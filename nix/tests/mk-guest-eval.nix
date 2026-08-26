@@ -262,12 +262,48 @@ in
   # project fail to evaluate with "unexpected argument". They are accepted and
   # recorded; nothing acts on them until the supervisor lands.
 
-  health_checks_are_accepted =
+  # `healthChecks` is consumed now, not merely recorded: each check becomes a
+  # `/etc/mvm/probes.d/<name>.json` drop-in, which the guest agent already
+  # scans at boot and runs on its own interval. Before this, the directory was
+  # always empty and a declared check did nothing.
+  health_checks_render_a_probe_dropin =
+    let
+      entry = (meta (mkGuest {
+        name = "hc";
+        entrypoint.command = [ "/bin/x" ];
+        healthChecks.app = { healthCmd = "/bin/true"; healthIntervalSecs = 5; };
+      })).probes."/etc/mvm/probes.d/app.json";
+    in
+    entry.name == "app"
+      && entry.cmd == "/bin/true"
+      && entry.interval_secs == 5
+      && entry.timeout_secs == 10          # documented default
+      && entry.output_format == "exit_code";
+
+  # A guest declaring no checks carries no drop-ins, so the agent's boot scan
+  # finds an empty directory rather than a stray file.
+  no_health_checks_renders_no_dropins =
     (meta (mkGuest {
-      name = "hc";
+      name = "plain-probe";
       entrypoint.command = [ "/bin/x" ];
-      healthChecks.app = { healthCmd = "true"; healthIntervalSecs = 5; };
-    })).unenforced.names == [ "healthChecks" ];
+    })).probes == { };
+
+  # A check with no command is a typo, not a default.
+  health_check_without_a_command_is_rejected =
+    rejects (mkGuest {
+      name = "hc-nocmd";
+      entrypoint.command = [ "/bin/x" ];
+      healthChecks.app = { healthIntervalSecs = 5; };
+    });
+
+  # `healthChecks` no longer appears in the unenforced list; the other two
+  # still do, because nothing consumes them yet.
+  health_checks_are_no_longer_unenforced =
+    (meta (mkGuest {
+      name = "hc2";
+      entrypoint.command = [ "/bin/x" ];
+      healthChecks.app = { healthCmd = "true"; };
+    })).unenforced.names == [ ];
 
   volume_mounts_are_accepted =
     (meta (mkGuest {

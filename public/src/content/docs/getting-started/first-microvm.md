@@ -3,11 +3,11 @@ title: Your First MicroVM
 description: Write a Nix flake and boot a microVM.
 ---
 
-:::caution[Declared, not enforced]
-`healthChecks`, `volumeMounts` and `serviceGroup` are accepted by `mkGuest`
-and recorded in `passthru.mvm.unenforced`, but nothing acts on them yet: the
-multi-service supervisor is still a stub. A flake using them builds, and
-prints a warning at evaluation saying so.
+:::note[Health checks run in the guest]
+`healthChecks` is rendered into `/etc/mvm/probes.d/<name>.json` in the image.
+The guest agent scans that directory at boot and runs each check on its own
+interval; results come back over vsock. `volumeMounts` and `serviceGroup` are
+still recorded rather than acted on — the multi-service supervisor is not wired.
 :::
 
 This guide walks through writing a Nix flake that builds a microVM image, then booting it with mvmctl.
