@@ -249,6 +249,17 @@ pub fn audit_root_path_for_tenant(audit_dir: &Path, tenant: &str) -> PathBuf {
     audit_dir.join(format!("{tenant}.root.json"))
 }
 
+/// The append-only history of every root ever published for `tenant`.
+///
+/// The latest-root sidecar is overwritten on each publish, which is what a
+/// reader wanting "where is the log now" needs and exactly the wrong shape
+/// for attesting that it only ever grew: a consistency proof relates *two*
+/// roots, and overwriting destroys the earlier one. So each publish also
+/// appends here, and the file is never rewritten.
+pub fn audit_root_history_path_for_tenant(audit_dir: &Path, tenant: &str) -> PathBuf {
+    audit_dir.join(format!("{tenant}.roots.jsonl"))
+}
+
 /// Host-side emitter wrapping `FileAuditSigner`. Owns its own signing
 /// key half (cloned from the host signer at construction); calls
 /// `tokio::runtime::Builder::new_current_thread()` per emit.
@@ -1133,6 +1144,10 @@ impl AuditEmitter {
     pub fn publish_root(&self, tenant: &str) -> Result<SignedAuditRoot> {
         let signed =
             crate::audit::merkle::sign_root_in(&self.audit_dir, tenant, &self.signing_key)?;
+        // History first. A crash between the two leaves a history entry with
+        // no matching sidecar, which a reader can reconcile; the reverse
+        // leaves a published root that no consistency check will ever see.
+        append_root_history(&self.audit_dir, tenant, &signed)?;
         let path = audit_root_path_for_tenant(&self.audit_dir, tenant);
         write_atomic(&path, serde_json::to_vec_pretty(&signed)?.as_slice())
             .with_context(|| format!("publishing signed root to {}", path.display()))?;
@@ -1425,6 +1440,29 @@ impl AuditEmitter {
 /// Still atomic — the rename gives a reader either the whole old file or the
 /// whole new one. What is dropped is survival of power loss, which is the
 /// right trade only for something reconstructible from data already durable.
+/// Append one published root to `tenant`'s root history, durably.
+///
+/// One JSON object per line, fsynced before returning: a root that is not on
+/// disk when the next one is published is a hole in the very sequence the
+/// consistency check walks.
+fn append_root_history(audit_dir: &Path, tenant: &str, signed: &SignedAuditRoot) -> Result<()> {
+    use std::io::Write as _;
+
+    let path = audit_root_history_path_for_tenant(audit_dir, tenant);
+    let mut line = serde_json::to_vec(signed)?;
+    line.push(b'\n');
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("opening root history at {}", path.display()))?;
+    file.write_all(&line)
+        .with_context(|| format!("appending to root history at {}", path.display()))?;
+    file.sync_data()
+        .with_context(|| format!("syncing root history at {}", path.display()))?;
+    Ok(())
+}
+
 pub(crate) fn write_atomic_unsynced(path: &Path, bytes: &[u8]) -> Result<()> {
     write_atomic_inner(path, bytes, false, None)
 }

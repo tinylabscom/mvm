@@ -169,7 +169,7 @@ ordered across rotation -- the property every previously issued inclusion proof
 rests on. What is missing is everything that would make the append-only property
 observable.
 
-- [ ] **5.1 Wire consistency proofs.** `build_consistency_proof` /
+- [x] **5.1 Wire consistency proofs.** `build_consistency_proof` /
       `verify_consistency` (`crates/mvm-contract/src/merkle.rs:555,623`) are full
       RFC 6962 and unit-tested, with zero production callers anywhere outside the
       module. Nothing in the audit pipeline, the CLI, or the archive builds or

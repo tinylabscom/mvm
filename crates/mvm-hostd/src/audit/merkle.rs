@@ -193,6 +193,98 @@ mod tests {
         (dir, key, lines)
     }
 
+    /// Grow `dir`'s chain by `n` more entries, then publish a root over it.
+    fn grow_and_publish(
+        dir: &Path,
+        key: &ed25519_dalek::SigningKey,
+        n: usize,
+        tag: &str,
+    ) -> mvm_contract::merkle::SignedAuditRoot {
+        let signer = FileAuditSigner::open(key.clone(), dir).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for i in 0..n {
+            rt.block_on(signer.sign_and_emit(&entry("local", &format!("{tag}-{i}"))))
+                .unwrap();
+        }
+        crate::audit::emitter::AuditEmitter::with_dir(key.clone(), dir)
+            .unwrap()
+            .publish_root("local")
+            .unwrap()
+    }
+
+    #[test]
+    fn a_log_that_only_grew_proves_consistent_across_every_published_root() {
+        let (dir, key, _) = seed_chain(3);
+        let vk = key.verifying_key();
+
+        grow_and_publish(dir.path(), &key, 0, "a");
+        grow_and_publish(dir.path(), &key, 4, "b");
+        grow_and_publish(dir.path(), &key, 2, "c");
+
+        let report = verify_root_history(dir.path(), "local", &vk).expect("history verifies");
+        assert_eq!(report.roots, 3);
+        assert_eq!(
+            report.transitions_checked, 2,
+            "each successive pair is proven, not just the endpoints"
+        );
+        assert_eq!(report.newest_tree_size, Some(9));
+    }
+
+    #[test]
+    fn an_empty_history_reports_that_it_checked_nothing() {
+        // Reporting a pass over no roots would imply an attestation nobody
+        // made. The counts are the honest answer.
+        let (dir, key, _) = seed_chain(2);
+        let vk = key.verifying_key();
+        let report =
+            verify_root_history(dir.path(), "local", &vk).expect("no history is not an error");
+        assert_eq!(report, RootHistoryReport::default());
+        assert_eq!(report.transitions_checked, 0);
+    }
+
+    #[test]
+    fn a_root_signed_by_another_key_is_refused() {
+        let (dir, key, _) = seed_chain(3);
+        grow_and_publish(dir.path(), &key, 0, "a");
+        // Verifying under a key that did not sign the history must fail
+        // rather than quietly accepting whatever pubkey the root names.
+        let stranger = fresh_key().verifying_key();
+        assert!(verify_root_history(dir.path(), "local", &stranger).is_err());
+    }
+
+    #[test]
+    fn a_rewritten_history_entry_is_refused() {
+        let (dir, key, _) = seed_chain(3);
+        let vk = key.verifying_key();
+        grow_and_publish(dir.path(), &key, 0, "a");
+        grow_and_publish(dir.path(), &key, 3, "b");
+        assert!(verify_root_history(dir.path(), "local", &vk).is_ok());
+
+        // Edit a published root's tree_size. Its signature no longer covers
+        // the bytes, so this is caught before any proof is attempted.
+        let path = crate::audit::emitter::audit_root_history_path_for_tenant(dir.path(), "local");
+        let content = std::fs::read_to_string(&path).unwrap();
+        let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+        let edited = lines[0].replace("\"tree_size\":3", "\"tree_size\":2");
+        assert_ne!(
+            edited, lines[0],
+            "the fixture must really have edited the root, or this test passes for free"
+        );
+        lines[0] = edited;
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+
+        let err = verify_root_history(dir.path(), "local", &vk)
+            .expect_err("a tampered root must not pass");
+        assert!(
+            format!("{err:#}").contains("does not verify"),
+            "the refusal must come from the signature check, not from some \
+             unrelated failure that would mask a real regression: {err:#}"
+        );
+    }
+
     #[test]
     fn build_root_matches_direct_merkle_root_over_lines() {
         let (dir, key, lines) = seed_chain(5);
@@ -289,4 +381,139 @@ mod tests {
         signed.root_hash = hex::encode([0xffu8; 32]);
         assert!(verify_signed_root(&signed, &vk).is_err());
     }
+}
+
+/// Verify that every root ever published for `tenant` describes a log that
+/// only grew.
+///
+/// Walks the append-only history written by
+/// [`crate::audit::emitter::AuditEmitter::publish_root`], checks each root's
+/// signature under `vk`, and proves each successive pair is a prefix
+/// extension using the RFC 6962 consistency proof.
+///
+/// # What this detects, and what it does not
+///
+/// Read [`mvm_contract::merkle`]'s module note before treating a pass here as
+/// tamper-evidence. Three limits carry over unchanged:
+///
+/// 1. Every root in this history was signed by the host that produced the
+///    log, and stored beside it. A host that rewrites the log reissues the
+///    whole history and every check here passes. This is worth running
+///    against accident, and against a later compromise that did not also
+///    capture the earlier roots; it is not a defence against the host itself.
+/// 2. Detection reaches back only to the oldest root present, and entries
+///    appended and deleted *between* two publishes leave no trace in either.
+///    The window is the publishing interval, not the log's lifetime.
+/// 3. Tail truncation past the newest root stays undetectable.
+///
+/// An off-host witness is what makes this meaningful, which is why the roots
+/// are also emitted to a sink. This function is the local half.
+pub fn verify_root_history(
+    audit_dir: &Path,
+    tenant: &str,
+    vk: &VerifyingKey,
+) -> Result<RootHistoryReport> {
+    use mvm_contract::merkle::{
+        build_consistency_proof, verify_consistency_against_roots, verify_signed_root,
+    };
+
+    let path = crate::audit::emitter::audit_root_history_path_for_tenant(audit_dir, tenant);
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        // No history is not a failure: a host that never published a root has
+        // nothing to be inconsistent about. Saying "checked 0" is honest;
+        // reporting a pass would imply an attestation nobody made.
+        return Ok(RootHistoryReport::default());
+    };
+
+    let mut roots: Vec<mvm_contract::merkle::SignedAuditRoot> = Vec::new();
+    for (n, line) in content.lines().filter(|l| !l.is_empty()).enumerate() {
+        let root = serde_json::from_str(line).with_context(|| {
+            format!(
+                "decoding root history entry {} at {}",
+                n + 1,
+                path.display()
+            )
+        })?;
+        roots.push(root);
+    }
+    for (n, root) in roots.iter().enumerate() {
+        verify_signed_root(root, vk).map_err(|e| {
+            anyhow::anyhow!(
+                "root history entry {} for {tenant} does not verify: {e}",
+                n + 1
+            )
+        })?;
+        if root.tenant != tenant {
+            anyhow::bail!(
+                "root history entry {} claims tenant '{}', not '{tenant}'",
+                n + 1,
+                root.tenant
+            );
+        }
+    }
+
+    // The proofs are built from the log as it stands now. A pair that will not
+    // prove against the current leaves is exactly the finding: either the log
+    // was rewritten under a root that still verifies, or a root was issued
+    // over something this log never was.
+    let leaves = read_leaves(audit_dir, tenant, vk)?;
+    let mut checked = 0usize;
+    for pair in roots.windows(2) {
+        let (old, new) = (&pair[0], &pair[1]);
+        if old.tree_size == new.tree_size && old.root_hash == new.root_hash {
+            // A republish with nothing appended in between. Nothing to prove
+            // and nothing wrong with it.
+            continue;
+        }
+        // Sizes are `u64` on the wire and `usize` in the tree math. A root
+        // claiming more leaves than this platform can index is a corrupt
+        // root, not a proof to attempt.
+        let (old_n, new_n) = match (
+            usize::try_from(old.tree_size),
+            usize::try_from(new.tree_size),
+        ) {
+            (Ok(o), Ok(n)) => (o, n),
+            _ => anyhow::bail!(
+                "root history for {tenant} claims a tree size this host cannot index: {} -> {}",
+                old.tree_size,
+                new.tree_size
+            ),
+        };
+        let proof = build_consistency_proof(&leaves, old_n, new_n).map_err(|e| {
+            anyhow::anyhow!(
+                "cannot build a consistency proof for {tenant} between sizes {} and {}: {e}",
+                old.tree_size,
+                new.tree_size
+            )
+        })?;
+        verify_consistency_against_roots(&proof, old, new).map_err(|e| {
+            anyhow::anyhow!(
+                "the audit log for {tenant} is not append-only between sizes {} and {}: {e}",
+                old.tree_size,
+                new.tree_size
+            )
+        })?;
+        checked += 1;
+    }
+
+    Ok(RootHistoryReport {
+        roots: roots.len(),
+        transitions_checked: checked,
+        newest_tree_size: roots.last().map(|r| r.tree_size),
+    })
+}
+
+/// What [`verify_root_history`] actually checked.
+///
+/// Counts rather than a bare bool, because "passed" over an empty history and
+/// "passed" over two hundred transitions are different statements and a caller
+/// reporting them identically would overstate the weaker one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RootHistoryReport {
+    /// Signed roots present in the history.
+    pub roots: usize,
+    /// Successive pairs proven to be prefix extensions.
+    pub transitions_checked: usize,
+    /// Tree size of the newest root, if any.
+    pub newest_tree_size: Option<u64>,
 }
