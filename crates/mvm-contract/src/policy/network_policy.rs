@@ -716,6 +716,7 @@ mod tests {
     use alloc::vec;
 
     use super::*;
+    use crate::peer::{PeerBinding, PeerName};
 
     #[test]
     fn host_port_parse() {
@@ -1003,6 +1004,25 @@ mod tests {
         ]);
         let rules = policy.resolve_rules().unwrap();
         assert_eq!(rules.len(), 2);
+    }
+
+    #[test]
+    fn policy_peers_returns_attached_bindings_for_every_shape() {
+        let peer = PeerBinding {
+            name: PeerName::parse("database.mvm.peer").expect("valid peer name"),
+            port: 5432,
+            host_addr: "127.0.0.1".into(),
+            host_port: 34567,
+        };
+
+        for policy in [
+            NetworkPolicy::deny_all().with_peers(vec![peer.clone()]),
+            NetworkPolicy::allow_list(vec![HostPort::new("example.com", 443)])
+                .with_peers(vec![peer.clone()]),
+        ] {
+            assert_eq!(policy.peers(), core::slice::from_ref(&peer));
+        }
+        assert!(NetworkPolicy::deny_all().peers().is_empty());
     }
 
     #[test]

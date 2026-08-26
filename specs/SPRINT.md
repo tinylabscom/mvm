@@ -3059,6 +3059,19 @@ to the configured ceiling and the first terse response immediately after it.
 - [x] Record the delivery in
       `specs/sprint/delivery/2870-extended-ci-recovery.md`.
 
+## 2026-08-26 Security peer-policy mutation witness
+
+- [x] Reproduce the scheduled Security failure from run 32931995875 as the
+      empty-slice replacement of `NetworkPolicy::peers()`.
+- [x] Add a focused witness for attached peer bindings on preset and explicit
+      allow-list policies while preserving the deny-all empty default.
+- [x] Prove the exact mutation surface: one replacement caught and the other
+      generated replacement unviable.
+- [x] Keep issues #2874 and #2875 open while the repair lands and fresh
+      scheduled evidence is collected.
+- [x] Record the delivery in
+      `specs/sprint/delivery/2874-security-peer-policy-witness.md`.
+
 ## Follow-up (not started) — repository-to-signed-workload generator
 
 Prompted by the same 2026-08-25 survey of a commercial enterprise
