@@ -128,7 +128,7 @@ the workload did".
 - [x] **4.3 Decide the adopted-seal representation.** A replayed seal cannot
       account for records shed at hand-off; the entry should carry that
       distinction rather than presenting a partial transcript as complete.
-- [ ] **4.4 Surface the transcript root on the receipt.** As an extension key
+- [x] **4.4 Surface the transcript root on the receipt.** As an extension key
       alongside `mvm.audit_root`, so a receipt lifted out of an archive still
       names the transcript it belongs to.
 - [x] **4.7 Establish what the console path actually covers.** Resolved by

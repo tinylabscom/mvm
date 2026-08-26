@@ -58,7 +58,24 @@ pub fn audit_entry_to_receipt(
 ) -> Option<ExecutionReceipt> {
     let (receipt_type, outcome) = map_event_to_receipt_type(&entry.event)?;
     let action = build_action(entry, receipt_type);
-    let extensions = build_extensions(entry);
+    let mut extensions = build_extensions(entry);
+
+    // Carried on the receipt, not only in the chain, so a receipt lifted out
+    // of an archive and forwarded on its own still names the transcript it
+    // belongs to. The extensions are signed material, so this is inside the
+    // content address rather than beside it.
+    if let Some(root) = context.and_then(|c| c.transcript_root.clone()) {
+        extensions.insert(
+            mvm_core::receipt::extension_key::TRANSCRIPT_ROOT.to_string(),
+            Value::String(root),
+        );
+    }
+    if let Some(adopted) = context.and_then(|c| c.transcript_adopted) {
+        extensions.insert(
+            mvm_core::receipt::extension_key::TRANSCRIPT_ADOPTED.to_string(),
+            Value::Bool(adopted),
+        );
+    }
 
     let image_node_digest = entry.labels.get("image_node_digest").cloned();
     let agent_id = entry.labels.get("agent_id").cloned();
@@ -147,6 +164,12 @@ pub struct ReceiptContext {
     /// Network destinations admitted for this workload, collected from
     /// `plan.egress_destinations` entries.
     pub network_destinations: Vec<(String, u16)>,
+    /// Ciphertext-manifest root of the sealed output transcript, from the
+    /// `gateway.transcript_sealed` anchor. `None` until the transcript seals.
+    pub transcript_root: Option<String>,
+    /// Whether that seal was rebuilt from the journal rather than written by
+    /// the capturing process.
+    pub transcript_adopted: Option<bool>,
 }
 
 /// One in-scope audit entry that has no receipt mapping.
@@ -463,6 +486,22 @@ fn build_context_map(entries: &[PlanAuditEntry]) -> BTreeMap<String, ReceiptCont
             ctx.started_at = Some(entry.timestamp.to_rfc3339());
         }
 
+        // The seal is the last thing a run produces, so a later anchor for the
+        // same plan supersedes an earlier one rather than being ignored: a
+        // restarted capture seals again and the newest root is the live one.
+        if entry.event == crate::supervisor::audit::TRANSCRIPT_SEALED_EVENT {
+            if let Some(root) = entry
+                .labels
+                .get(crate::supervisor::audit::LABEL_TRANSCRIPT_ROOT)
+            {
+                ctx.transcript_root = Some(root.clone());
+            }
+            ctx.transcript_adopted = entry
+                .labels
+                .get(crate::supervisor::audit::LABEL_ADOPTED)
+                .map(|v| v == "true");
+        }
+
         if entry.event == "plan.grant_required" {
             // Collect verb_N labels in order.
             let mut verbs: Vec<String> = Vec::new();
@@ -728,6 +767,110 @@ mod tests {
         for signed in &receipts {
             assert!(signed.payload.prev_receipt_id.is_none());
         }
+    }
+
+    #[test]
+    fn a_sealed_transcript_root_reaches_every_receipt_for_that_plan() {
+        // Without this the receipt names the audit root and nothing the
+        // workload produced, so a receipt forwarded on its own cannot say
+        // which transcript belongs to it.
+        let dir = tempfile::tempdir().unwrap();
+        let signing_key = SigningKey::from_bytes(&[13u8; 32]);
+        let signer = FileAuditSigner::open(signing_key.clone(), dir.path()).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let root = "ab".repeat(32);
+        let sealed = {
+            let mut labels = BTreeMap::new();
+            labels.insert(
+                crate::supervisor::audit::LABEL_TRANSCRIPT_ROOT.into(),
+                root.clone(),
+            );
+            labels.insert(
+                crate::supervisor::audit::LABEL_ADOPTED.into(),
+                "false".into(),
+            );
+            labels.insert(
+                crate::supervisor::audit::LABEL_CAPTURE_ID.into(),
+                "cap-1".into(),
+            );
+            sample_audit_entry(crate::supervisor::audit::TRANSCRIPT_SEALED_EVENT, labels)
+        };
+        let exited = {
+            let mut labels = BTreeMap::new();
+            labels.insert("backend".into(), "firecracker".into());
+            labels.insert("exit_code".into(), "0".into());
+            sample_audit_entry("plan.exited", labels)
+        };
+
+        for entry in [
+            sample_audit_entry("plan.admitted", BTreeMap::new()),
+            sealed,
+            exited,
+        ] {
+            rt.block_on(signer.sign_and_emit(&entry)).unwrap();
+        }
+
+        let receipts = export_receipts(dir.path(), "local", None, &signing_key).unwrap();
+        assert!(!receipts.is_empty(), "the export produced receipts");
+
+        let key = mvm_core::receipt::extension_key::TRANSCRIPT_ROOT;
+        let adopted_key = mvm_core::receipt::extension_key::TRANSCRIPT_ADOPTED;
+        for signed in &receipts {
+            assert_eq!(
+                signed.payload.extensions.get(key),
+                Some(&Value::String(root.clone())),
+                "receipt {} carries the sealed transcript root",
+                signed.payload.receipt_type
+            );
+            assert_eq!(
+                signed.payload.extensions.get(adopted_key),
+                Some(&Value::Bool(false))
+            );
+            // The extensions are signed material, so the root is inside the
+            // content address rather than beside it.
+            signed.verify().unwrap();
+        }
+    }
+
+    #[test]
+    fn an_adopted_transcript_is_marked_incomplete_on_the_receipt() {
+        // A floor presented as a full account would be a wrong record.
+        let dir = tempfile::tempdir().unwrap();
+        let signing_key = SigningKey::from_bytes(&[17u8; 32]);
+        let signer = FileAuditSigner::open(signing_key.clone(), dir.path()).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let sealed = {
+            let mut labels = BTreeMap::new();
+            labels.insert(
+                crate::supervisor::audit::LABEL_TRANSCRIPT_ROOT.into(),
+                "cd".repeat(32),
+            );
+            labels.insert(
+                crate::supervisor::audit::LABEL_ADOPTED.into(),
+                "true".into(),
+            );
+            sample_audit_entry(crate::supervisor::audit::TRANSCRIPT_SEALED_EVENT, labels)
+        };
+        for entry in [sample_audit_entry("plan.admitted", BTreeMap::new()), sealed] {
+            rt.block_on(signer.sign_and_emit(&entry)).unwrap();
+        }
+
+        let receipts = export_receipts(dir.path(), "local", None, &signing_key).unwrap();
+        let adopted_key = mvm_core::receipt::extension_key::TRANSCRIPT_ADOPTED;
+        assert!(
+            receipts
+                .iter()
+                .all(|r| r.payload.extensions.get(adopted_key) == Some(&Value::Bool(true))),
+            "an adopted seal must stay marked incomplete on every receipt"
+        );
     }
 
     #[test]

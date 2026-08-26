@@ -78,6 +78,17 @@ pub mod extension_key {
     pub const AUDIT_ROOT: &str = "mvm.audit_root";
     /// Tree size that root was published at.
     pub const TREE_SIZE: &str = "mvm.tree_size";
+    /// Ciphertext-manifest root of the workload's sealed output transcript.
+    ///
+    /// Present only once the transcript has sealed, so a receipt exported
+    /// mid-run does not carry one. Its value is the same root a reader
+    /// verifies before decrypting anything -- never a plaintext digest.
+    pub const TRANSCRIPT_ROOT: &str = "mvm.transcript_root";
+    /// Whether that transcript was rebuilt from its journal rather than
+    /// sealed by the process that captured it. `true` marks a floor: records
+    /// the departed writer shed after its last durable append are in no file
+    /// anywhere, so the transcript is an incomplete account of the run.
+    pub const TRANSCRIPT_ADOPTED: &str = "mvm.transcript_adopted";
 }
 
 /// Outcome of the action described by a receipt.
