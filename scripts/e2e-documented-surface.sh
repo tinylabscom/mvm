@@ -52,8 +52,28 @@ fi
 # initramfs. Acquiring them inside a scenario would put minutes on each one, and
 # a scenario that times out reads as a launch failure rather than a cold cache.
 # ---------------------------------------------------------------------------
+# This suite verifies the documented CLI surface, not the builder VM image.
+# A source checkout otherwise rebuilds that image from the in-repo flake on
+# every cold run, which couples the whole suite to an unrelated Nix build —
+# and when that build cannot reach crates.io from inside Stage 0, nothing here
+# runs at all. Fetch the published image instead. A contributor working *on*
+# the image sets MVM_BOOT_IMAGE themselves and this defers to them.
+export MVM_BOOT_IMAGE="${MVM_BOOT_IMAGE:-fetch}"
+echo "    boot image: $MVM_BOOT_IMAGE"
+
+# Bootstrap failure is reported, not fatal. It warms the builder VM image, which
+# the flake-build scenarios need and the OCI-image ones do not — so aborting here
+# would throw away every result that does not depend on it. The scenarios that do
+# need it then fail on their own, naming themselves.
 echo "==> warming artifacts in $E2E_HOME"
-MVM_HOME="$E2E_HOME" "$MVMCTL" bootstrap
+if ! MVM_HOME="$E2E_HOME" "$MVMCTL" bootstrap; then
+  echo
+  echo "!!! bootstrap FAILED — the builder VM image is unavailable."
+  echo "!!! Flake-build scenarios will fail; OCI-image scenarios are unaffected."
+  echo "!!! Continuing so the run still reports what it can prove."
+  echo
+  BOOTSTRAP_FAILED=1
+fi
 
 echo "==> host posture"
 # `doctor` exits nonzero precisely when it has something to report, so its
@@ -76,3 +96,8 @@ MVM_E2E_HOME="$E2E_HOME" \
 echo
 echo "==> done. Read the 'did NOT run' tally above, not just the pass count:"
 echo "    a skipped @live scenario is a documented command nothing booted."
+if [[ -n "${BOOTSTRAP_FAILED:-}" ]]; then
+  echo
+  echo "!!! REMINDER: bootstrap failed this run. Any flake-build failure above"
+  echo "!!! is that, not a regression in the command under test."
+fi
