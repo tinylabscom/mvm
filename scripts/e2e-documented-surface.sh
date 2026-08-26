@@ -33,8 +33,12 @@ echo "    home: $E2E_HOME"
 # The conformance runner refuses to start against an `mvmctl` older than its own
 # sources, so this has to happen before the test binary runs, not alongside it.
 # ---------------------------------------------------------------------------
-echo "==> building mvmctl"
-./scripts/cargo-fast.sh build --bin mvmctl
+# `user` carries manifest-verify. Without it the verified-fetch path refuses the
+# published builder VM image with "manifest-verify feature is disabled in this
+# build" — a default `cargo build` cannot check a signature, so it declines to
+# trust one. That refusal is correct; building without the feature is the bug.
+echo "==> building mvmctl (--features user)"
+./scripts/cargo-fast.sh build --bin mvmctl --features user
 
 # The TypeScript SDK scenarios import the SDK's built `dist/`, which is absent
 # in a fresh worktree. Without it they fail for a reason that has nothing to do
