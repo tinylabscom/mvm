@@ -41,6 +41,20 @@ function postError(error) {
   console.error("DEMO-RESULT: ERROR", error);
 }
 
+async function loadCompressedWasm() {
+  if (typeof DecompressionStream !== "function") {
+    throw new Error("this browser does not support gzip decompression streams");
+  }
+
+  const response = await fetch(`${baseUrl}qemu-system-x86_64.wasm.gz`);
+  if (!response.ok || !response.body) {
+    throw new Error(`failed to load compressed QEMU-WASM module (${response.status})`);
+  }
+
+  const decompressed = response.body.pipeThrough(new DecompressionStream("gzip"));
+  return new Response(decompressed).arrayBuffer();
+}
+
 // Minimal xterm.js-shaped object that lets xterm-pty's Master route output to
 // the UI and accept injected input from the main thread.
 function createFakeTerminal() {
@@ -154,6 +168,9 @@ self.onmessage = async (event) => {
         streamOps.poll = (stream, _timeout) => oldPoll.call(streamOps, stream, 0);
       }
     }, 10);
+
+    postStatus("loading engine");
+    self.Module.wasmBinary = await loadCompressedWasm();
 
     postStatus("initializing engine");
     const engineModule = await import(`${baseUrl}qemu-system-x86_64.js`);
