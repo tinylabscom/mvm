@@ -610,6 +610,16 @@ pub(in crate::commands::vm) fn admit_plan_for_boot_with_ingress(
         .context("loading the tenant policy bundle for the bridge")?,
     };
 
+    // Record the admitted L7 egress boundary in the chain-signed log so a
+    // receipt can name the destinations without re-resolving policy refs.
+    let egress_destinations = policy_bundle
+        .as_ref()
+        .map(|b| b.egress.allow_list.clone())
+        .unwrap_or_default();
+    if let Err(e) = emitter.emit_egress_destinations(admitted.plan(), &egress_destinations) {
+        tracing::warn!(error = %e, "audit emit_egress_destinations failed (non-fatal)");
+    }
+
     Ok(Some(AdmissionContext {
         admitted,
         emitter,

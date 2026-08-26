@@ -761,6 +761,28 @@ impl AuditEmitter {
         )
     }
 
+    /// Emit `plan.egress_destinations` — records the (host, port) allowlist
+    /// admitted for this workload so a receipt can name the network boundary
+    /// without resolving policy refs again. No-op when the list is empty.
+    pub fn emit_egress_destinations(
+        &self,
+        plan: &ExecutionPlan,
+        destinations: &[(String, u16)],
+    ) -> Result<()> {
+        if destinations.is_empty() {
+            return Ok(());
+        }
+        let mut labels: Vec<(String, String)> = vec![(
+            "destination_count".to_string(),
+            destinations.len().to_string(),
+        )];
+        for (i, (host, port)) in destinations.iter().enumerate() {
+            labels.push((format!("destination_{i}_host"), host.clone()));
+            labels.push((format!("destination_{i}_port"), port.to_string()));
+        }
+        self.emit(plan, "plan.egress_destinations", labels)
+    }
+
     /// Emit `plan.shares_admitted` — records the user host-fs grants
     /// (`--volume` / `MVM_VOLUMES`) baked into the admitted plan
     /// (claim 1 / claim 8), so every share is a tamper-evident audit
@@ -1283,7 +1305,7 @@ impl AuditEmitter {
         let host_did =
             mvm_core::did_key::DidKey::from_verifying_key(self.signing_key.verifying_key())
                 .to_did_key();
-        let mut receipt = audit_entry_to_receipt(entry, &host_did).ok_or_else(|| {
+        let mut receipt = audit_entry_to_receipt(entry, &host_did, None).ok_or_else(|| {
             anyhow::anyhow!(
                 "audit event {} has no receipt mapping; evidence cannot cite it",
                 entry.event
@@ -1320,7 +1342,7 @@ impl AuditEmitter {
         let host_did =
             mvm_core::did_key::DidKey::from_verifying_key(self.signing_key.verifying_key())
                 .to_did_key();
-        let mut receipt = match audit_entry_to_receipt(entry, &host_did) {
+        let mut receipt = match audit_entry_to_receipt(entry, &host_did, None) {
             Some(r) => r,
             None => return,
         };
@@ -2182,6 +2204,54 @@ mod tests {
         assert!(content.contains("\"3\""));
         assert!(content.contains("\"libkrun\""));
         assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
+    }
+
+    #[test]
+    fn emit_egress_destinations_records_host_port_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-EG");
+        let destinations = vec![
+            ("example.com".to_string(), 443),
+            ("api.example.com".to_string(), 8443),
+        ];
+        emitter
+            .emit_egress_destinations(&plan, &destinations)
+            .unwrap();
+
+        let path = dir.path().join("local.jsonl");
+        let content = std::fs::read_to_string(&path).expect("audit file exists");
+        assert!(content.contains("plan.egress_destinations"));
+        assert!(content.contains("\"example.com\""));
+        assert!(content.contains("\"api.example.com\""));
+        assert!(content.contains("\"443\""));
+        assert!(content.contains("\"8443\""));
+        assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
+    }
+
+    #[test]
+    fn emit_egress_destinations_is_noop_for_empty_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-EG-EMPTY");
+        emitter.emit_egress_destinations(&plan, &[]).unwrap();
+
+        let path = dir.path().join("local.jsonl");
+        assert!(
+            !path.exists(),
+            "empty allowlist must not write an audit entry"
+        );
     }
 
     #[test]
