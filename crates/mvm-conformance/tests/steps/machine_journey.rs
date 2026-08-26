@@ -73,12 +73,17 @@ fn ensure_journey_machine() -> &'static Result<(), String> {
         let _ = run_in_journey_home(["machine", "stop", JOURNEY_MACHINE, "--yes"]);
         let _ = run_in_journey_home(["machine", "rm", JOURNEY_MACHINE, "--yes"]);
 
+        // `nginx` rather than a bare `alpine`: every verb below needs a guest
+        // that is still up when it runs. An image with no long-running process
+        // boots, finds nothing to run and exits, and the state directory is
+        // gone by the next scenario — which then reports "never booted" and
+        // reads as a broken verb rather than a finished guest.
         let create = run_in_journey_home([
             "machine",
             "create",
             JOURNEY_MACHINE,
             "--image",
-            "alpine",
+            "nginx",
             "--cpus",
             "2",
             "--memory",
@@ -96,6 +101,20 @@ fn ensure_journey_machine() -> &'static Result<(), String> {
             return Err(format!(
                 "machine start failed: {}",
                 String::from_utf8_lossy(&start.stderr).trim()
+            ));
+        }
+
+        // Exit 0 from `start` is not the same as a guest that is up. Confirm
+        // the state directory the runtime verbs resolve against actually
+        // exists, so a guest that booted and exited is reported here — once,
+        // naming the boot — rather than as one cryptic failure per verb.
+        let state_dir = journey_home().join("vms").join(JOURNEY_MACHINE);
+        if !state_dir.exists() {
+            return Err(format!(
+                "machine start exited 0 but {} does not exist — the guest is \
+                 not running. An image with no long-running process boots and \
+                 exits immediately.",
+                state_dir.display()
             ));
         }
         Ok(())
