@@ -329,19 +329,18 @@ mod tests {
     }
 
     /// A sealed launch of the shape the live Firecracker workload path
-    /// produces: verity-sealed rootfs, the sibling initramfs that runs the
+    /// produces: verity-sealed rootfs, the universal initramfs that runs the
     /// verity setup, and the required runtime overlay carrying the guest agent.
-    fn sealed_launch(dir: &Path) -> VmStartConfig {
+    fn sealed_launch(dir: &Path, home: &Path) -> VmStartConfig {
         let rootfs = dir.join("rootfs.ext4");
         let verity = dir.join("rootfs.verity");
-        let initrd = dir.join("rootfs.initrd");
         std::fs::write(&rootfs, b"rootfs").unwrap();
         std::fs::write(&verity, b"verity").unwrap();
-        std::fs::write(&initrd, b"initrd").unwrap();
         VmStartConfig {
             name: "workload-a".into(),
             rootfs_path: rootfs.display().to_string(),
             kernel_path: Some(dir.join("vmlinux").display().to_string()),
+            initrd_path: Some(cmdline::seed_universal_initramfs(home)),
             verity_path: Some(verity.display().to_string()),
             roothash: Some("a".repeat(64)),
             runtime_overlay_path: Some(dir.join("overlay.ext4").display().to_string()),
@@ -417,9 +416,9 @@ mod tests {
     /// two shapes stay in step without anyone remembering to keep them there.
     #[test]
     fn parent_boots_the_same_device_model_and_cmdline_the_workload_does() {
-        let _home = isolated_home();
+        let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let launch = sealed_launch(tmp.path());
+        let launch = sealed_launch(tmp.path(), home.path());
         let spec = standby_spec_for(&launch, tmp.path());
 
         let workload = workload_boot(&launch, &tmp.path().join("workload-a"));
@@ -455,9 +454,9 @@ mod tests {
     /// on: whatever the workload path adds, the parent adds too.
     #[test]
     fn a_parent_warmed_for_an_egress_allowing_launch_boots_the_launchs_own_cmdline() {
-        let _home = isolated_home();
+        let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let mut launch = sealed_launch(tmp.path());
+        let mut launch = sealed_launch(tmp.path(), home.path());
         launch.network_policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
             mvm_core::network_policy::HostPort::new("api.example.com", 443),
         ]);
@@ -493,8 +492,9 @@ mod tests {
     /// child's own endpoint instead, and never rides the parent.
     #[test]
     fn the_parent_carries_the_egress_enablement_but_none_of_the_launchs_destinations() {
+        let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let mut launch = sealed_launch(tmp.path());
+        let mut launch = sealed_launch(tmp.path(), home.path());
         launch.network_policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
             mvm_core::network_policy::HostPort::new("api.example.com", 443),
             mvm_core::network_policy::HostPort::new("secret.internal", 8443),
@@ -525,9 +525,9 @@ mod tests {
     /// not perturb anything else.
     #[test]
     fn a_parent_warmed_for_a_deny_all_launch_boots_no_egress_client() {
-        let _home = isolated_home();
+        let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let launch = sealed_launch(tmp.path());
+        let launch = sealed_launch(tmp.path(), home.path());
         let spec = standby_spec_for(&launch, tmp.path());
         assert!(
             !spec.vsock_egress,
@@ -559,9 +559,9 @@ mod tests {
     /// child hostname delivered after restore.
     #[test]
     fn a_secret_bearing_launch_warms_a_parent_with_no_egress_client_either() {
-        let _home = isolated_home();
+        let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let mut launch = sealed_launch(tmp.path());
+        let mut launch = sealed_launch(tmp.path(), home.path());
         launch.network_policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
             mvm_core::network_policy::HostPort::new("api.example.com", 443),
         ]);
@@ -614,15 +614,14 @@ mod tests {
     /// recorded, so a failure names what the guest will miss rather than only
     /// that two values differ.
     ///
-    /// `sealed_launch` is the legacy sibling-initramfs shape, whose PID 1 reads
-    /// the roothashes and device paths off the kernel cmdline — it is never sent
-    /// `ActivateEnvironment`. A parent booted without those tokens aborts in PID
-    /// 1 and panics the kernel, so there is nothing left to capture.
+    /// The universal initramfs receives the roothashes and device paths over the
+    /// authenticated activation channel, so the parent keeps those secrets off
+    /// the kernel cmdline while still attaching the complete sealed disk stack.
     #[test]
     fn parent_carries_the_overlay_drives_and_runtime_tokens_the_guest_agent_needs() {
-        let _home = isolated_home();
+        let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let launch = sealed_launch(tmp.path());
+        let launch = sealed_launch(tmp.path(), home.path());
         let spec = standby_spec_for(&launch, tmp.path());
         let parent_cfg = factory_parent_config(&launch, &spec).unwrap();
         let parent = factory_parent_spec(&parent_cfg, Path::new(&spec.vm_state_dir), fc_base);
@@ -642,7 +641,7 @@ mod tests {
             "parent cmdline missing runtime-source policy: {}",
             parent.cmdline
         );
-        for token in [
+        for legacy_token in [
             "mvm.roothash=",
             "mvm.data=/dev/vda",
             "mvm.hash=/dev/vdb",
@@ -651,8 +650,8 @@ mod tests {
             "mvm.runtime_hash=/dev/vdd",
         ] {
             assert!(
-                parent.cmdline.contains(token),
-                "parent cmdline missing {token} its legacy PID 1 needs: {}",
+                !parent.cmdline.contains(legacy_token),
+                "parent cmdline leaked legacy token {legacy_token}: {}",
                 parent.cmdline
             );
         }
@@ -666,8 +665,7 @@ mod tests {
     fn parent_on_the_universal_initramfs_carries_no_roothash_tokens() {
         let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let mut launch = sealed_launch(tmp.path());
-        launch.initrd_path = Some(cmdline::seed_universal_initramfs(home.path()));
+        let launch = sealed_launch(tmp.path(), home.path());
         let spec = standby_spec_for(&launch, tmp.path());
         let parent_cfg = factory_parent_config(&launch, &spec).unwrap();
         let parent = factory_parent_spec(&parent_cfg, Path::new(&spec.vm_state_dir), fc_base);
@@ -701,9 +699,9 @@ mod tests {
 
     #[test]
     fn parent_drops_every_workload_authority_field_the_launch_carried() {
-        let _home = isolated_home();
+        let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let mut launch = sealed_launch(tmp.path());
+        let mut launch = sealed_launch(tmp.path(), home.path());
         launch.plan_json = Some("{\"signed\":\"plan\"}".into());
         launch.bundle_json = Some("{\"pin\":\"bundle\"}".into());
         launch.tenant_id = Some("tenant-a".into());
@@ -756,9 +754,9 @@ mod tests {
 
     #[test]
     fn live_parent_uses_stable_handoff_channels_without_workload_endpoints() {
-        let _home = isolated_home();
+        let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let launch = sealed_launch(tmp.path());
+        let launch = sealed_launch(tmp.path(), home.path());
         let spec = standby_spec_for(&launch, tmp.path());
         let parent_cfg = factory_parent_config(&launch, &spec).unwrap();
         let parent = factory_parent_spec_live(&parent_cfg, Path::new(&spec.vm_state_dir), fc_base);
@@ -792,8 +790,9 @@ mod tests {
 
     #[test]
     fn parent_identity_and_resources_come_from_the_pool_record_not_the_launch() {
+        let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let launch = sealed_launch(tmp.path());
+        let launch = sealed_launch(tmp.path(), home.path());
         let mut spec = standby_spec_for(&launch, tmp.path());
         spec.template_id = Some("tpl-7".into());
 
@@ -808,8 +807,9 @@ mod tests {
 
     #[test]
     fn factory_parent_config_refuses_a_record_without_a_rootfs_image() {
+        let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let launch = sealed_launch(tmp.path());
+        let launch = sealed_launch(tmp.path(), home.path());
         let mut spec = standby_spec_for(&launch, tmp.path());
         spec.image_path = None;
 
@@ -827,8 +827,9 @@ mod tests {
     /// agent-readiness timeout.
     #[test]
     fn factory_parent_config_refuses_a_required_overlay_launch_carrying_no_overlay() {
+        let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let mut launch = sealed_launch(tmp.path());
+        let mut launch = sealed_launch(tmp.path(), home.path());
         launch.runtime_overlay_path = None;
         launch.runtime_overlay_verity_path = None;
         launch.runtime_overlay_roothash = None;
@@ -847,9 +848,10 @@ mod tests {
     /// mounts them, which is the second shape of the same failure.
     #[test]
     fn factory_parent_config_refuses_a_sealed_rootfs_with_no_resolvable_initramfs() {
+        let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let launch = sealed_launch(tmp.path());
-        std::fs::remove_file(tmp.path().join("rootfs.initrd")).unwrap();
+        let mut launch = sealed_launch(tmp.path(), home.path());
+        launch.initrd_path = None;
         let spec = standby_spec_for(&launch, tmp.path());
 
         let err = factory_parent_config(&launch, &spec)
@@ -887,9 +889,9 @@ mod tests {
 
     #[test]
     fn parent_console_is_captured_into_its_own_state_dir() {
-        let _home = isolated_home();
+        let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let launch = sealed_launch(tmp.path());
+        let launch = sealed_launch(tmp.path(), home.path());
         let spec = standby_spec_for(&launch, tmp.path());
         let parent_cfg = factory_parent_config(&launch, &spec).unwrap();
         let state_dir = PathBuf::from(&spec.vm_state_dir);

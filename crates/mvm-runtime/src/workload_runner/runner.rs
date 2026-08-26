@@ -2298,18 +2298,24 @@ mod tests {
         let cfg = VmStartConfig {
             name: vm_name.into(),
             rootfs_path: rootfs.display().to_string(),
+            initrd_path: Some(mvm_vmm::host::cmdline::seed_universal_initramfs(
+                home.path(),
+            )),
             verity_path: Some(verity.display().to_string()),
             roothash: Some("a".repeat(64)),
             network_policy: NetworkPolicy::preset(mvm_core::network_policy::NetworkPreset::Dev),
             ..Default::default()
         };
 
+        let driver = MockDriver::default();
+        let guest = spawn_activation_guest(driver.clone(), vm_name);
         let runner = WorkloadRunner::new(
-            MockDriver::default(),
+            driver,
             RecordingSpawner::new("/run/ep.sock"),
             RecordingBrokerRegistrar::new(),
         );
         runner.start(&cfg).expect("start succeeds");
+        guest.join().expect("guest thread");
 
         let specs = runner.driver.booted_specs();
         assert_eq!(specs.len(), 1);
@@ -2379,6 +2385,46 @@ mod tests {
         );
     }
 
+    fn spawn_activation_guest(driver: MockDriver, vm_name: &str) -> std::thread::JoinHandle<()> {
+        use ed25519_dalek::SigningKey;
+        use mvm_agentd::vsock::{AuthenticatedSession, GuestRequest, GuestResponse};
+
+        let host_signer = [7u8; 32];
+        let keys_dir = mvm_core::config::mvm_keys_dir();
+        std::fs::create_dir_all(&keys_dir).unwrap();
+        std::fs::write(keys_dir.join("host-signer.ed25519"), host_signer).unwrap();
+        let vm_id = VmId(vm_name.to_string());
+
+        std::thread::spawn(move || {
+            let mut stream = {
+                let mut found = None;
+                for _ in 0..200 {
+                    if let Some(end) = driver.take_guest_end(&vm_id, GUEST_AGENT_PORT) {
+                        found = Some(end);
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                found.expect("the runner connected to the guest agent port")
+            };
+            let host_key = SigningKey::from_bytes(&host_signer).verifying_key();
+            let mut session = AuthenticatedSession::guest(
+                &mut stream,
+                SigningKey::from_bytes(&[9u8; 32]),
+                &host_key,
+            )
+            .expect("guest handshake");
+            let req: GuestRequest = session.read(&mut stream).expect("read request");
+            assert!(
+                matches!(req, GuestRequest::ActivateEnvironment(_)),
+                "the first post-boot verb must be ActivateEnvironment, got: {req:?}"
+            );
+            session
+                .write(&mut stream, &GuestResponse::ActivateEnvironmentAck)
+                .expect("write ack");
+        })
+    }
+
     /// A boot that attached the universal initramfs must be sent
     /// `ActivateEnvironment` over the agent vsock port before the launch
     /// returns — proven by driving `start_workload` through the `MockDriver`
@@ -2395,13 +2441,6 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
         env.set("MVM_HOME", home.path());
-
-        // The activation handshake authenticates against the host signer;
-        // seed one so both ends of the loopback share the identity.
-        let host_signer = [7u8; 32];
-        let keys_dir = mvm_core::config::mvm_keys_dir();
-        std::fs::create_dir_all(&keys_dir).unwrap();
-        std::fs::write(keys_dir.join("host-signer.ed25519"), host_signer).unwrap();
 
         // An initramfs artifact under the shared cache is the discriminant
         // for the universal-initramfs boot path.
@@ -2426,41 +2465,9 @@ mod tests {
         let policy = NetworkPolicy::deny_all();
         let redaction = RedactionPolicy::default();
 
-        // The guest side of the loopback: authenticate, assert the request
-        // is exactly the activation verb, ACK it.
-        let guest = std::thread::spawn(move || {
-            use ed25519_dalek::SigningKey;
-            use mvm_agentd::vsock::{AuthenticatedSession, GuestRequest, GuestResponse};
-
-            let mut stream = {
-                let mut found = None;
-                for _ in 0..200 {
-                    if let Some(end) =
-                        driver.take_guest_end(&VmId("runner-activation".into()), GUEST_AGENT_PORT)
-                    {
-                        found = Some(end);
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                found.expect("the runner connected to the guest agent port")
-            };
-            let host_key = SigningKey::from_bytes(&host_signer).verifying_key();
-            let mut session = AuthenticatedSession::guest(
-                &mut stream,
-                SigningKey::from_bytes(&[9u8; 32]),
-                &host_key,
-            )
-            .expect("guest handshake");
-            let req: GuestRequest = session.read(&mut stream).expect("read request");
-            assert!(
-                matches!(req, GuestRequest::ActivateEnvironment(_)),
-                "the first post-boot verb must be ActivateEnvironment, got: {req:?}"
-            );
-            session
-                .write(&mut stream, &GuestResponse::ActivateEnvironmentAck)
-                .expect("write ack");
-        });
+        // The guest side of the loopback authenticates, verifies that the first
+        // request is the activation verb, and acknowledges it.
+        let guest = spawn_activation_guest(driver, "runner-activation");
 
         runner
             .start_workload(&WorkloadLaunchInputs {
@@ -3078,7 +3085,9 @@ mod tests {
         // cmdline, so force an overflow with an oversized verb grant instead.
         launch.verity_path = Some(tmp.path().join("rootfs.verity").display().to_string());
         launch.roothash = Some("a".repeat(4096));
-        launch.initrd_path = Some(tmp.path().join("rootfs.initrd").display().to_string());
+        launch.initrd_path = Some(mvm_vmm::host::cmdline::seed_universal_initramfs(
+            home.path(),
+        ));
         let state_dir = mvm_core::config::vm_state_dir("parent-oversized");
         std::fs::create_dir_all(&state_dir).unwrap();
         let nonce = mvm_core::plan::Nonce::from_bytes([3u8; 16]);
@@ -3181,12 +3190,14 @@ mod tests {
 
         let (dir, rootfs) = overlay_aware_rootfs("shape-parity");
         std::fs::write(dir.path().join("rootfs.verity"), b"verity").unwrap();
-        std::fs::write(dir.path().join("rootfs.initrd"), b"initrd").unwrap();
 
         let launch = VmStartConfig {
             name: "shape-parity".into(),
             rootfs_path: rootfs.clone(),
             kernel_path: Some("/img/kernel".into()),
+            initrd_path: Some(mvm_vmm::host::cmdline::seed_universal_initramfs(
+                home.path(),
+            )),
             verity_path: Some(dir.path().join("rootfs.verity").display().to_string()),
             roothash: Some("a".repeat(64)),
             runtime_overlay_path: Some(dir.path().join("overlay.ext4").display().to_string()),
@@ -3202,13 +3213,16 @@ mod tests {
         };
 
         let store = CheckpointStore::at(home.path().join("checkpoints"));
+        let driver = MockDriver::default().with_vm_full_rootfs(Path::new(&rootfs));
+        let guest = spawn_activation_guest(driver.clone(), "shape-parity");
         let runner = WorkloadRunner::new(
-            MockDriver::default().with_vm_full_rootfs(Path::new(&rootfs)),
+            driver,
             RecordingSpawner::new("/run/ep.sock"),
             RecordingBrokerRegistrar::new(),
         );
 
         runner.start(&launch).expect("workload boots");
+        guest.join().expect("guest thread");
         let spec = standby_spec_for(
             "standby-parity",
             &home.path().join("standby-parity"),
