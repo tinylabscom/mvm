@@ -42,14 +42,19 @@ require_text Justfile './scripts/cargo-fast.sh build --workspace'
 require_text Justfile './scripts/cargo-fast.sh nextest run --workspace'
 require_text Justfile './scripts/cargo-stable.sh clippy --workspace --all-targets -- -D warnings'
 require_text Justfile './scripts/cargo-stable.sh clippy --fix --allow-dirty --workspace --all-targets -- -D warnings'
-require_text .githooks/pre-commit "./scripts/cargo-stable.sh clippy \$scope_args --all-targets -- -D warnings"
+require_text .githooks/pre-commit "./scripts/cargo-stable.sh clippy \$pass -- -D warnings"
+# The hook must keep running the workspace sweep and the staged-package pass as
+# two separate narrower invocations; collapsing them back into one
+# `--workspace --all-targets` run is a 4.6x regression on every commit.
+require_text .githooks/pre-commit 'sweep_args="--workspace"'
+require_text .githooks/pre-commit 'focus_args="${pkg_args# } --all-targets"'
 require_text .github/workflows/ci.yml './scripts/cargo-stable.sh clippy --all-targets -- -D warnings'
-require_text .github/workflows/ci.yml 'uses: dtolnay/rust-toolchain@1.96.0'
-require_text .github/workflows/ci-full.yml 'uses: dtolnay/rust-toolchain@1.96.0'
+require_text .github/workflows/ci.yml 'uses: dtolnay/rust-toolchain@1.97.1'
+require_text .github/workflows/ci-full.yml 'uses: dtolnay/rust-toolchain@1.97.1'
 require_text .github/workflows/cache-warm.yml './scripts/cargo-stable.sh clippy --workspace --all-targets -- -D warnings'
-require_text .github/workflows/cache-warm.yml 'uses: dtolnay/rust-toolchain@1.96.0'
+require_text .github/workflows/cache-warm.yml 'uses: dtolnay/rust-toolchain@1.97.1'
 require_text Justfile './scripts/cargo-stable.sh --direct cargo-zigbuild check --target {{ TARGET }} --workspace --all-targets'
-require_text scripts/cargo-stable.sh 'stable_toolchain="1.96.0"'
+require_text scripts/cargo-stable.sh 'stable_toolchain="1.97.1"'
 require_text scripts/cargo-stable.sh "CARGO_TARGET_DIR=\"\${stable_target_root}\""
 require_text scripts/cargo-stable.sh "if [[ \"\${1:-}\" == \"--direct\" ]]"
 require_text crates/mvm-build/src/guest_agent_build.rs 'pinned_rust_toolchain(&spec.workspace_root)'

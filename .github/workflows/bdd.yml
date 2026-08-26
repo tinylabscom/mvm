@@ -31,7 +31,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-08-08
+          toolchain: nightly-2026-08-25
           components: rustc-codegen-cranelift
 
       - uses: ./.github/actions/apt-deps

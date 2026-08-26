@@ -87,7 +87,7 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.96.0
+        uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
@@ -437,7 +437,7 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.96.0
+        uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3

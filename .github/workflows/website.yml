@@ -50,7 +50,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.96.0
+          toolchain: 1.97.1
           targets: wasm32-unknown-unknown,wasm32-wasip1
 
       - name: Install wasm-pack

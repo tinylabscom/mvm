@@ -9,7 +9,7 @@ export TMPDIR=/out/tmp
 mkdir -p "$HOME" "$XDG_CACHE_HOME" "$RUSTUP_HOME" "$CARGO_HOME" "$CARGO_TARGET_DIR" "$TMPDIR"
 cd /work
 nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#rustup nixpkgs#gcc nixpkgs#binutils nixpkgs#lld -c sh -c '
-  rustup toolchain install 1.96.0 --profile minimal
-  rustup default 1.96.0
+  rustup toolchain install 1.97.1 --profile minimal
+  rustup default 1.97.1
   cargo test -p mvm-vmm --quiet
 '
