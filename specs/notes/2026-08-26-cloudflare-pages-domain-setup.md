@@ -60,7 +60,7 @@ In the Cloudflare dashboard:
 3. Cloudflare will provide two nameservers, for example:
    - `bob.ns.cloudflare.com`
    - `lara.ns.cloudflare.com`
-   (The exact pair is assigned per-zone; copy the values from the Cloudflare setup page.)
+     (The exact pair is assigned per-zone; copy the values from the Cloudflare setup page.)
 
 ### 2. Update nameservers at iwantmyname
 
@@ -95,6 +95,71 @@ Look for:
 
 Also verify the demo works in a browser: open `https://gomicrovm.com/demo/weblinux/` and confirm `SharedArrayBuffer` is available (no console error).
 
+## Email setup
+
+Because Cloudflare is now the authoritative DNS provider for `gomicrovm.com`, all mail-related DNS records are managed in the Cloudflare dashboard.
+
+### Receiving email with Cloudflare Email Routing (free)
+
+Cloudflare Email Routing is a free, receive-only forwarding service. It is the simplest option for addresses like `hello@gomicrovm.com`.
+
+1. In the Cloudflare dashboard, select the `gomicrovm.com` zone → **Email** → **Email Routing**.
+2. Click **Get started** and choose **Catch-all address** or individual routes.
+3. Add a destination address you already own (e.g., your personal Gmail). Cloudflare will send a verification email; click the link to confirm.
+4. Add custom addresses:
+   - `hello@gomicrovm.com` → `your-address@gmail.com`
+   - `support@gomicrovm.com` → `your-address@gmail.com`
+   - Or enable a catch-all so any `@gomicrovm.com` address forwards to your inbox.
+5. Cloudflare automatically adds the required DNS records:
+   - **MX records** pointing to Cloudflare's inbound mail servers.
+   - **SPF TXT record** (`v=spf1 include:_spf.mx.cloudflare.net ~all`) to authorize Cloudflare to receive mail for the domain.
+
+Wait for DNS propagation (usually minutes), then send a test message to `hello@gomicrovm.com` and confirm it arrives in the destination inbox.
+
+**Limitations:** Email Routing only forwards incoming mail. You cannot send mail `From: hello@gomicrovm.com` through Cloudflare.
+
+### Sending email from the domain
+
+To send mail as `@gomicrovm.com`, use a transactional email provider and add their DNS records to Cloudflare. Good options:
+
+- **Resend** (developer-friendly, free tier)
+- **Postmark**
+- **AWS SES**
+- **Mailgun**
+- **SendGrid**
+
+Each provider will give you records to add. Typically you need:
+
+- **SPF TXT record** at the root:
+
+  ```
+  v=spf1 include:_spf.mx.cloudflare.net include:mailprovider.com ~all
+  ```
+
+  Replace `mailprovider.com` with the provider's SPF include (e.g., `include:amazonses.com`, `include:resend.com`). If you are not using Cloudflare Email Routing, omit `include:_spf.mx.cloudflare.net`.
+
+- **DKIM CNAME records** (usually 3) provided by the sending service.
+
+- **DMARC TXT record** at `_dmarc.gomicrovm.com`:
+  ```
+  v=DMARC1; p=quarantine; rua=mailto:dmarc-reports@example.com; pct=100
+  ```
+  Start with `p=none` while testing, then move to `p=quarantine` or `p=reject` once mail flows correctly. Provide a real address for aggregate reports, or use a free DMARC reporting service.
+
+### Recommended minimal setup
+
+If you only need to receive email at `gomicrovm.com`:
+
+1. Use Cloudflare Email Routing.
+2. Let it manage MX and SPF automatically.
+
+If you also need to send email:
+
+1. Keep Cloudflare Email Routing for inbound mail.
+2. Add the sending provider's SPF include to the existing SPF record.
+3. Add the provider's DKIM records.
+4. Add a DMARC record at `_dmarc.gomicrovm.com`.
+
 ## Triggering a deployment
 
 - Automatic: publish a GitHub Release or push a `v*` tag.
@@ -106,4 +171,5 @@ Also verify the demo works in a browser: open `https://gomicrovm.com/demo/weblin
 - **Deployment fails with "Could not find the project"**: create the `mvm` Pages project first; the workflow does not auto-create it.
 - **Secrets missing**: ensure `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are set at the repository level, not just environment level.
 - **Custom domain shows "Invalid"**: confirm the zone is active on Cloudflare and the nameservers at iwantmyname match exactly.
-- **SharedArrayBuffer still missing**: verify `public/public/_headers` is present in the built output and that the request path starts with `/demo/weblinux/`.
+- **SharedArrayBuffer still missing**: verify `public/public/_headers` is present in the built output and the request path starts with `/demo/weblinux/`.
+- **Email not arriving**: verify the destination address is verified in Cloudflare Email Routing, and that the MX records point to Cloudflare (check with `dig gomicrovm.com MX`).
