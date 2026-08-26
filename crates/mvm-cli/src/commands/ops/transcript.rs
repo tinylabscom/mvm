@@ -290,6 +290,7 @@ impl TranscriptCtx {
                     &manifest.binding.vm_name,
                     &manifest.sealed_root_hex,
                     manifest.chunks.len(),
+                    manifest.adopted,
                 )
                 .context("anchoring the sealed transcript in the host audit chain")?,
             1 => {}
@@ -530,6 +531,7 @@ mod tests {
                 &manifest.binding.vm_name,
                 root,
                 manifest.chunks.len(),
+                manifest.adopted,
             )
             .unwrap();
     }

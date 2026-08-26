@@ -118,31 +118,38 @@ it, and `.mvmev` carries neither the transcript nor a commitment to it.
 **Priority:** P1. This is the gap between "what the host authorized" and "what
 the workload did".
 
-- [ ] **4.1 Confirm the seal point.** `durable.rs:312` computes
+- [x] **4.1 Confirm the seal point.** `durable.rs:312` computes
       `sealed_root_hex`; `journal.rs:258` recomputes it on a replayed seal for a
       capture whose owning process died. Both paths need the same anchor, and a
       replayed seal is already marked `adopted`.
-- [ ] **4.2 Emit the anchor.** Call the existing `emit_transcript_sealed`
+- [x] **4.2 Emit the anchor.** Call the existing `emit_transcript_sealed`
       (`crates/mvm-hostd/src/audit/emitter.rs:1024`) from the stream plane's seal
       path. Reuse it rather than adding a second entry kind.
-- [ ] **4.3 Decide the adopted-seal representation.** A replayed seal cannot
+- [x] **4.3 Decide the adopted-seal representation.** A replayed seal cannot
       account for records shed at hand-off; the entry should carry that
       distinction rather than presenting a partial transcript as complete.
 - [ ] **4.4 Surface the transcript root on the receipt.** As an extension key
       alongside `mvm.audit_root`, so a receipt lifted out of an archive still
       names the transcript it belongs to.
-- [ ] **4.7 Close the unchained-console gap.** The vsock path has two blind
+- [x] **4.7 Establish what the console path actually covers.** Resolved by
+      reading it rather than by changing anything. The vsock path has two blind
       windows by construction -- nothing before the guest agent starts, nothing
-      after it dies (`crates/mvm-hostd/src/stream/console_source.rs:6-11`). The
-      always-on console follower covers both, but the console file is
-      *unchained*: `plane.rs:26` contrasts it with the chained transcript, and
-      `logs.rs:14` renders a console-only read as "no channel separation, no
-      hash chain". So the boot and post-mortem window -- the forensically
-      interesting one -- is the part with no integrity chain. Decide whether
-      console-sourced records enter the chained transcript, or whether the
-      console capture gets its own sealed root.
+      after it dies (`crates/mvm-hostd/src/stream/console_source.rs:6-11`) --
+      and the always-on console follower covers both. Those console records are
+      *not* unchained: `console_source.rs:317` ingests them into the same
+      broker, and `broker.rs:353-355` pushes every ingested record into the
+      durable transcript. So boot and post-mortem output is inside the sealed,
+      chained capture. What is unchained is narrower and is a *read* path, not a
+      capture gap: `logs.rs` falls back to reading the raw console file only
+      when neither the broker nor a sealed transcript answers, and it reports
+      that degradation on stderr. No change needed; the earlier reading of this
+      as an integrity hole was wrong.
 
-- [ ] **4.5 Tests.** Anchor emitted on seal; anchor emitted on replayed seal and
+- [ ] **4.8 Anchor from the supervisor seal path too.** `seal_capture` and
+      `adopt_capture` are the two stream-plane seals and both now anchor. Check
+      whether any other production path seals a transcript without one.
+
+- [x] **4.5 Tests.** Anchor emitted on seal; anchor emitted on replayed seal and
       distinguishable from a live one; label set pinned exhaustively so a future
       label carrying payload bytes fails, mirroring
       `stream_audit_entries_carry_the_binding_and_no_payload_bytes`.
