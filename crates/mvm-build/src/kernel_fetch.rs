@@ -135,7 +135,14 @@ fn verify_cached_kernel(kernel: &Path) -> Result<VerifiedKernel, KernelFetchErro
         }
     };
 
-    let actual = compute_file_sha256(kernel)?;
+    // Through the size+mtime-keyed digest cache, not a raw re-read. This check
+    // runs on every kernel resolve, so on an unchanged cached kernel it was
+    // re-reading the whole image once per launch to recompute a digest that
+    // cannot have changed. The rootfs pin backing claim 8 already reads its
+    // (far larger) image through this same cache for the same reason; any
+    // rewrite of the file moves its size or mtime and forces a re-hash, so a
+    // stale digest cannot be adopted here either.
+    let actual = mvm_core::crypto::image_verify::sha256_file_cached(kernel)?;
     if actual != expected {
         evict_kernel(kernel);
         return Err(KernelFetchError::HashMismatch { expected, actual });
@@ -143,13 +150,29 @@ fn verify_cached_kernel(kernel: &Path) -> Result<VerifiedKernel, KernelFetchErro
     Ok(VerifiedKernel(kernel.to_path_buf()))
 }
 
-/// Remove a rejected kernel, its sidecar, and its optional resolved config.
-/// Removing only part of the entry can leave stale capability metadata beside
-/// the replacement, or let a poisoned artifact be re-adopted.
+/// Every file that belongs to a cached kernel entry, in deletion order.
+///
+/// One definition because a kernel is evicted from more than one place, and a
+/// caller that lists the set itself drifts: removing only part of the entry can
+/// leave stale capability metadata beside the replacement, or let a poisoned
+/// artifact be re-adopted under a digest nothing re-derived.
+#[must_use]
+pub fn kernel_entry_files(kernel: &Path) -> Vec<PathBuf> {
+    vec![
+        kernel.to_path_buf(),
+        kernel_digest_sidecar(kernel),
+        kernel.with_file_name("config"),
+        // Keyed on the evicted file's size+mtime, so an orphan can be served to
+        // a replacement that happens to land on the same pair.
+        mvm_core::crypto::image_verify::sha256_cache_path(kernel),
+    ]
+}
+
+/// Remove a rejected kernel and everything else in its entry, best-effort.
 fn evict_kernel(kernel: &Path) {
-    let _ = std::fs::remove_file(kernel);
-    let _ = std::fs::remove_file(kernel_digest_sidecar(kernel));
-    let _ = std::fs::remove_file(kernel.with_file_name("config"));
+    for path in kernel_entry_files(kernel) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// How a kernel pin resolves to a concrete `vmlinux` for a given backend.
@@ -368,6 +391,59 @@ mod tests {
                 KernelResolution::Cached(v) => assert_eq!(v.path(), kernel),
                 other => panic!("expected a verified hit, got {other:?}"),
             }
+        }
+
+        /// This check runs on every kernel resolve, so on an unchanged cached
+        /// kernel it must not re-read the whole image to recompute a digest
+        /// that cannot have changed. Asserted by the shared digest cache being
+        /// warm afterwards: a raw re-read leaves no entry behind.
+        #[test]
+        fn serving_a_pinned_kernel_leaves_its_digest_cache_warm() {
+            use mvm_core::crypto::image_verify::{DigestSource, sha256_file_cached_with_source};
+
+            let _env = env_guard();
+            let dir = tempfile::tempdir().unwrap();
+            let kernel = staged(dir.path(), b"kernel bytes", true);
+
+            assert!(matches!(
+                resolve_kernel(dir.path(), "aarch64", "workload", true),
+                KernelResolution::Cached(_)
+            ));
+
+            let (_, source) = sha256_file_cached_with_source(&kernel).unwrap();
+            assert_eq!(
+                source,
+                DigestSource::Sidecar,
+                "the pin check must digest through the shared cache, not re-read the image"
+            );
+        }
+
+        /// The digest cache is keyed on the evicted file's size+mtime, so an
+        /// orphan left behind can be served to a replacement that lands on the
+        /// same pair — vouching for bytes nothing re-derived.
+        #[test]
+        fn evicting_a_kernel_removes_its_digest_cache() {
+            let _env = env_guard();
+            let dir = tempfile::tempdir().unwrap();
+            let kernel = staged(dir.path(), b"kernel bytes", true);
+            // Warm the cache, then corrupt the pin so the next resolve evicts.
+            assert!(matches!(
+                resolve_kernel(dir.path(), "aarch64", "workload", true),
+                KernelResolution::Cached(_)
+            ));
+            let cache = mvm_core::crypto::image_verify::sha256_cache_path(&kernel);
+            assert!(cache.is_file(), "cache must be warm before the eviction");
+            std::fs::write(kernel_digest_sidecar(&kernel), "0".repeat(64)).unwrap();
+
+            assert!(!matches!(
+                resolve_kernel(dir.path(), "aarch64", "workload", true),
+                KernelResolution::Cached(_)
+            ));
+            assert!(!kernel.exists(), "the rejected kernel must be gone");
+            assert!(
+                !cache.exists(),
+                "its digest cache must go with it, not outlive the bytes it names"
+            );
         }
 
         #[test]

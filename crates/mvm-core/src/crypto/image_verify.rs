@@ -449,7 +449,7 @@ pub fn sha256_file_cached_with_source(path: &Path) -> io::Result<(String, Digest
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_nanos());
 
-    let sidecar = sha256_sidecar_path(path);
+    let sidecar = sha256_cache_path(path);
     if let Some(mtime) = mtime_nanos
         && let Ok(contents) = fs::read_to_string(&sidecar)
         && let Some(hex) = parse_sha256_sidecar(&contents, size, mtime)
@@ -464,7 +464,13 @@ pub fn sha256_file_cached_with_source(path: &Path) -> io::Result<(String, Digest
     Ok((hex, DigestSource::Hashed(size)))
 }
 
-fn sha256_sidecar_path(path: &Path) -> std::path::PathBuf {
+/// Where [`sha256_file_cached`] keeps `path`'s digest.
+///
+/// Public because whoever *deletes* an artifact has to delete this beside it.
+/// The entry is keyed on the file's size+mtime, so an orphaned sidecar can be
+/// served to a replacement that lands on the same pair.
+#[must_use]
+pub fn sha256_cache_path(path: &Path) -> std::path::PathBuf {
     let mut s = path.as_os_str().to_os_string();
     s.push(".sha256cache");
     std::path::PathBuf::from(s)
@@ -503,7 +509,7 @@ mod tests {
         f.write_all(b"hello").expect("write");
         f.flush().expect("flush");
         let p = f.path().to_path_buf();
-        let sidecar = sha256_sidecar_path(&p);
+        let sidecar = sha256_cache_path(&p);
 
         let direct = sha256_file(&p).expect("direct hash");
         // First cached call computes + writes the sidecar.
@@ -537,7 +543,7 @@ mod tests {
         f.write_all(body).expect("write");
         f.flush().expect("flush");
         let p = f.path().to_path_buf();
-        let sidecar = sha256_sidecar_path(&p);
+        let sidecar = sha256_cache_path(&p);
         let _ = fs::remove_file(&sidecar);
 
         let (miss, miss_source) = sha256_file_cached_with_source(&p).expect("cached miss");

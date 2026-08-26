@@ -195,11 +195,7 @@ pub(crate) fn assert_workload_kernel_supports_verity(kernel_path: &str) -> Resul
 }
 
 pub(super) fn evict_incompatible_workload_kernel(kernel: &std::path::Path) -> Result<()> {
-    for path in [
-        kernel.to_path_buf(),
-        mvm_build::kernel_fetch::kernel_digest_sidecar(kernel),
-        kernel.with_file_name("config"),
-    ] {
+    for path in mvm_build::kernel_fetch::kernel_entry_files(kernel) {
         match std::fs::remove_file(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
