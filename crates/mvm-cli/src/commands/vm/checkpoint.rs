@@ -295,7 +295,7 @@ pub(in crate::commands) fn now_unix() -> u64 {
 fn create(name: &str, tag: Option<String>, json: bool) -> Result<()> {
     let rootfs = resolve_quiesced_vm_rootfs(name)?;
     let state_dir = vm_state_dir(name);
-    let (runtime_source_policy, runtime_overlay_version) = runtime_contract_for_checkpoint(name)?;
+    let runtime_overlay_version = runtime_contract_for_checkpoint(name)?;
     let store = CheckpointStore::open();
     let now = now_unix();
     let id = CheckpointId::new(format!("ckpt-{name}-{now}"));
@@ -307,7 +307,6 @@ fn create(name: &str, tag: Option<String>, json: bool) -> Result<()> {
             vm_name: name.to_string(),
             rootfs,
             supervisor_config_digest: supervisor_config_digest(&state_dir),
-            runtime_source_policy,
             runtime_overlay_version,
             tag,
             created_unix: now,
@@ -356,8 +355,7 @@ struct CaptureVmFullArgs<'a> {
 fn capture_vm_full_for_running_vm(
     args: CaptureVmFullArgs<'_>,
 ) -> Result<mvm_core::checkpoint::CheckpointMeta> {
-    let (runtime_source_policy, runtime_overlay_version) =
-        runtime_contract_for_checkpoint(args.name)?;
+    let runtime_overlay_version = runtime_contract_for_checkpoint(args.name)?;
     let control = args.backend.vm_full_control(args.name).ok_or_else(|| {
         anyhow::anyhow!(
             "backend '{}' has no full-VM capture control for '{}'",
@@ -369,7 +367,6 @@ fn capture_vm_full_for_running_vm(
         id: args.id,
         vm_name: args.name.to_string(),
         supervisor_config_digest: supervisor_config_digest(args.state_dir),
-        runtime_source_policy,
         runtime_overlay_version,
         // Backends that drive their VMM through a supervisor config (HVF) carry
         // it into the checkpoint: a restore has to rebuild the launch shape the
@@ -1056,11 +1053,6 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         memory_mib: mem_mib as u32,
         ..Default::default()
     };
-    start_config.runtime_source_policy = forked_child_checkpoint_runtime_source_policy(
-        &parent_meta,
-        &effective_hypervisor,
-        p.instance_rootfs,
-    )?;
     super::up::attach_runtime_overlay_if_cached_version(
         &mut start_config,
         &effective_hypervisor,
@@ -1110,43 +1102,6 @@ fn read_grant_envelope_for(
     let path = mvm_core::config::vm_state_dir(vm_name).join("verb-grant.json");
     let bytes = std::fs::read(&path).ok()?;
     serde_json::from_slice(&bytes).ok()
-}
-
-fn forked_child_runtime_source_policy(
-    hypervisor: &str,
-    instance_rootfs: &std::path::Path,
-) -> mvm_core::vm_backend::RuntimeSourcePolicy {
-    mvm_core::vm_backend::select_runtime_source_policy(
-        mvm_core::vm_backend::RuntimeSourcePolicySelection {
-            backend_name: Some(hypervisor),
-            sealed: super::agent_verbs::image_is_sealed(instance_rootfs),
-            root_strategy: Some(mvm_core::vm_backend::RuntimeSourceRootStrategy::BlockExt4),
-            launch_kind: mvm_core::vm_backend::RuntimeSourceLaunchKind::WorkloadImage,
-        },
-    )
-}
-
-fn forked_child_checkpoint_runtime_source_policy(
-    parent_meta: &mvm_core::checkpoint::CheckpointMeta,
-    hypervisor: &str,
-    instance_rootfs: &std::path::Path,
-) -> Result<mvm_core::vm_backend::RuntimeSourcePolicy> {
-    match (
-        parent_meta.runtime_source_policy,
-        parent_meta.runtime_overlay_version.as_deref(),
-    ) {
-        (Some(mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay), None) => {
-            bail!(
-                "checkpoint '{}' requires a runtime overlay but records no overlay version",
-                parent_meta.id
-            );
-        }
-        (Some(policy), _) => Ok(policy),
-        (None, _) => Ok(forked_child_runtime_source_policy(
-            hypervisor,
-            instance_rootfs,
-        )),
-    }
 }
 
 fn grant_predecessor_from_vm_name(vm_name: &str) -> Option<(String, mvm_core::plan::Nonce)> {
@@ -1942,7 +1897,6 @@ mod tests {
             mode: mvm_runtime::base::runtime_meta::StartModeKind::Detached,
             accessible: false,
             rootfs_path: Some(rootfs_file.to_string_lossy().into_owned()),
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
             runtime_overlay_version: None,
             observability_target: None,
         };
@@ -1973,7 +1927,6 @@ mod tests {
             mode: mvm_runtime::base::runtime_meta::StartModeKind::Detached,
             accessible: false,
             rootfs_path: Some(gone_path.to_string_lossy().into_owned()),
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
             runtime_overlay_version: None,
             observability_target: None,
         };
@@ -2096,168 +2049,6 @@ mod tests {
         assert_eq!(out, instance);
         // File must be untouched.
         assert_eq!(std::fs::read(&instance).unwrap(), b"forked");
-    }
-
-    #[test]
-    fn sealed_firecracker_forked_child_requires_overlay() {
-        let tmp = tempfile::tempdir().unwrap();
-        let rootfs = tmp.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"fake").unwrap();
-        let sidecar = mvm_build::builder_vm::GuestSidecar {
-            name: "sealed".to_string(),
-            accessible: false,
-            sealed: true,
-            entrypoint_kind: "command".to_string(),
-            entrypoint_argv: Vec::new(),
-            init_system: "busybox".to_string(),
-            expected_boot_ms: 300,
-            agent_binary: "real".to_string(),
-            rootless_entrypoint: true,
-            hypervisor: "firecracker".to_string(),
-            overlay_aware: true,
-            runtime_lean: true,
-            image_tag: String::new(),
-            source: String::new(),
-            built_at: String::new(),
-            protocol_version: 0,
-            generator_rev: String::new(),
-        };
-        sidecar.write_to_dir(tmp.path()).unwrap();
-        assert_eq!(
-            forked_child_runtime_source_policy("firecracker", &rootfs),
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
-        );
-    }
-
-    #[test]
-    fn unsealed_firecracker_forked_child_requires_overlay() {
-        // A forked child is a block workload boot, so it requires the overlay
-        // whether or not its rootfs is sealed.
-        let tmp = tempfile::tempdir().unwrap();
-        let rootfs = tmp.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"fake").unwrap();
-        let sidecar = mvm_build::builder_vm::GuestSidecar {
-            name: "dev".to_string(),
-            accessible: true,
-            sealed: false,
-            entrypoint_kind: "shell".to_string(),
-            entrypoint_argv: Vec::new(),
-            init_system: "busybox".to_string(),
-            expected_boot_ms: 300,
-            agent_binary: "real".to_string(),
-            rootless_entrypoint: false,
-            hypervisor: "firecracker".to_string(),
-            overlay_aware: true,
-            runtime_lean: false,
-            image_tag: String::new(),
-            source: String::new(),
-            built_at: String::new(),
-            protocol_version: 0,
-            generator_rev: String::new(),
-        };
-        sidecar.write_to_dir(tmp.path()).unwrap();
-        assert_eq!(
-            forked_child_runtime_source_policy("firecracker", &rootfs),
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
-        );
-    }
-
-    #[test]
-    fn forked_child_checkpoint_policy_prefers_recorded_policy() {
-        let tmp = tempfile::tempdir().unwrap();
-        let rootfs = tmp.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"fake").unwrap();
-        let parent_meta = mvm_core::checkpoint::CheckpointMeta::builder(
-            CheckpointId::new("ckpt-parent"),
-            CheckpointClass::FsQuick,
-            "parentvm",
-        )
-        .content(vec![mvm_core::checkpoint::ContentBlob {
-            name: "rootfs.ext4".into(),
-            sha256: "abc".into(),
-        }])
-        .supervisor_config_digest("d")
-        .runtime_source_policy(Some(
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-        ))
-        .runtime_overlay_version(Some("0.17.0".to_string()))
-        .created_unix(1)
-        .build();
-        assert_eq!(
-            forked_child_checkpoint_runtime_source_policy(&parent_meta, "firecracker", &rootfs)
-                .unwrap(),
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay
-        );
-    }
-
-    #[test]
-    fn forked_child_checkpoint_policy_rejects_required_overlay_without_version() {
-        let tmp = tempfile::tempdir().unwrap();
-        let rootfs = tmp.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"fake").unwrap();
-        let parent_meta = mvm_core::checkpoint::CheckpointMeta::builder(
-            CheckpointId::new("ckpt-parent"),
-            CheckpointClass::FsQuick,
-            "parentvm",
-        )
-        .content(vec![mvm_core::checkpoint::ContentBlob {
-            name: "rootfs.ext4".into(),
-            sha256: "abc".into(),
-        }])
-        .supervisor_config_digest("d")
-        .runtime_source_policy(Some(
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-        ))
-        .created_unix(1)
-        .build();
-        let err =
-            forked_child_checkpoint_runtime_source_policy(&parent_meta, "firecracker", &rootfs)
-                .unwrap_err();
-        assert!(err.to_string().contains("records no overlay version"));
-    }
-
-    #[test]
-    fn forked_child_checkpoint_policy_falls_back_for_older_checkpoints() {
-        let tmp = tempfile::tempdir().unwrap();
-        let rootfs = tmp.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"fake").unwrap();
-        let sidecar = mvm_build::builder_vm::GuestSidecar {
-            name: "sealed".to_string(),
-            accessible: false,
-            sealed: true,
-            entrypoint_kind: "command".to_string(),
-            entrypoint_argv: Vec::new(),
-            init_system: "busybox".to_string(),
-            expected_boot_ms: 300,
-            agent_binary: "real".to_string(),
-            rootless_entrypoint: true,
-            hypervisor: "firecracker".to_string(),
-            overlay_aware: true,
-            runtime_lean: true,
-            image_tag: String::new(),
-            source: String::new(),
-            built_at: String::new(),
-            protocol_version: 0,
-            generator_rev: String::new(),
-        };
-        sidecar.write_to_dir(tmp.path()).unwrap();
-        let parent_meta = mvm_core::checkpoint::CheckpointMeta::builder(
-            CheckpointId::new("ckpt-parent"),
-            CheckpointClass::FsQuick,
-            "parentvm",
-        )
-        .content(vec![mvm_core::checkpoint::ContentBlob {
-            name: "rootfs.ext4".into(),
-            sha256: "abc".into(),
-        }])
-        .supervisor_config_digest("d")
-        .created_unix(1)
-        .build();
-        assert_eq!(
-            forked_child_checkpoint_runtime_source_policy(&parent_meta, "firecracker", &rootfs)
-                .unwrap(),
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
-        );
     }
 
     // ── bind_checkpoint_forked: parent-name resolution ───────────────────

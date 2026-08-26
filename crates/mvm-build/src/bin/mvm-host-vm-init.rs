@@ -479,18 +479,6 @@ const EGRESS_CLIENT_BIN_CANDIDATES: [&str; 2] = [
 #[cfg(target_os = "linux")]
 const RUNTIME_OVERLAY_MOUNT: &str = "/mvm/runtime";
 
-/// Builder/dev VMs still default to the compatibility posture until their
-/// attach path is ready: prefer the overlay when present, but allow the baked
-/// rootfs copy when the host omitted the token.
-#[cfg(any(target_os = "linux", test))]
-fn runtime_source_policy_from_cmdline(cmdline: &str) -> mvm_core::vm_backend::RuntimeSourcePolicy {
-    cmdline
-        .split_whitespace()
-        .find_map(|tok| tok.strip_prefix("mvm.runtime_source_policy="))
-        .and_then(mvm_core::vm_backend::RuntimeSourcePolicy::from_cmdline_value)
-        .unwrap_or(mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay)
-}
-
 #[cfg(any(target_os = "linux", test))]
 fn runtime_overlay_device_from_cmdline(cmdline: &str) -> Option<String> {
     cmdline
@@ -596,17 +584,8 @@ fn append_init_breadcrumb_at(
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn resolve_egress_client_binary(
-    runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
-    is_exec: impl Fn(&Path) -> bool,
-) -> Option<PathBuf> {
-    let candidates: &[&str] = match runtime_source_policy {
-        mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay => {
-            &EGRESS_CLIENT_BIN_CANDIDATES[..1]
-        }
-        mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay => &EGRESS_CLIENT_BIN_CANDIDATES,
-        mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly => &EGRESS_CLIENT_BIN_CANDIDATES[1..],
-    };
+fn resolve_egress_client_binary(is_exec: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    let candidates: &[&str] = &EGRESS_CLIENT_BIN_CANDIDATES[..1];
     candidates
         .iter()
         .map(Path::new)
@@ -626,15 +605,8 @@ fn runtime_overlay_mount_flag_bits() -> libc::c_ulong {
 /// agent-less, which is non-fatal and surfaced in `mvmctl status`,
 /// exactly as the workload path treats a missing agent.
 #[cfg(any(target_os = "linux", test))]
-fn resolve_agent_binary(
-    runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
-    is_exec: impl Fn(&Path) -> bool,
-) -> Option<PathBuf> {
-    let candidates: &[&str] = match runtime_source_policy {
-        mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay => &AGENT_BIN_CANDIDATES[..1],
-        mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay => &AGENT_BIN_CANDIDATES,
-        mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly => &AGENT_BIN_CANDIDATES[1..],
-    };
+fn resolve_agent_binary(is_exec: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    let candidates: &[&str] = &AGENT_BIN_CANDIDATES[..1];
     candidates
         .iter()
         .map(Path::new)
@@ -796,105 +768,36 @@ mod tests {
     }
 
     #[test]
-    fn resolve_agent_binary_prefers_runtime_overlay() {
-        // Both present → the verity overlay path wins.
-        let got = resolve_agent_binary(
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-            |_| true,
-        );
+    fn resolve_agent_binary_resolves_the_runtime_overlay_copy() {
+        let got = resolve_agent_binary(|_| true);
         assert_eq!(got, Some(PathBuf::from("/mvm/runtime/agent")));
     }
 
     #[test]
-    fn resolve_agent_binary_falls_back_to_baked_copy() {
-        // Overlay absent, baked copy present → the rootfs copy.
-        let got = resolve_agent_binary(
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-            |p| p == Path::new("/usr/local/bin/mvm-guest-agent"),
-        );
-        assert_eq!(got, Some(PathBuf::from("/usr/local/bin/mvm-guest-agent")));
-    }
-
-    #[test]
-    fn resolve_agent_binary_none_when_neither_present() {
+    fn resolve_agent_binary_none_when_the_overlay_copy_is_absent() {
         // Neither present → boot agent-less (non-fatal, surfaced in status).
-        let got = resolve_agent_binary(
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-            |_| false,
-        );
+        assert_eq!(resolve_agent_binary(|_| false), None);
+    }
+
+    /// The overlay is the single runtime source, so a binary sitting at the old
+    /// baked path must not satisfy the lookup.
+    #[test]
+    fn resolve_agent_binary_ignores_a_binary_at_the_old_baked_path() {
+        let got = resolve_agent_binary(|p| p == Path::new("/usr/local/bin/mvm-guest-agent"));
         assert_eq!(got, None);
     }
 
     #[test]
-    fn resolve_agent_binary_refuses_baked_fallback_when_overlay_is_required() {
-        let got = resolve_agent_binary(
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-            |p| p == Path::new("/usr/local/bin/mvm-guest-agent"),
-        );
-        assert_eq!(got, None);
-    }
-
-    #[test]
-    fn resolve_agent_binary_rootfs_only_skips_runtime_overlay() {
-        let got =
-            resolve_agent_binary(mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly, |p| {
-                p == Path::new("/usr/local/bin/mvm-guest-agent")
-            });
-        assert_eq!(got, Some(PathBuf::from("/usr/local/bin/mvm-guest-agent")));
-    }
-
-    #[test]
-    fn resolve_egress_client_binary_prefers_runtime_overlay() {
-        let got = resolve_egress_client_binary(
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-            |_| true,
-        );
+    fn resolve_egress_client_binary_resolves_the_runtime_overlay_copy() {
+        let got = resolve_egress_client_binary(|_| true);
         assert_eq!(got, Some(PathBuf::from("/mvm/runtime/egress-client")));
     }
 
     #[test]
-    fn resolve_egress_client_binary_falls_back_to_baked_copy() {
-        let got = resolve_egress_client_binary(
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-            |p| p == Path::new("/usr/local/bin/mvm-egress-client"),
-        );
-        assert_eq!(got, Some(PathBuf::from("/usr/local/bin/mvm-egress-client")));
-    }
-
-    #[test]
-    fn resolve_egress_client_binary_refuses_baked_fallback_when_overlay_is_required() {
-        let got = resolve_egress_client_binary(
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-            |p| p == Path::new("/usr/local/bin/mvm-egress-client"),
-        );
+    fn resolve_egress_client_binary_ignores_a_binary_at_the_old_baked_path() {
+        let got =
+            resolve_egress_client_binary(|p| p == Path::new("/usr/local/bin/mvm-egress-client"));
         assert_eq!(got, None);
-    }
-
-    #[test]
-    fn resolve_egress_client_binary_rootfs_only_skips_runtime_overlay() {
-        let got = resolve_egress_client_binary(
-            mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
-            |p| p == Path::new("/usr/local/bin/mvm-egress-client"),
-        );
-        assert_eq!(got, Some(PathBuf::from("/usr/local/bin/mvm-egress-client")));
-    }
-
-    #[test]
-    fn runtime_source_policy_from_cmdline_defaults_to_prefer_overlay() {
-        assert_eq!(
-            runtime_source_policy_from_cmdline("console=hvc0 root=/dev/vda"),
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay
-        );
-    }
-
-    #[test]
-    fn runtime_source_policy_from_cmdline_decodes_required_overlay() {
-        assert_eq!(
-            runtime_source_policy_from_cmdline(
-                "console=hvc0 mvm.runtime_source_policy=required_overlay root=/dev/vda"
-            ),
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
-        );
     }
 
     #[test]
@@ -1452,22 +1355,11 @@ mod linux {
     /// RPC on port 5252; without it the host can boot the builder VM but
     /// can't reach the agent.
     fn fork_guest_agent() {
-        let runtime_source_policy = crate::runtime_source_policy_from_cmdline(
-            &std::fs::read_to_string("/proc/cmdline").unwrap_or_default(),
-        );
-        let Some(agent_bin) = crate::resolve_agent_binary(runtime_source_policy, is_executable)
-        else {
-            if runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay {
-                eprintln!(
-                    "mvm-host-vm-init: runtime overlay required but /mvm/runtime/agent is missing; refusing boot"
-                );
-                std::process::exit(1);
-            }
+        let Some(agent_bin) = crate::resolve_agent_binary(is_executable) else {
             eprintln!(
-                "mvm-host-vm-init: no mvm-guest-agent found at {:?}; booting agent-less",
-                crate::AGENT_BIN_CANDIDATES
+                "mvm-host-vm-init: runtime overlay required but /mvm/runtime/agent is missing; refusing boot"
             );
-            return;
+            std::process::exit(1);
         };
         let mut cmd = crate::agent_spawn_command(&agent_bin);
         // BusyBox `setsid` puts the agent in a new session, matching the
@@ -1479,19 +1371,11 @@ mod linux {
                 agent_bin.display()
             ),
             Err(e) => {
-                if runtime_source_policy
-                    == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
-                {
-                    eprintln!(
-                        "mvm-host-vm-init: failed to fork required overlay agent from {}: {e}; refusing boot",
-                        agent_bin.display()
-                    );
-                    std::process::exit(1);
-                }
                 eprintln!(
-                    "mvm-host-vm-init: failed to fork mvm-guest-agent from {}: {e}; booting agent-less",
+                    "mvm-host-vm-init: failed to fork the overlay agent from {}: {e}; refusing boot",
                     agent_bin.display()
-                )
+                );
+                std::process::exit(1);
             }
         }
     }
@@ -1513,20 +1397,10 @@ mod linux {
             return;
         }
 
-        let runtime_source_policy = crate::runtime_source_policy_from_cmdline(cmdline);
-        let Some(egress_client) =
-            crate::resolve_egress_client_binary(runtime_source_policy, is_executable)
-        else {
-            if runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay {
-                eprintln!(
-                    "mvm-host-vm-init: runtime overlay required but /mvm/runtime/egress-client is missing; refusing boot"
-                );
-                std::process::exit(1);
-            }
-            refuse_boot(EgressProbe::ClientMissing(format!(
-                "{:?}",
-                crate::EGRESS_CLIENT_BIN_CANDIDATES
-            )));
+        let Some(egress_client) = crate::resolve_egress_client_binary(is_executable) else {
+            refuse_boot(EgressProbe::ClientMissing(
+                "/mvm/runtime/egress-client".to_string(),
+            ));
         };
 
         let _ = Command::new("/bin/busybox")
@@ -1834,7 +1708,6 @@ mod linux {
 
         let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
         append_init_breadcrumb("cmdline_loaded", cmdline.trim());
-        let runtime_source_policy = crate::runtime_source_policy_from_cmdline(&cmdline);
         match mount_runtime_overlay(&cmdline) {
             Ok(true) => {
                 append_init_breadcrumb("runtime_overlay_mount_ok", crate::RUNTIME_OVERLAY_MOUNT);
@@ -1845,37 +1718,28 @@ mod linux {
             }
             Ok(false) => {
                 append_init_breadcrumb("runtime_overlay_mount_none", "no runtime disk declared");
-                if runtime_source_policy
-                    == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
-                {
-                    eprintln!(
-                        "mvm-host-vm-init: runtime overlay required but no runtime disk was declared; refusing boot"
-                    );
-                    write_result(
-                        2,
-                        "runtime overlay required but no runtime disk was declared",
-                    );
-                    stamp(&timings, |t| {
-                        t.poweroff_start_ms = Some(BootTimings::ms_since(anchor))
-                    });
-                    write_boot_timings(&timings);
-                    return power_off();
-                }
+                eprintln!(
+                    "mvm-host-vm-init: runtime overlay required but no runtime disk was declared; refusing boot"
+                );
+                write_result(
+                    2,
+                    "runtime overlay required but no runtime disk was declared",
+                );
+                stamp(&timings, |t| {
+                    t.poweroff_start_ms = Some(BootTimings::ms_since(anchor))
+                });
+                write_boot_timings(&timings);
+                return power_off();
             }
             Err(e) => {
                 append_init_breadcrumb("runtime_overlay_mount_error", &e);
-                if runtime_source_policy
-                    == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
-                {
-                    eprintln!("mvm-host-vm-init: {e}; refusing boot");
-                    write_result(2, &e);
-                    stamp(&timings, |t| {
-                        t.poweroff_start_ms = Some(BootTimings::ms_since(anchor))
-                    });
-                    write_boot_timings(&timings);
-                    return power_off();
-                }
-                eprintln!("mvm-host-vm-init: runtime overlay mount warning (non-fatal): {e}");
+                eprintln!("mvm-host-vm-init: {e}; refusing boot");
+                write_result(2, &e);
+                stamp(&timings, |t| {
+                    t.poweroff_start_ms = Some(BootTimings::ms_since(anchor))
+                });
+                write_boot_timings(&timings);
+                return power_off();
             }
         }
         // Optional accelerator: a builder pack may carry a pre-fetched

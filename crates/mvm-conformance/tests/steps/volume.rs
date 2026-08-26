@@ -79,7 +79,6 @@ fn cache_live_guest_binaries(world: &CliWorld) {
     let source = guest_binary_source().expect("resolve guest-runtime cache generation");
     install_into_cache(
         GuestRuntimeBinaryPaths {
-            oci_init: &source_dir.join("mvm-oci-init"),
             agent: &source_dir.join("mvm-guest-agent"),
             netinit: &source_dir.join("mvm-guest-netinit"),
             egress_client: &source_dir.join("mvm-egress-client"),

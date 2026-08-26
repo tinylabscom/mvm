@@ -60,7 +60,6 @@ fn seed_parent(world: &mut CliWorld, chain_carries_creation_entry: bool) {
             vm_name: "warm-parent".into(),
             rootfs,
             supervisor_config_digest: "d".into(),
-            runtime_source_policy: None,
             runtime_overlay_version: None,
             tag: None,
             created_unix: 1,

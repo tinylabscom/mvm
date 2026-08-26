@@ -148,14 +148,11 @@ fn workload_cmdline_for_hostname(
     let virtiofs_root = config.virtiofs_root.is_some();
     let has_disk = !virtiofs_root && !config.rootfs_path.is_empty();
     let verity_is_enabled = verity_enabled(config);
-    if egress.is_none()
-        && hostname.is_none()
-        && grants.is_empty()
-        && !verity_is_enabled
-        && config.runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly
-    {
-        // No security tokens, no runtime policy, and no initramfs boot: let the
-        // driver fall back to its own default base cmdline.
+    if egress.is_none() && hostname.is_none() && grants.is_empty() && !verity_is_enabled {
+        // Nothing mvm-specific to say and no initramfs boot: let the driver
+        // fall back to its own default base cmdline. (This used to also require
+        // a rootfs-only runtime-source policy; with the overlay as the single
+        // source that conjunct was always true and said nothing.)
         return None;
     }
     let mut cmdline = if verity_is_enabled {
@@ -180,10 +177,6 @@ fn workload_cmdline_for_hostname(
         cmdline.push(' ');
         cmdline.push_str(&overlay_args);
     }
-    cmdline.push(' ');
-    cmdline.push_str(&mvm_core::vm_backend::encode_runtime_source_policy_cmdline(
-        config.runtime_source_policy,
-    ));
     for token in hostname.into_iter().chain(egress).chain(grants) {
         cmdline.push(' ');
         cmdline.push_str(&token);
@@ -320,7 +313,6 @@ mod tests {
             runtime_overlay_path: Some("/cache/runtime-overlay/overlay.ext4".to_string()),
             runtime_overlay_verity_path: Some("/cache/runtime-overlay/overlay.verity".to_string()),
             runtime_overlay_roothash: Some("b".repeat(64)),
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
             ..Default::default()
         }
     }
@@ -503,7 +495,6 @@ mod tests {
             workload_cmdline(&config, dir.path(), hvf_like_workload_bootargs).expect("cmdline");
         assert!(cmdline.contains("rootfstype=virtiofs root=mvmroot"));
         assert!(cmdline.contains("init=/init"));
-        assert!(cmdline.contains("mvm.runtime_source_policy=rootfs_only"));
         assert!(cmdline.contains("mvm.vsock_egress=1"));
     }
 
@@ -511,7 +502,7 @@ mod tests {
     /// shared initramfs cache) gets its roothashes and device paths over vsock
     /// via `ActivateEnvironment`, so the kernel cmdline must not carry them.
     #[test]
-    fn workload_cmdline_for_universal_initramfs_verity_boot_emits_console_and_policy_only() {
+    fn workload_cmdline_for_universal_initramfs_verity_boot_emits_console_only() {
         let _guard = crate::host::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -531,7 +522,6 @@ mod tests {
             runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
             runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
             runtime_overlay_roothash: Some("b".repeat(64)),
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
             ..Default::default()
         };
         let cmdline =
@@ -548,7 +538,6 @@ mod tests {
         assert!(!cmdline.contains("mvm.runtime_roothash="));
         assert!(!cmdline.contains("mvm.runtime_data=/dev/vdc"));
         assert!(!cmdline.contains("mvm.runtime_hash=/dev/vdd"));
-        assert!(cmdline.contains("mvm.runtime_source_policy=required_overlay"));
     }
 
     #[test]
@@ -560,7 +549,6 @@ mod tests {
             rootfs_path: rootfs.display().to_string(),
             verity_path: Some("/tmp/rootfs.verity".into()),
             roothash: Some("a".repeat(64)),
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
             ..Default::default()
         };
         // libkrun's base: a verity boot (has_disk=false) carries only the

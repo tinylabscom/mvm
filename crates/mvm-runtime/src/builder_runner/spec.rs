@@ -100,9 +100,7 @@ pub fn builder_spec(inputs: &BuilderSpecInputs<'_>) -> VmmSpec {
     });
 
     let cmdline = if inputs.runtime_overlay.is_some() {
-        format!(
-            "{BUILDER_CMDLINE} mvm.runtime_source_policy=required_overlay mvm.runtime_data={BUILDER_RUNTIME_DEVICE}"
-        )
+        format!("{BUILDER_CMDLINE} mvm.runtime_data={BUILDER_RUNTIME_DEVICE}")
     } else {
         BUILDER_CMDLINE.to_string()
     };
@@ -212,7 +210,7 @@ pub fn persistent_builder_spec(inputs: &PersistentBuilderSpecInputs<'_>) -> VmmS
     let cmdline = if let Some(runtime_overlay) = inputs.runtime_overlay {
         blocks.push(block(runtime_overlay, 2, true)); // vdc: runtime overlay, RO
         format!(
-            "{PERSISTENT_BUILDER_CMDLINE} mvm.runtime_source_policy=required_overlay \
+            "{PERSISTENT_BUILDER_CMDLINE} \
              mvm.runtime_data={PERSISTENT_BUILDER_RUNTIME_DEVICE}"
         )
     } else {
@@ -373,10 +371,6 @@ mod tests {
         assert!(spec.cmdline.contains(&format!(
             "mvm.runtime_data={PERSISTENT_BUILDER_RUNTIME_DEVICE}"
         )));
-        assert!(
-            spec.cmdline
-                .contains("mvm.runtime_source_policy=required_overlay")
-        );
     }
 
     fn inputs() -> BuilderSpecInputs<'static> {
@@ -474,10 +468,6 @@ mod tests {
             PathBuf::from("/state/flowmux-identity.ext4")
         );
         assert!(spec.blocks[5].read_only);
-        assert!(
-            spec.cmdline
-                .contains("mvm.runtime_source_policy=required_overlay")
-        );
         assert!(spec.cmdline.contains("mvm.runtime_data=/dev/vde"));
     }
 }

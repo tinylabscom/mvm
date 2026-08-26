@@ -24,7 +24,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use mvm_core::vm_backend::{RuntimeSourcePolicy, StartMode, VmStartConfig};
+use mvm_core::vm_backend::{StartMode, VmStartConfig};
 use serde::{Deserialize, Serialize};
 
 pub use crate::host::observability_target::{
@@ -66,11 +66,6 @@ pub struct VmRuntimeMeta {
     /// supervisor config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rootfs_path: Option<String>,
-
-    /// Declared guest-runtime source policy for the boot that wrote this file.
-    /// Older mode.json files without this field default to `RootfsOnly`.
-    #[serde(default)]
-    pub runtime_source_policy: RuntimeSourcePolicy,
 
     /// Version of the runtime overlay actually attached for this boot, if any.
     ///
@@ -206,7 +201,6 @@ pub fn dev_attached(mode: StartMode) -> VmRuntimeMeta {
         mode: mode.into(),
         accessible: true,
         rootfs_path: None,
-        runtime_source_policy: RuntimeSourcePolicy::RootfsOnly,
         runtime_overlay_version: None,
         observability_target: None,
     }
@@ -239,13 +233,10 @@ struct OverlayAwareSidecar {
 
 /// Admission gate for the runtime-overlay contract.
 ///
-/// `PreferOverlay` / `RootfsOnly` require only the original overlay-awareness
-/// claim. `RequiredOverlay` additionally requires a runtime-lean rootfs so the
-/// boot contract cannot silently degrade back to a baked agent/netinit pair.
-pub fn admit_runtime_overlay_contract(
-    rootfs_dir: &std::path::Path,
-    runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
-) -> Result<()> {
+/// The overlay is the single source of the guest binaries, so every boot needs
+/// both an overlay-aware rootfs and a runtime-lean one: a rootfs still carrying
+/// a baked agent/netinit pair could silently degrade back to it.
+pub fn admit_runtime_overlay_contract(rootfs_dir: &std::path::Path) -> Result<()> {
     let path = rootfs_dir.join(SIDECAR_FILENAME);
     let body = match std::fs::read_to_string(&path) {
         Ok(b) => b,
@@ -273,13 +264,11 @@ pub fn admit_runtime_overlay_contract(
             rootfs_dir.display()
         )
     }
-    if runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
-        && !sidecar.runtime_lean
-    {
+    if !sidecar.runtime_lean {
         bail!(
             "refusing to start VM: rootfs at {} is marked `overlayAware: true` but \
-                 not `runtimeLean: true` in its `mvm-meta.json` sidecar. Required-overlay \
-                 boots must use a rootfs that intentionally omits the baked \
+                 not `runtimeLean: true` in its `mvm-meta.json` sidecar. Every \
+                 boot must use a rootfs that intentionally omits the baked \
                  `/usr/local/bin/mvm-guest-agent` + `mvm-guest-netinit` fallback so the \
                  boot contract cannot silently degrade. Rebuild the image with the \
                  sealed/required-overlay mkGuest shape.",
@@ -313,7 +302,6 @@ pub fn from_sidecar(mode: StartMode, rootfs_dir: &std::path::Path) -> Result<VmR
         mode: mode.into(),
         accessible,
         rootfs_path: None,
-        runtime_source_policy: RuntimeSourcePolicy::RootfsOnly,
         runtime_overlay_version: None,
         observability_target: None,
     })
@@ -349,7 +337,6 @@ pub fn record_from_start_config(
     let dir = rootfs.parent().unwrap_or_else(|| std::path::Path::new("."));
     let mut meta = from_sidecar(mode, dir)?;
     meta.rootfs_path = Some(start_config.rootfs_path.clone());
-    meta.runtime_source_policy = start_config.runtime_source_policy;
     meta.runtime_overlay_version = start_config.runtime_overlay_version.clone();
     write(name, &meta)
 }
@@ -380,7 +367,6 @@ mod tests {
                 mode: StartModeKind::Attached,
                 accessible: true,
                 rootfs_path: None,
-                runtime_source_policy: RuntimeSourcePolicy::RootfsOnly,
                 runtime_overlay_version: None,
                 observability_target: None,
             };
@@ -397,7 +383,6 @@ mod tests {
                 mode: StartModeKind::Detached,
                 accessible: false,
                 rootfs_path: None,
-                runtime_source_policy: RuntimeSourcePolicy::RootfsOnly,
                 runtime_overlay_version: None,
                 observability_target: None,
             };
@@ -433,7 +418,6 @@ mod tests {
         let meta = dev_attached(StartMode::Attached);
         assert_eq!(meta.mode, StartModeKind::Attached);
         assert!(meta.accessible);
-        assert_eq!(meta.runtime_source_policy, RuntimeSourcePolicy::RootfsOnly);
         assert!(meta.runtime_overlay_version.is_none());
     }
 
@@ -521,31 +505,24 @@ mod tests {
                 mode: StartModeKind::Detached,
                 accessible: false,
                 rootfs_path: Some("/abs/path/rootfs.ext4".to_string()),
-                runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
                 runtime_overlay_version: Some("0.17.0".to_string()),
                 observability_target: None,
             };
             write("rp-with", &with_path).expect("write");
             let back = read("rp-with").expect("read").expect("present");
             assert_eq!(back.rootfs_path.as_deref(), Some("/abs/path/rootfs.ext4"));
-            assert_eq!(
-                back.runtime_source_policy,
-                RuntimeSourcePolicy::RequiredOverlay
-            );
             assert_eq!(back.runtime_overlay_version.as_deref(), Some("0.17.0"));
 
             let without_path = VmRuntimeMeta {
                 mode: StartModeKind::Attached,
                 accessible: true,
                 rootfs_path: None,
-                runtime_source_policy: RuntimeSourcePolicy::RootfsOnly,
                 runtime_overlay_version: None,
                 observability_target: None,
             };
             write("rp-without", &without_path).expect("write");
             let back2 = read("rp-without").expect("read").expect("present");
             assert!(back2.rootfs_path.is_none());
-            assert_eq!(back2.runtime_source_policy, RuntimeSourcePolicy::RootfsOnly);
             assert!(back2.runtime_overlay_version.is_none());
         });
     }
@@ -561,7 +538,6 @@ mod tests {
             )
             .unwrap();
             let meta = read("oldvm-runtime").expect("read").expect("present");
-            assert_eq!(meta.runtime_source_policy, RuntimeSourcePolicy::RootfsOnly);
             assert!(meta.runtime_overlay_version.is_none());
         });
     }
@@ -576,7 +552,6 @@ mod tests {
             let start_config = VmStartConfig {
                 name: "rt-start-config".to_string(),
                 rootfs_path: rootfs.to_string_lossy().into_owned(),
-                runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
                 runtime_overlay_version: Some("0.17.0".to_string()),
                 ..Default::default()
             };
@@ -584,10 +559,6 @@ mod tests {
                 .expect("record");
 
             let meta = read("rt-start-config").expect("read").expect("present");
-            assert_eq!(
-                meta.runtime_source_policy,
-                RuntimeSourcePolicy::RequiredOverlay
-            );
             assert_eq!(meta.runtime_overlay_version.as_deref(), Some("0.17.0"));
             assert_eq!(meta.rootfs_path.as_deref(), Some(rootfs.to_str().unwrap()));
         });

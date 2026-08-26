@@ -911,18 +911,13 @@ pub(in crate::commands::vm) fn emit_launched_if(
 pub(in crate::commands::vm) fn emit_boot_posture_if(
     ctx: &Option<AdmissionContext>,
     strategy: mvm_build::run_image::RootStrategy,
-    runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
 ) {
     let Some(ctx) = ctx else { return };
     let label = match strategy {
         mvm_build::run_image::RootStrategy::VirtiofsRoot => "virtiofs-root",
         mvm_build::run_image::RootStrategy::BlockExt4 => "block-ext4",
     };
-    if let Err(e) = ctx.emitter.emit_boot_posture(
-        ctx.admitted.plan(),
-        label,
-        runtime_source_policy.audit_label(),
-    ) {
+    if let Err(e) = ctx.emitter.emit_boot_posture(ctx.admitted.plan(), label) {
         tracing::warn!(error = %e, "audit emit_boot_posture failed (non-fatal)");
     }
 }
@@ -1639,7 +1634,7 @@ mod admit_plan_tests {
     }
 
     #[test]
-    fn emit_boot_posture_audits_runtime_source_policy_label() {
+    fn emit_boot_posture_audits_the_root_strategy_label() {
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -1679,11 +1674,7 @@ mod admit_plan_tests {
         .expect("admission")
         .expect("Some when admission ran");
 
-        emit_boot_posture_if(
-            &Some(ctx),
-            mvm_build::run_image::RootStrategy::BlockExt4,
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-        );
+        emit_boot_posture_if(&Some(ctx), mvm_build::run_image::RootStrategy::BlockExt4);
 
         let audit_path = audit_dir.path().join("local.jsonl");
         let content = std::fs::read_to_string(&audit_path).expect("audit file exists");
@@ -1696,8 +1687,8 @@ mod admit_plan_tests {
             "audit chain must carry selected root strategy: {content}"
         );
         assert!(
-            content.contains("\"runtime_source_policy\":\"required-overlay\""),
-            "audit chain must carry runtime_source_policy label from the enum: {content}"
+            content.contains("\"root_strategy\":\"block-ext4\""),
+            "audit chain must carry the root_strategy label: {content}"
         );
     }
 

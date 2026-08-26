@@ -8,7 +8,7 @@
 //! This module is the host-side fix. It runs against the unpacked OCI
 //! tree *before* it is sealed into `rootfs.ext4`, baking in:
 //!
-//! - `/init`, installed from the static `mvm-oci-init` binary, so the
+//! - the entrypoint wrapper and mount points, so the
 //!   source OCI image does not need `/bin/sh`, busybox, or its own init.
 //! - `/usr/lib/mvm/wrappers/oci-entrypoint` plus `/etc/mvm/entrypoint`
 //!   when the OCI config declares Entrypoint/Cmd.
@@ -35,8 +35,6 @@ use std::path::{Path, PathBuf};
 /// overlay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MvmRuntimeBinaries {
-    /// Static OCI PID 1 (`mvm-oci-init`), installed as `/init`.
-    pub oci_init: PathBuf,
     /// Static guest agent binary (`mvm-guest-agent`).
     pub agent: PathBuf,
     /// Static guest netinit binary (`mvm-guest-netinit`).
@@ -58,15 +56,14 @@ pub struct MvmRuntimeBinaries {
 const CONTENT_DIGEST_FRAMING: &str = "mvm-runtime-id-v1";
 
 impl MvmRuntimeBinaries {
-    /// The six artifacts in a fixed order, tagged with the name each is
+    /// The five artifacts in a fixed order, tagged with the name each is
     /// digested under.
     ///
     /// One place defines the set, so [`content_digest`](Self::content_digest)
     /// and any caller that wants to stat the same files cannot disagree about
     /// what "the injected runtime" is.
-    pub fn artifacts(&self) -> [(&'static str, &Path); 6] {
+    pub fn artifacts(&self) -> [(&'static str, &Path); 5] {
         [
-            ("oci_init", self.oci_init.as_path()),
             ("agent", self.agent.as_path()),
             ("netinit", self.netinit.as_path()),
             ("egress_client", self.egress_client.as_path()),
@@ -79,7 +76,7 @@ impl MvmRuntimeBinaries {
     /// the injection layout that is not itself a file.
     ///
     /// This is the rootfs cache identity. It is derived from the artifacts
-    /// that actually get copied in, so a rebuilt `/init` or egress shim
+    /// that actually get copied in, so a rebuilt agent or egress shim
     /// invalidates every cached rootfs without anyone remembering to say so.
     /// The layout component ([`INJECT_DIRS`] + [`INJECT_DESTS`]) covers the
     /// part of the injection a byte digest cannot see: a mountpoint added or a
@@ -197,24 +194,11 @@ const INJECT_DESTS: &[&str] = &[
     ENTRYPOINT_MARKER_DEST,
     IMAGE_RUNTIME_CONFIG_DEST,
     VERB_TRUST_DEST,
-    "init",
     "etc/mvm/variant",
     "etc/mvm/name",
     "etc/passwd",
     "etc/group",
 ];
-
-/// Which runtime shape to inject into an OCI-prepared rootfs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeInjectionProfile {
-    /// Rootfs-only launch shape: bake the guest binaries into the tree because
-    /// the boot path intentionally does not consume `/mvm/runtime`.
-    RootfsOnly,
-    /// Overlay-backed launch shape: install only PID 1, entrypoint wrapper,
-    /// mountpoints, and markers; the actual guest runtime binaries must come
-    /// from the shared read-only runtime overlay.
-    RuntimeLean,
-}
 
 /// Inject the mvm runtime into the OCI-unpacked `rootfs_dir`.
 ///
@@ -225,7 +209,6 @@ pub fn inject_mvm_runtime(
     bins: &MvmRuntimeBinaries,
     entrypoint: Option<&ImageRuntimeConfig>,
     sealed: bool,
-    profile: RuntimeInjectionProfile,
 ) -> Result<InjectedPaths, io::Error> {
     if !rootfs_dir.is_dir() {
         return Err(io::Error::new(
@@ -269,20 +252,15 @@ pub fn inject_mvm_runtime(
         write_file(&rootfs_dir.join(VERB_TRUST_DEST), &policy_json, 0o444)?;
     }
 
+    // The runtime overlay is the single source of the guest binaries, so the
+    // rootfs must not carry a copy of any of them. An image that shipped its
+    // own is stripped here rather than left to shadow the overlay.
     let agent_dest = rootfs_dir.join(AGENT_DEST);
     let netinit_dest = rootfs_dir.join(NETINIT_DEST);
     let egress_client_dest = rootfs_dir.join(EGRESS_CLIENT_DEST);
-    if profile == RuntimeInjectionProfile::RootfsOnly {
-        let bin_dir = rootfs_dir.join("usr").join("local").join("bin");
-        std::fs::create_dir_all(&bin_dir)?;
-        copy_exec(&bins.agent, &agent_dest)?;
-        copy_exec(&bins.netinit, &netinit_dest)?;
-        copy_exec(&bins.egress_client, &egress_client_dest)?;
-    } else {
-        let _ = std::fs::remove_file(&agent_dest);
-        let _ = std::fs::remove_file(&netinit_dest);
-        let _ = std::fs::remove_file(&egress_client_dest);
-    }
+    let _ = std::fs::remove_file(&agent_dest);
+    let _ = std::fs::remove_file(&netinit_dest);
+    let _ = std::fs::remove_file(&egress_client_dest);
 
     let entrypoint_runner_dest = rootfs_dir.join(ENTRYPOINT_RUNNER_DEST);
     copy_file_with_mode(&bins.entrypoint_runner, &entrypoint_runner_dest, 0o555)?;
@@ -309,11 +287,7 @@ pub fn inject_mvm_runtime(
         }
     }
 
-    let init_dest = rootfs_dir.join("init");
-    copy_exec(&bins.oci_init, &init_dest)?;
-
     Ok(InjectedPaths {
-        init: init_dest,
         agent: agent_dest,
         netinit: netinit_dest,
         egress_client: egress_client_dest,
@@ -325,7 +299,6 @@ pub fn inject_mvm_runtime(
 /// Paths written by [`inject_mvm_runtime`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InjectedPaths {
-    pub init: PathBuf,
     pub agent: PathBuf,
     pub netinit: PathBuf,
     pub egress_client: PathBuf,
@@ -345,10 +318,6 @@ fn ensure_dir(rootfs_dir: &Path, rel: &str, mode: u32) -> Result<(), io::Error> 
     let path = rootfs_dir.join(rel);
     std::fs::create_dir_all(&path)?;
     set_mode(&path, mode)
-}
-
-fn copy_exec(src: &Path, dst: &Path) -> Result<(), io::Error> {
-    copy_file_with_mode(src, dst, 0o755)
 }
 
 fn copy_file_with_mode(src: &Path, dst: &Path, mode: u32) -> Result<(), io::Error> {
@@ -426,7 +395,6 @@ mod tests {
         let baseline = bins.content_digest().unwrap();
 
         let MvmRuntimeBinaries {
-            oci_init,
             agent,
             netinit,
             egress_client,
@@ -434,7 +402,6 @@ mod tests {
             verity_init,
         } = &bins;
         let every_field = [
-            ("oci_init", oci_init),
             ("agent", agent),
             ("netinit", netinit),
             ("egress_client", egress_client),
@@ -569,20 +536,17 @@ mod tests {
     }
 
     fn fake_bins(dir: &Path) -> MvmRuntimeBinaries {
-        let oci_init = dir.join("oci-init.bin");
         let agent = dir.join("agent.bin");
         let netinit = dir.join("netinit.bin");
         let egress_client = dir.join("egress-client.bin");
         let entrypoint_runner = dir.join("entrypoint-runner.bin");
         let verity_init = dir.join("verity-init.bin");
-        std::fs::write(&oci_init, b"\x7fELF-oci-init").unwrap();
         std::fs::write(&agent, b"\x7fELF-agent").unwrap();
         std::fs::write(&netinit, b"\x7fELF-netinit").unwrap();
         std::fs::write(&egress_client, b"\x7fELF-egress-client").unwrap();
         std::fs::write(&entrypoint_runner, b"\x7fELF-entrypoint-runner").unwrap();
         std::fs::write(&verity_init, b"\x7fELF-verity-init").unwrap();
         MvmRuntimeBinaries {
-            oci_init,
             agent,
             netinit,
             egress_client,
@@ -607,14 +571,7 @@ mod tests {
             env: vec!["PATH=/usr/local/cargo/bin".to_string()],
             working_dir: None,
         };
-        inject_mvm_runtime(
-            &root,
-            &bins,
-            Some(&config),
-            false,
-            RuntimeInjectionProfile::RootfsOnly,
-        )
-        .expect("inject");
+        inject_mvm_runtime(&root, &bins, Some(&config), false).expect("inject");
 
         let written: ImageRuntimeConfig = serde_json::from_slice(
             &std::fs::read(root.join(IMAGE_RUNTIME_CONFIG_DEST)).expect("config written"),
@@ -632,14 +589,8 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let bins = fake_bins(tmp.path());
 
-        inject_mvm_runtime(
-            &root,
-            &bins,
-            Some(&ImageRuntimeConfig::default()),
-            false,
-            RuntimeInjectionProfile::RootfsOnly,
-        )
-        .expect("inject");
+        inject_mvm_runtime(&root, &bins, Some(&ImageRuntimeConfig::default()), false)
+            .expect("inject");
 
         assert!(!root.join(IMAGE_RUNTIME_CONFIG_DEST).exists());
         assert!(!root.join(ENTRYPOINT_MARKER_DEST).exists());
@@ -658,14 +609,7 @@ mod tests {
         std::fs::write(root.join("etc/group"), "root:x:0:\n").unwrap();
         let bins = fake_bins(tmp.path());
 
-        inject_mvm_runtime(
-            &root,
-            &bins,
-            None,
-            false,
-            RuntimeInjectionProfile::RootfsOnly,
-        )
-        .expect("inject");
+        inject_mvm_runtime(&root, &bins, None, false).expect("inject");
 
         let passwd = std::fs::read_to_string(root.join("etc/passwd")).unwrap();
         assert!(
@@ -698,14 +642,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let bins = fake_bins(tmp.path());
 
-        inject_mvm_runtime(
-            &root,
-            &bins,
-            None,
-            false,
-            RuntimeInjectionProfile::RootfsOnly,
-        )
-        .expect("inject");
+        inject_mvm_runtime(&root, &bins, None, false).expect("inject");
 
         assert!(
             std::fs::read_to_string(root.join("etc/passwd"))
@@ -725,14 +662,7 @@ mod tests {
         std::fs::write(root.join("etc/passwd"), existing).unwrap();
         let bins = fake_bins(tmp.path());
 
-        inject_mvm_runtime(
-            &root,
-            &bins,
-            None,
-            false,
-            RuntimeInjectionProfile::RootfsOnly,
-        )
-        .expect("inject");
+        inject_mvm_runtime(&root, &bins, None, false).expect("inject");
 
         assert_eq!(
             std::fs::read_to_string(root.join("etc/passwd")).unwrap(),
@@ -750,14 +680,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let bins = fake_bins(tmp.path());
 
-        inject_mvm_runtime(
-            &root,
-            &bins,
-            None,
-            false,
-            RuntimeInjectionProfile::RootfsOnly,
-        )
-        .expect("inject");
+        inject_mvm_runtime(&root, &bins, None, false).expect("inject");
 
         assert!(
             root.join(mvm_agentd::guest_mount::WORKLOAD_HOME_REL)
@@ -783,7 +706,7 @@ mod tests {
     }
 
     #[test]
-    fn inject_writes_init_binaries_and_mount_point() {
+    fn inject_writes_the_entrypoint_runner_and_bakes_no_guest_binaries() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("rootfs");
         std::fs::create_dir_all(&root).unwrap();
@@ -799,29 +722,15 @@ mod tests {
             working_dir: Some("/app".to_string()),
         };
 
-        let injected = inject_mvm_runtime(
-            &root,
-            &bins,
-            Some(&entrypoint),
-            false,
-            RuntimeInjectionProfile::RootfsOnly,
-        )
-        .expect("inject");
+        let injected = inject_mvm_runtime(&root, &bins, Some(&entrypoint), false).expect("inject");
 
-        assert_eq!(std::fs::read(&injected.init).unwrap(), b"\x7fELF-oci-init");
-        assert!(is_executable(&injected.init));
-        assert_eq!(std::fs::read(&injected.agent).unwrap(), b"\x7fELF-agent");
-        assert!(is_executable(&injected.agent));
-        assert_eq!(
-            std::fs::read(&injected.netinit).unwrap(),
-            b"\x7fELF-netinit"
-        );
-        assert!(is_executable(&injected.netinit));
-        assert_eq!(
-            std::fs::read(&injected.egress_client).unwrap(),
-            b"\x7fELF-egress-client"
-        );
-        assert!(is_executable(&injected.egress_client));
+        // The overlay is the single source of the guest binaries, so none of
+        // them is baked into the tree and no rootfs `/init` is written: the
+        // universal initramfs supplies PID 1.
+        assert!(!root.join("init").exists());
+        assert!(!injected.agent.exists());
+        assert!(!injected.netinit.exists());
+        assert!(!injected.egress_client.exists());
         assert_eq!(
             std::fs::read(&injected.entrypoint_runner).unwrap(),
             b"\x7fELF-entrypoint-runner"
@@ -867,24 +776,15 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let bins = fake_bins(tmp.path());
 
-        inject_mvm_runtime(
-            &root,
-            &bins,
-            None,
-            false,
-            RuntimeInjectionProfile::RootfsOnly,
-        )
-        .expect("first inject");
-        let second = inject_mvm_runtime(
-            &root,
-            &bins,
-            None,
-            false,
-            RuntimeInjectionProfile::RootfsOnly,
-        )
-        .expect("second inject");
-        assert!(is_executable(&second.agent));
-        assert!(is_executable(&second.egress_client));
+        inject_mvm_runtime(&root, &bins, None, false).expect("first inject");
+        let second = inject_mvm_runtime(&root, &bins, None, false).expect("second inject");
+        // Re-running must leave the same shape: the entrypoint wrapper present,
+        // the guest binaries still absent (the overlay supplies them), and no
+        // entrypoint marker for an image that declared no command.
+        assert!(is_executable(&second.entrypoint_runner));
+        assert!(!second.agent.exists());
+        assert!(!second.egress_client.exists());
+        assert!(second.runtime_mount_point.is_dir());
         assert!(!root.join("etc/mvm/entrypoint").exists());
     }
 
@@ -892,39 +792,8 @@ mod tests {
     fn inject_rejects_missing_rootfs_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let bins = fake_bins(tmp.path());
-        let err = inject_mvm_runtime(
-            &tmp.path().join("nope"),
-            &bins,
-            None,
-            false,
-            RuntimeInjectionProfile::RootfsOnly,
-        )
-        .unwrap_err();
+        let err = inject_mvm_runtime(&tmp.path().join("nope"), &bins, None, false).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
-    }
-
-    #[test]
-    fn runtime_lean_profile_skips_baked_guest_binaries() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("rootfs");
-        std::fs::create_dir_all(&root).unwrap();
-        let bins = fake_bins(tmp.path());
-
-        let injected = inject_mvm_runtime(
-            &root,
-            &bins,
-            None,
-            false,
-            RuntimeInjectionProfile::RuntimeLean,
-        )
-        .expect("inject");
-
-        assert!(is_executable(&injected.init));
-        assert!(is_executable(&injected.entrypoint_runner));
-        assert!(injected.runtime_mount_point.is_dir());
-        assert!(!injected.agent.exists());
-        assert!(!injected.netinit.exists());
-        assert!(!injected.egress_client.exists());
     }
 
     #[test]
@@ -934,14 +803,7 @@ mod tests {
 
         let dev_root = tmp.path().join("dev-rootfs");
         std::fs::create_dir_all(&dev_root).unwrap();
-        inject_mvm_runtime(
-            &dev_root,
-            &bins,
-            None,
-            false,
-            RuntimeInjectionProfile::RootfsOnly,
-        )
-        .expect("dev inject");
+        inject_mvm_runtime(&dev_root, &bins, None, false).expect("dev inject");
         assert_eq!(
             std::fs::read_to_string(dev_root.join("etc/mvm/variant")).unwrap(),
             "dev\n"
@@ -949,14 +811,7 @@ mod tests {
 
         let prod_root = tmp.path().join("prod-rootfs");
         std::fs::create_dir_all(&prod_root).unwrap();
-        inject_mvm_runtime(
-            &prod_root,
-            &bins,
-            None,
-            true,
-            RuntimeInjectionProfile::RootfsOnly,
-        )
-        .expect("prod inject");
+        inject_mvm_runtime(&prod_root, &bins, None, true).expect("prod inject");
         assert_eq!(
             std::fs::read_to_string(prod_root.join("etc/mvm/variant")).unwrap(),
             "prod\n"
@@ -970,26 +825,12 @@ mod tests {
 
         let dev_root = tmp.path().join("dev-rootfs");
         std::fs::create_dir_all(&dev_root).unwrap();
-        inject_mvm_runtime(
-            &dev_root,
-            &bins,
-            None,
-            false,
-            RuntimeInjectionProfile::RootfsOnly,
-        )
-        .expect("dev inject");
+        inject_mvm_runtime(&dev_root, &bins, None, false).expect("dev inject");
         assert!(!dev_root.join("etc/mvm/verb-trust.json").exists());
 
         let prod_root = tmp.path().join("prod-rootfs");
         std::fs::create_dir_all(&prod_root).unwrap();
-        inject_mvm_runtime(
-            &prod_root,
-            &bins,
-            None,
-            true,
-            RuntimeInjectionProfile::RootfsOnly,
-        )
-        .expect("prod inject");
+        inject_mvm_runtime(&prod_root, &bins, None, true).expect("prod inject");
         let policy_path = prod_root.join("etc/mvm/verb-trust.json");
         assert!(policy_path.is_file());
         assert_eq!(

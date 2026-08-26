@@ -910,19 +910,11 @@ pub(in crate::commands) fn run_secure_with_source(
             &oci_provenance,
         )?;
         let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
-        let runtime_source_policy = crate::exec::RuntimeSourcePolicySink::new(
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-        );
-        let output = match crate::exec::run_captured_with_posture(
-            req,
-            Some(&admit),
-            &posture,
-            &runtime_source_policy,
-        ) {
+        let output = match crate::exec::run_captured_with_posture(req, Some(&admit), &posture) {
             Ok(o) => {
                 let ctx = admit_ctx.borrow_mut().take();
                 super::up::emit_launched_if(&ctx, &receipt_backend, false);
-                super::up::emit_boot_posture_if(&ctx, posture.get(), runtime_source_policy.get());
+                super::up::emit_boot_posture_if(&ctx, posture.get());
                 o
             }
             Err(e) => {
@@ -1108,25 +1100,21 @@ fn run_run_args(
         audit.oci_provenance,
     )?;
     let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
-    let runtime_source_policy = crate::exec::RuntimeSourcePolicySink::new(
-        mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-    );
-    let exit_code =
-        match crate::exec::run_with_posture(req, audit.admit, &posture, &runtime_source_policy) {
-            Ok(code) => {
-                // The VM booted and the command ran (whatever its exit code), so the
-                // admission launched — emit `plan.launched` plus the resolved boot
-                // posture (virtiofs-root vs block-ext4) against the same plan.
-                let ctx = audit.ctx.borrow_mut().take();
-                super::up::emit_launched_if(&ctx, audit.backend, false);
-                super::up::emit_boot_posture_if(&ctx, posture.get(), runtime_source_policy.get());
-                code
-            }
-            Err(e) => {
-                super::up::emit_failed_if(&audit.ctx.borrow_mut().take(), "launch", &e);
-                return Err(e);
-            }
-        };
+    let exit_code = match crate::exec::run_with_posture(req, audit.admit, &posture) {
+        Ok(code) => {
+            // The VM booted and the command ran (whatever its exit code), so the
+            // admission launched — emit `plan.launched` plus the resolved boot
+            // posture (virtiofs-root vs block-ext4) against the same plan.
+            let ctx = audit.ctx.borrow_mut().take();
+            super::up::emit_launched_if(&ctx, audit.backend, false);
+            super::up::emit_boot_posture_if(&ctx, posture.get());
+            code
+        }
+        Err(e) => {
+            super::up::emit_failed_if(&audit.ctx.borrow_mut().take(), "launch", &e);
+            return Err(e);
+        }
+    };
     if exit_code != 0 {
         std::process::exit(exit_code);
     }

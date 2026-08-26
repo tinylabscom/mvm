@@ -34,7 +34,7 @@ use mvm_core::plan::{
 };
 use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
 use mvm_core::protocol::broker::ServiceId;
-use mvm_core::vm_backend::{RuntimeSourcePolicy, VmStartConfig};
+use mvm_core::vm_backend::VmStartConfig;
 use mvm_runtime::AnyBackend;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -479,7 +479,6 @@ impl OperatorConfiguredTrialBooter {
             memory_mib: self.config.workload.memory_mib,
             tenant_id: Some(self.config.tenant.as_str().to_string()),
             network_policy: network_policy.clone(),
-            runtime_source_policy: RuntimeSourcePolicy::RootfsOnly,
             ..Default::default()
         };
         let campaign_now_unix_ms = now_unix_ms()?;

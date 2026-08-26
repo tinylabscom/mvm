@@ -4,7 +4,7 @@
 
 use cucumber::{given, then, when};
 use mvm_core::kernel_format::KernelFormat;
-use mvm_core::vm_backend::{RuntimeSourcePolicy, VmStartConfig};
+use mvm_core::vm_backend::VmStartConfig;
 use mvm_runtime::backends::hvf::HvfDriver;
 use mvm_runtime::driver::{ConsoleCapture, KernelImage, LibkrunDriver, VmmDriver, VmmSpec};
 
@@ -39,7 +39,6 @@ fn assemble_sealed_cmdline(world: &mut CliWorld, backend: String, flavor: String
         runtime_overlay_path: Some("/image/runtime.ext4".to_string()),
         runtime_overlay_verity_path: Some("/image/runtime.verity".to_string()),
         runtime_overlay_roothash: Some("b".repeat(64)),
-        runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
         ..Default::default()
     };
     let driver: Box<dyn VmmDriver> = match backend.as_str() {

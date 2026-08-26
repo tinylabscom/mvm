@@ -116,17 +116,14 @@ pub fn booted_with_universal_initramfs(config: &mvm_core::vm_backend::VmStartCon
 /// on a NON-verity workload boot, or `None` to attach nothing.
 ///
 /// A sealed (verity) boot instead attaches the dm-verity overlay pair that the
-/// verity initramfs sets up, so this is only consulted on the non-verity
-/// branch of each backend. The gate mirrors the firecracker path: attach only
-/// when the resolved overlay triple is present and the boot is not rootfs-only
-/// (the virtiofs-root shape carries no block overlay). Returned to the
-/// backends that assign the overlay the next free `/dev/vdN` after the rootfs
-/// — always `/dev/vdb` on the non-verity branch, matching
-/// [`build_runtime_overlay_cmdline_args`]`(None, true)`.
+/// universal initramfs sets up, so this is only consulted on the non-verity
+/// branch of each backend. Attach whenever the resolved overlay triple is
+/// present — including on the virtiofs-root shape, which reaches its guest
+/// binaries the same way every other shape does now that the overlay is the
+/// single runtime source. Returned to the backends that assign the overlay the
+/// next free `/dev/vdN` after the rootfs — always `/dev/vdb` on the non-verity
+/// branch, matching [`build_runtime_overlay_cmdline_args`]`(None, true)`.
 pub fn non_verity_overlay_ext4(config: &mvm_core::vm_backend::VmStartConfig) -> Option<&str> {
-    if config.runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly {
-        return None;
-    }
     // The three overlay fields are populated together; require the full triple
     // so a half-populated config can't attach a device the guest can't
     // corroborate against the cmdline token.
@@ -424,22 +421,18 @@ mod tests {
     }
 
     #[test]
-    fn non_verity_overlay_ext4_requires_full_triple_and_non_rootfs_only() {
-        use mvm_core::vm_backend::{RuntimeSourcePolicy, VmStartConfig};
+    fn non_verity_overlay_ext4_requires_the_full_triple() {
+        use mvm_core::vm_backend::VmStartConfig;
 
         // Bare rootfs, no overlay resolved → nothing to attach.
-        let bare = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::PreferOverlay,
-            ..Default::default()
-        };
+        let bare = VmStartConfig::default();
         assert_eq!(non_verity_overlay_ext4(&bare), None);
 
-        // Full triple + a non-rootfs-only policy → attach the ext4.
+        // Full triple → attach the ext4.
         let resolved = VmStartConfig {
             runtime_overlay_path: Some("/cache/runtime.ext4".into()),
             runtime_overlay_verity_path: Some("/cache/runtime.verity".into()),
             runtime_overlay_roothash: Some("b".repeat(64)),
-            runtime_source_policy: RuntimeSourcePolicy::PreferOverlay,
             ..Default::default()
         };
         assert_eq!(
@@ -451,17 +444,32 @@ mod tests {
         // corroborate against the cmdline token.
         let partial = VmStartConfig {
             runtime_overlay_path: Some("/cache/runtime.ext4".into()),
-            runtime_source_policy: RuntimeSourcePolicy::PreferOverlay,
             ..Default::default()
         };
         assert_eq!(non_verity_overlay_ext4(&partial), None);
+    }
 
-        // Rootfs-only (the virtiofs-root shape) never attaches a block overlay.
-        let rootfs_only = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RootfsOnly,
-            ..resolved.clone()
+    /// The virtiofs-root shape used to be excluded from the block overlay,
+    /// because it declared `RootfsOnly` and reached its guest binaries from the
+    /// baked rootfs copy instead. With the overlay as the single runtime source
+    /// there is no baked copy to fall back to, so this shape has to carry the
+    /// same overlay device every other shape does.
+    #[test]
+    fn a_virtiofs_root_boot_still_attaches_the_runtime_overlay() {
+        use mvm_core::vm_backend::VmStartConfig;
+
+        let virtiofs = VmStartConfig {
+            virtiofs_root: Some("/host/unpacked-oci".into()),
+            runtime_overlay_path: Some("/cache/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/cache/runtime.verity".into()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
+            ..Default::default()
         };
-        assert_eq!(non_verity_overlay_ext4(&rootfs_only), None);
+        assert_eq!(
+            non_verity_overlay_ext4(&virtiofs),
+            Some("/cache/runtime.ext4"),
+            "a virtiofs-root guest has no baked binaries left to fall back to"
+        );
     }
 
     #[test]

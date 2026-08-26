@@ -539,7 +539,6 @@ mod tests {
             runtime_overlay_roothash: Some(sidecar(
                 &overlay.join("overlay.roothash").display().to_string(),
             )),
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
             cpus: 2,
             memory_mib: 1024,
             ..Default::default()

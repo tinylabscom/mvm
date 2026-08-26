@@ -123,10 +123,8 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
 
         // A cold boot's rootfs *is* its image, so the gate reads the dir it
         // already boots from.
-        ClaimGuards::new(&self.spawner).admit_overlay_contract(
-            std::path::Path::new(&config.rootfs_path),
-            config.runtime_source_policy,
-        )?;
+        ClaimGuards::new(&self.spawner)
+            .admit_overlay_contract(std::path::Path::new(&config.rootfs_path))?;
         #[cfg(target_os = "linux")]
         if should_repair_rootfs_before_start(config)
             && let Err(e) = mvm_build::builderd::repair_ext4_filesystem(std::path::Path::new(

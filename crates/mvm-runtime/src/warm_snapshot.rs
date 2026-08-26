@@ -146,7 +146,6 @@ mod tests {
                 vm_name: "warm-parent".into(),
                 rootfs,
                 supervisor_config_digest: "d".into(),
-                runtime_source_policy: None,
                 runtime_overlay_version: None,
                 tag: None,
                 created_unix: 1,

@@ -67,7 +67,7 @@ pub(crate) fn early_setup() {
 /// Copy the host-signer anchor off the kernel cmdline into the filesystem the
 /// control listener reads it from.
 ///
-/// A block-backed guest gets this from `mvm-oci-init`, which copies the key off
+/// A block-backed guest gets this from the init, which copies the key off
 /// the config drive. The universal initramfs has no config drive and no second
 /// init — the agent itself is `/init` — so without this the anchor never lands,
 /// every control connection is refused for want of a pinned key, and the run

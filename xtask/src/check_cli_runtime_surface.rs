@@ -124,6 +124,21 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
         "shared backend-selection helpers (from_hypervisor / auto_select) the CLI dispatches through",
     ),
     (
+        "exec/session.rs",
+        &[Rule::AnyBackend],
+        "same helpers as exec.rs: the warm-session lifecycle split out of it, not a new reach",
+    ),
+    (
+        "exec/transient.rs",
+        &[Rule::AnyBackend],
+        "same helpers as exec.rs: the transient boot/teardown lifecycle split out of it",
+    ),
+    (
+        "exec/guest_run.rs",
+        &[Rule::AnyBackend],
+        "same helpers as exec.rs: the in-guest dispatch leg split out of it",
+    ),
+    (
         "bench/probe.rs",
         &[Rule::AnyBackend],
         "live benchmark probe: directly boots and stops a libkrun probe VM to sample boot marks and process footprint",

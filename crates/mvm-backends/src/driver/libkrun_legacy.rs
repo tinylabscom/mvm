@@ -241,9 +241,6 @@ pub fn libkrun_verity_cmdline_args(config: &VmStartConfig) -> Option<String> {
 }
 
 pub fn ensure_libkrun_runtime_source_supported(config: &VmStartConfig) -> Result<()> {
-    if config.runtime_source_policy != mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay {
-        return Ok(());
-    }
     // A sealed boot (verity metadata present) must be fully verity capable — a
     // missing initrd fails closed rather than downgrading to an unverified root —
     // and carries the dm-verity overlay triple its initramfs mounts. A non-verity
@@ -311,10 +308,6 @@ pub fn build_guest_cmdline(config: &VmStartConfig, state_dir: &Path) -> String {
         cmdline.push(' ');
         cmdline.push_str(&overlay_args);
     }
-    cmdline.push(' ');
-    cmdline.push_str(&mvm_core::vm_backend::encode_runtime_source_policy_cmdline(
-        config.runtime_source_policy,
-    ));
     // Vsock-only guests have no config drive, so the grant trust anchor rides
     // the cmdline instead.
     if let Some(token) = mvm_vmm::host::egress_bridge::host_signer_pub_cmdline_token(&config.name) {

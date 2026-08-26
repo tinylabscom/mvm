@@ -63,7 +63,6 @@ mod tests {
             runtime_overlay_path: None,
             runtime_overlay_verity_path: None,
             runtime_overlay_roothash: None,
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
             revision_hash: "abc".to_string(),
             flake_ref: "/p".to_string(),
             profile: None,

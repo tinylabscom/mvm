@@ -28,7 +28,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use mvm_core::vm_backend::{RuntimeSourcePolicy, VmId, VmStartConfig};
+use mvm_core::vm_backend::{VmId, VmStartConfig};
 use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::workload_runner::StopTiming;
 use mvm_vmm::host::hvf_supervisor::HvfShutdownTimingRecord;
@@ -160,7 +160,6 @@ fn apply_runtime_overlay(config: &mut VmStartConfig, runtime_overlay: &RuntimeOv
     config.runtime_overlay_verity_path =
         Some(runtime_overlay.verity.to_string_lossy().into_owned());
     config.runtime_overlay_roothash = Some(runtime_overlay.roothash.clone());
-    config.runtime_source_policy = RuntimeSourcePolicy::RequiredOverlay;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -804,10 +803,6 @@ fn runtime_overlay_is_optional_but_must_be_complete_and_valid() {
 
     let mut config = VmStartConfig::default();
     apply_runtime_overlay(&mut config, &parsed);
-    assert_eq!(
-        config.runtime_source_policy,
-        RuntimeSourcePolicy::RequiredOverlay
-    );
     assert_eq!(
         config.runtime_overlay_roothash.as_deref(),
         Some(roothash.as_str())

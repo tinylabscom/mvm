@@ -217,7 +217,6 @@ mod tests {
             runtime_overlay_verity_path: None,
             runtime_overlay_roothash: None,
             runtime_overlay_version: None,
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
             revision_hash: "abc".to_string(),
             flake_ref: "test".to_string(),
             profile: None,

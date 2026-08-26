@@ -9,7 +9,7 @@ use cucumber::{given, then, when};
 use mvm_contract::protocol::broker::ServiceId;
 use mvm_core::arch::GuestArch;
 use mvm_core::plan::test_support::PlanFixture;
-use mvm_core::vm_backend::{RuntimeSourcePolicy, VmStartConfig, VmVolume, VmVolumeKind};
+use mvm_core::vm_backend::{VmStartConfig, VmVolume, VmVolumeKind};
 use mvm_fs::sdk_sidecar::{
     SDK_SIDECAR_IMAGE_FILE, SDK_SIDECAR_VERSION_FILE, SdkSidecarLayout, SdkSidecarResolver,
 };
@@ -456,7 +456,6 @@ fn assembled_cmdline(world: &mut CliWorld) -> String {
         runtime_overlay_path: Some("/image/runtime.ext4".to_string()),
         runtime_overlay_verity_path: Some("/image/runtime.verity".to_string()),
         runtime_overlay_roothash: Some("b".repeat(64)),
-        runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
         volumes: attached_volumes(world),
         ..Default::default()
     };

@@ -1012,7 +1012,7 @@ mod tests {
     }
 
     /// The universal initramfs makes the agent itself PID 1, so no
-    /// `mvm-oci-init` runs to copy the anchor off a config drive. If PID-1
+    /// the init runs to copy the anchor off a config drive. If PID-1
     /// early setup does not provision it, `host_signer_key()` stays `None`,
     /// every control connection is refused, and the run dies at
     /// `ActivateEnvironment` — its first RPC. That shipped.

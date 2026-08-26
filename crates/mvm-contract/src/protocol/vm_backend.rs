@@ -15,55 +15,6 @@ use core::fmt;
 
 use serde::{Deserialize, Serialize};
 
-/// Which guest-runtime source policy this boot declares.
-///
-/// This is intentionally a **contract field**, not a backend behavior switch by
-/// itself. The first rollout slice uses it to make the intended runtime source
-/// machine-readable in launch configs and audit events without changing any
-/// backend behavior yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeSourcePolicy {
-    /// This boot expects the mvm guest runtime to come from the sealed runtime
-    /// overlay, and should fail closed if that overlay is unavailable.
-    RequiredOverlay,
-    /// This boot prefers the runtime overlay when available, but currently keeps
-    /// a baked rootfs fallback for compatibility with backends/tier
-    /// combinations that have not flipped to required-overlay yet.
-    PreferOverlay,
-    /// This boot does not rely on the runtime overlay path at all; the guest
-    /// runtime is expected to come from the rootfs.
-    #[default]
-    RootfsOnly,
-}
-
-impl RuntimeSourcePolicy {
-    pub const fn audit_label(self) -> &'static str {
-        match self {
-            Self::RequiredOverlay => "required-overlay",
-            Self::PreferOverlay => "prefer-overlay",
-            Self::RootfsOnly => "rootfs-only",
-        }
-    }
-
-    pub const fn cmdline_value(self) -> &'static str {
-        match self {
-            Self::RequiredOverlay => "required_overlay",
-            Self::PreferOverlay => "prefer_overlay",
-            Self::RootfsOnly => "rootfs_only",
-        }
-    }
-
-    pub fn from_cmdline_value(value: &str) -> Option<Self> {
-        match value {
-            "required_overlay" => Some(Self::RequiredOverlay),
-            "prefer_overlay" => Some(Self::PreferOverlay),
-            "rootfs_only" => Some(Self::RootfsOnly),
-            _ => None,
-        }
-    }
-}
-
 /// Which kind of guest launch is selecting a runtime-source policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeSourceLaunchKind {
@@ -193,13 +144,6 @@ pub fn encode_egress_ca_cmdline(cert_pem: &str) -> Option<String> {
         return None;
     }
     Some(format!("mvm.egress_ca=pem:{body}"))
-}
-
-/// `mvm.runtime_source_policy=<snake_case>` kernel-cmdline token. This lets the
-/// guest-side launcher distinguish required-overlay vs preferred-overlay boots
-/// without inventing a second policy channel.
-pub fn encode_runtime_source_policy_cmdline(policy: RuntimeSourcePolicy) -> String {
-    format!("mvm.runtime_source_policy={}", policy.cmdline_value())
 }
 
 /// Encode the per-run secret **placeholder** env as a single
@@ -1876,20 +1820,6 @@ mod tests {
     }
 
     #[test]
-    fn encode_runtime_source_policy_cmdline_round_trips_as_single_token() {
-        let token = encode_runtime_source_policy_cmdline(RuntimeSourcePolicy::RequiredOverlay);
-        assert_eq!(token, "mvm.runtime_source_policy=required_overlay");
-        assert!(!token.contains(' '));
-        let value = token
-            .strip_prefix("mvm.runtime_source_policy=")
-            .expect("token prefix");
-        assert_eq!(
-            RuntimeSourcePolicy::from_cmdline_value(value),
-            Some(RuntimeSourcePolicy::RequiredOverlay)
-        );
-    }
-
-    #[test]
     fn encode_user_volumes_cmdline_format() {
         let vols = vec![
             VmVolume {
@@ -2215,58 +2145,9 @@ mod tests {
     /// The audit label is what the chain-signed log records for the boot's
     /// runtime source. A blank or wrong label is a corrupt audit record,
     /// and every variant must be distinguishable from every other.
-    #[test]
-    fn runtime_source_audit_labels_are_exact_and_distinct() {
-        assert_eq!(
-            RuntimeSourcePolicy::RequiredOverlay.audit_label(),
-            "required-overlay"
-        );
-        assert_eq!(
-            RuntimeSourcePolicy::PreferOverlay.audit_label(),
-            "prefer-overlay"
-        );
-        assert_eq!(RuntimeSourcePolicy::RootfsOnly.audit_label(), "rootfs-only");
-
-        let labels = [
-            RuntimeSourcePolicy::RequiredOverlay.audit_label(),
-            RuntimeSourcePolicy::PreferOverlay.audit_label(),
-            RuntimeSourcePolicy::RootfsOnly.audit_label(),
-        ];
-        for label in labels {
-            assert!(!label.is_empty());
-        }
-        assert_ne!(labels[0], labels[1]);
-        assert_ne!(labels[1], labels[2]);
-        assert_ne!(labels[0], labels[2]);
-    }
-
     /// Every cmdline spelling round-trips to its own variant. Dropping an
     /// arm makes that value unparseable, so the boot silently falls back to
     /// a runtime source the cmdline did not ask for.
-    #[test]
-    fn every_runtime_source_cmdline_value_round_trips() {
-        for policy in [
-            RuntimeSourcePolicy::RequiredOverlay,
-            RuntimeSourcePolicy::PreferOverlay,
-            RuntimeSourcePolicy::RootfsOnly,
-        ] {
-            assert_eq!(
-                RuntimeSourcePolicy::from_cmdline_value(policy.cmdline_value()),
-                Some(policy),
-                "{} must parse back to itself",
-                policy.cmdline_value()
-            );
-        }
-        assert_eq!(RuntimeSourcePolicy::from_cmdline_value("nonsense"), None);
-        assert_eq!(RuntimeSourcePolicy::from_cmdline_value(""), None);
-        // The audit spelling is not the cmdline spelling; neither is accepted
-        // in the other's place.
-        assert_eq!(
-            RuntimeSourcePolicy::from_cmdline_value("prefer-overlay"),
-            None
-        );
-    }
-
     /// `is_microvm` gates the Tier 3 shared-kernel banner, so it must be a
     /// conjunction: any missing isolation layer means not a microVM. With
     /// a disjunction, a container that only clears the host-hypervisor

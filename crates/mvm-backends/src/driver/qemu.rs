@@ -875,7 +875,7 @@ mod tests {
             ],
         );
         let spec = VmmSpec {
-            cmdline: "  console=ttyAMA0 mvm.runtime_source_policy=required_overlay  ".into(),
+            cmdline: "  console=ttyAMA0 mvm.vsock_egress=1  ".into(),
             ..spec
         };
         let argv = qemu_boot_argv(
@@ -891,7 +891,7 @@ mod tests {
         // Non-empty spec cmdline is threaded verbatim (trimmed).
         assert_eq!(
             argvalue(&argv, "-append"),
-            Some("console=ttyAMA0 mvm.runtime_source_policy=required_overlay")
+            Some("console=ttyAMA0 mvm.vsock_egress=1")
         );
         assert_eq!(argvalue(&argv, "-m"), Some("512"));
         assert_eq!(argvalue(&argv, "-smp"), Some("2"));

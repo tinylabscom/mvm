@@ -233,16 +233,9 @@ impl<'a> ClaimGuards<'a> {
     /// claim for a missing sidecar while the identical cold boot of the same
     /// image was admitted — the resident-handoff path already passed the image
     /// dir here for exactly this reason, and the two must not disagree.
-    pub fn admit_overlay_contract(
-        &self,
-        image_rootfs: &Path,
-        runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
-    ) -> Result<()> {
+    pub fn admit_overlay_contract(&self, image_rootfs: &Path) -> Result<()> {
         let rootfs_dir = image_rootfs.parent().unwrap_or_else(|| Path::new("."));
-        mvm_vmm::host::runtime_meta::admit_runtime_overlay_contract(
-            rootfs_dir,
-            runtime_source_policy,
-        )
+        mvm_vmm::host::runtime_meta::admit_runtime_overlay_contract(rootfs_dir)
     }
 
     /// Spawn the per-child substitution endpoint keyed on `vm`'s own id — 0700,
@@ -292,7 +285,6 @@ impl<'a> ClaimGuards<'a> {
 mod tests {
     use super::*;
     use mvm_core::checkpoint::{CheckpointClass, CheckpointId, ContentBlob};
-    use mvm_core::vm_backend::RuntimeSourcePolicy;
 
     fn fake_meta_with_rootfs(hex: String) -> CheckpointMeta {
         CheckpointMeta::builder(
@@ -464,11 +456,7 @@ mod tests {
         mvm_build::builder_vm::GuestSidecar::for_oci_run("cg-valid", false, true)
             .write_to_dir(ok_dir.path())
             .unwrap();
-        assert!(
-            guards
-                .admit_overlay_contract(&ok_rootfs, RuntimeSourcePolicy::default())
-                .is_ok()
-        );
+        assert!(guards.admit_overlay_contract(&ok_rootfs).is_ok());
 
         // A rootfs whose dir carries no sidecar is refused — same message the
         // cold-boot gate emits.
@@ -476,7 +464,7 @@ mod tests {
         let bare_rootfs = bare_dir.path().join("rootfs.ext4");
         std::fs::write(&bare_rootfs, b"rootfs").unwrap();
         let err = guards
-            .admit_overlay_contract(&bare_rootfs, RuntimeSourcePolicy::default())
+            .admit_overlay_contract(&bare_rootfs)
             .expect_err("a rootfs with no overlay-aware sidecar must be refused");
         assert!(
             err.to_string().contains("mvm-meta.json"),
@@ -509,15 +497,11 @@ mod tests {
         std::fs::write(clone_dir.path().join("memory.bin"), b"mem").unwrap();
 
         assert!(
-            guards
-                .admit_overlay_contract(&image_rootfs, RuntimeSourcePolicy::default())
-                .is_ok(),
+            guards.admit_overlay_contract(&image_rootfs).is_ok(),
             "the admitted image carries the sidecar and must be admitted"
         );
         assert!(
-            guards
-                .admit_overlay_contract(&clone_rootfs, RuntimeSourcePolicy::default())
-                .is_err(),
+            guards.admit_overlay_contract(&clone_rootfs).is_err(),
             "the clone has no sidecar — proving the gate must not be pointed at it"
         );
     }

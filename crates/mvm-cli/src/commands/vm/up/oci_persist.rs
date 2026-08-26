@@ -120,21 +120,6 @@ fn machine_port_ingress(ports: &[String]) -> Result<Vec<mvm_core::plan::IngressM
         .collect()
 }
 
-fn persistent_oci_rootfs_requires_overlay_policy(rootfs_path: &std::path::Path) -> bool {
-    let runtime_lean = rootfs_path
-        .parent()
-        .and_then(|dir| {
-            mvm_build::builder_vm::GuestSidecar::read_from_dir(dir)
-                .ok()
-                .flatten()
-        })
-        .map(|sidecar| sidecar.runtime_lean)
-        .unwrap_or(false);
-    let (verity_path, roothash) =
-        mvm_runtime::microvm::probe_verity_sidecar(&rootfs_path.to_string_lossy());
-    runtime_lean && verity_path.is_some() && roothash.is_some()
-}
-
 /// Resolve the initrd a persistent OCI boot should carry.
 ///
 /// Sealed OCI boots rely on the universal initramfs; the legacy per-rootfs
@@ -145,10 +130,7 @@ fn persistent_oci_rootfs_requires_overlay_policy(rootfs_path: &std::path::Path) 
 /// This is the boot-policy contract surface the dev-only conformance harness
 /// drives directly; it is re-exported at `mvm_cli::boot_policy` for that
 /// harness and is not a general-purpose API.
-pub fn persistent_oci_effective_initrd(
-    _rootfs_path: &std::path::Path,
-    _runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
-) -> Result<Option<String>> {
+pub fn persistent_oci_effective_initrd(_rootfs_path: &std::path::Path) -> Result<Option<String>> {
     Ok(None)
 }
 
@@ -190,18 +172,8 @@ pub(in crate::commands) fn start_persistent_oci_machine(
             .context("resolving registered local volumes before admission")?;
     let volumes = &prepared_volumes.volumes;
     register_vm_name(name, "default");
-    let image_sealed = crate::commands::vm::agent_verbs::image_is_sealed(rootfs_path);
-    let overlay_required_oci = persistent_oci_rootfs_requires_overlay_policy(rootfs_path);
     let (verity_path, roothash) =
         mvm_runtime::microvm::probe_verity_sidecar(&rootfs_path.to_string_lossy());
-    let runtime_source_policy = mvm_core::vm_backend::select_runtime_source_policy(
-        mvm_core::vm_backend::RuntimeSourcePolicySelection {
-            backend_name: Some(backend_name),
-            sealed: image_sealed || overlay_required_oci,
-            root_strategy: Some(mvm_core::vm_backend::RuntimeSourceRootStrategy::BlockExt4),
-            launch_kind: mvm_core::vm_backend::RuntimeSourceLaunchKind::WorkloadImage,
-        },
-    );
     let kernel_path = if let Some(k) = kernel_path {
         k
     } else {
@@ -215,7 +187,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         // image whose rootfs we'd discard.
         ensure_workload_kernel()?
     };
-    let initrd_path = persistent_oci_effective_initrd(rootfs_path, runtime_source_policy)?;
+    let initrd_path = persistent_oci_effective_initrd(rootfs_path)?;
 
     let admission_ledger = InMemoryNonceLedger::new();
     let ingress = machine_port_ingress(ports)?;
@@ -288,7 +260,6 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         .network_policy(network_policy)
         .build()?
         .into_start_config();
-    start_config.runtime_source_policy = runtime_source_policy;
     // Only dev-profile machines can be attached to later with `machine shell`
     // or `machine console`. Keep the host-side console listeners absent for
     // sealed production boots; the guest profile and verb grant remain the
@@ -337,11 +308,10 @@ pub(in crate::commands) fn start_persistent_oci_machine(
 }
 
 #[cfg(test)]
-mod runtime_source_policy_for_workload_boot_tests {
+mod persistent_oci_boot_tests {
     static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     use mvm_core::util::test_env::TestEnv;
-    use mvm_core::vm_backend::RuntimeSourcePolicy;
 
     #[test]
     fn machine_ports_lower_to_admitted_flowmux_ingress() {
@@ -372,88 +342,6 @@ mod runtime_source_policy_for_workload_boot_tests {
     }
 
     #[test]
-    fn firecracker_sealed_boot_requires_overlay() {
-        assert_eq!(
-            mvm_core::vm_backend::select_runtime_source_policy(
-                mvm_core::vm_backend::RuntimeSourcePolicySelection {
-                    backend_name: Some("firecracker"),
-                    sealed: true,
-                    root_strategy: Some(mvm_core::vm_backend::RuntimeSourceRootStrategy::BlockExt4),
-                    launch_kind: mvm_core::vm_backend::RuntimeSourceLaunchKind::WorkloadImage,
-                }
-            ),
-            RuntimeSourcePolicy::RequiredOverlay
-        );
-    }
-
-    #[test]
-    fn firecracker_unsealed_block_boot_requires_overlay() {
-        // Unsealed block workloads now require the overlay too — the overlay is
-        // the single source of guest binaries, so a missing overlay fails closed
-        // instead of falling back to the baked rootfs copy.
-        assert_eq!(
-            mvm_core::vm_backend::select_runtime_source_policy(
-                mvm_core::vm_backend::RuntimeSourcePolicySelection {
-                    backend_name: Some("firecracker"),
-                    sealed: false,
-                    root_strategy: Some(mvm_core::vm_backend::RuntimeSourceRootStrategy::BlockExt4),
-                    launch_kind: mvm_core::vm_backend::RuntimeSourceLaunchKind::WorkloadImage,
-                }
-            ),
-            RuntimeSourcePolicy::RequiredOverlay
-        );
-    }
-
-    #[test]
-    fn libkrun_sealed_boot_requires_overlay() {
-        assert_eq!(
-            mvm_core::vm_backend::select_runtime_source_policy(
-                mvm_core::vm_backend::RuntimeSourcePolicySelection {
-                    backend_name: Some("libkrun"),
-                    sealed: true,
-                    root_strategy: Some(mvm_core::vm_backend::RuntimeSourceRootStrategy::BlockExt4),
-                    launch_kind: mvm_core::vm_backend::RuntimeSourceLaunchKind::WorkloadImage,
-                }
-            ),
-            RuntimeSourcePolicy::RequiredOverlay
-        );
-    }
-
-    #[test]
-    fn persistent_oci_runtime_lean_verity_root_requires_overlay_policy() {
-        let dir = tempfile::tempdir().unwrap();
-        let rootfs = dir.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"rootfs").unwrap();
-        std::fs::write(dir.path().join("rootfs.verity"), b"verity").unwrap();
-        std::fs::write(
-            dir.path().join("rootfs.roothash"),
-            format!("{}\n", "a".repeat(64)),
-        )
-        .unwrap();
-        mvm_build::builder_vm::GuestSidecar::for_oci_run("oci:test", true, true)
-            .write_to_dir(dir.path())
-            .unwrap();
-
-        assert!(super::persistent_oci_rootfs_requires_overlay_policy(
-            &rootfs
-        ));
-    }
-
-    #[test]
-    fn persistent_oci_rootfs_without_verity_stays_prefer_overlay() {
-        let dir = tempfile::tempdir().unwrap();
-        let rootfs = dir.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"rootfs").unwrap();
-        mvm_build::builder_vm::GuestSidecar::for_oci_run("oci:test", true, true)
-            .write_to_dir(dir.path())
-            .unwrap();
-
-        assert!(!super::persistent_oci_rootfs_requires_overlay_policy(
-            &rootfs
-        ));
-    }
-
-    #[test]
     fn persistent_oci_required_overlay_returns_no_initrd() {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
@@ -463,9 +351,7 @@ mod runtime_source_policy_for_workload_boot_tests {
         // A sibling legacy initrd, if present, must be ignored.
         std::fs::write(&sibling, b"legacy-initrd").unwrap();
 
-        let resolved =
-            super::persistent_oci_effective_initrd(&rootfs, RuntimeSourcePolicy::RequiredOverlay)
-                .unwrap();
+        let resolved = super::persistent_oci_effective_initrd(&rootfs).unwrap();
 
         assert_eq!(resolved, None, "legacy initrd must not be returned");
     }
@@ -533,9 +419,7 @@ mod runtime_source_policy_for_workload_boot_tests {
         );
         seed_warm_universal_initramfs(cache.path());
 
-        let resolved =
-            super::persistent_oci_effective_initrd(&rootfs, RuntimeSourcePolicy::RequiredOverlay)
-                .unwrap();
+        let resolved = super::persistent_oci_effective_initrd(&rootfs).unwrap();
 
         // The universal initramfs attach step later in the boot supplies the
         // initramfs, so the effective initrd is always empty here.
@@ -567,9 +451,7 @@ mod runtime_source_policy_for_workload_boot_tests {
         );
         seed_warm_universal_initramfs(cache.path());
 
-        let resolved =
-            super::persistent_oci_effective_initrd(&rootfs, RuntimeSourcePolicy::RequiredOverlay)
-                .unwrap();
+        let resolved = super::persistent_oci_effective_initrd(&rootfs).unwrap();
 
         // Source-checkout mode previously refreshed a legacy verity initrd.
         // That path is no longer supported; the universal initramfs attach

@@ -19,57 +19,18 @@ use crate::commands::runtime_overlay::{
 };
 use crate::ui;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RuntimeSourceStatus {
-    OverlayRequired,
-    OverlayPreferred,
-    OverlayPreferredFallbackUsed,
-    RootfsOnlyByPolicy,
-}
-
-impl RuntimeSourceStatus {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::OverlayRequired => "overlay-required",
-            Self::OverlayPreferred => "overlay-preferred",
-            Self::OverlayPreferredFallbackUsed => "overlay-preferred-fallback-used",
-            Self::RootfsOnlyByPolicy => "rootfs-only-by-policy",
-        }
-    }
-}
-
-pub(crate) fn resolve_runtime_source_status(
-    start_config: &mvm_core::vm_backend::VmStartConfig,
-) -> RuntimeSourceStatus {
-    match start_config.runtime_source_policy {
-        mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay => {
-            RuntimeSourceStatus::OverlayRequired
-        }
-        mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay => {
-            if start_config.runtime_overlay_path.is_some()
-                && start_config.runtime_overlay_verity_path.is_some()
-                && start_config.runtime_overlay_roothash.is_some()
-            {
-                RuntimeSourceStatus::OverlayPreferred
-            } else {
-                RuntimeSourceStatus::OverlayPreferredFallbackUsed
-            }
-        }
-        mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly => {
-            RuntimeSourceStatus::RootfsOnlyByPolicy
-        }
-    }
-}
-
+/// Report where this launch's guest binaries come from.
+///
+/// There is one answer now — the runtime overlay — so this reports whether the
+/// overlay was actually attached rather than which of several postures applied.
 pub(crate) fn emit_runtime_source_status(start_config: &mvm_core::vm_backend::VmStartConfig) {
-    let status = resolve_runtime_source_status(start_config);
-    tracing::info!(
-        runtime_source_status = status.label(),
-        runtime_source_policy = start_config.runtime_source_policy.audit_label(),
-        overlay_attached = start_config.runtime_overlay_path.is_some(),
-        "resolved guest runtime source"
-    );
-    ui::info(&format!("Runtime source: {}", status.label()));
+    let attached = start_config.runtime_overlay_path.is_some();
+    tracing::info!(overlay_attached = attached, "resolved guest runtime source");
+    ui::info(if attached {
+        "Runtime source: overlay attached"
+    } else {
+        "Runtime source: overlay not attached"
+    });
 }
 
 fn apply_runtime_overlay_artifact(
@@ -87,10 +48,12 @@ fn apply_runtime_overlay_artifact(
 /// probe. Backends that can consume the sealed overlay attach it as extra
 /// read-only block devices and thread the matching roothash through the
 /// guest cmdline; unsupported backends ignore the fields.
-/// **Non-fatal**: a cold cache or a non-verity dev rootfs leaves the
-/// fields `None` and the VM boots legacy. The seeded resolve is a pure
-/// cache read — no build, no download, no `nix` — so this is safe on
-/// every host.
+/// **Fatal on a real backend**: the overlay is the only source of the guest
+/// binaries, so a cold cache returns `Err` rather than leaving the fields
+/// `None` and booting a guest that cannot reach an agent. The caller's
+/// acquisition ladder catches that and builds or downloads. The seeded
+/// resolve is a pure cache read — no build, no download, no `nix` — so this
+/// is safe on every host.
 #[tracing::instrument(skip_all, fields(hypervisor, arch = ?arch))]
 pub(crate) fn attach_runtime_overlay(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
@@ -107,16 +70,7 @@ pub(crate) fn attach_runtime_overlay(
             Ok(())
         }
         Err(e) => {
-            if start_config.runtime_source_policy
-                == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
-            {
-                anyhow::bail!(
-                    "runtime overlay required for {hypervisor} boot but unavailable: {e}"
-                );
-            }
-            // Cold cache / dev rootfs / version drift — boot legacy, don't fail.
-            tracing::debug!(backend = hypervisor, error = %e, "runtime overlay not attached");
-            Ok(())
+            anyhow::bail!("runtime overlay required for {hypervisor} boot but unavailable: {e}")
         }
     }
 }
@@ -149,8 +103,6 @@ pub(crate) fn attach_runtime_overlay_if_cached_version(
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let arch = mvm_core::arch::GuestArch::host();
     if expected_version.is_none()
-        && start_config.runtime_source_policy
-            == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
         && matches!(hypervisor, "firecracker" | "hvf" | "qemu" | "libkrun")
         && runtime_overlay_acquire_mode() == RuntimeOverlayAcquireMode::BuildFromSourceCheckout
         && runtime_overlay_source_checkout_root().is_some()
@@ -167,10 +119,7 @@ pub(crate) fn attach_runtime_overlay_if_cached_version(
         mvm_fs::overlay::RuntimeOverlayResolver::new(cache_root.clone(), version.to_string());
     match attach_runtime_overlay(start_config, hypervisor, &resolver, arch) {
         Ok(()) => Ok(()),
-        Err(_err)
-            if start_config.runtime_source_policy
-                == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay =>
-        {
+        Err(_err) => {
             if expected_version.is_some() {
                 return Err(anyhow::anyhow!(
                     "runtime overlay version {version} is required for this boot and was not found in the local cache"
@@ -209,7 +158,6 @@ pub(crate) fn attach_runtime_overlay_if_cached_version(
             );
             Ok(())
         }
-        Err(err) => Err(err),
     }
 }
 
@@ -423,13 +371,11 @@ fn attach_universal_initramfs_with_resolver(
 /// Whether this launch cannot boot without the universal initramfs.
 ///
 /// True for every boot that has a guest root to mount and expects its runtime
-/// binaries from the overlay. Only a `RootfsOnly` launch — one that declares it
-/// brings its own agent baked into the image — can come up without it, and a
-/// kernel-less shape (wasm) has no initramfs leg at all.
+/// binaries from the overlay. A kernel-less shape (wasm) has no initramfs leg
+/// at all, and is the only launch that can come up without one.
 fn initramfs_is_required(config: &mvm_core::vm_backend::VmStartConfig) -> bool {
     config.kernel_path.is_some()
         && (!config.rootfs_path.is_empty() || config.virtiofs_root.is_some())
-        && config.runtime_source_policy != mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly
 }
 
 // ── SDK sidecar ──────────────────────────────────────────────────────────────
@@ -790,7 +736,7 @@ mod runtime_overlay_attach_tests {
     use crate::commands::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV;
     use mvm_core::arch::GuestArch;
     use mvm_core::util::test_env::TestEnv;
-    use mvm_core::vm_backend::{RuntimeSourcePolicy, VmStartConfig};
+    use mvm_core::vm_backend::VmStartConfig;
     use mvm_fs::ext4::Node;
     use mvm_fs::overlay::RuntimeOverlayResolver;
     use sha2::{Digest, Sha256};
@@ -969,7 +915,6 @@ mod runtime_overlay_attach_tests {
         seed_cache(dir.path(), ver, arch);
         let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::PreferOverlay,
             ..VmStartConfig::default()
         };
         attach_runtime_overlay(&mut sc, "firecracker", &resolver, arch).unwrap();
@@ -995,7 +940,6 @@ mod runtime_overlay_attach_tests {
         seed_cache(dir.path(), ver, arch);
         let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             ..VmStartConfig::default()
         };
         attach_runtime_overlay(&mut sc, "hvf", &resolver, arch).unwrap();
@@ -1018,7 +962,6 @@ mod runtime_overlay_attach_tests {
         seed_cache(dir.path(), ver, arch);
         let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             ..VmStartConfig::default()
         };
         attach_runtime_overlay(&mut sc, "libkrun", &resolver, arch).unwrap();
@@ -1041,7 +984,6 @@ mod runtime_overlay_attach_tests {
         seed_cache(dir.path(), ver, arch);
         let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             ..VmStartConfig::default()
         };
         attach_runtime_overlay(&mut sc, "mock", &resolver, arch).unwrap();
@@ -1050,7 +992,7 @@ mod runtime_overlay_attach_tests {
     }
 
     #[test]
-    fn firecracker_cold_cache_leaves_fields_unset_non_fatal() {
+    fn firecracker_cold_cache_refuses_rather_than_booting_without_the_overlay() {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap(); // empty cache
@@ -1060,14 +1002,19 @@ mod runtime_overlay_attach_tests {
         let arch = GuestArch::host();
         let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::PreferOverlay,
             ..VmStartConfig::default()
         };
-        attach_runtime_overlay(&mut sc, "firecracker", &resolver, arch).unwrap();
+        // The overlay is the single source of the guest binaries, so a cold
+        // cache is fatal here rather than something the boot can shrug off.
+        // The caller's acquisition ladder catches this Err and builds or
+        // downloads; what must never happen is a silent overlay-free boot.
+        let err = attach_runtime_overlay(&mut sc, "firecracker", &resolver, arch)
+            .expect_err("a cold cache must refuse, not attach nothing");
         assert!(
-            sc.runtime_overlay_path.is_none(),
-            "cold cache must not attach (legacy boot)"
+            err.to_string().contains("runtime overlay required"),
+            "unexpected refusal: {err}"
         );
+        assert!(sc.runtime_overlay_path.is_none());
     }
 
     #[test]
@@ -1081,7 +1028,6 @@ mod runtime_overlay_attach_tests {
         let arch = GuestArch::host();
         let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             ..VmStartConfig::default()
         };
         let err = attach_runtime_overlay(&mut sc, "firecracker", &resolver, arch).unwrap_err();
@@ -1099,7 +1045,6 @@ mod runtime_overlay_attach_tests {
         let arch = GuestArch::host();
         let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             ..VmStartConfig::default()
         };
         let err = attach_runtime_overlay(&mut sc, "hvf", &resolver, arch).unwrap_err();
@@ -1118,7 +1063,6 @@ mod runtime_overlay_attach_tests {
         let arch = GuestArch::host();
         let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             ..VmStartConfig::default()
         };
         let err = attach_runtime_overlay(&mut sc, "libkrun", &resolver, arch).unwrap_err();
@@ -1139,7 +1083,6 @@ mod runtime_overlay_attach_tests {
         seed_cache(dir.path(), ver, arch);
         let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             ..VmStartConfig::default()
         };
         attach_runtime_overlay(&mut sc, "qemu", &resolver, arch).unwrap();
@@ -1159,7 +1102,6 @@ mod runtime_overlay_attach_tests {
         let arch = GuestArch::host();
         let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             ..VmStartConfig::default()
         };
         let err = attach_runtime_overlay(&mut sc, "qemu", &resolver, arch).unwrap_err();
@@ -1191,7 +1133,6 @@ mod runtime_overlay_attach_tests {
         );
 
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             ..VmStartConfig::default()
         };
         attach_runtime_overlay_if_cached_version(&mut sc, "firecracker", None).unwrap();
@@ -1269,7 +1210,6 @@ mod runtime_overlay_attach_tests {
         seed_cache(&dir.path().join("cache"), pinned, arch);
 
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             ..VmStartConfig::default()
         };
         attach_runtime_overlay_if_cached_version(&mut sc, "firecracker", Some(pinned)).unwrap();
@@ -1313,7 +1253,6 @@ mod runtime_overlay_attach_tests {
         seed_cache(&dir.path().join("cache"), current, arch);
 
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             ..VmStartConfig::default()
         };
         let err = attach_runtime_overlay_if_cached_version(&mut sc, "firecracker", Some(missing))
@@ -1351,7 +1290,6 @@ mod runtime_overlay_attach_tests {
         seed_cache(&dir.path().join("cache"), older, arch);
 
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             ..VmStartConfig::default()
         };
         attach_runtime_overlay_if_cached(&mut sc, "firecracker").unwrap();
@@ -1390,7 +1328,6 @@ mod runtime_overlay_attach_tests {
         seed_cache(&dir.path().join("cache"), stale, arch);
 
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             runtime_overlay_version: Some(stale.to_string()),
             ..VmStartConfig::default()
         };
@@ -1408,45 +1345,6 @@ mod runtime_overlay_attach_tests {
                     .to_str()
                     .expect("utf-8 overlay path")
             )
-        );
-    }
-
-    #[test]
-    fn prefer_overlay_reports_fallback_when_overlay_not_attached() {
-        let sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::PreferOverlay,
-            ..VmStartConfig::default()
-        };
-        assert_eq!(
-            resolve_runtime_source_status(&sc),
-            RuntimeSourceStatus::OverlayPreferredFallbackUsed
-        );
-    }
-
-    #[test]
-    fn prefer_overlay_reports_overlay_when_all_artifacts_attached() {
-        let sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::PreferOverlay,
-            runtime_overlay_path: Some("/overlay.ext4".into()),
-            runtime_overlay_verity_path: Some("/overlay.verity".into()),
-            runtime_overlay_roothash: Some("a".repeat(64)),
-            ..VmStartConfig::default()
-        };
-        assert_eq!(
-            resolve_runtime_source_status(&sc),
-            RuntimeSourceStatus::OverlayPreferred
-        );
-    }
-
-    #[test]
-    fn rootfs_only_reports_rootfs_only_by_policy() {
-        let sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RootfsOnly,
-            ..VmStartConfig::default()
-        };
-        assert_eq!(
-            resolve_runtime_source_status(&sc),
-            RuntimeSourceStatus::RootfsOnlyByPolicy
         );
     }
 }
@@ -1562,7 +1460,6 @@ mod universal_initramfs_attach_tests {
         let mut sc = VmStartConfig {
             kernel_path: Some("/dummy/vmlinux".to_string()),
             rootfs_path: "/cache/oci/rootfs.ext4".to_string(),
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
             ..Default::default()
         };
         let error = attach_universal_initramfs_with_resolver(&mut sc, |_, _, _, _| {
@@ -1598,7 +1495,6 @@ mod universal_initramfs_attach_tests {
         let mut sc = VmStartConfig {
             kernel_path: Some("/dummy/vmlinux".to_string()),
             rootfs_path: "/cache/oci/rootfs.ext4".to_string(),
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
             ..Default::default()
         };
         attach_universal_initramfs_with_resolver(&mut sc, |_, _, _, _| Err(cold_cache_failure()))
@@ -1606,22 +1502,22 @@ mod universal_initramfs_attach_tests {
     }
 
     #[test]
-    fn attach_universal_initramfs_lets_a_rootfs_only_boot_through() {
-        // RootfsOnly is the one policy that declares "my image carries its own
-        // agent", so it is the one shape that can legitimately boot with no
-        // overlay and therefore no initramfs.
+    fn attach_universal_initramfs_lets_a_kernel_less_launch_through() {
+        // A wasm launch has no kernel and therefore no initramfs leg at all.
+        // It is the only shape left that can come up without one — every
+        // guest that boots a kernel sources its binaries from the overlay,
+        // and the initramfs is what mounts it.
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         env.isolate_mvm_home(dir.path());
 
         let mut sc = VmStartConfig {
-            kernel_path: Some("/dummy/vmlinux".to_string()),
-            rootfs_path: "/cache/oci/rootfs.ext4".to_string(),
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
+            kernel_path: None,
             ..Default::default()
         };
         attach_universal_initramfs_with_resolver(&mut sc, |_, _, _, _| Err(cold_cache_failure()))
-            .expect("a rootfs-only boot brings its own agent and needs no initramfs");
+            .expect("a kernel-less launch needs no initramfs");
+        assert!(sc.initrd_path.is_none());
     }
 
     #[test]

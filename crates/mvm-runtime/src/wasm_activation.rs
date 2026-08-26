@@ -39,7 +39,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use mvm_core::vm_backend::{RuntimeSourcePolicy, VmStartConfig, VmVolumeKind};
+use mvm_core::vm_backend::{VmStartConfig, VmVolumeKind};
 use serde::{Deserialize, Serialize};
 
 use crate::wasm_backend::WasmBackendError;
@@ -143,15 +143,13 @@ pub fn build_wasm_preopen_plan(
     }
 }
 
-/// Whether this launch declares the runtime overlay: the full artifact
-/// triple is present (the all-three-or-none rule the block layout
-/// applies), or the runtime-source policy requires it. An overlay-free
-/// launch gets no preopen and no error.
+/// Whether this launch declares the runtime overlay: the full artifact triple
+/// is present (the all-three-or-none rule the block layout applies). An
+/// overlay-free launch gets no preopen and no error.
 pub fn overlay_declared(config: &VmStartConfig) -> bool {
-    let triple = config.runtime_overlay_path.is_some()
+    config.runtime_overlay_path.is_some()
         && config.runtime_overlay_verity_path.is_some()
-        && config.runtime_overlay_roothash.is_some();
-    triple || config.runtime_source_policy == RuntimeSourcePolicy::RequiredOverlay
+        && config.runtime_overlay_roothash.is_some()
 }
 
 /// Resolve the runtime-overlay guest binaries as a host directory to
@@ -319,12 +317,6 @@ mod tests {
         c.runtime_overlay_verity_path = Some("/img/runtime.verity".into());
         c.runtime_overlay_roothash = Some("ab".repeat(32));
         assert!(overlay_declared(&c), "the full triple declares the overlay");
-        let mut c = cfg("x");
-        c.runtime_source_policy = RuntimeSourcePolicy::RequiredOverlay;
-        assert!(
-            overlay_declared(&c),
-            "a required policy declares the overlay"
-        );
     }
 
     #[test]
