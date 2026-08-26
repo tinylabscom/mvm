@@ -52,7 +52,10 @@ ls -la "$GUEST_WASM"
 python3 "$SCRIPT_DIR/fixtures/build.py"
 
 # Stage assets only. index.html is served by public/src/pages/demo.astro.
-rm -rf "$DEST_DIR"
+# Remove only the wasm demo's own artifacts so a parallel weblinux staging
+# under $DEST_DIR/weblinux/ is preserved.
+rm -rf "$DEST_DIR/pkg" "$DEST_DIR/fixtures" "$DEST_DIR/guest" \
+       "$DEST_DIR/demo.js" "$DEST_DIR/worker.js"
 mkdir -p "$DEST_DIR/pkg"
 mkdir -p "$DEST_DIR/fixtures"
 mkdir -p "$DEST_DIR/guest"
