@@ -215,6 +215,120 @@ mod tests {
             .unwrap()
     }
 
+    /// Append `n` entries under an explicit rotation policy, so a test decides
+    /// exactly when the chain splits instead of inferring it from entry sizes.
+    fn grow_with_rotation(
+        dir: &Path,
+        key: &ed25519_dalek::SigningKey,
+        n: usize,
+        tag: &str,
+        rotation: crate::supervisor::RotationPolicy,
+    ) {
+        let signer = FileAuditSigner::open(key.clone(), dir)
+            .unwrap()
+            .with_rotation(rotation);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for i in 0..n {
+            rt.block_on(signer.sign_and_emit(&entry("local", &format!("{tag}-{i}"))))
+                .unwrap();
+        }
+    }
+
+    fn segment_count(dir: &Path) -> usize {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".seg-"))
+            .count()
+    }
+
+    #[test]
+    fn consistency_holds_across_a_segment_rotation() {
+        // The case that would break a naive implementation: `read_leaves`
+        // spans the whole segment set, so leaf indices stay globally ordered
+        // across a rotation. A root published before the rotation must still
+        // be provably a prefix of one published after it -- if the tree were
+        // rebuilt per-segment, the older root would describe leaves that no
+        // longer sit where it says they do.
+        let dir = tempfile::tempdir().unwrap();
+        let key = fresh_key();
+        let vk = key.verifying_key();
+
+        use crate::supervisor::RotationPolicy;
+        grow_with_rotation(dir.path(), &key, 4, "pre", RotationPolicy::never());
+        let before = crate::audit::emitter::AuditEmitter::with_dir(key.clone(), dir.path())
+            .unwrap()
+            .publish_root("local")
+            .unwrap();
+        assert_eq!(
+            segment_count(dir.path()),
+            0,
+            "the fixture must publish its first root BEFORE any rotation"
+        );
+
+        // Now rotate: a threshold below one entry's size splits on every append.
+        grow_with_rotation(dir.path(), &key, 6, "post", RotationPolicy::at_bytes(256));
+        assert!(
+            segment_count(dir.path()) > 0,
+            "the fixture must really have rotated, or this test proves nothing"
+        );
+
+        let after = crate::audit::emitter::AuditEmitter::with_dir(key.clone(), dir.path())
+            .unwrap()
+            .publish_root("local")
+            .unwrap();
+        assert!(
+            after.tree_size > before.tree_size,
+            "the log grew across the rotation"
+        );
+
+        let report = verify_root_history(dir.path(), "local", &vk)
+            .expect("the log is append-only across the rotation");
+        assert_eq!(report.roots, 2);
+        assert_eq!(report.transitions_checked, 1);
+        assert_eq!(report.newest_tree_size, Some(after.tree_size));
+    }
+
+    #[test]
+    fn a_rewritten_prefix_is_refused_even_though_every_root_still_verifies() {
+        // The signature check cannot catch this: both roots are genuinely
+        // host-signed. Only the consistency proof can, because the leaves no
+        // longer extend what the older root committed to.
+        let dir = tempfile::tempdir().unwrap();
+        let key = fresh_key();
+        let vk = key.verifying_key();
+
+        grow_and_publish(dir.path(), &key, 4, "a");
+        grow_and_publish(dir.path(), &key, 4, "b");
+        assert!(verify_root_history(dir.path(), "local", &vk).is_ok());
+
+        // Rebuild the chain from scratch under the same key: every entry is
+        // validly signed and the chain verifies, but it is a different log.
+        let path = dir.path().join("local.jsonl");
+        std::fs::remove_file(&path).unwrap();
+        let signer = FileAuditSigner::open(key.clone(), dir.path()).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for i in 0..8 {
+            rt.block_on(signer.sign_and_emit(&entry("local", &format!("forged-{i}"))))
+                .unwrap();
+        }
+
+        let err = verify_root_history(dir.path(), "local", &vk)
+            .expect_err("a rewritten prefix must not pass");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("not append-only") || text.contains("consistency proof"),
+            "the refusal must come from the consistency check, not from a \
+             signature or decode failure that would mask this: {text}"
+        );
+    }
+
     #[test]
     fn a_log_that_only_grew_proves_consistent_across_every_published_root() {
         let (dir, key, _) = seed_chain(3);

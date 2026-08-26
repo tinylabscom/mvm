@@ -145,9 +145,15 @@ the workload did".
       that degradation on stderr. No change needed; the earlier reading of this
       as an integrity hole was wrong.
 
-- [ ] **4.8 Anchor from the supervisor seal path too.** `seal_capture` and
-      `adopt_capture` are the two stream-plane seals and both now anchor. Check
-      whether any other production path seals a transcript without one.
+- [x] **4.8 Every production seal path anchors.** Resolved by audit. Three
+      sites set a transcript's `sealed_root_hex` in production:
+      `durable.rs:312` (the owner's seal, anchored via `seal_capture`),
+      `journal.rs:267` (the journal rebuild, anchored via `adopt_capture`), and
+      the opt-in forensic network capture in `commands/ops/transcript.rs`, which
+      already anchored before this plan. `transcript.rs:687` is the library
+      primitive that *builds* the manifest -- its only two production callers
+      are the first two above. `stream_client/output.rs:1393` is inside
+      `#[cfg(test)]`. No unanchored production seal remains.
 
 - [x] **4.5 Tests.** Anchor emitted on seal; anchor emitted on replayed seal and
       distinguishable from a live one; label set pinned exhaustively so a future
@@ -193,7 +199,7 @@ observable.
       per-tenant; tracing one run means filtering by `plan_id` via
       `mvmctl trust audit show`. Decide whether a receipt should cite its own
       leaf range so a verifier can bound one execution without scanning.
-- [ ] **5.5 Tests.** A consistency proof across a rotation boundary; a refused
+- [x] **5.5 Tests.** A consistency proof across a rotation boundary; a refused
       proof on a rewritten prefix; roots published at both boundaries.
 
 ## Open questions
