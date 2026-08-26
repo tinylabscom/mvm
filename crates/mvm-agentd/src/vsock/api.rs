@@ -359,10 +359,11 @@ pub fn send_proc_request_on(stream: &mut UnixStream, req: GuestRequest) -> Resul
     let resp = call_unary(stream, &req)?;
     match resp {
         GuestResponse::ProcResult(r) => Ok(r),
-        GuestResponse::Error { message } => {
-            bail!("Guest proc-control transport error: {}", message)
-        }
-        _ => bail!("Unexpected response to proc-control verb"),
+        other => bail!(
+            "expected ProcResult for {}, got {:?}",
+            req.verb().name(),
+            other.variant()
+        ),
     }
 }
 
@@ -445,8 +446,11 @@ pub fn send_fs_request_on(stream: &mut UnixStream, req: GuestRequest) -> Result<
     let resp = call_unary(stream, &req)?;
     match resp {
         GuestResponse::FsResult(r) => Ok(r),
-        GuestResponse::Error { message } => bail!("Guest FS RPC transport error: {}", message),
-        _ => bail!("Unexpected response to FS RPC verb"),
+        other => bail!(
+            "expected FsResult for {}, got {:?}",
+            req.verb().name(),
+            other.variant()
+        ),
     }
 }
 
