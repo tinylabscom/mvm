@@ -201,7 +201,7 @@ let
     sha256 = "0jzf1znfpb2gx8nr8mvmyqs1crnv79l57nxnbiszc7xf7ynbjm1k";
   };
 
-  depsPrefix = "/builddeps/target";
+  depsPrefix = "/build/deps/target";
 
   # Wrapper for Emscripten's file_packager.py.  It must run with a writable
   # HOME because Emscripten writes cache/lock files there.  Using a runtime
@@ -423,10 +423,10 @@ stdenv.mkDerivation (finalAttrs: {
     link_libs = (
         '-Wl,--start-group libqemuutil.a subprojects/dtc/libfdt/libfdt.a '
         'subprojects/slirp/libslirp.a '
-        '/builddeps/target/lib/libglib-2.0.a /builddeps/target/lib/libgobject-2.0.a '
-        '/builddeps/target/lib/libgthread-2.0.a /builddeps/target/lib/libgmodule-2.0.a '
-        '/builddeps/target/lib/libgio-2.0.a /builddeps/target/lib/libpcre2-8.a '
-        '/builddeps/target/lib/libffi.a /builddeps/target/lib/libz.a -lm -Wl,--end-group'
+        '/build/deps/target/lib/libglib-2.0.a /build/deps/target/lib/libgobject-2.0.a '
+        '/build/deps/target/lib/libgthread-2.0.a /build/deps/target/lib/libgmodule-2.0.a '
+        '/build/deps/target/lib/libgio-2.0.a /build/deps/target/lib/libpcre2-8.a '
+        '/build/deps/target/lib/libffi.a /build/deps/target/lib/libz.a -lm -Wl,--end-group'
     )
     insert = f"\n ARGS = {link_flags}\n LINK_ARGS = {link_libs}"
     pos = m.end()
