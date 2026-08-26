@@ -59,10 +59,7 @@ const GUEST_BOOT_FAILURES: &[(&str, &str)] = &[
 fn e2e_home() -> PathBuf {
     std::env::var_os(E2E_HOME_ENV)
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = std::env::var_os("HOME").expect("HOME must be set to locate ~/.mvm");
-            PathBuf::from(home).join(".mvm")
-        })
+        .unwrap_or_else(|| PathBuf::from(mvm_core::config::mvm_home()))
 }
 
 /// Parse `dispatch_window=<n>ms` out of the `phase-timing` line.
@@ -130,6 +127,7 @@ fn run_in_e2e_home(args: &str, extra_env: &[(&str, &str)]) -> LaunchRecord {
         .current_dir(workspace_root())
         .args(shell_split(args))
         .env("MVM_HOME", &home)
+        .env("HOME", &home)
         .env("MVM_PHASE_TIMING", "1");
     for (key, value) in extra_env {
         command.env(key, value);
