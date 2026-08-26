@@ -638,6 +638,35 @@ async fn write_request_body(stream: &mut Stream, body: Option<RequestBody>) -> R
     }
 }
 
+/// How long one address may take to connect before the next is tried.
+///
+/// A default rather than an option, because "no timeout" is not a sensible
+/// posture for a connect: a black-holed address does not refuse, it simply
+/// never answers, so an untimed connect blocks forever and the fallback loop
+/// below never runs. That is not hypothetical — a host with a configured but
+/// non-functional IPv6 route hangs here indefinitely with no diagnostic, which
+/// is how an image pull came to sit in `SYN-SENT` for half an hour.
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Order candidate addresses IPv4-first.
+///
+/// The timeout above makes a dead address survivable; this makes it cheap.
+/// Resolvers commonly return AAAA first, so a host whose IPv6 is broken would
+/// otherwise pay the full timeout on every single connect before falling back.
+/// Preferring IPv4 costs nothing where IPv6 works — both are tried, and the
+/// order only decides which is attempted first.
+fn ipv4_first(addrs: &[std::net::SocketAddr]) -> Vec<std::net::SocketAddr> {
+    let (v4, v6): (Vec<_>, Vec<_>) = addrs.iter().partition(|a| a.is_ipv4());
+    v4.into_iter().chain(v6).copied().collect()
+}
+
+/// The per-address connect budget. An unset timeout resolves to a finite
+/// default; it must never resolve to "wait indefinitely", which is what let a
+/// dead address consume a whole request.
+fn connect_budget(configured: Option<Duration>) -> Duration {
+    configured.unwrap_or(DEFAULT_CONNECT_TIMEOUT)
+}
+
 async fn connect(
     inner: &Inner,
     addrs: &[std::net::SocketAddr],
@@ -645,20 +674,18 @@ async fn connect(
     tls_wanted: bool,
 ) -> Result<Stream> {
     let mut last: Option<std::io::Error> = None;
-    for addr in addrs {
+    let budget = connect_budget(inner.connect_timeout);
+    for addr in &ipv4_first(addrs) {
         let attempt = TcpStream::connect(addr);
-        let tcp = match inner.connect_timeout {
-            Some(d) => match tokio::time::timeout(d, attempt).await {
-                Ok(r) => r,
-                Err(_) => {
-                    last = Some(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "connect timed out",
-                    ));
-                    continue;
-                }
-            },
-            None => attempt.await,
+        let tcp = match tokio::time::timeout(budget, attempt).await {
+            Ok(r) => r,
+            Err(_) => {
+                last = Some(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("connect to {addr} timed out after {budget:?}"),
+                ));
+                continue;
+            }
         };
         match tcp {
             Ok(tcp) => {
@@ -1219,5 +1246,113 @@ mod tests {
         let err = c.get("https://blocked.example/").send().await.unwrap_err();
         assert!(err.is_address_refusal(), "{err:?}");
         assert!(matches!(&err, Error::NoPermittedAddress(h) if h == "blocked.example"));
+    }
+}
+
+#[cfg(test)]
+mod connect_resilience_tests {
+    use super::*;
+
+    fn v4(p: u16) -> std::net::SocketAddr {
+        format!("127.0.0.1:{p}").parse().expect("v4")
+    }
+    fn v6(p: u16) -> std::net::SocketAddr {
+        format!("[::1]:{p}").parse().expect("v6")
+    }
+
+    /// IPv4 is attempted first. A resolver that returns AAAA first would
+    /// otherwise make a host with broken IPv6 pay the connect timeout on
+    /// every request before it ever reaches a working address.
+    #[test]
+    fn addresses_are_ordered_ipv4_first() {
+        let ordered = ipv4_first(&[v6(1), v4(2), v6(3), v4(4)]);
+        assert_eq!(ordered, vec![v4(2), v4(4), v6(1), v6(3)]);
+    }
+
+    /// Ordering is stable within a family, so a resolver's own preference
+    /// between two IPv4 addresses is preserved.
+    #[test]
+    fn ordering_is_stable_within_a_family() {
+        assert_eq!(
+            ipv4_first(&[v4(1), v4(2), v4(3)]),
+            vec![v4(1), v4(2), v4(3)]
+        );
+    }
+
+    #[test]
+    fn an_empty_or_single_family_list_is_unchanged() {
+        assert!(ipv4_first(&[]).is_empty());
+        assert_eq!(ipv4_first(&[v6(1), v6(2)]), vec![v6(1), v6(2)]);
+    }
+
+    /// **The deterministic half of the regression.** An unset timeout must
+    /// resolve to a finite budget. Before the fix it resolved to "no timeout",
+    /// so one dead address consumed the request forever and the fallback loop
+    /// below it never ran.
+    ///
+    /// Asserted on the selection itself rather than by dialing a black hole:
+    /// whether a reserved address hangs or fails fast is a property of the
+    /// host's network, so a dial-based test proves nothing portable.
+    #[test]
+    fn an_unset_connect_timeout_resolves_to_a_finite_budget() {
+        assert_eq!(connect_budget(None), DEFAULT_CONNECT_TIMEOUT);
+        assert!(connect_budget(None) <= Duration::from_secs(30));
+        assert_eq!(
+            connect_budget(Some(Duration::from_millis(250))),
+            Duration::from_millis(250),
+            "an explicit timeout still wins"
+        );
+    }
+
+    /// Ordering, exercised through `connect` rather than by calling the
+    /// helper. A dead IPv6 address listed first must not delay a working
+    /// IPv4 sibling — which is the whole point of preferring v4, and is
+    /// invisible to a test that only checks the sort function.
+    ///
+    /// `100::/64` is the RFC 6666 discard prefix: routed to nowhere by design.
+    #[tokio::test]
+    async fn a_dead_ipv6_first_does_not_delay_a_working_ipv4() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let good = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+
+        let inner = Client::builder().build().expect("builds").inner.clone();
+        let dead_v6: std::net::SocketAddr = "[100::1]:443".parse().expect("discard prefix");
+
+        let started = std::time::Instant::now();
+        connect(&inner, &[dead_v6, good], "localhost", false)
+            .await
+            .expect("the reachable IPv4 address is used");
+
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "IPv4 should be tried first, not after the v6 budget expires; took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A caller that sets nothing still gets a bound. `None` used to mean
+    /// "wait forever", which is the shape that produced a half-hour hang with
+    /// no output.
+    #[test]
+    fn the_default_connect_budget_is_bounded() {
+        let inner = Client::builder()
+            .build()
+            .expect("client builds")
+            .inner
+            .clone();
+        assert!(
+            inner.connect_timeout.is_none(),
+            "the builder still records 'unset' rather than inventing a value"
+        );
+        assert_eq!(
+            inner.connect_timeout.unwrap_or(DEFAULT_CONNECT_TIMEOUT),
+            DEFAULT_CONNECT_TIMEOUT,
+            "an unset timeout resolves to a finite default, never to no timeout"
+        );
     }
 }
