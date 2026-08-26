@@ -13,6 +13,25 @@ use std::path::{Path, PathBuf};
 /// Directories never worth descending into: build output and VCS metadata.
 const SKIP_DIRS: [&str; 3] = ["target", ".git", "node_modules"];
 
+/// Whether `dir` is the root of a *different* checkout, and so not ours to scan.
+///
+/// A linked worktree carries a `.git` **file** (pointing at the real gitdir), a
+/// clone carries a `.git` directory; either way, the presence of a `.git` entry
+/// in a subdirectory means everything beneath it belongs to another checkout.
+///
+/// Gates walk the filesystem rather than `git ls-files`, so without this they
+/// descend into gitignored worktrees a contributor happens to have nested
+/// inside the repo and report that tree's files as findings. Observed on
+/// 2026-08-26: a worktree at `.claude/worktrees/<name>/` — gitignored, another
+/// session's — made `test_support_source_owners_match_the_targeted_ci_lane`
+/// fail with 34 paths that were all copies of files the gate already allows.
+///
+/// The root being scanned is never tested here; only directories we are about
+/// to descend into, so a normal run over the repo root is unaffected.
+fn is_nested_checkout(dir: &Path) -> bool {
+    dir.join(".git").exists()
+}
+
 /// Visit every file under `dir`, recursively, in sorted order.
 ///
 /// A missing `dir` is not an error — a gate that scans an optional tree
@@ -32,7 +51,7 @@ pub fn walk_files(dir: &Path, f: &mut dyn FnMut(&Path)) -> Result<()> {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or_default();
-            if SKIP_DIRS.contains(&name) {
+            if SKIP_DIRS.contains(&name) || is_nested_checkout(&path) {
                 continue;
             }
             walk_files(&path, f)?;
@@ -94,6 +113,49 @@ mod tests {
             names,
             vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()]
         );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A gitignored worktree nested inside the repo belongs to another checkout;
+    /// scanning it reports that tree's files as if they were ours.
+    #[test]
+    fn walk_does_not_descend_into_a_nested_worktree() {
+        let tmp = std::env::temp_dir().join(format!("xtask-fs-nested-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("crates")).unwrap();
+        std::fs::create_dir_all(tmp.join("nested/crates")).unwrap();
+        std::fs::write(tmp.join("crates/ours.rs"), "ours").unwrap();
+        // A linked worktree's `.git` is a file, not a directory.
+        std::fs::write(tmp.join("nested/.git"), "gitdir: /elsewhere").unwrap();
+        std::fs::write(tmp.join("nested/crates/theirs.rs"), "theirs").unwrap();
+
+        let mut names: Vec<String> = Vec::new();
+        walk_files(&tmp, &mut |p| {
+            names.push(p.file_name().unwrap().to_string_lossy().into_owned());
+        })
+        .unwrap();
+
+        assert_eq!(names, vec!["ours.rs".to_string()], "{names:?}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The same rule must not stop the walk at the repo root, which also has
+    /// a `.git`.
+    #[test]
+    fn walk_still_scans_the_root_even_though_it_is_a_checkout() {
+        let tmp = std::env::temp_dir().join(format!("xtask-fs-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("crates")).unwrap();
+        std::fs::create_dir_all(tmp.join(".git")).unwrap();
+        std::fs::write(tmp.join("crates/ours.rs"), "ours").unwrap();
+
+        let mut names: Vec<String> = Vec::new();
+        walk_files(&tmp, &mut |p| {
+            names.push(p.file_name().unwrap().to_string_lossy().into_owned());
+        })
+        .unwrap();
+
+        assert_eq!(names, vec!["ours.rs".to_string()], "{names:?}");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
