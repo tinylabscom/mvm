@@ -3,7 +3,7 @@
 Backing: preview
 Validation: focused
 
-**Status:** In progress — format-level canonicalization complete
+**Status:** In progress — canonicalization spec + transcript anchoring + Merkle operationalization complete
 **Date:** 2026-08-25
 **Branch:** `feat/mvmev-format-spec`
 **Issue:** #2863
@@ -195,10 +195,14 @@ observable.
       successful witness is unprotected, the detection window is the publishing
       interval, and someone still has to *compare* -- a sink nobody reads
       records evidence without checking anything.
-- [ ] **5.4 Carry a per-execution index into the tenant tree.** The tree is
-      per-tenant; tracing one run means filtering by `plan_id` via
-      `mvmctl trust audit show`. Decide whether a receipt should cite its own
-      leaf range so a verifier can bound one execution without scanning.
+- [x] **5.4 Per-execution leaf bound on the receipt.** `mvm.plan_leaf_first` /
+      `mvm.plan_leaf_last`, computed over the full verified chain so the
+      indices address the real tree. Deliberately a **bound, not an
+      enumeration**: the tree is per-tenant, so another plan's entries can sit
+      between them. What it buys is that nothing for this plan sits outside
+      them, so a verifier restricts its scan to that window instead of walking
+      every leaf. The test interleaves a second plan inside the range to pin
+      that reading.
 - [x] **5.5 Tests.** A consistency proof across a rotation boundary; a refused
       proof on a rewritten prefix; roots published at both boundaries.
 

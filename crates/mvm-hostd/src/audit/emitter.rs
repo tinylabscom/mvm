@@ -60,8 +60,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 mod atomic_sync;
+use atomic_sync::AtomicSyncBatch;
 pub(crate) use atomic_sync::AtomicSyncState;
-use atomic_sync::{AtomicSyncBatch, atomic_sync_is_batched, defer_atomic_sync, sync_path};
+#[cfg(test)]
+use atomic_sync::atomic_sync_is_batched;
+
+mod atomic_write;
+pub(crate) use atomic_write::{write_atomic, write_atomic_batched, write_atomic_unsynced};
 
 mod session_events;
 
@@ -1465,72 +1470,6 @@ fn append_root_history(audit_dir: &Path, tenant: &str, signed: &SignedAuditRoot)
         .with_context(|| format!("appending to root history at {}", path.display()))?;
     file.sync_data()
         .with_context(|| format!("syncing root history at {}", path.display()))?;
-    Ok(())
-}
-
-pub(crate) fn write_atomic_unsynced(path: &Path, bytes: &[u8]) -> Result<()> {
-    write_atomic_inner(path, bytes, false, None)
-}
-
-pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    write_atomic_inner(path, bytes, true, None)
-}
-
-pub(crate) fn write_atomic_batched(
-    path: &Path,
-    bytes: &[u8],
-    state: &AtomicSyncState,
-) -> Result<()> {
-    write_atomic_inner(path, bytes, true, Some(state))
-}
-
-fn write_atomic_inner(
-    path: &Path,
-    bytes: &[u8],
-    sync: bool,
-    state: Option<&AtomicSyncState>,
-) -> Result<()> {
-    use std::io::Write;
-    let dir = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("path {} has no parent directory", path.display()))?;
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| anyhow::anyhow!("path {} has no file name", path.display()))?;
-    let tmp = dir.join(format!(".{file_name}.tmp.{}", std::process::id()));
-    // Best-effort: if any step before the rename fails, don't leave the
-    // partial temp file behind.
-    let batched_sync = sync && state.is_some_and(atomic_sync_is_batched);
-    let write = (|| -> Result<()> {
-        let mut f = std::fs::File::create(&tmp)
-            .with_context(|| format!("creating temp file {}", tmp.display()))?;
-        f.write_all(bytes)
-            .with_context(|| format!("writing temp file {}", tmp.display()))?;
-        if sync && !batched_sync {
-            // `sync_data` preserves the file bytes and the size metadata
-            // needed to read them while avoiding unrelated inode-metadata
-            // work. The subsequent rename's directory entry has never been
-            // fsynced by this helper, so `sync_all` did not make publication
-            // itself more durable than this.
-            f.sync_data()
-                .with_context(|| format!("fdatasync temp file {}", tmp.display()))?;
-        }
-        Ok(())
-    })();
-    if let Err(e) = write {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(anyhow::Error::from(e))
-            .with_context(|| format!("renaming {} to {}", tmp.display(), path.display()));
-    }
-    if batched_sync && !state.is_some_and(|state| defer_atomic_sync(state, path)) {
-        sync_path(path).with_context(|| format!("fdatasync file {}", path.display()))?;
-    }
     Ok(())
 }
 
