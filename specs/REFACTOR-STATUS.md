@@ -139,6 +139,15 @@ for detailed scope and acceptance criteria.
       the host-binary manifest, including `mvm-builderd`. Structural tests pin
       the two workflow contracts.
 
+- [x] **Issue #2870 — Extended CI failures repaired.** The AArch64 no-KVM
+      witness executes the sealed exit-code image's baked entrypoint instead of
+      replacing it with `/bin/true`, and both macOS lanes use one trusted-tap
+      installer that builds the checksum-pinned firmware formula from source
+      instead of requesting an upstream bottle basename that does not exist.
+      The Apple workspace lane also installs the pinned embedded-host Zig/Rust
+      toolchain before mvm-cli's build script needs it. The release workflow
+      reuses the same installer and bounded retries.
+
 - [x] **Issue #2789 — guest hostname follows the machine name.** The shared
       workload cmdline carries one validated `mvm.hostname=` token for cold
       boots, while warm children receive their final name through the existing

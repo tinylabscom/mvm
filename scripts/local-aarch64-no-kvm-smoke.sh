@@ -87,8 +87,8 @@ set +e
     --flake examples/exit_code \
     --builder qemu \
     --hypervisor qemu \
+    --entrypoint \
     -v \
-    -- /bin/true \
     > /tmp/mvmctl-first-boot.log 2>&1
 actual=$?
 set -e
@@ -122,8 +122,8 @@ set +e
 /tmp/mvmctl-source-under-test machine run \
     --manifest "$installed_sha" \
     --hypervisor qemu \
+    --entrypoint \
     -v \
-    -- /bin/true \
     > /tmp/mvmctl-bundle-run.log 2>&1
 actual=$?
 set -e

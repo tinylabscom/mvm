@@ -88,10 +88,7 @@ jobs:
       # formula ... from untrusted tap slp/krun". Tap + trust before installing.
       - name: Install libkrun (macOS backend FFI)
         if: runner.os == 'macOS'
-        run: |
-          brew tap slp/krun
-          brew trust slp/krun
-          brew install slp/krun/libkrun slp/krun/libkrunfw
+        uses: ./.github/actions/install-libkrun
 
       - name: Install cross-compilation tools (Linux aarch64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
