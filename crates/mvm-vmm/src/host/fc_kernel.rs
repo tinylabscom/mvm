@@ -111,14 +111,22 @@ pub fn ensure_fc_loadable_kernel(path: &Path) -> Result<PathBuf> {
 
 /// Identifies the exact `vmlinux` an extracted ELF came from.
 ///
-/// Filesystems exposed through a builder or shared-volume boundary may report
-/// timestamps at one-second resolution. A same-sized kernel replacement can
-/// therefore retain the same `(length, mtime)` pair and must not reuse an ELF
-/// extracted from the previous bytes. Hashing is deliberate here: serving a
-/// stale kernel would cross the verified-kernel seam, while the caller invokes
-/// this only during kernel preparation.
+/// The stamp is the kernel's content digest, so replacing `vmlinux` — a
+/// rebuild, a re-fetch — never reuses an ELF extracted from the previous bytes.
+/// Serving a stale kernel would cross the verified-kernel seam.
+///
+/// The digest is obtained through the shared size+mtime-keyed cache rather than
+/// by re-reading the image. The caller that resolved this kernel just verified
+/// the same bytes against their recorded pin through that same cache, so an
+/// unconditional read here was hashing one multi-MB image twice per boot to
+/// reach a value already computed. The two now share one entry and one hash per
+/// kernel change. What that trades away is the one case a raw re-read still
+/// caught: a same-sized replacement landing on a byte-identical mtime, which a
+/// filesystem reporting timestamps at one-second resolution can produce. The
+/// pin backing the kernel is keyed the same way, so on such a filesystem both
+/// go stale together rather than one silently covering for the other.
 fn source_stamp(path: &Path) -> Result<String> {
-    mvm_core::crypto::image_verify::sha256_file(path)
+    mvm_core::crypto::image_verify::sha256_file_cached(path)
         .with_context(|| format!("hash kernel {} for extracted-ELF cache", path.display()))
 }
 
@@ -362,6 +370,30 @@ mod tests {
 
         let got = ensure_fc_loadable_kernel(&kpath).unwrap();
         assert_eq!(std::fs::read(&got).unwrap(), real);
+    }
+
+    /// The stamp is the same content digest the kernel's own pin is checked
+    /// against, so preparing a kernel for boot must go through the shared
+    /// digest cache rather than re-reading the image. Asserted by the cache
+    /// being warm afterwards: a raw re-read leaves no entry behind, so a boot
+    /// path that stopped using the cache would re-read the whole image on every
+    /// launch and nothing else here would notice.
+    #[test]
+    fn preparing_a_kernel_leaves_the_shared_digest_cache_warm() {
+        use mvm_core::crypto::image_verify::{DigestSource, sha256_file_cached_with_source};
+
+        let dir = tempfile::tempdir().unwrap();
+        let kpath = dir.path().join("vmlinux");
+        std::fs::write(&kpath, fake_bzimage(&fake_vmlinux_tagged(0x99))).unwrap();
+
+        ensure_fc_loadable_kernel(&kpath).unwrap();
+
+        let (_, source) = sha256_file_cached_with_source(&kpath).unwrap();
+        assert_eq!(
+            source,
+            DigestSource::Sidecar,
+            "kernel preparation must digest through the shared cache, not a raw re-read"
+        );
     }
 
     #[test]
