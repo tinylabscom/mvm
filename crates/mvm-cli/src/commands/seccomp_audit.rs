@@ -131,8 +131,8 @@ fn run_linux(args: Args) -> Result<()> {
     let argv_c: Vec<std::ffi::CString> = args
         .command
         .iter()
-        .map(|s| std::ffi::CString::new(s.as_str()).unwrap())
-        .collect();
+        .map(|s| std::ffi::CString::new(s.as_str()).context("command argument contains a NUL byte"))
+        .collect::<anyhow::Result<_>>()?;
 
     // We fork manually instead of using std::process::Command so the child can
     // stop itself with SIGSTOP immediately after PTRACE_TRACEME, before the
@@ -150,8 +150,10 @@ fn run_linux(args: Args) -> Result<()> {
                 // Do not leak unrelated file descriptors into the audited command.
                 close_non_stdio_fds();
                 nix::sys::signal::raise(Signal::SIGSTOP).context("raise(SIGSTOP) failed")?;
-                nix::unistd::execvp(&program_c, &argv_c).context("execvp failed")?;
-                Ok(())
+                match nix::unistd::execvp(&program_c, &argv_c) {
+                    Ok(never) => match never {},
+                    Err(error) => Err(error).context("execvp failed"),
+                }
             })() {
                 eprintln!("mvmctl seccomp-audit (child): {e:#}");
             }

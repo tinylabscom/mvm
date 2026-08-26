@@ -327,6 +327,7 @@ fn evict_stale_universal_initramfs(
 /// without building or downloading anything? Applies the same
 /// source-fingerprint eviction as the attach path first, so a stale artifact
 /// never counts as available.
+#[cfg(test)]
 pub(crate) fn universal_initramfs_available() -> bool {
     let version = env!("CARGO_PKG_VERSION");
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
@@ -1503,7 +1504,7 @@ mod universal_initramfs_attach_tests {
         );
         assert!(
             sc.initrd_path.is_none(),
-            "a cold-cache resolution failure must preserve legacy boot"
+            "a cold-cache resolution failure leaves no initramfs attached"
         );
     }
 

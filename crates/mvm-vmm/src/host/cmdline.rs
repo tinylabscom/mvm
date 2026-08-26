@@ -19,10 +19,9 @@ use std::path::{Path, PathBuf};
 
 use mvm_core::vm_backend::VmStartConfig;
 
-use crate::host::boot_config::{
-    booted_with_universal_initramfs, build_runtime_overlay_cmdline_args, build_verity_cmdline_args,
-    non_verity_overlay_ext4,
-};
+#[cfg(test)]
+use crate::host::boot_config::booted_with_universal_initramfs;
+use crate::host::boot_config::{build_runtime_overlay_cmdline_args, non_verity_overlay_ext4};
 use crate::host::egress_bridge::{
     host_signer_pub_cmdline_token, require_grant_cmdline_token, verb_grant_cmdline_token,
 };
@@ -69,27 +68,10 @@ pub fn hostname_cmdline_token(machine_name: &str) -> Option<String> {
         .then(|| format!("mvm.hostname={machine_name}"))
 }
 
-fn verity_initrd_path(config: &VmStartConfig) -> Option<PathBuf> {
-    config
-        .verity_path
-        .as_deref()
-        .zip(config.roothash.as_deref())
-        .and_then(|_| {
-            Path::new(&config.rootfs_path)
-                .parent()
-                .map(|p| p.join("rootfs.initrd"))
-        })
-        .filter(|p| p.exists())
-}
-
-/// The initramfs this boot uses: an explicit `--initrd` override, or (for a
-/// verity-sealed boot) the sibling `rootfs.initrd` next to the rootfs image.
+/// The initramfs this boot uses: the explicit `--initrd` override, or the
+/// universal initramfs path attached by the runtime source resolver.
 pub fn effective_initrd(config: &VmStartConfig) -> Option<PathBuf> {
-    config
-        .initrd_path
-        .as_ref()
-        .map(PathBuf::from)
-        .or_else(|| verity_initrd_path(config))
+    config.initrd_path.as_ref().map(PathBuf::from)
 }
 
 /// Whether this boot has everything dm-verity needs: a verity sidecar, a
@@ -165,21 +147,8 @@ fn workload_cmdline_for_hostname(
     };
     // The universal initramfs receives the rootfs and runtime-overlay
     // roothashes/device paths over vsock via `ActivateEnvironment` after boot, so
-    // its cmdline carries none of them. A legacy per-rootfs verity initramfs
-    // (`mvm-verity-init` as PID 1) is never sent that verb — the cmdline is its
-    // only channel, and without these tokens it aborts before userspace and the
-    // kernel panics on a dead PID 1. Hosts that cannot yet resolve the universal
-    // artifact still boot the legacy initramfs, so both shapes stay live.
-    if verity_is_enabled
-        && !booted_with_universal_initramfs(config)
-        && let Some(verity_args) = build_verity_cmdline_args(
-            config.roothash.as_deref(),
-            runtime_overlay(config).map(|(_, _, roothash)| roothash),
-        )
-    {
-        cmdline.push(' ');
-        cmdline.push_str(&verity_args);
-    }
+    // its cmdline carries none of them. The legacy per-rootfs verity initramfs
+    // is no longer supported.
     // Non-verity boots carry the runtime overlay as a plain read-only
     // `/dev/vdb` (attached by the backend's disk layout); emit the token its
     // `/init` mounts from. Verity boots already emitted the dm-verity variant
@@ -463,64 +432,6 @@ mod tests {
         assert!(cmdline.contains("mvm.runtime_source_policy=required_overlay"));
     }
 
-    /// The counterpart: a legacy per-rootfs verity initramfs (`mvm-verity-init`
-    /// as PID 1) is never sent `ActivateEnvironment`, so the kernel cmdline is
-    /// its only channel for the roothashes and device paths. Dropping those
-    /// tokens makes `mvm-verity-init` fatal ("no mvm.roothash= on kernel
-    /// cmdline") and panics the guest before userspace.
-    #[test]
-    fn workload_cmdline_for_legacy_verity_initramfs_boot_carries_the_roothash_tokens() {
-        let _guard = crate::host::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_HOME", dir.path());
-        let rootfs = dir.path().join("rootfs.ext4");
-        let verity = dir.path().join("rootfs.verity");
-        let initrd = dir.path().join("rootfs.initrd");
-        std::fs::write(&rootfs, b"rootfs").unwrap();
-        std::fs::write(&verity, b"verity").unwrap();
-        std::fs::write(&initrd, b"initrd").unwrap();
-
-        let rootfs_hash = "a".repeat(64);
-        let overlay_hash = "b".repeat(64);
-        let config = VmStartConfig {
-            rootfs_path: rootfs.display().to_string(),
-            verity_path: Some(verity.display().to_string()),
-            roothash: Some(rootfs_hash.clone()),
-            runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
-            runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
-            runtime_overlay_roothash: Some(overlay_hash.clone()),
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-            ..Default::default()
-        };
-        assert!(
-            !booted_with_universal_initramfs(&config),
-            "fixture must resolve as a legacy-initramfs boot"
-        );
-        let cmdline =
-            workload_cmdline(&config, dir.path(), hvf_like_workload_bootargs).expect("cmdline");
-        for token in [
-            format!("mvm.roothash={rootfs_hash}"),
-            "mvm.data=/dev/vda".to_string(),
-            "mvm.hash=/dev/vdb".to_string(),
-            format!("mvm.runtime_roothash={overlay_hash}"),
-            "mvm.runtime_data=/dev/vdc".to_string(),
-            "mvm.runtime_hash=/dev/vdd".to_string(),
-        ] {
-            assert!(
-                cmdline.contains(&token),
-                "legacy verity cmdline missing {token}: {cmdline}"
-            );
-        }
-        assert!(cmdline.contains("mvm.runtime_source_policy=required_overlay"));
-    }
-
-    /// A verity boot must take its console base from the driver seam, not a
-    /// hardcoded HVF UART. A libkrun-style base yields `console=hvc0`; the
-    /// cmdline must never carry the pl011 `ttyAMA0`/`earlycon` that a libkrun
-    /// guest has no device for (the regression that emitted a 0-byte console).
     #[test]
     fn verity_cmdline_takes_the_console_from_the_driver_seam_not_a_hardcoded_uart() {
         let dir = tempfile::tempdir().unwrap();

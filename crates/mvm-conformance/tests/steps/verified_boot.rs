@@ -10,25 +10,17 @@ use mvm_runtime::driver::{ConsoleCapture, KernelImage, LibkrunDriver, VmmDriver,
 
 use crate::world::{CliWorld, MvmHomeGuard};
 
-/// Materialize the initramfs this sealed boot attaches, and return its path.
+/// Materialize the universal initramfs this sealed boot attaches, and return its path.
 ///
-/// The path is the discriminant between the two boot protocols, so the fixture
-/// has to produce a real one. `universal` lands in the shared initramfs cache —
-/// that PID 1 is handed its roothashes and device slots over vsock. `legacy` is
-/// a per-rootfs `rootfs.initrd` sibling, whose PID 1 can only read them off the
-/// kernel cmdline.
-fn sealed_initramfs_path(flavor: &str) -> String {
-    match flavor {
-        "universal" => {
-            let dir = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
-            std::fs::create_dir_all(&dir).expect("create initramfs cache dir");
-            let image = dir.join("initramfs.cpio.gz");
-            std::fs::write(&image, b"initramfs").expect("write initramfs");
-            image.display().to_string()
-        }
-        "legacy" => "/image/rootfs.initrd".to_string(),
-        other => panic!("unsupported sealed initramfs flavor {other:?}"),
-    }
+/// The universal initramfs lives in the shared initramfs cache; its PID 1 is
+/// handed roothashes and device slots over vsock. A legacy per-rootfs initrd
+/// is no longer supported, so this fixture only produces the universal path.
+fn sealed_initramfs_path(_flavor: &str) -> String {
+    let dir = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
+    std::fs::create_dir_all(&dir).expect("create initramfs cache dir");
+    let image = dir.join("initramfs.cpio.gz");
+    std::fs::write(&image, b"initramfs").expect("write initramfs");
+    image.display().to_string()
 }
 
 #[when(expr = "I assemble a sealed workload cmdline for {string} booting the {string} initramfs")]

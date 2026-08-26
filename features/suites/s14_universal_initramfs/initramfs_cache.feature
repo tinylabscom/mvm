@@ -1,11 +1,11 @@
 Feature: Universal initramfs cache attachment
 
   The universal initramfs is shared across workloads and may be absent from the
-  local cache.  Its absence must never be the reason a workload fails to start;
-  the boot path falls back to the legacy per-rootfs /init when the initramfs is
-  not yet cached, and the CLI must fail fast for the *next* real precondition
+  local cache. Its absence must never silently fall back to a legacy per-rootfs
+  initrd; sealed/verity boots own their initramfs through the universal
+  initramfs attach step. The CLI must fail fast for the *next* real precondition
   (e.g., failed verified kernel reacquisition) rather than emitting an initramfs
-  error.
+  error or resurrecting the unsupported legacy path.
 
   @cli
   Scenario: A cold initramfs cache does not block machine run

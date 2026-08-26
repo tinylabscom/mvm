@@ -279,10 +279,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((path.to_path_buf(), force));
-            if self.umount_busy_unless_force && !force {
-                return Ok(false);
-            }
-            Ok(true)
+            Ok(!self.umount_busy_unless_force || force)
         }
     }
 

@@ -3402,14 +3402,13 @@ mod tests {
     }
 
     #[test]
-    fn transient_oci_required_overlay_prefers_sibling_initrd() {
+    fn transient_oci_required_overlay_returns_no_initrd() {
         let dir = tempfile::tempdir().unwrap();
         let rootfs = dir.path().join("rootfs.ext4");
-        let initrd = dir.path().join("rootfs.initrd");
+        let sibling = dir.path().join("rootfs.initrd");
         std::fs::write(&rootfs, b"rootfs").unwrap();
-        std::fs::write(&initrd, b"initrd").unwrap();
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_RUNTIME_OVERLAY_ACQUIRE_MODE", "download");
+        // A sibling legacy initrd must be ignored.
+        std::fs::write(&sibling, b"initrd").unwrap();
         let image = ImageSource::Prebuilt {
             kernel_path: "/k".into(),
             rootfs_path: rootfs.display().to_string(),
@@ -3430,63 +3429,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            resolved.as_deref(),
-            Some(initrd.to_str().expect("utf-8 initrd path"))
-        );
-    }
-
-    #[test]
-    fn transient_oci_required_overlay_falls_back_to_cached_verity_initrd() {
-        let dir = tempfile::tempdir().unwrap();
-        let rootfs = dir.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"rootfs").unwrap();
-        let image = ImageSource::Prebuilt {
-            kernel_path: "/k".into(),
-            rootfs_path: rootfs.display().to_string(),
-            initrd_path: None,
-            label: "oci".into(),
-            virtiofs_oci_root: Some(VirtiofsOciRoot {
-                tree_dir: "/tree".into(),
-                prod: false,
-            }),
-        };
-
-        let cache = tempfile::tempdir().unwrap();
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.isolate_mvm_home(cache.path());
-        env.set("MVM_RUNTIME_OVERLAY_ACQUIRE_MODE", "download");
-        let initrd_dir = cache
-            .path()
-            .join("cache")
-            .join("verity-initrd")
-            .join(env!("CARGO_PKG_VERSION"))
-            .join(if cfg!(target_arch = "aarch64") {
-                "aarch64"
-            } else {
-                "x86_64"
-            });
-        std::fs::create_dir_all(&initrd_dir).unwrap();
-        std::fs::write(initrd_dir.join("rootfs.initrd"), b"initrd").unwrap();
-
-        let resolved = effective_transient_initrd(
-            &image,
-            None,
-            &rootfs.display().to_string(),
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-            mvm_build::run_image::RootStrategy::BlockExt4,
-        )
-        .unwrap();
-
-        assert_eq!(
-            resolved.as_deref(),
-            Some(
-                initrd_dir
-                    .join("rootfs.initrd")
-                    .to_str()
-                    .expect("utf-8 cached initrd path")
-            )
-        );
+        assert_eq!(resolved, None, "legacy initrd must not be returned");
     }
 
     #[test]
