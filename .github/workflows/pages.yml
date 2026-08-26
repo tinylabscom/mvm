@@ -83,12 +83,28 @@ jobs:
         working-directory: public
         run: pnpm build
 
+      - name: Verify cross-origin isolation headers are staged
+        run: |
+          if [ ! -f public/dist/_headers ]; then
+            echo "ERROR: public/dist/_headers is missing; Cloudflare Pages will not send COOP/COEP headers." >&2
+            exit 1
+          fi
+          echo "OK: public/dist/_headers present"
+
+      - name: Ensure Cloudflare Pages project exists
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages project create mvm --production-branch=main
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
       - name: Deploy to Cloudflare Pages
         id: deployment
         uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          # Create a Cloudflare Pages project named `mvm` (or change this).
           command: pages deploy public/dist --project-name=mvm --branch=main
           gitHubToken: ${{ secrets.GITHUB_TOKEN }}

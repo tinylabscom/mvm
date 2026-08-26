@@ -47,6 +47,8 @@ The workflow deploys with:
 wrangler pages deploy public/dist --project-name=mvm --branch=main
 ```
 
+The workflow also runs `wrangler pages project create mvm --production-branch=main` before deploying. That step is allowed to fail (for example, when the project already exists), so a missing project is created automatically on the first run.
+
 ## Custom domain setup
 
 Cloudflare Pages custom domains work best when Cloudflare is also the authoritative DNS provider for the zone. The registrar (iwantmyname) can keep the registration; only the nameservers need to point at Cloudflare.
@@ -168,8 +170,24 @@ If you also need to send email:
 
 ## Troubleshooting
 
-- **Deployment fails with "Could not find the project"**: create the `mvm` Pages project first; the workflow does not auto-create it.
+- **Deployment fails with "Could not find the project"**: the workflow now tries to create the `mvm` project automatically. If this still fails, make sure the API token has `Cloudflare Pages:Edit` permission for the account.
 - **Secrets missing**: ensure `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are set at the repository level, not just environment level.
 - **Custom domain shows "Invalid"**: confirm the zone is active on Cloudflare and the nameservers at iwantmyname match exactly.
-- **SharedArrayBuffer still missing**: verify `public/public/_headers` is present in the built output and the request path starts with `/demo/weblinux/`.
-- **Email not arriving**: verify the destination address is verified in Cloudflare Email Routing, and that the MX records point to Cloudflare (check with `dig gomicrovm.com MX`).
+- **SharedArrayBuffer still missing**:
+  - Check that the deployed response carries the headers:
+    ```bash
+    curl -I https://gomicrovm.com/demo/weblinux/
+    ```
+    You should see `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`.
+  - If the headers are missing, the build did not include `public/dist/_headers`. The workflow now fails fast if that file is missing.
+  - Make sure you are testing the deployed Cloudflare Pages URL, not a local `demo.mvm.local` dev server (Astro dev does not send COOP/COEP headers; use the production URL or the local `web/weblinux-demo/serve.py` helper).
+- **Email not arriving**:
+  - In Cloudflare Email Routing, verify the destination address (e.g., `gomicrovm@ari.io`). An unverified destination causes Cloudflare to silently drop messages.
+  - Check the zone overview: the zone status must be **Active** (not **Pending**) for Email Routing to work.
+  - Confirm the required DNS records are live:
+    ```bash
+    dig gomicrovm.com MX
+    dig gomicrovm.com TXT
+    ```
+    You should see MX records pointing to Cloudflare inbound servers and an SPF TXT record including `_spf.mx.cloudflare.net`.
+  - Make sure the catch-all rule action is set to **Send to an email** (not **Drop**) and a verified destination is selected.
