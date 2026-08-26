@@ -44,4 +44,14 @@ pub enum AttestationError {
     /// Report schema_version newer than this build supports.
     #[error("attestation schema_version {found} > supported {supported}")]
     UnsupportedSchema { found: u32, supported: u32 },
+
+    /// A hardware attestation provider failed to produce a measurement.
+    /// Carries a provider-specific error message; the caller should treat
+    /// this as a transient or environmental failure (no TPM, TPM in failure
+    /// mode, permission denied, etc.).
+    #[error("attestation measurement failed for {provider:?}: {message}")]
+    MeasurementFailed {
+        provider: HwProviderKind,
+        message: String,
+    },
 }

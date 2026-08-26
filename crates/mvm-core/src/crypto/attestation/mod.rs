@@ -21,6 +21,8 @@ pub mod error;
 pub mod header;
 pub mod identity;
 pub mod provider;
+#[cfg(all(target_os = "linux", feature = "attestation-tpm2"))]
+pub mod tpm2;
 
 pub use error::AttestationError;
 pub use header::{

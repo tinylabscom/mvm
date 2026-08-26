@@ -182,6 +182,7 @@ fn validate_verification(
         AttestationMode::Tpm2 => "tpm2",
         AttestationMode::SevSnp => "sev_snp",
         AttestationMode::Tdx => "tdx",
+        AttestationMode::AppleDeviceAttestation => "apple_device_attestation",
     };
     if verification.provider.as_str() != expected_provider {
         anyhow::bail!("runtime attestation provider does not match the admitted plan");

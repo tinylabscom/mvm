@@ -77,6 +77,7 @@ let
     "third_party"
     "schema"
     "nix"
+    ".github"
   ];
 
   # Pruned *within* the admitted roots.

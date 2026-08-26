@@ -95,6 +95,7 @@ const INCLUDED_TOP_LEVEL: &[&str] = &[
     "third_party",
     "schema",
     "nix",
+    ".github",
 ];
 
 /// Directory basenames excluded from the source fingerprint.

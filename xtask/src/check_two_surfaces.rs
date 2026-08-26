@@ -26,11 +26,13 @@ const SURFACES: [&str; 2] = ["host", "user"];
 /// forwards are inlined in the root Cargo.toml); what remains here is `default`
 /// plus platform/storage opt-ins that genuinely cannot always be on. Keep this
 /// list tiny — a new entry is a conscious "this cannot live in a surface".
-const INTERNAL: [&str; 8] = [
+const INTERNAL: [&str; 9] = [
     "default",
     // Platform: link the libkrun C VMM (absent on a macOS-26 HVF host).
     "libkrun-sys",
     "libkrun-live",
+    // Platform: link the Linux TPM2 TSS provider when a host exposes a TPM.
+    "attestation-tpm2",
     // Optional heavy S3 storage backend for the template registry (fleet-only).
     "template-registry-s3",
     // Lean library knob: mvm-core's gated hostd IPC transport, flipped through
@@ -298,6 +300,7 @@ dev = ["host", "user", "dev-watch"]
             "default",
             "dev",
             "libkrun-sys",
+            "attestation-tpm2",
             "template-registry-s3",
             "hostd-transport",
             "release-artifact-bootstrap",

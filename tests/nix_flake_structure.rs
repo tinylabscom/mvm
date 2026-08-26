@@ -191,8 +191,13 @@ fn host_mvmctl_package_keeps_native_vmm_linkage_explicit() {
     );
     assert!(
         content.contains("assert withNativeLibkrun -> withBuilderVm")
-            && content.contains("\"mvmctl/builder-vm\""),
+            && content.contains("\"mvm-cli/builder-vm\"")
+            && content.contains("\"mvm-build/builder-vm\""),
         "feature flags must stay package-qualified when mvmctl and sidecars build together"
+    );
+    assert!(
+        content.contains("lib.optionals withTpm2 [ \"mvmctl/attestation-tpm2\" ]"),
+        "TPM2 must forward through the root package so cargo-auditable can resolve the feature"
     );
     assert!(
         content.contains("\"mvm-cli/libkrun-sys\"")

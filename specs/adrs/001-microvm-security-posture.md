@@ -7,6 +7,18 @@ Validation: check-claim-catalog
 
 Accepted.
 
+## Amendment
+
+*2026-08-24.* The project now ships an opt-in TPM2 attestation provider
+(`mvm-core/attestation-tpm2`) that can quote PCR values from a host TPM
+or a software TPM. This reverses the earlier "hardware-backed key
+attestation is out of scope" wording, but only to the extent that the
+provider is a supported measurement source. It does **not** reverse the
+trusted-host boundary: a malicious host remains out of scope, because the
+host still owns the TPM, the TCTI connection, and the launch material.
+The "Explicit out of scope" and "Non-goals" sections below are updated
+to reflect this narrower in-scope change.
+
 ## Context
 
 mvm runs untrusted-shaped Linux workloads inside real microVMs. The
@@ -38,9 +50,11 @@ A **malicious host** — the machine running `mvmctl` itself — is out of
 scope. mvmctl trusts the host with the hypervisor, the GC roots, the
 user's secrets, and the private signing keys. **Multi-tenant guests** are
 out of scope: one guest is one workload. **Hardware-backed key
-attestation** is out of scope: every trust anchor mvm verifies today is
-launcher-provisioned, not measured by hardware the host cannot forge (see
-"Explicit out of scope" below).
+attestation against a malicious host** remains out of scope: a real TPM2
+source is now supported as an opt-in, host-measured attestation input,
+but it does not move the trusted-host boundary because the host still
+controls the TPM, the TCTI, and the launch material (see "Explicit out
+of scope" and "Amendment" above).
 
 ### Hardware boundary, not a userspace syscall sandbox
 
@@ -352,18 +366,18 @@ not paraphrase this row without them.
 - **Multi-tenant guests.** One guest is one workload. Fleet-level
   multi-tenancy is a distinct, separately-scoped trust boundary owned by
   the sibling fleet-orchestration product, not by this ADR.
-- **Hardware-backed key attestation.** Every trust anchor a guest
-  verifies today — the kernel cmdline, the per-launch config drive, even
-  the dm-verity roothash — is provisioned by the same trusted launcher
-  that provisions the material it protects; the launcher-provided
-  verifying key rides in the same envelope as the grant it authenticates,
-  which is integrity over a trusted channel, not independent key
-  separation. Real separation against a malicious host requires a trust
-  root the host cannot forge — confidential-computing hardware
-  (SEV-SNP/TDX) with CPU-signed attestation — and the primary Linux
-  workload VMM has no vTPM or measured-boot surface today. This ADR does
-  not pursue that path; a future claim binding a grant's verifying key to
-  an attested launch measurement is possible only after a dedicated
+- **Hardware-backed key attestation against a malicious host.** Every
+  trust anchor a guest verifies today — the kernel cmdline, the per-launch
+  config drive, even the dm-verity roothash — remains provisioned by the
+  same trusted launcher that provisions the material it protects. A real
+  TPM2 source is now supported as an opt-in, host-measured attestation
+  input, but it does not move the trusted-host boundary: the host still
+  owns the TPM, the TCTI connection, and the launch material, so a
+  compromised host remains out of scope. Real separation against a
+  malicious host still requires a trust root the host cannot forge —
+  confidential-computing hardware (SEV-SNP/TDX) with CPU-signed
+  attestation — and a future claim binding a grant's verifying key to an
+  attested launch measurement is possible only after a dedicated
   confidential-computing workload backend exists and after this ADR's
   threat model is revised to bring a malicious host partly in scope.
 
@@ -687,7 +701,9 @@ tuning decision.
 
 - **Malicious host defense.**
 - **Multi-tenant guests**, at the `mvm` layer.
-- **Hardware-backed key attestation / TPM / measured boot.**
+- **Hardware-backed key attestation as a defense against a malicious host.**
+  TPM2 measured-boot quotes are supported as an opt-in attestation input,
+  but they do not by themselves defeat a compromised host.
 - **Network policy enforcement inside the dev/test-only QEMU backend.**
   The `NetworkPolicy` type and the seccomp tier filter network syscalls,
   but QEMU's start path carries no untrusted workload and is
@@ -990,7 +1006,7 @@ generates.
 
 **Out of scope**, per this ADR's own scoping: physical attacks on the
 host; multi-tenant guests; hardware-backed key attestation of the
-workload itself; vulnerabilities in a third-party hypervisor's vsock
+workload itself as a defense against a malicious host; vulnerabilities in a third-party hypervisor's vsock
 implementation, which are dependency-CVE-managed rather than reviewed
 here (the in-house HVF backend's vsock implementation is not a
 third-party dependency, so it is in-scope for review here).
