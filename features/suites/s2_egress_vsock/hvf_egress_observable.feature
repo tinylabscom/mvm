@@ -18,7 +18,7 @@ Feature: HVF admitted egress is observable and does not hang
     Then the command exits with code 0
     And the output contains "Successfully installed"
 
-  @live
+  @live @tls_tunnel_client
   Scenario: Substitution endpoint diagnostics are written to /tmp
     When I run mvmctl with "machine run --name bdd-subst-log --image alpine --allow-host httpbin.org -- wget -q -O - https://httpbin.org/get" with a 120 second timeout
     Then the command exits with code 0
