@@ -1,5 +1,8 @@
 # Detached declared ingress
 
+Backing: shipped-source
+Validation: check-sprint-append
+
 **Status: IN PROGRESS**
 
 Issue #2901 identified a lifecycle gap: TCP ingress has to be declared before
