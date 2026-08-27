@@ -188,6 +188,24 @@ pub const SUBST_SESSION_FILE: &str = "substitution.session";
 /// FlowMux session. The marker above remains the durable evidence; this socket
 /// is only the event that avoids racing a one-shot marker check.
 pub const SUBST_SESSION_READY_SOCKET: &str = "substitution-session-ready.sock";
+
+/// Where the session-readiness socket lives.
+///
+/// Through `vm_socket_dir_at`, not `state_dir` directly: a deep `MVM_HOME`
+/// overflows macOS's ~104-byte `sun_path` limit, and that helper falls back to
+/// a short hashed `/tmp` namespace. Binding it from the state dir made every
+/// launch under a worktree-local home fail with "path must be shorter than
+/// SUN_LEN" while the substitution socket — which already used the helper —
+/// bound fine.
+fn session_ready_socket_path(state_dir: &std::path::Path) -> std::path::PathBuf {
+    mvm_core::config::vm_socket_dir_at(state_dir).join(SUBST_SESSION_READY_SOCKET)
+}
+
+/// Same treatment for the connector socket, which shares the directory and the
+/// same limit.
+fn connector_socket_path(state_dir: &std::path::Path) -> std::path::PathBuf {
+    mvm_core::config::vm_socket_dir_at(state_dir).join(SUBST_CONNECTOR_SOCKET)
+}
 /// Host-local typed-connector socket served by the same per-VM endpoint that
 /// owns guest FlowMux egress. Broker/tool code may authorize a request, but it
 /// reaches the network only by sending that request here.
@@ -227,7 +245,7 @@ fn wait_for_endpoint_session_with_timeout(
         return refuse_launch_without_endpoint_session(vm_name, state_dir);
     }
 
-    let socket = state_dir.join(SUBST_SESSION_READY_SOCKET);
+    let socket = session_ready_socket_path(state_dir);
     let mut stream = std::os::unix::net::UnixStream::connect(&socket).map_err(|e| {
         if pid_alive(pid) {
             anyhow!(
@@ -815,9 +833,8 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
     }
     if params.flowmux_identity.is_some() {
         cfg["session_ready_socket"] =
-            serde_json::json!(params.state_dir.join(SUBST_SESSION_READY_SOCKET));
-        cfg["connector_uds_path"] =
-            serde_json::json!(params.state_dir.join(SUBST_CONNECTOR_SOCKET));
+            serde_json::json!(session_ready_socket_path(params.state_dir));
+        cfg["connector_uds_path"] = serde_json::json!(connector_socket_path(params.state_dir));
     }
     if let Some(proxy) = params.egress_proxy.as_ref() {
         // `EndpointConfig.proxy_*`: the operator's upstream proxy for the
@@ -908,7 +925,7 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
         params.egress_proxy = EgressProxySpawnConfig::from_host_env();
     }
     let session_marker = params.state_dir.join(SUBST_SESSION_FILE);
-    let session_ready_socket = params.state_dir.join(SUBST_SESSION_READY_SOCKET);
+    let session_ready_socket = session_ready_socket_path(params.state_dir);
     // A stale marker from a previous boot would make this launch look ready
     // before any guest had connected, which is the exact failure the check
     // exists to catch.
@@ -1155,7 +1172,7 @@ pub fn reap_network_endpoint(state_dir: &Path, vm_name: &str) {
         kill(spid, libc::SIGTERM);
     }
     let _ = std::fs::remove_file(state_dir.join(SUBST_PID_FILE));
-    let _ = std::fs::remove_file(state_dir.join(SUBST_SESSION_READY_SOCKET));
+    let _ = std::fs::remove_file(session_ready_socket_path(state_dir));
     let _ = std::fs::remove_file(state_dir.join(SUBST_CONNECTOR_SOCKET));
     let _ = std::fs::remove_file(mvm_core::config::vm_substitution_env_path(vm_name));
     // The endpoint's secrets are gone; the shapes the gate recognised them by
