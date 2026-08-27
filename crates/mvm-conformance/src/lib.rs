@@ -61,6 +61,12 @@ pub const WORKLOAD_KERNEL_TAG: &str = "workload_kernel";
 /// Firecracker reports snapshot tier `unsupported` on hosts without the
 /// required support, and the verb then refuses rather than misbehaving.
 pub const SNAPSHOT_TAG: &str = "snapshot";
+/// A scenario that seeds the guest-runtime cache from a prebuilt directory of
+/// `mvm-`prefixed guest binaries, named by `MVM_BDD_GUEST_BIN_DIR`.
+pub const GUEST_BINS_TAG: &str = "guest_bins";
+/// A scenario whose workload binds an SDK host service, which admission refuses
+/// unless the SDK sidecar image is mounted read-only in the guest.
+pub const SDK_SIDECAR_TAG: &str = "sdk_sidecar";
 
 /// Host capabilities a scenario may require, probed once by the harness.
 ///
@@ -83,6 +89,12 @@ pub struct RuntimeCaps {
     /// A prebuilt workload kernel is resolvable, so a scenario that boots one
     /// has something to boot.
     pub workload_kernel: bool,
+    /// `MVM_BDD_GUEST_BIN_DIR` names a directory of prebuilt guest binaries, so
+    /// a scenario that seeds the guest-runtime cache has something to seed from.
+    pub guest_bin_dir: bool,
+    /// The SDK sidecar image is present in the version-keyed cache, so a
+    /// workload binding an SDK host service can be admitted.
+    pub sdk_sidecar: bool,
     /// The active backend can capture a full-VM memory snapshot, so
     /// `machine checkpoint create --class vm-full` and the pause/resume
     /// round-trip can succeed rather than refusing by capability.
@@ -124,6 +136,10 @@ pub enum ScenarioGate {
     NeedsWorkloadKernel,
     /// The backend cannot capture a full-VM memory snapshot on this host.
     NeedsMemorySnapshot,
+    /// No prebuilt guest-binary directory was named.
+    NeedsGuestBinDir,
+    /// The SDK sidecar image is not in the cache.
+    NeedsSdkSidecar,
     /// No `node` on `PATH`, so the TypeScript example checkers cannot run.
     NeedsNode,
     /// The merge-queue lane selected only `@ci_live` scenarios, and this
@@ -160,6 +176,12 @@ pub fn scenario_gate(tags: &[String], caps: RuntimeCaps) -> ScenarioGate {
     }
     if tagged(SNAPSHOT_TAG) && !caps.memory_snapshot {
         return ScenarioGate::NeedsMemorySnapshot;
+    }
+    if tagged(GUEST_BINS_TAG) && !caps.guest_bin_dir {
+        return ScenarioGate::NeedsGuestBinDir;
+    }
+    if tagged(SDK_SIDECAR_TAG) && !caps.sdk_sidecar {
+        return ScenarioGate::NeedsSdkSidecar;
     }
     ScenarioGate::Run
 }
@@ -200,6 +222,15 @@ impl ScenarioGate {
                 "need MVM_BDD_SNAPSHOT=1 on a host whose active backend reports \
                  snapshot tier `save-restore` (see `mvmctl doctor`)",
             ),
+            Self::NeedsGuestBinDir => Some(
+                "need MVM_BDD_GUEST_BIN_DIR to name a directory of prebuilt \
+                 guest binaries (mvm-guest-agent, mvm-guest-netinit, \
+                 mvm-egress-client, mvm-oci-entrypoint)",
+            ),
+            Self::NeedsSdkSidecar => Some(
+                "need the SDK sidecar image in the mvm cache (build it with \
+                 `nix build ./nix/images/runtime-overlay#sdk-sidecar-image`)",
+            ),
             Self::OutsideCiLiveSubset => Some("outside the merge-queue @ci_live subset"),
         }
     }
@@ -218,6 +249,8 @@ mod tests {
         firecracker_bootable: false,
         bundle_fixture: false,
         node_available: false,
+        guest_bin_dir: false,
+        sdk_sidecar: false,
         memory_snapshot: false,
         workload_kernel: false,
     };
@@ -226,6 +259,8 @@ mod tests {
         firecracker_bootable: true,
         bundle_fixture: true,
         node_available: false,
+        guest_bin_dir: true,
+        sdk_sidecar: false,
         memory_snapshot: true,
         workload_kernel: true,
     };
@@ -255,6 +290,8 @@ mod tests {
         assert!(!scenario_should_run(
             &tags(&["live", "firecracker", "workload_kernel"]),
             RuntimeCaps {
+                guest_bin_dir: false,
+                sdk_sidecar: false,
                 memory_snapshot: false,
                 workload_kernel: false,
                 ..ALL
@@ -274,6 +311,8 @@ mod tests {
         assert!(!scenario_should_run(
             &tags(&["live", "snapshot"]),
             RuntimeCaps {
+                guest_bin_dir: false,
+                sdk_sidecar: false,
                 memory_snapshot: false,
                 ..ALL
             },
@@ -286,6 +325,8 @@ mod tests {
         let gate = scenario_gate(
             &tags(&["live", "snapshot"]),
             RuntimeCaps {
+                guest_bin_dir: false,
+                sdk_sidecar: false,
                 memory_snapshot: false,
                 ..ALL
             },
@@ -296,6 +337,24 @@ mod tests {
                 .is_some_and(|r| r.contains("MVM_BDD_SNAPSHOT")),
             "the skip reason must name the variable that turns it on"
         );
+    }
+
+    #[test]
+    fn guest_bins_scenario_skips_without_a_prebuilt_directory() {
+        // The variable is named in no recipe, lane or document, so these
+        // scenarios panicked on it the moment the live opt-in turned them on.
+        // A skip names what is missing; a panic reads as a broken verb.
+        assert!(!scenario_should_run(
+            &tags(&["live", "firecracker", "guest_bins"]),
+            RuntimeCaps {
+                guest_bin_dir: false,
+                ..ALL
+            },
+        ));
+        assert!(scenario_should_run(
+            &tags(&["live", "firecracker", "guest_bins"]),
+            ALL
+        ));
     }
 
     #[test]
@@ -318,6 +377,8 @@ mod tests {
                 firecracker_bootable: false,
                 bundle_fixture: false,
                 node_available: false,
+                guest_bin_dir: false,
+                sdk_sidecar: false,
                 memory_snapshot: false,
                 workload_kernel: false,
             },
@@ -333,6 +394,8 @@ mod tests {
                 firecracker_bootable: false,
                 bundle_fixture: false,
                 node_available: false,
+                guest_bin_dir: false,
+                sdk_sidecar: false,
                 memory_snapshot: false,
                 workload_kernel: false,
             },
@@ -350,6 +413,8 @@ mod tests {
                 firecracker_bootable: true,
                 bundle_fixture: false,
                 node_available: false,
+                guest_bin_dir: false,
+                sdk_sidecar: false,
                 memory_snapshot: false,
                 workload_kernel: false,
             },
@@ -362,6 +427,8 @@ mod tests {
                 firecracker_bootable: false,
                 bundle_fixture: false,
                 node_available: false,
+                guest_bin_dir: false,
+                sdk_sidecar: false,
                 memory_snapshot: false,
                 workload_kernel: false,
             },
@@ -381,6 +448,8 @@ mod tests {
                 firecracker_bootable: false,
                 bundle_fixture: false,
                 node_available: false,
+                guest_bin_dir: false,
+                sdk_sidecar: false,
                 memory_snapshot: false,
                 workload_kernel: false,
             },
@@ -389,6 +458,8 @@ mod tests {
                 firecracker_bootable: false,
                 bundle_fixture: false,
                 node_available: false,
+                guest_bin_dir: false,
+                sdk_sidecar: false,
                 memory_snapshot: false,
                 workload_kernel: false,
             },
@@ -397,6 +468,8 @@ mod tests {
                 firecracker_bootable: true,
                 bundle_fixture: false,
                 node_available: false,
+                guest_bin_dir: false,
+                sdk_sidecar: false,
                 memory_snapshot: false,
                 workload_kernel: false,
             },
@@ -405,6 +478,8 @@ mod tests {
                 firecracker_bootable: true,
                 bundle_fixture: true,
                 node_available: false,
+                guest_bin_dir: false,
+                sdk_sidecar: false,
                 memory_snapshot: false,
                 workload_kernel: true,
             },
@@ -413,6 +488,8 @@ mod tests {
                 firecracker_bootable: true,
                 bundle_fixture: true,
                 node_available: false,
+                guest_bin_dir: false,
+                sdk_sidecar: false,
                 memory_snapshot: false,
                 workload_kernel: true,
             },
@@ -447,6 +524,8 @@ mod tests {
             firecracker_bootable: false,
             bundle_fixture: false,
             node_available: false,
+            guest_bin_dir: false,
+            sdk_sidecar: false,
             memory_snapshot: false,
             workload_kernel: false,
         };
@@ -455,6 +534,8 @@ mod tests {
             firecracker_bootable: false,
             bundle_fixture: false,
             node_available: false,
+            guest_bin_dir: false,
+            sdk_sidecar: false,
             memory_snapshot: false,
             workload_kernel: false,
         };
@@ -463,6 +544,8 @@ mod tests {
             firecracker_bootable: true,
             bundle_fixture: false,
             node_available: false,
+            guest_bin_dir: false,
+            sdk_sidecar: false,
             memory_snapshot: false,
             workload_kernel: false,
         };
@@ -515,6 +598,8 @@ mod tests {
                     firecracker_bootable: false,
                     bundle_fixture: false,
                     node_available: false,
+                    guest_bin_dir: false,
+                    sdk_sidecar: false,
                     memory_snapshot: false,
                     workload_kernel: false,
                 },

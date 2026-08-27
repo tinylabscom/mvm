@@ -217,6 +217,19 @@ else
   ./scripts/cargo-fast.sh build --bin mvmctl
 fi
 
+# The SDK codegen drift scenario shells out to `target/debug/xtask`; without it
+# the step fails with a bare "NotFound" that says nothing about the SDK.
+./scripts/cargo-fast.sh build -p xtask
+
+# Drop the nested aux-helper target so the per-VM helpers are rebuilt against
+# this source tree. `mvm-network-endpoint` and friends are separate `[[bin]]`s
+# that cargo does not refresh when `mvmctl` is rebuilt, so a stale copy survives
+# — and the launch path refuses it rather than booting a guest that ignores the
+# current sources ("was reused from an earlier build"). That refusal failed six
+# live scenarios on the Linux run, all of them reading as egress or DNS bugs.
+echo "==> refreshing embedded aux helpers"
+just embed-refresh
+
 # Now that `mvmctl` exists, clear anything a previous run left behind. A guest
 # still holding its name makes the next run fail on a collision that reads as a
 # broken verb.
@@ -230,11 +243,17 @@ start_watcher
 # The TypeScript SDK scenarios import the SDK's built `dist/`, which is absent
 # in a fresh worktree. Without it they fail for a reason that has nothing to do
 # with the documentation.
-if [[ ! -f crates/mvm-sdk/sdks/typescript/dist/index.js ]]; then
-  echo "==> building the TypeScript SDK (dist/ is absent)"
+#
+# Rebuilt every run, not just when absent: a `dist/` left over from an earlier
+# checkout is *stale*, not missing, and an existence check cannot tell the
+# difference. A stale one makes the golden-argv scenarios report SDK drift that
+# is really just an old build — which is exactly how it read the first time.
+# `tsc` is incremental, so the cost when nothing changed is small.
+echo "==> building the TypeScript SDK"
+if [[ ! -d crates/mvm-sdk/sdks/typescript/node_modules ]]; then
   just sdk-install-typescript
-  just sdk-build-typescript
 fi
+just sdk-build-typescript
 
 # ---------------------------------------------------------------------------
 # 2. Warm the shared artifact home.

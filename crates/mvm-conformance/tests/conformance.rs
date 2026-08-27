@@ -217,8 +217,41 @@ fn probe_caps() -> RuntimeCaps {
         bundle_fixture: bundle_fixture_path().is_some() && bundle_pubkey_path().is_some(),
         node_available: binary_on_path("node"),
         workload_kernel: workload_kernel_path().is_some(),
+        guest_bin_dir: guest_bin_dir_available(),
+        sdk_sidecar: sdk_sidecar_cached(),
         memory_snapshot: memory_snapshot_supported(),
     }
+}
+
+/// Whether the SDK sidecar image is in the version-keyed cache.
+///
+/// Admission refuses a workload that binds an SDK host service without it, so
+/// a scenario that binds one cannot pass on a host where the image was never
+/// built. Globbed on version rather than hardcoded so a bump does not silently
+/// turn this into "never available".
+fn sdk_sidecar_cached() -> bool {
+    let root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("sdk-sidecar");
+    let Ok(versions) = std::fs::read_dir(&root) else {
+        return false;
+    };
+    versions.filter_map(Result::ok).any(|v| {
+        std::fs::read_dir(v.path()).is_ok_and(|arches| {
+            arches
+                .filter_map(Result::ok)
+                .any(|a| a.path().join("sdk.ext4").is_file())
+        })
+    })
+}
+
+/// Whether a prebuilt guest-binary directory was named and exists.
+///
+/// The variable appears in no Justfile recipe, no CI lane and no document, so
+/// requiring it silently meant these scenarios could never pass — they simply
+/// panicked on the missing variable the moment the live opt-in turned them on.
+fn guest_bin_dir_available() -> bool {
+    std::env::var_os("MVM_BDD_GUEST_BIN_DIR")
+        .map(std::path::PathBuf::from)
+        .is_some_and(|d| d.is_dir())
 }
 
 /// Whether the active backend can capture a full-VM memory snapshot here.

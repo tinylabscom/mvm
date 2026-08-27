@@ -46,7 +46,7 @@ Feature: A workload reaches a key-value store without a network path
   # The guest-mount allow-roots are `/data` and `/work`. `/mnt` is mvm-owned
   # (it carries the config and secret drives), so mounting there is refused —
   # which is how the first live attempt of this scenario failed.
-  @live
+  @live @sdk_sidecar
   Scenario: a booted workload round-trips a key through the broker
     When I run mvmctl in an isolated live home with "run --runtime python --host-service host.kv.v1 --mount features/suites/s30_service_plane/fixtures:/work/fixtures:ro --timeout 300 -- python /work/fixtures/kv_roundtrip.py"
     Then the command exits with code 0
@@ -54,7 +54,7 @@ Feature: A workload reaches a key-value store without a network path
 
   # Binding is what makes the store reachable, so the refusal has to be
   # observable from inside a guest too -- not only at the registry.
-  @live
+  @live @sdk_sidecar
   Scenario: an unbound workload is refused from inside the guest
     When I run mvmctl in an isolated live home with "run --runtime python --host-service host.time.v1 --mount features/suites/s30_service_plane/fixtures:/work/fixtures:ro --timeout 300 -- python /work/fixtures/kv_roundtrip.py"
     Then the command exits with code 1
