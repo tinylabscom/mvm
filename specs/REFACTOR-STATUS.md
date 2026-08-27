@@ -4,6 +4,12 @@ Last updated: 2026-08-27
 
 ## In progress
 
+- [ ] **Audit root-history classification repair — issue #2940.**
+      `specs/plans/2026-08-27-audit-root-history-classification.md`.
+      Signed Merkle-root history files are excluded from lifecycle-chain
+      sweeps through one shared suffix; focused and workspace tests, doctests,
+      check, and Clippy are green, and merge-queue delivery remains.
+
 - [ ] **SDK surface contract repairs — issues #2902 and #2906.**
       `specs/plans/2026-08-26-sdk-surface-contract-repairs.md`.
       The README's `mvm.local_path` decorator source and the builder-pack Cargo
