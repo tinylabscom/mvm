@@ -232,6 +232,7 @@ fn relay_supervisor_config_with_handoff(
         kernel,
         cmdline,
         memory_mib: spec.memory_mib,
+        vcpus: spec.vcpus,
         initramfs: spec.initramfs.clone(),
         disks,
         virtiofs_root: spec

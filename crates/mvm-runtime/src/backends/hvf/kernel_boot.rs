@@ -49,6 +49,24 @@ const RAM_BASE: u64 = 0x8000_0000;
 /// demo/agent boot. A builder overrides it (a `nix build` OOMs at 512 MiB).
 const DEFAULT_RAM_SIZE: usize = 0x2000_0000;
 
+/// vCPUs this VMM will actually create, for a requested `vcpus`.
+///
+/// One, always, for now: the run loop below creates a single vCPU, PSCI answers
+/// no `CPU_ON`, and the device model is reached from one thread with no
+/// synchronisation. The clamp is here — one function the DTB and the vCPU
+/// creation both read — so the tree can never describe CPUs the VMM does not
+/// create. That mismatch does not degrade; it hangs the boot waiting for a
+/// secondary that never arrives.
+///
+/// Callers must not pre-validate against this: `relay_supervisor_config`
+/// already refuses a count this backend cannot honour, so reaching here with
+/// `vcpus > 1` means the request survived that gate and the honest response is
+/// to boot the guest it can rather than describe one it cannot.
+fn effective_vcpus(vcpus: u32) -> u32 {
+    let _ = vcpus;
+    1
+}
+
 /// Guest RAM in bytes for `mem_mib` MiB, or the default when `mem_mib` is 0.
 /// A MiB is a multiple of the 16 KiB hypervisor page size, so the result is
 /// always page-aligned.
@@ -222,6 +240,13 @@ pub struct HostChannels {
     /// Guest RAM in MiB. `0` ⇒ the built-in default (512 MiB). A builder sets
     /// several GiB so `nix build` doesn't OOM.
     pub mem_mib: u32,
+    /// Guest vCPUs. `0` ⇒ 1.
+    ///
+    /// Read by exactly two things that must agree: the device tree, which tells
+    /// the guest how many CPUs exist, and the vCPU creation below. A tree that
+    /// describes more CPUs than the VMM creates hangs the boot waiting for
+    /// secondaries; fewer, and the extra vCPUs are never onlined.
+    pub vcpus: u32,
     /// When set, serve this host directory (the unpacked+injected OCI tree) to
     /// the guest as a read-only **virtiofs root** instead of a block rootfs — the
     /// Plan-223 dev-tier boot. No virtio-blk disk is attached; the default
@@ -540,6 +565,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
     // Validate it's an arm64 Image; we load at the fixed boot-protocol offset.
     let kernel_meta = kernel.metadata()?;
     let ram_size = ram_size_bytes(channels.mem_mib);
+    let vcpus = effective_vcpus(channels.vcpus);
     let load_off = KERNEL_LOAD_OFFSET as usize;
     let dtb_off = ram_size
         .checked_sub(FDT_MAX_SIZE as usize)
@@ -636,12 +662,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
         initrd_bounds,
         &virtio_nodes,
         Some(&rng_seed),
-        // One, until the count reaches this process. `HvfSupervisorConfig`
-        // carries no `vcpus` field yet, so there is nothing truthful to pass —
-        // describing CPUs in the tree that no `hv_vcpu_create` backs would hang
-        // the guest waiting for secondaries that never arrive. Once the
-        // supervisor carries the admitted vCPU count, pass it through here.
-        1,
+        vcpus,
     );
     if dtb.len() > FDT_MAX_SIZE as usize {
         return Err(HvfError::BadBoot(BootFault::DtbTooLarge {
@@ -1333,6 +1354,54 @@ unsafe fn run(
 
 #[cfg(test)]
 mod tests {
+    /// The tree this VMM boots describes exactly one CPU, whatever was asked
+    /// for.
+    ///
+    /// Pinned against the literal 1 — the number of `hv_vcpu_create` calls the
+    /// run loop actually makes — and deliberately **not** against
+    /// `effective_vcpus()`. Comparing the tree to the same function that built
+    /// it is self-referential: it stays green when the clamp changes, which is
+    /// precisely the drift worth catching. A tree advertising more CPUs than
+    /// the VMM creates does not degrade to a smaller machine; the guest onlines
+    /// secondaries that never respond and the boot hangs with no console
+    /// output, reading as a VMM fault rather than a topology mismatch.
+    ///
+    /// When SMP lands this becomes the assertion that the tree matches the
+    /// spawned thread count, and it has to be updated deliberately — which is
+    /// the point.
+    #[test]
+    fn the_booted_tree_describes_exactly_the_one_cpu_the_vmm_creates() {
+        for requested in [0u32, 1, 2, 4, 64] {
+            let dtb = mvm_vmm::vmm::fdt::build_dtb(
+                "console=ttyAMA0",
+                0x8000_0000,
+                0x2000_0000,
+                None,
+                &[],
+                None,
+                super::effective_vcpus(requested),
+            );
+            let described = dtb.windows(4).filter(|w| *w == b"cpu@").count();
+            assert_eq!(
+                described, 1,
+                "requested {requested}: the tree must describe the single CPU \
+                 this VMM creates, not the request"
+            );
+        }
+    }
+
+    /// Until the run loop is threaded, the honest answer to any request is one.
+    ///
+    /// `relay_supervisor_config` refuses `vcpus > 1` before this is reached, so
+    /// this clamp is the second line rather than the first — but it is the one
+    /// that keeps the tree truthful if a caller ever bypasses that gate.
+    #[test]
+    fn a_request_beyond_what_the_vmm_supports_clamps_rather_than_lies() {
+        assert_eq!(super::effective_vcpus(0), 1, "zero is not a machine");
+        assert_eq!(super::effective_vcpus(1), 1);
+        assert_eq!(super::effective_vcpus(8), 1, "no SMP yet — see #2888");
+    }
+
     use super::*;
 
     fn arm64_image(size: usize, image_size: u64) -> Vec<u8> {
