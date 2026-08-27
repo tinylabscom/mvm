@@ -1,9 +1,10 @@
-# Semantic address (UOR-ADDR-compatible) — pilot design (DECISION-READY)
+# Workload address (UOR-ADDR-compatible) — pilot design (DECISION-READY)
 
-A scoped, additive increment: give the **Workload IR** a *semantic* content
-identity — one that says "these two workload declarations *mean* the same thing"
-regardless of JSON formatting, key order, or which SDK language emitted them —
-without touching any exact-byte or trust mechanism. Builds on the research note
+A scoped, additive increment: give the **Workload IR** a canonical content
+address. Two declarations that deserialize to the same IR value receive the
+same address regardless of JSON formatting, object-key order, or which SDK
+language emitted them; array order remains significant. This does not touch
+any exact-byte or trust mechanism. Builds on the research note
 [`specs/research/uor-addr-integration-assessment.md`](../research/uor-addr-integration-assessment.md)
 and its decision ("adopt for investigation, additive pilot around the Workload
 IR"). This document is the concrete, ready-to-execute cut; it is **not** a
@@ -12,9 +13,10 @@ dependency commitment.
 ## Intent
 
 The SDKs emit the Workload IR across Rust / Python / TypeScript. Formatting and
-key order differ; the *meaning* does not. A `SemanticAddress` lets mvm:
-- fingerprint a workload declaration cross-language (same meaning → same label);
-- key a **semantic** compile/build cache (distinct from exact-byte cache keys);
+object-key order differ while the deserialized IR value does not. A
+`WorkloadAddress` lets mvm:
+- fingerprint the same workload IR value cross-language;
+- key a canonical workload compile/build cache (distinct from exact-byte keys);
 - correlate audit entries by declared workload shape;
 - dedupe/registry-lookup equivalent declarations.
 
@@ -25,7 +27,7 @@ UOR-ecosystem interop *as a conformance property*, not as a dependency (see
 
 ## Non-negotiable boundary (this is the load-bearing part)
 
-A semantic address is a deterministic digest of *meaning*. It authenticates
+A workload address is a deterministic digest of a normalized Workload IR value. It authenticates
 nothing, proves no provenance, is not confidential, and is not fresh. It
 **never** enters — and this pilot must prove, by leaving their tests green — any
 of:
@@ -42,7 +44,7 @@ of:
   nonces. Those need unpredictability or sequencing; a deterministic address is
   the wrong primitive.
 
-The type system enforces the separation: `SemanticAddress` is a **distinct
+The type system enforces the separation: `WorkloadAddress` is a **distinct
 newtype**, never interchangeable with `Sha256Hex`, `OciDigest`, `KeyId`, or
 `Nonce`. Passing one where an exact-byte digest is expected must not compile
 without an explicit, intentional conversion.
@@ -50,10 +52,10 @@ without an explicit, intentional conversion.
 ## The type + its versioned contract
 
 ```rust
-/// Semantic content identity of a versioned structured document (JSON/JCS
-/// realization, SHA-256). NOT an exact-byte digest, NOT a signature, NOT a
-/// runtime id — see the module's boundary docs.
-pub struct SemanticAddress(String); // "sha256:<64 lowercase hex>"
+/// Canonical content address of a versioned Workload IR value (JSON/JCS
+/// realization, SHA-256). NOT an exact-byte digest, a signature, or a
+/// runtime id.
+pub struct WorkloadAddress(String); // "sha256:<64 lowercase hex>"
 ```
 
 The address is only meaningful with its canonicalization context pinned — the
@@ -70,7 +72,7 @@ version, surfaced explicitly — never a silent reinterpretation.
 **Host-side first (the pilot).** mvm uses `serde_jcs = "0.1"` (RFC 8785 JCS —
 the same canonicalizer that signs `ControlRequest`), `sha2`, and the small
 `unicode-normalization` dependency to apply UOR-ADDR's Unicode NFC boundary.
-The `mvm-core` module computes `semantic_address(&Workload) -> SemanticAddress`
+The `mvm-core` module computes `workload_address(&Workload) -> WorkloadAddress`
 as `sha256(NFC(JSON value) → serde_jcs::to_vec(value))`, formatted
 `sha256:<hex>`. No `uor-addr` crate or Prism/UOR-Foundation transitive closure
 is adopted, which preserves mvm's hard dependency-aversion (ADR-002).
@@ -104,10 +106,10 @@ small in-house no_std JCS, or (c) `uor-addr` — decided at P4, not now.
 
 ## Pilot steps (additive, reversible)
 
-1. Add the `SemanticAddress` newtype (validated: `sha256:` + 64 lowercase hex)
+1. Add the `WorkloadAddress` newtype (validated: `sha256:` + 64 lowercase hex)
    in the host-side crate that owns IR authoring, distinct from every existing
    digest type.
-2. `semantic_address(&Workload) -> SemanticAddress` via `serde_jcs` + `sha2`
+2. `workload_address(&Workload) -> WorkloadAddress` via `serde_jcs` + `sha2`
    over the schema-validated IR. Zero new deps.
 3. Expose it as an **optional** field / accessor — never a required wire field,
    never a cache key or lookup key *yet* (the note: don't make it load-bearing
@@ -142,12 +144,12 @@ equality is where the `uor-addr` dependency, if any, is evaluated).
 2. **Crate vs. native for the no_std/browser path** (P4): `uor-addr`, verified
    `serde_jcs`-no_std, or an in-house no_std JCS — decided when the browser slice
    needs it, under the full dependency verification.
-3. **When (if) the address becomes load-bearing** — a semantic cache key or
+3. **When (if) the address becomes load-bearing** — a canonical workload cache key or
    registry-dedup key — only after cross-impl interop is demonstrated.
 
 ## Decision
 
-Additive host-side pilot, `SemanticAddress` over the Workload IR, matching the
+Additive host-side pilot, `WorkloadAddress` over the Workload IR, matching the
 UOR-ADDR JSON realization (including Unicode NFC normalization) as a conformance
 property. The published 12-fixture UOR-ADDR baseline is pinned in the
 `mvm-core` tests.

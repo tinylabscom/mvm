@@ -42,8 +42,10 @@ pub struct LocalVolumeEntry {
     pub volume_name: String,
     pub host_path: String,
     pub encrypted: bool,
-    /// Local artifact shape presented to the VM after unlock. Missing fields
-    /// in pre-block-volume catalogs decode as a directory for compatibility.
+    /// Local artifact shape presented to the VM after unlock. Absent in a
+    /// catalog written before the field existed, and defaulted rather than
+    /// version-bumped — a new optional field is `#[serde(default)]`, not a
+    /// schema migration.
     #[serde(default)]
     pub kind: LocalVolumeKind,
     #[serde(default)]

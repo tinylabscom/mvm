@@ -28,7 +28,7 @@ pub(in crate::commands) enum BuildCmd {
     /// Prebuild or refresh the read-only runtime overlay cache
     #[command(name = "runtime-overlay")]
     RuntimeOverlay(runtime_overlay::Args),
-    /// Print a Workload IR's semantic address and ir-hash
+    /// Print a Workload IR's workload address and ir-hash
     Address(address::Args),
 }
 

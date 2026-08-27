@@ -2,16 +2,16 @@
 //!
 //! `mvm_contract::ir::canonicalize` (the load-bearing hand-rolled `no_std`
 //! JCS writer that feeds `ir_hash`) and `serde_jcs` (the canonicalizer used by
-//! [`crate::semantic_address::semantic_address`]) are independent
+//! [`crate::workload_address::workload_address`]) are independent
 //! implementations of the same canonical form. Nothing else proves they emit
 //! byte-identical output, so a change to either one could silently make an
 //! `ir_hash` disagree with the unnormalized JCS bytes used to derive a
-//! `SemanticAddress` for the same workload.
+//! `WorkloadAddress` for the same workload.
 //!
 //! These tests assert byte-for-byte agreement over a corpus of divergence-prone
 //! `Workload` shapes (astral-plane map keys, escaped string values, large
 //! integers, nested/empty containers), plus the digest chain
-//! `ir_hash == hex(sha256(serde_jcs))`. `SemanticAddress` applies the UOR-ADDR
+//! `ir_hash == hex(sha256(serde_jcs))`. `WorkloadAddress` applies the UOR-ADDR
 //! Unicode NFC normalization boundary before hashing, so it is intentionally
 //! a separate identity for non-NFC input.
 //!
@@ -24,7 +24,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::semantic_address::semantic_address;
+    use crate::workload_address::workload_address;
     use mvm_contract::ir::{
         App, Entrypoint, EnvValue, Image, Resources, Source, Workload, canonicalize, ir_hash,
     };
@@ -207,14 +207,14 @@ mod tests {
     }
 
     #[test]
-    fn semantic_address_normalizes_unicode_before_hashing() {
+    fn workload_address_normalizes_unicode_before_hashing() {
         let mut composed = base_workload();
         composed.id = "café".to_string();
         let mut decomposed = base_workload();
         decomposed.id = "cafe\u{301}".to_string();
 
-        let composed_address = semantic_address(&composed).expect("semantic address");
-        let decomposed_address = semantic_address(&decomposed).expect("semantic address");
+        let composed_address = workload_address(&composed).expect("workload address");
+        let decomposed_address = workload_address(&decomposed).expect("workload address");
         assert_eq!(composed_address, decomposed_address);
         assert_ne!(
             ir_hash(&composed).expect("ir hash"),
