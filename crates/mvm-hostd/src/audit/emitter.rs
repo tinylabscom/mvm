@@ -66,7 +66,9 @@ pub(crate) use atomic_sync::AtomicSyncState;
 use atomic_sync::atomic_sync_is_batched;
 
 mod atomic_write;
-pub(crate) use atomic_write::{write_atomic, write_atomic_batched, write_atomic_unsynced};
+#[cfg(test)]
+pub(crate) use atomic_write::write_atomic_batched;
+pub(crate) use atomic_write::{write_atomic, write_atomic_unsynced};
 
 mod session_events;
 
@@ -643,7 +645,7 @@ impl AuditEmitter {
 
         if self.decisions_enabled
             && let Some(store) = self.decision_store_for_tenant(&plan.tenant.0)
-            && let Err(e) = store.put_batched(&record, &self.atomic_sync_state)
+            && let Err(e) = store.put(&record)
         {
             tracing::warn!(
                 decision_id = %record.decision_id.0,
@@ -1325,7 +1327,7 @@ impl AuditEmitter {
             )
         })?;
         let mut emitted_id = None;
-        store.append_chained_batched(&self.atomic_sync_state, |prev| {
+        store.append_chained(|prev| {
             receipt.prev_receipt_id = prev;
             receipt.receipt_id = receipt.compute_id().context("computing receipt id")?;
             emitted_id = Some(receipt.receipt_id.clone());
@@ -1363,7 +1365,7 @@ impl AuditEmitter {
         // of the receipt id and of the signed bytes, so reading the head out
         // here and appending afterwards would let a concurrent emitter claim
         // the same parent between the two.
-        let appended = store.append_chained_batched(&self.atomic_sync_state, |prev| {
+        let appended = store.append_chained(|prev| {
             receipt.prev_receipt_id = prev;
             receipt.receipt_id = receipt.compute_id().context("computing receipt id")?;
             let signed_at = chrono::Utc::now().to_rfc3339();
@@ -1499,6 +1501,54 @@ mod tests {
         let after = dir.path().join("after.json");
         write_atomic(&after, b"after").unwrap();
         assert_eq!(std::fs::read(after).unwrap(), b"after");
+    }
+
+    #[test]
+    fn derived_caches_do_not_extend_the_admission_durability_barrier() {
+        use mvm_contract::provenance::{
+            ActorRef, AttestationBinding, DecisionCategory, DecisionOutcome, DecisionRecordBuilder,
+        };
+
+        let audit_dir = tempfile::tempdir().unwrap();
+        let decisions_dir = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[34; 32]);
+        let signer_pubkey = hex::encode(key.verifying_key().to_bytes());
+        let emitter = AuditEmitter::with_dir(key, audit_dir.path())
+            .unwrap()
+            .with_receipts()
+            .with_decisions_dir(decisions_dir.path());
+        let plan = fixture_plan("local", "plan-cache-durability");
+        let record = DecisionRecordBuilder::new()
+            .version(1)
+            .category(DecisionCategory::Admission)
+            .actor(ActorRef {
+                principal: "host:builder".to_string(),
+                key_id: "host-signer-1".to_string(),
+                key_role: None,
+            })
+            .reasoning("grant ceiling satisfied")
+            .outcome(DecisionOutcome::Approved)
+            .timestamp("2026-08-26T00:00:00Z".to_string())
+            .attestation(AttestationBinding {
+                plan_id: Some(plan.plan_id.0.clone()),
+                signer_pubkey,
+                ..AttestationBinding::default()
+            })
+            .build()
+            .expect("valid record");
+
+        emitter
+            .batched(|| {
+                emitter.emit_admitted(&plan, "host:test")?;
+                emitter.emit_decision_record(&plan, record)?;
+                assert_eq!(
+                    atomic_sync::deferred_path_count(&emitter.atomic_sync_state),
+                    0,
+                    "receipt and decision caches are reconstructible from the audit chain and must not add stable-storage waits to admission"
+                );
+                Ok(())
+            })
+            .expect("the audit-chain barrier remains durable");
     }
 
     #[test]

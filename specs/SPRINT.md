@@ -10,6 +10,15 @@
 
 ## In progress
 
+- [ ] **Admission cache durability boundary.**
+      `specs/plans/2026-08-26-admission-cache-durability.md`.
+      Preserve the chain-signed admission record's fail-closed durability
+      barrier while removing independent pre-boot fsync waits from the
+      reconstructible receipt, decision, and per-machine plan caches. Atomic
+      publication, permissions, recovery, and rebuild behavior remain covered;
+      focused tests and package Clippy are green. Remaining: merge the repair
+      and close issue #2900 through the merged PR.
+
 - [x] **Site QEMU-WASM release artifact.**
       `specs/plans/2026-08-26-site-qemu-wasm-release-artifact.md`.
       Move the expensive browser QEMU pack build from every Cloudflare Pages

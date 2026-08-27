@@ -560,6 +560,15 @@ for detailed scope and acceptance criteria.
       instead of the retired dynamic-forwarding verb. Validation and merge are
       in progress.
 
+- [ ] **Admission cache durability boundary**
+      (`specs/plans/2026-08-26-admission-cache-durability.md`, issue #2900).
+      The chain-signed admission event retains the one fail-closed durability
+      barrier that gates boot. Receipt files, decision records, and per-machine
+      `plan.json` remain atomically published, permission-restricted derived
+      views, but no longer add independent stable-storage waits before launch.
+      Focused recovery, rebuild, permissions, and barrier-count tests plus
+      package Clippy are green; merge is pending.
+
 - [x] **`.mvmev` offline verifiability**
       (`specs/plans/2026-08-25-mvmev-offline-verifiability.md`, issue #2863).
       The format-level gap is complete: schema version 1 now normatively names

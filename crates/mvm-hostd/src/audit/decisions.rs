@@ -26,7 +26,7 @@ use anyhow::{Context, Result};
 use ed25519_dalek::VerifyingKey;
 use mvm_contract::provenance::{DecisionId, DecisionRecord, DecisionScenario};
 
-use crate::audit::emitter::{AtomicSyncState, write_atomic, write_atomic_batched};
+use crate::audit::emitter::write_atomic_unsynced;
 use crate::supervisor::audit_file::{flock_exclusive, verify_audit_chain_entries};
 
 /// File-backed content-addressed store for one tenant's decision records.
@@ -72,24 +72,10 @@ impl DecisionStore {
     /// Verifies the content-address before writing so a corrupted or
     /// tampered record cannot enter the cache.
     pub fn put(&self, record: &DecisionRecord) -> Result<DecisionId> {
-        self.put_inner(record, None)
+        self.put_inner(record)
     }
 
-    /// Cache a decision while joining its stable-storage wait to an enclosing
-    /// admission durability batch.
-    pub(crate) fn put_batched(
-        &self,
-        record: &DecisionRecord,
-        state: &AtomicSyncState,
-    ) -> Result<DecisionId> {
-        self.put_inner(record, Some(state))
-    }
-
-    fn put_inner(
-        &self,
-        record: &DecisionRecord,
-        state: Option<&AtomicSyncState>,
-    ) -> Result<DecisionId> {
+    fn put_inner(&self, record: &DecisionRecord) -> Result<DecisionId> {
         let _guard = self.lock()?;
         if !record.verify_id() {
             anyhow::bail!("decision record id does not match its body");
@@ -98,11 +84,10 @@ impl DecisionStore {
         let path = self.path_for(&id);
         if !path.exists() {
             let bytes = serde_json::to_vec_pretty(record).context("serializing decision record")?;
-            match state {
-                Some(state) => write_atomic_batched(&path, &bytes, state),
-                None => write_atomic(&path, &bytes),
-            }
-            .context("writing decision record")?;
+            // The chain-signed `decision_record` event is authoritative and
+            // this content-addressed file can be rebuilt from it. Publish the
+            // cache atomically without extending admission's durability wait.
+            write_atomic_unsynced(&path, &bytes).context("writing decision record")?;
         }
         Ok(id)
     }

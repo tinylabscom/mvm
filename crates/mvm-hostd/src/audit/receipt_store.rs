@@ -32,9 +32,7 @@ use anyhow::{Context, Result};
 use mvm_core::receipt::SignedExecutionReceipt;
 use serde::{Deserialize, Serialize};
 
-use crate::audit::emitter::{
-    AtomicSyncState, write_atomic, write_atomic_batched, write_atomic_unsynced,
-};
+use crate::audit::emitter::write_atomic_unsynced;
 use crate::supervisor::audit_file::flock_exclusive;
 
 /// Head file content: the chain tip for one tenant's receipt store.
@@ -96,19 +94,10 @@ impl ReceiptStore {
     where
         F: FnOnce(Option<String>) -> Result<SignedExecutionReceipt>,
     {
-        self.append_chained_inner(None, build)
+        self.append_chained_inner(build)
     }
 
-    /// Append with the receipt's durability wait joined to an enclosing
-    /// admission batch. The batch still completes before admission returns.
-    pub(crate) fn append_chained_batched<F>(&self, state: &AtomicSyncState, build: F) -> Result<u64>
-    where
-        F: FnOnce(Option<String>) -> Result<SignedExecutionReceipt>,
-    {
-        self.append_chained_inner(Some(state), build)
-    }
-
-    fn append_chained_inner<F>(&self, state: Option<&AtomicSyncState>, build: F) -> Result<u64>
+    fn append_chained_inner<F>(&self, build: F) -> Result<u64>
     where
         F: FnOnce(Option<String>) -> Result<SignedExecutionReceipt>,
     {
@@ -122,10 +111,11 @@ impl ReceiptStore {
 
         let bytes =
             serde_json::to_vec_pretty(&receipt).context("serializing signed execution receipt")?;
-        match state {
-            Some(state) => write_atomic_batched(&receipt_path, &bytes, state)?,
-            None => write_atomic(&receipt_path, &bytes)?,
-        }
+        // Receipts are a reconstructible view over the durable audit chain,
+        // not a control that authorizes the workload. Keep atomic publication
+        // for concurrent readers, but do not add a second stable-storage wait
+        // to the admission boundary.
+        write_atomic_unsynced(&receipt_path, &bytes)?;
 
         head.last_receipt_id = Some(receipt.payload.receipt_id.clone());
         self.write_head(&head)?;

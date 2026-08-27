@@ -23,6 +23,7 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 
 /// Atomically replace `path`, joining its stable-storage wait to `state` when
 /// the caller has an active durability batch.
+#[cfg(test)]
 pub(crate) fn write_atomic_batched(
     path: &Path,
     bytes: &[u8],

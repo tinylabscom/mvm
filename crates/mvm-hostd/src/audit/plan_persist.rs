@@ -14,7 +14,9 @@
 //! degrades the per-VM audit chain (lifecycle verbs will not be
 //! plan-bound) but must not block the launch — boot succeeded; the
 //! VM is running. Callers log a warn and continue, mirroring the
-//! `audit emit_*` policy in `audit_chain.rs`.
+//! `audit emit_*` policy in `audit_chain.rs`. The chain-signed admission
+//! record is the durable source of truth, so this reconstructible lifecycle
+//! cache is published atomically without adding its own pre-boot fsync.
 
 use anyhow::{Context, Result, bail};
 use mvm_core::plan::ExecutionPlan;
@@ -67,7 +69,6 @@ pub fn write_plan(vm_name: &str, plan: &ExecutionPlan) -> Result<PathBuf> {
             .with_context(|| format!("opening {} for write", tmp.display()))?;
         f.write_all(&bytes)
             .with_context(|| format!("writing plan to {}", tmp.display()))?;
-        f.sync_all().ok();
     }
     // Force-tighten in case the open()'s mode arg was honored loosely
     // under an odd umask; readers refuse loose perms below.
