@@ -74,6 +74,72 @@ impl VcpuStart {
     }
 }
 
+/// Serialises `hv_vcpu_create` into CPU-number order.
+///
+/// HVF hands each vCPU a GIC redistributor frame as it is created, allocating
+/// them consecutively from the base the GIC was configured with — **in creation
+/// order**. The device tree tells the guest that CPU *n* owns the *n*th frame,
+/// so the *n*th vCPU created has to be CPU *n*. Threads spawned in a loop reach
+/// their first instruction in whatever order the scheduler picks, so without
+/// this two of them swap frames.
+///
+/// That is not hypothetical: it is what `--cpus 5` did. CPU 3 took CPU 4's
+/// frame on one boot and CPU 4 took CPU 3's on the next, and the guest could
+/// never match its CPUs to their redistributors. The odds rise with the thread
+/// count, which is why it read as a ceiling at four rather than as the race it
+/// is.
+///
+/// Setting MPIDR_EL1 does *not* substitute for this. Affinity is a precondition
+/// for `hv_gic_get_redistributor_base` answering at all, which is a different
+/// thing from it deciding where the frame goes — assuming otherwise is exactly
+/// how this ordering came to be removed once already.
+pub(crate) struct CreationOrder {
+    /// The CPU whose turn it is. Starts at 1: the boot CPU is created before
+    /// any secondary thread is spawned.
+    next: Mutex<u32>,
+    advanced: Condvar,
+}
+
+impl Default for CreationOrder {
+    fn default() -> Self {
+        Self {
+            next: Mutex::new(1),
+            advanced: Condvar::new(),
+        }
+    }
+}
+
+impl CreationOrder {
+    /// Block until it is `cpu`'s turn to be created.
+    pub(crate) fn wait_for_turn(&self, cpu: u32) {
+        let mut next = self
+            .next
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *next < cpu {
+            next = self
+                .advanced
+                .wait(next)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    /// Release the next CPU.
+    ///
+    /// Must be called whether or not the creation succeeded. A CPU that failed
+    /// and kept the turn would leave every later CPU blocked here, and the boot
+    /// CPU waiting on reports that are never coming.
+    pub(crate) fn finished(&self, cpu: u32) {
+        let mut next = self
+            .next
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *next = (*next).max(cpu.saturating_add(1));
+        drop(next);
+        self.advanced.notify_all();
+    }
+}
+
 /// Why a parked secondary woke up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Release {
@@ -387,6 +453,74 @@ mod tests {
             assert_eq!(gates.cpu_on(absent, 0, 0), psci::INVALID_PARAMETERS);
             assert_eq!(gates.affinity_info(absent), psci::INVALID_PARAMETERS);
         }
+    }
+
+    /// vCPUs are created in CPU-number order however their threads are
+    /// scheduled.
+    ///
+    /// HVF hands out GIC redistributor frames in creation order and the device
+    /// tree says CPU *n* owns the *n*th, so the two have to agree. Threads
+    /// spawned in a loop start in whatever order the scheduler chooses — and
+    /// when they raced, CPU 3 and CPU 4 swapped frames and the guest could not
+    /// match either to its redistributor.
+    #[test]
+    fn vcpus_are_created_in_cpu_order_whatever_order_their_threads_start() {
+        let order = Arc::new(CreationOrder::default());
+        let created = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        // Spawned high-to-low, so the natural order is the wrong one.
+        let threads: Vec<_> = (1..6u32)
+            .rev()
+            .map(|cpu| {
+                let order = Arc::clone(&order);
+                let created = Arc::clone(&created);
+                std::thread::spawn(move || {
+                    order.wait_for_turn(cpu);
+                    created.lock().unwrap().push(cpu);
+                    order.finished(cpu);
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        assert_eq!(
+            *created.lock().unwrap(),
+            vec![1, 2, 3, 4, 5],
+            "creation must follow CPU number, not thread start order"
+        );
+    }
+
+    /// A CPU that fails to be created still releases the CPUs behind it.
+    ///
+    /// Otherwise every later CPU blocks on a turn that never comes, and the
+    /// boot CPU waits for bring-up reports that are never sent — a hang, where
+    /// the honest outcome is a failed boot naming the CPU that could not be
+    /// created.
+    #[test]
+    fn a_failed_creation_still_releases_the_cpus_behind_it() {
+        let order = Arc::new(CreationOrder::default());
+        let reached = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let threads: Vec<_> = (1..4u32)
+            .map(|cpu| {
+                let order = Arc::clone(&order);
+                let reached = Arc::clone(&reached);
+                std::thread::spawn(move || {
+                    order.wait_for_turn(cpu);
+                    reached.lock().unwrap().push(cpu);
+                    // Every CPU releases the next, including the one that
+                    // "failed" (cpu 2, which records nothing further).
+                    order.finished(cpu);
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        assert_eq!(*reached.lock().unwrap(), vec![1, 2, 3]);
     }
 
     /// Every CPU's start state agrees with the device tree node built for it.

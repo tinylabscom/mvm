@@ -109,7 +109,7 @@ mvmctl machine run --image python:3.12 \
 mvmctl machine run --image alpine -it -- /bin/sh
 
 # Give it resources; admit specific egress only (audited; TCP/22 always refused).
-# A request above the backend's vCPU ceiling is clamped to it, with a warning (HVF: 4).
+# A request above the backend's vCPU ceiling is clamped to it, with a warning.
 mvmctl machine run --image alpine --cpus 2 --memory 512M \
   --allow-host api.example.com:443 -- ./fetch
 
@@ -138,7 +138,7 @@ A persistent machine has a name and an on-disk spec: create once, start/stop/exe
 against it, reconfigure it, remove it when done.
 
 ```bash
-# A request above the backend's vCPU ceiling is clamped to it, with a warning (HVF: 4).
+# A request above the backend's vCPU ceiling is clamped to it, with a warning.
 mvmctl machine create web --image nginx --cpus 2 --memory 512M
 mvmctl machine start web
 mvmctl machine exec  web -- nginx -v

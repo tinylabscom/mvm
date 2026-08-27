@@ -27,7 +27,7 @@ use super::HvfError;
 use super::guest_ram::HVF_PAGE_SIZE;
 use super::guest_ram::{GuestRam, page_rounded_len};
 use super::hv_impl::{HvfHandle, HvfVcpu};
-use super::smp::{Release, SecondaryGates, VcpuStart, psci};
+use super::smp::{CreationOrder, Release, SecondaryGates, VcpuStart, psci};
 use super::snapshot::{HVF_SNAPSHOT_BACKEND_KIND, HvfVcpuState};
 use super::sys::*;
 use super::vcpu::esr_ec;
@@ -945,6 +945,9 @@ struct SnapshotPaths {
 struct MachineShared<'a> {
     /// The parking spots PSCI `CPU_ON` releases.
     gates: &'a SecondaryGates,
+    /// Keeps vCPU creation in CPU-number order, so each CPU gets the GIC
+    /// redistributor frame the device tree assigned it.
+    creation_order: &'a CreationOrder,
     /// Every live vCPU's force-exit token.
     roster: &'a Mutex<Vec<HvfHandle>>,
     /// The supervisor's stop flag: a timeout, or a graceful stop.
@@ -1189,9 +1192,11 @@ fn run_primary<B: run::DeviceBus>(
 /// Confirm one vCPU's GIC redistributor frame is where the device tree told the
 /// guest it would be.
 ///
-/// HVF derives the frame from the vCPU's MPIDR_EL1 affinity and will not answer
-/// before that register is set, so this must follow the affinity write. It is
-/// the only way to read back where a vCPU's frame landed, and worth asking:
+/// HVF will not answer before MPIDR_EL1 is set, so this must follow the
+/// affinity write — but affinity is only a precondition for the *query*. The
+/// frame itself is assigned in `hv_vcpu_create` order, which is why creation is
+/// serialised. It is the only way to read back where a vCPU's frame landed, and
+/// worth asking:
 /// a mismatch does not degrade, it hangs. The guest matches CPUs to
 /// redistributors during IRQ init, before the console exists, so the boot stops
 /// with nothing written anywhere. Failing here names the CPU and both
@@ -1221,9 +1226,12 @@ fn verify_redistributor_frame(vcpu_id: hv_vcpu_t, cpu: u32) -> Result<(), HvfErr
 /// MPIDR_EL1 is set here rather than left to [`apply_vcpu_start`] because it is
 /// this CPU's identity, known from its number alone, and everything else about
 /// the start state comes from a PSCI `CPU_ON` that has not happened yet. HVF
-/// also needs the affinity before it will say where the redistributor frame is,
+/// needs the affinity before it will say where the redistributor frame is,
 /// which is what makes the check possible this early — before the guest is
 /// running and while a failure is still a failed boot rather than a hang.
+///
+/// The caller must hold this CPU's turn in the creation order; the frame this
+/// checks is handed out by `hv_vcpu_create` in call order, not by affinity.
 fn create_secondary_vcpu(cpu: u32) -> Result<(HvfVcpu, hv_vcpu_t), HvfError> {
     let mut vcpu_id: hv_vcpu_t = 0;
     let mut exit: *mut hv_vcpu_exit_t = core::ptr::null_mut();
@@ -1260,10 +1268,16 @@ fn run_secondary<B: run::DeviceBus>(
     bus: &B,
     created: &std::sync::mpsc::Sender<Result<Option<ThreadCpuHandle>, HvfError>>,
 ) -> Result<CpuDiagnostics, HvfError> {
-    // Creation order does not matter: HVF places a vCPU's redistributor frame
-    // by its MPIDR affinity, which `create_secondary_vcpu` sets from the CPU
-    // number before checking where the frame landed.
-    let (vcpu, vcpu_id) = match create_secondary_vcpu(cpu) {
+    // HVF allocates GIC redistributor frames in `hv_vcpu_create` order, and the
+    // device tree tells the guest CPU n owns the nth. Take a turn, so the nth
+    // vCPU created is CPU n whatever order the scheduler started these threads
+    // in. Without it two threads swap frames and the guest cannot match either
+    // CPU to its redistributor.
+    shared.creation_order.wait_for_turn(cpu);
+    let create = create_secondary_vcpu(cpu);
+    shared.creation_order.finished(cpu);
+
+    let (vcpu, vcpu_id) = match create {
         Ok(created_vcpu) => created_vcpu,
         Err(e) => {
             let _ = created.send(Err(e));
@@ -1804,8 +1818,10 @@ unsafe fn run(
             // it to know when to park. The quota controller that sets it starts
             // later, once each CPU has contributed its CPU clock.
             let throttle = Arc::new(AtomicBool::new(false));
+            let creation_order = CreationOrder::default();
             let shared = MachineShared {
                 gates: &gates,
+                creation_order: &creation_order,
                 roster: &roster,
                 stop,
                 paused,
