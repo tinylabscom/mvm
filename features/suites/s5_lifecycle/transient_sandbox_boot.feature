@@ -36,7 +36,7 @@ Feature: Transient sandbox boot
   # failed as `Network unreachable` — while the proxy environment variables were
   # still exported, which made it read as a broken network rather than as a
   # policy denial. This is that regression, as a scenario.
-  @live
+  @live @tls_tunnel_client
   Scenario: a workload reaches an admitted host over the mediated egress path
     When I run mvmctl in an isolated live home with "machine run --name bdd-egress-https --image alpine --allow-host example.com --timeout 180 -- wget -q -O- https://example.com"
     Then the command exits with code 0

@@ -5,13 +5,13 @@ Feature: Admitted egress completes end-to-end over the vsock seam
   reports success, and it tries every admitted address so an unreachable IPv6
   pin never strands the request.
 
-  @live
+  @live @tls_tunnel_client
   Scenario: An admitted name resolves and connects through the in-seam resolver
     When I run mvmctl with "machine run --image alpine --allow-host example.com -- wget -q -O - https://example.com"
     Then the command exits with code 0
     And the output contains "Example Domain"
 
-  @live
+  @live @tls_tunnel_client
   Scenario: An admitted IPv6 literal falls back to its pinned IPv4 sibling
     When I run mvmctl with "machine run --image alpine --allow-host one.one.one.one -- wget -q --no-check-certificate --header=Host:one.one.one.one -O - https://[2606:4700:4700::1111]/cdn-cgi/trace" with a 120 second timeout
     Then the command exits with code 0
@@ -22,7 +22,7 @@ Feature: Admitted egress completes end-to-end over the vsock seam
     When I run mvmctl with "machine run --image alpine --allow-host example.com -- wget -q -O - https://not-admitted.test"
     Then the command exits with code 1
 
-  @live
+  @live @tls_tunnel_client
   Scenario: DNS queries land in the chain-signed audit log
     When I run mvmctl with "machine run --image alpine --allow-host example.com -- wget -q -O - https://example.com"
     Then the command exits with code 0

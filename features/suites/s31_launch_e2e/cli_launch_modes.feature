@@ -76,7 +76,10 @@ Feature: every README-documented CLI launch mode boots a real guest
   # matched the combined streams and the `MVM_PHASE_TIMING` table supplied a
   # "2". `the guest printed exactly` reads the guest's own stdout, which is what
   # made the defect visible in the first place.
-  @live
+  # `@single_vcpu_backend`: the assertion is about a ceiling, so it only means
+  # anything on a backend that has one. Firecracker does SMP and honours the
+  # request, which is correct there and would fail this scenario.
+  @live @single_vcpu_backend
   Scenario: a vCPU count the backend cannot honour is refused, not silently reduced
     When I launch "machine run --image alpine --cpus 2 --memory 512M -- nproc"
     Then the launch fails
@@ -97,7 +100,7 @@ Feature: every README-documented CLI launch mode boots a real guest
   @live
   Scenario: the documented persistent machine lifecycle operates one guest
     Given no machine named "e2e-web"
-    When I launch "machine create e2e-web --image alpine --cpus 2 --memory 512M"
+    When I launch "machine create e2e-web --image alpine --cpus 1 --memory 512M"
     Then the launch succeeds
     When I launch "machine start e2e-web"
     Then the launch succeeds

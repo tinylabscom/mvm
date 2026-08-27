@@ -6,7 +6,7 @@ Feature: HVF admitted egress is observable and does not hang
   timeout kills it. Endpoint diagnostics must also be capturable on disk instead
   of being discarded to /dev/null.
 
-  @live
+  @live @tls_tunnel_client
   Scenario: Admitted HTTPS egress completes instead of hanging
     When I run mvmctl with "machine run --image alpine --allow-host httpbin.org -- wget -q -O - https://httpbin.org/get" with a 120 second timeout
     Then the command exits with code 0
