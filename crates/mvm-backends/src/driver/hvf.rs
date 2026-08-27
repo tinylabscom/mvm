@@ -129,13 +129,6 @@ fn relay_supervisor_config_with_handoff(
     handoff: Option<&HandoffConfig>,
     exclusive_image_lock: Option<&Path>,
 ) -> Result<HvfSupervisorConfig> {
-    if spec.vcpus != 1 {
-        bail!(
-            "the hvf backend supports exactly 1 vCPU, but this launch requests {}",
-            spec.vcpus
-        );
-    }
-
     let kernel = match &spec.kernel {
         KernelImage::Path(p) => p.clone(),
         KernelImage::Bundled => {
@@ -1448,22 +1441,32 @@ mod tests {
         assert!(relay_supervisor_config(&spec, &sample_paths()).is_err());
     }
 
+    /// A multi-vCPU request reaches the supervisor rather than being refused.
+    ///
+    /// This backend used to bail here, because the VMM below described one CPU
+    /// in the device tree whatever was asked for and answering a `CPU_ON` it
+    /// could not honour would hang the boot. It creates the CPUs now, so the
+    /// only correct thing to do with the count is pass it on — and passing it
+    /// on is the whole fix, since the supervisor is the process that calls
+    /// `hv_vcpu_create`.
     #[test]
-    fn relay_config_refuses_a_vcpu_count_hvf_cannot_honor() {
-        let mut spec = spec_with(
-            KernelImage::Path("/img/Image".into()),
-            vec![egress_port("/run/egress.sock")],
-            vec![],
-        );
-        spec.vcpus = 2;
+    fn relay_config_carries_a_multi_vcpu_request_to_the_supervisor() {
+        for requested in [1u32, 2, 4] {
+            let mut spec = spec_with(
+                KernelImage::Path("/img/Image".into()),
+                vec![egress_port("/run/egress.sock")],
+                vec![],
+            );
+            spec.vcpus = requested;
 
-        let error = relay_supervisor_config(&spec, &sample_paths())
-            .expect_err("HVF must not silently reduce a multi-vCPU request");
+            let config = relay_supervisor_config(&spec, &sample_paths())
+                .expect("a vCPU count this backend now honours must not be refused");
 
-        assert_eq!(
-            error.to_string(),
-            "the hvf backend supports exactly 1 vCPU, but this launch requests 2"
-        );
+            assert_eq!(
+                config.vcpus, requested,
+                "the supervisor must be told the {requested} CPUs that were asked for"
+            );
+        }
     }
 
     #[test]
