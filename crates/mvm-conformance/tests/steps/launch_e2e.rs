@@ -290,8 +290,7 @@ fn guest_last_line_is(world: &mut CliWorld, expected: String) {
     let actual = record
         .stdout
         .lines()
-        .filter(|line| !line.trim().is_empty())
-        .next_back()
+        .rfind(|line| !line.trim().is_empty())
         .unwrap_or("")
         .trim();
     assert_eq!(
