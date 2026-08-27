@@ -1,9 +1,9 @@
-//! `mvmctl build address` — print a Workload IR's semantic identities.
+//! `mvmctl build address` — print a Workload IR's content identities.
 //!
 //! Reads a Workload IR JSON (the cross-language interop shape the SDKs emit)
 //! and prints its two content identities: the UOR-ADDR-compatible
-//! `sha256(JCS(ir))` semantic address and mvm's internal `ir_hash`. Both are
-//! stable across key order and whitespace. The semantic address additionally
+//! `sha256(JCS(ir))` workload address and mvm's internal `ir_hash`. Both are
+//! stable across key order and whitespace. The workload address additionally
 //! normalizes Unicode to match the external UOR-ADDR contract; the two values
 //! are therefore reported independently rather than treated as interchangeable.
 
@@ -14,8 +14,8 @@ use clap::Args as ClapArgs;
 use serde::Serialize;
 
 use mvm_contract::ir::{Workload, ir_hash};
-use mvm_core::semantic_address::semantic_address;
 use mvm_core::user_config::MvmConfig;
+use mvm_core::workload_address;
 
 use super::Cli;
 use super::ir_input::load_ir_json_workload;
@@ -39,13 +39,13 @@ pub(in crate::commands) struct Args {
 /// The two independent content identities of a workload.
 #[derive(Debug)]
 struct Identities {
-    semantic_address: String,
+    workload_address: String,
     ir_hash: String,
 }
 
 #[derive(Serialize)]
 struct AddressReport {
-    semantic_address: String,
+    workload_address: String,
     ir_hash: String,
 }
 
@@ -56,15 +56,15 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     Ok(())
 }
 
-/// Compute both identities. The semantic address is the cross-language UOR-ADDR
+/// Compute both identities. The workload address is the cross-language UOR-ADDR
 /// label; `ir_hash` remains mvm's internal fingerprint for launch plans and
 /// audit records. They intentionally use separate normalization boundaries.
 fn compute_identities(workload: &Workload) -> Result<Identities> {
-    let addr = semantic_address(workload).context("computing semantic address")?;
+    let addr = workload_address(workload).context("computing workload address")?;
     let ih = ir_hash(workload).context("computing ir_hash")?;
     let addr = addr.as_str().to_string();
     Ok(Identities {
-        semantic_address: addr,
+        workload_address: addr,
         ir_hash: ih,
     })
 }
@@ -72,7 +72,7 @@ fn compute_identities(workload: &Workload) -> Result<Identities> {
 fn render(identities: &Identities, json: bool) -> Result<String> {
     if json {
         let report = AddressReport {
-            semantic_address: identities.semantic_address.clone(),
+            workload_address: identities.workload_address.clone(),
             ir_hash: identities.ir_hash.clone(),
         };
         let mut out = serde_json::to_string(&report).context("serializing address report")?;
@@ -80,8 +80,8 @@ fn render(identities: &Identities, json: bool) -> Result<String> {
         Ok(out)
     } else {
         Ok(format!(
-            "semantic-address: {}\nir-hash: {}\n",
-            identities.semantic_address, identities.ir_hash
+            "workload-address: {}\nir-hash: {}\n",
+            identities.workload_address, identities.ir_hash
         ))
     }
 }
@@ -144,24 +144,24 @@ mod tests {
         let from_pretty: Workload = serde_json::from_slice(&pretty).unwrap();
         let a = compute_identities(&from_compact).unwrap();
         let b = compute_identities(&from_pretty).unwrap();
-        assert_eq!(a.semantic_address, b.semantic_address);
+        assert_eq!(a.workload_address, b.workload_address);
     }
 
     #[test]
-    fn different_meaning_produces_different_address() {
+    fn different_workload_produces_different_address() {
         let a = sample_workload();
         let mut b = sample_workload();
         b.id = "goodbye".to_string();
         let ia = compute_identities(&a).unwrap();
         let ib = compute_identities(&b).unwrap();
-        assert_ne!(ia.semantic_address, ib.semantic_address);
+        assert_ne!(ia.workload_address, ib.workload_address);
     }
 
     #[test]
     fn identities_have_distinct_valid_shapes() {
         let ids = compute_identities(&sample_workload()).unwrap();
-        assert!(ids.semantic_address.starts_with("sha256:"));
-        assert_eq!(ids.semantic_address.len(), "sha256:".len() + 64);
+        assert!(ids.workload_address.starts_with("sha256:"));
+        assert_eq!(ids.workload_address.len(), "sha256:".len() + 64);
         assert_eq!(ids.ir_hash.len(), 64);
     }
 
@@ -175,8 +175,8 @@ mod tests {
         let composed_ids = compute_identities(&composed).unwrap();
         let decomposed_ids = compute_identities(&decomposed).unwrap();
         assert_eq!(
-            composed_ids.semantic_address,
-            decomposed_ids.semantic_address
+            composed_ids.workload_address,
+            decomposed_ids.workload_address
         );
         assert_ne!(composed_ids.ir_hash, decomposed_ids.ir_hash);
     }
@@ -200,7 +200,7 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(
             lines[0],
-            format!("semantic-address: {}", ids.semantic_address)
+            format!("workload-address: {}", ids.workload_address)
         );
         assert_eq!(lines[1], format!("ir-hash: {}", ids.ir_hash));
     }
@@ -210,7 +210,7 @@ mod tests {
         let ids = compute_identities(&sample_workload()).unwrap();
         let out = render(&ids, true).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
-        assert_eq!(parsed["semantic_address"], ids.semantic_address);
+        assert_eq!(parsed["workload_address"], ids.workload_address);
         assert_eq!(parsed["ir_hash"], ids.ir_hash);
     }
 }

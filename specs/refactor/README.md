@@ -37,6 +37,6 @@ This status line is the single source of truth for "where are we" — if any oth
 | [09-closeout.md](09-closeout.md) | Issue/PR disposition table and the biggest confirmed code removals |
 | [10-increment3-protocol-core-split.md](10-increment3-protocol-core-split.md) | The `mvm-core` → `mvm-contract` wire/policy DTO split — per-module cut, extraction order, byte-identity invariant (design of record for the Phase 1a long pole) |
 | [11-wasm-backend.md](11-wasm-backend.md) | The `WasmBackend` seam (WS11 core goal) — scoped as the claim-free portability tier, the three resolved open questions, the seam + WASI egress transport, the POC gate, and the P1–P4 plan |
-| [12-semantic-address-pilot.md](12-semantic-address-pilot.md) | Decision-ready pilot: a UOR-ADDR-compatible `SemanticAddress` (JCS+SHA-256) for the Workload IR — additive host-side, zero new deps, the security boundary it must not cross, and the deferred `uor-addr`-crate/browser (WS11 P4) decision |
+| [12-workload-address-pilot.md](12-workload-address-pilot.md) | Decision-ready pilot: a UOR-ADDR-compatible `WorkloadAddress` (JCS+SHA-256) for the Workload IR — additive host-side, zero new deps, the security boundary it must not cross, and the deferred `uor-addr`-crate/browser (WS11 P4) decision |
 
 Read order for a newcomer: this README, then [01-goals.md](01-goals.md), then [02-architecture.md](02-architecture.md), then whichever of 03–09 matches what you're touching.

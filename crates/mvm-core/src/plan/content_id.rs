@@ -100,7 +100,7 @@ mod tests {
     #[test]
     fn id_has_sha256_prefixed_shape() {
         // Reuse the one shared shape validator so this id can never drift from
-        // the checkpoint/OCI/semantic-address content-address wire shape.
+        // the checkpoint/OCI/workload-address content-address wire shape.
         let id = compute_plan_id(&plan());
         assert!(matches!(
             validate_sha256_prefixed(&id.0),

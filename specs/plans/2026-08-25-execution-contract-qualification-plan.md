@@ -267,7 +267,7 @@ The answers also surfaced concrete gaps:
 - `specs/research/MVM_Execution_Contract_Qualification_Answers.md`
 - `specs/adrs/110-execution-receipt-evidence-archive.md`
 - `specs/adrs/001-microvm-security-posture.md`
-- `specs/refactor/12-semantic-address-pilot.md`
+- `specs/refactor/12-workload-address-pilot.md`
 - `specs/notes/2026-07-29-ai-command-design.md`
 - `specs/plans/288-kernel-cache-verify-on-read.md`
 - `crates/mvm-core/src/receipt.rs`
@@ -276,4 +276,4 @@ The answers also surfaced concrete gaps:
 - `crates/mvm-hostd/src/audit/receipt_archive_verify.rs`
 - `crates/mvm-core/src/crypto/attestation/provider.rs`
 - `crates/mvm-contract/src/assurance/binding.rs`
-- `crates/mvm-core/src/semantic_address.rs`
+- `crates/mvm-core/src/workload_address.rs`
