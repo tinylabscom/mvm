@@ -337,7 +337,27 @@ build-supervisors:
 # (mvm-build, mvm-core, ...) when you are about to boot a real VM; ordinary
 # check/test/clippy runs never need it. Release builds always rebuild.
 embed-refresh:
-    rm -rf target/*/build/mvm-cli-nested-target/host-vm-target
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Located with `find`, not a glob. The previous pattern
+    # (`target/*/build/mvm-cli-nested-target/host-vm-target`) matched nothing:
+    # it hardcoded `target/` so it missed any CARGO_TARGET_DIR, and it lacked
+    # the `mvm-cli/` path segment the current layout uses. The recipe was a
+    # silent no-op, which is why the launch path kept refusing helpers that
+    # "were reused from an earlier build".
+    #
+    # `aux-helper-target` is cleared too. It holds the per-VM helpers
+    # (mvm-network-endpoint and friends), and leaving it was the actual cause
+    # of that refusal — `host-vm-target` alone was never enough.
+    root="${CARGO_TARGET_DIR:-target}"
+    [[ -d "$root" ]] || exit 0
+    found=0
+    while IFS= read -r dir; do
+      echo "  removing $dir"
+      rm -rf "$dir"
+      found=$((found + 1))
+    done < <(find "$root" -type d \( -name host-vm-target -o -name aux-helper-target \) 2>/dev/null)
+    echo "embed-refresh: cleared $found nested target dir(s)"
 
 # Build the dm-verity-capable workload kernel into the local mvm cache.
 # Set MVM_KERNEL_SOURCE=download to use the hash-verified release artifact, or
