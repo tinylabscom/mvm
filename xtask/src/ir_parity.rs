@@ -3,7 +3,7 @@
 //! Executes the shared workload declaration through the Python and
 //! TypeScript SDKs. Generated IR documents are committed so Rust tests can
 //! deserialize them and prove all three language surfaces resolve to the same
-//! semantic address. CI re-executes both SDKs and rejects fixture drift.
+//! workload address. CI re-executes both SDKs and rejects fixture drift.
 
 use anyhow::{Context, Result, bail};
 use std::path::Path;

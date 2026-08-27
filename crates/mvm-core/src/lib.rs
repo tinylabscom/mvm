@@ -100,9 +100,12 @@ pub mod pii;
 /// templates a stock binary trusts for its own release packs, with
 /// version interpolation.
 pub mod release_trust;
-/// Semantic content identity for the Workload IR (`sha256(JCS(ir))`,
-/// distinct from every exact-byte/trust/replay identity type).
-pub mod semantic_address;
+/// UOR-ADDR-compatible canonical content identity for the Workload IR,
+/// distinct from every exact-byte, trust, and replay identity type.
+pub mod workload_address;
+pub use workload_address::{
+    WorkloadAddress, WorkloadAddressError, WorkloadAddressParseError, workload_address,
+};
 pub mod user_config;
 
 /// Test-only drift-lock proving `mvm_contract::ir::canonicalize` and

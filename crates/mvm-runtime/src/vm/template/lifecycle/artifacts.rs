@@ -348,7 +348,6 @@ pub(super) fn bundle_artifacts_for_sha(
         template_id: bundle_sha256.to_string(),
         flake_ref: format!("bundle:{bundle_sha256}"),
         profile: installed.manifest.profile.clone().unwrap_or_default(),
-        role: String::new(),
         vcpus: u8::try_from(vcpus_u32.min(u32::from(u8::MAX))).unwrap_or(u8::MAX),
         mem_mib,
         mem_initial_mib: None,

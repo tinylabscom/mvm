@@ -1045,9 +1045,9 @@ mod tests {
 
     #[test]
     fn resolver_backend_defaults_to_local_when_field_omitted() {
-        // Back-compat: a config the backend wrote before `resolver` existed
-        // (or one that simply omits it) must still parse and land on the
-        // local-store behaviour existing `mvmctl secret set` flows rely on.
+        // A config that omits `resolver` parses and lands on the local-store
+        // behaviour `mvmctl secret set` relies on — the `#[serde(default)]`
+        // rule for a new optional field, not a shim for an older format.
         let json = serde_json::json!({
             "tenant_id": "local",
             "secrets": [],

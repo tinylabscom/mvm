@@ -21,7 +21,7 @@
 - `mvm_core::packs::PackManifest` — already carries `PackInputs { flake_locks, derivations, nar_hashes, oci_images, setup_commands, source_revisions, toolchain_versions }`, `PackProvenance { builder_identity, build_environment_identity, build_timestamp, reproducibility, sbom, signature_bundle }`, `ReproducibilityStatus`, `SbomReference`, `TransparencyLogReference`, and both Ed25519 and Sigstore/keyless signature formats. It is a SLSA-shaped provenance manifest already.
 - `mvm_fs::rootfs::collect_nodes` — a walk that already captures mode and guest-semantic xattrs (including file capabilities) and has an explicit `UnsupportedNodePolicy::{Skip,Reject}` for device/FIFO/socket nodes.
 - `mvm_fs::ext4` — a byte-deterministic writer (uid/gid forced to 0, timestamps zeroed).
-- `mvm_core::semantic_address` — the identity taxonomy (semantic / exact-byte / trust / ephemeral) stated in prose *and* enforced by the absence of conversions between the families.
+- `mvm_core::workload_address` — the identity taxonomy (semantic / exact-byte / trust / ephemeral) stated in prose *and* enforced by the absence of conversions between the families.
 - `mvm_core::plan::content_id` + `xtask check-content-address-determinism` — the content-address pattern and its CI gate.
 - `mvm_hostd::host_signer` + the chain-signed audit log.
 
@@ -58,7 +58,7 @@ A source read of the current build/cache/rootfs/snapshot paths, recorded in `spe
 - **S1 — address ≠ authorization.** An `ArtifactDigest` proves bytes, never permission. It must never become an admission input.
 - **S2 — the assurance ladder must be stated, never skipped.** A CAS blob proves bytes; an action-cache entry is a claim; a signature is a claim by a named key; policy-compliant evidence adds a monitor's word; only an independent rebuild removes single-builder trust. Prose describing any of these must not borrow a higher rung's language — `check-no-overclaim` is the instrument.
 - **S3 — no silent skips in the manifest.** `hash_dir` today drops device/FIFO/socket nodes silently. The new manifest **rejects** by default with an explicit opt-in that represents them. A skipped node is an unrepresented input.
-- **S4 — bytes, not meaning.** The artifact manifest does **not** Unicode-normalize paths; raw bytes are the identity. This is deliberately the opposite of `SemanticAddress`, which NFC-normalizes because it addresses meaning. Document the asymmetry at both sites so neither is "fixed" to match the other.
+- **S4 — bytes, not meaning.** The artifact manifest does **not** Unicode-normalize paths; raw bytes are the identity. This is deliberately the opposite of `WorkloadAddress`, which NFC-normalizes because it addresses meaning. Document the asymmetry at both sites so neither is "fixed" to match the other.
 - **S5 — cross-tenant dedup is a leak.** A shared address confirms two tenants hold identical content. Keep any cache keyed within the existing per-tenant boundary.
 - **S6 — domain separation is mandatory.** Every new digest carries a `"mvm.<kind>.v<n>\0"` prefix. Without it a manifest and a plan that serialize alike address alike.
 
@@ -66,7 +66,7 @@ A source read of the current build/cache/rootfs/snapshot paths, recorded in `spe
 
 ### WS1 — `ActionDigest`: promote the build fingerprint into the taxonomy
 
-- [ ] New `mvm-core::action` module with an `ActionDigest` newtype, `sha256:<64-hex>` shape validated through the shared `digest_shape` validator, and **no** `From`/`Into`/`Deref` to `SemanticAddress`, `CheckpointDigest`, `OciDigest`, `Sha256Hex`, or `KeyId`.
+- [ ] New `mvm-core::action` module with an `ActionDigest` newtype, `sha256:<64-hex>` shape validated through the shared `digest_shape` validator, and **no** `From`/`Into`/`Deref` to `WorkloadAddress`, `CheckpointDigest`, `OciDigest`, `Sha256Hex`, or `KeyId`.
 - [ ] Add the `"mvm.action.v1\0"` domain separator (the current fingerprint's scheme tag is a string prefix, not a separated field) and keep the existing tagged, length-delimited `fold_field` framing — it is already correct.
 - [ ] Move the environment contract into the digest explicitly: declared variables only, `PATH` constructed from the toolchain root rather than inherited, `TZ`/`LC_ALL`/`SOURCE_DATE_EPOCH` pinned. An undeclared caller variable is dropped and its presence is not hashed.
 - [ ] `mvm-build`'s `workload_build_fingerprint` returns `ActionDigest`; the cache is keyed by it.

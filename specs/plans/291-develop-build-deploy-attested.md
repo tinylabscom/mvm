@@ -27,7 +27,7 @@ difficult — it is that someone rebuilds machinery that already ships, or that
 | Declared dependencies, with **hash-pinned lockfiles enforced** | `mvm_sdk::compile::deps::validate_lockfiles` — `uv.lock`, `yarn.lock`, and friends; any entry lacking an integrity hash is rejected |
 | Sealed dependency volume: SBOM, CVE scan, hash-chained `meta.json` | `mvm_sdk::compile::deps_audit::{seal_volume, reseal_volume, verify_sealed_volume, derive_volume_hash}` (claim 11) |
 | Admission-time refusal of a tampered dep volume | supervisor admission verifier |
-| Workload content address | `mvmctl build address` (semantic address + `ir_hash`) |
+| Workload content address | `mvmctl build address` (workload address + `ir_hash`) |
 | Image + environment pinned into the signed plan | `SignedImageRef`, `EnvironmentRef` |
 
 **`reseal_volume` is the capture primitive.** Installing a package inside a dev
