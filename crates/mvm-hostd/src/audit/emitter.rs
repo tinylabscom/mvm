@@ -60,8 +60,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 mod atomic_sync;
+use atomic_sync::AtomicSyncBatch;
 pub(crate) use atomic_sync::AtomicSyncState;
-use atomic_sync::{AtomicSyncBatch, atomic_sync_is_batched, defer_atomic_sync, sync_path};
+#[cfg(test)]
+use atomic_sync::atomic_sync_is_batched;
+
+mod atomic_write;
+pub(crate) use atomic_write::{write_atomic, write_atomic_batched, write_atomic_unsynced};
 
 mod session_events;
 
@@ -247,6 +252,17 @@ pub fn audit_path_for_tenant(audit_dir: &Path, tenant: &str) -> PathBuf {
 /// CLI reads.
 pub fn audit_root_path_for_tenant(audit_dir: &Path, tenant: &str) -> PathBuf {
     audit_dir.join(format!("{tenant}.root.json"))
+}
+
+/// The append-only history of every root ever published for `tenant`.
+///
+/// The latest-root sidecar is overwritten on each publish, which is what a
+/// reader wanting "where is the log now" needs and exactly the wrong shape
+/// for attesting that it only ever grew: a consistency proof relates *two*
+/// roots, and overwriting destroys the earlier one. So each publish also
+/// appends here, and the file is never rewritten.
+pub fn audit_root_history_path_for_tenant(audit_dir: &Path, tenant: &str) -> PathBuf {
+    audit_dir.join(format!("{tenant}.roots.jsonl"))
 }
 
 /// Host-side emitter wrapping `FileAuditSigner`. Owns its own signing
@@ -1130,9 +1146,18 @@ impl AuditEmitter {
     /// sidecar is written temp-then-fsync-then-rename to
     /// `<audit_dir>/<tenant>.root.json` so a reader never observes a partial
     /// file.
+    /// The directory this emitter's chains, roots, and witness marks live in.
+    pub fn audit_dir(&self) -> &Path {
+        &self.audit_dir
+    }
+
     pub fn publish_root(&self, tenant: &str) -> Result<SignedAuditRoot> {
         let signed =
             crate::audit::merkle::sign_root_in(&self.audit_dir, tenant, &self.signing_key)?;
+        // History first. A crash between the two leaves a history entry with
+        // no matching sidecar, which a reader can reconcile; the reverse
+        // leaves a published root that no consistency check will ever see.
+        append_root_history(&self.audit_dir, tenant, &signed)?;
         let path = audit_root_path_for_tenant(&self.audit_dir, tenant);
         write_atomic(&path, serde_json::to_vec_pretty(&signed)?.as_slice())
             .with_context(|| format!("publishing signed root to {}", path.display()))?;
@@ -1425,69 +1450,26 @@ impl AuditEmitter {
 /// Still atomic — the rename gives a reader either the whole old file or the
 /// whole new one. What is dropped is survival of power loss, which is the
 /// right trade only for something reconstructible from data already durable.
-pub(crate) fn write_atomic_unsynced(path: &Path, bytes: &[u8]) -> Result<()> {
-    write_atomic_inner(path, bytes, false, None)
-}
+/// Append one published root to `tenant`'s root history, durably.
+///
+/// One JSON object per line, fsynced before returning: a root that is not on
+/// disk when the next one is published is a hole in the very sequence the
+/// consistency check walks.
+fn append_root_history(audit_dir: &Path, tenant: &str, signed: &SignedAuditRoot) -> Result<()> {
+    use std::io::Write as _;
 
-pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    write_atomic_inner(path, bytes, true, None)
-}
-
-pub(crate) fn write_atomic_batched(
-    path: &Path,
-    bytes: &[u8],
-    state: &AtomicSyncState,
-) -> Result<()> {
-    write_atomic_inner(path, bytes, true, Some(state))
-}
-
-fn write_atomic_inner(
-    path: &Path,
-    bytes: &[u8],
-    sync: bool,
-    state: Option<&AtomicSyncState>,
-) -> Result<()> {
-    use std::io::Write;
-    let dir = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("path {} has no parent directory", path.display()))?;
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| anyhow::anyhow!("path {} has no file name", path.display()))?;
-    let tmp = dir.join(format!(".{file_name}.tmp.{}", std::process::id()));
-    // Best-effort: if any step before the rename fails, don't leave the
-    // partial temp file behind.
-    let batched_sync = sync && state.is_some_and(atomic_sync_is_batched);
-    let write = (|| -> Result<()> {
-        let mut f = std::fs::File::create(&tmp)
-            .with_context(|| format!("creating temp file {}", tmp.display()))?;
-        f.write_all(bytes)
-            .with_context(|| format!("writing temp file {}", tmp.display()))?;
-        if sync && !batched_sync {
-            // `sync_data` preserves the file bytes and the size metadata
-            // needed to read them while avoiding unrelated inode-metadata
-            // work. The subsequent rename's directory entry has never been
-            // fsynced by this helper, so `sync_all` did not make publication
-            // itself more durable than this.
-            f.sync_data()
-                .with_context(|| format!("fdatasync temp file {}", tmp.display()))?;
-        }
-        Ok(())
-    })();
-    if let Err(e) = write {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(anyhow::Error::from(e))
-            .with_context(|| format!("renaming {} to {}", tmp.display(), path.display()));
-    }
-    if batched_sync && !state.is_some_and(|state| defer_atomic_sync(state, path)) {
-        sync_path(path).with_context(|| format!("fdatasync file {}", path.display()))?;
-    }
+    let path = audit_root_history_path_for_tenant(audit_dir, tenant);
+    let mut line = serde_json::to_vec(signed)?;
+    line.push(b'\n');
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("opening root history at {}", path.display()))?;
+    file.write_all(&line)
+        .with_context(|| format!("appending to root history at {}", path.display()))?;
+    file.sync_data()
+        .with_context(|| format!("syncing root history at {}", path.display()))?;
     Ok(())
 }
 

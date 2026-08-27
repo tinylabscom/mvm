@@ -58,7 +58,40 @@ pub fn audit_entry_to_receipt(
 ) -> Option<ExecutionReceipt> {
     let (receipt_type, outcome) = map_event_to_receipt_type(&entry.event)?;
     let action = build_action(entry, receipt_type);
-    let extensions = build_extensions(entry);
+    let mut extensions = build_extensions(entry);
+
+    // Carried on the receipt, not only in the chain, so a receipt lifted out
+    // of an archive and forwarded on its own still names the transcript it
+    // belongs to. The extensions are signed material, so this is inside the
+    // content address rather than beside it.
+    if let Some(root) = context.and_then(|c| c.transcript_root.clone()) {
+        extensions.insert(
+            mvm_core::receipt::extension_key::TRANSCRIPT_ROOT.to_string(),
+            Value::String(root),
+        );
+    }
+    if let Some(adopted) = context.and_then(|c| c.transcript_adopted) {
+        extensions.insert(
+            mvm_core::receipt::extension_key::TRANSCRIPT_ADOPTED.to_string(),
+            Value::Bool(adopted),
+        );
+    }
+
+    // Where this execution sits in the tenant-wide tree, so a verifier can
+    // bound its scan instead of walking every leaf.
+    if let (Some(first), Some(last)) = (
+        context.and_then(|c| c.leaf_first),
+        context.and_then(|c| c.leaf_last),
+    ) {
+        extensions.insert(
+            mvm_core::receipt::extension_key::PLAN_LEAF_FIRST.to_string(),
+            Value::Number(first.into()),
+        );
+        extensions.insert(
+            mvm_core::receipt::extension_key::PLAN_LEAF_LAST.to_string(),
+            Value::Number(last.into()),
+        );
+    }
 
     let image_node_digest = entry.labels.get("image_node_digest").cloned();
     let agent_id = entry.labels.get("agent_id").cloned();
@@ -147,6 +180,17 @@ pub struct ReceiptContext {
     /// Network destinations admitted for this workload, collected from
     /// `plan.egress_destinations` entries.
     pub network_destinations: Vec<(String, u16)>,
+    /// Ciphertext-manifest root of the sealed output transcript, from the
+    /// `gateway.transcript_sealed` anchor. `None` until the transcript seals.
+    pub transcript_root: Option<String>,
+    /// Whether that seal was rebuilt from the journal rather than written by
+    /// the capturing process.
+    pub transcript_adopted: Option<bool>,
+    /// Lowest and highest leaf index in the full verified chain carrying an
+    /// entry for this plan. A bound on where this execution lives in the
+    /// tenant-wide tree, not a claim that the range holds only its entries.
+    pub leaf_first: Option<u64>,
+    pub leaf_last: Option<u64>,
 }
 
 /// One in-scope audit entry that has no receipt mapping.
@@ -456,11 +500,33 @@ fn build_extensions(entry: &PlanAuditEntry) -> BTreeMap<String, Value> {
 fn build_context_map(entries: &[PlanAuditEntry]) -> BTreeMap<String, ReceiptContext> {
     let mut map: BTreeMap<String, ReceiptContext> = BTreeMap::new();
 
-    for entry in entries {
+    // Enumerated over the FULL verified chain, matching `export_evidence`, so
+    // these indices address the real Merkle tree. Counted within a filtered
+    // subset they would point at the wrong leaves.
+    for (leaf_index, entry) in entries.iter().enumerate() {
         let ctx = map.entry(entry.plan_id.0.clone()).or_default();
+        let leaf_index = leaf_index as u64;
+        ctx.leaf_first = Some(ctx.leaf_first.map_or(leaf_index, |f| f.min(leaf_index)));
+        ctx.leaf_last = Some(ctx.leaf_last.map_or(leaf_index, |l| l.max(leaf_index)));
 
         if entry.event == "plan.launched" && ctx.started_at.is_none() {
             ctx.started_at = Some(entry.timestamp.to_rfc3339());
+        }
+
+        // The seal is the last thing a run produces, so a later anchor for the
+        // same plan supersedes an earlier one rather than being ignored: a
+        // restarted capture seals again and the newest root is the live one.
+        if entry.event == crate::supervisor::audit::TRANSCRIPT_SEALED_EVENT {
+            if let Some(root) = entry
+                .labels
+                .get(crate::supervisor::audit::LABEL_TRANSCRIPT_ROOT)
+            {
+                ctx.transcript_root = Some(root.clone());
+            }
+            ctx.transcript_adopted = entry
+                .labels
+                .get(crate::supervisor::audit::LABEL_ADOPTED)
+                .map(|v| v == "true");
         }
 
         if entry.event == "plan.grant_required" {
@@ -728,6 +794,183 @@ mod tests {
         for signed in &receipts {
             assert!(signed.payload.prev_receipt_id.is_none());
         }
+    }
+
+    #[test]
+    fn a_receipt_bounds_its_execution_in_the_tenant_wide_tree() {
+        // The tree is per-tenant, so without a bound a verifier has to walk
+        // every leaf to find one execution. The pair is a bound and not an
+        // enumeration -- another plan's entries can sit between them -- and
+        // this test pins exactly that, interleaving a second plan inside the
+        // first one's range.
+        let dir = tempfile::tempdir().unwrap();
+        let signing_key = SigningKey::from_bytes(&[23u8; 32]);
+        let signer = FileAuditSigner::open(signing_key.clone(), dir.path()).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let other = |event: &str| {
+            let mut e = sample_audit_entry(event, BTreeMap::new());
+            e.plan_id = mvm_core::plan::PlanId("some-other-plan".to_string());
+            e
+        };
+        // leaf 0 = ours, leaf 1 = someone else's, leaf 2 = ours.
+        for entry in [
+            sample_audit_entry("plan.admitted", BTreeMap::new()),
+            other("plan.admitted"),
+            sample_audit_entry("plan.exited", {
+                let mut l = BTreeMap::new();
+                l.insert("backend".into(), "firecracker".into());
+                l.insert("exit_code".into(), "0".into());
+                l
+            }),
+        ] {
+            rt.block_on(signer.sign_and_emit(&entry)).unwrap();
+        }
+
+        let receipts = export_receipts(dir.path(), "local", None, &signing_key).unwrap();
+        let first_key = mvm_core::receipt::extension_key::PLAN_LEAF_FIRST;
+        let last_key = mvm_core::receipt::extension_key::PLAN_LEAF_LAST;
+
+        let ours: Vec<_> = receipts
+            .iter()
+            .filter(|r| r.payload.plan_id == sample_plan_id().0)
+            .collect();
+        assert!(!ours.is_empty(), "our plan produced receipts");
+        for signed in &ours {
+            assert_eq!(
+                signed.payload.extensions.get(first_key),
+                Some(&Value::Number(0u64.into()))
+            );
+            assert_eq!(
+                signed.payload.extensions.get(last_key),
+                Some(&Value::Number(2u64.into())),
+                "the bound must span to our last entry even though another \
+                 plan's entry sits inside the range"
+            );
+            signed.verify().unwrap();
+        }
+
+        // The interleaved plan gets its own, tighter bound.
+        if let Some(theirs) = receipts
+            .iter()
+            .find(|r| r.payload.plan_id == "some-other-plan")
+        {
+            assert_eq!(
+                theirs.payload.extensions.get(first_key),
+                Some(&Value::Number(1u64.into()))
+            );
+            assert_eq!(
+                theirs.payload.extensions.get(last_key),
+                Some(&Value::Number(1u64.into()))
+            );
+        }
+    }
+
+    #[test]
+    fn a_sealed_transcript_root_reaches_every_receipt_for_that_plan() {
+        // Without this the receipt names the audit root and nothing the
+        // workload produced, so a receipt forwarded on its own cannot say
+        // which transcript belongs to it.
+        let dir = tempfile::tempdir().unwrap();
+        let signing_key = SigningKey::from_bytes(&[13u8; 32]);
+        let signer = FileAuditSigner::open(signing_key.clone(), dir.path()).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let root = "ab".repeat(32);
+        let sealed = {
+            let mut labels = BTreeMap::new();
+            labels.insert(
+                crate::supervisor::audit::LABEL_TRANSCRIPT_ROOT.into(),
+                root.clone(),
+            );
+            labels.insert(
+                crate::supervisor::audit::LABEL_ADOPTED.into(),
+                "false".into(),
+            );
+            labels.insert(
+                crate::supervisor::audit::LABEL_CAPTURE_ID.into(),
+                "cap-1".into(),
+            );
+            sample_audit_entry(crate::supervisor::audit::TRANSCRIPT_SEALED_EVENT, labels)
+        };
+        let exited = {
+            let mut labels = BTreeMap::new();
+            labels.insert("backend".into(), "firecracker".into());
+            labels.insert("exit_code".into(), "0".into());
+            sample_audit_entry("plan.exited", labels)
+        };
+
+        for entry in [
+            sample_audit_entry("plan.admitted", BTreeMap::new()),
+            sealed,
+            exited,
+        ] {
+            rt.block_on(signer.sign_and_emit(&entry)).unwrap();
+        }
+
+        let receipts = export_receipts(dir.path(), "local", None, &signing_key).unwrap();
+        assert!(!receipts.is_empty(), "the export produced receipts");
+
+        let key = mvm_core::receipt::extension_key::TRANSCRIPT_ROOT;
+        let adopted_key = mvm_core::receipt::extension_key::TRANSCRIPT_ADOPTED;
+        for signed in &receipts {
+            assert_eq!(
+                signed.payload.extensions.get(key),
+                Some(&Value::String(root.clone())),
+                "receipt {} carries the sealed transcript root",
+                signed.payload.receipt_type
+            );
+            assert_eq!(
+                signed.payload.extensions.get(adopted_key),
+                Some(&Value::Bool(false))
+            );
+            // The extensions are signed material, so the root is inside the
+            // content address rather than beside it.
+            signed.verify().unwrap();
+        }
+    }
+
+    #[test]
+    fn an_adopted_transcript_is_marked_incomplete_on_the_receipt() {
+        // A floor presented as a full account would be a wrong record.
+        let dir = tempfile::tempdir().unwrap();
+        let signing_key = SigningKey::from_bytes(&[17u8; 32]);
+        let signer = FileAuditSigner::open(signing_key.clone(), dir.path()).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let sealed = {
+            let mut labels = BTreeMap::new();
+            labels.insert(
+                crate::supervisor::audit::LABEL_TRANSCRIPT_ROOT.into(),
+                "cd".repeat(32),
+            );
+            labels.insert(
+                crate::supervisor::audit::LABEL_ADOPTED.into(),
+                "true".into(),
+            );
+            sample_audit_entry(crate::supervisor::audit::TRANSCRIPT_SEALED_EVENT, labels)
+        };
+        for entry in [sample_audit_entry("plan.admitted", BTreeMap::new()), sealed] {
+            rt.block_on(signer.sign_and_emit(&entry)).unwrap();
+        }
+
+        let receipts = export_receipts(dir.path(), "local", None, &signing_key).unwrap();
+        let adopted_key = mvm_core::receipt::extension_key::TRANSCRIPT_ADOPTED;
+        assert!(
+            receipts
+                .iter()
+                .all(|r| r.payload.extensions.get(adopted_key) == Some(&Value::Bool(true))),
+            "an adopted seal must stay marked incomplete on every receipt"
+        );
     }
 
     #[test]

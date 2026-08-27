@@ -3,7 +3,7 @@
 Backing: preview
 Validation: focused
 
-**Status:** In progress — format-level canonicalization complete
+**Status:** Complete — every workstream landed; see #2865 (anchoring) and #2882 (the rest)
 **Date:** 2026-08-25
 **Branch:** `feat/mvmev-format-spec`
 **Issue:** #2863
@@ -95,10 +95,24 @@ it, and `.mvmev` carries neither the transcript nor a commitment to it.
 - [x] **2.1 Freeze a vector set.** Canonical-form inputs and expected bytes
       covering key ordering, escaping, integer bounds, empty containers, and
       nested objects.
-- [ ] **2.2 Freeze an end-to-end archive vector.** One `.mvmev` with a known
-      host key and expected outcomes for each of the three results.
-- [ ] **2.3 Add a negative vector set.** Tampered manifest, wrong-leaf proof,
-      missing member, digest drift.
+- [x] **2.2 End-to-end archive vector.** `tests/vectors/mvmev-archive-v1.tar`
+      (3-entry tenant-scoped chain under a committed test-only key) plus
+      `mvmev-archive-v1.json` stating the expected outcome for each of the three
+      results, the exit code, and the host pubkey. The test reads its
+      expectations from the sidecar rather than hardcoding them, so the
+      cross-language contract and the Rust assertions cannot drift apart. The
+      archive is committed rather than rebuilt because `signed_at` comes from
+      the wall clock and sits outside the signature -- and because a frozen
+      artifact pins what an *existing* archive must verify as, not what this
+      code happens to emit today.
+- [x] **2.3 Negative vector set.** All four, each derived by a single named
+      mutation of the same frozen archive so a failure is attributable to the
+      mutation and not to an independently built artifact. Tampered manifest,
+      missing member, and digest drift fail integrity. The wrong-leaf case
+      repairs and re-signs the manifest after swapping two proof bodies, so
+      **integrity passes and inclusion is the only check left that can catch
+      it** -- without the repair the digests would break first and the
+      `leaf_index` cross-check the verifier exists to perform would never run.
 - [x] **2.4 Gate the vectors.** A test that reads the frozen vectors, so a
       canonicalization change is a red test rather than a silent break.
 
@@ -128,7 +142,7 @@ the workload did".
 - [x] **4.3 Decide the adopted-seal representation.** A replayed seal cannot
       account for records shed at hand-off; the entry should carry that
       distinction rather than presenting a partial transcript as complete.
-- [ ] **4.4 Surface the transcript root on the receipt.** As an extension key
+- [x] **4.4 Surface the transcript root on the receipt.** As an extension key
       alongside `mvm.audit_root`, so a receipt lifted out of an archive still
       names the transcript it belongs to.
 - [x] **4.7 Establish what the console path actually covers.** Resolved by
@@ -145,16 +159,24 @@ the workload did".
       that degradation on stderr. No change needed; the earlier reading of this
       as an integrity hole was wrong.
 
-- [ ] **4.8 Anchor from the supervisor seal path too.** `seal_capture` and
-      `adopt_capture` are the two stream-plane seals and both now anchor. Check
-      whether any other production path seals a transcript without one.
+- [x] **4.8 Every production seal path anchors.** Resolved by audit. Three
+      sites set a transcript's `sealed_root_hex` in production:
+      `durable.rs:312` (the owner's seal, anchored via `seal_capture`),
+      `journal.rs:267` (the journal rebuild, anchored via `adopt_capture`), and
+      the opt-in forensic network capture in `commands/ops/transcript.rs`, which
+      already anchored before this plan. `transcript.rs:687` is the library
+      primitive that *builds* the manifest -- its only two production callers
+      are the first two above. `stream_client/output.rs:1393` is inside
+      `#[cfg(test)]`. No unanchored production seal remains.
 
 - [x] **4.5 Tests.** Anchor emitted on seal; anchor emitted on replayed seal and
       distinguishable from a live one; label set pinned exhaustively so a future
       label carrying payload bytes fails, mirroring
       `stream_audit_entries_carry_the_binding_and_no_payload_bytes`.
-- [ ] **4.6 Run gates.** `just fmt-check`, `just clippy`, `just check-gated`,
-      `cargo nextest run --workspace`, `just test-doc`, and the xtask gates.
+- [x] **4.6 Gates green.** CI run 32999330435 on `0623f57e88`: 13 jobs
+      succeeded, 4 skipped by path scope, none failed. The frozen-archive
+      vectors executed on both the x86 and aarch64 workspace lanes rather than
+      only being collected.
 
 ## Workstream 5 -- Operationalize the Merkle log
 
@@ -169,27 +191,64 @@ ordered across rotation -- the property every previously issued inclusion proof
 rests on. What is missing is everything that would make the append-only property
 observable.
 
-- [ ] **5.1 Wire consistency proofs.** `build_consistency_proof` /
+- [x] **5.1 Wire consistency proofs.** `build_consistency_proof` /
       `verify_consistency` (`crates/mvm-contract/src/merkle.rs:555,623`) are full
       RFC 6962 and unit-tested, with zero production callers anywhere outside the
       module. Nothing in the audit pipeline, the CLI, or the archive builds or
       checks one.
-- [ ] **5.2 Publish roots at execution boundaries.** `publish_root`
+- [x] **5.2 Publish roots at execution boundaries.** `publish_root`
       (`crates/mvm-hostd/src/audit/emitter.rs:1131`) has one caller, the manual
       `mvmctl trust audit publish-root` verb. Without roots published at
       admission and exit there is no sequence of roots to run 5.1 against.
-- [ ] **5.3 Decide the off-host witness.** `merkle.rs:70-87` states the limit
-      directly: a consistency proof relates two roots the caller already holds,
-      and a host-signed root stored beside the log it attests carries no
-      tamper-evidence against that host. Detection needs somewhere the host
-      cannot rewrite a root. Choose a mechanism or record that this is
-      accepted, with the detection window stated.
-- [ ] **5.4 Carry a per-execution index into the tenant tree.** The tree is
-      per-tenant; tracing one run means filtering by `plan_id` via
-      `mvmctl trust audit show`. Decide whether a receipt should cite its own
-      leaf range so a verifier can bound one execution without scanning.
-- [ ] **5.5 Tests.** A consistency proof across a rotation boundary; a refused
+- [x] **5.3 Off-host witness.** `WitnessSink` trait with a file and an HTTP
+      impl, selected by `MVM_AUDIT_WITNESS` (unset = no witnessing, so no
+      network call the operator did not ask for). Fail-open: unsent roots stay
+      above a per-sink high-water mark into the root history and go out on the
+      next flush, so an outage costs delay rather than evidence. What it buys,
+      stated in the module doc rather than implied: it converts "detects
+      nothing against a malicious host" into "detects a host that rewrites the
+      log **after** a root reached the sink". Everything before the first
+      successful witness is unprotected, the detection window is the publishing
+      interval, and someone still has to *compare* -- a sink nobody reads
+      records evidence without checking anything.
+- [x] **5.4 Per-execution leaf bound on the receipt.** `mvm.plan_leaf_first` /
+      `mvm.plan_leaf_last`, computed over the full verified chain so the
+      indices address the real tree. Deliberately a **bound, not an
+      enumeration**: the tree is per-tenant, so another plan's entries can sit
+      between them. What it buys is that nothing for this plan sits outside
+      them, so a verifier restricts its scan to that window instead of walking
+      every leaf. The test interleaves a second plan inside the range to pin
+      that reading.
+- [x] **5.5 Tests.** A consistency proof across a rotation boundary; a refused
       proof on a rewritten prefix; roots published at both boundaries.
+
+## Follow-on — the witness now has a consumer
+
+Landed after the plan's own items closed, because a witness nobody reads is an
+audit trail with no auditor and the plan would have shipped that gap.
+
+- [x] **Readback seam.** `WitnessSource`, deliberately separate from
+      `WitnessSink`: shipping a root and reading one back are different
+      capabilities. `FileWitnessSink` implements both; `HttpWitnessSink`
+      implements only the sink, because reading roots back over HTTP needs a
+      GET contract nobody has specified and guessing one would bake it into the
+      wire.
+- [x] **`detect_divergence`.** Compares what the host now claims against what a
+      witness recorded. Both sides are signature-checked first, so a divergence
+      is always between two genuinely host-signed statements — which is the
+      point: no signature check can find this, only the comparison can.
+- [x] **Reported by `mvmctl trust audit verify`.** Append-only status and
+      witness agreement print alongside the chain verdict, kept separate from
+      it because they attest different things and a host can pass one and fail
+      the other. With no witness configured it says so out loud rather than
+      passing silently.
+- [x] **Tests, mutation-checked.** Rewritten log, dropped root, unsent tail
+      (must *not* alarm), empty witness. Neutering the comparison turns the two
+      detection tests red.
+
+Still true and unchanged: detection reaches back only to the oldest witnessed
+root, the window is the witnessing interval, and tail truncation past the newest
+witnessed root stays undetectable.
 
 ## Open questions
 

@@ -1,5 +1,7 @@
 //! `mvmctl audit` subcommand handlers.
 
+mod inspect;
+
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
 use std::io::Write;
@@ -19,6 +21,8 @@ use super::super::vm::host_signer;
 use super::Cli;
 use mvm_contract::provenance::DecisionId;
 use mvm_hostd::audit::decisions::DecisionStore;
+
+use inspect::{audit_show, audit_tail};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -1231,6 +1235,67 @@ fn print_chain_line(line: &str) {
     }
 }
 
+/// Report the two append-only properties beyond "each entry is signed".
+///
+/// Both are reported, never merged into the chain's own verdict, because they
+/// attest different things: the chain verifying says every entry is signed and
+/// linked; these say the log was only ever appended to. A host can pass the
+/// first and fail the second.
+///
+/// Neither is fatal here. `verify` already exits nonzero on a chain refusal,
+/// and a missing witness is a configuration state rather than a finding -- but
+/// a *divergence* is a finding, and it is printed as an error so an operator
+/// reading the output cannot miss it.
+fn report_append_only(dir: &std::path::Path, tenant: &str, vk: &ed25519_dalek::VerifyingKey) {
+    match mvm_hostd::audit::merkle::verify_root_history(dir, tenant, vk) {
+        Ok(r) if r.roots == 0 => ui::info(
+            "No published audit roots, so nothing attests the log was only appended to. \
+             Roots are published at admission and exit.",
+        ),
+        Ok(r) => ui::success(&format!(
+            "append-only: {} published root(s), {} transition(s) proven a prefix extension",
+            r.roots, r.transitions_checked
+        )),
+        Err(e) => ui::error(&format!("append-only check failed: {e:#}")),
+    }
+
+    let Some(source) = mvm_hostd::audit::witness::configured_source() else {
+        // Said out loud rather than passed over in silence: without an
+        // off-host witness the roots above were all signed by this host and
+        // stored beside the log they attest, which is no evidence against
+        // this host rewriting both.
+        ui::info(
+            "No readable off-host witness configured (MVM_AUDIT_WITNESS), so a rewrite by \
+             this host is undetectable from here.",
+        );
+        return;
+    };
+    match mvm_hostd::audit::witness::detect_divergence(dir, tenant, source.as_ref(), vk) {
+        Ok(r) if !r.is_clean() => {
+            ui::error(&format!(
+                "WITNESS DIVERGENCE: {} witnessed root(s) disagree with this host",
+                r.diverged.len()
+            ));
+            for d in &r.diverged {
+                ui::error(&format!(
+                    "  tree_size {}: witness has {}, host has {}",
+                    d.tree_size,
+                    d.witnessed_root,
+                    d.host_root.as_deref().unwrap_or("nothing")
+                ));
+            }
+        }
+        Ok(r) if r.agreed == 0 => ui::info(
+            "The configured witness holds no roots for this tenant yet; nothing was compared.",
+        ),
+        Ok(r) => ui::success(&format!(
+            "witness agrees on {} root(s); {} not yet witnessed",
+            r.agreed, r.unwitnessed
+        )),
+        Err(e) => ui::error(&format!("witness comparison failed: {e:#}")),
+    }
+}
+
 fn audit_verify(tenant: &str) -> Result<()> {
     let dir = default_audit_dir()?;
 
@@ -1266,6 +1331,8 @@ fn audit_verify(tenant: &str) -> Result<()> {
             summary.entries
         ));
     }
+
+    report_append_only(&dir, tenant, &signer.verifying);
 
     // Print a clear error AND propagate so the process exits nonzero.
     // `mvmctl trust audit verify` is meant for scripting.
@@ -1356,125 +1423,6 @@ fn source_path(dir: &std::path::Path, source: &AuditSourceId) -> std::path::Path
             mvm_core::config::WORKLOAD_AUDIT_SUFFIX
         )),
         _ => audit_path_for_tenant(dir, &source.tenant),
-    }
-}
-
-fn audit_show(tenant: &str, plan_id: &str, json: bool) -> Result<()> {
-    let dir = default_audit_dir()?;
-    let path = audit_path_for_tenant(&dir, tenant);
-    if !path.exists() {
-        if json {
-            crate::json_out::emit_json(&Vec::<SignedEnvelope>::new())?;
-        } else {
-            ui::info(&format!(
-                "No audit chain found for tenant '{tenant}' at {}.",
-                path.display()
-            ));
-        }
-        return Ok(());
-    }
-    use std::io::BufRead;
-    let file = std::fs::File::open(&path).with_context(|| format!("opening {}", path.display()))?;
-    let reader = std::io::BufReader::new(file);
-    let mut matched: Vec<SignedEnvelope> = Vec::new();
-    for line in reader.lines() {
-        let line = line?;
-        if let Ok(env) = serde_json::from_str::<SignedEnvelope>(&line)
-            && env.entry.plan_id.0 == plan_id
-        {
-            if json {
-                matched.push(env);
-            } else {
-                print_chain_line(&line);
-            }
-        }
-    }
-    if json {
-        crate::json_out::emit_json(&matched)?;
-    } else if matched.is_empty() {
-        ui::info(&format!(
-            "No audit entries found for plan_id '{plan_id}' in tenant '{tenant}'."
-        ));
-    }
-    Ok(())
-}
-
-fn audit_tail(lines: usize, follow: bool) -> Result<()> {
-    let log_path = mvm_core::audit::default_audit_log();
-    let path = std::path::Path::new(&log_path);
-
-    if !path.exists() {
-        ui::info(&format!(
-            "No audit log found. Events are recorded at {log_path}."
-        ));
-        return Ok(());
-    }
-
-    print_last_n_lines(path, lines)?;
-
-    if !follow {
-        return Ok(());
-    }
-
-    // Tail -f: track file position and poll for new content.
-    let mut pos = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-
-    loop {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        if !path.exists() {
-            continue;
-        }
-        let new_len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-        if new_len > pos {
-            let mut file = std::fs::File::open(path)?;
-            use std::io::{BufRead, Seek, SeekFrom};
-            file.seek(SeekFrom::Start(pos))?;
-            let reader = std::io::BufReader::new(&file);
-            for line in reader.lines() {
-                let line = line?;
-                print_audit_line(&line);
-            }
-            pos = new_len;
-        }
-    }
-}
-
-fn print_last_n_lines(path: &std::path::Path, n: usize) -> Result<()> {
-    use std::io::BufRead;
-    let file =
-        std::fs::File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
-    let reader = std::io::BufReader::new(file);
-    let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
-    let start = lines.len().saturating_sub(n);
-    for line in &lines[start..] {
-        print_audit_line(line);
-    }
-    Ok(())
-}
-
-fn print_audit_line(line: &str) {
-    match serde_json::from_str::<mvm_core::audit::LocalAuditEvent>(line) {
-        Ok(event) => {
-            let kind = serde_json::to_string(&event.kind)
-                .unwrap_or_default()
-                .trim_matches('"')
-                .to_string();
-            let vm = event
-                .vm_name
-                .as_deref()
-                .map(|n| format!("  [{n}]"))
-                .unwrap_or_default();
-            let detail = event
-                .detail
-                .as_deref()
-                .map(|d| format!("  {d}"))
-                .unwrap_or_default();
-            println!("{ts}  {kind}{vm}{detail}", ts = event.timestamp);
-        }
-        Err(_) => {
-            // Non-local-audit line — print as-is (fleet PlanAuditEntry, etc.)
-            println!("{line}");
-        }
     }
 }
 

@@ -23,6 +23,7 @@ pub mod receipt_archive_verify;
 pub mod receipt_export;
 /// Persistent store for runtime-emitted signed ExecutionReceipts.
 pub mod receipt_store;
+pub mod witness;
 
 /// Content-addressed derived store for decision records.
 pub mod decisions;
