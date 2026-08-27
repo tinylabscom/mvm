@@ -1280,7 +1280,7 @@ fn report_append_only(dir: &std::path::Path, tenant: &str, vk: &ed25519_dalek::V
                 ui::error(&format!(
                     "  tree_size {}: witness has {}, host has {}",
                     d.tree_size,
-                    &d.witnessed_root,
+                    d.witnessed_root,
                     d.host_root.as_deref().unwrap_or("nothing")
                 ));
             }
