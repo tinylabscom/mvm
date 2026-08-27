@@ -10,6 +10,15 @@
 
 ## In progress
 
+- [ ] **Extended CI documented-surface repair — issue #2938.**
+      `specs/plans/2026-08-27-extended-ci-documented-surface.md`.
+      Linux and macOS now build the live documented-surface binary with signed
+      release-manifest verification enabled, and macOS installs the root
+      binary's target-gated libkrun dependency through the shared installer.
+      Focused regression tests, actionlint, the exact macOS feature build,
+      workspace tests/check/doctests, and zero-warning Clippy are green.
+      Remaining: merge and close #2938 through the PR link.
+
 - [ ] **Admission cache durability boundary.**
       `specs/plans/2026-08-26-admission-cache-durability.md`.
       Preserve the chain-signed admission record's fail-closed durability
