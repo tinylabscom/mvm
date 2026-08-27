@@ -3069,6 +3069,15 @@ to the configured ceiling and the first terse response immediately after it.
 - [x] Record the delivery in
       `specs/sprint/delivery/2870-extended-ci-recovery.md`.
 
+## 2026-08-26 static crates registry recovery
+
+- [x] Route every Nix `buildRustPackage` crate fetch through the crates.io
+      static CDN while preserving the committed `Cargo.lock` checksums.
+- [x] Guard all current and future Rust Nix derivations with one shared helper
+      and a repository-wide structural regression.
+- [ ] Restore the builder-image and Linux flake gates blocked by issue #2904,
+      then merge the repair through the queue.
+
 ## 2026-08-26 Security peer-policy mutation witness
 
 - [x] Reproduce the scheduled Security failure from run 32931995875 as the

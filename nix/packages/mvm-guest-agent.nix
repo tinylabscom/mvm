@@ -32,9 +32,10 @@
 # the guest agent's runtime profile and signed verb grant, after protocol
 # authentication; image construction does not select a handler set.
 
-{ pkgs
-, lib
-, mvmSrc
+{
+  pkgs,
+  lib,
+  mvmSrc,
 }:
 
 pkgs.rustPlatform.buildRustPackage {
@@ -46,7 +47,10 @@ pkgs.rustPlatform.buildRustPackage {
   # Workspace's Cargo.lock is the source of truth for every crate
   # we vendor. `buildRustPackage` vendors the closure even though
   # we only build mvm-agentd; the unused deps compile zero code.
-  cargoLock.lockFile = mvmSrc + "/Cargo.lock";
+  cargoDeps = import ../lib/static-crates-cargo-deps.nix {
+    inherit pkgs;
+    lockFile = mvmSrc + "/Cargo.lock";
+  };
 
   unpackPhase = import ./workspace-unpack.nix { inherit mvmSrc; };
 
@@ -54,18 +58,25 @@ pkgs.rustPlatform.buildRustPackage {
   # has heavier members (libkrun via mvm-build, libkrun via
   # mvm-providers, etc.) that aren't in the guest closure.
   cargoBuildFlags = [
-    "--package" "mvm-agentd"
-    "--bin" "mvm-guest-agent"
-    "--bin" "mvm-seccomp-apply"
-    "--bin" "mvm-verity-init"
+    "--package"
+    "mvm-agentd"
+    "--bin"
+    "mvm-guest-agent"
+    "--bin"
+    "mvm-seccomp-apply"
+    "--bin"
+    "mvm-verity-init"
     # Guest-side network defense. Installs kernel blackhole routes
     # for `MANDATORY_DENY_RANGES` at boot from `/init` (uid 0) before
     # the main agent forks under setpriv.
-    "--bin" "mvm-guest-netinit"
+    "--bin"
+    "mvm-guest-netinit"
     # Runtime-lean OCI roots still need their static PID 1 and entrypoint
     # wrapper before the read-only runtime overlay is mounted.
-    "--bin" "mvm-oci-init"
-    "--bin" "mvm-oci-entrypoint"
+    "--bin"
+    "mvm-oci-init"
+    "--bin"
+    "mvm-oci-entrypoint"
   ];
 
   # Same selection for the `nix flake check`-equivalent test run.
@@ -73,7 +84,8 @@ pkgs.rustPlatform.buildRustPackage {
   # parsing, seccomp filter golden tests) so they run inside the
   # sandbox without privilege.
   cargoTestFlags = [
-    "--package" "mvm-agentd"
+    "--package"
+    "mvm-agentd"
   ];
 
   # Skip tests by default — they need a Linux build host and the

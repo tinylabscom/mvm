@@ -1,13 +1,21 @@
 # Minimal static-musl privilege-drop helper used by the guest PID 1.
 
-{ rustPlatform, lib, mvmSrc }:
+{
+  pkgs,
+  rustPlatform,
+  lib,
+  mvmSrc,
+}:
 
 rustPlatform.buildRustPackage {
   pname = "mvm-setpriv";
   version = "0.18.1";
 
   src = mvmSrc;
-  cargoLock.lockFile = mvmSrc + "/Cargo.lock";
+  cargoDeps = import ../lib/static-crates-cargo-deps.nix {
+    inherit pkgs;
+    lockFile = mvmSrc + "/Cargo.lock";
+  };
 
   unpackPhase = import ./workspace-unpack.nix { inherit mvmSrc; };
 
@@ -15,8 +23,10 @@ rustPlatform.buildRustPackage {
   # Nix's sentinel home directory in the shared build root.
   HOME = "/tmp";
   cargoBuildFlags = [
-    "--package" "mvm-agentd"
-    "--bin" "mvm-setpriv"
+    "--package"
+    "mvm-agentd"
+    "--bin"
+    "mvm-setpriv"
   ];
   doCheck = false;
 

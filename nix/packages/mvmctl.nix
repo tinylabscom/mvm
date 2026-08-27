@@ -9,24 +9,26 @@
 #   DX but does not force a host libkrun install on systems that do not
 #   need the native FFI path.
 
-{ lib
-, stdenv
-, rustPlatform
-, pkg-config
-, cargo-zigbuild
-, curl
-, zig
-, embeddedCargo
-, embeddedRustc
-, lld
-, mvmSrc
-, libkrun ? null
-, libkrunfw ? null
-, tpm2-tss ? null
-, withBuilderVm ? true
-, withNativeLibkrun ? false
-, withTpm2 ? false
-, runTests ? true
+{
+  pkgs,
+  lib,
+  stdenv,
+  rustPlatform,
+  pkg-config,
+  cargo-zigbuild,
+  curl,
+  zig,
+  embeddedCargo,
+  embeddedRustc,
+  lld,
+  mvmSrc,
+  libkrun ? null,
+  libkrunfw ? null,
+  tpm2-tss ? null,
+  withBuilderVm ? true,
+  withNativeLibkrun ? false,
+  withTpm2 ? false,
+  runTests ? true,
 }:
 
 assert withNativeLibkrun -> libkrun != null;
@@ -36,7 +38,7 @@ assert withTpm2 -> tpm2-tss != null;
 
 let
   featureList =
-    []
+    [ ]
     ++ lib.optionals withBuilderVm [
       "mvm-cli/builder-vm"
       "mvm-build/builder-vm"
@@ -53,7 +55,10 @@ rustPlatform.buildRustPackage {
 
   src = mvmSrc;
 
-  cargoLock.lockFile = mvmSrc + "/Cargo.lock";
+  cargoDeps = import ../lib/static-crates-cargo-deps.nix {
+    inherit pkgs;
+    lockFile = mvmSrc + "/Cargo.lock";
+  };
 
   # The `nix/` subflake imports the workspace as `path:..`; when the
   # flake itself is evaluated from a git source, that input can arrive
@@ -68,20 +73,19 @@ rustPlatform.buildRustPackage {
     runHook postUnpack
   '';
 
-  cargoBuildFlags =
-    [
-      "--package"
-      "mvmctl"
-      "--package"
-      "mvm-hostd"
-    ]
-    ++ lib.optionals (!withBuilderVm) [
-      "--no-default-features"
-    ]
-    ++ lib.optionals (featureList != [ ]) [
-      "--features"
-      (lib.concatStringsSep "," featureList)
-    ];
+  cargoBuildFlags = [
+    "--package"
+    "mvmctl"
+    "--package"
+    "mvm-hostd"
+  ]
+  ++ lib.optionals (!withBuilderVm) [
+    "--no-default-features"
+  ]
+  ++ lib.optionals (featureList != [ ]) [
+    "--features"
+    (lib.concatStringsSep "," featureList)
+  ];
 
   cargoTestFlags = [
     "--package"
@@ -102,31 +106,32 @@ rustPlatform.buildRustPackage {
   # auditable.
   auditable = !withNativeLibkrun;
 
-  nativeBuildInputs =
-    [
-      cargo-zigbuild
-      lld
-      pkg-config
-      zig
-    ]
-    ++ lib.optional withNativeLibkrun rustPlatform.bindgenHook;
+  nativeBuildInputs = [
+    cargo-zigbuild
+    lld
+    pkg-config
+    zig
+  ]
+  ++ lib.optional withNativeLibkrun rustPlatform.bindgenHook;
 
   nativeCheckInputs = [
     curl
   ];
 
-  buildInputs = lib.optionals withNativeLibkrun [
-    libkrun
-    libkrunfw
-  ]
-  ++ lib.optionals withTpm2 [
-    tpm2-tss
-  ];
+  buildInputs =
+    lib.optionals withNativeLibkrun [
+      libkrun
+      libkrunfw
+    ]
+    ++ lib.optionals withTpm2 [
+      tpm2-tss
+    ];
 
   env = {
     MVM_EMBED_CARGO = "${embeddedCargo}/bin/cargo";
     MVM_EMBED_RUSTC = "${embeddedRustc}/bin/rustc";
-  } // lib.optionalAttrs withNativeLibkrun {
+  }
+  // lib.optionalAttrs withNativeLibkrun {
     MVM_LIBKRUN_HEADER = "${lib.getDev libkrun}/include/libkrun.h";
   };
 

@@ -530,6 +530,14 @@ for detailed scope and acceptance criteria.
 
 ## In-flight plans
 
+- [ ] **Static crates registry recovery**
+      (`specs/plans/2026-08-26-static-crates-registry-fetch.md`, issue #2904).
+      The pinned Nix crate fetcher is blocked by crates.io's curl user-agent
+      policy. One shared cargo-deps helper is applied to every repository Rust
+      derivation so checksum-verified downloads use the unaffected static CDN
+      without redefining Cargo's built-in registry, and future derivations
+      cannot silently restore the API endpoint.
+
 - [ ] **`.mvmev` offline verifiability**
       (`specs/plans/2026-08-25-mvmev-offline-verifiability.md`, issue #2863).
       The format-level gap is complete: schema version 1 now normatively names

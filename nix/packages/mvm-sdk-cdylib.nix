@@ -11,9 +11,10 @@
 # matching `mvm-guest-agent`), not the static-musl builder-VM target — a
 # `cdylib` needs a dynamic loader, which the glibc rootfs provides.
 
-{ pkgs
-, lib
-, mvmSrc
+{
+  pkgs,
+  lib,
+  mvmSrc,
 }:
 
 pkgs.rustPlatform.buildRustPackage {
@@ -22,14 +23,18 @@ pkgs.rustPlatform.buildRustPackage {
 
   src = mvmSrc;
 
-  cargoLock.lockFile = mvmSrc + "/Cargo.lock";
+  cargoDeps = import ../lib/static-crates-cargo-deps.nix {
+    inherit pkgs;
+    lockFile = mvmSrc + "/Cargo.lock";
+  };
 
   unpackPhase = import ./workspace-unpack.nix { inherit mvmSrc; };
 
   # Build only mvm-sdk's library target, which produces both the Rust `lib`
   # and the `cdylib`. The cdylib is renamed to the stable FFI filename below.
   cargoBuildFlags = [
-    "--package" "mvm-sdk"
+    "--package"
+    "mvm-sdk"
     "--lib"
   ];
 
@@ -47,8 +52,7 @@ pkgs.rustPlatform.buildRustPackage {
   '';
 
   meta = with lib; {
-    description =
-      "mvm in-guest host-services FFI — one JSON-in/JSON-out C ABI over the broker clients, loaded by every language SDK";
+    description = "mvm in-guest host-services FFI — one JSON-in/JSON-out C ABI over the broker clients, loaded by every language SDK";
     homepage = "https://github.com/tinylabscom/mvm";
     license = licenses.asl20;
     platforms = platforms.linux;

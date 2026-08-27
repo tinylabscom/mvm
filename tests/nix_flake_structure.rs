@@ -35,6 +35,86 @@ fn normalized_whitespace(content: &str) -> String {
 }
 
 #[test]
+fn every_rust_derivation_uses_the_static_crates_registry() {
+    let helper = nix_dir().join("lib").join("static-crates-cargo-deps.nix");
+    let helper_content = fs::read_to_string(&helper)
+        .unwrap_or_else(|e| panic!("static crate registry helper must be present: {e}"));
+
+    assert!(
+        helper_content.contains("https://crates.io/api/v1/crates")
+            && helper_content.contains("https://static.crates.io/crates")
+            && helper_content.contains("builtins.replaceStrings")
+            && helper_content.contains("fetchurl = fetchStaticCrate"),
+        "the cargo-deps helper must rewrite crates.io downloads to its static CDN"
+    );
+    assert!(
+        !helper_content.contains("extraRegistries"),
+        "the helper must not redefine Cargo's built-in crates.io source"
+    );
+
+    let mut nix_files = Vec::new();
+    collect_nix_files(&nix_dir(), &mut nix_files);
+    let mut rust_derivations = 0;
+    for path in nix_files {
+        let content = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()));
+        if !content.contains("rustPlatform.buildRustPackage {") {
+            continue;
+        }
+        rust_derivations += 1;
+        assert!(
+            content.contains("cargoDeps = import")
+                && content.contains("static-crates-cargo-deps.nix"),
+            "{} builds Rust without the static crates.io registry helper",
+            path.display()
+        );
+    }
+
+    assert!(
+        rust_derivations > 0,
+        "expected at least one Rust Nix derivation"
+    );
+}
+
+#[test]
+fn mvm_setpriv_imports_pass_pkgs_to_the_static_crates_helper() {
+    let mk_guest = normalized_whitespace(
+        &fs::read_to_string(nix_dir().join("lib").join("mk-guest.nix"))
+            .expect("mk-guest.nix must be readable"),
+    );
+    assert!(
+        mk_guest.contains(
+            "import ../packages/mvm-setpriv.nix { inherit pkgs; rustPlatform = pkgs.pkgsStatic.rustPlatform;"
+        ),
+        "the workload guest must pass pkgs into mvm-setpriv.nix"
+    );
+
+    let builder_flake = normalized_whitespace(
+        &fs::read_to_string(nix_dir().join("images/builder-vm/flake.nix"))
+            .expect("builder VM flake must be readable"),
+    );
+    assert!(
+        builder_flake.contains(
+            "import (workspace + \"/nix/packages/mvm-setpriv.nix\") { inherit pkgs; rustPlatform = pkgs.pkgsStatic.rustPlatform;"
+        ),
+        "the builder guest must pass pkgs into mvm-setpriv.nix"
+    );
+}
+
+fn collect_nix_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    for entry in
+        fs::read_dir(dir).unwrap_or_else(|e| panic!("{} must be readable: {e}", dir.display()))
+    {
+        let path = entry.expect("directory entry must be readable").path();
+        if path.is_dir() {
+            collect_nix_files(&path, files);
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("nix") {
+            files.push(path);
+        }
+    }
+}
+
+#[test]
 fn flake_nix_exists_and_imports_microvm_nix() {
     let path = nix_dir().join("flake.nix");
     let content =
@@ -122,7 +202,8 @@ fn host_mvmctl_package_is_source_only() {
     );
     assert!(
         content.contains("src = mvmSrc")
-            && content.contains("cargoLock.lockFile = mvmSrc + \"/Cargo.lock\""),
+            && content.contains("static-crates-cargo-deps.nix")
+            && content.contains("lockFile = mvmSrc + \"/Cargo.lock\""),
         "mvmctl package must use the source checkout and committed Cargo.lock"
     );
     assert!(
@@ -1097,10 +1178,11 @@ fn runtime_overlay_guest_packages_use_static_musl_and_have_no_loader_bundle() {
         .join("flake.nix");
     let content = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("nix/images/runtime-overlay/flake.nix must be present: {e}"));
-    let runtime = content
+    let normalized = normalized_whitespace(&content);
+    let runtime = normalized
         .split("mkRuntimeOverlay = system:")
         .nth(1)
-        .and_then(|tail| tail.split("\n    in\n    {").next())
+        .and_then(|tail| tail.split(" in {").next())
         .expect("runtime-overlay derivation body");
 
     assert!(
@@ -1136,9 +1218,10 @@ fn runtime_overlay_exposes_sdk_sidecar_separately() {
         .join("flake.nix");
     let content = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("nix/images/runtime-overlay/flake.nix must be present: {e}"));
+    let normalized = normalized_whitespace(&content);
 
     assert!(
-        content.contains("mkSdkSidecar = system:"),
+        normalized.contains("mkSdkSidecar = system:"),
         "the glibc SDK FFI must have a distinct sidecar derivation"
     );
     assert!(
@@ -1168,9 +1251,10 @@ fn runtime_overlay_publishes_an_attachable_sdk_sidecar_image() {
         .join("flake.nix");
     let content = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("nix/images/runtime-overlay/flake.nix must be present: {e}"));
+    let normalized = normalized_whitespace(&content);
 
     assert!(
-        content.contains("mkSdkSidecarImage = system:"),
+        normalized.contains("mkSdkSidecarImage = system:"),
         "the sidecar must have an ext4-image derivation, not just a directory tree"
     );
     assert!(
@@ -1341,18 +1425,19 @@ fn cryptsetup_pin_is_shared_by_builder_vm_and_runtime_overlay() {
         ("builder-vm flake", builder.as_str()),
         ("runtime-overlay flake", runtime.as_str()),
     ] {
+        let normalized = normalized_whitespace(content);
         assert!(
-            content.contains("pinnedCryptsetupVersion = \"2.8.6\""),
+            normalized.contains("pinnedCryptsetupVersion = \"2.8.6\""),
             "{name} must pin cryptsetup 2.8.6 explicitly for ADR-017 / #223"
         );
         assert!(
-            content.contains(
+            normalized.contains(
                 "pinnedCryptsetupSrcHash = \"sha256-gAQmX9mTiF0I97Yz2+BWhR3hohAwdhOk693HQ/zO/lo=\""
             ),
             "{name} must pin the cryptsetup 2.8.6 release tarball hash"
         );
         assert!(
-            content.contains("pinnedCryptsetupFor = pkgs:"),
+            normalized.contains("pinnedCryptsetupFor = pkgs:"),
             "{name} must expose a pinned cryptsetup helper instead of using raw pkgs.cryptsetup"
         );
         assert!(

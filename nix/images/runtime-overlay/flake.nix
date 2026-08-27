@@ -86,7 +86,10 @@
   outputs =
     { self, nixpkgs, ... }:
     let
-      systems = [ "aarch64-linux" "x86_64-linux" ];
+      systems = [
+        "aarch64-linux"
+        "x86_64-linux"
+      ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
 
       # Workspace staging — same `MVM_WORKSPACE_PATH` env override
@@ -105,7 +108,7 @@
         (import (workspaceRoot + "/nix/lib/workspace-filter.nix") {
           inherit (nixpkgs) lib;
         })
-        { inherit workspaceRoot; };
+          { inherit workspaceRoot; };
 
       # mvmctl semver pinned to match
       # `[workspace.package].version` in the root Cargo.toml. The
@@ -126,7 +129,8 @@
       # `--bin mvm-guest-agent --bin mvm-seccomp-apply --bin mvm-verity-init`
       # flags); we just don't copy the verity-init binary into the
       # overlay's staging dir.
-      mvmGuestFor = system:
+      mvmGuestFor =
+        system:
         let
           pkgs = import nixpkgs { inherit system; };
         in
@@ -140,7 +144,8 @@
       # Folded into mvm-agentd as a [[bin]], so we select just that
       # binary out of the mvm-agentd package; workspace Cargo.lock
       # drives the closure.
-      mvmRunnerFor = system:
+      mvmRunnerFor =
+        system:
         let
           pkgs = import nixpkgs { inherit system; };
           staticPkgs = pkgs.pkgsStatic;
@@ -149,10 +154,16 @@
           pname = "mvm-runner";
           version = overlayVersion;
           src = workspace;
-          cargoLock = {
+          cargoDeps = import (workspace + "/nix/lib/static-crates-cargo-deps.nix") {
+            inherit pkgs;
             lockFile = workspace + "/Cargo.lock";
           };
-          cargoBuildFlags = [ "--package" "mvm-agentd" "--bin" "mvm-runner" ];
+          cargoBuildFlags = [
+            "--package"
+            "mvm-agentd"
+            "--bin"
+            "mvm-runner"
+          ];
           doCheck = false;
           meta = {
             description = "mvm function-workload entrypoint runner (plan 60 Phase 5 Slice C)";
@@ -160,7 +171,8 @@
           };
         };
 
-      mvmEgressClientFor = system:
+      mvmEgressClientFor =
+        system:
         let
           pkgs = import nixpkgs { inherit system; };
         in
@@ -170,7 +182,8 @@
           mvmSrc = workspace;
         };
 
-      mvmAddonDnsFor = system:
+      mvmAddonDnsFor =
+        system:
         let
           pkgs = import nixpkgs { inherit system; };
         in
@@ -180,7 +193,8 @@
           mvmSrc = workspace;
         };
 
-      mvmExitReportFor = system:
+      mvmExitReportFor =
+        system:
         let
           pkgs = import nixpkgs { inherit system; };
         in
@@ -196,7 +210,8 @@
       # filename; built for the glibc workload rootfs (same platform as the
       # agent), not the static-musl builder target — a cdylib needs the
       # dynamic loader the rootfs provides.
-      mvmSdkCdylibFor = system:
+      mvmSdkCdylibFor =
+        system:
         let
           pkgs = import nixpkgs { inherit system; };
         in
@@ -241,7 +256,8 @@
       # `nix/images/builder-vm/flake.nix` together.
       pinnedCryptsetupVersion = "2.8.6";
       pinnedCryptsetupSrcHash = "sha256-gAQmX9mTiF0I97Yz2+BWhR3hohAwdhOk693HQ/zO/lo=";
-      pinnedCryptsetupFor = pkgs:
+      pinnedCryptsetupFor =
+        pkgs:
         pkgs.cryptsetup.overrideAttrs (_old: {
           version = pinnedCryptsetupVersion;
           src = pkgs.fetchurl {
@@ -258,7 +274,8 @@
       # 32 MiB allocation.
       overlaySizeBytes = 16 * 1024 * 1024;
 
-      mkSdkSidecar = system:
+      mkSdkSidecar =
+        system:
         let
           pkgs = import nixpkgs { inherit system; };
           hostsvc = mvmSdkCdylibFor system;
@@ -305,7 +322,8 @@
       # `sha256sum`-format manifest the host-side resolver verifies before it
       # offers an attachment — so a truncated or drifted artifact refuses to
       # boot instead of surfacing as an in-guest dlopen failure.
-      mkSdkSidecarImage = system:
+      mkSdkSidecarImage =
+        system:
         let
           pkgs = import nixpkgs { inherit system; };
           tree = mkSdkSidecar system;
@@ -356,7 +374,8 @@
             echo "  VERSION: $(cat $out/VERSION)" >&2
           '';
 
-      mkRuntimeOverlay = system:
+      mkRuntimeOverlay =
+        system:
         let
           pkgs = import nixpkgs { inherit system; };
           guest = mvmGuestFor system;
@@ -373,7 +392,13 @@
               pkgs.coreutils
             ];
             passthru = {
-              inherit guest runner egressClient addonDns exitReport;
+              inherit
+                guest
+                runner
+                egressClient
+                addonDns
+                exitReport
+                ;
               sdkSidecar = mkSdkSidecar system;
               sdkSidecarImage = mkSdkSidecarImage system;
               version = overlayVersion;

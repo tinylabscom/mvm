@@ -4,13 +4,15 @@
 # driver, which is not part of the minimal rustPlatform toolchain used for
 # the release build.
 
-{ lib
-, stdenv
-, rustPlatform
-, pkg-config
-, clippy
-, mvmSrc
-, tpm2-tss
+{
+  pkgs,
+  lib,
+  stdenv,
+  rustPlatform,
+  pkg-config,
+  clippy,
+  mvmSrc,
+  tpm2-tss,
 }:
 
 rustPlatform.buildRustPackage {
@@ -19,7 +21,10 @@ rustPlatform.buildRustPackage {
 
   src = mvmSrc;
 
-  cargoLock.lockFile = mvmSrc + "/Cargo.lock";
+  cargoDeps = import ../lib/static-crates-cargo-deps.nix {
+    inherit pkgs;
+    lockFile = mvmSrc + "/Cargo.lock";
+  };
 
   unpackPhase = ''
     runHook preUnpack
