@@ -1,5 +1,8 @@
 # FlowMux HTTPS live-client repair
 
+Backing: shipped-source
+Validation: check-sprint-append
+
 Issue: #2930
 
 The forward proxy must continue refusing an absolute-form `https://` request:
