@@ -1,48 +1,17 @@
-//! QEMU **workload** runtime backend.
+//! Host-process mechanics for the QEMU **workload** backend.
 //!
 //! The dev/test counterpart to the QEMU *builder* (`mvm-build`'s
-//! `qemu_builder`): this boots a user **workload** microVM via
-//! `qemu-system-<arch>` so a workload can run for dev/test on a host
-//! without `/dev/kvm` (TCG fallback) or where Firecracker isn't wanted.
-//! **Firecracker stays the sole production runtime**; QEMU is opt-in
-//! (`--hypervisor qemu` / `MVM_BACKEND=qemu`) and `auto_select` never
-//! picks it.
+//! `qemu_builder`): boots a user workload microVM via `qemu-system-<arch>` so a
+//! workload can run for dev/test on a host without `/dev/kvm` (TCG fallback) or
+//! where Firecracker isn't wanted. **Firecracker stays the sole production
+//! runtime**; QEMU is opt-in (`--hypervisor qemu` / `MVM_BACKEND=qemu`) and
+//! `auto_select` never picks it.
 //!
-//! The selectable launch path is the unified workload runner over
-//! [`crate::driver::QemuDriver`] — a QEMU boot attaches the universal
-//! initramfs and receives `ActivateEnvironment` over vsock exactly like
-//! Firecracker/libkrun/HVF. This raw backend remains as the driver's
-//! identity delegate and owns the shared QEMU machinery both paths use:
-//! guest-CID allocation, the AF_VSOCK↔UNIX bridge, and the pid-file
-//! lifecycle.
+//! Locating the binary, allocating a CID, PID files, and the vsock bridge
+//! subprocesses live here; the `VmmDriver` half is [`super::qemu`].
 //!
-//! ## Tier
-//!
-//! Dev tier only, outside the security claims. `AnyBackend::tier()` reports
-//! the **best-case** Tier 2 (KVM-accelerated, comparable to the
-//! microvm.nix/qemu classification); when `/dev/kvm` is absent the boot
-//! runs under TCG software emulation and `start` emits a loud Tier-3
-//! banner. The static enum tier stays
-//! Tier 2 because it's a compile-time classification consulted by the
-//! tier-sync test + `doctor`; the live KVM-vs-TCG mode is a *runtime*
-//! property surfaced through the banner and `doctor`, not the enum.
-//!
-//! ## Lifecycle
-//!
-//! - `start` boots `qemu-system` with `-daemonize -pidfile` (qemu forks
-//!   and writes its own PID file), captures the guest serial console
-//!   **write-only** to `console.log` (claim 15 — no host input fd), wires
-//!   user-mode (slirp) networking, and attaches a virtio-vsock device on
-//!   a per-VM guest CID. It then spawns a host-side AF_VSOCK↔UNIX bridge
-//!   (a detached `mvmctl` subprocess) so the shared UNIX-socket agent
-//!   client reaches the guest agent exactly as it does under
-//!   libkrun/Firecracker — QEMU's `vhost-vsock` speaks real AF_VSOCK, not
-//!   the per-port UNIX sockets those VMMs expose. The bridge is
-//!   spec-driven ([`QemuBridgeSpec`]): the runner's driver additionally
-//!   relays the guest-dialed channels (egress, broker) and captures the
-//!   workload-exit report through the same process.
-//! - `stop` SIGTERMs the qemu PID (then SIGKILL), reaps the bridge.
-//! - `status` probes the qemu PID; `list` walks `~/.mvm/vms/*/qemu.pid`.
+//! The file was called `qemu_legacy` while the backend split was in progress.
+//! Nothing in it is legacy — `qemu.rs` calls into it on every boot.
 
 use anyhow::{Context, Result, anyhow, bail};
 use mvm_core::config::{vm_state_dir, vms_dir};

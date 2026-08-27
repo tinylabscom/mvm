@@ -16,7 +16,7 @@ use anyhow::{Context, Result, bail};
 use mvm_build::rootfs_inject::{InjectBinary, build_inject_initramfs};
 use mvm_vmm::host::hvf_supervisor::{HvfDisk, HvfSupervisorConfig};
 
-use mvm_backends::driver::hvf_legacy::resolve_supervisor_path;
+use mvm_backends::driver::hvf_process::resolve_supervisor_path;
 
 /// A rootfs-injection request.
 pub struct InjectRequest<'a> {

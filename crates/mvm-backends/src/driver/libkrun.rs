@@ -60,7 +60,7 @@ fn libkrun_base_bootargs(virtiofs_root: bool, has_disk: bool) -> String {
     } else {
         // Verity / initramfs boot: the initramfs PID 1 owns root/init selection,
         // so only the console base is emitted here.
-        crate::driver::libkrun_legacy::VERITY_CMDLINE.to_string()
+        crate::driver::libkrun_process::VERITY_CMDLINE.to_string()
     }
 }
 
@@ -93,7 +93,7 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
     // kernel to a libkrun-loadable ELF and reports the format; on aarch64 it is a
     // passthrough at Raw. The driver must not diverge from the host kernel-prep.
     let (kernel, kernel_format) =
-        crate::driver::libkrun_legacy::libkrun_kernel_for_host(&kernel_path)?;
+        crate::driver::libkrun_process::libkrun_kernel_for_host(&kernel_path)?;
 
     let vcpus = u8::try_from(spec.vcpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
     let state_dir_str = state_dir.to_string_lossy().into_owned();
@@ -378,7 +378,7 @@ impl VmmDriver for LibkrunDriver {
         let json = serde_json::to_string(&cfg)
             .map_err(|e| anyhow!("serialize libkrun SupervisorConfig: {e}"))?;
 
-        let supervisor = crate::driver::libkrun_legacy::resolve_supervisor_path()?;
+        let supervisor = crate::driver::libkrun_process::resolve_supervisor_path()?;
         let stdout = mvm_vmm::host::console_capture::open_console_capture(&console_log)
             .map(Stdio::from)
             .unwrap_or_else(|_| Stdio::null());
@@ -398,7 +398,7 @@ impl VmmDriver for LibkrunDriver {
 
         // Poll for the PID file (boot confirmed). If the supervisor exits first,
         // surface that — its console capture carries the actionable detail.
-        let deadline = Instant::now() + crate::driver::libkrun_legacy::PID_FILE_TIMEOUT;
+        let deadline = Instant::now() + crate::driver::libkrun_process::PID_FILE_TIMEOUT;
         loop {
             if pid_file.exists() {
                 break;
@@ -416,7 +416,7 @@ impl VmmDriver for LibkrunDriver {
                 let _ = child.kill();
                 bail!(
                     "libkrun supervisor did not confirm boot within {:?}; see {}",
-                    crate::driver::libkrun_legacy::PID_FILE_TIMEOUT,
+                    crate::driver::libkrun_process::PID_FILE_TIMEOUT,
                     console_log.display()
                 );
             }
@@ -428,7 +428,7 @@ impl VmmDriver for LibkrunDriver {
         // attach / shell_exec that immediately follows doesn't race a
         // not-yet-bound socket and report the VM "not running".
         let agent_socket = vm_vsock_port_socket_at(&state_dir, GUEST_AGENT_PORT);
-        let sock_deadline = Instant::now() + crate::driver::libkrun_legacy::VSOCK_SOCKET_TIMEOUT;
+        let sock_deadline = Instant::now() + crate::driver::libkrun_process::VSOCK_SOCKET_TIMEOUT;
         while !agent_socket.exists() {
             if let Some(status) = child
                 .try_wait()
@@ -445,7 +445,7 @@ impl VmmDriver for LibkrunDriver {
                 bail!(
                     "libkrun supervisor did not bind vsock socket {} within {:?}; killed; see {}",
                     agent_socket.display(),
-                    crate::driver::libkrun_legacy::VSOCK_SOCKET_TIMEOUT,
+                    crate::driver::libkrun_process::VSOCK_SOCKET_TIMEOUT,
                     console_log.display()
                 );
             }
@@ -501,7 +501,7 @@ impl RunningVm for LibkrunRunningVm {
     }
 
     fn host_process_id(&self) -> Option<u32> {
-        crate::driver::libkrun_legacy::read_pid(&self.pid_file)
+        crate::driver::libkrun_process::read_pid(&self.pid_file)
             .and_then(|pid| u32::try_from(pid).ok())
     }
 
@@ -514,21 +514,21 @@ impl RunningVm for LibkrunRunningVm {
     fn kill(&self) -> Result<()> {
         // Arm before SIGTERM so a short-lived supervisor cannot exit between
         // signal delivery and observer registration.
-        if let Some(pid) = crate::driver::libkrun_legacy::read_pid(&self.pid_file)
-            && crate::driver::libkrun_legacy::pid_alive(pid)
+        if let Some(pid) = crate::driver::libkrun_process::read_pid(&self.pid_file)
+            && crate::driver::libkrun_process::pid_alive(pid)
         {
             let observer = mvm_vmm::host::process_exit::ProcessExitObserver::arm(pid).ok();
             // SIGTERM gives libkrun a chance to close its virtio-blk file
             // descriptors, then SIGKILL if it ignores us within the grace
             // window.
-            crate::driver::libkrun_legacy::send_signal(pid, libc::SIGTERM);
+            crate::driver::libkrun_process::send_signal(pid, libc::SIGTERM);
             let exited = mvm_vmm::host::process_exit::wait_for_pid_exit(
                 pid,
-                Instant::now() + crate::driver::libkrun_legacy::STOP_TIMEOUT,
+                Instant::now() + crate::driver::libkrun_process::STOP_TIMEOUT,
                 observer.as_ref(),
             );
             if !exited {
-                crate::driver::libkrun_legacy::send_signal(pid, libc::SIGKILL);
+                crate::driver::libkrun_process::send_signal(pid, libc::SIGKILL);
                 if !mvm_vmm::host::process_exit::wait_for_pid_exit(
                     pid,
                     Instant::now() + Duration::from_millis(500),
@@ -542,7 +542,7 @@ impl RunningVm for LibkrunRunningVm {
             }
         }
         let _ = std::fs::remove_file(&self.pid_file);
-        crate::driver::libkrun_legacy::cleanup_vsock_sockets(&self.state_dir);
+        crate::driver::libkrun_process::cleanup_vsock_sockets(&self.state_dir);
         Ok(())
     }
 
@@ -560,8 +560,8 @@ impl RunningVm for LibkrunRunningVm {
 
     fn status(&self) -> Result<VmStatus> {
         Ok(
-            match crate::driver::libkrun_legacy::read_pid(&self.pid_file) {
-                Some(pid) if crate::driver::libkrun_legacy::pid_alive(pid) => VmStatus::Running,
+            match crate::driver::libkrun_process::read_pid(&self.pid_file) {
+                Some(pid) if crate::driver::libkrun_process::pid_alive(pid) => VmStatus::Running,
                 _ => VmStatus::Stopped,
             },
         )
@@ -673,7 +673,7 @@ mod tests {
     }
 
     #[test]
-    fn carrying_a_plan_does_not_move_the_supervisor_off_its_legacy_route() {
+    fn carrying_a_plan_does_not_move_the_supervisor_onto_the_admission_route() {
         let mut spec = spec_with(KernelImage::Path("/k/Image".into()), vec![], vec![]);
         spec.plan_binding = Some(binding());
         let cfg = relay(&spec);
@@ -1039,7 +1039,7 @@ mod tests {
         let cfg = relay(&spec);
         assert_eq!(
             cfg.krun.kernel_cmdline.as_deref(),
-            Some(crate::driver::libkrun_legacy::VERITY_CMDLINE)
+            Some(crate::driver::libkrun_process::VERITY_CMDLINE)
         );
     }
 

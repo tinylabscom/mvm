@@ -7,9 +7,9 @@ pub mod hvf_restore;
 pub mod libkrun;
 pub mod qemu;
 
-pub mod hvf_legacy;
-pub mod libkrun_legacy;
-pub mod qemu_legacy;
+pub mod hvf_process;
+pub mod libkrun_process;
+pub mod qemu_process;
 
 pub use fc::FcDriver;
 pub use hvf::HvfDriver;
