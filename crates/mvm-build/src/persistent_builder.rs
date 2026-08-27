@@ -421,23 +421,13 @@ impl PersistentBuilderSupervisor {
             job_dir_relpath,
         };
 
-        // The generic shell-job channel has no typed mvm-builderd equivalent
-        // yet, so this dispatch always resolves to the legacy route. Emit the
-        // structured diagnostic so the remaining shell surface stays visible
-        // and shrinkable; per-operation typed routing (BuildGuestImage /
-        // FlakeCheck via BuilderdClient) lands in the callers behind the
-        // opt-in flag, flipping this resolution one operation at a time.
-        let route = crate::builder_route::resolve_route(
-            false,
-            crate::builder_route::typed_opt_in(|k| std::env::var(k).ok()),
-        );
-        if route == crate::builder_route::BuilderRoute::LegacyShell {
-            tracing::debug!(
-                target: "mvm::builder",
-                "{}",
-                crate::builder_route::legacy_shell_diagnostic(&job_id.to_string())
-            );
-        }
+        // The generic shell-job channel is still the only channel for a
+        // builder job of this shape — `BuildGuestImage` / `FlakeCheck` have
+        // typed `mvm-builderd` equivalents and this does not. The route used to
+        // be "decided" here by a resolver called with `daemon_reachable: false`
+        // hardcoded, so it only ever returned one answer; the decision is the
+        // absence of a typed op, and `xtask check-builder-shell-job-sites`
+        // is what keeps that surface visible and shrinkable.
 
         // Emit `dispatched` before the round begins. Reasons:
         //
