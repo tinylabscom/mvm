@@ -246,7 +246,7 @@ jobs:
   # The universal initramfs, without which a published prod image cannot be
   # sealed-booted from its own release assets.
   #
-  # `mvm-verity-init` runs from this as PID 1: it sets up the dm-verity target
+  # the universal initramfs agent runs from this as PID 1: it sets up the dm-verity target
   # over the rootfs, mounts the runtime overlay at /sysroot/mvm/runtime, and
   # switch_roots. A source checkout builds one locally
   # (`resolve_or_build_local_initramfs`); an installed binary calls

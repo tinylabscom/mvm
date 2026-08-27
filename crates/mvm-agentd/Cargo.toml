@@ -38,16 +38,6 @@ path = "src/bin/mvm-seccomp-apply.rs"
 name = "mvm-runner"
 path = "src/bin/mvm-runner.rs"
 
-# Early-userspace init (PID 1) that runs from the verity initramfs
-# baked by `mkGuest` when `verifiedBoot = true`. Reads the roothash
-# from /proc/cmdline, constructs the dm-verity device-mapper target
-# via raw ioctls, mounts it, and switch_roots to the real /init.
-# Bypasses Firecracker's auto-appended `root=/dev/vda` by owning the
-# boot pivot in userspace.
-[[bin]]
-name = "mvm-verity-init"
-path = "src/bin/mvm-verity-init.rs"
-
 # Guest-side network defense. Installs kernel blackhole
 # routes for `MANDATORY_DENY_RANGES` (cloud metadata, link-local,
 # CGNAT, host loopback) inside every microVM. Run as root from

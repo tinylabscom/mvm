@@ -612,7 +612,6 @@ mod tests {
             &guest_layout.netinit,
             &guest_layout.egress_client,
             &guest_layout.entrypoint_runner,
-            &guest_layout.verity_init,
         ] {
             std::fs::write(path, b"#!/bin/sh\nexit 0\n").expect("seed guest runtime cache");
         }

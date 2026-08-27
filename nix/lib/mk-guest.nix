@@ -982,7 +982,7 @@ let
     # agent shows up in `mvmctl status`.
     #
     # The agent rides the runtime overlay: on a verity boot
-    # `mvm-verity-init` bind-mounts it at /mvm/runtime before
+    # the guest agent bind-mounts it at /mvm/runtime before
     # switch_root, and on a non-verity boot the overlay is mounted
     # there directly, so /mvm/runtime/agent is the canonical binary
     # location. mkGuest no longer bakes a /usr/local/bin fallback, so ANY
@@ -1189,21 +1189,14 @@ let
   # Side-binaries from the guest-agent derivation. The agent, netinit,
   # addon-dns, exit-report, and egress-client the guest execs at boot now
   # come exclusively from the mounted runtime overlay at `/mvm/runtime`, so
-  # mkGuest no longer bakes them into the rootfs. These two are still needed
-  # off the overlay path: `mvm-seccomp-apply` on the per-service launch line,
-  # and `mvm-verity-init` as PID 1 of the verity initramfs.
+  # mkGuest no longer bakes them into the rootfs. This one is still needed
+  # off the overlay path: `mvm-seccomp-apply` on the per-service launch line.
   #
   # `mvm-seccomp-apply` ships in the same Cargo workspace member and
   # derivation as the agent. The per-service launch line in
   # `mkServiceBlock` execs it via setpriv to apply the tier's seccomp
   # filter before handing control to the workload.
   seccompApplyBinary = "${guestAgentPkg}/bin/mvm-seccomp-apply";
-
-  # `mvm-verity-init` is the PID 1 of the verity initramfs.
-  # Baked into the verity-initrd cpio.gz, not into the rootfs
-  # directly — wired here as a passthru export so the initramfs
-  # builder can reach it without duplicating the agent derivation.
-  verityInitBinary = "${guestAgentPkg}/bin/mvm-verity-init";
 
   mvmAuditProbeBinary = "${auditProbePkg}/bin/audit-probe";
 
@@ -1287,12 +1280,12 @@ let
     chmod 0444 "$out/nix-path-registration"
 
     # The mvm runtime overlay is
-    # bind-mounted at /mvm/runtime by `mvm-verity-init` before
+    # bind-mounted at /mvm/runtime by the universal initramfs agent before
     # switch_root. The directory must exist in the rootfs so the
     # bind-mount has a target. Mode 0755 (owner root); the overlay
     # itself is mounted read-only over it, so contents can't be
     # written by the guest regardless. Outside the verity-boot
-    # path (dev-mode VMs that don't run `mvm-verity-init`) the
+    # path (dev-mode VMs that mount no overlay) the
     # directory is empty — /init below falls back to the baked-in
     # agent. `/mvm/` is reserved (an admission-time check
     # rejects OCI images that carry content under this path).
@@ -1683,9 +1676,9 @@ warnUnenforced (rootfsImage.overrideAttrs (old: {
     inherit hypervisor;
     resources = { inherit vcpus memory_mib; };
     # Expose the side-binaries from the guest-agent build so
-    # downstream derivations (verity-initrd, per-service launch line
+    # downstream derivations (per-service launch line
     # in `mkServiceBlock`) can reach `mvm-seccomp-apply` and
-    # `mvm-verity-init` without re-running the cargo build.
-    inherit guestAgentPkg seccompApplyBinary verityInitBinary;
+    # `mvm-seccomp-apply` without re-running the cargo build.
+    inherit guestAgentPkg seccompApplyBinary;
   };
 }))

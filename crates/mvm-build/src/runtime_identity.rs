@@ -122,7 +122,6 @@ mod tests {
             netinit: mk("mvm-guest-netinit", b"netinit-bytes"),
             egress_client: mk("mvm-egress-client", b"egress-bytes"),
             entrypoint_runner: mk("mvm-oci-entrypoint", b"entrypoint-bytes"),
-            verity_init: mk("mvm-verity-init", b"verity-bytes"),
         }
     }
 
@@ -289,7 +288,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bins = bins_in(dir.path());
         identity_with_sidecar(&bins, dir.path()).unwrap();
-        std::fs::remove_file(&bins.verity_init).unwrap();
+        std::fs::remove_file(&bins.egress_client).unwrap();
 
         assert!(
             identity_with_sidecar(&bins, dir.path()).is_err(),

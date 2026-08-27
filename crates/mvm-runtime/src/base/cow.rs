@@ -104,7 +104,6 @@ const ROOTFS_SIDECAR_FILES: &[&str] = &[
     mvm_build::builder_vm::SIDECAR_FILENAME,
     "rootfs.verity",
     "rootfs.roothash",
-    "rootfs.initrd",
 ];
 
 /// Copy guest sidecars from the source rootfs's directory to the destination
@@ -197,12 +196,10 @@ mod tests {
         std::fs::write(&src, b"data").unwrap();
         std::fs::write(src_dir.path().join("rootfs.verity"), b"verity-tree").unwrap();
         std::fs::write(src_dir.path().join("rootfs.roothash"), b"abc123").unwrap();
-        std::fs::write(src_dir.path().join("rootfs.initrd"), b"initrd-bytes").unwrap();
         let instance = dst_dir.path().join("rootfs.ext4");
         prepare_instance_rootfs_inner(&instance, src.to_str().unwrap()).expect("clone");
         assert!(dst_dir.path().join("rootfs.verity").exists());
         assert!(dst_dir.path().join("rootfs.roothash").exists());
-        assert!(dst_dir.path().join("rootfs.initrd").exists());
         let hash = std::fs::read_to_string(dst_dir.path().join("rootfs.roothash")).unwrap();
         assert_eq!(hash, "abc123");
     }

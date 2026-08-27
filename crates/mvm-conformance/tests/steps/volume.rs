@@ -9,7 +9,6 @@ use mvm_build::guest_agent_build::{
     GuestBinarySource, GuestRuntimeBinaryPaths, RuntimeOverlayGuestLayout, guest_binary_source,
     install_into_cache, runtime_overlay_source_checkout_fingerprint,
 };
-use mvm_build::verity_initrd::install_verity_initrd_from_binary;
 use mvm_core::arch::GuestArch;
 use mvm_core::plan::test_support::PlanFixture;
 use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
@@ -83,7 +82,6 @@ fn cache_live_guest_binaries(world: &CliWorld) {
             netinit: &source_dir.join("mvm-guest-netinit"),
             egress_client: &source_dir.join("mvm-egress-client"),
             entrypoint_runner: &source_dir.join("mvm-oci-entrypoint"),
-            verity_init: &source_dir.join("mvm-verity-init"),
         },
         &isolated_home(world).join("cache").join("oci"),
         source.cache_key(),
@@ -93,14 +91,6 @@ fn cache_live_guest_binaries(world: &CliWorld) {
     if let GuestBinarySource::SourceCheckout { workspace_root, .. } = source {
         let fingerprint = runtime_overlay_source_checkout_fingerprint(&workspace_root)
             .expect("fingerprint local runtime-overlay sources");
-        install_verity_initrd_from_binary(
-            &source_dir.join("mvm-verity-init"),
-            &isolated_home(world).join("cache"),
-            env!("CARGO_PKG_VERSION"),
-            GuestArch::host(),
-            Some(&fingerprint),
-        )
-        .expect("seed isolated verity initrd cache from the prebuilt runtime");
         cache_live_runtime_overlay(world, &source_dir, &fingerprint);
     }
 }
@@ -117,7 +107,6 @@ fn cache_live_runtime_overlay(world: &CliWorld, source_dir: &Path, fingerprint: 
         ("mvm-guest-agent", &layout.agent),
         ("mvm-guest-netinit", &layout.netinit),
         ("mvm-seccomp-apply", &layout.seccomp_apply),
-        ("mvm-verity-init", &layout.verity_init),
         ("mvm-runner", &layout.runner),
         ("mvm-egress-client", &layout.egress_client),
         ("mvm-addon-dns", &layout.addon_dns),

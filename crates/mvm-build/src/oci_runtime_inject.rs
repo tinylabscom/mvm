@@ -43,10 +43,6 @@ pub struct MvmRuntimeBinaries {
     pub egress_client: PathBuf,
     /// Static OCI entrypoint runner (`mvm-oci-entrypoint`).
     pub entrypoint_runner: PathBuf,
-    /// Static verity initramfs PID 1 (`mvm-verity-init`). Not baked into the
-    /// rootfs itself; carried here so the guest-binary resolver produces the
-    /// full set consistently.
-    pub verity_init: PathBuf,
 }
 
 /// Version tag on the digest encoding itself. Bump only when the *framing*
@@ -56,19 +52,18 @@ pub struct MvmRuntimeBinaries {
 const CONTENT_DIGEST_FRAMING: &str = "mvm-runtime-id-v1";
 
 impl MvmRuntimeBinaries {
-    /// The five artifacts in a fixed order, tagged with the name each is
+    /// The four artifacts in a fixed order, tagged with the name each is
     /// digested under.
     ///
     /// One place defines the set, so [`content_digest`](Self::content_digest)
     /// and any caller that wants to stat the same files cannot disagree about
     /// what "the injected runtime" is.
-    pub fn artifacts(&self) -> [(&'static str, &Path); 5] {
+    pub fn artifacts(&self) -> [(&'static str, &Path); 4] {
         [
             ("agent", self.agent.as_path()),
             ("netinit", self.netinit.as_path()),
             ("egress_client", self.egress_client.as_path()),
             ("entrypoint_runner", self.entrypoint_runner.as_path()),
-            ("verity_init", self.verity_init.as_path()),
         ]
     }
 
@@ -399,14 +394,12 @@ mod tests {
             netinit,
             egress_client,
             entrypoint_runner,
-            verity_init,
         } = &bins;
         let every_field = [
             ("agent", agent),
             ("netinit", netinit),
             ("egress_client", egress_client),
             ("entrypoint_runner", entrypoint_runner),
-            ("verity_init", verity_init),
         ];
 
         for (name, path) in every_field {
@@ -540,18 +533,15 @@ mod tests {
         let netinit = dir.join("netinit.bin");
         let egress_client = dir.join("egress-client.bin");
         let entrypoint_runner = dir.join("entrypoint-runner.bin");
-        let verity_init = dir.join("verity-init.bin");
         std::fs::write(&agent, b"\x7fELF-agent").unwrap();
         std::fs::write(&netinit, b"\x7fELF-netinit").unwrap();
         std::fs::write(&egress_client, b"\x7fELF-egress-client").unwrap();
         std::fs::write(&entrypoint_runner, b"\x7fELF-entrypoint-runner").unwrap();
-        std::fs::write(&verity_init, b"\x7fELF-verity-init").unwrap();
         MvmRuntimeBinaries {
             agent,
             netinit,
             egress_client,
             entrypoint_runner,
-            verity_init,
         }
     }
 

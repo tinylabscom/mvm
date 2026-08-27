@@ -250,12 +250,12 @@ mod tests {
         let path = dir.path().join("console.log");
         let mut uart = streaming_uart(&path);
 
-        emit(&mut uart, b"mvm-verity-init: switching to /init\n");
+        emit(&mut uart, b"mvm-guest-init: switching to /init\n");
 
         // Deliberately no drop, no flush call: the guest is still running.
         assert_eq!(
             std::fs::read(&path).unwrap(),
-            b"mvm-verity-init: switching to /init\n"
+            b"mvm-guest-init: switching to /init\n"
         );
     }
 

@@ -585,7 +585,7 @@ mod tests {
             drop(f);
             swapped += 1;
         }
-        assert_eq!(swapped, 5, "expected the full artifact set");
+        assert_eq!(swapped, 4, "expected the full artifact set");
 
         assert_eq!(
             oci_runtime_tag(tmp.path()),
