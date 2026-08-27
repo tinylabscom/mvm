@@ -69,16 +69,32 @@ jobs:
           COSIGN_OIDC_ISSUER: "https://token.actions.githubusercontent.com"
         run: |
           set -euo pipefail
+          # No `-r`: `gh --jq` already prints a string result raw, and gh has no
+          # such flag. Passing one consumes `--jq`'s value, demoting the real
+          # expression to a positional argument, and gh rejects the whole
+          # invocation with `unknown command "<the entire jq program>"`.
           BOOT_TAG="$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 100 \
-            --json tagName --jq -r '
+            --json tagName --jq '
               [ .[].tagName
                 | select(test("^boot-image/v[0-9]+\\.[0-9]+\\.[0-9]+$"))
                 | {tag: ., v: (ltrimstr("boot-image/v") | split(".") | map(tonumber))} ]
               | sort_by(.v) | last | .tag // empty')"
           if [ -z "${BOOT_TAG}" ]; then
-            echo "::error::no boot-image/v* release contains the WebLinux runtime pack" >&2
+            echo "::error::no boot-image/v* release exists to take the WebLinux runtime pack from" >&2
             exit 1
           fi
+
+          # A boot-image release cut before the pack job existed carries every
+          # other asset and none of these. `gh release download` reports that as
+          # `no assets match the file pattern`, which reads like a typo in the
+          # pattern rather than a release that needs re-cutting.
+          ASSETS="$(gh release view "${BOOT_TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --json assets --jq '.assets[].name')"
+          if ! printf '%s\n' "${ASSETS}" | grep -qxF 'qemu-wasm-smoke-pack.tar.gz'; then
+            echo "::error::${BOOT_TAG} carries no qemu-wasm-smoke-pack.tar.gz, so the WebLinux demo cannot be staged. Cut a new boot-image/v* tag from a commit whose release-boot-image.yml builds the pack, then re-run this deploy." >&2
+            exit 1
+          fi
+
           gh release download "${BOOT_TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
             --pattern 'qemu-wasm-smoke-pack.tar.gz*'
