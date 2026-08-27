@@ -32,6 +32,19 @@ export function markdownTwinPath(id: string): string {
   return `${id}.md`;
 }
 
+/**
+ * Body of a page, with MDX component imports removed. Roughly a sixth of the
+ * docs are `.mdx` and open with a Starlight component import, which is build
+ * machinery: it tells a reader nothing and the twins exist precisely so
+ * nobody has to strip chrome back off. The component tags themselves stay —
+ * a `<TabItem label="Python">` still says which variant follows.
+ */
+export function readableBody(entry: DocEntry): string {
+  return (entry.body ?? "")
+    .replace(/^import\s.*?from\s*["'][^"']+["'];?\s*$/gm, "")
+    .replace(/^\n{2,}/, "");
+}
+
 export async function docEntries(): Promise<DocEntry[]> {
   return getCollection("docs");
 }

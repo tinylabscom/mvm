@@ -11,6 +11,7 @@ import {
   docUrl,
   ROOT_ID,
   type DocEntry,
+  readableBody,
   requireDescription,
 } from "../lib/docs-index";
 
@@ -38,7 +39,7 @@ export const GET: APIRoute = ({ props }) => {
     "",
   ].join("\n");
 
-  return new Response(`${header}${entry.body ?? ""}`.trimEnd() + "\n", {
+  return new Response(`${header}${readableBody(entry)}`.trimEnd() + "\n", {
     headers: { "Content-Type": "text/markdown; charset=utf-8" },
   });
 };

@@ -41,5 +41,6 @@ a page back to a user.
 
 - Strong claims need Shipped, Preview, Planned, or Not claimed status.
 - Runtime SDK lifecycle APIs are partial until shared SDK tests cover the full lifecycle.
+- Persistent builder DX is Preview until top-level `dev up` and `build` behavior is proven.
 - OCI examples should use digest-pinned or clearly local/dev references.
 - Secret examples should use references or redacted example values, not plaintext credentials.
