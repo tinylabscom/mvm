@@ -201,6 +201,21 @@ mkdir -p "$E2E_HOME"
 echo $$ > "$LOCK"
 release_lock() { [[ -f "$LOCK" ]] && [[ "$(cat "$LOCK" 2>/dev/null)" == "$$" ]] && rm -f "$LOCK"; }
 
+# Drop the nested aux-helper target *before* building, so `mvmctl`'s build
+# script regenerates the per-VM helpers as part of the build that follows.
+#
+# `mvm-network-endpoint` and `mvm-hvf-supervisor` are separate `[[bin]]`s that
+# cargo does not refresh when `mvmctl` is rebuilt, so a copy from an earlier
+# build survives and the launch path refuses it rather than booting a guest
+# that ignores the current sources.
+#
+# Order matters and cost me a run: with this *after* the build, the clear
+# deleted helpers the build had just produced and every launch then failed with
+# "mvm-hvf-supervisor not found" — a worse failure than the stale one it was
+# meant to fix.
+echo "==> refreshing embedded aux helpers"
+just embed-refresh
+
 # `user` carries manifest-verify, which the verified-fetch path needs to accept
 # the published builder VM image. It is off by default anyway: that feature
 # pulls the sigstore/aws-lc stack, and on both hosts tested aws-lc-rs resolves
@@ -217,18 +232,34 @@ else
   ./scripts/cargo-fast.sh build --bin mvmctl
 fi
 
+# Confirm the helpers came back. `cargo build` only regenerates them by running
+# `mvmctl`'s build script, and cargo may consider the binary up to date and skip
+# it — leaving the helpers deleted by the refresh above and every launch failing
+# with "not found". Checking is cheap; discovering it from a dead run is not.
+helpers_present() {
+  local root="${CARGO_TARGET_DIR:-target}"
+  find "$root" -type f -name mvm-network-endpoint 2>/dev/null | grep -q . || return 1
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    find "$root" -type f -name mvm-hvf-supervisor 2>/dev/null | grep -q . || return 1
+  fi
+  return 0
+}
+
+if ! helpers_present; then
+  echo "==> aux helpers absent after the build; building them explicitly"
+  just build-supervisors
+fi
+if ! helpers_present; then
+  echo "!!! per-VM aux helpers are still missing; every launch would fail." >&2
+  echo "!!! Expected mvm-network-endpoint (and mvm-hvf-supervisor on macOS) under" >&2
+  echo "!!! ${CARGO_TARGET_DIR:-target}." >&2
+  exit 1
+fi
+
 # The SDK codegen drift scenario shells out to `target/debug/xtask`; without it
 # the step fails with a bare "NotFound" that says nothing about the SDK.
 ./scripts/cargo-fast.sh build -p xtask
 
-# Drop the nested aux-helper target so the per-VM helpers are rebuilt against
-# this source tree. `mvm-network-endpoint` and friends are separate `[[bin]]`s
-# that cargo does not refresh when `mvmctl` is rebuilt, so a stale copy survives
-# — and the launch path refuses it rather than booting a guest that ignores the
-# current sources ("was reused from an earlier build"). That refusal failed six
-# live scenarios on the Linux run, all of them reading as egress or DNS bugs.
-echo "==> refreshing embedded aux helpers"
-just embed-refresh
 
 # Now that `mvmctl` exists, clear anything a previous run left behind. A guest
 # still holding its name makes the next run fail on a collision that reads as a
