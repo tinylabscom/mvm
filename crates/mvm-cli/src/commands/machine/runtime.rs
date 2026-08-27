@@ -411,7 +411,9 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
         return run_entrypoint_action(args, resolved_flake_slot);
     }
 
-    let mode = args.resolve_mode()?;
+    // A flake was built into a manifest slot above, and that image carries its
+    // own `entrypoint.command` — so an empty argv is the image supplying one.
+    let mode = args.resolve_mode(resolved_flake_slot.is_some())?;
     let warm_pool_size = mode.warm_pool_size(None, args.name.is_some());
     // The wasm backend is a claim-free, host-wasmtime runner: it has no
     // standby-pool machinery and should never be blocked by a warm-pool
