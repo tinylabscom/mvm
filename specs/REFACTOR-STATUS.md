@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-26
+Last updated: 2026-08-27
 
 ## In progress
 
@@ -643,7 +643,10 @@ for detailed scope and acceptance criteria.
       feasibility is now pinned: `ktock/qemu-wasm` 5a65998d47, Emscripten
       3.1.50, zlib/libffi/pixman/glib/xterm-pty versions are recorded, and
       `nix/packages/qemu-wasm.nix` packages the engine through the Nix
-      builder boundary. Build verification is queued for the Linux builder.
+      builder boundary. The demo terminal now forwards Ctrl+C/Ctrl+D as raw
+      ETX/EOT bytes through the Worker to the serial PTY, with focused and
+      live-browser coverage. Build verification is queued for the Linux
+      builder.
 
 - [~] **Security lane recovery — issue #2736.** The advisory finding is fixed,
       the release-artifact bootstrap source now compiles with warnings denied,

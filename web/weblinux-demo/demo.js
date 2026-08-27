@@ -1,6 +1,8 @@
 // Main thread for the WebLinux browser demo.
 // It owns the UI and a dedicated Worker that runs the QEMU-Wasm engine.
 
+import { terminalControlBytes } from "./terminal-input.mjs";
+
 const statusEl = document.getElementById("status");
 const logEl = document.getElementById("log");
 const runBtn = document.getElementById("runBtn");
@@ -203,7 +205,7 @@ function runWorker() {
         // Allow headless tests to inject a command via ?exec=...
         const exec = new URLSearchParams(location.search).get("exec");
         if (exec) {
-          worker.postMessage({ type: "stdin", line: exec });
+          worker.postMessage({ type: "stdin", data: exec + "\r" });
         }
         break;
       case "error":
@@ -253,11 +255,15 @@ inputForm.addEventListener("submit", (event) => {
   commandEl.value = "";
   historyIndex = -1;
   savedInput = "";
-  worker.postMessage({ type: "stdin", line });
+  worker.postMessage({ type: "stdin", data: line + "\r" });
 });
 
 commandEl.addEventListener("keydown", (event) => {
-  if (event.key === "ArrowUp") {
+  const controlBytes = terminalControlBytes(event);
+  if (controlBytes && worker && !commandEl.disabled) {
+    event.preventDefault();
+    worker.postMessage({ type: "stdin", data: controlBytes });
+  } else if (event.key === "ArrowUp") {
     event.preventDefault();
     if (commandHistory.length === 0) return;
     if (historyIndex === -1) {
