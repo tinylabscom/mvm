@@ -17,7 +17,7 @@ of top-level daily-driver verbs plus noun groups; operations on a single
 running VM are flattened into `machine`, build-time verbs under `build`, observability
 under `ops`, install/environment lifecycle under `env`, and provenance &
 verification under `trust`. Domains that already own their own subcommands
-(`image`, `catalog`, `manifest`, `storage`, `network`, `cache`, `pool`,
+(`image`, `catalog`, `manifest`, `network`, `cache`, `pool`,
 `secret`, `bundle`, `deps`, `artifact`, `capture`) stay top-level.
 
 | Group / top-level         | Commands                                                                                                                                                                |
@@ -28,7 +28,7 @@ verification under `trust`. Domains that already own their own subcommands
 | `ops <sub>`               | `metrics`, `config`, `mcp`                                                                                                                                              |
 | `env <sub>`               | `bootstrap`, `cleanup`, `uninstall`, `update`, `sign`                                                                                                                   |
 | `trust <sub>`             | `add`/`list`/`remove` (publishers), `attest`, `receipt`, `audit`                                                                                                        |
-| Already-grouped top-level | `image`, `catalog`, `manifest`, `storage`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact`, `capture`                                                |
+| Already-grouped top-level | `image`, `catalog`, `manifest`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact`, `capture`                                                |
 
 **Beginner vs. advanced surfaces.** [`mvmctl machine`](#machine-beginner-ux)
 (further down) is the beginner-facing front door — one small command group for
