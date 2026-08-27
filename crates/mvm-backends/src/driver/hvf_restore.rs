@@ -251,7 +251,9 @@ pub fn restore_hvf_vm(req: &HvfRestoreRequest<'_>) -> Result<RestoredHvfVm> {
     let mut child = bounded_restore_command(&supervisor, req)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
+        .stderr(mvm_vmm::host::console_capture::supervisor_stderr(
+            req.state_dir,
+        ))
         .spawn()
         .with_context(|| format!("spawning {}", supervisor.display()))?;
     child

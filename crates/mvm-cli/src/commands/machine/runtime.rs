@@ -63,23 +63,7 @@ fn run_persistent(
         return Ok(());
     }
 
-    let booted = persist_and_boot_machine(
-        &name,
-        &spec,
-        action,
-        MachineStartArgs {
-            name: name.clone(),
-            create_flags: MachineStartCreateFlags::default(),
-            receipt: args.run.receipt.clone(),
-            json: args.run.json,
-            dry_run: false,
-            quiet: false,
-            hypervisor: args.run.hypervisor.clone(),
-            no_supervisor: args.no_supervisor,
-            kernel_pin: args.kernel_pin.clone(),
-            has_ad_hoc_argv: !args.run.argv.is_empty(),
-        },
-    )?;
+    let booted = persist_and_boot_machine(&name, &spec, action, start_args_for_run(&args, &name))?;
     if !booted && !args.run.json && !args.up_json {
         println!("machine {name} already running");
     }
@@ -171,6 +155,39 @@ pub(super) enum PostStart {
     Attach,
 }
 
+/// Whether the human `started machine <name>` banner must be withheld.
+///
+/// `--up-json` reserves stdout for exactly one JSON envelope. The banner was
+/// printed to stdout ahead of it, so a caller doing `json.loads(stdout)` failed
+/// on line 1 — which is how the SDK's live transport broke: it shells
+/// `machine run -d --up-json ...` and parses the result. `--json` is already
+/// withheld inside the start path itself, by the branch that prints the summary
+/// instead.
+pub(crate) fn banner_suppressed(args: &MachineRunArgs) -> bool {
+    args.up_json
+}
+
+/// Translate a persistent `machine run` into the start arguments it boots
+/// under.
+///
+/// Split out from the boot call so the `quiet` wiring is testable without a VM.
+/// A test that only pinned `banner_suppressed` would keep passing if this
+/// mapping stopped calling it, which is the shape of the bug it exists for.
+pub(crate) fn start_args_for_run(args: &MachineRunArgs, name: &str) -> MachineStartArgs {
+    MachineStartArgs {
+        name: name.to_string(),
+        create_flags: MachineStartCreateFlags::default(),
+        receipt: args.run.receipt.clone(),
+        json: args.run.json,
+        dry_run: false,
+        quiet: banner_suppressed(args),
+        hypervisor: args.run.hypervisor.clone(),
+        no_supervisor: args.no_supervisor,
+        kernel_pin: args.kernel_pin.clone(),
+        has_ad_hoc_argv: !args.run.argv.is_empty(),
+    }
+}
+
 /// Resolve the post-start behaviour from the flags alone, so the choice is
 /// testable without booting anything.
 pub(super) fn post_start_action(args: &MachineRunArgs) -> PostStart {
@@ -236,8 +253,37 @@ fn apply_machine_ttl(name: &str, dur_str: &str) -> Result<()> {
     }
 }
 
+/// `build_mode` for the SDK boot envelope: the tier of the grant this launch
+/// actually carries, not the tier of the image it booted.
+///
+/// The SDK gates its DevOnly surfaces on this field —
+/// `if self.build_mode != "dev": raise SandboxDevOnly`. Reporting the image
+/// posture made that gate pass for a launch whose grant is ProdSafe-only, so
+/// the SDK went ahead and the *guest* refused instead, with a verb-grant error
+/// rather than the documented `SandboxDevOnly`. A caller cannot act on a field
+/// that answers a different question than the one it is asked.
+///
+/// A grant-eligible launch receives the attenuated ProdSafe verb set
+/// (`default_agent_verbs`), which admits no DevOnly verb — `--agent-verb`
+/// rejects them outright — so `fs`/`proc`/`exec` will be refused no matter how
+/// the image was built. That is `prod` from the SDK's point of view whatever
+/// the template says.
 fn resolve_build_mode_for_envelope(args: &MachineRunArgs, name: &str) -> &'static str {
+    if launch_carries_restricted_grant(args) {
+        return "prod";
+    }
     resolve_machine_build_mode(args.run.manifest.as_deref(), name)
+}
+
+/// Whether this launch is admitted with the attenuated ProdSafe-only verb
+/// grant. Mirrors the `restrict_agent_verbs` decision the persistent OCI start
+/// makes, so the envelope cannot disagree with the grant that was issued.
+pub(crate) fn launch_carries_restricted_grant(args: &MachineRunArgs) -> bool {
+    crate::commands::vm::agent_verbs::grant_eligible(
+        args.tty,
+        !args.run.argv.is_empty(),
+        matches!(args.run.profile, crate::commands::vm::exec::RunProfile::Dev),
+    )
 }
 
 /// Resolve a machine's `build_mode` (`"dev"` / `"prod"`) for the boot-time

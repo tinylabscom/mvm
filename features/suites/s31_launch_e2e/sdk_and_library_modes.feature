@@ -25,15 +25,23 @@ Feature: the README's SDK entry points reach the same launch path
     And the output mentions "ADMITTED"
     And the output mentions "no microVM booted"
 
-  # @wip for the same reason as the persistent-lifecycle scenario: the SDK's
-  # live transport shells `machine run -d --up-json --name ... --ttl ...`, so it
-  # rides the persistent path and inherits its hang. See
-  # specs/plans/2026-08-26-persistent-machine-path-on-hvf.md.
-  @live @wip
-  Scenario: a runtime-SDK script boots a real guest in live mode
+  # The README's claim-4 contract, now literally true: "Interactive surfaces
+  # (exec, commands.start, console) are dev-tier only; they refuse with
+  # SandboxDevOnly when the run needs DevOnly verbs but admission offers only
+  # the restricted ProdSafe grant — no silent fallback."
+  #
+  # The script does boot a real guest — `Sandbox.create` returns — and is then
+  # refused at the SDK's own gate, which is where the README says the refusal
+  # happens. It used to get past that gate (the envelope reported the image's
+  # posture rather than the grant's) and be refused by the *guest* instead, with
+  # a verb-grant error. Same security either way; only one of them is the
+  # documented behaviour a caller can program against.
+  @live
+  Scenario: a runtime-SDK script is refused DevOnly surfaces under a ProdSafe grant
     When I launch "run --mode live crates/mvm-conformance/fixtures/e2e/sandbox_script.py"
-    Then the launch succeeds
-    And the guest control plane came up
+    Then the launch fails
+    And the output mentions "SandboxDevOnly"
+    And the output mentions "build_mode='prod'"
 
   @live
   Scenario: a decorator workload compiles from its source file

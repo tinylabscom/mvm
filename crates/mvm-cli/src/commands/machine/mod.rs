@@ -20,7 +20,7 @@ mod list;
 mod portable;
 pub(crate) mod prewarm;
 mod receipt;
-mod runtime;
+pub(crate) mod runtime;
 mod spec_ops;
 
 use anyhow::{Context, Result, anyhow, bail};
