@@ -446,6 +446,64 @@ pub fn guest_source_fingerprint(workspace_root: &Path) -> Result<String, GuestAg
     Ok(digest)
 }
 
+/// A content fingerprint over the inputs to `libmvm_host_services.so` — the
+/// SDK sidecar's cdylib, and the one file in that image a source change can
+/// alter.
+///
+/// Separate from [`guest_source_fingerprint`] because the input sets differ:
+/// the cdylib is `mvm-sdk`'s `[lib]` target, which the guest-binary set does
+/// not build, while the shared crates underneath it are common to both. Folding
+/// `mvm-sdk` into the guest fingerprint instead would invalidate every cached
+/// guest binary on an SDK-only edit, which is a rebuild nobody asked for.
+///
+/// The sidecar's other members — the glibc loader, `libc.so.6`, `libgcc_s.so.1`
+/// — come from nixpkgs and cannot change without the version changing, so they
+/// are deliberately not inputs here.
+pub fn sdk_cdylib_source_fingerprint(
+    workspace_root: &Path,
+) -> Result<String, GuestAgentBuildError> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"mvm-sdk-cdylib-input-v1\0");
+    hash_inputs(
+        &mut hasher,
+        workspace_root,
+        &[
+            "Cargo.lock",
+            "Cargo.toml",
+            "crates/mvm-contract/Cargo.toml",
+            "crates/mvm-contract/src",
+            "crates/mvm-core/Cargo.toml",
+            "crates/mvm-core/src",
+            "crates/mvm-agentd/Cargo.toml",
+            "crates/mvm-agentd/src",
+            "crates/mvm-sdk/Cargo.toml",
+            "crates/mvm-sdk/src",
+        ],
+    )?;
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// Fold each declared input into `hasher`, failing closed on one that is
+/// missing. A fingerprint that quietly skipped an absent input would collide
+/// with the tree that still has it.
+fn hash_inputs(
+    hasher: &mut Sha256,
+    workspace_root: &Path,
+    inputs: &[&str],
+) -> Result<(), GuestAgentBuildError> {
+    for rel in inputs {
+        let path = workspace_root.join(rel);
+        if path.is_dir() {
+            hash_dir_recursive(hasher, rel, &path)?;
+        } else if path.is_file() {
+            hash_file(hasher, rel, &path)?;
+        } else {
+            return Err(GuestAgentBuildError::OutputMissing(path));
+        }
+    }
+    Ok(())
+}
+
 /// The walk itself, split out so the memo above has something to wrap and a
 /// test can measure the uncached cost directly.
 fn compute_guest_source_fingerprint(workspace_root: &Path) -> Result<String, GuestAgentBuildError> {

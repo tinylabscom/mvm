@@ -89,6 +89,15 @@ pub enum SdkSidecarBuildError {
         /// Human-readable description of the problem.
         reason: String,
     },
+
+    /// The cdylib's source inputs could not be fingerprinted, so the cached
+    /// sidecar's provenance is unknown. Distinct from a resolve failure: the
+    /// artifact may be perfectly sound and only the *working tree* unreadable.
+    #[error("SDK sidecar source fingerprint failed: {reason}")]
+    FingerprintFailed {
+        /// Human-readable description of the problem.
+        reason: String,
+    },
 }
 
 /// Download the SDK sidecar for `version` + `arch` from the published release,
@@ -246,6 +255,76 @@ fn promote_staging(staging: &Path, artifact_dir: &Path) -> Result<(), SdkSidecar
     Ok(())
 }
 
+/// Name of the marker recording which source tree built a cached sidecar.
+///
+/// Absent on a downloaded artifact, which is correct and load-bearing: absence
+/// is how a published sidecar is told apart from a source-built one.
+pub const LOCAL_SOURCE_FINGERPRINT_FILE: &str = "SOURCE_FINGERPRINT";
+
+/// What a cached sidecar was built from, relative to the working tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SidecarProvenance {
+    /// Built from this exact source tree.
+    MatchesSource,
+    /// Built from a different revision of this source tree.
+    StaleSource,
+    /// The published artifact. It cannot carry local changes to the cdylib,
+    /// because nothing local produced it.
+    Published,
+}
+
+/// Record which source tree produced the sidecar now in the cache.
+///
+/// Nothing writes this yet — the local build path is still to come.
+/// It exists so the marker has exactly one definition rather than being
+/// invented twice, and so the reader below has a producer to name.
+pub fn record_source_fingerprint(
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+    fingerprint: &str,
+) -> std::io::Result<()> {
+    let layout = SdkSidecarLayout::under(cache_root, version, &arch.to_string());
+    std::fs::create_dir_all(&layout.artifact_dir)?;
+    std::fs::write(
+        layout.artifact_dir.join(LOCAL_SOURCE_FINGERPRINT_FILE),
+        format!("{fingerprint}\n"),
+    )
+}
+
+/// Compare the cached sidecar against `workspace_root`'s cdylib sources.
+///
+/// The sidecar is the only guest artifact with no source-build path: it is
+/// fetched from the published release and cached under `<version>/<arch>`. That
+/// key does not move when someone edits the cdylib, so a contributor who adds a
+/// host-service verb keeps getting a sidecar that predates it — and finds out
+/// only from inside a booted guest, as `unknown method \`host.kv.get\``, which
+/// points at the broker rather than at the image.
+///
+/// Reporting provenance does not fix that. It makes it legible, and gives the
+/// build path a marker to write when it lands.
+pub fn cached_sidecar_provenance(
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+    workspace_root: &Path,
+) -> Result<SidecarProvenance, SdkSidecarBuildError> {
+    let layout = SdkSidecarLayout::under(cache_root, version, &arch.to_string());
+    let recorded = std::fs::read_to_string(layout.artifact_dir.join(LOCAL_SOURCE_FINGERPRINT_FILE));
+    let Ok(recorded) = recorded else {
+        return Ok(SidecarProvenance::Published);
+    };
+    let expected = crate::guest_agent_build::sdk_cdylib_source_fingerprint(workspace_root)
+        .map_err(|e| SdkSidecarBuildError::FingerprintFailed {
+            reason: format!("compute SDK cdylib source fingerprint: {e}"),
+        })?;
+    Ok(if recorded.trim() == expected {
+        SidecarProvenance::MatchesSource
+    } else {
+        SidecarProvenance::StaleSource
+    })
+}
+
 /// Resolve `arch`'s sidecar from `resolver`'s cache; on a miss with a
 /// non-default cache root (a worktree-isolated `MVM_HOME`), seed that cache from
 /// the default one and retry once.
@@ -325,6 +404,116 @@ mod tests {
             },
         ];
         mvm_fs::ext4::build_image(nodes).expect("build the sidecar ext4 fixture")
+    }
+
+    /// A workspace shaped like the ones `sdk_cdylib_source_fingerprint` reads.
+    fn fake_checkout(root: &Path, sdk_src: &str) {
+        for rel in [
+            "crates/mvm-contract/src",
+            "crates/mvm-core/src",
+            "crates/mvm-agentd/src",
+            "crates/mvm-sdk/src",
+        ] {
+            std::fs::create_dir_all(root.join(rel)).unwrap();
+            std::fs::write(root.join(rel).join("lib.rs"), "pub fn shared() {}\n").unwrap();
+        }
+        for rel in [
+            "Cargo.lock",
+            "Cargo.toml",
+            "crates/mvm-contract/Cargo.toml",
+            "crates/mvm-core/Cargo.toml",
+            "crates/mvm-agentd/Cargo.toml",
+            "crates/mvm-sdk/Cargo.toml",
+        ] {
+            std::fs::write(root.join(rel), "[package]\n").unwrap();
+        }
+        std::fs::write(
+            root.join("crates/mvm-sdk/src/host_services_ffi.rs"),
+            sdk_src,
+        )
+        .unwrap();
+    }
+
+    /// A downloaded sidecar carries no source marker, and that absence is the
+    /// signal — it is how "the published artifact" is told apart from "built
+    /// here". This is the case a contributor actually hits: the cache holds a
+    /// release image that predates the verb they just wrote.
+    #[test]
+    fn a_downloaded_sidecar_reports_itself_as_published() {
+        let _env = TestEnv::new();
+        let cache = tempfile::tempdir().unwrap();
+        let checkout = tempfile::tempdir().unwrap();
+        fake_checkout(checkout.path(), "// v1\n");
+        let layout = SdkSidecarLayout::under(
+            cache.path(),
+            FIXTURE_VERSION,
+            &GuestArch::host().to_string(),
+        );
+        std::fs::create_dir_all(&layout.artifact_dir).unwrap();
+
+        assert_eq!(
+            cached_sidecar_provenance(
+                cache.path(),
+                FIXTURE_VERSION,
+                GuestArch::host(),
+                checkout.path(),
+            )
+            .unwrap(),
+            SidecarProvenance::Published,
+        );
+    }
+
+    /// A sidecar recorded against this tree is current, and an edit to the
+    /// cdylib's own sources makes it stale. Both directions, because a
+    /// provenance check that can only ever say "stale" carries no information.
+    #[test]
+    fn a_source_built_sidecar_goes_stale_when_the_cdylib_sources_change() {
+        let _env = TestEnv::new();
+        let cache = tempfile::tempdir().unwrap();
+        let checkout = tempfile::tempdir().unwrap();
+        fake_checkout(checkout.path(), "// v1\n");
+
+        let fingerprint =
+            crate::guest_agent_build::sdk_cdylib_source_fingerprint(checkout.path()).unwrap();
+        record_source_fingerprint(
+            cache.path(),
+            FIXTURE_VERSION,
+            GuestArch::host(),
+            &fingerprint,
+        )
+        .unwrap();
+
+        assert_eq!(
+            cached_sidecar_provenance(
+                cache.path(),
+                FIXTURE_VERSION,
+                GuestArch::host(),
+                checkout.path(),
+            )
+            .unwrap(),
+            SidecarProvenance::MatchesSource,
+        );
+
+        // The edit that motivated all of this: a new verb in the FFI dispatch.
+        std::fs::write(
+            checkout
+                .path()
+                .join("crates/mvm-sdk/src/host_services_ffi.rs"),
+            "// v2 — adds host.kv.get\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            cached_sidecar_provenance(
+                cache.path(),
+                FIXTURE_VERSION,
+                GuestArch::host(),
+                checkout.path(),
+            )
+            .unwrap(),
+            SidecarProvenance::StaleSource,
+            "an edit to the cdylib's sources must invalidate the cached sidecar"
+        );
     }
 
     fn append_file<W: std::io::Write>(tar: &mut tar::Builder<W>, path: &str, bytes: &[u8]) {
