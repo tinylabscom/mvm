@@ -1,5 +1,8 @@
 # Static crates registry fetch
 
+Backing: shipped-source
+Validation: check-sprint-append
+
 **Status: IN PROGRESS**
 
 Issue #2904 blocks every source-built Rust derivation used by the builder VM:
