@@ -538,6 +538,85 @@ def greet(name: str) -> str:
     }
 
     #[test]
+    fn documented_local_path_source_lowers_to_the_workload_ir() {
+        let src = r#"
+import mvm
+
+@mvm.app(
+    name="greeter",
+    source=mvm.local_path(
+        ".",
+        include=["src/**", "pyproject.toml"],
+        exclude=["target/**"],
+    ),
+    image=mvm.python_image(python="3.12"),
+    resources=mvm.resources(cpu=1, memory_mb=256, rootfs_size_mb=512),
+)
+def greet(name: str) -> str:
+    return f"hello {name}"
+"#;
+
+        let (workload, _) = parse_str(src).expect("the documented local_path helper must parse");
+        match &workload.apps[0].source {
+            crate::ir::Source::LocalPath {
+                path,
+                include,
+                exclude,
+            } => {
+                assert_eq!(path, ".");
+                assert_eq!(include, &["src/**", "pyproject.toml"]);
+                assert_eq!(exclude, &["target/**"]);
+            }
+            other => panic!("expected local_path source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn local_path_requires_a_path() {
+        let src = r#"
+import mvm
+
+@mvm.app(
+    source=mvm.local_path(),
+    image=mvm.python_image(python="3.12"),
+)
+def greet(): pass
+"#;
+
+        let error = parse_str(src).expect_err("a local source without a path must fail");
+        assert!(
+            matches!(
+                error,
+                ParseError::HelperMissingKwarg {
+                    ref helper,
+                    kwarg: "path",
+                    ..
+                } if helper == "mvm.local_path"
+            ),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn local_path_rejects_non_string_include_entries() {
+        let src = r#"
+import mvm
+
+@mvm.app(
+    source=mvm.local_path(".", include=["src/**", 7]),
+    image=mvm.python_image(python="3.12"),
+)
+def greet(): pass
+"#;
+
+        let error = parse_str(src).expect_err("include entries must be strings");
+        let rendered = error.to_string();
+        assert!(rendered.contains("mvm.local_path"), "{rendered}");
+        assert!(rendered.contains("include"), "{rendered}");
+        assert!(rendered.contains("expected string element"), "{rendered}");
+    }
+
+    #[test]
     fn name_kwarg_overrides_function_name() {
         let src = r#"
 import mvm

@@ -20,6 +20,14 @@
       decompressed by the browser worker. Workflow contracts, actionlint,
       workspace tests/check/doctests, and Clippy are green.
 
+- [ ] **SDK surface contract repairs for issues #2902 and #2906.**
+      `specs/plans/2026-08-26-sdk-surface-contract-repairs.md`.
+      The documented `mvm.local_path` decorator source now lowers to the shared
+      workload IR with strict path/include/exclude validation, and the
+      builder-pack download refusal names root Cargo features that exist.
+      Implementation, focused tests, the full `mvm-sdk` suite, formatting, and
+      package Clippy are green; merge-queue delivery remains.
+
 - [x] **AI egress metering and token budgets.**
       `specs/plans/2026-08-21-ai-egress-metering-and-budget.md`.
       Provider-reported token counts at the host substitution endpoint,
