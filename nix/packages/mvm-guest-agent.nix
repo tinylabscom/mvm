@@ -71,10 +71,8 @@ pkgs.rustPlatform.buildRustPackage {
     # the main agent forks under setpriv.
     "--bin"
     "mvm-guest-netinit"
-    # Runtime-lean OCI roots still need their static PID 1 and entrypoint
-    # wrapper before the read-only runtime overlay is mounted.
-    "--bin"
-    "mvm-oci-init"
+    # Runtime-lean OCI roots still need their entrypoint wrapper; PID 1 is
+    # the universal initramfs agent, not a binary baked into the rootfs.
     "--bin"
     "mvm-oci-entrypoint"
   ];

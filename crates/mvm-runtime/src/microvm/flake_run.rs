@@ -42,10 +42,6 @@ pub struct FlakeRunConfig {
     /// 64-char lowercase-hex root hash for the overlay; baked into
     /// the cmdline as `mvm.runtime_roothash=`.
     pub runtime_overlay_roothash: Option<String>,
-    /// Declared guest-runtime source contract carried through the kernel
-    /// cmdline so the guest launcher can distinguish required-overlay vs
-    /// preferred-overlay boots.
-    pub runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
     /// Nix store revision hash.
     pub revision_hash: String,
     /// Original flake reference (for display / status).
@@ -141,7 +137,6 @@ mod tests {
             runtime_overlay_path: None,
             runtime_overlay_verity_path: None,
             runtime_overlay_roothash: None,
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
             revision_hash: "abc".to_string(),
             flake_ref: "/p".to_string(),
             profile: None,

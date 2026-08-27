@@ -133,7 +133,6 @@ impl FirecrackerConfig {
             runtime_overlay_path: config.runtime_overlay_path.clone(),
             runtime_overlay_verity_path: config.runtime_overlay_verity_path.clone(),
             runtime_overlay_roothash: config.runtime_overlay_roothash.clone(),
-            runtime_source_policy: config.runtime_source_policy,
             revision_hash: config.revision_hash.clone(),
             flake_ref: config.flake_ref.clone(),
             profile: config.profile.clone(),

@@ -214,14 +214,6 @@ impl Machine {
             memory_mib: u32::try_from(self.spec.memory_mib).unwrap_or(u32::MAX),
             network_policy,
             warm_pool_size: 0,
-            runtime_source_policy: mvm_core::vm_backend::select_runtime_source_policy(
-                mvm_core::vm_backend::RuntimeSourcePolicySelection {
-                    backend_name: inputs.backend_name.as_deref(),
-                    sealed: inputs.sealed,
-                    root_strategy: inputs.root_strategy,
-                    launch_kind: mvm_core::vm_backend::RuntimeSourceLaunchKind::WorkloadImage,
-                },
-            ),
             ..Default::default()
         }
     }
@@ -390,39 +382,5 @@ mod tests {
         let backend = MockBackend::new();
         let id = backend.start(&cfg).unwrap();
         backend.stop(&id).unwrap();
-    }
-
-    #[test]
-    fn to_start_config_requires_overlay_for_sealed_libkrun_block_workloads() {
-        let machine = Machine::builder().image("alpine").build().unwrap();
-        let cfg = machine.to_start_config(LaunchInputs {
-            name: "m2".into(),
-            rootfs_path: "/store/rootfs.ext4".into(),
-            kernel_path: Some("/store/vmlinux".into()),
-            backend_name: Some("libkrun".into()),
-            sealed: true,
-            root_strategy: Some(mvm_core::vm_backend::RuntimeSourceRootStrategy::BlockExt4),
-        });
-        assert_eq!(
-            cfg.runtime_source_policy,
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
-        );
-    }
-
-    #[test]
-    fn to_start_config_keeps_virtiofs_roots_on_rootfs_only() {
-        let machine = Machine::builder().image("alpine").build().unwrap();
-        let cfg = machine.to_start_config(LaunchInputs {
-            name: "m3".into(),
-            rootfs_path: "/store/rootfs.ext4".into(),
-            kernel_path: Some("/store/vmlinux".into()),
-            backend_name: Some("hvf".into()),
-            sealed: false,
-            root_strategy: Some(mvm_core::vm_backend::RuntimeSourceRootStrategy::VirtiofsRoot),
-        });
-        assert_eq!(
-            cfg.runtime_source_policy,
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay
-        );
     }
 }

@@ -184,6 +184,9 @@ pub struct CliWorld {
     pub ir_hashes: HashMap<String, String>,
     /// Full sealed-workload cmdline assembled through a real VMM driver.
     pub workload_cmdline: Option<String>,
+    /// Whether the sealed launch's production block mapping attached both
+    /// read-only runtime-overlay devices under a complete verified triple.
+    pub sealed_runtime_overlay_attached: Option<bool>,
     /// Kernel format mapped by the libkrun supervisor-config seam.
     pub libkrun_kernel_format: Option<KernelFormat>,
     /// An isolated `MVM_HOME` created by a `Given` step and reused by later
@@ -481,6 +484,10 @@ impl fmt::Debug for CliWorld {
             .field("addresses", &self.addresses)
             .field("ir_hashes", &self.ir_hashes)
             .field("workload_cmdline", &self.workload_cmdline)
+            .field(
+                "sealed_runtime_overlay_attached",
+                &self.sealed_runtime_overlay_attached,
+            )
             .field("libkrun_kernel_format", &self.libkrun_kernel_format)
             .field(
                 "isolated_home",

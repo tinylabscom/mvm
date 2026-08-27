@@ -249,14 +249,12 @@ fn builder_disk_transport_cmdline(base_cmdline: &str) -> String {
 
 fn builder_runtime_overlay_cmdline(base_cmdline: &str, runtime_device: &str) -> String {
     let cmdline = builder_disk_transport_cmdline(base_cmdline);
-    let cmdline = append_cmdline_token(&cmdline, "mvm.runtime_source_policy=required_overlay");
     append_cmdline_token(&cmdline, &format!("mvm.runtime_data={runtime_device}"))
 }
 
 fn builder_virtiofs_runtime_overlay_cmdline(base_cmdline: &str, runtime_device: &str) -> String {
     let cmdline = builder_boot_contract_cmdline(base_cmdline);
     let cmdline = builder_vsock_egress_cmdline(&cmdline);
-    let cmdline = append_cmdline_token(&cmdline, "mvm.runtime_source_policy=required_overlay");
     append_cmdline_token(&cmdline, &format!("mvm.runtime_data={runtime_device}"))
 }
 
@@ -7224,7 +7222,6 @@ mod tests {
         assert!(cmdline.contains("mvm.builder_transport=disk"));
         assert!(cmdline.contains("mvm.builder_input=/dev/vdc"));
         assert!(cmdline.contains("mvm.builder_output=/dev/vdd"));
-        assert!(cmdline.contains("mvm.runtime_source_policy=required_overlay"));
         assert!(cmdline.contains("mvm.runtime_data=/dev/vde"));
         assert!(cmdline.contains(BUILDER_VSOCK_EGRESS_TOKEN));
         assert!(cmdline.starts_with("console=hvc0 root=/dev/vda"));
@@ -7242,11 +7239,6 @@ mod tests {
             .expect("rootfs builder images attach the runtime overlay");
         assert_eq!(attachment.disk_path, overlay);
         assert!(attachment.read_only);
-        assert!(
-            attachment
-                .cmdline
-                .contains("mvm.runtime_source_policy=required_overlay")
-        );
         assert!(attachment.cmdline.contains("rootwait"));
         assert!(attachment.cmdline.contains("panic=-1"));
         assert!(attachment.cmdline.contains("loglevel=8"));
@@ -7282,11 +7274,6 @@ mod tests {
         assert_eq!(attachment.disk_path, overlay);
         assert!(attachment.read_only);
         assert!(attachment.cmdline.contains("mvm.runtime_data=/dev/vdc"));
-        assert!(
-            attachment
-                .cmdline
-                .contains("mvm.runtime_source_policy=required_overlay")
-        );
         assert!(!attachment.cmdline.contains("mvm.builder_transport=disk"));
         assert!(!attachment.cmdline.contains("mvm.builder_input="));
         assert!(!attachment.cmdline.contains("mvm.builder_output="));

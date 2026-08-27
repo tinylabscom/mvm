@@ -17,7 +17,6 @@ pub struct CaptureFsQuickParams {
     /// Absolute path to the VM's live rootfs image to clone.
     pub rootfs: PathBuf,
     pub supervisor_config_digest: String,
-    pub runtime_source_policy: Option<mvm_core::vm_backend::RuntimeSourcePolicy>,
     pub runtime_overlay_version: Option<String>,
     pub tag: Option<String>,
     pub created_unix: u64,
@@ -50,7 +49,6 @@ pub struct CaptureFsQuickParamsBuilder {
     vm_name: Option<String>,
     rootfs: Option<PathBuf>,
     supervisor_config_digest: Option<String>,
-    runtime_source_policy: Option<mvm_core::vm_backend::RuntimeSourcePolicy>,
     runtime_overlay_version: Option<String>,
     tag: Option<String>,
     created_unix: Option<u64>,
@@ -67,7 +65,6 @@ impl CaptureFsQuickParamsBuilder {
             vm_name: None,
             rootfs: None,
             supervisor_config_digest: None,
-            runtime_source_policy: None,
             runtime_overlay_version: None,
             tag: None,
             created_unix: None,
@@ -101,16 +98,6 @@ impl CaptureFsQuickParamsBuilder {
     #[must_use]
     pub fn supervisor_config_digest(mut self, supervisor_config_digest: String) -> Self {
         self.supervisor_config_digest = Some(supervisor_config_digest);
-        self
-    }
-
-    /// Set `runtime_source_policy`. Takes a value or an `Option`; unset means `None`.
-    #[must_use]
-    pub fn runtime_source_policy(
-        mut self,
-        runtime_source_policy: impl Into<Option<mvm_core::vm_backend::RuntimeSourcePolicy>>,
-    ) -> Self {
-        self.runtime_source_policy = runtime_source_policy.into();
         self
     }
 
@@ -167,7 +154,6 @@ impl CaptureFsQuickParamsBuilder {
             supervisor_config_digest: self.supervisor_config_digest.ok_or(
                 BuilderError::missing("CaptureFsQuickParams", "supervisor_config_digest"),
             )?,
-            runtime_source_policy: self.runtime_source_policy,
             runtime_overlay_version: self.runtime_overlay_version,
             tag: self.tag,
             created_unix: self.created_unix.ok_or(BuilderError::missing(
@@ -328,7 +314,6 @@ pub struct CaptureVmFullParams {
     pub id: CheckpointId,
     pub vm_name: String,
     pub supervisor_config_digest: String,
-    pub runtime_source_policy: Option<mvm_core::vm_backend::RuntimeSourcePolicy>,
     pub runtime_overlay_version: Option<String>,
     /// The live VM's persisted supervisor config, copied into the checkpoint so
     /// restore can rebuild the state dir (every stop reaps the live one).
@@ -366,7 +351,6 @@ pub struct CaptureVmFullParamsBuilder {
     id: Option<CheckpointId>,
     vm_name: Option<String>,
     supervisor_config_digest: Option<String>,
-    runtime_source_policy: Option<mvm_core::vm_backend::RuntimeSourcePolicy>,
     runtime_overlay_version: Option<String>,
     supervisor_config_src: Option<PathBuf>,
     tag: Option<String>,
@@ -383,7 +367,6 @@ impl CaptureVmFullParamsBuilder {
             id: None,
             vm_name: None,
             supervisor_config_digest: None,
-            runtime_source_policy: None,
             runtime_overlay_version: None,
             supervisor_config_src: None,
             tag: None,
@@ -411,16 +394,6 @@ impl CaptureVmFullParamsBuilder {
     #[must_use]
     pub fn supervisor_config_digest(mut self, supervisor_config_digest: String) -> Self {
         self.supervisor_config_digest = Some(supervisor_config_digest);
-        self
-    }
-
-    /// Set `runtime_source_policy`. Takes a value or an `Option`; unset means `None`.
-    #[must_use]
-    pub fn runtime_source_policy(
-        mut self,
-        runtime_source_policy: impl Into<Option<mvm_core::vm_backend::RuntimeSourcePolicy>>,
-    ) -> Self {
-        self.runtime_source_policy = runtime_source_policy.into();
         self
     }
 
@@ -484,7 +457,6 @@ impl CaptureVmFullParamsBuilder {
             supervisor_config_digest: self.supervisor_config_digest.ok_or(
                 BuilderError::missing("CaptureVmFullParams", "supervisor_config_digest"),
             )?,
-            runtime_source_policy: self.runtime_source_policy,
             runtime_overlay_version: self.runtime_overlay_version,
             supervisor_config_src: self.supervisor_config_src,
             tag: self.tag,

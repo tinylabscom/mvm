@@ -59,6 +59,9 @@ mod tests {
             kernel_path: Some("/img/vmlinux".into()),
             cpus: 2,
             memory_mib: 512,
+            runtime_overlay_path: Some("/img/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/img/runtime.verity".into()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
             ..Default::default()
         };
         let spec = StandbySpec {
@@ -120,6 +123,9 @@ mod tests {
             kernel_path: Some("/img/vmlinux".into()),
             cpus: 2,
             memory_mib: 512,
+            runtime_overlay_path: Some("/img/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/img/runtime.verity".into()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
             ..Default::default()
         };
         let egress_launch = VmStartConfig {

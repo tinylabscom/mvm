@@ -14,7 +14,8 @@ Feature: Verified boot rejects a tampered rootfs
   Scenario: A sealed libkrun workload on the universal initramfs uses its virtio console
     When I assemble a sealed workload cmdline for "libkrun" booting the "universal" initramfs
     Then the sealed workload cmdline contains "console=hvc0"
-    And the sealed workload cmdline contains "mvm.runtime_source_policy=required_overlay"
+    And the sealed workload attaches the verified runtime overlay
+    And the sealed workload cmdline omits "mvm.runtime_source_policy="
     And the sealed workload cmdline omits "mvm.roothash="
     And the sealed workload cmdline omits "mvm.data=/dev/vda"
     And the sealed workload cmdline omits "mvm.hash=/dev/vdb"
@@ -28,7 +29,8 @@ Feature: Verified boot rejects a tampered rootfs
     When I assemble a sealed workload cmdline for "hvf" booting the "universal" initramfs
     Then the sealed workload cmdline contains "console=ttyAMA0"
     And the sealed workload cmdline contains "earlycon=pl011"
-    And the sealed workload cmdline contains "mvm.runtime_source_policy=required_overlay"
+    And the sealed workload attaches the verified runtime overlay
+    And the sealed workload cmdline omits "mvm.runtime_source_policy="
     And the sealed workload cmdline omits "mvm.roothash="
     But the sealed workload cmdline omits "console=hvc0"
 

@@ -608,7 +608,6 @@ mod tests {
             GuestAgentLayout::under(cache_root, source.cache_key(), GuestArch::host());
         std::fs::create_dir_all(&guest_layout.dir).expect("create guest cache dir");
         for path in [
-            &guest_layout.oci_init,
             &guest_layout.agent,
             &guest_layout.netinit,
             &guest_layout.egress_client,

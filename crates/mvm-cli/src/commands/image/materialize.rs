@@ -229,7 +229,7 @@ pub(super) fn materialize_run_rootfs(input: &MaterializeExt4Input) -> Result<()>
 /// with no vsock control plane and times out at `wait_for_agent`. The
 /// injected `/init` + baked agent + `/mvm/runtime` mount point make the
 /// rootfs genuinely overlay-aware, so the `for_oci_run` sidecar admits
-/// honestly through `admit_overlay_aware` without weakening the gate.
+/// honestly through `admit_runtime_overlay_contract` without weakening the gate.
 pub(super) fn inject_runtime_and_materialize(
     cache_root: &Path,
     unpacked_root: &Path,
@@ -246,7 +246,6 @@ pub(super) fn inject_runtime_and_materialize(
             rootfs_abs,
             image_label,
         )
-        .profile(mvm_build::oci_runtime_inject::RuntimeInjectionProfile::RuntimeLean)
         .entrypoint(entrypoint)
         .sealed(sealed)
         .deferred_nodes(deferred_nodes)
@@ -275,19 +274,13 @@ pub(super) fn prepare_rootfs_only_tree(
     })?;
     let bins = mvm_build::run_image::resolve_guest_binaries(cache_root)
         .context("resolve guest binaries for rootfs-only OCI tree")?;
-    mvm_build::oci_runtime_inject::inject_mvm_runtime(
-        &prepared_root,
-        &bins,
-        None,
-        false,
-        mvm_build::oci_runtime_inject::RuntimeInjectionProfile::RootfsOnly,
-    )
-    .with_context(|| {
-        format!(
-            "inject rootfs-only runtime into {}",
-            prepared_root.display()
-        )
-    })?;
+    mvm_build::oci_runtime_inject::inject_mvm_runtime(&prepared_root, &bins, None, false)
+        .with_context(|| {
+            format!(
+                "inject rootfs-only runtime into {}",
+                prepared_root.display()
+            )
+        })?;
     Ok(prepared_root)
 }
 
@@ -592,7 +585,7 @@ mod tests {
             drop(f);
             swapped += 1;
         }
-        assert_eq!(swapped, 6, "expected the full artifact set");
+        assert_eq!(swapped, 5, "expected the full artifact set");
 
         assert_eq!(
             oci_runtime_tag(tmp.path()),

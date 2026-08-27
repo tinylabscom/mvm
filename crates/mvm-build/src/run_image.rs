@@ -22,7 +22,6 @@ pub struct InjectAndMaterializeRequest<'a> {
     unpacked_root: &'a Path,
     output: &'a Path,
     label: &'a str,
-    profile: crate::oci_runtime_inject::RuntimeInjectionProfile,
     entrypoint: Option<&'a ImageRuntimeConfig>,
     sealed: bool,
     deferred_nodes: Vec<mvm_fs::ext4::Node>,
@@ -40,7 +39,6 @@ impl<'a> InjectAndMaterializeRequest<'a> {
             unpacked_root,
             output,
             label,
-            profile: crate::oci_runtime_inject::RuntimeInjectionProfile::RootfsOnly,
             entrypoint: None,
             sealed: false,
             deferred_nodes: Vec::new(),
@@ -53,18 +51,12 @@ pub struct InjectAndMaterializeRequestBuilder<'a> {
     unpacked_root: &'a Path,
     output: &'a Path,
     label: &'a str,
-    profile: crate::oci_runtime_inject::RuntimeInjectionProfile,
     entrypoint: Option<&'a ImageRuntimeConfig>,
     sealed: bool,
     deferred_nodes: Vec<mvm_fs::ext4::Node>,
 }
 
 impl<'a> InjectAndMaterializeRequestBuilder<'a> {
-    pub fn profile(mut self, profile: crate::oci_runtime_inject::RuntimeInjectionProfile) -> Self {
-        self.profile = profile;
-        self
-    }
-
     pub fn entrypoint(mut self, entrypoint: Option<&'a ImageRuntimeConfig>) -> Self {
         self.entrypoint = entrypoint;
         self
@@ -88,7 +80,6 @@ impl<'a> InjectAndMaterializeRequestBuilder<'a> {
             unpacked_root: self.unpacked_root,
             output: self.output,
             label: self.label,
-            profile: self.profile,
             entrypoint: self.entrypoint,
             sealed: self.sealed,
             deferred_nodes: self.deferred_nodes,
@@ -106,32 +97,25 @@ impl<'a> InjectAndMaterializeRequestBuilder<'a> {
 /// (see [`seal_and_assemble_verity`]) — and the sidecar is written `sealed`, so
 /// the runtime routes the block+ext4 verity boot and refuses interactive access.
 ///
-/// Guest binaries for the remaining legacy/rootfs-only injection shapes resolve
-/// from the invoking source checkout's content-keyed cache or an existing
-/// compatibility cache. The host executable does not carry workload binaries.
+/// Guest binaries resolve from the invoking source checkout's content-keyed
+/// cache or an existing compatibility cache. The host executable does not carry
+/// workload binaries.
 pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Result<()> {
     let InjectAndMaterializeRequest {
         cache_root,
         unpacked_root,
         output,
         label,
-        profile,
         entrypoint,
         sealed,
         deferred_nodes,
     } = request;
     let bins = resolve_guest_binaries(cache_root)?;
-    crate::oci_runtime_inject::inject_mvm_runtime(
-        unpacked_root,
-        &bins,
-        entrypoint,
-        sealed,
-        profile,
-    )
-    .context("inject mvm runtime into OCI rootfs")?;
+    crate::oci_runtime_inject::inject_mvm_runtime(unpacked_root, &bins, entrypoint, sealed)
+        .context("inject mvm runtime into OCI rootfs")?;
     ensure_volume_mount_roots(unpacked_root)?;
 
-    // Measure AFTER injection so the ext4 sizing covers the baked agent/netinit.
+    // Measure AFTER injection so the ext4 sizing covers everything injected.
     let tree_size = unpacked_tree_size(unpacked_root)
         .with_context(|| format!("measure unpacked root {}", unpacked_root.display()))?;
     materialize_run_rootfs(
@@ -146,23 +130,21 @@ pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Resul
         seal_and_assemble_verity(output, &bins.verity_init)?;
     }
 
-    // The sidecar lives next to rootfs.ext4 so the backend's admit_overlay_aware
+    // The sidecar lives next to rootfs.ext4 so the backend's admit_runtime_overlay_contract
     // gate reads it at start.
     let rootfs_dir = output
         .parent()
         .ok_or_else(|| anyhow::anyhow!("rootfs path has no parent dir: {}", output.display()))?;
-    crate::builder_vm::GuestSidecar::for_oci_run(
-        label,
-        sealed,
-        profile == crate::oci_runtime_inject::RuntimeInjectionProfile::RuntimeLean,
-    )
-    // The same argv baked into `etc/mvm/image-runtime.json` above, put where
-    // the host can still read it: once this tree is an ext4 blob nothing on
-    // the host opens it, and admission has to know what the image runs before
-    // it decides whether anything may drive its stdin.
-    .with_entrypoint_argv(entrypoint.map(|e| e.argv.clone()).unwrap_or_default())
-    .write_to_dir(rootfs_dir)
-    .with_context(|| format!("write OCI sidecar in {}", rootfs_dir.display()))?;
+    // Always runtime-lean: the overlay is the single source of the guest
+    // binaries, so an injected rootfs never carries a copy of them.
+    crate::builder_vm::GuestSidecar::for_oci_run(label, sealed, true)
+        // The same argv baked into `etc/mvm/image-runtime.json` above, put where
+        // the host can still read it: once this tree is an ext4 blob nothing on
+        // the host opens it, and admission has to know what the image runs before
+        // it decides whether anything may drive its stdin.
+        .with_entrypoint_argv(entrypoint.map(|e| e.argv.clone()).unwrap_or_default())
+        .write_to_dir(rootfs_dir)
+        .with_context(|| format!("write OCI sidecar in {}", rootfs_dir.display()))?;
     Ok(())
 }
 

@@ -731,30 +731,16 @@ impl AuditEmitter {
     /// dev virtiofs-root boot (the weaker dev-tier virtiofs contract — no
     /// dm-verity, does not witness claim 3) from a block+ext4 boot (the path the
     /// numbered claim-3 witness rides on). `root_strategy` is
-    /// `"virtiofs-root"` or `"block-ext4"`. `runtime_source_policy` records
-    /// whether this boot declared the guest runtime source as
-    /// `"required-overlay"`, `"prefer-overlay"`, or `"rootfs-only"`.
+    /// `"virtiofs-root"` or `"block-ext4"`.
     /// Informational — the hard admission decision is still `plan.admitted`;
     /// this event lets an operator answer "did this run boot off a virtiofs
-    /// root or a materialized block image, and was the runtime contract
-    /// overlay-required or not?" via the tamper-evident chain rather than an
-    /// unsigned side channel.
-    pub fn emit_boot_posture(
-        &self,
-        plan: &ExecutionPlan,
-        root_strategy: &str,
-        runtime_source_policy: &str,
-    ) -> Result<()> {
+    /// root or a materialized block image?" via the tamper-evident chain rather
+    /// than an unsigned side channel.
+    pub fn emit_boot_posture(&self, plan: &ExecutionPlan, root_strategy: &str) -> Result<()> {
         self.emit(
             plan,
             "plan.boot_posture",
-            [
-                ("root_strategy".to_string(), root_strategy.to_string()),
-                (
-                    "runtime_source_policy".to_string(),
-                    runtime_source_policy.to_string(),
-                ),
-            ],
+            [("root_strategy".to_string(), root_strategy.to_string())],
         )
     }
 
@@ -1962,7 +1948,7 @@ mod tests {
         // The dev virtiofs-root boot and the block boot must be distinguishable
         // in the tamper-evident chain (dev-tier virtiofs vs the claim-3 block
         // witness). Emit one of each and assert both verify + carry the right
-        // root_strategy + runtime_source_policy labels.
+        // root_strategy label.
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
@@ -1974,12 +1960,8 @@ mod tests {
 
         let vfs = fixture_plan("local", "plan-vfs");
         let blk = fixture_plan("local", "plan-blk");
-        emitter
-            .emit_boot_posture(&vfs, "virtiofs-root", "rootfs-only")
-            .unwrap();
-        emitter
-            .emit_boot_posture(&blk, "block-ext4", "prefer-overlay")
-            .unwrap();
+        emitter.emit_boot_posture(&vfs, "virtiofs-root").unwrap();
+        emitter.emit_boot_posture(&blk, "block-ext4").unwrap();
 
         let path = dir.path().join("local.jsonl");
         let content = std::fs::read_to_string(&path).expect("audit file exists");
@@ -1987,10 +1969,8 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("plan.boot_posture"));
         assert!(lines[0].contains("virtiofs-root"));
-        assert!(lines[0].contains("rootfs-only"));
         assert!(lines[0].contains("\"plan-vfs\""));
         assert!(lines[1].contains("block-ext4"));
-        assert!(lines[1].contains("prefer-overlay"));
         assert!(lines[1].contains("\"plan-blk\""));
         // A block boot never mislabels as virtiofs and vice-versa.
         assert!(!lines[1].contains("virtiofs-root"));

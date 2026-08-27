@@ -249,12 +249,6 @@ pub fn hvf_workload_disks(config: &VmStartConfig) -> Vec<HvfDisk> {
 }
 
 pub fn ensure_hvf_runtime_source_supported(config: &VmStartConfig) -> Result<()> {
-    if config.runtime_source_policy != mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay {
-        return Ok(());
-    }
-    if config.virtiofs_root.is_some() {
-        bail!("required-overlay hvf boots do not support virtiofs-root");
-    }
     // Two supported required-overlay shapes, keyed on whether the rootfs asks to
     // be sealed. A sealed boot (verity metadata present) must be fully verity
     // capable — a missing initrd fails closed rather than silently downgrading to

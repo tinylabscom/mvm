@@ -505,10 +505,6 @@ fn run_image_block_root_required_overlay_is_read_only_on_selected_backend() {
         "guest command did not run inside the OCI VM.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
-        combined.contains("mvm.runtime_source_policy=required_overlay"),
-        "guest cmdline must declare required_overlay on OCI block boots.\nstdout:\n{stdout}\nstderr:\n{stderr}"
-    );
-    assert!(
         combined.contains(" /mvm/runtime ")
             && (combined.contains(" ro,") || combined.contains(" ro ")),
         "guest must report /mvm/runtime mounted read-only.\nstdout:\n{stdout}\nstderr:\n{stderr}"

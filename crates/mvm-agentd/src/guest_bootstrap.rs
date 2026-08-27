@@ -1,9 +1,8 @@
 //! Guest environment setup shared by the two guest inits.
 //!
-//! Both entry points reach the same workload environment: `mvm-oci-init` as PID 1
-//! on the legacy per-rootfs initrd, and the guest agent's activation path when the
-//! universal initramfs boots it as PID 1. Keeping the steps here means neither can
-//! quietly acquire — or lose — one of them.
+//! The guest agent's activation path reaches this when the universal initramfs
+//! boots it as PID 1. Keeping the steps here rather than inline in that path
+//! means an init cannot quietly acquire — or lose — one of them.
 
 use std::ffi::CString;
 use std::fs;
@@ -108,7 +107,7 @@ pub fn provision_guest_environment() -> Result<(), EgressClientMissing> {
     provision_verb_grant();
     provision_flowmux_identity();
     start_forward_proxy();
-    run_one(resolve_exec([NETINIT_OVERLAY, NETINIT_FALLBACK]), "netinit");
+    run_one(resolve_exec([NETINIT_OVERLAY]), "netinit");
     if cmdline_has_flag("mvm.vsock_egress=1") {
         start_vsock_egress()?;
     }
@@ -219,15 +218,9 @@ fn start_vsock_egress() -> Result<(), EgressClientMissing> {
     Ok(())
 }
 
-pub const NETINIT_FALLBACK: &str = "/usr/local/bin/mvm-guest-netinit";
-
 pub const NETINIT_OVERLAY: &str = "/mvm/runtime/netinit";
 
-pub const EGRESS_CLIENT: &str = "/usr/local/bin/mvm-egress-client";
-
 pub const EGRESS_CLIENT_OVERLAY: &str = "/mvm/runtime/egress-client";
-
-pub const FORWARD_PROXY: &str = "/usr/local/bin/mvm-forward-proxy";
 
 pub const FORWARD_PROXY_OVERLAY: &str = "/mvm/runtime/forward-proxy";
 
@@ -551,68 +544,34 @@ pub fn resolve_exec<const N: usize>(candidates: [&str; N]) -> Option<PathBuf> {
         .find(|p| is_executable(p))
 }
 
-pub fn runtime_source_policy() -> mvm_core::vm_backend::RuntimeSourcePolicy {
-    cmdline_value("mvm.runtime_source_policy")
-        .as_deref()
-        .and_then(mvm_core::vm_backend::RuntimeSourcePolicy::from_cmdline_value)
-        .unwrap_or(mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay)
+/// The overlay copy of one helper, or nothing.
+///
+/// One rule for every helper, and only one candidate: the runtime overlay is
+/// the single source of the guest binaries. A helper that fell back to a baked
+/// copy would be the one binary in the guest whose provenance the boot could
+/// not account for.
+fn resolve_runtime_binary_for(
+    overlay: &'static str,
+    is_exec: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    let path = Path::new(overlay);
+    is_exec(path).then(|| path.to_path_buf())
 }
 
 pub fn resolve_egress_client() -> Option<PathBuf> {
-    resolve_egress_client_for(runtime_source_policy(), is_executable)
+    resolve_egress_client_for(is_executable)
 }
 
-pub fn resolve_egress_client_for(
-    runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
-    is_exec: impl Fn(&Path) -> bool,
-) -> Option<PathBuf> {
-    resolve_runtime_binary_for(
-        runtime_source_policy,
-        EGRESS_CLIENT_OVERLAY,
-        EGRESS_CLIENT,
-        is_exec,
-    )
+pub fn resolve_egress_client_for(is_exec: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    resolve_runtime_binary_for(EGRESS_CLIENT_OVERLAY, is_exec)
 }
 
 pub fn resolve_forward_proxy() -> Option<PathBuf> {
-    resolve_forward_proxy_for(runtime_source_policy(), is_executable)
+    resolve_forward_proxy_for(is_executable)
 }
 
-pub fn resolve_forward_proxy_for(
-    runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
-    is_exec: impl Fn(&Path) -> bool,
-) -> Option<PathBuf> {
-    resolve_runtime_binary_for(
-        runtime_source_policy,
-        FORWARD_PROXY_OVERLAY,
-        FORWARD_PROXY,
-        is_exec,
-    )
-}
-
-/// Pick the overlay or the baked copy of one helper, per the boot's declared
-/// runtime-source policy.
-///
-/// One rule for every helper. A required-overlay boot is a statement about
-/// where *all* of the runtime came from, so a helper that quietly fell back to
-/// a baked copy would be the one binary in the guest the declaration did not
-/// cover — and it would take a reader comparing two ladders to notice.
-fn resolve_runtime_binary_for(
-    runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
-    overlay: &'static str,
-    baked: &'static str,
-    is_exec: impl Fn(&Path) -> bool,
-) -> Option<PathBuf> {
-    let candidates: &[&str] = match runtime_source_policy {
-        mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay => &[overlay],
-        mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay => &[overlay, baked],
-        mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly => &[baked],
-    };
-    candidates
-        .iter()
-        .map(Path::new)
-        .find(|path| is_exec(path))
-        .map(Path::to_path_buf)
+pub fn resolve_forward_proxy_for(is_exec: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    resolve_runtime_binary_for(FORWARD_PROXY_OVERLAY, is_exec)
 }
 
 pub fn is_executable(path: &Path) -> bool {
@@ -894,116 +853,39 @@ mod tests {
     }
 
     #[test]
-    fn resolve_egress_client_for_required_overlay_resolves_overlay() {
-        let got = resolve_egress_client_for(
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-            |path| path == Path::new(EGRESS_CLIENT_OVERLAY),
-        );
+    fn resolve_egress_client_resolves_the_overlay_copy() {
+        let got = resolve_egress_client_for(|path| path == Path::new(EGRESS_CLIENT_OVERLAY));
         assert_eq!(got, Some(PathBuf::from(EGRESS_CLIENT_OVERLAY)));
     }
 
     #[test]
-    fn resolve_egress_client_for_required_overlay_returns_none_when_nothing_executable() {
-        // No executable candidate -> None, which main() treats as fatal
-        // (fail closed) rather than booting a workload with no egress path.
-        let got = resolve_egress_client_for(
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-            |_path| false,
-        );
+    fn resolve_egress_client_returns_none_when_nothing_is_executable() {
+        // None is fatal to the boot (fail closed) rather than launching a
+        // workload that silently cannot reach its admitted egress.
+        assert_eq!(resolve_egress_client_for(|_| false), None);
+    }
+
+    /// The overlay is the single runtime source, so a stray executable at the
+    /// old baked path must not satisfy the lookup. This is the exact shape that
+    /// let a boot come up with an unaccounted-for binary.
+    #[test]
+    fn resolve_egress_client_ignores_a_stray_binary_at_the_old_baked_path() {
+        let got =
+            resolve_egress_client_for(|path| path == Path::new("/usr/local/bin/mvm-egress-client"));
         assert_eq!(got, None);
     }
 
     #[test]
-    fn resolve_egress_client_for_required_overlay_does_not_fall_back_to_baked() {
-        // Only the baked path is executable; required-overlay must not accept it.
-        let got = resolve_egress_client_for(
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-            |path| path == Path::new(EGRESS_CLIENT),
-        );
-        assert_eq!(got, None);
-    }
-
-    #[test]
-    fn resolve_egress_client_for_prefer_overlay_prefers_overlay_when_both_present() {
-        let got = resolve_egress_client_for(
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-            |_path| true,
-        );
-        assert_eq!(got, Some(PathBuf::from(EGRESS_CLIENT_OVERLAY)));
-    }
-
-    #[test]
-    fn resolve_egress_client_for_prefer_overlay_falls_back_to_baked() {
-        let got = resolve_egress_client_for(
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-            |path| path == Path::new(EGRESS_CLIENT),
-        );
-        assert_eq!(got, Some(PathBuf::from(EGRESS_CLIENT)));
-    }
-
-    #[test]
-    fn resolve_egress_client_for_rootfs_only_ignores_overlay_and_uses_baked() {
-        // Overlay executable but policy is rootfs-only -> only the baked
-        // candidate is considered, so it wins.
-        let got = resolve_egress_client_for(
-            mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
-            |path| path == Path::new(EGRESS_CLIENT_OVERLAY) || path == Path::new(EGRESS_CLIENT),
-        );
-        assert_eq!(got, Some(PathBuf::from(EGRESS_CLIENT)));
-    }
-
-    #[test]
-    fn resolve_egress_client_for_rootfs_only_returns_none_when_baked_missing() {
-        let got = resolve_egress_client_for(
-            mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
-            |_path| false,
-        );
-        assert_eq!(got, None);
-    }
-
-    /// The forward proxy follows the same declaration the egress client does.
-    /// A required-overlay boot that ran a baked copy would be one binary the
-    /// declaration did not actually cover.
-    #[test]
-    fn resolve_forward_proxy_for_required_overlay_does_not_fall_back_to_baked() {
+    fn resolve_forward_proxy_resolves_the_overlay_copy_and_ignores_the_baked_path() {
         assert_eq!(
-            resolve_forward_proxy_for(
-                mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-                |path| path == Path::new(FORWARD_PROXY),
-            ),
+            resolve_forward_proxy_for(|path| path == Path::new(FORWARD_PROXY_OVERLAY)),
+            Some(PathBuf::from(FORWARD_PROXY_OVERLAY))
+        );
+        assert_eq!(
+            resolve_forward_proxy_for(|path| {
+                path == Path::new("/usr/local/bin/mvm-forward-proxy")
+            }),
             None
-        );
-        assert_eq!(
-            resolve_forward_proxy_for(
-                mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-                |path| path == Path::new(FORWARD_PROXY_OVERLAY),
-            ),
-            Some(PathBuf::from(FORWARD_PROXY_OVERLAY))
-        );
-    }
-
-    #[test]
-    fn resolve_forward_proxy_for_prefers_the_overlay_and_falls_back_when_allowed() {
-        assert_eq!(
-            resolve_forward_proxy_for(
-                mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-                |_| true
-            ),
-            Some(PathBuf::from(FORWARD_PROXY_OVERLAY))
-        );
-        assert_eq!(
-            resolve_forward_proxy_for(
-                mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-                |path| path == Path::new(FORWARD_PROXY),
-            ),
-            Some(PathBuf::from(FORWARD_PROXY))
-        );
-        assert_eq!(
-            resolve_forward_proxy_for(
-                mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
-                |_| true
-            ),
-            Some(PathBuf::from(FORWARD_PROXY))
         );
     }
 
@@ -1011,23 +893,19 @@ mod tests {
     /// where the runtime came from, and the shared rule is what keeps them one.
     #[test]
     fn the_egress_client_and_the_forward_proxy_resolve_by_the_same_rule() {
-        for policy in [
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-            mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
+        for (overlay, baked) in [
+            (EGRESS_CLIENT_OVERLAY, "/usr/local/bin/mvm-egress-client"),
+            (FORWARD_PROXY_OVERLAY, "/usr/local/bin/mvm-forward-proxy"),
         ] {
-            let only_baked = |overlay: &'static str, baked: &'static str| {
-                (
-                    resolve_runtime_binary_for(policy, overlay, baked, |p| p == Path::new(baked)),
-                    baked,
-                )
-            };
-            let (egress, egress_baked) = only_baked(EGRESS_CLIENT_OVERLAY, EGRESS_CLIENT);
-            let (proxy, proxy_baked) = only_baked(FORWARD_PROXY_OVERLAY, FORWARD_PROXY);
             assert_eq!(
-                egress.map(|p| p == Path::new(egress_baked)),
-                proxy.map(|p| p == Path::new(proxy_baked)),
-                "{policy:?} treated the two helpers differently"
+                resolve_runtime_binary_for(overlay, |p| p == Path::new(overlay)),
+                Some(PathBuf::from(overlay)),
+                "{overlay} did not resolve from the overlay"
+            );
+            assert_eq!(
+                resolve_runtime_binary_for(overlay, |p| p == Path::new(baked)),
+                None,
+                "{overlay} accepted a binary at the old baked path {baked}"
             );
         }
     }

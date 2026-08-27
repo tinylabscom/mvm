@@ -24,8 +24,7 @@ pub const GUEST_BUILD_VERBOSE_ENV: &str = "MVM_GUEST_BUILD_VERBOSE";
 
 /// Static guest binaries required while materializing and booting an OCI root.
 /// Release packaging and download verification share this canonical set.
-pub const OCI_GUEST_RUNTIME_BINARY_NAMES: [&str; 6] = [
-    "mvm-oci-init",
+pub const OCI_GUEST_RUNTIME_BINARY_NAMES: [&str; 5] = [
     "mvm-guest-agent",
     "mvm-guest-netinit",
     "mvm-egress-client",
@@ -54,7 +53,6 @@ pub enum GuestAgentBuildError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestAgentLayout {
     pub dir: PathBuf,
-    pub oci_init: PathBuf,
     pub agent: PathBuf,
     pub netinit: PathBuf,
     pub egress_client: PathBuf,
@@ -65,7 +63,6 @@ pub struct GuestAgentLayout {
 /// Built guest runtime binary paths ready to install into the cache.
 #[derive(Debug, Clone, Copy)]
 pub struct GuestRuntimeBinaryPaths<'a> {
-    pub oci_init: &'a Path,
     pub agent: &'a Path,
     pub netinit: &'a Path,
     pub egress_client: &'a Path,
@@ -88,7 +85,6 @@ impl GuestAgentLayout {
             .join(cache_key)
             .join(arch.to_string());
         Self {
-            oci_init: dir.join("mvm-oci-init"),
             agent: dir.join("mvm-guest-agent"),
             netinit: dir.join("mvm-guest-netinit"),
             egress_client: dir.join("mvm-egress-client"),
@@ -99,8 +95,7 @@ impl GuestAgentLayout {
     }
 
     pub fn is_complete(&self) -> bool {
-        self.oci_init.is_file()
-            && self.agent.is_file()
+        self.agent.is_file()
             && self.netinit.is_file()
             && self.egress_client.is_file()
             && self.entrypoint_runner.is_file()
@@ -109,7 +104,6 @@ impl GuestAgentLayout {
 
     pub fn binaries(&self) -> MvmRuntimeBinaries {
         MvmRuntimeBinaries {
-            oci_init: self.oci_init.clone(),
             agent: self.agent.clone(),
             netinit: self.netinit.clone(),
             egress_client: self.egress_client.clone(),
@@ -260,8 +254,6 @@ impl GuestAgentBuildSpec {
             "mvm-guest-agent".to_string(),
             "--bin".to_string(),
             "mvm-guest-netinit".to_string(),
-            "--bin".to_string(),
-            "mvm-oci-init".to_string(),
             "--bin".to_string(),
             "mvm-oci-entrypoint".to_string(),
             "--bin".to_string(),
@@ -525,12 +517,11 @@ pub fn resolve_or_build_guest_binaries(
     let built = build_guest_binaries(&spec)?;
     install_into_cache(
         GuestRuntimeBinaryPaths {
-            oci_init: &built.0,
-            agent: &built.1,
-            netinit: &built.2,
-            egress_client: &built.3,
-            entrypoint_runner: &built.4,
-            verity_init: &built.5,
+            agent: &built.0,
+            netinit: &built.1,
+            egress_client: &built.2,
+            entrypoint_runner: &built.3,
+            verity_init: &built.4,
         },
         cache_root,
         cache_key,
@@ -549,7 +540,6 @@ pub fn install_into_cache(
 ) -> Result<MvmRuntimeBinaries, GuestAgentBuildError> {
     let layout = GuestAgentLayout::under(cache_root, cache_key, arch);
     std::fs::create_dir_all(&layout.dir)?;
-    install_one(src.oci_init, &layout.oci_init)?;
     install_one(src.agent, &layout.agent)?;
     install_one(src.netinit, &layout.netinit)?;
     install_one(src.egress_client, &layout.egress_client)?;
@@ -745,9 +735,9 @@ fn install_one(src: &Path, dst: &Path) -> Result<(), GuestAgentBuildError> {
     Ok(())
 }
 
-/// The six built guest binary paths, in the order `oci_init, agent, netinit,
+/// The five built guest binary paths, in the order `agent, netinit,
 /// egress_client, entrypoint_runner, verity_init`.
-type BuiltGuestBinaries = (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf, PathBuf);
+type BuiltGuestBinaries = (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf);
 
 /// Run `cargo zigbuild` for the spec, returning the built binary paths.
 pub fn build_guest_binaries(
@@ -790,14 +780,12 @@ pub fn build_guest_binaries(
         "guest runtime build complete"
     );
     let dir = spec.output_dir();
-    let oci_init = dir.join("mvm-oci-init");
     let agent = dir.join("mvm-guest-agent");
     let netinit = dir.join("mvm-guest-netinit");
     let egress_client = dir.join("mvm-egress-client");
     let entrypoint_runner = dir.join("mvm-oci-entrypoint");
     let verity_init = dir.join("mvm-verity-init");
     for p in [
-        &oci_init,
         &agent,
         &netinit,
         &egress_client,
@@ -809,7 +797,6 @@ pub fn build_guest_binaries(
         }
     }
     Ok((
-        oci_init,
         agent,
         netinit,
         egress_client,
@@ -1031,7 +1018,6 @@ mod tests {
         let layout = GuestAgentLayout::under(cache_root, cache_key, arch);
         std::fs::create_dir_all(&layout.dir).expect("create guest cache dir");
         for path in [
-            &layout.oci_init,
             &layout.agent,
             &layout.netinit,
             &layout.egress_client,
@@ -1073,7 +1059,6 @@ mod tests {
         let arch = GuestArch::Aarch64;
 
         let paths: Vec<std::path::PathBuf> = [
-            "mvm-oci-init",
             "mvm-guest-agent",
             "mvm-guest-netinit",
             "mvm-egress-client",
@@ -1091,12 +1076,11 @@ mod tests {
         let install = |cache_root: &Path| {
             install_into_cache(
                 GuestRuntimeBinaryPaths {
-                    oci_init: &paths[0],
-                    agent: &paths[1],
-                    netinit: &paths[2],
-                    egress_client: &paths[3],
-                    entrypoint_runner: &paths[4],
-                    verity_init: &paths[5],
+                    agent: &paths[0],
+                    netinit: &paths[1],
+                    egress_client: &paths[2],
+                    entrypoint_runner: &paths[3],
+                    verity_init: &paths[4],
                 },
                 cache_root,
                 "test-key",
@@ -1138,14 +1122,12 @@ mod tests {
         // Nothing cached yet.
         assert!(cached_guest_binaries(cache.path(), version, arch).is_none());
 
-        let oci_init = source.path().join("mvm-oci-init");
         let agent = source.path().join("mvm-guest-agent");
         let netinit = source.path().join("mvm-guest-netinit");
         let egress_client = source.path().join("mvm-egress-client");
         let entrypoint_runner = source.path().join("mvm-oci-entrypoint");
         let verity_init = source.path().join("mvm-verity-init");
         for (path, tag) in [
-            (&oci_init, b"oci-init".as_slice()),
             (&agent, b"agent".as_slice()),
             (&netinit, b"netinit".as_slice()),
             (&egress_client, b"egress-client".as_slice()),
@@ -1158,7 +1140,6 @@ mod tests {
         // Install artifact paths, then the cache lookup finds them.
         let bins = install_into_cache(
             GuestRuntimeBinaryPaths {
-                oci_init: &oci_init,
                 agent: &agent,
                 netinit: &netinit,
                 egress_client: &egress_client,
@@ -1174,12 +1155,7 @@ mod tests {
         assert!(bins.netinit.is_file());
         assert!(bins.egress_client.is_file());
         let layout = GuestAgentLayout::under(cache.path(), version, arch);
-        assert!(layout.oci_init.is_file());
         assert!(layout.entrypoint_runner.is_file());
-        assert_eq!(
-            std::fs::read(&layout.oci_init).unwrap(),
-            fake_static_elf(arch, b"oci-init")
-        );
         assert_eq!(
             std::fs::read(&bins.agent).unwrap(),
             fake_static_elf(arch, b"agent")
@@ -1228,7 +1204,6 @@ mod tests {
             .join(version)
             .join("aarch64");
         assert_eq!(l.dir, expected_dir);
-        assert_eq!(l.oci_init, l.dir.join("mvm-oci-init"));
         assert_eq!(l.agent, l.dir.join("mvm-guest-agent"));
         assert_eq!(l.netinit, l.dir.join("mvm-guest-netinit"));
         assert_eq!(l.egress_client, l.dir.join("mvm-egress-client"));
@@ -1256,7 +1231,6 @@ mod tests {
             vec![
                 "mvm-guest-agent",
                 "mvm-guest-netinit",
-                "mvm-oci-init",
                 "mvm-oci-entrypoint",
                 "mvm-verity-init",
                 "mvm-egress-client",
@@ -1419,7 +1393,6 @@ rust = "1.91.1"
     fn install_and_resolve_round_trips_from_cache() {
         let tmp = tempfile::tempdir().unwrap();
         let version = env!("CARGO_PKG_VERSION");
-        let oci_init_src = tmp.path().join("i");
         let agent_src = tmp.path().join("a");
         let netinit_src = tmp.path().join("n");
         let egress_client_src = tmp.path().join("e");
@@ -1432,7 +1405,6 @@ rust = "1.91.1"
         // were x86_64 but the install arch is aarch64.
         let elf_arch = GuestArch::Aarch64;
         for (path, tag) in [
-            (&oci_init_src, b"INIT".as_slice()),
             (&agent_src, b"AGENT".as_slice()),
             (&netinit_src, b"NETINIT".as_slice()),
             (&egress_client_src, b"EGRESS".as_slice()),
@@ -1445,7 +1417,6 @@ rust = "1.91.1"
 
         let installed = install_into_cache(
             GuestRuntimeBinaryPaths {
-                oci_init: &oci_init_src,
                 agent: &agent_src,
                 netinit: &netinit_src,
                 egress_client: &egress_client_src,
@@ -1466,10 +1437,6 @@ rust = "1.91.1"
             fake_static_elf(elf_arch, b"EGRESS")
         );
         let layout = GuestAgentLayout::under(&cache, version, GuestArch::Aarch64);
-        assert_eq!(
-            std::fs::read(&layout.oci_init).unwrap(),
-            fake_static_elf(elf_arch, b"INIT")
-        );
         assert_eq!(
             std::fs::read(&layout.entrypoint_runner).unwrap(),
             fake_static_elf(elf_arch, b"RUNNER")
@@ -1493,7 +1460,6 @@ rust = "1.91.1"
         let version = env!("CARGO_PKG_VERSION");
         let err = install_into_cache(
             GuestRuntimeBinaryPaths {
-                oci_init: &tmp.path().join("missing-oci-init"),
                 agent: &tmp.path().join("missing-agent"),
                 netinit: &tmp.path().join("missing-netinit"),
                 egress_client: &tmp.path().join("missing-egress-client"),

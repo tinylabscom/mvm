@@ -621,10 +621,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // boots: the sidecar describes how the image was built and is not part
         // of the captured snapshot, so it exists only beside the image.
         guards
-            .admit_overlay_contract(
-                std::path::Path::new(&claim.rootfs_path),
-                child_cfg.runtime_source_policy,
-            )
+            .admit_overlay_contract(std::path::Path::new(&claim.rootfs_path))
             .map_err(|e| StandbyError::ClaimFailed(format!("overlay contract: {e}")))?;
 
         let grant_envelope = issue_child_grant(&plan, &child_cfg, ctx.grant_issuer)
@@ -877,7 +874,6 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             id: CheckpointId::new(format!("standby-{}", spec.id)),
             vm_name: spec.id.clone(),
             supervisor_config_digest: String::new(),
-            runtime_source_policy: None,
             runtime_overlay_version: None,
             // Firecracker keeps no supervisor-config blob; its presence is
             // what marks a checkpoint as originating from a backend that does.
@@ -2324,14 +2320,13 @@ mod tests {
         let require_grant = mvm_vmm::host::egress_bridge::require_grant_cmdline_token(vm_name)
             .expect("sidecar present ⇒ enforcement token");
         // Roothash and block-device tokens travel over vsock via
-        // ActivateEnvironment, so the kernel cmdline only carries policy,
-        // egress, and grant tokens.
+        // ActivateEnvironment, so the kernel cmdline only carries egress and
+        // grant tokens.
         for needle in [
             "mvm.verb_grant=",
             require_grant.as_str(),
             "mvm.host_signer_pub=",
             "mvm.vsock_egress=1",
-            "mvm.runtime_source_policy=",
         ] {
             assert!(
                 cmdline.contains(needle),
@@ -2939,6 +2934,12 @@ mod tests {
             kernel_path: Some("/img/kernel".into()),
             cpus: 2,
             memory_mib: 512,
+            // Every launch carries the overlay triple — it is the only source
+            // of the guest agent, so a parent warmed without one cannot reach
+            // an agent to be captured.
+            runtime_overlay_path: Some("/img/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/img/runtime.verity".into()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
             ..Default::default()
         }
     }
@@ -3206,7 +3207,6 @@ mod tests {
             ),
             runtime_overlay_roothash: Some("b".repeat(64)),
             runtime_overlay_version: Some("0.18.0".into()),
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
             cpus: 2,
             memory_mib: 512,
             ..Default::default()
@@ -3247,13 +3247,6 @@ mod tests {
             workload.blocks.len(),
             4,
             "fixture must boot rootfs + verity + overlay + overlay verity"
-        );
-        assert!(
-            workload
-                .cmdline
-                .contains("mvm.runtime_source_policy=required_overlay"),
-            "fixture must boot the required-overlay contract: {}",
-            workload.cmdline
         );
         assert_eq!(
             parent.blocks, workload.blocks,
@@ -3298,6 +3291,9 @@ mod tests {
             network_policy: NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)]),
             cpus: 2,
             memory_mib: 512,
+            runtime_overlay_path: Some("/img/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/img/runtime.verity".into()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
             ..Default::default()
         };
 
@@ -3470,7 +3466,6 @@ mod tests {
                 vm_name: "warm-parent".into(),
                 rootfs,
                 supervisor_config_digest: "d".into(),
-                runtime_source_policy: None,
                 runtime_overlay_version: None,
                 tag: None,
                 created_unix: 1,

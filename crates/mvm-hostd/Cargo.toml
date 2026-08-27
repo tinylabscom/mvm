@@ -194,6 +194,9 @@ mvm-core = { workspace = true, features = ["test-support"] }
 # production binary; force it on for this crate's own test build the same
 # way the `mvm-core` entry above does.
 mvm-runtime = { workspace = true, features = ["test-support"] }
+# Session-resume fixtures install a resolver-valid runtime overlay through the
+# shared ext4 and overlay helpers instead of bypassing the production contract.
+mvm-fs.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "time", "sync", "test-util"] }
 # jailer property tests re-spawn under SECCOMP_PROBE=1 before main.
 ctor = "0.2"

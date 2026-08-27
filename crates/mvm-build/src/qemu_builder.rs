@@ -1693,12 +1693,8 @@ mod vsock_module_tests {
     fn cmdline_preserves_runtime_overlay_tokens() {
         let out = qemu_build_cmdline(
             "console=hvc0 root=/dev/vda ro init=/sbin/mvm-host-vm-init \
-             mvm.runtime_source_policy=required_overlay mvm.runtime_data=/dev/vdc",
+             mvm.runtime_data=/dev/vdc",
             45253,
-        );
-        assert!(
-            out.contains("mvm.runtime_source_policy=required_overlay"),
-            "got: {out}"
         );
         assert!(out.contains("mvm.runtime_data=/dev/vdc"), "got: {out}");
     }

@@ -512,7 +512,6 @@ fn materialize_from_dir(
     // a source checkout or a complete compatibility cache.
     mvm_build::run_image::inject_and_materialize(
         mvm_build::run_image::InjectAndMaterializeRequest::builder(&cache_root, dir, &output, name)
-            .profile(mvm_build::oci_runtime_inject::RuntimeInjectionProfile::RuntimeLean)
             .sealed(false)
             .deferred_nodes(deferred_nodes)
             .build(),

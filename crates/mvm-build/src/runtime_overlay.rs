@@ -967,7 +967,6 @@ pub fn download_runtime_overlay(
 
     crate::guest_agent_build::install_into_cache(
         crate::guest_agent_build::GuestRuntimeBinaryPaths {
-            oci_init: &stage.join("mvm-oci-init"),
             agent: &stage.join("mvm-guest-agent"),
             netinit: &stage.join("mvm-guest-netinit"),
             egress_client: &stage.join("mvm-egress-client"),
@@ -1010,15 +1009,14 @@ pub fn download_runtime_overlay(
 /// Exactly the members the overlay's release tarball may carry. Doubles as the
 /// extraction allow-list and the completeness check — an archive carrying
 /// anything else, or missing any of these, is refused.
-const RELEASE_GUEST_RUNTIME_FILES: [&str; 6] =
+const RELEASE_GUEST_RUNTIME_FILES: [&str; 5] =
     crate::guest_agent_build::OCI_GUEST_RUNTIME_BINARY_NAMES;
 
-const OVERLAY_ARCHIVE_MEMBERS: [&str; 11] = [
+const OVERLAY_ARCHIVE_MEMBERS: [&str; 10] = [
     "overlay.ext4",
     "overlay.verity",
     "overlay.roothash",
     "VERSION",
-    "mvm-oci-init",
     "mvm-guest-agent",
     "mvm-guest-netinit",
     "mvm-egress-client",
@@ -2102,7 +2100,7 @@ mod tests {
             .expect_err("unsigned inner guest binaries must be refused");
         match err {
             RuntimeOverlayError::ChecksumMissing { name, .. } => {
-                assert_eq!(name, "mvm-oci-init");
+                assert_eq!(name, "mvm-guest-agent");
             }
             other => panic!("expected ChecksumMissing, got {other:?}"),
         }

@@ -464,7 +464,6 @@
             # the overlay is attached. Publish the exact static binaries beside
             # the disk so an installed mvmctl never needs a Rust toolchain.
             mkdir -p $out/guest-runtime
-            cp ${guest}/bin/mvm-oci-init       $out/guest-runtime/mvm-oci-init
             cp ${guest}/bin/mvm-guest-agent    $out/guest-runtime/mvm-guest-agent
             cp ${guest}/bin/mvm-guest-netinit  $out/guest-runtime/mvm-guest-netinit
             cp ${egressClient}/bin/mvm-egress-client $out/guest-runtime/mvm-egress-client

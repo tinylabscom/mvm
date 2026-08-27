@@ -118,20 +118,8 @@ pub(super) fn supervisor_config_digest(state_dir: &std::path::Path) -> String {
     mvm_core::crypto::image_verify::sha256_file(&cfg_path).unwrap_or_default()
 }
 
-pub(super) fn runtime_contract_for_checkpoint(
-    name: &str,
-) -> Result<(
-    Option<mvm_core::vm_backend::RuntimeSourcePolicy>,
-    Option<String>,
-)> {
-    Ok(mvm_runtime::base::runtime_meta::read(name)?
-        .map(|meta| {
-            (
-                Some(meta.runtime_source_policy),
-                meta.runtime_overlay_version,
-            )
-        })
-        .unwrap_or((None, None)))
+pub(super) fn runtime_contract_for_checkpoint(name: &str) -> Result<Option<String>> {
+    Ok(mvm_runtime::base::runtime_meta::read(name)?.and_then(|meta| meta.runtime_overlay_version))
 }
 
 /// The backend that actually owns `name`, falling back to the host default for

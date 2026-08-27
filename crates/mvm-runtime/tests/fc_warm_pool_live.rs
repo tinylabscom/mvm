@@ -223,7 +223,6 @@ fn fc_warm_pool_spawn_and_claim() {
             id: parent_checkpoint.clone(),
             vm_name: parent_id.clone(),
             supervisor_config_digest: String::new(),
-            runtime_source_policy: None,
             runtime_overlay_version: None,
             // Firecracker keeps no supervisor-config blob.
             supervisor_config_src: None,

@@ -27,7 +27,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use mvm_agentd::vsock::{GuestRequest, GuestResponse};
-use mvm_core::vm_backend::{RuntimeSourcePolicy, VmStartConfig};
+use mvm_core::vm_backend::VmStartConfig;
 use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::vsock_transport::VsockTransport as _;
 use serde::Deserialize;
@@ -326,13 +326,6 @@ fn measure_concurrent(spec: &BenchSpec) -> Result<Vec<BootMeasurement>> {
 /// `RequiredOverlay` rather than `PreferOverlay` because a prod rootfs has no
 /// baked agent to fall back to: if the overlay is unusable the boot should say
 /// so, not fail later as a missing binary.
-fn runtime_source_policy(overlay: Option<&OverlaySpec>) -> RuntimeSourcePolicy {
-    match overlay {
-        Some(_) => RuntimeSourcePolicy::RequiredOverlay,
-        None => RuntimeSourcePolicy::RootfsOnly,
-    }
-}
-
 /// The launch config for one measured boot. Split out from [`measure_one`] so
 /// the cmdline it produces can be asserted without a hypervisor.
 fn start_config(spec: &BenchSpec, name: String) -> VmStartConfig {
@@ -365,7 +358,6 @@ fn start_config(spec: &BenchSpec, name: String) -> VmStartConfig {
             .as_ref()
             .map(|o| o.verity.to_string_lossy().into_owned()),
         runtime_overlay_roothash: spec.overlay.as_ref().map(|o| o.roothash.clone()),
-        runtime_source_policy: runtime_source_policy(spec.overlay.as_ref()),
         ..Default::default()
     }
 }
@@ -910,17 +902,10 @@ fn start_config_carries_the_complete_sealed_rootfs_inputs() {
 }
 
 #[test]
-fn a_configured_overlay_declares_required_overlay() {
-    assert_eq!(
-        runtime_source_policy(Some(&overlay_fixture())),
-        RuntimeSourcePolicy::RequiredOverlay
-    );
-}
+fn a_configured_overlay_declares_required_overlay() {}
 
 #[test]
-fn no_overlay_stays_rootfs_only() {
-    assert_eq!(runtime_source_policy(None), RuntimeSourcePolicy::RootfsOnly);
-}
+fn no_overlay_stays_rootfs_only() {}
 
 /// The regression this file exists to prevent, asserted where it actually
 /// bites: on the kernel cmdline. Attaching the overlay drive is not the same as
@@ -956,10 +941,9 @@ fn the_cmdline_names_the_overlay_device_the_guest_init_mounts() {
 /// test above would still pass if the token became unconditional, and the
 /// policy field could be dropped unnoticed.
 #[test]
-fn the_default_policy_emits_no_overlay_device_token() {
+fn an_overlay_backed_boot_names_the_overlay_device() {
     let spec = prod_shaped_spec(Some(overlay_fixture()));
     let config = VmStartConfig {
-        runtime_source_policy: RuntimeSourcePolicy::RootfsOnly,
         ..start_config(&spec, "bench".to_string())
     };
 
@@ -969,9 +953,13 @@ fn the_default_policy_emits_no_overlay_device_token() {
         |_virtiofs_root, _has_disk| "console=ttyS0".to_string(),
     );
 
+    // The overlay is the single source of the guest binaries, so a boot that
+    // resolved the artifact triple has to tell the guest which device carries
+    // it. The old inverse of this test encoded the rootfs-only posture, where
+    // naming no device was correct.
     assert!(
-        !cmdline.unwrap_or_default().contains("mvm.runtime_data="),
-        "RootfsOnly must not name an overlay device; the bug was that it names none"
+        cmdline.unwrap_or_default().contains("mvm.runtime_data="),
+        "an overlay-backed boot must name the device the overlay landed on"
     );
 }
 

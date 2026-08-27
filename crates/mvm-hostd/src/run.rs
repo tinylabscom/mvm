@@ -145,19 +145,9 @@ pub(crate) fn attach_runtime_overlay_from_cache(
             config.runtime_overlay_version = Some(artifact.version);
             Ok(())
         }
-        Err(e)
-            if config.runtime_source_policy
-                == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay =>
-        {
-            Err(anyhow::anyhow!(
-                "runtime overlay required for {backend_name} boot but unavailable: {e}"
-            ))
-        }
-        Err(e) => {
-            // Cold cache / dev rootfs / version drift — boot legacy, don't fail.
-            tracing::debug!(backend = backend_name, error = %e, "runtime overlay not attached");
-            Ok(())
-        }
+        Err(e) => Err(anyhow::anyhow!(
+            "runtime overlay required for {backend_name} boot but unavailable: {e}"
+        )),
     }
 }
 
@@ -238,14 +228,6 @@ pub fn admit_and_boot_local(
         memory_mib: req.mem_mib,
         volumes: req.volumes.clone(),
         tenant_id: Some(LOCAL_TENANT.to_string()),
-        runtime_source_policy: mvm_core::vm_backend::select_runtime_source_policy(
-            mvm_core::vm_backend::RuntimeSourcePolicySelection {
-                backend_name: None,
-                sealed: false,
-                root_strategy: None,
-                launch_kind: mvm_core::vm_backend::RuntimeSourceLaunchKind::WorkloadImage,
-            },
-        ),
         // With no egress grant the deny-all default from `VmStartConfig` stands;
         // a granted allow-list is projected onto it, so the policy the gate
         // enforces is derived from the same grants the plan was signed for.
@@ -518,7 +500,7 @@ mod tests {
     /// legacy boot under `PreferOverlay`, fails closed under
     /// `RequiredOverlay`); non-VMM backends (the mock) skip entirely.
     #[test]
-    fn runtime_overlay_attachment_matches_the_cli_matrix() {
+    fn runtime_overlay_attachment_fails_closed_on_a_cold_cache() {
         let data = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
         env.isolate_mvm_home(data.path());
@@ -528,23 +510,15 @@ mod tests {
         attach_runtime_overlay_from_cache(&mut config, "mock").expect("mock skips");
         assert!(config.runtime_overlay_path.is_none());
 
-        // Firecracker + cold cache + PreferOverlay: legacy boot, no fields.
+        // A real backend with a cold cache fails closed. There is no second
+        // arm any more: the overlay is the only source of the guest binaries,
+        // so "boot anyway with nothing attached" is not a posture a backend
+        // can select.
         let mut config = VmStartConfig {
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-            ..Default::default()
-        };
-        attach_runtime_overlay_from_cache(&mut config, "firecracker")
-            .expect("cold cache under PreferOverlay boots legacy");
-        assert!(config.runtime_overlay_path.is_none());
-        assert!(config.runtime_overlay_roothash.is_none());
-
-        // Firecracker + cold cache + RequiredOverlay: fail closed.
-        let mut config = VmStartConfig {
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
             ..Default::default()
         };
         let err = attach_runtime_overlay_from_cache(&mut config, "firecracker")
-            .expect_err("required overlay + cold cache must refuse");
+            .expect_err("a cold cache must refuse");
         assert!(
             err.to_string().contains("runtime overlay required"),
             "got: {err:#}"

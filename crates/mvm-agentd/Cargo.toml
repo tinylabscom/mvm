@@ -59,14 +59,6 @@ path = "src/bin/mvm-verity-init.rs"
 name = "mvm-guest-netinit"
 path = "src/bin/mvm-guest-netinit.rs"
 
-# Static PID 1 injected into arbitrary OCI rootfs trees by `run --image`.
-# It performs the mvm boot/runtime setup with syscalls and direct process
-# spawns, so scratch/distroless images do not need `/bin/sh`, busybox, coreutils,
-# or an image-native init system.
-[[bin]]
-name = "mvm-oci-init"
-path = "src/bin/mvm-oci-init.rs"
-
 [[bin]]
 name = "mvm-oci-entrypoint"
 path = "src/bin/mvm-oci-entrypoint.rs"

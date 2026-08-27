@@ -118,7 +118,6 @@ mod tests {
             p
         };
         MvmRuntimeBinaries {
-            oci_init: mk("mvm-oci-init", b"init-bytes"),
             agent: mk("mvm-guest-agent", b"agent-bytes"),
             netinit: mk("mvm-guest-netinit", b"netinit-bytes"),
             egress_client: mk("mvm-egress-client", b"egress-bytes"),

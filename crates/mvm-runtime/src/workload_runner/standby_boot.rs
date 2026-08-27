@@ -27,7 +27,7 @@
 use std::path::Path;
 
 use mvm_core::policy::network_policy::NetworkPolicy;
-use mvm_core::vm_backend::{RuntimeSourcePolicy, StandbyError, StandbySpec, VmStartConfig};
+use mvm_core::vm_backend::{StandbyError, StandbySpec, VmStartConfig};
 
 use crate::driver::VmmSpec;
 use mvm_vmm::host::cmdline;
@@ -51,9 +51,7 @@ fn ensure_parent_can_reach_an_agent(
     id: &str,
     config: &VmStartConfig,
 ) -> std::result::Result<(), StandbyError> {
-    if config.runtime_source_policy == RuntimeSourcePolicy::RequiredOverlay
-        && cmdline::runtime_overlay(config).is_none()
-    {
+    if cmdline::runtime_overlay(config).is_none() {
         return Err(StandbyError::SpawnFailed(format!(
             "standby '{id}' would boot without the runtime overlay its launch requires: the \
              overlay is the only source of the guest agent, so the parent would panic before it \
@@ -162,7 +160,6 @@ pub fn factory_parent_config(
         runtime_overlay_verity_path,
         runtime_overlay_roothash,
         runtime_overlay_version,
-        runtime_source_policy,
         mem_initial_mib,
     } = launch;
 
@@ -182,7 +179,6 @@ pub fn factory_parent_config(
         runtime_overlay_verity_path: runtime_overlay_verity_path.clone(),
         runtime_overlay_roothash: runtime_overlay_roothash.clone(),
         runtime_overlay_version: runtime_overlay_version.clone(),
-        runtime_source_policy: *runtime_source_policy,
         mem_initial_mib: *mem_initial_mib,
         revision_hash: String::new(),
         flake_ref: String::new(),
@@ -291,7 +287,7 @@ mod tests {
     use std::sync::MutexGuard;
 
     use mvm_core::util::test_env::TestEnv;
-    use mvm_core::vm_backend::{RuntimeSourcePolicy, VmVolume, VmVolumeKind};
+    use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
     use mvm_net::channel::GuestService;
 
     use mvm_vmm::host::spec_map::{WorkloadSockets, WorkloadSpecInputs, workload_spec};
@@ -347,7 +343,6 @@ mod tests {
             runtime_overlay_verity_path: Some(dir.join("overlay.verity").display().to_string()),
             runtime_overlay_roothash: Some("b".repeat(64)),
             runtime_overlay_version: Some("0.18.0".into()),
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             cpus: 2,
             memory_mib: 512,
             ..Default::default()
@@ -634,13 +629,6 @@ mod tests {
         );
         assert!(parent.blocks.iter().all(|b| b.read_only));
 
-        assert!(
-            parent
-                .cmdline
-                .contains("mvm.runtime_source_policy=required_overlay"),
-            "parent cmdline missing runtime-source policy: {}",
-            parent.cmdline
-        );
         for legacy_token in [
             "mvm.roothash=",
             "mvm.data=/dev/vda",
@@ -688,13 +676,6 @@ mod tests {
                 parent.cmdline
             );
         }
-        assert!(
-            parent
-                .cmdline
-                .contains("mvm.runtime_source_policy=required_overlay"),
-            "parent cmdline missing runtime-source policy: {}",
-            parent.cmdline
-        );
     }
 
     #[test]
@@ -859,31 +840,6 @@ mod tests {
         assert!(
             format!("{err}").contains("initramfs"),
             "unexpected refusal: {err}"
-        );
-    }
-
-    /// The guard is keyed on the launch's own policy, so an unsealed
-    /// rootfs-only launch — a dev image with the agent baked in — still warms.
-    #[test]
-    fn factory_parent_config_admits_a_rootfs_only_launch_with_no_overlay() {
-        let tmp = tempfile::tempdir().unwrap();
-        let rootfs = tmp.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"rootfs").unwrap();
-        let launch = VmStartConfig {
-            name: "workload-a".into(),
-            rootfs_path: rootfs.display().to_string(),
-            kernel_path: Some(tmp.path().join("vmlinux").display().to_string()),
-            cpus: 2,
-            memory_mib: 512,
-            ..Default::default()
-        };
-        let spec = standby_spec_for(&launch, tmp.path());
-
-        let parent = factory_parent_config(&launch, &spec)
-            .expect("a rootfs-only launch needs no overlay to reach its agent");
-        assert_eq!(
-            parent.runtime_source_policy,
-            RuntimeSourcePolicy::RootfsOnly
         );
     }
 

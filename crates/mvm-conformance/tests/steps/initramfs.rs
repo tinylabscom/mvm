@@ -6,7 +6,6 @@
 
 use cucumber::{given, then, when};
 use mvm_core::arch::GuestArch;
-use mvm_core::vm_backend::RuntimeSourcePolicy;
 use mvm_fs::initramfs::InitramfsResolver;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -142,17 +141,15 @@ fn sealed_oci_rootfs_with_sibling_legacy_initrd(world: &mut CliWorld) {
     std::fs::write(&legacy_initrd, b"legacy initrd").expect("write the legacy sibling initrd");
 }
 
-#[when("the persistent OCI effective initrd is resolved for a required-overlay boot")]
+#[when("the persistent OCI effective initrd is resolved")]
 fn resolve_persistent_oci_effective_initrd(world: &mut CliWorld) {
     let home = world
         .isolated_home
         .as_ref()
         .expect("a prior step must isolate the mvm home");
-    let outcome = mvm_cli::boot_policy::persistent_oci_effective_initrd(
-        &scenario_rootfs(home.path()),
-        RuntimeSourcePolicy::RequiredOverlay,
-    )
-    .map_err(|e| format!("{e:#}"));
+    let outcome =
+        mvm_cli::boot_policy::persistent_oci_effective_initrd(&scenario_rootfs(home.path()))
+            .map_err(|e| format!("{e:#}"));
     world.initramfs_boot_initrd = Some(outcome);
 }
 

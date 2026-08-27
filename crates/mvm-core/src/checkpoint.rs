@@ -4,8 +4,6 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::vm_backend::RuntimeSourcePolicy;
-
 /// Stable identifier for a checkpoint (also its on-disk directory name under
 /// `config::checkpoints_dir()`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -332,8 +330,6 @@ pub struct CheckpointMeta {
     pub content: Vec<ContentBlob>,
     pub supervisor_config_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_source_policy: Option<RuntimeSourcePolicy>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_overlay_version: Option<String>,
     /// Content-addressed snapshot-store entry containing this checkpoint's
     /// immutable bytes. It is part of the load-bearing digest so a claim
@@ -375,7 +371,6 @@ impl CheckpointMeta {
             created_unix: 0,
             content: Vec::new(),
             supervisor_config_digest: String::new(),
-            runtime_source_policy: None,
             runtime_overlay_version: None,
             snapshot_id: None,
             grants: None,
@@ -399,7 +394,6 @@ impl CheckpointMeta {
             created_unix: self.created_unix,
             content: sorted_content(&self.content),
             supervisor_config_digest: &self.supervisor_config_digest,
-            runtime_source_policy: &self.runtime_source_policy,
             runtime_overlay_version: &self.runtime_overlay_version,
             snapshot_id: &self.snapshot_id,
             grants: &self.grants,
@@ -425,7 +419,6 @@ impl CheckpointMeta {
             .created_unix(self.created_unix)
             .content(self.content.clone())
             .supervisor_config_digest(self.supervisor_config_digest.clone())
-            .runtime_source_policy(self.runtime_source_policy)
             .runtime_overlay_version(self.runtime_overlay_version.clone())
             .snapshot_id(Some(snapshot_id.into()))
             .grants(self.grants.clone())
@@ -465,7 +458,6 @@ struct CheckpointDigestInput<'a> {
     /// invariant to blob ordering.
     content: Vec<&'a ContentBlob>,
     supervisor_config_digest: &'a str,
-    runtime_source_policy: &'a Option<RuntimeSourcePolicy>,
     runtime_overlay_version: &'a Option<String>,
     snapshot_id: &'a Option<String>,
     /// Skipped when absent so a record that seals no grant hashes exactly as it
@@ -527,7 +519,6 @@ pub struct CheckpointMetaBuilder {
     created_unix: u64,
     content: Vec<ContentBlob>,
     supervisor_config_digest: String,
-    runtime_source_policy: Option<RuntimeSourcePolicy>,
     runtime_overlay_version: Option<String>,
     snapshot_id: Option<String>,
     grants: Option<mvm_contract::grants::Grants>,
@@ -556,10 +547,6 @@ impl CheckpointMetaBuilder {
     }
     pub fn supervisor_config_digest(mut self, d: impl Into<String>) -> Self {
         self.supervisor_config_digest = d.into();
-        self
-    }
-    pub fn runtime_source_policy(mut self, policy: Option<RuntimeSourcePolicy>) -> Self {
-        self.runtime_source_policy = policy;
         self
     }
     pub fn runtime_overlay_version(mut self, version: Option<String>) -> Self {
@@ -598,7 +585,6 @@ impl CheckpointMetaBuilder {
             created_unix: self.created_unix,
             content: sorted_content(&self.content),
             supervisor_config_digest: &self.supervisor_config_digest,
-            runtime_source_policy: &self.runtime_source_policy,
             runtime_overlay_version: &self.runtime_overlay_version,
             snapshot_id: &self.snapshot_id,
             grants: &self.grants,
@@ -614,7 +600,6 @@ impl CheckpointMetaBuilder {
             created_unix: self.created_unix,
             content: self.content,
             supervisor_config_digest: self.supervisor_config_digest,
-            runtime_source_policy: self.runtime_source_policy,
             runtime_overlay_version: self.runtime_overlay_version,
             snapshot_id: self.snapshot_id,
             grants: self.grants,
@@ -634,61 +619,11 @@ mod tests {
     }
 
     #[test]
-    fn meta_roundtrips_through_json() {
-        let meta = CheckpointMeta::builder(
-            CheckpointId::new("ckpt-abc123"),
-            CheckpointClass::FsQuick,
-            "myvm",
-        )
-        .content(vec![ContentBlob {
-            name: "rootfs.ext4".into(),
-            sha256: "deadbeef".into(),
-        }])
-        .supervisor_config_digest("cfg99")
-        .tag(Some("golden".to_string()))
-        .parent(Some(parent_digest()))
-        .created_unix(1_700_000_000)
-        .runtime_source_policy(Some(RuntimeSourcePolicy::RequiredOverlay))
-        .runtime_overlay_version(Some("0.17.0".to_string()))
-        .build();
-
-        let json = serde_json::to_string(&meta).unwrap();
-        let back: CheckpointMeta = serde_json::from_str(&json).unwrap();
-        assert_eq!(meta, back);
-        assert_eq!(back.class, CheckpointClass::FsQuick);
-        assert_eq!(back.parent.unwrap(), parent_digest());
-        assert_eq!(back.content[0].sha256, "deadbeef");
-        assert_eq!(back.meta_digest, meta.meta_digest);
-        assert_eq!(
-            back.runtime_source_policy,
-            Some(RuntimeSourcePolicy::RequiredOverlay)
-        );
-        assert_eq!(back.runtime_overlay_version.as_deref(), Some("0.17.0"));
-    }
-
-    #[test]
     fn meta_rejects_unknown_fields() {
         let json = r#"{"id":"x","class":"fs_quick","vm_name":"v","tag":null,
             "parent":null,"created_unix":1,"content":[],
             "supervisor_config_digest":"d","audit_ref":null,"bogus":true}"#;
         assert!(serde_json::from_str::<CheckpointMeta>(json).is_err());
-    }
-
-    #[test]
-    fn builder_defaults_are_none() {
-        let meta = CheckpointMeta::builder(CheckpointId::new("c1"), CheckpointClass::FsQuick, "vm")
-            .content(vec![ContentBlob {
-                name: "rootfs.ext4".into(),
-                sha256: "h".into(),
-            }])
-            .supervisor_config_digest("d")
-            .created_unix(5)
-            .build();
-        assert!(meta.tag.is_none());
-        assert!(meta.parent.is_none());
-        assert!(meta.runtime_source_policy.is_none());
-        assert!(meta.runtime_overlay_version.is_none());
-        assert!(meta.audit_ref.is_none());
     }
 
     #[test]
@@ -814,18 +749,22 @@ mod tests {
         );
     }
 
+    /// The digest of a grant-less record, pinned so it cannot move by accident.
+    ///
+    /// It last moved deliberately when `runtime_source_policy` was removed from
+    /// the meta: the overlay became the single runtime source, so the field had
+    /// no remaining values to distinguish. Checkpoints captured before that
+    /// change read as `meta_digest drift` — schema-stale, not tampered — which
+    /// is the accepted cost of the no-back-compat rule on local state. Anything
+    /// that moves this literal without a matching schema change in the same
+    /// commit is a silent digest break.
     #[test]
     fn sealing_no_grant_leaves_a_records_digest_where_it_was() {
-        // A record that seals no grant must hash exactly as it did before the
-        // field existed, or every checkpoint captured earlier reports as
-        // `meta_digest drift` — as tampered rather than as schema-stale. The
-        // literal is this fixture's digest read off the commit before `grants`
-        // was added, not a value re-derived from the code it is checking.
         let m = digest_fixture_meta(vec![blob("rootfs.ext4", "aa")]);
         assert!(m.grants.is_none());
         assert_eq!(
             m.meta_digest.as_str(),
-            "sha256:47b3411659eddf390da230557216188e6fe4b56572f8f8545702fcc04a608e5b"
+            "sha256:a139182b3a51e1f4ac84f8feb344c8beeb363ad5579ddc81d3547dc25c8224fe"
         );
     }
 
@@ -873,98 +812,6 @@ mod tests {
     }
 
     #[test]
-    fn meta_digest_covers_every_load_bearing_field() {
-        // Flip exactly one load-bearing field per case and assert the
-        // content-address moves. Guards a future field silently falling outside
-        // the digest input (the two excluded fields — meta_digest, audit_ref —
-        // are covered by their own tests above).
-        #[derive(Clone)]
-        struct Fields {
-            id: String,
-            class: CheckpointClass,
-            vm: String,
-            tag: Option<String>,
-            parent: Option<CheckpointDigest>,
-            created: u64,
-            content: Vec<ContentBlob>,
-            cfg: String,
-            policy: Option<RuntimeSourcePolicy>,
-            overlay: Option<String>,
-            grants: Option<mvm_contract::grants::Grants>,
-            session: Option<SessionBinding>,
-        }
-        let build = |f: &Fields| {
-            CheckpointMeta::builder(CheckpointId::new(f.id.clone()), f.class, f.vm.clone())
-                .tag(f.tag.clone())
-                .parent(f.parent.clone())
-                .created_unix(f.created)
-                .content(f.content.clone())
-                .supervisor_config_digest(f.cfg.clone())
-                .runtime_source_policy(f.policy)
-                .runtime_overlay_version(f.overlay.clone())
-                .grants(f.grants.clone())
-                .session(f.session.clone())
-                .build()
-                .meta_digest
-        };
-        let base = Fields {
-            id: "id0".into(),
-            class: CheckpointClass::FsQuick,
-            vm: "vm0".into(),
-            tag: Some("t0".into()),
-            parent: None,
-            created: 100,
-            content: vec![blob("rootfs.ext4", "aa")],
-            cfg: "cfg0".into(),
-            policy: Some(RuntimeSourcePolicy::PreferOverlay),
-            overlay: Some("0.1.0".into()),
-            grants: None,
-            session: None,
-        };
-        let baseline = build(&base);
-
-        let mut f = base.clone();
-        f.id = "id1".into();
-        assert_ne!(baseline, build(&f), "id");
-        let mut f = base.clone();
-        f.class = CheckpointClass::VmFull;
-        assert_ne!(baseline, build(&f), "class");
-        let mut f = base.clone();
-        f.vm = "vm1".into();
-        assert_ne!(baseline, build(&f), "vm_name");
-        let mut f = base.clone();
-        f.tag = Some("t1".into());
-        assert_ne!(baseline, build(&f), "tag");
-        let mut f = base.clone();
-        f.created = 200;
-        assert_ne!(baseline, build(&f), "created_unix");
-        let mut f = base.clone();
-        f.content = vec![blob("rootfs.ext4", "bb")];
-        assert_ne!(baseline, build(&f), "content");
-        let mut f = base.clone();
-        f.cfg = "cfg1".into();
-        assert_ne!(baseline, build(&f), "supervisor_config_digest");
-        let mut f = base.clone();
-        f.policy = Some(RuntimeSourcePolicy::RequiredOverlay);
-        assert_ne!(baseline, build(&f), "runtime_source_policy");
-        let mut f = base.clone();
-        f.overlay = Some("0.2.0".into());
-        assert_ne!(baseline, build(&f), "runtime_overlay_version");
-        let mut f = base.clone();
-        f.parent = Some(parent_digest());
-        assert_ne!(baseline, build(&f), "parent");
-        let mut f = base.clone();
-        f.grants = Some(mvm_contract::grants::Grants {
-            cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 1000 }),
-            ..Default::default()
-        });
-        assert_ne!(baseline, build(&f), "grants");
-        let mut f = base.clone();
-        f.session = Some(test_binding());
-        assert_ne!(baseline, build(&f), "session");
-    }
-
-    #[test]
     fn meta_digest_changes_when_the_session_binding_changes() {
         let base =
             CheckpointMeta::builder(CheckpointId::new("cp-1"), CheckpointClass::VmFull, "vm-1")
@@ -1003,7 +850,6 @@ mod tests {
             created_unix: sessionless.created_unix,
             content: sorted_content(&sessionless.content),
             supervisor_config_digest: &sessionless.supervisor_config_digest,
-            runtime_source_policy: &sessionless.runtime_source_policy,
             runtime_overlay_version: &sessionless.runtime_overlay_version,
             snapshot_id: &sessionless.snapshot_id,
             grants: &sessionless.grants,
