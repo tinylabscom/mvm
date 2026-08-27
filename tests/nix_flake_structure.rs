@@ -36,14 +36,20 @@ fn normalized_whitespace(content: &str) -> String {
 
 #[test]
 fn every_rust_derivation_uses_the_static_crates_registry() {
-    let helper = nix_dir().join("lib").join("static-crates-cargo-lock.nix");
+    let helper = nix_dir().join("lib").join("static-crates-cargo-deps.nix");
     let helper_content = fs::read_to_string(&helper)
         .unwrap_or_else(|e| panic!("static crate registry helper must be present: {e}"));
 
     assert!(
-        helper_content.contains("https://github.com/rust-lang/crates.io-index")
-            && helper_content.contains("https://static.crates.io/crates"),
-        "the cargo-lock helper must redirect the crates.io index to its static CDN"
+        helper_content.contains("https://crates.io/api/v1/crates")
+            && helper_content.contains("https://static.crates.io/crates")
+            && helper_content.contains("builtins.replaceStrings")
+            && helper_content.contains("fetchurl = fetchStaticCrate"),
+        "the cargo-deps helper must rewrite crates.io downloads to its static CDN"
+    );
+    assert!(
+        !helper_content.contains("extraRegistries"),
+        "the helper must not redefine Cargo's built-in crates.io source"
     );
 
     let mut nix_files = Vec::new();
@@ -57,7 +63,8 @@ fn every_rust_derivation_uses_the_static_crates_registry() {
         }
         rust_derivations += 1;
         assert!(
-            content.contains("static-crates-cargo-lock.nix"),
+            content.contains("cargoDeps = import")
+                && content.contains("static-crates-cargo-deps.nix"),
             "{} builds Rust without the static crates.io registry helper",
             path.display()
         );
@@ -170,7 +177,7 @@ fn host_mvmctl_package_is_source_only() {
     );
     assert!(
         content.contains("src = mvmSrc")
-            && content.contains("static-crates-cargo-lock.nix")
+            && content.contains("static-crates-cargo-deps.nix")
             && content.contains("lockFile = mvmSrc + \"/Cargo.lock\""),
         "mvmctl package must use the source checkout and committed Cargo.lock"
     );

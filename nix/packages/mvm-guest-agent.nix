@@ -47,7 +47,8 @@ pkgs.rustPlatform.buildRustPackage {
   # Workspace's Cargo.lock is the source of truth for every crate
   # we vendor. `buildRustPackage` vendors the closure even though
   # we only build mvm-agentd; the unused deps compile zero code.
-  cargoLock = import ../lib/static-crates-cargo-lock.nix {
+  cargoDeps = import ../lib/static-crates-cargo-deps.nix {
+    inherit pkgs;
     lockFile = mvmSrc + "/Cargo.lock";
   };
 

@@ -154,7 +154,8 @@
           pname = "mvm-runner";
           version = overlayVersion;
           src = workspace;
-          cargoLock = import (workspace + "/nix/lib/static-crates-cargo-lock.nix") {
+          cargoDeps = import (workspace + "/nix/lib/static-crates-cargo-deps.nix") {
+            inherit pkgs;
             lockFile = workspace + "/Cargo.lock";
           };
           cargoBuildFlags = [

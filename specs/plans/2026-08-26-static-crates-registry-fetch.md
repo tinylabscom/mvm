@@ -13,12 +13,14 @@ checksums already committed in `Cargo.lock`.
 
 ## Delivery
 
-- [x] Add one shared `cargoLock` helper that retains the committed lockfile and
-      redirects the crates.io registry download base to `static.crates.io`.
+- [x] Add one shared `cargoDeps` helper that retains the committed lockfile and
+      overrides Nix's crate fetcher to use `static.crates.io` without defining
+      Cargo's built-in crates.io source a second time.
 - [x] Move every repository `buildRustPackage` derivation onto the helper,
       including the independently evaluated runtime-overlay flake.
 - [x] Add a structural regression that rejects a new Rust Nix derivation which
-      bypasses the helper or a helper which loses either registry endpoint.
+      bypasses the helper, loses either endpoint, or reintroduces an alternate
+      registry definition for crates.io.
 - [x] Prove the focused regression, full Nix-structure test target, formatting,
       and Clippy are green.
 - [ ] Merge the repair through the merge queue and confirm issue #2904 closes

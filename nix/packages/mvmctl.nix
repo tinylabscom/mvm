@@ -10,6 +10,7 @@
 #   need the native FFI path.
 
 {
+  pkgs,
   lib,
   stdenv,
   rustPlatform,
@@ -54,7 +55,8 @@ rustPlatform.buildRustPackage {
 
   src = mvmSrc;
 
-  cargoLock = import ../lib/static-crates-cargo-lock.nix {
+  cargoDeps = import ../lib/static-crates-cargo-deps.nix {
+    inherit pkgs;
     lockFile = mvmSrc + "/Cargo.lock";
   };
 

@@ -1,6 +1,7 @@
 # Minimal static-musl privilege-drop helper used by the guest PID 1.
 
 {
+  pkgs,
   rustPlatform,
   lib,
   mvmSrc,
@@ -11,7 +12,8 @@ rustPlatform.buildRustPackage {
   version = "0.18.1";
 
   src = mvmSrc;
-  cargoLock = import ../lib/static-crates-cargo-lock.nix {
+  cargoDeps = import ../lib/static-crates-cargo-deps.nix {
+    inherit pkgs;
     lockFile = mvmSrc + "/Cargo.lock";
   };
 
