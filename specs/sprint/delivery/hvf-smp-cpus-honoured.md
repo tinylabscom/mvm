@@ -39,17 +39,43 @@ next to the exit; the alternative was a second copy of the loop for the common
 case, which is the kind that rots. KVM still enters through `SoleBus` and is
 unchanged.
 
-## Two things the hardware taught us
+## What the hardware taught us, and what it did not
 
 `hv_gic_get_redistributor_base` **must be called after MPIDR_EL1 is set** — it
-returns `HV_BAD_ARGUMENT` otherwise, which is what the first working build did
-for four minutes of confusion. That is also the useful fact: HVF places a vCPU's
-redistributor frame by its *affinity*, not by creation order, so an early
-experiment serialising `hv_vcpu_create` into CPU order was solving a problem that
-does not exist and was removed. Each secondary now sets its own MPIDR at creation
-and the frame is checked against the address the device tree published. A
-mismatch is `RedistributorMismatch { cpu, expected, actual }` rather than a guest
-that faults in IRQ init before the console exists.
+returns `HV_BAD_ARGUMENT` otherwise, which cost the first working build four
+minutes of confusion. That much is true and documented in the header.
+
+The inference drawn from it was wrong, and this section recorded the wrong
+version for a while: that HVF therefore places a vCPU's redistributor frame by
+its *affinity*. It does not. Affinity is a precondition for the query being
+answerable, which is a different thing from it deciding where the frame goes.
+**HVF assigns frames in `hv_vcpu_create` call order.** On the false reading, the
+primitive serialising creation into CPU order was deleted as solving a
+non-problem — and the race came straight back.
+
+It surfaced as an apparent ceiling: 5, 6 and 8 vCPU guests never reached the
+agent, and a `max_vcpus: Some(4)` was recorded as a measured limit with a note
+that the cause was unexplained. It was not a limit. Two boots of the same
+machine gave `cpu: 3` holding frame 4 and then `cpu: 4` holding frame 3 — a
+swap, which is what two threads racing to call `hv_vcpu_create` looks like. The
+odds rise with the thread count, so one and two CPUs could not race, four
+sometimes did, and five nearly always. Four was never safe either.
+
+The refutation is cleaner than the measurement: if frames were keyed to
+affinity, a mismatch would be impossible, because each CPU sets its own MPIDR
+before querying. It mismatched, so they are not.
+
+Creation is ordered again, and the ordering now lives inside the one function
+that calls `hv_vcpu_create` rather than as two statements around the call — a
+pair that a later edit can separate, which is precisely how it was lost. The
+turn is an RAII guard, so no failure arm has to remember to release it. The
+frame check stays: it is what turned a silent hang into
+`RedistributorMismatch { cpu, expected, actual }`, and it is the only reason
+this was diagnosable at all.
+
+With the race gone the ceiling is not four, and `hv_vm_get_max_vcpu_count`
+answers 64 on this host — so the backend asks rather than hardcoding a number
+that a bug produced.
 
 ## Snapshot, restore and the CPU quota
 
@@ -84,7 +110,8 @@ vCPU thread" rather than "the vCPU thread's".
 
 ## Confirmed live, on a real guest
 
-`--cpus 2` → `2/2` and `--cpus 4` → `4/4`, reading `nproc` and
+`--cpus` at 1, 2, 4, 5, 6, 8, 16, 32 and (via the clamp) 64 all boot and
+report their full count, reading `nproc` and
 `grep -c ^processor /proc/cpuinfo` and comparing the whole line. Both are
 asserted because both were wrong together: they agreed at 1 before, so a fix
 that moved only one would be reading something other than the machine.
