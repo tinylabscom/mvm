@@ -10,6 +10,15 @@
 
 ## In progress
 
+- [x] **FlowMux HTTPS live-client repair.**
+      `specs/plans/2026-08-27-flowmux-https-live-client.md`.
+      The seven live HTTPS egress witnesses now use the pinned multi-arch
+      `curlimages/curl:8.21.0` client, which opens an HTTP `CONNECT` tunnel
+      before TLS. The proxy's fail-closed refusal of plaintext HTTPS
+      absolute-form requests remains unchanged. A repository regression,
+      workspace check/tests/doctests, and Clippy are green; merge-queue
+      delivery remains.
+
 - [ ] **Admission cache durability boundary.**
       `specs/plans/2026-08-26-admission-cache-durability.md`.
       Preserve the chain-signed admission record's fail-closed durability
