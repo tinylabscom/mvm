@@ -4,6 +4,13 @@ Last updated: 2026-08-27
 
 ## In progress
 
+- [ ] **Issue #2942 — warm-launch gate contract repair.**
+      `specs/plans/2026-08-27-warm-launch-gate-contract.md`.
+      The live warm-residency witness now consumes the CLI's strict sub-300 ms
+      hard ceiling rather than a prepared-cold 200 ms literal. Focused boundary
+      and BDD compilation checks, workspace tests, check, Clippy, formatting,
+      and repository gates are green; merge-queue delivery remains.
+
 - [ ] **SDK surface contract repairs — issues #2902 and #2906.**
       `specs/plans/2026-08-26-sdk-surface-contract-repairs.md`.
       The README's `mvm.local_path` decorator source and the builder-pack Cargo

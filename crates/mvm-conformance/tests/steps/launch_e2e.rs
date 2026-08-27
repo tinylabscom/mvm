@@ -304,8 +304,8 @@ fn guest_control_plane_came_up(world: &mut CliWorld) {
     );
 }
 
-#[then(expr = "the guest became dispatchable within {int} ms")]
-fn dispatchable_within(world: &mut CliWorld, budget_ms: i64) {
+#[then(expr = "the warm launch meets its hard dispatch ceiling")]
+fn warm_launch_meets_hard_dispatch_ceiling(world: &mut CliWorld) {
     let record = last(world);
     let observed = record.dispatch_window_ms.unwrap_or_else(|| {
         panic!(
@@ -315,8 +315,9 @@ fn dispatchable_within(world: &mut CliWorld, budget_ms: i64) {
         )
     });
     assert!(
-        observed <= budget_ms as f64,
-        "dispatch window was {observed:.1}ms, over the {budget_ms}ms budget"
+        mvm_cli::launch_contract::within_warm_start_slo_ms(observed),
+        "dispatch window was {observed:.1}ms; the warm-claim contract is strictly under {:.0}ms",
+        mvm_cli::launch_contract::WARM_START_MAX_MS,
     );
 }
 
