@@ -55,6 +55,30 @@ pub struct LocalBackend {
     pub(crate) secret_service: Option<std::sync::Arc<crate::secret::SecretService>>,
 }
 
+/// vCPUs to give a guest when the caller does not say.
+///
+/// Not a constant, because the answer is a property of the backend rather than
+/// of the product: HVF supports exactly one vCPU and refuses anything else, and
+/// it is the default backend on macOS 26+. A fixed default of 2 made the
+/// default configuration and the default backend mutually exclusive there —
+/// every `mvmctl machine run --image …` failed, the documented quickstart
+/// included.
+///
+/// Only the *default* moves. An explicit `--cpus 2` on HVF still reaches the
+/// backend and is still refused, which is the contract the HVF driver states: a
+/// request it cannot honour is refused, never silently reduced.
+///
+/// Probed once per process; clap evaluates this for every command it builds.
+#[must_use]
+pub fn default_vcpus() -> u32 {
+    static RESOLVED: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *RESOLVED.get_or_init(|| match AnyBackend::auto_select().kind() {
+        // The one backend with a hard single-vCPU ceiling.
+        mvm_core::vm_backend::BackendKind::Hvf => 1,
+        _ => 2,
+    })
+}
+
 impl LocalBackend {
     pub fn new() -> Self {
         Self {
@@ -66,6 +90,21 @@ impl LocalBackend {
     pub fn with_hypervisor(name: &str) -> Self {
         Self {
             backend: AnyBackend::from_hypervisor(name),
+            secret_service: None,
+        }
+    }
+
+    /// Client bound to the backend that actually started `vm`, falling back to
+    /// the host default when the VM has left no marker.
+    ///
+    /// A verb operating an *existing* machine must reach the VMM that owns it.
+    /// Choosing from a flag default instead sent `pause` at Firecracker for a
+    /// guest running on HVF, which failed on a socket that was never going to
+    /// exist.
+    #[must_use]
+    pub fn for_started_vm(vm: &str) -> Self {
+        Self {
+            backend: AnyBackend::for_started_vm(vm).unwrap_or_else(AnyBackend::auto_select),
             secret_service: None,
         }
     }

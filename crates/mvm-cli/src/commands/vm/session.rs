@@ -193,7 +193,7 @@ pub(in crate::commands) struct StartArgs {
     #[arg(long = "agent-verb", value_name = "VERB")]
     pub agent_verb: Vec<String>,
     /// vCPU count for the booted VM. Default 2.
-    #[arg(long, default_value = "2")]
+    #[arg(long, default_value_t = crate::commands::shared::default_vcpus())]
     pub cpus: u32,
     /// Memory for the booted VM (MiB). Default 512.
     #[arg(long, default_value = "512")]

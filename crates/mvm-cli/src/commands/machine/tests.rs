@@ -482,7 +482,7 @@ fn transient_run_without_argv_is_rejected_at_dispatch() {
 #[test]
 fn run_defaults_match_the_lower_level_runner() {
     let args = parse_run(&["run", "--image", "alpine", "--", "true"]).expect("parse");
-    assert_eq!(args.run.cpus, 2);
+    assert_eq!(args.run.cpus, crate::commands::shared::default_vcpus());
     assert_eq!(args.run.memory, "512M");
     assert_eq!(
         args.run.profile,
@@ -3025,7 +3025,8 @@ fn cpus_and_cpu_limit_are_independent_controls() {
         parse_run(&["run", "--image", "alpine", "--cpu-limit", "500"]).expect("parses");
     assert_eq!(only_limit.run.cpu_limit, Some(500));
     assert_eq!(
-        only_limit.run.cpus, 2,
+        only_limit.run.cpus,
+        crate::commands::shared::default_vcpus(),
         "--cpu-limit must not move the vCPU count off its default"
     );
 }

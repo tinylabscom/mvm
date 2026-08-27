@@ -43,7 +43,7 @@ pub(in crate::commands) struct Args {
     #[arg(skip)]
     pub vm_name: Option<String>,
     /// vCPU cores (default: 2)
-    #[arg(long, default_value = "2")]
+    #[arg(long, default_value_t = crate::commands::shared::default_vcpus())]
     pub cpus: u32,
     /// Memory (supports human-readable: 512M, 1G, …)
     #[arg(long, default_value = "512M")]
@@ -273,7 +273,7 @@ pub(in crate::commands) struct RunArgs {
     #[arg(long = "peer", value_name = "NAME:PORT=ADDR:PORT")]
     pub peer: Vec<String>,
     /// Set how many vCPUs the guest sees (not a host CPU share).
-    #[arg(long, default_value = "2")]
+    #[arg(long, default_value_t = crate::commands::shared::default_vcpus())]
     pub cpus: u32,
     /// Cap host CPU time in millicores (1500 = 1.5 cores); not `--cpus`.
     #[arg(long = "cpu-limit", value_name = "MILLICORES")]
@@ -576,7 +576,11 @@ impl Default for RunArgs {
             net: false,
             allow_host: Vec::new(),
             peer: Vec::new(),
-            cpus: 2,
+            // Must track the clap default, which is resolved from the backend
+            // this host selects — a test pins the two together, because a
+            // `Default` that disagrees with the parsed default is a silent
+            // difference between constructing args and parsing them.
+            cpus: crate::commands::shared::default_vcpus(),
             cpu_limit: None,
             grants_file: None,
             memory: "512M".to_string(),
