@@ -88,6 +88,16 @@ pub(super) fn defer_atomic_sync(state: &AtomicSyncState, path: &Path) -> bool {
     true
 }
 
+#[cfg(test)]
+pub(super) fn deferred_path_count(state: &AtomicSyncState) -> usize {
+    state
+        .paths
+        .lock()
+        .expect("atomic sync state poisoned")
+        .as_ref()
+        .map_or(0, HashSet::len)
+}
+
 pub(super) fn sync_path(path: &Path) -> std::io::Result<()> {
     std::fs::OpenOptions::new()
         .append(true)
