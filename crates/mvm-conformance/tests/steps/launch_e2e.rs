@@ -57,7 +57,7 @@ const GUEST_BOOT_FAILURES: &[(&str, &str)] = &[
     ),
 ];
 
-fn e2e_home() -> PathBuf {
+pub(crate) fn e2e_home() -> PathBuf {
     std::env::var_os(E2E_HOME_ENV)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(mvm_core::config::mvm_home()))

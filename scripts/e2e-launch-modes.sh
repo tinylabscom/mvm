@@ -24,6 +24,32 @@ E2E_HOME="${MVM_E2E_HOME:-$HOME/.mvm}"
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 MVMCTL="$TARGET_DIR/debug/mvmctl"
 
+# Sweep this lane's guests too, on the way in and out. It boots the same kind of
+# machine as `e2e-documented-surface.sh` and had no cleanup of its own, so a run
+# killed at the wrong moment left a guest holding its name and the next run
+# failed on a collision that reads as a broken verb. Scoped to the `bdd-` prefix
+# every suite machine carries, so a machine you made by hand is never touched.
+sweep() {
+  [[ -x "$MVMCTL" ]] || return 0
+  # Pass the home through explicitly: the cleaner defaults to ~/.mvm, which is
+  # not necessarily the home this run is using.
+  MVM_E2E_HOME="$E2E_HOME" ./scripts/e2e-documented-surface.sh --clean-only \
+    >/dev/null 2>&1 || true
+}
+trap sweep EXIT
+trap 'echo; echo "!!! interrupted — cleaning up"; exit 130' INT TERM
+
+# Follow each guest's console as it boots. Cucumber only prints a step's output
+# when the step fails, so without this a multi-minute boot shows nothing.
+WATCHER_PID=""
+if [[ "${MVM_E2E_FOLLOW:-$([[ -t 1 ]] && echo 1 || echo 0)}" == "1" ]]; then
+  ./scripts/e2e-watch-vms.sh "$E2E_HOME" &
+  WATCHER_PID=$!
+  trap 'kill -TERM "$WATCHER_PID" 2>/dev/null || true; sweep' EXIT
+fi
+
+sweep   # clear anything a previous run left behind
+
 echo "==> e2e launch gate"
 echo "    repo:  $REPO"
 echo "    home:  $E2E_HOME"

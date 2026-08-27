@@ -285,8 +285,32 @@ bdd:
 # narrowed to the merge-queue subset and NOT `@firecracker`-gated — that
 # narrowing is what left the macOS default backend with no lane that boots a
 # guest at all.
+#
+# Sibling of `e2e-docs`: this one proves the ways in, that one proves the whole
+# documented command surface. They overlap in the suite they drive; the split is
+# that this lane also exercises the in-process Rust library seam.
+#
+# Boot a real guest through every documented entry point
 e2e-launch:
     ./scripts/e2e-launch-modes.sh
+
+# The hermetic `bdd` lane proves a documented command parses; this one boots
+# real microVMs and runs them. Needs an artifact-warm home: it defaults to the
+# real `~/.mvm`, override with MVM_E2E_HOME. Expect minutes on a cold home.
+#
+# Follows each guest's console as it boots; MVM_E2E_FOLLOW=0 silences that.
+# Sweeps its own machines on entry and exit — see `e2e-docs-clean`.
+#
+# Every documented example, executed against a real host
+e2e-docs:
+    ./scripts/e2e-documented-surface.sh
+
+# Reap machines a killed e2e run left behind. Scoped to the `bdd-` prefix the
+# suite creates, so it never touches a machine you made.
+#
+# Clean up after an interrupted e2e run
+e2e-docs-clean:
+    ./scripts/e2e-documented-surface.sh --clean-only
 
 # KVM-backed merge-queue witness for the cheap documented machine lifecycle.
 # The tag selector keeps registry/build-heavy live scenarios in their dedicated

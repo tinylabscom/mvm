@@ -12,6 +12,7 @@ mod hvf_save_restore;
 mod initramfs;
 mod kernel_pin;
 pub(crate) mod launch_e2e;
+mod machine_journey;
 mod network_surface;
 mod oci_unpack;
 mod one_transport;

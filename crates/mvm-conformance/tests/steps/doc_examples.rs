@@ -108,6 +108,26 @@ struct CommandEntry {
     /// dropped.
     #[serde(default)]
     exit_reports_host_state: bool,
+    /// Why this path is proven only by parsing. Required for `tier = "parse"`,
+    /// which is the weakest tier and the one a path lands in by neglect
+    /// rather than by decision. Writing the obstruction down is what keeps
+    /// "we could not run this" distinguishable from "nobody tried".
+    #[serde(default)]
+    reason: Option<String>,
+    /// Environment the exec tier sets for this path alone.
+    ///
+    /// Some commands reach outside `MVM_HOME` by design and ship an explicit
+    /// sandbox hook for exactly that reason — `env uninstall` rewrites its
+    /// system paths under `MVM_UNINSTALL_PATH_PREFIX`. Without the hook such a
+    /// command "passes" only by being cancelled at its confirmation prompt,
+    /// which proves nothing and leaves the real path untested.
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    /// A named fixture staged into the isolated home before this path runs.
+    /// Several documented commands are runnable and fail only because the file
+    /// they name is not there — a pubkey, a manifest, a bundle archive.
+    #[serde(default)]
+    fixture: Option<String>,
 }
 
 /// A command the docs name while it does not exist — either future syntax the
@@ -158,6 +178,25 @@ fn host_state_exit_paths() -> BTreeSet<Vec<String>> {
                 .split_whitespace()
                 .map(str::to_string)
                 .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Per-path exec overrides: the environment to set, and the fixture to stage.
+type ExecOverride = (BTreeMap<String, String>, Option<String>);
+
+fn exec_overrides() -> BTreeMap<Vec<String>, ExecOverride> {
+    manifest()
+        .command
+        .into_iter()
+        .filter(|entry| !entry.env.is_empty() || entry.fixture.is_some())
+        .map(|entry| {
+            let path = entry
+                .path
+                .split_whitespace()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            (path, (entry.env, entry.fixture))
         })
         .collect()
 }
@@ -339,15 +378,79 @@ fn collect_paths(command: &ClapCommand, prefix: &[String], out: &mut BTreeSet<Ve
 }
 
 /// Run one documented example for real against a private `MVM_HOME`.
-fn execute(example: &DocExample, home: &Path) -> std::process::Output {
-    crate::steps::cli::mvmctl_command()
+/// Run a documented example against an isolated home, optionally from a
+/// staged working directory and with per-entry environment.
+fn execute_in(
+    example: &DocExample,
+    home: &Path,
+    cwd: Option<&Path>,
+    env: &BTreeMap<String, String>,
+) -> std::process::Output {
+    let mut command = crate::steps::cli::mvmctl_command();
+    command
         .isolated_home(home)
         // Reconcile-on-entry converges live VM state; a doc example must not
         // reach for the host's real machines just to print its help.
         .env("MVM_SKIP_RECONCILE", "1")
-        .args(&example.argv)
+        .args(&example.argv);
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+    for (key, value) in env {
+        // A manifest env value naming a path in this repo is written
+        // repo-relative, because that is how a reader would write it. The
+        // command runs from a staged fixture directory, so resolve it here
+        // rather than leaving a relative path to miss silently.
+        let candidate = repo_root().join(value);
+        if candidate.exists() {
+            command.env(key, candidate);
+        } else {
+            command.env(key, value);
+        }
+    }
+    command
         .output()
         .unwrap_or_else(|error| panic!("spawn mvmctl for {}: {error}", example.location()))
+}
+
+/// Stage the files a documented example names, in a directory of its own.
+///
+/// A command that fails only because `./publisher.pub` is not there is not
+/// un-runnable; it is unstaged. Distinguishing the two is the difference
+/// between a tier that reflects the CLI and one that reflects the fixture set.
+fn stage_fixture(name: &str, dir: &Path, home: &Path) {
+    match name {
+        // `manifest info|rm|verify` all resolve a manifest from the working
+        // directory, which is what `init` writes.
+        "manifest" => {
+            let output = crate::steps::cli::mvmctl_command()
+                .isolated_home(home)
+                .env("MVM_SKIP_RECONCILE", "1")
+                .current_dir(dir)
+                .args(["init", "."])
+                .output()
+                .expect("spawn mvmctl init to stage the manifest fixture");
+            assert!(
+                output.status.success(),
+                "staging the manifest fixture failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        // The decorator examples compile a Python source file by path.
+        //
+        // Deliberately without the README's `source=mvm.local_path(".")`:
+        // `local_path` is defined by the Python SDK but absent from the
+        // decorator compiler's HELPER_ALLOWLIST, so the README form does not
+        // compile. Tracked separately — this fixture proves the command, not
+        // that particular kwarg.
+        "decorator-script" => {
+            let script = "import mvm\n\n\n@mvm.app(\n    name=\"greeter\",\n                    image=mvm.python_image(python=\"3.12\"),\n                    resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),\n)\n                def greet(name: str) -> str:\n    return f\"hello {name}\"\n";
+            for file in ["app.py", "script.py"] {
+                std::fs::write(dir.join(file), script).expect("write decorator fixture");
+            }
+        }
+        other => panic!("unknown fixture {other:?} in the tier manifest"),
+    }
 }
 
 #[then(expr = "every side-effect-free documented example executes successfully")]
@@ -355,6 +458,7 @@ fn every_exec_tier_example_runs(_world: &mut CliWorld) {
     let command = mvm_cli::commands::cli_command();
     let policy = tier_policy();
     let host_state_exit = host_state_exit_paths();
+    let overrides = exec_overrides();
     let home = std::env::temp_dir().join(format!("mvm-doc-exec-{}", std::process::id()));
     std::fs::create_dir_all(&home).expect("create isolated MVM_HOME");
 
@@ -377,7 +481,19 @@ fn every_exec_tier_example_runs(_world: &mut CliWorld) {
             continue;
         }
 
-        let output = execute(&example, &home);
+        // Per-entry environment and fixtures, for paths that are runnable
+        // but reach outside the home or name a file that has to exist.
+        let (env, fixture) = overrides.get(&path).cloned().unwrap_or_default();
+        // Always run from a scratch directory, never the repo root. Several
+        // documented examples scaffold into a relative path — `mvmctl init
+        // ./agent-tool`, `generate template python ./my-python-app` — and at
+        // the repo root that drops generated trees into the working copy.
+        let dir = home.join("scratch").join(path.join("-"));
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        if let Some(name) = fixture.as_deref() {
+            stage_fixture(name, &dir, &home);
+        }
+        let output = execute_in(&example, &home, Some(&dir), &env);
         ran += 1;
 
         // A command killed by a signal never ran to completion, whatever its
@@ -1092,5 +1208,35 @@ fn cli_output_names_real_commands(_world: &mut CliWorld) {
          features/suites/s29_doc_examples/tiers.toml:\n{}",
         failures.len(),
         failures.join("\n")
+    );
+}
+
+#[then(expr = "every parse-tier command path explains why it is only parsed")]
+fn every_parse_tier_path_explains_itself(_world: &mut CliWorld) {
+    // `parse` is the tier a path reaches by nobody deciding anything: it is
+    // the weakest rung and the default landing spot for a newly documented
+    // verb. Requiring a written obstruction is what stops the ladder decaying
+    // back into "everything parses" — the state this suite exists to leave.
+    let unexplained: Vec<String> = manifest()
+        .command
+        .into_iter()
+        .filter(|entry| entry.tier == "parse")
+        .filter(|entry| {
+            entry
+                .reason
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+        })
+        .map(|entry| format!("  {}", entry.path))
+        .collect();
+
+    assert!(
+        unexplained.is_empty(),
+        "{} command path(s) sit at tier `parse` with no reason. Either promote \
+         them to `exec`/`live`, or record what blocks that:\n{}",
+        unexplained.len(),
+        unexplained.join("\n")
     );
 }
