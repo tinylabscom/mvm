@@ -165,8 +165,8 @@ fn make_tenant() -> TenantConfig {
     }
 }
 
-/// Create a TemplateRevision JSON string with the given profile and role.
-fn template_revision_json(profile: &str, role: &str) -> String {
+/// Create a TemplateRevision JSON string with the given profile.
+fn template_revision_json(profile: &str) -> String {
     let rev = TemplateRevision {
         schema_version: mvm_core::template::CURRENT_SCHEMA_VERSION,
         revision_hash: "rev123".to_string(),
@@ -181,7 +181,6 @@ fn template_revision_json(profile: &str, role: &str) -> String {
         },
         built_at: "2025-01-01T00:00:00Z".to_string(),
         profile: profile.to_string(),
-        role: role.to_string(),
         vcpus: 2,
         mem_mib: 1024,
         data_disk_mib: 0,
@@ -228,7 +227,7 @@ fn test_cache_hit_skips_build() {
 fn test_template_reuse_skips_build() {
     let spec = make_pool_spec("minimal", "base-tpl");
     let tenant = make_tenant();
-    let rev_json = template_revision_json("minimal", "worker");
+    let rev_json = template_revision_json("minimal");
 
     // Stdout queue for reuse_template_artifacts:
     // 1. test -L template current -> "yes"
@@ -259,7 +258,7 @@ fn test_cache_key_mismatch_triggers_build() {
     // Pool wants profile="full" but template was built with profile="minimal"
     let spec = make_pool_spec("full", "base-tpl");
     let tenant = make_tenant();
-    let rev_json = template_revision_json("minimal", "worker"); // mismatch!
+    let rev_json = template_revision_json("minimal"); // mismatch!
 
     // Stdout queue:
     // 1-3: template reuse check (fails due to cache key mismatch)
@@ -320,7 +319,7 @@ fn test_force_rebuild_ignores_cache() {
 fn test_build_revision_recorded() {
     let spec = make_pool_spec("minimal", "base-tpl");
     let tenant = make_tenant();
-    let rev_json = template_revision_json("minimal", "worker");
+    let rev_json = template_revision_json("minimal");
 
     let env = TestBuildEnv::new(spec, tenant, &["yes", "revisions/rev123", &rev_json]);
 

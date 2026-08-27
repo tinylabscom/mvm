@@ -72,7 +72,7 @@ This is the most important finding in the report: **mvm has already done most of
 
 | Concept | Where | Notes |
 |---|---|---|
-| Identity taxonomy (semantic / exact-byte / trust / ephemeral) | `crates/mvm-core/src/semantic_address.rs:28-41` | Explicitly enumerated in prose *and* enforced by the type system — no `From`/`Into`/`Deref` between the four families. This is exactly the four-way split §5 of the brief asks for, already articulated. |
+| Identity taxonomy (semantic / exact-byte / trust / ephemeral) | `crates/mvm-core/src/workload_address.rs:28-41` | Explicitly enumerated in prose *and* enforced by the type system — no `From`/`Into`/`Deref` between the four families. This is exactly the four-way split §5 of the brief asks for, already articulated. |
 | Plan content-address | `crates/mvm-core/src/plan/content_id.rs:44-56` | `sha256(serde_json(plan − plan_id))`. Deterministic because `serde_json::Value` is a `BTreeMap`. |
 | Determinism gate for the above | `xtask/src/check_content_address_determinism.rs:1-56` | CI-enforced: `serde_json`'s `preserve_order` feature must not be reachable from `mvm-core`/`mvm-contract`. |
 | Signed, content-addressed workload bundle | `crates/mvm-core/src/plan/bundle.rs` | `.mvmpkg` = tar of `manifest.json` + `manifest.sig` + `artifacts/`; `BundleRegistry` is a CAS keyed by `bundle_sha256` (`bundle.rs:269-300`); out-of-band trust store; re-verified at fetch **and** at admit. |
@@ -95,7 +95,7 @@ This is the most important finding in the report: **mvm has already done most of
 
 4. **Four different "canonical" JSON forms coexist.** **[fact]**
    - `mvm_contract::ir::canonicalize` — hand-rolled `no_std` JCS writer feeding `ir_hash`.
-   - `serde_jcs` over an NFC-normalized value — `SemanticAddress` (`semantic_address.rs:9-26`).
+   - `serde_jcs` over an NFC-normalized value — `WorkloadAddress` (`workload_address.rs:9-26`).
    - `serde_json::to_vec` over a `serde_json::Value` (sorted keys, but *not* JCS number/string rules) — `compute_plan_id` (`content_id.rs:47-55`).
    - `serde_json::to_vec` over the struct directly (**declaration order**, not sorted) — `canonical_manifest_bytes` (`bundle.rs:104-106`) and `PackManifest::canonical_bytes` (`packs.rs:150-152`).
 
@@ -404,7 +404,7 @@ TreeNode =
 | Property | Decision |
 |---|---|
 | Path | Relative to the declared root. Raw bytes, never lossy UTF-8 (keep `os_str_bytes`, `hash.rs:104-113`). No `.`/`..` components — **rejected**, not normalized. |
-| Unicode | **No normalization.** Bytes are the identity. (Deliberately *unlike* `SemanticAddress`, which NFC-normalizes because it addresses *meaning*; an artifact tree addresses *bytes*.) Document the asymmetry explicitly. |
+| Unicode | **No normalization.** Bytes are the identity. (Deliberately *unlike* `WorkloadAddress`, which NFC-normalizes because it addresses *meaning*; an artifact tree addresses *bytes*.) Document the asymmetry explicitly. |
 | Case | Preserved. A tree built on a case-insensitive host that would collide on ext4 is **rejected at manifest time**, not silently merged. |
 | Mode | Preserved, masked to `0o7777`. |
 | uid/gid | **Normalized to 0** and not represented — matching `ext4/mod.rs:1044-1046`. Guest-visible ownership comes from the image, not the builder's account. |
@@ -425,7 +425,7 @@ Making it a **Merkle tree** rather than the current flat manifest buys increment
 - gives the Lean spec (§8) a single object to model;
 - makes cross-language SDK conformance free (the IR path already relies on it).
 
-**Caveat that must be recorded, not papered over:** `serde_jcs` 0.1.0 sorts object keys by UTF-8 byte order, not RFC 8785's UTF-16 code-unit order, so astral-plane keys diverge from a strictly conformant implementation (`semantic_address.rs:19-26`). Every new manifest schema should therefore constrain keys to ASCII, which sidesteps the divergence entirely and is enforceable with a `deny_unknown_fields` + fixed-key schema.
+**Caveat that must be recorded, not papered over:** `serde_jcs` 0.1.0 sorts object keys by UTF-8 byte order, not RFC 8785's UTF-16 code-unit order, so astral-plane keys diverge from a strictly conformant implementation (`workload_address.rs:19-26`). Every new manifest schema should therefore constrain keys to ASCII, which sidesteps the divergence entirely and is enforceable with a `deny_unknown_fields` + fixed-key schema.
 
 **SHA-256, single axis.** Plan 276 WS0 already pins this and the reasoning holds: `Sha256Hex` is a workspace-wide newtype, `digest_shape::validate_sha256_prefixed` is the one shape validator, and the audit chain, OCI digests, dm-verity, bundle hashes, pack hashes, and `plan_id` all agree. BLAKE3 would be faster for large-tree hashing but a second axis is a real cost (dual-hashing every artifact, or a migration) for a benefit that §3 does not show as a bottleneck. **Recommendation: SHA-256 only. Revisit only if H4 becomes the dominant cost after H1/H2 are fixed.**
 
@@ -440,7 +440,7 @@ Placement follows the existing dependency direction (`mvm-cli` → `mvm-runtime`
 | Proposed | Home | Relationship to existing code |
 |---|---|---|
 | `BuildPlan`, `Material`, `ExecutionPolicy` | `mvm-contract::build` | New DTOs, `no_std`+alloc, `deny_unknown_fields`. Siblings of `plan::` types. |
-| `ActionDigest`, `ArtifactDigest` | `mvm-core::action` | New newtypes joining the taxonomy in `semantic_address.rs:28-41`. **No `From`/`Into` to `SemanticAddress`, `CheckpointDigest`, `OciDigest`, `Sha256Hex`, or `KeyId`.** |
+| `ActionDigest`, `ArtifactDigest` | `mvm-core::action` | New newtypes joining the taxonomy in `workload_address.rs:28-41`. **No `From`/`Into` to `WorkloadAddress`, `CheckpointDigest`, `OciDigest`, `Sha256Hex`, or `KeyId`.** |
 | `ArtifactManifest`, `TreeNode` | `mvm-fs::manifest` | Extends `hash.rs`. Shares the walk with `rootfs::collect_nodes` — **one walk implementation**, per the repo's reuse rule. |
 | `ContentStore` (trait) | `mvm-core::pack_cache` | Generalizes the existing promote/resolve pair. |
 | `ActionCache` (trait) | `mvm-core::pack_cache` | New; replaces `build_cache::{read,write}_cached_revision`. |
@@ -556,7 +556,7 @@ This is the section the brief is most insistent about, and it deserves to be sta
 | 3. + policy-compliant evidence | The host observed the execution and found no policy violation. Trust additionally = trust in the monitor's completeness. | `ExecutionEvidence` + `PolicyVerifier` |
 | 4. + independent reproduction | Two independently-keyed builders produced the same `artifact_digest`. A single dishonest builder can no longer forge the binding. | `ReproducibilityStatus::Reproduced` |
 
-**A content hash is level 0 and nothing more.** "Content-addressed" is not a synonym for "reproducible" and not a synonym for "provenance-backed". The `semantic_address.rs:28-41` module docs already make this argument for semantic addresses; the same discipline must be applied to build artifacts. Claim prose should be gated: plan 276 WS1's `tier:` field and WS2's over-claim verb gate are the right instruments, and this ladder gives them a vocabulary.
+**A content hash is level 0 and nothing more.** "Content-addressed" is not a synonym for "reproducible" and not a synonym for "provenance-backed". The `workload_address.rs:28-41` module docs already make this argument for workload addresses; the same discipline must be applied to build artifacts. Claim prose should be gated: plan 276 WS1's `tier:` field and WS2's over-claim verb gate are the right instruments, and this ladder gives them a vocabulary.
 
 ### 8.3 Cache verification rules
 
@@ -868,7 +868,7 @@ Only questions that genuinely cannot be settled from the repository or a safe lo
 2. **Can `nix build` be made fully offline for an arbitrary user flake with a pre-seeded closure?** The mechanism exists (`builder_pack` closure file, plan 213 SP3), but whether it covers arbitrary user flakes — as opposed to the builder VM's own known closure — is unvalidated. Milestone E depends on the answer.
 3. **Does `materialize_ext4_pure` reproduce byte-identically across macOS and Linux hosts for the same input tree?** The writer is deterministic by construction, but the *walk* reads host filesystem metadata (mode, xattrs), and APFS vs ext4 differ on case sensitivity and xattr namespaces. This is testable but has not been tested cross-platform.
 4. **What is the acceptable dev-profile trust posture for unsigned local attestations?** Requiring a signature for every local build adds ceremony; not requiring one weakens T9's defence. My inclination is to always sign with the existing auto-provisioned host key (it costs microseconds and the key already exists), but this is a product decision.
-5. **Should the semantic/artifact Unicode asymmetry be documented as intentional or converged?** `SemanticAddress` NFC-normalizes; the artifact manifest should not. Plan 276 S5 defers the NFC decision; this proposal takes a position (asymmetry is correct) that the owner should ratify or overrule.
+5. **Should the semantic/artifact Unicode asymmetry be documented as intentional or converged?** `WorkloadAddress` NFC-normalizes; the artifact manifest should not. Plan 276 S5 defers the NFC decision; this proposal takes a position (asymmetry is correct) that the owner should ratify or overrule.
 6. **Is there an appetite for a Lean toolchain in CI at all?** The cost is real and recurring. If the answer is no, the golden-vector corpus should be hand-frozen (plan 276 WS3 as written) and §9 reduces to "Kani only".
 
 ---

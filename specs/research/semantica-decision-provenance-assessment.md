@@ -13,7 +13,7 @@ Semantica is a Python knowledge-graph / decision-intelligence platform. It is **
 `mvm` already owns the harder cryptographic foundation:
 
 - content-addressed `ExecutionPlan` (`plan_id` = SHA-256 of plan body);
-- UOR-ADDR-compatible `SemanticAddress` for Workload IR (JCS + NFC + SHA-256);
+- UOR-ADDR-compatible `WorkloadAddress` for Workload IR (JCS + NFC + SHA-256);
 - chain-signed audit entries with Ed25519;
 - RFC-6962 Merkle roots;
 - image/checkpoint lineage with hash-links.
@@ -41,7 +41,7 @@ It is Python, depends on Faiss, graph databases, vector stores, LLM provider SDK
 | Capability | mvm primitive | Where it lives |
 | --- | --- | --- |
 | Content-addressed execution identity | `plan_id` = SHA-256 over load-bearing `ExecutionPlan` fields | `crates/mvm-core/src/plan/content_id.rs` |
-| Semantic content identity for structured IR | `SemanticAddress` = `sha256(JCS(NFC(Workload)))`, UOR-ADDR JSON realization | `crates/mvm-core/src/semantic_address.rs` |
+| Semantic content identity for structured IR | `WorkloadAddress` = `sha256(JCS(NFC(Workload)))`, UOR-ADDR JSON realization | `crates/mvm-core/src/workload_address.rs` |
 | Chain-signed tamper-evident audit log | `AuditEmitter` + `FileAuditSigner`, Ed25519 per-tenant `tenant.jsonl` | `crates/mvm-hostd/src/audit/emitter.rs` |
 | Merkle transparency root | `SignedAuditRoot` over RFC-6962 tree | `crates/mvm-hostd/src/audit/emitter.rs`, `mvm_contract::merkle` |
 | Image/checkpoint lineage with hash-links | `ImageNode.node_digest` / `parent_digest`; `emit_checkpoint_forked` labels | `crates/mvm-hostd/src/audit/emitter.rs` |
@@ -93,7 +93,7 @@ If `mvm` adds a decision-provenance layer, it should be a thin semantic coating 
 
 - **`DecisionId`** — content-addressed identifier derived from the canonical JSON of a decision body.
 - **`DecisionRecord`** — category, scenario, reasoning, outcome, confidence, timestamp, causal links, metadata.
-- **`AttestationBinding`** — binds the decision to `plan_id`, optional `SemanticAddress`, artifact digests, chain entry hash, signer pubkey.
+- **`AttestationBinding`** — binds the decision to `plan_id`, optional `WorkloadAddress`, artifact digests, chain entry hash, signer pubkey.
 - **`CausalLink`** — `Caused`, `Influenced`, `PrecedentFor`, `Invalidated`.
 - **`ProvenanceGraph`** — derived read-only view over decision records; supports `trace_decision_chain`, `analyze_decision_impact`, `find_similar_decisions`, `state_at`.
 - **`ProvenanceExporter`** — deterministic PROV-O / RDF / Turtle / JSON-LD output.
@@ -115,7 +115,7 @@ The chain-signed log remains the source of truth. The decision store is a derive
 
 1. Recompute `DecisionId` from the decision body.
 2. Find the matching chain-signed `AuditEntry` and verify its Ed25519 signature.
-3. Recompute `plan_id` and `SemanticAddress` from the plan/workload.
+3. Recompute `plan_id` and `WorkloadAddress` from the plan/workload.
 4. Confirm artifact digests against OCI/checkpoint manifests.
 
 ### Example lifecycle as decisions
@@ -148,7 +148,7 @@ The `AttestationBinding` struct should reserve an extension slot for a UOR/Holog
 // Conceptual only
 pub struct AttestationBinding {
     pub plan_id: PlanId,
-    pub workload_addr: Option<SemanticAddress>,
+    pub workload_addr: Option<WorkloadAddress>,
     pub artifact_digests: BTreeMap<String, String>,
     pub audit_entry_hash: String,
     pub signer_pubkey: String,

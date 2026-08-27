@@ -4,6 +4,12 @@ Last updated: 2026-08-27
 
 ## In progress
 
+- [ ] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
+      `specs/plans/2026-08-27-kernel-6-12-106.md`.
+      Both kernel consumers use the kernel.org-verified archive and SRI hash;
+      local synchronization, freshness, workspace, and Clippy gates are green.
+      Linux Nix PR checks and merge delivery remain.
+
 - [ ] **SDK surface contract repairs — issues #2902 and #2906.**
       `specs/plans/2026-08-26-sdk-surface-contract-repairs.md`.
       The README's `mvm.local_path` decorator source and the builder-pack Cargo
@@ -12,14 +18,22 @@ Last updated: 2026-08-27
 
 ## Completed
 
+- [x] **Workload address public API rename.** The unused UOR-ADDR pilot is now
+      exposed as `mvm_core::{WorkloadAddress, WorkloadAddressError,
+      WorkloadAddressParseError, workload_address}` and the
+      `mvm_core::workload_address` module. CLI and BDD vocabulary use workload
+      address throughout; no deprecated semantic-name aliases remain.
+
 - [x] **Site QEMU-WASM release artifact** —
       `specs/plans/2026-08-26-site-qemu-wasm-release-artifact.md`.
       The browser QEMU pack now builds on the `boot-image/v*` release cadence;
       Cloudflare Pages consumes the signed, checksummed release artifact while
       retaining the current revision's demo shell. Its oversized WASM module is
       staged as an explicitly decompressed gzip payload so it fits Cloudflare's
-      per-file limit. Workflow contracts, actionlint, workspace
-      tests/check/doctests, and Clippy are green.
+      per-file limit. GitHub CLI receives the semantic-version filter directly
+      through `--jq` in both consuming workflows, with a regression contract
+      against the unsupported standalone jq `-r` flag. Workflow contracts,
+      actionlint, and Clippy are green.
 
 - [x] **AI egress metering and token budgets** —
       `specs/plans/2026-08-21-ai-egress-metering-and-budget.md`.

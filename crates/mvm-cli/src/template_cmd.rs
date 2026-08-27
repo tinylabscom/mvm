@@ -12,22 +12,10 @@ fn now_iso() -> String {
 /// config) in the given directory. Called from the `mvmctl init <DIR>`
 /// smart-dispatch in `commands/env/init.rs`.
 ///
-/// `local` is preserved for source compatibility with the CLI args
-/// shape; project-scaffold is always local now (the legacy `--vm` mode
-/// that initialised a directory inside the Lima VM is gone with the
-/// rest of the `template *` namespace).
-pub fn init(
-    name: &str,
-    local: bool,
-    base_dir: &str,
-    preset: Option<&str>,
-    prompt: Option<&str>,
-) -> Result<()> {
-    if !local {
-        anyhow::bail!(
-            "non-local init was a `mvmctl template init --vm` mode that no longer exists; pass a local DIR"
-        );
-    }
+/// Project scaffolding is always local. The `--vm` mode that initialised a
+/// directory inside the Lima VM went with the rest of the `template *`
+/// namespace, so there is no longer a second mode to select between.
+pub fn init(name: &str, base_dir: &str, preset: Option<&str>, prompt: Option<&str>) -> Result<()> {
     let selected_preset = resolve_scaffold_preset(preset, prompt);
     let dir = std::path::Path::new(base_dir).join(name);
     // Use the final path component as the human-readable project name;

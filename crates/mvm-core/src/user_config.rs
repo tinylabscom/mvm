@@ -79,6 +79,60 @@ pub struct MvmConfig {
     /// uncapped and contributes nothing, so this bounds the total of what was
     /// promised rather than the total of what can be consumed.
     pub host_budget_cpu_millicores: Option<u32>,
+    /// External signers whose Ed25519-signed plans this host will admit.
+    ///
+    /// Empty by default, and the default is the security posture: a host that
+    /// pins nobody refuses every externally-signed plan. Pinning an entry is
+    /// the operator delegating plan authority to a fleet control plane's
+    /// issuer key — the plan's grants are still measured against this host's
+    /// ceiling and budget, which the signer cannot widen.
+    pub trusted_plan_signers: Vec<TrustedPlanSigner>,
+}
+
+/// One external plan signer the operator has chosen to trust: the
+/// `signer_id` a `SignedExecutionPlan` envelope names, pinned to the Ed25519
+/// public key the signature must verify under.
+///
+/// The key is pinned, not looked up: the envelope's `signer_id` selects which
+/// entry verifies it, so two entries must never share an id (the first match
+/// wins, and a duplicated id would shadow the later pin).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustedPlanSigner {
+    /// The identifier the signed envelope carries and the verifier matches on.
+    pub signer_id: String,
+    /// The signer's Ed25519 public key, lowercase hex (64 chars, 32 bytes).
+    pub ed25519_pubkey_hex: String,
+}
+
+impl TrustedPlanSigner {
+    /// Parse the pinned public key into a verifying key.
+    ///
+    /// A malformed pin is an error, never a skipped entry: silently dropping
+    /// an unparseable pin would admit nothing the operator meant to refuse,
+    /// but surfacing it tells them the pin they wrote is not the pin in
+    /// force.
+    pub fn verifying_key(&self) -> Result<ed25519_dalek::VerifyingKey> {
+        let raw = hex::decode(&self.ed25519_pubkey_hex).with_context(|| {
+            format!(
+                "trusted plan signer {:?}: ed25519_pubkey_hex is not hex",
+                self.signer_id
+            )
+        })?;
+        let bytes: [u8; 32] = raw.try_into().map_err(|raw: Vec<u8>| {
+            anyhow::anyhow!(
+                "trusted plan signer {:?}: ed25519_pubkey_hex decodes to {} bytes, expected 32",
+                self.signer_id,
+                raw.len()
+            )
+        })?;
+        ed25519_dalek::VerifyingKey::from_bytes(&bytes).with_context(|| {
+            format!(
+                "trusted plan signer {:?}: ed25519_pubkey_hex is not a valid Ed25519 key",
+                self.signer_id
+            )
+        })
+    }
 }
 
 impl MvmConfig {
@@ -133,6 +187,20 @@ impl MvmConfig {
         }
     }
 
+    /// The host's trusted external plan signers, parsed into verifying keys.
+    ///
+    /// Read at admission, never from the plan being admitted — same trust-root
+    /// rule as the grant ceiling. An empty set is the fail-closed default:
+    /// callers must treat it as "this host admits no externally-signed plans".
+    /// A malformed pin fails the whole load rather than being skipped, so the
+    /// set in force is exactly the set the operator wrote.
+    pub fn trusted_plan_signer_keys(&self) -> Result<Vec<(String, ed25519_dalek::VerifyingKey)>> {
+        self.trusted_plan_signers
+            .iter()
+            .map(|signer| Ok((signer.signer_id.clone(), signer.verifying_key()?)))
+            .collect()
+    }
+
     /// Resolve the effective services-health timeout, honoring an
     /// `MVM_SERVICES_HEALTH_TIMEOUT_SECS` env-var override over the
     /// config field. Env-var takes precedence so a single shell
@@ -175,6 +243,10 @@ impl Default for MvmConfig {
             // a large machine while under-protecting a small one.
             host_budget_memory_mib: None,
             host_budget_cpu_millicores: None,
+            // Empty = refuse every externally-signed plan. Trusting a fleet
+            // issuer is a delegation of plan authority; it has to be written
+            // by the operator, never defaulted into.
+            trusted_plan_signers: Vec::new(),
         }
     }
 }
@@ -529,5 +601,71 @@ mod tests {
         let mut cfg = MvmConfig::default();
         let err = set_key(&mut cfg, "dev_vm_cpus", "not-a-number").unwrap_err();
         assert!(err.to_string().contains("integer"));
+    }
+
+    #[test]
+    fn trusted_plan_signers_default_empty() {
+        // Fail closed: a host that pinned nobody admits no externally-signed
+        // plan, and the empty default must survive a TOML round trip.
+        let cfg = MvmConfig::default();
+        assert!(cfg.trusted_plan_signers.is_empty());
+        assert_eq!(cfg.trusted_plan_signer_keys().unwrap(), Vec::new());
+
+        let parsed: MvmConfig = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert!(parsed.trusted_plan_signers.is_empty());
+    }
+
+    #[test]
+    fn trusted_plan_signers_round_trip_and_parse() {
+        let signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let expected = signing.verifying_key();
+        let cfg = MvmConfig {
+            trusted_plan_signers: vec![TrustedPlanSigner {
+                signer_id: "fleet-prod".to_string(),
+                ed25519_pubkey_hex: hex::encode(expected.as_bytes()),
+            }],
+            ..MvmConfig::default()
+        };
+
+        // The operator writes this into config.toml, so the persisted form is
+        // what must parse back into the same pin.
+        let parsed: MvmConfig = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(parsed.trusted_plan_signers, cfg.trusted_plan_signers);
+
+        let keys = parsed.trusted_plan_signer_keys().unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].0, "fleet-prod");
+        assert_eq!(keys[0].1, expected);
+    }
+
+    #[test]
+    fn a_malformed_trusted_signer_pin_fails_the_load() {
+        // Never skip an unparseable pin: the operator believes the key they
+        // wrote is the one in force.
+        let bad_pins = [
+            "not-hex!".to_string(),
+            "ab".repeat(16), // 16 bytes — wrong length
+            "ab".repeat(64), // 64 bytes — wrong length
+        ];
+        for bad in &bad_pins {
+            let signer = TrustedPlanSigner {
+                signer_id: "fleet-prod".to_string(),
+                ed25519_pubkey_hex: bad.clone(),
+            };
+            let err = signer.verifying_key().unwrap_err();
+            assert!(
+                err.to_string().contains("fleet-prod"),
+                "the error must name the offending pin: {err:#}"
+            );
+        }
+
+        // A real key's hex parses back to that key.
+        let signing = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let expected = signing.verifying_key();
+        let signer = TrustedPlanSigner {
+            signer_id: "fleet-prod".to_string(),
+            ed25519_pubkey_hex: hex::encode(expected.as_bytes()),
+        };
+        assert_eq!(signer.verifying_key().unwrap(), expected);
     }
 }

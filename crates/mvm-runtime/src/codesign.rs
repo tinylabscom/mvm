@@ -116,13 +116,13 @@ pub fn collect_sign_targets() -> Vec<SignTarget> {
             required: RequiredEntitlement::Virtualization,
         });
     }
-    if let Ok(p) = mvm_backends::driver::libkrun_legacy::resolve_supervisor_path() {
+    if let Ok(p) = mvm_backends::driver::libkrun_process::resolve_supervisor_path() {
         out.push(SignTarget {
             path: p,
             required: RequiredEntitlement::Hypervisor,
         });
     }
-    if let Ok(p) = mvm_backends::driver::hvf_legacy::resolve_supervisor_path() {
+    if let Ok(p) = mvm_backends::driver::hvf_process::resolve_supervisor_path() {
         out.push(SignTarget {
             path: p,
             required: RequiredEntitlement::Hypervisor,
