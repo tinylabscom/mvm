@@ -301,6 +301,7 @@ let
   # util-linux setpriv closure while preserving the exact privilege flags
   # emitted by the generated init script.
   setprivPkg = import ../packages/mvm-setpriv.nix {
+    inherit pkgs;
     rustPlatform = pkgs.pkgsStatic.rustPlatform;
     lib = pkgs.lib;
     inherit mvmSrc;

@@ -158,6 +158,7 @@
       # `/sbin/mvm-setpriv` symlink through mkGuest's package population loop.
       builderSetprivFor = pkgs:
         import (workspace + "/nix/packages/mvm-setpriv.nix") {
+          inherit pkgs;
           rustPlatform = pkgs.pkgsStatic.rustPlatform;
           lib = pkgs.lib;
           mvmSrc = workspace;

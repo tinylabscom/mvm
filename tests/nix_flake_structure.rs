@@ -76,6 +76,31 @@ fn every_rust_derivation_uses_the_static_crates_registry() {
     );
 }
 
+#[test]
+fn mvm_setpriv_imports_pass_pkgs_to_the_static_crates_helper() {
+    let mk_guest = normalized_whitespace(
+        &fs::read_to_string(nix_dir().join("lib").join("mk-guest.nix"))
+            .expect("mk-guest.nix must be readable"),
+    );
+    assert!(
+        mk_guest.contains(
+            "import ../packages/mvm-setpriv.nix { inherit pkgs; rustPlatform = pkgs.pkgsStatic.rustPlatform;"
+        ),
+        "the workload guest must pass pkgs into mvm-setpriv.nix"
+    );
+
+    let builder_flake = normalized_whitespace(
+        &fs::read_to_string(nix_dir().join("images/builder-vm/flake.nix"))
+            .expect("builder VM flake must be readable"),
+    );
+    assert!(
+        builder_flake.contains(
+            "import (workspace + \"/nix/packages/mvm-setpriv.nix\") { inherit pkgs; rustPlatform = pkgs.pkgsStatic.rustPlatform;"
+        ),
+        "the builder guest must pass pkgs into mvm-setpriv.nix"
+    );
+}
+
 fn collect_nix_files(dir: &Path, files: &mut Vec<PathBuf>) {
     for entry in
         fs::read_dir(dir).unwrap_or_else(|e| panic!("{} must be readable: {e}", dir.display()))
