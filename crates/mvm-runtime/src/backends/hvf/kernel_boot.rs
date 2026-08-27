@@ -1230,9 +1230,18 @@ fn verify_redistributor_frame(vcpu_id: hv_vcpu_t, cpu: u32) -> Result<(), HvfErr
 /// which is what makes the check possible this early — before the guest is
 /// running and while a failure is still a failed boot rather than a hang.
 ///
-/// The caller must hold this CPU's turn in the creation order; the frame this
-/// checks is handed out by `hv_vcpu_create` in call order, not by affinity.
-fn create_secondary_vcpu(cpu: u32) -> Result<(HvfVcpu, hv_vcpu_t), HvfError> {
+/// Takes this CPU's turn in `order` for the duration, because the frame HVF
+/// hands back is chosen by `hv_vcpu_create` call order rather than by affinity.
+/// The turn is taken *here*, in the one function that creates a vCPU, so the
+/// ordering cannot be separated from the call it exists to order — it was a
+/// pair of statements at the call site once, and deleting them was a one-line
+/// change that reintroduced the race with nothing in CI to notice.
+fn create_secondary_vcpu(
+    cpu: u32,
+    order: &CreationOrder,
+) -> Result<(HvfVcpu, hv_vcpu_t), HvfError> {
+    // Held until this function returns, by any path.
+    let _turn = order.take_turn(cpu);
     let mut vcpu_id: hv_vcpu_t = 0;
     let mut exit: *mut hv_vcpu_exit_t = core::ptr::null_mut();
     // SAFETY: between `hv_vm_create` and `hv_vm_destroy` — the boot CPU holds
@@ -1268,16 +1277,11 @@ fn run_secondary<B: run::DeviceBus>(
     bus: &B,
     created: &std::sync::mpsc::Sender<Result<Option<ThreadCpuHandle>, HvfError>>,
 ) -> Result<CpuDiagnostics, HvfError> {
-    // HVF allocates GIC redistributor frames in `hv_vcpu_create` order, and the
-    // device tree tells the guest CPU n owns the nth. Take a turn, so the nth
-    // vCPU created is CPU n whatever order the scheduler started these threads
-    // in. Without it two threads swap frames and the guest cannot match either
-    // CPU to its redistributor.
-    shared.creation_order.wait_for_turn(cpu);
-    let create = create_secondary_vcpu(cpu);
-    shared.creation_order.finished(cpu);
-
-    let (vcpu, vcpu_id) = match create {
+    // Ordered internally: HVF allocates GIC redistributor frames in
+    // `hv_vcpu_create` order and the device tree tells the guest CPU n owns the
+    // nth, so the nth vCPU created has to be CPU n whatever order the scheduler
+    // started these threads in.
+    let (vcpu, vcpu_id) = match create_secondary_vcpu(cpu, shared.creation_order) {
         Ok(created_vcpu) => created_vcpu,
         Err(e) => {
             let _ = created.send(Err(e));

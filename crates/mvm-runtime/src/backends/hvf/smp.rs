@@ -110,8 +110,14 @@ impl Default for CreationOrder {
 }
 
 impl CreationOrder {
-    /// Block until it is `cpu`'s turn to be created.
-    pub(crate) fn wait_for_turn(&self, cpu: u32) {
+    /// Block until it is `cpu`'s turn, and hold the turn until the guard drops.
+    ///
+    /// A guard rather than a `wait`/`release` pair because the release is not
+    /// optional: a CPU that kept its turn would leave every later CPU blocked
+    /// forever, and the boot CPU waiting on reports that never come. Every way
+    /// out of the creation path — success, an error return, a panic — drops
+    /// the guard, so there is no arm that can forget.
+    pub(crate) fn take_turn(&self, cpu: u32) -> TurnGuard<'_> {
         let mut next = self
             .next
             .lock()
@@ -122,21 +128,27 @@ impl CreationOrder {
                 .wait(next)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
+        drop(next);
+        TurnGuard { order: self, cpu }
     }
+}
 
-    /// Release the next CPU.
-    ///
-    /// Must be called whether or not the creation succeeded. A CPU that failed
-    /// and kept the turn would leave every later CPU blocked here, and the boot
-    /// CPU waiting on reports that are never coming.
-    pub(crate) fn finished(&self, cpu: u32) {
+/// One CPU's turn to call `hv_vcpu_create`, released on drop.
+pub(crate) struct TurnGuard<'a> {
+    order: &'a CreationOrder,
+    cpu: u32,
+}
+
+impl Drop for TurnGuard<'_> {
+    fn drop(&mut self) {
         let mut next = self
+            .order
             .next
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *next = (*next).max(cpu.saturating_add(1));
+        *next = (*next).max(self.cpu.saturating_add(1));
         drop(next);
-        self.advanced.notify_all();
+        self.order.advanced.notify_all();
     }
 }
 
@@ -475,9 +487,8 @@ mod tests {
                 let order = Arc::clone(&order);
                 let created = Arc::clone(&created);
                 std::thread::spawn(move || {
-                    order.wait_for_turn(cpu);
+                    let _turn = order.take_turn(cpu);
                     created.lock().unwrap().push(cpu);
-                    order.finished(cpu);
                 })
             })
             .collect();
@@ -497,7 +508,9 @@ mod tests {
     /// Otherwise every later CPU blocks on a turn that never comes, and the
     /// boot CPU waits for bring-up reports that are never sent — a hang, where
     /// the honest outcome is a failed boot naming the CPU that could not be
-    /// created.
+    /// created. The guard is what makes this hold on every arm: cpu 2 returns
+    /// early here, exactly as a failed `hv_vcpu_create` does, and releases the
+    /// queue anyway because it never had to remember to.
     #[test]
     fn a_failed_creation_still_releases_the_cpus_behind_it() {
         let order = Arc::new(CreationOrder::default());
@@ -508,11 +521,12 @@ mod tests {
                 let order = Arc::clone(&order);
                 let reached = Arc::clone(&reached);
                 std::thread::spawn(move || {
-                    order.wait_for_turn(cpu);
+                    let _turn = order.take_turn(cpu);
                     reached.lock().unwrap().push(cpu);
-                    // Every CPU releases the next, including the one that
-                    // "failed" (cpu 2, which records nothing further).
-                    order.finished(cpu);
+                    // The failure arm for cpu 2: it records nothing further and
+                    // releases no turn explicitly, exactly as a failed
+                    // `hv_vcpu_create` returning early does.
+                    assert!(cpu != 2 || reached.lock().unwrap().contains(&2));
                 })
             })
             .collect();
@@ -521,6 +535,34 @@ mod tests {
         }
 
         assert_eq!(*reached.lock().unwrap(), vec![1, 2, 3]);
+    }
+
+    /// A panicking creation releases the queue too.
+    ///
+    /// The strongest form of the same property: unwinding drops the guard, so
+    /// even a vCPU thread that dies mid-creation cannot wedge the boot CPU
+    /// waiting on CPUs that will never take their turn.
+    #[test]
+    fn a_panicking_creation_does_not_wedge_the_cpus_behind_it() {
+        let order = Arc::new(CreationOrder::default());
+
+        let panicker = {
+            let order = Arc::clone(&order);
+            std::thread::spawn(move || {
+                let _turn = order.take_turn(1);
+                panic!("hv_vcpu_create blew up");
+            })
+        };
+        assert!(panicker.join().is_err(), "the thread must have panicked");
+
+        let follower = {
+            let order = Arc::clone(&order);
+            std::thread::spawn(move || {
+                let _turn = order.take_turn(2);
+                "cpu 2 got its turn"
+            })
+        };
+        assert_eq!(follower.join().unwrap(), "cpu 2 got its turn");
     }
 
     /// Every CPU's start state agrees with the device tree node built for it.
