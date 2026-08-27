@@ -88,10 +88,10 @@ function createFakeTerminal() {
 
 self.onmessage = async (event) => {
   if (event.data.type === "stdin") {
-    if (inputCallback) {
-      // Send a carriage return so xterm-pty's line discipline turns it into a
-      // newline for the shell.
-      inputCallback(event.data.line + "\r");
+    if (inputCallback && typeof event.data.data === "string") {
+      // The main thread owns input encoding: submitted commands include their
+      // carriage return, while terminal controls arrive as their raw byte.
+      inputCallback(event.data.data);
     }
     return;
   }

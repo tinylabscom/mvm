@@ -2608,6 +2608,9 @@ Browser-hosted demo scoped in `specs/plans/2026-08-21-weblinux-browser-demo.md`.
 - [x] 2.1 Pin and package a reproducible QEMU-Wasm engine through Nix.
       Pinned upstream revisions and added `nix/packages/qemu-wasm.nix`;
       build is queued for the Linux builder VM.
+- [x] Demo terminal input forwards Ctrl+C and Ctrl+D as raw ETX/EOT bytes
+      through the Worker to the QEMU-Wasm serial PTY, with focused input tests
+      and live-browser interruption/EOF scenarios.
 - [ ] 2.8 Boot an `mvm`-built x86_64 kernel under headless Chromium and record measurements.
 
 Workstream 1 first slice (1.1, 1.7) and the WS-2 engine packaging

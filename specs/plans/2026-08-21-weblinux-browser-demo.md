@@ -110,6 +110,9 @@ cdf057a71b07e3b52b19cbe210bdefa59250d01a9810b960f7fe1f98eed95a27  bios/kvmvapic.
   polish (ANSI color rendering, bottom-docked input, command history) and a
   CLI preview that advertises the intended
   `mvmctl machine run --hypervisor web-linux ...` surface.
+- [x] Forward Ctrl+C and Ctrl+D from the active command input to the QEMU-Wasm
+  serial PTY as raw ETX/EOT bytes. Focused browser-input tests cover both keys,
+  and the Playwright flow exercises interrupting `sleep` and closing `cat`.
 
 ### Phase 1 — Engine integration (builder VM verified)
 
