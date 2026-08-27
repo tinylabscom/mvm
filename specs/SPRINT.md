@@ -10,6 +10,14 @@
 
 ## In progress
 
+- [ ] **Recorded-backend pause and resume — issue #2929.**
+      `specs/plans/2026-08-27-recorded-backend-pause-resume.md`.
+      Existing-machine lifecycle operations resolve the VMM that owns the live
+      state marker instead of trusting the CLI's Firecracker default. The
+      Firecracker sealed-snapshot replay gate and marker-less mock fallback stay
+      intact; focused and workspace validation remain before merge-queue
+      delivery.
+
 - [ ] **Admission cache durability boundary.**
       `specs/plans/2026-08-26-admission-cache-durability.md`.
       Preserve the chain-signed admission record's fail-closed durability

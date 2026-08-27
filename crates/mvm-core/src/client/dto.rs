@@ -415,18 +415,20 @@ impl Default for PauseOpts {
     }
 }
 
-/// The outcome of a successful `pause_machine`: the sealed snapshot's replay
-/// epoch and the byte lengths of the sealed vmstate + memory artifacts. Plain
-/// data the caller renders in its success line and audit entry.
+/// The outcome of a successful `pause_machine`. A sealed-snapshot backend
+/// reports its replay epoch and artifact lengths; a backend-native vCPU pause
+/// reports zeroes because it creates no sealed artifacts. Plain data the caller
+/// renders in its success line and audit entry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PauseOutcome {
     /// Monotonic replay-defence counter stamped into the sealed envelope; a
     /// resume refuses any snapshot whose epoch is below the high-water mark.
+    /// Zero for a backend-native pause that creates no sealed snapshot.
     pub epoch: u64,
-    /// Length in bytes of the sealed `vmstate.bin`.
+    /// Length in bytes of the sealed `vmstate.bin`; zero for backend-native pause.
     pub vmstate_len: u64,
-    /// Length in bytes of the sealed `mem.bin`.
+    /// Length in bytes of the sealed `mem.bin`; zero for backend-native pause.
     pub mem_len: u64,
 }
 
@@ -448,8 +450,8 @@ pub struct ResumeOpts {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResumeOutcome {
-    /// The verified snapshot's epoch (plain resume). `0` for a warm resume,
-    /// which restores live memory rather than a sealed snapshot.
+    /// The verified snapshot's epoch (plain resume). `0` for a warm resume or
+    /// backend-native vCPU resume, neither of which restores a sealed snapshot.
     #[serde(default)]
     pub epoch: u64,
     /// Length in bytes of the restored `vmstate.bin` (plain resume); `0` for warm.
