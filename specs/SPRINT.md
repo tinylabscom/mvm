@@ -3153,6 +3153,18 @@ to the configured ceiling and the first terse response immediately after it.
 - [x] Record the delivery in
       `specs/sprint/delivery/2887-guest-rpc-refusals.md`.
 
+## 2026-08-27 ad-hoc exec image environment
+
+- [x] Reproduce the bare-command failure with an executable available only on
+      the image-declared `PATH`.
+- [x] Route streaming exec through the shared image environment resolver while
+      retaining inherited agent variables and the forced writable `HOME`.
+- [x] Preserve the prior behavior when the image runtime configuration is
+      absent or unreadable.
+- [x] Retain the existing live Python service-plane scenarios as the end-to-end
+      witness and record delivery in
+      `specs/sprint/delivery/2951-ad-hoc-exec-image-environment.md`.
+
 ## Follow-up (not started) — repository-to-signed-workload generator
 
 Prompted by the same 2026-08-25 survey of a commercial enterprise

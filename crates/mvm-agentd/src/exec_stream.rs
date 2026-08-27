@@ -2,9 +2,11 @@
 //! `ExecEvent` chunks via an `emit` closure as the child produces output,
 //! returning the terminal `Exit`. The wire-writing lives in the agent bin
 //! (`do_exec_streaming`); this core is closure-driven so it is unit-
-//! testable without a vsock `File`. Mirrors `process_rpc::spawn_drain` +
-//! the `handle_proc_wait` sleep-poll loop (the in-repo streaming idiom —
-//! mvm-guest has no `libc::poll` usage).
+//! testable without a vsock `File`. Commands inherit the agent environment,
+//! then apply the image's declared environment and working directory through
+//! the shared workload resolver. Mirrors `process_rpc::spawn_drain` + the
+//! `handle_proc_wait` sleep-poll loop (the in-repo streaming idiom — mvm-guest
+//! has no `libc::poll` usage).
 use crate::vsock::ExecEvent;
 use std::io::{Read, Write};
 #[cfg(unix)]
@@ -17,6 +19,30 @@ use std::time::{Duration, Instant};
 /// (was `MAX_EXEC_OUTPUT` in the agent bin).
 pub const MAX_EXEC_OUTPUT: usize = 1024 * 1024;
 const DRAIN_BUF: usize = 4096;
+
+fn resolve_exec_environment() -> crate::workload_env::WorkloadEnvironment {
+    resolve_exec_environment_from(
+        std::env::vars_os(),
+        crate::workload_env::ImageRuntimeConfig::load(),
+    )
+}
+
+fn resolve_exec_environment_from<I>(
+    vars: I,
+    image: Result<crate::workload_env::ImageRuntimeConfig, String>,
+) -> crate::workload_env::WorkloadEnvironment
+where
+    I: IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+{
+    let image = image.unwrap_or_else(|error| {
+        eprintln!("mvm-guest-agent: ignoring unreadable image runtime config: {error}");
+        crate::workload_env::ImageRuntimeConfig::default()
+    });
+    crate::workload_env::WorkloadEnvironment::builder()
+        .inherit(vars)
+        .image(&image)
+        .build()
+}
 
 fn spawn_drain<R: Read + Send + 'static>(
     mut reader: R,
@@ -96,13 +122,26 @@ pub fn stream_exec<F: FnMut(ExecEvent)>(
     command: &str,
     stdin_data: Option<&str>,
     timeout_secs: Option<u64>,
+    emit: F,
+) -> ExecEvent {
+    let environment = resolve_exec_environment();
+    stream_exec_with_environment(command, stdin_data, timeout_secs, &environment, emit)
+}
+
+fn stream_exec_with_environment<F: FnMut(ExecEvent)>(
+    command: &str,
+    stdin_data: Option<&str>,
+    timeout_secs: Option<u64>,
+    environment: &crate::workload_env::WorkloadEnvironment,
     mut emit: F,
 ) -> ExecEvent {
     let mut builder = Command::new("/bin/sh");
     builder
         .arg("-c")
         .arg(command)
-        .env("HOME", crate::guest_mount::workload_home())
+        .env_clear()
+        .envs(environment.vars())
+        .current_dir(environment.working_dir())
         .stdin(if stdin_data.is_some() {
             Stdio::piped()
         } else {
@@ -225,6 +264,73 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use libc;
+
+    fn stdout(events: &[ExecEvent]) -> Vec<u8> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ExecEvent::Stdout { chunk } => Some(chunk.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    #[test]
+    fn ad_hoc_exec_resolves_a_bare_command_from_the_image_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temporary image bin directory");
+        let executable = temp.path().join("image-python");
+        std::fs::write(&executable, "#!/bin/sh\nprintf image-path\n")
+            .expect("write image-only executable");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("image-only executable metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions)
+            .expect("mark image-only executable runnable");
+
+        let image = crate::workload_env::ImageRuntimeConfig {
+            argv: Vec::new(),
+            env: vec![format!("PATH={}", temp.path().display())],
+            working_dir: None,
+        };
+        let environment = resolve_exec_environment_from(
+            [(
+                std::ffi::OsString::from("PATH"),
+                std::ffi::OsString::from("/agent/bin"),
+            )],
+            Ok(image),
+        );
+        let mut events = Vec::new();
+        let terminal =
+            stream_exec_with_environment("image-python", None, None, &environment, |event| {
+                events.push(event)
+            });
+
+        assert!(matches!(terminal, ExecEvent::Exit { code: 0 }));
+        assert_eq!(stdout(&events), b"image-path");
+    }
+
+    #[test]
+    fn unreadable_image_environment_falls_back_to_the_agent_environment() {
+        let environment = resolve_exec_environment_from(
+            [(
+                std::ffi::OsString::from("PATH"),
+                std::ffi::OsString::from("/agent/bin"),
+            )],
+            Err("malformed fixture".to_string()),
+        );
+        let vars = environment
+            .vars()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect::<Vec<_>>();
+
+        assert!(vars.iter().any(|(key, value)| {
+            key == std::ffi::OsStr::new("PATH") && value == std::ffi::OsStr::new("/agent/bin")
+        }));
+    }
 
     #[test]
     fn streams_stdout_then_exit_zero() {

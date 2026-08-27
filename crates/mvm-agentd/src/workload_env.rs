@@ -5,12 +5,12 @@
 //! rootfs at [`CONFIG_PATH`]; this module is the only place the guest reads it
 //! back, and the only place a workload environment is assembled.
 //!
-//! Both ways into a workload go through it. The entrypoint runner execs the
-//! declared argv; the interactive console starts a shell. They differ in two
-//! narrow ways — the console inherits the agent's own vars and describes a
-//! terminal — and agree on everything else, which is the point: a second
-//! resolver is exactly how `machine run --image rust:latest -it` came to land
-//! in a shell whose `PATH` was missing the image's own `/usr/local/cargo/bin`.
+//! Every way into a workload goes through it. The entrypoint runner execs the
+//! declared argv; ad-hoc exec runs a supplied command; the interactive console
+//! starts a shell. The latter two inherit the agent's own vars, and only the
+//! console describes a terminal. They agree on everything else, which is the
+//! point: a second resolver is exactly how an image command can land in an
+//! environment whose `PATH` is missing the image's own tools.
 
 use std::ffi::{CString, OsStr, OsString};
 use std::path::Path;
