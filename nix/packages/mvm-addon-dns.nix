@@ -14,9 +14,10 @@
 # so the crate keeps it behind that feature to hold the sealed agent's
 # default build tokio-free.
 
-{ pkgs
-, lib
-, mvmSrc
+{
+  pkgs,
+  lib,
+  mvmSrc,
 }:
 
 pkgs.rustPlatform.buildRustPackage {
@@ -25,7 +26,9 @@ pkgs.rustPlatform.buildRustPackage {
 
   src = mvmSrc;
 
-  cargoLock.lockFile = mvmSrc + "/Cargo.lock";
+  cargoLock = import ../lib/static-crates-cargo-lock.nix {
+    lockFile = mvmSrc + "/Cargo.lock";
+  };
 
   unpackPhase = import ./workspace-unpack.nix { inherit mvmSrc; };
 
@@ -33,13 +36,17 @@ pkgs.rustPlatform.buildRustPackage {
   # heavier members (mvm-libkrun, mvm-providers, etc.) are not in the
   # closure of this crate, so the produced artifact stays small.
   cargoBuildFlags = [
-    "--package" "mvm-agentd"
-    "--bin" "mvm-addon-dns"
-    "--features" "mvm-agentd/addons"
+    "--package"
+    "mvm-agentd"
+    "--bin"
+    "mvm-addon-dns"
+    "--features"
+    "mvm-agentd/addons"
   ];
 
   cargoTestFlags = [
-    "--package" "mvm-agentd"
+    "--package"
+    "mvm-agentd"
   ];
 
   # Tests run in the workspace's host-side `cargo test` lane; the Nix
@@ -48,8 +55,7 @@ pkgs.rustPlatform.buildRustPackage {
   doCheck = false;
 
   meta = with lib; {
-    description =
-      "mvm in-guest addon DNS — loopback-only UDP resolver for configured local-addon hostnames";
+    description = "mvm in-guest addon DNS — loopback-only UDP resolver for configured local-addon hostnames";
     homepage = "https://github.com/tinylabscom/mvm";
     license = licenses.asl20;
     platforms = platforms.linux;

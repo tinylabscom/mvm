@@ -14,9 +14,10 @@
 # tokio, so the crate keeps them behind that feature to hold the sealed
 # agent's default build tokio-free.
 
-{ pkgs
-, lib
-, mvmSrc
+{
+  pkgs,
+  lib,
+  mvmSrc,
 }:
 
 pkgs.rustPlatform.buildRustPackage {
@@ -25,20 +26,26 @@ pkgs.rustPlatform.buildRustPackage {
 
   src = mvmSrc;
 
-  cargoLock.lockFile = mvmSrc + "/Cargo.lock";
+  cargoLock = import ../lib/static-crates-cargo-lock.nix {
+    lockFile = mvmSrc + "/Cargo.lock";
+  };
 
   unpackPhase = import ./workspace-unpack.nix { inherit mvmSrc; };
 
   # Restrict the build to the egress-client binary; the workspace's heavier members
   # are not in this crate's closure, so the artifact stays small.
   cargoBuildFlags = [
-    "--package" "mvm-agentd"
-    "--bin" "mvm-egress-client"
-    "--features" "mvm-agentd/addons"
+    "--package"
+    "mvm-agentd"
+    "--bin"
+    "mvm-egress-client"
+    "--features"
+    "mvm-agentd/addons"
   ];
 
   cargoTestFlags = [
-    "--package" "mvm-agentd"
+    "--package"
+    "mvm-agentd"
   ];
 
   # Host-side `cargo test` lane runs the tests; the Nix build stays focused on the
@@ -46,8 +53,7 @@ pkgs.rustPlatform.buildRustPackage {
   doCheck = false;
 
   meta = with lib; {
-    description =
-      "mvm in-guest egress shim — loopback SOCKS5 to the host vsock egress gateway ";
+    description = "mvm in-guest egress shim — loopback SOCKS5 to the host vsock egress gateway ";
     homepage = "https://github.com/tinylabscom/mvm";
     license = licenses.asl20;
     platforms = platforms.linux;

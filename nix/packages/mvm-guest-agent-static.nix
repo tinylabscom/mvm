@@ -7,9 +7,10 @@
 #
 # The binary is stripped and built with LTO to keep the initramfs small.
 
-{ pkgs
-, lib
-, mvmSrc
+{
+  pkgs,
+  lib,
+  mvmSrc,
 }:
 
 let
@@ -24,17 +25,22 @@ staticPkgs.rustPlatform.buildRustPackage {
 
   src = mvmSrc;
 
-  cargoLock.lockFile = mvmSrc + "/Cargo.lock";
+  cargoLock = import ../lib/static-crates-cargo-lock.nix {
+    lockFile = mvmSrc + "/Cargo.lock";
+  };
 
   # Build only the guest-agent binary; the initramfs does not need the
   # seccomp shim, verity-init, netinit, or runner.
   cargoBuildFlags = [
-    "--package" "mvm-agentd"
-    "--bin" "mvm-guest-agent"
+    "--package"
+    "mvm-agentd"
+    "--bin"
+    "mvm-guest-agent"
   ];
 
   cargoTestFlags = [
-    "--package" "mvm-agentd"
+    "--package"
+    "mvm-agentd"
   ];
 
   doCheck = false;

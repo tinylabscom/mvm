@@ -6,13 +6,14 @@
 # `mvm-core-tpm2` package because it must build swtpm and exercise the
 # full TPM2 command flow.
 
-{ lib
-, stdenv
-, rustPlatform
-, pkg-config
-, mvmSrc
-, tpm2-tss
-, swtpm
+{
+  lib,
+  stdenv,
+  rustPlatform,
+  pkg-config,
+  mvmSrc,
+  tpm2-tss,
+  swtpm,
 }:
 
 rustPlatform.buildRustPackage {
@@ -21,7 +22,9 @@ rustPlatform.buildRustPackage {
 
   src = mvmSrc;
 
-  cargoLock.lockFile = mvmSrc + "/Cargo.lock";
+  cargoLock = import ../lib/static-crates-cargo-lock.nix {
+    lockFile = mvmSrc + "/Cargo.lock";
+  };
 
   unpackPhase = ''
     runHook preUnpack

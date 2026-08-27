@@ -4,12 +4,13 @@
 # the heavy mvmctl build-script path (which builds qemu-wasm-engine) and only
 # exercises the tss-esapi link surface inside mvm-core.
 
-{ lib
-, stdenv
-, rustPlatform
-, pkg-config
-, mvmSrc
-, tpm2-tss
+{
+  lib,
+  stdenv,
+  rustPlatform,
+  pkg-config,
+  mvmSrc,
+  tpm2-tss,
 }:
 
 rustPlatform.buildRustPackage {
@@ -18,7 +19,9 @@ rustPlatform.buildRustPackage {
 
   src = mvmSrc;
 
-  cargoLock.lockFile = mvmSrc + "/Cargo.lock";
+  cargoLock = import ../lib/static-crates-cargo-lock.nix {
+    lockFile = mvmSrc + "/Cargo.lock";
+  };
 
   unpackPhase = ''
     runHook preUnpack
