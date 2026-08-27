@@ -298,6 +298,26 @@ bdd:
 e2e-launch:
     ./scripts/e2e-launch-modes.sh
 
+# Runs both live lanes in order, against one shared artifact home:
+#
+#   e2e-launch  the ways in — CLI verbs, both SDKs, and the in-process Rust
+#               library seam
+#   e2e-docs    the whole documented command surface, plus the machine journey
+#
+# They overlap in the suite they drive, so this is the belt-and-braces run
+# rather than the quick one; reach for a single lane when iterating. Both sweep
+# their own machines, and the second refuses to start if the first is still
+# holding the home.
+#
+# Read the "did NOT run" tally at the end, not just the pass count: a skipped
+# scenario names a capability this host lacks, and a green suite is not full
+# coverage while any of them are nonzero.
+#
+# Every live end-to-end lane, back to back
+e2e:
+    ./scripts/e2e-launch-modes.sh
+    ./scripts/e2e-documented-surface.sh
+
 # The hermetic `bdd` lane proves a documented command parses; this one boots
 # real microVMs and runs them. Needs an artifact-warm home: it defaults to the
 # real `~/.mvm`, override with MVM_E2E_HOME. Expect minutes on a cold home.
