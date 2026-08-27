@@ -93,6 +93,28 @@ API host. Those are left alone deliberately: `cache.nixos.org` substitutes them
 so they never reach the network, which is why only the twelve written here ever
 403'd.
 
+### The guard that should have existed
+
+`every_rust_derivation_uses_the_static_crates_registry` asserted four string
+literals against `static-crates-cargo-deps.nix` — including both hostnames and
+`builtins.replaceStrings`. Moving those three lines into `crates-io.nix` failed
+it, on a PR that made the thing it was guarding *more* true. A test that pins a
+constant's file rather than its effect breaks on every refactor and catches no
+regression, and this one had a blind spot to match: it only inspected files
+containing `rustPlatform.buildRustPackage`, so the twelve hand-written fetches
+in `qemu-wasm.nix` — the ones that actually 403'd — were never in scope.
+
+Split into three, each asserting one property, plus a new
+`no_nix_file_fetches_a_crate_from_the_api_host` that scans every `.nix` file in
+the tree and allows the API host to be named only in `crates-io.nix`, and only
+to rewrite it away. Verified by injecting the old URL back into `qemu-wasm.nix`:
+
+```
+these files fetch crates from the crates.io API host, which 403s Nix's fetchurl;
+use the fetchCrate helper in nix/lib/crates-io.nix instead:
+["…/nix/packages/qemu-wasm.nix"]
+```
+
 ## Limits
 
 The nix change is verified by evaluation and by fetching one crate; the full
