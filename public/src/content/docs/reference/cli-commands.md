@@ -369,9 +369,9 @@ shell).
 | `mvmctl run --profile standard -- <cmd>`             | Default profile on both `run` and `machine run`: explicit env is allowed; host shares must be read-only                                                                                                                            |
 | `mvmctl run --profile dev -- <cmd>`                  | Dev tier: as standard, plus a writable (`:rw`) host share on a persistent machine and the dev guest profile for a sealed-image entrypoint run                                                                                      |
 | `mvmctl run --profile restrictive -- <cmd>`          | No env injection and no host directory shares                                                                                                                                                                                      |
-| `mvmctl run --mount .:/work:ro -- <cmd>`             | Attach a live read-only host-directory share                                                                                                                                                                                       |
+| `mvmctl run --mount .:/work:ro -- <cmd>`             | Attach a live read-only host-directory share (needs a virtio-fs backend)                                                                                                                                                                                       |
 | `mvmctl run --profile permissive -- <cmd>`           | Escape hatch; requires `MVM_ACK_PERMISSIVE_RUN=1`                                                                                                                                                                                  |
-| `mvmctl run --mount HOST:GUEST:ro -- <cmd>`          | Attach a live read-only host-directory share                                                                                                                                                                                       |
+| `mvmctl run --mount HOST:GUEST:ro -- <cmd>`          | Attach a live read-only host-directory share (needs a virtio-fs backend)                                                                                                                                                                                       |
 | `mvmctl run --env KEY=VAL -- <cmd>`                  | Inject an explicit environment variable. Repeatable; disabled by `--profile restrictive`                                                                                                                                           |
 | `mvmctl run --cpus <n> --memory <size> -- <cmd>`     | Resize the transient VM                                                                                                                                                                                                            |
 | `mvmctl run --timeout <secs> -- <cmd>`               | Per-command timeout                                                                                                                                                                                                                |
@@ -916,7 +916,7 @@ host endpoint.
 ```bash
 mvmctl run -- uname -a                                # default image
 mvmctl run --manifest minimal -- /bin/true            # named template
-mvmctl run --mount .:/work:ro -- ls /work            # share current dir, RO
+mvmctl run --mount .:/work:ro -- ls /work            # share current dir, RO (virtio-fs backends only)
 mvmctl run -e DEBUG=1 -- env | grep DEBUG             # env var injection
 mvmctl run --launch-plan ./launch.json                # launch-plan entrypoint
 ```
