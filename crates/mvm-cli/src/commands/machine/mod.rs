@@ -386,9 +386,19 @@ impl MachineRunArgs {
             }
             (false, false) => {
                 self.require_image_for_fresh_boot()?;
-                // The wasm backend runs the module itself; there is no guest
-                // agent command to dispatch, so an empty argv is allowed.
-                if self.run.argv.is_empty() && self.run.hypervisor.as_deref() != Some("wasm") {
+                // Two shapes carry their own entrypoint, so an empty argv is
+                // not a missing argument:
+                //
+                //   - the wasm backend runs the module itself, with no guest
+                //     agent command to dispatch;
+                //   - a flake's `entrypoint.command` is baked into the image by
+                //     mkGuest. `examples/exit_code` exists precisely to run its
+                //     own entrypoint and hand back that exit code, and the
+                //     README teaches `machine run --flake examples/<name>`
+                //     with nothing after it.
+                let carries_own_entrypoint =
+                    self.run.hypervisor.as_deref() == Some("wasm") || self.run.flake.is_some();
+                if self.run.argv.is_empty() && !carries_own_entrypoint {
                     bail!(
                         "machine run needs a command: pass `-- <cmd>`, \
                          or `-d`/`--detach` to boot a persistent machine, \

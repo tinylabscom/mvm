@@ -1924,7 +1924,7 @@ mod tests {
         );
         assert!(
             vars.iter()
-                .any(|(k, v)| k == "ALL_PROXY" && v == "http://127.0.0.1:1080")
+                .any(|(k, v)| k == "ALL_PROXY" && v == "socks5h://127.0.0.1:1080")
         );
         assert!(
             vars.iter()

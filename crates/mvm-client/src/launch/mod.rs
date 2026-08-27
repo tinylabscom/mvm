@@ -240,7 +240,7 @@ impl LocalBackend {
         // binding it before its ready handshake; a non-running machine owns
         // no live state there, so recover by starting from an empty dir.
         if !self.machine_running(&params.name) {
-            remove_dir_if_present(&vm_state_dir(&params.name))?;
+            remove_vm_runtime_dirs(&params.name)?;
         }
         let rootfs = crate::local::resolve_local_rootfs(&params.image, &params.name).await?;
         let (verity_path, roothash) = crate::local::host_verity_sidecars(&rootfs);
@@ -874,7 +874,7 @@ impl LocalBackend {
             // Drop the per-VM runtime dir too: a stale substitution-endpoint
             // socket left behind blocks the next launch under the same name
             // (the endpoint dies binding it, before its ready handshake).
-            remove_dir_if_present(&vm_state_dir(name))?;
+            remove_vm_runtime_dirs(name)?;
             // The definition directory carries machine.json plus the
             // secret-refs sidecar (already cleared above) — drop it whole.
             remove_dir_if_present(&machine_state_dir(name))?;
@@ -923,7 +923,7 @@ impl LocalBackend {
             self.stop_for_recreate(name);
         }
         self.release_session_resources(name)?;
-        remove_dir_if_present(&vm_state_dir(name))?;
+        remove_vm_runtime_dirs(name)?;
         // The state dir under machines/ only carries session sidecars for a
         // transient (no machine.json); never touch a persistent definition.
         if !machine_spec_path(name).exists() {
@@ -1034,6 +1034,24 @@ impl LocalBackend {
 }
 
 /// Remove a directory tree, treating "already absent" as success.
+/// Drop a VM's runtime state *and* the directory its sockets live in.
+///
+/// Those are not always the same place. When the state dir is deep enough that
+/// a socket path would overflow macOS's `sun_path` limit, `vm_socket_dir_at`
+/// puts the sockets under a short hashed `/tmp/mvm-sock/<hash>` namespace
+/// instead. Removing only the state dir then leaves the substitution socket
+/// behind, and the next launch under that name dies binding it with "Address
+/// already in use" — the same stale-socket failure this cleanup exists to
+/// prevent, just relocated.
+fn remove_vm_runtime_dirs(name: &str) -> Result<()> {
+    let state_dir = vm_state_dir(name);
+    let socket_dir = mvm_core::config::vm_socket_dir_at(&state_dir);
+    if socket_dir != state_dir {
+        remove_dir_if_present(&socket_dir)?;
+    }
+    remove_dir_if_present(&state_dir)
+}
+
 fn remove_dir_if_present(dir: &std::path::Path) -> Result<()> {
     match std::fs::remove_dir_all(dir) {
         Ok(()) => Ok(()),

@@ -480,6 +480,18 @@ fn transient_run_without_argv_is_rejected_at_dispatch() {
 }
 
 #[test]
+fn a_flake_run_without_argv_is_accepted() {
+    // A flake bakes `entrypoint.command` into the image via mkGuest, so an
+    // empty argv is not a missing argument — it is the image supplying one.
+    // `examples/exit_code` exists to run its own entrypoint and hand back that
+    // code, and the README teaches `machine run --flake examples/<name>` with
+    // nothing after it.
+    let args = parse_run(&["run", "--flake", "examples/exit_code"]).expect("parse");
+    args.resolve_mode()
+        .expect("a flake carries its own entrypoint");
+}
+
+#[test]
 fn run_defaults_match_the_lower_level_runner() {
     let args = parse_run(&["run", "--image", "alpine", "--", "true"]).expect("parse");
     assert_eq!(args.run.cpus, crate::commands::shared::default_vcpus());
