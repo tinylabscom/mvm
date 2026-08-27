@@ -67,6 +67,54 @@ fn effective_vcpus(vcpus: u32) -> u32 {
     1
 }
 
+/// The register state one vCPU starts from.
+///
+/// The primary and a secondary differ only in these values, not in how they are
+/// created, so the difference is data rather than a second code path. The
+/// primary enters at the kernel's entry point with the DTB in x0, per the arm64
+/// boot protocol. A secondary released by PSCI `CPU_ON` enters at the address
+/// that call supplied, with its context id in x0 — the kernel puts a per-CPU
+/// pointer there and reads it back on the other side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VcpuStart {
+    /// MPIDR_EL1 affinity. Must equal the `cpu@<addr>` node's reg in the device
+    /// tree, or the CPU cannot be matched to its GIC redistributor frame.
+    pub(crate) mpidr: u64,
+    /// Where this CPU begins executing.
+    pub(crate) entry: u64,
+    /// x0 at entry: the DTB address for the primary, the PSCI context id for a
+    /// secondary.
+    pub(crate) x0: u64,
+}
+
+impl VcpuStart {
+    /// The boot CPU: entry point from the kernel image, DTB in x0.
+    pub(crate) fn primary(entry: u64, dtb_addr: u64) -> Self {
+        Self {
+            mpidr: fdt::mpidr_for_cpu(0),
+            entry,
+            x0: dtb_addr,
+        }
+    }
+}
+
+/// Put one vCPU into its architectural start state.
+///
+/// Shared by the primary and, once secondaries exist, by every CPU a PSCI
+/// `CPU_ON` releases — the two differ only in the `VcpuStart` values. x1..x3
+/// are zeroed because the arm64 boot protocol reserves them, and a secondary
+/// entering with stale register contents is a fault the guest attributes to
+/// itself.
+fn apply_vcpu_start(vcpu: &HvfVcpu, start: VcpuStart) -> Result<(), HvfError> {
+    vcpu.set_sys(SysReg::MpidrEl1, start.mpidr)
+        .and_then(|()| vcpu.set_core(CoreReg::Pc, start.entry))
+        .and_then(|()| vcpu.set_core(CoreReg::Cpsr, 0x3c5))
+        .and_then(|()| vcpu.set_core(CoreReg::X(0), start.x0))
+        .and_then(|()| vcpu.set_core(CoreReg::X(1), 0))
+        .and_then(|()| vcpu.set_core(CoreReg::X(2), 0))
+        .and_then(|()| vcpu.set_core(CoreReg::X(3), 0))
+}
+
 /// Guest RAM in bytes for `mem_mib` MiB, or the default when `mem_mib` is 0.
 /// A MiB is a multiple of the 16 KiB hypervisor page size, so the result is
 /// always page-aligned.
@@ -916,18 +964,13 @@ unsafe fn run(
         // loop (crate::vmm::run) — the same body the KVM backend uses.
         let vcpu = HvfVcpu::from_raw(vcpu_id, exit);
 
-        // MPIDR_EL1 affinity 0 must match FDT cpu@0 + the GIC redistributor frame
-        // (else gic_populate_rdist walks off the region and faults). arm64 boot
-        // protocol: x0=DTB, x1..x3=0, PC=entry, EL1h with DAIF masked.
-        let setup = vcpu
-            .set_sys(SysReg::MpidrEl1, 0)
-            .and_then(|()| vcpu.set_core(CoreReg::Pc, entry))
-            .and_then(|()| vcpu.set_core(CoreReg::Cpsr, 0x3c5))
-            .and_then(|()| vcpu.set_core(CoreReg::X(0), dtb_addr))
-            .and_then(|()| vcpu.set_core(CoreReg::X(1), 0))
-            .and_then(|()| vcpu.set_core(CoreReg::X(2), 0))
-            .and_then(|()| vcpu.set_core(CoreReg::X(3), 0));
-        if let Err(e) = setup {
+        // MPIDR_EL1 must match this CPU's `cpu@<addr>` node and hence its GIC
+        // redistributor frame (else gic_populate_rdist walks off the region and
+        // faults). arm64 boot protocol: x0 per `VcpuStart`, x1..x3=0, PC=entry,
+        // EL1h with DAIF masked. Routed through `VcpuStart` so a secondary
+        // released by PSCI takes this same path with different data rather than
+        // a second copy of it.
+        if let Err(e) = apply_vcpu_start(&vcpu, VcpuStart::primary(entry, dtb_addr)) {
             hv_vcpu_destroy(vcpu_id);
             return Err(e);
         }
@@ -1456,6 +1499,60 @@ mod tests {
                 described, 1,
                 "requested {requested}: the tree must describe the single CPU \
                  this VMM creates, not the request"
+            );
+        }
+    }
+
+    /// The primary starts per the arm64 boot protocol: DTB in x0, affinity 0.
+    #[test]
+    fn the_primary_starts_with_the_dtb_in_x0_at_affinity_zero() {
+        let start = super::VcpuStart::primary(0x8008_0000, 0x9FE0_0000);
+        assert_eq!(start.mpidr, 0, "the boot CPU is cpu@0");
+        assert_eq!(start.entry, 0x8008_0000);
+        assert_eq!(
+            start.x0, 0x9FE0_0000,
+            "arm64 boot protocol puts the DTB address in x0"
+        );
+    }
+
+    /// A secondary carries its PSCI context id in x0, not the DTB.
+    ///
+    /// `CPU_ON(target, entry, context_id)` hands the kernel a per-CPU pointer it
+    /// reads back on the other side. Passing the DTB there instead would have
+    /// the secondary dereference the device tree as its per-CPU data — a fault
+    /// the guest attributes to itself, with nothing on the host to explain it.
+    #[test]
+    fn a_secondary_starts_at_its_psci_entry_with_the_context_id_in_x0() {
+        // Built directly: the constructor lands with the code that releases
+        // secondaries. What is pinned here is the *shape* a secondary starts
+        // with, which the release path must produce.
+        let start = super::VcpuStart {
+            mpidr: mvm_vmm::vmm::fdt::mpidr_for_cpu(3),
+            entry: 0x8100_0000,
+            x0: 0xDEAD_BEEF,
+        };
+        assert_eq!(start.mpidr, 3, "cpu@3 has affinity 3");
+        assert_eq!(start.entry, 0x8100_0000, "PSCI supplies the entry point");
+        assert_eq!(start.x0, 0xDEAD_BEEF, "PSCI supplies the context id");
+    }
+
+    /// Every CPU's MPIDR matches the device tree node built for it.
+    ///
+    /// These are the two halves of one fact. If they drift, the CPU cannot be
+    /// matched to its GIC redistributor frame and IRQ init faults before any
+    /// console output — a silent hang.
+    #[test]
+    fn each_vcpu_start_agrees_with_its_device_tree_node() {
+        for index in 0..8u32 {
+            assert_eq!(
+                super::VcpuStart::primary(0, 0).mpidr,
+                mvm_vmm::vmm::fdt::mpidr_for_cpu(0),
+                "the boot cpu's start state and device tree must agree"
+            );
+            assert_eq!(
+                mvm_vmm::vmm::fdt::mpidr_for_cpu(index),
+                u64::from(index),
+                "cpu {index}: affinity is the node address"
             );
         }
     }
