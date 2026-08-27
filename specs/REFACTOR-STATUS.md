@@ -4,6 +4,12 @@ Last updated: 2026-08-27
 
 ## In progress
 
+- [ ] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
+      `specs/plans/2026-08-27-kernel-6-12-106.md`.
+      Both kernel consumers use the kernel.org-verified archive and SRI hash;
+      local synchronization, freshness, workspace, and Clippy gates are green.
+      Linux Nix PR checks and merge delivery remain.
+
 - [ ] **SDK surface contract repairs — issues #2902 and #2906.**
       `specs/plans/2026-08-26-sdk-surface-contract-repairs.md`.
       The README's `mvm.local_path` decorator source and the builder-pack Cargo

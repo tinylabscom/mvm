@@ -10,6 +10,14 @@
 
 ## In progress
 
+- [ ] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
+      `specs/plans/2026-08-27-kernel-6-12-106.md`.
+      The custom workload/builder kernel and libkrunfw firmware build now use
+      the same kernel.org-verified Linux 6.12.106 archive and SRI hash.
+      Structural synchronization and freshness tests, workspace check/tests,
+      and zero-warning Clippy are green. Remaining: pass the PR's Linux Nix
+      evaluation/build gates, merge it, and close #2931 through the PR link.
+
 - [ ] **Admission cache durability boundary.**
       `specs/plans/2026-08-26-admission-cache-durability.md`.
       Preserve the chain-signed admission record's fail-closed durability
