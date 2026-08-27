@@ -114,8 +114,13 @@ pub struct ParsedHvfSnapshot<'a> {
     pub ram: &'a [u8],
     /// Versioned device-state container.
     pub devices: &'a [u8],
-    /// Decoded AArch64 core-register state.
-    pub vcpu: HvfVcpuState,
+    /// Decoded AArch64 core-register state, one entry per vCPU in CPU order.
+    ///
+    /// Always at least one — the boot CPU. A machine with more carries them all,
+    /// because a restored child has to resume every CPU its parent was running.
+    /// Resuming only CPU 0 would leave the guest's scheduler dispatching onto
+    /// CPUs that exist in its own tables and are executing nothing.
+    pub vcpus: Vec<HvfVcpuState>,
     /// Artifact identity metadata carried by the producer.
     pub artifact_digests: &'a [u8],
 }
@@ -183,10 +188,13 @@ pub fn encode_hvf_snapshot_frame(
     flags: u32,
     ram: &[u8],
     devices: &[u8],
-    vcpu: &HvfVcpuState,
+    vcpus: &[HvfVcpuState],
     artifact_digests: &[u8],
 ) -> Result<Vec<u8>, FrameError> {
-    let vcpu_bytes = vcpu.encode();
+    // Every CPU's state, concatenated in CPU order. Fixed-width records, so the
+    // count is the section length over the record length and no separate field
+    // can disagree with the payload.
+    let vcpu_bytes: Vec<u8> = vcpus.iter().flat_map(|state| state.encode()).collect();
     mvm_core::snapshot_frame::encode_frame(
         GuestArch::Aarch64,
         backend_kind,
@@ -232,7 +240,7 @@ pub fn capture_hvf_snapshot_frame(
         flags,
         &ram.snapshot_bytes(),
         &device_state,
-        &vcpu_state,
+        std::slice::from_ref(&vcpu_state),
         artifact_digests,
     )
     .map_err(HvfSnapshotError::Frame)
@@ -289,9 +297,27 @@ pub fn parse_hvf_snapshot_frame<'a>(
     Ok(ParsedHvfSnapshot {
         ram,
         devices,
-        vcpu: HvfVcpuState::decode(vcpu_bytes).map_err(HvfSnapshotError::Vcpu)?,
+        vcpus: decode_vcpu_states(vcpu_bytes)?,
         artifact_digests,
     })
+}
+
+/// Decode the vCPU section as one fixed-width record per CPU.
+///
+/// A section that is not a whole number of records, or that carries no CPU at
+/// all, is refused rather than truncated: the count is derived from the length,
+/// so a partial trailing record would otherwise silently drop a CPU and produce
+/// a child running fewer CPUs than the guest inside it believes it has.
+fn decode_vcpu_states(bytes: &[u8]) -> Result<Vec<HvfVcpuState>, HvfSnapshotError> {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(VCPU_STATE_LEN) {
+        return Err(HvfSnapshotError::Vcpu(HvfError::SnapshotState(
+            "vCPU section is not a whole number of vCPU records",
+        )));
+    }
+    bytes
+        .chunks(VCPU_STATE_LEN)
+        .map(|record| HvfVcpuState::decode(record).map_err(HvfSnapshotError::Vcpu))
+        .collect()
 }
 
 /// Restore a validated frame into an already-paused HVF target.
@@ -299,13 +325,20 @@ pub fn parse_hvf_snapshot_frame<'a>(
 /// Frame parsing and vCPU decoding happen before RAM or device mutation. The
 /// target remains paused; the caller owns the final resume decision and any
 /// host-channel rebind required by the restored device topology.
+/// Restores the boot CPU and returns every secondary's state for its own
+/// thread to apply.
+///
+/// The secondaries are not restored here because HVF only lets a vCPU's
+/// registers be written from the thread that created it. This call runs on the
+/// boot CPU's thread, so it restores CPU 0 and hands the rest back for the
+/// threads that own them.
 pub fn restore_hvf_snapshot_frame(
     frame: &[u8],
     expected_backend_kind: u8,
     ram: &mut GuestRam,
     vcpu: &HvfVcpu,
     devices: &mut [&mut dyn SnapshotDeviceState],
-) -> Result<(), HvfSnapshotError> {
+) -> Result<Vec<HvfVcpuState>, HvfSnapshotError> {
     let parsed = parse_hvf_snapshot_frame(frame, expected_backend_kind, ram.len())?;
     let mut targets = devices
         .iter_mut()
@@ -317,8 +350,20 @@ pub fn restore_hvf_snapshot_frame(
     restore_device_states(&mut targets, parsed.devices)?;
     ram.restore_bytes(parsed.ram)
         .map_err(HvfSnapshotError::Vcpu)?;
-    vcpu.restore_state(&parsed.vcpu)
-        .map_err(HvfSnapshotError::Vcpu)
+    restore_boot_cpu_and_split(vcpu, parsed.vcpus)
+}
+
+/// Apply the boot CPU's state and return the secondaries' in CPU order.
+fn restore_boot_cpu_and_split(
+    vcpu: &HvfVcpu,
+    mut states: Vec<HvfVcpuState>,
+) -> Result<Vec<HvfVcpuState>, HvfSnapshotError> {
+    // `decode_vcpu_states` refuses an empty section, so there is always a boot
+    // CPU here.
+    let secondaries = states.split_off(1);
+    let boot = states.remove(0);
+    vcpu.restore_state(&boot).map_err(HvfSnapshotError::Vcpu)?;
+    Ok(secondaries)
 }
 
 /// Restore only vCPU and deterministic device state from a frame whose RAM is
@@ -328,11 +373,10 @@ pub fn restore_hvf_snapshot_control(
     expected_ram_len: usize,
     vcpu: &HvfVcpu,
     devices: &mut [&mut dyn SnapshotDeviceState],
-) -> Result<(), HvfSnapshotError> {
+) -> Result<Vec<HvfVcpuState>, HvfSnapshotError> {
     let parsed = parse_hvf_snapshot_frame(frame, HVF_SNAPSHOT_BACKEND_KIND, expected_ram_len)?;
     restore_device_states(devices, parsed.devices)?;
-    vcpu.restore_state(&parsed.vcpu)
-        .map_err(HvfSnapshotError::Vcpu)
+    restore_boot_cpu_and_split(vcpu, parsed.vcpus)
 }
 
 fn read_word(bytes: &[u8], index: usize) -> Result<u64, HvfError> {
@@ -387,8 +431,15 @@ mod tests {
             cpsr: 0x3c5,
             sys: [0; SNAPSHOT_SYS_REGS.len()],
         };
-        let frame =
-            encode_hvf_snapshot_frame(9, 0x20, b"ram", b"devices", &state, b"digest").unwrap();
+        let frame = encode_hvf_snapshot_frame(
+            9,
+            0x20,
+            b"ram",
+            b"devices",
+            std::slice::from_ref(&state),
+            b"digest",
+        )
+        .unwrap();
         let header = mvm_core::snapshot_frame::parse_header(&frame).unwrap();
         assert_eq!(header.arch, GuestArch::Aarch64);
         assert_eq!(header.backend_kind, 9);
@@ -411,12 +462,19 @@ mod tests {
             cpsr: 0x3c5,
             sys: [0; SNAPSHOT_SYS_REGS.len()],
         };
-        let frame =
-            encode_hvf_snapshot_frame(9, 0x20, b"ram", b"devices", &state, b"digest").unwrap();
+        let frame = encode_hvf_snapshot_frame(
+            9,
+            0x20,
+            b"ram",
+            b"devices",
+            std::slice::from_ref(&state),
+            b"digest",
+        )
+        .unwrap();
         let parsed = parse_hvf_snapshot_frame(&frame, 9, 3).unwrap();
         assert_eq!(parsed.ram, b"ram");
         assert_eq!(parsed.devices, b"devices");
-        assert_eq!(parsed.vcpu, state);
+        assert_eq!(parsed.vcpus, vec![state]);
         assert_eq!(parsed.artifact_digests, b"digest");
         assert!(matches!(
             parse_hvf_snapshot_frame(&frame, 8, 3),
@@ -432,6 +490,69 @@ mod tests {
                 actual: 3
             })
         ));
+    }
+
+    /// One CPU's register state, distinguishable per CPU by the caller.
+    fn sample_state() -> HvfVcpuState {
+        HvfVcpuState {
+            x: [7; 31],
+            pc: 0x8000,
+            cpsr: 0x3c5,
+            sys: [0; SNAPSHOT_SYS_REGS.len()],
+        }
+    }
+
+    /// A machine's every CPU survives a frame round-trip, in CPU order.
+    ///
+    /// Order is the payload: a restore hands slot *n* to CPU *n*, so a frame
+    /// that reordered them would resume each CPU on another's registers —
+    /// stacks, per-CPU pointers and all — inside a RAM image that says
+    /// otherwise.
+    #[test]
+    fn every_vcpu_survives_the_frame_in_cpu_order() {
+        let states: Vec<HvfVcpuState> = (0..4u64)
+            .map(|cpu| {
+                let mut state = sample_state();
+                state.pc = 0x8100_0000 + cpu;
+                state.x[0] = 0xC0FFEE00 + cpu;
+                state
+            })
+            .collect();
+
+        let frame =
+            encode_hvf_snapshot_frame(9, 0x20, b"ram", b"devices", &states, b"digest").unwrap();
+        let parsed = parse_hvf_snapshot_frame(&frame, 9, 3).unwrap();
+
+        assert_eq!(parsed.vcpus, states);
+    }
+
+    /// A vCPU section that is not a whole number of records is refused.
+    ///
+    /// The CPU count is derived from the section length, so a truncated
+    /// trailing record would otherwise silently drop a CPU — and the child
+    /// would boot with fewer CPUs than the guest inside its own restored memory
+    /// believes it has.
+    #[test]
+    fn a_partial_vcpu_record_is_refused_rather_than_truncated() {
+        let state = sample_state();
+        let mut bytes = state.encode().to_vec();
+        bytes.extend_from_slice(&state.encode()[..VCPU_STATE_LEN - 1]);
+
+        let error = decode_vcpu_states(&bytes).unwrap_err();
+        assert!(
+            matches!(error, HvfSnapshotError::Vcpu(_)),
+            "expected a vCPU-section error, got {error:?}"
+        );
+    }
+
+    /// A frame carrying no CPU at all is refused.
+    ///
+    /// There is no such machine. Accepting it would hand the restore an empty
+    /// list and leave the boot CPU resuming whatever the fresh vCPU happened to
+    /// hold.
+    #[test]
+    fn a_vcpu_section_with_no_cpus_is_refused() {
+        assert!(decode_vcpu_states(&[]).is_err());
     }
 
     #[test]
