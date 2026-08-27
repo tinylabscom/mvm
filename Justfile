@@ -202,6 +202,7 @@ sdk-test-typescript: sdk-install-typescript
 test:
     #!/usr/bin/env bash
     set -euo pipefail
+    ./scripts/require-nextest.sh
     mkdir -p target/nextest
     ./scripts/cargo-fast.sh nextest run --workspace 2>&1 | tee target/nextest/last-run.log
 
@@ -250,10 +251,12 @@ test-cached:
 
 # Test a single crate
 test-crate CRATE:
+    ./scripts/require-nextest.sh
     ./scripts/cargo-fast.sh nextest run -p {{ CRATE }}
 
 # Run tests matching a filter expression
 test-filter FILTER:
+    ./scripts/require-nextest.sh
     ./scripts/cargo-fast.sh nextest run --workspace -E 'test({{ FILTER }})'
 
 # Run tests under the `ci` profile: no retries, slow-test warnings, and a
@@ -261,6 +264,7 @@ test-filter FILTER:
 
 # only (no captured test output — see .config/nextest.toml).
 test-ci:
+    ./scripts/require-nextest.sh
     ./scripts/cargo-fast.sh nextest run --workspace --profile ci
 
 # Run tests with cargo test (fallback if nextest not installed)

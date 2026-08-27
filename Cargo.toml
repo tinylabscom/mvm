@@ -695,6 +695,19 @@ rust = "1.91.1"
 zig = "0.13.0"
 cargo-zigbuild = "0.23.0"
 
+# Developer tooling that is NOT vendored or pinned by rust-toolchain.toml, so a
+# contributor's machine can silently drift below what the workspace needs.
+#
+# nextest: the pinned nightly cargo emits test binaries under
+# `target/debug/build/<pkg>/<hash>/out/` rather than `target/debug/deps/`.
+# A nextest older than this does not export `CARGO_BIN_EXE_<name>` for that
+# layout, and `assert_cmd`'s fallback — pop one dir, expect `deps` — then looks
+# for `mvmctl` in the wrong place. Every one of the 111 root-package CLI
+# integration tests fails with "CARGO_BIN_EXE_mvmctl is unset", which reads as
+# broken code rather than a stale tool. `scripts/require-nextest.sh` turns that
+# into one actionable line. This is a known-good floor, not a bisected minimum.
+nextest-min = "0.9.143"
+
 # Per-arch musl target. build.rs picks the entry for CARGO_CFG_TARGET_ARCH
 # (the arch mvmctl is built for == the arch of the guest it boots, since the
 # local builder/Stage 0 VM is always same-arch as the host). Plan 164.
