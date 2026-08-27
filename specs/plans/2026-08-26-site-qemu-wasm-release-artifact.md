@@ -22,6 +22,9 @@ JavaScript shell remains sourced from the deploying revision.
 - [x] Compress the staged QEMU WebAssembly module below Cloudflare Pages'
       25 MiB per-file limit and explicitly decompress it in the browser worker.
 - [x] Ignore Wrangler's repository-local cache and account metadata.
+- [x] Pass the semantic-version filter directly to GitHub CLI's `--jq` option
+      in both Pages and CLI release lookups, with a regression contract that
+      rejects the unsupported standalone jq `-r` flag.
 - [x] Pass the focused release-assets suite, actionlint, workspace tests,
       workspace check, and Clippy with warnings denied.
 

@@ -26,8 +26,10 @@
       latest semantic-versioned pack and verifies its keyless release identity
       and checksum before staging the current demo shell. The staged QEMU WASM
       is explicitly gzip-compressed below Cloudflare Pages' per-file limit and
-      decompressed by the browser worker. Workflow contracts, actionlint,
-      workspace tests/check/doctests, and Clippy are green.
+      decompressed by the browser worker. The Pages and CLI release lookups now
+      pass their semantic-version filter directly to GitHub CLI's `--jq`
+      option; a 28-test workflow contract suite prevents the invalid standalone
+      jq `-r` flag from returning. Actionlint and Clippy are green.
 
 - [ ] **SDK surface contract repairs for issues #2902 and #2906.**
       `specs/plans/2026-08-26-sdk-surface-contract-repairs.md`.
