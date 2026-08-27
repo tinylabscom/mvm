@@ -391,8 +391,12 @@ jobs:
           # property of the version, not of the order someone happened to push.
           # The strict N.N.N match also drops anything that is not a plain
           # release tag rather than trying to order it.
+          # No `-r`: `gh --jq` already prints a string result raw, and gh has no
+          # such flag. Passing one consumes `--jq`'s value, demoting the real
+          # expression to a positional argument, and gh rejects the whole
+          # invocation with `unknown command "<the entire jq program>"`.
           BOOT_TAG="$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 100 \
-            --json tagName --jq -r '
+            --json tagName --jq '
               [ .[].tagName
                 | select(test("^boot-image/v[0-9]+\\.[0-9]+\\.[0-9]+$"))
                 | {tag: ., v: (ltrimstr("boot-image/v") | split(".") | map(tonumber))} ]

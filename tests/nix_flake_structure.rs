@@ -34,24 +34,42 @@ fn normalized_whitespace(content: &str) -> String {
     content.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+const CRATES_IO_API: &str = "https://crates.io/api/v1/crates";
+
 #[test]
-fn every_rust_derivation_uses_the_static_crates_registry() {
+fn the_crate_source_helper_rewrites_the_api_host_to_the_cdn() {
+    let source = nix_dir().join("lib").join("crates-io.nix");
+    let content = fs::read_to_string(&source)
+        .unwrap_or_else(|e| panic!("crate source helper must be present: {e}"));
+
+    assert!(
+        content.contains(CRATES_IO_API)
+            && content.contains("https://static.crates.io/crates")
+            && content.contains("builtins.replaceStrings"),
+        "nix/lib/crates-io.nix must rewrite crates.io API downloads to the CDN"
+    );
+}
+
+#[test]
+fn the_cargo_deps_helper_routes_downloads_through_the_crate_source_helper() {
     let helper = nix_dir().join("lib").join("static-crates-cargo-deps.nix");
     let helper_content = fs::read_to_string(&helper)
         .unwrap_or_else(|e| panic!("static crate registry helper must be present: {e}"));
 
     assert!(
-        helper_content.contains("https://crates.io/api/v1/crates")
-            && helper_content.contains("https://static.crates.io/crates")
-            && helper_content.contains("builtins.replaceStrings")
+        helper_content.contains("crates-io.nix")
+            && helper_content.contains("toCdn")
             && helper_content.contains("fetchurl = fetchStaticCrate"),
-        "the cargo-deps helper must rewrite crates.io downloads to its static CDN"
+        "the cargo-deps helper must route lockfile downloads through crates-io.nix"
     );
     assert!(
         !helper_content.contains("extraRegistries"),
         "the helper must not redefine Cargo's built-in crates.io source"
     );
+}
 
+#[test]
+fn every_rust_derivation_uses_the_static_crates_registry() {
     let mut nix_files = Vec::new();
     collect_nix_files(&nix_dir(), &mut nix_files);
     let mut rust_derivations = 0;
@@ -73,6 +91,35 @@ fn every_rust_derivation_uses_the_static_crates_registry() {
     assert!(
         rust_derivations > 0,
         "expected at least one Rust Nix derivation"
+    );
+}
+
+/// crates.io's API host answers a plain curl User-Agent with 403, which is what
+/// Nix's fetchurl sends. A hand-written crate fetch against that host therefore
+/// cannot build — it fails with `curl: (22) ... error: 403` on a derivation
+/// named `download`, naming neither the crate nor the host. `crates-io.nix` is
+/// the one place allowed to name the API host, and only to rewrite it away.
+#[test]
+fn no_nix_file_fetches_a_crate_from_the_api_host() {
+    let allowed = nix_dir().join("lib").join("crates-io.nix");
+
+    let mut nix_files = Vec::new();
+    collect_nix_files(&nix_dir(), &mut nix_files);
+
+    let offenders: Vec<PathBuf> = nix_files
+        .into_iter()
+        .filter(|path| *path != allowed)
+        .filter(|path| {
+            fs::read_to_string(path)
+                .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()))
+                .contains(CRATES_IO_API)
+        })
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "these files fetch crates from the crates.io API host, which 403s Nix's \
+         fetchurl; use the fetchCrate helper in nix/lib/crates-io.nix instead: {offenders:?}"
     );
 }
 

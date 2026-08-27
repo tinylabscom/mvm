@@ -33,6 +33,10 @@
 }:
 
 let
+  # Crate tarballs come off the CDN, not the crates.io API host, which 403s a
+  # plain curl User-Agent. See nix/lib/crates-io.nix.
+  fetchCrate = (import ../lib/crates-io.nix).fetchCrate fetchurl;
+
   # ── Upstream pins ──────────────────────────────────────────────────
   qemuWasmRev = "5a65998d47d78723115d1478a8a40f8d6d497f37";
   qemuWasmVersion = "9.2.92-wasm";
@@ -141,63 +145,75 @@ let
     sha256 = "1jdv47cq5aplyj3kz79jpapbfm3wv26inh8szjwrl99z47491ldb";
   };
 
-  arbitraryIntSrc = fetchurl {
-    url = "https://crates.io/api/v1/crates/arbitrary-int/1.2.7/download";
+  arbitraryIntSrc = fetchCrate {
+    crate = "arbitrary-int";
+    version = "1.2.7";
     sha256 = "0vgl3n5zzpdn2hxpz6gqk8zg2psk5gwyjzsgpngzd9iqwc1w0ky8";
   };
 
-  bilgeSrc = fetchurl {
-    url = "https://crates.io/api/v1/crates/bilge/0.2.0/download";
+  bilgeSrc = fetchCrate {
+    crate = "bilge";
+    version = "0.2.0";
     sha256 = "0mvvwq9caiq701bmmwyd4q4pc8c69i5zaj3zdk6ya7gqxgc7ww6w";
   };
 
-  bilgeImplSrc = fetchurl {
-    url = "https://crates.io/api/v1/crates/bilge-impl/0.2.0/download";
+  bilgeImplSrc = fetchCrate {
+    crate = "bilge-impl";
+    version = "0.2.0";
     sha256 = "1n5jml0c1z0np76ms0h5rxx19krblz46h84wycx29b9q4001xcgy";
   };
 
-  eitherSrc = fetchurl {
-    url = "https://crates.io/api/v1/crates/either/1.12.0/download";
+  eitherSrc = fetchCrate {
+    crate = "either";
+    version = "1.12.0";
     sha256 = "12xmhlrv5gfsraimh6xaxcmb0qh6cc7w7ap4sw40ky9wfm095jix";
   };
 
-  itertoolsSrc = fetchurl {
-    url = "https://crates.io/api/v1/crates/itertools/0.11.0/download";
+  itertoolsSrc = fetchCrate {
+    crate = "itertools";
+    version = "0.11.0";
     sha256 = "0mzyqcc59azx9g5cg6fs8k529gvh4463smmka6jvzs3cd2jp7hdi";
   };
 
-  libcSrc = fetchurl {
-    url = "https://crates.io/api/v1/crates/libc/0.2.162/download";
+  libcSrc = fetchCrate {
+    crate = "libc";
+    version = "0.2.162";
     sha256 = "1633a00yyx45kzx9r54fndvr8njsjqyr7zl12mzgsmgyczg8glhq";
   };
 
-  procMacroErrorSrc = fetchurl {
-    url = "https://crates.io/api/v1/crates/proc-macro-error/1.0.4/download";
+  procMacroErrorSrc = fetchCrate {
+    crate = "proc-macro-error";
+    version = "1.0.4";
     sha256 = "1373bhxaf0pagd8zkyd03kkx6bchzf6g0dkwrwzsnal9z47lj9fs";
   };
 
-  procMacroErrorAttrSrc = fetchurl {
-    url = "https://crates.io/api/v1/crates/proc-macro-error-attr/1.0.4/download";
+  procMacroErrorAttrSrc = fetchCrate {
+    crate = "proc-macro-error-attr";
+    version = "1.0.4";
     sha256 = "0sgq6m5jfmasmwwy8x4mjygx5l7kp8s4j60bv25ckv2j1qc41gm1";
   };
 
-  procMacro2Src = fetchurl {
-    url = "https://crates.io/api/v1/crates/proc-macro2/1.0.84/download";
+  procMacro2Src = fetchCrate {
+    crate = "proc-macro2";
+    version = "1.0.84";
     sha256 = "1mj998115z75c0007glkdr8qj57ibv82h7kg6r8hnc914slwd5pc";
   };
 
-  quoteSrc = fetchurl {
-    url = "https://crates.io/api/v1/crates/quote/1.0.36/download";
+  quoteSrc = fetchCrate {
+    crate = "quote";
+    version = "1.0.36";
     sha256 = "19xcmh445bg6simirnnd4fvkmp6v2qiwxh5f6rw4a70h76pnm9qg";
   };
 
-  synSrc = fetchurl {
-    url = "https://crates.io/api/v1/crates/syn/2.0.66/download";
+  synSrc = fetchCrate {
+    crate = "syn";
+    version = "2.0.66";
     sha256 = "1xfgrprsbz8j31kabvfinb4fyhajlk2q7lxa18fb006yl90kyby4";
   };
 
-  unicodeIdentSrc = fetchurl {
-    url = "https://crates.io/api/v1/crates/unicode-ident/1.0.12/download";
+  unicodeIdentSrc = fetchCrate {
+    crate = "unicode-ident";
+    version = "1.0.12";
     sha256 = "0jzf1znfpb2gx8nr8mvmyqs1crnv79l57nxnbiszc7xf7ynbjm1k";
   };
 
