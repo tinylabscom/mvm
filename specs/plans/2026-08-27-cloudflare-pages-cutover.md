@@ -14,6 +14,8 @@ production hostname from GitHub Pages to that deployment.
 - [x] Install and pin Wrangler in the Astro site workspace.
 - [x] Download the existing `mvm` Pages configuration and declare `dist` as the
       Pages build output.
+- [x] Pin the non-secret Cloudflare account ID so stale local Wrangler state
+      cannot redirect commands to another account.
 - [x] Add local production, preview-deployment, and Cloudflare-preview scripts.
 - [x] Make the GitHub Pages workflow deploy from the checked-in Wrangler config.
 - [x] Fail fast unless the GitHub repository secrets can access the `mvm` Pages

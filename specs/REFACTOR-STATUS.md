@@ -6,7 +6,7 @@ Last updated: 2026-08-27
 
 - [ ] **Cloudflare Pages cutover.**
       `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.
-      The existing Pages project now has a checked-in Wrangler configuration,
+      The existing Pages project and account now have a checked-in Wrangler configuration,
       reproducible local/CI deployment commands, an account/project preflight,
       a shared and tested complete-WebLinux-bundle gate, and a verified
       deployment.

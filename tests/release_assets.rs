@@ -612,8 +612,10 @@ fn pages_deployment_uses_the_checked_in_wrangler_config() {
         "the Pages action must deploy from public/ so Wrangler reads the checked-in config"
     );
     assert!(
-        config.contains("name = \"mvm\"") && config.contains("pages_build_output_dir = \"./dist\""),
-        "Wrangler must target the existing mvm project and Astro output"
+        config.contains("name = \"mvm\"")
+            && config.contains("account_id = \"f2367197e79029355117dd7f7c5db277\"")
+            && config.contains("pages_build_output_dir = \"./dist\""),
+        "Wrangler must target the existing mvm project, account, and Astro output"
     );
     assert!(
         package.contains("\"wrangler\": \"^4.127.0\"")
