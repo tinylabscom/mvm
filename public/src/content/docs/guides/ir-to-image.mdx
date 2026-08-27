@@ -48,7 +48,7 @@ The IR is a JSON document with a fixed schema. It describes one or more applicat
 
 The top-level shape:
 
-```rust,ignore
+```rust
 // illustrative: the canonical shape of `mvm_contract::ir::Workload`, written with elisions
 pub struct Workload {
     pub schema_version: String,                       // currently "0.1"
@@ -494,7 +494,7 @@ The Workload IR types live in `crates/mvm-ir/src/workload.rs`. The full schema i
 
 ### `Source` — where the code comes from
 
-```rust,ignore
+```rust
 // illustrative: IR variant shape; sibling types are named but not in scope here
 enum Source {
     LocalPath  { path: String, include: Vec<String>, exclude: Vec<String> },
@@ -511,7 +511,7 @@ enum Source {
 
 ### `Image` — what the rootfs is built from
 
-```rust,ignore
+```rust
 // illustrative: IR variant shape; sibling types are named but not in scope here
 enum Image {
     NixPackages { packages: Vec<String> },
@@ -523,7 +523,7 @@ enum Image {
 
 ### `Dependencies` — language deps that aren't in stdlib
 
-```rust,ignore
+```rust
 // illustrative: IR variant shape; sibling types are named but not in scope here
 enum Dependencies {
     Python { lockfile: String, tool: PythonTool },   // Uv | PipTools
@@ -544,7 +544,7 @@ If your workload only needs the language standard library, set `dependencies = m
 
 ### `Entrypoint` — how the wrapper inside the microVM is dispatched
 
-```rust,ignore
+```rust
 // illustrative: IR variant shape; sibling types are named but not in scope here
 enum Entrypoint {
     Command  { command: Vec<String>, working_dir: String, env: BTreeMap<…> },

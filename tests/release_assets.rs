@@ -617,27 +617,36 @@ fn pages_deployment_uses_the_checked_in_wrangler_config() {
     );
     assert!(
         package.contains("\"wrangler\": \"^4.127.0\"")
-            && package
-                .contains("\"deploy\": \"pnpm build && wrangler pages deploy --branch=main\""),
-        "the site must pin Wrangler and expose a reproducible production deploy command"
+            && package.contains("\"check:deploy-assets\":")
+            && package.contains(
+                "\"deploy\": \"pnpm build && pnpm check:deploy-assets && wrangler pages deploy --branch=main\""
+            ),
+        "the site must pin Wrangler and validate assets in its production deploy command"
     );
 }
 
 #[test]
 fn pages_deployment_refuses_an_incomplete_weblinux_bundle() {
     let workflow = pages_workflow();
+    let validator = fs::read_to_string("public/scripts/check-weblinux-deploy-assets.mjs")
+        .expect("read WebLinux deployment validator");
+
+    assert!(
+        workflow.contains("node public/scripts/check-weblinux-deploy-assets.mjs public/dist"),
+        "Pages must run the shared WebLinux bundle validator before publishing"
+    );
 
     for asset in [
-        "public/dist/demo/weblinux/demo.js",
-        "public/dist/demo/weblinux/worker.js",
-        "public/dist/demo/weblinux/qemu-system-x86_64.js",
-        "public/dist/demo/weblinux/qemu-system-x86_64.wasm.gz",
-        "public/dist/demo/weblinux/pack/kernel.img",
-        "public/dist/demo/weblinux/pack/rootfs.bin",
+        "demo/weblinux/demo.js",
+        "demo/weblinux/worker.js",
+        "demo/weblinux/qemu-system-x86_64.js",
+        "demo/weblinux/qemu-system-x86_64.wasm.gz",
+        "demo/weblinux/pack/kernel.img",
+        "demo/weblinux/pack/rootfs.bin",
     ] {
         assert!(
-            workflow.contains(asset),
-            "Pages must verify {asset} exists before publishing"
+            validator.contains(asset),
+            "the shared deployment validator must require {asset}"
         );
     }
 }

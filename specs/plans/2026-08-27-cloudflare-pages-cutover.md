@@ -24,6 +24,8 @@ production hostname from GitHub Pages to that deployment.
       complete QEMU site pack rather than assuming the newest release has it.
 - [x] Refuse deployment unless the built WebLinux shell, engine, compressed
       module, kernel, and root filesystem are all present and non-empty.
+- [x] Use the same complete-bundle validator for local Wrangler commands and
+      GitHub Actions, with positive and negative regression coverage.
 - [ ] Attach `gomicrovm.com` to the `mvm` Pages project and verify the production
       hostname serves those headers instead of GitHub Pages.
 
