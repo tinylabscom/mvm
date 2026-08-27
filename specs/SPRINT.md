@@ -3086,6 +3086,17 @@ to the configured ceiling and the first terse response immediately after it.
 - [ ] Restore the builder-image and Linux flake gates blocked by issue #2904,
       then merge the repair through the queue.
 
+## 2026-08-26 HVF vCPU resource-contract closeout
+
+- [x] Reproduce that the HVF driver accepted a multi-vCPU `VmmSpec` even though
+      the guest could only ever observe one processor.
+- [x] Refuse every HVF launch whose requested vCPU count is not exactly one,
+      before writing supervisor state or spawning a process.
+- [x] Correct the README's backend-neutral live examples and preserve focused
+      regression coverage for the exact diagnostic.
+- [x] Record the delivery in
+      `specs/sprint/delivery/2888-hvf-vcpu-contract.md`.
+
 ## 2026-08-26 Security peer-policy mutation witness
 
 - [x] Reproduce the scheduled Security failure from run 32931995875 as the
