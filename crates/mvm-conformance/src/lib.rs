@@ -67,6 +67,10 @@ pub const GUEST_BINS_TAG: &str = "guest_bins";
 /// A scenario whose workload binds an SDK host service, which admission refuses
 /// unless the SDK sidecar image is mounted read-only in the guest.
 pub const SDK_SIDECAR_TAG: &str = "sdk_sidecar";
+/// A scenario asserting a latency *budget*, not just recording a measurement.
+/// A budget is a claim about hardware as much as about code: the same build
+/// meets it on NVMe and misses it on spinning disk.
+pub const PERF_BUDGET_TAG: &str = "perf_budget";
 
 /// Host capabilities a scenario may require, probed once by the harness.
 ///
@@ -95,6 +99,9 @@ pub struct RuntimeCaps {
     /// The SDK sidecar image is present in the version-keyed cache, so a
     /// workload binding an SDK host service can be admitted.
     pub sdk_sidecar: bool,
+    /// The host is declared fast enough to hold the launch budget, so a
+    /// threshold assertion measures the code rather than the disk.
+    pub perf_budget_host: bool,
     /// The active backend can capture a full-VM memory snapshot, so
     /// `machine checkpoint create --class vm-full` and the pause/resume
     /// round-trip can succeed rather than refusing by capability.
@@ -140,6 +147,8 @@ pub enum ScenarioGate {
     NeedsGuestBinDir,
     /// The SDK sidecar image is not in the cache.
     NeedsSdkSidecar,
+    /// The host is not declared fast enough to assert a latency budget.
+    NeedsPerfBudgetHost,
     /// No `node` on `PATH`, so the TypeScript example checkers cannot run.
     NeedsNode,
     /// The merge-queue lane selected only `@ci_live` scenarios, and this
@@ -182,6 +191,9 @@ pub fn scenario_gate(tags: &[String], caps: RuntimeCaps) -> ScenarioGate {
     }
     if tagged(SDK_SIDECAR_TAG) && !caps.sdk_sidecar {
         return ScenarioGate::NeedsSdkSidecar;
+    }
+    if tagged(PERF_BUDGET_TAG) && !caps.perf_budget_host {
+        return ScenarioGate::NeedsPerfBudgetHost;
     }
     ScenarioGate::Run
 }
@@ -231,6 +243,11 @@ impl ScenarioGate {
                 "need the SDK sidecar image in the mvm cache (build it with \
                  `nix build ./nix/images/runtime-overlay#sdk-sidecar-image`)",
             ),
+            Self::NeedsPerfBudgetHost => Some(
+                "need MVM_BDD_PERF_BUDGET=1 on a host that can hold the launch \
+                 budget (a latency threshold on rotational storage measures the \
+                 disk, not the code)",
+            ),
             Self::OutsideCiLiveSubset => Some("outside the merge-queue @ci_live subset"),
         }
     }
@@ -251,6 +268,7 @@ mod tests {
         node_available: false,
         guest_bin_dir: false,
         sdk_sidecar: false,
+        perf_budget_host: false,
         memory_snapshot: false,
         workload_kernel: false,
     };
@@ -260,7 +278,8 @@ mod tests {
         bundle_fixture: true,
         node_available: false,
         guest_bin_dir: true,
-        sdk_sidecar: false,
+        sdk_sidecar: true,
+        perf_budget_host: true,
         memory_snapshot: true,
         workload_kernel: true,
     };
@@ -292,6 +311,7 @@ mod tests {
             RuntimeCaps {
                 guest_bin_dir: false,
                 sdk_sidecar: false,
+                perf_budget_host: false,
                 memory_snapshot: false,
                 workload_kernel: false,
                 ..ALL
@@ -313,6 +333,7 @@ mod tests {
             RuntimeCaps {
                 guest_bin_dir: false,
                 sdk_sidecar: false,
+                perf_budget_host: false,
                 memory_snapshot: false,
                 ..ALL
             },
@@ -327,6 +348,7 @@ mod tests {
             RuntimeCaps {
                 guest_bin_dir: false,
                 sdk_sidecar: false,
+                perf_budget_host: false,
                 memory_snapshot: false,
                 ..ALL
             },
@@ -358,6 +380,35 @@ mod tests {
     }
 
     #[test]
+    fn sdk_sidecar_scenario_skips_without_the_cached_image() {
+        // Admission refuses a workload binding an SDK host service when the
+        // sidecar is absent, so the scenario cannot pass on a host where the
+        // image was never built.
+        assert!(!scenario_should_run(
+            &tags(&["live", "sdk_sidecar"]),
+            RuntimeCaps {
+                sdk_sidecar: false,
+                ..ALL
+            },
+        ));
+        assert!(scenario_should_run(&tags(&["live", "sdk_sidecar"]), ALL));
+    }
+
+    #[test]
+    fn perf_budget_scenario_skips_on_an_undeclared_host() {
+        // A latency threshold on slow storage measures the disk. The
+        // measurement scenarios stay ungated; only the budget claim is.
+        assert!(!scenario_should_run(
+            &tags(&["live", "perf_budget"]),
+            RuntimeCaps {
+                perf_budget_host: false,
+                ..ALL
+            },
+        ));
+        assert!(scenario_should_run(&tags(&["live", "perf_budget"]), ALL));
+    }
+
+    #[test]
     fn untagged_scenario_always_runs() {
         assert!(scenario_should_run(&tags(&[]), NONE));
     }
@@ -379,6 +430,7 @@ mod tests {
                 node_available: false,
                 guest_bin_dir: false,
                 sdk_sidecar: false,
+                perf_budget_host: false,
                 memory_snapshot: false,
                 workload_kernel: false,
             },
@@ -396,6 +448,7 @@ mod tests {
                 node_available: false,
                 guest_bin_dir: false,
                 sdk_sidecar: false,
+                perf_budget_host: false,
                 memory_snapshot: false,
                 workload_kernel: false,
             },
@@ -415,6 +468,7 @@ mod tests {
                 node_available: false,
                 guest_bin_dir: false,
                 sdk_sidecar: false,
+                perf_budget_host: false,
                 memory_snapshot: false,
                 workload_kernel: false,
             },
@@ -429,6 +483,7 @@ mod tests {
                 node_available: false,
                 guest_bin_dir: false,
                 sdk_sidecar: false,
+                perf_budget_host: false,
                 memory_snapshot: false,
                 workload_kernel: false,
             },
@@ -450,6 +505,7 @@ mod tests {
                 node_available: false,
                 guest_bin_dir: false,
                 sdk_sidecar: false,
+                perf_budget_host: false,
                 memory_snapshot: false,
                 workload_kernel: false,
             },
@@ -460,6 +516,7 @@ mod tests {
                 node_available: false,
                 guest_bin_dir: false,
                 sdk_sidecar: false,
+                perf_budget_host: false,
                 memory_snapshot: false,
                 workload_kernel: false,
             },
@@ -470,6 +527,7 @@ mod tests {
                 node_available: false,
                 guest_bin_dir: false,
                 sdk_sidecar: false,
+                perf_budget_host: false,
                 memory_snapshot: false,
                 workload_kernel: false,
             },
@@ -480,6 +538,7 @@ mod tests {
                 node_available: false,
                 guest_bin_dir: false,
                 sdk_sidecar: false,
+                perf_budget_host: false,
                 memory_snapshot: false,
                 workload_kernel: true,
             },
@@ -490,6 +549,7 @@ mod tests {
                 node_available: false,
                 guest_bin_dir: false,
                 sdk_sidecar: false,
+                perf_budget_host: false,
                 memory_snapshot: false,
                 workload_kernel: true,
             },
@@ -526,6 +586,7 @@ mod tests {
             node_available: false,
             guest_bin_dir: false,
             sdk_sidecar: false,
+            perf_budget_host: false,
             memory_snapshot: false,
             workload_kernel: false,
         };
@@ -536,6 +597,7 @@ mod tests {
             node_available: false,
             guest_bin_dir: false,
             sdk_sidecar: false,
+            perf_budget_host: false,
             memory_snapshot: false,
             workload_kernel: false,
         };
@@ -546,6 +608,7 @@ mod tests {
             node_available: false,
             guest_bin_dir: false,
             sdk_sidecar: false,
+            perf_budget_host: false,
             memory_snapshot: false,
             workload_kernel: false,
         };
@@ -600,6 +663,7 @@ mod tests {
                     node_available: false,
                     guest_bin_dir: false,
                     sdk_sidecar: false,
+                    perf_budget_host: false,
                     memory_snapshot: false,
                     workload_kernel: false,
                 },

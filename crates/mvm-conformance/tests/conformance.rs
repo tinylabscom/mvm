@@ -219,6 +219,7 @@ fn probe_caps() -> RuntimeCaps {
         workload_kernel: workload_kernel_path().is_some(),
         guest_bin_dir: guest_bin_dir_available(),
         sdk_sidecar: sdk_sidecar_cached(),
+        perf_budget_host: std::env::var_os("MVM_BDD_PERF_BUDGET").is_some(),
         memory_snapshot: memory_snapshot_supported(),
     }
 }

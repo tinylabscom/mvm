@@ -20,7 +20,10 @@ Feature: the launch budget stays observable on every run
     And the guest control plane came up
     And the dispatch window is recorded
 
-  @live
+  # `@perf_budget` gates the *threshold*, not the measurement: the two scenarios
+  # above still record a dispatch window everywhere. A 200 ms budget on a host
+  # with rotational storage measures the disk rather than the launch path.
+  @live @perf_budget
   Scenario: a warm-residency launch meets the documented start budget
     When I launch "machine run --image alpine -- true" with env "MVM_RESIDENCY" set to "warm"
     Then the launch succeeds

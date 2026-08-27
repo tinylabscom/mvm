@@ -327,7 +327,11 @@ warm_launch_artifacts() {
     fi
     sleep 10
     waited=$((waited + 10))
-    (( waited % 60 == 0 )) && echo "    ... still warming (${waited}s)"
+    # `(( ... )) && echo` returns 1 whenever the arithmetic is false, and under
+    # `set -e` that ends the run — at the very first tick, ten seconds in.
+    if (( waited % 60 == 0 )); then
+      echo "    ... still warming (${waited}s)"
+    fi
   done
   wait "$warm_pid" 2>/dev/null || true
   echo "    warm-up done (${waited}s)"
@@ -352,7 +356,15 @@ MVM_HOME="$E2E_HOME" "$MVMCTL" doctor || true
 # `timeout(1)`, which is absent from a stock macOS and from the macOS runners.
 E2E_TIMEOUT_SECS="${MVM_E2E_TIMEOUT_SECS:-3600}"
 
+# A run that dies before the suite starts must not look like a pass. This has
+# happened twice: a stray token from a bad edit, and a `(( ... )) && echo` that
+# returns 1 under `set -e`. Both ended the script early, and both left an exit
+# status that read as success from the outside. The marker is checked after the
+# suite and turns "never ran" into a loud failure.
+SUITE_STARTED=""
+
 echo "==> documented examples + machine journey (cucumber, @live)"
+SUITE_STARTED=1
 echo "    deadline: ${E2E_TIMEOUT_SECS}s"
 set +e
 CARGO_BIN_EXE_mvmctl="$MVMCTL" \
@@ -389,6 +401,13 @@ set -e
 echo
 echo "==> done. Read the 'did NOT run' tally above, not just the pass count:"
 echo "    a skipped @live scenario is a documented command nothing booted."
+if [[ -z "${SUITE_STARTED:-}" ]]; then
+  echo
+  echo "!!! the suite never started — this run proves nothing." >&2
+  echo "!!! Something above ended the script early; read the last line of output." >&2
+  exit 70
+fi
+
 if [[ -n "${BOOTSTRAP_FAILED:-}" ]]; then
   echo
   echo "!!! REMINDER: bootstrap failed this run. Any flake-build failure above"
