@@ -189,6 +189,11 @@ jobs:
           node-version: "22"
 
       - name: Run the documented surface end to end
+        # HVF reports snapshot tier `save-restore`, so the pause/resume and
+        # checkpoint scenarios can run here. The Linux lane leaves this unset:
+        # Firecracker reports `unsupported` and those verbs refuse by capability.
+        env:
+          MVM_BDD_SNAPSHOT: "1"
         run: just e2e-docs
 
       - name: Dump VMM diagnostics on failure

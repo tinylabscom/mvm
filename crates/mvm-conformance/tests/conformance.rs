@@ -217,7 +217,23 @@ fn probe_caps() -> RuntimeCaps {
         bundle_fixture: bundle_fixture_path().is_some() && bundle_pubkey_path().is_some(),
         node_available: binary_on_path("node"),
         workload_kernel: workload_kernel_path().is_some(),
+        memory_snapshot: memory_snapshot_supported(),
     }
+}
+
+/// Whether the active backend can capture a full-VM memory snapshot here.
+///
+/// Declared by the operator rather than probed. `doctor --json` reports a tier
+/// per backend, not for the one a launch would actually select, so deciding
+/// this automatically would mean re-deriving backend auto-selection here — a
+/// copy that drifts silently and, when it drifts, either skips a scenario that
+/// could have run or fails one that never could.
+///
+/// `mvmctl doctor` prints the matrix; a host whose active backend reports
+/// `save-restore` sets `MVM_BDD_SNAPSHOT=1`. Firecracker reports `unsupported`,
+/// which is why the Linux lane leaves it unset.
+fn memory_snapshot_supported() -> bool {
+    std::env::var_os("MVM_BDD_SNAPSHOT").is_some()
 }
 
 /// The operator-supplied `.mvmpkg` a bundle scenario installs, when

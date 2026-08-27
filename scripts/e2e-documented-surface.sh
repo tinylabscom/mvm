@@ -30,53 +30,89 @@ echo "    home: $E2E_HOME"
 # ---------------------------------------------------------------------------
 # Cleanup.
 #
-# Scoped to the `bdd-` prefix every suite-created machine carries. This home
-# defaults to the real `~/.mvm`, so an unscoped sweep would delete the machines
-# the person running this actually cares about. Nothing here matches a name the
-# suite did not create.
+# Reaps exactly the machines this run created, by diffing the machine list
+# against a snapshot taken before the suite starts. Prefix matching was the
+# first attempt and it under-reaped: the SDK scenarios name their guests
+# `sdk-<registry>-<digest>`, not `bdd-*`, so those leaked on every run.
+# Snapshotting needs no list of prefixes to keep in sync with the suite.
 #
-# Runs on the way in as well as the way out: a previous run killed at its
-# timeout — or with ^C — leaves a guest holding a vsock socket, and the next
-# run then fails on a name collision that looks like a broken verb.
+# The snapshot lives in the home rather than in a shell variable so that
+# `--clean-only` can still reap after a run was killed hard enough to skip its
+# own trap.
+#
+# Runs on the way in as well as the way out: a guest left holding its name makes
+# the next run fail on a collision that reads as a broken verb.
 # ---------------------------------------------------------------------------
+SNAPSHOT="$E2E_HOME/.e2e-machines-before"
+
+machine_names() {
+  MVM_HOME="$E2E_HOME" "$MVMCTL" machine ls 2>/dev/null \
+    | awk 'NR>1 && NF {print $1}' | sort || true
+}
+
+snapshot_machines() {
+  mkdir -p "$E2E_HOME"
+  machine_names > "$SNAPSHOT" 2>/dev/null || : > "$SNAPSHOT"
+}
+
 reap() {
   local phase="$1"
-  local names
-  names="$(MVM_HOME="$E2E_HOME" "$MVMCTL" machine ls 2>/dev/null \
-    | awk 'NR>1 && $1 ~ /^bdd-/ {print $1}' || true)"
+  [[ -x "$MVMCTL" ]] || return 0
 
-  if [[ -n "$names" ]]; then
-    echo "==> $phase cleanup: reaping $(echo "$names" | wc -w | tr -d ' ') bdd- machine(s)"
+  # Without a snapshot there is no way to tell this run's machines from
+  # someone else's, and deleting the wrong one is worse than leaking.
+  if [[ ! -f "$SNAPSHOT" ]]; then
+    echo "==> $phase cleanup: no snapshot to diff against, leaving machines alone"
+    return 0
+  fi
+
+  local created
+  created="$(comm -13 "$SNAPSHOT" <(machine_names) 2>/dev/null || true)"
+
+  REAPED_NAMES="$created"
+  if [[ -n "$created" ]]; then
+    echo "==> $phase cleanup: reaping $(echo "$created" | wc -w | tr -d ' ') machine(s) this run created"
     while read -r name; do
       [[ -z "$name" ]] && continue
       echo "    - $name"
       MVM_HOME="$E2E_HOME" "$MVMCTL" machine stop "$name" --yes >/dev/null 2>&1 || true
       MVM_HOME="$E2E_HOME" "$MVMCTL" machine rm "$name" --yes >/dev/null 2>&1 || true
-    done <<< "$names"
+    done <<< "$created"
   elif [[ "$phase" == "pre-run" ]]; then
-    echo "==> pre-run cleanup: no leftover bdd- machines"
+    echo "==> pre-run cleanup: nothing left over"
   fi
 
-  # State directories for suite machines, in case a spec was removed while its
-  # runtime directory survived.
+  # State directories whose spec is gone but whose runtime directory survived.
   if [[ -d "$E2E_HOME/vms" ]]; then
-    find "$E2E_HOME/vms" -maxdepth 1 -name 'bdd-*' -type d -exec rm -rf {} + 2>/dev/null || true
+    while read -r name; do
+      [[ -z "$name" ]] && continue
+      rm -rf "$E2E_HOME/vms/$name" 2>/dev/null || true
+    done <<< "$created"
   fi
 }
 
 # Per-VM supervisors outlive a killed suite and keep a vCPU thread and a vsock
-# socket alive. Only those whose state directory is gone are reaped, so a
-# supervisor belonging to someone else's machine is left alone.
+# socket alive. Only supervisors for machines this run created are signalled —
+# another session may be driving its own guests out of the same home, and its
+# supervisor is not ours to kill.
+REAPED_NAMES=""
 reap_orphan_supervisors() {
+  [[ -n "$REAPED_NAMES" ]] || return 0
   local pids
   pids="$(pgrep -f 'mvm-(hvf|libkrun)-supervisor' 2>/dev/null || true)"
   [[ -z "$pids" ]] && return 0
   for pid in $pids; do
     local args
     args="$(ps -o args= -p "$pid" 2>/dev/null || true)"
-    case "$args" in
-      *bdd-*) echo "    - reaping orphan supervisor $pid"; kill -TERM "$pid" 2>/dev/null || true ;;
-    esac
+    while read -r name; do
+      [[ -z "$name" ]] && continue
+      case "$args" in
+        *"$name"*)
+          echo "    - reaping supervisor $pid for $name"
+          kill -TERM "$pid" 2>/dev/null || true
+          ;;
+      esac
+    done <<< "$REAPED_NAMES"
   done
 }
 
@@ -123,6 +159,7 @@ on_exit() {
   echo
   reap "post-run"
   reap_orphan_supervisors
+  release_lock
   return "$status"
 }
 trap on_exit EXIT
@@ -150,6 +187,20 @@ if [[ "${1:-}" == "--clean-only" ]]; then
   exit 0
 fi
 
+# Two runs against one home corrupt each other: they share the machine
+# namespace, the artifact caches and the per-VM supervisors, and each one's
+# cleanup then sees the other's guests. Refuse rather than interleave.
+LOCK="$E2E_HOME/.e2e-run.lock"
+if [[ -f "$LOCK" ]] && kill -0 "$(cat "$LOCK" 2>/dev/null)" 2>/dev/null; then
+  echo "!!! another e2e run (pid $(cat "$LOCK")) is already using $E2E_HOME." >&2
+  echo "!!! Set MVM_E2E_HOME to a different home, or wait for it to finish." >&2
+  trap - EXIT
+  exit 1
+fi
+mkdir -p "$E2E_HOME"
+echo $$ > "$LOCK"
+release_lock() { [[ -f "$LOCK" ]] && [[ "$(cat "$LOCK" 2>/dev/null)" == "$$" ]] && rm -f "$LOCK"; }
+
 # `user` carries manifest-verify, which the verified-fetch path needs to accept
 # the published builder VM image. It is off by default anyway: that feature
 # pulls the sigstore/aws-lc stack, and on both hosts tested aws-lc-rs resolves
@@ -171,6 +222,9 @@ fi
 # broken verb.
 reap "pre-run"
 reap_orphan_supervisors
+# Baseline for this run: everything above is the previous run's mess, and
+# everything that appears from here is ours.
+snapshot_machines
 start_watcher
 
 # The TypeScript SDK scenarios import the SDK's built `dist/`, which is absent

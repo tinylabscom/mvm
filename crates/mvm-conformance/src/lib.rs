@@ -57,6 +57,10 @@ pub const BUNDLE_TAG: &str = "bundle";
 /// Justfile recipe, no CI lane and no document, so that failure was the only
 /// outcome it ever had, and it read as a broken volume path.
 pub const WORKLOAD_KERNEL_TAG: &str = "workload_kernel";
+/// A scenario that captures a full-VM memory snapshot. Not every backend can:
+/// Firecracker reports snapshot tier `unsupported` on hosts without the
+/// required support, and the verb then refuses rather than misbehaving.
+pub const SNAPSHOT_TAG: &str = "snapshot";
 
 /// Host capabilities a scenario may require, probed once by the harness.
 ///
@@ -79,6 +83,10 @@ pub struct RuntimeCaps {
     /// A prebuilt workload kernel is resolvable, so a scenario that boots one
     /// has something to boot.
     pub workload_kernel: bool,
+    /// The active backend can capture a full-VM memory snapshot, so
+    /// `machine checkpoint create --class vm-full` and the pause/resume
+    /// round-trip can succeed rather than refusing by capability.
+    pub memory_snapshot: bool,
 }
 
 /// Decide whether a scenario with `tags` should run given the host `caps`.
@@ -114,6 +122,8 @@ pub enum ScenarioGate {
     NeedsBundleFixture,
     /// No prebuilt workload kernel could be resolved.
     NeedsWorkloadKernel,
+    /// The backend cannot capture a full-VM memory snapshot on this host.
+    NeedsMemorySnapshot,
     /// No `node` on `PATH`, so the TypeScript example checkers cannot run.
     NeedsNode,
     /// The merge-queue lane selected only `@ci_live` scenarios, and this
@@ -147,6 +157,9 @@ pub fn scenario_gate(tags: &[String], caps: RuntimeCaps) -> ScenarioGate {
     }
     if tagged(WORKLOAD_KERNEL_TAG) && !caps.workload_kernel {
         return ScenarioGate::NeedsWorkloadKernel;
+    }
+    if tagged(SNAPSHOT_TAG) && !caps.memory_snapshot {
+        return ScenarioGate::NeedsMemorySnapshot;
     }
     ScenarioGate::Run
 }
@@ -183,6 +196,10 @@ impl ScenarioGate {
                 "need a prebuilt workload kernel (MVM_BDD_WORKLOAD_KERNEL, or one \
                  in the host builder-VM cache)",
             ),
+            Self::NeedsMemorySnapshot => Some(
+                "need MVM_BDD_SNAPSHOT=1 on a host whose active backend reports \
+                 snapshot tier `save-restore` (see `mvmctl doctor`)",
+            ),
             Self::OutsideCiLiveSubset => Some("outside the merge-queue @ci_live subset"),
         }
     }
@@ -201,6 +218,7 @@ mod tests {
         firecracker_bootable: false,
         bundle_fixture: false,
         node_available: false,
+        memory_snapshot: false,
         workload_kernel: false,
     };
     const ALL: RuntimeCaps = RuntimeCaps {
@@ -208,6 +226,7 @@ mod tests {
         firecracker_bootable: true,
         bundle_fixture: true,
         node_available: false,
+        memory_snapshot: true,
         workload_kernel: true,
     };
 
@@ -236,6 +255,7 @@ mod tests {
         assert!(!scenario_should_run(
             &tags(&["live", "firecracker", "workload_kernel"]),
             RuntimeCaps {
+                memory_snapshot: false,
                 workload_kernel: false,
                 ..ALL
             },
@@ -244,6 +264,38 @@ mod tests {
             &tags(&["live", "firecracker", "workload_kernel"]),
             ALL
         ));
+    }
+
+    #[test]
+    fn snapshot_scenario_skips_where_the_backend_cannot_snapshot() {
+        // Firecracker reports snapshot tier `unsupported`, so the pause/resume
+        // and checkpoint verbs refuse by capability rather than misbehaving.
+        // Skipping names that; failing would read as a broken verb.
+        assert!(!scenario_should_run(
+            &tags(&["live", "snapshot"]),
+            RuntimeCaps {
+                memory_snapshot: false,
+                ..ALL
+            },
+        ));
+        assert!(scenario_should_run(&tags(&["live", "snapshot"]), ALL));
+    }
+
+    #[test]
+    fn snapshot_gate_reports_its_own_reason() {
+        let gate = scenario_gate(
+            &tags(&["live", "snapshot"]),
+            RuntimeCaps {
+                memory_snapshot: false,
+                ..ALL
+            },
+        );
+        assert_eq!(gate, ScenarioGate::NeedsMemorySnapshot);
+        assert!(
+            gate.reason()
+                .is_some_and(|r| r.contains("MVM_BDD_SNAPSHOT")),
+            "the skip reason must name the variable that turns it on"
+        );
     }
 
     #[test]
@@ -266,6 +318,7 @@ mod tests {
                 firecracker_bootable: false,
                 bundle_fixture: false,
                 node_available: false,
+                memory_snapshot: false,
                 workload_kernel: false,
             },
         ));
@@ -280,6 +333,7 @@ mod tests {
                 firecracker_bootable: false,
                 bundle_fixture: false,
                 node_available: false,
+                memory_snapshot: false,
                 workload_kernel: false,
             },
         ));
@@ -296,6 +350,7 @@ mod tests {
                 firecracker_bootable: true,
                 bundle_fixture: false,
                 node_available: false,
+                memory_snapshot: false,
                 workload_kernel: false,
             },
         ));
@@ -307,6 +362,7 @@ mod tests {
                 firecracker_bootable: false,
                 bundle_fixture: false,
                 node_available: false,
+                memory_snapshot: false,
                 workload_kernel: false,
             },
         ));
@@ -325,6 +381,7 @@ mod tests {
                 firecracker_bootable: false,
                 bundle_fixture: false,
                 node_available: false,
+                memory_snapshot: false,
                 workload_kernel: false,
             },
             RuntimeCaps {
@@ -332,6 +389,7 @@ mod tests {
                 firecracker_bootable: false,
                 bundle_fixture: false,
                 node_available: false,
+                memory_snapshot: false,
                 workload_kernel: false,
             },
             RuntimeCaps {
@@ -339,6 +397,7 @@ mod tests {
                 firecracker_bootable: true,
                 bundle_fixture: false,
                 node_available: false,
+                memory_snapshot: false,
                 workload_kernel: false,
             },
             RuntimeCaps {
@@ -346,6 +405,7 @@ mod tests {
                 firecracker_bootable: true,
                 bundle_fixture: true,
                 node_available: false,
+                memory_snapshot: false,
                 workload_kernel: true,
             },
             RuntimeCaps {
@@ -353,6 +413,7 @@ mod tests {
                 firecracker_bootable: true,
                 bundle_fixture: true,
                 node_available: false,
+                memory_snapshot: false,
                 workload_kernel: true,
             },
         ];
@@ -386,6 +447,7 @@ mod tests {
             firecracker_bootable: false,
             bundle_fixture: false,
             node_available: false,
+            memory_snapshot: false,
             workload_kernel: false,
         };
         let live_only = RuntimeCaps {
@@ -393,6 +455,7 @@ mod tests {
             firecracker_bootable: false,
             bundle_fixture: false,
             node_available: false,
+            memory_snapshot: false,
             workload_kernel: false,
         };
         let bootable = RuntimeCaps {
@@ -400,6 +463,7 @@ mod tests {
             firecracker_bootable: true,
             bundle_fixture: false,
             node_available: false,
+            memory_snapshot: false,
             workload_kernel: false,
         };
 
@@ -451,6 +515,7 @@ mod tests {
                     firecracker_bootable: false,
                     bundle_fixture: false,
                     node_available: false,
+                    memory_snapshot: false,
                     workload_kernel: false,
                 },
                 true,
