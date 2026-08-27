@@ -687,15 +687,9 @@ mod tests {
             .unwrap()
     }
 
-    /// Material for a resume the tests actually boot: the mock backend.
-    ///
-    /// A real backend name sends `cold_boot_config` through the runtime-overlay
-    /// resolver, which reads the host cache — so these tests would pass on a
-    /// developer box that happens to have one and fail on a clean CI home. The
-    /// one test that cares about the backend name sets its own.
     fn material() -> ResumePlanMaterial {
         ResumePlanMaterial {
-            backend_name: "mock".to_string(),
+            backend_name: "hvf".to_string(),
             image_name: "demo".to_string(),
             image_sha256: "ab".repeat(32),
             kernel_sha256: Some("cd".repeat(32)),
@@ -719,10 +713,6 @@ mod tests {
     fn the_material_fields_reach_the_plan_input() {
         let rec = parked_record("sess-alpha");
         let m = material();
-        let m = ResumePlanMaterial {
-            backend_name: "hvf".to_string(),
-            ..m
-        };
         let input = synthesis_for_resume(&rec, &m);
         assert_eq!(input.backend_name, "hvf");
         assert_eq!(input.image_sha256, m.image_sha256);
@@ -1243,7 +1233,7 @@ mod tests {
 
     #[test]
     fn a_cold_tier_resume_with_boot_starts_the_sandbox() {
-        let (_env, _home) = isolated_host(GrantCeiling::default());
+        let (_env, _home) = isolated_host_with_runtime_overlay();
         let fx = Fixture::new();
         let (rec, m, kernel) = boot_fixture(&fx, ParkReason::RetentionDemotion);
         assert_eq!(
@@ -1531,7 +1521,7 @@ mod tests {
 
     #[test]
     fn a_booting_resume_records_session_resumed_before_the_boot() {
-        let (_env, _home) = isolated_host(GrantCeiling::default());
+        let (_env, _home) = isolated_host_with_runtime_overlay();
         let fx = Fixture::new();
         let parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-audit");
         let mut rec = parked_record_at("sess-alpha", ParkReason::RetentionDemotion);
