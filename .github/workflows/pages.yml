@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   cloudflare-account:
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-latest
     steps:
       - name: Ensure Cloudflare Pages project exists
         uses: cloudflare/wrangler-action@v4
@@ -156,6 +156,22 @@ jobs:
       - name: Build Astro site
         working-directory: public
         run: pnpm build
+
+      - name: Verify WebLinux bundle is complete
+        run: |
+          set -euo pipefail
+          for asset in \
+            public/dist/demo/weblinux/demo.js \
+            public/dist/demo/weblinux/worker.js \
+            public/dist/demo/weblinux/qemu-system-x86_64.js \
+            public/dist/demo/weblinux/qemu-system-x86_64.wasm.gz \
+            public/dist/demo/weblinux/pack/kernel.img \
+            public/dist/demo/weblinux/pack/rootfs.bin; do
+            if [ ! -s "${asset}" ]; then
+              echo "::error::WebLinux deployment asset is missing or empty: ${asset}" >&2
+              exit 1
+            fi
+          done
 
       - name: Verify cross-origin isolation headers are staged
         run: |

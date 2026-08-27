@@ -595,12 +595,13 @@ fn release_lookups_pass_the_filter_directly_to_gh_jq() {
 #[test]
 fn pages_deployment_uses_the_checked_in_wrangler_config() {
     let workflow = pages_workflow();
+    let account_job = job_block(&workflow, "cloudflare-account");
     let package = fs::read_to_string("public/package.json").expect("read site package manifest");
     let config = fs::read_to_string("public/wrangler.toml").expect("read Wrangler config");
 
     assert!(
         workflow.contains("cloudflare-account:")
-            && workflow.contains("runs-on: ubuntu-slim")
+            && account_job.contains("runs-on: ubuntu-latest")
             && workflow.contains("needs: cloudflare-account")
             && workflow.contains("command: pages deployment list --project-name=mvm"),
         "the Pages workflow must verify the configured account and project before building"
@@ -620,6 +621,25 @@ fn pages_deployment_uses_the_checked_in_wrangler_config() {
                 .contains("\"deploy\": \"pnpm build && wrangler pages deploy --branch=main\""),
         "the site must pin Wrangler and expose a reproducible production deploy command"
     );
+}
+
+#[test]
+fn pages_deployment_refuses_an_incomplete_weblinux_bundle() {
+    let workflow = pages_workflow();
+
+    for asset in [
+        "public/dist/demo/weblinux/demo.js",
+        "public/dist/demo/weblinux/worker.js",
+        "public/dist/demo/weblinux/qemu-system-x86_64.js",
+        "public/dist/demo/weblinux/qemu-system-x86_64.wasm.gz",
+        "public/dist/demo/weblinux/pack/kernel.img",
+        "public/dist/demo/weblinux/pack/rootfs.bin",
+    ] {
+        assert!(
+            workflow.contains(asset),
+            "Pages must verify {asset} exists before publishing"
+        );
+    }
 }
 
 #[test]
