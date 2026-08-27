@@ -186,7 +186,7 @@ pub fn dispatch_in_session(
         name: None,
         warm_pool_size: 0,
         image: ImageSource::Template(String::new()),
-        cpus: 0,
+        cpus: Some(0),
         memory_mib: 0,
         mem_initial_mib: None,
         dir_shares: vec![],

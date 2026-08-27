@@ -635,7 +635,7 @@ fn machine_run_spec(
         peer: Vec::new(),
         ai: None,
         ports: args.port.clone(),
-        cpus: args.run.cpus,
+        cpus: crate::exec::effective_cpus(args.run.cpus, args.run.hypervisor.as_deref()),
         memory: args.run.memory.clone(),
         mem_initial: None,
         profile,

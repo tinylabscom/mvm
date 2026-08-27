@@ -180,7 +180,7 @@ impl RunPreflightSummary {
                 timeout_secs: receipt_input.timeout_secs,
             },
             resources: RunPreflightResources {
-                cpus: args.cpus,
+                cpus: crate::exec::effective_cpus(args.cpus, args.hypervisor.as_deref()),
                 memory: args.memory.clone(),
                 memory_mib,
                 timeout_secs: args.timeout.unwrap_or(60),

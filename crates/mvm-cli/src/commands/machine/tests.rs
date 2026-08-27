@@ -482,7 +482,9 @@ fn transient_run_without_argv_is_rejected_at_dispatch() {
 #[test]
 fn run_defaults_match_the_lower_level_runner() {
     let args = parse_run(&["run", "--image", "alpine", "--", "true"]).expect("parse");
-    assert_eq!(args.run.cpus, 2);
+    // Unspecified: the selected backend's `default_vcpus` decides at launch,
+    // so parsing must not bake a count in here.
+    assert_eq!(args.run.cpus, None);
     assert_eq!(args.run.memory, "512M");
     assert_eq!(
         args.run.profile,
@@ -524,7 +526,7 @@ fn run_accepts_passthrough_flags() {
         "-a",
     ])
     .expect("parse");
-    assert_eq!(args.run.cpus, 4);
+    assert_eq!(args.run.cpus, Some(4));
     assert_eq!(args.run.memory, "1G");
     assert_eq!(args.run.profile, RunProfile::Dev);
     assert_eq!(args.run.mounts, vec!["/host:/work:rw"]);
@@ -3011,11 +3013,11 @@ fn cpus_and_cpu_limit_are_independent_controls() {
         "500",
     ])
     .expect("both flags parse together");
-    assert_eq!(args.run.cpus, 4);
+    assert_eq!(args.run.cpus, Some(4));
     assert_eq!(args.run.cpu_limit, Some(500));
 
     let only_cpus = parse_run(&["run", "--image", "alpine", "--cpus", "4"]).expect("parses");
-    assert_eq!(only_cpus.run.cpus, 4);
+    assert_eq!(only_cpus.run.cpus, Some(4));
     assert_eq!(
         only_cpus.run.cpu_limit, None,
         "--cpus must not imply a share"
@@ -3025,8 +3027,8 @@ fn cpus_and_cpu_limit_are_independent_controls() {
         parse_run(&["run", "--image", "alpine", "--cpu-limit", "500"]).expect("parses");
     assert_eq!(only_limit.run.cpu_limit, Some(500));
     assert_eq!(
-        only_limit.run.cpus, 2,
-        "--cpu-limit must not move the vCPU count off its default"
+        only_limit.run.cpus, None,
+        "--cpu-limit must not turn an unspecified vCPU count into a request"
     );
 }
 

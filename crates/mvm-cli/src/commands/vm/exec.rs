@@ -42,9 +42,9 @@ pub(in crate::commands) struct Args {
     /// Internal (not a CLI flag): optional foreground transient VM identity.
     #[arg(skip)]
     pub vm_name: Option<String>,
-    /// vCPU cores (default: 2)
-    #[arg(long, default_value = "2")]
-    pub cpus: u32,
+    /// vCPU cores; default is the backend's (HVF 1, else 2)
+    #[arg(long)]
+    pub cpus: Option<u32>,
     /// Memory (supports human-readable: 512M, 1G, …)
     #[arg(long, default_value = "512M")]
     pub memory: String,
@@ -272,9 +272,9 @@ pub(in crate::commands) struct RunArgs {
     /// Bind a peer route this workload may dial (repeatable).
     #[arg(long = "peer", value_name = "NAME:PORT=ADDR:PORT")]
     pub peer: Vec<String>,
-    /// Set how many vCPUs the guest sees (not a host CPU share).
-    #[arg(long, default_value = "2")]
-    pub cpus: u32,
+    /// vCPUs the guest sees; default is the backend's (HVF 1, else 2)
+    #[arg(long)]
+    pub cpus: Option<u32>,
     /// Cap host CPU time in millicores (1500 = 1.5 cores); not `--cpus`.
     #[arg(long = "cpu-limit", value_name = "MILLICORES")]
     pub cpu_limit: Option<u32>,
@@ -576,7 +576,7 @@ impl Default for RunArgs {
             net: false,
             allow_host: Vec::new(),
             peer: Vec::new(),
-            cpus: 2,
+            cpus: None,
             cpu_limit: None,
             grants_file: None,
             memory: "512M".to_string(),
@@ -783,7 +783,12 @@ pub(in crate::commands) fn run_secure_with_source(
     let receipt_backend = admit_backend.clone();
     let admit_network_mode = args.network_mode;
     let admit_grants = resolved_grants.plan_grants.clone();
-    let admit_cpus = args.cpus;
+    // The plan records what will actually boot, not what the caller typed. An
+    // unspecified count resolves through the backend already selected above, so
+    // the signed plan and the launch cannot disagree about vCPUs.
+    let admit_cpus = args
+        .cpus
+        .unwrap_or_else(|| admit_backend_kind.default_vcpus());
     let admit_mem_mib = u64::from(parse_human_size(&args.memory).context("Invalid --memory")?);
     let admit_network_policy = network_policy.clone();
     let admit_agent_verb = args.agent_verb.clone();
@@ -1496,7 +1501,9 @@ impl ReceiptInput {
         Ok(Self {
             manifest: args.manifest.clone(),
             image: args.image.clone(),
-            cpus: args.cpus,
+            // The receipt is signed over what the run actually used, so an
+            // unspecified count resolves the same way the launch resolves it.
+            cpus: crate::exec::effective_cpus(args.cpus, args.hypervisor.as_deref()),
             memory: args.memory.clone(),
             profile: args
                 .profile

@@ -210,7 +210,7 @@ mod tests {
             name: None,
             warm_pool_size: 0,
             image: ImageSource::Template("t".into()),
-            cpus: 1,
+            cpus: Some(1),
             memory_mib: 256,
             mem_initial_mib: None,
             // Live shares are attached by the guest activation path.
@@ -240,7 +240,7 @@ mod tests {
             name: None,
             warm_pool_size: 0,
             image: ImageSource::Template("t".into()),
-            cpus: 1,
+            cpus: Some(1),
             memory_mib: 256,
             mem_initial_mib: None,
             // Live shares are attached by the guest activation path.

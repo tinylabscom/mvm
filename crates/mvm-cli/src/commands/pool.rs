@@ -1957,7 +1957,7 @@ mod tests {
         let shape = |name: Option<&'static str>| crate::exec::LaunchShape {
             name,
             image: &image,
-            cpus: 2,
+            cpus: Some(2),
             memory_mib: 1024,
             mem_initial_mib: None,
             dir_shares: &[],
@@ -2294,7 +2294,7 @@ fn resolve_warm_launch(req: &WarmRequest) -> Result<crate::exec::ResolvedLaunch>
     let shape = crate::exec::LaunchShape {
         name: None,
         image: &image,
-        cpus: req.cpus,
+        cpus: Some(req.cpus),
         memory_mib: req.memory_mib,
         mem_initial_mib: None,
         dir_shares: &[],

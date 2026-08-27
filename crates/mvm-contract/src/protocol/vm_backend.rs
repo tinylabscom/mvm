@@ -1261,6 +1261,28 @@ impl BackendKind {
         }
     }
 
+    /// How many vCPUs to boot when the caller did not ask for a count.
+    ///
+    /// Not a maximum: it is the number a bare `mvmctl machine run` gets. HVF is
+    /// the reason this is per-backend rather than one constant — it runs
+    /// exactly one vCPU (`fdt.rs` emits a single `cpu@0` and PSCI implements no
+    /// `CPU_ON`), so any other default makes the macOS default backend refuse
+    /// every unqualified launch. An explicit `--cpus 2` on HVF still fails in
+    /// the driver; this only decides what "unspecified" means.
+    #[must_use]
+    pub const fn default_vcpus(self) -> u32 {
+        match self {
+            Self::Hvf => 1,
+            Self::Firecracker
+            | Self::Libkrun
+            | Self::Qemu
+            | Self::Mock
+            | Self::Wasm
+            | Self::WebLinux
+            | Self::AppleContainer => 2,
+        }
+    }
+
     /// The inverse of [`as_str`](Self::as_str).
     ///
     /// A plan names its backend as a string, so somewhere a label has to
@@ -2152,6 +2174,37 @@ mod tests {
     /// conjunction: any missing isolation layer means not a microVM. With
     /// a disjunction, a container that only clears the host-hypervisor
     /// layer reports as hardware-isolated and the banner never fires.
+    /// The macOS default backend runs exactly one vCPU, so an unqualified
+    /// launch must default to one. A fixed default of 2 made every bare
+    /// `mvmctl machine run` refuse on HVF once the driver started rejecting
+    /// unsupported counts instead of silently ignoring them.
+    #[test]
+    fn hvf_defaults_to_the_single_vcpu_it_can_actually_run() {
+        assert_eq!(BackendKind::Hvf.default_vcpus(), 1);
+    }
+
+    /// Every backend has to answer, so a new variant is a compile error here
+    /// rather than a launch that refuses in the driver.
+    #[test]
+    fn every_backend_declares_a_bootable_default_vcpu_count() {
+        for kind in [
+            BackendKind::Firecracker,
+            BackendKind::Libkrun,
+            BackendKind::Qemu,
+            BackendKind::Mock,
+            BackendKind::Hvf,
+            BackendKind::Wasm,
+            BackendKind::WebLinux,
+            BackendKind::AppleContainer,
+        ] {
+            assert!(
+                kind.default_vcpus() >= 1,
+                "{} must boot at least one vCPU",
+                kind.as_str()
+            );
+        }
+    }
+
     #[test]
     fn is_microvm_requires_every_isolation_layer() {
         assert!(LayerCoverage::all_layers().is_microvm());

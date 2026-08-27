@@ -190,7 +190,11 @@ pub struct LaunchShape<'a> {
     /// Explicit VM name, or `None` to generate a throwaway one.
     pub name: Option<&'a str>,
     pub image: &'a ImageSource,
-    pub cpus: u32,
+    /// `None` means the caller did not ask, and the selected backend's
+    /// [`mvm_core::vm_backend::BackendKind::default_vcpus`] decides. An
+    /// explicit count passes through unchanged, so a backend that cannot run
+    /// it still refuses rather than being silently corrected.
+    pub cpus: Option<u32>,
     pub memory_mib: u32,
     pub mem_initial_mib: Option<u32>,
     pub dir_shares: &'a [DirShareSpec],
@@ -208,7 +212,8 @@ pub struct ExecRequest {
     /// throwaway name.
     pub name: Option<String>,
     pub image: ImageSource,
-    pub cpus: u32,
+    /// `None` = unspecified; the selected backend's `default_vcpus` decides.
+    pub cpus: Option<u32>,
     pub memory_mib: u32,
     /// Opt into virtio-balloon. `None` keeps the legacy "commit
     /// memory_mib at boot" behaviour; `Some(n)` commits only `n` MiB
@@ -1205,6 +1210,7 @@ fn build_start_config(
     vm_name: &str,
     resolved: &ResolvedImage,
     boot: &BootStrategy,
+    cpus: u32,
 ) -> VmStartConfig {
     // Pre-open console data sockets for interactive PTY runs against
     // non-sealed images. OCI/dev images can carry verity sidecars and still be
@@ -1246,7 +1252,7 @@ fn build_start_config(
         revision_hash: resolved.revision.clone(),
         flake_ref: resolved.flake_ref.clone(),
         profile: resolved.profile.clone(),
-        cpus: shape.cpus,
+        cpus,
         memory_mib: shape.memory_mib,
         mem_initial_mib: shape.mem_initial_mib,
         ports: Vec::new(),
@@ -1341,6 +1347,23 @@ pub struct ResolvedLaunch {
 /// what makes the config claim-eligible. A warm spawn passes `None`: a factory
 /// parent carries no workload authority, and the spawn drops the tenant and
 /// plan from the config it is handed anyway.
+/// The vCPU count a launch will actually boot with.
+///
+/// `requested` is what the caller asked for, if anything. With nothing asked,
+/// the answer is the selected backend's own default — HVF runs exactly one
+/// vCPU, so a fixed default made every unqualified launch on the macOS default
+/// backend refuse. Shared by the launch path and the preflight summaries so the
+/// number a dry run prints is the number a real run boots.
+pub(crate) fn effective_cpus(requested: Option<u32>, hypervisor: Option<&str>) -> u32 {
+    if let Some(n) = requested {
+        return n;
+    }
+    let kind = hypervisor
+        .and_then(mvm_core::vm_backend::BackendKind::from_label)
+        .unwrap_or_else(|| mvm_runtime::backend::AnyBackend::auto_select().kind());
+    kind.default_vcpus()
+}
+
 pub fn resolve_launch(
     shape: &LaunchShape<'_>,
     admit: Option<&SessionAdmit<'_>>,
@@ -1352,6 +1375,11 @@ pub fn resolve_launch(
         shape.network_policy,
         shape.hypervisor,
     )?;
+
+    // The vCPU count the caller left unspecified is the selected backend's
+    // own default — HVF runs exactly one, so a fixed default made every bare
+    // launch on the macOS default backend refuse.
+    let cpus = shape.cpus.unwrap_or_else(|| backend.kind().default_vcpus());
 
     // Resolve image artifacts: either a named template or a pre-built pair.
     // For templates, also probe for a pre-built snapshot so we can skip the
@@ -1383,7 +1411,7 @@ pub fn resolve_launch(
     // spans account for roughly half the window, so the rest needs naming
     // before any of it can be acted on.
     let t_build = std::time::Instant::now();
-    let mut start_config = build_start_config(shape, &vm_name, &image, &boot);
+    let mut start_config = build_start_config(shape, &vm_name, &image, &boot, cpus);
     tracing::debug!(
         ms = t_build.elapsed().as_secs_f64() * 1000.0,
         "admit window: build_start_config"
@@ -1476,7 +1504,7 @@ mod tests {
         let shape = LaunchShape {
             name: Some("wasm-test"),
             image: &image,
-            cpus: 1,
+            cpus: Some(1),
             memory_mib: 64,
             mem_initial_mib: None,
             dir_shares: &[],
@@ -1623,7 +1651,7 @@ mod tests {
             name: Some("named-vm".into()),
             warm_pool_size: 3,
             image: ImageSource::Template("t".into()),
-            cpus: 4,
+            cpus: Some(4),
             memory_mib: 2048,
             mem_initial_mib: Some(512),
             dir_shares: vec![share.clone()],
@@ -1642,7 +1670,7 @@ mod tests {
 
         assert_eq!(shape.name, Some("named-vm"));
         assert!(matches!(shape.image, ImageSource::Template(n) if n == "t"));
-        assert_eq!(shape.cpus, 4);
+        assert_eq!(shape.cpus, Some(4));
         assert_eq!(shape.memory_mib, 2048);
         assert_eq!(shape.mem_initial_mib, Some(512));
         assert_eq!(shape.dir_shares.len(), 1);
@@ -1692,7 +1720,7 @@ mod tests {
         let shape = LaunchShape {
             name: None,
             image: &image,
-            cpus: 2,
+            cpus: Some(2),
             memory_mib: 1024,
             mem_initial_mib: None,
             dir_shares: &[],
@@ -1724,6 +1752,8 @@ mod tests {
             "the verity sidecar beside the rootfs must reach the config"
         );
         assert_eq!(resolved.start_config.roothash.as_deref(), Some(ROOTHASH));
+        // The shape asked for 2, so the resolved config carries 2 — an
+        // explicit request passes through the backend default untouched.
         assert_eq!(resolved.start_config.cpus, 2);
         assert_eq!(resolved.start_config.memory_mib, 1024);
         assert!(
@@ -1767,7 +1797,7 @@ mod tests {
             name: None,
             warm_pool_size: 0,
             image: ImageSource::Template("t".into()),
-            cpus: 1,
+            cpus: Some(1),
             memory_mib: 256,
             mem_initial_mib: None,
             // Live shares are attached by the guest activation path.
@@ -1793,7 +1823,7 @@ mod tests {
             name: None,
             warm_pool_size: 0,
             image: ImageSource::Template("t".into()),
-            cpus: 1,
+            cpus: Some(1),
             memory_mib: 256,
             mem_initial_mib: None,
             // Live shares are attached by the guest activation path.
@@ -1827,7 +1857,7 @@ mod tests {
             name: None,
             warm_pool_size: 0,
             image: ImageSource::Template("t".into()),
-            cpus: 1,
+            cpus: Some(1),
             memory_mib: 256,
             mem_initial_mib: None,
             // Live shares are attached by the guest activation path.
@@ -1876,7 +1906,7 @@ mod tests {
             name: None,
             warm_pool_size: 0,
             image: ImageSource::Template("t".into()),
-            cpus: 1,
+            cpus: Some(1),
             memory_mib: 256,
             mem_initial_mib: None,
             // Live shares are attached by the guest activation path.
@@ -1909,7 +1939,7 @@ mod tests {
             name: None,
             warm_pool_size: 0,
             image: ImageSource::Template("t".into()),
-            cpus: 1,
+            cpus: Some(1),
             memory_mib: 256,
             mem_initial_mib: None,
             // Live shares are attached by the guest activation path.
@@ -1957,7 +1987,7 @@ mod tests {
             name: None,
             warm_pool_size: 0,
             image: ImageSource::Template("t".into()),
-            cpus: 1,
+            cpus: Some(1),
             memory_mib: 256,
             mem_initial_mib: None,
             dir_shares: Vec::new(),

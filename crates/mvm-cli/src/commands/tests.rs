@@ -3385,7 +3385,7 @@ fn run_transient_default_manifest_argv_only() {
                 ..
             }) => {
                 assert!(manifest.is_none());
-                assert_eq!(cpus, 2);
+                assert_eq!(cpus, None, "unspecified until the backend resolves it");
                 assert_eq!(memory, "512M");
                 assert!(volume.is_empty());
                 assert!(env.is_empty());
@@ -3468,7 +3468,7 @@ fn run_default_profile_argv_only() {
                 assert_eq!(image.as_deref(), Some("alpine:latest"));
                 assert!(!net, "deny-all by default");
                 assert!(allow_host.is_empty());
-                assert_eq!(cpus, 2);
+                assert_eq!(cpus, None, "unspecified until the backend resolves it");
                 assert_eq!(memory, "512M");
                 assert_eq!(profile, exec::RunProfile::Standard);
                 assert!(volume.is_empty());
@@ -4026,7 +4026,7 @@ fn run_transient_with_manifest_and_resources() {
                 ..
             }) => {
                 assert_eq!(manifest.as_deref(), Some("my-tpl"));
-                assert_eq!(cpus, 4);
+                assert_eq!(cpus, Some(4));
                 assert_eq!(memory, "1G");
                 assert_eq!(argv, vec!["/bin/true".to_string()]);
             }

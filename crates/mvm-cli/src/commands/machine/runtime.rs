@@ -329,7 +329,7 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
         source,
         stdin,
         timeout: args.run.timeout.unwrap_or(30),
-        cpus: args.run.cpus,
+        cpus: crate::exec::effective_cpus(args.run.cpus, args.run.hypervisor.as_deref()),
         memory_mib,
         from_workload_ir: args.from_workload_ir.clone(),
         agent_verb_override: args.run.agent_verb.clone(),
