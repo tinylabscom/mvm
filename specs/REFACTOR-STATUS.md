@@ -12,6 +12,12 @@ Last updated: 2026-08-27
 
 ## Completed
 
+- [x] **Workload address public API rename.** The unused UOR-ADDR pilot is now
+      exposed as `mvm_core::{WorkloadAddress, WorkloadAddressError,
+      WorkloadAddressParseError, workload_address}` and the
+      `mvm_core::workload_address` module. CLI and BDD vocabulary use workload
+      address throughout; no deprecated semantic-name aliases remain.
+
 - [x] **Site QEMU-WASM release artifact** —
       `specs/plans/2026-08-26-site-qemu-wasm-release-artifact.md`.
       The browser QEMU pack now builds on the `boot-image/v*` release cadence;

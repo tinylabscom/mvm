@@ -177,7 +177,7 @@ pub struct CliWorld {
     /// Result of exercising the signed-plan share gate with an attachment the
     /// plan did not authorize.
     pub volume_admission_result: Option<Result<(), String>>,
-    /// `semantic_address` per fixture name, populated on a zero-exit
+    /// `workload_address` per fixture name, populated on a zero-exit
     /// `build address` run.
     pub addresses: HashMap<String, String>,
     /// `ir_hash` per fixture name, from the same run as `addresses`.
@@ -514,7 +514,7 @@ impl CliWorld {
             .expect("no CLI invocation recorded yet — a prior `When` step must run one")
     }
 
-    /// The stored semantic address for `fixture`, or a failed assertion
+    /// The stored workload address for `fixture`, or a failed assertion
     /// naming the fixture whose `When` step didn't run (or didn't succeed).
     pub fn address_of(&self, fixture: &str) -> &str {
         self.addresses.get(fixture).unwrap_or_else(|| {

@@ -1,7 +1,7 @@
 # serde_jcs 0.1.0 — RFC 8785 object-key-ordering non-conformance
 
 **Status:** Upstream-facing finding; reproducing evidence in-tree
-**Scope:** `serde_jcs` 0.1.0 (the JCS canonicalizer `mvm-core` hashes for `SemanticAddress`)
+**Scope:** `serde_jcs` 0.1.0 (the JCS canonicalizer `mvm-core` hashes for `WorkloadAddress`)
 **Owner:** mvm (finding); resolution belongs to the `serde_jcs` / UOR-Foundation upstream
 
 ## Summary
@@ -29,10 +29,10 @@ not to UTF-16 code-unit order.
 
 mvm's own hand-rolled `no_std` canonicalizer (`mvm_contract::ir::canonicalize`)
 sorts keys by `str` `Ord` (also scalar-value order), so the two agree with each
-other — which is why mvm's internal `semantic-address ↔ ir-hash` equivalence
+other — which is why mvm's internal `workload-address ↔ ir-hash` equivalence
 holds byte-for-byte. This is pinned as a drift-lock in
 `crates/mvm-core/src/canonicalizer_equivalence.rs`, with a caveat now on the
-`semantic_address` and `ir::canonicalize` module docs.
+`workload_address` and `ir::canonicalize` module docs.
 
 ## Impact
 
@@ -44,7 +44,7 @@ holds byte-for-byte. This is pinned as a drift-lock in
 - For mvm this is a cross-implementation interop caveat, not an internal
   correctness bug: mvm never claims two *different* documents share an address,
   and both its canonicalizers agree. It matters only if a second toolchain
-  computes the "same" semantic address with a spec-correct JCS and expects
+  computes the "same" workload address with a spec-correct JCS and expects
   byte-identical results.
 
 ## Proposed upstream fix
