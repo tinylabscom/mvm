@@ -1,5 +1,8 @@
 # Recorded-backend pause and resume
 
+Backing: shipped-source
+Validation: check-sprint-append
+
 **Status: IN PROGRESS**
 
 ## Problem
@@ -26,4 +29,3 @@ when the machine's live marker records HVF as its owner.
       Firecracker snapshot verification.
 - [ ] Focused tests, workspace tests/check, Clippy, and gated target checks pass.
 - [ ] Sprint and refactor rollups describe the delivered behavior.
-
