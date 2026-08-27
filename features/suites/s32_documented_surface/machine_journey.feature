@@ -75,7 +75,10 @@ Feature: The documented machine verbs operate a real guest
     # and wants it stopped or paused first.
     When I run mvmctl against the journey machine with "machine checkpoint create bdd-journey --class vm-full"
     Then the command exits with code 0
-    When I run mvmctl against the journey machine with "machine checkpoint ls bdd-journey"
+    # No machine name: `checkpoint ls` lists every checkpoint and takes no
+    # positional, which is the form the docs show. Passing one made clap refuse
+    # the whole command.
+    When I run mvmctl against the journey machine with "machine checkpoint ls"
     Then the command exits with code 0
     Then the journey machine is still running
 
