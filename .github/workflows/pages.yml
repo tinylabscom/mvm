@@ -22,7 +22,31 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  cloudflare-account:
+    runs-on: ubuntu-slim
+    steps:
+      - name: Ensure Cloudflare Pages project exists
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4.127.0"
+          command: pages project create mvm --production-branch=main
+        continue-on-error: true
+
+      # Project creation also fails when the project already exists. This
+      # second call must succeed, so a bad account ID or token still fails the
+      # workflow before the expensive site build begins.
+      - name: Verify Cloudflare account and Pages project
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4.127.0"
+          command: pages deployment list --project-name=mvm
+
   deploy:
+    needs: cloudflare-account
     environment:
       name: cloudflare-pages
       url: ${{ steps.deployment.outputs.deployment-url }}
@@ -73,12 +97,25 @@ jobs:
           # such flag. Passing one consumes `--jq`'s value, demoting the real
           # expression to a positional argument, and gh rejects the whole
           # invocation with `unknown command "<the entire jq program>"`.
-          BOOT_TAG="$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 100 \
+          BOOT_TAG=""
+          while IFS= read -r CANDIDATE; do
+            HAS_SITE_PACK="$(gh release view "${CANDIDATE}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --json assets --jq '
+                [.assets[].name]
+                | (index("qemu-wasm-smoke-pack.tar.gz") != null
+                   and index("qemu-wasm-smoke-pack.tar.gz.sha256") != null
+                   and index("qemu-wasm-smoke-pack.tar.gz.sha256.bundle") != null)')"
+            if [ "${HAS_SITE_PACK}" = "true" ]; then
+              BOOT_TAG="${CANDIDATE}"
+              break
+            fi
+          done < <(gh release list --repo "${GITHUB_REPOSITORY}" --limit 100 \
             --json tagName --jq '
               [ .[].tagName
                 | select(test("^boot-image/v[0-9]+\\.[0-9]+\\.[0-9]+$"))
                 | {tag: ., v: (ltrimstr("boot-image/v") | split(".") | map(tonumber))} ]
-              | sort_by(.v) | last | .tag // empty')"
+              | sort_by(.v) | reverse | .[].tag')
           if [ -z "${BOOT_TAG}" ]; then
             echo "::error::no boot-image/v* release exists to take the WebLinux runtime pack from" >&2
             exit 1
@@ -128,22 +165,14 @@ jobs:
           fi
           echo "OK: public/dist/_headers present"
 
-      - name: Ensure Cloudflare Pages project exists
-        uses: cloudflare/wrangler-action@v4
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages project create mvm --production-branch=main
-          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
-
       - name: Deploy to Cloudflare Pages
         id: deployment
         uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy public/dist --project-name=mvm --branch=main
+          workingDirectory: public
+          command: pages deploy --branch=main
           gitHubToken: ${{ secrets.GITHUB_TOKEN }}
 
       # `_headers` is inert unless the host reads it, so the only proof that

@@ -593,6 +593,36 @@ fn release_lookups_pass_the_filter_directly_to_gh_jq() {
 }
 
 #[test]
+fn pages_deployment_uses_the_checked_in_wrangler_config() {
+    let workflow = pages_workflow();
+    let package = fs::read_to_string("public/package.json").expect("read site package manifest");
+    let config = fs::read_to_string("public/wrangler.toml").expect("read Wrangler config");
+
+    assert!(
+        workflow.contains("cloudflare-account:")
+            && workflow.contains("runs-on: ubuntu-slim")
+            && workflow.contains("needs: cloudflare-account")
+            && workflow.contains("command: pages deployment list --project-name=mvm"),
+        "the Pages workflow must verify the configured account and project before building"
+    );
+    assert!(
+        workflow.contains("workingDirectory: public")
+            && workflow.contains("command: pages deploy --branch=main"),
+        "the Pages action must deploy from public/ so Wrangler reads the checked-in config"
+    );
+    assert!(
+        config.contains("name = \"mvm\"") && config.contains("pages_build_output_dir = \"./dist\""),
+        "Wrangler must target the existing mvm project and Astro output"
+    );
+    assert!(
+        package.contains("\"wrangler\": \"^4.127.0\"")
+            && package
+                .contains("\"deploy\": \"pnpm build && wrangler pages deploy --branch=main\""),
+        "the site must pin Wrangler and expose a reproducible production deploy command"
+    );
+}
+
+#[test]
 fn qemu_wasm_site_pack_is_built_once_on_the_boot_image_train() {
     let boot_image = boot_image_workflow();
     let pages = pages_workflow();
@@ -640,6 +670,12 @@ fn qemu_wasm_site_pack_is_built_once_on_the_boot_image_train() {
             && pages.contains("release-boot-image.yml@refs/tags/boot-image/v.*")
             && pages.contains("sha256sum -c qemu-wasm-smoke-pack.tar.gz.sha256"),
         "site deployment must verify the tag-built pack's release identity"
+    );
+    assert!(
+        pages.contains("gh release view \"${CANDIDATE}\"")
+            && pages.contains("HAS_SITE_PACK")
+            && pages.contains("| sort_by(.v) | reverse | .[].tag"),
+        "site deployment must select the newest semantic release that actually carries the pack"
     );
     assert!(
         pages.contains("./web/weblinux-demo/build.sh qemu-wasm-smoke-pack"),

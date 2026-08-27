@@ -7,7 +7,10 @@
     "dev": "astro dev",
     "start": "astro dev",
     "build": "astro build",
+    "deploy": "pnpm build && wrangler pages deploy --branch=main",
+    "deploy:preview": "pnpm build && wrangler pages deploy",
     "preview": "astro preview",
+    "preview:cloudflare": "pnpm build && wrangler pages dev",
     "astro": "astro",
     "check:tokens": "node scripts/check-no-hardcoded-hex.mjs",
     "check:samples": "node scripts/check-sample-provenance.mjs",
@@ -36,6 +39,7 @@
     "tailwindcss": "^4.1.0"
   },
   "devDependencies": {
-    "playwright": "^1.62.1"
+    "playwright": "^1.62.1",
+    "wrangler": "^4.127.0"
   }
 }

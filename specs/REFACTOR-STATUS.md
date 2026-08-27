@@ -4,6 +4,13 @@ Last updated: 2026-08-27
 
 ## In progress
 
+- [ ] **Cloudflare Pages cutover.**
+      `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.
+      The existing Pages project now has a checked-in Wrangler configuration,
+      reproducible local/CI deployment commands, an account/project preflight,
+      and a verified deployment.
+      The production hostname still needs to be attached to the project.
+
 - [ ] **SDK surface contract repairs — issues #2902 and #2906.**
       `specs/plans/2026-08-26-sdk-surface-contract-repairs.md`.
       The README's `mvm.local_path` decorator source and the builder-pack Cargo
