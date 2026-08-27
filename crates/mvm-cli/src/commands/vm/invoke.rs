@@ -408,12 +408,10 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
         ));
     }
 
-    // The entrypoint action targets a *template* / manifest slot. Resolve
-    // through the same shared helper as `machine exec --manifest`. Slot-hash
-    // and registered-name both resolve to a string the lifecycle helpers
-    // consume.
+    // The entrypoint action targets a manifest slot. Resolve through the same
+    // shared helper as `machine exec --manifest`; the slot hash is the string
+    // the lifecycle helpers consume.
     let template_id = match super::shared::resolve_manifest_arg(&call.source)? {
-        super::shared::ManifestArgRef::Name(n) => n,
         super::shared::ManifestArgRef::Slot { slot_hash } => slot_hash,
         super::shared::ManifestArgRef::WasmModule { .. } => {
             anyhow::bail!("wasm module manifests are not supported for this command")

@@ -987,7 +987,6 @@ fn cmd_start(args: StartArgs) -> Result<()> {
 
     // Resolve the manifest argument the same way `mvmctl invoke` does.
     let template_id = match super::shared::resolve_manifest_arg(&args.manifest)? {
-        super::shared::ManifestArgRef::Name(n) => n,
         super::shared::ManifestArgRef::Slot { slot_hash } => slot_hash,
         super::shared::ManifestArgRef::WasmModule { .. } => {
             anyhow::bail!("wasm module manifests are not supported for this command")

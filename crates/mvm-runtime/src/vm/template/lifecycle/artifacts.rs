@@ -10,7 +10,6 @@ use mvm_core::template::{
 };
 use tracing::instrument;
 
-use super::crud::template_load;
 use super::slots::template_load_slot;
 
 pub(super) fn slot_kernel_source(
@@ -446,52 +445,6 @@ pub struct Checksums {
     pub template_id: String,
     pub revision_hash: String,
     pub files: std::collections::BTreeMap<String, String>,
-}
-
-/// Resolve a built template to its current artifact paths.
-///
-/// Returns `(spec, vmlinux, initrd, rootfs, revision_hash)`.
-/// The artifact paths are absolute and valid on the host.
-#[instrument(skip_all, fields(template_id = id))]
-pub fn template_artifacts(
-    id: &str,
-) -> Result<(TemplateSpec, String, Option<String>, String, String)> {
-    let spec = template_load(id)?;
-    let rev = current_revision_id(id)?;
-    let rev_dir = template_revision_dir(id, &rev);
-
-    let vmlinux = format!("{rev_dir}/vmlinux");
-    let rootfs = format!("{rev_dir}/rootfs.ext4");
-    let initrd_candidate = format!("{rev_dir}/initrd");
-
-    if !std::path::Path::new(&vmlinux).exists() {
-        anyhow::bail!(
-            "Template '{}' has no vmlinux (run `mvmctl template build {}`)",
-            id,
-            id
-        );
-    }
-    if !std::path::Path::new(&rootfs).exists() {
-        anyhow::bail!(
-            "Template '{}' has no rootfs (run `mvmctl template build {}`)",
-            id,
-            id
-        );
-    }
-
-    let has_initrd = std::path::Path::new(&initrd_candidate).exists();
-
-    Ok((
-        spec,
-        vmlinux,
-        if has_initrd {
-            Some(initrd_candidate)
-        } else {
-            None
-        },
-        rootfs,
-        rev,
-    ))
 }
 
 #[instrument(skip_all, fields(template_id))]

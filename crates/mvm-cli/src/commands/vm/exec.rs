@@ -1313,7 +1313,6 @@ fn build_exec_request(
         match (args.manifest, image_ref) {
             (Some(_), Some(_)) => unreachable!("clap conflicts_with prevents --manifest + --image"),
             (Some(arg), None) => match super::shared::resolve_manifest_arg(&arg)? {
-                super::shared::ManifestArgRef::Name(n) => crate::exec::ImageSource::Template(n),
                 super::shared::ManifestArgRef::Slot { slot_hash } => {
                     crate::exec::ImageSource::Template(slot_hash)
                 }
