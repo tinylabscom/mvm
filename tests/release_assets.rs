@@ -617,10 +617,19 @@ fn pages_deployment_uses_the_checked_in_wrangler_config() {
         "the Pages action must deploy from public/ so Wrangler reads the checked-in config"
     );
     assert!(
-        config.contains("name = \"mvm\"")
-            && config.contains("account_id = \"f2367197e79029355117dd7f7c5db277\"")
-            && config.contains("pages_build_output_dir = \"./dist\""),
-        "Wrangler must target the existing mvm project, account, and Astro output"
+        config.contains("name = \"mvm\"") && config.contains("pages_build_output_dir = \"./dist\""),
+        "Wrangler must target the existing mvm project and Astro output"
+    );
+    // Wrangler refuses a Pages config carrying `account_id` outright --
+    // "Configuration file for Pages projects does not support account_id" --
+    // so the deploy fails after a successful build, at the last step. The
+    // account is supplied by the workflow from `secrets.CLOUDFLARE_ACCOUNT_ID`,
+    // which is where it belongs: it is deployment identity, not site config,
+    // and checking it in pins one account into a file every fork inherits.
+    assert!(
+        !config.contains("account_id"),
+        "a Pages wrangler config must not carry account_id; the workflow passes \
+         accountId from secrets"
     );
     assert!(
         package.contains("\"wrangler\": \"^4.127.0\"")
