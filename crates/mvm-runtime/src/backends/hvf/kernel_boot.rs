@@ -128,7 +128,57 @@ fn disk_mmio(i: usize) -> (u64, u32) {
 const PSCI_VERSION_FN: u64 = 0x8400_0000;
 const PSCI_SYSTEM_OFF: u64 = 0x8400_0008;
 const PSCI_SYSTEM_RESET: u64 = 0x8400_0009;
+/// `CPU_ON`, both calling conventions. A 64-bit guest uses the SMC64 id; the
+/// SMC32 id is accepted because a kernel may probe with it.
+const PSCI_CPU_ON_SMC64: u64 = 0xC400_0003;
+const PSCI_CPU_ON_SMC32: u64 = 0x8400_0003;
+/// `AFFINITY_INFO`, used by the kernel to poll whether a target CPU came up.
+const PSCI_AFFINITY_INFO_SMC64: u64 = 0xC400_0004;
+const PSCI_AFFINITY_INFO_SMC32: u64 = 0x8400_0004;
+
 const PSCI_NOT_SUPPORTED: u64 = (-1i64) as u64;
+/// The target CPU is not one this machine has.
+const PSCI_INVALID_PARAMETERS: u64 = (-2i64) as u64;
+/// `AFFINITY_INFO`: the queried CPU is off.
+const PSCI_AFFINITY_OFF: u64 = 1;
+
+/// Answer a PSCI `CPU_ON` for `target_mpidr`, given the CPUs this VMM created.
+///
+/// Deliberately incapable of answering `SUCCESS` while `created` is 1, and that
+/// is the whole point of the function today. Reporting success for a CPU no
+/// thread backs is strictly worse than refusing: the kernel's `cpu_up` waits on
+/// that CPU reaching its release point, and a CPU that never runs means a boot
+/// that never finishes — a hang with no console output rather than a machine
+/// with fewer CPUs than asked for.
+///
+/// `INVALID_PARAMETERS` is the defined PSCI answer for a target the
+/// implementation does not have, and Linux handles it by leaving that CPU
+/// offline and carrying on. With the device tree clamped to the CPUs this VMM
+/// creates (`effective_vcpus`), a well-behaved guest never issues the call at
+/// all; this is the answer for one that does anyway.
+fn psci_cpu_on(target_mpidr: u64, created: u32) -> u64 {
+    if target_mpidr < u64::from(created) {
+        // Reachable only once secondaries exist. Until a thread is actually
+        // waiting to be released, no caller can get here.
+        PSCI_NOT_SUPPORTED
+    } else {
+        PSCI_INVALID_PARAMETERS
+    }
+}
+
+/// Answer `AFFINITY_INFO` for `target_mpidr`.
+///
+/// A CPU this machine does not have is `INVALID_PARAMETERS`; one it does have
+/// but has not started is `OFF`. The kernel polls this after a `CPU_ON`, so
+/// answering `NOT_SUPPORTED` here would leave it unable to tell a failed
+/// bring-up from an unimplemented call.
+fn psci_affinity_info(target_mpidr: u64, created: u32) -> u64 {
+    if target_mpidr < u64::from(created) {
+        PSCI_AFFINITY_OFF
+    } else {
+        PSCI_INVALID_PARAMETERS
+    }
+}
 
 /// Raises a device SPI on the process-global in-kernel GIC — the [`IrqLine`] the
 /// vsock host-I/O thread uses to interrupt the guest off the vCPU exit path
@@ -699,6 +749,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
                 vsock,
                 timeout,
                 ram_size: mapped_ram_size,
+                vcpus,
                 agent_socket: channels.agent_socket,
                 substitution_socket: channels.substitution_socket,
                 egress_relay: channels.egress_relay,
@@ -750,6 +801,11 @@ struct RunInputs {
     timeout: Duration,
     /// Mapped guest RAM size in bytes (matches the host allocation).
     ram_size: usize,
+    /// vCPUs this run actually creates — already through `effective_vcpus`, and
+    /// the same number the device tree was built from. PSCI answers `CPU_ON`
+    /// and `AFFINITY_INFO` against it so the guest cannot be told a CPU exists
+    /// that no thread backs.
+    vcpus: u32,
     /// Per-VM agent RPC socket (productionized off `MVM_HVF_AGENT_SOCKET`).
     agent_socket: Option<PathBuf>,
     /// Per-VM substitution-endpoint socket (productionized off
@@ -801,6 +857,7 @@ unsafe fn run(
         vsock,
         timeout,
         ram_size,
+        vcpus,
         agent_socket,
         substitution_socket,
         egress_relay,
@@ -1202,6 +1259,19 @@ unsafe fn run(
                             match fn_id {
                                 PSCI_SYSTEM_OFF | PSCI_SYSTEM_RESET => return Ok(RunControl::Stop),
                                 PSCI_VERSION_FN => vc.set_core(CoreReg::X(0), 0x1_0000)?, // PSCI v1.0
+                                // x1 is the target MPIDR for both calls. Answered
+                                // against the CPUs this VMM actually created —
+                                // the same count the device tree was built from —
+                                // so the two can never disagree about which CPUs
+                                // exist.
+                                PSCI_CPU_ON_SMC64 | PSCI_CPU_ON_SMC32 => {
+                                    let target = vc.get_core(CoreReg::X(1))?;
+                                    vc.set_core(CoreReg::X(0), psci_cpu_on(target, vcpus))?;
+                                }
+                                PSCI_AFFINITY_INFO_SMC64 | PSCI_AFFINITY_INFO_SMC32 => {
+                                    let target = vc.get_core(CoreReg::X(1))?;
+                                    vc.set_core(CoreReg::X(0), psci_affinity_info(target, vcpus))?;
+                                }
                                 _ => vc.set_core(CoreReg::X(0), PSCI_NOT_SUPPORTED)?,
                             }
                             // HVC is completed: HVF already advanced PC. Do NOT advance.
@@ -1388,6 +1458,57 @@ mod tests {
                  this VMM creates, not the request"
             );
         }
+    }
+
+    /// `CPU_ON` must never claim success for a CPU no thread backs.
+    ///
+    /// This is the property that keeps a partial SMP implementation safe. The
+    /// kernel's `cpu_up` waits for the target to reach its release point, so
+    /// answering SUCCESS for a CPU that will never run turns "fewer CPUs than
+    /// asked for" into "boot never finishes" — a hang with no console output.
+    /// `INVALID_PARAMETERS` is the defined answer for a target the
+    /// implementation does not have, and Linux leaves that CPU offline and
+    /// carries on.
+    #[test]
+    fn cpu_on_never_reports_success_for_a_cpu_no_thread_backs() {
+        // One vCPU: every target above CPU 0 is absent.
+        for target in [1u64, 2, 7, 63] {
+            assert_eq!(
+                super::psci_cpu_on(target, 1),
+                super::PSCI_INVALID_PARAMETERS,
+                "target {target} does not exist on a 1-CPU machine"
+            );
+        }
+        // Whatever the count, success is not currently reachable — there is no
+        // secondary thread to release.
+        for created in [1u32, 2, 4] {
+            for target in 0..u64::from(created) {
+                assert_ne!(
+                    super::psci_cpu_on(target, created),
+                    0,
+                    "PSCI SUCCESS is 0 and must not be returned while no \
+                     secondary thread exists to be released"
+                );
+            }
+        }
+    }
+
+    /// `AFFINITY_INFO` distinguishes "absent" from "present but off".
+    ///
+    /// The kernel polls this after a `CPU_ON`. Answering NOT_SUPPORTED would
+    /// leave it unable to tell a failed bring-up from an unimplemented call.
+    #[test]
+    fn affinity_info_separates_an_absent_cpu_from_a_stopped_one() {
+        assert_eq!(super::psci_affinity_info(0, 1), super::PSCI_AFFINITY_OFF);
+        assert_eq!(
+            super::psci_affinity_info(1, 1),
+            super::PSCI_INVALID_PARAMETERS
+        );
+        assert_eq!(super::psci_affinity_info(3, 4), super::PSCI_AFFINITY_OFF);
+        assert_eq!(
+            super::psci_affinity_info(4, 4),
+            super::PSCI_INVALID_PARAMETERS
+        );
     }
 
     /// Until the run loop is threaded, the honest answer to any request is one.

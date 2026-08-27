@@ -22,6 +22,28 @@ REPO="$PWD"
 
 E2E_HOME="${MVM_E2E_HOME:-$HOME/.mvm}"
 
+# A CHANGING value, exported for every cargo invocation below.
+#
+# `mvm-cli`'s build script reuses a previously-built per-VM helper whenever
+# `PROFILE == debug` and the binary is present, and marks it stale so mvmctl
+# refuses to spawn it. `MVM_EMBED_NO_CACHE` (any non-empty value) forces the
+# rebuild instead. Two traps, both of which produce a suite that fails at spawn
+# against a supervisor which may well be current:
+#
+#  * Set it on only the first build and the later `cargo build -p xtask` /
+#    `cargo test -p mvm-conformance` re-run the build script without it, find
+#    the freshly-built binary present, take the reuse branch, and re-write the
+#    stale marker the first build had just cleared.
+#  * Export a constant `1` and the second run of this script is a no-op:
+#    `cargo:rerun-if-env-changed` compares the value, `1 == 1`, so the build
+#    script never re-runs and a marker left by an earlier run survives
+#    untouched. Setting a flag that is already set changes nothing.
+#
+# A per-run value satisfies both: the value always differs from last run, so the
+# build script re-runs, and it is non-empty, so the rebuild is forced. Costs a
+# cross-compile per gate run, which is the price of measuring the tree.
+export MVM_EMBED_NO_CACHE="e2e-$(date +%s)"
+
 # Floor on scenarios that must actually execute. See the assertion after the
 # cucumber run for why a count, not just an exit status.
 MIN_SCENARIOS=15
