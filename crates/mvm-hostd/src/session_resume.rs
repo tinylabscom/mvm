@@ -747,6 +747,53 @@ mod tests {
         (env, home)
     }
 
+    /// Isolate the host and install the runtime artifact a real HVF cold boot
+    /// now requires. The fixture goes through the shared overlay reader and
+    /// cache installer so the resolver verifies the same ext4 payload,
+    /// checksums, version, and sidecars as production.
+    fn isolated_host_with_runtime_overlay() -> (TestEnv, TempDir) {
+        use mvm_build::runtime_overlay::{InstallOptions, install_overlay_into_cache};
+        use mvm_fs::ext4::Node;
+        use mvm_fs::overlay::{REQUIRED_OVERLAY_GUEST_PATHS, read_overlay_artifact_from_dir};
+
+        let (env, home) = isolated_host(GrantCeiling::default());
+        let source = home.path().join("runtime-overlay-source");
+        std::fs::create_dir_all(&source).expect("create runtime overlay source");
+        let nodes = REQUIRED_OVERLAY_GUEST_PATHS
+            .iter()
+            .map(|path| Node::File {
+                path: path.to_string(),
+                mode: 0o755,
+                data: b"session-resume-runtime-stub".to_vec(),
+                xattrs: Vec::new(),
+            })
+            .collect();
+        let ext4 = mvm_fs::ext4::build_image(nodes).expect("build runtime overlay fixture");
+        std::fs::write(source.join("overlay.ext4"), ext4).expect("write overlay ext4");
+        std::fs::write(source.join("overlay.verity"), b"verity-sidecar")
+            .expect("write overlay verity sidecar");
+        std::fs::write(
+            source.join("overlay.roothash"),
+            format!("{}\n", "ab".repeat(32)),
+        )
+        .expect("write overlay root hash");
+        std::fs::write(
+            source.join("VERSION"),
+            format!("{}\n", env!("CARGO_PKG_VERSION")),
+        )
+        .expect("write overlay version");
+
+        let artifact = read_overlay_artifact_from_dir(&source, std::env::consts::ARCH)
+            .expect("read runtime overlay fixture");
+        install_overlay_into_cache(
+            &artifact,
+            &home.path().join("cache"),
+            &InstallOptions { overwrite: true },
+        )
+        .expect("install runtime overlay fixture");
+        (env, home)
+    }
+
     /// Stage a checkpoint whose content blob is really on disk and really
     /// hashes to what its record says, so `verify_content` has something to
     /// pass on and something to be tampered out from under.
@@ -1072,6 +1119,7 @@ mod tests {
     fn a_cold_boot_config_names_the_resume_points_rootfs() {
         // Not an arbitrary path: the bytes behind `rootfs_path` must be the
         // resume point's, which is the whole reason the resume point exists.
+        let (_env, _home) = isolated_host_with_runtime_overlay();
         let fx = Fixture::new();
         let state = fx.tmp.path().join("state");
         let (rec, parent) = cold_boot_fixture(&fx);
@@ -1106,6 +1154,7 @@ mod tests {
         // The started VM and the plan that authorized it must name the same
         // thing. A config named anything else boots a machine the plan does not
         // describe.
+        let (_env, _home) = isolated_host_with_runtime_overlay();
         let fx = Fixture::new();
         let state = fx.tmp.path().join("state");
         let (rec, parent) = cold_boot_fixture(&fx);
@@ -1404,6 +1453,7 @@ mod tests {
     #[test]
     fn cold_boot_config_stages_and_names_verity_sidecars() {
         use mvm_core::checkpoint::ContentBlob;
+        let (_env, _home) = isolated_host_with_runtime_overlay();
         let fx = Fixture::new();
         let state = fx.tmp.path().join("state");
         let mut parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-verity");

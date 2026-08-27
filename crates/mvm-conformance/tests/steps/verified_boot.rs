@@ -46,12 +46,37 @@ fn assemble_sealed_cmdline(world: &mut CliWorld, backend: String, flavor: String
         "hvf" => Box::new(HvfDriver::new()),
         _ => panic!("unsupported verified-boot BDD backend {backend:?}"),
     };
+    let blocks = mvm_vmm::host::spec_map::workload_blocks(&config);
+    world.sealed_runtime_overlay_attached = Some(
+        config
+            .runtime_overlay_roothash
+            .as_deref()
+            .is_some_and(|hash| {
+                hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+            && ["/image/runtime.ext4", "/image/runtime.verity"]
+                .iter()
+                .all(|path| {
+                    blocks
+                        .iter()
+                        .any(|block| block.source == std::path::Path::new(path) && block.read_only)
+                }),
+    );
     world.workload_cmdline = Some(
         mvm_runtime::workload_runner::assemble_workload_cmdline_for_test(
             driver.as_ref(),
             &config,
             state.path(),
         ),
+    );
+}
+
+#[then("the sealed workload attaches the verified runtime overlay")]
+fn sealed_workload_attaches_verified_runtime_overlay(world: &mut CliWorld) {
+    assert_eq!(
+        world.sealed_runtime_overlay_attached,
+        Some(true),
+        "the complete runtime-overlay triple must map both the data and verity devices read-only"
     );
 }
 
