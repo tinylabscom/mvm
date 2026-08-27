@@ -749,7 +749,7 @@ fn capture_vm_full_inner(
     }
 
     // Mirror the fs_quick path: copy guest sidecars (mvm-meta.json,
-    // rootfs.verity, rootfs.roothash, rootfs.initrd) so that forks of this
+    // rootfs.verity, rootfs.roothash) so that forks of this
     // vm_full checkpoint can read them from their content dir and boot through
     // the runtime-meta gate plus verity reconstruction.
     // The sidecar read is from the static source dir — outside the pause window
@@ -986,7 +986,6 @@ const GUEST_SIDECAR_FILES: &[&str] = &[
     mvm_build::builder_vm::SIDECAR_FILENAME,
     "rootfs.verity",
     "rootfs.roothash",
-    "rootfs.initrd",
 ];
 
 /// Copy guest sidecars from the directory that contains `src_rootfs` into
@@ -1169,7 +1168,7 @@ pub fn capture_fs_quick(
     }];
 
     // When the source rootfs directory carries guest sidecars (mvm-meta.json,
-    // rootfs.verity, rootfs.roothash, rootfs.initrd), include them so that any
+    // rootfs.verity, rootfs.roothash), include them so that any
     // fork materialised from this checkpoint can boot through the runtime-meta
     // gate and reconstruct a verity rootfs.
     for sidecar_blob in copy_guest_sidecars_if_present(&params.rootfs, &content_dir)? {
@@ -1550,7 +1549,6 @@ mod tests {
         let rootfs = write_fake_rootfs(tmp.path());
         std::fs::write(tmp.path().join("rootfs.verity"), b"verity-tree").unwrap();
         std::fs::write(tmp.path().join("rootfs.roothash"), b"abc123").unwrap();
-        std::fs::write(tmp.path().join("rootfs.initrd"), b"initrd-bytes").unwrap();
         let meta = capture_fs_quick(
             &store,
             CaptureFsQuickParams {
@@ -1570,7 +1568,6 @@ mod tests {
         assert!(names.contains(&"rootfs.ext4"));
         assert!(names.contains(&"rootfs.verity"));
         assert!(names.contains(&"rootfs.roothash"));
-        assert!(names.contains(&"rootfs.initrd"));
         let roothash_blob = meta
             .content
             .iter()

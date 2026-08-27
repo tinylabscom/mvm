@@ -4,7 +4,7 @@
 # `crates/mvm-agentd/src/bin/mvm-guest-agent.rs` (~2400 LOC of vsock
 # RPC + worker-pool dispatch + integration manifest + system
 # metrics). Side-bins `mvm-seccomp-apply` (the per-service seccomp
-# shim) and `mvm-verity-init` (the verity-initrd PID 1) ride the
+# shim) rides the
 # same derivation since the rootfs needs them too.
 #
 # ## Build environment
@@ -64,8 +64,6 @@ pkgs.rustPlatform.buildRustPackage {
     "mvm-guest-agent"
     "--bin"
     "mvm-seccomp-apply"
-    "--bin"
-    "mvm-verity-init"
     # Guest-side network defense. Installs kernel blackhole routes
     # for `MANDATORY_DENY_RANGES` at boot from `/init` (uid 0) before
     # the main agent forks under setpriv.

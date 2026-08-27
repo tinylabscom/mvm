@@ -20,7 +20,7 @@
   #                       boot.
   #   overlay.verity    — dm-verity sidecar (Merkle tree).
   #   overlay.roothash  — 64 lowercase hex chars + newline. What
-  #                       mvm-verity-init reads from the kernel
+  #                       the guest agent reads from the kernel
   #                       cmdline as `mvm.runtime_roothash=<hex>`.
   #   VERSION           — semver of the producing mvmctl. The
   #                       resolver (`mvm_build::runtime_overlay`)
@@ -121,12 +121,12 @@
       overlayVersion = "0.18.0";
 
       # mvm-agentd binaries — agent + seccomp shim + verity-init.
-      # `mvm-verity-init` is the initrd PID 1; it lives in the
+      # the universal initramfs agent is PID 1; it lives in the
       # initramfs cpio.gz, *not* in this overlay. We still build
       # it here because the rustPlatform derivation produces all
       # three binaries from one `--package mvm-agentd` build (per
       # `nix/packages/mvm-guest-agent.nix`'s
-      # `--bin mvm-guest-agent --bin mvm-seccomp-apply --bin mvm-verity-init`
+      # `--bin mvm-guest-agent --bin mvm-seccomp-apply`
       # flags); we just don't copy the verity-init binary into the
       # overlay's staging dir.
       mvmGuestFor =
@@ -468,7 +468,6 @@
             cp ${guest}/bin/mvm-guest-netinit  $out/guest-runtime/mvm-guest-netinit
             cp ${egressClient}/bin/mvm-egress-client $out/guest-runtime/mvm-egress-client
             cp ${guest}/bin/mvm-oci-entrypoint $out/guest-runtime/mvm-oci-entrypoint
-            cp ${guest}/bin/mvm-verity-init    $out/guest-runtime/mvm-verity-init
             chmod 0555 $out/guest-runtime/*
 
             # ext4 generation. Mirrors
@@ -491,7 +490,7 @@
 
             # Verity sidecar. Parameters mirror
             # `mvm_build::oci_to_rootfs::verity::VeritysetupOptions::default` —
-            # data block 1024 (must match `mvm-verity-init.rs`'s
+            # data block 1024 (must match the guest agent's
             # DATA_BLOCK_SIZE constant), hash block 4096, zero
             # salt, sha256.
             touch $out/overlay.verity

@@ -194,25 +194,8 @@ pub(crate) fn libkrun_kernel_for_host(kernel: &str) -> Result<(String, KernelFor
     Ok((kernel.to_string(), KernelFormat::Raw))
 }
 
-pub fn libkrun_verity_initrd_path(config: &VmStartConfig) -> Option<PathBuf> {
-    config
-        .verity_path
-        .as_deref()
-        .zip(config.roothash.as_deref())
-        .and_then(|_| {
-            Path::new(&config.rootfs_path)
-                .parent()
-                .map(|p| p.join("rootfs.initrd"))
-        })
-        .filter(|p| p.exists())
-}
-
 pub fn libkrun_effective_initrd(config: &VmStartConfig) -> Option<PathBuf> {
-    config
-        .initrd_path
-        .as_ref()
-        .map(PathBuf::from)
-        .or_else(|| libkrun_verity_initrd_path(config))
+    config.initrd_path.as_ref().map(PathBuf::from)
 }
 
 pub fn libkrun_verity_enabled(config: &VmStartConfig) -> bool {

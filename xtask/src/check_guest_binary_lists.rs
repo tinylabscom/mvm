@@ -238,11 +238,11 @@ name = "mvm-agentd"
 name = "mvm-guest-agent"
 
 [[bin]]
-name = "mvm-verity-init"
+name = "mvm-oci-entrypoint"
 "#;
         let bins = parse_bin_names(manifest);
         assert!(bins.contains("mvm-guest-agent"));
-        assert!(bins.contains("mvm-verity-init"));
+        assert!(bins.contains("mvm-oci-entrypoint"));
         assert!(
             !bins.contains("mvm-agentd"),
             "package name must not be a bin"
@@ -253,19 +253,22 @@ name = "mvm-verity-init"
     fn extract_bin_flags_handles_both_argv_forms() {
         // The plain build.rs form and the `.to_string()` guest_agent_build form.
         let build_rs =
-            r#"cmd.args(["zigbuild", "--bin", "mvm-verity-init", "--bin", "mvm-guest-agent"]);"#;
+            r#"cmd.args(["zigbuild", "--bin", "mvm-oci-entrypoint", "--bin", "mvm-guest-agent"]);"#;
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("a.rs"), build_rs).unwrap();
         let got = extract_bin_flags_from_file(tmp.path(), "a.rs").unwrap();
         assert_eq!(
             got,
-            BTreeSet::from(["mvm-verity-init".to_string(), "mvm-guest-agent".to_string()])
+            BTreeSet::from([
+                "mvm-oci-entrypoint".to_string(),
+                "mvm-guest-agent".to_string()
+            ])
         );
 
-        let gab = r#"vec!["--bin".to_string(), "mvm-verity-init".to_string()]"#;
+        let gab = r#"vec!["--bin".to_string(), "mvm-seccomp-apply".to_string()]"#;
         std::fs::write(tmp.path().join("b.rs"), gab).unwrap();
         let got = extract_bin_flags_from_file(tmp.path(), "b.rs").unwrap();
-        assert_eq!(got, BTreeSet::from(["mvm-verity-init".to_string()]));
+        assert_eq!(got, BTreeSet::from(["mvm-seccomp-apply".to_string()]));
     }
 
     #[test]
@@ -275,14 +278,13 @@ name = "mvm-verity-init"
     }
 
     #[test]
-    fn artifact_extractors_each_find_the_five_runtime_bins() {
+    fn artifact_extractors_each_find_the_four_runtime_bins() {
         let root = workspace_root();
         let expected = BTreeSet::from([
             "mvm-oci-entrypoint".to_string(),
             "mvm-guest-agent".to_string(),
             "mvm-guest-netinit".to_string(),
             "mvm-egress-client".to_string(),
-            "mvm-verity-init".to_string(),
         ]);
         assert_eq!(
             extract_guest_agent_build_argv(&root, GUEST_AGENT_BUILD).unwrap(),
@@ -325,7 +327,6 @@ name = "mvm-verity-init"
             "mvm-guest-agent",
             "mvm-guest-netinit",
             "mvm-egress-client",
-            "mvm-verity-init",
         ] {
             assert!(universe.contains(b), "{b} must be a known guest [[bin]]");
         }

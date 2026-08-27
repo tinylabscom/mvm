@@ -971,7 +971,6 @@ pub fn download_runtime_overlay(
             netinit: &stage.join("mvm-guest-netinit"),
             egress_client: &stage.join("mvm-egress-client"),
             entrypoint_runner: &stage.join("mvm-oci-entrypoint"),
-            verity_init: &stage.join("mvm-verity-init"),
         },
         &cache_root.join("oci"),
         version,
@@ -1009,10 +1008,10 @@ pub fn download_runtime_overlay(
 /// Exactly the members the overlay's release tarball may carry. Doubles as the
 /// extraction allow-list and the completeness check — an archive carrying
 /// anything else, or missing any of these, is refused.
-const RELEASE_GUEST_RUNTIME_FILES: [&str; 5] =
+const RELEASE_GUEST_RUNTIME_FILES: [&str; 4] =
     crate::guest_agent_build::OCI_GUEST_RUNTIME_BINARY_NAMES;
 
-const OVERLAY_ARCHIVE_MEMBERS: [&str; 10] = [
+const OVERLAY_ARCHIVE_MEMBERS: [&str; 9] = [
     "overlay.ext4",
     "overlay.verity",
     "overlay.roothash",
@@ -1021,7 +1020,6 @@ const OVERLAY_ARCHIVE_MEMBERS: [&str; 10] = [
     "mvm-guest-netinit",
     "mvm-egress-client",
     "mvm-oci-entrypoint",
-    "mvm-verity-init",
     CHECKSUM_MANIFEST_FILE,
 ];
 
@@ -2189,7 +2187,6 @@ mod tests {
             addon_dns: make_bin("addon-dns"),
             exit_report: make_bin("exit-report"),
             forward_proxy: make_bin("forward-proxy"),
-            verity_init: make_bin("verity-init"),
         };
 
         let artifact = build_runtime_overlay_from_guest_binaries(

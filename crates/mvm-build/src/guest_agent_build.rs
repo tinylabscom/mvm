@@ -24,12 +24,11 @@ pub const GUEST_BUILD_VERBOSE_ENV: &str = "MVM_GUEST_BUILD_VERBOSE";
 
 /// Static guest binaries required while materializing and booting an OCI root.
 /// Release packaging and download verification share this canonical set.
-pub const OCI_GUEST_RUNTIME_BINARY_NAMES: [&str; 5] = [
+pub const OCI_GUEST_RUNTIME_BINARY_NAMES: [&str; 4] = [
     "mvm-guest-agent",
     "mvm-guest-netinit",
     "mvm-egress-client",
     "mvm-oci-entrypoint",
-    "mvm-verity-init",
 ];
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -57,7 +56,6 @@ pub struct GuestAgentLayout {
     pub netinit: PathBuf,
     pub egress_client: PathBuf,
     pub entrypoint_runner: PathBuf,
-    pub verity_init: PathBuf,
 }
 
 /// Built guest runtime binary paths ready to install into the cache.
@@ -67,7 +65,6 @@ pub struct GuestRuntimeBinaryPaths<'a> {
     pub netinit: &'a Path,
     pub egress_client: &'a Path,
     pub entrypoint_runner: &'a Path,
-    pub verity_init: &'a Path,
 }
 
 /// Bump when a previously populated source-keyed guest cache may contain
@@ -89,7 +86,6 @@ impl GuestAgentLayout {
             netinit: dir.join("mvm-guest-netinit"),
             egress_client: dir.join("mvm-egress-client"),
             entrypoint_runner: dir.join("mvm-oci-entrypoint"),
-            verity_init: dir.join("mvm-verity-init"),
             dir,
         }
     }
@@ -99,7 +95,6 @@ impl GuestAgentLayout {
             && self.netinit.is_file()
             && self.egress_client.is_file()
             && self.entrypoint_runner.is_file()
-            && self.verity_init.is_file()
     }
 
     pub fn binaries(&self) -> MvmRuntimeBinaries {
@@ -108,7 +103,6 @@ impl GuestAgentLayout {
             netinit: self.netinit.clone(),
             egress_client: self.egress_client.clone(),
             entrypoint_runner: self.entrypoint_runner.clone(),
-            verity_init: self.verity_init.clone(),
         }
     }
 }
@@ -119,7 +113,6 @@ pub struct RuntimeOverlayGuestBinaries {
     pub agent: PathBuf,
     pub netinit: PathBuf,
     pub seccomp_apply: PathBuf,
-    pub verity_init: PathBuf,
     pub runner: PathBuf,
     pub egress_client: PathBuf,
     pub addon_dns: PathBuf,
@@ -134,7 +127,6 @@ pub struct RuntimeOverlayGuestLayout {
     pub agent: PathBuf,
     pub netinit: PathBuf,
     pub seccomp_apply: PathBuf,
-    pub verity_init: PathBuf,
     pub runner: PathBuf,
     pub egress_client: PathBuf,
     pub addon_dns: PathBuf,
@@ -154,7 +146,6 @@ impl RuntimeOverlayGuestLayout {
             agent: dir.join("agent"),
             netinit: dir.join("netinit"),
             seccomp_apply: dir.join("seccomp-apply"),
-            verity_init: dir.join("verity-init"),
             runner: dir.join("runner"),
             egress_client: dir.join("egress-client"),
             addon_dns: dir.join("addon-dns"),
@@ -169,7 +160,6 @@ impl RuntimeOverlayGuestLayout {
         self.agent.is_file()
             && self.netinit.is_file()
             && self.seccomp_apply.is_file()
-            && self.verity_init.is_file()
             && self.runner.is_file()
             && self.egress_client.is_file()
             && self.addon_dns.is_file()
@@ -183,7 +173,6 @@ impl RuntimeOverlayGuestLayout {
             agent: self.agent.clone(),
             netinit: self.netinit.clone(),
             seccomp_apply: self.seccomp_apply.clone(),
-            verity_init: self.verity_init.clone(),
             runner: self.runner.clone(),
             egress_client: self.egress_client.clone(),
             addon_dns: self.addon_dns.clone(),
@@ -256,8 +245,6 @@ impl GuestAgentBuildSpec {
             "mvm-guest-netinit".to_string(),
             "--bin".to_string(),
             "mvm-oci-entrypoint".to_string(),
-            "--bin".to_string(),
-            "mvm-verity-init".to_string(),
             "--bin".to_string(),
             "mvm-egress-client".to_string(),
             "--features".to_string(),
@@ -521,7 +508,6 @@ pub fn resolve_or_build_guest_binaries(
             netinit: &built.1,
             egress_client: &built.2,
             entrypoint_runner: &built.3,
-            verity_init: &built.4,
         },
         cache_root,
         cache_key,
@@ -544,7 +530,6 @@ pub fn install_into_cache(
     install_one(src.netinit, &layout.netinit)?;
     install_one(src.egress_client, &layout.egress_client)?;
     install_one(src.entrypoint_runner, &layout.entrypoint_runner)?;
-    install_one(src.verity_init, &layout.verity_init)?;
 
     // Validate on the way into the cache — once per build, rather than on every
     // invocation. A wrong-architecture or dynamically linked artifact cached
@@ -648,7 +633,6 @@ fn build_runtime_overlay_guest_binaries_into_cache(
         "--bin".to_string(),
         "mvm-seccomp-apply".to_string(),
         "--bin".to_string(),
-        "mvm-verity-init".to_string(),
         "--bin".to_string(),
         "mvm-ping".to_string(),
         "--bin".to_string(),
@@ -672,7 +656,6 @@ fn build_runtime_overlay_guest_binaries_into_cache(
     install_one(&output_dir.join("mvm-guest-agent"), &layout.agent)?;
     install_one(&output_dir.join("mvm-guest-netinit"), &layout.netinit)?;
     install_one(&output_dir.join("mvm-seccomp-apply"), &layout.seccomp_apply)?;
-    install_one(&output_dir.join("mvm-verity-init"), &layout.verity_init)?;
     install_one(&output_dir.join("mvm-ping"), &layout.ping)?;
     install_one(&output_dir.join("mvm-runner"), &layout.runner)?;
     install_one(&output_dir.join("mvm-egress-client"), &layout.egress_client)?;
@@ -735,9 +718,9 @@ fn install_one(src: &Path, dst: &Path) -> Result<(), GuestAgentBuildError> {
     Ok(())
 }
 
-/// The five built guest binary paths, in the order `agent, netinit,
-/// egress_client, entrypoint_runner, verity_init`.
-type BuiltGuestBinaries = (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf);
+/// The four built guest binary paths, in the order `agent, netinit,
+/// egress_client, entrypoint_runner`.
+type BuiltGuestBinaries = (PathBuf, PathBuf, PathBuf, PathBuf);
 
 /// Run `cargo zigbuild` for the spec, returning the built binary paths.
 pub fn build_guest_binaries(
@@ -784,25 +767,12 @@ pub fn build_guest_binaries(
     let netinit = dir.join("mvm-guest-netinit");
     let egress_client = dir.join("mvm-egress-client");
     let entrypoint_runner = dir.join("mvm-oci-entrypoint");
-    let verity_init = dir.join("mvm-verity-init");
-    for p in [
-        &agent,
-        &netinit,
-        &egress_client,
-        &entrypoint_runner,
-        &verity_init,
-    ] {
+    for p in [&agent, &netinit, &egress_client, &entrypoint_runner] {
         if !p.is_file() {
             return Err(GuestAgentBuildError::OutputMissing(p.clone()));
         }
     }
-    Ok((
-        agent,
-        netinit,
-        egress_client,
-        entrypoint_runner,
-        verity_init,
-    ))
+    Ok((agent, netinit, egress_client, entrypoint_runner))
 }
 
 fn zigbuild_args_for_output(args: &[String]) -> Vec<String> {
@@ -1022,7 +992,6 @@ mod tests {
             &layout.netinit,
             &layout.egress_client,
             &layout.entrypoint_runner,
-            &layout.verity_init,
         ] {
             write_exec(path, bytes).expect("seed guest cache binary");
         }
@@ -1063,7 +1032,6 @@ mod tests {
             "mvm-guest-netinit",
             "mvm-egress-client",
             "mvm-oci-entrypoint",
-            "mvm-verity-init",
         ]
         .iter()
         .map(|n| {
@@ -1080,7 +1048,6 @@ mod tests {
                     netinit: &paths[1],
                     egress_client: &paths[2],
                     entrypoint_runner: &paths[3],
-                    verity_init: &paths[4],
                 },
                 cache_root,
                 "test-key",
@@ -1126,13 +1093,11 @@ mod tests {
         let netinit = source.path().join("mvm-guest-netinit");
         let egress_client = source.path().join("mvm-egress-client");
         let entrypoint_runner = source.path().join("mvm-oci-entrypoint");
-        let verity_init = source.path().join("mvm-verity-init");
         for (path, tag) in [
             (&agent, b"agent".as_slice()),
             (&netinit, b"netinit".as_slice()),
             (&egress_client, b"egress-client".as_slice()),
             (&entrypoint_runner, b"entrypoint-runner".as_slice()),
-            (&verity_init, b"verity-init".as_slice()),
         ] {
             std::fs::write(path, fake_static_elf(arch, tag)).unwrap();
         }
@@ -1144,7 +1109,6 @@ mod tests {
                 netinit: &netinit,
                 egress_client: &egress_client,
                 entrypoint_runner: &entrypoint_runner,
-                verity_init: &verity_init,
             },
             cache.path(),
             version,
@@ -1208,7 +1172,6 @@ mod tests {
         assert_eq!(l.netinit, l.dir.join("mvm-guest-netinit"));
         assert_eq!(l.egress_client, l.dir.join("mvm-egress-client"));
         assert_eq!(l.entrypoint_runner, l.dir.join("mvm-oci-entrypoint"));
-        assert_eq!(l.verity_init, l.dir.join("mvm-verity-init"));
     }
 
     #[test]
@@ -1232,7 +1195,6 @@ mod tests {
                 "mvm-guest-agent",
                 "mvm-guest-netinit",
                 "mvm-oci-entrypoint",
-                "mvm-verity-init",
                 "mvm-egress-client",
             ]
         );
@@ -1397,7 +1359,6 @@ rust = "1.91.1"
         let netinit_src = tmp.path().join("n");
         let egress_client_src = tmp.path().join("e");
         let entrypoint_runner_src = tmp.path().join("r");
-        let verity_init_src = tmp.path().join("v");
         // Must match the arch this test installs under, not the build host:
         // `install_into_cache` validates each artifact against the arch it is
         // cached for. Using `GuestArch::host()` here passed on an arm64 macOS
@@ -1409,7 +1370,6 @@ rust = "1.91.1"
             (&netinit_src, b"NETINIT".as_slice()),
             (&egress_client_src, b"EGRESS".as_slice()),
             (&entrypoint_runner_src, b"RUNNER".as_slice()),
-            (&verity_init_src, b"VERITY".as_slice()),
         ] {
             std::fs::write(path, fake_static_elf(elf_arch, tag)).unwrap();
         }
@@ -1421,7 +1381,6 @@ rust = "1.91.1"
                 netinit: &netinit_src,
                 egress_client: &egress_client_src,
                 entrypoint_runner: &entrypoint_runner_src,
-                verity_init: &verity_init_src,
             },
             &cache,
             version,
@@ -1464,7 +1423,6 @@ rust = "1.91.1"
                 netinit: &tmp.path().join("missing-netinit"),
                 egress_client: &tmp.path().join("missing-egress-client"),
                 entrypoint_runner: &tmp.path().join("missing-entrypoint-runner"),
-                verity_init: &tmp.path().join("missing-verity-init"),
             },
             &tmp.path().join("cache"),
             version,

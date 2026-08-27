@@ -247,7 +247,7 @@ jobs:
 
   # Plan 74 W1.4b / ADR-018: the verity-sealed mvm runtime overlay
   # disk. Attached as `/dev/vdc` at every microVM boot;
-  # `mvm-verity-init` mounts it at `/mvm/runtime` so the guest agent,
+  # the universal initramfs agent mounts it at `/mvm/runtime` so the agent,
   # seccomp shim, and per-language SDK runtime libraries live in a
   # single mvm-controlled blob instead of being baked into every
   # per-image rootfs. Built per-arch from `nix/images/runtime-overlay/`.
@@ -300,7 +300,7 @@ jobs:
           cp -L "$STORE_PATH/VERSION"          "staging/runtime-overlay-${ARCH}/VERSION"
           for bin in \
             mvm-guest-agent mvm-guest-netinit \
-            mvm-egress-client mvm-oci-entrypoint mvm-verity-init; do
+            mvm-egress-client mvm-oci-entrypoint; do
             cp -L "$STORE_PATH/guest-runtime/$bin" "staging/runtime-overlay-${ARCH}/$bin"
           done
           (
@@ -308,14 +308,14 @@ jobs:
             sha256sum \
               overlay.ext4 overlay.verity overlay.roothash VERSION \
               mvm-guest-agent mvm-guest-netinit \
-              mvm-egress-client mvm-oci-entrypoint mvm-verity-init \
+              mvm-egress-client mvm-oci-entrypoint \
               > checksums-sha256.txt
           )
           tar -C "staging/runtime-overlay-${ARCH}" \
             -czf "staging/runtime-overlay-${ARCH}.tar.gz" \
             overlay.ext4 overlay.verity overlay.roothash VERSION \
             mvm-guest-agent mvm-guest-netinit \
-            mvm-egress-client mvm-oci-entrypoint mvm-verity-init \
+            mvm-egress-client mvm-oci-entrypoint \
             checksums-sha256.txt
           (
             cd staging

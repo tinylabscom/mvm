@@ -90,25 +90,8 @@ pub(crate) const BRIDGE_SPEC_FILE: &str = "qemu-vsock-bridge.json";
 pub const DEFAULT_CMDLINE: &str = "console=ttyS0 root=/dev/vda rw init=/init mvm.backend=qemu";
 pub const VERITY_CMDLINE: &str = "console=ttyS0 mvm.backend=qemu";
 
-pub fn qemu_verity_initrd_path(config: &VmStartConfig) -> Option<PathBuf> {
-    config
-        .verity_path
-        .as_deref()
-        .zip(config.roothash.as_deref())
-        .and_then(|_| {
-            Path::new(&config.rootfs_path)
-                .parent()
-                .map(|p| p.join("rootfs.initrd"))
-        })
-        .filter(|p| p.exists())
-}
-
 pub fn qemu_effective_initrd(config: &VmStartConfig) -> Option<PathBuf> {
-    config
-        .initrd_path
-        .as_ref()
-        .map(PathBuf::from)
-        .or_else(|| qemu_verity_initrd_path(config))
+    config.initrd_path.as_ref().map(PathBuf::from)
 }
 
 pub fn qemu_verity_enabled(config: &VmStartConfig) -> bool {
