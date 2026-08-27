@@ -20,6 +20,8 @@ production hostname from GitHub Pages to that deployment.
 - [x] Make the GitHub Pages workflow deploy from the checked-in Wrangler config.
 - [x] Fail fast unless the GitHub repository secrets can access the `mvm` Pages
       project in their selected Cloudflare account.
+- [x] Keep project creation out of deployment so an existing project does not
+      produce an expected-failure annotation on every successful run.
 - [x] Validate the site and publish a production-branch Pages deployment.
 - [x] Verify the Pages deployment URL serves the required COOP/COEP headers.
 - [x] Select the newest semantic boot-image release that actually contains the

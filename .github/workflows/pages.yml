@@ -25,18 +25,6 @@ jobs:
   cloudflare-account:
     runs-on: ubuntu-latest
     steps:
-      - name: Ensure Cloudflare Pages project exists
-        uses: cloudflare/wrangler-action@v4
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          wranglerVersion: "4.127.0"
-          command: pages project create mvm --production-branch=main
-        continue-on-error: true
-
-      # Project creation also fails when the project already exists. This
-      # second call must succeed, so a bad account ID or token still fails the
-      # workflow before the expensive site build begins.
       - name: Verify Cloudflare account and Pages project
         uses: cloudflare/wrangler-action@v4
         with:
@@ -55,7 +43,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           package_json_file: public/package.json
 

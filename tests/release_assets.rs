@@ -603,8 +603,13 @@ fn pages_deployment_uses_the_checked_in_wrangler_config() {
         workflow.contains("cloudflare-account:")
             && account_job.contains("runs-on: ubuntu-latest")
             && workflow.contains("needs: cloudflare-account")
-            && workflow.contains("command: pages deployment list --project-name=mvm"),
+            && workflow.contains("command: pages deployment list --project-name=mvm")
+            && !workflow.contains("pages project create"),
         "the Pages workflow must verify the configured account and project before building"
+    );
+    assert!(
+        workflow.contains("uses: pnpm/action-setup@v6"),
+        "the Pages workflow must use the Node 24-compatible pnpm setup action"
     );
     assert!(
         workflow.contains("workingDirectory: public")
