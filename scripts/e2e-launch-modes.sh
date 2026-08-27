@@ -46,7 +46,7 @@ export MVM_EMBED_NO_CACHE="e2e-$(date +%s)"
 
 # Floor on scenarios that must actually execute. See the assertion after the
 # cucumber run for why a count, not just an exit status.
-MIN_SCENARIOS=16
+MIN_SCENARIOS=17
 SCENARIO_LOG="$(mktemp -t mvm-e2e-scenarios)"
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 MVMCTL="$TARGET_DIR/debug/mvmctl"

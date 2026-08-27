@@ -1416,6 +1416,33 @@ pub fn resolve_launch(
         "admit window: admission"
     );
 
+    // Clamp the vCPU request to what this backend can actually create, and say
+    // so. Before the backend is chosen there is nothing to clamp against, and
+    // after the launch it is too late to tell anyone.
+    //
+    // Not an error. `--cpus 4` is a portable command meeting a host limit, and
+    // refusing it would make the same script succeed on Linux and fail on
+    // macOS for a reason the user cannot act on — worse, HVF's default is 2, so
+    // a hard refusal at a ceiling of 1 failed *every* launch on that backend.
+    // Silence is the other failure: a guest on one CPU while its admitted plan
+    // says four, with nothing to explain the performance.
+    if let Some(granted) =
+        mvm_core::vm_backend::clamp_vcpus(start_config.cpus, backend.capabilities().max_vcpus)
+    {
+        ui::warn(&format!(
+            "{} supports at most {granted} vCPU(s); {} requested, booting with {granted}",
+            backend.name(),
+            start_config.cpus,
+        ));
+        tracing::info!(
+            backend = backend.name(),
+            requested = start_config.cpus,
+            granted,
+            "vcpu request clamped to the backend ceiling"
+        );
+        start_config.cpus = granted;
+    }
+
     let t_overlay = std::time::Instant::now();
     crate::commands::vm::up::attach_runtime_overlay_if_cached(&mut start_config, backend.name())?;
     tracing::debug!(

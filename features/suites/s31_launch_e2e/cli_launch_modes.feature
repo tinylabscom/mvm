@@ -93,6 +93,28 @@ Feature: every README-documented CLI launch mode boots a real guest
     And the guest printed exactly "1/1"
     And the guest control plane came up
 
+  # Over the backend's ceiling is clamped and reported, never refused.
+  #
+  # HVF tops out at 4 — measured on this host, not derived: 1, 2 and 4 boot and
+  # report back, while 5, 6 and 8 never reach the guest agent. The MMIO gap fits
+  # 124 redistributor frames and the host has 16 cores, so neither explains it;
+  # the number is empirical and the capability says so.
+  #
+  # Refusing would make a portable `--cpus 8` succeed on Linux and fail on
+  # macOS for a reason the user cannot act on — and HVF's own default of 2 once
+  # sat above a ceiling of 1, which failed *every* launch on this backend. The
+  # warning is the point: the silent version booted a guest on fewer CPUs than
+  # its admitted plan claimed, with nothing to explain it.
+  @live
+  Scenario: a vCPU request beyond the backend ceiling is clamped and reported
+    When I launch "machine run --image alpine --cpus 8 -- sh -c 'echo $(nproc)/$(grep -c ^processor /proc/cpuinfo)'"
+    Then the launch succeeds
+    And the output mentions "supports at most 4"
+    # Last line, not the whole of stdout: the clamp warning is chrome and
+    # legitimately precedes the guest's output on the same stream.
+    And the guest's last line is "4/4"
+    And the guest control plane came up
+
   # `--memory` was never verified on this path either, and it cannot be checked
   # at 512M: that is also the built-in default, so a guest that ignored the flag
   # entirely would report the expected number. 1024M is the smallest request

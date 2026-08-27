@@ -408,6 +408,20 @@ impl VmmDriver for HvfDriver {
         // vsock is live-proven through the unified run loop; the rest land as
         // pause/snapshot/networking are wired onto the primitive.
         VmCapabilities {
+            // Four, established by probing this backend rather than derived:
+            // 1, 2 and 4 boot and report the CPUs back through `nproc` and
+            // `/proc/cpuinfo`; 5, 6 and 8 never reach the guest agent
+            // ("connect to hvf vsock socket: Connection refused"), so the guest
+            // does not finish booting.
+            //
+            // The cause is not the device tree. The MMIO gap between
+            // `GICV3_REDIST_BASE` and `SERIAL_MMIO_BASE` fits 124 redistributor
+            // frames, and the host has 16 logical cores, so neither the address
+            // map nor the hardware explains it. Recording the measured number
+            // and saying it is unexplained beats inventing a derivation that
+            // sounds principled — if the underlying limit is a bug in the vCPU
+            // threading, a plausible-looking formula would hide it.
+            max_vcpus: Some(4),
             pause_resume: true,
             // The supervisor serializes guest RAM plus vCPU and deterministic
             // device state under an acknowledged pause, and reloads both into a
