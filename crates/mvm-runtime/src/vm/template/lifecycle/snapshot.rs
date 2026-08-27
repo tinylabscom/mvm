@@ -47,7 +47,6 @@ fn persisted_to_synthetic_spec(p: &PersistedManifest) -> TemplateSpec {
         template_id: p.manifest_hash.clone(),
         flake_ref: p.flake_ref.clone(),
         profile: p.profile.clone(),
-        role: String::new(),
         vcpus: p.vcpus,
         mem_mib: p.mem_mib,
         mem_initial_mib: p.mem_initial_mib,
