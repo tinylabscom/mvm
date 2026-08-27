@@ -95,24 +95,29 @@ Feature: every README-documented CLI launch mode boots a real guest
 
   # Over the backend's ceiling is clamped and reported, never refused.
   #
-  # HVF tops out at 4 — measured on this host, not derived: 1, 2 and 4 boot and
-  # report back, while 5, 6 and 8 never reach the guest agent. The MMIO gap fits
-  # 124 redistributor frames and the host has 16 cores, so neither explains it;
-  # the number is empirical and the capability says so.
-  #
-  # Refusing would make a portable `--cpus 8` succeed on Linux and fail on
+  # Refusing would make a portable `--cpus 9999` succeed on Linux and fail on
   # macOS for a reason the user cannot act on — and HVF's own default of 2 once
   # sat above a ceiling of 1, which failed *every* launch on this backend. The
   # warning is the point: the silent version booted a guest on fewer CPUs than
   # its admitted plan claimed, with nothing to explain it.
+  #
+  # The request is absurd on purpose. HVF's ceiling comes from
+  # `hv_vm_get_max_vcpu_count`, so it is a property of the host and not a
+  # constant this suite can name — an earlier revision asserted "supports at
+  # most 4", which was a number a bug had produced and which went stale the
+  # moment the bug was fixed. A count no machine will ever have exercises the
+  # clamp on any host, and the assertion checks that the ceiling was reported
+  # rather than what it happens to be here.
   @live
   Scenario: a vCPU request beyond the backend ceiling is clamped and reported
-    When I launch "machine run --image alpine --cpus 8 -- sh -c 'echo $(nproc)/$(grep -c ^processor /proc/cpuinfo)'"
+    When I launch "machine run --image alpine --cpus 9999 -- sh -c 'echo clamped-and-booted'"
     Then the launch succeeds
-    And the output mentions "supports at most 4"
+    And the output mentions "supports at most"
+    And the output mentions "9999 requested"
     # Last line, not the whole of stdout: the clamp warning is chrome and
-    # legitimately precedes the guest's output on the same stream.
-    And the guest's last line is "4/4"
+    # legitimately precedes the guest's output on the same stream. A fixed
+    # token rather than the granted count, which is whatever this host allows.
+    And the guest's last line is "clamped-and-booted"
     And the guest control plane came up
 
   # `--memory` was never verified on this path either, and it cannot be checked
