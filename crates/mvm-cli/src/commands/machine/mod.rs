@@ -215,7 +215,7 @@ pub(in crate::commands) struct MachineRunArgs {
         long,
         value_name = "HOST_PORT:GUEST_PORT",
         value_parser = super::shared::clap_port_spec,
-        conflicts_with_all = ["detach", "json", "tty", "interactive", "entrypoint"]
+        conflicts_with_all = ["json", "tty", "interactive", "entrypoint"]
     )]
     pub port: Vec<String>,
     /// Return machine startup details as JSON.

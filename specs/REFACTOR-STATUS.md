@@ -553,6 +553,13 @@ for detailed scope and acceptance criteria.
       without redefining Cargo's built-in registry, and future derivations
       cannot silently restore the API endpoint.
 
+- [ ] **Detached declared ingress**
+      (`specs/plans/2026-08-26-detached-declared-ingress.md`, issue #2901).
+      Persistent `machine run -d` launches can now carry signed `--port`
+      declarations before boot, and the Obscura example uses that lifecycle
+      instead of the retired dynamic-forwarding verb. Validation and merge are
+      in progress.
+
 - [x] **`.mvmev` offline verifiability**
       (`specs/plans/2026-08-25-mvmev-offline-verifiability.md`, issue #2863).
       The format-level gap is complete: schema version 1 now normatively names

@@ -580,7 +580,7 @@ fn run_port_is_repeatable_and_implies_persistence() {
 }
 
 #[test]
-fn run_port_rejects_invalid_mappings_and_detached_ownership() {
+fn run_port_rejects_invalid_mappings_and_supports_detached_ownership() {
     let invalid = parse_run(&["run", "--image", "alpine", "--port", "abc:3000"])
         .expect_err("invalid ports must fail during CLI parsing");
     assert_eq!(invalid.kind(), clap::error::ErrorKind::ValueValidation);
@@ -593,8 +593,14 @@ fn run_port_rejects_invalid_mappings_and_detached_ownership() {
         "8080:3000",
         "--detach",
     ])
-    .expect_err("a detached CLI cannot own the forwarding process");
-    assert_eq!(detached.kind(), clap::error::ErrorKind::ArgumentConflict);
+    .expect("declared ingress belongs to the persistent machine, not the foreground CLI");
+    assert_eq!(detached.port, vec!["8080:3000"]);
+    assert!(detached.detach);
+    assert_eq!(
+        detached.resolve_mode().expect("detached ingress resolves"),
+        MachineRunMode::Persistent
+    );
+    assert_eq!(post_start_action(&detached), PostStart::PrintId);
 
     let with_command = parse_run(&[
         "run",
