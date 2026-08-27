@@ -48,12 +48,15 @@ Feature: machine run request contract
     Then the command exits with code 1
     And the error output contains "needs a terminal on stdin"
 
-  # A foreground mvmctl process owns the socat children and cleans them up on
-  # Ctrl-C. Claiming detach at the same time would strand that ownership.
-  Scenario: machine run refuses to detach an attached port forward
-    When I run mvmctl with "machine run --image alpine --port 8080:3000 --detach" and an isolated mvm home
-    Then the command exits with code 2
-    And the error output contains "cannot be used"
+  # Declared ingress is signed before boot and belongs to the persistent
+  # machine runtime, so the foreground CLI may detach without orphaning it.
+  Scenario: machine run accepts declared ingress with detached ownership
+    Given an isolated mvm home
+    When I run mvmctl in the isolated mvm home with "machine run --image alpine --port 8080:3000 --detach --dry-run --name bdd-detached-ingress"
+    Then the command exits with code 0
+    And the output contains "no VM will be booted"
+    And the output contains "machine: bdd-detached-ingress"
+    And the isolated mvm home does not contain directory "vms/bdd-detached-ingress"
 
   # Egress-enabling dry runs are deliberately absent. `--allow-host` / `--net`
   # make the dry run resolve an *available* egress-capable backend, so the

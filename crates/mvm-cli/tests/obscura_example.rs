@@ -38,3 +38,13 @@ fn obscura_example_documents_explicit_opt_in() {
     assert!(readme.contains("Chromium remains the default"));
     assert!(readme.contains("Apache-2.0"));
 }
+
+#[test]
+fn obscura_example_declares_ingress_before_a_detached_boot() {
+    let readme =
+        fs::read_to_string(example_file("README.md")).expect("Obscura README must be readable");
+
+    assert!(readme.contains("machine run -d"));
+    assert!(readme.contains("--port 9222:9222"));
+    assert!(!readme.contains("machine forward"));
+}

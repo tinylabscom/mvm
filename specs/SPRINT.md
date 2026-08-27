@@ -3097,6 +3097,15 @@ to the configured ceiling and the first terse response immediately after it.
 - [x] Record the delivery in
       `specs/sprint/delivery/2888-hvf-vcpu-contract.md`.
 
+## 2026-08-26 detached declared ingress
+
+- [x] Allow signed `--port` ingress declarations on detached persistent
+      `machine run` launches.
+- [x] Replace the Obscura example's retired dynamic-forwarding step with the
+      pre-boot declaration and guard both CLI parsing and documentation.
+- [ ] Merge the repair through the queue and close issue #2901 from the merged
+      PR.
+
 ## 2026-08-26 Security peer-policy mutation witness
 
 - [x] Reproduce the scheduled Security failure from run 32931995875 as the
