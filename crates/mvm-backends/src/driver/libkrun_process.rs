@@ -1,27 +1,18 @@
-//! libkrun backend for mvm.
+//! Host-process mechanics for the libkrun backend.
 //!
-//! Tier 2 microVM backend that runs on
-//! Linux KVM and macOS Apple Silicon. The lifecycle
-//! delegates to a per-VM `mvm-libkrun-supervisor` subprocess
-//! rather than calling libkrun in-process: `krun_start_enter` calls
-//! `exit()` on the host process when the guest powers off, so any
-//! in-process registry would tear down sibling guests. One process per
-//! VM scopes the `exit()` to that supervisor and lets the parent
-//! `mvmctl` survive a guest shutdown.
+//! libkrun's lifecycle delegates to a per-VM `mvm-libkrun-supervisor`
+//! subprocess rather than calling libkrun in-process: `krun_start_enter` calls
+//! `exit()` on the host process when the guest powers off, so an in-process
+//! registry would tear down sibling guests. One process per VM scopes that
+//! `exit()` and lets the parent `mvmctl` survive a guest shutdown.
 //!
-//! ## Lifecycle
+//! This module is the host side of that arrangement — supervisor resolution,
+//! PID-file handling, cmdline and disk assembly. The `VmmDriver` half is
+//! [`super::libkrun`].
 //!
-//! - `start` writes `~/.mvm/vms/<name>/{rootfs.ref,kernel.ref}` runtime
-//!   metadata (so `mvmctl console` can find the artifacts), serializes a
-//!   [`SupervisorConfig`], spawns `mvm-libkrun-supervisor` with the JSON
-//!   on stdin, and waits up to `PID_FILE_TIMEOUT` for the supervisor
-//!   to write its PID file. Returns once the supervisor is running or
-//!   exits with an error if the spawn fails or PID file never appears.
-//! - `stop` reads `<vm_state_dir>/libkrun.pid`, arms a host process-exit
-//!   observer before `SIGTERM`, and falls back to bounded polling plus
-//!   `SIGKILL` if the process does not exit within `STOP_TIMEOUT`.
-//! - `status` reads the PID file and probes with `kill(pid, 0)`.
-//! - `list` walks `~/.mvm/vms/*/libkrun.pid`.
+//! The file was called `libkrun_legacy` while the backend split was in
+//! progress. Nothing in it is legacy: it is the live path on Linux and on
+//! macOS 13-25.
 
 use anyhow::{Context, Result, anyhow, bail};
 use libkrun_sys::{BridgeRestartPolicy, KrunContext, SupervisorAttachConfig, SupervisorBaseConfig};

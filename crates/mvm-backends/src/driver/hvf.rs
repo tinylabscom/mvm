@@ -26,7 +26,7 @@ use mvm_vmm::host::hvf_supervisor::{
 };
 use mvm_vmm::hvf_handoff::HvfHandoffRequest;
 
-use crate::driver::hvf_legacy::{
+use crate::driver::hvf_process::{
     self as hvf_backend, PID_FILE_NAME, PID_FILE_TIMEOUT, resolve_supervisor_path,
 };
 use mvm_contract::grants::CpuGrant;

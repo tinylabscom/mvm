@@ -30,7 +30,7 @@ use mvm_core::checkpoint::{
 };
 use mvm_vmm::host::hvf_supervisor::{HvfDisk, HvfSupervisorConfig};
 
-use crate::driver::hvf_legacy::{
+use crate::driver::hvf_process::{
     PID_FILE_NAME, PID_FILE_TIMEOUT, read_pid, resolve_supervisor_path,
 };
 
