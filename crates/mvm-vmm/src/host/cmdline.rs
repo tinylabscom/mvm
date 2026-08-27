@@ -542,13 +542,28 @@ mod tests {
 
     #[test]
     fn verity_cmdline_takes_the_console_from_the_driver_seam_not_a_hardcoded_uart() {
+        // Isolate MVM_HOME: this seeds an initramfs cache, and it also keeps
+        // the host signer out — an un-isolated home leaks a real
+        // `mvm.host_signer_pub=` token in and makes the assertions below pass
+        // for a reason that has nothing to do with the console.
+        let _guard = crate::host::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", dir.path());
         let rootfs = dir.path().join("rootfs.ext4");
         std::fs::write(&rootfs, b"rootfs").unwrap();
         let config = VmStartConfig {
             rootfs_path: rootfs.display().to_string(),
-            verity_path: Some("/tmp/rootfs.verity".into()),
+            verity_path: Some(dir.path().join("rootfs.verity").display().to_string()),
             roothash: Some("a".repeat(64)),
+            // `verity_enabled` needs an initramfs as well as the sidecar pair:
+            // the initramfs is PID 1 on a sealed boot and is what sets the
+            // dm-verity target up. Without it this is not a verity boot, the
+            // cmdline carries no mvm tokens at all, and the driver's own base
+            // is used instead — which is a different function's contract.
+            initrd_path: Some(seed_universal_initramfs(dir.path())),
             ..Default::default()
         };
         // libkrun's base: a verity boot (has_disk=false) carries only the

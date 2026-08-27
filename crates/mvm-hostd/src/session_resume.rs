@@ -687,9 +687,15 @@ mod tests {
             .unwrap()
     }
 
+    /// Material for a resume the tests actually boot: the mock backend.
+    ///
+    /// A real backend name sends `cold_boot_config` through the runtime-overlay
+    /// resolver, which reads the host cache — so these tests would pass on a
+    /// developer box that happens to have one and fail on a clean CI home. The
+    /// one test that cares about the backend name sets its own.
     fn material() -> ResumePlanMaterial {
         ResumePlanMaterial {
-            backend_name: "hvf".to_string(),
+            backend_name: "mock".to_string(),
             image_name: "demo".to_string(),
             image_sha256: "ab".repeat(32),
             kernel_sha256: Some("cd".repeat(32)),
@@ -713,6 +719,10 @@ mod tests {
     fn the_material_fields_reach_the_plan_input() {
         let rec = parked_record("sess-alpha");
         let m = material();
+        let m = ResumePlanMaterial {
+            backend_name: "hvf".to_string(),
+            ..m
+        };
         let input = synthesis_for_resume(&rec, &m);
         assert_eq!(input.backend_name, "hvf");
         assert_eq!(input.image_sha256, m.image_sha256);
@@ -1226,12 +1236,7 @@ mod tests {
 
         let kernel = fx.tmp.path().join("vmlinux");
         std::fs::write(&kernel, b"resume-kernel").unwrap();
-        // The material must name the backend the test actually boots. A real
-        // backend resolves the runtime overlay and fails closed without one;
-        // naming `hvf` here while booting `mock` asked for an artifact the
-        // isolated home has no reason to hold.
         let mut m = material();
-        m.backend_name = "mock".to_string();
         m.kernel_sha256 = Some(mvm_core::crypto::image_verify::sha256_file(&kernel).unwrap());
         (rec, m, kernel)
     }
@@ -1536,7 +1541,6 @@ mod tests {
         let kernel = fx.tmp.path().join("vmlinux");
         std::fs::write(&kernel, b"resume-kernel").unwrap();
         let mut m = material();
-        m.backend_name = "mock".to_string();
         m.kernel_sha256 = Some(mvm_core::crypto::image_verify::sha256_file(&kernel).unwrap());
 
         let audit_dir = fx.tmp.path().join("audit");
