@@ -576,6 +576,23 @@ fn pages_workflow_installs_every_wasm_target_used_by_the_demo() {
 }
 
 #[test]
+fn release_lookups_pass_the_filter_directly_to_gh_jq() {
+    for (name, workflow) in [
+        ("pages.yml", pages_workflow()),
+        ("release.yml", release_workflow()),
+    ] {
+        assert!(
+            workflow.contains("--json tagName --jq '"),
+            "{name} must pass its semantic-version filter directly to gh --jq"
+        );
+        assert!(
+            !workflow.contains("--json tagName --jq -r"),
+            "{name} must pass the filter directly to gh --jq; -r is a standalone jq flag"
+        );
+    }
+}
+
+#[test]
 fn qemu_wasm_site_pack_is_built_once_on_the_boot_image_train() {
     let boot_image = boot_image_workflow();
     let pages = pages_workflow();

@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-26
+Last updated: 2026-08-27
 
 ## In progress
 
@@ -18,8 +18,10 @@ Last updated: 2026-08-26
       Cloudflare Pages consumes the signed, checksummed release artifact while
       retaining the current revision's demo shell. Its oversized WASM module is
       staged as an explicitly decompressed gzip payload so it fits Cloudflare's
-      per-file limit. Workflow contracts, actionlint, workspace
-      tests/check/doctests, and Clippy are green.
+      per-file limit. GitHub CLI receives the semantic-version filter directly
+      through `--jq` in both consuming workflows, with a regression contract
+      against the unsupported standalone jq `-r` flag. Workflow contracts,
+      actionlint, and Clippy are green.
 
 - [x] **AI egress metering and token budgets** —
       `specs/plans/2026-08-21-ai-egress-metering-and-budget.md`.
