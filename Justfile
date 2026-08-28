@@ -45,6 +45,7 @@ build:
 # `--all-targets` is narrower than it sounds: it skips any target behind
 # `required-features`, and on macOS it cannot compile `cfg(target_os = "linux")`
 # files at all. `check-gated` covers both.
+
 # Type-check without codegen
 check:
     ./scripts/cargo-fast.sh check --workspace --all-targets
@@ -57,6 +58,7 @@ check:
 # `rustup target add x86_64-unknown-linux-gnu`. musl is intentionally not the
 # default — libc's ioctl request arg is c_int there vs c_ulong on glibc, so the
 # COW FICLONE path (mvm-runtime) only type-checks against glibc.
+
 # Cross-compile every crate's lib for Linux via zig
 check-linux TARGET="x86_64-unknown-linux-gnu":
     ./scripts/cargo-stable.sh zigbuild --target {{ TARGET }} --workspace --lib --all-features
@@ -82,6 +84,7 @@ check-linux TARGET="x86_64-unknown-linux-gnu":
 # (the same reason `check-linux` is opt-in), and a cold run costs ~8 min because
 # it type-checks the whole workspace for a second target. Run it before pushing
 # anything that changes a shared type's shape; a warm run is far cheaper.
+
 # Type-check the linux-gated and feature-gated targets `just check` cannot see
 check-gated TARGET="x86_64-unknown-linux-gnu":
     ./scripts/cargo-stable.sh --direct cargo-zigbuild check --target {{ TARGET }} --workspace --all-targets
@@ -135,6 +138,7 @@ dev-check:
     just dev-cargo check --workspace
 
 # Verify that the nightly fast path stays pinned and does not leak into the
+
 # stable-compatible Cargo configuration used by release and MSRV lanes.
 check-fast-cargo:
     ./scripts/check-fast-cargo.sh
@@ -173,10 +177,12 @@ sdk-build-typescript:
 # Run the language SDKs' own unit suites. Neither is a cargo target, so
 # `cargo nextest run --workspace` does not touch them and a Rust-only gate
 # leaves the hand-written half of each SDK — the subprocess wrappers, the
+
 # argv builders, the refusal paths — unproven.
 sdk-test: sdk-test-python sdk-test-typescript
 
 # `--extra schema` installs pydantic; without it the eight
+
 # `derive_schema` tests fail on an ImportError rather than being skipped.
 sdk-test-python:
     uv run --directory crates/mvm-sdk/sdks/python --group dev --extra schema pytest -q
@@ -243,6 +249,7 @@ test-doc:
 # nothing for the second checkout — which is why the machine-wide Rust hit rate
 # sits near 2.5% across ~35k compiles rather than the 84% a same-path
 # experiment suggests. Cargo already caches deps within a target dir, so the
+
 # remaining value here is narrow.
 test-cached:
     @command -v sccache >/dev/null || { echo "sccache not found — install with: cargo install sccache"; exit 1; }
@@ -294,6 +301,7 @@ bdd:
 # documented command surface. They overlap in the suite they drive; the split is
 # that this lane also exercises the in-process Rust library seam.
 #
+
 # Boot a real guest through every documented entry point
 e2e-launch:
     ./scripts/e2e-launch-modes.sh
@@ -325,6 +333,7 @@ e2e:
 # Follows each guest's console as it boots; MVM_E2E_FOLLOW=0 silences that.
 # Sweeps its own machines on entry and exit — see `e2e-docs-clean`.
 #
+
 # Every documented example, executed against a real host
 e2e-docs:
     ./scripts/e2e-documented-surface.sh
@@ -332,12 +341,14 @@ e2e-docs:
 # Reap machines a killed e2e run left behind. Scoped to the `bdd-` prefix the
 # suite creates, so it never touches a machine you made.
 #
+
 # Clean up after an interrupted e2e run
 e2e-docs-clean:
     ./scripts/e2e-documented-surface.sh --clean-only
 
 # KVM-backed merge-queue witness for the cheap documented machine lifecycle.
 # The tag selector keeps registry/build-heavy live scenarios in their dedicated
+
 # witness lanes while proving that the public commands operate a real guest.
 bdd-live-ci:
     cargo build --bin mvmctl --features user
@@ -355,6 +366,7 @@ build-supervisors:
 # Dev builds reuse these instead of re-running cargo-zigbuild, which is ~93% of
 # mvm-cli's build-script wall time. Run this after editing anything they link
 # (mvm-build, mvm-core, ...) when you are about to boot a real VM; ordinary
+
 # check/test/clippy runs never need it. Release builds always rebuild.
 embed-refresh:
     #!/usr/bin/env bash
@@ -394,6 +406,7 @@ hvf-oci-allow-host-smoke:
     bash scripts/check-hvf-oci-allow-host-smoke.sh
 
 # Live Apple-Silicon HVF warm-restore matrix. Requires the HVF warm capability
+
 # to have passed its live continuity gate; it never enables that capability.
 hvf-warm-restore:
     bash scripts/check-hvf-warm-restore.sh
@@ -642,8 +655,44 @@ weblinux-demo-build:
 demo-assets:
     [ -d public/public/demo ] || just demo-build
 
+# Download the qemu-wasm-smoke-pack from GitHub releases.
+# This is faster than building from scratch (seconds vs 10-30 minutes).
+# Usage: just qemu-wasm-pack-download [output-dir] [tag]
+#   output-dir: Where to place the unpacked pack (default: ./qemu-wasm-smoke-pack)
+
+# tag:        The boot-image tag to download from (default: latest)
+qemu-wasm-pack-download *ARGS:
+    ./scripts/download-qemu-wasm-smoke-pack.sh {{ ARGS }}
+
+# Build the qemu-wasm-smoke-pack in the Linux builder VM and copy it back.
+# This is an alternative to downloading from GitHub releases.
+# Usage: just qemu-wasm-pack [output-dir]
+
+# output-dir: Where to place the built pack (default: ./qemu-wasm-smoke-pack)
+qemu-wasm-pack *ARGS:
+    ./scripts/build-qemu-wasm-smoke-pack.sh {{ ARGS }}
+
 # Build all demo assets (wasm + weblinux); requires Linux for weblinux
-demo-build-all: demo-build weblinux-demo-build
+# Usage: just demo-build-all [qemu-wasm-pack-path]
+#   qemu-wasm-pack-path: Path to the built pack (default: ./qemu-wasm-smoke-pack)
+
+# If not provided, downloads it first via just qemu-wasm-pack-download
+demo-build-all *PACK_DIR:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just demo-build
+    # Determine pack directory
+    if [ -n "{{ PACK_DIR }}" ]; then
+      PACK_DIR="{{ PACK_DIR }}"
+    else
+      PACK_DIR="$PWD/qemu-wasm-smoke-pack"
+    fi
+    if [ ! -d "$PACK_DIR" ]; then
+      echo "qemu-wasm-smoke-pack not found at $PACK_DIR"
+      echo "Download it first with: just qemu-wasm-pack-download"
+      exit 1
+    fi
+    ./web/weblinux-demo/build.sh "$PACK_DIR"
 
 # ── VMM setup ────────────────────────────────────────────────────────────
 
