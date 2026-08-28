@@ -458,6 +458,11 @@ tier = "parse"
 reason = "downloads or builds a multi-hundred-megabyte artifact over the network; the e2e runner performs it once as setup rather than as an assertion"
 
 [[command]]
+path = "build sdk-sidecar build"
+tier = "parse"
+reason = "boots the Stage 0 builder and builds a multi-megabyte guest artifact; the documented-surface runner performs it as shared setup"
+
+[[command]]
 path = "build validate"
 tier = "parse"
 reason = "needs a generated launch plan to validate"

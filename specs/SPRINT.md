@@ -26,6 +26,15 @@
       tests, workspace tests and doctests, check, and Clippy are green;
       remaining: merge-queue delivery.
 
+- [ ] **SDK sidecar source build — issue #2941.**
+      `specs/plans/2026-08-27-sdk-sidecar-source-build.md`.
+      An explicit builder-VM command now realizes the existing glibc sidecar
+      derivation through Stage 0, verifies its artifact contract, and promotes
+      the source fingerprint atomically with the image. Focused and workspace
+      tests, workspace check, gated Linux/BDD compilation, zero-warning Clippy,
+      all policy gates, and a live aarch64 Stage 0/Nix build are green; merge
+      delivery remains.
+
 - [x] **FlowMux HTTPS live-client repair.**
       `specs/plans/2026-08-27-flowmux-https-live-client.md`.
       The seven live HTTPS egress witnesses now use the pinned multi-arch
