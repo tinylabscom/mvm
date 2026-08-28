@@ -3222,6 +3222,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mvm-host-services"
+version = "0.18.0"
+dependencies = [
+ "mvm-agentd",
+ "mvm-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mvm-hostd"
 version = "0.18.0"
 dependencies = [
@@ -3383,6 +3393,7 @@ dependencies = [
  "mvm-agentd",
  "mvm-contract",
  "mvm-core",
+ "mvm-host-services",
  "mvm-http",
  "schemars",
  "serde",

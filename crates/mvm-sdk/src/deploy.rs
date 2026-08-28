@@ -23,7 +23,6 @@
 //! is the additional sidecar the receiver reads to make scheduling
 //! decisions without unpacking the rest.
 
-use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -659,7 +658,7 @@ impl MvmdClient {
         let endpoint = remote_upload_endpoint(&self.base_url)?;
         let record_json = serde_json::to_string(record)?;
         let bundle_bytes =
-            fs::read(&bundle.archive_path).map_err(|error| DeployError::RemoteProtocol {
+            std::fs::read(&bundle.archive_path).map_err(|error| DeployError::RemoteProtocol {
                 base_url: self.base_url.clone(),
                 reason: format!("opening bundle: {error}"),
             })?;

@@ -15,6 +15,11 @@ members = [
     "crates/mvm-backends",
     "crates/mvm-build",
     "crates/mvm-agentd",
+    # The in-guest host-services C ABI. Its own crate so the object compiled
+    # into every guest carries no host-side toolchain: `mvm-sdk` holds the
+    # decorator parser (tree-sitter) and the deploy record (blake3), both C,
+    # and building the cdylib from that crate dragged them along.
+    "crates/mvm-host-services",
     "crates/mvm-cli",
     "crates/mvm-hostd",
     "crates/mvm-client",
@@ -356,6 +361,7 @@ mvm-core = { path = "crates/mvm-core", version = "0.18.0" }
 mvm-client = { path = "crates/mvm-client", version = "0.18.0" }
 mvm-mcp = { path = "crates/mvm-mcp", version = "0.18.0" }
 mvm-agentd = { path = "crates/mvm-agentd", version = "0.18.0" }
+mvm-host-services = { path = "crates/mvm-host-services", version = "0.18.0" }
 mvm-build = { path = "crates/mvm-build", version = "0.18.0", default-features = false }
 mvm-runtime = { path = "crates/mvm-runtime", version = "0.18.0", default-features = false }
 mvm-vmm = { path = "crates/mvm-vmm", version = "0.18.0" }

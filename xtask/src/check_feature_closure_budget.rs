@@ -60,7 +60,12 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 ///
 /// 483 (was 471): the opt-in `tpm2` attestation provider requires the
 /// `tss-esapi` TPM command stack; the default `mvmctl` closure is unchanged.
-const FEATURE_CLOSURE_BUDGET: usize = 483;
+///
+/// 484 (was 483): the first-party `mvm-host-services` workspace crate, split
+/// out of `mvm-sdk` so the in-guest cdylib stops being compiled from a crate
+/// carrying the decorator parser. It vendors nothing — its dependencies were
+/// already present — so the single new closure node is the crate itself.
+const FEATURE_CLOSURE_BUDGET: usize = 484;
 
 /// The two gates measure nested sets — everything in the default closure is
 /// reachable with all features on — so a feature budget at or below the default

@@ -7,19 +7,16 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
-[lib]
-# The normal Rust library (`lib`) is consumed by mvmctl and the build pipeline.
-# The `cdylib` output is the in-guest host-services FFI shared object the
-# Python/TypeScript SDKs dlopen; the nix package renames it to the stable
-# `libmvm_host_services.so` filename.
-crate-type = ["lib", "cdylib"]
-
 [dependencies]
 mvm-core = { workspace = true }
 # In-guest host-services FFI: drives `host.audit.v1` / `host.time.v1` /
 # `host.cost.v1` over the vsock broker. The broker client and vsock primitives
 # live in the guest-agent crate; mvm-sdk only holds the C-ABI veneer.
 mvm-agentd.workspace = true
+# Status codes for the error taxonomy. The C ABI itself moved to its own crate
+# so the object loaded inside every guest does not carry this crate's
+# host-side decorator toolchain.
+mvm-host-services.workspace = true
 # The Workload IR itself (`mvm_sdk::ir` re-exports `mvm_contract::ir`
 # unchanged — see `src/lib.rs`). The IR's own `JsonSchema` derives come from
 # `mvm-contract/schema`, which this crate's `schema` feature forwards to —

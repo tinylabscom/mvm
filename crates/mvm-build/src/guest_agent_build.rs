@@ -463,7 +463,7 @@ pub fn sdk_cdylib_source_fingerprint(
     workspace_root: &Path,
 ) -> Result<String, GuestAgentBuildError> {
     let mut hasher = Sha256::new();
-    hasher.update(b"mvm-sdk-cdylib-input-v1\0");
+    hasher.update(b"mvm-host-services-cdylib-input-v1\0");
     hash_inputs(
         &mut hasher,
         workspace_root,
@@ -476,8 +476,8 @@ pub fn sdk_cdylib_source_fingerprint(
             "crates/mvm-core/src",
             "crates/mvm-agentd/Cargo.toml",
             "crates/mvm-agentd/src",
-            "crates/mvm-sdk/Cargo.toml",
-            "crates/mvm-sdk/src",
+            "crates/mvm-host-services/Cargo.toml",
+            "crates/mvm-host-services/src",
         ],
     )?;
     Ok(hex::encode(hasher.finalize()))
