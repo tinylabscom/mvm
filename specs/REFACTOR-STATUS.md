@@ -4,6 +4,15 @@ Last updated: 2026-08-28
 
 ## In progress
 
+- [ ] **HVF machine restore dispatch — issue #2961.**
+      `specs/plans/2026-08-27-hvf-machine-restore-dispatch.md`.
+      The `machine` fork/restore surfaces now share the backend-origin
+      dispatcher with `vm checkpoint fork`, preserving the machine surface's
+      Firecracker opt-in without misrouting HVF checkpoints. Focused dispatch
+      regressions are green, and a live two-to-one-vCPU mismatch refuses before
+      restore-target construction. The successful live two-vCPU child witness
+      and merge delivery remain.
+
 - [ ] **Recorded-backend pause and resume — issue #2929.**
       `specs/plans/2026-08-27-recorded-backend-pause-resume.md`.
       Pause/resume now resolves the live machine's owner before dispatch while

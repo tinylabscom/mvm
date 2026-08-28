@@ -174,6 +174,16 @@ impl Default for CaptureFsQuickParamsBuilder {
     }
 }
 
+/// Whether a checkpoint fork may coexist with its captured parent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForkParentLiveness {
+    /// The parent must be stopped before any child bytes are materialized.
+    MustBeStopped,
+    /// The backend has proved that the restored child cannot collide with the
+    /// still-running parent.
+    MayBeRunning,
+}
+
 /// Inputs for forking a child instance from a checkpoint.
 pub struct ForkParams {
     pub checkpoint: CheckpointId,
@@ -183,6 +193,8 @@ pub struct ForkParams {
     /// Where to materialize the child's rootfs (the new VM's state dir).
     pub dest_dir: PathBuf,
     pub created_unix: u64,
+    /// Backend-specific parent coexistence policy for this restore.
+    pub parent_liveness: ForkParentLiveness,
     /// Serialized `SignedExecutionPlan` JSON for the child's own claim-8
     /// admission. When `Some`, the spawner injects it into the child's
     /// `SupervisorConfig.plan` so the supervisor re-verifies it at start.
@@ -212,6 +224,7 @@ pub struct ForkParamsBuilder {
     child_vm_name: Option<String>,
     dest_dir: Option<PathBuf>,
     created_unix: Option<u64>,
+    parent_liveness: ForkParentLiveness,
     child_plan_json: Option<String>,
     child_tenant_id: Option<String>,
 }
@@ -226,6 +239,7 @@ impl ForkParamsBuilder {
             child_vm_name: None,
             dest_dir: None,
             created_unix: None,
+            parent_liveness: ForkParentLiveness::MustBeStopped,
             child_plan_json: None,
             child_tenant_id: None,
         }
@@ -266,6 +280,13 @@ impl ForkParamsBuilder {
         self
     }
 
+    /// Set the backend's live-parent coexistence policy.
+    #[must_use]
+    pub fn parent_liveness(mut self, parent_liveness: ForkParentLiveness) -> Self {
+        self.parent_liveness = parent_liveness;
+        self
+    }
+
     /// Set `child_plan_json`. Takes a value or an `Option`; unset means `None`.
     #[must_use]
     pub fn child_plan_json(mut self, child_plan_json: impl Into<Option<String>>) -> Self {
@@ -298,6 +319,7 @@ impl ForkParamsBuilder {
             created_unix: self
                 .created_unix
                 .ok_or(BuilderError::missing("ForkParams", "created_unix"))?,
+            parent_liveness: self.parent_liveness,
             child_plan_json: self.child_plan_json,
             child_tenant_id: self.child_tenant_id,
         })

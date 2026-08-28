@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use mvm_contract::protocol::vm_backend::BackendKind;
 use mvm_core::checkpoint::{CheckpointId, VmFullOrigin, vm_full_origin};
 use mvm_core::config::vm_state_dir;
-use mvm_runtime::checkpoint::{CheckpointStore, ForkParams, fork_vm_full};
+use mvm_runtime::checkpoint::{CheckpointStore, ForkParams, ForkParentLiveness, fork_vm_full};
 
 use super::{
     CheckpointForkJson, SignedChainAnchor, bind_checkpoint_forked, grant_predecessor_from_vm_name,
@@ -23,21 +23,24 @@ use crate::ui;
 
 /// Inputs for [`fork_vm_full_arm`]. Grouped to stay under the
 /// `clippy::too_many_arguments` workspace ceiling.
-pub(super) struct ForkVmFullArmParams<'a> {
-    pub(super) store: &'a CheckpointStore,
-    pub(super) checkpoint: &'a CheckpointId,
-    pub(super) new_id: Option<String>,
+pub(in crate::commands) struct ForkVmFullArmParams<'a> {
+    pub(in crate::commands) store: &'a CheckpointStore,
+    pub(in crate::commands) checkpoint: &'a CheckpointId,
+    pub(in crate::commands) new_id: Option<String>,
     /// Refused with a user-visible error: a vm_full fork restores the saved
     /// machine state (cpu/mem baked into the snapshot), so the shape is fixed.
     /// Use an fs_quick fork to boot a resized child.
-    pub(super) cpus_override: Option<u32>,
+    pub(in crate::commands) cpus_override: Option<u32>,
     /// Refused with a user-visible error for the same reason as `cpus_override`.
-    pub(super) memory_override: Option<&'a str>,
-    pub(super) json: bool,
+    pub(in crate::commands) memory_override: Option<&'a str>,
+    pub(in crate::commands) json: bool,
+    /// Whether the caller explicitly opted into Firecracker's experimental
+    /// full-memory fork. This is ignored for checkpoints from other backends.
+    pub(in crate::commands) bypass_experimental_guard: bool,
     /// Secret bindings declared for the child. Empty reproduces the prior
     /// behaviour: a child admitted with no bindings.
-    pub(super) declared_secrets: &'a [mvm_core::plan::SecretBinding],
-    pub(super) allow_secret_drop: bool,
+    pub(in crate::commands) declared_secrets: &'a [mvm_core::plan::SecretBinding],
+    pub(in crate::commands) allow_secret_drop: bool,
 }
 
 /// vm_full fork: clone the captured triple into a new child identity, admit a
@@ -56,7 +59,7 @@ fn fc_vm_full_fork_experimental_enabled() -> bool {
     std::env::var_os("MVM_FORK_VMFULL_FC_EXPERIMENTAL").is_some()
 }
 
-pub(super) fn fork_vm_full_arm(p: ForkVmFullArmParams<'_>) -> Result<()> {
+pub(in crate::commands) fn fork_vm_full_arm(p: ForkVmFullArmParams<'_>) -> Result<()> {
     fork_vm_full_arm_inner(p)
 }
 
@@ -115,7 +118,7 @@ fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
                 child_id,
                 now,
                 json: p.json,
-                bypass_experimental_guard: false,
+                bypass_experimental_guard: p.bypass_experimental_guard,
                 declared_secrets: p.declared_secrets,
                 allow_secret_drop: p.allow_secret_drop,
             })?;
@@ -227,6 +230,7 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
             child_vm_name: p.child_vm_name.clone(),
             dest_dir: p.dest_dir,
             created_unix: p.now,
+            parent_liveness: ForkParentLiveness::MustBeStopped,
             child_plan_json,
             child_tenant_id,
         },
@@ -505,6 +509,7 @@ fn fork_vm_full_arm_hvf(p: ForkVmFullArmHvfParams<'_>) -> Result<()> {
             child_vm_name: p.child_vm_name.clone(),
             dest_dir: p.dest_dir,
             created_unix: p.now,
+            parent_liveness: ForkParentLiveness::MayBeRunning,
             child_plan_json,
             child_tenant_id,
         },
@@ -593,11 +598,7 @@ fn deliver_hvf_fork_post_restore(
     let token = mvm_core::crypto::vmgenid::fresh_generation_token(parent_snapshot_digest).token;
     let outcome = mvm_vmm::post_restore::signal_post_restore(
         child_vm_name,
-        &mvm_vmm::post_restore::VsockPostRestoreSignal {
-            token,
-            hostname: Some(child_vm_name.to_string()),
-            grant_envelope,
-        },
+        &mvm_vmm::post_restore::VsockPostRestoreSignal::for_resumed_child(token, grant_envelope),
         mvm_vmm::post_restore::POST_RESTORE_READY_TIMEOUT,
     )
     .with_context(|| format!("sending PostRestore to '{child_vm_name}'"))?;
@@ -1004,6 +1005,7 @@ mod tests {
             cpus_override: Some(8),
             memory_override: None,
             json: false,
+            bypass_experimental_guard: false,
             declared_secrets: &[],
             allow_secret_drop: false,
         })
@@ -1027,6 +1029,7 @@ mod tests {
             cpus_override: None,
             memory_override: Some("2G"),
             json: false,
+            bypass_experimental_guard: false,
             declared_secrets: &[],
             allow_secret_drop: false,
         })

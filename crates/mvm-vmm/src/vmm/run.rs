@@ -44,6 +44,14 @@ pub trait RunDevice {
     /// explicitly for a restored child.
     fn prepare_snapshot(&mut self) {}
 
+    /// Recreate host-owned runtime handles after the live parent leaves its
+    /// pause hold.
+    ///
+    /// Restored children bind their own authorized channels before first run;
+    /// this hook is only for the already-live parent whose handles were parked
+    /// by [`Self::prepare_snapshot`].
+    fn resume_after_snapshot(&mut self) {}
+
     /// Expose deterministic device state to the pause snapshot hook.
     fn snapshot_device(&self) -> Option<&dyn SnapshotDeviceState> {
         None
@@ -454,6 +462,14 @@ where
                     })?;
                     std::thread::sleep(Duration::from_millis(1));
                 }
+                if pause_prepared && !(hooks.should_stop)() {
+                    bus.with_devices(|devices| {
+                        for device in devices.iter_mut() {
+                            device.resume_after_snapshot();
+                        }
+                    });
+                    pause_prepared = false;
+                }
                 // Throttle hold: a throttle is not a pause. The vCPU is parked
                 // to stay inside its CPU quota, and the guest's device state
                 // must survive it untouched. Devices are still polled every
@@ -623,6 +639,9 @@ impl RunDevice for super::vsock::VirtioVsock {
     }
     fn prepare_snapshot(&mut self) {
         super::vsock::VirtioVsock::prepare_snapshot(self);
+    }
+    fn resume_after_snapshot(&mut self) {
+        super::vsock::VirtioVsock::resume_after_snapshot(self);
     }
     fn snapshot_device(&self) -> Option<&dyn SnapshotDeviceState> {
         Some(self)
@@ -1136,16 +1155,21 @@ mod tests {
     /// A device that counts how many times the snapshot machinery touches it.
     struct SnapshotCountDev {
         prepare_count: RefCell<usize>,
+        resume_count: RefCell<usize>,
     }
 
     impl SnapshotCountDev {
         fn new() -> Self {
             Self {
                 prepare_count: RefCell::new(0),
+                resume_count: RefCell::new(0),
             }
         }
         fn prepare_count(&self) -> usize {
             *self.prepare_count.borrow()
+        }
+        fn resume_count(&self) -> usize {
+            *self.resume_count.borrow()
         }
     }
 
@@ -1164,6 +1188,9 @@ mod tests {
         }
         fn prepare_snapshot(&mut self) {
             *self.prepare_count.borrow_mut() += 1;
+        }
+        fn resume_after_snapshot(&mut self) {
+            *self.resume_count.borrow_mut() += 1;
         }
         fn snapshot_device(&self) -> Option<&dyn SnapshotDeviceState> {
             Some(self)
@@ -1310,6 +1337,11 @@ mod tests {
         assert!(
             dev2.prepare_count() > 0,
             "pause hold must prepare a snapshot"
+        );
+        assert_eq!(
+            dev2.resume_count(),
+            1,
+            "the live parent must recreate host handles exactly once"
         );
     }
 

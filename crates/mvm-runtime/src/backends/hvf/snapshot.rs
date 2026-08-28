@@ -9,6 +9,10 @@
 use super::HvfError;
 use super::guest_ram::GuestRam;
 use super::hv_impl::HvfVcpu;
+use super::sys::{
+    HV_SUCCESS, hv_gic_icc_reg_t, hv_gic_set_state, hv_gic_state_create, hv_gic_state_get_data,
+    hv_gic_state_get_size, hv_gic_state_t, os_release,
+};
 use crate::vmm::device_state::{
     DeviceStateError, SnapshotDeviceState, capture_device_states, restore_device_states,
 };
@@ -36,12 +40,48 @@ pub const SNAPSHOT_SYS_REGS: [SysReg; 15] = [
     SysReg::CntvCtlEl0,
     SysReg::CntvCvalEl0,
 ];
+/// Additional writable HVF system registers required to resume either an EL0
+/// task or the EL1 kernel context that was interrupted to capture it.
+pub const SNAPSHOT_EXTRA_SYS_REGS: [super::sys::hv_sys_reg_t; 17] = [
+    super::sys::HV_SYS_REG_ACTLR_EL1,
+    super::sys::HV_SYS_REG_CPACR_EL1,
+    super::sys::HV_SYS_REG_APIAKEYLO_EL1,
+    super::sys::HV_SYS_REG_APIAKEYHI_EL1,
+    super::sys::HV_SYS_REG_APIBKEYLO_EL1,
+    super::sys::HV_SYS_REG_APIBKEYHI_EL1,
+    super::sys::HV_SYS_REG_APDAKEYLO_EL1,
+    super::sys::HV_SYS_REG_APDAKEYHI_EL1,
+    super::sys::HV_SYS_REG_APDBKEYLO_EL1,
+    super::sys::HV_SYS_REG_APDBKEYHI_EL1,
+    super::sys::HV_SYS_REG_APGAKEYLO_EL1,
+    super::sys::HV_SYS_REG_APGAKEYHI_EL1,
+    super::sys::HV_SYS_REG_SP_EL0,
+    super::sys::HV_SYS_REG_CONTEXTIDR_EL1,
+    super::sys::HV_SYS_REG_TPIDR_EL1,
+    super::sys::HV_SYS_REG_TPIDR_EL0,
+    super::sys::HV_SYS_REG_TPIDRRO_EL0,
+];
+/// GIC CPU-interface registers serialized for each vCPU.
+pub const SNAPSHOT_GIC_ICC_REGS: [hv_gic_icc_reg_t; 10] = [
+    0xc230, 0xc643, 0xc644, 0xc648, 0xc65b, 0xc663, 0xc664, 0xc665, 0xc666, 0xc667,
+];
+/// Whether Hypervisor.framework permits restoring this ICC register directly.
+/// `ICC_RPR_EL1` is read-only and is recomputed from the active-priority state.
+pub const fn gic_icc_is_restorable(reg: hv_gic_icc_reg_t) -> bool {
+    reg != 0xc65b
+}
 /// Number of serialized 64-bit AArch64 register words.
-pub const VCPU_STATE_WORDS: usize = 33 + SNAPSHOT_SYS_REGS.len();
+pub const VCPU_STATE_WORDS: usize =
+    35 + SNAPSHOT_SYS_REGS.len() + SNAPSHOT_EXTRA_SYS_REGS.len() + SNAPSHOT_GIC_ICC_REGS.len();
+/// Number of 128-bit SIMD/FP registers in AArch64 architectural state.
+pub const VCPU_SIMD_REGS: usize = 32;
 /// Fixed encoded length of [`HvfVcpuState`].
-pub const VCPU_STATE_LEN: usize = VCPU_STATE_WORDS * 8;
+pub const VCPU_STATE_LEN: usize = VCPU_STATE_WORDS * 8 + VCPU_SIMD_REGS * 16;
 /// Stable frame identity for the first-party HVF device model.
 pub const HVF_SNAPSHOT_BACKEND_KIND: u8 = 1;
+/// Backend-private section kind carrying Hypervisor.framework's opaque,
+/// versioned GIC distributor and redistributor state.
+pub const HVF_GIC_STATE_SECTION_KIND: u16 = 5;
 
 /// Errors raised while assembling or validating one complete HVF snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,6 +154,8 @@ pub struct ParsedHvfSnapshot<'a> {
     pub ram: &'a [u8],
     /// Versioned device-state container.
     pub devices: &'a [u8],
+    /// Opaque, versioned GIC distributor and redistributor state.
+    pub gic: &'a [u8],
     /// Decoded AArch64 core-register state, one entry per vCPU in CPU order.
     ///
     /// Always at least one — the boot CPU. A machine with more carries them all,
@@ -137,6 +179,15 @@ pub struct HvfVcpuState {
     pub cpsr: u64,
     /// System-register state in [`SNAPSHOT_SYS_REGS`] order.
     pub sys: [u64; SNAPSHOT_SYS_REGS.len()],
+    /// Additional raw HVF system registers in [`SNAPSHOT_EXTRA_SYS_REGS`] order.
+    pub extra_sys: [u64; SNAPSHOT_EXTRA_SYS_REGS.len()],
+    /// GIC CPU-interface state in [`SNAPSHOT_GIC_ICC_REGS`] order.
+    pub gic_icc: [u64; SNAPSHOT_GIC_ICC_REGS.len()],
+    /// Floating-point control and status registers.
+    pub fpcr: u64,
+    pub fpsr: u64,
+    /// Q0 through Q31, preserving the complete non-streaming SIMD/FP state.
+    pub simd: [[u8; 16]; VCPU_SIMD_REGS],
 }
 
 impl HvfVcpuState {
@@ -155,6 +206,25 @@ impl HvfVcpuState {
             let start = (33 + index) * 8;
             bytes[start..start + 8].copy_from_slice(&value.to_le_bytes());
         }
+        for (index, value) in self.gic_icc.iter().copied().enumerate() {
+            let start = (33 + SNAPSHOT_SYS_REGS.len() + SNAPSHOT_EXTRA_SYS_REGS.len() + index) * 8;
+            bytes[start..start + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        for (index, value) in self.extra_sys.iter().copied().enumerate() {
+            let start = (33 + SNAPSHOT_SYS_REGS.len() + index) * 8;
+            bytes[start..start + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        let fpcr_index = 33
+            + SNAPSHOT_SYS_REGS.len()
+            + SNAPSHOT_EXTRA_SYS_REGS.len()
+            + SNAPSHOT_GIC_ICC_REGS.len();
+        bytes[fpcr_index * 8..(fpcr_index + 1) * 8].copy_from_slice(&self.fpcr.to_le_bytes());
+        bytes[(fpcr_index + 1) * 8..(fpcr_index + 2) * 8].copy_from_slice(&self.fpsr.to_le_bytes());
+        let simd_start = VCPU_STATE_WORDS * 8;
+        for (index, value) in self.simd.iter().enumerate() {
+            let start = simd_start + index * 16;
+            bytes[start..start + 16].copy_from_slice(value);
+        }
         bytes
     }
 
@@ -171,12 +241,92 @@ impl HvfVcpuState {
         for (index, slot) in sys.iter_mut().enumerate() {
             *slot = read_word(bytes, 33 + index)?;
         }
+        let mut gic_icc = [0u64; SNAPSHOT_GIC_ICC_REGS.len()];
+        for (index, slot) in gic_icc.iter_mut().enumerate() {
+            *slot = read_word(
+                bytes,
+                33 + SNAPSHOT_SYS_REGS.len() + SNAPSHOT_EXTRA_SYS_REGS.len() + index,
+            )?;
+        }
+        let mut extra_sys = [0u64; SNAPSHOT_EXTRA_SYS_REGS.len()];
+        for (index, slot) in extra_sys.iter_mut().enumerate() {
+            *slot = read_word(bytes, 33 + SNAPSHOT_SYS_REGS.len() + index)?;
+        }
+        let fpcr_index = 33
+            + SNAPSHOT_SYS_REGS.len()
+            + SNAPSHOT_EXTRA_SYS_REGS.len()
+            + SNAPSHOT_GIC_ICC_REGS.len();
+        let mut simd = [[0u8; 16]; VCPU_SIMD_REGS];
+        let simd_start = VCPU_STATE_WORDS * 8;
+        for (index, slot) in simd.iter_mut().enumerate() {
+            let start = simd_start + index * 16;
+            slot.copy_from_slice(&bytes[start..start + 16]);
+        }
         Ok(Self {
             x,
             pc: read_word(bytes, 31)?,
             cpsr: read_word(bytes, 32)?,
             sys,
+            extra_sys,
+            gic_icc,
+            fpcr: read_word(bytes, fpcr_index)?,
+            fpsr: read_word(bytes, fpcr_index + 1)?,
+            simd,
         })
+    }
+}
+
+struct GicStateObject(hv_gic_state_t);
+
+impl Drop for GicStateObject {
+    fn drop(&mut self) {
+        // SAFETY: `hv_gic_state_create` returned this retained OS object and it
+        // has not been released elsewhere.
+        unsafe { os_release(self.0.cast()) };
+    }
+}
+
+/// Capture Hypervisor.framework's complete non-CPU GIC state while every vCPU
+/// is stopped at the snapshot boundary.
+pub fn capture_gic_device_state() -> Result<Vec<u8>, HvfError> {
+    // SAFETY: the caller holds every vCPU outside `hv_vcpu_run`; the returned
+    // retained object is owned by `GicStateObject` until this function returns.
+    let state = unsafe { hv_gic_state_create() };
+    if state.is_null() {
+        return Err(HvfError::SnapshotState("GIC state object capture failed"));
+    }
+    let state = GicStateObject(state);
+    let mut size = 0usize;
+    // SAFETY: `state` is live and `size` is a valid out-parameter.
+    let rc = unsafe { hv_gic_state_get_size(state.0, &mut size) };
+    if rc != HV_SUCCESS {
+        return Err(HvfError::GicDeviceCapture(rc));
+    }
+    if size == 0 {
+        return Err(HvfError::SnapshotState("GIC state payload is empty"));
+    }
+    let mut bytes = vec![0u8; size];
+    // SAFETY: `bytes` has at least the exact size the state object reported.
+    let rc = unsafe { hv_gic_state_get_data(state.0, bytes.as_mut_ptr().cast()) };
+    if rc != HV_SUCCESS {
+        return Err(HvfError::GicDeviceCapture(rc));
+    }
+    Ok(bytes)
+}
+
+/// Restore Hypervisor.framework's opaque GIC device state after every vCPU has
+/// been created and before any vCPU is allowed to run.
+pub fn restore_gic_device_state(bytes: &[u8]) -> Result<(), HvfError> {
+    if bytes.is_empty() {
+        return Err(HvfError::SnapshotState("GIC state payload is empty"));
+    }
+    // SAFETY: the GIC and every vCPU exist, none has run, and `bytes` remains
+    // valid for the duration of the call.
+    let rc = unsafe { hv_gic_set_state(bytes.as_ptr().cast(), bytes.len()) };
+    if rc == HV_SUCCESS {
+        Ok(())
+    } else {
+        Err(HvfError::GicDeviceRestore(rc))
     }
 }
 
@@ -188,6 +338,7 @@ pub fn encode_hvf_snapshot_frame(
     flags: u32,
     ram: &[u8],
     devices: &[u8],
+    gic: &[u8],
     vcpus: &[HvfVcpuState],
     artifact_digests: &[u8],
 ) -> Result<Vec<u8>, FrameError> {
@@ -207,6 +358,10 @@ pub fn encode_hvf_snapshot_frame(
             SnapshotSection {
                 kind: SectionKind::Devices,
                 data: devices,
+            },
+            SnapshotSection {
+                kind: SectionKind::Unknown(HVF_GIC_STATE_SECTION_KIND),
+                data: gic,
             },
             SnapshotSection {
                 kind: SectionKind::Vcpu,
@@ -235,11 +390,13 @@ pub fn capture_hvf_snapshot_frame(
 ) -> Result<Vec<u8>, HvfSnapshotError> {
     let vcpu_state = vcpu.capture_state().map_err(HvfSnapshotError::Vcpu)?;
     let device_state = capture_device_states(devices)?;
+    let gic_state = capture_gic_device_state().map_err(HvfSnapshotError::Vcpu)?;
     encode_hvf_snapshot_frame(
         backend_kind,
         flags,
         &ram.snapshot_bytes(),
         &device_state,
+        &gic_state,
         std::slice::from_ref(&vcpu_state),
         artifact_digests,
     )
@@ -265,12 +422,14 @@ pub fn parse_hvf_snapshot_frame<'a>(
 
     let mut ram = None;
     let mut devices = None;
+    let mut gic = None;
     let mut vcpu = None;
     let mut artifact_digests = None;
     for entry in parse_sections(frame)? {
         let slot = match entry.kind {
             SectionKind::Ram => &mut ram,
             SectionKind::Devices => &mut devices,
+            SectionKind::Unknown(HVF_GIC_STATE_SECTION_KIND) => &mut gic,
             SectionKind::Vcpu => &mut vcpu,
             SectionKind::ArtifactDigests => &mut artifact_digests,
             SectionKind::Unknown(_) => continue,
@@ -289,6 +448,9 @@ pub fn parse_hvf_snapshot_frame<'a>(
         });
     }
     let devices = devices.ok_or(HvfSnapshotError::MissingSection(SectionKind::Devices))?;
+    let gic = gic.ok_or(HvfSnapshotError::MissingSection(SectionKind::Unknown(
+        HVF_GIC_STATE_SECTION_KIND,
+    )))?;
     let vcpu_bytes = vcpu.ok_or(HvfSnapshotError::MissingSection(SectionKind::Vcpu))?;
     let artifact_digests = artifact_digests.ok_or(HvfSnapshotError::MissingSection(
         SectionKind::ArtifactDigests,
@@ -297,9 +459,22 @@ pub fn parse_hvf_snapshot_frame<'a>(
     Ok(ParsedHvfSnapshot {
         ram,
         devices,
+        gic,
         vcpus: decode_vcpu_states(vcpu_bytes)?,
         artifact_digests,
     })
+}
+
+/// Return the CPU count from a fully validated HVF snapshot frame.
+///
+/// Callers can use this before constructing restore targets so a machine-shape
+/// mismatch is refused before any device or vCPU state is mutated.
+pub fn hvf_snapshot_vcpu_count(
+    frame: &[u8],
+    expected_ram_len: usize,
+) -> Result<usize, HvfSnapshotError> {
+    let parsed = parse_hvf_snapshot_frame(frame, HVF_SNAPSHOT_BACKEND_KIND, expected_ram_len)?;
+    Ok(parsed.vcpus.len())
 }
 
 /// Decode the vCPU section as one fixed-width record per CPU.
@@ -350,6 +525,7 @@ pub fn restore_hvf_snapshot_frame(
     restore_device_states(&mut targets, parsed.devices)?;
     ram.restore_bytes(parsed.ram)
         .map_err(HvfSnapshotError::Vcpu)?;
+    restore_gic_device_state(parsed.gic).map_err(HvfSnapshotError::Vcpu)?;
     restore_boot_cpu_and_split(vcpu, parsed.vcpus)
 }
 
@@ -371,12 +547,23 @@ fn restore_boot_cpu_and_split(
 pub fn restore_hvf_snapshot_control(
     frame: &[u8],
     expected_ram_len: usize,
-    vcpu: &HvfVcpu,
     devices: &mut [&mut dyn SnapshotDeviceState],
-) -> Result<Vec<HvfVcpuState>, HvfSnapshotError> {
+) -> Result<RestoredHvfControl, HvfSnapshotError> {
     let parsed = parse_hvf_snapshot_frame(frame, HVF_SNAPSHOT_BACKEND_KIND, expected_ram_len)?;
     restore_device_states(devices, parsed.devices)?;
-    restore_boot_cpu_and_split(vcpu, parsed.vcpus)
+    Ok(RestoredHvfControl {
+        vcpus: parsed.vcpus,
+        gic: parsed.gic.to_vec(),
+    })
+}
+
+/// Validated control state held until every restored vCPU exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoredHvfControl {
+    /// Core and GIC CPU-interface state, in CPU order.
+    pub vcpus: Vec<HvfVcpuState>,
+    /// Opaque GIC distributor and redistributor state.
+    pub gic: Vec<u8>,
 }
 
 fn read_word(bytes: &[u8], index: usize) -> Result<u64, HvfError> {
@@ -405,10 +592,25 @@ mod tests {
             pc: 0x4000,
             cpsr: 0x3c5,
             sys: core::array::from_fn(|index| index as u64),
+            extra_sys: core::array::from_fn(|index| 0x80 + index as u64),
+            gic_icc: core::array::from_fn(|index| 0x100 + index as u64),
+            fpcr: 0x1234,
+            fpsr: 0x5678,
+            simd: core::array::from_fn(|index| [index as u8; 16]),
         };
         let encoded = state.encode();
         assert_eq!(encoded.len(), VCPU_STATE_LEN);
         assert_eq!(HvfVcpuState::decode(&encoded).unwrap(), state);
+    }
+
+    #[test]
+    fn only_the_derived_running_priority_register_is_not_restored() {
+        let refused: Vec<_> = SNAPSHOT_GIC_ICC_REGS
+            .iter()
+            .copied()
+            .filter(|reg| !gic_icc_is_restorable(*reg))
+            .collect();
+        assert_eq!(refused, vec![0xc65b]);
     }
 
     #[test]
@@ -430,12 +632,18 @@ mod tests {
             pc: 0x8000,
             cpsr: 0x3c5,
             sys: [0; SNAPSHOT_SYS_REGS.len()],
+            extra_sys: [0; SNAPSHOT_EXTRA_SYS_REGS.len()],
+            gic_icc: [0; SNAPSHOT_GIC_ICC_REGS.len()],
+            fpcr: 0,
+            fpsr: 0,
+            simd: [[0; 16]; VCPU_SIMD_REGS],
         };
         let frame = encode_hvf_snapshot_frame(
             9,
             0x20,
             b"ram",
             b"devices",
+            b"gic",
             std::slice::from_ref(&state),
             b"digest",
         )
@@ -447,11 +655,12 @@ mod tests {
         let entries = mvm_core::snapshot_frame::parse_sections(&frame).unwrap();
         assert_eq!(entries[0].data(&frame), b"ram");
         assert_eq!(entries[1].data(&frame), b"devices");
+        assert_eq!(entries[2].data(&frame), b"gic");
         assert_eq!(
-            HvfVcpuState::decode(entries[2].data(&frame)).unwrap(),
+            HvfVcpuState::decode(entries[3].data(&frame)).unwrap(),
             state
         );
-        assert_eq!(entries[3].data(&frame), b"digest");
+        assert_eq!(entries[4].data(&frame), b"digest");
     }
 
     #[test]
@@ -461,12 +670,18 @@ mod tests {
             pc: 0x8000,
             cpsr: 0x3c5,
             sys: [0; SNAPSHOT_SYS_REGS.len()],
+            extra_sys: [0; SNAPSHOT_EXTRA_SYS_REGS.len()],
+            gic_icc: [0; SNAPSHOT_GIC_ICC_REGS.len()],
+            fpcr: 0,
+            fpsr: 0,
+            simd: [[0; 16]; VCPU_SIMD_REGS],
         };
         let frame = encode_hvf_snapshot_frame(
             9,
             0x20,
             b"ram",
             b"devices",
+            b"gic",
             std::slice::from_ref(&state),
             b"digest",
         )
@@ -474,6 +689,7 @@ mod tests {
         let parsed = parse_hvf_snapshot_frame(&frame, 9, 3).unwrap();
         assert_eq!(parsed.ram, b"ram");
         assert_eq!(parsed.devices, b"devices");
+        assert_eq!(parsed.gic, b"gic");
         assert_eq!(parsed.vcpus, vec![state]);
         assert_eq!(parsed.artifact_digests, b"digest");
         assert!(matches!(
@@ -499,6 +715,11 @@ mod tests {
             pc: 0x8000,
             cpsr: 0x3c5,
             sys: [0; SNAPSHOT_SYS_REGS.len()],
+            extra_sys: [0; SNAPSHOT_EXTRA_SYS_REGS.len()],
+            gic_icc: [0; SNAPSHOT_GIC_ICC_REGS.len()],
+            fpcr: 0,
+            fpsr: 0,
+            simd: [[0; 16]; VCPU_SIMD_REGS],
         }
     }
 
@@ -520,10 +741,28 @@ mod tests {
             .collect();
 
         let frame =
-            encode_hvf_snapshot_frame(9, 0x20, b"ram", b"devices", &states, b"digest").unwrap();
+            encode_hvf_snapshot_frame(9, 0x20, b"ram", b"devices", b"gic", &states, b"digest")
+                .unwrap();
         let parsed = parse_hvf_snapshot_frame(&frame, 9, 3).unwrap();
 
         assert_eq!(parsed.vcpus, states);
+    }
+
+    #[test]
+    fn validated_frame_reports_its_vcpu_count_before_restore() {
+        let states = vec![sample_state(), sample_state()];
+        let frame = encode_hvf_snapshot_frame(
+            HVF_SNAPSHOT_BACKEND_KIND,
+            0,
+            b"ram",
+            b"devices",
+            b"gic",
+            &states,
+            b"digest",
+        )
+        .unwrap();
+
+        assert_eq!(hvf_snapshot_vcpu_count(&frame, 3).unwrap(), 2);
     }
 
     /// A vCPU section that is not a whole number of records is refused.
@@ -562,6 +801,11 @@ mod tests {
             pc: 0,
             cpsr: 0,
             sys: [0; SNAPSHOT_SYS_REGS.len()],
+            extra_sys: [0; SNAPSHOT_EXTRA_SYS_REGS.len()],
+            gic_icc: [0; SNAPSHOT_GIC_ICC_REGS.len()],
+            fpcr: 0,
+            fpsr: 0,
+            simd: [[0; 16]; VCPU_SIMD_REGS],
         };
         let vcpu = state.encode();
         let frame = mvm_core::snapshot_frame::encode_frame(
@@ -582,6 +826,10 @@ mod tests {
                     data: b"devices",
                 },
                 SnapshotSection {
+                    kind: SectionKind::Unknown(HVF_GIC_STATE_SECTION_KIND),
+                    data: b"gic",
+                },
+                SnapshotSection {
                     kind: SectionKind::Vcpu,
                     data: &vcpu,
                 },
@@ -595,6 +843,42 @@ mod tests {
         assert!(matches!(
             parse_hvf_snapshot_frame(&frame, 9, 3),
             Err(HvfSnapshotError::DuplicateSection(SectionKind::Ram))
+        ));
+    }
+
+    #[test]
+    fn complete_frame_parser_requires_gic_state() {
+        let state = sample_state().encode();
+        let frame = mvm_core::snapshot_frame::encode_frame(
+            GuestArch::Aarch64,
+            9,
+            0,
+            &[
+                SnapshotSection {
+                    kind: SectionKind::Ram,
+                    data: b"ram",
+                },
+                SnapshotSection {
+                    kind: SectionKind::Devices,
+                    data: b"devices",
+                },
+                SnapshotSection {
+                    kind: SectionKind::Vcpu,
+                    data: &state,
+                },
+                SnapshotSection {
+                    kind: SectionKind::ArtifactDigests,
+                    data: b"digest",
+                },
+            ],
+        )
+        .expect("encode frame");
+
+        assert!(matches!(
+            parse_hvf_snapshot_frame(&frame, 9, 3),
+            Err(HvfSnapshotError::MissingSection(SectionKind::Unknown(
+                HVF_GIC_STATE_SECTION_KIND
+            )))
         ));
     }
 }

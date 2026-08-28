@@ -113,6 +113,20 @@ pub enum HvfError {
     BadBoot(BootFault),
     /// In-kernel GICv3 creation failed (needs macOS 15+).
     GicCreate(hv_return_t),
+    /// Capturing the in-kernel GICv3 device state failed.
+    GicDeviceCapture(hv_return_t),
+    /// Restoring the in-kernel GICv3 device state failed.
+    GicDeviceRestore(hv_return_t),
+    /// Capturing one vCPU's GIC CPU-interface state failed.
+    GicCpuCapture {
+        reg: hv_gic_icc_reg_t,
+        status: hv_return_t,
+    },
+    /// Restoring one vCPU's GIC CPU-interface state failed.
+    GicCpuRestore {
+        reg: hv_gic_icc_reg_t,
+        status: hv_return_t,
+    },
     /// A vCPU's GIC redistributor frame is not where the device tree told the
     /// guest it would be.
     ///

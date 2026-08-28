@@ -20,8 +20,8 @@ use mvm_core::vm_backend::SnapshotCapability;
 use mvm_hostd::audit::bind::class_str;
 use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::checkpoint::{
-    CaptureFsQuickParams, CaptureVmFullParams, CheckpointStore, ForkParams, capture_fs_quick,
-    capture_vm_full, fork_checkpoint,
+    CaptureFsQuickParams, CaptureVmFullParams, CheckpointStore, ForkParams, ForkParentLiveness,
+    capture_fs_quick, capture_vm_full, fork_checkpoint,
 };
 
 use super::Cli;
@@ -33,8 +33,7 @@ mod lineage;
 mod revert;
 mod timeline;
 mod vm_state;
-use fork_vm_full::fork_vm_full_arm;
-pub(in crate::commands) use fork_vm_full::{ForkVmFullArmFcParams, fork_vm_full_arm_fc};
+pub(in crate::commands) use fork_vm_full::{ForkVmFullArmParams, fork_vm_full_arm};
 pub(in crate::commands) use lineage::SignedChainAnchor;
 pub(in crate::commands) use revert::{
     AdvanceArgs, RevertArgs, RevertImageSource, RevertOutcome, RevertRunImage, run_advance,
@@ -802,6 +801,7 @@ fn fork(p: ForkCmdParams<'_>) -> Result<()> {
                 cpus_override: cpus,
                 memory_override: memory,
                 json,
+                bypass_experimental_guard: false,
                 // No CLI surface declares bindings yet, so a fork declares
                 // none — exactly the prior behaviour.
                 declared_secrets,
@@ -880,6 +880,7 @@ fn fork_fs_quick_arm(p: ForkFsQuickArmParams<'_>) -> Result<()> {
             child_vm_name: child_vm_name.clone(),
             dest_dir: dest_dir.clone(),
             created_unix: now,
+            parent_liveness: ForkParentLiveness::MustBeStopped,
             child_plan_json: None,
             child_tenant_id: None,
         },
