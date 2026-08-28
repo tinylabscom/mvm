@@ -16,6 +16,14 @@ Last updated: 2026-08-27
       synchronization, freshness, workspace, Clippy, Linux Nix, and merge
       gates passed; PR #2939 merged and closed issue #2931.
 
+- [ ] **Cloudflare Pages cutover.**
+      `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.
+      The existing Pages project and account now have a checked-in Wrangler configuration,
+      reproducible local/CI deployment commands, an account/project preflight,
+      a shared and tested complete-WebLinux-bundle gate, and a verified
+      deployment.
+      The production hostname still needs to be attached to the project.
+
 - [ ] **SDK surface contract repairs — issues #2902 and #2906.**
       `specs/plans/2026-08-26-sdk-surface-contract-repairs.md`.
       The README's `mvm.local_path` decorator source and the builder-pack Cargo
@@ -23,6 +31,12 @@ Last updated: 2026-08-27
       delivery remains.
 
 ## Completed
+
+- [x] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
+      `specs/plans/2026-08-27-kernel-6-12-106.md`.
+      Both kernel consumers use the kernel.org-verified archive and SRI hash;
+      local and merge-queue gates passed, PR #2939 merged, and issue #2931
+      closed through the PR link.
 
 - [x] **Workload address public API rename.** The unused UOR-ADDR pilot is now
       exposed as `mvm_core::{WorkloadAddress, WorkloadAddressError,

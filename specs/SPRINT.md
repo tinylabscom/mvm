@@ -18,6 +18,16 @@
       tests, workspace tests and doctests, check, and Clippy are green;
       remaining: merge-queue delivery.
 
+- [ ] **Cloudflare Pages cutover.**
+      `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.
+      Wrangler is pinned locally, the existing `mvm` Pages project and account
+      are checked in, CI verifies the selected account before building, local
+      scripts deploy through that configuration, local and CI uploads share a
+      tested complete-WebLinux-bundle gate, and a production-branch deployment
+      is live with the required COOP/COEP headers.
+      Remaining: attach `gomicrovm.com` to the Pages project; the hostname still
+      resolves to GitHub Pages and cannot serve those headers.
+
 - [x] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
       `specs/plans/2026-08-27-kernel-6-12-106.md`.
       The custom workload/builder kernel and libkrunfw firmware build now use

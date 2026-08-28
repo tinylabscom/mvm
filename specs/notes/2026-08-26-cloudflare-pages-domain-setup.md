@@ -47,7 +47,10 @@ The workflow deploys with:
 wrangler pages deploy public/dist --project-name=mvm --branch=main
 ```
 
-The workflow also runs `wrangler pages project create mvm --production-branch=main` before deploying. That step is allowed to fail (for example, when the project already exists), so a missing project is created automatically on the first run.
+The workflow verifies that its configured account can list deployments for the
+existing `mvm` project before starting the expensive site build. It does not
+create projects during deployment; a missing or wrong-account project fails
+the preflight.
 
 ## Custom domain setup
 
