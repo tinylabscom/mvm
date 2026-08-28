@@ -388,6 +388,15 @@ impl RunPhaseMarks {
 /// as warm-launch latency.
 pub const WARM_START_MAX_MS: f64 = 300.0;
 
+/// Whether one warm-claim dispatch window satisfies the strict hard ceiling.
+///
+/// This is the shared contract for the CLI timing report and live conformance
+/// witnesses. Keeping the comparison beside the constant prevents a scenario
+/// from substituting the prepared-cold 200ms target for the warm-claim limit.
+pub fn within_warm_start_slo_ms(dispatch_window_ms: f64) -> bool {
+    dispatch_window_ms < WARM_START_MAX_MS
+}
+
 /// Which span contains which, as `(span, parent)`.
 ///
 /// Parents named here are either another sub-span or one of the coarse bucket
@@ -505,7 +514,7 @@ impl RunPhaseTimings {
     /// [`WARM_START_MAX_MS`] ceiling. A result at exactly 300ms misses the
     /// sub-300ms requirement.
     pub fn within_warm_start_slo(&self) -> bool {
-        self.dispatch_window_ms() < WARM_START_MAX_MS
+        within_warm_start_slo_ms(self.dispatch_window_ms())
     }
 
     /// Render the warm SLO only for a warm claim. Cold launches are diagnostic
@@ -664,7 +673,7 @@ pub fn warm_vs_cold(warm: &RunPhaseTimings, cold: &RunPhaseTimings) -> WarmVsCol
     WarmVsColdReport {
         warm_hot_ms,
         cold_hot_ms,
-        clears_slo: warm.dispatch_window_ms() < WARM_START_MAX_MS,
+        clears_slo: within_warm_start_slo_ms(warm.dispatch_window_ms()),
         clears_p50_target: warm_hot_ms <= WARM_START_P50_BUDGET_MS,
         speedup,
     }
@@ -735,6 +744,12 @@ mod tests {
                 + t.teardown_ms,
             t.total_ms,
         );
+    }
+
+    #[test]
+    fn standalone_warm_ceiling_check_is_strict() {
+        assert!(within_warm_start_slo_ms(WARM_START_MAX_MS - 0.1));
+        assert!(!within_warm_start_slo_ms(WARM_START_MAX_MS));
     }
 
     #[test]

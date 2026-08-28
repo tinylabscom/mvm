@@ -87,7 +87,9 @@ Debug logs are useful but risky. Recommended rules:
 
 ## Current CLI tools
 
-Use these while SDK error and metric helpers mature:
+Use these while SDK error and metric helpers mature. `machine boot-report` is a
+hidden advanced verb: it works, but it does not appear in
+`mvmctl machine --help`.
 
 ```sh
 mvmctl run --receipt /tmp/receipt.json -- python task.py

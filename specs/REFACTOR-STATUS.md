@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-27
+Last updated: 2026-08-28
 
 ## In progress
 
@@ -10,6 +10,13 @@ Last updated: 2026-08-27
       through the shared Stage 0 artifact runner and atomically bind it to the
       checkout fingerprint. The full local gates and a live aarch64 Stage 0/Nix
       artifact build are green; merge delivery remains.
+
+- [ ] **Issue #2942 — warm-launch gate contract repair.**
+      `specs/plans/2026-08-27-warm-launch-gate-contract.md`.
+      The live warm-residency witness now consumes the CLI's strict sub-300 ms
+      hard ceiling rather than a prepared-cold 200 ms literal. Focused boundary
+      and BDD compilation checks, workspace tests, check, Clippy, formatting,
+      and repository gates are green; merge-queue delivery remains.
 
 - [ ] **Cloudflare Pages cutover.**
       `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.
@@ -70,6 +77,13 @@ for detailed scope and acceptance criteria.
       agent variables and the writable workload `HOME` retain their established
       semantics. An unreadable image config degrades to the prior behavior. See
       `specs/sprint/delivery/2951-ad-hoc-exec-image-environment.md`.
+
+- [x] **Issue #2930 — FlowMux HTTPS live-client repair.** The seven live HTTPS
+      egress witnesses use the pinned multi-arch `curlimages/curl:8.21.0`
+      client so HTTPS is carried through an HTTP `CONNECT` tunnel. The
+      fail-closed refusal of plaintext HTTPS absolute-form requests is
+      preserved and protected by a repository regression. See
+      `specs/sprint/delivery/egress-https-absolute-uri-refusal.md`.
 
 - [x] **Issue #2887 — guest RPC refusals and SDK live-profile propagation.**
       Filesystem and process unary calls now preserve universal policy

@@ -93,9 +93,9 @@ For a reviewed outbound grant:
 network: mvm.network({
   mode: "bridge",
   egress: mvm.egress([
-    mvm.hostPort("api.openai.com", 443),
+    mvm.host_port("api.openai.com", 443),
   ]),
-  dns: mvm.dnsSystem(),
+  dns: mvm.dns_system(),
 })
 ```
 
@@ -207,7 +207,7 @@ network=mvm.network(
 network: mvm.network({
   mode: "bridge",
   egress: mvm.egress([
-    mvm.hostPort("api.openai.com", 443),
+    mvm.host_port("api.openai.com", 443),
   ]),
   ai: mvm.aiPolicy({
     metering: true,

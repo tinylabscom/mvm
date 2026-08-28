@@ -36,9 +36,10 @@ Avoid caching:
 ## Cleanup
 
 ```sh
-mvmctl machine stop --all
+mvmctl machine stop --all --yes
 mvmctl manifest prune --orphans --dry-run
 mvmctl cache prune --orphan-builds
 ```
 
-Use dry-run first on shared runners.
+Use dry-run first on shared runners. `machine stop --all` refuses to run
+without a confirmation, so a non-interactive job has to pass `--yes`.

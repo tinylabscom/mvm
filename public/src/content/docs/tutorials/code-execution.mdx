@@ -10,13 +10,14 @@ Code execution is the core sandbox operation: run a process inside the guest and
 ## CLI flow
 
 ```sh
-cargo run -- up codebox --flake .
-cargo run -- exec codebox -- python - <<'PY'
-print("hello from the guest")
-PY
+cargo run -- machine run --flake . --name codebox -d
+cargo run -- machine exec codebox -- python -c 'print("hello from the guest")'
 ```
 
-`exec` runs in the guest microVM. The host process sends the request through the guest control path and receives structured output.
+`machine exec` runs the command in the guest microVM, sending the request
+through the guest control path and returning structured output. It does not
+forward host stdin, so pass the program inline with `python -c` rather than
+piping it in; a heredoc would reach the host and the guest would read EOF.
 
 ## Planned runtime SDK shape
 

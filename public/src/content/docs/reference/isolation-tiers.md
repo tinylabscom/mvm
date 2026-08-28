@@ -112,22 +112,34 @@ just not paying the cold-boot cost on every start.
 | Security-claim chain | Full                            | Full, re-verified on restore           | Narrower by construction    |
 | Typical latency      | Hundreds of ms to a few seconds | Tens of milliseconds (Firecracker/KVM) | Sub-millisecond             |
 
-## Browser-tier WASI backend
+## Wasm and browser tiers
 
-The browser-tier backend (`BrowserWasi`) runs workloads inside the browser's own WebAssembly engine. It is **claim-free**: there is no hypervisor boundary, no guest kernel, and no hardware isolation. The browser's process and sandbox boundaries are the only isolation layers.
+Two backends sit outside the hypervisor boundary. They are distinct, and neither is
+`BrowserWasi` — there is no backend by that name and no `--hypervisor browser-wasm`
+selector.
 
-| Feature         | Browser-tier                                                       |
-| --------------- | ------------------------------------------------------------------ |
-| Isolation       | Browser sandbox/process isolation only                             |
-| Guest kernel    | None (WASI module)                                                 |
-| Virtual devices | None (WASI capability model)                                       |
-| vsock           | None                                                               |
-| Verified boot   | None                                                               |
-| Snapshots       | None                                                               |
-| Network         | Egress mediated through host-imports (`mvm:egress`), no native NIC |
-| Secure claims   | None (claim-free tier)                                             |
+- **`wasm`** (`--hypervisor wasm`) is the host tier: the workload runs as a module in a
+  host `wasmtime` engine. No guest kernel, no guest network.
+- **`web-linux`** (`--hypervisor web-linux`) is the browser tier: it boots a real
+  Nix-built Linux kernel under QEMU-Wasm inside the browser's own WebAssembly engine. On
+  a native host the backend is a stub that fails closed with a typed "browser-only"
+  error.
 
-This tier exists for demos, playgrounds, and browser-local development. It cannot be auto-selected and is never used for production workloads. When a browser-tier backend is selected, the same admission, policy, and audit semantics that apply to host backends are enforced inside the browser's own WebAssembly engine.
+Both are **claim-free**: there is no hardware isolation, so neither can assert the
+numbered security claims.
+
+| Feature         | `wasm` (host wasmtime)      | `web-linux` (browser)                        |
+| --------------- | --------------------------- | -------------------------------------------- |
+| Isolation       | Wasm engine sandbox only    | Browser sandbox/process isolation only       |
+| Guest kernel    | None (Wasm module)          | Nix-built Linux kernel under QEMU-Wasm       |
+| vsock           | None                        | None                                         |
+| Verified boot   | None                        | None                                         |
+| Snapshots       | None                        | None                                         |
+| Network         | No guest network            | No native NIC                                |
+| Secure claims   | None (claim-free tier)      | None (claim-free tier)                       |
+
+These tiers exist for demos, playgrounds, and browser-local development. Neither can be
+auto-selected, and neither is used for production workloads.
 
 ## When to pick which
 

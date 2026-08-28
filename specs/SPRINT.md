@@ -19,6 +19,25 @@
       all policy gates, and a live aarch64 Stage 0/Nix build are green; merge
       delivery remains.
 
+- [x] **FlowMux HTTPS live-client repair.**
+      `specs/plans/2026-08-27-flowmux-https-live-client.md`.
+      The seven live HTTPS egress witnesses now use the pinned multi-arch
+      `curlimages/curl:8.21.0` client, which opens an HTTP `CONNECT` tunnel
+      before TLS. The proxy's fail-closed refusal of plaintext HTTPS
+      absolute-form requests remains unchanged. A repository regression,
+      workspace check/tests/doctests, and Clippy are green; merge-queue
+      delivery remains.
+
+- [x] **Extended CI documented-surface repair — issue #2938.**
+      `specs/plans/2026-08-27-extended-ci-documented-surface.md`.
+      Linux and macOS now build the live documented-surface binary with signed
+      release-manifest verification enabled, and macOS installs the root
+      binary's target-gated libkrun dependency through the shared installer.
+      Focused regression tests, actionlint, the exact macOS feature build,
+      workspace tests/check/doctests, and zero-warning Clippy are green.
+      PR #2943 merged and closed issue #2938; a manual Extended CI run on
+      `main` is recording the post-merge live-lane evidence.
+
 - [ ] **Cloudflare Pages cutover.**
       `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.
       Wrangler is pinned locally, the existing `mvm` Pages project and account
@@ -3213,3 +3232,13 @@ writes the plan:
       at generation time rather than at boot.
 - [ ] Whether the emitted plan is signed interactively or written unsigned for a
       separate signing step. Unsigned-by-default is the safer starting posture.
+
+## 2026-08-27 warm-launch gate contract repair
+
+- [x] Separate the warm-claim hard ceiling from the prepared-cold 200 ms target
+      in the live launch scenario.
+- [x] Make the CLI timing report and BDD witness consume one strict sub-300 ms
+      predicate, with an exact-boundary regression test.
+- [x] Record why the 224.5 ms sample is inside the warm hard ceiling without
+      relabeling it as a prepared-cold percentile result.
+- [ ] Merge the repair through the queue and close issue #2942.

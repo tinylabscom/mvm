@@ -12,7 +12,7 @@ Networking differs by backend:
 | Firecracker (Linux native) | NIC-less vsock egress     | —            | Host endpoint; default-deny policy gate           |
 | HVF (macOS 26+, default)   | NIC-less vsock egress     | —            | Host endpoint; default-deny policy gate           |
 | libkrun (macOS)            | NIC-less vsock egress     | —            | Host endpoint; default-deny policy gate           |
-| QEMU (Linux dev/test)      | Rootless user-mode virtio | 10.0.2.15/24 | QEMU user-mode network; outside production claims |
+| QEMU (Linux dev/test)      | NIC-less vsock egress     | —            | Host endpoint; default-deny policy gate           |
 
 ## Production Network Layout
 
@@ -38,10 +38,10 @@ Raw ICMP and arbitrary non-proxy-aware sockets are intentionally not available
 on this path. `ping` is therefore not a valid egress smoke test; use an HTTP,
 TCP, or SOCKS5-aware UDP probe.
 
-## Rootless QEMU transparent networking
+## QEMU dev/test backend
 
-Linux users who need ordinary guest TCP and UDP sockets without configuring a
-host TAP device can opt into QEMU's dev/test backend:
+Linux users without `/dev/kvm` can opt into QEMU's dev/test backend. It is not
+a wider network path — the converged QEMU boot attaches no NIC either:
 
 ```bash
 mvmctl machine run --hypervisor qemu --image alpine --net -- \
@@ -124,12 +124,17 @@ For debugging dev builds, use `mvmctl machine logs <name>` to view guest console
 ## Network Policies
 
 By default, a workload gets **no outbound network** (deny-all egress). Opt in
-with `--net` (broad dev egress) or narrow to specific hosts with `--allow-host
-HOST[:PORT]` (repeatable; `--allow-host` wins over `--net`). For a deny-first
-review workflow, see [Network egress policy](/guides/network-egress-policy/).
+with `--net` or narrow to specific hosts with `--allow-host HOST[:PORT]`
+(repeatable; `--allow-host` wins over `--net`). For a deny-first review
+workflow, see [Network egress policy](/guides/network-egress-policy/).
+
+`--net` selects the built-in **`dev` preset**, which is an allowlist, not
+general outbound: package registries (npm, crates.io, PyPI) **plus** GitHub,
+OpenAI and Anthropic. Anything outside that set is still denied. No CLI flag
+reaches the narrower `registries` preset.
 
 ```bash
-# Broad dev egress (DNS + general outbound)
+# The dev preset: registries + GitHub + OpenAI + Anthropic
 mvmctl machine run --flake . --net
 
 # Narrow allowlist — only these hosts (PORT defaults to 443)
@@ -164,10 +169,10 @@ That wrapper packages both the exact CLI path
 and a second admit/deny relay proof that demonstrates allowed traffic is
 reachable while a non-admitted destination is refused, all without a guest NIC.
 
-For production NIC-less backends, policies are enforced by the host endpoint
-and the shared egress gate rather than guest firewall rules. QEMU's user-mode
-network is a dev/test convenience and is not a substitute for that production
-policy boundary.
+Policies are enforced by the host endpoint and the shared egress gate rather
+than guest firewall rules — there is no guest NIC for a firewall rule to act
+on. QEMU rides the same gate, but it is a dev/test tier for other reasons
+(software emulation without `/dev/kvm`, a larger TCB, partial verified boot).
 
 ## Measuring the paths
 
@@ -183,8 +188,10 @@ particular hypervisor, VPN, or Internet route.
 
 ## Security Profiles
 
-Pick the guest's security posture with `--profile`. It governs env injection and
-host-share permissions, and selects the seccomp posture applied inside the guest:
+Pick the guest's security posture with `--profile`. It governs env injection,
+host-share permissions, and whether the guest gets the dev profile. It does
+**not** select a seccomp tier — every plan is synthesised at the `standard`
+tier and there is no per-launch selector:
 
 ```bash
 mvmctl machine run --flake . --profile restrictive   # no env injection, no host shares
@@ -196,10 +203,12 @@ The resolved profile is copied into the signed `ExecutionPlan` admission record 
 
 | Profile              | Env injection           | Host shares                                      |
 | -------------------- | ----------------------- | ------------------------------------------------ |
-| `restrictive`        | none                    | none                                             |
-| `standard` (default) | explicit `-e KEY=VALUE` | read-only                                        |
-| `dev`                | explicit `-e KEY=VALUE` | read-write allowed                               |
-| `permissive`         | explicit                | read-write (requires `MVM_ACK_PERMISSIVE_RUN=1`) |
+| `restrictive`        | none                    | none                                                          |
+| `standard` (default) | explicit `-e KEY=VALUE` | read-only                                                     |
+| `dev`                | explicit `-e KEY=VALUE` | read-write **on a persistent machine only**                   |
+| `permissive`         | explicit                | as `dev`, and requires `MVM_ACK_PERMISSIVE_RUN=1`             |
+
+A transient run's host shares are read-only under every profile.
 
 ## DNS
 

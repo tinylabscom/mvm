@@ -291,6 +291,10 @@ impl VmmDriver for LibkrunDriver {
             max_vcpus: Some(u32::from(u8::MAX)),
             pause_resume: false,
             snapshots: false,
+            // Both of the next two are overwritten below — see the
+            // reassignment after this literal. They describe the raw libkrun
+            // substrate, not what the selectable runner advertises. Quoting
+            // either value from here is wrong, and has been more than once.
             snapshot_capability: SnapshotCapability::DiskOnly,
             standby_pool: true,
             vsock: true,
@@ -322,6 +326,10 @@ impl VmmDriver for LibkrunDriver {
             resource_controls: ResourceControls::for_backend(BackendKind::Libkrun),
             ..VmCapabilities::default()
         };
+        // The runner-facing answer, and the one every caller sees. The
+        // substrate has the primitives; this runner does not route them
+        // through its admission and endpoint guards, so it advertises
+        // neither.
         capabilities.snapshot_capability = SnapshotCapability::Unsupported;
         capabilities.standby_pool = false;
         capabilities

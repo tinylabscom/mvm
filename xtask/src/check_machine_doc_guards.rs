@@ -12,10 +12,16 @@ const LIMITATIONS: &str = "public/src/content/docs/guides/machine-limitations.md
 const QUICKSTART: &str = "public/src/content/docs/getting-started/quickstart.md";
 const HAPPY_PATHS: &str = "public/src/content/docs/getting-started/happy-paths.md";
 
+// `local image archive` was here until 2026-08-27, requiring the use-cases page
+// to document a `--image-archive` input. No such flag has ever existed: no
+// commit in this repository has touched `image-archive` under `crates/`, and
+// `RunArgs` takes `--manifest`, `--image`, `--flake`, `--deployment`,
+// `--runtime-pack`, and `--runtime` only. The guard was mandating a false
+// claim, and the page complied for two months. A required term has to name
+// something the CLI does; add the flag first if this capability is wanted.
 const REQUIRED_USE_CASE_TERMS: &[&str] = &[
     "sandbox untrusted code",
     "mvmctl machine run --image",
-    "local image archive",
     "mvmctl machine create",
     "mvm.toml",
     "machine check-artifact",

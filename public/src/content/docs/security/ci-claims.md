@@ -24,7 +24,7 @@ Each numbered claim is backed by a test or a CI workflow gate.
 | 4 | A production-safe run cannot invoke DevOnly guest-agent verbs. | Guest confinement |
 | 5 | Vsock framing, supervisor-config JSON, and the userspace datapath's guest-facing ingress are fuzzed. | Interface hardening |
 | 6 | The pre-built dev image is hash-verified. | Supply chain |
-| 7 | Cargo dependencies are audited on every PR. | Supply chain |
+| 7 | Cargo dependencies are audited nightly and on every release tag. | Supply chain |
 | 8 | Every workload runs from a signed, audited `ExecutionPlan`. | Admission and audit |
 | 9 | Every published bundle is content-addressed, key_id-pinned, and re-verified at fetch and at admit time. | Supply chain |
 | 10 | No untrusted workload reaches the network unless explicitly admitted by policy. | Data containment |
@@ -45,7 +45,7 @@ in the ADR that you should read before relying on it.
 | --- | --- | --- |
 | 16 | Egress substitution keeps a raw secret off the guest — bound-only, with no value in the audit log. | Promotion is a pending maintainer decision. |
 | 17 | Workload stdin is grant-gated, single-writer, secret-scanned across frames, and every refusal is audited. | The secret scan matches a length and a rolling hash, not an identity; encoding, derivation, or a window-straddling split defeat it. |
-| 18 | A workload's resource consumption is bounded at admission, and CPU-bound at spawn where the host has a mechanism. | Admission bounding holds everywhere. CPU binding is Linux-with-systemd only, wall-clock has no enforcement mechanism at all, and a restored or warm-claimed child is not re-bound. |
+| 18 | A workload's resource consumption is bounded at admission, and bound at spawn where the host has a mechanism. | Admission bounding holds everywhere. CPU is enforced on Linux (a systemd transient scope) and on the in-house HVF VMM (in-process, from the vCPU threads' Mach CPU time), and stays declared-only on libkrun. Wall clock is enforced only where a supervisor process holds the plan — libkrun and HVF — and is absent on Firecracker and QEMU. A same-identity `restore` deliberately re-arms neither, since it does not inherit the parent's plan. |
 
 ## What is out of scope
 
@@ -55,7 +55,10 @@ covering them:
 - A malicious **host**. mvm trusts the host with the hypervisor and the private
   build keys.
 - **Multi-tenant guests.** One guest is one workload.
-- **Hardware-backed key attestation.**
+- **Hardware-backed key attestation against a malicious host.** An opt-in TPM2
+  provider ships and its quotes are a real host-measured attestation input, but
+  the host still owns the TPM and the launch material, so a compromised host
+  remains out of scope.
 
 ## How to use this page
 

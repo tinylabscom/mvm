@@ -37,10 +37,13 @@ a user-facing claim.
 ## Snapshots and restore
 
 Snapshots are separate from first boot. Firecracker sealed pause/resume has its
-own integrity evidence. Full-VM machine-state save/restore is currently
-unavailable through the selectable workload runners; `mvmctl doctor` is the
-authoritative capability check. A restore is a lifecycle transition, not a new
-security boundary.
+own integrity evidence. Full-VM machine-state save/restore is advertised by HVF
+— the macOS 26+ auto-detect default — and by `apple-container`, which boots
+through the same supervisor; libkrun, QEMU, and Firecracker report it
+unsupported. The incremental live-memory tier is advertised only by the
+test-support mock. `mvmctl doctor` is the authoritative capability check, and a
+request a backend does not advertise fails closed. A restore is a lifecycle
+transition, not a new security boundary.
 
 ## Documentation rule
 
