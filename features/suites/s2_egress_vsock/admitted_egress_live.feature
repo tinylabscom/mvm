@@ -7,24 +7,24 @@ Feature: Admitted egress completes end-to-end over the vsock seam
 
   @live
   Scenario: An admitted name resolves and connects through the in-seam resolver
-    When I run mvmctl with "machine run --image alpine --allow-host example.com -- wget -q -O - https://example.com"
+    When I run mvmctl with "machine run --image curlimages/curl:8.21.0 --allow-host example.com -- curl -fsSL https://example.com"
     Then the command exits with code 0
     And the output contains "Example Domain"
 
   @live
   Scenario: An admitted IPv6 literal falls back to its pinned IPv4 sibling
-    When I run mvmctl with "machine run --image alpine --allow-host one.one.one.one -- wget -q --no-check-certificate --header=Host:one.one.one.one -O - https://[2606:4700:4700::1111]/cdn-cgi/trace" with a 120 second timeout
+    When I run mvmctl with "machine run --image curlimages/curl:8.21.0 --allow-host one.one.one.one -- curl -kfsSL -H Host:one.one.one.one https://[2606:4700:4700::1111]/cdn-cgi/trace" with a 120 second timeout
     Then the command exits with code 0
     And the output contains "fl="
 
   @live
   Scenario: A non-admitted name is refused, not resolved
-    When I run mvmctl with "machine run --image alpine --allow-host example.com -- wget -q -O - https://not-admitted.test"
+    When I run mvmctl with "machine run --image curlimages/curl:8.21.0 --allow-host example.com -- curl -fsSL https://not-admitted.test"
     Then the command exits with code 1
 
   @live
   Scenario: DNS queries land in the chain-signed audit log
-    When I run mvmctl with "machine run --image alpine --allow-host example.com -- wget -q -O - https://example.com"
+    When I run mvmctl with "machine run --image curlimages/curl:8.21.0 --allow-host example.com -- curl -fsSL https://example.com"
     Then the command exits with code 0
     When I run mvmctl with "trust audit verify"
     Then the command exits with code 0

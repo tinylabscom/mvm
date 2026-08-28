@@ -10,6 +10,25 @@
 
 ## In progress
 
+- [x] **FlowMux HTTPS live-client repair.**
+      `specs/plans/2026-08-27-flowmux-https-live-client.md`.
+      The seven live HTTPS egress witnesses now use the pinned multi-arch
+      `curlimages/curl:8.21.0` client, which opens an HTTP `CONNECT` tunnel
+      before TLS. The proxy's fail-closed refusal of plaintext HTTPS
+      absolute-form requests remains unchanged. A repository regression,
+      workspace check/tests/doctests, and Clippy are green; merge-queue
+      delivery remains.
+
+- [x] **Extended CI documented-surface repair — issue #2938.**
+      `specs/plans/2026-08-27-extended-ci-documented-surface.md`.
+      Linux and macOS now build the live documented-surface binary with signed
+      release-manifest verification enabled, and macOS installs the root
+      binary's target-gated libkrun dependency through the shared installer.
+      Focused regression tests, actionlint, the exact macOS feature build,
+      workspace tests/check/doctests, and zero-warning Clippy are green.
+      PR #2943 merged and closed issue #2938; a manual Extended CI run on
+      `main` is recording the post-merge live-lane evidence.
+
 - [ ] **Cloudflare Pages cutover.**
       `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.
       Wrangler is pinned locally, the existing `mvm` Pages project and account

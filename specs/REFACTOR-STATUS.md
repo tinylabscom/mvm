@@ -64,6 +64,13 @@ for detailed scope and acceptance criteria.
       semantics. An unreadable image config degrades to the prior behavior. See
       `specs/sprint/delivery/2951-ad-hoc-exec-image-environment.md`.
 
+- [x] **Issue #2930 — FlowMux HTTPS live-client repair.** The seven live HTTPS
+      egress witnesses use the pinned multi-arch `curlimages/curl:8.21.0`
+      client so HTTPS is carried through an HTTP `CONNECT` tunnel. The
+      fail-closed refusal of plaintext HTTPS absolute-form requests is
+      preserved and protected by a repository regression. See
+      `specs/sprint/delivery/egress-https-absolute-uri-refusal.md`.
+
 - [x] **Issue #2887 — guest RPC refusals and SDK live-profile propagation.**
       Filesystem and process unary calls now preserve universal policy
       refusals as typed errors. The live SDK carries an explicitly selected
