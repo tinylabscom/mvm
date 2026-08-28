@@ -24,6 +24,7 @@ use mvm_core::did_key::DidKey;
 use mvm_core::receipt::{
     ExecutionReceipt, ReceiptAction, ReceiptOutcome, SignedExecutionReceipt, receipt_type,
 };
+use mvm_core::usage_capture::UsageCapture;
 use serde_json::Value;
 
 use crate::supervisor::audit::PlanAuditEntry;
@@ -113,6 +114,20 @@ pub fn audit_entry_to_receipt(
     } else {
         None
     };
+
+    // Every exit receipt answers the usage question, even when the answer is
+    // that nothing was observed. An absent extension would be ambiguous
+    // between "not measured" and "not asked", and only one of those is true.
+    if receipt_type == receipt_type::PLAN_EXITED {
+        let usage: UsageCapture = entry
+            .labels
+            .get("usage")
+            .and_then(|raw| serde_json::from_str(raw).ok())
+            .unwrap_or_default();
+        if let Ok(value) = serde_json::to_value(usage) {
+            extensions.insert(mvm_core::receipt::extension_key::USAGE.to_string(), value);
+        }
+    }
     let granted_capabilities = context
         .map(|c| c.granted_capabilities.clone())
         .unwrap_or_default();
@@ -1138,5 +1153,186 @@ mod tests {
 
         let receipts = export_receipts(dir.path(), "local", None, &signing_key).unwrap();
         assert!(receipts.is_empty());
+    }
+
+    /// Export a `plan.launched` + `plan.exited` pair where the exit entry
+    /// carries a `usage` label encoding `capture` as compact JSON, mirroring
+    /// what Task 4's `emit_exited_with_capture` writes.
+    fn export_fixture_with_usage(
+        capture: mvm_core::usage_capture::UsageCapture,
+    ) -> Vec<SignedExecutionReceipt> {
+        let dir = tempfile::tempdir().unwrap();
+        let signing_key = SigningKey::from_bytes(&[21u8; 32]);
+        let signer = FileAuditSigner::open(signing_key.clone(), dir.path()).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let launched = sample_audit_entry("plan.launched", BTreeMap::new());
+
+        let exited = {
+            let mut labels = BTreeMap::new();
+            labels.insert("exit_code".into(), "0".into());
+            labels.insert("usage".into(), serde_json::to_string(&capture).unwrap());
+            sample_audit_entry("plan.exited", labels)
+        };
+
+        rt.block_on(signer.sign_and_emit(&launched)).unwrap();
+        rt.block_on(signer.sign_and_emit(&exited)).unwrap();
+
+        export_receipts(dir.path(), "local", None, &signing_key).unwrap()
+    }
+
+    /// Export a `plan.launched` + `plan.exited` pair where the exit entry
+    /// carries no `usage` label at all, standing in for an entry written
+    /// before this feature existed.
+    fn export_fixture_without_usage_label() -> Vec<SignedExecutionReceipt> {
+        let dir = tempfile::tempdir().unwrap();
+        let signing_key = SigningKey::from_bytes(&[22u8; 32]);
+        let signer = FileAuditSigner::open(signing_key.clone(), dir.path()).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let launched = sample_audit_entry("plan.launched", BTreeMap::new());
+
+        let exited = {
+            let mut labels = BTreeMap::new();
+            labels.insert("exit_code".into(), "0".into());
+            sample_audit_entry("plan.exited", labels)
+        };
+
+        rt.block_on(signer.sign_and_emit(&launched)).unwrap();
+        rt.block_on(signer.sign_and_emit(&exited)).unwrap();
+
+        export_receipts(dir.path(), "local", None, &signing_key).unwrap()
+    }
+
+    /// A bare, valid `plan.exited` receipt payload for tests that need to
+    /// mutate `extensions` directly rather than going through the exporter.
+    fn sample_exited_receipt() -> ExecutionReceipt {
+        let mut labels = BTreeMap::new();
+        labels.insert("exit_code".into(), "0".into());
+        let entry = sample_audit_entry("plan.exited", labels);
+        let signing_key = SigningKey::from_bytes(&[23u8; 32]);
+        let host_did = DidKey::from_verifying_key(signing_key.verifying_key()).to_did_key();
+        audit_entry_to_receipt(&entry, &host_did, None).expect("plan.exited maps to a receipt")
+    }
+
+    #[test]
+    fn an_exited_receipt_carries_the_usage_extension() {
+        use mvm_core::usage_capture::{Mechanism, Metric, UsageCapture};
+
+        let receipts = export_fixture_with_usage(UsageCapture {
+            cpu_ms: Metric::measured(4210, Mechanism::HostProcessCpu),
+            ..UsageCapture::default()
+        });
+        let exited = receipts
+            .iter()
+            .find(|r| r.payload.receipt_type == receipt_type::PLAN_EXITED)
+            .expect("an exit receipt");
+        let usage = exited
+            .payload
+            .extensions
+            .get(mvm_core::receipt::extension_key::USAGE)
+            .expect("mvm.usage");
+        assert_eq!(usage["cpu_ms"]["value"], serde_json::json!(4210));
+        assert_eq!(usage["cpu_ms"]["source"], serde_json::json!("measured"));
+        assert_eq!(
+            usage["cpu_ms"]["mechanism"],
+            serde_json::json!("host_process_cpu")
+        );
+    }
+
+    #[test]
+    fn a_dimension_nobody_observed_carries_no_number_to_misread() {
+        use mvm_core::usage_capture::UsageCapture;
+
+        let receipts = export_fixture_with_usage(UsageCapture::default());
+        let exited = receipts
+            .iter()
+            .find(|r| r.payload.receipt_type == receipt_type::PLAN_EXITED)
+            .expect("an exit receipt");
+        let usage = exited
+            .payload
+            .extensions
+            .get(mvm_core::receipt::extension_key::USAGE)
+            .expect("mvm.usage is present even when nothing was measured");
+        assert_eq!(usage["cpu_ms"]["source"], serde_json::json!("unavailable"));
+        assert!(
+            usage["cpu_ms"].get("value").is_none(),
+            "no number to read as zero"
+        );
+    }
+
+    #[test]
+    fn an_entry_with_no_usage_label_still_yields_an_all_unavailable_extension() {
+        // An entry written before this feature must not be reported as a run
+        // whose usage question was never asked.
+        let receipts = export_fixture_without_usage_label();
+        let exited = receipts
+            .iter()
+            .find(|r| r.payload.receipt_type == receipt_type::PLAN_EXITED)
+            .expect("an exit receipt");
+        let usage = exited
+            .payload
+            .extensions
+            .get(mvm_core::receipt::extension_key::USAGE)
+            .expect("mvm.usage");
+        assert_eq!(usage["wall_ms"]["source"], serde_json::json!("unavailable"));
+    }
+
+    #[test]
+    fn a_usage_extension_survives_the_receipt_value_space() {
+        use mvm_core::usage_capture::{Mechanism, Metric, UsageCapture};
+
+        // Integers and ASCII only: the receipt refuses floats, so a percentage
+        // added here later would break every verifier rather than degrade.
+        let receipts = export_fixture_with_usage(UsageCapture {
+            cpu_ms: Metric::measured(4210, Mechanism::HostProcessCpu),
+            peak_rss_mib: Metric::measured(312, Mechanism::HostProcessRss),
+            ..UsageCapture::default()
+        });
+        for receipt in &receipts {
+            receipt.verify().expect("a signed receipt verifies");
+            receipt
+                .payload
+                .verify_id()
+                .expect("the content address holds");
+        }
+    }
+
+    #[test]
+    fn flipping_a_usage_integer_breaks_the_content_address() {
+        use mvm_core::usage_capture::{Mechanism, Metric, UsageCapture};
+
+        let receipts = export_fixture_with_usage(UsageCapture {
+            cpu_ms: Metric::measured(4210, Mechanism::HostProcessCpu),
+            ..UsageCapture::default()
+        });
+        let mut tampered = receipts
+            .iter()
+            .find(|r| r.payload.receipt_type == receipt_type::PLAN_EXITED)
+            .expect("an exit receipt")
+            .clone();
+        tampered.payload.extensions.insert(
+            mvm_core::receipt::extension_key::USAGE.to_string(),
+            serde_json::json!({ "cpu_ms": { "source": "measured", "value": 1, "mechanism": "host_process_cpu" } }),
+        );
+        assert!(tampered.payload.verify_id().is_err());
+        assert!(tampered.verify().is_err());
+    }
+
+    #[test]
+    fn a_float_in_the_usage_extension_is_refused_by_the_value_space() {
+        // Guards the no-percentages rule directly rather than by convention.
+        let mut receipt = sample_exited_receipt();
+        receipt.extensions.insert(
+            mvm_core::receipt::extension_key::USAGE.to_string(),
+            serde_json::json!({ "cpu_percent": 42.5 }),
+        );
+        assert!(receipt.compute_id().is_err(), "floats must not be signable");
     }
 }

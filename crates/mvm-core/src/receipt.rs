@@ -101,6 +101,11 @@ pub mod extension_key {
     /// the departed writer shed after its last durable append are in no file
     /// anywhere, so the transcript is an incomplete account of the run.
     pub const TRANSCRIPT_ADOPTED: &str = "mvm.transcript_adopted";
+    /// Measured resource consumption for the run this receipt closes.
+    /// Present on every `plan.exited` receipt, including runs where nothing
+    /// could be observed — a dimension with no reading is recorded as
+    /// unavailable rather than omitted.
+    pub const USAGE: &str = "mvm.usage";
 }
 
 /// Outcome of the action described by a receipt.
