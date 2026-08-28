@@ -557,6 +557,74 @@ fn handle_client(
     send_authenticated_response(&mut file, &mut session, &resp);
 }
 
+#[derive(Clone)]
+struct GuestServer {
+    state: Arc<Mutex<AgentState>>,
+    integration_state: Arc<Mutex<IntegrationState>>,
+    probe_state: Arc<Mutex<ProbeState>>,
+    boot_state: Arc<AgentBootState>,
+    guest_signing_key: Arc<SigningKey>,
+}
+
+impl GuestServer {
+    fn handle_inline(&self, fd: RawFd, connection_guard: CounterGuard) {
+        let _connection_guard = connection_guard;
+        handle_client(
+            fd,
+            &self.state,
+            &self.integration_state,
+            &self.probe_state,
+            &self.boot_state,
+            &self.guest_signing_key,
+        );
+    }
+
+    fn spawn_handler(&self, fd: RawFd, connection_guard: CounterGuard) {
+        let server = self.clone();
+        std::thread::spawn(move || server.handle_inline(fd, connection_guard));
+    }
+}
+
+fn acquire_connection_slot(fd: RawFd) -> Option<CounterGuard> {
+    let limits = ConnectionLimits::default();
+    let Some(connection_guard) = try_acquire(&ACTIVE_CONNECTIONS, limits.total) else {
+        eprintln!("mvm-guest-agent: rejecting connection at concurrency limit");
+        // SAFETY: fd was returned by accept and ownership has not been passed
+        // to a File or another thread.
+        unsafe {
+            close(fd);
+        }
+        return None;
+    };
+    Some(connection_guard)
+}
+
+/// Serve PID-1 activation synchronously so the mount, identity, capability,
+/// bounding-set, and `no_new_privs` transition occurs before any thread is
+/// created. Linux credentials are per-thread; doing this in a worker would
+/// harden only that worker and leave later handlers with different credentials.
+fn serve_until_activated(listener: &AgentListener, server: &GuestServer) -> bool {
+    loop {
+        if SHUTDOWN_REQUESTED.load(Ordering::Acquire) {
+            return false;
+        }
+        let Some(cfd) = accept_control(listener) else {
+            continue;
+        };
+        server.boot_state.mark_first_accept();
+        let Some(connection_guard) = acquire_connection_slot(cfd) else {
+            continue;
+        };
+        server.handle_inline(cfd, connection_guard);
+        if matches!(
+            server.boot_state.activation_state(),
+            ActivationState::Activated
+        ) {
+            return true;
+        }
+    }
+}
+
 fn main() {
     let cfg = parse_config();
 
@@ -673,36 +741,49 @@ fn main() {
         });
     }
 
-    // Start background monitoring thread.
     let state = Arc::new(Mutex::new(AgentState::new()));
-    let monitor_state = Arc::clone(&state);
     // Seed the hot-reloadable atomics from the boot-time config so
     // monitoring_loop picks up the same values it would have with
     // the prior captured-by-value shape.
     HOT_BUSY_THRESHOLD_BITS.store(cfg.busy_threshold.to_bits(), Ordering::Release);
     HOT_SAMPLE_INTERVAL_SECS.store(cfg.sample_interval_secs, Ordering::Release);
-    std::thread::spawn(move || monitoring_loop(monitor_state));
 
-    // Defer integration drop-in scanning + health loop startup to a
-    // dedicated background thread. The scan
-    // itself is fast (single directory read), but moving it off the
-    // bind-to-accept critical path also means a malformed drop-in
-    // can't bubble a panic into the boot sequence.
     let integration_state = Arc::new(Mutex::new(IntegrationState {
         integrations: Vec::new(),
     }));
-    {
-        let bs = Arc::clone(&boot_state);
-        let s = Arc::clone(&integration_state);
-        std::thread::spawn(move || init_integrations(&bs, &s));
+    let probe_state = Arc::new(Mutex::new(ProbeState { probes: Vec::new() }));
+
+    let server = GuestServer {
+        state: Arc::clone(&state),
+        integration_state: Arc::clone(&integration_state),
+        probe_state: Arc::clone(&probe_state),
+        boot_state: Arc::clone(&boot_state),
+        guest_signing_key: Arc::clone(&guest_signing_key),
+    };
+
+    // PID 1 must activate synchronously. `apply_activation` changes Linux
+    // credentials and capability sets, which are per-thread at the kernel
+    // boundary; no background or request thread may exist before it returns.
+    if init::is_pid1() && serve_until_activated(&listener, &server) {
+        init::start_orphan_reaper();
     }
 
-    // Same shape for the probe drop-in scan + loop.
-    let probe_state = Arc::new(Mutex::new(ProbeState { probes: Vec::new() }));
-    {
-        let bs = Arc::clone(&boot_state);
-        let s = Arc::clone(&probe_state);
-        std::thread::spawn(move || init_probes(&bs, &s));
+    if !SHUTDOWN_REQUESTED.load(Ordering::Acquire) {
+        let monitor_state = Arc::clone(&state);
+        std::thread::spawn(move || monitoring_loop(monitor_state));
+
+        // Defer integration and probe scans to background threads, but only
+        // after PID-1 activation has completed its privilege transition.
+        {
+            let bs = Arc::clone(&boot_state);
+            let s = Arc::clone(&integration_state);
+            std::thread::spawn(move || init_integrations(&bs, &s));
+        }
+        {
+            let bs = Arc::clone(&boot_state);
+            let s = Arc::clone(&probe_state);
+            std::thread::spawn(move || init_probes(&bs, &s));
+        }
     }
 
     // Port forwarders are started on-demand via StartPortForward requests
@@ -747,30 +828,10 @@ fn main() {
         // Stamp first-accept timing once. Idempotent inside
         // `AgentBootState` — subsequent calls are no-ops.
         boot_state.mark_first_accept();
-        let limits = ConnectionLimits::default();
-        let Some(connection_guard) = try_acquire(&ACTIVE_CONNECTIONS, limits.total) else {
-            eprintln!("mvm-guest-agent: rejecting connection at concurrency limit");
-            unsafe {
-                close(cfd);
-            }
+        let Some(connection_guard) = acquire_connection_slot(cfd) else {
             continue;
         };
-        let state = Arc::clone(&state);
-        let integration_state = Arc::clone(&integration_state);
-        let probe_state = Arc::clone(&probe_state);
-        let bs = Arc::clone(&boot_state);
-        let guest_signing_key = Arc::clone(&guest_signing_key);
-        std::thread::spawn(move || {
-            let _connection_guard = connection_guard;
-            handle_client(
-                cfd,
-                &state,
-                &integration_state,
-                &probe_state,
-                &bs,
-                &guest_signing_key,
-            );
-        });
+        server.spawn_handler(cfd, connection_guard);
     }
 
     // Close the listening socket so any in-flight accept on a

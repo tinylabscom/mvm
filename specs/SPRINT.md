@@ -3174,6 +3174,21 @@ to the configured ceiling and the first terse response immediately after it.
       witness and record delivery in
       `specs/sprint/delivery/2951-ad-hoc-exec-image-environment.md`.
 
+## 2026-08-27 HVF machine restore dispatch
+
+- [x] Route `machine fork`, `machine restore`, and `machine warm-restore`
+      through the shared vm_full backend-origin dispatcher instead of calling
+      the Firecracker arm unconditionally.
+- [x] Preserve the machine surface's explicit Firecracker experimental opt-in
+      while leaving HVF and retired-backend decisions backend-specific.
+- [x] Add focused regressions proving an HVF-marked checkpoint never reaches
+      the Firecracker arm and a retired checkpoint retains its fail-closed
+      diagnostic.
+- [ ] Exercise a live two-vCPU HVF fork and a live mismatched-CPU restore
+      refusal on Apple Silicon.
+- [ ] Merge the repair through the queue and close issue #2961 from the merged
+      PR.
+
 ## Follow-up (not started) — repository-to-signed-workload generator
 
 Prompted by the same 2026-08-25 survey of a commercial enterprise

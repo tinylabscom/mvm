@@ -8,7 +8,10 @@
 use std::cell::Cell;
 
 use super::HvfError;
-use super::snapshot::{HvfVcpuState, SNAPSHOT_SYS_REGS};
+use super::snapshot::{
+    HvfVcpuState, SNAPSHOT_EXTRA_SYS_REGS, SNAPSHOT_GIC_ICC_REGS, SNAPSHOT_SYS_REGS,
+    VCPU_SIMD_REGS, gic_icc_is_restorable,
+};
 use super::sys::*;
 use super::vcpu::{advance_pc, decode_data_abort, esr_ec, read_gp, write_gp};
 use crate::vmm::fdt;
@@ -70,6 +73,48 @@ impl HvfVcpu {
                 .collect::<Result<Vec<_>, _>>()?
                 .try_into()
                 .map_err(|_| HvfError::SnapshotState("system register state length"))?,
+            extra_sys: SNAPSHOT_EXTRA_SYS_REGS
+                .iter()
+                .map(|reg| {
+                    let mut value = 0u64;
+                    // SAFETY: this vCPU is live and owned by this thread;
+                    // `value` is a valid out-parameter.
+                    let rc = unsafe { hv_vcpu_get_sys_reg(self.vcpu, *reg, &mut value) };
+                    if rc == HV_SUCCESS {
+                        Ok(value)
+                    } else {
+                        Err(HvfError::GetReg(rc))
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .try_into()
+                .map_err(|_| HvfError::SnapshotState("extra system register state length"))?,
+            gic_icc: SNAPSHOT_GIC_ICC_REGS
+                .iter()
+                .map(|reg| {
+                    let mut value = 0u64;
+                    // SAFETY: this vCPU is live and owned by the calling thread;
+                    // `value` is a valid out-parameter.
+                    let rc = unsafe { hv_gic_get_icc_reg(self.vcpu, *reg, &mut value) };
+                    if rc == HV_SUCCESS {
+                        Ok(value)
+                    } else {
+                        Err(HvfError::GicCpuCapture {
+                            reg: *reg,
+                            status: rc,
+                        })
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .try_into()
+                .map_err(|_| HvfError::SnapshotState("GIC CPU register state length"))?,
+            fpcr: self.get_raw_reg(HV_REG_FPCR)?,
+            fpsr: self.get_raw_reg(HV_REG_FPSR)?,
+            simd: (0..VCPU_SIMD_REGS)
+                .map(|index| self.get_simd(index))
+                .collect::<Result<Vec<_>, _>>()?
+                .try_into()
+                .map_err(|_| HvfError::SnapshotState("SIMD register state length"))?,
         })
     }
 
@@ -85,7 +130,81 @@ impl HvfVcpu {
         for (reg, value) in SNAPSHOT_SYS_REGS.iter().zip(state.sys) {
             self.set_sys(*reg, value)?;
         }
+        for (reg, value) in SNAPSHOT_EXTRA_SYS_REGS.iter().zip(state.extra_sys) {
+            // SAFETY: this vCPU is live and owned by this thread.
+            let rc = unsafe { hv_vcpu_set_sys_reg(self.vcpu, *reg, value) };
+            if rc != HV_SUCCESS {
+                return Err(HvfError::SetReg(rc));
+            }
+        }
+        self.set_raw_reg(HV_REG_FPCR, state.fpcr)?;
+        self.set_raw_reg(HV_REG_FPSR, state.fpsr)?;
+        for (index, value) in state.simd.iter().copied().enumerate() {
+            self.set_simd(index, value)?;
+        }
+        for (reg, value) in SNAPSHOT_GIC_ICC_REGS.iter().zip(state.gic_icc) {
+            if !gic_icc_is_restorable(*reg) {
+                continue;
+            }
+            // SAFETY: this vCPU is live and owned by the calling thread; the
+            // opaque GIC device state has already been restored.
+            let rc = unsafe { hv_gic_set_icc_reg(self.vcpu, *reg, value) };
+            if rc != HV_SUCCESS {
+                return Err(HvfError::GicCpuRestore {
+                    reg: *reg,
+                    status: rc,
+                });
+            }
+        }
         Ok(())
+    }
+
+    fn get_raw_reg(&self, reg: hv_reg_t) -> Result<u64, HvfError> {
+        let mut value = 0u64;
+        // SAFETY: this vCPU is live and owned by this thread; `value` is a
+        // valid out-parameter.
+        let rc = unsafe { hv_vcpu_get_reg(self.vcpu, reg, &mut value) };
+        if rc == HV_SUCCESS {
+            Ok(value)
+        } else {
+            Err(HvfError::GetReg(rc))
+        }
+    }
+
+    fn set_raw_reg(&self, reg: hv_reg_t, value: u64) -> Result<(), HvfError> {
+        // SAFETY: this vCPU is live and owned by this thread.
+        let rc = unsafe { hv_vcpu_set_reg(self.vcpu, reg, value) };
+        if rc == HV_SUCCESS {
+            Ok(())
+        } else {
+            Err(HvfError::SetReg(rc))
+        }
+    }
+
+    fn get_simd(&self, index: usize) -> Result<[u8; 16], HvfError> {
+        let reg =
+            u32::try_from(index).map_err(|_| HvfError::SnapshotState("SIMD register index"))?;
+        let mut value = [0u8; 16];
+        // SAFETY: this vCPU is live and owned by this thread; `value` is a
+        // writable 16-byte out-parameter for the framework's vector value.
+        let rc = unsafe { hv_vcpu_get_simd_fp_reg(self.vcpu, reg, &mut value) };
+        if rc != HV_SUCCESS {
+            return Err(HvfError::GetReg(rc));
+        }
+        Ok(value)
+    }
+
+    fn set_simd(&self, index: usize, value: [u8; 16]) -> Result<(), HvfError> {
+        let reg =
+            u32::try_from(index).map_err(|_| HvfError::SnapshotState("SIMD register index"))?;
+        // SAFETY: this vCPU is live and owned by this thread; the assembly
+        // bridge synchronously loads all 16 bytes before tail-calling HVF.
+        let rc = unsafe { mvm_hv_vcpu_set_simd_fp_reg(self.vcpu, reg, &value) };
+        if rc == HV_SUCCESS {
+            Ok(())
+        } else {
+            Err(HvfError::SetReg(rc))
+        }
     }
 }
 

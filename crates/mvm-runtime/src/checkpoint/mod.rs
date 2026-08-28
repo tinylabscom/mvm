@@ -14,7 +14,7 @@ use crate::lineage::{LineageAnchor, LineageGraph, LineageRecord};
 mod params;
 pub use params::{
     CaptureFsQuickParams, CaptureFsQuickParamsBuilder, CaptureVmFullParams,
-    CaptureVmFullParamsBuilder, ForkParams, ForkParamsBuilder,
+    CaptureVmFullParamsBuilder, ForkParams, ForkParamsBuilder, ForkParentLiveness,
 };
 
 pub use mvm_core::checkpoint::SUPERVISOR_CONFIG_BLOB as SUPERVISOR_CONFIG_FILE_NAME;
@@ -281,12 +281,6 @@ pub fn checkpoint_children(
     crate::lineage::verified_children(&CheckpointGraph(store), parent_digest, anchor)
 }
 
-/// A fork restores captured memory into a new runtime identity. Refuse a live
-/// parent because its captured device state can still refer to active host
-/// resources, and because the child must never become a second owner of those
-/// resources while the parent is running.
-const FORK_ALLOW_PARENT_RUNNING: bool = false;
-
 /// The child a restore is about to bring up: its fresh identity, its state dir
 /// (checkpoint blobs already cloned there), and the CPU share its admitted plan
 /// was granted.
@@ -417,7 +411,8 @@ pub fn fork_vm_full(
     // must still match the digest the host signed at creation before we clone.
     verify_checkpoint_against_chain(anchor, &parent)?;
 
-    if !FORK_ALLOW_PARENT_RUNNING && vm_is_running(&parent.vm_name) {
+    if params.parent_liveness == ForkParentLiveness::MustBeStopped && vm_is_running(&parent.vm_name)
+    {
         anyhow::bail!(
             "cannot fork checkpoint '{}': parent VM '{}' is still running; stop it first",
             parent.id,
@@ -1398,6 +1393,7 @@ mod tests {
                 child_vm_name: "childvm-session".into(),
                 dest_dir: dst,
                 created_unix: 2,
+                parent_liveness: ForkParentLiveness::MustBeStopped,
                 child_plan_json: None,
                 child_tenant_id: None,
             },
@@ -1427,6 +1423,7 @@ mod tests {
                 child_vm_name: "childvm".into(),
                 dest_dir: dst.clone(),
                 created_unix: 2,
+                parent_liveness: ForkParentLiveness::MustBeStopped,
                 child_plan_json: None,
                 child_tenant_id: None,
             },
@@ -1465,6 +1462,7 @@ mod tests {
                 child_vm_name: "c".into(),
                 dest_dir: tmp.path().join("d"),
                 created_unix: 2,
+                parent_liveness: ForkParentLiveness::MustBeStopped,
                 child_plan_json: None,
                 child_tenant_id: None,
             },
@@ -1489,6 +1487,7 @@ mod tests {
                 child_vm_name: "c".into(),
                 dest_dir: tmp.path().join("d"),
                 created_unix: 2,
+                parent_liveness: ForkParentLiveness::MustBeStopped,
                 child_plan_json: None,
                 child_tenant_id: None,
             },
@@ -1600,6 +1599,7 @@ mod tests {
                 child_vm_name: "childvm".into(),
                 dest_dir: dst.clone(),
                 created_unix: 2,
+                parent_liveness: ForkParentLiveness::MustBeStopped,
                 child_plan_json: None,
                 child_tenant_id: None,
             },
@@ -2389,6 +2389,7 @@ mod tests {
                 child_vm_name: "new-child".into(),
                 dest_dir: tmp.path().join("same-checkpoint"),
                 created_unix: 2,
+                parent_liveness: ForkParentLiveness::MustBeStopped,
                 child_plan_json: None,
                 child_tenant_id: None,
             },
@@ -2406,6 +2407,7 @@ mod tests {
                 child_vm_name: parent.vm_name.clone(),
                 dest_dir: tmp.path().join("same-vm"),
                 created_unix: 2,
+                parent_liveness: ForkParentLiveness::MustBeStopped,
                 child_plan_json: None,
                 child_tenant_id: None,
             },
@@ -2450,6 +2452,63 @@ mod tests {
             !vm_is_running("pid-check"),
             "a marker no registered backend owns is not liveness"
         );
+    }
+
+    #[test]
+    fn live_parent_fork_requires_an_explicit_backend_coexistence_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", tmp.path().join("home"));
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let parent = seed_fc_vm_full_checkpoint(&store, tmp.path(), "live-parent-policy");
+        let state = mvm_core::config::vm_state_dir(&parent.vm_name);
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("hvf.pid"), std::process::id().to_string()).unwrap();
+
+        let (child_plan_json, child_tenant_id) = admitted_child_plan();
+        let stopped_only = RecordedRestore::default();
+        let error = fork_vm_full(
+            &store,
+            ForkParams {
+                checkpoint: parent.id.clone(),
+                child_id: CheckpointId::new("stopped-only-child"),
+                child_vm_name: "stopped-only-child-vm".into(),
+                dest_dir: tmp.path().join("stopped-only-child"),
+                created_unix: 2,
+                parent_liveness: ForkParentLiveness::MustBeStopped,
+                child_plan_json: Some(child_plan_json),
+                child_tenant_id: Some(child_tenant_id),
+            },
+            &stopped_only.restore(),
+            &AgreeingAnchor,
+        )
+        .expect_err("the default policy must refuse a live parent");
+        assert!(
+            error
+                .to_string()
+                .contains("parent VM 'fc-origin' is still running")
+        );
+        assert!(stopped_only.seen.borrow().is_none());
+
+        let (child_plan_json, child_tenant_id) = admitted_child_plan();
+        let coexistence_safe = RecordedRestore::default();
+        fork_vm_full(
+            &store,
+            ForkParams {
+                checkpoint: parent.id,
+                child_id: CheckpointId::new("coexisting-child"),
+                child_vm_name: "coexisting-child-vm".into(),
+                dest_dir: tmp.path().join("coexisting-child"),
+                created_unix: 2,
+                parent_liveness: ForkParentLiveness::MayBeRunning,
+                child_plan_json: Some(child_plan_json),
+                child_tenant_id: Some(child_tenant_id),
+            },
+            &coexistence_safe.restore(),
+            &AgreeingAnchor,
+        )
+        .expect("an explicitly coexistence-safe backend may fork a live parent");
+        assert!(coexistence_safe.seen.borrow().is_some());
     }
 
     #[test]
@@ -2593,6 +2652,7 @@ mod tests {
                 child_vm_name: "fc-childvm-session".into(),
                 dest_dir: dest,
                 created_unix: 2,
+                parent_liveness: ForkParentLiveness::MustBeStopped,
                 child_plan_json: Some(child_plan_json),
                 child_tenant_id: Some(child_tenant_id),
             },
@@ -2627,6 +2687,7 @@ mod tests {
                 child_vm_name: "fc-childvm".into(),
                 dest_dir: dest.clone(),
                 created_unix: 2,
+                parent_liveness: ForkParentLiveness::MustBeStopped,
                 child_plan_json: Some(child_plan_json),
                 child_tenant_id: Some(child_tenant_id),
             },
@@ -2668,6 +2729,7 @@ mod tests {
                 child_vm_name: "fc-missing-plan-child".into(),
                 dest_dir: tmp.path().join("missing-plan-child-state"),
                 created_unix: 2,
+                parent_liveness: ForkParentLiveness::MustBeStopped,
                 child_plan_json: None,
                 child_tenant_id: None,
             },
@@ -2687,6 +2749,7 @@ mod tests {
             child_vm_name: "child-vm".into(),
             dest_dir: PathBuf::from("/tmp/child-state"),
             created_unix: 2,
+            parent_liveness: ForkParentLiveness::MustBeStopped,
             child_plan_json,
             child_tenant_id,
         };
@@ -2763,6 +2826,7 @@ mod tests {
                 child_vm_name: "fc-childvm".into(),
                 dest_dir: tmp.join(format!("{id}-child-state")),
                 created_unix: 2,
+                parent_liveness: ForkParentLiveness::MustBeStopped,
                 child_plan_json: Some(child_plan_json),
                 child_tenant_id: Some(child_tenant_id),
             },
@@ -2802,6 +2866,7 @@ mod tests {
                 child_vm_name: "fc-childvm".into(),
                 dest_dir: tmp.path().join("bound-child-state"),
                 created_unix: 2,
+                parent_liveness: ForkParentLiveness::MustBeStopped,
                 child_plan_json: Some(child_plan_json),
                 child_tenant_id: Some(child_tenant_id),
             },
@@ -2840,6 +2905,7 @@ mod tests {
                 child_vm_name: "fc-childvm".into(),
                 dest_dir: tmp.path().join("ungranted-child-state"),
                 created_unix: 2,
+                parent_liveness: ForkParentLiveness::MustBeStopped,
                 child_plan_json: Some(child_plan_json),
                 child_tenant_id: Some(child_tenant_id),
             },
@@ -3030,6 +3096,7 @@ mod tests {
                 child_vm_name: "fc-childvm".into(),
                 dest_dir: tmp.path().join("tampered-child-state"),
                 created_unix: 2,
+                parent_liveness: ForkParentLiveness::MustBeStopped,
                 child_plan_json: Some(child_plan_json),
                 child_tenant_id: Some(child_tenant_id),
             },
@@ -3058,6 +3125,7 @@ mod tests {
                 child_vm_name: "fc-childvm2".into(),
                 dest_dir: tmp.path().join("childvm2-state"),
                 created_unix: 2,
+                parent_liveness: ForkParentLiveness::MustBeStopped,
                 child_plan_json: None,
                 child_tenant_id: None,
             },
@@ -3119,6 +3187,7 @@ mod tests {
                 child_vm_name: "childvm".into(),
                 dest_dir: tmp.path().join("childvm-state"),
                 created_unix: 2,
+                parent_liveness: ForkParentLiveness::MustBeStopped,
                 child_plan_json: None,
                 child_tenant_id: None,
             },
@@ -3255,6 +3324,7 @@ mod tests {
                 child_vm_name: "childvm".into(),
                 dest_dir: dest.clone(),
                 created_unix: 2,
+                parent_liveness: ForkParentLiveness::MustBeStopped,
                 child_plan_json: None,
                 child_tenant_id: None,
             },
@@ -3290,6 +3360,7 @@ mod tests {
                 child_vm_name: "childvm".into(),
                 dest_dir: dest.clone(),
                 created_unix: 2,
+                parent_liveness: ForkParentLiveness::MustBeStopped,
                 child_plan_json: None,
                 child_tenant_id: None,
             },

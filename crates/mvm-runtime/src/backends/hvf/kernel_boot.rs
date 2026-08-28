@@ -19,7 +19,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use super::HvfError;
@@ -937,6 +937,37 @@ struct SnapshotPaths {
     frame: Option<PathBuf>,
 }
 
+/// Holds secondary vCPUs after creation until the primary has restored the
+/// process-global GIC state and is ready for per-vCPU state restoration.
+#[derive(Default)]
+struct MachineStartGate {
+    released: Mutex<bool>,
+    changed: Condvar,
+}
+
+impl MachineStartGate {
+    fn wait(&self) {
+        let mut released = self
+            .released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !*released {
+            released = self
+                .changed
+                .wait(released)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    fn release(&self) {
+        *self
+            .released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        self.changed.notify_all();
+    }
+}
+
 /// The state every vCPU of one machine shares.
 ///
 /// Borrowed by each vCPU thread for the length of the run. Every field is
@@ -948,6 +979,12 @@ struct MachineShared<'a> {
     /// Keeps vCPU creation in CPU-number order, so each CPU gets the GIC
     /// redistributor frame the device tree assigned it.
     creation_order: &'a CreationOrder,
+    /// Prevents any secondary from running before whole-machine restore is
+    /// complete.
+    start: &'a MachineStartGate,
+    /// Holds restored CPUs after their local state is installed until every
+    /// CPU has acknowledged the same restore boundary.
+    run: &'a MachineStartGate,
     /// Every live vCPU's force-exit token.
     roster: &'a Mutex<Vec<HvfHandle>>,
     /// The supervisor's stop flag: a timeout, or a graceful stop.
@@ -1159,8 +1196,11 @@ fn run_primary<B: run::DeviceBus>(
                 );
 
                 let ram_bytes = guest_ram.snapshot_bytes();
-                let device_bytes = capture_device_states(devices)
-                    .map_err(|_| HvfError::SnapshotState("snapshot device capture failed"))?;
+                let device_bytes = capture_device_states(devices).map_err(|error| {
+                    eprintln!("HVF snapshot device capture failed: {error}");
+                    HvfError::SnapshotState("snapshot device capture failed")
+                })?;
+                let gic_bytes = super::snapshot::capture_gic_device_state()?;
                 // Boot CPU first, then the rest in CPU order — the order a
                 // restore hands them back out in.
                 let mut vcpu_states = Vec::with_capacity(vcpus as usize);
@@ -1171,6 +1211,7 @@ fn run_primary<B: run::DeviceBus>(
                     0,
                     &ram_bytes,
                     &device_bytes,
+                    &gic_bytes,
                     &vcpu_states,
                     &[],
                 )
@@ -1276,6 +1317,7 @@ fn run_secondary<B: run::DeviceBus>(
     shared: &MachineShared<'_>,
     bus: &B,
     created: &std::sync::mpsc::Sender<Result<Option<ThreadCpuHandle>, HvfError>>,
+    ready: &std::sync::mpsc::Sender<Result<(), HvfError>>,
 ) -> Result<CpuDiagnostics, HvfError> {
     // Ordered internally: HVF allocates GIC redistributor frames in
     // `hv_vcpu_create` order and the device tree tells the guest CPU n owns the
@@ -1298,28 +1340,46 @@ fn run_secondary<B: run::DeviceBus>(
     let registered = created.send(Ok(clock)).is_ok();
 
     let result = (|| {
-        if !registered || shared.stopping() {
+        if !registered {
             // The boot CPU gave up on the bring-up. Do not enter the guest.
             return Ok((RunOutcome::Stopped, CpuDiagnostics::default()));
         }
-        match shared.take_restored(cpu) {
+        shared.start.wait();
+        if shared.stopping() {
+            let error = HvfError::SnapshotState("machine stopped before vCPU restore");
+            let _ = ready.send(Err(error));
+            return Err(error);
+        }
+        let restored = match shared.take_restored(cpu) {
             // A restored machine: this CPU was already running when its parent
             // was captured, and the guest inside the restored RAM believes it
             // still is. Resume it directly — waiting for a `CPU_ON` that the
             // guest has no reason to issue again would hang the child with a
             // CPU its own scheduler is dispatching onto.
             Some(state) => {
-                vcpu.restore_state(&state)?;
+                if let Err(error) = vcpu.restore_state(&state) {
+                    let _ = ready.send(Err(error));
+                    return Err(error);
+                }
                 shared.gates.mark_on(cpu);
+                true
             }
             // A cold boot: park until the guest's PSCI `CPU_ON` says where to
             // start — or until the machine ends, for a CPU it never onlined.
-            None => {
-                let Release::Start(start) = shared.gates.wait_for_release(cpu) else {
-                    return Ok((RunOutcome::Stopped, CpuDiagnostics::default()));
-                };
-                apply_vcpu_start(&vcpu, start)?;
-            }
+            None => false,
+        };
+        if ready.send(Ok(())).is_err() {
+            return Ok((RunOutcome::Stopped, CpuDiagnostics::default()));
+        }
+        shared.run.wait();
+        if shared.stopping() {
+            return Ok((RunOutcome::Stopped, CpuDiagnostics::default()));
+        }
+        if !restored {
+            let Release::Start(start) = shared.gates.wait_for_release(cpu) else {
+                return Ok((RunOutcome::Stopped, CpuDiagnostics::default()));
+            };
+            apply_vcpu_start(&vcpu, start)?;
         }
 
         let mut diagnostics = CpuDiagnostics::default();
@@ -1717,6 +1777,8 @@ unsafe fn run(
         // where secondaries wait for the guest's PSCI `CPU_ON` instead.
         let mut restored_secondaries: Vec<Option<HvfVcpuState>> =
             (0..vcpus).map(|_| None).collect();
+        let mut restored_boot = None;
+        let mut restored_gic = None;
 
         if let Some(frame_path) = restore_frame.as_deref() {
             let frame = std::fs::read(frame_path)
@@ -1739,10 +1801,9 @@ unsafe fn run(
             // Restores the boot CPU here and hands back the rest: HVF only
             // lets a vCPU's registers be written from the thread that created
             // it, and those threads do not exist yet.
-            let secondary_states = super::snapshot::restore_hvf_snapshot_control(
+            let restored = super::snapshot::restore_hvf_snapshot_control(
                 &frame,
                 guest_ram.len(),
-                &vcpu,
                 &mut snapshot_targets,
             )
             .map_err(|_| HvfError::SnapshotState("restore control state failed"))?;
@@ -1750,18 +1811,17 @@ unsafe fn run(
             // into this one: the guest in the restored RAM has a CPU count
             // baked into its own scheduler state. Refuse rather than boot a
             // child whose CPUs disagree with the memory image describing them.
-            if secondary_states.len() + 1 != vcpus as usize {
+            if restored.vcpus.len() != vcpus as usize {
                 return Err(HvfError::SnapshotState(
                     "snapshot vCPU count does not match this machine",
                 ));
             }
-            for (slot, state) in restored_secondaries
-                .iter_mut()
-                .skip(1)
-                .zip(secondary_states)
-            {
+            let mut states = restored.vcpus.into_iter();
+            restored_boot = states.next();
+            for (slot, state) in restored_secondaries.iter_mut().skip(1).zip(states) {
                 *slot = Some(state);
             }
+            restored_gic = Some(restored.gic);
             drop(snapshot_targets);
             drop(restore_devices);
 
@@ -1823,9 +1883,13 @@ unsafe fn run(
             // later, once each CPU has contributed its CPU clock.
             let throttle = Arc::new(AtomicBool::new(false));
             let creation_order = CreationOrder::default();
+            let start = MachineStartGate::default();
+            let run_start = MachineStartGate::default();
             let shared = MachineShared {
                 gates: &gates,
                 creation_order: &creation_order,
+                start: &start,
+                run: &run_start,
                 roster: &roster,
                 stop,
                 paused,
@@ -1852,15 +1916,18 @@ unsafe fn run(
                 // Every secondary reports the result of its own
                 // `hv_vcpu_create` here before parking.
                 let (created_tx, created_rx) = std::sync::mpsc::channel();
+                let (ready_tx, ready_rx) = std::sync::mpsc::channel();
                 let secondaries: Vec<_> = (1..vcpus)
                     .map(|cpu| {
                         let created_tx = created_tx.clone();
+                        let ready_tx = ready_tx.clone();
                         let shared = &shared;
                         let bus = &bus;
-                        scope.spawn(move || run_secondary(cpu, shared, bus, &created_tx))
+                        scope.spawn(move || run_secondary(cpu, shared, bus, &created_tx, &ready_tx))
                     })
                     .collect();
                 drop(created_tx);
+                drop(ready_tx);
 
                 // Wait for the whole machine to exist before starting the
                 // guest. The device tree already describes these CPUs, so a
@@ -1882,6 +1949,45 @@ unsafe fn run(
                         }
                     }
                 }
+
+                // Hypervisor.framework restores the process-global GIC only
+                // after every vCPU exists and before any vCPU runs. CPU-local
+                // ICC state follows on each vCPU's owning thread. The start
+                // gate makes those ordering requirements explicit.
+                if bring_up.is_ok()
+                    && let Some(gic) = restored_gic.as_deref()
+                {
+                    bring_up = super::snapshot::restore_gic_device_state(gic);
+                }
+                if bring_up.is_ok()
+                    && let Some(state) = restored_boot.as_ref()
+                {
+                    bring_up = vcpu.restore_state(state);
+                }
+                if bring_up.is_err() {
+                    shared.end();
+                }
+                shared.start.release();
+
+                // Do not run the primary until every secondary has either
+                // restored its CPU-local state or reported a failure.
+                if bring_up.is_ok() {
+                    for _ in 1..vcpus {
+                        match ready_rx.recv() {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => bring_up = bring_up.and(Err(error)),
+                            Err(_) => {
+                                bring_up = bring_up.and(Err(HvfError::SnapshotState(
+                                    "secondary vCPU restore report missing",
+                                )));
+                            }
+                        }
+                    }
+                }
+                if bring_up.is_err() {
+                    shared.end();
+                }
+                shared.run.release();
 
                 // Bound the machine only once every vCPU exists and has
                 // contributed its clock: a controller charging one thread of an
@@ -2351,4 +2457,27 @@ mod tests {
             })
         );
     }
+}
+#[test]
+fn machine_start_gate_holds_a_cpu_until_release() {
+    let gate = Arc::new(MachineStartGate::default());
+    let worker_gate = Arc::clone(&gate);
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (released_tx, released_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        entered_tx.send(()).expect("announce wait");
+        worker_gate.wait();
+        released_tx.send(()).expect("announce release");
+    });
+
+    entered_rx.recv().expect("worker reached gate");
+    assert!(
+        released_rx.recv_timeout(Duration::from_millis(20)).is_err(),
+        "worker must remain held before release"
+    );
+    gate.release();
+    released_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("worker released");
+    worker.join().expect("worker joins");
 }

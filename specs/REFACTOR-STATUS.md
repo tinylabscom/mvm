@@ -4,6 +4,14 @@ Last updated: 2026-08-27
 
 ## In progress
 
+- [ ] **HVF machine restore dispatch — issue #2961.**
+      `specs/plans/2026-08-27-hvf-machine-restore-dispatch.md`.
+      The `machine` fork/restore surfaces now share the backend-origin
+      dispatcher with `vm checkpoint fork`, preserving the machine surface's
+      Firecracker opt-in without misrouting HVF checkpoints. Focused dispatch
+      regressions are green; live two-vCPU HVF restore evidence and merge
+      delivery remain.
+
 - [ ] **Extended CI documented-surface repair — issue #2938.**
       `specs/plans/2026-08-27-extended-ci-documented-surface.md`.
       Both scheduled platform witnesses now request signed-manifest

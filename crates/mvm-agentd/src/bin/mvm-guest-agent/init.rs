@@ -4,15 +4,12 @@
 //! this harness before entering the normal vsock control plane:
 //!
 //!   1. Mount `/proc`, `/sys`, and `/dev`.
-//!   2. Start the orphan reaper so descendants re-parented to PID 1 are
-//!      collected instead of accumulating as zombies. It is a thread, not
-//!      a SIGCHLD handler, so it can publish the statuses of children the
-//!      agent owns rather than destroying them — see
-//!      [`mvm_agentd::child_wait`].
-//!   3. Hand control back to `main`; the normal vsock accept loop serves
+//!   2. Hand control back to `main`; the normal vsock accept loop serves
 //!      `ActivateEnvironment` as the only allowed verb.
-//!   4. `apply_activation` mounts the rootfs, runtime overlay, and volumes,
+//!   3. `apply_activation` mounts the rootfs, runtime overlay, and volumes,
 //!      drops privilege, and flips the boot state to `Activated`.
+//!   4. Only after that single-threaded privilege transition does `main`
+//!      start the orphan reaper and other background threads.
 //!
 //! Linux-only.  On non-Linux targets the functions are no-ops so the
 //! workspace still compiles on macOS.
@@ -39,9 +36,7 @@ pub(crate) fn early_setup() {
         if crate::transport::unix_transport_selected() {
             // A shared-kernel container runtime has already mounted /proc,
             // /sys, and /dev for the namespace and drops CAP_SYS_ADMIN, so
-            // the initramfs early mounts would fail with EPERM. The agent
-            // is still PID 1 of the container's PID namespace, so the
-            // orphan reaper is still required.
+            // the initramfs early mounts would fail with EPERM.
             eprintln!(
                 "mvm-guest-agent: unix transport — container runtime provides early filesystems"
             );
@@ -54,13 +49,21 @@ pub(crate) fn early_setup() {
         // Pin it now from the kernel cmdline so the pre-activation trust
         // decision sees the pinned grant before the agent accepts requests.
         mvm_agentd::guest_bootstrap::provision_verb_grant();
-        mvm_agentd::child_wait::install_orphan_reaper();
     }
 
     #[cfg(not(target_os = "linux"))]
     {
         // Should never be PID 1 on non-Linux, but keep the compile path
         // quiet.
+    }
+}
+
+/// Start the PID-1 orphan reaper after activation has dropped privilege on the
+/// main thread. Starting it earlier would leave a pre-existing thread outside
+/// the capability and `no_new_privs` transition.
+pub(crate) fn start_orphan_reaper() {
+    if is_pid1() {
+        mvm_agentd::child_wait::install_orphan_reaper();
     }
 }
 
