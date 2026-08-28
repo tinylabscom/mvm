@@ -158,11 +158,15 @@ pub(in crate::commands) fn bootstrap_builder_vm_image() -> Result<()> {
     let out_dir = format!("{}/builder-vm/{arch}", mvm_core::config::mvm_cache_dir());
     let out_dir_path = std::path::Path::new(&out_dir);
     let builder_flake = find_builder_vm_flake();
-    let source_fingerprint = builder_flake
-        .as_ref()
-        .ok()
-        .map(|flake_dir| builder_vm_source_fingerprint(flake_dir))
-        .transpose()?;
+    let acquisition = mvm_build::boot_image_select::resolve(None, builder_flake.is_ok()).choice;
+    let source_fingerprint = match acquisition {
+        mvm_build::boot_image_select::BootImageAcquisition::Build => builder_flake
+            .as_ref()
+            .ok()
+            .map(|flake_dir| builder_vm_source_fingerprint(flake_dir))
+            .transpose()?,
+        mvm_build::boot_image_select::BootImageAcquisition::Fetch => None,
+    };
     let cache_ready = match source_fingerprint.as_deref() {
         Some(fingerprint) => {
             let status = builder_vm_source_cache_status(out_dir_path, fingerprint);
@@ -175,7 +179,7 @@ pub(in crate::commands) fn bootstrap_builder_vm_image() -> Result<()> {
         None => validate_builder_vm_stage0_artifacts(out_dir_path).is_ok(),
     };
 
-    match resolve_builder_vm_bootstrap_action(builder_flake, cache_ready)? {
+    match resolve_builder_vm_bootstrap_action(builder_flake, cache_ready, acquisition)? {
         BuilderVmBootstrapAction::UseCached => {
             ui::info(&format!("Builder VM image already cached at {out_dir}."));
             Ok(())
@@ -407,14 +411,19 @@ pub(super) enum BuilderVmBootstrapAction {
 pub(super) fn resolve_builder_vm_bootstrap_action(
     builder_flake: Result<String>,
     cache_ready: bool,
+    acquisition: mvm_build::boot_image_select::BootImageAcquisition,
 ) -> Result<BuilderVmBootstrapAction> {
     if cache_ready {
         return Ok(BuilderVmBootstrapAction::UseCached);
     }
 
-    match builder_flake {
-        Ok(flake_dir) => Ok(BuilderVmBootstrapAction::BuildFromSource { flake_dir }),
-        Err(_) => Ok(BuilderVmBootstrapAction::DownloadPublished),
+    match acquisition {
+        mvm_build::boot_image_select::BootImageAcquisition::Fetch => {
+            Ok(BuilderVmBootstrapAction::DownloadPublished)
+        }
+        mvm_build::boot_image_select::BootImageAcquisition::Build => builder_flake
+            .map(|flake_dir| BuilderVmBootstrapAction::BuildFromSource { flake_dir })
+            .context("a local builder VM image build requires the in-repo builder VM flake"),
     }
 }
 

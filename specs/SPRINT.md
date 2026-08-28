@@ -47,12 +47,16 @@
 - [x] **Extended CI documented-surface repair — issue #2938.**
       `specs/plans/2026-08-27-extended-ci-documented-surface.md`.
       Linux and macOS now build the live documented-surface binary with signed
-      release-manifest verification enabled, and macOS installs the root
-      binary's target-gated libkrun dependency through the shared installer.
-      Focused regression tests, actionlint, the exact macOS feature build,
-      workspace tests/check/doctests, and zero-warning Clippy are green.
-      PR #2943 merged and closed issue #2938; a manual Extended CI run on
-      `main` is recording the post-merge live-lane evidence.
+      release-manifest verification enabled through Cargo's standard linker
+      path. The macOS witness installs both the root binary's target-gated
+      libkrun dependency and the embedded Linux cross toolchain through shared
+      installers. PR #2943 landed the first repair; the post-merge live run
+      exposed the next clean-run blockers: the
+      bootstrap ignored its explicit published-image choice and the SDK drift
+      scenario had no compiled xtask. Both are fixed with resolver and workflow
+      regressions; the exact release-download build and zero-warning Clippy are
+      green. Remaining: warm the source sidecar after #2954, pass both live
+      witnesses, merge, and close #2938 through the PR link.
 
 - [ ] **Cloudflare Pages cutover.**
       `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.

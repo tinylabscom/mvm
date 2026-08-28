@@ -165,18 +165,24 @@ fn builder_vm_artifact_names_match_release_workflow() {
 
 #[test]
 fn builder_vm_bootstrap_uses_cache_even_in_source_checkout() {
-    let action =
-        resolve_builder_vm_bootstrap_action(Ok("/repo/nix/images/builder-vm".to_string()), true)
-            .expect("cache hit should be usable in a source checkout");
+    let action = resolve_builder_vm_bootstrap_action(
+        Ok("/repo/nix/images/builder-vm".to_string()),
+        true,
+        mvm_build::boot_image_select::BootImageAcquisition::Build,
+    )
+    .expect("cache hit should be usable in a source checkout");
 
     assert_eq!(action, BuilderVmBootstrapAction::UseCached);
 }
 
 #[test]
 fn builder_vm_bootstrap_source_checkout_builds_from_source_on_cache_miss() {
-    let action =
-        resolve_builder_vm_bootstrap_action(Ok("/repo/nix/images/builder-vm".to_string()), false)
-            .expect("source checkout cache miss should route to local source build");
+    let action = resolve_builder_vm_bootstrap_action(
+        Ok("/repo/nix/images/builder-vm".to_string()),
+        false,
+        mvm_build::boot_image_select::BootImageAcquisition::Build,
+    )
+    .expect("source checkout cache miss should route to local source build");
 
     assert_eq!(
         action,
@@ -188,11 +194,42 @@ fn builder_vm_bootstrap_source_checkout_builds_from_source_on_cache_miss() {
 
 #[test]
 fn builder_vm_bootstrap_installed_binary_may_download_on_cache_miss() {
-    let action =
-        resolve_builder_vm_bootstrap_action(Err(anyhow::anyhow!("no source flake")), false)
-            .expect("installed binaries may use published prebuilts");
+    let action = resolve_builder_vm_bootstrap_action(
+        Err(anyhow::anyhow!("no source flake")),
+        false,
+        mvm_build::boot_image_select::BootImageAcquisition::Fetch,
+    )
+    .expect("installed binaries may use published prebuilts");
 
     assert_eq!(action, BuilderVmBootstrapAction::DownloadPublished);
+}
+
+#[test]
+fn builder_vm_bootstrap_fetch_override_bypasses_source_build() {
+    let action = resolve_builder_vm_bootstrap_action(
+        Ok("/repo/nix/images/builder-vm".to_string()),
+        false,
+        mvm_build::boot_image_select::BootImageAcquisition::Fetch,
+    )
+    .expect("an explicit fetch in a source checkout must use the published image");
+
+    assert_eq!(action, BuilderVmBootstrapAction::DownloadPublished);
+}
+
+#[test]
+fn builder_vm_bootstrap_build_override_needs_a_source_flake() {
+    let error = resolve_builder_vm_bootstrap_action(
+        Err(anyhow::anyhow!("no source flake")),
+        false,
+        mvm_build::boot_image_select::BootImageAcquisition::Build,
+    )
+    .expect_err("an installed binary cannot satisfy a forced local build");
+
+    assert!(
+        error
+            .to_string()
+            .contains("requires the in-repo builder VM flake")
+    );
 }
 
 #[cfg(feature = "builder-vm")]

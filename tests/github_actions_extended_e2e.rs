@@ -6,6 +6,10 @@ fn extended_ci() -> String {
     fs::read_to_string(".github/workflows/ci-full.yml").expect("read extended CI workflow")
 }
 
+fn documented_surface_script() -> String {
+    fs::read_to_string("scripts/e2e-documented-surface.sh").expect("read documented-surface runner")
+}
+
 fn job_block<'a>(workflow: &'a str, job: &str) -> &'a str {
     let marker = format!("  {job}:\n");
     let start = workflow
@@ -30,14 +34,35 @@ fn documented_surface_jobs_build_a_signature_verifying_mvmctl() {
     for job in ["e2e-docs-linux", "e2e-docs-macos"] {
         let block = job_block(&workflow, job);
         assert!(
-            block.contains("MVM_E2E_FEATURES: user"),
-            "{job} must enable the user surface so signed release manifests are verified"
+            block.contains("MVM_E2E_FEATURES: user,release-artifact-bootstrap"),
+            "{job} must verify signed release manifests and compile the explicit published-image path"
         );
         assert!(
             !block.contains("MVM_SKIP_COSIGN_VERIFY"),
             "{job} must not bypass signed-manifest verification"
         );
     }
+}
+
+#[test]
+fn macos_documented_surface_uses_the_published_workload_kernel() {
+    let workflow = extended_ci();
+    let macos = job_block(&workflow, "e2e-docs-macos");
+
+    assert!(
+        macos.contains("MVM_KERNEL_SOURCE: download"),
+        "the macOS witness must not source-build its workload kernel through the builder image it is bootstrapping"
+    );
+}
+
+#[test]
+fn documented_surface_builds_the_sdk_codegen_driver() {
+    let script = documented_surface_script();
+
+    assert!(
+        script.contains("cargo build -p xtask"),
+        "the SDK drift scenario invokes the compiled xtask binary directly"
+    );
 }
 
 #[test]
@@ -48,5 +73,30 @@ fn macos_documented_surface_job_installs_its_target_gated_libkrun_dependency() {
     assert!(
         macos.contains("uses: ./.github/actions/install-libkrun"),
         "the macOS root binary enables libkrun-sys and needs the shared libkrun installer"
+    );
+}
+
+#[test]
+fn macos_documented_surface_job_installs_the_embedded_cross_toolchain() {
+    let workflow = extended_ci();
+    let macos = job_block(&workflow, "e2e-docs-macos");
+
+    assert!(
+        macos.contains("uses: ./.github/actions/install-zigbuild"),
+        "the macOS build script compiles the embedded Linux binaries and needs the shared cross-toolchain installer"
+    );
+}
+
+#[test]
+fn signature_verifying_build_avoids_the_fast_codegen_link_path() {
+    let script = documented_surface_script();
+
+    assert!(
+        script.contains("cargo build --bin mvmctl --features \"$E2E_FEATURES\""),
+        "the aws-lc-backed user build must use Cargo's standard compiler and linker path"
+    );
+    assert!(
+        !script.contains("./scripts/cargo-fast.sh build --bin mvmctl --features"),
+        "the fast codegen wrapper leaves aws-lc native symbols unresolved"
     );
 }

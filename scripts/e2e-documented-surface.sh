@@ -217,16 +217,14 @@ echo "==> refreshing embedded aux helpers"
 just embed-refresh
 
 # `user` carries manifest-verify, which the verified-fetch path needs to accept
-# the published builder VM image. It is off by default anyway: that feature
-# pulls the sigstore/aws-lc stack, and on both hosts tested aws-lc-rs resolves
-# while its native symbols do not, failing the link outright. A build that does
-# not link runs nothing, which is strictly worse than losing the flake-build
-# scenarios to an unverifiable fetch. Set MVM_E2E_FEATURES=user where that
-# native toolchain is known good.
+# the published builder VM image. Its sigstore/aws-lc dependency must use the
+# standard compiler/linker path: the nightly fast-codegen wrapper leaves the
+# native aws-lc symbols unresolved. The featureless local path can retain the
+# faster wrapper because it does not link that stack.
 E2E_FEATURES="${MVM_E2E_FEATURES-}"
 if [[ -n "$E2E_FEATURES" ]]; then
   echo "==> building mvmctl (--features $E2E_FEATURES)"
-  ./scripts/cargo-fast.sh build --bin mvmctl --features "$E2E_FEATURES"
+  cargo build --bin mvmctl --features "$E2E_FEATURES"
 else
   echo "==> building mvmctl"
   ./scripts/cargo-fast.sh build --bin mvmctl
@@ -270,10 +268,11 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
   MVM_HOME="$E2E_HOME" "$MVMCTL" env sign
 fi
 
-# The SDK codegen drift scenario shells out to `target/debug/xtask`; without it
-# the step fails with a bare "NotFound" that says nothing about the SDK.
-./scripts/cargo-fast.sh build -p xtask
-
+# The generated-SDK drift scenario invokes the compiled xtask binary directly.
+# `cargo test` builds the conformance runner but does not materialize that
+# sibling workspace binary, so a clean runner otherwise reports ENOENT rather
+# than an SDK drift result.
+cargo build -p xtask
 
 # Now that `mvmctl` exists, clear anything a previous run left behind. A guest
 # still holding its name makes the next run fail on a collision that reads as a
