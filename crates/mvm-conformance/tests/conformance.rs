@@ -21,6 +21,7 @@
 //! where it can be unit-tested independent of the cucumber runner.
 
 mod steps;
+mod support;
 mod world;
 
 use std::path::{Path, PathBuf};

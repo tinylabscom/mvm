@@ -144,6 +144,9 @@ pub struct CliWorld {
     pub broker_registry: Option<mvm_hostd::broker::registry::Registry>,
     /// Tempdir backing the key-value store, held so it outlives the scenario.
     pub kv_root: Option<tempfile::TempDir>,
+    /// Read-only ext4 carrying the live service-plane fixture tree, held so it
+    /// remains present while the microVM boots and mounts it.
+    pub service_plane_fixture_disk: Option<tempfile::TempDir>,
     /// Outcome of the most recent broker dispatch.
     pub kv_result: Option<mvm_core::protocol::handler::ServiceDispatchResult>,
     /// Catalog under test in the declared-binding scenarios.
@@ -492,6 +495,13 @@ impl fmt::Debug for CliWorld {
             .field(
                 "isolated_home",
                 &self.isolated_home.as_ref().map(|t| t.path().to_path_buf()),
+            )
+            .field(
+                "service_plane_fixture_disk",
+                &self
+                    .service_plane_fixture_disk
+                    .as_ref()
+                    .map(|t| t.path().to_path_buf()),
             )
             .field(
                 "kernel_reacquisition_must_fail",
