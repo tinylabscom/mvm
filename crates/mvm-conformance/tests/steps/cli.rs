@@ -67,7 +67,7 @@ pub(crate) fn workspace_root() -> PathBuf {
 fn run_mvmctl(world: &mut CliWorld, args: String) {
     let mut cmd = mvmctl_command();
     let output = cmd
-        .args(args.split_whitespace())
+        .args(mvm_conformance::doc_examples::tokenize(&args))
         .output()
         .expect("failed to spawn mvmctl");
     world.last_run = Some(output);
@@ -80,7 +80,7 @@ async fn run_mvmctl_with_timeout(world: &mut CliWorld, args: String, seconds: i6
 
     let handle = spawn_blocking(move || {
         mvmctl_command()
-            .args(args.split_whitespace())
+            .args(mvm_conformance::doc_examples::tokenize(&args))
             .output()
             .expect("failed to spawn mvmctl")
     });
@@ -102,7 +102,7 @@ fn run_mvmctl_isolated_home(world: &mut CliWorld, args: String) {
     let home = tempfile::tempdir().expect("create isolated MVM_HOME");
     let mut cmd = mvmctl_command();
     let output = cmd
-        .args(args.split_whitespace())
+        .args(mvm_conformance::doc_examples::tokenize(&args))
         .isolated_home(home.path())
         .output()
         .expect("failed to spawn mvmctl");
@@ -123,7 +123,8 @@ fn run_mvmctl_in_isolated_home(world: &mut CliWorld, args: String) {
         .as_ref()
         .expect("`Given an isolated mvm home` must run before this step");
     let mut cmd = mvmctl_command();
-    cmd.args(args.split_whitespace()).isolated_home(home.path());
+    cmd.args(mvm_conformance::doc_examples::tokenize(&args))
+        .isolated_home(home.path());
     if world.kernel_reacquisition_must_fail {
         cmd.env("MVM_KERNEL_SOURCE", "download")
             .env("MVM_UPDATE_DOWNLOAD_URL", "http://127.0.0.1:9");
@@ -214,7 +215,7 @@ pub(crate) fn run_mvmctl_isolated_live_home(world: &mut CliWorld, args: String) 
     let mut command = mvmctl_command();
     command
         .current_dir(workspace_root())
-        .args(args.split_whitespace())
+        .args(mvm_conformance::doc_examples::tokenize(&args))
         .isolated_home(&home);
     if world.warm_residency {
         command.env("MVM_RESIDENCY", "warm");
@@ -279,7 +280,7 @@ fn boot_installed_bundle(world: &mut CliWorld, args: String) {
     let output = mvmctl_command()
         .current_dir(workspace_root())
         .args(["machine", "run", "--manifest", &sha])
-        .args(args.split_whitespace())
+        .args(mvm_conformance::doc_examples::tokenize(&args))
         .isolated_home(home.path())
         .output()
         .expect("failed to spawn mvmctl");
@@ -688,7 +689,7 @@ fn run_mvmctl_against_local_registry(world: &mut CliWorld, args: String) {
     let registry_url = format!("file://{}", reg.path().display());
 
     let output = mvmctl_command()
-        .args(args.split_whitespace())
+        .args(mvm_conformance::doc_examples::tokenize(&args))
         .env("MVM_TEMPLATE_REGISTRY", registry_url)
         .output()
         .expect("failed to spawn mvmctl");

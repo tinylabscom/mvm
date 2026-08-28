@@ -30,53 +30,89 @@ echo "    home: $E2E_HOME"
 # ---------------------------------------------------------------------------
 # Cleanup.
 #
-# Scoped to the `bdd-` prefix every suite-created machine carries. This home
-# defaults to the real `~/.mvm`, so an unscoped sweep would delete the machines
-# the person running this actually cares about. Nothing here matches a name the
-# suite did not create.
+# Reaps exactly the machines this run created, by diffing the machine list
+# against a snapshot taken before the suite starts. Prefix matching was the
+# first attempt and it under-reaped: the SDK scenarios name their guests
+# `sdk-<registry>-<digest>`, not `bdd-*`, so those leaked on every run.
+# Snapshotting needs no list of prefixes to keep in sync with the suite.
 #
-# Runs on the way in as well as the way out: a previous run killed at its
-# timeout — or with ^C — leaves a guest holding a vsock socket, and the next
-# run then fails on a name collision that looks like a broken verb.
+# The snapshot lives in the home rather than in a shell variable so that
+# `--clean-only` can still reap after a run was killed hard enough to skip its
+# own trap.
+#
+# Runs on the way in as well as the way out: a guest left holding its name makes
+# the next run fail on a collision that reads as a broken verb.
 # ---------------------------------------------------------------------------
+SNAPSHOT="$E2E_HOME/.e2e-machines-before"
+
+machine_names() {
+  MVM_HOME="$E2E_HOME" "$MVMCTL" machine ls 2>/dev/null \
+    | awk 'NR>1 && NF {print $1}' | sort || true
+}
+
+snapshot_machines() {
+  mkdir -p "$E2E_HOME"
+  machine_names > "$SNAPSHOT" 2>/dev/null || : > "$SNAPSHOT"
+}
+
 reap() {
   local phase="$1"
-  local names
-  names="$(MVM_HOME="$E2E_HOME" "$MVMCTL" machine ls 2>/dev/null \
-    | awk 'NR>1 && $1 ~ /^bdd-/ {print $1}' || true)"
+  [[ -x "$MVMCTL" ]] || return 0
 
-  if [[ -n "$names" ]]; then
-    echo "==> $phase cleanup: reaping $(echo "$names" | wc -w | tr -d ' ') bdd- machine(s)"
+  # Without a snapshot there is no way to tell this run's machines from
+  # someone else's, and deleting the wrong one is worse than leaking.
+  if [[ ! -f "$SNAPSHOT" ]]; then
+    echo "==> $phase cleanup: no snapshot to diff against, leaving machines alone"
+    return 0
+  fi
+
+  local created
+  created="$(comm -13 "$SNAPSHOT" <(machine_names) 2>/dev/null || true)"
+
+  REAPED_NAMES="$created"
+  if [[ -n "$created" ]]; then
+    echo "==> $phase cleanup: reaping $(echo "$created" | wc -w | tr -d ' ') machine(s) this run created"
     while read -r name; do
       [[ -z "$name" ]] && continue
       echo "    - $name"
       MVM_HOME="$E2E_HOME" "$MVMCTL" machine stop "$name" --yes >/dev/null 2>&1 || true
       MVM_HOME="$E2E_HOME" "$MVMCTL" machine rm "$name" --yes >/dev/null 2>&1 || true
-    done <<< "$names"
+    done <<< "$created"
   elif [[ "$phase" == "pre-run" ]]; then
-    echo "==> pre-run cleanup: no leftover bdd- machines"
+    echo "==> pre-run cleanup: nothing left over"
   fi
 
-  # State directories for suite machines, in case a spec was removed while its
-  # runtime directory survived.
+  # State directories whose spec is gone but whose runtime directory survived.
   if [[ -d "$E2E_HOME/vms" ]]; then
-    find "$E2E_HOME/vms" -maxdepth 1 -name 'bdd-*' -type d -exec rm -rf {} + 2>/dev/null || true
+    while read -r name; do
+      [[ -z "$name" ]] && continue
+      rm -rf "$E2E_HOME/vms/$name" 2>/dev/null || true
+    done <<< "$created"
   fi
 }
 
 # Per-VM supervisors outlive a killed suite and keep a vCPU thread and a vsock
-# socket alive. Only those whose state directory is gone are reaped, so a
-# supervisor belonging to someone else's machine is left alone.
+# socket alive. Only supervisors for machines this run created are signalled —
+# another session may be driving its own guests out of the same home, and its
+# supervisor is not ours to kill.
+REAPED_NAMES=""
 reap_orphan_supervisors() {
+  [[ -n "$REAPED_NAMES" ]] || return 0
   local pids
   pids="$(pgrep -f 'mvm-(hvf|libkrun)-supervisor' 2>/dev/null || true)"
   [[ -z "$pids" ]] && return 0
   for pid in $pids; do
     local args
     args="$(ps -o args= -p "$pid" 2>/dev/null || true)"
-    case "$args" in
-      *bdd-*) echo "    - reaping orphan supervisor $pid"; kill -TERM "$pid" 2>/dev/null || true ;;
-    esac
+    while read -r name; do
+      [[ -z "$name" ]] && continue
+      case "$args" in
+        *"$name"*)
+          echo "    - reaping supervisor $pid for $name"
+          kill -TERM "$pid" 2>/dev/null || true
+          ;;
+      esac
+    done <<< "$REAPED_NAMES"
   done
 }
 
@@ -123,6 +159,7 @@ on_exit() {
   echo
   reap "post-run"
   reap_orphan_supervisors
+  release_lock
   return "$status"
 }
 trap on_exit EXIT
@@ -150,6 +187,35 @@ if [[ "${1:-}" == "--clean-only" ]]; then
   exit 0
 fi
 
+# Two runs against one home corrupt each other: they share the machine
+# namespace, the artifact caches and the per-VM supervisors, and each one's
+# cleanup then sees the other's guests. Refuse rather than interleave.
+LOCK="$E2E_HOME/.e2e-run.lock"
+if [[ -f "$LOCK" ]] && kill -0 "$(cat "$LOCK" 2>/dev/null)" 2>/dev/null; then
+  echo "!!! another e2e run (pid $(cat "$LOCK")) is already using $E2E_HOME." >&2
+  echo "!!! Set MVM_E2E_HOME to a different home, or wait for it to finish." >&2
+  trap - EXIT
+  exit 1
+fi
+mkdir -p "$E2E_HOME"
+echo $$ > "$LOCK"
+release_lock() { [[ -f "$LOCK" ]] && [[ "$(cat "$LOCK" 2>/dev/null)" == "$$" ]] && rm -f "$LOCK"; }
+
+# Drop the nested aux-helper target *before* building, so `mvmctl`'s build
+# script regenerates the per-VM helpers as part of the build that follows.
+#
+# `mvm-network-endpoint` and `mvm-hvf-supervisor` are separate `[[bin]]`s that
+# cargo does not refresh when `mvmctl` is rebuilt, so a copy from an earlier
+# build survives and the launch path refuses it rather than booting a guest
+# that ignores the current sources.
+#
+# Order matters and cost me a run: with this *after* the build, the clear
+# deleted helpers the build had just produced and every launch then failed with
+# "mvm-hvf-supervisor not found" — a worse failure than the stale one it was
+# meant to fix.
+echo "==> refreshing embedded aux helpers"
+just embed-refresh
+
 # `user` carries manifest-verify, which the verified-fetch path needs to accept
 # the published builder VM image. Its sigstore/aws-lc dependency must use the
 # standard compiler/linker path: the nightly fast-codegen wrapper leaves the
@@ -164,6 +230,44 @@ else
   ./scripts/cargo-fast.sh build --bin mvmctl
 fi
 
+# Always rebuild the per-VM helpers, never just check they exist.
+#
+# Presence is not freshness. `cargo build --bin mvmctl` regenerates some of them
+# and not others, so a stale `mvm-hvf-supervisor` from an earlier build survives
+# a refresh — and a stale one is worse than a missing one. It parses the config
+# `mvmctl` hands it with `deny_unknown_fields`, so a field added on the host side
+# makes it exit 1 with "unknown field `vcpus`", which the launch path reports as
+# "hvf supervisor exited before writing its PID file". Thirty-three scenarios
+# failed that way, none of them naming the stale binary.
+#
+# cargo makes this a no-op when they are already current, so the cost of always
+# doing it is a fingerprint check.
+echo "==> building the per-VM host helpers"
+just build-supervisors
+
+helpers_present() {
+  local root="${CARGO_TARGET_DIR:-target}"
+  find "$root" -type f -name mvm-network-endpoint 2>/dev/null | grep -q . || return 1
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    find "$root" -type f -name mvm-hvf-supervisor 2>/dev/null | grep -q . || return 1
+  fi
+  return 0
+}
+if ! helpers_present; then
+  echo "!!! per-VM aux helpers are still missing; every launch would fail." >&2
+  exit 1
+fi
+
+# macOS kills an unentitled Hypervisor.framework binary, and the only symptom is
+# "hvf supervisor exited before writing its PID file" — which names neither the
+# signature nor the rebuild that dropped it. Every build step above re-links the
+# per-VM supervisor without re-signing it, and the aux-helper refresh deletes it
+# outright, so signing has to follow the builds or every HVF boot dies.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  echo "==> signing VMM binaries"
+  MVM_HOME="$E2E_HOME" "$MVMCTL" env sign
+fi
+
 # The generated-SDK drift scenario invokes the compiled xtask binary directly.
 # `cargo test` builds the conformance runner but does not materialize that
 # sibling workspace binary, so a clean runner otherwise reports ENOENT rather
@@ -175,16 +279,25 @@ cargo build -p xtask
 # broken verb.
 reap "pre-run"
 reap_orphan_supervisors
+# Baseline for this run: everything above is the previous run's mess, and
+# everything that appears from here is ours.
+snapshot_machines
 start_watcher
 
 # The TypeScript SDK scenarios import the SDK's built `dist/`, which is absent
 # in a fresh worktree. Without it they fail for a reason that has nothing to do
 # with the documentation.
-if [[ ! -f crates/mvm-sdk/sdks/typescript/dist/index.js ]]; then
-  echo "==> building the TypeScript SDK (dist/ is absent)"
+#
+# Rebuilt every run, not just when absent: a `dist/` left over from an earlier
+# checkout is *stale*, not missing, and an existence check cannot tell the
+# difference. A stale one makes the golden-argv scenarios report SDK drift that
+# is really just an old build — which is exactly how it read the first time.
+# `tsc` is incremental, so the cost when nothing changed is small.
+echo "==> building the TypeScript SDK"
+if [[ ! -d crates/mvm-sdk/sdks/typescript/node_modules ]]; then
   just sdk-install-typescript
-  just sdk-build-typescript
 fi
+just sdk-build-typescript
 
 # ---------------------------------------------------------------------------
 # 2. Warm the shared artifact home.
@@ -258,7 +371,11 @@ warm_launch_artifacts() {
     fi
     sleep 10
     waited=$((waited + 10))
-    (( waited % 60 == 0 )) && echo "    ... still warming (${waited}s)"
+    # `(( ... )) && echo` returns 1 whenever the arithmetic is false, and under
+    # `set -e` that ends the run — at the very first tick, ten seconds in.
+    if (( waited % 60 == 0 )); then
+      echo "    ... still warming (${waited}s)"
+    fi
   done
   wait "$warm_pid" 2>/dev/null || true
   echo "    warm-up done (${waited}s)"
@@ -283,13 +400,27 @@ MVM_HOME="$E2E_HOME" "$MVMCTL" doctor || true
 # `timeout(1)`, which is absent from a stock macOS and from the macOS runners.
 E2E_TIMEOUT_SECS="${MVM_E2E_TIMEOUT_SECS:-3600}"
 
+# A run that dies before the suite starts must not look like a pass. This has
+# happened twice: a stray token from a bad edit, and a `(( ... )) && echo` that
+# returns 1 under `set -e`. Both ended the script early, and both left an exit
+# status that read as success from the outside. The marker is checked after the
+# suite and turns "never ran" into a loud failure.
+SUITE_STARTED=""
+
 echo "==> documented examples + machine journey (cucumber, @live)"
+SUITE_STARTED=1
 echo "    deadline: ${E2E_TIMEOUT_SECS}s"
 set +e
+# Tee'd so the run can afterwards assert the suite actually produced a summary.
+# "no failures" is not the same as "nothing ran": the conformance binary
+# refuses to start against a stale `mvmctl`, and that refusal prints no
+# scenarios at all — which reads as a clean run to anyone counting failures.
+SUITE_LOG="$(mktemp "${TMPDIR:-/tmp}/mvm-e2e-suite.XXXXXX")"
 CARGO_BIN_EXE_mvmctl="$MVMCTL" \
 MVM_BDD_LIVE=1 \
 MVM_E2E_HOME="$E2E_HOME" \
-  ./scripts/cargo-fast.sh test -p mvm-conformance --test conformance --features bdd &
+  ./scripts/cargo-fast.sh test -p mvm-conformance --test conformance --features bdd \
+  2>&1 | tee "$SUITE_LOG" &
 SUITE_PID=$!
 
 waited=0
@@ -320,6 +451,26 @@ set -e
 echo
 echo "==> done. Read the 'did NOT run' tally above, not just the pass count:"
 echo "    a skipped @live scenario is a documented command nothing booted."
+# A run that produced no scenario summary proved nothing, whatever its failure
+# count says. This is the shape that fooled a reader once already: the suite was
+# invoked, refused to start against a stale binary, and the log showed zero
+# failures because it showed zero scenarios.
+if [[ -n "${SUITE_LOG:-}" ]] && ! grep -q '^\[Summary\]' "$SUITE_LOG"; then
+  echo
+  echo "!!! the suite produced no scenario summary — this run proves nothing." >&2
+  echo "!!! Zero failures here means zero scenarios, not a clean run." >&2
+  rm -f "$SUITE_LOG"
+  exit 70
+fi
+rm -f "${SUITE_LOG:-}"
+
+if [[ -z "${SUITE_STARTED:-}" ]]; then
+  echo
+  echo "!!! the suite never started — this run proves nothing." >&2
+  echo "!!! Something above ended the script early; read the last line of output." >&2
+  exit 70
+fi
+
 if [[ -n "${BOOTSTRAP_FAILED:-}" ]]; then
   echo
   echo "!!! REMINDER: bootstrap failed this run. Any flake-build failure above"

@@ -460,7 +460,9 @@ fn fresh_boot_without_image_is_rejected_at_dispatch() {
     // by name), so a fresh transient boot with no image parses and is
     // refused at mode resolution with a clear message.
     let args = parse_run(&["run", "--", "echo", "hi"]).expect("parse");
-    let err = args.resolve_mode().expect_err("fresh boot needs an image");
+    let err = args
+        .resolve_mode(false)
+        .expect_err("fresh boot needs an image");
     assert!(err.to_string().contains("image"), "unexpected error: {err}");
 }
 
@@ -471,7 +473,7 @@ fn transient_run_without_argv_is_rejected_at_dispatch() {
     // mode resolution with a clear message — not a hang, not a silent exit.
     let args = parse_run(&["run", "--image", "alpine"]).expect("parse");
     let err = args
-        .resolve_mode()
+        .resolve_mode(false)
         .expect_err("transient run needs a command");
     assert!(
         err.to_string().contains("command"),
@@ -480,9 +482,38 @@ fn transient_run_without_argv_is_rejected_at_dispatch() {
 }
 
 #[test]
+fn a_flake_run_without_argv_is_accepted() {
+    // A flake bakes `entrypoint.command` into the image via mkGuest, so an
+    // empty argv is not a missing argument — it is the image supplying one.
+    // `examples/exit_code` exists to run its own entrypoint and hand back that
+    // code, and the README teaches `machine run --flake examples/<name>` with
+    // nothing after it.
+    let args = parse_run(&["run", "--flake", "examples/exit_code"]).expect("parse");
+    args.resolve_mode(false)
+        .expect("a flake carries its own entrypoint");
+}
+
+#[test]
+fn a_flake_already_built_into_a_slot_still_supplies_its_entrypoint() {
+    // The runtime path takes `run.flake` and leaves a manifest slot behind
+    // before resolving the mode, so by then `run.flake` is None even though the
+    // image does carry an entrypoint. Reading the field alone refused exactly
+    // the launches that should have been allowed.
+    let mut args = parse_run(&["run", "--flake", "examples/exit_code"]).expect("parse");
+    args.run.flake = None;
+    args.run.manifest = Some("deadbeef".to_string());
+    args.resolve_mode(true)
+        .expect("a slot built from a flake carries its own entrypoint");
+
+    // And the same shape without that fact is still refused.
+    args.resolve_mode(false)
+        .expect_err("a bare manifest run still needs a command");
+}
+
+#[test]
 fn run_defaults_match_the_lower_level_runner() {
     let args = parse_run(&["run", "--image", "alpine", "--", "true"]).expect("parse");
-    assert_eq!(args.run.cpus, 2);
+    assert_eq!(args.run.cpus, crate::commands::shared::default_vcpus());
     assert_eq!(args.run.memory, "512M");
     assert_eq!(
         args.run.profile,
@@ -573,7 +604,7 @@ fn run_port_is_repeatable_and_implies_persistence() {
     assert_eq!(args.port, vec!["8080:3000", "9090"]);
     assert!(args.persistent(), "a forward needs a live machine owner");
     assert_eq!(
-        args.resolve_mode().expect("port forward resolves"),
+        args.resolve_mode(false).expect("port forward resolves"),
         MachineRunMode::Persistent
     );
     assert_eq!(post_start_action(&args), PostStart::Attach);
@@ -597,7 +628,9 @@ fn run_port_rejects_invalid_mappings_and_supports_detached_ownership() {
     assert_eq!(detached.port, vec!["8080:3000"]);
     assert!(detached.detach);
     assert_eq!(
-        detached.resolve_mode().expect("detached ingress resolves"),
+        detached
+            .resolve_mode(false)
+            .expect("detached ingress resolves"),
         MachineRunMode::Persistent
     );
     assert_eq!(post_start_action(&detached), PostStart::PrintId);
@@ -616,7 +649,7 @@ fn run_port_rejects_invalid_mappings_and_supports_detached_ownership() {
     .expect("the trailing command is syntactically valid");
     assert_eq!(
         with_command
-            .resolve_mode()
+            .resolve_mode(false)
             .expect("declared FlowMux ingress and a foreground service share one owner"),
         MachineRunMode::Persistent
     );
@@ -694,7 +727,7 @@ fn resolve_mode_covers_the_behavior_matrix() {
     ];
     for (argv, expected) in cases {
         let args = parse_run(argv).expect("parse");
-        let mode = args.resolve_mode().expect("resolve");
+        let mode = args.resolve_mode(false).expect("resolve");
         assert_eq!(mode, *expected, "argv {argv:?}");
     }
 }
@@ -712,7 +745,7 @@ fn resolve_mode_wasm_allows_empty_argv() {
     ])
     .expect("parse");
     assert_eq!(
-        args.resolve_mode().expect("resolve"),
+        args.resolve_mode(false).expect("resolve"),
         MachineRunMode::Transient
     );
 }
@@ -724,7 +757,9 @@ fn resolve_mode_accepts_materialized_flake_slot_after_build() {
     assert_eq!(flake, ".");
     args.run.manifest = Some("materialized-slot".to_string());
 
-    let mode = args.resolve_mode().expect("materialized flake is a source");
+    let mode = args
+        .resolve_mode(false)
+        .expect("materialized flake is a source");
 
     assert_eq!(mode, MachineRunMode::Transient);
 }
@@ -732,7 +767,9 @@ fn resolve_mode_accepts_materialized_flake_slot_after_build() {
 #[test]
 fn interactive_run_requires_foreground_argv() {
     let args = parse_run(&["run", "-t", "--image", "X"]).expect("parse");
-    let err = args.resolve_mode().expect_err("interactive run needs argv");
+    let err = args
+        .resolve_mode(false)
+        .expect_err("interactive run needs argv");
     assert!(err.to_string().contains("command after `--`"));
 }
 
@@ -3025,7 +3062,8 @@ fn cpus_and_cpu_limit_are_independent_controls() {
         parse_run(&["run", "--image", "alpine", "--cpu-limit", "500"]).expect("parses");
     assert_eq!(only_limit.run.cpu_limit, Some(500));
     assert_eq!(
-        only_limit.run.cpus, 2,
+        only_limit.run.cpus,
+        crate::commands::shared::default_vcpus(),
         "--cpu-limit must not move the vCPU count off its default"
     );
 }

@@ -142,7 +142,7 @@ Feature: every README-documented CLI launch mode boots a real guest
   @live
   Scenario: the documented persistent machine lifecycle operates one guest
     Given no machine named "e2e-web"
-    When I launch "machine create e2e-web --image alpine --cpus 2 --memory 512M"
+    When I launch "machine create e2e-web --image alpine --cpus 1 --memory 512M"
     Then the launch succeeds
     When I launch "machine start e2e-web"
     Then the launch succeeds

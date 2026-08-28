@@ -56,7 +56,7 @@ pub use launch::{
     ExitReport, LaunchNetworkPolicy, LaunchOutcome, LaunchRequest, LaunchRequestBuilder,
     LaunchVolumeSpec, LifecycleMode, RemoveOptions,
 };
-pub use local::LocalBackend;
+pub use local::{LocalBackend, default_vcpus};
 pub use readiness::{readiness_of, record_readiness, touch_activity};
 pub use registration::{
     MachineRegistration, StaleRegistration, gc_stale_registrations, name_registry_path,
