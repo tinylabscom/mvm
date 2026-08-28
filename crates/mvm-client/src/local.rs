@@ -57,26 +57,15 @@ pub struct LocalBackend {
 
 /// vCPUs to give a guest when the caller does not say.
 ///
-/// Not a constant, because the answer is a property of the backend rather than
-/// of the product: HVF supports exactly one vCPU and refuses anything else, and
-/// it is the default backend on macOS 26+. A fixed default of 2 made the
-/// default configuration and the default backend mutually exclusive there —
-/// every `mvmctl machine run --image …` failed, the documented quickstart
-/// included.
-///
-/// Only the *default* moves. An explicit `--cpus 2` on HVF still reaches the
-/// backend and is still refused, which is the contract the HVF driver states: a
-/// request it cannot honour is refused, never silently reduced.
-///
-/// Probed once per process; clap evaluates this for every command it builds.
+/// A plain constant again. It was briefly resolved per backend, because HVF
+/// accepted exactly one vCPU and refused anything else while being the macOS
+/// default — so the default configuration and the default backend were
+/// mutually exclusive there. HVF has real SMP now, which removes the ceiling
+/// and with it the reason to vary the default by backend. Varying it anyway
+/// would quietly hand a macOS caller half the CPUs everyone else gets.
 #[must_use]
 pub fn default_vcpus() -> u32 {
-    static RESOLVED: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *RESOLVED.get_or_init(|| match AnyBackend::auto_select().kind() {
-        // The one backend with a hard single-vCPU ceiling.
-        mvm_core::vm_backend::BackendKind::Hvf => 1,
-        _ => 2,
-    })
+    2
 }
 
 impl LocalBackend {

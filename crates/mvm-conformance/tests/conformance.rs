@@ -220,10 +220,6 @@ fn probe_caps() -> RuntimeCaps {
         guest_bin_dir: guest_bin_dir_available(),
         sdk_sidecar: sdk_sidecar_cached(),
         perf_budget_host: std::env::var_os("MVM_BDD_PERF_BUDGET").is_some(),
-        // One vCPU by default *is* the ceiling: the launch path resolves the
-        // default from the backend, so a default of one means this backend
-        // takes no more.
-        single_vcpu_backend: mvm_client::default_vcpus() == 1,
         tls_tunnel_client: std::env::var_os("MVM_BDD_TLS_CLIENT").is_some(),
         memory_snapshot: memory_snapshot_supported(),
     }

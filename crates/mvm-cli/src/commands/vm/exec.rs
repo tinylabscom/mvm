@@ -1261,8 +1261,18 @@ fn build_exec_request(
         prod,
         runtime_pack,
     } = selection;
-    let is_wasm = args.hypervisor.as_deref() == Some("wasm");
-    let target = match (args.launch_plan.as_ref(), args.argv.is_empty(), is_wasm) {
+    // Shapes where the thing being booted already carries a command, so an
+    // empty argv is the image supplying one rather than the caller omitting it:
+    // the wasm backend runs the module itself, and a manifest slot names an
+    // image with a baked entrypoint — which is what a `--flake` run has become
+    // by the time it reaches here, the flake having been built into a slot.
+    let image_supplies_entrypoint =
+        args.hypervisor.as_deref() == Some("wasm") || args.manifest.is_some();
+    let target = match (
+        args.launch_plan.as_ref(),
+        args.argv.is_empty(),
+        image_supplies_entrypoint,
+    ) {
         (Some(_), false, _) => {
             anyhow::bail!("--launch-plan and a trailing argv are mutually exclusive");
         }

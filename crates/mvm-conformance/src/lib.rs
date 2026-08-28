@@ -71,10 +71,6 @@ pub const SDK_SIDECAR_TAG: &str = "sdk_sidecar";
 /// A budget is a claim about hardware as much as about code: the same build
 /// meets it on NVMe and misses it on spinning disk.
 pub const PERF_BUDGET_TAG: &str = "perf_budget";
-/// A scenario that asserts a backend *refuses* more than one vCPU. True on HVF,
-/// false where SMP works — the assertion is about the ceiling, so it only means
-/// anything on a backend that has one.
-pub const SINGLE_VCPU_TAG: &str = "single_vcpu_backend";
 /// A scenario whose guest must tunnel TLS through the egress proxy. The proxy
 /// offers CONNECT and SOCKS5; a client that can do neither (BusyBox `wget`
 /// ignores `ALL_PROXY` and sends the absolute-URI form the proxy refuses rather
@@ -111,9 +107,6 @@ pub struct RuntimeCaps {
     /// The host is declared fast enough to hold the launch budget, so a
     /// threshold assertion measures the code rather than the disk.
     pub perf_budget_host: bool,
-    /// The active backend accepts only one vCPU, so a scenario asserting that
-    /// ceiling has a ceiling to assert.
-    pub single_vcpu_backend: bool,
     /// The guest image ships a client that can tunnel TLS through the proxy.
     pub tls_tunnel_client: bool,
     /// The active backend can capture a full-VM memory snapshot, so
@@ -163,8 +156,6 @@ pub enum ScenarioGate {
     NeedsSdkSidecar,
     /// The host is not declared fast enough to assert a latency budget.
     NeedsPerfBudgetHost,
-    /// This backend accepts more than one vCPU, so there is no ceiling to test.
-    NeedsSingleVcpuBackend,
     /// The guest image has no client that can tunnel TLS through the proxy.
     NeedsTlsTunnelClient,
     /// No `node` on `PATH`, so the TypeScript example checkers cannot run.
@@ -212,9 +203,6 @@ pub fn scenario_gate(tags: &[String], caps: RuntimeCaps) -> ScenarioGate {
     }
     if tagged(PERF_BUDGET_TAG) && !caps.perf_budget_host {
         return ScenarioGate::NeedsPerfBudgetHost;
-    }
-    if tagged(SINGLE_VCPU_TAG) && !caps.single_vcpu_backend {
-        return ScenarioGate::NeedsSingleVcpuBackend;
     }
     if tagged(TLS_TUNNEL_CLIENT_TAG) && !caps.tls_tunnel_client {
         return ScenarioGate::NeedsTlsTunnelClient;
@@ -272,10 +260,6 @@ impl ScenarioGate {
                  budget (a latency threshold on rotational storage measures the \
                  disk, not the code)",
             ),
-            Self::NeedsSingleVcpuBackend => Some(
-                "need a backend that accepts only one vCPU (this one does SMP, \
-                 so there is no ceiling to refuse)",
-            ),
             Self::NeedsTlsTunnelClient => Some(
                 "need MVM_BDD_TLS_CLIENT=1: the guest image must ship a client \
                  that tunnels TLS via CONNECT or SOCKS5 (BusyBox wget ignores \
@@ -302,7 +286,6 @@ mod tests {
         guest_bin_dir: false,
         sdk_sidecar: false,
         perf_budget_host: false,
-        single_vcpu_backend: false,
         tls_tunnel_client: false,
         memory_snapshot: false,
         workload_kernel: false,
@@ -315,7 +298,6 @@ mod tests {
         guest_bin_dir: true,
         sdk_sidecar: true,
         perf_budget_host: true,
-        single_vcpu_backend: true,
         tls_tunnel_client: true,
         memory_snapshot: true,
         workload_kernel: true,
@@ -349,7 +331,6 @@ mod tests {
                 guest_bin_dir: false,
                 sdk_sidecar: false,
                 perf_budget_host: false,
-                single_vcpu_backend: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
                 workload_kernel: false,
@@ -373,7 +354,6 @@ mod tests {
                 guest_bin_dir: false,
                 sdk_sidecar: false,
                 perf_budget_host: false,
-                single_vcpu_backend: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
                 ..ALL
@@ -390,7 +370,6 @@ mod tests {
                 guest_bin_dir: false,
                 sdk_sidecar: false,
                 perf_budget_host: false,
-                single_vcpu_backend: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
                 ..ALL
@@ -452,24 +431,6 @@ mod tests {
     }
 
     #[test]
-    fn single_vcpu_scenario_skips_where_the_backend_does_smp() {
-        // The assertion is that a ceiling is enforced. On a backend without
-        // one, honouring the request is correct and the scenario would fail
-        // for being right.
-        assert!(!scenario_should_run(
-            &tags(&["live", "single_vcpu_backend"]),
-            RuntimeCaps {
-                single_vcpu_backend: false,
-                ..ALL
-            },
-        ));
-        assert!(scenario_should_run(
-            &tags(&["live", "single_vcpu_backend"]),
-            ALL
-        ));
-    }
-
-    #[test]
     fn tls_tunnel_scenario_skips_without_a_capable_guest_client() {
         // The proxy offers CONNECT and SOCKS5 and refuses the absolute-URI
         // form rather than forward it in cleartext. A guest client that can do
@@ -511,7 +472,6 @@ mod tests {
                 guest_bin_dir: false,
                 sdk_sidecar: false,
                 perf_budget_host: false,
-                single_vcpu_backend: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
                 workload_kernel: false,
@@ -531,7 +491,6 @@ mod tests {
                 guest_bin_dir: false,
                 sdk_sidecar: false,
                 perf_budget_host: false,
-                single_vcpu_backend: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
                 workload_kernel: false,
@@ -553,7 +512,6 @@ mod tests {
                 guest_bin_dir: false,
                 sdk_sidecar: false,
                 perf_budget_host: false,
-                single_vcpu_backend: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
                 workload_kernel: false,
@@ -570,7 +528,6 @@ mod tests {
                 guest_bin_dir: false,
                 sdk_sidecar: false,
                 perf_budget_host: false,
-                single_vcpu_backend: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
                 workload_kernel: false,
@@ -594,7 +551,6 @@ mod tests {
                 guest_bin_dir: false,
                 sdk_sidecar: false,
                 perf_budget_host: false,
-                single_vcpu_backend: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
                 workload_kernel: false,
@@ -607,7 +563,6 @@ mod tests {
                 guest_bin_dir: false,
                 sdk_sidecar: false,
                 perf_budget_host: false,
-                single_vcpu_backend: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
                 workload_kernel: false,
@@ -620,7 +575,6 @@ mod tests {
                 guest_bin_dir: false,
                 sdk_sidecar: false,
                 perf_budget_host: false,
-                single_vcpu_backend: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
                 workload_kernel: false,
@@ -633,7 +587,6 @@ mod tests {
                 guest_bin_dir: false,
                 sdk_sidecar: false,
                 perf_budget_host: false,
-                single_vcpu_backend: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
                 workload_kernel: true,
@@ -646,7 +599,6 @@ mod tests {
                 guest_bin_dir: false,
                 sdk_sidecar: false,
                 perf_budget_host: false,
-                single_vcpu_backend: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
                 workload_kernel: true,
@@ -685,7 +637,6 @@ mod tests {
             guest_bin_dir: false,
             sdk_sidecar: false,
             perf_budget_host: false,
-            single_vcpu_backend: false,
             tls_tunnel_client: false,
             memory_snapshot: false,
             workload_kernel: false,
@@ -698,7 +649,6 @@ mod tests {
             guest_bin_dir: false,
             sdk_sidecar: false,
             perf_budget_host: false,
-            single_vcpu_backend: false,
             tls_tunnel_client: false,
             memory_snapshot: false,
             workload_kernel: false,
@@ -711,7 +661,6 @@ mod tests {
             guest_bin_dir: false,
             sdk_sidecar: false,
             perf_budget_host: false,
-            single_vcpu_backend: false,
             tls_tunnel_client: false,
             memory_snapshot: false,
             workload_kernel: false,
@@ -768,7 +717,6 @@ mod tests {
                     guest_bin_dir: false,
                     sdk_sidecar: false,
                     perf_budget_host: false,
-                    single_vcpu_backend: false,
                     tls_tunnel_client: false,
                     memory_snapshot: false,
                     workload_kernel: false,
