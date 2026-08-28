@@ -49,7 +49,7 @@ machine path. The console PTY-over-vsock transport (`machine exec -it`,
 ## macOS Signing And Entitlements
 
 Apple Silicon macOS uses the supported macOS virtualization path. Some behavior
-depends on host OS version, Apple virtualization framework availability, and the
+depends on host OS version, Hypervisor.framework availability, and the
 local signed binary/entitlement posture.
 
 If a command fails only on macOS, include `mvmctl doctor`, the macOS version,

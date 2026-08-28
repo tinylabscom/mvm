@@ -176,6 +176,14 @@ unsafe extern "C" {
     pub fn hv_gic_get_distributor_size(size: *mut usize) -> hv_return_t;
     pub fn hv_gic_get_distributor_base_alignment(alignment: *mut usize) -> hv_return_t;
     pub fn hv_gic_get_redistributor_size(size: *mut usize) -> hv_return_t;
+    /// The guest-physical base of one vCPU's redistributor frame. HVF assigns
+    /// these itself as vCPUs are created; this is the only way to learn where a
+    /// given vCPU's landed, and hence whether it matches the device tree the
+    /// guest is reading.
+    pub fn hv_gic_get_redistributor_base(
+        vcpu: hv_vcpu_t,
+        redistributor_base: *mut hv_ipa_t,
+    ) -> hv_return_t;
     pub fn hv_gic_get_redistributor_base_alignment(alignment: *mut usize) -> hv_return_t;
     pub fn hv_gic_get_spi_interrupt_range(
         spi_intid_base: *mut u32,
@@ -299,6 +307,14 @@ pub unsafe fn hv_gic_get_distributor_base_alignment(_alignment: *mut usize) -> h
 #[cfg(not(target_os = "macos"))]
 #[allow(clippy::missing_safety_doc)]
 pub unsafe fn hv_gic_get_redistributor_size(_size: *mut usize) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn hv_gic_get_redistributor_base(
+    _vcpu: hv_vcpu_t,
+    _redistributor_base: *mut hv_ipa_t,
+) -> hv_return_t {
     HV_ERROR_UNSUPPORTED
 }
 #[cfg(not(target_os = "macos"))]

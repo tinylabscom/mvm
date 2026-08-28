@@ -640,6 +640,11 @@ impl VmmDriver for FcDriver {
         // authenticated identity handshake still gates admission after
         // resume, so preloading changes placement of VMM work, not authority.
         VmCapabilities {
+            // None: this driver hands `vcpu_count` to Firecracker's
+            // machine-config API unmodified and imposes no ceiling of its own.
+            // `None` says exactly that — distinct from a backend that has a
+            // limit and has not declared one, which would read as `Some(large)`.
+            max_vcpus: None,
             pause_resume: true,
             snapshots: false,
             snapshot_capability: SnapshotCapability::Unsupported,
