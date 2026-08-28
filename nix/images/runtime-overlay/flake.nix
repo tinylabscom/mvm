@@ -283,11 +283,26 @@
 
       mkSdkSidecar =
         system:
+        mkSdkSidecarForLibc system "glibc";
+
+      # The musl sidecar carries only what the guest lacks.
+      #
+      # The glibc tree bundles a loader and a libc because the workload rootfs
+      # has neither — the catalog is Alpine. A musl guest already has both: its
+      # own interpreter is running under `/lib/ld-musl-<arch>.so.1`. So the musl
+      # tree is the cdylib plus musl's libgcc, which the object still records as
+      # NEEDED — rustc emits `-lgcc_s` for unwinding and `-static-libgcc` does
+      # not remove it. The RPATH stays, because that libgcc is what the object
+      # finds through it.
+      mkSdkSidecarForLibc =
+        system: libc:
         let
           pkgs = import nixpkgs { inherit system; };
-          hostsvc = mvmSdkCdylibFor system;
+          isMusl = libc == "musl";
+          hostsvc = mvmSdkCdylibForLibc system libc;
+          muslLibgcc = "${pkgs.pkgsMusl.lib.getLib pkgs.pkgsMusl.stdenv.cc.cc}/lib/libgcc_s.so.1";
         in
-        pkgs.runCommand "mvm-sdk-sidecar-${system}"
+        pkgs.runCommand "mvm-sdk-sidecar-${libc}-${system}"
           {
             nativeBuildInputs = [ pkgs.patchelf ];
             passthru = {
@@ -299,11 +314,20 @@
             set -euo pipefail
 
             mkdir -p "$out/lib"
-            cp ${sdkRuntimeLoaderFor pkgs} "$out/lib/${sdkRuntimeLoaderBaseFor pkgs}"
             cp ${hostsvc}/lib/libmvm_host_services.so \
               "$out/lib/libmvm_host_services.so"
-            cp ${sdkRuntimeLibcFor pkgs} "$out/lib/libc.so.6"
-            cp ${sdkRuntimeLibgccFor pkgs} "$out/lib/libgcc_s.so.1"
+            ${
+              if isMusl then
+                ''
+                  cp ${muslLibgcc} "$out/lib/libgcc_s.so.1"
+                ''
+              else
+                ''
+                  cp ${sdkRuntimeLoaderFor pkgs} "$out/lib/${sdkRuntimeLoaderBaseFor pkgs}"
+                  cp ${sdkRuntimeLibcFor pkgs} "$out/lib/libc.so.6"
+                  cp ${sdkRuntimeLibgccFor pkgs} "$out/lib/libgcc_s.so.1"
+                ''
+            }
             chmod u+w "$out/lib/libmvm_host_services.so"
             patchelf \
               --set-rpath /mvm/sdk/lib \
@@ -311,7 +335,7 @@
             chmod 0555 "$out/lib"/*
             echo "${overlayVersion}" > "$out/VERSION"
             cat > "$out/README" <<'EOF'
-            This read-only sidecar supplies the glibc SDK host-services cdylib.
+            This read-only sidecar supplies the ${libc} SDK host-services cdylib.
             Attach it at /mvm/sdk for workloads that use mvm.audit or mvm.host.
             EOF
             chmod 0444 "$out/VERSION" "$out/README"
@@ -331,11 +355,15 @@
       # boot instead of surfacing as an in-guest dlopen failure.
       mkSdkSidecarImage =
         system:
+        mkSdkSidecarImageForLibc system "glibc";
+
+      mkSdkSidecarImageForLibc =
+        system: libc:
         let
           pkgs = import nixpkgs { inherit system; };
-          tree = mkSdkSidecar system;
+          tree = mkSdkSidecarForLibc system libc;
         in
-        pkgs.runCommand "mvm-sdk-sidecar-image-${system}"
+        pkgs.runCommand "mvm-sdk-sidecar-image-${libc}-${system}"
           {
             nativeBuildInputs = [
               pkgs.e2fsprogs
@@ -548,6 +576,8 @@
         # on its own; the musl one is what an Alpine guest can load.
         sdk-cdylib-glibc = mvmSdkCdylibForLibc system "glibc";
         sdk-cdylib-musl = mvmSdkCdylibForLibc system "musl";
+        sdk-sidecar-musl = mkSdkSidecarForLibc system "musl";
+        sdk-sidecar-image-musl = mkSdkSidecarImageForLibc system "musl";
       });
     };
 }
