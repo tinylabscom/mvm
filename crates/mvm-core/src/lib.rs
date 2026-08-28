@@ -73,6 +73,9 @@ pub mod launch_metadata;
 pub mod launch_trace;
 /// Shared backoff for polls that wait on a condition.
 pub mod poll_backoff;
+/// Measured resource consumption for one workload run, and the sidecar
+/// convention that carries it off the process that owned the VM.
+pub mod usage_capture;
 pub mod vcpu_quota;
 // Guest lifecycle markers + snapshot timing (the `mvm-init` ↔ host
 // contract) are a pure-DTO leaf that now lives in `mvm-contract`;

@@ -151,6 +151,26 @@ impl Default for ResourceControls {
     }
 }
 
+/// How a measured value was observed. Named on every measurement because the
+/// mechanisms do not measure the same quantity: guest vCPU time excludes the
+/// host-side device emulation that a process total includes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mechanism {
+    /// Summed Mach clocks of every vCPU thread: guest execution only.
+    HvfSummedVcpuClock,
+    /// CPU time of the in-process VMM's own process: guest plus VMM overhead.
+    HostProcessCpu,
+    /// `getrusage` over a reaped VMM child: guest plus VMM overhead.
+    HostChildRusage,
+    /// Kernel-kept resident high-water mark of the VMM process.
+    HostProcessRss,
+    /// Byte total of the VM state directory tree.
+    StateDirTreeBytes,
+    /// The host's own observation of the span from launch to teardown.
+    HostLaunchSpan,
+}
+
 /// What actually bounded one dimension. Constructed from a read-back of the
 /// live control, never from the value that was written.
 ///
