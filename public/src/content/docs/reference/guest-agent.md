@@ -273,6 +273,13 @@ once a background init thread actually ran.
 
 ### Host commands
 
+:::note[These verbs are hidden, not missing]
+`machine wait`, `machine boot-report`, and `machine diff` (below) are marked
+`hide = true` in the CLI. They work exactly as documented, but they do not appear
+in `mvmctl machine --help` — so don't read their absence from the help output as
+their absence from the binary.
+:::
+
 - `mvmctl machine wait <vm> --for <component> [--timeout <secs>]` —
   Blocks until the named component reaches `Ready`, `Disabled`,
   or `Failed`. Targets: `control-plane`, `entrypoint`,
@@ -293,22 +300,32 @@ protocol-hello prelude; the agent advertises it in
 
 ## Health Checks
 
-Health checks defined in `mkGuest`'s `healthChecks` parameter are automatically written to `/etc/mvm/integrations.d/` at build time:
+Health checks defined in `mkGuest`'s `healthChecks` parameter are written at
+build time to **`/etc/mvm/probes.d/<name>.json`** — the probe drop-in directory,
+not `integrations.d/`. Each entry renders as:
 
 ```json
 {
   "name": "my-service",
-  "health_cmd": "curl -sf http://localhost:8080/health",
-  "health_interval_secs": 10,
-  "health_timeout_secs": 5
+  "cmd": "curl -sf http://localhost:8080/health",
+  "interval_secs": 10,
+  "timeout_secs": 5,
+  "output_format": "exit_code"
 }
 ```
 
-The agent picks them up on boot and begins periodic checks immediately.
+`mkGuest` reads exactly three keys per check: `healthCmd` (required — omitting it
+throws), `healthIntervalSecs` (default 30), and `healthTimeoutSecs` (default 10).
+The agent picks the drop-ins up on boot and begins periodic checks immediately;
+results come back over vsock as `ProbeStatus`.
 
-### Startup Grace Period
+### Integrations and the startup grace period
 
-Services that take time to initialize (e.g., running database migrations) can specify a grace period. During the grace period, health check failures are suppressed and the service reports `Starting` status instead of `Error`:
+`/etc/mvm/integrations.d/*.json` is a separate drop-in directory with its own
+schema, loaded by the integration manager (checkpoint/restore commands plus a
+health loop). Its entries use `health_cmd` / `health_interval_secs` /
+`health_timeout_secs`, and only *these* support a grace period during which
+health failures are not logged:
 
 ```json
 {
@@ -320,17 +337,9 @@ Services that take time to initialize (e.g., running database migrations) can sp
 }
 ```
 
-In a Nix flake, set the grace period via `startupGraceSecs`:
-
-```nix
-healthChecks.my-app = {
-  healthCmd = "curl -sf http://localhost:8080/health";
-  healthIntervalSecs = 10;
-  startupGraceSecs = 120;  # suppress failures for 2 minutes after boot
-};
-```
-
-After the grace period expires, normal health reporting resumes.
+There is **no `startupGraceSecs` key in `mkGuest`**, and `mkGuest` does not write
+integration drop-ins at all — a flake that sets it gets no grace period. Write
+the integration JSON yourself via `extraFiles` if you need one.
 
 ## Querying from the Host
 
@@ -354,10 +363,17 @@ Probes are read-only system checks loaded from `/etc/mvm/probes.d/*.json`:
 ```json
 {
   "name": "disk-usage",
-  "command": "df -h /mnt/data | tail -1 | awk '{print $5}'",
-  "interval_secs": 60
+  "cmd": "df -h /data | tail -1 | awk '{print $5}'",
+  "interval_secs": 60,
+  "timeout_secs": 10,
+  "output_format": "exit_code"
 }
 ```
+
+The command field is `cmd`, not `command`. `interval_secs` defaults to 30,
+`timeout_secs` to 10, and `output_format` to `exit_code` (the alternative is
+`json`, which parses stdout into the report). An optional `description` string is
+also accepted.
 
 Probe results are reported via the vsock protocol and included in guest console logs.
 

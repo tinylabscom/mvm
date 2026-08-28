@@ -5,12 +5,14 @@ description: Pause, save, restore, and wake sandboxes from backend-specific snap
 
 Cold mode lets a sandbox stop consuming a running VM while keeping recoverable state.
 
+Every verb on this page is an advanced single-VM op reached through `machine`. They work, but they are hidden from `machine --help`.
+
 ## Firecracker sealed pause/resume
 
 ```sh
-cargo run -- pause agent-sandbox
-cargo run -- snapshot ls
-cargo run -- resume agent-sandbox
+cargo run -- machine pause agent-sandbox
+cargo run -- machine snapshot ls
+cargo run -- machine resume agent-sandbox
 ```
 
 Firecracker pause/resume writes sealed instance state and verifies it before resume. This is the local `mvm` primitive.
@@ -18,11 +20,13 @@ Firecracker pause/resume writes sealed instance state and verifies it before res
 ## Full-VM memory checkpoints
 
 ```sh
-cargo run -- checkpoint create agent-sandbox --class vm-full
-cargo run -- checkpoint restore agent-sandbox --name <checkpoint-name>
+cargo run -- machine checkpoint create agent-sandbox --class vm-full
+cargo run -- machine checkpoint restore <checkpoint-id>
 ```
 
-Full-VM checkpoints capture full machine state. They are currently unavailable through the selectable workload runners; request them only when `mvmctl doctor` reports a compatible backend and capability. `mvm` records the checkpoint content hash in the audit chain when the launch plan and host signer are available, and restore records whether the content matched the prior chain entry.
+`checkpoint restore` takes the checkpoint's own id, not the VM name.
+
+Full-VM checkpoints capture full machine state. Among the selectable workload runners only `hvf` and `apple-container` support save/restore; `firecracker`, `libkrun`, `qemu`, and `wasm` do not. Check `mvmctl doctor` for the backend and capability on your host before relying on one. `mvm` records the checkpoint content hash in the audit chain when the launch plan and host signer are available, and restore records whether the content matched the prior chain entry.
 
 ## Security checklist
 

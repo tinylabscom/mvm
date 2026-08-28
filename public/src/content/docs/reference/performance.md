@@ -96,24 +96,32 @@ degradation, and recorded every prepared-cold work flag as false.
 
 ## Reproducing a measurement
 
-The launch benchmark is a library surface driven by a live, `#[ignore]`d test,
-not a shipped CLI verb — the suite can never produce a launch number by
-accident. Run it against a release binary on a host with a prepared artifact
+`mvmctl bench` is the shipped, visible verb for this. The lane is a **flag**, not
+a subcommand. Run it from a release build on a host with a prepared artifact
 cache:
 
 ```sh
-export MVM_COLD_LAUNCH_MVMCTL=target/release/mvmctl
-export MVM_COLD_LAUNCH_ARGS="machine run --image alpine -- /bin/true"
-export MVM_COLD_LAUNCH_LANE=prepared_cold
-export MVM_COLD_LAUNCH_RUNS=20
-export MVM_COLD_LAUNCH_WARMUP=2
-
-cargo test --release --test cold_launch_bench -- --ignored --nocapture
+mvmctl prepare
+mvmctl bench --lane prepared-cold --runs 20 --warmup 2
 ```
 
-Every knob except the counts is required. A benchmark that guesses what to
-launch measures the wrong thing, so an unset variable fails and names itself
-rather than defaulting.
+`--lane` defaults to `prepared-cold` and accepts `prepared-cold`,
+`prepared-cold-mount-hit`, `mount-miss`, `artifact-miss`, and `warm-claim`.
+`--runs` defaults to 20 and `--warmup` to 2 — below 20 measured samples the
+report is not publication-grade. `--json` prints the report instead of a human
+summary, `--out <PATH>` redirects where it is written, and a debug build refuses
+to measure at all unless you pass `--allow-debug-build`, whose numbers mean
+nothing.
+
+Name the launch after `--` to measure something other than the built-in
+reproducible baseline:
+
+```sh
+mvmctl bench --lane prepared-cold -- machine run --image alpine -- /bin/true
+```
+
+The same measurement substrate is also driven by a live, `#[ignore]`d test for
+CI use, so a routine `cargo test` never produces a launch number by accident.
 
 The run writes a JSON report under `$MVM_HOME/state/bench/`, alongside a
 `-latest.json` copy. The report carries the host fingerprint, the per-lane

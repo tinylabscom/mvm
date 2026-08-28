@@ -116,9 +116,9 @@ def worker() -> None:
 export const worker = mvm.app({
   name: "worker",
   source: mvm.localPath(".", { include: ["worker.ts", "pnpm-lock.yaml"] }),
-  image: mvm.nodeImage({ packages: ["pnpm"] }),
+  image: mvm.node_image({ packages: ["pnpm"] }),
   resources: mvm.resources({ cpu_cores: 1, memory_mb: 512, rootfs_size_mb: 1024 }),
-  dependencies: mvm.nodeDeps({ lockfile: "pnpm-lock.yaml" }),
+  dependencies: mvm.node_deps("pnpm-lock.yaml"),
   network: mvm.network({ mode: "none" }),
   entrypoint: mvm.entrypoint({ command: ["node", "/app/worker.js"] }),
 })(() => undefined);
@@ -153,13 +153,9 @@ network=mvm.network(
 <TabItem label="TypeScript">
 
 ```ts
-network: mvm.network({
-  mode: "bridge",
-  egress: mvm.egress([
-    mvm.hostPort("api.openai.com", 443),
-  ]),
-  dns: mvm.dnsSystem(),
-})
+// The TypeScript `network()` surface is mode + ports + ai today. `egress` and
+// `dns` are not accepted here; declare the allow-list from Python or mvm.toml.
+network: mvm.network({ mode: "bridge" })
 ```
 
 </TabItem>
@@ -232,13 +228,13 @@ def service() -> None:
 export const service = mvm.app({
   name: "service",
   source: mvm.localPath("."),
-  image: mvm.nodeImage({ packages: ["pnpm"] }),
+  image: mvm.node_image({ packages: ["pnpm"] }),
   resources: mvm.resources({ cpu_cores: 1, memory_mb: 512, rootfs_size_mb: 1024 }),
   network: mvm.network({ mode: "none" }),
   entrypoint: mvm.entrypoint({ command: ["node", "/app/server.js"] }),
-  beforeBuild: mvm.hook(["pnpm", "install", "--frozen-lockfile"]),
-  beforeStart: mvm.hook(["node", "/app/migrate.js"]),
-  afterStart: mvm.hook(["node", "/app/healthcheck.js"]),
+  before_build: mvm.hook(["pnpm", "install", "--frozen-lockfile"]),
+  before_start: mvm.hook(["node", "/app/migrate.js"]),
+  after_start: mvm.hook(["node", "/app/healthcheck.js"]),
 })(() => undefined);
 ```
 
@@ -284,10 +280,10 @@ def math() -> None:
 export const math = mvm.app({
   name: "math",
   source: mvm.localPath(".", { include: ["mathsvc.ts"] }),
-  image: mvm.nodeImage(),
+  image: mvm.node_image(),
   resources: mvm.resources({ cpu_cores: 1, memory_mb: 256, rootfs_size_mb: 512 }),
   network: mvm.network({ mode: "none" }),
-  dependencies: mvm.noDeps(),
+  dependencies: mvm.no_deps(),
   entrypoints: [
     mvm.entrypoint_function({ module: "mathsvc", function: "add", primary: true }),
     mvm.entrypoint_function({ module: "mathsvc", function: "mul" }),

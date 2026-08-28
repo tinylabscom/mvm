@@ -5,6 +5,9 @@ description: Move files across the host and guest boundary safely.
 
 Filesystem operations cross a trust boundary. Keep paths narrow, copy only the files required for the task, and avoid broad host mounts for generated or third-party code.
 
+`machine cp` and `machine volume` are hidden advanced verbs: they work, but they
+do not appear in `mvmctl machine --help`.
+
 ## Copy files
 
 ```sh

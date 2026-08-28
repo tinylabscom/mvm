@@ -15,15 +15,15 @@ The SDKs share one runtime model:
 | --- | --- | --- |
 | Python | Partial runtime SDK plus declarative workload SDK. | Local runtime scripts and static declarations. |
 | TypeScript/Node.js | Partial runtime SDK plus declarative workload SDK. | Local runtime scripts and static declarations. |
-| Rust | Build-time SDK and lower-level IR contract. | Tooling, generators, and typed declarations. |
+| Rust | Build-time SDK and lower-level IR contract, plus the `MvmClient` runtime client in `mvm-client`. | Tooling, generators, typed declarations, and host-side machine lifecycle. |
 
 ## Runtime parity target
 
 The language SDKs should converge on:
 
 - `Sandbox.create(...)`
-- `sandbox.commands.run(...)`
-- `sandbox.files.read/write/list/remove(...)`
+- a one-shot with a captured result — shipped as `sandbox.exec(...)` in Python and TypeScript
+- `sandbox.files.read/write/list/remove(...)` — shipped in Python and TypeScript
 - `sandbox.logs(...)`
 - declarative `network.ports` on `Sandbox.create(...)`
 - `sandbox.snapshot(...)`
