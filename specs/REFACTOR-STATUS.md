@@ -215,6 +215,18 @@ for detailed scope and acceptance criteria.
       missing-state behavior. See
       `specs/sprint/delivery/2824-stopped-vm-logs-error.md`.
 
+- [x] **Documented examples gate a release.** `release.yml` blocked only on the
+      hermetic BDD lane, which boots no guest; the live documented-surface lanes
+      ran nightly in `ci-full.yml` and gated nothing. Both moved into a reusable
+      `e2e-docs.yml` that Extended CI and `release.yml` now share, so no tag is
+      cut while a documented example is red on Linux/Firecracker or macOS/HVF.
+      Coverage also moved from per command path to per example: all 38 README
+      invocations carry a checked `@live` witness, a hermetic witness, or a
+      reviewed exemption, and a witness must carry the example's flags rather
+      than merely name its verb. First run surfaced a second broken README
+      example (`run --mode live --profile dev`, the #2887 residual). See
+      `specs/sprint/delivery/readme-examples-gate-a-release.md`.
+
 - [x] **Guest devpts and `/dev/fd` provisioning.** The universal-initramfs boot
       path created `/dev/pts` and never mounted `devpts` onto it, so `openpty()`
       failed for every `ConsoleOpen` and no OCI image could serve

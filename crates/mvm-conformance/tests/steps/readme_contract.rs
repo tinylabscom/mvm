@@ -108,6 +108,340 @@ fn readme_cli_examples_resolve(_world: &mut CliWorld) {
     }
 }
 
+/// Resolve a flag set to long-form names using the real command's arguments.
+///
+/// The README writes `--out` where a scenario writes `-o`; they are one flag
+/// and comparing the spellings would report the example as uncovered. Anything
+/// the command does not declare is left as written, so a typo stays visible
+/// rather than being normalized away.
+fn normalize_flags(
+    flags: &BTreeSet<String>,
+    path: &[String],
+    tree: &ClapCommand,
+) -> BTreeSet<String> {
+    let mut command = tree;
+    for segment in path {
+        match command
+            .get_subcommands()
+            .find(|sub| sub.get_name() == segment)
+        {
+            Some(sub) => command = sub,
+            None => return flags.clone(),
+        }
+    }
+    flags
+        .iter()
+        .map(|flag| {
+            let Some(short) = flag.strip_prefix('-').filter(|rest| !rest.starts_with('-')) else {
+                return flag.clone();
+            };
+            let Some(ch) = short.chars().next() else {
+                return flag.clone();
+            };
+            command
+                .get_arguments()
+                .find(|arg| arg.get_short() == Some(ch))
+                .and_then(|arg| arg.get_long())
+                .map_or_else(|| flag.clone(), |long| format!("--{long}"))
+        })
+        .collect()
+}
+
+/// Whether `witness` exercises the same request shape as `example`, with flag
+/// spellings resolved against the command they belong to.
+fn witness_covers_example(
+    example: &[String],
+    witness: &[String],
+    known_paths: &[Vec<String>],
+    tree: &ClapCommand,
+) -> bool {
+    use mvm_conformance::doc_examples::{command_path_in, flag_set};
+    let path = command_path_in(example, known_paths);
+    if path.is_empty() || path != command_path_in(witness, known_paths) {
+        return false;
+    }
+    let wanted = normalize_flags(&flag_set(example), &path, tree);
+    let have = normalize_flags(&flag_set(witness), &path, tree);
+    wanted.is_subset(&have)
+}
+
+/// One README example's proof obligation, as recorded by a human.
+#[derive(Debug, Deserialize)]
+struct ReadmeExampleWitness {
+    /// The invocation exactly as the README prints it, line continuations
+    /// folded. The key, so moving an example around the README does not churn
+    /// the manifest but changing what it *says* does.
+    command: String,
+    /// `<feature-file>::<scenario name>` — a `@live` scenario that boots a
+    /// guest running this shape.
+    #[serde(default)]
+    witness: Option<String>,
+    /// A scenario that really executes this shape but boots no guest, for
+    /// commands where there is no guest to boot: `template list` reads a
+    /// registry, `build compile` writes a directory. Structurally checked
+    /// exactly like `witness`, minus the `@live` requirement, and it must say
+    /// why a live lane has nothing to add.
+    #[serde(default)]
+    hermetic_witness: Option<String>,
+    /// Why this example cannot be executed at all.
+    #[serde(default)]
+    exempt: Option<String>,
+    /// Required alongside `hermetic_witness`.
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReadmeExampleManifest {
+    example: Vec<ReadmeExampleWitness>,
+}
+
+/// Every `mvmctl` invocation the README prints, deduplicated, in first-seen
+/// order. Templates (`mvmctl <verb> …`) are excluded: they document shape, not
+/// a command a reader can paste.
+fn readme_runnable_examples() -> Vec<mvm_conformance::doc_examples::DocExample> {
+    let readme = std::fs::read_to_string(repo_root().join("README.md")).expect("read README.md");
+    let mut seen = BTreeSet::new();
+    mvm_conformance::doc_examples::doc_examples("README.md", &readme)
+        .into_iter()
+        .filter(|example| {
+            matches!(
+                example.source,
+                mvm_conformance::doc_examples::ExampleSource::Fenced
+            )
+        })
+        .filter(|example| !example.is_template())
+        .filter(|example| seen.insert(example.command.clone()))
+        .collect()
+}
+
+fn readme_example_manifest() -> ReadmeExampleManifest {
+    let path = repo_root()
+        .join("features")
+        .join("suites")
+        .join("s8_readme_contract")
+        .join("readme_examples.toml");
+    let manifest = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read README example manifest {}: {error}", path.display()));
+    toml::from_str(&manifest)
+        .unwrap_or_else(|error| panic!("parse README example manifest {}: {error}", path.display()))
+}
+
+/// Load every scenario in the feature tree, keyed `<relative path>::<name>`.
+fn all_feature_scenarios()
+-> std::collections::BTreeMap<String, mvm_conformance::doc_examples::ScenarioCommands> {
+    let features_root = repo_root().join("features");
+    let mut scenarios = std::collections::BTreeMap::new();
+    let mut stack = vec![features_root.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("feature") {
+                continue;
+            }
+            let Ok(contents) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let relative = path
+                .strip_prefix(&features_root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            for scenario in mvm_conformance::doc_examples::scenario_commands(&contents) {
+                scenarios.insert(format!("{relative}::{}", scenario.name), scenario);
+            }
+        }
+    }
+    scenarios
+}
+
+/// Every README example is either executed by a named scenario or carries a
+/// reviewed reason why it cannot be.
+///
+/// The tier ladder that already exists is keyed on *command path*, so one live
+/// `machine run` discharged all twelve documented `machine run` variants. The
+/// `-it` variant the README prints was never executed by anything, and its
+/// guest console was broken on every OCI image. This gate is per example, and
+/// it checks the witness actually carries the example's flags rather than
+/// merely naming the same verb.
+#[then(expr = "every README example is executed or carries a reviewed exemption")]
+fn every_readme_example_is_executed_or_exempt(_world: &mut CliWorld) {
+    use mvm_conformance::doc_examples::tokenize;
+
+    // The real verb tree, so `machine create web` resolves to the
+    // `machine create` verb rather than treating the machine name as part of
+    // the path.
+    let command_tree = mvm_cli::commands::cli_command();
+    let mut known_paths = Vec::new();
+    crate::steps::cli::collect_command_paths(&command_tree, &[], &mut known_paths);
+
+    let examples = readme_runnable_examples();
+    assert!(
+        !examples.is_empty(),
+        "README.md contains no runnable mvmctl examples"
+    );
+    let manifest = readme_example_manifest();
+    let scenarios = all_feature_scenarios();
+
+    let documented: BTreeSet<&str> = examples.iter().map(|e| e.command.as_str()).collect();
+    let recorded: BTreeSet<&str> = manifest
+        .example
+        .iter()
+        .map(|e| e.command.as_str())
+        .collect();
+
+    let missing: Vec<&&str> = documented.difference(&recorded).collect();
+    assert!(
+        missing.is_empty(),
+        "these README examples have no entry in \
+         features/suites/s8_readme_contract/readme_examples.toml, so nothing \
+         proves they work. Add a `witness` naming the scenario that runs the \
+         shape, or an `exempt` saying why it cannot be run:\n{}",
+        missing
+            .iter()
+            .map(|c| format!("  {c}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    let stale: Vec<&&str> = recorded.difference(&documented).collect();
+    assert!(
+        stale.is_empty(),
+        "these manifest entries name commands the README no longer prints; \
+         delete them so the manifest cannot accrue proof for examples that are \
+         gone:\n{}",
+        stale
+            .iter()
+            .map(|c| format!("  {c}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    for entry in &manifest.example {
+        let argv = {
+            let tokens = tokenize(&entry.command);
+            let index = tokens
+                .iter()
+                .position(|token| token == "mvmctl")
+                .unwrap_or_else(|| panic!("manifest entry is not an mvmctl command: {entry:?}"));
+            tokens[index + 1..].to_vec()
+        };
+
+        let declared = [
+            entry.witness.is_some(),
+            entry.hermetic_witness.is_some(),
+            entry.exempt.is_some(),
+        ]
+        .iter()
+        .filter(|set| **set)
+        .count();
+        assert_eq!(
+            declared, 1,
+            "a README example carries exactly one of `witness`, \
+             `hermetic_witness` or `exempt`; {} declares {declared}",
+            entry.command
+        );
+
+        if let Some(witness) = &entry.hermetic_witness {
+            let reason = entry.reason.as_deref().unwrap_or("");
+            assert!(
+                reason.trim().len() >= 20,
+                "`hermetic_witness` has to say why booting a guest would prove \
+                 nothing here, and {reason:?} does not: {}",
+                entry.command
+            );
+            let scenario = scenarios.get(witness.as_str()).unwrap_or_else(|| {
+                panic!(
+                    "README example {:?} names hermetic witness {witness:?}, \
+                     which is not a scenario in features/",
+                    entry.command
+                )
+            });
+            assert!(
+                scenario
+                    .commands
+                    .iter()
+                    .any(|command| witness_covers_example(
+                        &argv,
+                        command,
+                        &known_paths,
+                        &command_tree
+                    )),
+                "hermetic witness {witness:?} does not run README example {:?}",
+                entry.command
+            );
+            continue;
+        }
+
+        match (&entry.witness, &entry.exempt) {
+            (Some(_), Some(_)) | (None, None) => unreachable!("checked above"),
+            (None, Some(reason)) => {
+                assert!(
+                    reason.trim().len() >= 20,
+                    "an exemption is a claim someone has to be able to disagree \
+                     with, so it needs a real reason, not {reason:?}: {}",
+                    entry.command
+                );
+            }
+            (Some(witness), None) => {
+                let scenario = scenarios.get(witness.as_str()).unwrap_or_else(|| {
+                    panic!(
+                        "README example {:?} names witness {witness:?}, which is \
+                         not a scenario in features/. Known scenarios are keyed \
+                         `<path>::<name>`.",
+                        entry.command
+                    )
+                });
+                // A witness has to *run* the example, so it has to boot a
+                // guest. Without this the hermetic suites match on shape alone
+                // and the ledger fills with proof that is the opposite of
+                // proof: `-it` matched "machine run refuses an interactive PTY
+                // without a terminal", and `bootstrap` matched "--help lists
+                // the documented top-level verbs". Both name the right verb and
+                // neither runs the command.
+                assert!(
+                    scenario.is_live,
+                    "witness {witness:?} for README example {:?} is not @live, \
+                     so it never boots a guest. A hermetic refusal or help \
+                     scenario matches the same verb and flags while proving the \
+                     command does not work; use `exempt` with a reason instead.",
+                    entry.command
+                );
+                assert!(
+                    scenario
+                        .commands
+                        .iter()
+                        .any(|command| witness_covers_example(
+                            &argv,
+                            command,
+                            &known_paths,
+                            &command_tree
+                        )),
+                    "witness {witness:?} does not exercise README example {:?}. \
+                     The scenario must invoke the same command path carrying at \
+                     least the same flags — naming the same verb is what let a \
+                     broken `-it` ship while `machine run` looked covered.\n\
+                     Scenario commands:\n{}",
+                    entry.command,
+                    scenario
+                        .commands
+                        .iter()
+                        .map(|c| format!("  mvmctl {}", c.join(" ")))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+            }
+        }
+    }
+}
+
 /// Exercise every declared CLI option through a help request. Visible options
 /// must be present in the real subprocess help. Hidden options are rendered
 /// from the same command tree with hiding disabled; they remain covered while

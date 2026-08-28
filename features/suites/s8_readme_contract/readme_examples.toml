@@ -1,0 +1,188 @@
+# What proves each README example works.
+#
+# One entry per distinct `mvmctl` invocation the README prints. Exactly one of:
+#
+#   witness           a @live scenario that boots a guest running this shape
+#   hermetic_witness  a scenario that really executes it but boots no guest,
+#                     because there is no guest to boot; needs `reason`
+#   exempt            why it cannot be executed at all
+#
+# The witness is checked, not trusted: it must resolve to the same verb and
+# carry at least the same flags, with short and long spellings reconciled
+# against the real command. Naming a scenario that happens to mention the verb
+# is what the per-command-path tier already did, and it is how `machine run
+# --image alpine -it -- /bin/sh` sat in this README while its guest console
+# failed on every OCI image.
+#
+# `witness` additionally has to be @live. A hermetic refusal scenario matches
+# the same verb and flags while proving the command does *not* work — the `-it`
+# example matched "machine run refuses an interactive PTY without a terminal"
+# before that rule existed.
+
+# ── Transient machines ───────────────────────────────────────────────────────
+
+[[example]]
+command = 'mvmctl machine run --image python:3.12 -- python -c "print(2 + 2)"'
+witness = "suites/s31_launch_e2e/cli_launch_modes.feature::a transient run boots an OCI image and runs one command"
+
+[[example]]
+command = 'mvmctl machine run --image alpine -- sh -c "echo hello from a microVM && uname -a"'
+witness = "suites/s31_launch_e2e/cli_launch_modes.feature::a transient run boots an OCI image and runs one command"
+
+[[example]]
+command = 'mvmctl machine run --image python:3.12 --mount "$PWD:/work:ro" -- python /work/app.py'
+witness = "suites/s31_launch_e2e/cli_launch_modes.feature::--mount shares a host directory the workload can read"
+
+[[example]]
+command = "mvmctl machine run --image python:3.12 --allow-host pypi.org:443 --allow-host files.pythonhosted.org:443 --mount \"$PWD:/work:ro\" -- sh -c 'python -m pip install --no-cache-dir --target /tmp/python-deps pandas && PYTHONPATH=/tmp/python-deps python /work/app.py'"
+witness = "suites/s31_launch_e2e/cli_launch_modes.feature::--allow-host and --mount together on one launch"
+
+[[example]]
+command = "mvmctl machine run --image alpine -it -- /bin/sh"
+witness = "suites/s31_launch_e2e/cli_launch_modes.feature::an interactive run gets a real pseudo-terminal in the guest"
+
+[[example]]
+command = "mvmctl machine run --image alpine --cpus 2 --memory 512M --allow-host api.example.com:443 -- ./fetch"
+witness = "suites/s31_launch_e2e/cli_launch_modes.feature::--cpus, --memory and --allow-host on one launch"
+
+[[example]]
+command = "mvmctl machine run --flake . -- ./app"
+witness = "suites/s5_lifecycle/transient_sandbox_boot.feature::machine run boots a transient sandbox from a Nix flake"
+
+[[example]]
+command = "mvmctl machine run   --flake . -- ./app"
+witness = "suites/s5_lifecycle/transient_sandbox_boot.feature::machine run boots a transient sandbox from a Nix flake"
+
+[[example]]
+command = "mvmctl machine run --flake . -- ./ask-model"
+witness = "suites/s5_lifecycle/transient_sandbox_boot.feature::machine run boots a transient sandbox from a Nix flake"
+
+[[example]]
+command = "mvmctl machine run --image alpine --mount .:/work -- ls /work"
+witness = "suites/s31_launch_e2e/cli_launch_modes.feature::--mount shares a host directory the workload can read"
+
+[[example]]
+command = "mvmctl machine run --image alpine -vvv --allow-host api.example.com -- ps aux"
+witness = "suites/s31_launch_e2e/cli_launch_modes.feature::-vvv does not disturb a launch that admits a host"
+
+# ── Persistent machines ──────────────────────────────────────────────────────
+
+[[example]]
+command = "mvmctl machine create web --image nginx --cpus 2 --memory 512M"
+witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented persistent machine lifecycle operates one guest"
+
+[[example]]
+command = "mvmctl machine start web"
+witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented persistent machine lifecycle operates one guest"
+
+[[example]]
+command = "mvmctl machine exec  web -- nginx -v"
+witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented persistent machine lifecycle operates one guest"
+
+[[example]]
+command = "mvmctl machine logs  web"
+witness = "suites/s32_documented_surface/machine_journey.feature::the guest reports its own state"
+
+[[example]]
+command = "mvmctl machine reconfigure web --memory 1G"
+witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented persistent machine lifecycle operates one guest"
+
+[[example]]
+command = "mvmctl machine stop  web"
+witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented persistent machine lifecycle operates one guest"
+
+[[example]]
+command = "mvmctl machine rm web"
+witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented persistent machine lifecycle operates one guest"
+
+[[example]]
+command = "mvmctl machine ls"
+witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented persistent machine lifecycle operates one guest"
+
+[[example]]
+command = "mvmctl machine inspect web"
+witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented persistent machine lifecycle operates one guest"
+
+# ── Host setup ───────────────────────────────────────────────────────────────
+
+[[example]]
+command = "mvmctl bootstrap"
+exempt = "acquires the builder VM image, workload kernel, runtime overlay and initramfs — hundreds of megabytes and tens of minutes. Every live lane runs it as setup before its first scenario, so a broken bootstrap fails the whole suite at the door rather than as one assertion inside it."
+
+[[example]]
+command = "mvmctl doctor"
+hermetic_witness = "suites/s2_egress_vsock/default_deny_egress.feature::Host mediates egress over vsock, not a NIC"
+reason = "doctor reports host posture and boots nothing, so a live lane has no guest to add. The scenario runs the real binary and asserts the lines it prints."
+
+[[example]]
+command = "mvmctl build kernel build --which workload --source download"
+exempt = "downloads the published multi-hundred-megabyte kernel. The live lanes set MVM_KERNEL_SOURCE=download and every guest they boot uses the result, so the download path is exercised as their precondition."
+
+[[example]]
+command = "mvmctl build kernel build --which workload --source compile"
+exempt = "compiles a Linux kernel inside the builder VM — tens of minutes, and the artifact is the same one the download arm fetches. Covered by the builder-VM image lane in Extended CI rather than per release."
+
+# ── Templates ────────────────────────────────────────────────────────────────
+
+[[example]]
+command = "mvmctl template list"
+hermetic_witness = "suites/s0_cli/template_registry.feature::template list shows bundled core presets"
+reason = "reads the bundled preset registry and prints it; no guest is involved at any point, so there is nothing for a live lane to boot."
+
+[[example]]
+command = "mvmctl template info python"
+hermetic_witness = "suites/s0_cli/template_registry.feature::template info resolves a bundled preset"
+reason = "resolves a preset out of the bundled registry and prints it; boots nothing."
+
+[[example]]
+command = "mvmctl template search pandas"
+hermetic_witness = "suites/s0_cli/template_registry.feature::template search finds a remote template"
+reason = "queries the template registry and prints matches; boots nothing. The scenario points it at a local registry so the assertion does not depend on what is published today."
+
+[[example]]
+command = "mvmctl generate template python ./my-python-app"
+exempt = "run by `template_registry.feature::generate template fetches a remote template and scaffolds its files`, which drives it through a bespoke step (`I generate a project from template \"demo\"`) rather than a quoted command line. The structural check reads commands out of quoted step text, so it cannot confirm the shape here and is not asked to pretend otherwise. Spelling the invocation in the step would let it be a hermetic_witness."
+
+# ── Build and deps ───────────────────────────────────────────────────────────
+
+[[example]]
+command = "mvmctl machine build --flake ."
+witness = "suites/s29_doc_examples/documented_build_live.feature::the documented flake build produces an image"
+
+[[example]]
+command = "mvmctl machine build --flake ./out"
+witness = "suites/s29_doc_examples/documented_build_live.feature::the documented flake build produces an image"
+
+[[example]]
+command = "mvmctl build compile app.py --out ./out"
+witness = "suites/s31_launch_e2e/sdk_and_library_modes.feature::a decorator workload compiles from its source file"
+
+[[example]]
+command = "mvmctl machine run --entrypoint --flake ./out"
+witness = "suites/s29_doc_examples/documented_build_live.feature::the documented entrypoint launch runs the compiled workload"
+
+[[example]]
+command = "mvmctl deps install --lockfile uv.lock --language python"
+exempt = "installs a Python dependency set into a sealed volume inside the builder VM, which needs a real package index. Covered by the app-deps-audit lane in security.yml against a fixture, so a release does not depend on PyPI being up."
+
+[[example]]
+command = "mvmctl deps capture-live HASH --vm dev-vm --guest-content /mvm/deps/content --guest-sbom /mvm/deps/sbom.cdx.json --guest-fetch-log /mvm/deps/fetch.log --guest-cve /mvm/deps/cve.json"
+exempt = "captures a dependency tree out of a running dev VM that a reader has already installed into by hand. There is no fixture for the guest-side state it reads, so the scenario would have to build the thing it is meant to observe."
+
+[[example]]
+command = "mvmctl deps inspect HASH"
+exempt = "reads the sealed volume that `deps install` produced, addressed by its content hash. The app-deps-audit lane exercises it against a sealed fixture volume, including the byte-flip refusal."
+
+# ── Runtime SDK ──────────────────────────────────────────────────────────────
+
+[[example]]
+command = "mvmctl run --mode plan ./script.py"
+witness = "suites/s31_launch_e2e/sdk_and_library_modes.feature::a runtime-SDK script admits as a signed plan without booting"
+
+[[example]]
+command = "mvmctl run --mode live --profile dev ./script.py"
+exempt = "DOES NOT WORK TODAY. `--profile dev` clears the grant gate and the script then dies on `mvmctl machine proc start` exit 1 against the guest it just booted — the residual named in the title of #2887, closed 2026-08-27 with the reporting half fixed and this half not. `sdk_and_library_modes.feature::a runtime-SDK script reaches DevOnly surfaces under an explicit dev profile` drives it and is tagged @wip on that. This entry is an exemption and not a witness precisely because the README documents something that does not currently function; delete it and retag the scenario @live when it does."
+
+[[example]]
+command = "mvmctl run --peer db.mvm.peer:5432=127.0.0.1:34567 -- ./my-service"
+exempt = "routes to a second workload that has to be running and reachable at the named peer address. Standing up both halves is the service-plane suite's job; s30_service_plane covers the route lifecycle, and this line documents the client half of it."

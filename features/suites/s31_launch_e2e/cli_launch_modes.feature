@@ -96,6 +96,43 @@ Feature: every README-documented CLI launch mode boots a real guest
     And the guest printed "1 received"
     And the guest control plane came up
 
+  # The README's headline "install a dependency at boot" example combines
+  # --allow-host with --mount, and no scenario carried both: the allow-host one
+  # had no mount and the mount one had no egress. A flag pair is its own code
+  # path — the mount is set up by the same launch that installs the egress
+  # policy — so covering them separately covers neither.
+  #
+  # The payload is a fetch rather than a `pip install`: the shape under test is
+  # "read the mount while reaching an admitted host", and making CI depend on a
+  # package index would trade a launch regression for an upstream outage.
+  @live
+  Scenario: --allow-host and --mount together on one launch
+    When I launch "machine run --image alpine --allow-host github.com --mount .:/work -- sh -c 'ls /work/README.md && ping -c 1 github.com'"
+    Then the launch succeeds
+    And the guest printed "/work/README.md"
+    And the guest printed "1 received"
+    And the guest control plane came up
+
+  # The README sizes a machine and admits a host in the same command. `--cpus`
+  # and `--memory` were covered without egress, and egress without sizing.
+  @live
+  Scenario: --cpus, --memory and --allow-host on one launch
+    When I launch "machine run --image alpine --cpus 2 --memory 512M --allow-host github.com -- sh -c 'echo $(nproc) && ping -c 1 github.com'"
+    Then the launch succeeds
+    And the guest printed "2"
+    And the guest printed "1 received"
+    And the guest control plane came up
+
+  # `-vvv` is in the README's egress example. Verbosity changes what the launch
+  # path logs and nothing had ever run a guest with it set, so a panic behind a
+  # log statement would only ever have reproduced for a user.
+  @live
+  Scenario: -vvv does not disturb a launch that admits a host
+    When I launch "machine run --image alpine -vvv --allow-host github.com -- ping -c 1 github.com"
+    Then the launch succeeds
+    And the guest printed "1 received"
+    And the guest control plane came up
+
   @live
   Scenario: egress is default-deny without --allow-host
     When I launch "machine run --image alpine -- ping -c 1 github.com"
@@ -192,6 +229,11 @@ Feature: every README-documented CLI launch mode boots a real guest
     When I launch "machine exec e2e-web -- uname -s"
     Then the launch succeeds
     And the guest printed "Linux"
+    # Documented in the same README block as the verbs around it, and the only
+    # one of them nothing ran. It patches the machine and relaunches, so a
+    # break here reads as a dead machine rather than a bad flag.
+    When I launch "machine reconfigure e2e-web --memory 1G"
+    Then the launch succeeds
     When I launch "machine inspect e2e-web"
     Then the launch succeeds
     When I launch "machine ls"

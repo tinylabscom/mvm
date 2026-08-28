@@ -648,6 +648,87 @@ fn strip_redirections(tokens: Vec<String>) -> Vec<String> {
     kept
 }
 
+/// One executable scenario of a feature file, with the `mvmctl` invocations
+/// its steps drive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioCommands {
+    /// The scenario name as written after `Scenario:` / `Scenario Outline:`.
+    pub name: String,
+    /// Whether the scenario carries `@live` (or inherits it from the feature).
+    pub is_live: bool,
+    /// Each quoted `mvmctl` invocation the scenario's steps carry, as argv.
+    pub commands: Vec<Vec<String>>,
+}
+
+/// Every scenario in a feature file, paired with the commands it drives.
+///
+/// [`live_scenario_commands`] answers "is this command exercised anywhere",
+/// which is enough for a per-command-path tier. Pinning a *documented example*
+/// to the scenario that covers it needs the scenarios kept apart, so the
+/// witness a manifest names can be looked up and checked rather than trusted.
+pub fn scenario_commands(contents: &str) -> Vec<ScenarioCommands> {
+    let feature_is_live = contents
+        .lines()
+        .take_while(|line| !line.trim_start().starts_with("Feature:"))
+        .any(|line| line.contains("@live"));
+
+    let mut scenarios: Vec<ScenarioCommands> = Vec::new();
+    let mut pending_live = feature_is_live;
+
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('@') {
+            pending_live = trimmed.contains("@live") || feature_is_live;
+            continue;
+        }
+        if let Some(name) = trimmed
+            .strip_prefix("Scenario Outline:")
+            .or_else(|| trimmed.strip_prefix("Scenario:"))
+        {
+            scenarios.push(ScenarioCommands {
+                name: name.trim().to_string(),
+                is_live: pending_live,
+                commands: Vec::new(),
+            });
+            pending_live = feature_is_live;
+            continue;
+        }
+        let Some(current) = scenarios.last_mut() else {
+            continue;
+        };
+        // Steps quote the command: `... with "machine run --image alpine"`.
+        for fragment in line.split('"').skip(1).step_by(2) {
+            let argv = strip_redirections(tokenize(fragment));
+            if !argv.is_empty() {
+                current.commands.push(argv);
+            }
+        }
+    }
+
+    scenarios
+}
+
+/// Whether `witness` exercises the same request shape as `example`.
+///
+/// Same command path, and every flag the example passes to `mvmctl` is also
+/// passed by the witness. Values are free to differ — a scenario booting
+/// `--image alpine` legitimately stands in for a README line booting
+/// `--image python:3.12`, and pinning the value would make the suite a
+/// transcription of the README rather than a test of it.
+///
+/// The flag set is what must match, and it is the half that was missing. A
+/// single live `machine run --image alpine -- true` used to discharge every
+/// documented `machine run`, including the `-it` form, whose console had been
+/// broken on every OCI image the whole time.
+#[must_use]
+pub fn witness_covers(example: &[String], witness: &[String], known: &[Vec<String>]) -> bool {
+    let example_path = command_path_in(example, known);
+    if example_path.is_empty() || example_path != command_path_in(witness, known) {
+        return false;
+    }
+    flag_set(example).is_subset(&flag_set(witness))
+}
+
 /// The `mvmctl` invocations inside every `@live`-tagged scenario of a feature
 /// file.
 ///
@@ -689,6 +770,70 @@ pub fn live_scenario_commands(contents: &str) -> Vec<Vec<String>> {
     }
 
     commands
+}
+
+/// The `mvmctl` command path an invocation names, resolved against the real
+/// command tree.
+///
+/// `known` is every verb path the CLI actually exposes, longest match wins.
+/// Resolving rather than guessing is the point: `machine create web` is the
+/// `machine create` verb with a positional machine name, and a rule that
+/// stopped at the first non-flag token would read the name as part of the path.
+/// Two scenarios naming different machines would then look like two different
+/// commands, and the documented lifecycle would appear uncovered.
+///
+/// The tree is passed in rather than imported so this module stays free of the
+/// CLI crate — it is a dev-dependency of the harness, not of this library.
+#[must_use]
+pub fn command_path_in(argv: &[String], known: &[Vec<String>]) -> Vec<String> {
+    known
+        .iter()
+        .filter(|path| argv.len() >= path.len() && argv[..path.len()] == path[..])
+        .max_by_key(|path| path.len())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The flags an invocation passes to `mvmctl` itself.
+///
+/// Only what precedes `--`: everything after it is the guest's argv, and a
+/// guest flag says nothing about which mvm code path runs. Clustered short
+/// flags are split, so `-it` contributes `-i` and `-t` — otherwise a scenario
+/// spelling them `-i -t` would not match an example spelling them `-it`, and
+/// the two are the same request.
+///
+/// `--flag=value` keeps only the flag. The value varies freely between a
+/// documented example and the scenario that exercises it — `--image alpine`
+/// stands in for `--image python:3.12` — but the *set of flags* is the shape
+/// of the request, and that is what has to be covered.
+#[must_use]
+pub fn flag_set(argv: &[String]) -> BTreeSet<String> {
+    let mut flags = BTreeSet::new();
+    for token in argv {
+        if token == "--" {
+            break;
+        }
+        let Some(body) = token.strip_prefix('-') else {
+            continue;
+        };
+        if let Some(long) = body.strip_prefix('-') {
+            if long.is_empty() {
+                break;
+            }
+            let name = long.split('=').next().unwrap_or(long);
+            flags.insert(format!("--{name}"));
+            continue;
+        }
+        // A short cluster. `-vvv` is one repeated flag, not three distinct
+        // ones, so the set collapses it naturally.
+        for ch in body.chars() {
+            if ch == '=' {
+                break;
+            }
+            flags.insert(format!("-{ch}"));
+        }
+    }
+    flags
 }
 
 /// The tier each documented command path is verified at.
