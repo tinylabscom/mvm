@@ -357,11 +357,46 @@ impl VmExitStatus {
 ///
 /// Used by consumers to check what operations are available before attempting
 /// them. Recovery capabilities are deliberately part of this same value so a
+/// What a launch actually gets when it asks for `requested` vCPUs.
+///
+/// `Some(granted)` when the backend cannot honour the request in full — the
+/// caller is expected to say so and carry on with `granted`. `None` when the
+/// request is satisfiable as asked.
+///
+/// Clamping rather than refusing is the point. `--cpus 4` on a single-vCPU
+/// backend is a portable command meeting a host limit, not a malformed
+/// request; refusing it would mean a script that runs on Linux fails on macOS
+/// for a reason the user cannot act on. Silence is the other failure — a guest
+/// running on one CPU while its plan says four, with nothing to explain the
+/// performance.
+#[must_use]
+pub fn clamp_vcpus(requested: u32, max_vcpus: Option<u32>) -> Option<u32> {
+    let ceiling = max_vcpus?;
+    // A backend declaring zero has no usable answer; treat it as one rather
+    // than hand back a machine with no CPUs.
+    let ceiling = ceiling.max(1);
+    (requested > ceiling).then_some(ceiling)
+}
+
 /// caller cannot accidentally combine a snapshot tier from one backend with a
 /// standby answer from another.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VmCapabilities {
+    /// Most guest vCPUs this backend can actually create, or `None` when it
+    /// imposes no ceiling of its own.
+    ///
+    /// A request above this is **clamped and reported**, never refused: asking
+    /// for more parallelism than the host tier offers is a preference, not an
+    /// error, and failing the launch would make a portable command
+    /// backend-specific. What must not happen is the silent version — HVF
+    /// booted every guest on one CPU while its admitted plan said two, and
+    /// nothing said so.
+    ///
+    /// `None` rather than `u32::MAX` so "no ceiling" is distinguishable from a
+    /// backend that forgot to declare one.
+    #[serde(default)]
+    pub max_vcpus: Option<u32>,
     /// Can pause/resume vCPUs (Firecracker: yes, WASM: no).
     pub pause_resume: bool,
     /// Legacy coarse snapshot flag. New recovery callers should use
@@ -1292,6 +1327,41 @@ impl BackendKind {
 
 #[cfg(test)]
 mod tests {
+
+    /// A satisfiable request is left alone.
+    #[test]
+    fn a_request_within_the_ceiling_is_not_clamped() {
+        assert_eq!(super::clamp_vcpus(1, Some(1)), None);
+        assert_eq!(super::clamp_vcpus(2, Some(4)), None);
+        assert_eq!(super::clamp_vcpus(4, Some(4)), None, "equal is satisfiable");
+        assert_eq!(super::clamp_vcpus(64, None), None, "no ceiling declared");
+    }
+
+    /// Over the ceiling reports the granted count rather than refusing.
+    ///
+    /// The caller needs a value to boot with *and* something to tell the user.
+    /// Returning the granted count gives both; returning an error would make a
+    /// portable `--cpus 4` fail on one host and succeed on another for a reason
+    /// the user cannot act on.
+    #[test]
+    fn a_request_over_the_ceiling_is_granted_the_ceiling() {
+        assert_eq!(super::clamp_vcpus(4, Some(1)), Some(1));
+        assert_eq!(super::clamp_vcpus(8, Some(2)), Some(2));
+    }
+
+    /// A backend declaring zero still yields a bootable machine.
+    ///
+    /// Zero CPUs is not a smaller guest, it is not a guest. Treat a nonsense
+    /// ceiling as one rather than propagate it into the device tree.
+    #[test]
+    fn a_zero_ceiling_still_grants_one_cpu() {
+        assert_eq!(super::clamp_vcpus(4, Some(0)), Some(1));
+        assert_eq!(
+            super::clamp_vcpus(1, Some(0)),
+            None,
+            "one is already within"
+        );
+    }
     use super::*;
 
     #[test]

@@ -337,7 +337,8 @@ build-supervisors:
 # (mvm-build, mvm-core, ...) when you are about to boot a real VM; ordinary
 # check/test/clippy runs never need it. Release builds always rebuild.
 embed-refresh:
-    rm -rf target/*/build/mvm-cli-nested-target/host-vm-target
+    rm -rf target/*/build/mvm-cli/mvm-cli-nested-target/host-vm-target
+    rm -rf target/*/build/mvm-cli/mvm-cli-nested-target/aux-helper-target
 
 # Build the dm-verity-capable workload kernel into the local mvm cache.
 # Set MVM_KERNEL_SOURCE=download to use the hash-verified release artifact, or
