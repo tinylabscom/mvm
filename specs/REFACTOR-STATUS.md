@@ -11,6 +11,14 @@ Last updated: 2026-08-27
       checkout fingerprint. The full local gates and a live aarch64 Stage 0/Nix
       artifact build are green; merge delivery remains.
 
+- [ ] **Cloudflare Pages cutover.**
+      `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.
+      The existing Pages project and account now have a checked-in Wrangler configuration,
+      reproducible local/CI deployment commands, an account/project preflight,
+      a shared and tested complete-WebLinux-bundle gate, and a verified
+      deployment.
+      The production hostname still needs to be attached to the project.
+
 - [ ] **SDK surface contract repairs — issues #2902 and #2906.**
       `specs/plans/2026-08-26-sdk-surface-contract-repairs.md`.
       The README's `mvm.local_path` decorator source and the builder-pack Cargo

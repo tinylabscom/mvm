@@ -29,10 +29,12 @@ use crate::ui;
 /// Matches GNU `timeout(1)` so scripts can branch on it.
 mod guest_run;
 mod launch_plan;
+mod mounts;
 mod session;
 mod transient;
 
 pub use launch_plan::load_launch_plan;
+pub(crate) use mounts::refuse_unsupported_dir_shares;
 
 use guest_run::{emit_guest_console_diagnostic, run_in_guest, run_wasm_module};
 use session::wait_for_agent_timed;
@@ -1351,6 +1353,17 @@ pub fn resolve_launch(
         shape_uses_vsock_proxy_backend(shape),
         shape.network_policy,
         shape.hypervisor,
+    )?;
+
+    // Before any image work: a `--mount` this backend cannot serve is decidable
+    // from the arguments alone. The runner refuses it too, but only once the
+    // spec is being assembled — by then the image has been resolved and
+    // prepared and the VM directory built, all of it discarded to reach a
+    // conclusion that was available here.
+    refuse_unsupported_dir_shares(
+        backend.name(),
+        backend.capabilities().directory_shares,
+        shape.dir_shares,
     )?;
 
     // Resolve image artifacts: either a named template or a pre-built pair.
