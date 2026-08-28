@@ -593,6 +593,81 @@ fn release_lookups_pass_the_filter_directly_to_gh_jq() {
 }
 
 #[test]
+fn pages_deployment_uses_the_checked_in_wrangler_config() {
+    let workflow = pages_workflow();
+    let account_job = job_block(&workflow, "cloudflare-account");
+    let package = fs::read_to_string("public/package.json").expect("read site package manifest");
+    let config = fs::read_to_string("public/wrangler.toml").expect("read Wrangler config");
+
+    assert!(
+        workflow.contains("cloudflare-account:")
+            && account_job.contains("runs-on: ubuntu-latest")
+            && workflow.contains("needs: cloudflare-account")
+            && workflow.contains("command: pages deployment list --project-name=mvm")
+            && !workflow.contains("pages project create"),
+        "the Pages workflow must verify the configured account and project before building"
+    );
+    assert!(
+        workflow.contains("uses: pnpm/action-setup@v6"),
+        "the Pages workflow must use the Node 24-compatible pnpm setup action"
+    );
+    assert!(
+        workflow.contains("workingDirectory: public")
+            && workflow.contains("command: pages deploy --branch=main"),
+        "the Pages action must deploy from public/ so Wrangler reads the checked-in config"
+    );
+    assert!(
+        config.contains("name = \"mvm\"") && config.contains("pages_build_output_dir = \"./dist\""),
+        "Wrangler must target the existing mvm project and Astro output"
+    );
+    // Wrangler refuses a Pages config carrying `account_id` outright --
+    // "Configuration file for Pages projects does not support account_id" --
+    // so the deploy fails after a successful build, at the last step. The
+    // account is supplied by the workflow from `secrets.CLOUDFLARE_ACCOUNT_ID`,
+    // which is where it belongs: it is deployment identity, not site config,
+    // and checking it in pins one account into a file every fork inherits.
+    assert!(
+        !config.contains("account_id"),
+        "a Pages wrangler config must not carry account_id; the workflow passes \
+         accountId from secrets"
+    );
+    assert!(
+        package.contains("\"wrangler\": \"^4.127.0\"")
+            && package.contains("\"check:deploy-assets\":")
+            && package.contains(
+                "\"deploy\": \"pnpm build && pnpm check:deploy-assets && wrangler pages deploy --branch=main\""
+            ),
+        "the site must pin Wrangler and validate assets in its production deploy command"
+    );
+}
+
+#[test]
+fn pages_deployment_refuses_an_incomplete_weblinux_bundle() {
+    let workflow = pages_workflow();
+    let validator = fs::read_to_string("public/scripts/check-weblinux-deploy-assets.mjs")
+        .expect("read WebLinux deployment validator");
+
+    assert!(
+        workflow.contains("node public/scripts/check-weblinux-deploy-assets.mjs public/dist"),
+        "Pages must run the shared WebLinux bundle validator before publishing"
+    );
+
+    for asset in [
+        "demo/weblinux/demo.js",
+        "demo/weblinux/worker.js",
+        "demo/weblinux/qemu-system-x86_64.js",
+        "demo/weblinux/qemu-system-x86_64.wasm.gz",
+        "demo/weblinux/pack/kernel.img",
+        "demo/weblinux/pack/rootfs.bin",
+    ] {
+        assert!(
+            validator.contains(asset),
+            "the shared deployment validator must require {asset}"
+        );
+    }
+}
+
+#[test]
 fn qemu_wasm_site_pack_is_built_once_on_the_boot_image_train() {
     let boot_image = boot_image_workflow();
     let pages = pages_workflow();
@@ -640,6 +715,12 @@ fn qemu_wasm_site_pack_is_built_once_on_the_boot_image_train() {
             && pages.contains("release-boot-image.yml@refs/tags/boot-image/v.*")
             && pages.contains("sha256sum -c qemu-wasm-smoke-pack.tar.gz.sha256"),
         "site deployment must verify the tag-built pack's release identity"
+    );
+    assert!(
+        pages.contains("gh release view \"${CANDIDATE}\"")
+            && pages.contains("HAS_SITE_PACK")
+            && pages.contains("| sort_by(.v) | reverse | .[].tag"),
+        "site deployment must select the newest semantic release that actually carries the pack"
     );
     assert!(
         pages.contains("./web/weblinux-demo/build.sh qemu-wasm-smoke-pack"),

@@ -29,13 +29,23 @@
       PR #2943 merged and closed issue #2938; a manual Extended CI run on
       `main` is recording the post-merge live-lane evidence.
 
+- [ ] **Cloudflare Pages cutover.**
+      `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.
+      Wrangler is pinned locally, the existing `mvm` Pages project and account
+      are checked in, CI verifies the selected account before building, local
+      scripts deploy through that configuration, local and CI uploads share a
+      tested complete-WebLinux-bundle gate, and a production-branch deployment
+      is live with the required COOP/COEP headers.
+      Remaining: attach `gomicrovm.com` to the Pages project; the hostname still
+      resolves to GitHub Pages and cannot serve those headers.
+
 - [x] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
       `specs/plans/2026-08-27-kernel-6-12-106.md`.
       The custom workload/builder kernel and libkrunfw firmware build now use
       the same kernel.org-verified Linux 6.12.106 archive and SRI hash.
       Structural synchronization and freshness tests, workspace check/tests,
-      zero-warning Clippy, and the merge-queue gates passed; PR #2939 merged
-      and closed issue #2931.
+      zero-warning Clippy, and merge-queue gates passed; PR #2939 merged and
+      closed issue #2931.
 
 - [ ] **Admission cache durability boundary.**
       `specs/plans/2026-08-26-admission-cache-durability.md`.

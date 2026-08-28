@@ -4,19 +4,13 @@ Last updated: 2026-08-27
 
 ## In progress
 
-- [ ] **Extended CI documented-surface repair — issue #2938.**
-      `specs/plans/2026-08-27-extended-ci-documented-surface.md`.
-      Both scheduled platform witnesses now request signed-manifest
-      verification, and the macOS HVF lane installs its target-gated libkrun
-      build dependency. Local focused coverage, actionlint, the exact feature
-      build, workspace tests/check/doctests, and Clippy are green; merge
-      delivery remains.
-
-- [ ] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
-      `specs/plans/2026-08-27-kernel-6-12-106.md`.
-      Both kernel consumers use the kernel.org-verified archive and SRI hash;
-      local synchronization, freshness, workspace, and Clippy gates are green.
-      Linux Nix PR checks and merge delivery remain.
+- [ ] **Cloudflare Pages cutover.**
+      `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.
+      The existing Pages project and account now have a checked-in Wrangler configuration,
+      reproducible local/CI deployment commands, an account/project preflight,
+      a shared and tested complete-WebLinux-bundle gate, and a verified
+      deployment.
+      The production hostname still needs to be attached to the project.
 
 - [ ] **SDK surface contract repairs — issues #2902 and #2906.**
       `specs/plans/2026-08-26-sdk-surface-contract-repairs.md`.
@@ -25,6 +19,12 @@ Last updated: 2026-08-27
       delivery remains.
 
 ## Completed
+
+- [x] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
+      `specs/plans/2026-08-27-kernel-6-12-106.md`.
+      Both kernel consumers use the kernel.org-verified archive and SRI hash;
+      local and merge-queue gates passed, PR #2939 merged, and issue #2931
+      closed through the PR link.
 
 - [x] **Workload address public API rename.** The unused UOR-ADDR pilot is now
       exposed as `mvm_core::{WorkloadAddress, WorkloadAddressError,
