@@ -256,6 +256,16 @@ if ! helpers_present; then
   exit 1
 fi
 
+# macOS kills an unentitled Hypervisor.framework binary, and the only symptom is
+# "hvf supervisor exited before writing its PID file" — which names neither the
+# signature nor the rebuild that dropped it. Every build step above re-links the
+# per-VM supervisor without re-signing it, and the aux-helper refresh deletes it
+# outright, so signing has to follow the builds or every HVF boot dies.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  echo "==> signing VMM binaries"
+  MVM_HOME="$E2E_HOME" "$MVMCTL" env sign
+fi
+
 # The SDK codegen drift scenario shells out to `target/debug/xtask`; without it
 # the step fails with a bare "NotFound" that says nothing about the SDK.
 ./scripts/cargo-fast.sh build -p xtask
