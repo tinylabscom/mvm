@@ -92,26 +92,21 @@ fn which_version(cmd: &str, args: &[&str]) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// The success arm, against a binary at a fixed absolute path rather than
+    /// a host toolchain.
+    ///
+    /// This replaces a pair of tests that ran `rustup --version` and `cargo
+    /// --version`. Those asserted a property of the developer's machine rather
+    /// than of `check_cmd`, and failed outright for anyone whose cargo came
+    /// from a distro package or from nix — neither installs rustup. Naming an
+    /// absolute path also drops the PATH lookup, so the assertion is about the
+    /// helper and nothing else.
     #[test]
-    fn check_cmd_rustup_on_host() {
-        let c = check_cmd("rustup", "tools", &["--version"]);
-        assert!(c.ok, "rustup should be available: {}", c.info);
-        assert!(
-            c.info.contains("rustup"),
-            "expected version string, got: {}",
-            c.info
-        );
-    }
-
-    #[test]
-    fn check_cmd_cargo_on_host() {
-        let c = check_cmd("cargo", "tools", &["--version"]);
-        assert!(c.ok, "cargo should be available: {}", c.info);
-        assert!(
-            c.info.contains("cargo"),
-            "expected version string, got: {}",
-            c.info
-        );
+    fn check_cmd_reports_the_stdout_of_a_successful_command() {
+        let c = check_cmd("/bin/echo", "tools", &["mvm"]);
+        assert!(c.ok, "/bin/echo should succeed: {}", c.info);
+        assert_eq!(c.info, "mvm", "stdout is captured and trimmed");
+        assert_eq!(c.category, "tools");
     }
 
     #[test]
