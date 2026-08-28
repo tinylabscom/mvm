@@ -101,6 +101,14 @@ mvm-cli = { workspace = true, features = ["builder-vm", "pure-mkfs"] }
 # cannot be type-checked at all. Dev-only.
 mvm-sdk.workspace = true
 mvmctl = { path = "../..", default-features = false }
+# Allocates a host PTY for the interactive-console scenario. `mvmctl -t`
+# refuses without a terminal on stdin, so a scenario driven through
+# `Command::output()` — piped stdin — can never reach the guest's `openpty()`
+# at all, which is why an interactive console that failed on every OCI image
+# had no lane that could see it. `nix` is already in the workspace at this
+# version for five shipped crates; only the `term` feature is new, and it is
+# dev-only here.
+nix = { version = "0.29", features = ["term"] }
 
 [lints]
 workspace = true
