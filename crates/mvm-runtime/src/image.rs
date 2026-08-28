@@ -135,7 +135,8 @@ pub struct RuntimeVolume {
     pub guest: String,
     pub size: String,
     /// Mark the underlying drive read-only at the Firecracker level.
-    /// Defaults to false for backwards compatibility with persistent volumes.
+    /// Defaults to false: a persistent volume is writable unless it says
+    /// otherwise, which is also what a config omitting the field means.
     #[serde(default)]
     pub read_only: bool,
     /// Disk image (virtio-blk) vs live directory share (virtio-fs).

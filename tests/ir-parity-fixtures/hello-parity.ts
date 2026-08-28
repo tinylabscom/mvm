@@ -2,7 +2,7 @@
 //
 // The identical workload is declared in `hello-parity.py` and in the Rust
 // conformance test (`crates/mvm-sdk/tests/ir_address_parity.rs`). All three
-// must resolve to one `mvm_core::semantic_address` — the pinned golden the
+// must resolve to one `mvm_core::workload_address` — the pinned golden the
 // test asserts. Emitting to stdout lets `xtask gen-ir-parity`/`check-ir-parity`
 // regenerate `hello-parity.typescript.ir.json` and diff it for drift.
 //

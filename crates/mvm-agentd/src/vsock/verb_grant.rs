@@ -1181,14 +1181,15 @@ mod tests {
         );
     }
 
-    // ---- PostRestore back-compat + grant_envelope roundtrip ----
+    // ---- PostRestore grant_envelope default + roundtrip ----
 
     #[test]
     fn post_restore_grant_envelope_defaults_absent_and_roundtrips() {
         use mvm_core::crypto::vmgenid::GENID_BYTES;
 
-        // Back-compat: an old PostRestore frame without the grant_envelope field
-        // still deserializes successfully with grant_envelope defaulting to None.
+        // A PostRestore frame that omits grant_envelope deserializes with it as
+        // None. That is the `#[serde(default)]` rule this repo applies to every
+        // new optional field, not a shim for an older wire format.
         let old = r#"{"token":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}"#;
         let g: GuestRequest =
             serde_json::from_str(&format!(r#"{{"PostRestore":{}}}"#, old)).unwrap();

@@ -25,7 +25,7 @@
 //! serialized into published artifacts.
 //!
 //! This extends the identity taxonomy documented on
-//! [`crate::semantic_address`] rather than starting a new one. That taxonomy
+//! [`crate::workload_address`] rather than starting a new one. That taxonomy
 //! separates *what* is being identified — semantic content, exact bytes, trust,
 //! ephemeral. This axis is orthogonal: given exact bytes, *which* bytes —
 //! the plaintext a protocol names, or the representation on disk.

@@ -84,7 +84,7 @@ pub struct ActorRef {
 /// What triggered the decision.
 pub struct DecisionScenario {
     pub plan_id: Option<PlanId>,
-    pub workload_addr: Option<SemanticAddress>,
+    pub workload_addr: Option<WorkloadAddress>,
     pub capability_id: Option<CapabilityId>,
     pub approval_id: Option<ApprovalRequestId>,
 }
@@ -105,7 +105,7 @@ pub struct DecisionMetadata {
 /// Cryptographic binding to the existing audit substrate.
 pub struct AttestationBinding {
     pub plan_id: Option<PlanId>,
-    pub workload_addr: Option<SemanticAddress>,
+    pub workload_addr: Option<WorkloadAddress>,
     pub artifact_digests: BTreeMap<String, String>,
     pub audit_entry_hash: String,
     pub signer_pubkey: String,

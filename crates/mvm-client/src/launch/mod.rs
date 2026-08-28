@@ -186,6 +186,11 @@ pub(crate) struct BootParams {
     /// The request's permission set, carried into the signed plan and — for
     /// its egress dimension — into the policy the gate enforces.
     pub(crate) grants: Option<mvm_contract::grants::Grants>,
+    /// A fleet-issued signed plan to admit instead of synthesizing one.
+    /// `Some` only when the launch request carried one; admission then
+    /// verifies it against the operator-pinned `trusted_plan_signers` and the
+    /// plan becomes the authority for sizing, grants, and teardown intent.
+    pub(crate) signed_plan: Option<mvm_core::plan::SignedExecutionPlan>,
     /// Path to an operator-authored campaign declaration, when one was asked
     /// for. Read and validated here, so a malformed declaration refuses the
     /// launch instead of producing a boot with no campaign on it.
@@ -258,6 +263,7 @@ impl LocalBackend {
             volumes: params.volumes,
             destroy_on_exit: params.transient,
             grants: params.grants.clone(),
+            signed_plan: params.signed_plan.clone(),
         };
 
         // A fresh per-launch ledger: local launches are one-shot from this
@@ -708,6 +714,7 @@ impl LocalBackend {
                 volumes,
                 transient,
                 grants: request.grants.clone(),
+                signed_plan: request.signed_plan.clone(),
                 assurance_campaign: request.assurance_campaign.clone(),
             })
             .await?;

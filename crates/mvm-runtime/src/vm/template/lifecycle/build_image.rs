@@ -146,7 +146,6 @@ pub fn template_build_from_image(
         },
         built_at: utc_now(),
         profile: persisted.profile.clone(),
-        role: String::new(),
         vcpus: persisted.vcpus,
         mem_mib: persisted.mem_mib,
         data_disk_mib: persisted.data_disk_mib,
