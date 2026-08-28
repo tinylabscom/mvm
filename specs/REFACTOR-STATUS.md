@@ -4,6 +4,12 @@ Last updated: 2026-08-28
 
 ## In progress
 
+- [ ] **Linux 6.12.107 synchronized kernel pin — issue #2971.**
+      `specs/plans/2026-08-28-kernel-6-12-107.md`.
+      Both kernel consumers use the kernel.org-verified archive and SRI hash;
+      structural tests and workspace Clippy are green. Linux Nix builds and
+      merge delivery remain.
+
 - [ ] **HVF machine restore dispatch — issue #2961.**
       `specs/plans/2026-08-27-hvf-machine-restore-dispatch.md`.
       The `machine` fork/restore surfaces now share the backend-origin
