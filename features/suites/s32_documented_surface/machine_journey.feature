@@ -59,7 +59,7 @@ Feature: The documented machine verbs operate a real guest
     Then the command exits with code 0
     Then the journey machine is still running
 
-  @live
+  @live @snapshot
   Scenario: the guest pauses and resumes
     When I run mvmctl against the journey machine with "machine pause bdd-journey"
     Then the command exits with code 0
@@ -67,7 +67,7 @@ Feature: The documented machine verbs operate a real guest
     Then the command exits with code 0
     Then the journey machine is still running
 
-  @live
+  @live @snapshot
   Scenario: the guest checkpoints and restores
     # `--class vm-full` because that is the form the docs teach, and the two
     # classes have opposite preconditions: `vm-full` checkpoints a *running*
@@ -75,7 +75,10 @@ Feature: The documented machine verbs operate a real guest
     # and wants it stopped or paused first.
     When I run mvmctl against the journey machine with "machine checkpoint create bdd-journey --class vm-full"
     Then the command exits with code 0
-    When I run mvmctl against the journey machine with "machine checkpoint ls bdd-journey"
+    # No machine name: `checkpoint ls` lists every checkpoint and takes no
+    # positional, which is the form the docs show. Passing one made clap refuse
+    # the whole command.
+    When I run mvmctl against the journey machine with "machine checkpoint ls"
     Then the command exits with code 0
     Then the journey machine is still running
 

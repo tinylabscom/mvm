@@ -13,12 +13,41 @@ Last updated: 2026-08-28
       restore-target construction. The successful live two-vCPU child witness
       and merge delivery remain.
 
+- [ ] **Recorded-backend pause and resume — issue #2929.**
+      `specs/plans/2026-08-27-recorded-backend-pause-resume.md`.
+      Pause/resume now resolves the live machine's owner before dispatch while
+      retaining Firecracker's sealed snapshot path and explicit marker-less
+      backend fallback. Validation and merge-queue delivery remain.
+
+- [ ] **Audit root-history classification repair — issue #2940.**
+      `specs/plans/2026-08-27-audit-root-history-classification.md`.
+      Signed Merkle-root history files are excluded from lifecycle-chain
+      sweeps through one shared suffix; focused and workspace tests, doctests,
+      check, and Clippy are green, and merge-queue delivery remains.
+
+- [ ] **SDK sidecar source build — issue #2941.**
+      `specs/plans/2026-08-27-sdk-sidecar-source-build.md`.
+      Source checkouts can explicitly build the guest-facing glibc sidecar
+      through the shared Stage 0 artifact runner and atomically bind it to the
+      checkout fingerprint. The full local gates and a live aarch64 Stage 0/Nix
+      artifact build are green; merge delivery remains.
+
 - [ ] **Issue #2942 — warm-launch gate contract repair.**
       `specs/plans/2026-08-27-warm-launch-gate-contract.md`.
       The live warm-residency witness now consumes the CLI's strict sub-300 ms
       hard ceiling rather than a prepared-cold 200 ms literal. Focused boundary
       and BDD compilation checks, workspace tests, check, Clippy, formatting,
       and repository gates are green; merge-queue delivery remains.
+
+- [ ] **Extended CI documented-surface repair — issue #2938.**
+      `specs/plans/2026-08-27-extended-ci-documented-surface.md`.
+      Both scheduled platform witnesses now build signed-manifest verification
+      through the standard link path, and the macOS HVF lane installs its
+      target-gated libkrun and embedded Linux cross-toolchain dependencies.
+      The explicit published-image choice now reaches builder bootstrap, macOS
+      downloads its workload kernel, and clean runners build the SDK codegen
+      driver. Focused tests, the exact feature build, and Clippy are green; the
+      source-sidecar warm-up, live rerun, and merge delivery remain.
 
 - [ ] **Cloudflare Pages cutover.**
       `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.
@@ -28,11 +57,26 @@ Last updated: 2026-08-28
       deployment.
       The production hostname still needs to be attached to the project.
 
+- [ ] **Cold-boot guest wall clock — issue #2956.**
+      `specs/plans/2026-08-27-cold-boot-wall-clock.md`.
+      The active universal-initramfs PID 1 now consumes the host epoch before
+      trust validation or workload activation. Strict shared parsing and the
+      existing narrow clock-sync path have focused positive and refusal tests;
+      workspace tests, gated targets, and zero-warning Clippy are green. Merge
+      delivery remains.
+
 - [ ] **SDK surface contract repairs — issues #2902 and #2906.**
       `specs/plans/2026-08-26-sdk-surface-contract-repairs.md`.
       The README's `mvm.local_path` decorator source and the builder-pack Cargo
       feature remediation are implemented and locally green; merge-queue
       delivery remains.
+
+- [ ] **Flake-built slot resolution — issue #2967.**
+      `specs/plans/2026-08-28-flake-slot-resolution.md`.
+      Strict materialized slot addresses resolve through the existing registry;
+      unknown and identity-mismatched records fail closed. Focused and workspace
+      tests, gated-target compilation, and Clippy are green; merge delivery
+      remains.
 
 ## Completed
 

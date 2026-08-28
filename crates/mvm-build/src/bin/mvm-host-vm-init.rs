@@ -512,7 +512,7 @@ fn vsock_egress_requested_from_cmdline(cmdline: &str) -> bool {
 /// non-positive values so a malformed token can't wind the clock backwards.
 #[cfg(any(target_os = "linux", test))]
 fn hostepoch_from_cmdline(cmdline: &str) -> Option<i64> {
-    mvm_vmm::host::boot_config::builder_hostepoch_from_cmdline(cmdline)
+    mvm_core::vm_backend::decode_host_epoch_cmdline(cmdline)
         .and_then(|seconds| seconds.try_into().ok())
 }
 

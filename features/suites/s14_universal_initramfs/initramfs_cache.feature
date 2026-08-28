@@ -20,5 +20,5 @@ Feature: Universal initramfs cache attachment
     Given an isolated mvm home with a cached non-verity workload kernel
     When I run mvmctl in the isolated mvm home with "machine run --image alpine -- /bin/true"
     Then the command exits with code 1
-    And the output contains "workload kernel capability check failed"
+    And the error output contains "workload kernel capability check failed"
     And the error output does not contain "initramfs"

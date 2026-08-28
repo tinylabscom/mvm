@@ -370,7 +370,13 @@ impl MachineRunArgs {
 
     /// Resolve the lifecycle mode purely from the flags. Fresh foreground runs
     /// need an image source and an argv; persistent runs just boot and return.
-    fn resolve_mode(&self) -> Result<MachineRunMode> {
+    /// `image_supplies_entrypoint` is the caller's answer to "does the thing
+    /// being booted already carry a command?". It is a parameter rather than a
+    /// field read because the flake is *consumed* before this runs: the runtime
+    /// path takes `run.flake`, builds it, and leaves a manifest slot behind, so
+    /// checking `run.flake` here sees `None` for exactly the launches that do
+    /// carry an entrypoint.
+    fn resolve_mode(&self, image_supplies_entrypoint: bool) -> Result<MachineRunMode> {
         let mode = match (self.interactive(), self.persistent()) {
             (true, true) => bail!(
                 "`machine run -it` is foreground-only; use `machine exec <name> -it -- <cmd>` for an interactive command in a long-lived machine"
@@ -386,9 +392,20 @@ impl MachineRunArgs {
             }
             (false, false) => {
                 self.require_image_for_fresh_boot()?;
-                // The wasm backend runs the module itself; there is no guest
-                // agent command to dispatch, so an empty argv is allowed.
-                if self.run.argv.is_empty() && self.run.hypervisor.as_deref() != Some("wasm") {
+                // Two shapes carry their own entrypoint, so an empty argv is
+                // not a missing argument:
+                //
+                //   - the wasm backend runs the module itself, with no guest
+                //     agent command to dispatch;
+                //   - a flake's `entrypoint.command` is baked into the image by
+                //     mkGuest. `examples/exit_code` exists precisely to run its
+                //     own entrypoint and hand back that exit code, and the
+                //     README teaches `machine run --flake examples/<name>`
+                //     with nothing after it.
+                let carries_own_entrypoint = self.run.hypervisor.as_deref() == Some("wasm")
+                    || self.run.flake.is_some()
+                    || image_supplies_entrypoint;
+                if self.run.argv.is_empty() && !carries_own_entrypoint {
                     bail!(
                         "machine run needs a command: pass `-- <cmd>`, \
                          or `-d`/`--detach` to boot a persistent machine, \

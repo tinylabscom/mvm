@@ -54,7 +54,11 @@ while true; do
     [ -d "$dir" ] || continue
     name="$(basename "$dir")"
     [ -e "$STATE/$name" ] && continue
-    : > "$STATE/$name"
+    # Recreate the marker directory if it went away. Losing it silently turns
+    # "have I seen this guest" into "no" on every pass, so the same guest is
+    # announced over and over and the follow output stops meaning anything.
+    [ -d "$STATE" ] || STATE="$(mktemp -d "${TMPDIR:-/tmp}/mvm-vm-watch.XXXXXX")"
+    : > "$STATE/$name" 2>/dev/null || continue
     printf '  [vm] %s — microVM starting\n' "$name"
     # One process per guest rather than a backgrounded pipeline: bash reports a
     # finished job by printing its source, and a pipeline's source is the whole

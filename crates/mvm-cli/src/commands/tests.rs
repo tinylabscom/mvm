@@ -1023,6 +1023,19 @@ fn build_runtime_overlay_subcommand_parses() {
 }
 
 #[test]
+fn build_sdk_sidecar_subcommand_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "build", "sdk-sidecar", "build", "--force"])
+        .expect("SDK sidecar source-build command must parse");
+    let Commands::Build(bg) = cli.command else {
+        panic!("expected build group");
+    };
+    assert!(
+        matches!(bg.action, build_group::BuildCmd::SdkSidecar(_)),
+        "expected sdk-sidecar build command"
+    );
+}
+
+#[test]
 fn top_level_kernel_build_subcommand_parses() {
     let cli = Cli::try_parse_from(["mvmctl", "kernel", "build", "--which", "workload"])
         .expect("kernel build must parse");
@@ -3385,7 +3398,7 @@ fn run_transient_default_manifest_argv_only() {
                 ..
             }) => {
                 assert!(manifest.is_none());
-                assert_eq!(cpus, 2);
+                assert_eq!(cpus, crate::commands::shared::default_vcpus());
                 assert_eq!(memory, "512M");
                 assert!(volume.is_empty());
                 assert!(env.is_empty());
@@ -3468,7 +3481,7 @@ fn run_default_profile_argv_only() {
                 assert_eq!(image.as_deref(), Some("alpine:latest"));
                 assert!(!net, "deny-all by default");
                 assert!(allow_host.is_empty());
-                assert_eq!(cpus, 2);
+                assert_eq!(cpus, crate::commands::shared::default_vcpus());
                 assert_eq!(memory, "512M");
                 assert_eq!(profile, exec::RunProfile::Standard);
                 assert!(volume.is_empty());
@@ -4885,6 +4898,21 @@ fn emits_machine_readable_stdout(argv: &[&str]) -> bool {
         .unwrap()
         .command
         .emits_machine_readable_stdout()
+}
+
+#[test]
+fn a_transient_run_with_a_command_reserves_stdout_for_the_guest() {
+    // The guest's own stdout is relayed to the caller, so host chrome must not
+    // share the stream — a warning printed there lands glued to the workload's
+    // output and breaks anything reading it.
+    assert!(emits_machine_readable_stdout(&[
+        "mvmctl", "machine", "run", "--image", "alpine", "--", "echo", "hi"
+    ]));
+
+    // Nothing to relay: a detached boot prints host chrome and no guest output.
+    assert!(!emits_machine_readable_stdout(&[
+        "mvmctl", "machine", "run", "--image", "alpine", "-d"
+    ]));
 }
 
 fn exits_early(argv: &[&str]) -> bool {

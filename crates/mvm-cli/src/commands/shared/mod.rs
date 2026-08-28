@@ -13,6 +13,7 @@ mod parse;
 mod resolve;
 mod start;
 mod state;
+mod vcpu_default;
 mod vsock;
 
 pub(super) use build_mode::BuildModeFlags;
@@ -32,4 +33,5 @@ pub(super) use resolve::{
 };
 pub(super) use start::VmStartParams;
 pub(super) use state::{CHILD_PIDS, IN_CONSOLE_MODE};
+pub(crate) use vcpu_default::default_vcpus;
 pub(super) use vsock::{emit_vsock_rpc_audit, wait_for_guest_agent};

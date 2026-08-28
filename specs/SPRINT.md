@@ -10,6 +10,31 @@
 
 ## In progress
 
+- [ ] **Recorded-backend pause and resume — issue #2929.**
+      `specs/plans/2026-08-27-recorded-backend-pause-resume.md`.
+      Existing-machine lifecycle operations resolve the VMM that owns the live
+      state marker instead of trusting the CLI's Firecracker default. The
+      Firecracker sealed-snapshot replay gate and marker-less mock fallback stay
+      intact; focused and workspace validation remain before merge-queue
+      delivery.
+
+- [ ] **Audit root-history classification repair (issue #2940).**
+      `specs/plans/2026-08-27-audit-root-history-classification.md`.
+      The shared audit-directory classifier now excludes signed
+      `<tenant>.roots.jsonl` Merkle-root histories from lifecycle-chain
+      verification, and the writer shares the same filename suffix. Focused
+      tests, workspace tests and doctests, check, and Clippy are green;
+      remaining: merge-queue delivery.
+
+- [ ] **SDK sidecar source build — issue #2941.**
+      `specs/plans/2026-08-27-sdk-sidecar-source-build.md`.
+      An explicit builder-VM command now realizes the existing glibc sidecar
+      derivation through Stage 0, verifies its artifact contract, and promotes
+      the source fingerprint atomically with the image. Focused and workspace
+      tests, workspace check, gated Linux/BDD compilation, zero-warning Clippy,
+      all policy gates, and a live aarch64 Stage 0/Nix build are green; merge
+      delivery remains.
+
 - [x] **FlowMux HTTPS live-client repair.**
       `specs/plans/2026-08-27-flowmux-https-live-client.md`.
       The seven live HTTPS egress witnesses now use the pinned multi-arch
@@ -22,12 +47,16 @@
 - [x] **Extended CI documented-surface repair — issue #2938.**
       `specs/plans/2026-08-27-extended-ci-documented-surface.md`.
       Linux and macOS now build the live documented-surface binary with signed
-      release-manifest verification enabled, and macOS installs the root
-      binary's target-gated libkrun dependency through the shared installer.
-      Focused regression tests, actionlint, the exact macOS feature build,
-      workspace tests/check/doctests, and zero-warning Clippy are green.
-      PR #2943 merged and closed issue #2938; a manual Extended CI run on
-      `main` is recording the post-merge live-lane evidence.
+      release-manifest verification enabled through Cargo's standard linker
+      path. The macOS witness installs both the root binary's target-gated
+      libkrun dependency and the embedded Linux cross toolchain through shared
+      installers. PR #2943 landed the first repair; the post-merge live run
+      exposed the next clean-run blockers: the
+      bootstrap ignored its explicit published-image choice and the SDK drift
+      scenario had no compiled xtask. Both are fixed with resolver and workflow
+      regressions; the exact release-download build and zero-warning Clippy are
+      green. Remaining: warm the source sidecar after #2954, pass both live
+      witnesses, merge, and close #2938 through the PR link.
 
 - [ ] **Cloudflare Pages cutover.**
       `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.
@@ -38,6 +67,15 @@
       is live with the required COOP/COEP headers.
       Remaining: attach `gomicrovm.com` to the Pages project; the hostname still
       resolves to GitHub Pages and cannot serve those headers.
+
+- [ ] **Cold-boot guest wall clock — issue #2956.**
+      `specs/plans/2026-08-27-cold-boot-wall-clock.md`.
+      The universal-initramfs agent now consumes the host epoch as PID 1 before
+      signed-grant timestamp validation or workload activation. The shared
+      decoder rejects absent, malformed, zero, and duplicated epochs, and the
+      existing narrow clock-sync syscall is reused. Focused positive, refusal,
+      and syscall-error tests, the full workspace, gated targets, and
+      zero-warning Clippy are green; merge delivery remains.
 
 - [x] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
       `specs/plans/2026-08-27-kernel-6-12-106.md`.
@@ -75,6 +113,14 @@
       builder-pack download refusal names root Cargo features that exist.
       Implementation, focused tests, the full `mvm-sdk` suite, formatting, and
       package Clippy are green; merge-queue delivery remains.
+
+- [ ] **Flake-built slot resolution — issue #2967.**
+      `specs/plans/2026-08-28-flake-slot-resolution.md`.
+      The shared manifest boundary now recognizes only strict, existing slot
+      addresses returned by `machine run --flake`; ordinary bare arguments
+      remain filesystem paths. Positive, unknown-slot, and mismatched-identity
+      resolver tests, workspace tests, gated-target compilation, and Clippy are
+      green; merge delivery remains.
 
 - [x] **AI egress metering and token budgets.**
       `specs/plans/2026-08-21-ai-egress-metering-and-budget.md`.

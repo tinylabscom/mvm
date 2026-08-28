@@ -464,9 +464,7 @@ mod linux {
     /// or Nix. Without this, TLS validation observes 1970 and every fresh
     /// bootstrap download fails with a misleading certificate error.
     fn sync_clock_from_host_epoch(cmdline: &str) -> Result<(), String> {
-        let Some(epoch_seconds) =
-            mvm_vmm::host::boot_config::builder_hostepoch_from_cmdline(cmdline)
-        else {
+        let Some(epoch_seconds) = mvm_core::vm_backend::decode_host_epoch_cmdline(cmdline) else {
             return Ok(());
         };
         mvm_agentd::restore_clock::resync(epoch_seconds)
@@ -1117,12 +1115,29 @@ mod linux {
 
     /// Output by mode: image = kernel + rootfs.ext4 + cmdline + manifest;
     /// kernel = kernel only; rootfs = rootfs + cmdline (+ manifest when
-    /// present).
+    /// present); sdk-sidecar = the resolver's three-file sidecar contract.
     fn copy_artifacts(out: &Path, mode: &str) -> Result<(), String> {
         copy_artifacts_into(out, mode, Path::new("/out"))
     }
 
     fn copy_artifacts_into(out: &Path, mode: &str, out_root: &Path) -> Result<(), String> {
+        if mode == "sdk-sidecar" {
+            for name in [
+                mvm_fs::sdk_sidecar::SDK_SIDECAR_IMAGE_FILE,
+                mvm_fs::sdk_sidecar::SDK_SIDECAR_VERSION_FILE,
+                mvm_fs::overlay::CHECKSUM_MANIFEST_FILE,
+            ] {
+                let source = out.join(name);
+                if !source.is_file() {
+                    return Err(format!(
+                        "SDK sidecar output {} is missing {name}",
+                        out.display()
+                    ));
+                }
+                copy_deref(&source, &out_root.join(name))?;
+            }
+            return Ok(());
+        }
         if mode != "rootfs" {
             let kernel = ["vmlinux", "Image", "bzImage"]
                 .iter()
@@ -1352,8 +1367,8 @@ mod linux {
     }
 
     /// Minimal `KEY=VALUE` / `KEY="VALUE"` reader for the optional
-    /// host-dropped build conf — the host only ever writes two plain
-    /// assignments (`MVM_STAGE0_BUILD_ATTR`, `MVM_STAGE0_OUTPUT_MODE`).
+    /// host-dropped build conf — the host writes a small fixed set of plain
+    /// `MVM_STAGE0_*` assignments after validating every value as a token.
     fn read_build_conf(path: &str) -> std::collections::HashMap<String, String> {
         let mut map = std::collections::HashMap::new();
         let Ok(text) = std::fs::read_to_string(path) else {
@@ -1611,6 +1626,32 @@ mod linux {
                 std::fs::read(copied.join("manifest.json")).expect("read copied manifest"),
                 std::fs::read(out.join("manifest.json")).expect("read source manifest")
             );
+        }
+
+        #[test]
+        fn copy_artifacts_promotes_only_the_sdk_sidecar_contract() {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let out = temp.path().join("sidecar-out");
+            let copied = temp.path().join("copied");
+            std::fs::create_dir_all(&out).expect("create out dir");
+            std::fs::create_dir_all(&copied).expect("create copied dir");
+            std::fs::write(out.join("sdk.ext4"), b"sidecar").expect("write sidecar image");
+            std::fs::write(out.join("VERSION"), b"0.18.0\n").expect("write version");
+            std::fs::write(
+                out.join("checksums-sha256.txt"),
+                b"digest  sdk.ext4\ndigest  VERSION\n",
+            )
+            .expect("write checksum manifest");
+            std::fs::write(out.join("rootfs.ext4"), b"must not copy")
+                .expect("write unrelated rootfs");
+
+            copy_artifacts_into(&out, "sdk-sidecar", &copied).expect("copy SDK sidecar outputs");
+
+            assert_eq!(std::fs::read(copied.join("sdk.ext4")).unwrap(), b"sidecar");
+            assert_eq!(std::fs::read(copied.join("VERSION")).unwrap(), b"0.18.0\n");
+            assert!(copied.join("checksums-sha256.txt").is_file());
+            assert!(!copied.join("vmlinux").exists());
+            assert!(!copied.join("rootfs.ext4").exists());
         }
 
         #[test]

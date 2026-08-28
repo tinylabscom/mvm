@@ -91,8 +91,8 @@ pub fn resolve_sdk_sidecar_attachment(
     let artifact = resolver.resolve(&arch.to_string()).with_context(|| {
         format!(
             "this workload binds SDK host service(s) [{}], which need the SDK sidecar mounted \
-             read-only at {}. Populate {} from a source checkout with: nix build \
-             ./nix/images/runtime-overlay#sdk-sidecar-image",
+             read-only at {}. Populate {} from a source checkout with: \
+             mvmctl build sdk-sidecar build",
             bound.join(", "),
             mvm_core::plan::SDK_SIDECAR_GUEST_PATH,
             layout.artifact_dir.display(),
@@ -245,7 +245,7 @@ mod tests {
         let rendered = format!("{err:#}");
         assert!(rendered.contains("host.secrets.v1"), "{rendered}");
         assert!(
-            rendered.contains("nix build ./nix/images/runtime-overlay#sdk-sidecar-image"),
+            rendered.contains("mvmctl build sdk-sidecar build"),
             "{rendered}"
         );
         // The cache path the operator has to populate is named, not implied.

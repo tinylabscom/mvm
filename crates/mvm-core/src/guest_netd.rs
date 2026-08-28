@@ -101,11 +101,24 @@ pub const MEDIATED_TOOLS_BIN: &str = "/run/mvm/bin";
 /// about which it reads. `NO_PROXY` excludes loopback.
 pub fn proxy_env_vars(proxy_addr: &str) -> Vec<(String, String)> {
     let url = format!("http://{proxy_addr}");
+    // `ALL_PROXY` advertises SOCKS5h, not HTTP. The same listener serves both —
+    // it dispatches on the first byte — but the two differ for TLS: a client
+    // pointed at an HTTP proxy for an `https://` URL may send the request in
+    // absolute-URI form, which this proxy refuses rather than forward, because
+    // forwarding it would put the request line and headers on the wire in
+    // cleartext. SOCKS has no such form; it tunnels from the first byte.
+    //
+    // Naming SOCKS here lets every client that understands `ALL_PROXY` take the
+    // form that works, and matches [`DEFAULT_EGRESS_PROXY_URL`], which already
+    // described the endpoint that way.
+    let socks_url = format!("socks5h://{proxy_addr}");
     let mut env = Vec::with_capacity(8);
-    for key in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
+    for key in ["HTTP_PROXY", "HTTPS_PROXY"] {
         env.push((key.to_string(), url.clone()));
         env.push((key.to_lowercase(), url.clone()));
     }
+    env.push(("ALL_PROXY".to_string(), socks_url.clone()));
+    env.push(("all_proxy".to_string(), socks_url));
     env.push(("NO_PROXY".to_string(), NO_PROXY_LOOPBACK.to_string()));
     env.push(("no_proxy".to_string(), NO_PROXY_LOOPBACK.to_string()));
     env
@@ -127,9 +140,34 @@ mod tests {
             env.get("HTTPS_PROXY").map(String::as_str),
             Some("http://127.0.0.1:3128")
         );
+        // SOCKS5h, deliberately: it tunnels TLS from the first byte, where an
+        // HTTP proxy would be asked for the absolute-URI form this endpoint
+        // refuses.
         assert_eq!(
             env.get("ALL_PROXY").map(String::as_str),
-            Some("http://127.0.0.1:3128")
+            Some("socks5h://127.0.0.1:3128")
+        );
+    }
+
+    #[test]
+    fn all_proxy_names_socks_while_the_http_vars_name_http() {
+        // The difference is deliberate and is the whole point: one listener
+        // serves both, but only the SOCKS form tunnels TLS from the first
+        // byte. Collapsing them back to one scheme would reintroduce the
+        // absolute-URI request the endpoint refuses.
+        let env: HashMap<_, _> = proxy_env_vars("127.0.0.1:3128").into_iter().collect();
+        assert_eq!(
+            env.get("ALL_PROXY").map(String::as_str),
+            Some("socks5h://127.0.0.1:3128")
+        );
+        assert_eq!(
+            env.get("all_proxy").map(String::as_str),
+            Some("socks5h://127.0.0.1:3128")
+        );
+        assert_eq!(
+            env.get("HTTPS_PROXY").map(String::as_str),
+            Some("http://127.0.0.1:3128"),
+            "the HTTP vars keep the http scheme; only ALL_PROXY names SOCKS"
         );
     }
 

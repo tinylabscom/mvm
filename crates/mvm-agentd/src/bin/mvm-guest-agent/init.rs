@@ -40,8 +40,11 @@ pub(crate) fn early_setup() {
             eprintln!(
                 "mvm-guest-agent: unix transport — container runtime provides early filesystems"
             );
-        } else if let Err(e) = guest_mount::mount_early_filesystems() {
-            fatal(&format!("early filesystem mount failed: {e}"));
+        } else {
+            if let Err(e) = guest_mount::mount_early_filesystems() {
+                fatal(&format!("early filesystem mount failed: {e}"));
+            }
+            seed_wall_clock_from_host_epoch();
         }
         provision_host_signer_anchor();
         // In the universal initramfs path there is no second init to copy the
@@ -64,6 +67,18 @@ pub(crate) fn early_setup() {
 pub(crate) fn start_orphan_reaper() {
     if is_pid1() {
         mvm_agentd::child_wait::install_orphan_reaper();
+    }
+}
+
+/// Apply the host's launch epoch before trust-policy timestamps or workload
+/// TLS validation can observe the RTC-less guest's kernel clock.
+#[cfg(target_os = "linux")]
+fn seed_wall_clock_from_host_epoch() {
+    let cmdline = std::fs::read_to_string("/proc/cmdline")
+        .unwrap_or_else(|error| fatal(&format!("read /proc/cmdline for wall clock: {error}")));
+    match mvm_agentd::restore_clock::resync_from_cmdline(&cmdline) {
+        Ok(epoch) => eprintln!("mvm-guest-agent: wall clock set from host epoch {epoch}"),
+        Err(error) => fatal(&format!("wall clock synchronization failed: {error}")),
     }
 }
 

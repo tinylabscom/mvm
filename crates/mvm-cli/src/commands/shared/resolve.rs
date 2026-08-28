@@ -2,9 +2,9 @@
 
 use anyhow::{Context, Result};
 
-/// One of two ways to refer to a built manifest: a legacy name (looked
-/// up in the name-keyed registry) or a manifest path that resolves to
-/// a slot hash.
+/// One of the two built workload sources accepted by `--manifest`: a
+/// manifest path that resolves to a slot hash, or a manifest selecting a
+/// pre-built wasm module.
 ///
 /// `mvmctl up` / `mvmctl exec` accept either form via their
 /// `--manifest` flag. A manifest is addressed by its path; the slot hash is
@@ -27,10 +27,12 @@ pub enum ManifestArgRef {
 
 /// Resolve a `--manifest` argument to the manifest it names.
 ///
-/// The argument is a path — a manifest file or the directory containing one.
-/// A bare name used to resolve against a name-keyed template slot; those are
-/// gone, so a non-existent path is an error here rather than a lookup failure
-/// three layers down.
+/// User-supplied arguments are paths — a manifest file or the directory
+/// containing one. The machine-run flake path also threads the strict
+/// 64-character address returned by `build_flake_to_slot` through this helper;
+/// that internal shape resolves directly against the slot registry. Every
+/// other non-existent bare argument remains a missing-path error: name-keyed
+/// template slots are gone.
 pub fn resolve_manifest_arg(arg: &str) -> Result<ManifestArgRef> {
     use mvm_core::manifest::{canonical_key_for_path, resolve_manifest_config_path};
 
@@ -72,6 +74,21 @@ pub fn resolve_manifest_arg(arg: &str) -> Result<ManifestArgRef> {
 
     let path = std::path::Path::new(arg);
     if !path.exists() {
+        if mvm_core::manifest::is_slot_hash_dirname(arg) {
+            let persisted = mvm_runtime::vm::template::lifecycle::template_load_slot(arg)
+                .with_context(|| {
+                    format!("Built slot {arg} is not present in the local registry")
+                })?;
+            if persisted.manifest_hash != arg {
+                anyhow::bail!(
+                    "Built slot {arg} records mismatched identity {}",
+                    persisted.manifest_hash
+                );
+            }
+            return Ok(ManifestArgRef::Slot {
+                slot_hash: arg.to_string(),
+            });
+        }
         anyhow::bail!(
             "Manifest path '{}' does not exist (expected a manifest file or its directory)",
             arg
@@ -329,8 +346,96 @@ pub fn resolve_effective_hypervisor(requested: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::manifest::{MANIFEST_SCHEMA_VERSION, PersistedManifest, Provenance};
     use mvm_core::network_policy::{HostPort, NetworkPolicy, NetworkPreset};
     use mvm_core::util::test_env::TestEnv;
+
+    fn persist_flake_slot(slot_hash: &str) {
+        let now = mvm_core::time::utc_now();
+        let persisted = PersistedManifest {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            manifest_path: "<flake-slot>/fixture".to_string(),
+            manifest_hash: slot_hash.to_string(),
+            flake_ref: "/tmp/fixture-flake".to_string(),
+            profile: "default".to_string(),
+            vcpus: 2,
+            mem_mib: 512,
+            mem_initial_mib: None,
+            data_disk_mib: 0,
+            name: None,
+            backend: "mock".to_string(),
+            provenance: Provenance::current(),
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        mvm_runtime::vm::template::lifecycle::template_persist_slot(&persisted)
+            .expect("persist flake slot");
+    }
+
+    #[test]
+    fn a_materialized_flake_slot_hash_resolves_through_the_registry() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(tmp.path());
+        let slot_hash = "a".repeat(64);
+        persist_flake_slot(&slot_hash);
+
+        let resolved = resolve_manifest_arg(&slot_hash).expect("built slot must resolve");
+
+        assert!(matches!(resolved, ManifestArgRef::Slot { slot_hash: got } if got == slot_hash));
+    }
+
+    #[test]
+    fn an_unknown_slot_hash_fails_closed_as_a_registry_lookup() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(tmp.path());
+        let slot_hash = "b".repeat(64);
+
+        let err = resolve_manifest_arg(&slot_hash).expect_err("unknown slot must fail");
+
+        assert!(
+            format!("{err:#}").contains("not present in the local registry"),
+            "the refusal must identify a missing registry slot: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_slot_record_with_a_mismatched_identity_fails_closed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(tmp.path());
+        let requested = "c".repeat(64);
+        let recorded = "d".repeat(64);
+        let now = mvm_core::time::utc_now();
+        let persisted = PersistedManifest {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            manifest_path: "<flake-slot>/fixture".to_string(),
+            manifest_hash: recorded.clone(),
+            flake_ref: "/tmp/fixture-flake".to_string(),
+            profile: "default".to_string(),
+            vcpus: 2,
+            mem_mib: 512,
+            mem_initial_mib: None,
+            data_disk_mib: 0,
+            name: None,
+            backend: "mock".to_string(),
+            provenance: Provenance::current(),
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        let slot_dir = mvm_core::manifest::slot_dir(&requested);
+        persisted
+            .write_to_slot(std::path::Path::new(&slot_dir))
+            .expect("persist mismatched slot record");
+
+        let err = resolve_manifest_arg(&requested).expect_err("mismatch must fail");
+
+        assert!(
+            format!("{err:#}").contains(&format!("mismatched identity {recorded}")),
+            "the refusal must identify the recorded identity: {err:#}"
+        );
+    }
 
     /// A bare directory name is a manifest *path*, not a registry name.
     ///

@@ -190,7 +190,13 @@ impl Commands {
                 // `machine run --json` streams a structured MachineRunSummary;
                 // `machine run --up-json` emits the SDK boot envelope;
                 // reserve stdout so reconcile chrome can't interleave.
-                machine::MachineAction::Run(r) => r.run.json || r.up_json,
+                //
+                // A trailing argv reserves it too. That run relays the guest's
+                // own stdout to the caller, so anything the host prints there
+                // lands in the middle of the workload's output — a caller
+                // reading `machine run -- echo hi` got the greeting with an
+                // `[mvm]` warning glued to the front of it.
+                machine::MachineAction::Run(r) => r.run.json || r.up_json || !r.run.argv.is_empty(),
                 // `machine timeline --json` prints a structured lineage.
                 machine::MachineAction::Timeline(t) => t.json,
                 // A `--json` restore reuses the fork path's structured output.

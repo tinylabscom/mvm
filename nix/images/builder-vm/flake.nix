@@ -79,6 +79,16 @@
         in
         if envPath != "" then /. + envPath else ../../..;
 
+      # Evaluate the workspace-owned runtime-overlay flake against this
+      # flake's pinned nixpkgs. A remote flake input would make contributor
+      # source changes unreachable from Stage 0 and could silently drift from
+      # the exact checkout the builder is compiling.
+      runtimeOverlay =
+        (import (workspaceRoot + "/nix/images/runtime-overlay/flake.nix")).outputs {
+          self = { };
+          inherit nixpkgs;
+        };
+
       # Host binaries are embedded in mvmctl and extracted by
       # `host_binaries::ensure_extracted()` before invoking
       # `nix build path:... --impure`. The dir is passed in via env var;
@@ -543,6 +553,10 @@
         workload-kernel-configfile = mkWorkloadKernelConfigfile system;
         workload-sizeopt-kernel = mkWorkloadKernelSizeopt system;
         workload-sizeopt-kernel-configfile = mkWorkloadKernelSizeoptConfigfile system;
+        # SDK sidecar image for Stage 0 builds. The builder VM needs the
+        # sidecar to build guest workloads, so this exposes the runtime-overlay's
+        # sdk-sidecar-image output through the builder-vm flake.
+        sdk-sidecar-image = runtimeOverlay.packages.${system}.sdk-sidecar-image;
       });
     };
 }
