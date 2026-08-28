@@ -24,6 +24,14 @@ Last updated: 2026-08-28
       workspace Clippy, formatting, and policy gates are green. Merge delivery
       remains.
 
+- [ ] **Security lane red repair — issue #2982.**
+      `specs/plans/2026-08-28-security-lane-red-repair.md`.
+      The scheduled supply-chain failure is repaired with non-yanked
+      `chacha20 0.10.2`; a lockfile regression pins it. Libkrun's vCPU ceiling
+      now has a mutation witness, and eight stale baseline exemptions are
+      removed. Focused validation is green; full gates and merge delivery
+      remain.
+
 - [ ] **HVF machine restore dispatch — issue #2961.**
       `specs/plans/2026-08-27-hvf-machine-restore-dispatch.md`.
       The `machine` fork/restore surfaces now share the backend-origin

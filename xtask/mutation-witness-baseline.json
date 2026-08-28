@@ -508,11 +508,6 @@
     },
     {
       "file": "crates/mvm-backends/src/driver/hvf.rs",
-      "mutant": "replace <impl VmmDriver for HvfDriver>::supports_directory_shares -> bool with false",
-      "reason": "HVF capability constant; the directory-share path is exercised by live HVF runs and BDD scenarios."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf.rs",
       "mutant": "replace <impl VmmDriver for HvfDriver>::supports_resident_handoff -> bool with false",
       "reason": "HVF capability constant; the resident-handoff path is exercised by live HVF warm-claim tests and BDD scenarios."
     },
@@ -560,11 +555,6 @@
       "file": "crates/mvm-backends/src/driver/hvf.rs",
       "mutant": "replace match guard !spec .vsock .iter() .any(|port| port.service == GuestService::NetworkFlow) with true in relay_supervisor_config_with_handoff",
       "reason": "HVF supervisor config relay is macOS-specific and exercises vsock channel setup that is validated by live HVF BDD scenarios, not by Linux unit tests."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf.rs",
-      "mutant": "replace match guard !spec.vsock.iter().any(|port| port.service == GuestService::NetworkFlow) with true in relay_supervisor_config_with_handoff",
-      "reason": "The substitution-service port selection is part of HVF supervisor config relay; the correct shape is asserted by live HVF runs and BDD scenarios."
     },
     {
       "file": "crates/mvm-backends/src/driver/hvf.rs",
@@ -830,36 +820,6 @@
       "file": "crates/mvm-backends/src/fc/host.rs",
       "mutant": "replace jailer_is_installed -> Result<bool> with Ok(true)",
       "reason": "This function probes the builder VM for a Firecracker asset. Mutating the probe result only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace output.status.success() with false in has_kernel",
-      "reason": "has_kernel probes the builder VM for a vmlinux file. Mutating the probe to always report false only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace output.status.success() with false in has_squashfs",
-      "reason": "has_squashfs probes the builder VM for a squashfs rootfs. Mutating the probe to always report false only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace output.status.success() with false in is_installed",
-      "reason": "is_installed probes the builder VM for a firecracker binary. Mutating the probe to always report false only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace output.status.success() with true in has_kernel",
-      "reason": "has_kernel probes the builder VM for a vmlinux file. Mutating the probe to always report true only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace output.status.success() with true in has_squashfs",
-      "reason": "has_squashfs probes the builder VM for a squashfs rootfs. Mutating the probe to always report true only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace output.status.success() with true in is_installed",
-      "reason": "is_installed probes the builder VM for a firecracker binary. Mutating the probe to always report true only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
     },
     {
       "file": "crates/mvm-backends/src/fc/host.rs",

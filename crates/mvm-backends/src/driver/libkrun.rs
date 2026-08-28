@@ -726,6 +726,11 @@ mod tests {
         assert!(caps.vsock);
         assert!(caps.no_routable_guest_nic);
         assert!(caps.host_vsock_proxy);
+        assert_eq!(
+            caps.max_vcpus,
+            Some(u32::from(u8::MAX)),
+            "libkrun's u8 vCPU boundary must remain visible to admission"
+        );
         assert_eq!(d.snapshot_capability(), SnapshotCapability::Unsupported);
         assert_eq!(d.security_profile().tier, "Tier 2");
     }
