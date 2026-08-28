@@ -749,6 +749,26 @@ default of read-only mounts unless `:rw` is explicit. `--name` is optional: when
 omitted, `machine create` auto-generates a name and prints it (mirroring
 `machine run -d`).
 
+A host can also admit plans it did not synthesize. By default every plan booted
+locally is synthesized and self-signed under the host key at admission time;
+a fleet control plane can instead sign an `ExecutionPlan` itself and have a
+host boot it, when the operator pins the fleet's issuer key in
+`~/.mvm/config/config.toml`:
+
+```toml
+[[trusted_plan_signers]]
+signer_id = "fleet-prod"              # the signer_id the plan envelope names
+ed25519_pubkey_hex = "88a4b2c1046fb3f6a1d3e5c709a2b4d6e8f0a1b3c5d7e9f1a2b4c6d8e0f2a4b6c8"
+```
+
+The list is empty by default and the default is the posture: a host that pins
+nobody refuses every externally-signed plan. Pinning a key delegates plan
+*authorship*, not host policy — the grant ceiling, host budget, validity
+window, replay protection, and content-address check above all still apply to
+an externally-signed plan unchanged, so a fleet signer cannot ask for more
+than the operator's ceiling allows. A pinned entry whose key does not parse
+fails the whole admission rather than being silently skipped.
+
 `machine start`, `machine exec`, `machine shell`, and `machine stop` require the
 named `MachineSpec` to exist first. `machine start` resolves the stored OCI
 image through the normal cache/materialization path, emits the same admission

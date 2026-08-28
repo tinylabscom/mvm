@@ -43,6 +43,16 @@
 //! `admit_for_run` takes a `Clock` and a `NonceLedger` so tests can
 //! drive the validity window + replay protection deterministically.
 //! Production callers use `SystemClock` + the host's nonce store.
+//!
+//! ## Externally-signed plans
+//!
+//! [`admit_signed_plan_for_run`] admits a plan signed by a fleet issuer the
+//! operator pinned in the host config's `trusted_plan_signers`, verifying the
+//! envelope against that set — never the host's own key — before any policy
+//! gate reads the plan body. From the content-address check onward it runs
+//! the same `finish_admission` tail as the self-signed path: the host's
+//! ceiling, budget, validity window, and replay protection apply unchanged,
+//! so the host stays the final authority over what it boots.
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -110,7 +120,8 @@ impl Default for InMemoryNonceLedger {
 /// input gate — decide what a workload may do by reading this plan, so a value
 /// of this type has to be a claim that the plan *was* signed, verified,
 /// window-checked and replay-checked, not merely a struct shaped like one. Both
-/// halves of that are enforced by privacy: [`admit_for_run`] is the only
+/// halves of that are enforced by privacy: `finish_admission` — the shared
+/// tail of [`admit_for_run`] and [`admit_signed_plan_for_run`] — is the only
 /// non-test code that can build one (a struct literal needs every field named,
 /// and there is no `Default` to spread from), and no accessor hands out a `&mut`
 /// or an owned field, so a caller that legitimately holds one cannot afterwards
@@ -145,7 +156,9 @@ impl AdmittedPlan {
         &self.plan_id
     }
 
-    /// The host signer whose key the plan verified under.
+    /// The signer whose key the plan verified under — this host's own signer
+    /// for a synthesized run, or the pinned external signer for a
+    /// fleet-issued one.
     #[must_use]
     pub fn signer_id(&self) -> &str {
         &self.signer_id
@@ -360,6 +373,126 @@ fn admit_plan_for_run_inner(
     let trusted: [(&str, &VerifyingKey); 1] = [(&signer_id, &signer.verifying)];
     let verified = verify_plan(&signed, &trusted).context("verifying just-signed plan")?;
 
+    finish_admission(VerifiedAdmission {
+        verified,
+        signed,
+        signer_id,
+        extensions,
+        clock,
+        ledger,
+        bundle_ctx,
+    })
+}
+
+/// Admit an externally-signed plan — one signed by a fleet issuer the
+/// operator pinned in `trusted_plan_signers`, not by this host's own key.
+///
+/// The order differs from the self-signed path in exactly the way the trust
+/// boundary dictates: the envelope is verified against the pinned signer set
+/// *first*, because every byte of it is attacker-controlled until then, and
+/// only afterwards do the host's own policy gates (extension bindings, grant
+/// ceiling, host budget) read the plan. From [`verify_plan_id`] onward both
+/// paths run the same checks through [`finish_admission`] — the host remains
+/// the final authority over what it boots, whoever signed the plan.
+///
+/// The trusted set comes from operator config and nowhere else, so a caller
+/// cannot hand admission a wider trust than the host configured. An empty set
+/// is the fail-closed default: every externally-signed plan is refused.
+///
+/// A refusal never emits an audit entry: the plan body is the only anchor a
+/// refusal entry could bind to, and until the signature verifies the body is
+/// an attacker's claim, not a fact to record.
+#[tracing::instrument(skip_all)]
+pub fn admit_signed_plan_for_run(
+    signed: &SignedExecutionPlan,
+    clock: &dyn Clock,
+    ledger: &InMemoryNonceLedger,
+    bundle_ctx: Option<&BundleAdmissionContext<'_>>,
+    posture: RunPosture,
+) -> Result<AdmittedPlan> {
+    let trusted = host_trusted_plan_signers()?;
+    if trusted.is_empty() {
+        anyhow::bail!(
+            "refusing the externally-signed plan: this host pins no trusted plan signers; \
+             set `trusted_plan_signers` in the host config.toml to admit fleet-signed plans"
+        );
+    }
+    let trusted_refs: Vec<(&str, &VerifyingKey)> =
+        trusted.iter().map(|(id, key)| (id.as_str(), key)).collect();
+    let verified =
+        verify_plan(signed, &trusted_refs).context("verifying externally-signed plan")?;
+    let signer_id = signed.0.signer_id.clone();
+
+    validate_extension_bindings(&verified)?;
+    // No extension verification context on this path: a plan that binds
+    // optional extensions is refused rather than admitted unchecked.
+    let extensions = verify_extension_packs(&verified, None)?;
+    admit_grants(&verified, &host_grant_ceiling(), posture)?;
+    admit_within_host_budget(&verified)?;
+
+    finish_admission(VerifiedAdmission {
+        verified,
+        // The caller lends the envelope; the admitted plan owns a copy so
+        // downstream consumers can re-verify without trusting this process.
+        signed: signed.clone(),
+        signer_id,
+        extensions,
+        clock,
+        ledger,
+        bundle_ctx,
+    })
+}
+
+/// The external plan signers this host trusts, from operator config.
+///
+/// Read from config rather than taken as a parameter for the same reason as
+/// the grant ceiling: admission's trust root must not be widen-able by the
+/// caller asking for admission. A malformed pin fails the whole read, so the
+/// set in force is exactly the set the operator wrote.
+fn host_trusted_plan_signers() -> Result<Vec<(String, VerifyingKey)>> {
+    mvm_core::user_config::load(None).trusted_plan_signer_keys()
+}
+
+/// Everything the shared post-verification tail of admission needs.
+///
+/// A params struct rather than seven positional arguments: `verified`,
+/// `signed`, and `signer_id` travel together from whichever path verified
+/// them, and a positional call could transpose them with nothing to catch it.
+struct VerifiedAdmission<'a> {
+    /// The plan body, already signature-verified against the trust root of
+    /// the path that produced it (the host signer, or the operator's pinned
+    /// external signer set).
+    verified: ExecutionPlan,
+    /// The envelope `verified` was decoded from, carried verbatim onto the
+    /// launch config for consumers that re-verify.
+    signed: SignedExecutionPlan,
+    /// The signer the envelope verified under — the audit chain records it.
+    signer_id: String,
+    /// Re-verified extension artifacts, empty when the plan binds none.
+    extensions: Vec<AdmittedExtension>,
+    clock: &'a dyn Clock,
+    ledger: &'a InMemoryNonceLedger,
+    bundle_ctx: Option<&'a BundleAdmissionContext<'a>>,
+}
+
+/// The checks every admitted plan passes after its signature has verified,
+/// shared by the host-signed and externally-signed paths: content-address,
+/// ingress shape, validity window, replay protection, bundle re-verify.
+///
+/// The replay insert is deliberately last but one: every check that can
+/// refuse runs before the nonce is spent, so a refused plan can be corrected
+/// and resubmitted, while an admitted one cannot be replayed.
+fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
+    let VerifiedAdmission {
+        verified,
+        signed,
+        signer_id,
+        extensions,
+        clock,
+        ledger,
+        bundle_ctx,
+    } = parts;
+
     // The plan_id is the content-address of the plan body — recompute it and
     // refuse a plan whose stored id doesn't match, so a run is only ever
     // admitted under an id that genuinely addresses its content.
@@ -372,7 +505,9 @@ fn admit_plan_for_run_inner(
     // Validity window — refuses plans whose now() is outside
     // [valid_from, valid_until). For freshly-synthesized plans this
     // can only fire if the host's clock changed during signing or if
-    // someone overrode the validity window in synthesis defaults.
+    // someone overrode the validity window in synthesis defaults; for an
+    // externally-signed plan it is the host's own check that the window the
+    // fleet issuer chose still holds here.
     let now = clock.now();
     check_window(&verified, now).map_err(|e| match e {
         PlanValidityError::NotYetValid { .. } | PlanValidityError::Expired { .. } => {
@@ -381,10 +516,9 @@ fn admit_plan_for_run_inner(
         other => anyhow::anyhow!("plan validity error: {other}"),
     })?;
 
-    // Replay protection: insert (signer_id, nonce). A second admit_for_run
-    // call within the validity window with the same nonce gets refused.
-    // Synthesis generates fresh nonces, so this only fires on the
-    // pathological "same plan submitted twice" case.
+    // Replay protection: insert (signer_id, nonce). A second admission with
+    // the same signer + nonce — a re-submitted fleet plan, or a synthesized
+    // plan that somehow recurred — is refused.
     {
         let mut store = ledger.inner.lock().expect("nonce store mutex poisoned");
         store
@@ -392,9 +526,9 @@ fn admit_plan_for_run_inner(
             .context("replay protection check")?;
     }
 
-    // Claim 9 — bundle re-verify at admit time. Only fires
+    // Bundle re-verify at admit time. Only fires
     // when the plan pinned a bundle; missing context with a pinned
-    // plan is operator misconfiguration (mvmctl up wasn't wired
+    // plan is operator misconfiguration (the driver wasn't wired
     // with a resolver/trust store), so we refuse rather than skip
     // silently.
     if let Some(pin) = verified.bundle.as_ref() {
@@ -2132,11 +2266,11 @@ mod tests {
             "the test constructor must stay `#[cfg(test)]` and crate-private"
         );
 
-        // 5. And `admit_for_run` is the only place that writes the literal.
+        // 5. And `finish_admission` is the only place that writes the literal.
         let literals = production_source().matches("Ok(AdmittedPlan {").count();
         assert_eq!(
             literals, 1,
-            "exactly one production construction site, inside admit_for_run"
+            "exactly one production construction site, inside finish_admission"
         );
     }
 
@@ -4973,5 +5107,243 @@ mod launch_decision_record_tests {
             Some("plan-under-launch"),
             "the attestation binding must name the launched plan"
         );
+    }
+}
+
+#[cfg(test)]
+mod signed_plan_admission_tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+    use ed25519_dalek::SigningKey;
+    use mvm_core::plan::test_support::PlanFixture;
+    use mvm_core::user_config::{MvmConfig, TrustedPlanSigner};
+    use mvm_core::util::test_env::TestEnv;
+
+    /// The fleet issuer key the tests pin — or deliberately don't.
+    fn fleet_key() -> SigningKey {
+        SigningKey::from_bytes(&[42u8; 32])
+    }
+
+    fn pin_for(signer_id: &str, key: &SigningKey) -> TrustedPlanSigner {
+        TrustedPlanSigner {
+            signer_id: signer_id.to_string(),
+            ed25519_pubkey_hex: hex::encode(key.verifying_key().as_bytes()),
+        }
+    }
+
+    /// Isolate `MVM_HOME` and write `cfg` as the host config. Admission reads
+    /// the trusted signer set (and the grant ceiling) from host config rather
+    /// than from a parameter, so a test that wants a trusting host has to
+    /// *be* one. The guard and home must both outlive the admission call.
+    fn host_with(cfg: MvmConfig) -> (TestEnv, tempfile::TempDir) {
+        let home = tempfile::tempdir().expect("scratch mvm home");
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let pins = cfg.trusted_plan_signers.len();
+        mvm_core::user_config::save(&cfg, None).expect("writing the host config");
+        // Precondition, not a redundant assertion: if this fails the isolation
+        // did not hold and every check below would measure some other host.
+        assert_eq!(
+            mvm_core::user_config::load(None).trusted_plan_signers.len(),
+            pins,
+            "the isolated host must read back the pins it was configured with"
+        );
+        (env, home)
+    }
+
+    fn host_pinning(signers: Vec<TrustedPlanSigner>) -> (TestEnv, tempfile::TempDir) {
+        host_with(MvmConfig {
+            trusted_plan_signers: signers,
+            ..MvmConfig::default()
+        })
+    }
+
+    fn signed_by_fleet(plan: &ExecutionPlan) -> SignedExecutionPlan {
+        sign_plan(plan, &fleet_key(), "fleet-prod")
+    }
+
+    fn admit(signed: &SignedExecutionPlan, ledger: &InMemoryNonceLedger) -> Result<AdmittedPlan> {
+        admit_signed_plan_for_run(
+            signed,
+            &SystemClock,
+            ledger,
+            None,
+            RunPosture::without_backend(Variant::Dev),
+        )
+    }
+
+    #[test]
+    fn a_pinned_fleet_signers_plan_is_admitted() {
+        let (_env, _home) = host_pinning(vec![pin_for("fleet-prod", &fleet_key())]);
+        let plan = PlanFixture::new().tenant("fleet-tenant").build();
+        let signed = signed_by_fleet(&plan);
+
+        let admitted = admit(&signed, &InMemoryNonceLedger::new())
+            .expect("a plan signed by a pinned fleet signer admits");
+
+        assert_eq!(admitted.signer_id(), "fleet-prod");
+        assert_eq!(admitted.plan().tenant.0, "fleet-tenant");
+        // The admitted plan is content-addressed and the envelope the caller
+        // handed in is carried verbatim — not re-signed under the host key.
+        assert_eq!(admitted.plan_id(), &admitted.plan().plan_id);
+        assert_eq!(admitted.signed().0.signer_id, "fleet-prod");
+        assert_eq!(admitted.signed().0.signature, signed.0.signature);
+    }
+
+    #[test]
+    fn an_unpinned_host_refuses_every_signed_plan() {
+        // The default: no pins, no externally-signed admissions. This is the
+        // fail-closed posture a host is in before the operator delegates.
+        let (_env, _home) = host_pinning(Vec::new());
+        let signed = signed_by_fleet(&PlanFixture::new().build());
+
+        let err = admit(&signed, &InMemoryNonceLedger::new())
+            .expect_err("a host that pins nobody must refuse");
+        assert!(
+            format!("{err:#}").contains("pins no trusted plan signers"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_signer_is_refused() {
+        // The host pins a *different* fleet issuer; the envelope names one it
+        // never heard of.
+        let other = SigningKey::from_bytes(&[7u8; 32]);
+        let (_env, _home) = host_pinning(vec![pin_for("fleet-staging", &other)]);
+        let signed = signed_by_fleet(&PlanFixture::new().build());
+
+        let err = admit(&signed, &InMemoryNonceLedger::new())
+            .expect_err("an unpinned signer must be refused");
+        assert!(
+            format!("{err:#}").contains("no trusted key matched signer_id fleet-prod"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_tampered_payload_is_refused() {
+        let (_env, _home) = host_pinning(vec![pin_for("fleet-prod", &fleet_key())]);
+        let mut signed = signed_by_fleet(&PlanFixture::new().build());
+        signed.0.payload[0] ^= 0x01;
+
+        let err = admit(&signed, &InMemoryNonceLedger::new())
+            .expect_err("a tampered payload must fail signature verification");
+        assert!(
+            format!("{err:#}").contains("signature verification failed"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn an_expired_plan_is_refused() {
+        let (_env, _home) = host_pinning(vec![pin_for("fleet-prod", &fleet_key())]);
+        let now = Utc::now();
+        let plan = PlanFixture::new()
+            .validity(now - Duration::hours(2), now - Duration::hours(1))
+            .build();
+        let signed = signed_by_fleet(&plan);
+
+        let err = admit(&signed, &InMemoryNonceLedger::new())
+            .expect_err("a validly-signed but expired plan must be refused");
+        assert!(
+            format!("{err:#}").contains("plan validity window violated"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_not_yet_valid_plan_is_refused() {
+        let (_env, _home) = host_pinning(vec![pin_for("fleet-prod", &fleet_key())]);
+        let now = Utc::now();
+        let plan = PlanFixture::new()
+            .validity(now + Duration::hours(1), now + Duration::hours(2))
+            .build();
+        let signed = signed_by_fleet(&plan);
+
+        let err = admit(&signed, &InMemoryNonceLedger::new())
+            .expect_err("a plan whose window has not opened must be refused");
+        assert!(
+            format!("{err:#}").contains("plan validity window violated"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_replayed_nonce_is_refused() {
+        let (_env, _home) = host_pinning(vec![pin_for("fleet-prod", &fleet_key())]);
+        let signed = signed_by_fleet(&PlanFixture::new().build());
+        let ledger = InMemoryNonceLedger::new();
+
+        admit(&signed, &ledger).expect("the first admission succeeds");
+        let err = admit(&signed, &ledger).expect_err("the same plan admitted twice is a replay");
+        assert!(format!("{err:#}").contains("replay"), "got: {err:#}");
+    }
+
+    #[test]
+    fn a_plan_id_that_does_not_address_its_content_is_refused() {
+        use ed25519_dalek::Signer as _;
+
+        let (_env, _home) = host_pinning(vec![pin_for("fleet-prod", &fleet_key())]);
+        // sign_plan re-derives the content address, so a mismatched id cannot
+        // come through it — build the envelope by hand: a valid signature over
+        // a plan whose stored id does not address its body.
+        let plan = PlanFixture::new()
+            .plan_id("not-the-content-address")
+            .build();
+        let payload = serde_json::to_vec(&plan).expect("plan serializes");
+        let signature = fleet_key().sign(&payload);
+        let signed = SignedExecutionPlan(mvm_core::protocol::signing::SignedPayload {
+            payload,
+            signature: signature.to_bytes().to_vec(),
+            signer_id: "fleet-prod".to_string(),
+        });
+
+        let err = admit(&signed, &InMemoryNonceLedger::new())
+            .expect_err("a signed plan whose id does not address its content must be refused");
+        assert!(
+            format!("{err:#}").contains("plan_id content-address check"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_grant_over_the_host_ceiling_is_refused() {
+        // The fleet's signature does not widen host policy: the ceiling the
+        // operator configured still bounds what an externally-signed plan may
+        // ask for.
+        let (_env, _home) = host_with(MvmConfig {
+            max_cpu_millicores: Some(2000),
+            trusted_plan_signers: vec![pin_for("fleet-prod", &fleet_key())],
+            ..MvmConfig::default()
+        });
+        let plan = PlanFixture::new()
+            .grants(Some(mvm_contract::grants::Grants {
+                cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 64_000 }),
+                ..mvm_contract::grants::Grants::default()
+            }))
+            .build();
+        let signed = signed_by_fleet(&plan);
+
+        let err = admit(&signed, &InMemoryNonceLedger::new())
+            .expect_err("a grant above the host's ceiling must not be admitted");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("ceiling"), "{msg}");
+        assert!(msg.contains("64000") && msg.contains("2000"), "{msg}");
+    }
+
+    #[test]
+    fn a_malformed_pin_refuses_admission() {
+        // A pin the operator mistyped fails the whole load — admission never
+        // runs against a silently-truncated trust set.
+        let (_env, _home) = host_pinning(vec![TrustedPlanSigner {
+            signer_id: "fleet-prod".to_string(),
+            ed25519_pubkey_hex: "not-hex".to_string(),
+        }]);
+        let signed = signed_by_fleet(&PlanFixture::new().build());
+
+        let err = admit(&signed, &InMemoryNonceLedger::new())
+            .expect_err("a malformed pin must refuse admission");
+        assert!(format!("{err:#}").contains("fleet-prod"), "got: {err:#}");
     }
 }
