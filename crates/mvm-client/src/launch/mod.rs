@@ -27,7 +27,8 @@ use mvm_core::domain::instance::InstanceReadiness;
 use mvm_core::plan::ExecutionPlan;
 use mvm_core::protocol::vm_backend::{VmId, VmStatus};
 use mvm_core::rootfs_source::RootfsSource;
-use mvm_hostd::audit::emitter::AuditEmitter;
+use mvm_core::usage_capture::UsageCapture;
+use mvm_hostd::audit::emitter::{AuditEmitter, ExitRecord};
 use mvm_hostd::plan_admission::{InMemoryNonceLedger, StartedMachine, SystemClock};
 use mvm_hostd::run::{LocalRunContext, LocalRunRequest, admit_and_boot_local};
 use mvm_runtime::AnyBackend;
@@ -974,9 +975,14 @@ impl LocalBackend {
         // Capture fidelity: a missing capture is recorded as uncaptured,
         // never attested as exit 0.
         if let Some(emitter) = build_audit_emitter() {
-            if let Err(e) =
-                emitter.emit_exited_with_capture(&outcome.plan, exit_code, &outcome.machine.backend)
-            {
+            if let Err(e) = emitter.emit_exited_with_capture(
+                &outcome.plan,
+                ExitRecord {
+                    exit_code,
+                    backend: &outcome.machine.backend,
+                    usage: UsageCapture::default(),
+                },
+            ) {
                 tracing::warn!(error = %e, machine = name, "audit emit_exited failed (non-fatal)");
             }
             // The closing bracket of the run. Admission published the opening
