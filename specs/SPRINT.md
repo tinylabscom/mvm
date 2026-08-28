@@ -19,6 +19,14 @@
       and syscall-error tests, the full workspace, gated targets, and
       zero-warning Clippy are green; merge delivery remains.
 
+- [ ] **Audit root-history classification repair (issue #2940).**
+      `specs/plans/2026-08-27-audit-root-history-classification.md`.
+      The shared audit-directory classifier now excludes signed
+      `<tenant>.roots.jsonl` Merkle-root histories from lifecycle-chain
+      verification, and the writer shares the same filename suffix. Focused
+      tests, workspace tests and doctests, check, and Clippy are green;
+      remaining: merge-queue delivery.
+
 - [x] **FlowMux HTTPS live-client repair.**
       `specs/plans/2026-08-27-flowmux-https-live-client.md`.
       The seven live HTTPS egress witnesses now use the pinned multi-arch
