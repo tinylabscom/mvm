@@ -420,7 +420,7 @@ pub(crate) fn resolve_sdk_sidecar_attachment_for_host(
     match runtime_overlay_acquire_mode() {
         // Building the sidecar needs the builder VM, which must not be spawned
         // implicitly inside a launch. Keep the fail-closed refusal, which
-        // already names the binding and the `nix build` that satisfies it.
+        // names the binding and the explicit source-build command.
         RuntimeOverlayAcquireMode::BuildFromSourceCheckout => Err(cache_miss),
         RuntimeOverlayAcquireMode::DownloadPublishedArtifact => {
             ui::info("SDK sidecar missing from cache; downloading the published artifact now...");
@@ -433,19 +433,15 @@ pub(crate) fn resolve_sdk_sidecar_attachment_for_host(
 
 /// Say so when the cached sidecar cannot carry this checkout's cdylib changes.
 ///
-/// The sidecar is the one guest artifact with no source-build path: it is
-/// downloaded and cached under `<version>/<arch>`, and that key does not move
-/// when someone edits `crates/mvm-sdk`. A contributor who adds a host-service
-/// verb therefore keeps booting guests whose `libmvm_host_services.so` predates
-/// it, and learns about it only from inside the guest, as
-/// `unknown method \`host.kv.get\`` — an error that points at the broker rather
-/// than at a stale image. That is how the `host.kv.v1` live witness came to be
-/// written but never pass.
+/// The sidecar cache key is version + architecture, so an older downloaded or
+/// source-built image can remain structurally valid after `crates/mvm-sdk`
+/// changes. A contributor who adds a host-service verb would otherwise learn
+/// about the drift only from inside the guest, as `unknown method
+/// \`host.kv.get\`` — an error that points at the broker rather than at the
+/// stale image.
 ///
-/// A warning, not a refusal, and not an eviction. There is nothing local to
-/// rebuild from yet, so evicting would leave the guest with no cdylib at all —
-/// strictly worse than an old one for every workload that does not touch the
-/// new verb. Once the build path lands this becomes the trigger for it.
+/// A warning, not an implicit rebuild: source construction boots Stage 0 and
+/// therefore remains an explicit operator action outside a workload launch.
 ///
 /// Silent for a release binary, which has no checkout and for which the
 /// published artifact is exactly right.
@@ -481,7 +477,7 @@ fn warn_if_sidecar_predates_the_working_tree(
                 "SDK sidecar {origin}, so `libmvm_host_services.so` does not carry \
                  changes to crates/mvm-sdk in this checkout. Host-service calls from \
                  the guest use the verbs it shipped with; one added here answers \
-                 `unknown method`. There is no local build for this artifact yet."
+                 `unknown method`. Refresh it with `mvmctl build sdk-sidecar build`."
             ));
         }
         // Provenance is a diagnostic. Failing to compute it must not fail a
@@ -739,7 +735,7 @@ mod sdk_sidecar_host_resolution_tests {
             "{msg}"
         );
         assert!(
-            msg.contains("nix build ./nix/images/runtime-overlay#sdk-sidecar-image"),
+            msg.contains("mvmctl build sdk-sidecar build"),
             "the refusal must still name the build that satisfies it: {msg}"
         );
     }

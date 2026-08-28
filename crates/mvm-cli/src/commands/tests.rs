@@ -1023,6 +1023,19 @@ fn build_runtime_overlay_subcommand_parses() {
 }
 
 #[test]
+fn build_sdk_sidecar_subcommand_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "build", "sdk-sidecar", "build", "--force"])
+        .expect("SDK sidecar source-build command must parse");
+    let Commands::Build(bg) = cli.command else {
+        panic!("expected build group");
+    };
+    assert!(
+        matches!(bg.action, build_group::BuildCmd::SdkSidecar(_)),
+        "expected sdk-sidecar build command"
+    );
+}
+
+#[test]
 fn top_level_kernel_build_subcommand_parses() {
     let cli = Cli::try_parse_from(["mvmctl", "kernel", "build", "--which", "workload"])
         .expect("kernel build must parse");

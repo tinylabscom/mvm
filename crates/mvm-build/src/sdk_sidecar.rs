@@ -192,6 +192,58 @@ pub fn install_sidecar_into_cache(
     version: &str,
     arch: &str,
 ) -> Result<SdkSidecarLayout, SdkSidecarBuildError> {
+    install_sidecar_with_fingerprint(source, cache_root, version, arch, None)
+}
+
+/// Install a sidecar produced from the current checkout and publish its source
+/// fingerprint in the same staging rename as the verified artifact files.
+///
+/// The marker is part of the promotion boundary: a concurrent resolver can
+/// observe either the previous cache entry or the complete new entry, never a
+/// source-built image temporarily mislabeled as a published artifact.
+pub fn install_source_built_sidecar(
+    source: &Path,
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+    fingerprint: &str,
+) -> Result<SdkSidecarArtifact, SdkSidecarBuildError> {
+    if fingerprint.trim().is_empty() {
+        return Err(SdkSidecarBuildError::InstallInvalid {
+            reason: "source fingerprint is empty".to_string(),
+        });
+    }
+    verify_sidecar_dir_integrity(source)?;
+    let produced_version = std::fs::read_to_string(source.join(SDK_SIDECAR_VERSION_FILE))?;
+    if produced_version.trim() != version {
+        return Err(SdkSidecarBuildError::InstallInvalid {
+            reason: format!(
+                "source-built sidecar VERSION {:?} does not match expected {version:?}",
+                produced_version.trim()
+            ),
+        });
+    }
+    let arch_dir = arch.to_string();
+    install_sidecar_with_fingerprint(
+        source,
+        cache_root,
+        version,
+        &arch_dir,
+        Some(fingerprint.trim()),
+    )?;
+    Ok(
+        SdkSidecarResolver::new(cache_root.to_path_buf(), version.to_string())
+            .resolve(&arch_dir)?,
+    )
+}
+
+fn install_sidecar_with_fingerprint(
+    source: &Path,
+    cache_root: &Path,
+    version: &str,
+    arch: &str,
+    fingerprint: Option<&str>,
+) -> Result<SdkSidecarLayout, SdkSidecarBuildError> {
     let layout = SdkSidecarLayout::under(cache_root, version, arch);
     let parent =
         layout
@@ -205,6 +257,11 @@ pub fn install_sidecar_into_cache(
             })?;
     std::fs::create_dir_all(parent)?;
     let staging = stage_sidecar_artifact(parent, arch, source)?;
+    if let Some(fingerprint) = fingerprint {
+        let marker = staging.join(LOCAL_SOURCE_FINGERPRINT_FILE);
+        std::fs::write(&marker, format!("{fingerprint}\n"))?;
+        crate::runtime_overlay::set_cache_perms(&marker)?;
+    }
     promote_staging(&staging, &layout.artifact_dir)?;
     Ok(layout)
 }
@@ -275,9 +332,9 @@ pub enum SidecarProvenance {
 
 /// Record which source tree produced the sidecar now in the cache.
 ///
-/// Nothing writes this yet — the local build path is still to come.
-/// It exists so the marker has exactly one definition rather than being
-/// invented twice, and so the reader below has a producer to name.
+/// The source-build install path records the marker inside its atomic staging
+/// boundary. This helper remains useful to provenance tooling and tests that
+/// need to label an already-staged fixture.
 pub fn record_source_fingerprint(
     cache_root: &Path,
     version: &str,
@@ -294,15 +351,10 @@ pub fn record_source_fingerprint(
 
 /// Compare the cached sidecar against `workspace_root`'s cdylib sources.
 ///
-/// The sidecar is the only guest artifact with no source-build path: it is
-/// fetched from the published release and cached under `<version>/<arch>`. That
-/// key does not move when someone edits the cdylib, so a contributor who adds a
-/// host-service verb keeps getting a sidecar that predates it — and finds out
-/// only from inside a booted guest, as `unknown method \`host.kv.get\``, which
-/// points at the broker rather than at the image.
-///
-/// Reporting provenance does not fix that. It makes it legible, and gives the
-/// build path a marker to write when it lands.
+/// Published sidecars are cached under `<version>/<arch>`. That key does not
+/// move when someone edits the cdylib, so provenance distinguishes a release
+/// artifact from a sidecar explicitly built from this checkout and detects
+/// when the latter no longer matches its source inputs.
 pub fn cached_sidecar_provenance(
     cache_root: &Path,
     version: &str,
@@ -404,6 +456,21 @@ mod tests {
             },
         ];
         mvm_fs::ext4::build_image(nodes).expect("build the sidecar ext4 fixture")
+    }
+
+    fn stage_sidecar_dir(root: &Path, version: &str, image: &[u8]) {
+        let version = format!("{version}\n");
+        std::fs::write(root.join(SDK_SIDECAR_IMAGE_FILE), image).unwrap();
+        std::fs::write(root.join(SDK_SIDECAR_VERSION_FILE), &version).unwrap();
+        std::fs::write(
+            root.join(CHECKSUM_MANIFEST_FILE),
+            format!(
+                "{}  {SDK_SIDECAR_IMAGE_FILE}\n{}  {SDK_SIDECAR_VERSION_FILE}\n",
+                sha256_hex(image),
+                sha256_hex(version.as_bytes()),
+            ),
+        )
+        .unwrap();
     }
 
     /// A workspace shaped like the ones `sdk_cdylib_source_fingerprint` reads.
@@ -514,6 +581,91 @@ mod tests {
             SidecarProvenance::StaleSource,
             "an edit to the cdylib's sources must invalidate the cached sidecar"
         );
+    }
+
+    #[test]
+    fn source_built_install_promotes_artifact_and_fingerprint_together() {
+        let _env = TestEnv::new();
+        let cache = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let image = sidecar_ext4_bytes();
+        stage_sidecar_dir(source.path(), FIXTURE_VERSION, &image);
+
+        let artifact = install_source_built_sidecar(
+            source.path(),
+            cache.path(),
+            FIXTURE_VERSION,
+            GuestArch::host(),
+            "source-digest",
+        )
+        .expect("install source-built sidecar");
+
+        assert_eq!(artifact.version, FIXTURE_VERSION);
+        let layout = layout_of(cache.path());
+        assert_eq!(
+            std::fs::read_to_string(layout.artifact_dir.join(LOCAL_SOURCE_FINGERPRINT_FILE))
+                .unwrap(),
+            "source-digest\n"
+        );
+    }
+
+    #[test]
+    fn source_built_install_refuses_wrong_version_without_replacing_cache() {
+        let cache = tempfile::tempdir().unwrap();
+        let existing = tempfile::tempdir().unwrap();
+        let candidate = tempfile::tempdir().unwrap();
+        let old_image = sidecar_ext4_bytes();
+        let mut new_image = old_image.clone();
+        new_image.push(0);
+        stage_sidecar_dir(existing.path(), FIXTURE_VERSION, &old_image);
+        stage_sidecar_dir(candidate.path(), "wrong-version", &new_image);
+        install_sidecar_into_cache(
+            existing.path(),
+            cache.path(),
+            FIXTURE_VERSION,
+            &GuestArch::host().to_string(),
+        )
+        .expect("seed existing cache");
+
+        let error = install_source_built_sidecar(
+            candidate.path(),
+            cache.path(),
+            FIXTURE_VERSION,
+            GuestArch::host(),
+            "source-digest",
+        )
+        .expect_err("wrong VERSION must be rejected before promotion");
+
+        assert!(
+            error.to_string().contains("does not match expected"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(layout_of(cache.path()).image).unwrap(),
+            old_image
+        );
+    }
+
+    #[test]
+    fn source_built_install_rejects_an_empty_fingerprint() {
+        let cache = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        stage_sidecar_dir(source.path(), FIXTURE_VERSION, &sidecar_ext4_bytes());
+
+        let error = install_source_built_sidecar(
+            source.path(),
+            cache.path(),
+            FIXTURE_VERSION,
+            GuestArch::host(),
+            "  ",
+        )
+        .expect_err("empty provenance must not be published");
+
+        assert!(
+            error.to_string().contains("fingerprint is empty"),
+            "{error}"
+        );
+        assert!(!layout_of(cache.path()).artifact_dir.exists());
     }
 
     fn append_file<W: std::io::Write>(tar: &mut tar::Builder<W>, path: &str, bytes: &[u8]) {

@@ -30,6 +30,11 @@ pkgs.rustPlatform.buildRustPackage {
 
   unpackPhase = import ./workspace-unpack.nix { inherit mvmSrc; };
 
+  # Stage 0 runs Nix without its inner sandbox. Keep Cargo from creating
+  # Nix's sentinel builder home and making the following derivation fail its
+  # purity check.
+  HOME = "/tmp";
+
   # Build only mvm-sdk's library target, which produces both the Rust `lib`
   # and the `cdylib`. The cdylib is renamed to the stable FFI filename below.
   cargoBuildFlags = [
