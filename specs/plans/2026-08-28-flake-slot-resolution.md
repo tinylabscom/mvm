@@ -1,5 +1,8 @@
 # Flake slot resolution
 
+Backing: shipped-source
+Validation: check-sprint-append
+
 **Status:** IN PROGRESS
 **Issue:** #2967
 
