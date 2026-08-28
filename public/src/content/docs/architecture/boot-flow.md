@@ -57,11 +57,20 @@ attached only for verity-sealed boots):
 A block-less virtiofs-root dev boot attaches no disks at all; the root comes
 from a virtio-fs tag instead.
 
-The kernel cmdline **does not carry roothash tokens**. The legacy
-`mvm.roothash=`, `mvm.data=`, `mvm.hash=`, and `mvm.runtime_*=` tokens are gone;
-the cmdline carries only the VMM console base plus
-`mvm.runtime_source_policy=…` (and, when applicable, egress, verb-grant, and
-user-volume tokens). The 2048-byte cmdline overflow guard still applies.
+**On the universal-initramfs verity path the kernel cmdline carries no roothash
+tokens**: the rootfs and runtime-overlay roothashes and device paths arrive over
+vsock in `ActivateEnvironment` after boot, so the cmdline carries only the
+VMM console base plus, when applicable, egress, verb-grant, and user-volume
+tokens.
+
+That scoping matters, because the legacy tokens are not gone from the tree. The
+per-backend verity cmdline builders still emit `mvm.roothash=`, `mvm.data=`,
+`mvm.hash=`, and the `mvm.runtime_roothash=` / `mvm.runtime_data=` /
+`mvm.runtime_hash=` trio — the shared `build_verity_cmdline_args` for the QEMU
+driver, and an inline equivalent in the libkrun driver. A non-verity boot that
+carries a runtime overlay as a plain read-only block device still emits
+`mvm.runtime_data=`, naming the device the overlay actually landed on. The
+2048-byte cmdline overflow guard still applies.
 
 ## Guest PID 1: early setup, then a fail-closed gate
 
@@ -190,23 +199,27 @@ model in adapted form — or honestly not at all:
   guest, so verified boot is host-agnostic and a WHP backend could target the
   same Tier 2 posture as HVF/libkrun once its egress gate lands. Until then,
   WSL2 with nested `/dev/kvm` is the supported Windows-adjacent path.
-- **BrowserWasi (browser tier)** — runs the workload as a WASI Preview 1 module
-  inside the browser's own WebAssembly engine. There is no Linux kernel, no
-  initramfs, and no vsock; the capability handshake is implemented through
-  browser-native WASI imports and preopened directories. The guest workload
-  receives environment configuration through preopened directories (`/etc`,
-  `/run/mvm`) and a host-provided `MVM_ACTIVATION_FILE` environment variable.
-  Network egress is mediated through the browser's `fetch()` API via the
-  `mvm:egress` host import, and file system isolation is enforced by the WASI
-  preopen set. The tier is claim-free (no hardware isolation) and never
-  auto-selected.
+- **WebLinux (browser tier)** — boots a real Nix-built Linux kernel under
+  QEMU-Wasm inside a browser Worker, so the guest side is a Linux boot rather
+  than a bare module load. What is missing is the layer below: there is no
+  hypervisor and no hardware isolation boundary, only the browser's sandbox, so
+  the tier is claim-free and never auto-selected. It is reachable through
+  `--hypervisor web-linux`; on a native host the backend is a fail-closed stub
+  that refuses every lifecycle call.
+- **Wasm (host `wasmtime` tier)** — a separate claim-free tier that runs a
+  user-supplied WASI Preview 1 module directly, with no Linux kernel, no
+  initramfs, and no vsock. Its `mvm:egress` host import relays each request over
+  a Unix socket to the host-side substitution endpoint, so egress is gated at
+  the same place the microVM tiers gate it. Opt-in only.
 
 ## Security properties
 
 - **Fail-closed guest** — no operational RPCs before a successful
   `ActivateEnvironment`, on every boot that attaches the universal initramfs.
-- **No roothash on the kernel cmdline** — verity parameters travel over the
-  authenticated vsock channel instead of being visible in `/proc/cmdline`.
+- **No roothash on the kernel cmdline, on the universal-initramfs verity path**
+  — there, verity parameters travel over the authenticated vsock channel instead
+  of being visible in `/proc/cmdline`. The per-backend verity cmdline builders
+  still emit them on the paths described above.
 - **Verified root where sealed** — a verity boot only pivots into a rootfs
   that passed dm-verity; unverified dev-tier boots are mounted plainly and
   are exactly as trustworthy as the legacy path they replace.
