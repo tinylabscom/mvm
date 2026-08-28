@@ -1,8 +1,15 @@
 # Refactor status
 
-Last updated: 2026-08-27
+Last updated: 2026-08-28
 
 ## In progress
+
+- [ ] **Flake-built slot resolution — issue #2967.**
+      `specs/plans/2026-08-28-flake-slot-resolution.md`.
+      Strict materialized slot addresses resolve through the existing registry;
+      unknown and identity-mismatched records fail closed. Focused and workspace
+      tests, gated-target compilation, and Clippy are green; merge delivery
+      remains.
 
 - [ ] **Issue #2942 — warm-launch gate contract repair.**
       `specs/plans/2026-08-27-warm-launch-gate-contract.md`.
