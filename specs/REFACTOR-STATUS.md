@@ -4,22 +4,6 @@ Last updated: 2026-08-28
 
 ## In progress
 
-- [ ] **Cold-boot guest wall clock — issue #2956.**
-      `specs/plans/2026-08-27-cold-boot-wall-clock.md`.
-      The active universal-initramfs PID 1 now consumes the host epoch before
-      trust validation or workload activation. Strict shared parsing and the
-      existing narrow clock-sync path have focused positive and refusal tests;
-      workspace tests, gated targets, and zero-warning Clippy are green. Merge
-      delivery remains.
-
-- [ ] **Extended CI documented-surface repair — issue #2938.**
-      `specs/plans/2026-08-27-extended-ci-documented-surface.md`.
-      Both scheduled platform witnesses now request signed-manifest
-      verification, and the macOS HVF lane installs its target-gated libkrun
-      build dependency. Local focused coverage, actionlint, the exact feature
-      build, workspace tests/check/doctests, and Clippy are green; merge
-      delivery remains.
-
 - [ ] **Audit root-history classification repair — issue #2940.**
       `specs/plans/2026-08-27-audit-root-history-classification.md`.
       Signed Merkle-root history files are excluded from lifecycle-chain
@@ -40,6 +24,14 @@ Last updated: 2026-08-28
       a shared and tested complete-WebLinux-bundle gate, and a verified
       deployment.
       The production hostname still needs to be attached to the project.
+
+- [ ] **Cold-boot guest wall clock — issue #2956.**
+      `specs/plans/2026-08-27-cold-boot-wall-clock.md`.
+      The active universal-initramfs PID 1 now consumes the host epoch before
+      trust validation or workload activation. Strict shared parsing and the
+      existing narrow clock-sync path have focused positive and refusal tests;
+      workspace tests, gated targets, and zero-warning Clippy are green. Merge
+      delivery remains.
 
 - [ ] **SDK surface contract repairs — issues #2902 and #2906.**
       `specs/plans/2026-08-26-sdk-surface-contract-repairs.md`.
