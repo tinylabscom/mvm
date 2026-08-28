@@ -121,15 +121,15 @@ def run_agent_tool(request: dict) -> dict:
 </TabItem>
 <TabItem label="TypeScript">
 
-```ts
-import { NetworkPolicy, Sandbox } from "@mvm/sdk";
+```text
+import { Sandbox } from "@runmvm/mvm";
 
 async function runAgentTool(request: Record<string, unknown>) {
   const checked = validateRequest(request);
 
+  // Egress is deny-by-default; naming no allow-list is what denies it.
   using sandbox = await Sandbox.create({
     image: checked.image,
-    network: NetworkPolicy.denyByDefault(),
     ttlSeconds: checked.ttlSeconds,
   });
 

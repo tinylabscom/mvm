@@ -15,9 +15,13 @@ Every mvm project has a `mvm.toml` and a `flake.nix`:
 # my-app/mvm.toml
 flake     = "."
 profile   = "default"
-vcpus     = 1
-memory_mib = 256
+cpus      = 1          # `vcpus` is an accepted alias
+mem       = "256M"
 ```
+
+`mvm.toml` uses `deny_unknown_fields`, so a key it does not define is a parse
+error. Memory is `mem` (a size string); `memory_mib` is a `mkGuest` argument,
+not a manifest key.
 
 ```nix
 # my-app/flake.nix
@@ -32,9 +36,9 @@ memory_mib = 256
   outputs = { self, nixpkgs, mvm, ... }: {
     packages.x86_64-linux.default = mvm.lib.x86_64-linux.mkGuest {
       name = "my-app";
-      services.web = {
-        command = [ "/usr/local/bin/web" ];
-      };
+      # `entrypoint` is required — mkGuest throws without exactly one of
+      # `shell` / `command` / `services`.
+      entrypoint.command = [ "/usr/local/bin/web" ];
     };
   };
 }
@@ -47,9 +51,13 @@ That's the whole user-side surface. `mvmctl machine build` reads `mvm.toml`, fol
 From your project directory:
 
 ```sh
-mvmctl machine build              # reads mvm.toml; builds the named flake target
-mvmctl run                # builds (if needed) + boots
+mvmctl machine build                      # reads mvm.toml; builds the named flake target
+mvmctl machine run --manifest . -- <cmd>  # boots the built image and runs <cmd>
 ```
+
+A bare `mvmctl run` refuses with "needs a command" — it takes a trailing argv
+(or `--launch-plan`), and it never inspects `flake.nix` to decide what to
+build.
 
 `mvmctl machine build` is a host command. You run it from macOS or Linux, and mvm sends the Linux-only Nix work into the builder VM. The builder VM is headless — there is no shell into it, not even for debugging; you never need one before or during a normal build.
 
@@ -76,7 +84,7 @@ That direct Nix command is only for users who intentionally manage their own Nix
 |---|---|---|
 | `name` | `string` | Human-readable identifier; baked into the rootfs at `/etc/mvm/name`. |
 | `entrypoint` | `attrs` | The boot-time workload. Exactly one of three forms (see below). |
-| `services` | `attrs` (optional) | Auxiliary supervised services. Same shape as `entrypoint.services`. |
+| `services` | `attrs` (optional) | Declared and recorded, but **not enforced** — the multi-service supervisor is not wired. |
 | `packages` | `[pkg]` (optional) | Extra Nix packages added to the rootfs closure. |
 | `hypervisor` | `string` (optional) | Override the default (`firecracker`). |
 | `vcpus`, `memory_mib` | `int` (optional) | Resource defaults; `mvm.toml` overrides at run time. |
@@ -101,7 +109,8 @@ entrypoint.shell = "/bin/bash";
 # Form 2 — single sealed program (production default)
 entrypoint.command = [ "/usr/local/bin/serve" "--port" "8080" ];
 
-# Form 3 — supervised multi-service
+# Form 3 — supervised multi-service (NOT WIRED: the boot falls through
+# to a recovery shell; the multi-service supervisor is not built yet)
 entrypoint.services = {
   web    = { command = [ "/bin/web" ]; };
   worker = { command = [ "/bin/worker" ]; restart = "always"; };
@@ -122,7 +131,7 @@ The default is `attached`. Pass `-d` to detach:
 ```sh
 mvmctl machine run --flake .      # attached (default); Ctrl-C stops the VM
 mvmctl machine run --flake . -d   # detached; the VM outlives this command
-mvmctl machine wait my-app        # block until the VM exits (attached only)
+mvmctl machine wait my-app        # block until the guest reports ready (hidden verb)
 mvmctl machine stop my-app        # terminate a detached VM
 ```
 
@@ -181,13 +190,12 @@ can hide a slow launch. A backend that cannot meet it is not release-ready.
 | Backend | Cold p50 | Snapshot-cloned p50 | Notes |
 |---|---|---|---|
 | Firecracker (Linux/KVM) | < 200 ms | ≤ 30 ms | Hard prepared-cold requirement; every measured dispatch must pass. |
-| Cloud Hypervisor (Linux/KVM) | < 200 ms | ≤ 50 ms | Tier-1 peer of FC. Adds VFIO/GPU, virtio-gpu, virtio-fs, larger guests. Opt-in via `--hypervisor cloud-hypervisor`. |
-| libkrun / libkrun (Linux/KVM) | < 200 ms | ≤ 30 ms | Cross-platform default; libkrun-backed. |
-| libkrun / libkrun (macOS HVF) | < 200 ms | ≤ 60 ms | Cross-platform default; libkrun-backed. |
-| Apple Virtualization framework | < 200 ms | ≤ 200 ms | Legacy ladder; superseded by libkrun per ADR-013. |
+| HVF (macOS 26+, Apple Silicon) | < 200 ms | ≤ 60 ms | In-house Hypervisor.framework VMM; macOS default. |
+| libkrun (macOS 13-25, Linux/KVM) | < 200 ms | ≤ 30 ms | Third-party in-process VMM; needs the `slp/krun/*` Homebrew trio on macOS. |
+| QEMU (Linux dev/test) | — | — | Opt-in dev/test substrate; no snapshot support. |
 
 The artifact expectation is surfaced on every `mkGuest` derivation as
-`passthru.mvm.expectedBootMs`, while `mvmctl bench prepared-cold` enforces the
+`passthru.mvm.expectedBootMs`, while `mvmctl bench --lane prepared-cold` enforces the
 runtime maximum from raw samples. See [ADR-013 §"Boot-time budget"](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/013-libkrun-libkrun-microvm-nix-pivot.md)
 for the original backend rationale.
 
@@ -229,7 +237,7 @@ PID 1 must be uid 0 (kernel mandate). Everything else can — and by default in 
 | `mvm-guest-agent` | 990 | Vsock RPC handler (never needs root); supervised by `/init` |
 | Entrypoint (workload) | **0 in dev**, **1000 in prod** | Your service or shell |
 
-> **Agent binary status:** as of Phase 1 W6.1.1 the agent at `/usr/local/bin/mvm-guest-agent` is a **stub** — a sh script that logs startup and sleeps. The supervision pattern is real (init forks it under uid 990 before setpriv-exec'ing the entrypoint); the vsock RPC surface lands when W6.1.2 swaps in the cross-compiled Rust binary. Every derivation surfaces `passthru.mvm.agentBinary = "stub" | "real"` so production deployments can refuse to boot a stub image.
+> **Agent binary status:** the agent is the cross-compiled Rust binary; `mkGuest` emits `passthru.mvm.agentBinary = "real"` unconditionally. The `"stub"` value is retained only as something a consumer may refuse — nothing produces it any more.
 
 The dev/prod default split is intentional:
 

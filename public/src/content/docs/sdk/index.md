@@ -7,7 +7,7 @@ description: "The two SDK surfaces mvm exposes: runtime lifecycle APIs and decor
 
 | Surface | Best for | Current status |
 | --- | --- | --- |
-| Runtime SDK | Create a sandbox from application code, run commands, move files, snapshot, and stop it. | Partial in Python and TypeScript; Rust lifecycle client is planned. |
+| Runtime SDK | Create a sandbox from application code, run commands, move files, snapshot, and stop it. | Partial in Python and TypeScript; Rust ships the `MvmClient` lifecycle client in `mvm-client`. |
 | Decorator SDK | Declare a reproducible workload in source code and compile it into `mvm` Workload IR. | Available for build-time declarations. |
 
 The runtime SDK is the imperative surface: your app owns a sandbox lifecycle. The decorator SDK is the declarative surface: your source file declares what should be built and executed.

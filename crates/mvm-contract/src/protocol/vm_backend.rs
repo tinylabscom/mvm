@@ -173,6 +173,16 @@ pub fn decode_host_epoch_cmdline(cmdline: &str) -> Option<u64> {
 /// `None` for no secrets. The cmdline is the only per-VM channel a *fresh* FC
 /// boot has to a sealed guest (no secrets drive attached), and the placeholder
 /// must be minted **before** boot so it can ride here.
+///
+/// **Unwired.** Nothing calls this and no guest parses `mvm.secret_env`; the
+/// `/init` decode the paragraph above describes was never built. What ships
+/// instead injects placeholders on the invoke path, from the env file the
+/// per-VM substitution endpoint mints — which does not reach the fresh sealed
+/// boot this was meant for, so the gap the design names is real and open.
+///
+/// Kept rather than deleted for that reason. It is not evidence of anything
+/// today — the security ledger cited its round-trip test as a witness until
+/// that was found to prove only that an encoder is self-consistent.
 pub fn encode_secret_env_cmdline(pairs: &[(String, String)]) -> Option<String> {
     if pairs.is_empty() {
         return None;
@@ -475,6 +485,19 @@ pub struct VmCapabilities {
     /// non-prod, non-sealed; the virtiofs-root dev path carries a weaker
     /// integrity contract and does **not** witness the verified-boot claim.
     pub virtiofs_root: bool,
+    /// Backend can attach a live host **directory share** — the `--mount`
+    /// flag's `HOST:GUEST:ro` volumes — as a virtio-fs device.
+    ///
+    /// Distinct from [`virtiofs_root`](Self::virtiofs_root), which replaces the
+    /// root filesystem; this one adds a share alongside it. A backend can have
+    /// either without the other.
+    ///
+    /// Declared here, and not only on the driver, because the caller that has
+    /// to refuse a `--mount` holds an `AnyBackend` and never sees the driver.
+    /// Without it the refusal could only happen deep inside the runner's start,
+    /// after the image had been resolved and the VM directory built — work
+    /// discarded to reach a decision that was knowable from the arguments.
+    pub directory_shares: bool,
     /// Which resource dimensions this backend can actually bound. Declared
     /// separately from what a caller requests so a refusal can name the gap.
     #[serde(default)]

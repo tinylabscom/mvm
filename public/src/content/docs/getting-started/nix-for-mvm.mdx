@@ -34,13 +34,10 @@ Here's the end result — don't worry about understanding it yet:
         name = "hello";
         packages = [ pkgs.python3 pkgs.curl ];
 
-        services.hello = {
-          preStart = ''
-            mkdir -p /tmp/www
-            echo '<h1>Hello from mvm!</h1>' > /tmp/www/index.html
-          '';
-          command = "${pkgs.python3}/bin/python3 -m http.server 8080 --directory /tmp/www";
-        };
+        entrypoint.command = [
+          "/bin/sh" "-c"
+          "mkdir -p /tmp/www; echo '<h1>Hello from mvm!</h1>' > /tmp/www/index.html; exec ${pkgs.python3}/bin/python3 -m http.server 8080 --directory /tmp/www"
+        ];
 
         healthChecks.hello = {
           healthCmd = "${pkgs.curl}/bin/curl -sf http://localhost:8080/";
@@ -159,7 +156,7 @@ Let's unpack what's new here:
 | ARM Linux (Raspberry Pi, Graviton) | `"aarch64-linux"` |
 | Intel/AMD Mac or Linux | `"x86_64-linux"` |
 
-The OS is always `linux` — even when building on macOS — because the VM image runs Linux inside Firecracker. You're cross-compiling for the guest, not building for your host.
+The OS is always `linux` — even when building on macOS — because the VM image runs Linux inside the microVM, whichever backend boots it (Firecracker on Linux/KVM, HVF or libkrun on Apple Silicon). You're cross-compiling for the guest, not building for your host.
 
 When you see `${system}` later in the flake (e.g., `packages.${system}.default` or `mvm.lib.${system}.mkGuest`), Nix substitutes the string at evaluation time. It's just dynamic attribute access — `packages.${system}.default` becomes `packages.aarch64-linux.default`.
 :::
@@ -171,10 +168,13 @@ Inside the `outputs`, you tell Nix what to build. For mvm, that means calling `m
 ```nix "mkGuest"
 packages.${system}.default = mvm.lib.${system}.mkGuest {
   name = "hello";
+  entrypoint.command = [ "/bin/sh" "-c" "echo hello; exec sleep infinity" ];
 };
 ```
 
 `mkGuest` is the mvm function that builds a complete microVM image. It handles the kernel, init system, guest agent, networking, and drive mounting — you just describe what you want inside the VM.
+
+`entrypoint` is **required** — there is no default. It must declare exactly one of `shell`, `command`, or `services`; `mkGuest` throws at evaluation time otherwise, so a flake that omits it never even reaches a build. `command` is the sealed (production) form and `shell` is the dev-tier form. `services` is declared but unimplemented — see the note in Step 6.
 
 **`packages.${system}.default`** — this is the standard Nix way to declare a build output. `mvmctl machine build --flake .` looks for this by default.
 
@@ -186,6 +186,7 @@ A bare VM isn't very useful. Use `packages` to install software into the image:
 mvm.lib.${system}.mkGuest {
   name = "hello";
   packages = [ pkgs.python3 pkgs.curl ];
+  entrypoint.command = [ "/bin/sh" "-c" "echo hello; exec sleep infinity" ];
 };
 ```
 
@@ -220,30 +221,40 @@ nix search nixpkgs "node.*22" 2>/dev/null
 Nix stores every package in `/nix/store/hash-name/`. There's no global `PATH`. Using `pkgs.python3` tells Nix exactly which package to include — this is what makes builds reproducible. The same flake always produces the same image, on any machine.
 :::
 
-## Step 6: Add a service
+## Step 6: Run something
 
-A VM image with packages but no running process just boots and sits idle. Add a service:
+A VM image with packages but no running process just boots and sits idle. The
+entrypoint is what runs:
 
-```nix "services.hello"
+```nix "entrypoint.command"
 mvm.lib.${system}.mkGuest {
   name = "hello";
   packages = [ pkgs.python3 pkgs.curl ];
 
-  services.hello = {
-    preStart = ''
-      mkdir -p /tmp/www
-      echo '<h1>Hello from mvm!</h1>' > /tmp/www/index.html
-    '';
-    command = "${pkgs.python3}/bin/python3 -m http.server 8080 --directory /tmp/www";
-  };
+  entrypoint.command = [
+    "/bin/sh" "-c"
+    "mkdir -p /tmp/www; echo '<h1>Hello from mvm!</h1>' > /tmp/www/index.html; exec ${pkgs.python3}/bin/python3 -m http.server 8080 --directory /tmp/www"
+  ];
 };
 ```
 
-`services.hello` declares a long-running process. mvm's init system starts it at boot and restarts it if it crashes.
+`entrypoint.command` is an argv list that runs as PID 1. Do any setup first and
+`exec` the long-running process last, so PID 1 stays alive — a PID 1 that exits
+panics the kernel.
 
-- **`preStart`** creates a directory and writes an HTML file before the service starts.
-- **`command`** is the long-running process. It serves the HTML on port 8080.
 - **`"${pkgs.python3}/bin/python3"`** — Nix resolves this to the full `/nix/store/...` path at build time. You never hardcode paths — Nix handles it.
+
+:::caution[`services` is declared but not implemented]
+mkGuest accepts a `services.<name>` attribute (and an `entrypoint.services`
+form), but **the multi-service supervisor is not wired**. Nothing starts,
+supervises, or restarts a `services` entry: a top-level `services` block is only
+recorded in `passthru.mvm` and warned about at eval time, and
+`entrypoint.services` prints "not yet wired" and drops the guest into a recovery
+shell. The `preStart` and `env` keys those blocks take are part of the same
+unimplemented shape and have no effect today. Keep your workload in
+`entrypoint.command` (or `entrypoint.shell` for a dev image) until the
+supervisor lands.
+:::
 
 ## Step 7: Add a health check
 
@@ -256,7 +267,7 @@ healthChecks.hello = {
 };
 ```
 
-The guest agent runs this command every 5 seconds. Exit code 0 means healthy. The name (`hello`) should match your service name.
+The guest agent runs this command every 5 seconds. Exit code 0 means healthy. The attribute name (`hello`) becomes the probe's name — mkGuest renders each entry to `/etc/mvm/probes.d/<name>.json`, and the agent scans that directory at boot. Only `healthCmd` (required), `healthIntervalSecs` (default 30), and `healthTimeoutSecs` (default 10) are read; there is no `startupGraceSecs` key.
 
 ## Step 8: Build, run, and verify
 
@@ -312,93 +323,108 @@ Volumes let you pass files from your host into the microVM at boot — config fi
 ```bash
 # Mount host directories into the VM
 mvmctl machine run --flake . --name hello --port 8080:8080 \
-    --mount ./config:/mnt/config \
-    --mount ./secrets:/mnt/secrets \
-    --mount ./data:/mnt/data:1024
+    --mount ./config:/data/config \
+    --mount ./disk.img:/data/store:1024:rw
 ```
+
+The flag is `--mount`, with `--volume` as an alias. There is no short form —
+`-v` is the global verbosity counter, not a mount flag.
+
+**Guest mount paths must live under `/data` or `/work`.** Those are the only
+allow-roots. `/mnt` is deliberately excluded: `/init` mounts mvm's own read-only
+config and secret drives at `/mnt/config` and `/mnt/secrets` before any user
+volume is attached, and the mount policy refuses a share that would sit inside
+or shadow a runtime-owned path.
 
 Inside the guest, the files appear at the mount paths:
 
-| Mount | Access | Use case |
-|-------|--------|----------|
-| `./config:/mnt/config` | Read-only | App configuration |
-| `./secrets:/mnt/secrets` | Read-only | API keys, tokens |
-| `./data:/mnt/data:1024` | **Read-write** | Database files, logs, uploads |
+| Mount | Access | Kind |
+|-------|--------|------|
+| `./config:/data/config` | Read-only (default) | Live host-directory share |
+| `./config:/data/config:rw` | Read-write | Live host-directory share |
+| `./disk.img:/data/store:1024` | Read-only (default) | Persistent ext4 disk image |
+| `./disk.img:/data/store:1024:rw` | Read-write | Persistent ext4 disk image |
 
-Config and secrets are read-only by design — you don't want your app accidentally overwriting its own API keys. For data your service needs to write to (databases, logs, user uploads), use a **sized volume** with the three-part format `host:guest:sizeMB`:
+**Every mount is read-only unless you write `:rw`** — writing from a
+(potentially untrusted) guest to a host path is an explicit grant, not a
+default. `:rw` needs `--profile dev` or `--profile permissive`; a *transient*
+run's share is read-only under every profile.
 
-```bash
-# Read-only config + read-write 1GB data volume
-mvmctl machine run --flake . --name hello --port 8080:8080 \
-    --mount ./config:/mnt/config \
-    --mount ./data:/mnt/data:1024
-```
+The three-part form `host:guest:SIZE` selects a **disk image**, not a directory
+share: the host path is a file mvm creates and attaches as virtio-blk, sized in
+MB. Two-part `host:guest` is a live directory share over virtio-fs. Add `:rw`
+after the size for a writable disk.
 
-Your service can read config and write data at runtime — no rebuild needed:
+Your entrypoint can read config and write data at runtime — no rebuild needed:
 
 ```nix
-services.my-api = {
-  preStart = ''
-    # Data dir is read-write — create subdirs as needed
-    mkdir -p /mnt/data/logs
-  '';
-  command = "${pkgs.python3}/bin/python3 /app/server.py";
-  env = {
-    # Read config directly from the mounted volume
-    CONFIG_PATH = "/mnt/config/app.json";
-    LOG_DIR = "/mnt/data/logs";
-  };
-};
+entrypoint.command = [
+  "/bin/sh" "-c"
+  ''
+    mkdir -p /data/store/logs
+    export CONFIG_PATH=/data/config/app.json
+    export LOG_DIR=/data/store/logs
+    exec ${pkgs.python3}/bin/python3 /app/server.py
+  ''
+];
 ```
 
-This is the mvm pattern for separating **what runs** (baked into the image) from **how it's configured** (mounted at boot). The same image works across environments — only the mounted files change. Data volumes persist across restarts.
+This is the mvm pattern for separating **what runs** (baked into the image) from **how it's configured** (mounted at boot). The same image works across environments — only the mounted files change. Disk volumes persist across restarts.
 
 See [Config & Secrets](/guides/config-secrets/) and [Filesystem & Drives](/reference/filesystem/) for the full guide.
 
-## Step 10: Add environment variables and setup scripts
+## Step 10: Add environment variables and setup steps
 
-Real services often need configuration. Use `env` and `preStart`:
+Real workloads often need configuration. Because `entrypoint.command` is a plain
+argv list, set it up in the shell you exec into:
 
-```nix "env"
-services.my-api = {
-  preStart = ''
+```nix "entrypoint.command"
+entrypoint.command = [
+  "/bin/sh" "-c"
+  ''
     mkdir -p /tmp/data
     echo "starting up..."
-  '';
 
-  command = "${pkgs.python3}/bin/python3 /app/server.py";
+    export PORT=8080
+    export LOG_LEVEL=info
 
-  env = {
-    PORT = "8080";
-    LOG_LEVEL = "info";
-  };
-};
+    exec ${pkgs.python3}/bin/python3 /app/server.py
+  ''
+];
 ```
 
-- **`env`** — key-value pairs injected as environment variables into the service process.
-- **`preStart`** — runs once as root before the service starts. Use it for directory setup, file permissions, etc.
+- **setup first, `exec` last** — anything before the `exec` runs once as root at boot; the `exec` replaces the shell so your program becomes PID 1.
 - **`''...''`** — multi-line strings in Nix use two single quotes, not backticks or double quotes.
 
+(The `env` and `preStart` keys you may have seen belong to the `services` shape,
+which is unimplemented — see the note in Step 6. They are silently ignored.)
+
 :::note[Can I use a `.env` file?]
-The `env` block above is for values you're comfortable baking into the image. For secrets or per-environment config, mount a `.env` file at boot instead:
+Values baked into the image go in the `export` lines above. For per-environment config, mount a `.env` file at boot instead:
 
 ```bash
-mvmctl machine run --flake . -v ./secrets:/mnt/secrets
+mvmctl machine run --flake . --mount ./config:/data/config
 ```
 
-Then source it in `preStart`:
+Then source it before the `exec`:
 
 ```nix
-preStart = ''
-  if [ -f /mnt/secrets/.env ]; then
-    set -a
-    . /mnt/secrets/.env
-    set +a
-  fi
-'';
+entrypoint.command = [
+  "/bin/sh" "-c"
+  ''
+    if [ -f /data/config/.env ]; then
+      set -a
+      . /data/config/.env
+      set +a
+    fi
+    exec ${pkgs.python3}/bin/python3 /app/server.py
+  ''
+];
 ```
 
-This way the same image works across dev/staging/prod — only the mounted files change. See [Config & Secrets](/guides/config-secrets/) for more.
+Do **not** ship real credentials this way — mvm's secrets model keeps raw secret
+values out of the guest entirely and substitutes them host-side. See
+[Config & Secrets](/guides/config-secrets/) for that path.
 :::
 
 ## Common recipes
@@ -406,49 +432,51 @@ This way the same image works across dev/staging/prod — only the mounted files
 ### Python web app
 
 ```nix
-services.api = {
-  command = "${pkgs.python3}/bin/python3 -m gunicorn app:app -b 0.0.0.0:8080";
-};
+entrypoint.command = [
+  "${pkgs.python3}/bin/python3" "-m" "gunicorn" "app:app" "-b" "0.0.0.0:8080"
+];
 ```
 
 ### Node.js server
 
 ```nix
-services.app = {
-  command = "${pkgs.nodejs}/bin/node /app/server.js";
-  env = { NODE_ENV = "production"; PORT = "3000"; };
-};
+entrypoint.command = [
+  "/bin/sh" "-c"
+  ''
+    export NODE_ENV=production PORT=3000
+    exec ${pkgs.nodejs}/bin/node /app/server.js
+  ''
+];
 ```
 
 ### Static file server
 
 ```nix
-services.www = {
-  preStart = ''
+entrypoint.command = [
+  "/bin/sh" "-c"
+  ''
     mkdir -p /tmp/www
     echo '<h1>Hello!</h1>' > /tmp/www/index.html
-  '';
-  command = "${pkgs.python3}/bin/python3 -m http.server 8080 --directory /tmp/www";
-};
+    exec ${pkgs.python3}/bin/python3 -m http.server 8080 --directory /tmp/www
+  ''
+];
 ```
 
-### Multiple services in one VM
+### Multiple processes in one VM
 
-A single `mkGuest` call can define multiple services — they all run inside the same VM, supervised by the init system. This is useful for co-locating a service with its dependencies (e.g., an API server + Redis):
+There is no supervisor yet, so a `services` block will not run anything (see the
+note in Step 6). If you genuinely need a co-located dependency today, start it
+from the entrypoint yourself and keep the foreground process as PID 1:
 
 ```nix "mkGuest"
 mvm.lib.${system}.mkGuest {
   name = "my-stack";
   packages = [ pkgs.python3 pkgs.redis pkgs.curl ];
 
-  services.redis = {
-    command = "${pkgs.redis}/bin/redis-server --port 6379";
-  };
-
-  services.api = {
-    command = "${pkgs.python3}/bin/python3 /app/server.py";
-    env = { REDIS_URL = "redis://localhost:6379"; };
-  };
+  entrypoint.command = [
+    "/bin/sh" "-c"
+    "${pkgs.redis}/bin/redis-server --port 6379 --daemonize yes; export REDIS_URL=redis://localhost:6379; exec ${pkgs.python3}/bin/python3 /app/server.py"
+  ];
 
   healthChecks.api = {
     healthCmd = "${pkgs.curl}/bin/curl -sf http://localhost:8080/health";
@@ -457,13 +485,17 @@ mvm.lib.${system}.mkGuest {
 };
 ```
 
+Nothing restarts the backgrounded process if it dies — that is exactly what the
+missing supervisor would provide. Prefer one workload per microVM until it
+lands.
+
 ## What happens when you build
 
 When `mvmctl machine build --flake .` runs:
 
 1. Nix reads your `flake.nix` and resolves all inputs
 2. It builds your packages and services into a root filesystem (ext4 image)
-3. It bundles a pre-built Linux kernel tuned for Firecracker
+3. It bundles a pre-built slim Linux kernel for the selected backend
 4. The result is cached — rebuilds skip unchanged steps
 
 The output is a kernel (`vmlinux`) and rootfs (`rootfs.ext4`) that any mvm backend can boot.

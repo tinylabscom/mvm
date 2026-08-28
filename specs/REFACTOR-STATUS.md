@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-27
+Last updated: 2026-08-28
 
 ## In progress
 
@@ -20,11 +20,13 @@ Last updated: 2026-08-27
       build, workspace tests/check/doctests, and Clippy are green; merge
       delivery remains.
 
-- [ ] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
-      `specs/plans/2026-08-27-kernel-6-12-106.md`.
-      Both kernel consumers use the kernel.org-verified archive and SRI hash;
-      local synchronization, freshness, workspace, and Clippy gates are green.
-      Linux Nix PR checks and merge delivery remain.
+- [ ] **Cloudflare Pages cutover.**
+      `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.
+      The existing Pages project and account now have a checked-in Wrangler configuration,
+      reproducible local/CI deployment commands, an account/project preflight,
+      a shared and tested complete-WebLinux-bundle gate, and a verified
+      deployment.
+      The production hostname still needs to be attached to the project.
 
 - [ ] **SDK surface contract repairs — issues #2902 and #2906.**
       `specs/plans/2026-08-26-sdk-surface-contract-repairs.md`.
@@ -33,6 +35,12 @@ Last updated: 2026-08-27
       delivery remains.
 
 ## Completed
+
+- [x] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
+      `specs/plans/2026-08-27-kernel-6-12-106.md`.
+      Both kernel consumers use the kernel.org-verified archive and SRI hash;
+      local and merge-queue gates passed, PR #2939 merged, and issue #2931
+      closed through the PR link.
 
 - [x] **Workload address public API rename.** The unused UOR-ADDR pilot is now
       exposed as `mvm_core::{WorkloadAddress, WorkloadAddressError,
@@ -71,6 +79,13 @@ for detailed scope and acceptance criteria.
       agent variables and the writable workload `HOME` retain their established
       semantics. An unreadable image config degrades to the prior behavior. See
       `specs/sprint/delivery/2951-ad-hoc-exec-image-environment.md`.
+
+- [x] **Issue #2930 — FlowMux HTTPS live-client repair.** The seven live HTTPS
+      egress witnesses use the pinned multi-arch `curlimages/curl:8.21.0`
+      client so HTTPS is carried through an HTTP `CONNECT` tunnel. The
+      fail-closed refusal of plaintext HTTPS absolute-form requests is
+      preserved and protected by a repository regression. See
+      `specs/sprint/delivery/egress-https-absolute-uri-refusal.md`.
 
 - [x] **Issue #2887 — guest RPC refusals and SDK live-profile propagation.**
       Filesystem and process unary calls now preserve universal policy

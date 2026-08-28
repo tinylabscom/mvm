@@ -26,7 +26,7 @@ mvmctl build kernel build --all --source auto
 
 Flags:
 
-- `--which {builder,workload,workload-sizeopt}` — which kernel (default `builder`).
+- `--which {builder,workload}` — which kernel (default `builder`).
 - `--all` — build both variants.
 - `--source {compile,download,auto}` — where the kernel comes from (default
   `compile`, unless `--kernel-source` or `MVM_KERNEL_SOURCE` is set).
@@ -34,13 +34,14 @@ Flags:
 - `--boot-check` — after building the default workload kernel, boot a throwaway
   VM on it and confirm the in-guest agent answers over vsock.
 
-Workload kernels ship with `CONFIG_CC_OPTIMIZE_FOR_SIZE=y`. The
-`workload-sizeopt` selector remains as a compatibility alias for the measured
-size-oriented variant; it resolves to the same config as `workload`.
+Workload kernels ship with `CONFIG_CC_OPTIMIZE_FOR_SIZE=y`. There is no
+`workload-sizeopt` selector on `--which` — the only two values are `builder`
+and `workload`. (A `workload-sizeopt-metrics` *flake output* still exists as a
+compatibility alias; see below.)
 
 The compiled or downloaded kernel is cached at
 `~/.mvm/cache/builder-vm/<arch>/kernels/<variant>/vmlinux` and reused by every
-later `dev up`.
+later run that needs it. (There is no `mvmctl dev` command — it was removed.)
 
 When the kernel was compiled locally, the cache directory also carries a
 resolved `config` sidecar and `kernel-metrics-<arch>.json`, so you can inspect

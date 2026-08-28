@@ -40,7 +40,10 @@ preview claim 17 in the [claims ledger](/security/ci-claims/).
 ## 3. Which network destinations can it reach?
 
 Only the ones the admitted policy names. Egress defaults to deny-all, and an
-unrestricted policy is an explicit, warned opt-in — never a default.
+unrestricted policy is not selectable at all: the one resolution funnel every
+dispatched verb goes through yields deny-all, the `dev` preset via `--net`, or
+an explicit `--allow-host` allow-list. Nothing warns about unrestricted egress
+because nothing can request it.
 *Claim 10.*
 
 ## 4. Can it discover or steal credentials?
