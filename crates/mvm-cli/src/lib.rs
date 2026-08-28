@@ -23,6 +23,11 @@ pub mod watch;
 
 pub use commands::run;
 
+/// Launch-budget contract consumed by external validation harnesses.
+pub mod launch_contract {
+    pub use crate::commands::vm::phase_timing::{WARM_START_MAX_MS, within_warm_start_slo_ms};
+}
+
 /// Boot-policy contract surface for the dev-only conformance harness, which
 /// drives the real effective-initrd decision instead of re-stating it in
 /// Gherkin steps. Not a general-purpose API; other consumers must not take a
