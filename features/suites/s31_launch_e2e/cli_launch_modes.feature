@@ -75,7 +75,10 @@ Feature: every README-documented CLI launch mode boots a real guest
     And the guest printed "/proc/self/fd"
     And the guest control plane came up
 
-  @live
+  # The one scenario here that is *about* `--mount` rather than merely using it
+  # to deliver a file. libkrun and HVF both serve a virtio-fs share; Firecracker
+  # has no such device and refuses the volume before boot.
+  @live @dir_share
   Scenario: --mount shares a host directory the workload can read
     When I launch "machine run --image alpine --mount .:/work -- ls /work/README.md"
     Then the launch succeeds

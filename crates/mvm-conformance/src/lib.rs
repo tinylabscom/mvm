@@ -76,6 +76,17 @@ pub const PERF_BUDGET_TAG: &str = "perf_budget";
 /// ignores `ALL_PROXY` and sends the absolute-URI form the proxy refuses rather
 /// than forward in cleartext) cannot satisfy it.
 pub const TLS_TUNNEL_CLIENT_TAG: &str = "tls_tunnel_client";
+/// A scenario that shares a live host directory into the guest over virtio-fs.
+/// libkrun and the in-house HVF VMM both serve one; Firecracker has no virtio-fs
+/// device at all and refuses a `DirShare` volume before boot. Declared rather
+/// than probed, for the same reason as
+/// [`SNAPSHOT_TAG`] — deciding it here would mean re-deriving backend
+/// auto-selection, a copy that drifts silently.
+///
+/// A refusal-shaped scenario needs this tag as much as a success-shaped one:
+/// the share is refused with the same exit code the scenario is asserting, so
+/// without the gate it passes while witnessing nothing.
+pub const DIR_SHARE_TAG: &str = "dir_share";
 
 /// Host capabilities a scenario may require, probed once by the harness.
 ///
@@ -113,6 +124,10 @@ pub struct RuntimeCaps {
     /// `machine checkpoint create --class vm-full` and the pause/resume
     /// round-trip can succeed rather than refusing by capability.
     pub memory_snapshot: bool,
+    /// The active backend serves a live host-directory share (virtio-fs), so a
+    /// scenario passing `--mount` reaches a guest instead of being refused
+    /// before boot.
+    pub dir_share: bool,
 }
 
 /// Decide whether a scenario with `tags` should run given the host `caps`.
@@ -150,6 +165,8 @@ pub enum ScenarioGate {
     NeedsWorkloadKernel,
     /// The backend cannot capture a full-VM memory snapshot on this host.
     NeedsMemorySnapshot,
+    /// The active backend serves no virtio-fs directory share.
+    NeedsDirShare,
     /// No prebuilt guest-binary directory was named.
     NeedsGuestBinDir,
     /// The SDK sidecar image is not in the cache.
@@ -194,6 +211,9 @@ pub fn scenario_gate(tags: &[String], caps: RuntimeCaps) -> ScenarioGate {
     }
     if tagged(SNAPSHOT_TAG) && !caps.memory_snapshot {
         return ScenarioGate::NeedsMemorySnapshot;
+    }
+    if tagged(DIR_SHARE_TAG) && !caps.dir_share {
+        return ScenarioGate::NeedsDirShare;
     }
     if tagged(GUEST_BINS_TAG) && !caps.guest_bin_dir {
         return ScenarioGate::NeedsGuestBinDir;
@@ -241,6 +261,11 @@ impl ScenarioGate {
             Self::NeedsWorkloadKernel => Some(
                 "need a prebuilt workload kernel (MVM_BDD_WORKLOAD_KERNEL, or one \
                  in the host builder-VM cache)",
+            ),
+            Self::NeedsDirShare => Some(
+                "need MVM_BDD_DIR_SHARE=1 on a host whose active backend serves \
+                 virtio-fs directory shares (libkrun and HVF do; Firecracker has \
+                 no virtio-fs device and refuses --mount before boot)",
             ),
             Self::NeedsMemorySnapshot => Some(
                 "need MVM_BDD_SNAPSHOT=1 on a host whose active backend reports \
@@ -347,6 +372,7 @@ mod tests {
         perf_budget_host: false,
         tls_tunnel_client: false,
         memory_snapshot: false,
+        dir_share: false,
         workload_kernel: false,
     };
     const ALL: RuntimeCaps = RuntimeCaps {
@@ -359,8 +385,23 @@ mod tests {
         perf_budget_host: true,
         tls_tunnel_client: true,
         memory_snapshot: true,
+        dir_share: true,
         workload_kernel: true,
     };
+
+    #[test]
+    fn dir_share_scenario_skips_where_the_backend_serves_no_share() {
+        let gate = scenario_gate(
+            &tags(&["live", "dir_share"]),
+            RuntimeCaps {
+                dir_share: false,
+                ..ALL
+            },
+        );
+        assert_eq!(gate, ScenarioGate::NeedsDirShare);
+        assert!(gate.reason().is_some(), "a skip must name what is missing");
+        assert!(scenario_should_run(&tags(&["live", "dir_share"]), ALL));
+    }
 
     #[test]
     fn bundle_scenario_skips_without_a_fixture() {
@@ -392,6 +433,7 @@ mod tests {
                 perf_budget_host: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
+                dir_share: false,
                 workload_kernel: false,
                 ..ALL
             },
@@ -415,6 +457,7 @@ mod tests {
                 perf_budget_host: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
+                dir_share: false,
                 ..ALL
             },
         ));
@@ -431,6 +474,7 @@ mod tests {
                 perf_budget_host: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
+                dir_share: false,
                 ..ALL
             },
         );
@@ -533,6 +577,7 @@ mod tests {
                 perf_budget_host: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
+                dir_share: false,
                 workload_kernel: false,
             },
         ));
@@ -552,6 +597,7 @@ mod tests {
                 perf_budget_host: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
+                dir_share: false,
                 workload_kernel: false,
             },
         ));
@@ -573,6 +619,7 @@ mod tests {
                 perf_budget_host: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
+                dir_share: false,
                 workload_kernel: false,
             },
         ));
@@ -589,6 +636,7 @@ mod tests {
                 perf_budget_host: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
+                dir_share: false,
                 workload_kernel: false,
             },
         ));
@@ -612,6 +660,7 @@ mod tests {
                 perf_budget_host: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
+                dir_share: false,
                 workload_kernel: false,
             },
             RuntimeCaps {
@@ -624,6 +673,7 @@ mod tests {
                 perf_budget_host: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
+                dir_share: false,
                 workload_kernel: false,
             },
             RuntimeCaps {
@@ -636,6 +686,7 @@ mod tests {
                 perf_budget_host: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
+                dir_share: false,
                 workload_kernel: false,
             },
             RuntimeCaps {
@@ -648,6 +699,7 @@ mod tests {
                 perf_budget_host: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
+                dir_share: false,
                 workload_kernel: true,
             },
             RuntimeCaps {
@@ -660,6 +712,7 @@ mod tests {
                 perf_budget_host: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
+                dir_share: false,
                 workload_kernel: true,
             },
         ];
@@ -698,6 +751,7 @@ mod tests {
             perf_budget_host: false,
             tls_tunnel_client: false,
             memory_snapshot: false,
+            dir_share: false,
             workload_kernel: false,
         };
         let live_only = RuntimeCaps {
@@ -710,6 +764,7 @@ mod tests {
             perf_budget_host: false,
             tls_tunnel_client: false,
             memory_snapshot: false,
+            dir_share: false,
             workload_kernel: false,
         };
         let bootable = RuntimeCaps {
@@ -722,6 +777,7 @@ mod tests {
             perf_budget_host: false,
             tls_tunnel_client: false,
             memory_snapshot: false,
+            dir_share: false,
             workload_kernel: false,
         };
 
@@ -778,6 +834,7 @@ mod tests {
                     perf_budget_host: false,
                     tls_tunnel_client: false,
                     memory_snapshot: false,
+                    dir_share: false,
                     workload_kernel: false,
                 },
                 true,

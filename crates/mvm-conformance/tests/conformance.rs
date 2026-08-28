@@ -222,6 +222,7 @@ fn probe_caps() -> RuntimeCaps {
         perf_budget_host: std::env::var_os("MVM_BDD_PERF_BUDGET").is_some(),
         tls_tunnel_client: std::env::var_os("MVM_BDD_TLS_CLIENT").is_some(),
         memory_snapshot: memory_snapshot_supported(),
+        dir_share: dir_share_supported(),
     }
 }
 
@@ -279,6 +280,17 @@ fn guest_bin_dir_available() -> bool {
 /// `mvmctl doctor` prints the matrix; a host whose active backend reports
 /// `save-restore` sets `MVM_BDD_SNAPSHOT=1`. Firecracker reports `unsupported`,
 /// which is why the Linux lane leaves it unset.
+/// Whether the active backend serves a live host-directory share (virtio-fs).
+///
+/// Declared by the operator rather than probed, matching
+/// `memory_snapshot_supported`: the answer depends on which backend a launch
+/// would actually select, and re-deriving that here would be a copy that
+/// drifts. libkrun and HVF serve a share; Firecracker has no virtio-fs device
+/// and refuses a `DirShare` volume before boot.
+fn dir_share_supported() -> bool {
+    std::env::var_os("MVM_BDD_DIR_SHARE").is_some()
+}
+
 fn memory_snapshot_supported() -> bool {
     std::env::var_os("MVM_BDD_SNAPSHOT").is_some()
 }
