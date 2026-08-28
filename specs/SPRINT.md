@@ -10,6 +10,15 @@
 
 ## In progress
 
+- [ ] **Linux 6.12.107 synchronized kernel pin — issue #2971.**
+      `specs/plans/2026-08-28-kernel-6-12-107.md`.
+      The custom workload/builder kernel and libkrunfw firmware build now use
+      the same kernel.org-verified Linux 6.12.107 archive and SRI hash.
+      The archive digest, structural synchronization suite, sprint/plan gates,
+      and workspace Clippy are green. The macOS workspace run reaches only the
+      independently tracked #2973 failure. Linux Nix builds and merge delivery
+      remain.
+
 - [ ] **Recorded-backend pause and resume — issue #2929.**
       `specs/plans/2026-08-27-recorded-backend-pause-resume.md`.
       Existing-machine lifecycle operations resolve the VMM that owns the live
