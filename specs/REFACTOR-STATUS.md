@@ -20,6 +20,13 @@ Last updated: 2026-08-28
       build, workspace tests/check/doctests, and Clippy are green; merge
       delivery remains.
 
+- [ ] **Issue #2942 — warm-launch gate contract repair.**
+      `specs/plans/2026-08-27-warm-launch-gate-contract.md`.
+      The live warm-residency witness now consumes the CLI's strict sub-300 ms
+      hard ceiling rather than a prepared-cold 200 ms literal. Focused boundary
+      and BDD compilation checks, workspace tests, check, Clippy, formatting,
+      and repository gates are green; merge-queue delivery remains.
+
 - [ ] **Cloudflare Pages cutover.**
       `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.
       The existing Pages project and account now have a checked-in Wrangler configuration,
