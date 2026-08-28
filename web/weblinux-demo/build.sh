@@ -34,13 +34,14 @@ fi
 mkdir -p "$DEST_DIR"
 
 # Copy the pack first, then overlay the demo source files so the demo's
-# index.html, demo.js, and worker.js take precedence over any files that
-# happen to share a name in the pack.
+# index.html, demo.js, terminal-input.mjs, and worker.js take precedence over
+# any files that happen to share a name in the pack.
 cp -R "$PACK_DIR/." "$DEST_DIR/"
 chmod -R u+w "$DEST_DIR"
 rm -f "$DEST_DIR/index.html"
 cp "$SCRIPT_DIR/index.html" "$DEST_DIR/index.html"
 cp "$SCRIPT_DIR/demo.js" "$DEST_DIR/demo.js"
+cp "$SCRIPT_DIR/terminal-input.mjs" "$DEST_DIR/terminal-input.mjs"
 cp "$SCRIPT_DIR/worker.js" "$DEST_DIR/worker.js"
 
 # Cloudflare Pages rejects individual files larger than 25 MiB. The QEMU

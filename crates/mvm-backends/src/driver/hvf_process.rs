@@ -1,18 +1,15 @@
-//! `HvfBackend` — the `VmBackend` impl for the raw-HVF macOS path.
+//! Host-process mechanics for the HVF backend.
 //!
-//! Lifecycle mirrors the other detached-supervisor backend (libkrun): `start`
-//! builds an [`HvfSupervisorConfig`] from the `VmStartConfig`, spawns
-//! `mvm-hvf-supervisor` with the JSON on stdin, and waits for it to write its PID
-//! file (boot confirmed). `stop` signals that PID; `status` probes it with
-//! `kill(pid, 0)`; `list` walks `~/.mvm/vms/*/hvf.pid`; `logs` reads the captured
-//! `console.log`. The guest boots through `boot_kernel` → the unified `vmm::run`
-//! loop inside the supervisor.
+//! Not a `VmBackend` impl — the lifecycle that used to live beside these
+//! helpers moved to `mvm-runtime`'s workload runner, and the `VmmDriver` half
+//! is [`super::hvf`]. What is left here is everything the host does *around*
+//! the guest: resolve `mvm-hvf-supervisor`, wait on its PID file, enumerate the
+//! console sockets and workload disks, and answer whether this platform can run
+//! HVF at all.
 //!
-//! Transient by default (VM life = workload life): the guest runs its entrypoint
-//! and reports its exit code over the workload-exit vsock port, which ends the run;
-//! `wait` returns that code. A persistent (`-d`) VM instead runs until `stop`. With
-//! vsock + optional virtio-blk. Not yet: pause/resume/snapshot, and vsock-mediated
-//! networking/egress.
+//! The file was called `hvf_legacy` while the backend split was in progress.
+//! Nothing in it is legacy: every function has a live caller on the macOS
+//! default path.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

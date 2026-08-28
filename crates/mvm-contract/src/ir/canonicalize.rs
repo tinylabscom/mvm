@@ -6,7 +6,7 @@
 //! must be extended to perform JCS number canonicalization.
 //!
 //! Object keys are ordered by Unicode scalar value (a `str` sort). This matches
-//! the `serde_jcs` realization mvm-core hashes for its semantic address — which
+//! the `serde_jcs` realization mvm-core hashes for its workload address — which
 //! also orders by byte/scalar value — but diverges from the UTF-16 code-unit
 //! order true RFC 8785 mandates for astral-plane (>U+FFFF) keys. The two agree
 //! for every code point up to U+FFFF; the divergence class is documented and

@@ -108,7 +108,7 @@ We **document** this rather than add a runtime guard, deliberately:
 3. No external, spec-strict RFC 8785 verifier consumes Chain B today. The only
    cross-implementation verifier in the tree is Chain A's browser mirror, which
    uses declaration-order and is unaffected.
-4. The same scalar-value key ordering is used workspace-wide — `semantic_address`,
+4. The same scalar-value key ordering is used workspace-wide — `workload_address`,
    `ir_hash`, `broker_control`, and the IR `env`/`extensions` maps — un-guarded,
    and is already pinned in `mvm-core::canonicalizer_equivalence`. Guarding only
    this one chain would be inconsistent.

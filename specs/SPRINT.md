@@ -18,6 +18,14 @@
       intact; focused and workspace validation remain before merge-queue
       delivery.
 
+- [x] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
+      `specs/plans/2026-08-27-kernel-6-12-106.md`.
+      The custom workload/builder kernel and libkrunfw firmware build now use
+      the same kernel.org-verified Linux 6.12.106 archive and SRI hash.
+      Structural synchronization and freshness tests, workspace check/tests,
+      zero-warning Clippy, and merge-queue gates passed; PR #2939 merged and
+      closed issue #2931.
+
 - [ ] **Admission cache durability boundary.**
       `specs/plans/2026-08-26-admission-cache-durability.md`.
       Preserve the chain-signed admission record's fail-closed durability
@@ -34,8 +42,10 @@
       latest semantic-versioned pack and verifies its keyless release identity
       and checksum before staging the current demo shell. The staged QEMU WASM
       is explicitly gzip-compressed below Cloudflare Pages' per-file limit and
-      decompressed by the browser worker. Workflow contracts, actionlint,
-      workspace tests/check/doctests, and Clippy are green.
+      decompressed by the browser worker. The Pages and CLI release lookups now
+      pass their semantic-version filter directly to GitHub CLI's `--jq`
+      option; a 28-test workflow contract suite prevents the invalid standalone
+      jq `-r` flag from returning. Actionlint and Clippy are green.
 
 - [ ] **SDK surface contract repairs for issues #2902 and #2906.**
       `specs/plans/2026-08-26-sdk-surface-contract-repairs.md`.
@@ -2253,10 +2263,11 @@ Then unify + retire the old paths:
 - [ ] **REMAINING WS11 WORK — design of record is `specs/plans/301-wasm-backend-completion-and-browser-slice.md`** (plan landed, execution not started). Covers both open halves. **Part A (host tier):** A1 end-to-end `start()`→`spawn_wasm_egress_endpoint_if_needed`→real-subprocess coverage (the P3b.2 deferred follow-up; same SSRF-refuses-loopback wall); A2 = P3c TLS-terminating substitution (P3b.1 shipped http-only, `tls_intermediate`/`terminator_listen` both `None`, so https destinations must fail closed until it lands); A3 transparent WASI socket interception (Fork 1's eventual goal — the explicit `mvm:egress` host-import stays the supported path); A4 resolve the Preview 1 vs doc-11's "target Preview 2" divergence (amend one or the other, don't leave them disagreeing); A5 **ADR-024's Status paragraph is STALE** — it still says no implementation has landed and no `wasmtime` is in the workspace, both false since P2 (constraints untouched) + confirm the P2-assigned `deny.toml` review actually happened; A6 generalize the witness across all workload backends ("the same witness" was the whole argument for the subprocess route and is currently true only wasm-side). **Part B (P4 browser):** B1 = **the long pole** — the `no_std` OCI decoders P4 assumes DO NOT EXIST (`mvm-fs` is std-heavy: tokio/reqwest/rustls/rayon/libc/rustix/xattr/tar/flate2), so `oci/{manifest_types,manifest,reference,layer,archive}` must be cut decode-vs-fetch and the pure half relocated **verbatim** to `mvm-contract` by the Increment 3 method (leaf-first, byte-identical serde, green+wasm-clean each step); open question = gzip/tar under no_std (`flate2` defaults to a C backend) or scope to manifest-level inspection; B2 Worker + thin main-thread proxy (no verify work on the main thread — the current `web/audit-verify/index.html` jank-locks the tab); B3 OPFS content-addressed cache with **verify-on-read** eviction, `postcard` for the local unsigned record envelope ONLY (JCS stays the signing input — ADR-031 byte-identity with mvmd is untouchable); B4 `wasm-opt -Oz` + a gzipped-size budget in the existing wasm lane (`scripts/ci-linux-coverage.sh`) — Increment 3 moved the entire signed plan into the crate the bundle is built from and nobody is measuring it; B5 delete `web/audit-verify/` once B4 covers verify+Merkle, fix the stale `mvm-verify` crate refs in ADR-031, add `mvmctl audit pubkey` (without it the page can't be run against a user's own logs). Execution model for B2/B3/B4 is taken from ferrovec (in-browser Rust/wasm vector store; Worker + OPFS + ~33 KB gzipped) as prior art — not a dependency. ADR-024's three constraints bind throughout: **no numbered claim is added**.
 - Gate: `mvm-contract` wasm build+tests green; no_std-boundary lint holds; `WasmBackend` runs a workload through the shared egress/audit seam (POC-gated) with the data-governance witness passing.
 
-**Semantic address (UOR-ADDR) pilot — IMPLEMENTED (orthogonal to WS11; do NOT weave into P3)**
+**Workload address (UOR-ADDR) pilot — IMPLEMENTED (orthogonal to WS11; do NOT weave into P3)**
 
-- [x] **DESIGN** (`specs/refactor/12-semantic-address-pilot.md`): additive `SemanticAddress` (`sha256(JCS(ir))` = UOR-ADDR JSON realization) for Workload IR, with a distinct newtype and no use in exact-byte, signature, nonce, or ephemeral-ID paths. The `uor-addr` crate remains deferred to the verification-gated WS11-P4/browser decision.
-- [x] **EXECUTED** (`2f75f268b`, extended by this follow-up): `mvm-core/src/semantic_address.rs` validates schema first, NFC-normalizes JSON strings/object keys, then computes the UOR-ADDR label. The 12 published UOR-ADDR JSON fixtures pass; the Python/TypeScript SDK parity witness remains green. `ir_hash` is intentionally reported as a separate internal fingerprint because it does not perform UOR Unicode normalization.
+- [x] **DESIGN** (`specs/refactor/12-workload-address-pilot.md`): additive `WorkloadAddress` (`sha256(JCS(ir))` = UOR-ADDR JSON realization) for Workload IR, with a distinct newtype and no use in exact-byte, signature, nonce, or ephemeral-ID paths. The `uor-addr` crate remains deferred to the verification-gated WS11-P4/browser decision.
+- [x] **EXECUTED** (`2f75f268b`, extended by this follow-up): `mvm-core/src/workload_address.rs` validates schema first, NFC-normalizes JSON strings/object keys, then computes the UOR-ADDR label. The 12 published UOR-ADDR JSON fixtures pass; the Python/TypeScript SDK parity witness remains green. `ir_hash` is intentionally reported as a separate internal fingerprint because it does not perform UOR Unicode normalization.
+- [x] **PUBLIC API BREAKING RENAME** (2026-08-27): the unused pilot API is now `mvm_core::{WorkloadAddress, WorkloadAddressError, WorkloadAddressParseError, workload_address}`, with the canonical `mvm_core::workload_address` module. CLI JSON uses `workload_address`; human output and BDD use “workload address.” No deprecated semantic-name aliases remain. Focused unit, SDK parity, CLI, and four-scenario BDD coverage pass; workspace check, Clippy, and `just check-gated` are green.
 - [x] **UOR FRAMEWORK EXPLORATION** (`specs/research/uor-framework-integration-exploration.md`, 2026-07-22): broader UOR Framework, Prism, and PrimeShield adoption is not recommended. The host-side UOR-ADDR conformance baseline is complete; `BuildProvenance` addressing and `uor-addr` crate adoption remain separate follow-ups.
 
 **WS14 — mvmd contract (secondary)**
@@ -2616,6 +2627,9 @@ Browser-hosted demo scoped in `specs/plans/2026-08-21-weblinux-browser-demo.md`.
 - [x] 2.1 Pin and package a reproducible QEMU-Wasm engine through Nix.
       Pinned upstream revisions and added `nix/packages/qemu-wasm.nix`;
       build is queued for the Linux builder VM.
+- [x] Demo terminal input forwards Ctrl+C and Ctrl+D as raw ETX/EOT bytes
+      through the Worker to the QEMU-Wasm serial PTY, with focused input tests
+      and live-browser interruption/EOF scenarios.
 - [ ] 2.8 Boot an `mvm`-built x86_64 kernel under headless Chromium and record measurements.
 
 Workstream 1 first slice (1.1, 1.7) and the WS-2 engine packaging

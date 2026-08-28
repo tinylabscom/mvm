@@ -18,14 +18,28 @@ Last updated: 2026-08-27
 
 ## Completed
 
+- [x] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
+      `specs/plans/2026-08-27-kernel-6-12-106.md`.
+      Both kernel consumers use the kernel.org-verified archive and SRI hash;
+      local and merge-queue gates passed, PR #2939 merged, and issue #2931
+      closed through the PR link.
+
+- [x] **Workload address public API rename.** The unused UOR-ADDR pilot is now
+      exposed as `mvm_core::{WorkloadAddress, WorkloadAddressError,
+      WorkloadAddressParseError, workload_address}` and the
+      `mvm_core::workload_address` module. CLI and BDD vocabulary use workload
+      address throughout; no deprecated semantic-name aliases remain.
+
 - [x] **Site QEMU-WASM release artifact** —
       `specs/plans/2026-08-26-site-qemu-wasm-release-artifact.md`.
       The browser QEMU pack now builds on the `boot-image/v*` release cadence;
       Cloudflare Pages consumes the signed, checksummed release artifact while
       retaining the current revision's demo shell. Its oversized WASM module is
       staged as an explicitly decompressed gzip payload so it fits Cloudflare's
-      per-file limit. Workflow contracts, actionlint, workspace
-      tests/check/doctests, and Clippy are green.
+      per-file limit. GitHub CLI receives the semantic-version filter directly
+      through `--jq` in both consuming workflows, with a regression contract
+      against the unsupported standalone jq `-r` flag. Workflow contracts,
+      actionlint, and Clippy are green.
 
 - [x] **AI egress metering and token budgets** —
       `specs/plans/2026-08-21-ai-egress-metering-and-budget.md`.
@@ -649,7 +663,10 @@ for detailed scope and acceptance criteria.
       feasibility is now pinned: `ktock/qemu-wasm` 5a65998d47, Emscripten
       3.1.50, zlib/libffi/pixman/glib/xterm-pty versions are recorded, and
       `nix/packages/qemu-wasm.nix` packages the engine through the Nix
-      builder boundary. Build verification is queued for the Linux builder.
+      builder boundary. The demo terminal now forwards Ctrl+C/Ctrl+D as raw
+      ETX/EOT bytes through the Worker to the serial PTY, with focused and
+      live-browser coverage. Build verification is queued for the Linux
+      builder.
 
 - [~] **Security lane recovery — issue #2736.** The advisory finding is fixed,
       the release-artifact bootstrap source now compiles with warnings denied,

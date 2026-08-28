@@ -7,8 +7,8 @@ use anyhow::{Context, Result};
 /// a slot hash.
 ///
 /// `mvmctl up` / `mvmctl exec` accept either form via their
-/// `--manifest` flag. The `Slot` variant is the current path;
-/// `Name` is kept only to resolve any pre-existing name-keyed slots.
+/// `--manifest` flag. A manifest is addressed by its path; the slot hash is
+/// derived from that path.
 ///
 /// Callers that need the persisted manifest re-read it via
 /// `mvm_runtime::vm::template::lifecycle::template_load_slot(slot_hash)`
@@ -16,9 +16,6 @@ use anyhow::{Context, Result};
 /// warning (`PersistedManifest` is ~350 bytes).
 #[derive(Debug, Clone)]
 pub enum ManifestArgRef {
-    /// Legacy name-keyed slot (resolves through `template_load`,
-    /// `template_artifacts`, etc.).
-    Name(String),
     /// Manifest-keyed slot.
     Slot { slot_hash: String },
     /// Manifest selects a pre-built wasm module; no Nix/OCI build or slot.
@@ -28,17 +25,12 @@ pub enum ManifestArgRef {
     },
 }
 
-/// Decide whether a `--manifest` argument refers to a manifest path
-/// (file or directory containing one) or a legacy slot name.
+/// Resolve a `--manifest` argument to the manifest it names.
 ///
-/// Detection rule: if the argument resolves to an existing file or
-/// directory on disk, treat it as a manifest path; otherwise it's a
-/// name. Both `mvmctl up --manifest ./my-app` and
-/// `mvmctl up --manifest openclaw` work as long as the referenced
-/// thing actually exists.
-///
-/// Returns `Err` only on validation/IO failures; missing-name is
-/// handled by the caller's downstream `template_load` lookup.
+/// The argument is a path — a manifest file or the directory containing one.
+/// A bare name used to resolve against a name-keyed template slot; those are
+/// gone, so a non-existent path is an error here rather than a lookup failure
+/// three layers down.
 pub fn resolve_manifest_arg(arg: &str) -> Result<ManifestArgRef> {
     use mvm_core::manifest::{canonical_key_for_path, resolve_manifest_config_path};
 
@@ -58,10 +50,16 @@ pub fn resolve_manifest_arg(arg: &str) -> Result<ManifestArgRef> {
                     revision_hash,
                     "manifest alias resolved",
                 );
-                // Boot path still loads `current`; pinning to
-                // `revision_hash` is a follow-up. Treat as Name
-                // so the existing flow proceeds.
-                return Ok(ManifestArgRef::Name(template_id.to_string()));
+                // The alias resolves, but pinning the boot to
+                // `revision_hash` needs lifecycle plumbing that does not
+                // exist. With no name-keyed slot to fall back to there is
+                // nothing to boot, so say so rather than silently booting
+                // `current` under an alias the caller asked to pin.
+                anyhow::bail!(
+                    "manifest alias {alias:?} for template {template_id:?} resolves to \
+                     revision {revision_hash}, but booting a pinned revision is not \
+                     implemented; pass the manifest path instead"
+                );
             }
             None => {
                 anyhow::bail!(
@@ -73,15 +71,6 @@ pub fn resolve_manifest_arg(arg: &str) -> Result<ManifestArgRef> {
     }
 
     let path = std::path::Path::new(arg);
-    let looks_like_path = arg.contains('/')
-        || arg.starts_with('.')
-        || arg.ends_with(".toml")
-        || path.is_file()
-        || path.is_dir();
-    if !looks_like_path {
-        return Ok(ManifestArgRef::Name(arg.to_string()));
-    }
-
     if !path.exists() {
         anyhow::bail!(
             "Manifest path '{}' does not exist (expected a manifest file or its directory)",
@@ -366,10 +355,12 @@ mod tests {
         std::env::set_current_dir(previous).expect("restore cwd");
 
         // It resolves as a path — which fails, because the directory holds no
-        // manifest. The point is that it was not silently taken for a name.
-        if let Ok(ManifestArgRef::Name(n)) = resolved {
-            panic!("a directory was misclassified as the registry name {n:?}");
-        }
+        // manifest. Every argument is a path now, so the only outcome a bare
+        // directory can have is a manifest-not-found error.
+        assert!(
+            resolved.is_err(),
+            "a directory with no manifest must fail rather than resolve"
+        );
     }
 
     /// A relative wasm module resolves against the manifest's own directory.
@@ -620,11 +611,12 @@ mod tests {
     fn a_manifest_argument_is_a_path_on_any_one_signal_alone() {
         let tmp = tempfile::tempdir().expect("tempdir");
 
-        // A bare name matching none of the five signals is a slot name.
-        match resolve_manifest_arg("openclaw").expect("a bare name resolves") {
-            ManifestArgRef::Name(n) => assert_eq!(n, "openclaw"),
-            other => panic!("a bare name must resolve to Name, got {other:?}"),
-        }
+        // A bare name is no longer a slot lookup: name-keyed slots are gone,
+        // so it is just a path that does not exist.
+        assert!(
+            resolve_manifest_arg("openclaw").is_err(),
+            "a bare name must fail as a missing path, not resolve to a slot"
+        );
 
         // Each signal alone is enough to be treated as a path. None of
         // these exist, so the attempt must fail as a *missing path*

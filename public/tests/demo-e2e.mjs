@@ -30,6 +30,10 @@ import { loadHeaderRules, headersFor } from "../scripts/headers-config.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "../dist");
+const CTRL_C_MARKER_COMMAND =
+  "printf '\\103\\124\\122\\114\\137\\103\\137\\106\\117\\122\\127\\101\\122\\104\\105\\104\\n'";
+const CTRL_D_MARKER_COMMAND =
+  "cat; printf '\\103\\124\\122\\114\\137\\104\\137\\106\\117\\122\\127\\101\\122\\104\\105\\104\\n'";
 
 let chromium;
 try {
@@ -43,6 +47,7 @@ try {
 const mime = {
   ".html": "text/html",
   ".js": "application/javascript",
+  ".mjs": "application/javascript",
   ".css": "text/css",
   ".svg": "image/svg+xml",
   ".png": "image/png",
@@ -173,6 +178,20 @@ async function main() {
       // The demo's uname -a output includes "qemu" when running under QEMU-Wasm.
       throw new Error("guest uname did not look like the QEMU-Wasm Linux guest");
     }
+
+    // Ctrl+C must reach the serial PTY as ETX rather than becoming a browser
+    // copy shortcut. The marker command cannot execute until sleep exits.
+    await runCommand(page, "sleep 30");
+    await page.press("#command", "Control+c");
+    await runCommand(page, CTRL_C_MARKER_COMMAND);
+    await waitForLog(page, "CTRL_C_FORWARDED", 5000);
+
+    // Ctrl+D must reach the PTY as EOT. The command after `cat` only executes
+    // once cat observes EOF, and its literal marker is octal-encoded so input
+    // echo cannot satisfy the assertion.
+    await runCommand(page, CTRL_D_MARKER_COMMAND);
+    await page.press("#command", "Control+d");
+    await waitForLog(page, "CTRL_D_FORWARDED", 5000);
 
     // Stop the VM and confirm the worker tears down cleanly.
     await page.click("#stopBtn");

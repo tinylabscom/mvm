@@ -408,12 +408,10 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
         ));
     }
 
-    // The entrypoint action targets a *template* / manifest slot. Resolve
-    // through the same shared helper as `machine exec --manifest`. Slot-hash
-    // and registered-name both resolve to a string the lifecycle helpers
-    // consume.
+    // The entrypoint action targets a manifest slot. Resolve through the same
+    // shared helper as `machine exec --manifest`; the slot hash is the string
+    // the lifecycle helpers consume.
     let template_id = match super::shared::resolve_manifest_arg(&call.source)? {
-        super::shared::ManifestArgRef::Name(n) => n,
         super::shared::ManifestArgRef::Slot { slot_hash } => slot_hash,
         super::shared::ManifestArgRef::WasmModule { .. } => {
             anyhow::bail!("wasm module manifests are not supported for this command")
@@ -2087,6 +2085,26 @@ mod auto_stdin_tests {
         let mut fds = [0 as libc::c_int; 2];
         // SAFETY: `fds` is a two-element array, which is what `pipe` writes.
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe()");
+        // `pipe` hands back descriptors *without* close-on-exec, unlike every
+        // fd Rust's std opens. This suite spawns subprocesses continuously, and
+        // any child forked while these are open inherits them — including the
+        // write end. A surviving writer means the final assertion below never
+        // sees EOF, which is a load-sensitive failure that looks like a bug in
+        // the probe rather than a leaked descriptor.
+        //
+        // Set it before touching the pipe, so the window a concurrent spawn
+        // could land in is these two adjacent syscalls rather than the whole
+        // test body. macOS has no `pipe2`, so the window cannot be closed
+        // outright; leaking a descriptor into every process the suite starts is
+        // the part actually worth fixing.
+        for fd in fds {
+            // SAFETY: `fd` is a live descriptor from the successful `pipe` above.
+            assert_ne!(
+                unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+                -1,
+                "set FD_CLOEXEC"
+            );
+        }
         // SAFETY: both fds come from a successful `pipe` and are owned here.
         let (read_end, mut write_end) = unsafe {
             (
@@ -2109,12 +2127,50 @@ mod auto_stdin_tests {
 
         // A closed writer is EOF, which is available immediately — reading it
         // returns empty rather than blocking, so it counts as ready.
+        //
+        // Spawning a child here is the point, not incidental setup. This
+        // assertion was flaky before `FD_CLOEXEC` was set above: it failed
+        // roughly once in twelve full-suite runs, and only under load, because
+        // some *other* test's subprocess happened to be forked while this pipe
+        // was open and inherited the write end — leaving a writer alive, so no
+        // EOF, so no readiness. Holding a child open deliberately turns that
+        // race into a fact: without close-on-exec this fails every time.
+        // The child must be past `exec` before the write end is dropped.
+        // Close-on-exec applies *at* exec; between fork and exec the child holds
+        // a copy of every parent descriptor, so polling in that window sees a
+        // live writer no matter what `FD_CLOEXEC` says. Waiting for a byte the
+        // child could only emit after exec removes the race rather than
+        // out-running it — the first version of this test spawned and polled
+        // immediately, and duly failed under a loaded full-suite run while
+        // passing alone.
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("echo exec-done; sleep 30")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn a child to hold any inherited descriptor open");
+        {
+            use std::io::BufRead as _;
+            let stdout = child.stdout.as_mut().expect("child stdout is piped");
+            let mut line = String::new();
+            std::io::BufReader::new(stdout)
+                .read_line(&mut line)
+                .expect("read the child's post-exec marker");
+            assert_eq!(line.trim(), "exec-done", "child must reach exec");
+        }
+
         let mut drain = [0u8; 7];
         std::io::Read::read_exact(&mut { &read_end }, &mut drain).unwrap();
         drop(write_end);
+        // Read the answer before cleaning up, so a failure still reaps the child.
+        let ready_at_eof = super::fd_is_readable_now(fd);
+        let _ = child.kill();
+        let _ = child.wait();
+
         assert!(
-            super::fd_is_readable_now(fd),
-            "a closed writer is EOF, which is readable now"
+            ready_at_eof,
+            "a closed writer is EOF and must read as ready — a live child still \
+             holding the inherited write end means the pipe was not close-on-exec"
         );
     }
 }

@@ -4,6 +4,28 @@
 # recipe fails before running a single test with
 # `error: profile 'ci' not found`.
 
+# Refuse to run at all on a nextest too old for this toolchain's build layout.
+#
+# The pinned toolchain (rust-toolchain.toml) ships a cargo whose target
+# directory nests build artifacts as `target/debug/build/<pkg>/<hash>/out/`.
+# A nextest that predates that layout cannot associate the root package's
+# binary with its integration tests, so every one of them fails with
+# `CARGO_BIN_EXE_mvmctl is unset` — 43 test binaries, 308 tests, the entire
+# `mvmctl` CLI surface. Locally observed on 0.9.122; fine on 0.9.143.
+#
+# The reason this needs a floor rather than a note is that the failure is
+# indistinguishable from a broken working tree: the tests do not skip with a
+# warning, they fail with an error about an environment variable, which reads
+# as "my checkout is wrong" rather than "my tool is old". CI is unaffected —
+# it installs nextest through `taiki-e/install-action` with no pin and so
+# always gets a current one — which is exactly why this could rot locally for
+# a long time without a red lane anywhere.
+#
+# `required` is the oldest version verified against this layout, not a bisected
+# boundary; the true floor is somewhere between 0.9.122 and 0.9.143. Lower it
+# if someone establishes the real one.
+nextest-version = { required = "0.9.143" }
+
 [profile.default]
 # No retries, ever. A test that passes on the second attempt is a test
 # whose result carries no information, and a retry budget turns a real

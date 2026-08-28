@@ -32,7 +32,7 @@ impl std::fmt::Display for CheckpointId {
 ///
 /// This is a content-address, not a signature and not an exact-byte blob
 /// digest. It shares the `sha256:<64-hex>` wire shape with several unrelated
-/// ids (OCI manifest/layer digests, blob shas, semantic addresses) precisely so
+/// ids (OCI manifest/layer digests, blob shas, workload addresses) precisely so
 /// the boundary between them is a type-system property, not a string check:
 /// there is no `From`/`Into`/`Deref` to or from any of them (nor to
 /// [`CheckpointId`]), so handing one where another is expected does not compile.
@@ -912,7 +912,7 @@ mod tests {
     }
 
     /// `CheckpointDigest` shares the `sha256:<64-hex>` shape with [`OciDigest`]
-    /// and [`SemanticAddress`], which is exactly why the boundary is a
+    /// and [`WorkloadAddress`], which is exactly why the boundary is a
     /// type-system property rather than a string check. A `sha256:...` string
     /// re-validates as each type independently, but there is no
     /// `From`/`TryFrom`/`Deref` from `CheckpointDigest` to any of them (or to
@@ -921,7 +921,7 @@ mod tests {
     /// separate re-parse that names both types at the call site.
     ///
     /// [`OciDigest`]: crate::packs::OciDigest
-    /// [`SemanticAddress`]: crate::semantic_address::SemanticAddress
+    /// [`WorkloadAddress`]: crate::workload_address::WorkloadAddress
     #[test]
     fn checkpoint_digest_shape_overlaps_oci_digest_but_types_never_convert() {
         let m = digest_fixture_meta(vec![blob("rootfs.ext4", "aa")]);
@@ -930,8 +930,8 @@ mod tests {
         // Same shape, independently re-validated — not a type conversion.
         assert!(crate::packs::OciDigest::new(digest.as_str().to_string()).is_ok());
         assert!(
-            crate::semantic_address::SemanticAddress::parse(digest.as_str()).is_ok(),
-            "the semantic-address shape overlaps too"
+            crate::workload_address::WorkloadAddress::parse(digest.as_str()).is_ok(),
+            "the workload-address shape overlaps too"
         );
 
         // `Sha256Hex` carries no `sha256:` prefix, so the same string is
