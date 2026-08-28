@@ -1342,6 +1342,13 @@ fn run_secondary<B: run::DeviceBus>(
     let result = (|| {
         if !registered {
             // The boot CPU gave up on the bring-up. Do not enter the guest.
+            // Still report, so the primary's tally cannot block: it reads one
+            // message per secondary, and a sibling already parked on the run
+            // gate keeps its own sender alive, so a silent exit here would
+            // leave that read waiting on a message nobody will send.
+            let _ = ready.send(Err(HvfError::SnapshotState(
+                "vCPU never registered with the boot CPU",
+            )));
             return Ok((RunOutcome::Stopped, CpuDiagnostics::default()));
         }
         shared.start.wait();
@@ -2458,27 +2465,28 @@ mod tests {
             })
         );
     }
-}
-#[test]
-fn machine_start_gate_holds_a_cpu_until_release() {
-    let gate = Arc::new(MachineStartGate::default());
-    let worker_gate = Arc::clone(&gate);
-    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-    let (released_tx, released_rx) = std::sync::mpsc::channel();
-    let worker = std::thread::spawn(move || {
-        entered_tx.send(()).expect("announce wait");
-        worker_gate.wait();
-        released_tx.send(()).expect("announce release");
-    });
 
-    entered_rx.recv().expect("worker reached gate");
-    assert!(
-        released_rx.recv_timeout(Duration::from_millis(20)).is_err(),
-        "worker must remain held before release"
-    );
-    gate.release();
-    released_rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("worker released");
-    worker.join().expect("worker joins");
+    #[test]
+    fn machine_start_gate_holds_a_cpu_until_release() {
+        let gate = Arc::new(MachineStartGate::default());
+        let worker_gate = Arc::clone(&gate);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (released_tx, released_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            entered_tx.send(()).expect("announce wait");
+            worker_gate.wait();
+            released_tx.send(()).expect("announce release");
+        });
+
+        entered_rx.recv().expect("worker reached gate");
+        assert!(
+            released_rx.recv_timeout(Duration::from_millis(20)).is_err(),
+            "worker must remain held before release"
+        );
+        gate.release();
+        released_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("worker released");
+        worker.join().expect("worker joins");
+    }
 }
