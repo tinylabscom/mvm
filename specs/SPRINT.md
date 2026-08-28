@@ -19,6 +19,14 @@
       independently tracked #2973 failure. Linux Nix builds and merge delivery
       remain.
 
+- [ ] **Portable dev-VM socket resolver test — issue #2973.**
+      `specs/plans/2026-08-28-portable-dev-vm-socket-test.md`.
+      The libkrun per-port socket assertion now follows the canonical socket
+      directory resolver, preserving both the normal state-dir arm and the
+      macOS-safe shortened arm. The focused regression, all 598 `mvm-vmm`
+      tests, workspace tests, and workspace Clippy are green; merge delivery
+      remains.
+
 - [ ] **Recorded-backend pause and resume — issue #2929.**
       `specs/plans/2026-08-27-recorded-backend-pause-resume.md`.
       Existing-machine lifecycle operations resolve the VMM that owns the live

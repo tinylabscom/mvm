@@ -413,10 +413,10 @@ mod tests {
         env.set("HOME", tmp.path());
         env.remove("MVM_HOME");
 
-        // The dev env dials the libkrun dev VM's per-port vsock listener at
-        // `<vm_state_dir>/vsock-<port>.sock` — the same path
-        // `LibkrunTransport::for_vm` resolves, so the flake-build env and the
-        // console can't drift onto different sockets.
+        // The dev env dials the libkrun dev VM's per-port vsock listener in
+        // the canonical socket directory. That directory is normally the VM
+        // state directory and becomes the hashed short namespace when any
+        // socket path would exceed the platform limit.
         let port = mvm_agentd::vsock::GUEST_AGENT_PORT;
         let sock = mvm_core::config::vm_vsock_port_socket(DEV_VM_NAME, port);
         assert!(
@@ -425,7 +425,7 @@ mod tests {
         );
         assert_eq!(
             sock,
-            mvm_core::config::vm_state_dir(DEV_VM_NAME)
+            mvm_core::config::vm_socket_dir(DEV_VM_NAME)
                 .join(mvm_core::config::vsock_socket_filename(port))
         );
     }
