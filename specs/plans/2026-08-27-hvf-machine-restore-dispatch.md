@@ -1,5 +1,8 @@
 # HVF machine restore dispatch
 
+Backing: shipped-source
+Validation: check-sprint-append
+
 **Issue:** #2961  
 **Status:** IN PROGRESS
 
@@ -31,8 +34,8 @@ already existed and the checkpoint manifest classified correctly.
 ## Validation and delivery
 
 - [x] Focused `mvm-cli` machine checkpoint unit tests pass.
-- [ ] `cargo test --workspace` passes.
-- [ ] `cargo clippy --workspace -- -D warnings` passes.
-- [ ] `just check-gated` passes.
+- [x] `cargo test --workspace` passes.
+- [x] `cargo clippy --workspace -- -D warnings` passes.
+- [x] `just check-gated` passes.
 - [ ] Plan, sprint, refactor rollup, and delivery note agree.
 - [ ] Pull request checks pass and the PR merges through the merge queue.
