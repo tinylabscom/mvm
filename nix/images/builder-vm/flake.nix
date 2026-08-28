@@ -65,10 +65,14 @@
       url = "github:microvm-nix/microvm.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    runtime-overlay = {
+      url = "github:microvm.nix/runtime-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    { self, nixpkgs, microvm, ... }:
+    { self, nixpkgs, microvm, runtime-overlay, ... }:
     let
       systems = [ "aarch64-linux" "x86_64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
@@ -78,12 +82,6 @@
           envPath = builtins.getEnv "MVM_WORKSPACE_PATH";
         in
         if envPath != "" then /. + envPath else ../../..;
-
-      # Stage 0 can only build attributes exposed by this flake. Keep the
-      # sidecar derivation owned by the runtime-overlay flake and pass that
-      # exact package through here instead of duplicating its glibc closure,
-      # ext4 layout, or checksum contract.
-      runtimeOverlay = builtins.getFlake "path:${toString (workspaceRoot + "/nix/images/runtime-overlay")}";
 
       # Host binaries are embedded in mvmctl and extracted by
       # `host_binaries::ensure_extracted()` before invoking
@@ -549,7 +547,10 @@
         workload-kernel-configfile = mkWorkloadKernelConfigfile system;
         workload-sizeopt-kernel = mkWorkloadKernelSizeopt system;
         workload-sizeopt-kernel-configfile = mkWorkloadKernelSizeoptConfigfile system;
-        sdk-sidecar-image = runtimeOverlay.packages.${system}.sdk-sidecar-image;
+        # SDK sidecar image for Stage 0 builds. The builder VM needs the
+        # sidecar to build guest workloads, so this exposes the runtime-overlay's
+        # sdk-sidecar-image output through the builder-vm flake.
+        sdk-sidecar-image = runtime-overlay.packages.${system}.sdk-sidecar-image;
       });
     };
 }
