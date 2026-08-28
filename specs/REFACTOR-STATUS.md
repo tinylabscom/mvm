@@ -49,6 +49,13 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **Issue #2951 — ad-hoc exec honors the image environment.** Streaming
+      exec now uses the shared workload resolver, so image-declared `PATH`,
+      variables, and working directory reach `run -- <cmd>` while inherited
+      agent variables and the writable workload `HOME` retain their established
+      semantics. An unreadable image config degrades to the prior behavior. See
+      `specs/sprint/delivery/2951-ad-hoc-exec-image-environment.md`.
+
 - [x] **Issue #2930 — FlowMux HTTPS live-client repair.** The seven live HTTPS
       egress witnesses use the pinned multi-arch `curlimages/curl:8.21.0`
       client so HTTPS is carried through an HTTP `CONNECT` tunnel. The
