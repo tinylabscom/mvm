@@ -4,16 +4,6 @@ Last updated: 2026-08-28
 
 ## In progress
 
-- [ ] **Extended CI documented-surface repair — issue #2938.**
-      `specs/plans/2026-08-27-extended-ci-documented-surface.md`.
-      Both scheduled platform witnesses now build signed-manifest verification
-      through the standard link path, and the macOS HVF lane installs its
-      target-gated libkrun and embedded Linux cross-toolchain dependencies.
-      The explicit published-image choice now reaches builder bootstrap, macOS
-      downloads its workload kernel, and clean runners build the SDK codegen
-      driver. Focused tests, the exact feature build, and Clippy are green; the
-      source-sidecar warm-up, live rerun, and merge delivery remain.
-
 - [ ] **Audit root-history classification repair — issue #2940.**
       `specs/plans/2026-08-27-audit-root-history-classification.md`.
       Signed Merkle-root history files are excluded from lifecycle-chain
@@ -26,6 +16,16 @@ Last updated: 2026-08-28
       hard ceiling rather than a prepared-cold 200 ms literal. Focused boundary
       and BDD compilation checks, workspace tests, check, Clippy, formatting,
       and repository gates are green; merge-queue delivery remains.
+
+- [ ] **Extended CI documented-surface repair — issue #2938.**
+      `specs/plans/2026-08-27-extended-ci-documented-surface.md`.
+      Both scheduled platform witnesses now build signed-manifest verification
+      through the standard link path, and the macOS HVF lane installs its
+      target-gated libkrun and embedded Linux cross-toolchain dependencies.
+      The explicit published-image choice now reaches builder bootstrap, macOS
+      downloads its workload kernel, and clean runners build the SDK codegen
+      driver. Focused tests, the exact feature build, and Clippy are green; the
+      source-sidecar warm-up, live rerun, and merge delivery remain.
 
 - [ ] **Cloudflare Pages cutover.**
       `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.
