@@ -24,7 +24,7 @@ the archive says so. The rule itself is good: JCS via `serde_jcs` over a value
 space that `validate_value_space` (`crates/mvm-core/src/receipt.rs:288-302`)
 restricts to integers and ASCII strings, which is exactly what makes the two
 real JCS divergences (ECMAScript float formatting; UTF-16 vs UTF-8 key ordering,
-already documented at `crates/mvm-core/src/semantic_address.rs:19`) unreachable
+already documented at `crates/mvm-core/src/workload_address.rs:19`) unreachable
 rather than merely specified. It is simply invisible to the audience it was
 built for.
 

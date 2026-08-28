@@ -50,7 +50,7 @@ All of these are Python, zero-to-few runtime dependencies, and explicitly framed
 | Audit verifier parity           | Host + `no_std`/`wasm32` verifiers over a frozen signed corpus | Plan 274 WS4, `tests/vectors/audit-chain-v1.jsonl`                    |
 | Merkle transparency root        | `SignedAuditRoot` over RFC-6962 tree                           | `crates/mvm-hostd/src/audit/emitter.rs`, `mvm_contract::merkle`       |
 | Content-addressed plan identity | `plan_id` = SHA-256 over canonical plan body                   | `crates/mvm-core/src/plan/content_id.rs`                              |
-| Content-addressed IR identity   | `SemanticAddress` = `sha256(JCS(NFC(Workload)))`               | `crates/mvm-core/src/semantic_address.rs`                             |
+| Content-addressed IR identity   | `WorkloadAddress` = `sha256(JCS(NFC(Workload)))`               | `crates/mvm-core/src/workload_address.rs`                             |
 | Conformance claim ledger        | `model/claims.toml` + `xtask check-claim-catalog`              | `model/claims.toml`, `xtask/src/claims_ledger.rs`                     |
 | Artifact verify-on-read         | `mvm_core::action::verify_artifacts_on_disk`                   | Plan 276 WS6 (#2053)                                                  |
 | OCI provenance in audit         | Resolved digest + layer digest set recorded on `image.created` | `crates/mvm-hostd/src/audit/emitter.rs`                               |
@@ -143,7 +143,7 @@ The badge is a signed JSON envelope:
 }
 ```
 
-The signature covers the **RFC 8785 (JCS)** canonicalization of the payload, with the value space constrained to ASCII strings, integers, booleans, null, and nested objects/arrays — no floats, no non-ASCII strings, no raw bytes. This is the same canonicalization discipline mvm already uses for `SemanticAddress` and `plan_id`.
+The signature covers the **RFC 8785 (JCS)** canonicalization of the payload, with the value space constrained to ASCII strings, integers, booleans, null, and nested objects/arrays — no floats, no non-ASCII strings, no raw bytes. This is the same canonicalization discipline mvm already uses for `WorkloadAddress` and `plan_id`.
 
 Key properties:
 

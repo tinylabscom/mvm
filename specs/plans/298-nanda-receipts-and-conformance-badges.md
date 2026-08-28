@@ -44,9 +44,9 @@ Rust on mvm's existing cryptographic substrate.
 | Audit verifier parity           | Host + `no_std`/`wasm32` verifiers over frozen signed corpus | Plan 274 WS4, `tests/vectors/audit-chain-v1.jsonl`                    |
 | Merkle transparency root        | `SignedAuditRoot` over RFC-6962 tree                         | `crates/mvm-hostd/src/audit/emitter.rs`, `mvm_contract::merkle`       |
 | Content-addressed plan identity | `plan_id` = SHA-256 over canonical plan body                 | `crates/mvm-core/src/plan/content_id.rs`                              |
-| Content-addressed IR identity   | `SemanticAddress` = `sha256(JCS(NFC(Workload)))`             | `crates/mvm-core/src/semantic_address.rs`                             |
+| Content-addressed IR identity   | `WorkloadAddress` = `sha256(JCS(NFC(Workload)))`             | `crates/mvm-core/src/workload_address.rs`                             |
 | Conformance claim ledger        | `model/claims.toml` + `xtask check-claim-catalog`            | `model/claims.toml`, `xtask/src/claims_ledger.rs`                     |
-| JCS canonicalization + SHA-256  | Used for `SemanticAddress`, `plan_id`, etc.                  | `serde_jcs`, `sha2`                                                   |
+| JCS canonicalization + SHA-256  | Used for `WorkloadAddress`, `plan_id`, etc.                  | `serde_jcs`, `sha2`                                                   |
 | Ed25519 signing                 | Host signer, audit chain                                     | `ed25519-dalek`                                                       |
 
 ## Non-goals

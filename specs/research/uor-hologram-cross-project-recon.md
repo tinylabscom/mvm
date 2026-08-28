@@ -86,7 +86,7 @@ not take).
 
 | Primitive / repo | Maturity | mvm/mvmd surface | Verdict |
 | --- | --- | --- | --- |
-| `uor-addr` κ-label engine | Real, published, Apache-2.0 | `SemanticAddress`+`serde_jcs`; bundle addressing | **Study/align** — do not depend (drags `prism` + ~156 transitive crates incl. FHE/tensor; routes SHA-256 through `prism::crypto`). |
+| `uor-addr` κ-label engine | Real, published, Apache-2.0 | `WorkloadAddress`+`serde_jcs`; bundle addressing | **Study/align** — do not depend (drags `prism` + ~156 transitive crates incl. FHE/tensor; routes SHA-256 through `prism::crypto`). |
 | Conformance/honesty methodology (`template`, `uor-matmul`, `hologram*/model`) | Real, multiple impls | claim ledger + `check-claim-catalog` + cucumber | **Adopt patterns** — §6. Highest ROI, no dependency. |
 | `uor-registry` replayable ledger | Working prototype | claims catalog; provable-state-DAG | **Adopt pattern** — CI-write-only, content-addressed, `state_address` per run. |
 | `hologram-ai` inference + `stream()` provider IF | Production | deferred `ai` command | **Collaborate/interop** — flagship opportunity (§5.4). |
@@ -114,13 +114,13 @@ address-equality; makes the ledger independently replayable. Natural extension o
 the provable-state-DAG epic.
 
 ### 5.3 `uor-addr` — confirm "conform, don't consume", and harden
-`uor-addr::json::address` *is* the `SemanticAddress` pattern, productionized.
-Grounding correction: `SemanticAddress` **already NFC-normalizes before JCS**
-(`crates/mvm-core/src/semantic_address.rs:168`), so the "NFC bug" one agent flagged
+`uor-addr::json::address` *is* the `WorkloadAddress` pattern, productionized.
+Grounding correction: `WorkloadAddress` **already NFC-normalizes before JCS**
+(`crates/mvm-core/src/workload_address.rs:168`), so the "NFC bug" one agent flagged
 does not apply there; but `ir_hash`/`plan_id`/bundle paths do *not* NFC-normalize.
 Almost certainly benign (structured/ASCII data), but it is exactly what a replay
 golden vector (§6, U4) should pin. Low-risk borrows: the fixed-width ASCII-validated
-`KappaLabel<N>` newtype as a hardening of `SemanticAddress`; keep pinning the
+`KappaLabel<N>` newtype as a hardening of `WorkloadAddress`; keep pinning the
 published UOR-ADDR fixtures. Collaboration thread: a *lightweight* uor-addr-conformant
 crate that does not drag `prism`, so the wire label interoperates across all sibling
 projects without the FHE/tensor tax. (Check `uor-addr-1` v0.1 on crates.io —
@@ -204,10 +204,10 @@ and each aligns with a lesson mvm already learned the hard way.
 ### U4 — Replay golden-vector lane
 - **Source:** UOR Gate-4 four-category taxonomy (positive/negative/edge/**replay**);
   `uor-registry` `log.jsonl` `state_address` byte-stability discipline.
-- **Now:** `SemanticAddress` pins 12 UOR-ADDR fixtures + one golden vector.
+- **Now:** `WorkloadAddress` pins 12 UOR-ADDR fixtures + one golden vector.
 - **Upgrade:** a first-class frozen corpus (`tests/vectors/…`) of canonicalization
   inputs → expected addresses, checked byte-for-byte each PR across **every**
-  content-address surface: `SemanticAddress`, `ir_hash`, `plan_id`,
+  content-address surface: `WorkloadAddress`, `ir_hash`, `plan_id`,
   `bundle_sha256`/manifest, the audit `prev_hash` spine, and the RFC-6962 Merkle
   root. Catches silent canonicalization drift — `serde_jcs` version bumps, serde
   field reordering, the `ir_hash`/`plan_id` NFC question (§5.3) — before it changes
@@ -789,7 +789,7 @@ Selected code anchors validated during the read (external repos cloned under
 
 | Anchor | What it shows |
 | --- | --- |
-| `uor-addr/crates/uor-addr/src/json/pipeline.rs` | κ-label minting = the `SemanticAddress` pattern, productionized |
+| `uor-addr/crates/uor-addr/src/json/pipeline.rs` | κ-label minting = the `WorkloadAddress` pattern, productionized |
 | `uor-addr/crates/uor-addr/src/label.rs` (`KappaLabel<N>`) | Fixed-width ASCII-validated address newtype (hardening pattern) |
 | `uor-addr` deps: `uor-foundation`/`uor-prism-*` (~156 transitive) | The substrate tax that makes the crate dep prohibitive |
 | `kappa-registry/src/kappa.rs`, `bundle.rs` | Multi-axis content address + verify-on-write + KBND delta bundle re-verify |
@@ -806,6 +806,6 @@ Selected code anchors validated during the read (external repos cloned under
 | `holospaces/crates/holospaces/src/{realizations,config,boot,disk}.rs` | κ-address, content-addressed `Configuration`, suspend-to-κ-snapshot, `KappaDisk` dedup |
 | `hologram-network/src/compute/scheduler.rs` | Capability/load/locality placement + 3× replication (mvmd reference) |
 | `hologram-storage/src/ontology/certificate.rs` | Fail-closed (σ==1.0) content-addressed proof artifact |
-| mvm `crates/mvm-core/src/semantic_address.rs:59,152,168` | `sha256(JCS(NFC(IR)))`; already NFC-normalizes (corrects §5.3) |
+| mvm `crates/mvm-core/src/workload_address.rs:59,152,168` | `sha256(JCS(NFC(IR)))`; already NFC-normalizes (corrects §5.3) |
 | mvm `crates/mvm-core/src/plan/bundle.rs:616,954` | `verify_plan_bundle` / `read_and_verify_bundle` rejection ladders |
 | mvm `crates/mvm-contract/src/verify.rs:169`, `merkle.rs` | no_std audit-chain verifier + RFC-6962 transparency tree (the "≥2 impls" bar, §6 U5) |

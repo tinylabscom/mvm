@@ -7,7 +7,7 @@
 
 ## TL;DR
 
-The UOR Foundation has several projects, but only one is a strong fit for mvm today: **UOR-ADDR** as a cross-implementation semantic content-addressing primitive. mvm has implemented a host-side UOR-ADDR-compatible `SemanticAddress` over the Workload IR (`crates/mvm-core/src/semantic_address.rs`).
+The UOR Foundation has several projects, but only one is a strong fit for mvm today: **UOR-ADDR** as a cross-implementation semantic content-addressing primitive. mvm has implemented a host-side UOR-ADDR-compatible `WorkloadAddress` over the Workload IR (`crates/mvm-core/src/workload_address.rs`).
 
 The broader UOR Framework ontology, Prism substrate, and PrimeShield crypto are not good fits for mvm's current architecture or threat model. The host-side conformance loop is now closed against UOR-ADDR's published vectors; any actual `uor-addr` crate dependency remains deferred to the wasm/browser layer (WS11 P4) where cross-language equality is load-bearing.
 
@@ -17,13 +17,13 @@ The broader UOR Framework ontology, Prism substrate, and PrimeShield crypto are 
 
 | Type / primitive | Location | What it does |
 |---|---|---|
-| `SemanticAddress` | `crates/mvm-core/src/semantic_address.rs` | `sha256(JCS(Workload))` rendered as `sha256:<64-hex>`, with Unicode NFC normalization. A distinct newtype with validating parse, serde round-trips, a pinned golden test vector, and the published UOR-ADDR JSON fixture set. |
-| `semantic_address()` | same | Validates IR schema version first, normalizes JSON strings/object keys to NFC, then `serde_jcs::to_vec` + `sha2::Sha256`. |
+| `WorkloadAddress` | `crates/mvm-core/src/workload_address.rs` | `sha256(JCS(Workload))` rendered as `sha256:<64-hex>`, with Unicode NFC normalization. A distinct newtype with validating parse, serde round-trips, a pinned golden test vector, and the published UOR-ADDR JSON fixture set. |
+| `workload_address()` | same | Validates IR schema version first, normalizes JSON strings/object keys to NFC, then `serde_jcs::to_vec` + `sha2::Sha256`. |
 | `ir_hash()` | `crates/mvm-contract/src/ir/hash.rs` | Same JCS + SHA-256, rendered as bare 64-hex (no `sha256:` prefix). Used inside launch plans and audit records. |
 | `canonicalize()` | `crates/mvm-contract/src/ir/canonicalize.rs` | Hand-rolled `no_std` JCS writer. A drift-lock test (`canonicalizer_equivalence.rs`) proves it matches `serde_jcs` byte-for-byte. |
-| `mvmctl build address` | `crates/mvm-cli/src/commands/build/address.rs` | CLI surface that prints the independent `SemanticAddress` and `ir_hash` identities. |
+| `mvmctl build address` | `crates/mvm-cli/src/commands/build/address.rs` | CLI surface that prints the independent `WorkloadAddress` and `ir_hash` identities. |
 
-Key boundary property: `SemanticAddress` is explicitly **not** interchangeable with `Sha256Hex`, `OciDigest`, `KeyId`, or `Nonce`. There are no `From`/`Into`/`Deref` impls between them, and tests enforce that separation.
+Key boundary property: `WorkloadAddress` is explicitly **not** interchangeable with `Sha256Hex`, `OciDigest`, `KeyId`, or `Nonce`. There are no `From`/`Into`/`Deref` impls between them, and tests enforce that separation.
 
 ### Exact-byte identities and cryptography
 
@@ -86,14 +86,14 @@ A standard-library façade over the UOR substrate:
 
 ### 1. Close the UOR-ADDR conformance loop (completed 2026-07-22)
 
-The existing `SemanticAddress` golden test pins:
+The existing `WorkloadAddress` golden test pins:
 
 ```text
 sha256:bf6f9f61571d7c5080144d83b681eb6718d76ab30ab80f61a715c50ac85b6ab3
 ```
 
 The 12 published UOR-ADDR JSON byte-identity fixtures are now pinned in
-`crates/mvm-core/src/semantic_address.rs`. The test covers key ordering, empty
+`crates/mvm-core/src/workload_address.rs`. The test covers key ordering, empty
 containers, nested values, arrays, numbers, mixed scalar types, and composed /
 decomposed Unicode. NFC normalization was added at the JSON boundary so both
 café forms produce the upstream label. The existing astral-plane key-ordering
@@ -106,21 +106,21 @@ conformance loop.
 
 ### 2. Semantic address for `BuildProvenance` (short term)
 
-`BuildProvenance` is a structured, versioned document recording source revisions, flake-lock identities, derivation/NAR hashes, OCI inputs, setup-command hashes, and toolchain versions. A UOR-ADDR-compatible semantic address over it would let two equivalent provenance records share an identity regardless of JSON formatting.
+`BuildProvenance` is a structured, versioned document recording source revisions, flake-lock identities, derivation/NAR hashes, OCI inputs, setup-command hashes, and toolchain versions. A UOR-ADDR-compatible workload address over it would let two equivalent provenance records share an identity regardless of JSON formatting.
 
 - Add as an **optional** field or host-side accessor.
 - Reuse existing `serde_jcs` + `sha2` (zero new deps).
-- Keep exact artifact digests and signatures inside the record; the semantic address is an additional correlation key, not a replacement.
+- Keep exact artifact digests and signatures inside the record; the workload address is an additional correlation key, not a replacement.
 
 ### 3. Cross-SDK / IR deduplication and cache keys (short-to-medium term)
 
-The existing `SemanticAddress` is already useful for:
+The existing `WorkloadAddress` is already useful for:
 
 - Cross-language workload fingerprints.
 - Semantic compile/build cache keys (distinct from exact-byte cache keys).
 - Registry lookup / deduplication of equivalent declarations.
 
-A natural next step is to persist `SemanticAddress` in the signed `ExecutionPlan` or a registry index, but **only as optional metadata** until cross-implementation interop is proven.
+A natural next step is to persist `WorkloadAddress` in the signed `ExecutionPlan` or a registry index, but **only as optional metadata** until cross-implementation interop is proven.
 
 ### 4. `uor-addr` crate adoption (deferred to WS11 P4)
 
@@ -138,7 +138,7 @@ Before adoption, run the full verification checklist:
 
 ### 5. Bundle / pack manifest canonicalization (not recommended without migration)
 
-`.mvmpkg` `BundleManifest` is serialized with plain `serde_json::to_vec` today. Moving it to JCS would change existing signature fixtures and the mvmd byte-identity contract. **Do not change the signing input.** If a semantic address of a manifest is desired, compute it as a separate field rather than replacing canonicalization.
+`.mvmpkg` `BundleManifest` is serialized with plain `serde_json::to_vec` today. Moving it to JCS would change existing signature fixtures and the mvmd byte-identity contract. **Do not change the signing input.** If a workload address of a manifest is desired, compute it as a separate field rather than replacing canonicalization.
 
 ## Risks and boundaries
 
@@ -158,7 +158,7 @@ A UOR label provides no authentication, authorization, provenance, confidentiali
 
 ### Do not use deterministic labels for ephemeral IDs
 
-VM IDs, operation IDs, session IDs, capability tokens, and plan nonces need uniqueness, unpredictability, or sequencing. A deterministic semantic address is the wrong primitive.
+VM IDs, operation IDs, session IDs, capability tokens, and plan nonces need uniqueness, unpredictability, or sequencing. A deterministic workload address is the wrong primitive.
 
 ### Dependency risk
 
@@ -169,8 +169,8 @@ VM IDs, operation IDs, session IDs, capability tokens, and plan nonces need uniq
 ### Do now (host-side)
 
 1. Keep the 12-fixture UOR-ADDR JSON conformance test synchronized with the upstream published vectors.
-2. ~~If cross-language identity is a goal, compare Rust output with the TypeScript and Python SDK paths over a shared IR fixture.~~ **Completed 2026-07-22:** the checked-in `hello-parity` fixture now runs through both SDKs and the native Rust IR; all three resolve to the pinned `sha256:b7106af4133c7d678744adb3b617e7289bc3f4c131b2df03a8e9cc49aac90037` semantic address, with `xtask check-ir-parity` enforcing drift in CI.
-3. Consider a semantic address for `BuildProvenance`, computed with the existing `serde_jcs` + `sha2` stack, as a separate optional follow-up.
+2. ~~If cross-language identity is a goal, compare Rust output with the TypeScript and Python SDK paths over a shared IR fixture.~~ **Completed 2026-07-22:** the checked-in `hello-parity` fixture now runs through both SDKs and the native Rust IR; all three resolve to the pinned `sha256:b7106af4133c7d678744adb3b617e7289bc3f4c131b2df03a8e9cc49aac90037` workload address, with `xtask check-ir-parity` enforcing drift in CI.
+3. Consider a workload address for `BuildProvenance`, computed with the existing `serde_jcs` + `sha2` stack, as a separate optional follow-up.
 
 ### Do later (wasm/browser layer, WS11 P4)
 
@@ -184,7 +184,7 @@ VM IDs, operation IDs, session IDs, capability tokens, and plan nonces need uniq
 1. Adopting the full UOR Framework / `uor-foundation` ontology.
 2. Adopting `PrimeShield` or other novel UOR crypto.
 3. Replacing `.mvmpkg` signing canonicalization with JCS without a byte-identity migration plan.
-4. Using `SemanticAddress` for ephemeral or replay-sensitive identifiers.
+4. Using `WorkloadAddress` for ephemeral or replay-sensitive identifiers.
 
 ## Alignment with simplification plan
 
@@ -209,4 +209,4 @@ The refactor direction wants fewer crates, fewer features, fewer deps, and `mvm-
 - [Prism repository](https://github.com/UOR-Foundation/prism)
 - [RFC 8785 — JSON Canonicalization Scheme](https://www.rfc-editor.org/rfc/rfc8785)
 - [mvm UOR-ADDR integration assessment](../research/uor-addr-integration-assessment.md)
-- [mvm semantic address pilot design](../../specs/refactor/12-semantic-address-pilot.md)
+- [mvm workload address pilot design](../../specs/refactor/12-workload-address-pilot.md)

@@ -18,7 +18,7 @@ runtime identifiers must retain their current semantics.
 
 The recommended next step is a small, additive pilot around one versioned
 semantic document—preferably Workload IR or build provenance—with a dedicated
-`SemanticAddress` type. The pilot should not change OCI verification, `.mvm`
+`WorkloadAddress` type. The pilot should not change OCI verification, `.mvm`
 signing, or any existing wire contract.
 
 ## What was reviewed
@@ -65,17 +65,17 @@ because more than one serializes as `sha256:<hex>` or a 64-character hex value.
 | dm-verity `roothash` | Hash defined by the verity block-device format | Keep unchanged |
 | Ed25519, cosign, HMAC, and related signatures | Authenticity, integrity, and authorization evidence | Keep unchanged; a UOR label is not a signature |
 | VM, operation, session, and replay identifiers | Runtime correlation, uniqueness, or anti-replay values | Keep existing typed/random/sequenced mechanisms |
-| Workload IR and structured build metadata | Meaning-bearing documents that may be serialized by multiple tools | Strong candidate for an additive semantic address |
+| Workload IR and structured build metadata | Meaning-bearing documents that may be serialized by multiple tools | Strong candidate for an additive workload address |
 
 The implementation should introduce a distinct domain type rather than aliasing
 an existing digest type:
 
 ```rust
-struct SemanticAddress(String);
+struct WorkloadAddress(String);
 ```
 
 The exact final shape should follow mvm's existing newtype and validation
-conventions. It should be impossible to pass a semantic address to an API that
+conventions. It should be impossible to pass a workload address to an API that
 expects an OCI or exact-byte digest without an explicit conversion.
 
 ## Potential uses
@@ -83,7 +83,7 @@ expects an OCI or exact-byte digest without an explicit conversion.
 ### Workload IR identity
 
 The SDKs produce structured workload descriptions across language boundaries.
-A semantic address could identify equivalent declarations despite irrelevant
+A workload address could identify equivalent declarations despite irrelevant
 JSON formatting or object-key ordering differences. This could support:
 
 - cross-language workload fingerprints;
@@ -112,7 +112,7 @@ semantic provenance address
 + policy validation
 ```
 
-The semantic address answers whether two records express the same structured
+The workload address answers whether two records express the same structured
 provenance. It does not establish that a trusted producer created the record or
 that the referenced bytes are present.
 
@@ -152,7 +152,7 @@ A UOR label is a deterministic digest-like identifier. It does not provide:
 - freshness or replay resistance.
 
 Any integration must preserve mvm's existing signature, trust-policy, admission,
-validity-window, and nonce checks. A semantic address may be included in a
+validity-window, and nonce checks. A workload address may be included in a
 signed or attested record, but it cannot replace those checks.
 
 ### Canonicalization must be versioned
@@ -208,7 +208,7 @@ The pilot should be deliberately additive and reversible:
 
 1. Add the pinned `uor-addr` dependency only to the crate that owns the chosen
    semantic document.
-2. Define a validated `SemanticAddress` newtype distinct from `Sha256Hex` and
+2. Define a validated `WorkloadAddress` newtype distinct from `Sha256Hex` and
    `OciDigest`.
 3. Address one versioned document, preferably Workload IR or build provenance.
 4. Store the address as an optional field initially; do not make it a required

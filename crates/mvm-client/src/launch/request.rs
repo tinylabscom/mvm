@@ -89,6 +89,15 @@ pub struct LaunchRequest {
     /// for a campaign, which is what keeps campaign discovery off the launch
     /// critical path rather than merely cheap on it.
     pub(crate) assurance_campaign: Option<std::path::PathBuf>,
+    /// A fleet-issued signed plan to admit instead of synthesizing one under
+    /// the host key. When present, the plan is the authority: the host
+    /// verifies it against the operator-pinned `trusted_plan_signers`, and
+    /// sizing, grants, and teardown intent come from the verified plan body —
+    /// `build()` refuses a request that also tries to set them. Transient
+    /// launches only: a persisted definition cannot carry the plan, so a
+    /// persistent one would silently re-admit under the host key on its next
+    /// start.
+    pub(crate) signed_plan: Option<mvm_core::plan::SignedExecutionPlan>,
 }
 
 impl LaunchRequest {
@@ -115,6 +124,7 @@ impl LaunchRequest {
             force: false,
             grants: mvm_contract::grants::Grants::default(),
             assurance_campaign: None,
+            signed_plan: None,
         }
     }
 
@@ -149,6 +159,7 @@ pub struct LaunchRequestBuilder {
     force: bool,
     grants: mvm_contract::grants::Grants,
     assurance_campaign: Option<std::path::PathBuf>,
+    signed_plan: Option<mvm_core::plan::SignedExecutionPlan>,
 }
 
 impl LaunchRequestBuilder {
@@ -271,6 +282,17 @@ impl LaunchRequestBuilder {
         self
     }
 
+    /// Admit a fleet-issued signed plan instead of synthesizing one under the
+    /// host key. The host verifies the envelope against its operator-pinned
+    /// `trusted_plan_signers` at admission; a host that pins none refuses.
+    /// Transient launches only, and mutually exclusive with request-level
+    /// grants — both enforced at `build()`.
+    #[must_use]
+    pub fn signed_plan(mut self, plan: mvm_core::plan::SignedExecutionPlan) -> Self {
+        self.signed_plan = Some(plan);
+        self
+    }
+
     /// Attach a managed volume at `guest_path`.
     #[must_use]
     pub fn volume(mut self, spec: LaunchVolumeSpec) -> Self {
@@ -355,12 +377,53 @@ impl LaunchRequestBuilder {
                 )));
             }
         }
+        // A signed plan is the launch's authority: grants are signed into it,
+        // so a request-level set would either duplicate or contradict them.
+        // And it cannot persist — a stored definition would re-admit under
+        // the host key on its next start, silently dropping the fleet's
+        // authority after the first boot.
+        if self.signed_plan.is_some() {
+            if self.mode == LifecycleMode::Persistent {
+                return Err(invalid(
+                    "a signed plan admits a transient launch only; a persisted definition \
+                     cannot carry it and would re-admit under the host key on the next start"
+                        .into(),
+                ));
+            }
+            if self.grants != mvm_contract::grants::Grants::default() {
+                return Err(invalid(
+                    "grants ride inside the signed plan; setting them on the request too \
+                     would contradict it"
+                        .into(),
+                ));
+            }
+        }
+        // Read sizing out of the envelope so the request reports what the
+        // plan authorizes. Verification happens at admission — these values
+        // only shape the request; the boot path re-derives them from the
+        // verified plan body.
+        let (cpus, memory_mib) = match &self.signed_plan {
+            Some(signed) => {
+                let plan: mvm_core::plan::ExecutionPlan = serde_json::from_slice(&signed.0.payload)
+                    .map_err(|e| {
+                        invalid(format!("the signed plan's payload does not parse: {e}"))
+                    })?;
+                let memory_mib = u32::try_from(plan.resources.mem_mib).map_err(|_| {
+                    invalid(format!(
+                        "the signed plan's memory ({} MiB) does not fit this surface",
+                        plan.resources.mem_mib
+                    ))
+                })?;
+                (plan.resources.cpus, memory_mib)
+            }
+            None => (self.cpus, self.memory_mib),
+        };
         Ok(LaunchRequest {
             name: self.name,
             mode: self.mode,
             image: self.image,
-            cpus: self.cpus,
-            memory_mib: self.memory_mib,
+            cpus,
+            memory_mib,
             backend: self.backend,
             profile: self.profile,
             ttl_seconds: self.ttl_seconds,
@@ -372,6 +435,7 @@ impl LaunchRequestBuilder {
             // grants were expressible.
             grants: (self.grants != mvm_contract::grants::Grants::default()).then_some(self.grants),
             assurance_campaign: self.assurance_campaign,
+            signed_plan: self.signed_plan,
         })
     }
 }
@@ -511,5 +575,75 @@ mod tests {
             .build()
             .unwrap_err();
         assert!(err.to_string().contains("guest path"), "got: {err}");
+    }
+
+    /// A fleet-issued plan, signed by a key the request tests never verify —
+    /// signature verification is admission's job, not the builder's.
+    fn fleet_signed_plan() -> mvm_core::plan::SignedExecutionPlan {
+        let plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        mvm_core::plan::signing::sign_plan(
+            &plan,
+            &ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]),
+            "fleet-prod",
+        )
+    }
+
+    #[test]
+    fn a_signed_plan_launch_derives_sizing_from_the_plan() {
+        // The plan is the authority: the request reports the plan's sizing
+        // (the fixture's 1 cpu / 128 MiB), not the builder's defaults and not
+        // anything the caller set.
+        let req = base(LifecycleMode::Transient)
+            .cpus(8)
+            .memory_mib(4096)
+            .signed_plan(fleet_signed_plan())
+            .build()
+            .expect("a transient signed-plan request builds");
+        assert!(req.signed_plan.is_some());
+        assert_eq!((req.cpus, req.memory_mib), (1, 128));
+        assert!(req.grants.is_none());
+    }
+
+    #[test]
+    fn request_grants_with_a_signed_plan_are_refused() {
+        // Grants are signed into the plan; a request-level set would either
+        // duplicate or contradict them, so the combination cannot build.
+        let err = base(LifecycleMode::Transient)
+            .cpu_millicores(500)
+            .signed_plan(fleet_signed_plan())
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("grants ride inside the signed plan"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_signed_plan_is_transient_only() {
+        // A persisted definition cannot carry the plan; without the refusal a
+        // machine's first boot would honor the fleet's signature and every
+        // later start would silently re-admit under the host key.
+        let err = base(LifecycleMode::Persistent)
+            .signed_plan(fleet_signed_plan())
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("transient"), "got: {err}");
+    }
+
+    #[test]
+    fn a_signed_plan_with_an_unparseable_payload_is_refused() {
+        let malformed =
+            mvm_core::plan::SignedExecutionPlan(mvm_core::protocol::signing::SignedPayload {
+                payload: b"not a plan".to_vec(),
+                signature: vec![0u8; 64],
+                signer_id: "fleet-prod".to_string(),
+            });
+        let err = base(LifecycleMode::Transient)
+            .signed_plan(malformed)
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("does not parse"), "got: {err}");
     }
 }

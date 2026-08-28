@@ -111,7 +111,7 @@ fn generate_template(name: &str, dir: &str) -> Result<()> {
 }
 
 fn generate_prompt(description: &str, dir: &str) -> Result<()> {
-    crate::template_cmd::init(dir, true, ".", None, Some(description))
+    crate::template_cmd::init(dir, ".", None, Some(description))
 }
 
 fn tokio_block<F, T>(future: F) -> Result<T>

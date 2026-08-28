@@ -40,7 +40,7 @@ Two consequences for this plan. **WS6 moves from tail to lead** — it is no lon
 - `model/claims.toml` — already carries `level = some-true | build | open`, i.e. the `template/model/ids.toml` honesty axis recon U1 named as its source pattern.
 - `specs/VERIFICATION.md` §Falsifiability — 36 recorded planted-defect rows.
 - Host↔no_std audit-verifier parity (`mvm_verify_matches_supervisor_chain`, `crates/mvm-hostd/src/supervisor/audit_file.rs`).
-- `SemanticAddress` = `sha256(JCS(NFC(IR)))`, pinned to published UOR-ADDR fixtures by `matches_published_uor_addr_json_fixtures`.
+- `WorkloadAddress` = `sha256(JCS(NFC(IR)))`, pinned to published UOR-ADDR fixtures by `matches_published_uor_addr_json_fixtures`.
 
 This plan builds on those; it does not duplicate them.
 
@@ -85,8 +85,8 @@ Recorded so no workstream re-proposes them.
 - **S2 — cross-tenant dedup is an oracle, not merely a leak.** A truthful existence response across a trust boundary yields one bit per probe, and a target drawn from an enumerable set is recoverable in proportion to its entropy. Key WS6's cache within the existing per-tenant boundary. Two notes from recon §7.10: refusing a cross-namespace mount is *fully conformant* under the distribution spec (same request count, same client path, no unhandled error), so the safe default costs bandwidth rather than correctness; and under per-namespace key derivation the oracle cannot form **arithmetically** — identical plaintext yields different ciphertext, a different address and a different path — which is strictly better than preventing it by policy.
 - **S3 — verify-on-read must fail closed.** A cache hit whose recomputed address ≠ the key is a tamper/skew signal: reject + evict, never serve. Absence of a hash must not fall back to trusting the path.
 - **S4 — do not weaken dm-verity.** Content-addressing the kernel is additive provenance; the workload rootfs dm-verity roothash chain (claim 3) is unchanged and remains authoritative for the sealed rootfs.
-- **S5 — NFC decision.** `SemanticAddress` NFC-normalizes; `ir_hash`/`plan_id` do not. WS3 pins the *current* behavior as a replay vector first (freeze what ships), then WS1/owner decides whether to converge on NFC — never silently change an address.
-- **S7 — an address digest must be collision-resistant; an attestation digest need not be.** MD5, CRC32C and CRC64 are legitimate *attestations* and disqualified as *addresses*. Enforce the distinction with disjoint types and a compile-fail test, not with review — the same posture `mvm_core::semantic_address` already takes by having no conversions between identity families.
+- **S5 — NFC decision.** `WorkloadAddress` NFC-normalizes; `ir_hash`/`plan_id` do not. WS3 pins the *current* behavior as a replay vector first (freeze what ships), then WS1/owner decides whether to converge on NFC — never silently change an address.
+- **S7 — an address digest must be collision-resistant; an attestation digest need not be.** MD5, CRC32C and CRC64 are legitimate *attestations* and disqualified as *addresses*. Enforce the distinction with disjoint types and a compile-fail test, not with review — the same posture `mvm_core::workload_address` already takes by having no conversions between identity families.
 - **S8 — never sign state that cannot be substantiated.** The order is content → index → root → signature → publication. A crash before signing is recoverable; the reverse order forks the chain with no recovery path. This binds WS3's transcript-root vector and any future signed root.
 - **S9 — a reconciliation root is not a commitment.** If distributed transport is ever revisited (recon Phase 3), the fingerprint must be multiset-homomorphic — an XOR aggregation lets a peer withhold arbitrary data by claiming absence, with no collision-finding and no functional-test signal — and an MST page/root digest from a non-cryptographic hash must never be signed. Out of scope here; recorded so it is not rediscovered late.
 - **S6 — the two honesty registers are separate, and the witness bar is the real gap.** *(Corrected 2026-08-02. The first draft of this said `model/claims.toml` `level` and the ADR claim-frontmatter `status` were two vocabularies over the same claims, and that a claim reading `open` in one and `Shipped` in the other would silently disengage `check-no-overclaim`. That is wrong. They are separate registers with no shared key: the model holds 16 numbered `MVM-SEC-NN` claims keyed by number, the frontmatter holds 3 phrase-gating claims keyed by name — `trust-gradient`, `catalog`, `egress-no-secret-to-guest` — and no claim appears in both. No mistiering of the kind described is reachable.)* The register's honesty half is already enforced: `check-honesty` is the behavioural gate over `open`/`some-true` IDs and `check-conformance` the structural one. What nothing enforced was the **evidence** half — a claim could be delisted from a whole kind of witness with every gate green.
@@ -120,7 +120,7 @@ No residual work. WS1's cross-field check is what makes this gate trustworthy �
 
 ### WS3 — Replay golden-vector lane (U4)
 
-Premise verified before building, and this time it held: five of seven surfaces had no frozen address at all. `SemanticAddress` (13 literals, incl. 12 published UOR-ADDR fixtures) and the plan-280 transcript root were the exceptions. `bundle_sha256`'s single literal was `sha256("abc")` — a textbook vector pinning lowercase-hex output, not a bundle address.
+Premise verified before building, and this time it held: five of seven surfaces had no frozen address at all. `WorkloadAddress` (13 literals, incl. 12 published UOR-ADDR fixtures) and the plan-280 transcript root were the exceptions. `bundle_sha256`'s single literal was `sha256("abc")` — a textbook vector pinning lowercase-hex output, not a bundle address.
 
 The sharpest finding is what the existing `ir_hash` tests are: **all four are relational** — stable for identical input, key-order independent, different values differ, 64 hex long. A canonicalization change that moves every address consistently satisfies all of them. Demonstrated by planting exactly that (hash the canonical form with a trailing newline): the four unit tests stayed green and only the new vectors fired.
 
@@ -131,7 +131,7 @@ The sharpest finding is what the existing `ir_hash` tests are: **all four are re
 - [x] Seeded from shipped behaviour, so they freeze what ships rather than asserting what it ought to be. `MVM_PRINT_ADDRESS_VECTORS=1` prints instead of asserting, making a reseed a deliberate act with a diff that has to be justified.
 - [x] Falsifiability rows for both crates, each with the planted defect recorded.
 - [x] The audit `prev_hash` spine, closed by WS4: the spine is exercised by the frozen signed corpus, whose `a_reordered_corpus_breaks_the_chain` vector swaps two validly-signed entries and must fail — signatures alone do not order a chain.
-- [ ] Fold `SemanticAddress`'s existing 13 goldens into the same corpus shape, so WS4 has one vector set rather than two conventions.
+- [ ] Fold `WorkloadAddress`'s existing 13 goldens into the same corpus shape, so WS4 has one vector set rather than two conventions.
 
 ### WS4 — Two-verifier oracle bar (U5)
 
@@ -189,7 +189,7 @@ The tree was already keeping them apart correctly, under different names. What i
 - [x] The descriptor as an open enumeration, not a boolean: `Framing` (whole / fixed / chunked-by-manifest) × `per_frame: Vec<FrameTransform>` (identity / aead / deflate / delta / erasure) × `SeekMap` (implicit / explicit / absent). A chunked manifest is typed κ, since it is itself a stored object.
 - [x] S7 enforced by construction: both constructors go through `Sha256Hex`, whose width check rejects MD5 (32 hex), CRC32C (8) and CRC64 (16). Those stay legitimate attestations and are disqualified as addresses without review having to catch it.
 - [x] Compile-fail doctest, and it needed sharpening: the first version used a bare `let kappa: StorageAddress = sigma;`, which never compiles whatever impls exist, so it passed **with a `From` bridge present** — a vacuous test. Rewritten to `sigma.into()`, which compiles exactly when a bridge exists; planting the bridge now fails it.
-- [x] Cross-referenced from the `semantic_address` taxonomy prose, which separates *what* is identified; this is the orthogonal *which bytes* axis.
+- [x] Cross-referenced from the `workload_address` taxonomy prose, which separates *what* is identified; this is the orthogonal *which bytes* axis.
 - [ ] Adopt the types at the two live sites — the OCI layer/`diff_id` pair and the transcript chunk records. Deliberately separate: introducing the vocabulary is additive, and changing what those paths store is a format question that wants its own review.
 
 ## Sequencing

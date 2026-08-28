@@ -406,7 +406,10 @@ pub(crate) fn resolve_sdk_sidecar_attachment_for_host(
 
     let cache_miss =
         match mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(services, &resolver, arch) {
-            Ok(resolved) => return Ok(resolved),
+            Ok(resolved) => {
+                warn_if_sidecar_predates_the_working_tree(&cache_root, version, arch);
+                return Ok(resolved);
+            }
             Err(e) => e,
         };
 
@@ -424,6 +427,67 @@ pub(crate) fn resolve_sdk_sidecar_attachment_for_host(
             mvm_build::sdk_sidecar::download_sdk_sidecar(version, arch, &cache_root)
                 .with_context(|| sdk_sidecar_download_failure_context(services, version, arch))?;
             mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(services, &resolver, arch)
+        }
+    }
+}
+
+/// Say so when the cached sidecar cannot carry this checkout's cdylib changes.
+///
+/// The sidecar is the one guest artifact with no source-build path: it is
+/// downloaded and cached under `<version>/<arch>`, and that key does not move
+/// when someone edits `crates/mvm-sdk`. A contributor who adds a host-service
+/// verb therefore keeps booting guests whose `libmvm_host_services.so` predates
+/// it, and learns about it only from inside the guest, as
+/// `unknown method \`host.kv.get\`` — an error that points at the broker rather
+/// than at a stale image. That is how the `host.kv.v1` live witness came to be
+/// written but never pass.
+///
+/// A warning, not a refusal, and not an eviction. There is nothing local to
+/// rebuild from yet, so evicting would leave the guest with no cdylib at all —
+/// strictly worse than an old one for every workload that does not touch the
+/// new verb. Once the build path lands this becomes the trigger for it.
+///
+/// Silent for a release binary, which has no checkout and for which the
+/// published artifact is exactly right.
+/// Said once per process. A launch resolves the sidecar from more than one call
+/// site, and the condition is process-global — same cache, same checkout — so
+/// repeating it is noise that trains people to skip the line.
+fn warn_if_sidecar_predates_the_working_tree(
+    cache_root: &std::path::Path,
+    version: &str,
+    arch: mvm_core::arch::GuestArch,
+) {
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    let Some(workspace_root) =
+        crate::commands::runtime_overlay::runtime_overlay_source_checkout_root()
+    else {
+        return;
+    };
+    match mvm_build::sdk_sidecar::cached_sidecar_provenance(
+        cache_root,
+        version,
+        arch,
+        &workspace_root,
+    ) {
+        Ok(mvm_build::sdk_sidecar::SidecarProvenance::MatchesSource) => {}
+        Ok(_) if SAID.swap(true, std::sync::atomic::Ordering::Relaxed) => {}
+        Ok(provenance) => {
+            let origin = match provenance {
+                mvm_build::sdk_sidecar::SidecarProvenance::Published => "is the published artifact",
+                _ => "was built from a different revision of this tree",
+            };
+            ui::warn(&format!(
+                "SDK sidecar {origin}, so `libmvm_host_services.so` does not carry \
+                 changes to crates/mvm-sdk in this checkout. Host-service calls from \
+                 the guest use the verbs it shipped with; one added here answers \
+                 `unknown method`. There is no local build for this artifact yet."
+            ));
+        }
+        // Provenance is a diagnostic. Failing to compute it must not fail a
+        // launch that would otherwise proceed.
+        Err(error) => {
+            tracing::debug!(%error, "could not determine SDK sidecar provenance");
         }
     }
 }
