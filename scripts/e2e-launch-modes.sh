@@ -94,7 +94,7 @@ echo "    home:  $E2E_HOME"
 # 1. Build the binaries the suite drives.
 # ---------------------------------------------------------------------------
 echo "==> building mvmctl + host helpers"
-./scripts/cargo-fast.sh build --bin mvmctl
+./scripts/cargo-fast.sh build --bin mvmctl --features embed-host-bins
 ./scripts/cargo-fast.sh build -p xtask
 
 # ---------------------------------------------------------------------------

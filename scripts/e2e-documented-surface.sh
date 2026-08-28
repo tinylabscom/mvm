@@ -221,13 +221,17 @@ just embed-refresh
 # standard compiler/linker path: the nightly fast-codegen wrapper leaves the
 # native aws-lc symbols unresolved. The featureless local path can retain the
 # faster wrapper because it does not link that stack.
+# `embed-host-bins` is appended to both arms rather than left to the caller:
+# this suite boots builder VMs, and without the embedded payload every one of
+# them fails at bootstrap. A caller-supplied MVM_E2E_FEATURES is about which
+# acquisition channel to exercise, not about whether the guest binaries ship.
 E2E_FEATURES="${MVM_E2E_FEATURES-}"
 if [[ -n "$E2E_FEATURES" ]]; then
-  echo "==> building mvmctl (--features $E2E_FEATURES)"
-  cargo build --bin mvmctl --features "$E2E_FEATURES"
+  echo "==> building mvmctl (--features $E2E_FEATURES,embed-host-bins)"
+  cargo build --bin mvmctl --features "$E2E_FEATURES,embed-host-bins"
 else
   echo "==> building mvmctl"
-  ./scripts/cargo-fast.sh build --bin mvmctl
+  ./scripts/cargo-fast.sh build --bin mvmctl --features embed-host-bins
 fi
 
 # Always rebuild the per-VM helpers, never just check they exist.

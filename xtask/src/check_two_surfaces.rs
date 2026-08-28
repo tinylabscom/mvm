@@ -51,7 +51,15 @@ const INTERNAL: [&str; 9] = [
 /// either product surface (they gate acquisition mechanics, not behaviour).
 /// `dev` is the local-development meta-feature (the `host` + `user` union that
 /// runs every documented example) — a convenience, not a third product surface.
-const BUILD_ONLY: [&str; 3] = ["release-artifact-bootstrap", "release-channel", "dev"];
+const BUILD_ONLY: [&str; 4] = [
+    "release-artifact-bootstrap",
+    "release-channel",
+    "dev",
+    // Whether the Linux host binaries are cross-compiled into the artifact.
+    // Both settings expose the same verbs, so this gates acquisition, not
+    // behaviour — it belongs here rather than in `host` or `user`.
+    "embed-host-bins",
+];
 
 /// `dev` must aggregate both surfaces so a contributor can run every README /
 /// docs example from one build. Asserted structurally below.

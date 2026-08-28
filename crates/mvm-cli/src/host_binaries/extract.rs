@@ -10,7 +10,26 @@ use std::path::{Path, PathBuf};
 
 use super::embedded::EMBEDDED;
 
+/// Refuse before touching the cache when this binary carries no payload.
+///
+/// Without this the empty table extracts an empty directory and every caller
+/// fails later, somewhere else, as a missing file — the failure would be read
+/// as a corrupted cache rather than as a build that was never asked to embed
+/// anything. Named here so the message can say which build produced it.
+fn require_embedded_payload() -> std::io::Result<()> {
+    if !EMBEDDED.is_empty() {
+        return Ok(());
+    }
+    Err(std::io::Error::other(
+        "this mvmctl was built without the embedded Linux host binaries, so it \
+         cannot bootstrap a builder VM. Rebuild with `just embed` (or \
+         `cargo build --features embed-host-bins`); official release binaries \
+         always carry them.",
+    ))
+}
+
 pub fn ensure_extracted(cache_root: &Path) -> std::io::Result<PathBuf> {
+    require_embedded_payload()?;
     let combined_hash = combined_hash_hex();
     let target = cache_root.join(&combined_hash);
     std::fs::create_dir_all(&target)?;

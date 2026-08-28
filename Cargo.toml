@@ -550,6 +550,15 @@ release-artifact-bootstrap = ["mvm-cli/release-artifact-bootstrap"]
 # the published channel even when the binary runs from a source checkout.
 release-channel = ["mvm-cli/release-channel"]
 
+# Build-only: cross-compile the Linux host binaries and embed them in `mvmctl`.
+# Acquisition mechanics, not product behaviour — a build with this on and one
+# with it off expose exactly the same verbs; the difference is whether the
+# payload the builder VM needs travels inside the binary. Off by default so the
+# only remaining work in `mvm-cli`'s build script stays off the inner loop.
+
+# `just embed` and the tag-push release workflow turn it on.
+embed-host-bins = ["mvm-cli/embed-host-bins"]
+
 # Optional S3 storage backend for the template registry — a heavy cloud dep kept
 # opt-in (not part of the local host runtime; fleet/deployment use only).
 template-registry-s3 = [

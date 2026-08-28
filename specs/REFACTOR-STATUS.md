@@ -930,11 +930,20 @@ resume` takes a `current_head` and refuses when it differs from the
       **13.6 GB → 649 MB**. The `.mvm-stale` marker and `MVM_ALLOW_STALE_AUX`
       went with it — cargo owns freshness, so staleness is no longer
       representable rather than merely detected.
+      The remaining musl leg then went opt-in behind `embed-host-bins` —
+      `specs/plans/2026-08-28-embedded-host-binaries-are-opt-in.md` — so the
+      script no longer runs on the inner loop **at all**: with the feature off
+      it watches four files and writes an empty table, and a `mvm-core` edit
+      produces zero build-script executions. `just embed` and the tag-push
+      release workflow turn it on; an unembedded `mvmctl` refuses to bootstrap
+      a builder VM with the recipe named.
       STILL OPEN: Phase 3 (phantom build.rs tests — the `MVM_LIBKRUN_HEADER`
       half is closed, its probe is deleted), Phase 4 (dead crate edges;
       `deps_audit` and the tree-sitter grammars off the serial path; the
       `mvm-hostd` audit cluster), Phase 5 (sccache 4.2% Rust hit rate, worktree
-      hygiene). Not attempted: making the musl leg opt-in for dev builds.
+      hygiene). Also open: the ten now-mostly-unnecessary `install-zigbuild`
+      steps in `ci.yml`, and the embed store sitting at 17 GB against its 4 GiB
+      ceiling.
 
 - [~] **Agent tool and memory planes**
       (`specs/plans/2026-08-18-agent-tool-and-memory-planes.md`). Opened

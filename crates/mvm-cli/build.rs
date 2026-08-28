@@ -146,6 +146,61 @@ fn main() {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let workspace_root = workspace_root_from_manifest_dir(&manifest_dir);
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+
+    emit_pinned_toolchain_env(&workspace_root);
+
+    // The cross-compile is opt-in. Off, this script watches four files and does
+    // nothing else, so cargo runs it once per fingerprint and never again on
+    // the inner loop — the point of the feature. On, it produces the real set.
+    if !embedding_requested() {
+        write_unembedded_table(&out_dir);
+        return;
+    }
+    embed_host_binaries(&workspace_root, &out_dir);
+}
+
+/// Whether this build wants the Linux host binaries compiled into `mvmctl`.
+///
+/// Cargo sets `CARGO_FEATURE_<NAME>` for each enabled feature of the package
+/// being built, so this reads the `embed-host-bins` feature without the build
+/// script needing to know how it was turned on.
+fn embedding_requested() -> bool {
+    std::env::var_os("CARGO_FEATURE_EMBED_HOST_BINS").is_some()
+}
+
+/// Export the pinned zig / rust / cargo-zigbuild versions `mvmctl doctor`
+/// reports. Needed under both arms: doctor tells you what the embed toolchain
+/// *would* be even when this build did not use it.
+fn emit_pinned_toolchain_env(workspace_root: &Path) {
+    let pin = read_pinned_toolchain(workspace_root);
+    println!("cargo:rustc-env=MVM_PINNED_RUST={}", pin.rust);
+    println!("cargo:rustc-env=MVM_PINNED_ZIG={}", pin.zig);
+    println!(
+        "cargo:rustc-env=MVM_PINNED_CARGO_ZIGBUILD={}",
+        pin.cargo_zigbuild
+    );
+    println!("cargo:rustc-env=MVM_PINNED_TARGET={}", pin.target);
+}
+
+/// The unembedded arm: an empty `EMBEDDED` table plus the minimum watch set.
+///
+/// At least one `rerun-if-*` line is mandatory here. Emitting none does not
+/// mean "never re-run" — it restores cargo's default, which re-runs the script
+/// on *any* change to the package, i.e. every edit to `mvm-cli`'s 251 files.
+/// That is the opposite of what this arm is for. The four inputs below are the
+/// only ones that can change what it writes.
+fn write_unembedded_table(out_dir: &Path) {
+    std::fs::write(out_dir.join("embedded.rs"), render_embedded_rs(&[])).unwrap();
+    println!("cargo:rustc-env=MVM_EMBEDDED_BINS_REUSED=0");
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=build_support.rs");
+    println!("cargo:rerun-if-changed=build_embed_cache.rs");
+    println!("cargo:rerun-if-changed=src/host_binaries/manifest.rs");
+}
+
+fn embed_host_binaries(workspace_root: &Path, out_dir: &Path) {
+    let workspace_root = workspace_root.to_path_buf();
+    let out_dir = out_dir.to_path_buf();
     let bins_out = out_dir.join("mvm-host-bins");
     std::fs::create_dir_all(&bins_out).expect("create OUT_DIR/mvm-host-bins");
 
@@ -164,13 +219,6 @@ fn main() {
     let host_target_dir = nested_target_dir.join("host-vm-target");
 
     let pin = read_pinned_toolchain(&workspace_root);
-    println!("cargo:rustc-env=MVM_PINNED_RUST={}", pin.rust);
-    println!("cargo:rustc-env=MVM_PINNED_ZIG={}", pin.zig);
-    println!(
-        "cargo:rustc-env=MVM_PINNED_CARGO_ZIGBUILD={}",
-        pin.cargo_zigbuild
-    );
-    println!("cargo:rustc-env=MVM_PINNED_TARGET={}", pin.target);
     println!("cargo:rerun-if-env-changed=MVM_EMBED_CARGO");
     println!("cargo:rerun-if-env-changed=MVM_EMBED_RUSTC");
     println!("cargo:rerun-if-env-changed=MVM_EMBED_ZIG");

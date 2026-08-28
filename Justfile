@@ -386,6 +386,18 @@ build-supervisors:
       echo "  Install it (brew install slp/krun/libkrun) if you need the libkrun backend."
     fi
 
+# Build an mvmctl that carries the Linux host binaries the builder VM needs.
+#
+# The cross-compile is off by default, so a plain `cargo build` produces an
+# mvmctl that can run every host-side verb but cannot bootstrap a builder VM —
+# `host_binaries::extract` refuses and names this recipe. Run it when you are
+# about to boot a VM. Note that it and a plain `cargo build` write the same
+# `target/<profile>/mvmctl` under different feature sets, so alternating the two
+
+# relinks mvmctl; that is why this is a deliberate step and not part of `build`.
+embed *ARGS:
+    ./scripts/cargo-fast.sh build --features embed-host-bins {{ARGS}}
+
 # Drop the cached cross-compiled host binaries so the next build rebuilds them.
 # Dev builds reuse these instead of re-running cargo-zigbuild, which is the bulk
 # of mvm-cli's build-script wall time. Run this after editing anything they link
