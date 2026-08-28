@@ -50,6 +50,21 @@ path = "cache repair"
 tier = "exec"
 
 [[command]]
+path = "capture project"
+tier = "parse"
+reason = "needs a caller-owned project tree and writes a capture report"
+
+[[command]]
+path = "capture resolve"
+tier = "parse"
+reason = "needs a capture report produced from a caller-owned project tree"
+
+[[command]]
+path = "capture verify"
+tier = "parse"
+reason = "writes rendered artifacts and its optional modes boot the Linux builder VM"
+
+[[command]]
 path = "catalog list"
 tier = "exec"
 

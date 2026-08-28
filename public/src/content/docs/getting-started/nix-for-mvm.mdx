@@ -36,11 +36,7 @@ Here's the end result — don't worry about understanding it yet:
 
         entrypoint.command = [
           "/bin/sh" "-c"
-          ''
-            mkdir -p /tmp/www
-            echo '<h1>Hello from mvm!</h1>' > /tmp/www/index.html
-            exec ${pkgs.python3}/bin/python3 -m http.server 8080 --directory /tmp/www
-          ''
+          "mkdir -p /tmp/www; echo '<h1>Hello from mvm!</h1>' > /tmp/www/index.html; exec ${pkgs.python3}/bin/python3 -m http.server 8080 --directory /tmp/www"
         ];
 
         healthChecks.hello = {
@@ -237,11 +233,7 @@ mvm.lib.${system}.mkGuest {
 
   entrypoint.command = [
     "/bin/sh" "-c"
-    ''
-      mkdir -p /tmp/www
-      echo '<h1>Hello from mvm!</h1>' > /tmp/www/index.html
-      exec ${pkgs.python3}/bin/python3 -m http.server 8080 --directory /tmp/www
-    ''
+    "mkdir -p /tmp/www; echo '<h1>Hello from mvm!</h1>' > /tmp/www/index.html; exec ${pkgs.python3}/bin/python3 -m http.server 8080 --directory /tmp/www"
   ];
 };
 ```
@@ -483,11 +475,7 @@ mvm.lib.${system}.mkGuest {
 
   entrypoint.command = [
     "/bin/sh" "-c"
-    ''
-      ${pkgs.redis}/bin/redis-server --port 6379 --daemonize yes
-      export REDIS_URL=redis://localhost:6379
-      exec ${pkgs.python3}/bin/python3 /app/server.py
-    ''
+    "${pkgs.redis}/bin/redis-server --port 6379 --daemonize yes; export REDIS_URL=redis://localhost:6379; exec ${pkgs.python3}/bin/python3 /app/server.py"
   ];
 
   healthChecks.api = {

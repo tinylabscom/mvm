@@ -47,25 +47,25 @@ to build and run it, then produces a reviewable MVM definition. It is
 
 ```bash
 # Capture the project environment.
-mvmctl capture project ./my-app \\
-  --run "cargo test" \\
+mvmctl capture project ./my-app \
+  --run "cargo test" \
   --output capture.json
 
 # Resolve the report into canonical MVM IR.
-mvmctl capture resolve capture.json \\
+mvmctl capture resolve capture.json \
   --output environment.json
 
 # Render Nix artifacts and record a verification command.
-mvmctl capture verify environment.json \\
-  --manifest-dir ./my-app \\
-  --run "cargo test" \\
+mvmctl capture verify environment.json \
+  --manifest-dir ./my-app \
+  --run "cargo test" \
   --out-dir ./mvm-verify
 
 # (Optional) Build the rendered flake in the Linux builder VM.
-mvmctl capture verify environment.json \\
-  --manifest-dir ./my-app \\
-  --run "cargo test" \\
-  --out-dir ./mvm-verify \\
+mvmctl capture verify environment.json \
+  --manifest-dir ./my-app \
+  --run "cargo test" \
+  --out-dir ./mvm-verify \
   --exec-in-builder-vm
 
 # (Optional) Boot a microVM in the builder VM and replay the command inside the guest.
