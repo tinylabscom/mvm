@@ -13,11 +13,13 @@
 - [ ] **Extended CI documented-surface repair — issue #2938.**
       `specs/plans/2026-08-27-extended-ci-documented-surface.md`.
       Linux and macOS now build the live documented-surface binary with signed
-      release-manifest verification enabled, and macOS installs the root
-      binary's target-gated libkrun dependency through the shared installer.
-      Focused regression tests, actionlint, the exact macOS feature build,
-      workspace tests/check/doctests, and zero-warning Clippy are green.
-      Remaining: merge and close #2938 through the PR link.
+      release-manifest verification enabled through Cargo's standard linker
+      path. The macOS witness installs both the root binary's target-gated
+      libkrun dependency and the embedded Linux cross toolchain through shared
+      installers. Post-merge Extended CI run 33137960741 supplied the live
+      failure evidence; focused regressions now preserve both corrections.
+      Remaining: pass the corrected live witnesses, merge, and close #2938
+      through the PR link.
 
 - [ ] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
       `specs/plans/2026-08-27-kernel-6-12-106.md`.

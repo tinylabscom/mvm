@@ -181,6 +181,8 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
+      - uses: ./.github/actions/install-zigbuild
+
       - name: Install libkrun
         # The root package's macOS dependency enables libkrun-sys even when
         # HVF is the selected runtime backend.

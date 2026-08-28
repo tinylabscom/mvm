@@ -6,6 +6,10 @@ fn extended_ci() -> String {
     fs::read_to_string(".github/workflows/ci-full.yml").expect("read extended CI workflow")
 }
 
+fn documented_surface_script() -> String {
+    fs::read_to_string("scripts/e2e-documented-surface.sh").expect("read documented-surface runner")
+}
+
 fn job_block<'a>(workflow: &'a str, job: &str) -> &'a str {
     let marker = format!("  {job}:\n");
     let start = workflow
@@ -48,5 +52,30 @@ fn macos_documented_surface_job_installs_its_target_gated_libkrun_dependency() {
     assert!(
         macos.contains("uses: ./.github/actions/install-libkrun"),
         "the macOS root binary enables libkrun-sys and needs the shared libkrun installer"
+    );
+}
+
+#[test]
+fn macos_documented_surface_job_installs_the_embedded_cross_toolchain() {
+    let workflow = extended_ci();
+    let macos = job_block(&workflow, "e2e-docs-macos");
+
+    assert!(
+        macos.contains("uses: ./.github/actions/install-zigbuild"),
+        "the macOS build script compiles the embedded Linux binaries and needs the shared cross-toolchain installer"
+    );
+}
+
+#[test]
+fn signature_verifying_build_avoids_the_fast_codegen_link_path() {
+    let script = documented_surface_script();
+
+    assert!(
+        script.contains("cargo build --bin mvmctl --features \"$E2E_FEATURES\""),
+        "the aws-lc-backed user build must use Cargo's standard compiler and linker path"
+    );
+    assert!(
+        !script.contains("./scripts/cargo-fast.sh build --bin mvmctl --features"),
+        "the fast codegen wrapper leaves aws-lc native symbols unresolved"
     );
 }
