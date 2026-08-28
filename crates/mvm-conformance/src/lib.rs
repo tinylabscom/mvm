@@ -354,6 +354,54 @@ mod sidecar_cache {
     }
 }
 
+/// Which mvm home a live step runs against.
+///
+/// A home the scenario declared for itself wins over the artifact-warm
+/// `MVM_E2E_HOME`. The two phrasings must agree: a scenario that creates a
+/// machine through one step and starts it through another is talking about one
+/// directory, and while they disagreed it failed with `machine "..." does not
+/// exist` — an error naming the machine and never the home it was looked for
+/// in, which is why it read as a product defect.
+///
+/// The warm home still applies to every scenario that declared none, which is
+/// what keeps a live run from re-cross-compiling the guest binaries once per
+/// scenario.
+pub fn live_home_precedence<'a>(
+    scenario_home: Option<&'a std::path::Path>,
+    warm_home: Option<&'a std::path::Path>,
+) -> Option<&'a std::path::Path> {
+    scenario_home.or(warm_home)
+}
+
+#[cfg(test)]
+mod live_home {
+    use super::live_home_precedence;
+    use std::path::Path;
+
+    #[test]
+    fn a_scenario_declared_home_wins_over_the_warm_one() {
+        // The case that broke: create ran against the scenario home, start
+        // against the warm one, and the machine was "missing".
+        assert_eq!(
+            live_home_precedence(Some(Path::new("/scenario")), Some(Path::new("/warm"))),
+            Some(Path::new("/scenario"))
+        );
+    }
+
+    #[test]
+    fn the_warm_home_is_used_when_the_scenario_declared_none() {
+        assert_eq!(
+            live_home_precedence(None, Some(Path::new("/warm"))),
+            Some(Path::new("/warm"))
+        );
+    }
+
+    #[test]
+    fn neither_home_yields_none_so_the_caller_must_create_one() {
+        assert_eq!(live_home_precedence(None, None), None);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
