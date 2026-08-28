@@ -95,7 +95,7 @@ jobs:
       FC_VERSION: v1.14.1
       # The published builder/default-image paths fail closed unless the
       # source-built binary can verify their signed checksum manifests.
-      MVM_E2E_FEATURES: user
+      MVM_E2E_FEATURES: user,release-artifact-bootstrap
       # Hosted runners protect their distro kernel under /boot. Use the
       # published, hash-verified workload kernel rather than a Stage 0 source
       # build that attempts to boot that unreadable host file.
@@ -174,7 +174,11 @@ jobs:
     env:
       # The documented surface includes signed release downloads. Build the
       # exact binary under test with their verifier enabled.
-      MVM_E2E_FEATURES: user
+      MVM_E2E_FEATURES: user,release-artifact-bootstrap
+      # The source-checkout kernel build depends on the same Stage 0 image this
+      # witness deliberately fetches. Use the separately published, verified
+      # workload kernel so the live lane never falls back into that cycle.
+      MVM_KERNEL_SOURCE: download
     steps:
       - uses: actions/checkout@v6
 

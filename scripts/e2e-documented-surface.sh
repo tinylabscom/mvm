@@ -164,6 +164,12 @@ else
   ./scripts/cargo-fast.sh build --bin mvmctl
 fi
 
+# The generated-SDK drift scenario invokes the compiled xtask binary directly.
+# `cargo test` builds the conformance runner but does not materialize that
+# sibling workspace binary, so a clean runner otherwise reports ENOENT rather
+# than an SDK drift result.
+cargo build -p xtask
+
 # Now that `mvmctl` exists, clear anything a previous run left behind. A guest
 # still holding its name makes the next run fail on a collision that reads as a
 # broken verb.

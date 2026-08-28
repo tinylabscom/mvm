@@ -16,10 +16,12 @@
       release-manifest verification enabled through Cargo's standard linker
       path. The macOS witness installs both the root binary's target-gated
       libkrun dependency and the embedded Linux cross toolchain through shared
-      installers. Post-merge Extended CI run 33137960741 supplied the live
-      failure evidence; focused regressions now preserve both corrections.
-      Remaining: pass the corrected live witnesses, merge, and close #2938
-      through the PR link.
+      installers. Live run 33139650457 exposed the next clean-run blockers: the
+      bootstrap ignored its explicit published-image choice and the SDK drift
+      scenario had no compiled xtask. Both are fixed with resolver and workflow
+      regressions; the exact release-download build and zero-warning Clippy are
+      green. Remaining: warm the source sidecar after #2954, pass both live
+      witnesses, merge, and close #2938 through the PR link.
 
 - [ ] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
       `specs/plans/2026-08-27-kernel-6-12-106.md`.

@@ -34,14 +34,35 @@ fn documented_surface_jobs_build_a_signature_verifying_mvmctl() {
     for job in ["e2e-docs-linux", "e2e-docs-macos"] {
         let block = job_block(&workflow, job);
         assert!(
-            block.contains("MVM_E2E_FEATURES: user"),
-            "{job} must enable the user surface so signed release manifests are verified"
+            block.contains("MVM_E2E_FEATURES: user,release-artifact-bootstrap"),
+            "{job} must verify signed release manifests and compile the explicit published-image path"
         );
         assert!(
             !block.contains("MVM_SKIP_COSIGN_VERIFY"),
             "{job} must not bypass signed-manifest verification"
         );
     }
+}
+
+#[test]
+fn macos_documented_surface_uses_the_published_workload_kernel() {
+    let workflow = extended_ci();
+    let macos = job_block(&workflow, "e2e-docs-macos");
+
+    assert!(
+        macos.contains("MVM_KERNEL_SOURCE: download"),
+        "the macOS witness must not source-build its workload kernel through the builder image it is bootstrapping"
+    );
+}
+
+#[test]
+fn documented_surface_builds_the_sdk_codegen_driver() {
+    let script = documented_surface_script();
+
+    assert!(
+        script.contains("cargo build -p xtask"),
+        "the SDK drift scenario invokes the compiled xtask binary directly"
+    );
 }
 
 #[test]

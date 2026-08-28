@@ -10,6 +10,13 @@
 - [x] Signature-verifying builds use Cargo's standard link path, and the macOS
       witness installs the shared cross toolchain before it builds.
 - [x] Structural tests preserve both post-merge corrections.
+- [x] The explicit published-image choice now reaches builder bootstrap, both
+      witnesses compile that download arm, and macOS downloads its workload
+      kernel rather than cycling through the unavailable source builder.
+- [x] Clean runners build the SDK codegen driver before checking generated SDK
+      drift.
+- [ ] Warm the source-matched SDK sidecar after PR #2954 supplies its Stage 0
+      build command.
 
 Owning plan:
 `specs/plans/2026-08-27-extended-ci-documented-surface.md`.

@@ -9,8 +9,10 @@ Last updated: 2026-08-27
       Both scheduled platform witnesses now build signed-manifest verification
       through the standard link path, and the macOS HVF lane installs its
       target-gated libkrun and embedded Linux cross-toolchain dependencies.
-      Post-merge live evidence is captured and structural regressions preserve
-      both corrections; live rerun and merge delivery remain.
+      The explicit published-image choice now reaches builder bootstrap, macOS
+      downloads its workload kernel, and clean runners build the SDK codegen
+      driver. Focused tests, the exact feature build, and Clippy are green; the
+      source-sidecar warm-up, live rerun, and merge delivery remain.
 
 - [ ] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
       `specs/plans/2026-08-27-kernel-6-12-106.md`.
