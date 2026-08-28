@@ -917,16 +917,24 @@ resume` takes a `current_head` and refuses when it differs from the
       `cargo:warning=`. Supersedes the freshness half of
       `specs/plans/2026-08-15-aux-helper-binary-freshness.md`.
       The per-VM aux leg — the last unconditional rebuild, and by 2026-08-26
-      **17.8s of a 20.9s** inner-loop rebuild (85%) — is now closed too by
-      `specs/plans/2026-08-26-aux-helper-staleness-gate.md`: it reuses on a key
-      miss under the dev profile and marks the binary, and
-      `mvm_vmm::host::aux_bin::resolve` refuses to spawn a marked helper. That
-      keeps #2058's no-silently-stale-supervisor guarantee while charging its
-      cost only to builds that actually boot a VM. Measured **20.9s → 8.5s**.
-      STILL OPEN: Phase 3 (phantom build.rs tests, `MVM_LIBKRUN_HEADER`
-      rerun-if-env-changed), Phase 4 (dead crate edges; `deps_audit` and the
-      tree-sitter grammars off the serial path; the `mvm-hostd` audit cluster),
-      Phase 5 (sccache 4.2% Rust hit rate, worktree hygiene)
+      **17.8s of a 20.9s** inner-loop rebuild (85%) — was first made cheap by
+      `specs/plans/2026-08-26-aux-helper-staleness-gate.md` (reuse on a key
+      miss, plus a spawn-time refusal of the marked binary; **20.9s → 8.5s**),
+      and on 2026-08-28 **deleted outright** by
+      `specs/plans/2026-08-28-build-script-drops-the-aux-helper-leg.md`. Those
+      seven binaries are ordinary `mvm-hostd` `[[bin]]`s that a workspace
+      `cargo build` already produces where `aux_bin::resolve` already looked, so
+      the leg was a duplicate compile of `mvm-hostd`'s closure per worktree.
+      Build script on a key miss **60.37s → 0.13s**, nested cargo invocations
+      **7 → 0**, `rerun-if-changed` set **1013 → 648**, nested target dir
+      **13.6 GB → 649 MB**. The `.mvm-stale` marker and `MVM_ALLOW_STALE_AUX`
+      went with it — cargo owns freshness, so staleness is no longer
+      representable rather than merely detected.
+      STILL OPEN: Phase 3 (phantom build.rs tests — the `MVM_LIBKRUN_HEADER`
+      half is closed, its probe is deleted), Phase 4 (dead crate edges;
+      `deps_audit` and the tree-sitter grammars off the serial path; the
+      `mvm-hostd` audit cluster), Phase 5 (sccache 4.2% Rust hit rate, worktree
+      hygiene). Not attempted: making the musl leg opt-in for dev builds.
 
 - [~] **Agent tool and memory planes**
       (`specs/plans/2026-08-18-agent-tool-and-memory-planes.md`). Opened

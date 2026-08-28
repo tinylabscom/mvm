@@ -1,7 +1,7 @@
-#[path = "build_aux_helpers.rs"]
-mod build_aux_helpers;
 #[path = "build_embed_cache.rs"]
 mod build_embed_cache;
+#[path = "build_support.rs"]
+mod build_support;
 #[path = "src/host_binaries/toolchain.rs"]
 mod host_binaries_toolchain;
 
@@ -32,8 +32,7 @@ struct KeyRequest<'a> {
 
 /// The content store, plus the per-package source hashes its keys are built
 /// from. Hashing a closure is the expensive part, so it is memoised: the six
-/// embedded binaries share two root packages between them, and the aux
-/// helpers all share one.
+/// embedded binaries share two root packages between them.
 struct EmbedCache {
     workspace_root: PathBuf,
     graph: build_embed_cache::WorkspaceGraph,
@@ -109,7 +108,7 @@ impl EmbedCache {
         build_embed_cache::install(root, key, binary, source);
     }
 
-    /// Keep the store inside its ceiling. Runs after both legs, so a build
+    /// Keep the store inside its ceiling. Runs once at the end, so a build
     /// that published several artifacts prunes once rather than per binary.
     fn prune(&self) {
         let Some(root) = self.root.as_ref() else {
@@ -161,7 +160,7 @@ fn main() {
     // A separate target dir under the profile's build directory has its own
     // lock → no contention. It is shared across mvm-cli feature fingerprints,
     // so identical embedded binaries are not rebuilt for each OUT_DIR.
-    let nested_target_dir = build_aux_helpers::shared_nested_target_dir(&out_dir);
+    let nested_target_dir = build_support::shared_nested_target_dir(&out_dir);
     let host_target_dir = nested_target_dir.join("host-vm-target");
 
     let pin = read_pinned_toolchain(&workspace_root);
@@ -338,8 +337,6 @@ fn main() {
         );
     }
 
-    build_native_aux_helpers(&workspace_root, &nested_target_dir, &mut cache, dev_profile);
-
     let embedded_rs = render_embedded_rs(&entries);
     std::fs::write(out_dir.join("embedded.rs"), embedded_rs).unwrap();
     println!(
@@ -364,9 +361,8 @@ fn main() {
         "cargo:rerun-if-changed={}",
         workspace_root.join("rust-toolchain.toml").display()
     );
-    // Every crate the cached binaries actually link, taken from the manifest
-    // graph rather than named here. Both legs have contributed their roots by
-    // now, so this covers the embedded set and the per-VM helpers alike.
+    // Every crate the embedded binaries actually link, taken from the manifest
+    // graph rather than named here.
     cache.emit_rerun();
     cache.prune();
 }
@@ -389,202 +385,6 @@ fn emit_rerun_for_tree(root: &Path) {
             println!("cargo:rerun-if-changed={}", path.display());
         }
     }
-}
-
-/// Compile the native per-VM host helpers into a dedicated target dir under
-/// OUT_DIR and export that dir as `MVM_AUX_BIN_DIR`, so `cargo run` produces
-/// them during its build phase rather than mvmctl shelling out to `cargo` at
-/// run time. The dedicated target dir avoids the outer build-lock deadlock the
-/// same way the embedded-bins path does (see the note in `main`).
-fn build_native_aux_helpers(
-    workspace_root: &Path,
-    nested_target_dir: &Path,
-    cache: &mut EmbedCache,
-    dev_profile: bool,
-) {
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
-    let host_target = std::env::var("TARGET").unwrap_or_default();
-    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
-    let aux_target = nested_target_dir.join("aux-helper-target");
-    let bin_dir = aux_target.join(&profile);
-
-    // Always export the dir — even on skip or an unbuildable helper — so
-    // `env!("MVM_AUX_BIN_DIR")` compiles in mvm-cli; resolution `is_file`-checks
-    // each candidate, so a dir with missing bins is harmless.
-    println!("cargo:rustc-env=MVM_AUX_BIN_DIR={}", bin_dir.display());
-
-    // These are the supervisors, where a stale binary silently produces a
-    // running guest that ignores your edit — so they were rebuilt
-    // unconditionally, on every `cargo check` and `clippy` too. The content
-    // key is what makes skipping them safe: it cannot match unless the bytes
-    // are the ones this tree produces. Note the profile is part of the
-    // flavour, because unlike the musl leg these follow the outer profile.
-    //
-    // A key *miss* used to mean an unconditional nested rebuild, which is the
-    // single largest cost on the inner loop: every one of these binaries links
-    // `mvm-hostd` -> `mvm-core`, so any edit under those trees misses by
-    // construction and pays a nested `cargo build` of a 100K-LOC crate in a
-    // second target dir. Measured at 17.8s of a 20.9s rebuild (85%), with
-    // `mvm-cli` itself unable to start until it finished.
-    //
-    // The reason it could not simply reuse, the way the musl leg does, is that
-    // a stale *embedded* binary only sits inside `mvmctl`, whereas a stale
-    // supervisor is spawned — and a guest that quietly ignores your edit is a
-    // far worse failure than a slow build. So dev reuse here is paired with a
-    // marker file the runtime resolver refuses on. The staleness is detected
-    // at the moment of use rather than prevented at every build, which turns
-    // a silent wrong-behaviour boot into an instant, actionable error and
-    // takes the 17.8s off every edit that does not spawn a VM.
-    let libkrun_present = libkrun_header_present();
-    let mut stale_helpers: Vec<String> = Vec::new();
-    let aux_manifest_src = std::fs::read_to_string(
-        workspace_root.join("crates/mvm-cli/src/host_binaries/manifest.rs"),
-    )
-    .expect("read host-binaries manifest");
-    for spec in build_aux_helpers::aux_helper_specs_from(
-        &aux_manifest_src,
-        &target_os,
-        &target_arch,
-        libkrun_present,
-    ) {
-        let features = spec.features.join(",");
-        let (spec_package, spec_bin) = (spec.package.as_str(), spec.bin.as_str());
-        let key = cache.key_for(&KeyRequest {
-            package: spec_package,
-            binary: spec_bin,
-            features: &features,
-            target: &host_target,
-            toolchain: "native",
-            flavor: &format!("native-host-{profile}"),
-        });
-        let installed = bin_dir.join(spec_bin);
-
-        if cache.restore(key.as_deref(), spec_bin, &installed) {
-            clear_stale_marker(&bin_dir, spec_bin);
-            eprintln!(
-                "[build.rs] per-VM host helper {} restored from the content store",
-                spec_bin
-            );
-            continue;
-        }
-
-        // Miss with a usable previous build present: reuse it and mark it, so
-        // the edit/check/clippy loop stops paying the nested build. Only under
-        // the dev profile, and only when a binary is actually there to reuse —
-        // a cold worktree still builds, and `--release` / `release-witness`
-        // always build, matching the musl leg's rule.
-        if dev_profile && installed.is_file() {
-            write_stale_marker(&bin_dir, spec_bin);
-            eprintln!(
-                "[build.rs] per-VM host helper {} is STALE — this build's \
-                 changes are NOT in it. Reused to keep the inner loop fast; \
-                 mvmctl refuses to spawn it until you run `just embed-refresh` \
-                 (or build with MVM_EMBED_NO_CACHE=1).",
-                spec_bin
-            );
-            stale_helpers.push(spec_bin.to_string());
-            continue;
-        }
-
-        run_cargo_native_build(workspace_root, &aux_target, &profile, &spec);
-        if installed.is_file() {
-            clear_stale_marker(&bin_dir, spec_bin);
-            cache.publish(key.as_deref(), spec_bin, &installed);
-        }
-    }
-
-    // Same reasoning as the musl leg's warning: build-script stderr is hidden
-    // without `-vv`, and a developer whose supervisor edit will not reach the
-    // guest must be told without having to know to look.
-    if !stale_helpers.is_empty() {
-        println!(
-            "cargo:warning=per-VM host helpers are STALE and will be refused \
-             at spawn time: {}. Run `just embed-refresh` (or build with \
-             MVM_EMBED_NO_CACHE=1) before booting a VM.",
-            stale_helpers.join(", ")
-        );
-    }
-}
-
-/// Name of the marker written beside a reused-but-stale per-VM helper.
-///
-/// Kept in lockstep with `mvm_vmm::host::aux_bin`, which reads it. The two
-/// cannot share a constant: this build script is compiled before any workspace
-/// crate exists to import from.
-fn stale_marker_path(bin_dir: &Path, bin: &str) -> PathBuf {
-    bin_dir.join(format!("{bin}.mvm-stale"))
-}
-
-/// Mark `bin` as not carrying this tree's changes. Best-effort: a marker we
-/// fail to write costs the old silent-stale behaviour, not a broken build.
-fn write_stale_marker(bin_dir: &Path, bin: &str) {
-    let _ = std::fs::create_dir_all(bin_dir);
-    let _ = std::fs::write(
-        stale_marker_path(bin_dir, bin),
-        format!(
-            "{bin} was reused from a previous build and does not contain this \
-             source tree's changes.\n"
-        ),
-    );
-}
-
-/// Drop the marker once `bin` provably matches this tree.
-fn clear_stale_marker(bin_dir: &Path, bin: &str) {
-    let _ = std::fs::remove_file(stale_marker_path(bin_dir, bin));
-}
-
-/// Nested native `cargo build` for one helper into `target_dir`. Fail-open: a
-/// helper this host can't build must not break the outer compile — aux_bin
-/// surfaces a precise error only if the helper is actually needed at run time.
-fn run_cargo_native_build(
-    root: &Path,
-    target_dir: &Path,
-    profile: &str,
-    spec: &build_aux_helpers::AuxHelperSpec,
-) {
-    eprintln!(
-        "[build.rs] building per-VM host helper: {} (-p {})",
-        spec.bin, spec.package
-    );
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let mut cmd = Command::new(cargo);
-    cmd.args(["build", "-p", &spec.package, "--bin", &spec.bin]);
-    if profile == "release" {
-        cmd.arg("--release");
-    }
-    if !spec.features.is_empty() {
-        cmd.arg("--features").arg(spec.features.join(","));
-    }
-    // Dedicated target dir — the outer `cargo` holds the workspace `target/`
-    // lock for the whole build-script run; a nested cargo aimed at it deadlocks.
-    cmd.env("CARGO_TARGET_DIR", target_dir).current_dir(root);
-    match cmd.status() {
-        Ok(status) if status.success() => {}
-        other => eprintln!(
-            "[build.rs] per-VM helper {} not built ({other:?}); it will be \
-             resolved at run time only if needed",
-            spec.bin
-        ),
-    }
-}
-
-/// Whether `libkrun.h` is installed, mirroring the probe `libkrun-sys`'s build
-/// script uses to decide the `-lkrun` link. Gate for building the libkrun
-/// supervisor so an HVF-only / CI host does not attempt (and noisily fail) it.
-fn libkrun_header_present() -> bool {
-    if let Some(p) = std::env::var_os("MVM_LIBKRUN_HEADER")
-        && Path::new(&p).is_file()
-    {
-        return true;
-    }
-    [
-        "/opt/homebrew/include/libkrun.h",
-        "/usr/local/include/libkrun.h",
-        "/usr/include/libkrun.h",
-    ]
-    .iter()
-    .any(|p| Path::new(p).is_file())
 }
 
 fn read_pinned_toolchain(root: &Path) -> Pin {
@@ -667,7 +467,7 @@ fn read_manifest_section<'a>(src: &'a str, name: &str) -> &'a str {
 fn read_quoted_field_block(src: &str, section: &str, field: &str) -> Vec<String> {
     read_manifest_section(src, section)
         .lines()
-        .filter_map(|line| build_aux_helpers::extract_quoted_after(line, field))
+        .filter_map(|line| build_support::extract_quoted_after(line, field))
         .collect()
 }
 

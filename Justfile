@@ -38,8 +38,14 @@ toolchain-embed:
     rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl --toolchain "${RUST}"
     echo "embed toolchain ready: Rust ${RUST} + zig ${ZIG} + aarch64/x86_64 musl targets"
 
-# Build all crates (debug)
-build:
+# Build all crates (debug), including the per-VM host helpers `mvmctl` spawns.
+#
+# The helpers need their own step because `mvm-libkrun-supervisor` sits behind
+# `required-features`, which `--workspace` does not enable. Without it a
+# contributor on a libkrun host gets a `mvmctl` that cannot start a VM, which is
+
+# not what "build all crates" should mean.
+build: build-supervisors
     ./scripts/cargo-fast.sh build --workspace
 
 # `--all-targets` is narrower than it sounds: it skips any target behind
@@ -354,17 +360,35 @@ bdd-live-ci:
     cargo build --bin mvmctl --features user
     CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" MVM_BDD_LIVE=1 MVM_BDD_CI_LIVE_ONLY=1 cargo test -p mvm-conformance --test conformance --features bdd
 
-# Build the per-VM host helper bins explicitly. mvmctl's build script already
-# compiles them during `cargo build`/`cargo run`; this is the manual route for
+# Build the per-VM host helper bins into `target/<profile>/`, where
+# `aux_bin::resolve` looks for them. Reach for this after `cargo run -p mvm-cli`,
+# which builds no sibling `[[bin]]`s; `just build` runs it for you.
+#
+# `mvm-libkrun-supervisor` needs its own invocation because it carries
+# `required-features = ["libkrun-sys"]`, which a plain `--bins` does not enable,
+# and that feature makes `libkrun-sys`'s build script demand a real `libkrun.h`.
 
-# a targeted rebuild or CI.
+# So it is probed for, on the same three paths that build script checks.
 build-supervisors:
-    ./scripts/cargo-fast.sh build -p mvm-hostd --bin mvm-network-endpoint --bin mvm-hvf-supervisor
-    ./scripts/cargo-fast.sh build -p mvm-hostd --bin mvm-libkrun-supervisor --features libkrun-sys
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ./scripts/cargo-fast.sh build -p mvm-hostd --bins
+    header="${MVM_LIBKRUN_HEADER:-}"
+    if [[ -z "$header" ]]; then
+      for candidate in /opt/homebrew/include/libkrun.h /usr/local/include/libkrun.h /usr/include/libkrun.h; do
+        [[ -f "$candidate" ]] && header="$candidate" && break
+      done
+    fi
+    if [[ -f "$header" ]]; then
+      ./scripts/cargo-fast.sh build -p mvm-hostd --bin mvm-libkrun-supervisor --features libkrun-sys
+    else
+      echo "build-supervisors: no libkrun.h — skipping mvm-libkrun-supervisor."
+      echo "  Install it (brew install slp/krun/libkrun) if you need the libkrun backend."
+    fi
 
 # Drop the cached cross-compiled host binaries so the next build rebuilds them.
-# Dev builds reuse these instead of re-running cargo-zigbuild, which is ~93% of
-# mvm-cli's build-script wall time. Run this after editing anything they link
+# Dev builds reuse these instead of re-running cargo-zigbuild, which is the bulk
+# of mvm-cli's build-script wall time. Run this after editing anything they link
 # (mvm-build, mvm-core, ...) when you are about to boot a real VM; ordinary
 
 # check/test/clippy runs never need it. Release builds always rebuild.
@@ -378,9 +402,9 @@ embed-refresh:
     # silent no-op, which is why the launch path kept refusing helpers that
     # "were reused from an earlier build".
     #
-    # `aux-helper-target` is cleared too. It holds the per-VM helpers
-    # (mvm-network-endpoint and friends), and leaving it was the actual cause
-    # of that refusal — `host-vm-target` alone was never enough.
+    # Only the musl cross-compile is cached this way. The per-VM host helpers
+    # are ordinary workspace binaries now, so cargo rebuilds them on its own
+    # and there is nothing here to clear for them.
     root="${CARGO_TARGET_DIR:-target}"
     [[ -d "$root" ]] || exit 0
     found=0
@@ -388,7 +412,7 @@ embed-refresh:
       echo "  removing $dir"
       rm -rf "$dir"
       found=$((found + 1))
-    done < <(find "$root" -type d \( -name host-vm-target -o -name aux-helper-target \) 2>/dev/null)
+    done < <(find "$root" -type d -name host-vm-target 2>/dev/null)
     echo "embed-refresh: cleared $found nested target dir(s)"
 
 # Build the dm-verity-capable workload kernel into the local mvm cache.
