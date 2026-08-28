@@ -14,6 +14,12 @@ Last updated: 2026-08-28
       driver. Focused tests, the exact feature build, and Clippy are green; the
       source-sidecar warm-up, live rerun, and merge delivery remain.
 
+- [ ] **Audit root-history classification repair — issue #2940.**
+      `specs/plans/2026-08-27-audit-root-history-classification.md`.
+      Signed Merkle-root history files are excluded from lifecycle-chain
+      sweeps through one shared suffix; focused and workspace tests, doctests,
+      check, and Clippy are green, and merge-queue delivery remains.
+
 - [ ] **Issue #2942 — warm-launch gate contract repair.**
       `specs/plans/2026-08-27-warm-launch-gate-contract.md`.
       The live warm-residency witness now consumes the CLI's strict sub-300 ms
