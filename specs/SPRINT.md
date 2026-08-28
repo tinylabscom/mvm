@@ -64,6 +64,15 @@
       Remaining: attach `gomicrovm.com` to the Pages project; the hostname still
       resolves to GitHub Pages and cannot serve those headers.
 
+- [ ] **Cold-boot guest wall clock — issue #2956.**
+      `specs/plans/2026-08-27-cold-boot-wall-clock.md`.
+      The universal-initramfs agent now consumes the host epoch as PID 1 before
+      signed-grant timestamp validation or workload activation. The shared
+      decoder rejects absent, malformed, zero, and duplicated epochs, and the
+      existing narrow clock-sync syscall is reused. Focused positive, refusal,
+      and syscall-error tests, the full workspace, gated targets, and
+      zero-warning Clippy are green; merge delivery remains.
+
 - [x] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
       `specs/plans/2026-08-27-kernel-6-12-106.md`.
       The custom workload/builder kernel and libkrunfw firmware build now use

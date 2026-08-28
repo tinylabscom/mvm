@@ -23,17 +23,6 @@ pub fn builder_hostepoch_cmdline_token() -> String {
     format!("mvm.hostepoch={secs}")
 }
 
-/// Parse the positive Unix epoch carried by an `mvm.hostepoch=` kernel
-/// command-line token. Malformed, zero, and negative values are rejected so a
-/// guest cannot accidentally wind its clock back to the Unix epoch.
-pub fn builder_hostepoch_from_cmdline(cmdline: &str) -> Option<u64> {
-    cmdline
-        .split_whitespace()
-        .find_map(|token| token.strip_prefix("mvm.hostepoch="))
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|seconds| *seconds > 0)
-}
-
 pub fn probe_verity_sidecar(rootfs_path: &str) -> (Option<String>, Option<String>) {
     use std::path::Path;
 
@@ -204,23 +193,6 @@ pub fn balloon_body(amount_mib: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn builder_hostepoch_parser_accepts_only_positive_unix_epochs() {
-        assert_eq!(
-            builder_hostepoch_from_cmdline(
-                "console=ttyAMA0 mvm.hostepoch=1786425335 root=/dev/vda"
-            ),
-            Some(1_786_425_335)
-        );
-        assert_eq!(builder_hostepoch_from_cmdline("mvm.hostepoch=0"), None);
-        assert_eq!(builder_hostepoch_from_cmdline("mvm.hostepoch=-5"), None);
-        assert_eq!(
-            builder_hostepoch_from_cmdline("mvm.hostepoch=notanumber"),
-            None
-        );
-        assert_eq!(builder_hostepoch_from_cmdline("root=/dev/vda"), None);
-    }
 
     // ------------------------------------------------------------------
     // Firecracker API body builders — byte-identical pins

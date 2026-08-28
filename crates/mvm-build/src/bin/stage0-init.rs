@@ -464,9 +464,7 @@ mod linux {
     /// or Nix. Without this, TLS validation observes 1970 and every fresh
     /// bootstrap download fails with a misleading certificate error.
     fn sync_clock_from_host_epoch(cmdline: &str) -> Result<(), String> {
-        let Some(epoch_seconds) =
-            mvm_vmm::host::boot_config::builder_hostepoch_from_cmdline(cmdline)
-        else {
+        let Some(epoch_seconds) = mvm_core::vm_backend::decode_host_epoch_cmdline(cmdline) else {
             return Ok(());
         };
         mvm_agentd::restore_clock::resync(epoch_seconds)

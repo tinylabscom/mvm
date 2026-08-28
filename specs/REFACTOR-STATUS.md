@@ -38,6 +38,14 @@ Last updated: 2026-08-28
       deployment.
       The production hostname still needs to be attached to the project.
 
+- [ ] **Cold-boot guest wall clock — issue #2956.**
+      `specs/plans/2026-08-27-cold-boot-wall-clock.md`.
+      The active universal-initramfs PID 1 now consumes the host epoch before
+      trust validation or workload activation. Strict shared parsing and the
+      existing narrow clock-sync path have focused positive and refusal tests;
+      workspace tests, gated targets, and zero-warning Clippy are green. Merge
+      delivery remains.
+
 - [ ] **SDK surface contract repairs — issues #2902 and #2906.**
       `specs/plans/2026-08-26-sdk-surface-contract-repairs.md`.
       The README's `mvm.local_path` decorator source and the builder-pack Cargo

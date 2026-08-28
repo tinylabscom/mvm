@@ -146,6 +146,23 @@ pub fn encode_egress_ca_cmdline(cert_pem: &str) -> Option<String> {
     Some(format!("mvm.egress_ca=pem:{body}"))
 }
 
+/// Decode the single positive Unix epoch carried by an
+/// `mvm.hostepoch=<seconds>` kernel-cmdline token.
+///
+/// Missing, malformed, zero, and duplicated tokens are rejected. Rejecting a
+/// duplicate keeps the host-to-guest clock contract unambiguous rather than
+/// allowing token order to decide which wall clock the guest trusts.
+pub fn decode_host_epoch_cmdline(cmdline: &str) -> Option<u64> {
+    let mut values = cmdline
+        .split_whitespace()
+        .filter_map(|token| token.strip_prefix("mvm.hostepoch="));
+    let value = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    value.parse::<u64>().ok().filter(|seconds| *seconds > 0)
+}
+
 /// Encode the per-run secret **placeholder** env as a single
 /// `mvm.secret_env=<hex>` kernel-cmdline token: a newline-joined
 /// `VAR=placeholder` blob, hex-encoded so it survives `/proc/cmdline` as one
@@ -1874,6 +1891,27 @@ mod tests {
     #[test]
     fn encode_egress_ca_cmdline_empty_is_none() {
         assert!(encode_egress_ca_cmdline("").is_none());
+    }
+
+    #[test]
+    fn host_epoch_cmdline_decoder_accepts_one_positive_epoch() {
+        assert_eq!(
+            decode_host_epoch_cmdline("console=ttyAMA0 mvm.hostepoch=1786425335 root=/dev/vda"),
+            Some(1_786_425_335)
+        );
+    }
+
+    #[test]
+    fn host_epoch_cmdline_decoder_rejects_unsafe_encodings() {
+        for cmdline in [
+            "root=/dev/vda",
+            "mvm.hostepoch=0",
+            "mvm.hostepoch=-5",
+            "mvm.hostepoch=notanumber",
+            "mvm.hostepoch=1786425335 mvm.hostepoch=1786425336",
+        ] {
+            assert_eq!(decode_host_epoch_cmdline(cmdline), None, "{cmdline}");
+        }
     }
 
     #[test]
