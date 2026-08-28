@@ -3227,3 +3227,13 @@ writes the plan:
       at generation time rather than at boot.
 - [ ] Whether the emitted plan is signed interactively or written unsigned for a
       separate signing step. Unsigned-by-default is the safer starting posture.
+
+## 2026-08-27 warm-launch gate contract repair
+
+- [x] Separate the warm-claim hard ceiling from the prepared-cold 200 ms target
+      in the live launch scenario.
+- [x] Make the CLI timing report and BDD witness consume one strict sub-300 ms
+      predicate, with an exact-boundary regression test.
+- [x] Record why the 224.5 ms sample is inside the warm hard ceiling without
+      relabeling it as a prepared-cold percentile result.
+- [ ] Merge the repair through the queue and close issue #2942.
