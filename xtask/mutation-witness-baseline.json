@@ -140,13 +140,6 @@
       ]
     },
     {
-      "path": "crates/mvm-contract/src/protocol/vm_backend.rs",
-      "package": "mvm-contract",
-      "claims": [
-        13
-      ]
-    },
-    {
       "path": "crates/mvm-contract/src/substitution.rs",
       "package": "mvm-contract",
       "claims": [

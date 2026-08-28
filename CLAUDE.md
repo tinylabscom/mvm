@@ -395,10 +395,17 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
 13. **No raw secret value crosses the broker channel.**
     `host.secrets.v1` returns destination-bound, time-bound signed
     credentials only; raw secret bytes never leave the supervisor's
-    address space. Plan 104 W5 / ADR-023 / ADR-020. Witnesses, per the
-    ADR-001 row:
-    `encode_secret_env_cmdline_round_trips_pairs_as_single_token` and
-    `substitute`. The six test names this bullet used to list
+    address space. Plan 104 W5 / ADR-023 / ADR-020. Witness, per the
+    ADR-001 row: `substitute` — and only that one. The row also named
+    `encode_secret_env_cmdline_round_trips_pairs_as_single_token` until it
+    turned out to round-trip an encoder nothing calls: `mvm.secret_env` is
+    built by no backend and parsed by no guest, so the test witnessed an
+    encoding rather than a containment. The shipped mechanism injects
+    placeholders on the invoke path from the endpoint-minted env file. The
+    cmdline token remains in tree as designed-but-unwired. Note the shape
+    of that failure, because `check-claim-catalog` cannot catch it: the
+    gate proves a named witness *exists*, never that anything calls the
+    code it tests. The six test names this bullet used to list
     ("host_secrets_v1_denied_outside_allowed_destinations",
     "zeroize_drop_zeros_secret_bytes",
     "handler_inter_call_memory_hygiene",

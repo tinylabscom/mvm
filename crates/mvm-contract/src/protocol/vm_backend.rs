@@ -156,6 +156,16 @@ pub fn encode_egress_ca_cmdline(cert_pem: &str) -> Option<String> {
 /// `None` for no secrets. The cmdline is the only per-VM channel a *fresh* FC
 /// boot has to a sealed guest (no secrets drive attached), and the placeholder
 /// must be minted **before** boot so it can ride here.
+///
+/// **Unwired.** Nothing calls this and no guest parses `mvm.secret_env`; the
+/// `/init` decode the paragraph above describes was never built. What ships
+/// instead injects placeholders on the invoke path, from the env file the
+/// per-VM substitution endpoint mints — which does not reach the fresh sealed
+/// boot this was meant for, so the gap the design names is real and open.
+///
+/// Kept rather than deleted for that reason. It is not evidence of anything
+/// today — the security ledger cited its round-trip test as a witness until
+/// that was found to prove only that an encoder is self-consistent.
 pub fn encode_secret_env_cmdline(pairs: &[(String, String)]) -> Option<String> {
     if pairs.is_empty() {
         return None;
