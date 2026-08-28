@@ -29,7 +29,7 @@ pub use mvm_contract::protocol::vm_backend::{
     StandbySpec, StandbyState, StartMode, VmCapabilities, VmExitStatus, VmFile, VmId, VmInfo,
     VmNetworkInfo, VmPortMapping, VmStatus, VmVolume, VmVolumeKind, WarmArtifactIdentity,
     WarmClaimOutcome, WarmClaimRefusal, WarmClaimTiming, WarmLaunchMode, WarmPrewarmSource,
-    WarmServiceRequest, WarmServiceResponse, WarmStartError, WarmStartOutcome,
+    WarmServiceRequest, WarmServiceResponse, WarmStartError, WarmStartOutcome, clamp_vcpus,
     encode_egress_ca_cmdline, encode_secret_env_cmdline, encode_user_volumes_cmdline,
 };
 

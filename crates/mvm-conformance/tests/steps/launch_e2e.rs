@@ -273,6 +273,33 @@ fn guest_printed_exactly(world: &mut CliWorld, expected: String) {
     );
 }
 
+/// Assert the guest's *last* stdout line.
+///
+/// `the guest printed exactly` compares the whole of stdout, which is right
+/// when the command's output is all there is. It is wrong whenever mvm prints
+/// chrome first: a `[mvm]` warning is not a defect and not guest output, but it
+/// arrives on the same stream in the plain (non-JSON) case — deliberately, and
+/// consistently across the CLI. Verbs that emit a machine-readable envelope
+/// route chrome to stderr instead (`set_chrome_to_stderr`), so nothing is
+/// polluted there.
+///
+/// Still strict about the value: `contains` would pass "1" against "16".
+#[then(expr = "the guest's last line is {string}")]
+fn guest_last_line_is(world: &mut CliWorld, expected: String) {
+    let record = last(world);
+    let actual = record
+        .stdout
+        .lines()
+        .rfind(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    assert_eq!(
+        actual, expected,
+        "guest's last stdout line was {actual:?}, expected {expected:?}.\n--- stdout ---\n{}",
+        record.stdout
+    );
+}
+
 #[then(expr = "the output mentions {string}")]
 fn output_mentions(world: &mut CliWorld, expected: String) {
     let record = last(world);

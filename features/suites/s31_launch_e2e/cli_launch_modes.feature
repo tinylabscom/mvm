@@ -66,27 +66,72 @@ Feature: every README-documented CLI launch mode boots a real guest
     Then the launch exits with code 7
     And the guest control plane came up
 
-  # HVF has no SMP — the device tree describes one CPU, PSCI implements no
-  # `CPU_ON`, and the supervisor config carries no vCPU count. `--cpus 2` used
-  # to exit 0 and hand back one CPU; it now refuses, which is the honest answer
-  # until SMP lands (#2888). Asserting the refusal rather than deleting the
-  # scenario keeps the limit visible in the suite.
+  # The README documents `--cpus`, and on HVF it used to exit 0 and hand back
+  # one CPU whatever was asked for (#2888).
   #
-  # It passed in earlier runs of this suite for the wrong reason: the assertion
-  # matched the combined streams and the `MVM_PHASE_TIMING` table supplied a
-  # "2". `the guest printed exactly` reads the guest's own stdout, which is what
-  # made the defect visible in the first place.
+  # Both counts are asserted because they were both wrong together: `nproc` and
+  # `/proc/cpuinfo` agreed at 1 before SMP, so a fix that moved only one would
+  # be reading something other than the machine. They are combined into a
+  # single token so one line pins both — a disagreement shows up as "2/1"
+  # rather than passing on whichever the assertion happened to read.
+  #
+  # An earlier revision of this scenario passed for the wrong reason: the
+  # assertion matched the combined streams and the `MVM_PHASE_TIMING` table
+  # supplied a "2". `the guest printed exactly` reads the guest's own stdout,
+  # which is what made the defect visible in the first place.
   @live
-  Scenario: a vCPU count the backend cannot honour is refused, not silently reduced
-    When I launch "machine run --image alpine --cpus 2 --memory 512M -- nproc"
-    Then the launch fails
-    And the output mentions "supports exactly 1 vCPU"
+  Scenario: --cpus is honoured on a real boot
+    When I launch "machine run --image alpine --cpus 2 --memory 512M -- sh -c 'echo $(nproc)/$(grep -c ^processor /proc/cpuinfo)'"
+    Then the launch succeeds
+    And the guest printed exactly "2/2"
+    And the guest control plane came up
 
   @live
   Scenario: a single-vCPU launch with explicit memory boots
-    When I launch "machine run --image alpine --cpus 1 --memory 512M -- nproc"
+    When I launch "machine run --image alpine --cpus 1 --memory 512M -- sh -c 'echo $(nproc)/$(grep -c ^processor /proc/cpuinfo)'"
     Then the launch succeeds
-    And the guest printed exactly "1"
+    And the guest printed exactly "1/1"
+    And the guest control plane came up
+
+  # Over the backend's ceiling is clamped and reported, never refused.
+  #
+  # Refusing would make a portable `--cpus 9999` succeed on Linux and fail on
+  # macOS for a reason the user cannot act on — and HVF's own default of 2 once
+  # sat above a ceiling of 1, which failed *every* launch on this backend. The
+  # warning is the point: the silent version booted a guest on fewer CPUs than
+  # its admitted plan claimed, with nothing to explain it.
+  #
+  # The request is absurd on purpose. HVF's ceiling comes from
+  # `hv_vm_get_max_vcpu_count`, so it is a property of the host and not a
+  # constant this suite can name — an earlier revision asserted "supports at
+  # most 4", which was a number a bug had produced and which went stale the
+  # moment the bug was fixed. A count no machine will ever have exercises the
+  # clamp on any host, and the assertion checks that the ceiling was reported
+  # rather than what it happens to be here.
+  @live
+  Scenario: a vCPU request beyond the backend ceiling is clamped and reported
+    When I launch "machine run --image alpine --cpus 9999 -- sh -c 'echo clamped-and-booted'"
+    Then the launch succeeds
+    And the output mentions "supports at most"
+    And the output mentions "9999 requested"
+    # Last line, not the whole of stdout: the clamp warning is chrome and
+    # legitimately precedes the guest's output on the same stream. A fixed
+    # token rather than the granted count, which is whatever this host allows.
+    And the guest's last line is "clamped-and-booted"
+    And the guest control plane came up
+
+  # `--memory` was never verified on this path either, and it cannot be checked
+  # at 512M: that is also the built-in default, so a guest that ignored the flag
+  # entirely would report the expected number. 1024M is the smallest request
+  # that tells the two apart. The floor is well under the ask because the kernel
+  # reserves a slice of RAM before it reports `MemTotal`, and how much varies by
+  # kernel version — 800 MiB separates "got a gigabyte" from "got the 512 MiB
+  # default" without pinning a number that drifts.
+  @live
+  Scenario: --memory is honoured on a real boot
+    When I launch "machine run --image alpine --memory 1024M -- sh -c 'M=$(grep MemTotal /proc/meminfo | tr -cd 0-9); [ $M -gt 819200 ] && echo mem-ok || echo mem-only-$M'"
+    Then the launch succeeds
+    And the guest printed exactly "mem-ok"
     And the guest control plane came up
 
   # This scenario is the behavioural witness for the detached-supervisor stderr

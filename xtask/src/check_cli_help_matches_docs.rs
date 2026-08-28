@@ -24,6 +24,14 @@
 //! (`mvmctl security`, `mvmctl flake check`) and explicitly negates others
 //! ("not by a public `mvmctl policy` command"), and none of that is a claim
 //! that the verb exists.
+//!
+//! The surface-grouping table is the exception, and reading it is the third
+//! rule. Its cells name verbs bare — `` `ls` ``, not `` `mvmctl ls` `` — so it
+//! was indistinguishable from prose and went unread, while being the first
+//! description of the surface a reader meets. It accumulated two verbs that do
+//! not exist and one that is hidden. A row whose left cell says "top-level"
+//! claims every verb in its right cell; a `` `<verb> <sub>` `` left cell claims
+//! that verb. Anything parenthesised is a subcommand gloss, not a claim.
 
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
@@ -50,7 +58,8 @@ pub fn run(workspace: &Path) -> Result<()> {
             "{COMMANDS_SOURCE}: parsed no top-level verbs — the enum shape changed and this gate is now blind"
         );
     }
-    let documented = parse_documented_verbs(&reference);
+    let mut documented = parse_documented_verbs(&reference);
+    documented.extend(parse_grouping_table(&reference)?);
 
     let by_name: BTreeMap<&str, &Verb> = verbs.iter().map(|v| (v.name.as_str(), v)).collect();
     let mut findings: Vec<String> = Vec::new();
@@ -254,6 +263,111 @@ fn first_verb(rest: &str) -> Option<String> {
     None
 }
 
+/// Header cells identifying the surface-grouping table. Requiring both keeps
+/// this reader off every other table in the reference.
+const GROUPING_TABLE_HEADER: (&str, &str) = ("Group / top-level", "Commands");
+
+/// Verbs claimed by the surface-grouping table.
+///
+/// Errors rather than returning an empty set when the table is gone: this
+/// reader is the only thing between that table and the drift it has already
+/// accumulated once, and a silently blind gate is worse than no gate.
+fn parse_grouping_table(reference: &str) -> Result<BTreeSet<String>> {
+    let mut found = BTreeSet::new();
+    let mut in_table = false;
+
+    for line in reference.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with('|') {
+            if in_table {
+                break;
+            }
+            continue;
+        }
+        if !in_table {
+            in_table = trimmed.contains(GROUPING_TABLE_HEADER.0)
+                && trimmed.contains(GROUPING_TABLE_HEADER.1);
+            continue;
+        }
+        if is_separator_row(trimmed) {
+            continue;
+        }
+        let Some((left, right)) = row_cells(trimmed) else {
+            continue;
+        };
+        if left.to_ascii_lowercase().contains("top-level") {
+            found.extend(verb_tokens(right));
+        } else {
+            found.extend(verb_tokens(left).into_iter().take(1));
+        }
+    }
+
+    if !in_table {
+        bail!(
+            "{CLI_REFERENCE}: no `{} | {}` table — the grouping-table reader is blind \
+             and that table can drift again unnoticed",
+            GROUPING_TABLE_HEADER.0,
+            GROUPING_TABLE_HEADER.1
+        );
+    }
+    Ok(found)
+}
+
+/// `| --- | --- |` and friends carry no cells.
+fn is_separator_row(row: &str) -> bool {
+    row.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
+}
+
+/// First two cells of a markdown table row.
+fn row_cells(row: &str) -> Option<(&str, &str)> {
+    let mut cells = row.trim_matches('|').split('|').map(str::trim);
+    let left = cells.next()?;
+    let right = cells.next()?;
+    (!left.is_empty() && !right.is_empty()).then_some((left, right))
+}
+
+/// Leading word of every backticked span in a cell, skipping parenthesised
+/// spans. `` `machine` (`run`/`fork`), `build` `` yields `machine`, `build`:
+/// the gloss in parentheses lists subcommands, which are not this gate's
+/// business. `` `machine <sub>` `` yields `machine`.
+fn verb_tokens(cell: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut depth = 0usize;
+    let mut span: Option<String> = None;
+
+    for ch in cell.chars() {
+        match ch {
+            '(' if span.is_none() => depth += 1,
+            ')' if span.is_none() => depth = depth.saturating_sub(1),
+            '`' if depth == 0 => match span.take() {
+                Some(text) => {
+                    if let Some(verb) = leading_verb(&text) {
+                        tokens.push(verb);
+                    }
+                }
+                None => span = Some(String::new()),
+            },
+            _ => {
+                if let Some(text) = span.as_mut() {
+                    text.push(ch);
+                }
+            }
+        }
+    }
+    tokens
+}
+
+/// First word of a backticked span, if it looks like a verb rather than a
+/// flag or a placeholder.
+fn leading_verb(span: &str) -> Option<String> {
+    let word = span.split_whitespace().next()?;
+    let ok = !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    ok.then(|| word.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,6 +433,78 @@ mvmctl --builder qemu machine ls
             Some("doctor")
         );
         assert_eq!(first_verb("machine run").as_deref(), Some("machine"));
+    }
+
+    const GROUPING_TABLE: &str = "\
+Prose above the table mentioning `ls` must not count.
+
+| Group / top-level         | Commands                                          |
+| ------------------------- | ------------------------------------------------- |
+| Daily drivers (top-level) | `machine` (`run`/`exec`/`ls`/…), `build`, `doctor` |
+| `machine <sub>` (advanced) | `pause`, `resume`, `snapshot`                     |
+| `trust <sub>`             | `attest`, `receipt`, `audit`                       |
+| Already-grouped top-level | `image` (the former `build`), `cache`              |
+
+Prose below the table mentioning `security` must not count.
+";
+
+    #[test]
+    fn grouping_table_claims_top_level_verbs_and_group_heads() {
+        let found = parse_grouping_table(GROUPING_TABLE).expect("table is present");
+        let names: Vec<&str> = found.iter().map(String::as_str).collect();
+        assert_eq!(
+            names,
+            vec!["build", "cache", "doctor", "image", "machine", "trust"]
+        );
+    }
+
+    #[test]
+    fn grouping_table_ignores_subcommands_and_surrounding_prose() {
+        let found = parse_grouping_table(GROUPING_TABLE).expect("table is present");
+        for sub in ["run", "exec", "ls", "pause", "resume", "snapshot", "attest"] {
+            assert!(!found.contains(sub), "`{sub}` is a subcommand, not a verb");
+        }
+        assert!(!found.contains("security"), "prose must not count");
+    }
+
+    #[test]
+    fn a_missing_grouping_table_fails_rather_than_reading_nothing() {
+        let err =
+            parse_grouping_table("| Verb | Meaning |\n| --- | --- |\n| `mvmctl doctor` | x |")
+                .expect_err("a reference with no grouping table must not pass silently");
+        assert!(err.to_string().contains("blind"), "{err}");
+    }
+
+    #[test]
+    fn a_verb_in_a_top_level_row_is_a_claim_that_it_exists() {
+        // The exact shape that shipped green: `ls` sat in the daily-drivers
+        // row while no `Ls` variant existed.
+        let doc = "\
+| Group / top-level         | Commands                    |
+| ------------------------- | --------------------------- |
+| Daily drivers (top-level) | `machine` (`run`/…), `ls`   |
+";
+        let found = parse_grouping_table(doc).expect("table is present");
+        assert!(
+            found.contains("ls"),
+            "a bare verb in a top-level row counts"
+        );
+    }
+
+    #[test]
+    fn a_group_row_claims_its_own_head_verb() {
+        // And the shape below it: a `vm <sub>` group naming a verb that is
+        // flattened into `machine` rather than existing on its own.
+        let doc = "\
+| Group / top-level | Commands            |
+| ----------------- | ------------------- |
+| `vm <sub>`        | `pause`, `snapshot` |
+";
+        let found = parse_grouping_table(doc).expect("table is present");
+        assert_eq!(
+            found.iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["vm"]
+        );
     }
 
     #[test]

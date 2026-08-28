@@ -172,7 +172,7 @@ or `--manifest`.
 ```bash
 mvmctl machine run --image alpine -- uname -a                    # OCI image, one-shot
 mvmctl machine run --flake . --mount .:/work -- ls /work         # share host dir, read-only
-mvmctl machine run --image alpine -e DEBUG=1 -- env | grep DEBUG # inject env vars
+mvmctl machine run --image alpine -e DEBUG=1 -- sh -c 'env | grep DEBUG' # inject env vars
 mvmctl machine run --manifest my-tpl -- /bin/true                # registered template
 ```
 

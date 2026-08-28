@@ -38,7 +38,12 @@ impl QuotaConfig {
     /// Smallest run slice or hold that can be expressed without collapsing into
     /// the run loop's 1 ms hold quantum.
     pub const MIN_SLICE: Duration = Duration::from_millis(2);
-    /// HVF creates exactly one vCPU, so 1.0 core is the ceiling.
+    /// 1.0 core is the ceiling. This is a policy limit, not a consequence of
+    /// the backend's vCPU count: HVF creates more than one now, and the
+    /// scheduler charges their summed CPU time, so a multi-vCPU guest can
+    /// consume more than one core's worth. Grants above this are refused
+    /// rather than under-charged, so raising it is a deliberate widening of
+    /// the bound and not a correctness fix.
     pub const MAX_MILLICORES: u32 = 1000;
 
     const DEFAULT_PERIOD_MS: u32 = 10;

@@ -104,6 +104,16 @@ pub struct HvfSupervisorConfig {
     /// (512 MiB). A builder sets several GiB so `nix build` doesn't OOM.
     #[serde(default)]
     pub memory_mib: u32,
+    /// Guest vCPUs. `0` (the default) ⇒ 1.
+    ///
+    /// The count has to reach *this* process because the supervisor is what
+    /// calls `hv_vcpu_create`, and it also has to reach the device tree, which
+    /// is built here: a guest cannot online a CPU the DTB does not describe,
+    /// and describing one the VMM never creates hangs the boot waiting for a
+    /// secondary that never arrives. Both readers take this one field so they
+    /// cannot disagree.
+    #[serde(default)]
+    pub vcpus: u32,
     /// Optional initramfs (cpio, gzip-or-raw).
     #[serde(default)]
     pub initramfs: Option<PathBuf>,
@@ -255,6 +265,7 @@ mod tests {
             kernel: "/k/Image".into(),
             cmdline: Some("console=ttyAMA0 root=/dev/vda ro init=/sbin/mvm-host-vm-init".into()),
             memory_mib: 8192,
+            vcpus: 1,
             initramfs: Some("/k/initrd.cpio".into()),
             disks: vec![
                 HvfDisk {
@@ -369,6 +380,7 @@ mod tests {
             kernel: "/k/Image".into(),
             cmdline: None,
             memory_mib: 0,
+            vcpus: 1,
             initramfs: None,
             disks: vec![],
             virtiofs_root: None,
