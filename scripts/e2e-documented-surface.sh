@@ -232,10 +232,21 @@ else
   ./scripts/cargo-fast.sh build --bin mvmctl
 fi
 
-# Confirm the helpers came back. `cargo build` only regenerates them by running
-# `mvmctl`'s build script, and cargo may consider the binary up to date and skip
-# it — leaving the helpers deleted by the refresh above and every launch failing
-# with "not found". Checking is cheap; discovering it from a dead run is not.
+# Always rebuild the per-VM helpers, never just check they exist.
+#
+# Presence is not freshness. `cargo build --bin mvmctl` regenerates some of them
+# and not others, so a stale `mvm-hvf-supervisor` from an earlier build survives
+# a refresh — and a stale one is worse than a missing one. It parses the config
+# `mvmctl` hands it with `deny_unknown_fields`, so a field added on the host side
+# makes it exit 1 with "unknown field `vcpus`", which the launch path reports as
+# "hvf supervisor exited before writing its PID file". Thirty-three scenarios
+# failed that way, none of them naming the stale binary.
+#
+# cargo makes this a no-op when they are already current, so the cost of always
+# doing it is a fingerprint check.
+echo "==> building the per-VM host helpers"
+just build-supervisors
+
 helpers_present() {
   local root="${CARGO_TARGET_DIR:-target}"
   find "$root" -type f -name mvm-network-endpoint 2>/dev/null | grep -q . || return 1
@@ -244,15 +255,8 @@ helpers_present() {
   fi
   return 0
 }
-
-if ! helpers_present; then
-  echo "==> aux helpers absent after the build; building them explicitly"
-  just build-supervisors
-fi
 if ! helpers_present; then
   echo "!!! per-VM aux helpers are still missing; every launch would fail." >&2
-  echo "!!! Expected mvm-network-endpoint (and mvm-hvf-supervisor on macOS) under" >&2
-  echo "!!! ${CARGO_TARGET_DIR:-target}." >&2
   exit 1
 fi
 
