@@ -4,6 +4,14 @@ Last updated: 2026-08-27
 
 ## In progress
 
+- [ ] **Cold-boot guest wall clock — issue #2956.**
+      `specs/plans/2026-08-27-cold-boot-wall-clock.md`.
+      The active universal-initramfs PID 1 now consumes the host epoch before
+      trust validation or workload activation. Strict shared parsing and the
+      existing narrow clock-sync path have focused positive and refusal tests;
+      workspace tests, gated targets, and zero-warning Clippy are green. Merge
+      delivery remains.
+
 - [ ] **Extended CI documented-surface repair — issue #2938.**
       `specs/plans/2026-08-27-extended-ci-documented-surface.md`.
       Both scheduled platform witnesses now request signed-manifest

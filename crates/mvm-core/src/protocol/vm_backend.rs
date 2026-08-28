@@ -30,7 +30,8 @@ pub use mvm_contract::protocol::vm_backend::{
     VmNetworkInfo, VmPortMapping, VmStatus, VmVolume, VmVolumeKind, WarmArtifactIdentity,
     WarmClaimOutcome, WarmClaimRefusal, WarmClaimTiming, WarmLaunchMode, WarmPrewarmSource,
     WarmServiceRequest, WarmServiceResponse, WarmStartError, WarmStartOutcome, clamp_vcpus,
-    encode_egress_ca_cmdline, encode_secret_env_cmdline, encode_user_volumes_cmdline,
+    decode_host_epoch_cmdline, encode_egress_ca_cmdline, encode_secret_env_cmdline,
+    encode_user_volumes_cmdline,
 };
 
 // ---------------------------------------------------------------------------
