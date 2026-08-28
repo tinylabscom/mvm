@@ -6,8 +6,10 @@ description: Create custom Nix flakes that build microVM images for mvm.
 :::note[Health checks run in the guest]
 `healthChecks` is rendered into `/etc/mvm/probes.d/<name>.json` in the image.
 The guest agent scans that directory at boot and runs each check on its own
-interval; results come back over vsock. `volumeMounts` and `serviceGroup` are
-still recorded rather than acted on — the multi-service supervisor is not wired.
+interval; results come back over vsock. The top-level `services`,
+`volumeMounts` and `serviceGroup` arguments are still recorded rather than
+acted on — the multi-service supervisor is not wired. `entrypoint.services`
+is unwired for the same reason: it falls through to a recovery shell.
 :::
 
 mvmctl uses Nix flakes to produce reproducible microVM images. You run `mvmctl machine build` from the host, and mvm runs Nix evaluation and `nix build` inside the Linux builder VM. The result is a kernel and rootfs that can boot on any supported runtime backend, including Firecracker, HVF, libkrun, and QEMU.
@@ -32,9 +34,11 @@ You do not need to enter a dev shell to build a flake. The dev shell is only for
         name = "my-app";
         packages = [ pkgs.curl ];
 
-        services.my-app = {
-          command = "${pkgs.python3}/bin/python3 -m http.server 8080";
-        };
+        # `entrypoint` is required and takes exactly one of
+        # `shell` / `command` / `services`.
+        entrypoint.command = [
+          "${pkgs.python3}/bin/python3" "-m" "http.server" "8080"
+        ];
 
         healthChecks.my-app = {
           healthCmd = "${pkgs.curl}/bin/curl -sf http://localhost:8080/";
@@ -49,22 +53,26 @@ You do not need to enter a dev shell to build a flake. The dev shell is only for
 
 | Parameter | Description |
 |-----------|-------------|
-| `name` | VM name (used in image filename) |
-| `packages` | Nix packages to include in the rootfs |
-| `hostname` | Guest hostname (default: same as `name`) |
-| `serviceGroup` | Default service user/group name (default: `"mvm"`). Services run as this user; secrets are readable by this group. |
-| `users.<name>.uid` | User ID (optional, auto-assigned from 1000) |
-| `users.<name>.group` | Group name (optional, defaults to user name) |
-| `users.<name>.home` | Home directory (optional, defaults to `/home/<name>`) |
-| `services.<name>.command` | Long-running service command (supervised with respawn) |
-| `services.<name>.preStart` | Optional setup script (runs as root before the service) |
-| `services.<name>.env` | Optional environment variables (`{ KEY = "value"; }`) |
-| `services.<name>.user` | User to run as (default: `serviceGroup`) |
-| `services.<name>.logFile` | Optional log file path (default: `/dev/console`) |
-| `healthChecks.<name>.healthCmd` | Health check command (exit 0 = healthy) |
+| `name` | **Required.** VM name (used in image filename) |
+| `entrypoint` | **Required.** Exactly one of `shell` / `command` / `services`; see [Building MicroVM Images](/guides/building-microvm-images#entrypoint-forms) |
+| `packages` | Nix packages to include in the rootfs (default: `[]`) |
+| `hypervisor` | Default hypervisor (default: `"firecracker"`) |
+| `vcpus` | Resource default (default: `1`) |
+| `memory_mib` | Resource default (default: `256`) |
+| `dev` | Explicit accessible-vs-sealed override (default: inferred from `entrypoint`) |
+| `uids` | `{ agent; entrypoint; }` privilege-model override |
+| `extraFiles` | `{ "/abs/path" = { content; mode?; }; }` baked into the rootfs |
+| `kernel`, `bootCommand`, `builderUid`, `withAuditProbe` | Advanced overrides |
+| `healthChecks.<name>.healthCmd` | Health check command (exit 0 = healthy); **required** per check |
 | `healthChecks.<name>.healthIntervalSecs` | How often to run the check (default: 30) |
 | `healthChecks.<name>.healthTimeoutSecs` | Timeout for each check (default: 10) |
-| `volumeMounts."<guest-path>"` | Plan 45 — declarative virtio-fs volume mount declarations. See "Volume Mounts" below. |
+| `serviceGroup` | Accepted and recorded, but **not enforced** — nothing acts on it |
+| `services.<name>` | Accepted and recorded, but **not enforced** — the multi-service supervisor is not wired |
+| `volumeMounts."<guest-path>"` | Accepted and recorded, but **not enforced**. See "Volume Mounts" below. |
+
+The argument set is not variadic, so any name not in this table is an
+evaluation error. There is no `hostname` argument (the guest hostname comes
+from `name`) and no `users` argument.
 
 ## Volume Mounts
 
@@ -81,21 +89,22 @@ mkGuest {
 }
 ```
 
-The host (`mvmctl machine run` or mvmd) reads these declarations via `passthru.volumeMounts`:
+The declarations are recorded under `passthru.mvm.unenforced.volumeMounts`:
 
 ```sh
-nix eval .#mvm-worker.passthru.volumeMounts --json
-# → [
-#     {"guestPath":"/mnt/inputs","volumeName":"fixtures","readOnly":true},
-#     {"guestPath":"/mnt/work","volumeName":"workspace","readOnly":false}
-#   ]
+nix eval .#mvm-worker.passthru.mvm.unenforced.volumeMounts --json
 ```
 
-At boot the host attaches a virtio-fs device per declaration and the guest agent runs the matching `MountVolume` vsock verb. Validation:
+**Nothing consumes them yet.** `mkGuest` accepts the attribute set, checks only
+that it *is* an attribute set, and records it; there is no eval-time validation
+of guest paths or volume names, and no host code attaches a virtio-fs device
+from this declaration. Runtime volume mounting is driven by the kernel cmdline
+the host writes, independently of this argument.
 
-- **Guest paths** must be absolute and **outside** `/nix*`, `/run/booted-system`, `/run/current-system` — Nix-immutable paths are off-limits per plan 45 §"Nix semantics alignment".
-- **Volume names** must be non-empty strings ≤32 chars (used as the virtio-fs tag).
-- The host's `mvm_security::policy::MountPathPolicy` re-validates at runtime (defence-in-depth) — the eval-time checks fail fast for malformed flakes.
+When you do declare a guest path that the host will later mount, note that the
+host-side mount policy (`mvm_core::crypto::policy::MountPathPolicy`) allows
+only paths under `/data` and `/work` — `/mnt` is deliberately excluded so a
+share cannot shadow the runtime's own `/mnt/config` and `/mnt/secrets` drives.
 
 **Reproducibility boundary:** volume *contents* do not influence the image hash. The flake hash captures the *declaration* of the mounts, not the data behind them. Volumes are the explicit mutable layer; the rootfs stays immutable + verity-protected.
 
@@ -112,9 +121,11 @@ At boot the host attaches a virtio-fs device per declaration and the guest agent
 - **Guest agent** — vsock-based health checks, status reporting, snapshot
   coordination; baked into dev/fallback images and supplied by the runtime
   overlay on sealed required-overlay boots
-- **Networking** — eth0 configured via kernel boot args, NAT to host network
-- **Drive mounting** — `/mnt/config` (ro), `/mnt/secrets` (ro), `/mnt/data` (rw)
-- **Service supervision** — automatic restart on failure with backoff
+- **Networking** — none. A workload microVM boots with no guest NIC at all;
+  egress leaves only over vsock to the per-VM `mvm-network-endpoint`.
+- **Drive mounting** — `/mnt/config` (ro, `/dev/vdb`), `/mnt/secrets` (ro,
+  `/dev/vdc`), `/mnt/data` (rw). These are drive images mounted by `/init`,
+  not host `--mount` shares.
 
 ## Runtime overlay contract
 
@@ -146,7 +157,14 @@ Operationally, this means:
 
 ## Adding Services
 
-Services defined in `services.<name>` are supervised by the init system:
+:::caution[Not wired yet]
+`services` is accepted and recorded in `passthru.mvm.unenforced`, but nothing
+supervises it — the multi-service supervisor is not built. `mkGuest` emits an
+evaluation-time warning when you set it. The shape below is the declared
+surface, not running behaviour.
+:::
+
+The declared shape of a `services.<name>` entry:
 
 ```nix
 services.my-app = {
@@ -172,7 +190,7 @@ services.my-app = {
 
 ## Health Checks
 
-Health checks defined in `healthChecks` are automatically written to `/etc/mvm/integrations.d/` at build time. The guest agent picks them up on boot:
+Health checks defined in `healthChecks` are automatically written to `/etc/mvm/probes.d/<name>.json` at build time. The guest agent picks them up on boot:
 
 ```nix
 healthChecks.my-app = {
@@ -191,110 +209,36 @@ mvmctl machine logs <name> -f    # follow in real time
 
 ## Users
 
-All services run as a built-in non-root user (default: `mvm`, uid 900) — never as root. Secrets at `/mnt/secrets` are owned by `root:<serviceGroup>` with mode `0440`, so only members of the service group can read them. Custom users are automatically added to this group.
-
-To change the default service user/group name, set `serviceGroup`:
+The guest agent runs as uid **990**. The entrypoint runs as uid **1000** in a
+sealed (prod) image and uid **0** in a dev image; override either with the
+`uids` argument:
 
 ```nix
 mvm.lib.${system}.mkGuest {
   name = "my-app";
-  serviceGroup = "app";  # default: "mvm"
-  # ...
+  entrypoint.command = [ "/usr/local/bin/serve" ];
+  uids = { agent = 990; entrypoint = 1000; };
 };
 ```
 
-To run a service as a custom user, define it in `users` and reference it in the service. The custom user is automatically added to the service group for secrets access:
+Secrets at `/mnt/secrets` are owned by `root:<group>` with mode `0440`, so only
+members of the service group can read them.
 
-```nix
-users.app = {
-  uid = 1000;
-  group = "app";
-  home = "/home/app";
-};
-
-services.my-app = {
-  command = "${pkgs.nodejs}/bin/node /app/server.js";
-  user = "app";  # overrides the default serviceGroup user
-};
-```
-
-The `preStart` script always runs as root regardless of the `user` setting, so it can perform privileged setup like mounting filesystems or creating directories.
+`mkGuest` has no `users` argument — there is no way to declare additional guest
+users from the flake today. `serviceGroup` is accepted but not enforced.
 
 ## Rootfs Types
 
 By default, `mkGuest` produces an **ext4** rootfs. The build system also supports **squashfs** for smaller, read-only images (~76% smaller with LZ4 compression). When using squashfs, the init system mounts tmpfs overlays on `/etc` and `/var` automatically.
 
-## Service Builder Helpers
+## Composing a workload
 
-The guest library provides high-level helpers that return a `{ package, service, healthCheck }` set. Compose them with `mkGuest`:
-
-### mkPythonService
-
-Build a Python HTTP service using `python3.withPackages` (nixpkgs packages only):
-
-```nix
-let
-  pythonApp = mvm.lib.${system}.mkPythonService {
-    name = "my-api";
-    src = ./.;
-    pythonPackages = ps: [ ps.flask ];
-    entrypoint = "app/main.py";
-    port = 8080;
-    env = { WORKERS = "2"; };
-  };
-in
-  mvm.lib.${system}.mkGuest {
-    name = "my-api";
-    packages = [ pythonApp.package ];
-    services.app = pythonApp.service;
-    healthChecks.app = pythonApp.healthCheck;
-  };
-```
-
-### mkStaticSite
-
-Serve static files with busybox httpd (zero extra packages):
-
-```nix
-let
-  site = mvm.lib.${system}.mkStaticSite {
-    name = "docs";
-    src = ./public;
-    port = 8080;
-  };
-in
-  mvm.lib.${system}.mkGuest {
-    name = "docs";
-    packages = [ site.package ];
-    services.www = site.service;
-    healthChecks.www = site.healthCheck;
-  };
-```
-
-### mkNodeService
-
-Build a Node.js service with npm install + tsc:
-
-```nix
-let
-  app = mvm.lib.${system}.mkNodeService {
-    name = "my-app";
-    src = fetchGit { url = "..."; rev = "..."; };
-    npmHash = "sha256-...";
-    entrypoint = "dist/index.js";
-    port = 3000;
-  };
-in
-  mvm.lib.${system}.mkGuest {
-    name = "my-app";
-    packages = [ app.package ];
-    services.app = app.service;
-    healthChecks.app = app.healthCheck;
-  };
-```
-
-All three helpers return the same shape: `{ package, service, healthCheck }`. This makes it easy to swap between runtimes or compose multiple services in a single guest.
-
+`nix/lib` exports exactly three functions: `mkGuest`, `mkFunctionService`,
+and `mkFunctionWorkload`. There are no `mkPythonService`, `mkStaticSite`, or
+`mkNodeService` helpers — build the service attribute set yourself and pass it
+to `mkGuest`, or use `mkFunctionWorkload` to lower an SDK-emitted Workload IR
+straight to a rootfs (see
+[From Workload IR to MicroVM Image](/guides/ir-to-image/)).
 ## Build Process
 
 When you run `mvmctl machine build --flake .`:
@@ -370,13 +314,19 @@ chmod 0400 ~/.mvm/config/secrets/anthropic
 
 cd my-claude-code-vm
 mvmctl machine build
-mvmctl machine run --manifest . --profile dev \
-  --mount "$PWD:/workspace:rw" \
-  --mount "$HOME/.mvm/config/secrets:/mnt/secrets"
+mvmctl machine run --manifest . --profile dev --name agent -d \
+  --mount "$PWD:/work:rw" \
+  --mount "$HOME/.mvm/config/secrets:/data/secrets:ro"
 ```
 
+A guest mount path must sit under `/data` or `/work` — those are the only two
+allow-roots. `/mnt/*` is refused outright so a share cannot shadow the
+runtime's own config and secrets drives. A `:rw` share additionally needs a
+**persistent** machine (`--name` plus `-d`) and `--profile dev`; a transient
+run's shares are read-only under every profile.
+
 Inside the guest, your workload can read the file you mounted under
-`/mnt/secrets`. If you do not want the guest to ever see the raw
+`/data/secrets`. If you do not want the guest to ever see the raw
 credential, do not use this manual file-mount pattern; use managed
 secret refs instead.
 

@@ -1,14 +1,13 @@
 ---
 title: Sandbox parity status
-description: Which sandbox-parity claims mvm makes today, and which are Preview, Planned, or deliberately Not claimed. Backed by ADR-048 and the cargo xtask check-doc-claims lint.
+description: Which sandbox-parity claims mvm makes today, and which are Preview, Planned, or deliberately Not claimed. Backed by the cargo xtask check-doc-claims lint.
 ---
 
 mvm makes seven sandbox-parity claims relative to the earlier external sandbox
-runtime's published positioning. Each claim has a defined gate
-([ADR-048](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/048-claim-safe-sandbox-parity.md))
-and a current status. Public docs and release notes use the language
-in this table — anything stronger is enforced by the
-`cargo xtask check-doc-claims` lint in CI.
+runtime's published positioning. Each claim has a defined gate and a current
+status, both of which this page owns: there is no separate sandbox-parity ADR.
+Public docs and release notes use the language in this table — anything
+stronger is enforced by the `cargo xtask check-doc-claims` lint in CI.
 
 ## Status taxonomy
 
@@ -21,14 +20,14 @@ in this table — anything stronger is enforced by the
 
 ## Current status
 
-The seven claim ids correspond to ADR-048
-§"The seven target claims". Each row's machine marker (HTML comment
-above the row) is what the docs lint reads — flipping the status
-requires editing both the marker and the visible cell.
+The seven claim ids are defined by this table. Each row's machine
+marker (HTML comment above the row) is what the docs lint reads —
+flipping the status requires editing both the marker and the visible
+cell.
 
 <!-- claim:claims-hygiene status:Shipped -->
-<!-- claim:oci-ingest status:Planned -->
-<!-- claim:network-policy status:Planned -->
+<!-- claim:oci-ingest status:Shipped -->
+<!-- claim:network-policy status:Preview -->
 <!-- claim:secret-non-leakage status:Planned -->
 <!-- claim:sdk-lifecycle status:Planned -->
 <!-- claim:cold-start status:Planned -->
@@ -37,8 +36,8 @@ requires editing both the marker and the visible cell.
 | Claim id              | Description                                                                                                              | Status      |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------ | ----------- |
 | `claims-hygiene`      | Public docs clearly distinguish Shipped, Preview, Planned, and Not claimed.                                              | **Shipped** |
-| `oci-ingest`          | Run digest-pinned OCI images in microVMs without Docker as the runtime.                                                  | **Planned** |
-| `network-policy`      | Deny-by-default egress with DNS pinning, SNI/Host enforcement, metadata endpoint protection, and audit.                  | **Planned** |
+| `oci-ingest`          | Run digest-pinned OCI images in microVMs without Docker as the runtime.                                                  | **Shipped** |
+| `network-policy`      | Deny-by-default egress with DNS pinning, SNI/Host enforcement, metadata endpoint protection, and audit.                  | **Preview** |
 | `secret-non-leakage`  | Workloads receive opaque secret tokens; real secret values are substituted only by trusted host-side policy.             | **Planned** |
 | `sdk-lifecycle`       | Python/TypeScript/Rust SDKs create, run, inspect, snapshot, and stop sandboxes with cleanup bound to the parent process. | **Planned** |
 | `cold-start`          | Latency numbers produced by a reproducible harness, split by fresh boot, guest-agent-ready, checkpoint restore, warm pool. | **Planned** |
@@ -54,47 +53,55 @@ isn't this one or the deliberate `mvmforge` migration guide.
 Contributors flip a row to Shipped only when the underlying CI gate
 exists.
 
-### `oci-ingest` — Planned
+### `oci-ingest` — Shipped
 
-Today mvm builds rootfs from a Nix flake or from a bundled template
-catalog. There is no `mvmctl image pull` command, no OCI layer
-unpacker, and no digest-pinned launch path. There is no round-trip OCI bridge into a container runtime. OCI image
-support remains on the roadmap as a first-class microVM ingest path
-(digest-pinned pull and unpack into a verity-backed rootfs), not a
-container fallback.
+mvm still builds rootfs from a Nix flake or from a bundled template
+catalog, and OCI ingest now sits alongside that as a first-class
+microVM path rather than a container fallback. `mvmctl image pull`
+is a dispatched command; the allow-listed layer unpacker covers
+whiteouts, symlinks, hardlinks, device nodes, xattrs, and case-fold
+collisions; and `--prod` refuses a mutable, non-digest-pinned
+reference before any network fetch. Each `mvmctl run --image`
+admission is a signed `ExecutionPlan` that emits an OCI provenance
+entry — registry, repo, supplied reference, resolved digest, layer
+digests, trust policy, and cosign verdict — into the chain-signed
+audit log. That is numbered security claim 14; see the
+[CI-enforced security claims](/security/ci-claims/).
 
-To move to Preview: ship `mvmctl image pull` with digest
-verification, layer unpack with whiteout, symlink, and hardlink
-coverage, and an integration test against a hermetic local registry.
-
-To move to Shipped: production profile rejects mutable tags, audit
-events fire for resolve, fetch, cache-hit, materialize, verify,
-launch, and delete; mvmd-side consumer is wired (mvmd ADR-0020
-cross-repo handoff, tracked in
-[mvmd#153](https://github.com/tinylabscom/mvmd/issues/153)).
+The remaining cross-repo work is the fleet-side consumer, which is
+outside this claim: mvmd ADR-0020 handoff, tracked in
+[mvmd#153](https://github.com/tinylabscom/mvmd/issues/153).
 
 Tracking work:
-[Plan 74 W1](https://github.com/tinylabscom/mvm/blob/main/specs/plans/74-claim-safe-sandbox-parity.md#w1--oci-image-ingest),
 [mvm#222](https://github.com/tinylabscom/mvm/issues/222),
 [mvmd#153](https://github.com/tinylabscom/mvmd/issues/153).
 
-### `network-policy` — Planned
+### `network-policy` — Preview
 
-Today's egress enforcement is L3 allow-listing
-([ADR-003](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/003-egress-policy.md)).
-There is no DNS pinning resolver, no HTTPS SNI/Host policy, and the
-metadata endpoint (`169.254.169.254`) is not blocked by default.
+Egress is deny-by-default and enforced at one seam
+([ADR-003](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/003-hypervisor-egress-policy.md)):
+the per-VM host-side network endpoint, whose `EgressGate` is the sole
+decision point for numbered claim 10. Three pieces this row once
+listed as missing are live. Host-allowlist DNS pins are resolved once
+when the gate is built and the build fails closed on an unresolvable
+host, so a later rebind cannot move an admitted destination. TLS SNI
+is peeked out of the ClientHello without consuming it and routed by
+policy — a bound connection goes to a rustls server, an unbound one
+is spliced. And the cloud metadata endpoint (`169.254.169.254`) is
+the first entry of the mandatory-deny ranges, which are checked
+unconditionally ahead of every grant shape, including `Unrestricted`.
 
-To move to Preview: ship the pinning DNS resolver and an L7 proxy
-that enforces Host on HTTP and SNI on HTTPS CONNECT, with audit
-events for allow, deny, dns-pin, dns-reject, and proxy-fail.
+What keeps this Preview rather than Shipped: there is no check that a
+CONNECT request's authority matches the SNI actually presented on the
+tunnelled ClientHello, so the two can disagree. The destination
+allowlist is a literal host-string match today, not a certificate-SAN
+pin. Enforcement is also backend-scoped — the dev/test QEMU backend is
+type-excluded from the admitted workload path and carries no egress
+gate at all.
 
-To move to Shipped: per-plan network policy flows through the
-signed `ExecutionPlan`; integration tests prove DNS rebinding,
-raw-IP bypass, wrong-SNI, and metadata-endpoint denial.
-
-Tracking work:
-[Plan 74 W2](https://github.com/tinylabscom/mvm/blob/main/specs/plans/74-claim-safe-sandbox-parity.md#w2--programmable-network-policy).
+To move to Shipped: bind the CONNECT authority to the observed SNI,
+and cover DNS rebinding, raw-IP bypass, wrong-SNI, and
+metadata-endpoint denial with integration tests.
 
 ### `secret-non-leakage` — Planned
 
@@ -114,29 +121,31 @@ labels, and panic output; hostile-guest exfiltration tests run in
 CI; explicit guest-visible file mounts remain manual opt-ins and are
 documented as such.
 
-Tracking work:
-[Plan 74 W3](https://github.com/tinylabscom/mvm/blob/main/specs/plans/74-claim-safe-sandbox-parity.md).
-
 ### `sdk-lifecycle` — Planned
 
-`crates/mvm-sdk` ships today as the build-time SDK
+`crates/mvm-sdk` ships as the build-time SDK
 ([migration guide](/guides/mvmforge-migration/)) — it lets a user
 declare a workload, emit canonical IR, and compile entrypoints
-statically. There is no runtime lifecycle surface: no Python or
-TypeScript `create` / run / `snapshot` / `stop` methods that own
-a sandbox from a parent process.
+statically. A runtime lifecycle surface also ships in both the Python
+and TypeScript SDKs: `create` / `connect` / `exec` / files / `kill`,
+plus context managers, and in live mode each shells `mvmctl machine
+run` to boot and `mvmctl machine stop` to tear down.
 
-To move to Preview: ship the Rust lifecycle API plus a Python
-binding (pyo3), shared fixture suite, parent-process lease using
-`PR_SET_PDEATHSIG` on Linux.
+Two parts of this row's description are genuinely absent, which is
+what keeps it Planned. There is no `snapshot` method on either
+surface. And cleanup is not bound to the parent process in any
+enforced sense — it rests on a context manager, an `atexit` handler,
+and a default 30-minute TTL that an orchestrator-side reaper
+collects, none of which survive a hard parent kill.
 
-To move to Shipped: TypeScript binding via napi-rs; parent-death
-cleanup works on both Linux and macOS (kqueue `NOTE_EXIT` on
-macOS); static decorator compilation stays separate from the
+To move to Preview: a parent-process lease the kernel enforces
+(`PR_SET_PDEATHSIG` on Linux), plus a shared fixture suite across
+the two SDK surfaces.
+
+To move to Shipped: parent-death cleanup works on both Linux and
+macOS (kqueue `NOTE_EXIT` on macOS); `snapshot` lands on both
+surfaces; static decorator compilation stays separate from the
 runtime control surface (no importing user code to inspect it).
-
-Tracking work:
-[Plan 74 W4](https://github.com/tinylabscom/mvm/blob/main/specs/plans/74-claim-safe-sandbox-parity.md#w4--sdk-owned-lifecycle).
 
 ### `cold-start` — Planned
 
@@ -144,7 +153,7 @@ Tracking work:
 boots today, but mvm has no published end-to-end latency number
 covering Firecracker, libkrun, checkpoint restore, and warm-pool
 claim under a single methodology.
-ADR-048 §"Non-goals" explicitly forbids claiming
+This page's non-goals below explicitly forbid claiming
 <!-- allow(doc-claim:cold-start): explicit non-goal callout -->
 sub-100ms until measured data supports it.
 
@@ -156,9 +165,6 @@ To move to Shipped: the harness runs on at least two backends; CI
 budget gates have been green for at least one week;
 `specs/perf/` carries a published report contributors can diff
 their changes against.
-
-Tracking work:
-[Plan 74 W5](https://github.com/tinylabscom/mvm/blob/main/specs/plans/74-claim-safe-sandbox-parity.md#w5--cold-start-measurement-and-budgets).
 
 ### `filesystem-backends` — Planned
 
@@ -176,26 +182,28 @@ same suite; path-traversal, symlink-escape, concurrent-write, and
 large-file edge cases are covered by tests; audit records emit on
 attach, detach, read, write, delete, rename, snapshot, and health.
 
-Tracking work:
-[Plan 74 W6](https://github.com/tinylabscom/mvm/blob/main/specs/plans/74-claim-safe-sandbox-parity.md#w6--extensible-filesystem-backends).
-
 ## Deliberately not claimed
 
-ADR-048 §"Non-goals" names the postures mvm rejects:
+These are the postures mvm rejects:
 
 - Docker or a Docker daemon as the production runtime.
 - Kubernetes or Compose compatibility.
+- A round-trip OCI bridge into a container runtime. OCI ingest is a
+  microVM path — pull, verify, unpack, materialize a rootfs — not a
+  handoff to a shared-kernel runtime.
 - Sub-100ms cold boot before measured data supports it.
 - The phrase
   <!-- allow(doc-claim:secret-non-leakage): non-goal callout -->
   "secrets cannot leak" for legacy env/file injection
-  flows — those flows reach the guest in plaintext today and the
-  ADR forbids the claim.
+  flows — those flows reach the guest in plaintext today and this
+  page forbids the claim.
 - Bypassing signed plans, audit, or verified artifact checks for
   developer ergonomics.
 
-These are policy commitments. A future PR cannot flip them by
-editing this page alone — ADR-048 must be amended first.
+These are policy commitments, and this page is where they live —
+there is no separate ADR standing behind them. Flipping one is a
+maintainer decision, not a docs edit, and the reasoning belongs in
+the PR that does it.
 
 ## Reading the table programmatically
 
@@ -215,9 +223,6 @@ so audit bypasses stay visible in git blame.
 
 ## Related reading
 
-- [ADR-048: Claim-safe sandbox parity roadmap](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/048-claim-safe-sandbox-parity.md)
-- [Plan 74: workstreams W0-W6](https://github.com/tinylabscom/mvm/blob/main/specs/plans/74-claim-safe-sandbox-parity.md)
-- [Plan 74 attack plan: sequencing for W1-W6](https://github.com/tinylabscom/mvm/blob/main/specs/plans/83-w1-w6-attack-plan.md)
 - [CI-enforced security claims](/security/ci-claims/) — the existing
   operator-facing security guarantees this page does NOT duplicate. That
   is a separate, larger claim family from the seven sandbox-parity claims

@@ -7,15 +7,15 @@ Networking is part of the sandbox contract. Name what the guest can reach, name 
 
 ## Egress policy
 
-Use a preset when it matches the workload:
+Egress is off unless you ask for it. `--net` opts into the built-in dev preset:
 
 ```sh
-mvmctl machine run --flake .
-mvmctl machine run --flake . --net
-mvmctl machine run --flake . --net
+mvmctl machine run --flake .          # deny-all (the default)
+mvmctl machine run --flake . --net    # dev preset
 ```
 
-Use explicit allow rules for narrow agent workloads:
+Use explicit allow rules for narrow agent workloads. `--allow-host` replaces the
+preset with a concrete allow-list:
 
 ```sh
 mvmctl machine run --flake . \
@@ -35,7 +35,12 @@ mvmctl machine run --flake . --name api-dev \
   --port 8080:8080 --port 3000:3000
 ```
 
-Use readiness and logs while developing services:
+Ingress is declared before boot and is not changed afterwards; there is no
+dynamic port-forwarding verb.
+
+Use readiness and logs while developing services (`wait` and `boot-report` are
+hidden advanced verbs — they work, but they do not appear in
+`mvmctl machine --help`):
 
 ```sh
 mvmctl machine wait api-dev --for all

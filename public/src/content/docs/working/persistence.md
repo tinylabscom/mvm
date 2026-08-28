@@ -22,9 +22,12 @@ mvmctl machine pause agent-sandbox
 mvmctl machine resume agent-sandbox
 ```
 
-The exact backend mechanics differ. See [Snapshots](/working/snapshots/) for the
-separate live-memory, machine-state, disk-only, standby, and cold-boot tiers.
-Use `mvmctl doctor` to see which tier the selected backend advertises.
+Both verbs are hidden advanced operations — they work, but they do not appear in
+`mvmctl machine --help` — and both default to `--hypervisor firecracker` and
+drive the snapshot through Firecracker's control socket. See
+[Snapshots](/working/snapshots/) for the separate live-memory, machine-state,
+disk-only, standby, and cold-boot tiers. Use `mvmctl doctor` to see which tier
+the selected backend advertises.
 
 ## Cold mode
 

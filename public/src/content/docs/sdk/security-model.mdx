@@ -107,8 +107,8 @@ with Sandbox.create(
 </TabItem>
 <TabItem label="TypeScript">
 
-```ts
-import { NetworkPolicy, Sandbox, SecretRef } from "@mvm/sdk";
+```text
+import { NetworkPolicy, Sandbox, SecretRef } from "@runmvm/mvm";
 
 using sandbox = await Sandbox.create({
   image: "nix:./flake#agent-runtime",
@@ -127,7 +127,10 @@ console.log(result.stdout);
 </Tabs>
 
 This is the target SDK shape. Check [Lifecycle matrix](/sdk/lifecycle-matrix/)
-before treating a helper as shipped in a particular language.
+before treating a helper as shipped in a particular language. In particular,
+`@runmvm/mvm` exports no `NetworkPolicy` value today, and `SecretRef` is a
+type-only interface with no `.from()` — use `mvm.secret(...)` for a secret
+reference and `mvm.network({...})` for a policy.
 
 ## Related pages
 

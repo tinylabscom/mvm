@@ -110,7 +110,7 @@ transport is implemented.
 
 ### Manifest discovery
 
-`mvmctl machine build`, `mvmctl machine run`, `mvmctl run`, `mvmctl machine exec`, `mvmctl machine inspect`, `mvmctl machine rm` all accept an optional `[PATH]` argument:
+Only `mvmctl machine build` takes an optional positional `[PATH]` (defaulting to `.`). `mvmctl machine run` and `mvmctl run` take `-m/--manifest <PATH>` instead, because their positional slot is the trailing argv:
 
 ```bash
 mvmctl machine build                              # walks up from cwd looking for mvm.toml
@@ -164,8 +164,7 @@ mvmctl machine build --update-hash                    # recompute Nix FOD hash (
 ```
 
 Sizing is a launch-time decision: pass `--cpus` / `--memory` to `mvmctl
-machine run`, or persist them on a named machine with `mvmctl machine create
---cpus 4 --mem 2G`.
+machine run`, or persist them on a named machine via its manifest.
 
 Build artifacts are stored in a content-addressed registry under `~/.mvm/templates/<sha256(canonical_manifest_path)>/artifacts/revisions/<revision_hash>/`. The manifest's *path* identifies the project; `revision_hash = sha256(flake.lock + profile)` content-addresses the actual build outputs.
 
@@ -175,7 +174,7 @@ An unsupported request fails closed instead of downgrading to image-only.
 
 ## Listing / inspecting / removing
 
-Manifest registry operations live under `mvmctl manifest`. (The unprefixed `mvmctl machine ls` / `mvmctl machine inspect` / `mvmctl machine stop` continue to operate on **running VMs** — those are unchanged.)
+Manifest registry operations live under `mvmctl manifest`. (`mvmctl machine ls` / `mvmctl machine inspect` / `mvmctl machine stop` continue to operate on **machines** — those are unchanged. `machine ls` has a visible `ps` alias.)
 
 ```bash
 mvmctl manifest ls                            # list built slots (manifest path, name, last built)

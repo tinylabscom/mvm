@@ -10,22 +10,42 @@
 
 ## In progress
 
-- [ ] **Extended CI documented-surface repair — issue #2938.**
+- [x] **FlowMux HTTPS live-client repair.**
+      `specs/plans/2026-08-27-flowmux-https-live-client.md`.
+      The seven live HTTPS egress witnesses now use the pinned multi-arch
+      `curlimages/curl:8.21.0` client, which opens an HTTP `CONNECT` tunnel
+      before TLS. The proxy's fail-closed refusal of plaintext HTTPS
+      absolute-form requests remains unchanged. A repository regression,
+      workspace check/tests/doctests, and Clippy are green; merge-queue
+      delivery remains.
+
+- [x] **Extended CI documented-surface repair — issue #2938.**
       `specs/plans/2026-08-27-extended-ci-documented-surface.md`.
       Linux and macOS now build the live documented-surface binary with signed
       release-manifest verification enabled, and macOS installs the root
       binary's target-gated libkrun dependency through the shared installer.
       Focused regression tests, actionlint, the exact macOS feature build,
       workspace tests/check/doctests, and zero-warning Clippy are green.
-      Remaining: merge and close #2938 through the PR link.
+      PR #2943 merged and closed issue #2938; a manual Extended CI run on
+      `main` is recording the post-merge live-lane evidence.
 
-- [ ] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
+- [ ] **Cloudflare Pages cutover.**
+      `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.
+      Wrangler is pinned locally, the existing `mvm` Pages project and account
+      are checked in, CI verifies the selected account before building, local
+      scripts deploy through that configuration, local and CI uploads share a
+      tested complete-WebLinux-bundle gate, and a production-branch deployment
+      is live with the required COOP/COEP headers.
+      Remaining: attach `gomicrovm.com` to the Pages project; the hostname still
+      resolves to GitHub Pages and cannot serve those headers.
+
+- [x] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
       `specs/plans/2026-08-27-kernel-6-12-106.md`.
       The custom workload/builder kernel and libkrunfw firmware build now use
       the same kernel.org-verified Linux 6.12.106 archive and SRI hash.
       Structural synchronization and freshness tests, workspace check/tests,
-      and zero-warning Clippy are green. Remaining: pass the PR's Linux Nix
-      evaluation/build gates, merge it, and close #2931 through the PR link.
+      zero-warning Clippy, and merge-queue gates passed; PR #2939 merged and
+      closed issue #2931.
 
 - [ ] **Admission cache durability boundary.**
       `specs/plans/2026-08-26-admission-cache-durability.md`.
@@ -3218,3 +3238,13 @@ writes the plan:
       at generation time rather than at boot.
 - [ ] Whether the emitted plan is signed interactively or written unsigned for a
       separate signing step. Unsigned-by-default is the safer starting posture.
+
+## 2026-08-27 warm-launch gate contract repair
+
+- [x] Separate the warm-claim hard ceiling from the prepared-cold 200 ms target
+      in the live launch scenario.
+- [x] Make the CLI timing report and BDD witness consume one strict sub-300 ms
+      predicate, with an exact-boundary regression test.
+- [x] Record why the 224.5 ms sample is inside the warm hard ceiling without
+      relabeling it as a prepared-cold percentile result.
+- [ ] Merge the repair through the queue and close issue #2942.

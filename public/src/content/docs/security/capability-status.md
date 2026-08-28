@@ -64,7 +64,7 @@ leaves the guest only over vsock to the host-side policy endpoint. See the
 | Capability | Status | Notes |
 | --- | --- | --- |
 | AMD SEV-SNP / Intel TDX execution | Planned | No shipped backend targets a TEE today. |
-| Hardware attestation-gated key release | Planned | **Explicitly out of scope of the current runtime** — the threat model names hardware-backed key attestation as out of scope. No current page, deck, or answer may describe it in the present tense. |
+| Hardware attestation-gated key release | Planned | **Explicitly out of scope of the current runtime** — the threat model names hardware-backed key attestation *against a malicious host* as out of scope. An opt-in TPM2 provider ships as an attestation input, but nothing gates key release on it. No current page, deck, or answer may describe attestation-gated key release in the present tense. |
 
 ## Removed
 

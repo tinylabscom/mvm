@@ -27,9 +27,13 @@ For local development through this repository, the builder VM is the Linux build
 ## Run the task
 
 ```sh
-mvmctl machine run --flake . --name coding-agent
+mvmctl machine run --flake . --name coding-agent -d
 mvmctl machine exec coding-agent -- bash -lc 'cd /work && python task.py'
 ```
+
+`-d` is what keeps the machine alive after the command returns; `--name` alone
+does not, and `machine run` with neither `-d` nor a trailing `-- <cmd>` refuses
+to start.
 
 Use file transfer or a narrow mount for input/output. Keep generated patches and logs outside broad host write access.
 
@@ -45,6 +49,9 @@ Use cold mode only when the agent needs to resume an environment with installed 
 mvmctl machine pause coding-agent
 mvmctl machine resume coding-agent
 ```
+
+`machine pause` and `machine resume` are advanced verbs: they work, but they
+are hidden from `machine --help`.
 
 Use `mvmctl machine stop` and cleanup commands when the task is complete.
 

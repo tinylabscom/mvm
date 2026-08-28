@@ -64,20 +64,27 @@ let client = LocalBackend::new();
 let spec = MachineSpec::builder("web", "nginx")?
     .cpus(2)
     .memory_mib(512)
-    .env("PORT", "8080")
     .build();
 
 let machine = client.run_machine(spec).await?;
-let out = client
-    .exec_machine(&machine.id, vec!["nginx".into(), "-v".into()])
-    .await?;
-println!("{}", String::from_utf8_lossy(&out.stderr));
+let logs = client.machine_logs(&machine.id, Default::default()).await?;
+println!("{}", String::from_utf8_lossy(&logs));
 client.stop_machine(&machine.id).await?;
 ```
 
 The builder is equivalent to a struct literal — every field stays public — but
 reads far better at call sites and lets new optional fields land without churning
 existing callers.
+
+Two `LocalBackend` limits are worth knowing before you build against it:
+
+- `run_machine` and `create_machine` **refuse** a spec with a non-empty `env`.
+  The in-process boot path has no delivery seam for guest environment
+  variables, and dropping them silently would be worse than failing; use the
+  CLI run path when a workload needs env.
+- `exec_machine` always returns an error — in-guest exec goes through the
+  guest-agent RPC path, which this backend does not wire. `GatewayBackend`
+  is unaffected.
 
 ### Embedding it — studio, mvmd, and custom frontends
 
@@ -106,9 +113,9 @@ in-process `LocalBackend` when built `--features local` with
 `MVM_STUDIO_BACKEND=local` — one `dyn MvmClient` behind its Tauri commands.
 
 ```toml
-# a frontend that drives machines
-mvm-client       = { path = "../mvm/crates/mvm-client", features = ["remote"] }
-mvm-client-local = { path = "../mvm/crates/mvm-client-local" }   # optional, in-process backend
+# a frontend that drives machines. `LocalBackend` is unconditional; the
+# `remote` feature adds the REST `GatewayBackend`.
+mvm-client = { path = "../mvm/crates/mvm-client", features = ["remote"] }
 ```
 
 A **host-side daemon that manages instances directly** — the **mvmd** fleet
