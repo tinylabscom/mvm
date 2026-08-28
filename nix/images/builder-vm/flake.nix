@@ -65,14 +65,10 @@
       url = "github:microvm-nix/microvm.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    runtime-overlay = {
-      url = "github:microvm.nix/runtime-overlay";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
   outputs =
-    { self, nixpkgs, microvm, runtime-overlay, ... }:
+    { self, nixpkgs, microvm, ... }:
     let
       systems = [ "aarch64-linux" "x86_64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
@@ -82,6 +78,16 @@
           envPath = builtins.getEnv "MVM_WORKSPACE_PATH";
         in
         if envPath != "" then /. + envPath else ../../..;
+
+      # Evaluate the workspace-owned runtime-overlay flake against this
+      # flake's pinned nixpkgs. A remote flake input would make contributor
+      # source changes unreachable from Stage 0 and could silently drift from
+      # the exact checkout the builder is compiling.
+      runtimeOverlay =
+        (import (workspaceRoot + "/nix/images/runtime-overlay/flake.nix")).outputs {
+          self = { };
+          inherit nixpkgs;
+        };
 
       # Host binaries are embedded in mvmctl and extracted by
       # `host_binaries::ensure_extracted()` before invoking
@@ -550,7 +556,7 @@
         # SDK sidecar image for Stage 0 builds. The builder VM needs the
         # sidecar to build guest workloads, so this exposes the runtime-overlay's
         # sdk-sidecar-image output through the builder-vm flake.
-        sdk-sidecar-image = runtime-overlay.packages.${system}.sdk-sidecar-image;
+        sdk-sidecar-image = runtimeOverlay.packages.${system}.sdk-sidecar-image;
       });
     };
 }
