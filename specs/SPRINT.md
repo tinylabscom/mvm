@@ -3204,8 +3204,11 @@ to the configured ceiling and the first terse response immediately after it.
 - [x] Add focused regressions proving an HVF-marked checkpoint never reaches
       the Firecracker arm and a retired checkpoint retains its fail-closed
       diagnostic.
-- [ ] Exercise a live two-vCPU HVF fork and a live mismatched-CPU restore
-      refusal on Apple Silicon.
+- [ ] Exercise a live two-vCPU HVF fork on Apple Silicon and prove both restored
+      CPUs resume.
+- [x] Exercise a live mismatched-CPU restore refusal on Apple Silicon. A
+      two-vCPU checkpoint presented to a one-vCPU target is rejected before
+      restore-target construction with the exact machine-shape diagnostic.
 - [ ] Merge the repair through the queue and close issue #2961 from the merged
       PR.
 

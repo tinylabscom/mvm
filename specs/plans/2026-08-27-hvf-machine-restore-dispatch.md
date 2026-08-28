@@ -23,8 +23,10 @@ already existed and the checkpoint manifest classified correctly.
       through the user-facing machine helper.
 - [ ] Run a live two-vCPU HVF parent capture and child restore, proving both
       restored vCPUs resume.
-- [ ] Run a live restore with a deliberately mismatched target CPU count and
-      prove it refuses before resuming the guest.
+- [x] Run a live restore with a deliberately mismatched target CPU count and
+      prove it refuses before resuming the guest. A two-vCPU checkpoint offered
+      to a one-vCPU target is rejected before restore-target construction with
+      `snapshot vCPU count does not match this machine`.
 
 ## Validation and delivery
 

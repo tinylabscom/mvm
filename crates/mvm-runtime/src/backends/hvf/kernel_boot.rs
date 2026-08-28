@@ -1783,6 +1783,16 @@ unsafe fn run(
         if let Some(frame_path) = restore_frame.as_deref() {
             let frame = std::fs::read(frame_path)
                 .map_err(|_| HvfError::SnapshotState("restore frame read failed"))?;
+            // Validate the complete frame and its machine shape before
+            // constructing restore targets. Device restore mutates live state,
+            // so a snapshot from a differently-sized machine must fail first.
+            let restored_vcpus = super::snapshot::hvf_snapshot_vcpu_count(&frame, guest_ram.len())
+                .map_err(|_| HvfError::SnapshotState("restore frame validation failed"))?;
+            if restored_vcpus != vcpus as usize {
+                return Err(HvfError::SnapshotState(
+                    "snapshot vCPU count does not match this machine",
+                ));
+            }
             let mut restore_devices: Vec<&mut dyn RunDevice> = vec![&mut uart];
             for device in &mut virtio_disks {
                 restore_devices.push(device);
@@ -1807,15 +1817,6 @@ unsafe fn run(
                 &mut snapshot_targets,
             )
             .map_err(|_| HvfError::SnapshotState("restore control state failed"))?;
-            // A frame from a machine of a different shape cannot be resumed
-            // into this one: the guest in the restored RAM has a CPU count
-            // baked into its own scheduler state. Refuse rather than boot a
-            // child whose CPUs disagree with the memory image describing them.
-            if restored.vcpus.len() != vcpus as usize {
-                return Err(HvfError::SnapshotState(
-                    "snapshot vCPU count does not match this machine",
-                ));
-            }
             let mut states = restored.vcpus.into_iter();
             restored_boot = states.next();
             for (slot, state) in restored_secondaries.iter_mut().skip(1).zip(states) {

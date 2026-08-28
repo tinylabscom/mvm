@@ -9,8 +9,9 @@ Last updated: 2026-08-28
       The `machine` fork/restore surfaces now share the backend-origin
       dispatcher with `vm checkpoint fork`, preserving the machine surface's
       Firecracker opt-in without misrouting HVF checkpoints. Focused dispatch
-      regressions are green; live two-vCPU HVF restore evidence and merge
-      delivery remain.
+      regressions are green, and a live two-to-one-vCPU mismatch refuses before
+      restore-target construction. The successful live two-vCPU child witness
+      and merge delivery remain.
 
 - [ ] **Issue #2942 — warm-launch gate contract repair.**
       `specs/plans/2026-08-27-warm-launch-gate-contract.md`.

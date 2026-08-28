@@ -465,6 +465,18 @@ pub fn parse_hvf_snapshot_frame<'a>(
     })
 }
 
+/// Return the CPU count from a fully validated HVF snapshot frame.
+///
+/// Callers can use this before constructing restore targets so a machine-shape
+/// mismatch is refused before any device or vCPU state is mutated.
+pub fn hvf_snapshot_vcpu_count(
+    frame: &[u8],
+    expected_ram_len: usize,
+) -> Result<usize, HvfSnapshotError> {
+    let parsed = parse_hvf_snapshot_frame(frame, HVF_SNAPSHOT_BACKEND_KIND, expected_ram_len)?;
+    Ok(parsed.vcpus.len())
+}
+
 /// Decode the vCPU section as one fixed-width record per CPU.
 ///
 /// A section that is not a whole number of records, or that carries no CPU at
@@ -734,6 +746,23 @@ mod tests {
         let parsed = parse_hvf_snapshot_frame(&frame, 9, 3).unwrap();
 
         assert_eq!(parsed.vcpus, states);
+    }
+
+    #[test]
+    fn validated_frame_reports_its_vcpu_count_before_restore() {
+        let states = vec![sample_state(), sample_state()];
+        let frame = encode_hvf_snapshot_frame(
+            HVF_SNAPSHOT_BACKEND_KIND,
+            0,
+            b"ram",
+            b"devices",
+            b"gic",
+            &states,
+            b"digest",
+        )
+        .unwrap();
+
+        assert_eq!(hvf_snapshot_vcpu_count(&frame, 3).unwrap(), 2);
     }
 
     /// A vCPU section that is not a whole number of records is refused.
