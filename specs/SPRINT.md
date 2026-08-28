@@ -3297,3 +3297,15 @@ writes the plan:
 - [x] Record why the 224.5 ms sample is inside the warm hard ceiling without
       relabeling it as a prepared-cold percentile result.
 - [ ] Merge the repair through the queue and close issue #2942.
+
+## 2026-08-28 SDK cdylib dependency surface — issue #2978
+
+- [x] Reproduce the default `mvm-sdk` dependency leak and add an exact-name
+      Cargo-tree regression for host HTTP, TLS, and async crates.
+- [x] Put authenticated remote deployment behind the off-by-default
+      `remote-deploy` feature while keeping `mvm-cli` opted in.
+- [x] Pass default and remote-feature SDK tests, focused xtask tests, and
+      package all-target/all-feature Clippy.
+- [ ] Rebase on the latest merged queue head and pass full workspace and
+      repository gates.
+- [ ] Merge the repair and let the linked PR close issue #2978.

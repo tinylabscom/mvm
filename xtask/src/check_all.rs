@@ -157,6 +157,7 @@ pub const GATES: &[Gate] = &[
         "check-core-runtime-free",
         crate::check_core_runtime_free::run,
     ),
+    ("check-sdk-cdylib-deps", crate::check_sdk_cdylib_deps::run),
     (
         "check-content-address-determinism",
         crate::check_content_address_determinism::run,

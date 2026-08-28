@@ -59,6 +59,7 @@ mod check_per_vm_host_binaries_sync;
 mod check_plan_names;
 mod check_require_grant_token_allowlist;
 mod check_runtime_overlay_version;
+mod check_sdk_cdylib_deps;
 mod check_single_exec_secs_writer;
 mod check_single_fixture_corpus;
 mod check_single_grants_projection;
@@ -151,6 +152,10 @@ fn main() -> Result<()> {
         Some("check-core-runtime-free") => {
             let workspace = workspace_root();
             check_core_runtime_free::run(&workspace)
+        }
+        Some("check-sdk-cdylib-deps") => {
+            let workspace = workspace_root();
+            check_sdk_cdylib_deps::run(&workspace)
         }
         Some("check-content-address-determinism") => {
             let workspace = workspace_root();
@@ -449,6 +454,9 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-core-runtime-free                 Plan 126 B5: assert mvm-core's default build pulls no tokio"
+            );
+            eprintln!(
+                "  check-sdk-cdylib-deps                  assert mvm-sdk's default cdylib closure excludes host HTTP/TLS/async dependencies"
             );
             eprintln!(
                 "  check-content-address-determinism       Assert serde_json in mvm-core/mvm-contract has no preserve_order (stable key order → deterministic plan_id/checkpoint digests)"

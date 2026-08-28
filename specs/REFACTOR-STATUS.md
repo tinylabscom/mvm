@@ -4,6 +4,14 @@ Last updated: 2026-08-28
 
 ## In progress
 
+- [ ] **SDK cdylib dependency surface — issue #2978.**
+      `specs/plans/2026-08-28-sdk-cdylib-dependency-surface.md`.
+      Authenticated remote deployment is now an explicit `mvm-sdk` feature
+      enabled by `mvm-cli`; the default guest-facing cdylib closure excludes
+      `mvm-http`, `rustls`, `ring`, `tokio`, and `tokio-rustls`. Focused SDK
+      and gate tests plus package Clippy are green; latest-main validation and
+      merge delivery remain.
+
 - [ ] **HVF machine restore dispatch — issue #2961.**
       `specs/plans/2026-08-27-hvf-machine-restore-dispatch.md`.
       The `machine` fork/restore surfaces now share the backend-origin

@@ -23,6 +23,7 @@
 //! is the additional sidecar the receiver reads to make scheduling
 //! decisions without unpacking the rest.
 
+#[cfg(feature = "remote-deploy")]
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -621,17 +622,20 @@ pub struct RemoteArtifact {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg(feature = "remote-deploy")]
 struct RemoteResponse {
     data: RemoteArtifact,
 }
 
 /// Authenticated remote artifact client.
+#[cfg(feature = "remote-deploy")]
 pub struct MvmdClient {
     /// The configured mvmd endpoint.
     pub base_url: String,
     api_key: String,
 }
 
+#[cfg(feature = "remote-deploy")]
 impl MvmdClient {
     /// Construct a new client for `base_url` with a bearer credential.
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
@@ -694,6 +698,7 @@ impl MvmdClient {
     }
 }
 
+#[cfg(feature = "remote-deploy")]
 fn deploy_multipart_body(record_json: &str, bundle_bytes: &[u8]) -> (String, Vec<u8>) {
     let boundary = format!("mvm-deploy-{}", blake3::hash(bundle_bytes).to_hex());
     let mut body = Vec::with_capacity(record_json.len() + bundle_bytes.len() + 512);
@@ -712,6 +717,7 @@ fn deploy_multipart_body(record_json: &str, bundle_bytes: &[u8]) -> (String, Vec
     (format!("multipart/form-data; boundary={boundary}"), body)
 }
 
+#[cfg(feature = "remote-deploy")]
 fn remote_upload_endpoint(base_url: &str) -> Result<String, DeployError> {
     let parsed = mvm_http::Url::parse(base_url).map_err(|error| DeployError::RemoteProtocol {
         base_url: base_url.to_string(),
@@ -730,6 +736,7 @@ fn remote_upload_endpoint(base_url: &str) -> Result<String, DeployError> {
     ))
 }
 
+#[cfg(feature = "remote-deploy")]
 fn is_loopback_url(url: &mvm_http::Url) -> bool {
     match url.host_str() {
         Some("localhost") => true,
@@ -1034,6 +1041,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "remote-deploy")]
     fn remote_client_fails_closed_for_unreachable_transport() {
         let client = MvmdClient::new("http://127.0.0.1:1", "test-token");
         let tmp = tempfile::tempdir().unwrap();
@@ -1075,6 +1083,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "remote-deploy")]
     fn remote_endpoint_rejects_cleartext_non_loopback() {
         let error = remote_upload_endpoint("http://mvmd.example").unwrap_err();
         assert!(matches!(
@@ -1084,6 +1093,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "remote-deploy")]
     fn deploy_multipart_body_contains_record_and_bundle_parts() {
         let (content_type, body) = deploy_multipart_body(r#"{"workload_id":"demo"}"#, b"bundle");
         let body = String::from_utf8(body).expect("multipart test body is UTF-8");

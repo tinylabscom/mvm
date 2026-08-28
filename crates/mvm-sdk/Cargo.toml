@@ -35,7 +35,7 @@ mvm-contract.workspace = true
 async-trait = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-mvm-http.workspace = true
+mvm-http = { workspace = true, optional = true }
 thiserror.workspace = true
 
 # Runtime record mode encodes `Sandbox.files.write` bytes
@@ -66,6 +66,10 @@ tree-sitter-typescript = { workspace = true }
 [features]
 default = []
 client-facade = ["dep:async-trait", "mvm-core/client"]
+# Authenticated host-side deployment transport. The default library is also
+# built as the in-guest host-services cdylib, whose synchronous vsock C ABI
+# must not inherit HTTP, TLS, or async-runtime dependencies.
+remote-deploy = ["dep:mvm-http"]
 # Derive `schemars::JsonSchema` on the addon-manifest and runtime-record types
 # and forward to the IR's own derives, for the three schema-emitter bins below.
 # Off by default: nothing on the `mvmctl` runtime path reads a JSON Schema, and
