@@ -312,6 +312,46 @@ pub(crate) fn hvf_workload_support_available() -> bool {
     hvf_platform_supported() && hvf_supervisor_launch_support_available()
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[link(name = "Hypervisor", kind = "framework")]
+unsafe extern "C" {
+    /// The most vCPUs this host's hypervisor will create (macOS 11+).
+    fn hv_vm_get_max_vcpu_count(max_vcpu_count: *mut u32) -> i32;
+}
+
+/// The most vCPUs this host will let the backend create, or `None` if it will
+/// not say.
+///
+/// Asked rather than assumed. This ceiling was a hardcoded `Some(4)` derived by
+/// probing, back when a race in vCPU creation made five or more fail to boot —
+/// so the constant recorded a bug rather than a limit. With that fixed, the
+/// honest source is the host: `hv_vm_get_max_vcpu_count` reports 64 on the
+/// machine this was developed on, where guests of 1, 2, 4, 5, 6, 8, 16 and 32
+/// vCPUs all boot and report their full count back through both `nproc` and
+/// `/proc/cpuinfo`.
+///
+/// Querying also means a host smaller or larger than that one gets its own
+/// answer instead of inheriting this one's.
+pub(crate) fn hvf_max_vcpus() -> Option<u32> {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        let mut max: u32 = 0;
+        // SAFETY: `max` is a valid out-param for the documented signature. The
+        // call reads a static host property and creates nothing, so it needs
+        // neither a VM nor the hypervisor entitlement.
+        let rc = unsafe { hv_vm_get_max_vcpu_count(&mut max) };
+        // A host that will not answer, or answers zero, gets no ceiling rather
+        // than a made-up one: `None` means "never asked successfully", which is
+        // the truth, and leaves the request unclamped rather than silently
+        // reduced to a number nothing measured.
+        (rc == 0 && max > 0).then_some(max)
+    }
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    {
+        None
+    }
+}
+
 /// Probe whether HVF can actually run here. The backend's lifecycle is
 /// platform-agnostic (spawns a binary + tracks PID files), so it compiles
 /// everywhere; only this probe is macOS/Apple-silicon-specific.

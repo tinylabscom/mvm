@@ -1,4 +1,11 @@
-# HVF refuses unsupported multi-vCPU launches
+# HVF refuses unsupported multi-vCPU launches (SUPERSEDED)
+
+> **Superseded by `hvf-smp-cpus-honoured.md`.** HVF implements SMP: it creates
+> up to 4 vCPUs, and a request above that ceiling is clamped with a warning
+> rather than refused. Everything below describes the refusal contract that
+> preceded it, and is kept as the record of that step — not as current
+> behaviour. The "future complete SMP implementation" it anticipates is what
+> replaced it.
 
 Issue #2888 showed that a workload could request multiple vCPUs from the HVF
 backend, receive a successful launch, and still observe only one processor in

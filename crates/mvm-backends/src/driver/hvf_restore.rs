@@ -156,6 +156,11 @@ pub fn hvf_child_restore_config(
         kernel: parent.kernel.clone(),
         cmdline: parent.cmdline.clone(),
         memory_mib: parent.memory_mib,
+        // A restored child resumes the parent's saved vCPU state, so it must
+        // come up with the parent's CPU topology. Booting a different count
+        // against a snapshot taken under another one is not a smaller machine —
+        // it is a mismatched one.
+        vcpus: parent.vcpus,
         initramfs: parent.initramfs.clone(),
         disks,
         virtiofs_root: parent.virtiofs_root.clone(),
@@ -306,6 +311,7 @@ mod tests {
             kernel: state.join("Image"),
             cmdline: Some("console=ttyAMA0 root=/dev/vda ro".into()),
             memory_mib: 512,
+            vcpus: 1,
             initramfs: None,
             disks,
             virtiofs_root: None,

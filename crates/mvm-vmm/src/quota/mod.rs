@@ -10,6 +10,6 @@ pub mod policy;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use clock::{FixedClock, ScriptedClock};
-pub use clock::{ThreadCpuClock, ThreadCpuHandle};
+pub use clock::{SummedClock, ThreadCpuClock, ThreadCpuHandle};
 pub use controller::{QuotaAchievement, VcpuQuota};
 pub use policy::{PeriodVerdict, QuotaConfig, QuotaPolicy};

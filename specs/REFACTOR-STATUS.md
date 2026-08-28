@@ -63,11 +63,17 @@ for detailed scope and acceptance criteria.
       name plus the same validated argv contract. See
       `specs/sprint/delivery/2887-guest-rpc-refusals.md`.
 
-- [x] **Issue #2888 — HVF vCPU resource contract.** HVF now refuses any launch
-      whose requested vCPU count is not exactly one, before supervisor state is
-      written or a process is spawned. The README no longer implies that the
-      current single-vCPU backend honors a larger count. See
-      `specs/sprint/delivery/2888-hvf-vcpu-contract.md`.
+- [x] **Issue #2888 — HVF vCPU resource contract.** HVF implements SMP: the
+      vCPU count reaches the process that creates them, the FDT describes N
+      `cpu@N` nodes, PSCI `CPU_ON`/`AFFINITY_INFO` answer against the CPUs that
+      exist, and each secondary runs on its own thread against a mutex-guarded
+      device model. A request above the backend's declared ceiling
+      (`VmCapabilities::max_vcpus`; HVF 4, libkrun 255, firecracker none) is
+      clamped with a warning rather than refused, so a portable `--cpus` does
+      not fail on one host and succeed on another. The ceiling of 4 is measured,
+      not derived — tracked as #2927. Supersedes the earlier refusal contract in
+      `specs/sprint/delivery/2888-hvf-vcpu-contract.md`; see
+      `specs/sprint/delivery/hvf-smp-cpus-honoured.md`.
 
 - [x] **Issue #2874 — scheduled Security peer-policy mutation witness.**
       `NetworkPolicy::peers()` now has a focused witness that distinguishes
