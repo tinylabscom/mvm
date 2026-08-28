@@ -264,7 +264,10 @@ pub fn audit_root_path_for_tenant(audit_dir: &Path, tenant: &str) -> PathBuf {
 /// roots, and overwriting destroys the earlier one. So each publish also
 /// appends here, and the file is never rewritten.
 pub fn audit_root_history_path_for_tenant(audit_dir: &Path, tenant: &str) -> PathBuf {
-    audit_dir.join(format!("{tenant}.roots.jsonl"))
+    audit_dir.join(format!(
+        "{tenant}{}",
+        mvm_core::config::AUDIT_ROOT_HISTORY_SUFFIX
+    ))
 }
 
 /// Host-side emitter wrapping `FileAuditSigner`. Owns its own signing
@@ -1466,6 +1469,13 @@ mod tests {
     use super::*;
     use crate::supervisor::verify_audit_chain;
     use rand::Rng;
+
+    #[test]
+    fn root_history_path_is_outside_lifecycle_chain_scope() {
+        let path = audit_root_history_path_for_tenant(Path::new("/audit"), "local");
+        assert_eq!(path, Path::new("/audit/local.roots.jsonl"));
+        assert!(!mvm_core::config::is_host_lifecycle_chain(&path));
+    }
 
     fn fixture_plan(tenant: &str, plan_id: &str) -> ExecutionPlan {
         mvm_core::plan::test_support::PlanFixture::new()
