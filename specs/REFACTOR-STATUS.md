@@ -44,6 +44,13 @@ Last updated: 2026-08-28
       feature remediation are implemented and locally green; merge-queue
       delivery remains.
 
+- [ ] **Flake-built slot resolution — issue #2967.**
+      `specs/plans/2026-08-28-flake-slot-resolution.md`.
+      Strict materialized slot addresses resolve through the existing registry;
+      unknown and identity-mismatched records fail closed. Focused and workspace
+      tests, gated-target compilation, and Clippy are green; merge delivery
+      remains.
+
 ## Completed
 
 - [x] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
