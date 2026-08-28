@@ -1240,6 +1240,7 @@ mod tests {
             built_at: String::new(),
             protocol_version: 0,
             generator_rev: String::new(),
+            libc: mvm_build::guest_libc::GuestLibc::Glibc,
         };
         sidecar.write_to_dir(tmp.path()).unwrap();
 
