@@ -212,11 +212,18 @@
       # dynamic loader the rootfs provides.
       mvmSdkCdylibFor =
         system:
+        mvmSdkCdylibForLibc system "glibc";
+
+      # The same derivation, parameterized by the libc the object is built
+      # against. A guest can only dlopen the variant matching its own, and the
+      # host selects from the libc recorded in the image's `mvm-meta.json`.
+      mvmSdkCdylibForLibc =
+        system: libc:
         let
           pkgs = import nixpkgs { inherit system; };
         in
         import (workspace + "/nix/packages/mvm-sdk-cdylib.nix") {
-          inherit pkgs;
+          inherit pkgs libc;
           lib = pkgs.lib;
           mvmSrc = workspace;
         };
@@ -537,6 +544,10 @@
         runtime-overlay = mkRuntimeOverlay system;
         sdk-sidecar = mkSdkSidecar system;
         sdk-sidecar-image = mkSdkSidecarImage system;
+        # Exposed individually so each libc variant can be built and inspected
+        # on its own; the musl one is what an Alpine guest can load.
+        sdk-cdylib-glibc = mvmSdkCdylibForLibc system "glibc";
+        sdk-cdylib-musl = mvmSdkCdylibForLibc system "musl";
       });
     };
 }
