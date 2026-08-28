@@ -23,6 +23,13 @@ mvmctl run --dry-run --json -- python task.py
 
 JSON output is intended for scripts. Human output can change for readability.
 
+:::note[`machine boot-report` is a hidden verb]
+It is marked `hide = true` in the CLI, so it works as documented but does not
+appear in `mvmctl machine --help`. The same applies to the other single-VM ops
+scripts reach for — `machine wait`, `machine fs`, `machine cp`, `machine proc`,
+`machine diff`, `machine set-ttl`.
+:::
+
 ## Exit codes
 
 Treat non-zero exit as failure. Some commands use conventional `sysexits`
@@ -43,7 +50,7 @@ export CARGO_TARGET_DIR="$PWD/.mvm-test/target"
 export CARGO_HOME="$PWD/.mvm-test/cargo"
 ```
 
-The repository's `scripts/dev-env.sh`, `bin/dev`, and `just dev-*` wrappers
+The repository's `scripts/dev-env.sh` and the `just dev` / `just dev-*` wrappers
 apply this pattern for worktree development.
 
 ## Secrets

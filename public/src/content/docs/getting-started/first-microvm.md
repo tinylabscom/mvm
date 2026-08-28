@@ -47,7 +47,7 @@ $EDITOR flake.nix                     # add your services
 
 The rest of this guide writes the flake by hand to show how `mkGuest` works underneath.
 
-> The plan-38 manifest model is shipped. Older docs that reference `mvmctl template create/build/…` are stale; the `template` namespace was removed outright. See the [Manifests guide](/guides/manifests/) for the current flow.
+> The plan-38 manifest model is shipped. Older docs that reference `mvmctl template create/build/…` are stale: the mutation verbs were removed. `mvmctl template` still exists as a read-only registry browser — `list`, `search`, and `info`. See the [Manifests guide](/guides/manifests/) for the current build flow.
 
 ## Write a Flake
 
@@ -67,11 +67,14 @@ Create a `flake.nix` in your project (or edit the one `mvmctl init` produced):
     in {
       packages.${system}.default = mvm.lib.${system}.mkGuest {
         name = "hello";
-        packages = [ pkgs.curl ];
+        packages = [ pkgs.python3 pkgs.curl ];
 
-        services.hello = {
-          command = "${pkgs.python3}/bin/python3 -m http.server 8080";
-        };
+        # `entrypoint` is REQUIRED and must declare exactly one of
+        # `shell`, `command`, or `services`. mkGuest throws at eval time
+        # otherwise. `command` is the sealed (production) form.
+        entrypoint.command = [
+          "${pkgs.python3}/bin/python3" "-m" "http.server" "8080"
+        ];
 
         healthChecks.hello = {
           healthCmd = "${pkgs.curl}/bin/curl -sf http://localhost:8080/";
@@ -83,7 +86,11 @@ Create a `flake.nix` in your project (or edit the one `mvmctl init` produced):
 }
 ```
 
-`mkGuest` handles everything internally -- the kernel, busybox init, guest agent, networking, drive mounting, and service supervision are all built into the image automatically. You just define your services and health checks.
+`mkGuest` handles everything internally -- the kernel, busybox init, guest agent, and drive mounting are all built into the image automatically. You describe the entrypoint and its health checks.
+
+:::caution[One process, not a service set]
+`entrypoint.command` runs a single program as PID 1. The multi-service form (`entrypoint.services`, and the top-level `services` attribute) is accepted by `mkGuest` but **not implemented** — the supervisor is unwired, so `entrypoint.services` prints "not yet wired" and drops the guest to a recovery shell, and a top-level `services` block is only recorded in `passthru.mvm`. Use `entrypoint.command` (or `entrypoint.shell` for a dev-tier image) until the supervisor lands.
+:::
 
 ## Build and Run
 
@@ -122,16 +129,25 @@ mvmctl machine logs hello
 Pass custom files to the guest drives:
 
 ```bash
-mkdir -p /tmp/config /tmp/secrets
+mkdir -p /tmp/config
 echo '{"port": 8080}' > /tmp/config/app.json
-echo 'API_KEY=sk-...' > /tmp/secrets/app.env
 
 mvmctl machine run --flake . \
-    -v /tmp/config:/mnt/config \
-    -v /tmp/secrets:/mnt/secrets
+    --mount /tmp/config:/data/config
 ```
 
-Inside the guest, config files appear at `/mnt/config/` and secrets at `/mnt/secrets/`.
+The share flag is `--mount` (alias `--volume`); there is no short form — `-v` is
+the global verbosity counter.
+
+A guest mount path must live under `/data` or `/work`. `/mnt/config` and
+`/mnt/secrets` are runtime-owned: `/init` mounts mvm's own read-only config and
+secret drives there before any user volume is attached, and the mount policy
+refuses a share that would sit inside or shadow them. Mounts are read-only by
+default; a transient run is read-only under every profile.
+
+Inside the guest, the files appear at the path you asked for — `/data/config/`
+above. For credentials, use `mvmctl secret` and host-side substitution rather
+than shipping a secrets file into the guest.
 
 ## Stop
 

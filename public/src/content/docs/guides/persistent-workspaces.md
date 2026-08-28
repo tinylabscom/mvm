@@ -3,6 +3,14 @@ title: Persistent workspaces
 description: Use encrypted volumes, copy workflows, snapshots, and cleanup policies for stateful sandboxes.
 ---
 
+:::note[Hidden verbs]
+`machine volume`, `machine cp` and `machine fs` are all marked hidden in the
+CLI: they work, but they do not appear in `mvmctl machine --help`.
+
+Guest mount paths must be under `/data` or `/work` — those are the only two
+allow-roots. `/cache`, `/workspace` and anything under `/mnt` are refused.
+:::
+
 Persistent state is useful for agents, browser sessions, caches, databases, and
 long-running services. It is also where sensitive data accumulates. Choose the
 smallest state mechanism that fits the workflow, and make the retention policy
@@ -40,7 +48,7 @@ Mount the unlocked volume into a running sandbox:
 ```sh
 mvmctl machine volume mount agent-sandbox \
   --volume agent-cache \
-  --guest /cache \
+  --guest /data/cache \
   --rw
 ```
 
@@ -53,7 +61,7 @@ mvmctl machine volume ls agent-sandbox
 Unmount and lock when the workflow is done:
 
 ```sh
-mvmctl machine volume unmount agent-sandbox /cache
+mvmctl machine volume unmount agent-sandbox /data/cache
 mvmctl machine volume lock agent-cache
 ```
 
@@ -168,7 +176,7 @@ For a coding agent:
 
 1. Create a named sandbox with a short TTL.
 2. Copy the task input into `/work`.
-3. Mount a managed volume at `/workspace` only if the agent needs durable state.
+3. Mount a managed volume at `/data/workspace` only if the agent needs durable state.
 4. Keep network closed until the task has an approved egress need.
 5. Copy out bounded results.
 6. Stop, cold-pause, or destroy based on the retention decision.
@@ -180,11 +188,11 @@ Example:
 mvmctl machine volume create coding-agent-work
 mvmctl machine volume unlock coding-agent-work
 mvmctl machine run --flake ./agent-image --name coding-agent -d
-mvmctl machine volume mount coding-agent --volume coding-agent-work --guest /workspace --rw
+mvmctl machine volume mount coding-agent --volume coding-agent-work --guest /data/workspace --rw
 mvmctl machine cp ./task.json coding-agent:/work/task.json
 mvmctl machine exec coding-agent -- python /work/run_task.py
 mvmctl machine cp --max-bytes 16777216 coding-agent:/work/result.json ./result.json
-mvmctl machine volume unmount coding-agent /workspace
+mvmctl machine volume unmount coding-agent /data/workspace
 mvmctl machine stop coding-agent
 mvmctl machine volume lock coding-agent-work
 ```

@@ -99,15 +99,28 @@ verification.
 
 ## Updating
 
-`mvmctl` has no self-update command. Reinstall with the same
-method you used above — rerun the install script, or `git pull && cargo build
---release` in a source checkout. Cached build artifacts are refreshed
-separately with `mvmctl pack update <KIND>`.
+`mvmctl env update` is the self-update command: it fetches the latest release
+tarball and swaps the install in place. `--check` reports whether a newer
+release exists without installing it, `--force` reinstalls even when already
+current, and `--skip-verify` bypasses checksum verification (don't).
+
+```bash
+mvmctl env update --check
+mvmctl env update
+```
+
+A source checkout updates the usual way — `git pull && cargo build --release`.
+Cached build artifacts are refreshed separately with `mvmctl pack update <KIND>`
+(`builder`, `runtime`, `dev-image`, or `extension`).
 
 ## Prerequisites
 
 - **macOS Apple Silicon** or **Linux with `/dev/kvm`** (x86_64 or aarch64)
-- [Homebrew](https://brew.sh/) (macOS only -- mvmctl will install it if missing)
+- [Homebrew](https://brew.sh/) — only on macOS 13–25, where libkrun is the
+  default backend and comes from the third-party tap
+  (`brew install slp/krun/libkrun slp/krun/libkrunfw`). macOS 26+ Apple Silicon
+  defaults to HVF and needs no Homebrew at all. mvmctl does not install
+  Homebrew for you.
 
 ### Backend Auto-Detection
 

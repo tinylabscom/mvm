@@ -19,6 +19,9 @@ mvmctl machine wait api-dev --for all
 mvmctl machine logs api-dev -f
 ```
 
+`machine wait` and `machine boot-report` are advanced verbs: they work, but
+they are hidden from `machine --help`.
+
 ## Security notes
 
 - Bind only the ports the caller needs.

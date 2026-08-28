@@ -41,9 +41,12 @@ but not an interactive session. Use `mvmctl machine exec` for normal automation.
 | --- | --- |
 | Human debugging | `mvmctl machine console <name>` |
 | Scripted command execution | `mvmctl machine exec <name> -- <cmd>` |
-| Process lifecycle control | `mvmctl machine proc start/list/wait/kill` |
+| Process lifecycle control | `mvmctl machine proc start/ls/wait/kill` |
 | File transfer | `mvmctl machine fs` or `mvmctl machine cp` |
 | Service logs | `mvmctl machine logs <name>` |
+
+`machine proc`, `machine fs`, and `machine cp` are advanced verbs: they work,
+but they are hidden from `machine --help`.
 
 ## Related pages
 

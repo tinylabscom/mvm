@@ -12,7 +12,7 @@ Use this pattern when an agent needs a real Linux environment but the code it ru
 Prefer a pinned Nix flake target:
 
 ```sh
-cargo run -- build --flake .
+cargo run -- machine build --flake .
 ```
 
 The command runs on the host, while Linux Nix evaluation and image assembly happen inside the builder VM. The runtime guest later boots the built artifact; build time and boot time are separate phases.
@@ -22,11 +22,13 @@ If your team already has an OCI image, use the OCI path as compatibility input a
 ## Run locally
 
 ```sh
-cargo run -- up agent-sandbox --flake .
-cargo run -- exec agent-sandbox -- python /work/agent.py
+cargo run -- machine run --flake . --name agent-sandbox -d
+cargo run -- machine exec agent-sandbox -- python /work/agent.py
 ```
 
-Local mode talks to `mvm` on the same host. The microVM is the execution boundary.
+Local mode talks to `mvm` on the same host. The microVM is the execution
+boundary. `-d` is what makes the machine persist past the command; `--name`
+only labels it, so without `-d` the run needs a trailing `-- <cmd>`.
 
 ## Planned runtime SDK shape
 

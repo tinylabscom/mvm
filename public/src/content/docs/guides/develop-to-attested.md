@@ -86,25 +86,30 @@ The image, the environment it boots in, and the sealed dependency volume are all
 pinned into the signed execution plan, and every admission is recorded in the
 chain-signed audit log.
 
-## Designed, not yet built
+## Shipped, and designed-not-yet-built
 
-The following are specified in `specs/plans/291-develop-build-deploy-attested.md`
-and **do not exist yet**. They are listed here so the intended shape is legible,
-not because they can be run:
+`mvmctl deploy` and `mvmctl watch` **do exist** and are implemented:
 
-- **`mvmctl deploy`** — seal, compute the artifact's BLAKE3 identity alongside
-  its SHA-256 interop digest, and write a deploy record. If a remote (`mvmd`) is
-  configured it ships the recorded artifact; if not, you still end up holding a
+- **`mvmctl deploy`** seals, computes the artifact's BLAKE3 identity alongside
+  its SHA-256 interop digest, and writes a deploy record under
+  `~/.mvm/deployments/<ir-hash>/`. It requires `--boot-artifact`; pass
+  `--mvmd-url` to ship the recorded artifact to a remote, or omit it and hold a
   sealed, recorded artifact locally.
-- **`mvmctl watch`** — rebuild on source change during development, skipping
-  no-op rebuilds by content address.
+- **`mvmctl watch`** rebuilds on source change during development, skipping
+  no-op rebuilds by content address (`--interval-ms`, default 500; `--once` for
+  a single pass).
+
+The following is specified in `specs/plans/291-develop-build-deploy-attested.md`
+and **does not exist yet**. It is listed here so the intended shape is legible,
+not because it can be run:
+
 - **Capture from the sandbox** — install a dependency inside a dev sandbox and
   capture it into the sealed volume, then emit it back out as a declaration you
   can commit. The capture path is designed to converge on the declared path
   above, keeping the same hash-pin requirement, rather than becoming a second
   way to specify dependencies.
 
-Until those land, the declared route in step 2 is the supported way to get a
+Until that lands, the declared route in step 2 is the supported way to get a
 dependency into an attested workload.
 
 ## Why two digests

@@ -3,7 +3,7 @@ title: Working in the MicroVM
 description: Local sandbox management with mvmctl.
 ---
 
-`mvmctl` is the local sandbox management surface. It builds images, boots microVMs, runs commands, transfers files, forwards ports, captures logs, and moves sandboxes through pause, cold, resume, stop, and destroy-style workflows.
+`mvmctl` is the local sandbox management surface. It builds images, boots microVMs, runs commands, transfers files, declares ingress ports at boot, captures logs, and moves sandboxes through pause, cold, resume, stop, and destroy-style workflows.
 
 ## Common lifecycle
 
