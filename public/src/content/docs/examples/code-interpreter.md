@@ -9,12 +9,14 @@ important rule is that user code runs in the guest, not in the host process.
 ## One-shot interpreter
 
 ```sh
-mvmctl run --timeout 10 -- python - <<'PY'
+mvmctl machine run --runtime python --timeout 10 -- python - <<'PY'
 print("hello from inside the sandbox")
 PY
 ```
 
 Use this shape for stateless calls where every invocation should start clean.
+Piped stdin reaches the guest only on a transient `mvmctl machine run`; the
+top-level `mvmctl run` does not forward it, so the guest would read EOF.
 
 ## Persistent interpreter
 

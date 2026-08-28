@@ -17,7 +17,7 @@ boundary only when a workflow actually needs Linux build or evaluation work.
 | --- | --- | --- |
 | Sandbox untrusted code | `mvmctl machine run --image alpine -- <cmd>` | Fresh transient microVM, command output, teardown on exit. |
 | Run a command in an OCI image | `mvmctl machine run --image ghcr.io/org/app:tag -- <cmd>` | OCI provenance, cache reuse, admission, receipts, and audit. |
-| Use a local image archive | `mvmctl machine run --image-archive ./image.tar -- <cmd>` | Offline-friendly image input through the same hardened unpack/admission path. |
+| Run an offline, pre-sealed workload | `mvmctl bundle install ./app.mvmpkg` then `mvmctl machine run --manifest <bundle-sha256>` | Offline-friendly input through the signed-bundle verify/admission path. |
 | Keep a dev machine around | `mvmctl machine create dev --image alpine` | Durable spec plus `start`, `exec`, `shell`, `stop`, `inspect`, and `rm`. |
 | Start a machine, creating it if missing | `mvmctl machine start dev --image alpine` | Combines `create` + `start`; useful for scripts and idempotent workflows. |
 | Declare a repeatable machine | `mvmctl machine create dev --manifest ./mvm.toml` | TOML-backed image, sizing, network, volume, and dev-init settings. |
@@ -45,8 +45,13 @@ skips admission or verification.
 Networking is default-deny. Opt in explicitly:
 
 ```bash
-mvmctl machine run --net --image alpine:3.20 -- nslookup example.com
-mvmctl machine run --net --allow-host registry.npmjs.org --image alpine:3.20 -- \
+# --net selects the built-in `dev` preset: package registries plus
+# GitHub, OpenAI and Anthropic. It is an allowlist, not general outbound.
+mvmctl machine run --net --image alpine:3.20 -- \
+  wget -q -O /dev/null https://registry.npmjs.org
+
+# --allow-host narrows to exactly what you name, and wins over --net.
+mvmctl machine run --allow-host registry.npmjs.org --image alpine:3.20 -- \
   wget -q -O /dev/null https://registry.npmjs.org
 ```
 
@@ -83,8 +88,14 @@ image = "alpine:3.20"
 cpus = 2
 mem = "512M"
 net = true
-allow_hosts = ["registry.npmjs.org"]
+
+[network]
+allow_hosts = ["registry.npmjs.org:443"]
 ```
+
+`allow_hosts` lives under `[network]` (or `[grants]`), never at the top level —
+the manifest uses `deny_unknown_fields`, so a top-level `allow_hosts` is a
+parse error.
 
 ```bash
 mvmctl machine create js-dev --manifest ./mvm.toml
