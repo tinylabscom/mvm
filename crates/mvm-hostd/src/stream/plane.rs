@@ -75,6 +75,7 @@ use crate::audit::plan_persist;
 use crate::stream::broker::{StreamBroker, StreamCaptureIdentity, stream_capture_config};
 use crate::stream::console_source::{ConsoleSource, ConsoleSourceHandle, SharedBroker};
 use crate::stream::entrypoint_source::EntrypointSink;
+use crate::stream::fanout::ReaderHandle;
 use crate::stream::input_gate::InputRefusal;
 use crate::stream::input_route::{InputRoute, InputRouteError, InputTransport, WireSequence};
 use crate::stream::journal;
@@ -162,6 +163,22 @@ impl StreamPlane {
         let mut names: Vec<String> = self.registry().keys().cloned().collect();
         names.sort();
         names
+    }
+
+    /// Subscribe to the redacted output of a VM this plane owns.
+    ///
+    /// Returns `None` for every absent source. Authorization and binding
+    /// resolution belong to the fleet caller; this method deliberately does
+    /// not expose why a name failed to resolve. A successful subscription is
+    /// recorded by the broker in the source workload's chain-signed audit
+    /// log.
+    pub fn subscribe(&self, vm: &str) -> Option<ReaderHandle> {
+        let broker = {
+            let registry = self.registry();
+            Arc::clone(&registry.get(vm)?.broker)
+        };
+        let mut broker = broker.lock().unwrap_or_else(PoisonError::into_inner);
+        Some(broker.subscribe())
     }
 
     /// Stand up `vm`'s capture under `redaction` and start following its
@@ -1057,6 +1074,9 @@ mod tests {
         assert!(config::vm_stream_socket("plane-vm").exists());
 
         let follower = Follower::attach("plane-vm");
+        let mut edge_reader = plane
+            .subscribe("plane-vm")
+            .expect("an attached VM is subscribable");
         assert_eq!(follower.availability, StreamAvailability::LiveOnly);
 
         std::fs::write(&console, b"from the console\n").expect("write the console capture");
@@ -1067,6 +1087,17 @@ mod tests {
             record.origin
         );
         assert_eq!(record.payload, b"from the console\n");
+        assert_eq!(
+            edge_reader
+                .recv()
+                .expect("the edge reader saw the frame")
+                .payload,
+            b"from the console\n"
+        );
+        assert!(
+            plane.subscribe("not-attached").is_none(),
+            "all absent sources have the same result"
+        );
 
         plane.release("plane-vm");
     }

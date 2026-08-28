@@ -2,6 +2,13 @@
 
 **Status:** Complete. WS1–WS6 landed.
 
+**Integration repair (2026-08-28):** `EdgeConnector` now owns the admitted
+`InputRoute`, not a bare `InputSession`, so `step()` carries cleared bytes over
+the guest transport and `close()` delivers the scanner tail before EOF.
+`StreamPlane::subscribe` exposes the redacted reader by host-resolved VM name,
+and `LaunchOutcome::admitted` hands the fleet caller the exact authority object
+used for the boot rather than inviting a second admission.
+
 `mvm` ships the mechanism; `mvmd` declares the edges and resolves the bindings.
 That split is why the landed half has **no production caller in this
 repository** — see "Declared dormancy" below. It is a declaration, not an
@@ -91,9 +98,9 @@ Two consequences worth stating plainly, because they will surprise someone:
   a connector that had picked those answers here would have picked them blind.
   What it does own is local: acceptance order (one pass, never reordered,
   `seq` strictly increasing across the edge's life), lease upkeep on every
-  step including idle ones, and `close()` routing through
-  `InputSession::close` so the scanner's withheld tail is delivered rather
-  than dropped.
+  step including idle ones, and `close()` routing through `InputRoute::close`
+  so the scanner's withheld tail is carried to the guest before EOF rather
+  than merely returned to the caller or dropped.
 
   **E2 cannot be served from this reader, and that is a finding.** Redaction
   runs before hashing, so a record reaching a `ReaderHandle` has already

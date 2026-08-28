@@ -45,10 +45,11 @@
 use std::collections::VecDeque;
 
 use mvm_contract::stream::edge::{EdgeBackpressure, EdgeRedaction, StreamEdge};
-use mvm_contract::stream::input::{CloseInput, InputFrame};
+use mvm_contract::stream::input::InputFrame;
 
 use super::fanout::ReaderHandle;
-use super::input_gate::{InputRefusal, InputSession};
+use super::input_gate::InputRefusal;
+use super::input_route::{InputRoute, InputRouteError};
 
 /// What one [`EdgeConnector::step`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +82,9 @@ pub enum EdgeError {
     /// The consumer's input gate refused a frame.
     #[error("the consumer's input gate refused the edge: {0}")]
     Refused(#[from] InputRefusal),
+    /// The admitted route could not carry a frame to the guest.
+    #[error("the consumer's input route failed: {0}")]
+    Route(InputRouteError),
     /// A reliable edge lost records.
     #[error(
         "reliable edge lost records after seq {after_seq}: the consumer fell behind and the \
@@ -123,7 +127,7 @@ pub fn servable(edge: &StreamEdge) -> Result<(), EdgeError> {
 /// Pumps one producer's records into one consumer's stdin.
 pub struct EdgeConnector {
     binding: String,
-    session: InputSession,
+    route: InputRoute,
     reader: ReaderHandle,
     backpressure: EdgeBackpressure,
     /// Next frame sequence to hand the gate. Strictly increasing across the
@@ -139,20 +143,20 @@ pub struct EdgeConnector {
 }
 
 impl EdgeConnector {
-    /// Bind a reader to a consumer's input session.
+    /// Bind a reader to a consumer's admitted input route.
     ///
     /// # Errors
     ///
     /// [`EdgeError::RawUnavailable`] when the edge asks for unmasked bytes.
     pub fn new(
         edge: &StreamEdge,
-        session: InputSession,
+        route: InputRoute,
         reader: ReaderHandle,
     ) -> Result<Self, EdgeError> {
         servable(edge)?;
         Ok(Self {
             binding: edge.binding.clone(),
-            session,
+            route,
             reader,
             backpressure: edge.backpressure,
             next_seq: 0,
@@ -200,7 +204,7 @@ impl EdgeConnector {
             // Refresh even with nothing to send. An edge whose producer is
             // quiet must not lose the single-writer lease to the TTL and then
             // find another writer holding it.
-            self.session.refresh()?;
+            self.route.refresh().map_err(map_route_error)?;
             return Ok(match gap_at {
                 Some(after_seq) => EdgeStep::Gap {
                     after_seq,
@@ -217,18 +221,18 @@ impl EdgeConnector {
                 seq: self.next_seq,
                 payload,
             };
-            match self.session.write(frame) {
+            match self.route.write(frame) {
                 Ok(()) => {
                     self.next_seq += 1;
                     records += 1;
                     bytes += len;
                 }
                 Err(err) => {
-                    // The frame is gone — `write` consumed it — but everything
-                    // behind it is still owed to the consumer, and the caller
-                    // may retry. Leaving `carry` intact is what makes a
-                    // refusal recoverable rather than a silent truncation.
-                    return Err(EdgeError::Refused(err));
+                    // Route errors end this edge. A supervisor re-runs the
+                    // workflow rather than attempting to reconnect across a
+                    // fresh scanner or guessing whether the guest observed a
+                    // transport failure.
+                    return Err(map_route_error(err));
                 }
             }
         }
@@ -243,12 +247,19 @@ impl EdgeConnector {
     ///
     /// # Errors
     ///
-    /// [`InputRefusal`] when the session cannot be closed cleanly.
-    pub fn close(self) -> Result<CloseInput, InputRefusal> {
-        // `InputSession::close` flushes the scanner's withheld tail into the
-        // trailing bytes. Dropping the session instead would swallow it, which
-        // is a truncation the consumer cannot see.
-        self.session.close()
+    /// [`InputRouteError`] when the route cannot be closed cleanly.
+    pub fn close(self) -> Result<(), InputRouteError> {
+        // `InputRoute::close` flushes the scanner's withheld tail through the
+        // guest transport before EOF. Dropping the route instead would
+        // swallow it, which is a truncation the consumer cannot see.
+        self.route.close()
+    }
+}
+
+fn map_route_error(error: InputRouteError) -> EdgeError {
+    match error {
+        InputRouteError::Refused(refusal) => EdgeError::Refused(refusal),
+        other => EdgeError::Route(other),
     }
 }
 

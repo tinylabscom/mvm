@@ -92,6 +92,13 @@ Last updated: 2026-08-28
 
 ## Completed
 
+- [x] **Fleet stream edge delivery handoff.** The edge pump now terminates in
+      the bounded, exactly-once guest input route; close carries the scanner's
+      withheld tail before EOF. `StreamPlane::subscribe` and
+      `LaunchOutcome::admitted` provide the two narrow capabilities the
+      external fleet supervisor needs without re-admission or guest
+      addressing.
+
 - [x] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
       `specs/plans/2026-08-27-kernel-6-12-106.md`.
       Both kernel consumers use the kernel.org-verified archive and SRI hash;
