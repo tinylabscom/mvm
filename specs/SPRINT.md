@@ -19,6 +19,16 @@
       workspace check/tests/doctests, and Clippy are green; merge-queue
       delivery remains.
 
+- [x] **Extended CI documented-surface repair — issue #2938.**
+      `specs/plans/2026-08-27-extended-ci-documented-surface.md`.
+      Linux and macOS now build the live documented-surface binary with signed
+      release-manifest verification enabled, and macOS installs the root
+      binary's target-gated libkrun dependency through the shared installer.
+      Focused regression tests, actionlint, the exact macOS feature build,
+      workspace tests/check/doctests, and zero-warning Clippy are green.
+      PR #2943 merged and closed issue #2938; a manual Extended CI run on
+      `main` is recording the post-merge live-lane evidence.
+
 - [x] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
       `specs/plans/2026-08-27-kernel-6-12-106.md`.
       The custom workload/builder kernel and libkrunfw firmware build now use

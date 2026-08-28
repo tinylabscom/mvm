@@ -4,6 +4,14 @@ Last updated: 2026-08-27
 
 ## In progress
 
+- [ ] **Extended CI documented-surface repair — issue #2938.**
+      `specs/plans/2026-08-27-extended-ci-documented-surface.md`.
+      Both scheduled platform witnesses now request signed-manifest
+      verification, and the macOS HVF lane installs its target-gated libkrun
+      build dependency. Local focused coverage, actionlint, the exact feature
+      build, workspace tests/check/doctests, and Clippy are green; merge
+      delivery remains.
+
 - [ ] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
       `specs/plans/2026-08-27-kernel-6-12-106.md`.
       Both kernel consumers use the kernel.org-verified archive and SRI hash;
