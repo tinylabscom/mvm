@@ -38,6 +38,6 @@ root binary before exercising HVF.
       published workload kernel on macOS.
 - [x] Build the SDK codegen driver before the clean-run drift scenario invokes
       it directly.
-- [ ] Warm the source-matched SDK sidecar after PR #2954 lands.
+- [x] Warm the source-matched SDK sidecar after PR #2954 lands.
 - [ ] Pass the corrected live Extended CI witnesses.
 - [ ] Merge the corrective pull request and close #2938 through its linkage.

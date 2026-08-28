@@ -333,6 +333,14 @@ if ! MVM_HOME="$E2E_HOME" "$MVMCTL" bootstrap; then
   BOOTSTRAP_FAILED=1
 fi
 
+# SDK host-service scenarios must attach the sidecar built from this checkout.
+# A published sidecar can be version-compatible while still missing the source
+# changes under test, so warming only the general launch artifacts is not
+# enough. Build it once up front and fail here with the explicit prerequisite
+# rather than letting every dependent scenario refuse independently.
+echo "==> warming source-matched SDK sidecar"
+MVM_HOME="$E2E_HOME" "$MVMCTL" build sdk-sidecar build
+
 # ---------------------------------------------------------------------------
 # Warm the launch artifacts, even when bootstrap did not get that far.
 #

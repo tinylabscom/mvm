@@ -39,6 +39,15 @@ Last updated: 2026-08-29
       Clippy, formatting, `cargo deny`, and policy gates are green. A fresh
       Security run and merge delivery remain.
 
+- [ ] **Extended CI red repair — issue #2979.**
+      `specs/plans/2026-08-28-extended-ci-red-repair.md`.
+      Linux helper compilation is platform-scoped, clean runners install the
+      SDK prerequisites and warm the source sidecar, installed bundle SHA-256
+      values reach the shared slot-or-bundle dispatcher, and the live macOS
+      witness targets an Intel runner with HVF access. Focused tests and package
+      Clippy are green; latest-main full validation, a fresh Extended CI run,
+      and merge delivery remain.
+
 - [ ] **HVF machine restore dispatch — issue #2961.**
       `specs/plans/2026-08-27-hvf-machine-restore-dispatch.md`.
       The `machine` fork/restore surfaces now share the backend-origin
@@ -81,8 +90,9 @@ Last updated: 2026-08-29
       target-gated libkrun and embedded Linux cross-toolchain dependencies.
       The explicit published-image choice now reaches builder bootstrap, macOS
       downloads its workload kernel, and clean runners build the SDK codegen
-      driver. Focused tests, the exact feature build, and Clippy are green; the
-      source-sidecar warm-up, live rerun, and merge delivery remain.
+      driver, and the source-sidecar warm-up is now explicit. Focused tests, the
+      exact feature build, and Clippy are green; the live rerun and merge
+      delivery remain.
 
 - [ ] **Cloudflare Pages cutover.**
       `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.

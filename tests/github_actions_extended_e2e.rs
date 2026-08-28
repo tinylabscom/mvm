@@ -49,6 +49,10 @@ fn documented_surface_script() -> String {
     fs::read_to_string("scripts/e2e-documented-surface.sh").expect("read documented-surface runner")
 }
 
+fn justfile() -> String {
+    fs::read_to_string("Justfile").expect("read Justfile")
+}
+
 fn job_block<'a>(workflow: &'a str, job: &str) -> &'a str {
     let marker = format!("  {job}:\n");
     let start = workflow
@@ -91,6 +95,21 @@ fn macos_documented_surface_uses_the_published_workload_kernel() {
     assert!(
         macos.contains("MVM_KERNEL_SOURCE: download"),
         "the macOS witness must not source-build its workload kernel through the builder image it is bootstrapping"
+    );
+}
+
+#[test]
+fn macos_documented_surface_uses_an_intel_runner_with_hvf_access() {
+    let workflow = extended_ci();
+    let macos = job_block(&workflow, "e2e-docs-macos");
+
+    assert!(
+        macos.contains("runs-on: macos-15-intel"),
+        "the arm64 hosted runner rejects hv_vm_create with HV_UNSUPPORTED"
+    );
+    assert!(
+        !macos.contains("runs-on: macos-latest"),
+        "macos-latest currently selects an arm64 VM without nested HVF"
     );
 }
 
@@ -143,5 +162,51 @@ fn signature_verifying_build_avoids_the_fast_codegen_link_path() {
     assert!(
         !script.contains("./scripts/cargo-fast.sh build --bin mvmctl --features \"$E2E_FEATURES"),
         "the fast codegen wrapper leaves aws-lc native symbols unresolved"
+    );
+}
+
+#[test]
+fn documented_surface_jobs_install_the_sdk_codegen_runtime() {
+    let workflow = extended_ci();
+
+    for job in ["e2e-docs-linux", "e2e-docs-macos"] {
+        let block = job_block(&workflow, job);
+        assert!(
+            block.contains("uses: astral-sh/setup-uv@"),
+            "{job} invokes uvx through the SDK drift witness and must install uv"
+        );
+    }
+}
+
+#[test]
+fn documented_surface_warms_the_source_matched_sdk_sidecar() {
+    let script = documented_surface_script();
+
+    assert!(
+        script.contains("\"$MVMCTL\" build sdk-sidecar build"),
+        "the live SDK scenarios must use a sidecar built from the checkout under test"
+    );
+}
+
+#[test]
+fn linux_supervisor_build_does_not_require_macos_libkrun_headers() {
+    let just = justfile();
+    let recipe = just
+        .split_once("build-supervisors:")
+        .expect("build-supervisors recipe")
+        .1
+        .split_once("\n# ")
+        .map_or_else(|| just.as_str(), |(recipe, _)| recipe);
+
+    let darwin_gate = recipe
+        .find("if [[ \"$(uname -s)\" == \"Darwin\" ]]")
+        .expect("macOS-only helpers must be guarded by a Darwin check");
+    let libkrun_build = recipe
+        .find("--bin mvm-libkrun-supervisor --features libkrun-sys")
+        .expect("the macOS helper build must remain present");
+
+    assert!(
+        libkrun_build > darwin_gate,
+        "the libkrun-sys helper must only build inside the Darwin branch"
     );
 }

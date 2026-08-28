@@ -106,9 +106,12 @@
       exposed the next clean-run blockers: the
       bootstrap ignored its explicit published-image choice and the SDK drift
       scenario had no compiled xtask. Both are fixed with resolver and workflow
-      regressions; the exact release-download build and zero-warning Clippy are
-      green. Remaining: warm the source sidecar after #2954, pass both live
-      witnesses, merge, and close #2938 through the PR link.
+      regressions. The follow-on #2979 repair now scopes helper builds by host,
+      installs `uv`, warms the source-matched sidecar, dispatches installed
+      bundle SHA-256 addresses through the bundle registry, and moves the live
+      HVF witness to the Intel runner. Focused tests and zero-warning package
+      Clippy are green; latest-main full validation, live rerun, and merge
+      delivery remain.
 
 - [ ] **Cloudflare Pages cutover.**
       `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.
