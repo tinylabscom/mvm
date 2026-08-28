@@ -10,11 +10,11 @@ Last updated: 2026-08-27
       sweeps through one shared suffix; focused and workspace tests, doctests,
       check, and Clippy are green, and merge-queue delivery remains.
 
-- [ ] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
+- [x] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
       `specs/plans/2026-08-27-kernel-6-12-106.md`.
       Both kernel consumers use the kernel.org-verified archive and SRI hash;
-      local synchronization, freshness, workspace, and Clippy gates are green.
-      Linux Nix PR checks and merge delivery remain.
+      synchronization, freshness, workspace, Clippy, Linux Nix, and merge
+      gates passed; PR #2939 merged and closed issue #2931.
 
 - [ ] **SDK surface contract repairs — issues #2902 and #2906.**
       `specs/plans/2026-08-26-sdk-surface-contract-repairs.md`.
@@ -55,6 +55,13 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **Issue #2951 — ad-hoc exec honors the image environment.** Streaming
+      exec now uses the shared workload resolver, so image-declared `PATH`,
+      variables, and working directory reach `run -- <cmd>` while inherited
+      agent variables and the writable workload `HOME` retain their established
+      semantics. An unreadable image config degrades to the prior behavior. See
+      `specs/sprint/delivery/2951-ad-hoc-exec-image-environment.md`.
+
 - [x] **Issue #2887 — guest RPC refusals and SDK live-profile propagation.**
       Filesystem and process unary calls now preserve universal policy
       refusals as typed errors. The live SDK carries an explicitly selected
@@ -63,11 +70,17 @@ for detailed scope and acceptance criteria.
       name plus the same validated argv contract. See
       `specs/sprint/delivery/2887-guest-rpc-refusals.md`.
 
-- [x] **Issue #2888 — HVF vCPU resource contract.** HVF now refuses any launch
-      whose requested vCPU count is not exactly one, before supervisor state is
-      written or a process is spawned. The README no longer implies that the
-      current single-vCPU backend honors a larger count. See
-      `specs/sprint/delivery/2888-hvf-vcpu-contract.md`.
+- [x] **Issue #2888 — HVF vCPU resource contract.** HVF implements SMP: the
+      vCPU count reaches the process that creates them, the FDT describes N
+      `cpu@N` nodes, PSCI `CPU_ON`/`AFFINITY_INFO` answer against the CPUs that
+      exist, and each secondary runs on its own thread against a mutex-guarded
+      device model. A request above the backend's declared ceiling
+      (`VmCapabilities::max_vcpus`; HVF 4, libkrun 255, firecracker none) is
+      clamped with a warning rather than refused, so a portable `--cpus` does
+      not fail on one host and succeed on another. The ceiling of 4 is measured,
+      not derived — tracked as #2927. Supersedes the earlier refusal contract in
+      `specs/sprint/delivery/2888-hvf-vcpu-contract.md`; see
+      `specs/sprint/delivery/hvf-smp-cpus-honoured.md`.
 
 - [x] **Issue #2874 — scheduled Security peer-policy mutation witness.**
       `NetworkPolicy::peers()` now has a focused witness that distinguishes

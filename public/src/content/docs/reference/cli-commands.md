@@ -14,21 +14,21 @@ the hosted control plane are `mvmd` responsibilities.
 
 **Command grouping (Plan 178).** The surface is organized into a small set
 of top-level daily-driver verbs plus noun groups; operations on a single
-running VM live under `vm`, build-time verbs under `build`, observability
+running VM are flattened into `machine`, build-time verbs under `build`, observability
 under `ops`, install/environment lifecycle under `env`, and provenance &
 verification under `trust`. Domains that already own their own subcommands
-(`image`, `catalog`, `manifest`, `storage`, `network`, `cache`, `pool`,
+(`image`, `catalog`, `manifest`, `network`, `cache`, `pool`,
 `secret`, `bundle`, `deps`, `artifact`, `capture`) stay top-level.
 
 | Group / top-level         | Commands                                                                                                                                                                |
 | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Daily drivers (top-level) | `machine` (`run`/`fork`/`restore`/`exec`/`console`/`logs`/`stop`/`forward`/…), `ls`, `build`, `doctor`, `init`, `bootstrap`                                             |
-| `vm <sub>`                | `pause`, `resume`, `snapshot`, `save`, `restore`, `checkpoint`, `cp`, `fs`, `proc`, `diff`, `wait`, `boot-report`, `set-ttl`, `forward`, `sandbox`, `session`, `volume` |
+| Daily drivers (top-level) | `machine` (`run`/`fork`/`restore`/`exec`/`console`/`logs`/`ls`/`stop`/`forward`/…), `build`, `doctor`, `init`, `bootstrap`                                             |
+| `machine <sub>` (advanced) | `pause`, `resume`, `snapshot`, `save`, `restore`, `checkpoint`, `cp`, `fs`, `proc`, `diff`, `wait`, `boot-report`, `set-ttl`, `forward`, `sandbox`, `session`, `volume` |
 | `build <sub>`             | `image` (the former `build`), `compile`, `validate`, `kernel`, `runtime-overlay`                                                                                        |
 | `ops <sub>`               | `metrics`, `config`, `mcp`                                                                                                                                              |
 | `env <sub>`               | `bootstrap`, `cleanup`, `uninstall`, `update`, `sign`                                                                                                                   |
 | `trust <sub>`             | `add`/`list`/`remove` (publishers), `attest`, `receipt`, `audit`                                                                                                        |
-| Already-grouped top-level | `image`, `catalog`, `manifest`, `storage`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact`, `capture`                                                |
+| Already-grouped top-level | `image`, `catalog`, `manifest`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact`, `capture`                                                |
 
 **Beginner vs. advanced surfaces.** [`mvmctl machine`](#machine-beginner-ux)
 (further down) is the beginner-facing front door — one small command group for
@@ -739,6 +739,26 @@ are resolved relative to the manifest file; volume validation keeps the shared
 default of read-only mounts unless `:rw` is explicit. `--name` is optional: when
 omitted, `machine create` auto-generates a name and prints it (mirroring
 `machine run -d`).
+
+A host can also admit plans it did not synthesize. By default every plan booted
+locally is synthesized and self-signed under the host key at admission time;
+a fleet control plane can instead sign an `ExecutionPlan` itself and have a
+host boot it, when the operator pins the fleet's issuer key in
+`~/.mvm/config/config.toml`:
+
+```toml
+[[trusted_plan_signers]]
+signer_id = "fleet-prod"              # the signer_id the plan envelope names
+ed25519_pubkey_hex = "88a4b2c1046fb3f6a1d3e5c709a2b4d6e8f0a1b3c5d7e9f1a2b4c6d8e0f2a4b6c8"
+```
+
+The list is empty by default and the default is the posture: a host that pins
+nobody refuses every externally-signed plan. Pinning a key delegates plan
+*authorship*, not host policy — the grant ceiling, host budget, validity
+window, replay protection, and content-address check above all still apply to
+an externally-signed plan unchanged, so a fleet signer cannot ask for more
+than the operator's ceiling allows. A pinned entry whose key does not parse
+fails the whole admission rather than being silently skipped.
 
 `machine start`, `machine exec`, `machine shell`, and `machine stop` require the
 named `MachineSpec` to exist first. `machine start` resolves the stored OCI

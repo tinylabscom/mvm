@@ -18,13 +18,13 @@
       tests, workspace tests and doctests, check, and Clippy are green;
       remaining: merge-queue delivery.
 
-- [ ] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
+- [x] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
       `specs/plans/2026-08-27-kernel-6-12-106.md`.
       The custom workload/builder kernel and libkrunfw firmware build now use
       the same kernel.org-verified Linux 6.12.106 archive and SRI hash.
       Structural synchronization and freshness tests, workspace check/tests,
-      and zero-warning Clippy are green. Remaining: pass the PR's Linux Nix
-      evaluation/build gates, merge it, and close #2931 through the PR link.
+      zero-warning Clippy, and merge-queue gates passed; PR #2939 merged and
+      closed issue #2931.
 
 - [ ] **Admission cache durability boundary.**
       `specs/plans/2026-08-26-admission-cache-durability.md`.
@@ -3160,6 +3160,18 @@ to the configured ceiling and the first terse response immediately after it.
       focused language and Rust tests.
 - [x] Record the delivery in
       `specs/sprint/delivery/2887-guest-rpc-refusals.md`.
+
+## 2026-08-27 ad-hoc exec image environment
+
+- [x] Reproduce the bare-command failure with an executable available only on
+      the image-declared `PATH`.
+- [x] Route streaming exec through the shared image environment resolver while
+      retaining inherited agent variables and the forced writable `HOME`.
+- [x] Preserve the prior behavior when the image runtime configuration is
+      absent or unreadable.
+- [x] Retain the existing live Python service-plane scenarios as the end-to-end
+      witness and record delivery in
+      `specs/sprint/delivery/2951-ad-hoc-exec-image-environment.md`.
 
 ## Follow-up (not started) — repository-to-signed-workload generator
 

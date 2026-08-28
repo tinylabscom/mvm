@@ -5,7 +5,7 @@ description: How mvm builds Linux microVM images from the host without requiring
 
 The short version: **you run `mvmctl machine build` from the host, and mvm runs Nix inside the builder VM.** You do not need to enter an interactive dev shell to build a template or runtime image.
 
-The host process is the control plane. The builder VM is the Linux execution boundary for Nix evaluation, Nix builds, and image assembly. The runtime backend is separate: after the image is built, mvm boots the prebuilt kernel and rootfs with the selected microVM backend, such as Firecracker on Linux or Apple Virtualization on macOS.
+The host process is the control plane. The builder VM is the Linux execution boundary for Nix evaluation, Nix builds, and image assembly. The runtime backend is separate: after the image is built, mvm boots the prebuilt kernel and rootfs with the selected microVM backend, such as Firecracker on Linux, or HVF and libkrun on macOS.
 
 ```text
 macOS or Linux host
@@ -35,7 +35,7 @@ runtime microVM
 | Nix flake evaluation                      | Builder VM                  | The target is a Linux image, and the build environment must be Linux.                                |
 | `nix build`                               | Builder VM                  | Keeps host Nix optional and avoids macOS/Linux platform mismatch.                                    |
 | Rootfs and kernel artifact extraction     | Builder VM, then host cache | The builder produces artifacts; the host stores and reuses them.                                     |
-| Runtime boot                              | Runtime backend             | Uses an already-built image. This is Firecracker, Apple Virtualization, libkrun, or another backend. |
+| Runtime boot                              | Runtime backend             | Uses an already-built image. This is Firecracker, HVF, libkrun, or another backend. |
 | Runtime guest agent traffic               | Runtime microVM             | Uses the runtime VM's guest communication path, normally vsock where supported.                      |
 
 This separation is deliberate. A build can take seconds or minutes because it may fetch and compile Nix closures. A runtime boot benchmark should normally measure only the already-built image booting, not the build phase.
@@ -227,7 +227,7 @@ The runtime boot benchmark should start after the kernel and rootfs already exis
 - rootfs assembly;
 - artifact copy from the builder.
 
-For Apple Virtualization runtime tests, point the benchmark config at the built kernel and rootfs and use the Apple backend. The builder VM is only involved if the benchmark setup step chooses to rebuild the image first.
+For HVF runtime tests, point the benchmark config at the built kernel and rootfs and select that backend. The builder VM is only involved if the benchmark setup step chooses to rebuild the image first.
 
 ## Failure Modes
 

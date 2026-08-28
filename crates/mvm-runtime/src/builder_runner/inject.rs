@@ -63,6 +63,9 @@ pub fn inject_host_binaries(req: &InjectRequest<'_>) -> Result<()> {
         // is plenty for a mount + copy.
         cmdline: None,
         memory_mib: 0,
+        // One CPU: this helper VM mounts an image and copies files. Defaulting
+        // rather than inheriting anything — it is not the workload's machine.
+        vcpus: 1,
         initramfs: Some(initramfs_path),
         disks: vec![HvfDisk {
             path: req.out_rootfs.to_path_buf(),

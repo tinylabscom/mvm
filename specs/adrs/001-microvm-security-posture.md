@@ -238,12 +238,14 @@ re-admit memory the host has already promised.
 systemd transient scope before the payload execs — born-bounded rather than
 adopted — and the achieved tier is read back off the scope's `cpu.max`. On
 the in-house HVF VMM on macOS there is no host quota primitive, so the run
-loop enforces the share in-process: it measures the vCPU thread's consumed
-CPU time via Mach `thread_info`, predicts allowance exhaustion, and holds the
-vCPU out of `step()` until the period rolls over. The achieved tier is read
-back from the scheduler's own measured record. In both cases the receipt
-records what was measured rather than what was asked for. libkrun has no
-in-process vCPU control and stays declared-only.
+loop enforces the share in-process: it measures every vCPU thread's consumed
+CPU time via Mach `thread_info`, sums them, predicts allowance exhaustion, and
+holds all of them out of `step()` until the period rolls over. The sum is what
+makes the bound a bound on the machine — a controller reading one thread of a
+four-CPU guest sees a quarter of what it is consuming and never throttles. The
+achieved tier is read back from the scheduler's own measured record. In both
+cases the receipt records what was measured rather than what was asked for.
+libkrun has no in-process vCPU control and stays declared-only.
 
 *Wall clock* is enforced on the tiers with a per-VM supervisor process of
 ours — libkrun, HVF, and the AppleContainer tier that runs the same driver and

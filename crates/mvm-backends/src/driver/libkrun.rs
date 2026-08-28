@@ -272,6 +272,11 @@ impl VmmDriver for LibkrunDriver {
     }
 
     fn capabilities(&self) -> VmCapabilities {
+        // 255: libkrun's C API takes the count as a `u8`, and this driver
+        // already clamps to that range before the call. Declaring it here means
+        // the clamp is reported to the caller instead of happening silently one
+        // layer down.
+        //
         // libkrun does not support memory snapshots (same trade as
         // Apple Container). The mvm libkrun launch path is intentionally
         // vsock-only: the supervisor accepts only `NetworkingMode::VsockDirect`,
@@ -283,6 +288,7 @@ impl VmmDriver for LibkrunDriver {
         // admission and endpoint guards, so the runner-facing capability set
         // reports both snapshot and standby pool as unsupported.
         let mut capabilities = VmCapabilities {
+            max_vcpus: Some(u32::from(u8::MAX)),
             pause_resume: false,
             snapshots: false,
             snapshot_capability: SnapshotCapability::DiskOnly,

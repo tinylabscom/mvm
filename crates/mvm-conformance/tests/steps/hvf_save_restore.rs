@@ -61,6 +61,7 @@ fn parent_config(state_dir: &std::path::Path) -> HvfSupervisorConfig {
         kernel: state_dir.join("Image"),
         cmdline: Some("console=ttyAMA0 root=/dev/vda ro".into()),
         memory_mib: 512,
+        vcpus: 1,
         initramfs: None,
         disks: vec![HvfDisk {
             path: PathBuf::from("/parent/state/rootfs.ext4"),
