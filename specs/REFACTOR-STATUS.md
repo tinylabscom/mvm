@@ -10,6 +10,12 @@ Last updated: 2026-08-28
       structural tests and workspace Clippy are green. Linux Nix builds and
       merge delivery remain.
 
+- [ ] **Portable dev-VM socket resolver test — issue #2973.**
+      `specs/plans/2026-08-28-portable-dev-vm-socket-test.md`.
+      The test now asserts the canonical state-or-short socket namespace; the
+      focused regression, all 598 `mvm-vmm` tests, workspace tests, and
+      workspace Clippy are green. Merge delivery remains.
+
 - [ ] **HVF machine restore dispatch — issue #2961.**
       `specs/plans/2026-08-27-hvf-machine-restore-dispatch.md`.
       The `machine` fork/restore surfaces now share the backend-origin
