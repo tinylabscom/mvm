@@ -270,6 +270,65 @@ impl ScenarioGate {
     }
 }
 
+/// Whether a version-keyed SDK sidecar cache under `sidecar_root` holds a
+/// built image.
+///
+/// Walks version and arch directories rather than hardcoding either, so a
+/// version bump cannot quietly turn this into "never available".
+///
+/// The root is an argument rather than resolved here, because the directory
+/// that decides the gate is the one the *scenarios* run against. A probe that
+/// resolves its own `MVM_HOME` reports on a home the subject never reads, and
+/// where that home happens to hold an image, the gate admits a scenario that
+/// then fails in the isolated home where it is absent.
+///
+/// Note what counts as present: the image file, not the version directory.
+/// Those two answers diverge exactly when a cache was created and never
+/// populated, which is the state that makes the distinction matter.
+pub fn sidecar_image_cached_in(sidecar_root: &std::path::Path, image_file: &str) -> bool {
+    let Ok(versions) = std::fs::read_dir(sidecar_root) else {
+        return false;
+    };
+    versions.filter_map(Result::ok).any(|version| {
+        std::fs::read_dir(version.path()).is_ok_and(|arches| {
+            arches
+                .filter_map(Result::ok)
+                .any(|arch| arch.path().join(image_file).is_file())
+        })
+    })
+}
+
+#[cfg(test)]
+mod sidecar_cache {
+    use super::sidecar_image_cached_in;
+
+    const IMAGE: &str = "sdk.ext4";
+
+    #[test]
+    fn a_missing_cache_root_is_not_cached() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(!sidecar_image_cached_in(&dir.path().join("absent"), IMAGE));
+    }
+
+    #[test]
+    fn a_version_directory_without_the_image_is_not_cached() {
+        // The shape that made the gate lie: the cache exists and is keyed
+        // correctly, but nothing ever wrote the image into it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("0.18.0").join("x86_64")).expect("create arch dir");
+        assert!(!sidecar_image_cached_in(dir.path(), IMAGE));
+    }
+
+    #[test]
+    fn an_image_under_any_version_and_arch_is_cached() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let arch = dir.path().join("9.9.9").join("aarch64");
+        std::fs::create_dir_all(&arch).expect("create arch dir");
+        std::fs::write(arch.join(IMAGE), b"image").expect("write image");
+        assert!(sidecar_image_cached_in(dir.path(), IMAGE));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
