@@ -124,9 +124,11 @@ pub fn audit_entry_to_receipt(
             .get("usage")
             .and_then(|raw| serde_json::from_str(raw).ok())
             .unwrap_or_default();
-        if let Ok(value) = serde_json::to_value(usage) {
-            extensions.insert(mvm_core::receipt::extension_key::USAGE.to_string(), value);
-        }
+        // A serialization failure here must not fall through to a
+        // usage-free exit receipt: "present without exception" means a
+        // receipt that cannot carry a valid usage extension does not build.
+        let value = serde_json::to_value(usage).ok()?;
+        extensions.insert(mvm_core::receipt::extension_key::USAGE.to_string(), value);
     }
     let granted_capabilities = context
         .map(|c| c.granted_capabilities.clone())
@@ -472,7 +474,12 @@ fn build_action(entry: &PlanAuditEntry, receipt_type: &str) -> ReceiptAction {
 fn is_top_level_label(key: &str) -> bool {
     matches!(
         key,
-        "agent_id" | "principal_did" | "granted_by" | "prev_receipt_id" | "image_node_digest"
+        "agent_id"
+            | "principal_did"
+            | "granted_by"
+            | "prev_receipt_id"
+            | "image_node_digest"
+            | "usage"
     )
 }
 
@@ -1334,5 +1341,35 @@ mod tests {
             serde_json::json!({ "cpu_percent": 42.5 }),
         );
         assert!(receipt.compute_id().is_err(), "floats must not be signable");
+    }
+
+    #[test]
+    fn the_raw_usage_label_does_not_leak_into_action_params() {
+        // The usage claim must exist exactly once, typed and validated in
+        // extensions["mvm.usage"]. A copy of the raw label string in
+        // action.params would be a second, unvalidated usage claim inside
+        // the same signed payload -- one that can disagree with the first.
+        use mvm_core::usage_capture::{Mechanism, Metric, UsageCapture};
+
+        let receipts = export_fixture_with_usage(UsageCapture {
+            cpu_ms: Metric::measured(4210, Mechanism::HostProcessCpu),
+            ..UsageCapture::default()
+        });
+        let exited = receipts
+            .iter()
+            .find(|r| r.payload.receipt_type == receipt_type::PLAN_EXITED)
+            .expect("an exit receipt");
+
+        assert!(
+            !exited.payload.action.params.contains_key("usage"),
+            "the raw usage label must not be copied into action.params"
+        );
+        assert!(
+            exited
+                .payload
+                .extensions
+                .contains_key(mvm_core::receipt::extension_key::USAGE),
+            "the typed usage extension must still be present"
+        );
     }
 }
