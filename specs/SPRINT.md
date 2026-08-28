@@ -10,22 +10,23 @@
 
 ## In progress
 
-- [ ] **Extended CI documented-surface repair — issue #2938.**
-      `specs/plans/2026-08-27-extended-ci-documented-surface.md`.
-      Linux and macOS now build the live documented-surface binary with signed
-      release-manifest verification enabled, and macOS installs the root
-      binary's target-gated libkrun dependency through the shared installer.
-      Focused regression tests, actionlint, the exact macOS feature build,
-      workspace tests/check/doctests, and zero-warning Clippy are green.
-      Remaining: merge and close #2938 through the PR link.
+- [ ] **Cloudflare Pages cutover.**
+      `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.
+      Wrangler is pinned locally, the existing `mvm` Pages project and account
+      are checked in, CI verifies the selected account before building, local
+      scripts deploy through that configuration, local and CI uploads share a
+      tested complete-WebLinux-bundle gate, and a production-branch deployment
+      is live with the required COOP/COEP headers.
+      Remaining: attach `gomicrovm.com` to the Pages project; the hostname still
+      resolves to GitHub Pages and cannot serve those headers.
 
-- [ ] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
+- [x] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
       `specs/plans/2026-08-27-kernel-6-12-106.md`.
       The custom workload/builder kernel and libkrunfw firmware build now use
       the same kernel.org-verified Linux 6.12.106 archive and SRI hash.
       Structural synchronization and freshness tests, workspace check/tests,
-      and zero-warning Clippy are green. Remaining: pass the PR's Linux Nix
-      evaluation/build gates, merge it, and close #2931 through the PR link.
+      zero-warning Clippy, and merge-queue gates passed; PR #2939 merged and
+      closed issue #2931.
 
 - [ ] **Admission cache durability boundary.**
       `specs/plans/2026-08-26-admission-cache-durability.md`.
