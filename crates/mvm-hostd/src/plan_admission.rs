@@ -1239,7 +1239,7 @@ pub fn enforce_sdk_sidecar_attachment(
              need the SDK sidecar mounted read-only at {SDK_SIDECAR_GUEST_PATH}, and no such \
              attachment is present. The launch path resolves the sidecar from the version-keyed \
              cache under the mvm cache dir; build it with \
-             `nix build ./nix/images/runtime-overlay#sdk-sidecar-image` and retry.",
+             `mvmctl build sdk-sidecar build` and retry.",
             bound.join(", "),
         );
     };

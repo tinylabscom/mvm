@@ -1287,6 +1287,27 @@ fn runtime_overlay_exposes_sdk_sidecar_separately() {
     );
 }
 
+#[test]
+fn builder_vm_exposes_sdk_sidecar_image_for_stage0() {
+    let content =
+        fs::read_to_string("nix/images/builder-vm/flake.nix").expect("read builder VM flake");
+    assert!(
+        content
+            .contains("sdk-sidecar-image = runtimeOverlay.packages.${system}.sdk-sidecar-image;"),
+        "the builder VM flake must pass the runtime-overlay sidecar image through for Stage 0"
+    );
+}
+
+#[test]
+fn sdk_sidecar_build_keeps_cargo_out_of_nixs_sentinel_home() {
+    let content = fs::read_to_string("nix/packages/mvm-sdk-cdylib.nix")
+        .expect("read SDK sidecar cdylib package");
+    assert!(
+        content.contains("HOME = \"/tmp\";"),
+        "Stage 0 runs Nix without its inner sandbox, so Cargo must not create /homeless-shelter and wedge the next derivation"
+    );
+}
+
 /// The sidecar has to ship as an attachable read-only ext4 with the exact file
 /// set `mvm_fs::sdk_sidecar::SdkSidecarResolver` verifies. A directory output
 /// alone can't be attached to a microVM.

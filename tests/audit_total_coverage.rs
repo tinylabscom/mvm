@@ -123,6 +123,10 @@ const KERNEL_SUB: &[(&str, AuditPosture)] = &[("build", AuditPosture::ReadOnly)]
 // it does not emit a local audit-chain entry of its own.
 const RUNTIME_OVERLAY_SUB: &[(&str, AuditPosture)] = &[("build", AuditPosture::ReadOnly)];
 
+// The explicit sidecar build primes a content-verified cache and delegates
+// supply-chain audit events to the shared Stage 0 runner.
+const SDK_SIDECAR_SUB: &[(&str, AuditPosture)] = &[("build", AuditPosture::ReadOnly)];
+
 // Plan 178 (D1) — build-time verbs grouped under `build <sub>`.
 const BUILD_SUB: &[(&str, AuditPosture)] = &[
     // Reads an IR document and prints its content identity; no state change.
@@ -134,6 +138,7 @@ const BUILD_SUB: &[(&str, AuditPosture)] = &[
         "runtime-overlay",
         AuditPosture::DelegatesToSub(RUNTIME_OVERLAY_SUB),
     ),
+    ("sdk-sidecar", AuditPosture::DelegatesToSub(SDK_SIDECAR_SUB)),
 ];
 
 const NETWORK_SUB: &[(&str, AuditPosture)] = &[

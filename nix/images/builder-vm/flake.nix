@@ -79,6 +79,12 @@
         in
         if envPath != "" then /. + envPath else ../../..;
 
+      # Stage 0 can only build attributes exposed by this flake. Keep the
+      # sidecar derivation owned by the runtime-overlay flake and pass that
+      # exact package through here instead of duplicating its glibc closure,
+      # ext4 layout, or checksum contract.
+      runtimeOverlay = builtins.getFlake "path:${toString (workspaceRoot + "/nix/images/runtime-overlay")}";
+
       # Host binaries are embedded in mvmctl and extracted by
       # `host_binaries::ensure_extracted()` before invoking
       # `nix build path:... --impure`. The dir is passed in via env var;
@@ -543,6 +549,7 @@
         workload-kernel-configfile = mkWorkloadKernelConfigfile system;
         workload-sizeopt-kernel = mkWorkloadKernelSizeopt system;
         workload-sizeopt-kernel-configfile = mkWorkloadKernelSizeoptConfigfile system;
+        sdk-sidecar-image = runtimeOverlay.packages.${system}.sdk-sidecar-image;
       });
     };
 }

@@ -4,6 +4,13 @@ Last updated: 2026-08-27
 
 ## In progress
 
+- [ ] **SDK sidecar source build — issue #2941.**
+      `specs/plans/2026-08-27-sdk-sidecar-source-build.md`.
+      Source checkouts can explicitly build the guest-facing glibc sidecar
+      through the shared Stage 0 artifact runner and atomically bind it to the
+      checkout fingerprint. The full local gates and a live aarch64 Stage 0/Nix
+      artifact build are green; merge delivery remains.
+
 - [ ] **SDK surface contract repairs — issues #2902 and #2906.**
       `specs/plans/2026-08-26-sdk-surface-contract-repairs.md`.
       The README's `mvm.local_path` decorator source and the builder-pack Cargo

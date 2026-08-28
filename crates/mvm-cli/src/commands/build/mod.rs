@@ -1,5 +1,5 @@
-//! Build & artifact commands — flake/Mvmfile builds, runtime-overlay
-//! prebuild, and flake validation.
+//! Build & artifact commands — flake/Mvmfile builds, runtime-overlay and SDK
+//! sidecar prebuilds, and flake validation.
 //! The `image` catalog lives in the top-level `catalog` module; `flake`
 //! validation is the `validate` subcommand.
 
@@ -33,6 +33,7 @@ pub(super) mod runtime_overlay;
 /// Shared helpers for the SDK record-mode auto-exec path. Used by
 /// `mvmctl compile <Sandbox-script>` and `mvmctl run --mode plan`.
 pub(in crate::commands) mod sandbox_record;
+pub(super) mod sdk_sidecar;
 /// Host-side secret scan over a runtime recording. Walks every place
 /// raw bytes can hide (env literals, argv, decoded FilesWrite payloads)
 /// and reports findings. Used by `run --mode plan` to hard-refuse
