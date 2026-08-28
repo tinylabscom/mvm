@@ -4,6 +4,12 @@ Last updated: 2026-08-28
 
 ## In progress
 
+- [ ] **Recorded-backend pause and resume — issue #2929.**
+      `specs/plans/2026-08-27-recorded-backend-pause-resume.md`.
+      Pause/resume now resolves the live machine's owner before dispatch while
+      retaining Firecracker's sealed snapshot path and explicit marker-less
+      backend fallback. Validation and merge-queue delivery remain.
+
 - [ ] **Audit root-history classification repair — issue #2940.**
       `specs/plans/2026-08-27-audit-root-history-classification.md`.
       Signed Merkle-root history files are excluded from lifecycle-chain

@@ -306,6 +306,26 @@ bdd:
 e2e-launch:
     ./scripts/e2e-launch-modes.sh
 
+# Runs both live lanes in order, against one shared artifact home:
+#
+#   e2e-launch  the ways in — CLI verbs, both SDKs, and the in-process Rust
+#               library seam
+#   e2e-docs    the whole documented command surface, plus the machine journey
+#
+# They overlap in the suite they drive, so this is the belt-and-braces run
+# rather than the quick one; reach for a single lane when iterating. Both sweep
+# their own machines, and the second refuses to start if the first is still
+# holding the home.
+#
+# Read the "did NOT run" tally at the end, not just the pass count: a skipped
+# scenario names a capability this host lacks, and a green suite is not full
+# coverage while any of them are nonzero.
+#
+# Every live end-to-end lane, back to back
+e2e:
+    ./scripts/e2e-launch-modes.sh
+    ./scripts/e2e-documented-surface.sh
+
 # The hermetic `bdd` lane proves a documented command parses; this one boots
 # real microVMs and runs them. Needs an artifact-warm home: it defaults to the
 # real `~/.mvm`, override with MVM_E2E_HOME. Expect minutes on a cold home.
@@ -349,8 +369,27 @@ build-supervisors:
 
 # check/test/clippy runs never need it. Release builds always rebuild.
 embed-refresh:
-    rm -rf target/*/build/mvm-cli/mvm-cli-nested-target/host-vm-target
-    rm -rf target/*/build/mvm-cli/mvm-cli-nested-target/aux-helper-target
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Located with `find`, not a glob. The previous pattern
+    # (`target/*/build/mvm-cli-nested-target/host-vm-target`) matched nothing:
+    # it hardcoded `target/` so it missed any CARGO_TARGET_DIR, and it lacked
+    # the `mvm-cli/` path segment the current layout uses. The recipe was a
+    # silent no-op, which is why the launch path kept refusing helpers that
+    # "were reused from an earlier build".
+    #
+    # `aux-helper-target` is cleared too. It holds the per-VM helpers
+    # (mvm-network-endpoint and friends), and leaving it was the actual cause
+    # of that refusal — `host-vm-target` alone was never enough.
+    root="${CARGO_TARGET_DIR:-target}"
+    [[ -d "$root" ]] || exit 0
+    found=0
+    while IFS= read -r dir; do
+      echo "  removing $dir"
+      rm -rf "$dir"
+      found=$((found + 1))
+    done < <(find "$root" -type d \( -name host-vm-target -o -name aux-helper-target \) 2>/dev/null)
+    echo "embed-refresh: cleared $found nested target dir(s)"
 
 # Build the dm-verity-capable workload kernel into the local mvm cache.
 # Set MVM_KERNEL_SOURCE=download to use the hash-verified release artifact, or

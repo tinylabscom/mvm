@@ -25,11 +25,12 @@ pub(in crate::commands) struct PauseArgs {
     /// Name of the VM to pause
     #[arg(value_parser = clap_vm_name)]
     pub name: String,
-    /// Hypervisor to drive the snapshot through. Defaults to `firecracker`.
+    /// Hypervisor to drive the snapshot through. Defaults to the one that
+    /// started the machine.
     /// `--hypervisor mock` selects the hermetic in-memory backend (canned
     /// snapshot bytes, no guest agent) so the audited seal path runs in tests
     /// without a live Firecracker socket.
-    #[arg(long, default_value = "firecracker")]
+    #[arg(long, default_value = "auto")]
     pub hypervisor: String,
     /// Before sealing, wait for the workload to signal "primed" (it created
     /// `/run/mvm/primed`) so the warm base is deterministic and fully-warmed.
@@ -49,7 +50,7 @@ pub(in crate::commands) struct ResumeArgs {
     pub name: String,
     /// Hypervisor to drive the restore through. Defaults to `firecracker`.
     /// See `pause --help` for the `mock` variant.
-    #[arg(long, default_value = "firecracker")]
+    #[arg(long, default_value = "auto")]
     pub hypervisor: String,
     /// Drive the resume through the backend's live-memory warm-start path
     /// instead of the plain verify-and-resume. Fails closed with a typed
@@ -61,9 +62,15 @@ pub(in crate::commands) struct ResumeArgs {
 
 pub(in crate::commands) fn run_pause(_cli: &Cli, args: PauseArgs, _cfg: &MvmConfig) -> Result<()> {
     validate_vm_name(&args.name).with_context(|| format!("Invalid VM name: {:?}", args.name))?;
-    require_hypervisor_selectable(&args.hypervisor)?;
-
-    let client = LocalBackend::with_hypervisor(&args.hypervisor);
+    // `auto` means "whichever VMM started this machine". Resolving from the
+    // machine's own state marker rather than a flag default is what keeps
+    // `pause` from reaching for Firecracker on a guest running under HVF.
+    let client = if args.hypervisor == "auto" {
+        LocalBackend::for_started_vm(&args.name)
+    } else {
+        require_hypervisor_selectable(&args.hypervisor)?;
+        LocalBackend::with_hypervisor(&args.hypervisor)
+    };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -94,9 +101,15 @@ pub(in crate::commands) fn run_resume(
     _cfg: &MvmConfig,
 ) -> Result<()> {
     validate_vm_name(&args.name).with_context(|| format!("Invalid VM name: {:?}", args.name))?;
-    require_hypervisor_selectable(&args.hypervisor)?;
 
-    let client = LocalBackend::with_hypervisor(&args.hypervisor);
+    // Same resolution as `pause`: a resume must reach the VMM that owns the
+    // sealed instance, not whatever a flag defaults to.
+    let client = if args.hypervisor == "auto" {
+        LocalBackend::for_started_vm(&args.name)
+    } else {
+        require_hypervisor_selectable(&args.hypervisor)?;
+        LocalBackend::with_hypervisor(&args.hypervisor)
+    };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

@@ -84,8 +84,13 @@ fn ensure_journey_machine() -> &'static Result<(), String> {
             JOURNEY_MACHINE,
             "--image",
             "nginx",
+            // One vCPU, not two: HVF supports exactly one and refuses anything
+            // else, and it is the default backend on macOS. Pinning it here
+            // keeps the journey about the documented verbs rather than about
+            // the host's vCPU ceiling. The default count being incompatible
+            // with the default backend is tracked separately.
             "--cpus",
-            "2",
+            "1",
             "--memory",
             "512M",
         ]);

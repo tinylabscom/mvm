@@ -530,7 +530,13 @@ fn short_vm_socket_dir_at(state_dir: &std::path::Path) -> std::path::PathBuf {
 /// a hashed short namespace under `/tmp/mvm-sock/` so interactive HVF runs from
 /// deep worktrees still bind on macOS.
 pub fn vm_socket_dir_at(state_dir: &std::path::Path) -> std::path::PathBuf {
-    let max_root_socket = state_dir.join("substitution-endpoint.sock");
+    // Sized on the *longest* socket name that lands in this directory, not on
+    // any one of them. `substitution-session-ready.sock` is four bytes longer
+    // than `substitution-endpoint.sock`, so measuring the shorter one let a
+    // path through that fit the endpoint and then overflowed binding the
+    // readiness socket — the endpoint came up, announced itself, and died
+    // before its ready handshake.
+    let max_root_socket = state_dir.join("substitution-session-ready.sock");
     let max_vsock_socket = state_dir
         .join("vsock")
         .join(vsock_socket_filename(u16::MAX.into()));
@@ -1082,6 +1088,36 @@ pub fn is_dev_mode() -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// A state dir that fits the shorter socket name but not the longer one
+    /// must still be moved to the short namespace. Measuring only
+    /// `substitution-endpoint.sock` let such a path through, and the endpoint
+    /// then bound fine and died on the readiness socket.
+    #[test]
+    fn socket_dir_accounts_for_the_longest_socket_name() {
+        // Long enough that the 30-char readiness name overflows while the
+        // 26-char endpoint name still fits.
+        let base = std::path::PathBuf::from("/tmp").join("x".repeat(69));
+        let endpoint = base.join("substitution-endpoint.sock");
+        let ready = base.join("substitution-session-ready.sock");
+        assert!(
+            fits_unix_socket_path(&endpoint),
+            "fixture must fit the shorter name to exercise the gap ({} bytes)",
+            unix_socket_path_len(&endpoint)
+        );
+        assert!(
+            !fits_unix_socket_path(&ready),
+            "fixture must overflow the longer name ({} bytes)",
+            unix_socket_path_len(&ready)
+        );
+
+        let chosen = vm_socket_dir_at(&base);
+        assert_ne!(chosen, base, "must fall back to the short namespace");
+        assert!(
+            fits_unix_socket_path(&chosen.join("substitution-session-ready.sock")),
+            "the chosen dir must fit every socket it will hold"
+        );
+    }
+
     use super::*;
     use crate::util::test_env::TestEnv;
 

@@ -57,6 +57,25 @@ pub const BUNDLE_TAG: &str = "bundle";
 /// Justfile recipe, no CI lane and no document, so that failure was the only
 /// outcome it ever had, and it read as a broken volume path.
 pub const WORKLOAD_KERNEL_TAG: &str = "workload_kernel";
+/// A scenario that captures a full-VM memory snapshot. Not every backend can:
+/// Firecracker reports snapshot tier `unsupported` on hosts without the
+/// required support, and the verb then refuses rather than misbehaving.
+pub const SNAPSHOT_TAG: &str = "snapshot";
+/// A scenario that seeds the guest-runtime cache from a prebuilt directory of
+/// `mvm-`prefixed guest binaries, named by `MVM_BDD_GUEST_BIN_DIR`.
+pub const GUEST_BINS_TAG: &str = "guest_bins";
+/// A scenario whose workload binds an SDK host service, which admission refuses
+/// unless the SDK sidecar image is mounted read-only in the guest.
+pub const SDK_SIDECAR_TAG: &str = "sdk_sidecar";
+/// A scenario asserting a latency *budget*, not just recording a measurement.
+/// A budget is a claim about hardware as much as about code: the same build
+/// meets it on NVMe and misses it on spinning disk.
+pub const PERF_BUDGET_TAG: &str = "perf_budget";
+/// A scenario whose guest must tunnel TLS through the egress proxy. The proxy
+/// offers CONNECT and SOCKS5; a client that can do neither (BusyBox `wget`
+/// ignores `ALL_PROXY` and sends the absolute-URI form the proxy refuses rather
+/// than forward in cleartext) cannot satisfy it.
+pub const TLS_TUNNEL_CLIENT_TAG: &str = "tls_tunnel_client";
 
 /// Host capabilities a scenario may require, probed once by the harness.
 ///
@@ -79,6 +98,21 @@ pub struct RuntimeCaps {
     /// A prebuilt workload kernel is resolvable, so a scenario that boots one
     /// has something to boot.
     pub workload_kernel: bool,
+    /// `MVM_BDD_GUEST_BIN_DIR` names a directory of prebuilt guest binaries, so
+    /// a scenario that seeds the guest-runtime cache has something to seed from.
+    pub guest_bin_dir: bool,
+    /// The SDK sidecar image is present in the version-keyed cache, so a
+    /// workload binding an SDK host service can be admitted.
+    pub sdk_sidecar: bool,
+    /// The host is declared fast enough to hold the launch budget, so a
+    /// threshold assertion measures the code rather than the disk.
+    pub perf_budget_host: bool,
+    /// The guest image ships a client that can tunnel TLS through the proxy.
+    pub tls_tunnel_client: bool,
+    /// The active backend can capture a full-VM memory snapshot, so
+    /// `machine checkpoint create --class vm-full` and the pause/resume
+    /// round-trip can succeed rather than refusing by capability.
+    pub memory_snapshot: bool,
 }
 
 /// Decide whether a scenario with `tags` should run given the host `caps`.
@@ -114,6 +148,16 @@ pub enum ScenarioGate {
     NeedsBundleFixture,
     /// No prebuilt workload kernel could be resolved.
     NeedsWorkloadKernel,
+    /// The backend cannot capture a full-VM memory snapshot on this host.
+    NeedsMemorySnapshot,
+    /// No prebuilt guest-binary directory was named.
+    NeedsGuestBinDir,
+    /// The SDK sidecar image is not in the cache.
+    NeedsSdkSidecar,
+    /// The host is not declared fast enough to assert a latency budget.
+    NeedsPerfBudgetHost,
+    /// The guest image has no client that can tunnel TLS through the proxy.
+    NeedsTlsTunnelClient,
     /// No `node` on `PATH`, so the TypeScript example checkers cannot run.
     NeedsNode,
     /// The merge-queue lane selected only `@ci_live` scenarios, and this
@@ -147,6 +191,21 @@ pub fn scenario_gate(tags: &[String], caps: RuntimeCaps) -> ScenarioGate {
     }
     if tagged(WORKLOAD_KERNEL_TAG) && !caps.workload_kernel {
         return ScenarioGate::NeedsWorkloadKernel;
+    }
+    if tagged(SNAPSHOT_TAG) && !caps.memory_snapshot {
+        return ScenarioGate::NeedsMemorySnapshot;
+    }
+    if tagged(GUEST_BINS_TAG) && !caps.guest_bin_dir {
+        return ScenarioGate::NeedsGuestBinDir;
+    }
+    if tagged(SDK_SIDECAR_TAG) && !caps.sdk_sidecar {
+        return ScenarioGate::NeedsSdkSidecar;
+    }
+    if tagged(PERF_BUDGET_TAG) && !caps.perf_budget_host {
+        return ScenarioGate::NeedsPerfBudgetHost;
+    }
+    if tagged(TLS_TUNNEL_CLIENT_TAG) && !caps.tls_tunnel_client {
+        return ScenarioGate::NeedsTlsTunnelClient;
     }
     ScenarioGate::Run
 }
@@ -183,6 +242,29 @@ impl ScenarioGate {
                 "need a prebuilt workload kernel (MVM_BDD_WORKLOAD_KERNEL, or one \
                  in the host builder-VM cache)",
             ),
+            Self::NeedsMemorySnapshot => Some(
+                "need MVM_BDD_SNAPSHOT=1 on a host whose active backend reports \
+                 snapshot tier `save-restore` (see `mvmctl doctor`)",
+            ),
+            Self::NeedsGuestBinDir => Some(
+                "need MVM_BDD_GUEST_BIN_DIR to name a directory of prebuilt \
+                 guest binaries (mvm-guest-agent, mvm-guest-netinit, \
+                 mvm-egress-client, mvm-oci-entrypoint)",
+            ),
+            Self::NeedsSdkSidecar => Some(
+                "need the SDK sidecar image in the mvm cache (build it with \
+                 `nix build ./nix/images/runtime-overlay#sdk-sidecar-image`)",
+            ),
+            Self::NeedsPerfBudgetHost => Some(
+                "need MVM_BDD_PERF_BUDGET=1 on a host that can hold the launch \
+                 budget (a latency threshold on rotational storage measures the \
+                 disk, not the code)",
+            ),
+            Self::NeedsTlsTunnelClient => Some(
+                "need MVM_BDD_TLS_CLIENT=1: the guest image must ship a client \
+                 that tunnels TLS via CONNECT or SOCKS5 (BusyBox wget ignores \
+                 ALL_PROXY and sends the absolute-URI form the proxy refuses)",
+            ),
             Self::OutsideCiLiveSubset => Some("outside the merge-queue @ci_live subset"),
         }
     }
@@ -201,6 +283,11 @@ mod tests {
         firecracker_bootable: false,
         bundle_fixture: false,
         node_available: false,
+        guest_bin_dir: false,
+        sdk_sidecar: false,
+        perf_budget_host: false,
+        tls_tunnel_client: false,
+        memory_snapshot: false,
         workload_kernel: false,
     };
     const ALL: RuntimeCaps = RuntimeCaps {
@@ -208,6 +295,11 @@ mod tests {
         firecracker_bootable: true,
         bundle_fixture: true,
         node_available: false,
+        guest_bin_dir: true,
+        sdk_sidecar: true,
+        perf_budget_host: true,
+        tls_tunnel_client: true,
+        memory_snapshot: true,
         workload_kernel: true,
     };
 
@@ -236,12 +328,123 @@ mod tests {
         assert!(!scenario_should_run(
             &tags(&["live", "firecracker", "workload_kernel"]),
             RuntimeCaps {
+                guest_bin_dir: false,
+                sdk_sidecar: false,
+                perf_budget_host: false,
+                tls_tunnel_client: false,
+                memory_snapshot: false,
                 workload_kernel: false,
                 ..ALL
             },
         ));
         assert!(scenario_should_run(
             &tags(&["live", "firecracker", "workload_kernel"]),
+            ALL
+        ));
+    }
+
+    #[test]
+    fn snapshot_scenario_skips_where_the_backend_cannot_snapshot() {
+        // Firecracker reports snapshot tier `unsupported`, so the pause/resume
+        // and checkpoint verbs refuse by capability rather than misbehaving.
+        // Skipping names that; failing would read as a broken verb.
+        assert!(!scenario_should_run(
+            &tags(&["live", "snapshot"]),
+            RuntimeCaps {
+                guest_bin_dir: false,
+                sdk_sidecar: false,
+                perf_budget_host: false,
+                tls_tunnel_client: false,
+                memory_snapshot: false,
+                ..ALL
+            },
+        ));
+        assert!(scenario_should_run(&tags(&["live", "snapshot"]), ALL));
+    }
+
+    #[test]
+    fn snapshot_gate_reports_its_own_reason() {
+        let gate = scenario_gate(
+            &tags(&["live", "snapshot"]),
+            RuntimeCaps {
+                guest_bin_dir: false,
+                sdk_sidecar: false,
+                perf_budget_host: false,
+                tls_tunnel_client: false,
+                memory_snapshot: false,
+                ..ALL
+            },
+        );
+        assert_eq!(gate, ScenarioGate::NeedsMemorySnapshot);
+        assert!(
+            gate.reason()
+                .is_some_and(|r| r.contains("MVM_BDD_SNAPSHOT")),
+            "the skip reason must name the variable that turns it on"
+        );
+    }
+
+    #[test]
+    fn guest_bins_scenario_skips_without_a_prebuilt_directory() {
+        // The variable is named in no recipe, lane or document, so these
+        // scenarios panicked on it the moment the live opt-in turned them on.
+        // A skip names what is missing; a panic reads as a broken verb.
+        assert!(!scenario_should_run(
+            &tags(&["live", "firecracker", "guest_bins"]),
+            RuntimeCaps {
+                guest_bin_dir: false,
+                ..ALL
+            },
+        ));
+        assert!(scenario_should_run(
+            &tags(&["live", "firecracker", "guest_bins"]),
+            ALL
+        ));
+    }
+
+    #[test]
+    fn sdk_sidecar_scenario_skips_without_the_cached_image() {
+        // Admission refuses a workload binding an SDK host service when the
+        // sidecar is absent, so the scenario cannot pass on a host where the
+        // image was never built.
+        assert!(!scenario_should_run(
+            &tags(&["live", "sdk_sidecar"]),
+            RuntimeCaps {
+                sdk_sidecar: false,
+                ..ALL
+            },
+        ));
+        assert!(scenario_should_run(&tags(&["live", "sdk_sidecar"]), ALL));
+    }
+
+    #[test]
+    fn perf_budget_scenario_skips_on_an_undeclared_host() {
+        // A latency threshold on slow storage measures the disk. The
+        // measurement scenarios stay ungated; only the budget claim is.
+        assert!(!scenario_should_run(
+            &tags(&["live", "perf_budget"]),
+            RuntimeCaps {
+                perf_budget_host: false,
+                ..ALL
+            },
+        ));
+        assert!(scenario_should_run(&tags(&["live", "perf_budget"]), ALL));
+    }
+
+    #[test]
+    fn tls_tunnel_scenario_skips_without_a_capable_guest_client() {
+        // The proxy offers CONNECT and SOCKS5 and refuses the absolute-URI
+        // form rather than forward it in cleartext. A guest client that can do
+        // neither cannot satisfy the scenario, and that is the image's limit,
+        // not the proxy's.
+        assert!(!scenario_should_run(
+            &tags(&["live", "tls_tunnel_client"]),
+            RuntimeCaps {
+                tls_tunnel_client: false,
+                ..ALL
+            },
+        ));
+        assert!(scenario_should_run(
+            &tags(&["live", "tls_tunnel_client"]),
             ALL
         ));
     }
@@ -266,6 +469,11 @@ mod tests {
                 firecracker_bootable: false,
                 bundle_fixture: false,
                 node_available: false,
+                guest_bin_dir: false,
+                sdk_sidecar: false,
+                perf_budget_host: false,
+                tls_tunnel_client: false,
+                memory_snapshot: false,
                 workload_kernel: false,
             },
         ));
@@ -280,6 +488,11 @@ mod tests {
                 firecracker_bootable: false,
                 bundle_fixture: false,
                 node_available: false,
+                guest_bin_dir: false,
+                sdk_sidecar: false,
+                perf_budget_host: false,
+                tls_tunnel_client: false,
+                memory_snapshot: false,
                 workload_kernel: false,
             },
         ));
@@ -296,6 +509,11 @@ mod tests {
                 firecracker_bootable: true,
                 bundle_fixture: false,
                 node_available: false,
+                guest_bin_dir: false,
+                sdk_sidecar: false,
+                perf_budget_host: false,
+                tls_tunnel_client: false,
+                memory_snapshot: false,
                 workload_kernel: false,
             },
         ));
@@ -307,6 +525,11 @@ mod tests {
                 firecracker_bootable: false,
                 bundle_fixture: false,
                 node_available: false,
+                guest_bin_dir: false,
+                sdk_sidecar: false,
+                perf_budget_host: false,
+                tls_tunnel_client: false,
+                memory_snapshot: false,
                 workload_kernel: false,
             },
         ));
@@ -325,6 +548,11 @@ mod tests {
                 firecracker_bootable: false,
                 bundle_fixture: false,
                 node_available: false,
+                guest_bin_dir: false,
+                sdk_sidecar: false,
+                perf_budget_host: false,
+                tls_tunnel_client: false,
+                memory_snapshot: false,
                 workload_kernel: false,
             },
             RuntimeCaps {
@@ -332,6 +560,11 @@ mod tests {
                 firecracker_bootable: false,
                 bundle_fixture: false,
                 node_available: false,
+                guest_bin_dir: false,
+                sdk_sidecar: false,
+                perf_budget_host: false,
+                tls_tunnel_client: false,
+                memory_snapshot: false,
                 workload_kernel: false,
             },
             RuntimeCaps {
@@ -339,6 +572,11 @@ mod tests {
                 firecracker_bootable: true,
                 bundle_fixture: false,
                 node_available: false,
+                guest_bin_dir: false,
+                sdk_sidecar: false,
+                perf_budget_host: false,
+                tls_tunnel_client: false,
+                memory_snapshot: false,
                 workload_kernel: false,
             },
             RuntimeCaps {
@@ -346,6 +584,11 @@ mod tests {
                 firecracker_bootable: true,
                 bundle_fixture: true,
                 node_available: false,
+                guest_bin_dir: false,
+                sdk_sidecar: false,
+                perf_budget_host: false,
+                tls_tunnel_client: false,
+                memory_snapshot: false,
                 workload_kernel: true,
             },
             RuntimeCaps {
@@ -353,6 +596,11 @@ mod tests {
                 firecracker_bootable: true,
                 bundle_fixture: true,
                 node_available: false,
+                guest_bin_dir: false,
+                sdk_sidecar: false,
+                perf_budget_host: false,
+                tls_tunnel_client: false,
+                memory_snapshot: false,
                 workload_kernel: true,
             },
         ];
@@ -386,6 +634,11 @@ mod tests {
             firecracker_bootable: false,
             bundle_fixture: false,
             node_available: false,
+            guest_bin_dir: false,
+            sdk_sidecar: false,
+            perf_budget_host: false,
+            tls_tunnel_client: false,
+            memory_snapshot: false,
             workload_kernel: false,
         };
         let live_only = RuntimeCaps {
@@ -393,6 +646,11 @@ mod tests {
             firecracker_bootable: false,
             bundle_fixture: false,
             node_available: false,
+            guest_bin_dir: false,
+            sdk_sidecar: false,
+            perf_budget_host: false,
+            tls_tunnel_client: false,
+            memory_snapshot: false,
             workload_kernel: false,
         };
         let bootable = RuntimeCaps {
@@ -400,6 +658,11 @@ mod tests {
             firecracker_bootable: true,
             bundle_fixture: false,
             node_available: false,
+            guest_bin_dir: false,
+            sdk_sidecar: false,
+            perf_budget_host: false,
+            tls_tunnel_client: false,
+            memory_snapshot: false,
             workload_kernel: false,
         };
 
@@ -451,6 +714,11 @@ mod tests {
                     firecracker_bootable: false,
                     bundle_fixture: false,
                     node_available: false,
+                    guest_bin_dir: false,
+                    sdk_sidecar: false,
+                    perf_budget_host: false,
+                    tls_tunnel_client: false,
+                    memory_snapshot: false,
                     workload_kernel: false,
                 },
                 true,
