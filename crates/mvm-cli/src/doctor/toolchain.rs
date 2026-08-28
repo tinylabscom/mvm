@@ -23,7 +23,7 @@ pub(super) fn check_cmd(name: &'static str, category: &'static str, args: &[&str
             name,
             category,
             ok: false,
-            info: e.to_string(),
+            info: format!("{e:#}"),
         },
     }
 }
@@ -46,7 +46,7 @@ pub(super) fn check_vm_cmd(name: &'static str, category: &'static str, cmd: &'st
             name,
             category,
             ok: false,
-            info: e.to_string(),
+            info: format!("{e:#}"),
         },
     }
 }
@@ -118,5 +118,22 @@ mod tests {
     fn check_cmd_missing_tool() {
         let c = check_cmd("nonexistent-mvm-tool-xyz", "tools", &["--version"]);
         assert!(!c.ok, "nonexistent tool should fail");
+    }
+
+    #[test]
+    fn a_spawn_failure_reports_why_it_failed() {
+        let c = check_cmd("nonexistent-mvm-tool-xyz", "tools", &["--version"]);
+        assert!(
+            c.info.contains("nonexistent-mvm-tool-xyz"),
+            "expected the command to be named, got: {}",
+            c.info
+        );
+        assert!(
+            c.info.contains("os error"),
+            "a spawn failure must carry the underlying OS error, not just the \
+             context line — without it doctor reports a reason-free failure and \
+             an intermittent one cannot be told from a missing tool. got: {}",
+            c.info
+        );
     }
 }
