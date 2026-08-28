@@ -32,30 +32,49 @@ const VIRTIOFS_ROOT_TAG: &str = "mvmroot";
 pub use mvm_vmm::host::boot_config::booted_with_universal_initramfs;
 
 /// How long activation waits for the guest agent to come up before failing.
-/// The HVF boot confirms the VM process (pid file) in well under a second,
-/// but the guest agent takes a few seconds to mount the early filesystems and
-/// bind its control port, so a single immediate handshake lands before the
-/// agent is listening. Mirrors the Firecracker driver's agent-ready wait.
+///
+/// A generous ceiling on a wait that is normally short: measured on HVF, the
+/// agent binds its control port ~50ms after the VM starts, and the activation
+/// round-trip itself takes ~8ms. The 30s is headroom for a loaded host, not an
+/// expectation — which matters, because a schedule sized for "a few seconds"
+/// is a schedule that cannot see 50ms. See [`activation_retry_delay`].
 const ACTIVATION_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Activate a workload that booted with the universal initramfs.
 ///
 /// Sends [`ActivateEnvironment`] over the agent vsock port and waits for an
 /// ACK. If the guest replies with an error or an unexpected response, the
-/// boot fails closed. The guest agent takes a few seconds to come up after
-/// the VM process starts, so the connect+handshake retries on transient
-/// "agent not listening yet" failures until [`ACTIVATION_READY_TIMEOUT`]
-/// rather than failing the first attempt; a genuine activation rejection
-/// (an `ActivateEnvironmentError` or an unexpected response) is returned
+/// boot fails closed. The agent is not listening the instant the VM process
+/// starts, so the connect+handshake retries on transient "agent not listening
+/// yet" failures until [`ACTIVATION_READY_TIMEOUT`] rather than failing the
+/// first attempt; a genuine activation rejection (an
+/// `ActivateEnvironmentError` or an unexpected response) is returned
 /// immediately, never retried.
 pub fn activate_workload(vm: &dyn RunningVm, config: &VmStartConfig) -> Result<()> {
     let env = build_activation_environment(config)?;
-    let deadline = std::time::Instant::now() + ACTIVATION_READY_TIMEOUT;
+    let started = std::time::Instant::now();
+    let deadline = started + ACTIVATION_READY_TIMEOUT;
     let mut attempt = 0u32;
     loop {
         attempt = attempt.saturating_add(1);
+        let attempt_started = std::time::Instant::now();
         match activate_once(vm, &env) {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                // Attempt count and the split between waiting and working are
+                // what distinguish "the guest was slow" from "the schedule
+                // slept through the guest being ready". The coarse phase timer
+                // reports one `activate_workload` span and cannot tell those
+                // apart; that is how a 100ms first backoff hid inside a 160ms
+                // span for as long as it did.
+                tracing::debug!(
+                    attempt,
+                    waited_ms = (attempt_started - started).as_secs_f64() * 1000.0,
+                    activation_ms = attempt_started.elapsed().as_secs_f64() * 1000.0,
+                    total_ms = started.elapsed().as_secs_f64() * 1000.0,
+                    "guest activation complete"
+                );
+                return Ok(());
+            }
             Err(e) if is_retryable_activation_error(&e) && std::time::Instant::now() < deadline => {
                 std::thread::sleep(activation_retry_delay(attempt));
             }
@@ -97,10 +116,35 @@ fn is_retryable_activation_error(err: &anyhow::Error) -> bool {
     })
 }
 
-/// Backoff between activation attempts: grows from 50 ms, capped at 500 ms.
+/// First gap between activation attempts.
+///
+/// Small on purpose. The thing being waited for — the guest agent binding its
+/// control port — happens tens of milliseconds after the VM starts, so a first
+/// backsleep measured in that same order of magnitude decides the launch's
+/// latency rather than observing it.
+const ACTIVATION_POLL_MIN: std::time::Duration = std::time::Duration::from_millis(2);
+
+/// Ceiling on the gap between activation attempts.
+///
+/// The gap grows so a guest that is genuinely slow to come up is not polled
+/// thousands of times, but it stays far below [`ACTIVATION_READY_TIMEOUT`]:
+/// every millisecond of the final gap is latency added to a launch that was
+/// otherwise ready, and the cap is what bounds that error.
+const ACTIVATION_POLL_MAX: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// Backoff between activation attempts: doubles from
+/// [`ACTIVATION_POLL_MIN`], capped at [`ACTIVATION_POLL_MAX`].
+///
+/// This was `50ms << attempt`, capped at 500ms — so the first gap was 100ms.
+/// Measured against a real HVF launch, the agent became reachable ~50ms in and
+/// activation itself took ~8ms, but the first attempt failed and the schedule
+/// then slept 100ms before looking again: `activate_workload` cost ~160ms to
+/// do ~8ms of work. A backoff coarser than the event it polls for does not
+/// measure that event, it replaces it.
 fn activation_retry_delay(attempt: u32) -> std::time::Duration {
-    let scaled = 50u64.saturating_mul(1u64 << attempt.min(16));
-    std::time::Duration::from_millis(scaled.min(500))
+    let doublings = attempt.saturating_sub(1).min(16);
+    let scaled = ACTIVATION_POLL_MIN.saturating_mul(1u32 << doublings);
+    scaled.min(ACTIVATION_POLL_MAX)
 }
 
 /// Send a pre-built [`ActivateEnvironment`] over an already-connected
@@ -331,6 +375,51 @@ mod tests {
     use super::*;
     use mvm_core::net::session::SessionError;
     use mvm_core::util::test_env::TestEnv;
+
+    /// The first retry must not dominate the wait it is polling for.
+    ///
+    /// This schedule used to start at 100ms and double to 500ms. The guest
+    /// agent binds its port ~50ms after the VM starts, so the very first
+    /// backoff overshot the entire thing: a launch spent 100ms asleep to
+    /// discover a readiness that had already happened, and `activate_workload`
+    /// measured ~160ms against ~8ms of actual activation work.
+    #[test]
+    fn the_first_activation_retry_is_shorter_than_the_readiness_it_waits_for() {
+        assert!(
+            activation_retry_delay(1) <= std::time::Duration::from_millis(2),
+            "first retry {:?} must be a poll, not a sleep",
+            activation_retry_delay(1)
+        );
+    }
+
+    #[test]
+    fn activation_retries_back_off_monotonically_to_a_bounded_cap() {
+        let mut previous = std::time::Duration::ZERO;
+        for attempt in 1..=64u32 {
+            let delay = activation_retry_delay(attempt);
+            assert!(
+                delay >= previous,
+                "attempt {attempt} backed off to {delay:?}, below the previous {previous:?}"
+            );
+            assert!(
+                delay <= ACTIVATION_POLL_MAX,
+                "attempt {attempt} delay {delay:?} exceeds the cap"
+            );
+            previous = delay;
+        }
+        assert_eq!(activation_retry_delay(64), ACTIVATION_POLL_MAX);
+    }
+
+    /// A capped poll must still be coarse enough that a guest which never
+    /// comes up does not spin the full deadline away on handshake attempts.
+    #[test]
+    fn the_capped_poll_bounds_attempts_across_the_activation_deadline() {
+        let attempts = ACTIVATION_READY_TIMEOUT.as_millis() / ACTIVATION_POLL_MAX.as_millis();
+        assert!(
+            attempts <= 2_000,
+            "a never-ready guest would make {attempts} handshake attempts before the deadline"
+        );
+    }
 
     const VALID_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
