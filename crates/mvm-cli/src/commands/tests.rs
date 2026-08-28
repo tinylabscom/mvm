@@ -4887,6 +4887,21 @@ fn emits_machine_readable_stdout(argv: &[&str]) -> bool {
         .emits_machine_readable_stdout()
 }
 
+#[test]
+fn a_transient_run_with_a_command_reserves_stdout_for_the_guest() {
+    // The guest's own stdout is relayed to the caller, so host chrome must not
+    // share the stream — a warning printed there lands glued to the workload's
+    // output and breaks anything reading it.
+    assert!(emits_machine_readable_stdout(&[
+        "mvmctl", "machine", "run", "--image", "alpine", "--", "echo", "hi"
+    ]));
+
+    // Nothing to relay: a detached boot prints host chrome and no guest output.
+    assert!(!emits_machine_readable_stdout(&[
+        "mvmctl", "machine", "run", "--image", "alpine", "-d"
+    ]));
+}
+
 fn exits_early(argv: &[&str]) -> bool {
     Cli::try_parse_from(argv)
         .unwrap()
