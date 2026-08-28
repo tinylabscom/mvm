@@ -27,7 +27,6 @@ use mvm_core::domain::instance::InstanceReadiness;
 use mvm_core::plan::ExecutionPlan;
 use mvm_core::protocol::vm_backend::{VmId, VmStatus};
 use mvm_core::rootfs_source::RootfsSource;
-use mvm_core::usage_capture::UsageCapture;
 use mvm_hostd::audit::emitter::{AuditEmitter, ExitRecord};
 use mvm_hostd::plan_admission::{InMemoryNonceLedger, StartedMachine, SystemClock};
 use mvm_hostd::run::{LocalRunContext, LocalRunRequest, admit_and_boot_local};
@@ -55,6 +54,11 @@ pub struct LaunchOutcome {
     pub plan_id: String,
     pub(crate) mode: LifecycleMode,
     pub(crate) plan: ExecutionPlan,
+    /// When this process admitted the boot, for measuring the launch-to-exit
+    /// wall span. `None` when this outcome was not built from a fresh launch
+    /// in this process (there is no honest span to report), which keeps the
+    /// wall metric `unavailable` rather than fabricated.
+    pub(crate) launched_at: Option<std::time::Instant>,
 }
 
 /// Exit report for a waited-on transient machine.
@@ -690,6 +694,7 @@ impl LocalBackend {
         request: &LaunchRequest,
         transient: bool,
     ) -> Result<LaunchOutcome> {
+        let launched_at = std::time::Instant::now();
         let profile = AdmittedProfile::from_profile_name(&request.profile);
         let mut preparation = self.acquire_leases(name, profile)?;
         let volumes: Vec<mvm_core::vm_backend::VmVolume> = preparation
@@ -722,7 +727,7 @@ impl LocalBackend {
         preparation.commit();
 
         self.register_started(name, request, transient);
-        Ok(self.launch_outcome(name, request, started, transient))
+        Ok(self.launch_outcome(name, request, started, transient, launched_at))
     }
 
     /// Post-boot bookkeeping: name-registry registration (with TTL),
@@ -750,6 +755,7 @@ impl LocalBackend {
         request: &LaunchRequest,
         started: StartedMachine,
         transient: bool,
+        launched_at: std::time::Instant,
     ) -> LaunchOutcome {
         LaunchOutcome {
             machine: MachineState {
@@ -773,6 +779,7 @@ impl LocalBackend {
                 LifecycleMode::Persistent
             },
             plan: started.admitted.plan().clone(),
+            launched_at: Some(launched_at),
         }
     }
 }
@@ -971,16 +978,29 @@ impl LocalBackend {
     /// idempotent cleanup.
     pub fn report_exit(&self, outcome: &LaunchOutcome) -> Result<ExitReport> {
         let name = outcome.machine.name.as_str();
-        let exit_code = mvm_core::exit_capture::read_captured(&vm_state_dir(name));
+        let state_dir = vm_state_dir(name);
+        let exit_code = mvm_core::exit_capture::read_captured(&state_dir);
         // Capture fidelity: a missing capture is recorded as uncaptured,
         // never attested as exit 0.
+        //
+        // Whatever the process that owned the VM managed to observe. An
+        // absent sidecar reads as all-unavailable, which is the honest
+        // answer for a tier that cannot observe, a run that crashed before
+        // teardown, and a backend that has not been taught to write one yet.
+        let mut usage = mvm_core::usage_capture::read_captured(&state_dir);
+        // Two dimensions the host observes about itself, so they hold on
+        // every backend regardless of what the VMM could report.
+        usage.host_state_bytes = mvm_core::usage_capture::host_state_bytes(&state_dir);
+        if let Some(span) = outcome.launched_at.map(|at| at.elapsed()) {
+            usage.wall_ms = mvm_core::usage_capture::wall_ms(span);
+        }
         if let Some(emitter) = build_audit_emitter() {
             if let Err(e) = emitter.emit_exited_with_capture(
                 &outcome.plan,
                 ExitRecord {
                     exit_code,
                     backend: &outcome.machine.backend,
-                    usage: UsageCapture::default(),
+                    usage,
                 },
             ) {
                 tracing::warn!(error = %e, machine = name, "audit emit_exited failed (non-fatal)");
