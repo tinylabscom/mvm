@@ -29,7 +29,10 @@ mvm-client.workspace = true
 mvm-mcp.workspace = true
 # `mvmctl compile` reads the Workload IR (mvm_contract::ir, re-exported from
 # mvm_contract::ir) and routes it through the compile pipeline.
-mvm-sdk.workspace = true
+# `deploy-remote` carries the HTTPS upload behind `mvmctl deploy`. It is off by
+# default in `mvm-sdk` so the in-guest cdylib built from that crate's lib target
+# links no rustls/ring/tokio; the CLI is the one consumer that needs it.
+mvm-sdk = { workspace = true, features = ["deploy-remote"] }
 mvm-capture.workspace = true
 # Direct IR access (`mvm_contract::ir::…`) for the command surfaces that
 # only need the DTOs, not the rest of the SDK's build-time tooling.

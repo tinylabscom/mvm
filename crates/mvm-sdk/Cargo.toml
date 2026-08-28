@@ -35,7 +35,12 @@ mvm-contract.workspace = true
 async-trait = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-mvm-http.workspace = true
+# Only the remote deploy transport (`MvmdClient::ship`) speaks HTTPS, and it is
+# a host-side path. Optional so the default lib build — which is what the
+# in-guest `libmvm_host_services.so` cdylib is built from — carries no rustls,
+# no ring and no tokio. `ring` is C plus platform assembly, which neither the
+# musl cdylib target nor wasm can build.
+mvm-http = { workspace = true, optional = true }
 thiserror.workspace = true
 
 # Runtime record mode encodes `Sandbox.files.write` bytes
@@ -65,6 +70,10 @@ tree-sitter-typescript = { workspace = true }
 
 [features]
 default = []
+# The remote half of `deploy`: `MvmdClient` and the HTTPS upload. Off by
+# default; `mvm-cli` turns it on. Everything else in `deploy` — the record
+# types and boot-artifact digests the CLI verifies with — stays unconditional.
+deploy-remote = ["dep:mvm-http"]
 client-facade = ["dep:async-trait", "mvm-core/client"]
 # Derive `schemars::JsonSchema` on the addon-manifest and runtime-record types
 # and forward to the IR's own derives, for the three schema-emitter bins below.
