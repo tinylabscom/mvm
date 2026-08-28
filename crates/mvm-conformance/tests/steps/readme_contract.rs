@@ -149,7 +149,7 @@ fn normalize_flags(
 
 /// Whether `witness` exercises the same request shape as `example`, with flag
 /// spellings resolved against the command they belong to.
-fn witness_covers_example(
+pub(crate) fn witness_covers_example(
     example: &[String],
     witness: &[String],
     known_paths: &[Vec<String>],
@@ -228,7 +228,7 @@ fn readme_example_manifest() -> ReadmeExampleManifest {
 }
 
 /// Load every scenario in the feature tree, keyed `<relative path>::<name>`.
-fn all_feature_scenarios()
+pub(crate) fn all_scenario_commands()
 -> std::collections::BTreeMap<String, mvm_conformance::doc_examples::ScenarioCommands> {
     let features_root = repo_root().join("features");
     let mut scenarios = std::collections::BTreeMap::new();
@@ -288,7 +288,7 @@ fn every_readme_example_is_executed_or_exempt(_world: &mut CliWorld) {
         "README.md contains no runnable mvmctl examples"
     );
     let manifest = readme_example_manifest();
-    let scenarios = all_feature_scenarios();
+    let scenarios = all_scenario_commands();
 
     let documented: BTreeSet<&str> = examples.iter().map(|e| e.command.as_str()).collect();
     let recorded: BTreeSet<&str> = manifest

@@ -55,11 +55,32 @@ async fn main() {
         .await;
 
     report_skips();
+    let unexpected_skips = unexpected_skips();
 
     // `execution_has_failed` comes from the `Stats` trait, which the concrete
     // writer only exposes when the trait is in scope.
     use cucumber::writer::Stats as _;
     if writer.execution_has_failed() {
+        std::process::exit(1);
+    }
+    if !unexpected_skips.is_empty() {
+        eprintln!();
+        eprintln!(
+            "!!! {} scenario(s) were skipped that this lane does not tolerate:",
+            unexpected_skips.iter().map(|(_, n)| n).sum::<usize>()
+        );
+        for (reason, count) in &unexpected_skips {
+            eprintln!("!!!   {count:>3}  {reason}");
+        }
+        eprintln!(
+            "!!! A skipped scenario is coverage this run did not have. Under \
+             MVM_BDD_STRICT_SKIPS the lane fails rather than reporting a pass \
+             that quietly proved less than the last one."
+        );
+        eprintln!(
+            "!!! Either give the host the capability, or add the reason to \
+             MVM_BDD_ALLOWED_SKIPS in the lane that set this policy."
+        );
         std::process::exit(1);
     }
 }
@@ -183,6 +204,43 @@ fn record_gate(gate: ScenarioGate) {
     if let Ok(mut skipped) = SKIPPED.lock() {
         skipped.push(gate);
     }
+}
+
+/// Skips this lane declined to tolerate, as `(reason, count)`.
+///
+/// Empty unless `MVM_BDD_STRICT_SKIPS` is set, so a developer running the suite
+/// on a laptop still gets the tally and not a failure. A release-gating lane
+/// sets it, because there the tally is advice nobody reads at the moment it
+/// matters: a runner that quietly lost a capability produces a green run that
+/// proved less than the one before it, and nothing says so.
+///
+/// `MVM_BDD_ALLOWED_SKIPS` is a comma-separated list of [`ScenarioGate::as_str`]
+/// names the lane accepts — `@wip` work, a latency budget the host cannot hold,
+/// a backend that genuinely has no memory-snapshot tier. Everything else fails.
+fn unexpected_skips() -> Vec<(&'static str, usize)> {
+    if std::env::var_os("MVM_BDD_STRICT_SKIPS").is_none() {
+        return Vec::new();
+    }
+    let allowed_raw = std::env::var("MVM_BDD_ALLOWED_SKIPS").unwrap_or_default();
+    let allowed: std::collections::BTreeSet<&str> = allowed_raw
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .collect();
+
+    let Ok(skipped) = SKIPPED.lock() else {
+        return Vec::new();
+    };
+    let mut counts: std::collections::BTreeMap<&'static str, usize> =
+        std::collections::BTreeMap::new();
+    for gate in skipped.iter() {
+        let name = gate.as_str();
+        if allowed.contains(name) {
+            continue;
+        }
+        *counts.entry(name).or_default() += 1;
+    }
+    counts.into_iter().collect()
 }
 
 /// Print one line per skip reason, after the run.

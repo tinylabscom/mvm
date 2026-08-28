@@ -138,3 +138,71 @@ works.
 
 This is one example of the class the gate exists to surface, found within minutes
 of the gate existing.
+
+---
+
+# Follow-on: the two gaps this left open
+
+## A skipped scenario no longer passes as a green lane
+
+The suite prints a tally of what it declined to run and a line saying a green
+suite is not full coverage while it is nonzero. That is advice, and advice is
+not read at the moment it matters: a runner that quietly loses a capability
+produces a green run that proved less than the one before it, and nothing says
+so. In a lane that gates releases, that is the same failure shape as the tally
+not existing.
+
+`MVM_BDD_STRICT_SKIPS` makes the suite exit nonzero on any skip the lane did not
+declare, naming the reason and pointing at the two ways to resolve it. The
+allow-list is per lane, spelled with the stable `ScenarioGate` names:
+
+- **launch lane** — `pending,needs-perf-budget-host`. Verified against a real
+  run: those are the only two it skips.
+- **documented-surface lane** — additionally `needs-memory-snapshot` (Firecracker
+  genuinely reports `unsupported`; the macOS job sets `MVM_BDD_SNAPSHOT` and does
+  not skip these), `needs-bundle-fixture` and `needs-tls-tunnel-client`.
+
+Deliberately absent from both: `needs-workload-kernel`, `needs-guest-bin-dir`,
+`needs-firecracker`, `needs-live-opt-in`, `needs-sdk-sidecar`, `needs-node`. If
+one of those fires, the lane did not boot what it claims to boot, and that has to
+be a failure rather than a footnote. Unset, the variable changes nothing, so a
+developer running the suite on a laptop still gets the tally and not a failure.
+
+Verified across all three modes: strict with the reason disallowed exits 1,
+strict with it allowed exits 0, and the default exits 0.
+
+The Linux documented-surface lane has not run under this policy yet — it cannot
+run on this host. If its allow-list is short an entry, its first run fails loudly
+naming exactly which one, which is the intended way to find out.
+
+## The website is ratcheted, not adjudicated
+
+The README's 38 examples each carry a hand-written witness or exemption. The
+website is **461 distinct commands across 86 files**, and hand-writing 400-odd
+justifications would manufacture the appearance of review rather than perform
+it. An exemption is a claim someone has to be able to disagree with, and nobody
+can disagree with four hundred of them written in an afternoon.
+
+So `features/suites/s29_doc_examples/docs_coverage.toml` is computed, not
+authored. Coverage uses the same rule as the README gate — a scenario driving
+the same verb with at least the same flags — and the partition is checked in.
+Three properties hold from there:
+
+- a command that is covered today may not become uncovered
+- a newly documented command must be classified before it merges
+- a command that becomes covered must be moved out of the debt list, so the
+  number keeps meaning something
+
+**Baseline: 170 covered, 267 uncovered.** That number is the honest state of
+website-example coverage today, and it is now visible and monotonic rather than
+unknown. Regenerate with `MVM_UPDATE_DOCS_COVERAGE=1`.
+
+Both arms verified red-first: a covered command that loses its scenario fails
+with *"were exercised by a scenario and no longer are"*, and a newly documented
+command fails with *"newly documented and are not in the coverage ledger"*.
+
+This is deliberately weaker than the README's gate. The README says every
+example is proven or someone said why not; the website says coverage cannot
+silently decay and new documentation cannot skip the decision. Closing the
+267 is ordinary work that can now be done incrementally against a number that
+does not drift.

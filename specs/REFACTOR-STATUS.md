@@ -215,6 +215,16 @@ for detailed scope and acceptance criteria.
       missing-state behavior. See
       `specs/sprint/delivery/2824-stopped-vm-logs-error.md`.
 
+- [x] **Skipped scenarios fail a gating lane; website coverage ratcheted.**
+      `MVM_BDD_STRICT_SKIPS` turns the skip tally into a gate with a per-lane
+      allow-list, so a runner that quietly loses a capability reddens the lane
+      instead of reporting a pass that proved less than the last one. The
+      website's 461 documented commands across 86 files are ratcheted rather
+      than adjudicated — coverage is computed by the README gate's own rule and
+      checked in at 170 covered / 267 uncovered, and cannot decay or accept a
+      new undeclared command. See
+      `specs/sprint/delivery/readme-examples-gate-a-release.md`.
+
 - [x] **Documented examples gate a release.** `release.yml` blocked only on the
       hermetic BDD lane, which boots no guest; the live documented-surface lanes
       ran nightly in `ci-full.yml` and gated nothing. Both moved into a reusable

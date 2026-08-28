@@ -411,6 +411,25 @@ E2E_TIMEOUT_SECS="${MVM_E2E_TIMEOUT_SECS:-3600}"
 # suite and turns "never ran" into a loud failure.
 SUITE_STARTED=""
 
+# Skips this lane will not tolerate.
+#
+# The tally printed after the suite is advice, and advice is not read at the
+# moment it matters: a runner that quietly loses a capability produces a green
+# run that proved less than the one before it, and nothing says so. Under
+# `MVM_BDD_STRICT_SKIPS` the suite exits nonzero instead, naming the reason.
+#
+# The allow-list is only what is a genuine property of the host or a declared
+# state of the work — never a capability this lane is supposed to provide.
+# `needs-workload-kernel`, `needs-guest-bin-dir` and `needs-firecracker` are
+# deliberately absent: if one of those fires, the lane did not boot what it
+# claims to boot, and that has to be a failure rather than a footnote.
+#
+# This lane drives the whole suite, so it tolerates more than the launch lane:
+# a backend with no memory-snapshot tier (Firecracker reports `unsupported`;
+# the macOS job sets MVM_BDD_SNAPSHOT and does not skip these), and the two
+# fixtures that need material this lane does not publish.
+ALLOWED_SKIPS="pending,needs-perf-budget-host,needs-memory-snapshot,needs-bundle-fixture,needs-tls-tunnel-client"
+
 echo "==> documented examples + machine journey (cucumber, @live)"
 SUITE_STARTED=1
 echo "    deadline: ${E2E_TIMEOUT_SECS}s"
@@ -422,6 +441,8 @@ set +e
 SUITE_LOG="$(mktemp "${TMPDIR:-/tmp}/mvm-e2e-suite.XXXXXX")"
 CARGO_BIN_EXE_mvmctl="$MVMCTL" \
 MVM_BDD_LIVE=1 \
+MVM_BDD_STRICT_SKIPS=1 \
+MVM_BDD_ALLOWED_SKIPS="$ALLOWED_SKIPS" \
 MVM_E2E_HOME="$E2E_HOME" \
   ./scripts/cargo-fast.sh test -p mvm-conformance --test conformance --features bdd \
   2>&1 | tee "$SUITE_LOG" &
