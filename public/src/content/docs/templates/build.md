@@ -12,9 +12,12 @@ mvmctl machine build
 Or point at a project directory or manifest file:
 
 ```sh
-mvmctl machine build --flake ./my-worker
-mvmctl machine build --flake ./my-worker/mvm.toml
+mvmctl machine build ./my-worker
+mvmctl machine build ./my-worker/mvm.toml
 ```
+
+`--flake <ref>` is a different mode: it forces a flake-only build and skips
+manifest discovery entirely.
 
 `mvmctl machine build` discovers `mvm.toml` or `Mvmfile.toml`, runs the Nix build
 through the builder VM where Linux build work belongs, and stores artifacts in
@@ -25,10 +28,13 @@ a local slot keyed by the canonical manifest path.
 ```sh
 mvmctl machine build --force
 mvmctl machine build --update-hash
-mvmctl machine run --flake . --cpus 4 --memory 2G
+mvmctl machine run --flake . --cpus 4 --memory 2G -d
 mvmctl machine checkpoint create my-machine --class vm-full
 mvmctl machine build --json
 ```
+
+`machine checkpoint` is an advanced verb: it works, but it is hidden from
+`machine --help`.
 
 Snapshot builds are backend-specific. Do not present snapshot availability or
 latency as universal unless the backend and readiness boundary are named.
@@ -49,7 +55,7 @@ VMs. Use `mvmctl manifest *` for build slots and registry state.
 ## Boot after build
 
 ```sh
-mvmctl machine run --manifest .
+mvmctl machine run --manifest . -d
 mvmctl machine run --manifest ./my-worker -- uname -a
 ```
 

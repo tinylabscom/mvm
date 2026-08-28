@@ -5,6 +5,9 @@ description: Create, inspect, stop, pause, resume, and clean up local mvm sandbo
 
 Use `mvmctl` when you need the local management layer for sandboxes.
 
+The advanced single-VM verbs used below (`pause`, `resume`, `checkpoint`, `fs`)
+are hidden: they work, but they do not appear in `mvmctl machine --help`.
+
 ## Create or boot
 
 ```sh
@@ -43,11 +46,11 @@ mvmctl machine pause agent-sandbox
 mvmctl machine resume agent-sandbox
 ```
 
-Full-VM memory checkpoints (vm-full class) are currently unavailable through the selectable workload runners; check `mvmctl doctor` for the authoritative capability before requesting them:
+Full-VM memory checkpoints (vm-full class) need a backend at the `save-restore` snapshot tier or better — today `hvf` and `apple-container`. Check `mvmctl doctor` for the authoritative capability before requesting them:
 
 ```sh
 mvmctl machine checkpoint create agent-sandbox --class vm-full
-mvmctl machine checkpoint restore agent-sandbox --name <checkpoint-name>
+mvmctl machine checkpoint restore <checkpoint-id>
 ```
 
 Snapshots can contain memory, files, and runtime credentials. Apply retention and deletion policy.

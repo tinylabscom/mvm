@@ -27,6 +27,9 @@ mvmctl machine exec devbox -- id
 mvmctl machine proc start devbox -- python /work/task.py
 ```
 
+`machine proc` is an advanced verb: it works, but it is hidden from
+`machine --help`.
+
 ## Attach behavior
 
 Console behavior depends on the active backend, image mode, and launch policy:

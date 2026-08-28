@@ -82,7 +82,9 @@ mvmctl run --mode live ./sandbox.py
 ```
 
 The CLI sets `MVM_SDK_MODE=live` and `MVM_CLI_BIN` for the child process. The SDK
-then uses the local CLI for operations such as:
+then uses the local CLI for operations such as (`machine proc` and `machine fs`
+are hidden advanced verbs — they work, but they do not appear in
+`mvmctl machine --help`):
 
 - `mvmctl machine run --up-json --detach --name <generated-id> --manifest <template>`
 - `mvmctl machine fs write <vm> <path>`
@@ -101,8 +103,8 @@ Live mode is intentionally narrower than the target SDK contract:
 | --- | --- |
 | Sandbox count | One active sandbox per SDK process. |
 | TTL | Defaults to 30 minutes unless the caller sets `ttl`. |
-| Commands | `commands.start(...)` starts a command; result capture is still a parity target. |
-| Files | `files.write(...)` stages bytes into the running VM. |
+| Commands | `commands.start(...)` starts a command and returns a handle; `exec(...)` / `shell(...)` is the one-shot that returns a captured `ExecResult`. |
+| Files | `files.write(...)` stages bytes into the running VM; `read` / `list` / `stat` / `mkdir` / `remove` / `move` are live-mode only. |
 | Cleanup | Python `with`, TypeScript `using`, or explicit `kill()` calls `mvmctl machine stop`. |
 | Secrets | Live command env forwarding accepts literal values only. Secret refs must use host-managed injection paths. |
 

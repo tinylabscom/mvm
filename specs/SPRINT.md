@@ -10,26 +10,46 @@
 
 ## In progress
 
-- [ ] **Extended CI documented-surface repair — issue #2938.**
+- [x] **FlowMux HTTPS live-client repair.**
+      `specs/plans/2026-08-27-flowmux-https-live-client.md`.
+      The seven live HTTPS egress witnesses now use the pinned multi-arch
+      `curlimages/curl:8.21.0` client, which opens an HTTP `CONNECT` tunnel
+      before TLS. The proxy's fail-closed refusal of plaintext HTTPS
+      absolute-form requests remains unchanged. A repository regression,
+      workspace check/tests/doctests, and Clippy are green; merge-queue
+      delivery remains.
+
+- [x] **Extended CI documented-surface repair — issue #2938.**
       `specs/plans/2026-08-27-extended-ci-documented-surface.md`.
       Linux and macOS now build the live documented-surface binary with signed
       release-manifest verification enabled through Cargo's standard linker
       path. The macOS witness installs both the root binary's target-gated
       libkrun dependency and the embedded Linux cross toolchain through shared
-      installers. Live run 33139650457 exposed the next clean-run blockers: the
+      installers. PR #2943 landed the first repair; the post-merge live run
+      exposed the next clean-run blockers: the
       bootstrap ignored its explicit published-image choice and the SDK drift
       scenario had no compiled xtask. Both are fixed with resolver and workflow
       regressions; the exact release-download build and zero-warning Clippy are
       green. Remaining: warm the source sidecar after #2954, pass both live
       witnesses, merge, and close #2938 through the PR link.
 
-- [ ] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
+- [ ] **Cloudflare Pages cutover.**
+      `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.
+      Wrangler is pinned locally, the existing `mvm` Pages project and account
+      are checked in, CI verifies the selected account before building, local
+      scripts deploy through that configuration, local and CI uploads share a
+      tested complete-WebLinux-bundle gate, and a production-branch deployment
+      is live with the required COOP/COEP headers.
+      Remaining: attach `gomicrovm.com` to the Pages project; the hostname still
+      resolves to GitHub Pages and cannot serve those headers.
+
+- [x] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
       `specs/plans/2026-08-27-kernel-6-12-106.md`.
       The custom workload/builder kernel and libkrunfw firmware build now use
       the same kernel.org-verified Linux 6.12.106 archive and SRI hash.
       Structural synchronization and freshness tests, workspace check/tests,
-      and zero-warning Clippy are green. Remaining: pass the PR's Linux Nix
-      evaluation/build gates, merge it, and close #2931 through the PR link.
+      zero-warning Clippy, and merge-queue gates passed; PR #2939 merged and
+      closed issue #2931.
 
 - [ ] **Admission cache durability boundary.**
       `specs/plans/2026-08-26-admission-cache-durability.md`.

@@ -33,6 +33,13 @@ Both transports that do work are unchanged: `CONNECT` (curl, and anything else
 that tunnels) and SOCKS5. `http://` absolute-form requests are still forwarded,
 which is what a forward proxy is for.
 
+The live HTTPS BDD witnesses now exercise that supported path with the pinned,
+multi-architecture `curlimages/curl:8.21.0` image. This changes only the client
+used by the witness: curl establishes `CONNECT` before its TLS handshake, while
+the proxy continues to refuse BusyBox `wget`'s plaintext HTTPS absolute form.
+A repository regression keeps all seven live HTTPS commands on the pinned
+CONNECT-capable client.
+
 `http_forward_target` returns `HttpForwardTarget { target, tls }` rather than a
 bare string. The scheme decided the port and was then thrown away, which is how
 the two cases became indistinguishable one line later.

@@ -66,9 +66,12 @@ Point `mvm.toml` at the dev output:
 ```toml
 flake     = "."
 profile   = "dev"
-vcpus     = 2
-memory_mib = 1024
+cpus      = 2          # `vcpus` is an accepted alias
+mem       = "1024M"
 ```
+
+`mvm.toml` rejects unknown keys. Memory is `mem` (a size string) — `memory_mib`
+is a `mkGuest` argument, not a manifest key.
 
 Then:
 
@@ -84,7 +87,13 @@ You **never edit anything inside the mvm repository** to customize your dev imag
 
 ### Adding services to your dev image
 
-The shell is your interactive surface, but you can run additional services in parallel via the `services` field:
+:::caution[Not wired yet]
+The `services` field is accepted and recorded, but nothing supervises it — the
+multi-service supervisor is not built. `mkGuest` warns at evaluation time. The
+shape below is the declared surface, not running behaviour.
+:::
+
+The declared shape:
 
 ```nix
 dev = mvm.lib.${system}.mkGuest {
@@ -103,7 +112,8 @@ dev = mvm.lib.${system}.mkGuest {
 };
 ```
 
-Each service runs as its own supervised process. The shell stays your foreground; services are background.
+The intent is that each service runs as its own supervised process with the
+shell as your foreground. None of that supervision exists yet.
 
 ### Forcing the dev path on a sealed entrypoint
 
