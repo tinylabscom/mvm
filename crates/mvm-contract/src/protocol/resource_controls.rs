@@ -151,6 +151,172 @@ impl Default for ResourceControls {
     }
 }
 
+/// How a backend observes CPU consumption, if it can.
+///
+/// These do not measure the same quantity, which is why the choice is named
+/// rather than reduced to a boolean: guest vCPU time excludes the host-side
+/// device emulation that a process total includes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CpuObservation {
+    /// Nothing about CPU can be measured on this tier.
+    None,
+    /// Summed Mach clocks of every vCPU thread: guest execution only.
+    HvfSummedVcpuClock,
+    /// The in-process VMM's own process CPU time: guest plus VMM overhead.
+    HostProcessCpu,
+    /// `getrusage` over a reaped VMM child: guest plus VMM overhead.
+    HostChildRusage,
+}
+
+impl CpuObservation {
+    /// The mechanism a capture site uses on a backend carrying this control,
+    /// or `None` where there is nothing to measure.
+    #[must_use]
+    pub const fn mechanism(self) -> Option<Mechanism> {
+        match self {
+            Self::None => None,
+            Self::HvfSummedVcpuClock => Some(Mechanism::HvfSummedVcpuClock),
+            Self::HostProcessCpu => Some(Mechanism::HostProcessCpu),
+            Self::HostChildRusage => Some(Mechanism::HostChildRusage),
+        }
+    }
+}
+
+/// How a backend observes resident memory, if it can.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryObservation {
+    /// Nothing about resident memory can be measured on this tier.
+    None,
+    /// The kernel-kept resident high-water mark of the VMM process.
+    HostProcessRss,
+}
+
+impl MemoryObservation {
+    /// The mechanism a capture site uses on a backend carrying this control,
+    /// or `None` where there is nothing to measure.
+    #[must_use]
+    pub const fn mechanism(self) -> Option<Mechanism> {
+        match self {
+            Self::None => None,
+            Self::HostProcessRss => Some(Mechanism::HostProcessRss),
+        }
+    }
+}
+
+/// How a backend observes host-side state growth, if it can.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostStateObservation {
+    /// Nothing about host-side state growth can be measured on this tier.
+    None,
+    /// Byte total of the VM state directory tree.
+    StateDirTreeBytes,
+}
+
+impl HostStateObservation {
+    /// The mechanism a capture site uses on a backend carrying this control,
+    /// or `None` where there is nothing to measure.
+    #[must_use]
+    pub const fn mechanism(self) -> Option<Mechanism> {
+        match self {
+            Self::None => None,
+            Self::StateDirTreeBytes => Some(Mechanism::StateDirTreeBytes),
+        }
+    }
+}
+
+/// How a backend observes wall-clock span.
+///
+/// There is no `None`: the span is the host's own observation of the run and
+/// needs no cooperation from the backend. Distinct from the supervisor's
+/// wall-clock *timer*, which bounds a run and is a control, not an
+/// observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WallObservation {
+    /// The host's own observation of the span from launch to teardown.
+    HostLaunchSpan,
+}
+
+impl WallObservation {
+    /// The mechanism a capture site uses. Unconditional, because every tier
+    /// can be timed by the host that launched it.
+    #[must_use]
+    pub const fn mechanism(self) -> Mechanism {
+        match self {
+            Self::HostLaunchSpan => Mechanism::HostLaunchSpan,
+        }
+    }
+}
+
+/// What one backend can honestly report about a finished run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceObservation {
+    pub cpu: CpuObservation,
+    pub memory: MemoryObservation,
+    pub host_state: HostStateObservation,
+    pub wall: WallObservation,
+}
+
+impl ResourceObservation {
+    /// What each backend can observe. Exhaustive on purpose, for the same
+    /// reason [`ResourceControls::for_backend`] is: a new `BackendKind` must
+    /// answer this rather than inherit an answer nobody chose for it.
+    ///
+    /// Observation is a different question from control. A tier that can bound
+    /// nothing may still have a resident process to measure, and a tier that
+    /// bounds CPU only under a grant can measure it without one.
+    #[must_use]
+    pub const fn for_backend(kind: BackendKind) -> Self {
+        match kind {
+            // The vCPU threads are ours and their Mach clocks are readable
+            // without a quota controller, so CPU here is measurable whether or
+            // not a share was granted. AppleContainer is this same tier with a
+            // substituted kernel image.
+            BackendKind::Hvf | BackendKind::AppleContainer => Self {
+                cpu: if cfg!(target_os = "macos") {
+                    CpuObservation::HvfSummedVcpuClock
+                } else {
+                    CpuObservation::None
+                },
+                memory: MemoryObservation::HostProcessRss,
+                host_state: HostStateObservation::StateDirTreeBytes,
+                wall: WallObservation::HostLaunchSpan,
+            },
+            // The VMM runs inside our own supervisor process, so its CPU is
+            // this process's CPU — measurable with no cgroup, no session bus,
+            // and no grant.
+            BackendKind::Libkrun => Self {
+                cpu: CpuObservation::HostProcessCpu,
+                memory: MemoryObservation::HostProcessRss,
+                host_state: HostStateObservation::StateDirTreeBytes,
+                wall: WallObservation::HostLaunchSpan,
+            },
+            // The VMM is a child we reap, so its resource usage arrives with
+            // the reap itself.
+            BackendKind::Firecracker | BackendKind::Qemu => Self {
+                cpu: CpuObservation::HostChildRusage,
+                memory: MemoryObservation::HostProcessRss,
+                host_state: HostStateObservation::StateDirTreeBytes,
+                wall: WallObservation::HostLaunchSpan,
+            },
+            // Wasm's fuel counter is declared and unwired, so a fuel-derived
+            // CPU number would assert a measurement that does not happen.
+            // WebLinux runs in a browser with no host VMM process to observe.
+            // Mock boots nothing.
+            BackendKind::Wasm | BackendKind::WebLinux | BackendKind::Mock => Self {
+                cpu: CpuObservation::None,
+                memory: MemoryObservation::None,
+                host_state: HostStateObservation::None,
+                wall: WallObservation::HostLaunchSpan,
+            },
+        }
+    }
+}
+
 /// How a measured value was observed. Named on every measurement because the
 /// mechanisms do not measure the same quantity: guest vCPU time excludes the
 /// host-side device emulation that a process total includes.
@@ -375,5 +541,99 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn hvf_observes_guest_vcpu_time_rather_than_a_process_total() {
+        let observation = ResourceObservation::for_backend(BackendKind::Hvf);
+        if cfg!(target_os = "macos") {
+            assert_eq!(observation.cpu, CpuObservation::HvfSummedVcpuClock);
+        } else {
+            assert_eq!(observation.cpu, CpuObservation::None);
+        }
+    }
+
+    #[test]
+    fn apple_container_observes_exactly_what_hvf_does() {
+        // It is the HVF tier with a substituted kernel image, so a divergence
+        // here would be a claim about a difference that does not exist.
+        assert_eq!(
+            ResourceObservation::for_backend(BackendKind::AppleContainer),
+            ResourceObservation::for_backend(BackendKind::Hvf)
+        );
+    }
+
+    #[test]
+    fn a_cpu_bound_a_backend_cannot_apply_does_not_stop_it_observing_memory() {
+        // The distinction the whole matrix exists for: a control is not an
+        // observation. Firecracker off Linux bounds no CPU and still has a
+        // resident process to measure.
+        let controls = ResourceControls::for_backend(BackendKind::Firecracker);
+        let observation = ResourceObservation::for_backend(BackendKind::Firecracker);
+        if !cfg!(target_os = "linux") {
+            assert_eq!(controls.cpu, CpuControl::None);
+        }
+        assert_eq!(observation.memory, MemoryObservation::HostProcessRss);
+    }
+
+    #[test]
+    fn the_non_vm_tiers_observe_only_the_span_the_host_saw() {
+        for kind in [BackendKind::Wasm, BackendKind::WebLinux, BackendKind::Mock] {
+            let observation = ResourceObservation::for_backend(kind);
+            assert_eq!(observation.cpu, CpuObservation::None);
+            assert_eq!(observation.memory, MemoryObservation::None);
+            assert_eq!(observation.host_state, HostStateObservation::None);
+            assert_eq!(observation.wall, WallObservation::HostLaunchSpan);
+        }
+    }
+
+    #[test]
+    fn every_backend_observes_the_wall_span_because_it_needs_no_cooperation() {
+        for kind in [
+            BackendKind::Firecracker,
+            BackendKind::Libkrun,
+            BackendKind::Qemu,
+            BackendKind::Mock,
+            BackendKind::Hvf,
+            BackendKind::Wasm,
+            BackendKind::WebLinux,
+            BackendKind::AppleContainer,
+        ] {
+            assert_eq!(
+                ResourceObservation::for_backend(kind).wall,
+                WallObservation::HostLaunchSpan
+            );
+        }
+    }
+
+    #[test]
+    fn every_observation_maps_to_a_distinct_mechanism() {
+        // The observation enums deliberately mirror `Mechanism`'s vocabulary.
+        // Mapping every measurable variant into that one vocabulary, and
+        // requiring the mapping to be injective, is what catches a variant
+        // added to one enum and not the other: without it the two would drift
+        // into carrying duplicate wire strings for different quantities.
+        let mapped = [
+            CpuObservation::HvfSummedVcpuClock.mechanism(),
+            CpuObservation::HostProcessCpu.mechanism(),
+            CpuObservation::HostChildRusage.mechanism(),
+            MemoryObservation::HostProcessRss.mechanism(),
+            HostStateObservation::StateDirTreeBytes.mechanism(),
+            Some(WallObservation::HostLaunchSpan.mechanism()),
+        ];
+        for (i, a) in mapped.iter().enumerate() {
+            assert!(
+                a.is_some(),
+                "a measurable observation must name a mechanism"
+            );
+            for (j, b) in mapped.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b, "two observations claim the same mechanism");
+                }
+            }
+        }
+        assert_eq!(CpuObservation::None.mechanism(), None);
+        assert_eq!(MemoryObservation::None.mechanism(), None);
+        assert_eq!(HostStateObservation::None.mechanism(), None);
     }
 }

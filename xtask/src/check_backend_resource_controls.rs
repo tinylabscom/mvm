@@ -1,10 +1,19 @@
 //! `xtask check-backend-resource-controls`
 //!
-//! Every `BackendKind` must answer what it can bound. The exhaustive match in
-//! `ResourceControls::for_backend` already makes a new variant a compile
+//! Every `BackendKind` must answer what it can bound and what it can observe.
+//! The exhaustive matches in `ResourceControls::for_backend` and
+//! `ResourceObservation::for_backend` already make a new variant a compile
 //! error; this gate closes the way around that: a wildcard or bare-binding
 //! arm, which would let a future backend silently inherit an answer nobody
 //! chose for it.
+//!
+//! *Every* `for_backend` in the file is checked, and at least two must exist.
+//! The original shape located its target with a first-match `find`, which
+//! meant the moment the file grew a second exhaustive match the gate went on
+//! inspecting only the first one and stayed green over an unchecked matrix.
+//! The count floor is the other half of the same problem: a gate that passes
+//! when a matrix has been deleted has stopped noticing that the matrix used
+//! to exist.
 //!
 //! The function body is located by brace-depth counting, not by scanning for
 //! the first unindented `}`: `for_backend` nests an `if cfg!(...) { } else {
@@ -44,6 +53,9 @@ use std::path::Path;
 const CONTROLS_FILE: &str = "crates/mvm-contract/src/protocol/resource_controls.rs";
 const FN_MARKER: &str = "pub const fn for_backend";
 const ENUM_PATH: &str = "BackendKind::";
+/// The control matrix and the observation matrix. Both are `for_backend`
+/// blocks in this file, and neither may go missing without the gate saying so.
+const MINIMUM_MATRICES: usize = 2;
 
 pub fn run(workspace: &Path) -> Result<()> {
     let path = workspace.join(CONTROLS_FILE);
@@ -51,9 +63,25 @@ pub fn run(workspace: &Path) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("reading {CONTROLS_FILE}: {e}"))?;
     let body = crate::rust_source::blank_comments_and_strings(&raw);
 
-    let fn_block = extract_marked_block(&body, FN_MARKER)
-        .ok_or_else(|| anyhow::anyhow!("{CONTROLS_FILE} no longer defines for_backend"))?;
+    let fn_blocks = marked_blocks(&body, FN_MARKER);
+    if fn_blocks.len() < MINIMUM_MATRICES {
+        bail!(
+            "{CONTROLS_FILE} must declare both the control and the observation matrix \
+             as `{FN_MARKER}`; found {}. A matrix that has been deleted is a question \
+             a new BackendKind no longer has to answer.",
+            fn_blocks.len()
+        );
+    }
 
+    for fn_block in fn_blocks {
+        check_one_matrix(&fn_block)?;
+    }
+    Ok(())
+}
+
+/// Reject any arm of one `for_backend` match whose pattern has an alternative
+/// that never names a `BackendKind` variant.
+fn check_one_matrix(fn_block: &MarkedBlock<'_>) -> Result<()> {
     // The parameter name has to come from the signature header, not the
     // body: the body's first `(` is `cfg!(target_os = "linux")`'s, not the
     // parameter list's, so reading it from `fn_block.body` would silently
@@ -96,10 +124,41 @@ pub fn run(workspace: &Path) -> Result<()> {
 struct MarkedBlock<'a> {
     header: &'a str,
     body: &'a str,
+    /// Absolute offset into the haystack one past the block's closing brace,
+    /// so a walk over every occurrence of a marker can resume past this one.
+    end: usize,
 }
 
 fn extract_marked_block<'a>(haystack: &'a str, marker: &str) -> Option<MarkedBlock<'a>> {
     let marker_pos = haystack.find(marker)?;
+    block_at(haystack, marker_pos)
+}
+
+/// Every block in `haystack` introduced by `marker`, in source order.
+///
+/// A first-match lookup was the original shape, and it silently stopped
+/// inspecting this file the moment it grew a second exhaustive match: the gate
+/// stayed green while the new matrix went unchecked. Anything that must hold
+/// for one `for_backend` must hold for all of them.
+fn marked_blocks<'a>(haystack: &'a str, marker: &str) -> Vec<MarkedBlock<'a>> {
+    let mut blocks = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(found) = haystack[cursor..].find(marker) {
+        let marker_pos = cursor + found;
+        let Some(block) = block_at(haystack, marker_pos) else {
+            break;
+        };
+        cursor = block.end;
+        blocks.push(block);
+    }
+    blocks
+}
+
+/// The block introduced by a marker already located at `marker_pos`: the `{`
+/// that follows it, brace-depth-matched to its close. Depth counting — not a
+/// scan for the first unindented `}` — is what survives a nested block like
+/// `for_backend`'s `if cfg!(...) { } else { }`, which both matrices contain.
+fn block_at(haystack: &str, marker_pos: usize) -> Option<MarkedBlock<'_>> {
     let open = haystack[marker_pos..].find('{')? + marker_pos;
     let mut depth = 0i32;
     for (offset, b) in haystack.as_bytes()[open..].iter().enumerate() {
@@ -111,6 +170,7 @@ fn extract_marked_block<'a>(haystack: &'a str, marker: &str) -> Option<MarkedBlo
                     return Some(MarkedBlock {
                         header: &haystack[marker_pos..open],
                         body: &haystack[open..=open + offset],
+                        end: open + offset + 1,
                     });
                 }
             }
@@ -418,7 +478,7 @@ mod tests {
         }
     }
 "#;
-        let tmp = write_controls_fixture("legitimate-paren-or-pattern", controls_body);
+        let tmp = write_paired_fixture("legitimate-paren-or-pattern", controls_body);
         run(&tmp).expect(
             "a parenthesized or-pattern naming BackendKind:: on every alternative must pass",
         );
@@ -444,7 +504,7 @@ mod tests {
         }
     }
 "#;
-        let tmp = write_controls_fixture("leading-pipe", controls_body);
+        let tmp = write_paired_fixture("leading-pipe", controls_body);
         run(&tmp).expect("a leading `|` must not be misread as a missing alternative");
         cleanup(&tmp);
     }
@@ -481,7 +541,7 @@ mod tests {
         }
     }
 "#;
-        let tmp = write_controls_fixture("legitimate-multi-variant", controls_body);
+        let tmp = write_paired_fixture("legitimate-multi-variant", controls_body);
         run(&tmp)
             .expect("a real multi-variant arm naming BackendKind:: on every alternative must pass");
         cleanup(&tmp);
@@ -508,7 +568,7 @@ mod tests {
         }
     }
 "#;
-        let tmp = write_controls_fixture("after-nested-if", controls_body);
+        let tmp = write_paired_fixture("after-nested-if", controls_body);
         let err = run(&tmp).unwrap_err();
         assert!(err.to_string().contains("never"));
         cleanup(&tmp);
@@ -539,7 +599,7 @@ mod tests {
         }
     }
 "#;
-        let tmp = write_controls_fixture("unrelated-nested-match", controls_body);
+        let tmp = write_paired_fixture("unrelated-nested-match", controls_body);
         run(&tmp).expect("a wildcard outside for_backend's own match must not be flagged");
         cleanup(&tmp);
     }
@@ -560,7 +620,7 @@ mod tests {
         }
     }
 "#;
-        let tmp = write_controls_fixture("all-explicit", controls_body);
+        let tmp = write_paired_fixture("all-explicit", controls_body);
         run(&tmp).expect("every arm names BackendKind:: explicitly");
         cleanup(&tmp);
     }
@@ -602,12 +662,52 @@ mod tests {
         }
     }
 "#;
-        let tmp = write_controls_fixture("brace-in-string", controls_body);
+        let tmp = write_paired_fixture("brace-in-string", controls_body);
         let err = run(&tmp).unwrap_err();
         assert!(
             err.to_string().contains("never"),
             "a brace inside a literal must not hide the arms after it, got: {err}"
         );
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn a_wildcard_in_a_later_for_backend_is_caught_not_skipped() {
+        // The gate used to locate its target with a first-match find, so a second
+        // exhaustive match in the same file was never inspected at all.
+        let body = r#"
+    pub const fn for_backend(kind: BackendKind) -> Self {
+        match kind {
+            BackendKind::Firecracker => Self { cpu: CpuControl::None },
+            BackendKind::Libkrun => Self { cpu: CpuControl::None },
+        }
+    }
+    pub const fn for_backend(kind: BackendKind) -> Self {
+        match kind {
+            BackendKind::Firecracker => Self { cpu: CpuObservation::None },
+            _ => Self { cpu: CpuObservation::None },
+        }
+    }
+"#;
+        let tmp = write_controls_fixture("later_wildcard", body);
+        let err = run(&tmp).unwrap_err();
+        assert!(err.to_string().contains("never"), "got: {err}");
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn both_for_backend_matches_must_be_present_for_the_gate_to_pass() {
+        // A gate that passes when the second matrix has been deleted is a gate
+        // that stops noticing when the second matrix stops existing.
+        let body = r#"
+    pub const fn for_backend(kind: BackendKind) -> Self {
+        match kind {
+            BackendKind::Firecracker => Self { cpu: CpuControl::None },
+        }
+    }
+"#;
+        let tmp = write_controls_fixture("only_one", body);
+        assert!(run(&tmp).is_err(), "one matrix is not both matrices");
         cleanup(&tmp);
     }
 
@@ -625,7 +725,7 @@ mod tests {
     }}
 "#
         );
-        let tmp = write_controls_fixture(label, &controls_body);
+        let tmp = write_paired_fixture(label, &controls_body);
         let err = run(&tmp).unwrap_err();
         assert!(
             err.to_string().contains("never"),
@@ -642,6 +742,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         tmp
+    }
+
+    /// A second, unimpeachable `for_backend` to sit beside a fixture that is
+    /// exercising one matrix. The gate requires both matrices to be present,
+    /// so a fixture testing arm-level behaviour has to satisfy the count floor
+    /// without that floor being what the test observes.
+    const COMPANION_MATRIX: &str = r#"
+    pub const fn for_backend(kind: BackendKind) -> Self {
+        match kind {
+            BackendKind::Firecracker => Self { cpu: CpuObservation::None },
+            BackendKind::Mock => Self { cpu: CpuObservation::None },
+        }
+    }
+"#;
+
+    /// Write a fixture whose sole subject is `fn_body`, paired with a valid
+    /// companion matrix so only `fn_body` can be the reason the gate speaks.
+    fn write_paired_fixture(label: &str, fn_body: &str) -> std::path::PathBuf {
+        write_controls_fixture(label, &format!("{fn_body}{COMPANION_MATRIX}"))
     }
 
     fn write_controls_fixture(label: &str, fn_body: &str) -> std::path::PathBuf {
