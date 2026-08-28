@@ -506,9 +506,10 @@ counts each machine's configured maximum rather than the balloon's
 current commitment. CPU is the partial half: a granted share wraps the VMM spawn in a
 systemd transient scope on Linux and the achieved tier is read back off
 `cpu.max`. On the in-house HVF VMM on macOS there is no host-level quota
-primitive, so the run loop enforces the share in-process using the vCPU
-thread's Mach CPU time; the achieved tier is read back from the scheduler's
-measured record and audited. libkrun has no in-process vCPU control, so a CPU
+primitive, so the run loop enforces the share in-process using the summed Mach
+CPU time of every vCPU thread — the sum, so the bound stays a bound on the
+machine rather than on one CPU of an SMP guest; the achieved tier is read back
+from the scheduler's measured record and audited. libkrun has no in-process vCPU control, so a CPU
 grant there stays `declared` and `--prod` refuses it. Wall clock is enforced
 by the per-VM supervisor on libkrun and HVF: the process that owns the guest
 for its whole life arms a timer from the admitted plan, and a workload that

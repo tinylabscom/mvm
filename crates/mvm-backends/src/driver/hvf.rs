@@ -129,13 +129,6 @@ fn relay_supervisor_config_with_handoff(
     handoff: Option<&HandoffConfig>,
     exclusive_image_lock: Option<&Path>,
 ) -> Result<HvfSupervisorConfig> {
-    if spec.vcpus != 1 {
-        bail!(
-            "the hvf backend supports exactly 1 vCPU, but this launch requests {}",
-            spec.vcpus
-        );
-    }
-
     let kernel = match &spec.kernel {
         KernelImage::Path(p) => p.clone(),
         KernelImage::Bundled => {
@@ -232,6 +225,7 @@ fn relay_supervisor_config_with_handoff(
         kernel,
         cmdline,
         memory_mib: spec.memory_mib,
+        vcpus: spec.vcpus,
         initramfs: spec.initramfs.clone(),
         disks,
         virtiofs_root: spec
@@ -414,6 +408,22 @@ impl VmmDriver for HvfDriver {
         // vsock is live-proven through the unified run loop; the rest land as
         // pause/snapshot/networking are wired onto the primitive.
         VmCapabilities {
+            // Asked of the host, not assumed. This was a hardcoded `Some(4)`
+            // for a while: 5, 6 and 8 vCPU guests really did fail to reach the
+            // agent, and the number recorded that. The cause turned out to be a
+            // race in this backend's own vCPU creation rather than any limit —
+            // HVF hands out GIC redistributor frames in `hv_vcpu_create` order,
+            // and the creation threads were unordered, so two CPUs swapped
+            // frames and the guest could not match either to its
+            // redistributor. The suspicion written beside that constant — that
+            // a plausible-looking derivation would hide a threading bug — was
+            // right, and it was the constant that was hiding it.
+            //
+            // With creation ordered, 1, 2, 4, 5, 6, 8, 16 and 32 all boot and
+            // report their full count. So the ceiling comes from
+            // `hv_vm_get_max_vcpu_count` now, which answers 64 here and answers
+            // for itself on a different host.
+            max_vcpus: hvf_backend::hvf_max_vcpus(),
             pause_resume: true,
             // The supervisor serializes guest RAM plus vCPU and deterministic
             // device state under an acknowledged pause, and reloads both into a
@@ -1473,22 +1483,32 @@ mod tests {
         assert!(relay_supervisor_config(&spec, &sample_paths()).is_err());
     }
 
+    /// A multi-vCPU request reaches the supervisor rather than being refused.
+    ///
+    /// This backend used to bail here, because the VMM below described one CPU
+    /// in the device tree whatever was asked for and answering a `CPU_ON` it
+    /// could not honour would hang the boot. It creates the CPUs now, so the
+    /// only correct thing to do with the count is pass it on — and passing it
+    /// on is the whole fix, since the supervisor is the process that calls
+    /// `hv_vcpu_create`.
     #[test]
-    fn relay_config_refuses_a_vcpu_count_hvf_cannot_honor() {
-        let mut spec = spec_with(
-            KernelImage::Path("/img/Image".into()),
-            vec![egress_port("/run/egress.sock")],
-            vec![],
-        );
-        spec.vcpus = 2;
+    fn relay_config_carries_a_multi_vcpu_request_to_the_supervisor() {
+        for requested in [1u32, 2, 4] {
+            let mut spec = spec_with(
+                KernelImage::Path("/img/Image".into()),
+                vec![egress_port("/run/egress.sock")],
+                vec![],
+            );
+            spec.vcpus = requested;
 
-        let error = relay_supervisor_config(&spec, &sample_paths())
-            .expect_err("HVF must not silently reduce a multi-vCPU request");
+            let config = relay_supervisor_config(&spec, &sample_paths())
+                .expect("a vCPU count this backend now honours must not be refused");
 
-        assert_eq!(
-            error.to_string(),
-            "the hvf backend supports exactly 1 vCPU, but this launch requests 2"
-        );
+            assert_eq!(
+                config.vcpus, requested,
+                "the supervisor must be told the {requested} CPUs that were asked for"
+            );
+        }
     }
 
     #[test]

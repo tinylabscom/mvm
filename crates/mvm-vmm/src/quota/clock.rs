@@ -104,6 +104,36 @@ impl Drop for ThreadCpuHandle {
     }
 }
 
+/// The CPU consumed by a whole machine: the sum of its vCPU threads.
+///
+/// A quota bounds the machine, so an SMP guest has to be charged for every vCPU
+/// it is running. Reading one thread of a four-CPU guest reports a quarter of
+/// what it is actually consuming, and a controller fed that number never
+/// throttles — the workload runs at four times its granted share while the
+/// audit record says it stayed inside it.
+pub struct SummedClock<C: ThreadCpuClock> {
+    threads: Vec<C>,
+}
+
+impl<C: ThreadCpuClock> SummedClock<C> {
+    /// Sum `threads`. Each must have been captured on the thread it measures.
+    pub fn new(threads: Vec<C>) -> Self {
+        Self { threads }
+    }
+}
+
+impl<C: ThreadCpuClock> ThreadCpuClock for SummedClock<C> {
+    fn consumed(&self) -> Duration {
+        // Saturating: a machine cannot consume more CPU than `Duration` holds,
+        // but the alternative is an overflow panic on the controller thread,
+        // which would leave the vCPUs held and the VM wedged.
+        self.threads
+            .iter()
+            .map(ThreadCpuClock::consumed)
+            .fold(Duration::ZERO, |total, one| total.saturating_add(one))
+    }
+}
+
 /// A fake clock that always returns the same value.
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone)]
@@ -211,6 +241,42 @@ mod tests {
             delta < Duration::from_millis(5),
             "a sleeping thread should be charged almost no CPU, got {delta:?}"
         );
+    }
+
+    /// A machine's consumption is every vCPU's, added up.
+    ///
+    /// The number that matters for a quota: four CPUs each burning a full core
+    /// for a second is four core-seconds of machine, and a controller told
+    /// otherwise lets the workload run past its granted share.
+    #[test]
+    fn a_summed_clock_charges_every_vcpu_of_the_machine() {
+        let clock = SummedClock::new(vec![
+            FixedClock::new(Duration::from_millis(250)),
+            FixedClock::new(Duration::from_millis(250)),
+            FixedClock::new(Duration::from_millis(500)),
+        ]);
+        assert_eq!(clock.consumed(), Duration::from_millis(1000));
+    }
+
+    /// A one-vCPU machine reads exactly as it did before summing existed.
+    #[test]
+    fn a_summed_clock_over_one_thread_is_that_thread() {
+        let clock = SummedClock::new(vec![FixedClock::new(Duration::from_millis(37))]);
+        assert_eq!(clock.consumed(), Duration::from_millis(37));
+    }
+
+    /// Summing cannot panic the controller thread.
+    ///
+    /// An overflow here would leave the throttle flag set and every vCPU parked
+    /// behind a controller that is no longer running — a wedged VM rather than
+    /// a mis-measured one.
+    #[test]
+    fn a_summed_clock_saturates_rather_than_overflowing() {
+        let clock = SummedClock::new(vec![
+            FixedClock::new(Duration::MAX),
+            FixedClock::new(Duration::MAX),
+        ]);
+        assert_eq!(clock.consumed(), Duration::MAX);
     }
 
     #[cfg(not(target_os = "macos"))]

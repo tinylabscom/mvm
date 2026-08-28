@@ -3,8 +3,9 @@
 //! The former Firecracker TAP redirect lived here. Only the port-number
 //! allocator remains for the live libkrun endpoint configuration.
 
-/// Per-slot terminator port base. The slot range is retained for compatibility
-/// with persisted endpoint metadata; it no longer identifies a guest NIC.
+/// Per-slot terminator port base. The slot range is a stable numbering that
+/// persisted endpoint metadata already refers to — changing it would move live
+/// endpoints, so it stays. It no longer identifies a guest NIC.
 pub const TERMINATOR_PORT_BASE: u16 = 18080;
 
 /// Derive a terminator port from a slot index.

@@ -29,7 +29,7 @@ pub use mvm_contract::protocol::vm_backend::{
     StandbySpec, StandbyState, StartMode, VmCapabilities, VmExitStatus, VmFile, VmId, VmInfo,
     VmNetworkInfo, VmPortMapping, VmStatus, VmVolume, VmVolumeKind, WarmArtifactIdentity,
     WarmClaimOutcome, WarmClaimRefusal, WarmClaimTiming, WarmLaunchMode, WarmPrewarmSource,
-    WarmServiceRequest, WarmServiceResponse, WarmStartError, WarmStartOutcome,
+    WarmServiceRequest, WarmServiceResponse, WarmStartError, WarmStartOutcome, clamp_vcpus,
     encode_egress_ca_cmdline, encode_secret_env_cmdline, encode_user_volumes_cmdline,
 };
 
@@ -444,9 +444,9 @@ pub trait VmBackend: Send + Sync {
     ///
     /// Returns the [`VmId`] assigned to the running VM.
     /// Equivalent to [`start_with_mode`](Self::start_with_mode) with
-    /// [`StartMode::Detached`] — preserved for back-compat with
-    /// existing consumers + because Detached is the right default
-    /// for the most common path (`mvmctl up`).
+    /// [`StartMode::Detached`], which is the right default for the most common
+    /// path (`mvmctl up`) — this is a default-argument convenience, not a
+    /// compatibility shim.
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {
         self.start_with_mode(config, StartMode::Detached)
     }

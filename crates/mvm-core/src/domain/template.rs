@@ -26,10 +26,9 @@ pub struct TemplateConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TemplateVariant {
-    /// Template name for this variant; if empty, falls back to `<template_id>-<role>`.
+    /// Template name for this variant; if empty, falls back to the template id.
     #[serde(default)]
     pub name: String,
-    pub role: String,
     #[serde(default = "default_profile")]
     pub profile: String,
     pub vcpus: u8,
@@ -51,7 +50,6 @@ pub struct TemplateSpec {
     pub template_id: String,
     pub flake_ref: String,
     pub profile: String,
-    pub role: String,
     pub vcpus: u8,
     pub mem_mib: u32,
     /// Initial host commitment in MiB when the template opts into
@@ -258,7 +256,6 @@ pub struct TemplateRevision {
     pub artifact_paths: crate::pool::ArtifactPaths,
     pub built_at: String,
     pub profile: String,
-    pub role: String,
     pub vcpus: u8,
     pub mem_mib: u32,
     pub data_disk_mib: u32,
@@ -283,12 +280,11 @@ impl TemplateRevision {
     /// Composite cache key from the two dimensions that define a unique build
     /// output: flake.lock content and Nix profile.
     ///
-    /// The historical `role` component was dropped: role is a fleet
-    /// concept (mvmd's territory) and role-shaped flake variants live behind
-    /// `profile` (`packages.<system>.gateway` vs `packages.<system>.worker`)
-    /// or `passthru` inside the flake itself. The struct's `role` field is
-    /// preserved for forward-/backward-compat with on-disk revision JSON,
-    /// but it no longer participates in build identity.
+    /// The historical `role` component was dropped: role is a fleet concept
+    /// (mvmd's territory) and role-shaped flake variants live behind `profile`
+    /// (`packages.<system>.gateway` vs `packages.<system>.worker`) or
+    /// `passthru` inside the flake itself. The field it was read from is gone
+    /// too; a revision JSON that still carries `role` simply ignores it.
     pub fn cache_key(&self) -> String {
         let mut hasher = sha2::Sha256::new();
         hasher.update(self.flake_lock_hash.as_bytes());
@@ -303,7 +299,7 @@ mod tests {
     use super::*;
     use crate::pool::ArtifactPaths;
 
-    fn make_revision(flake_lock_hash: &str, profile: &str, role: &str) -> TemplateRevision {
+    fn make_revision(flake_lock_hash: &str, profile: &str) -> TemplateRevision {
         TemplateRevision {
             schema_version: CURRENT_SCHEMA_VERSION,
             revision_hash: "abc123".to_string(),
@@ -318,7 +314,6 @@ mod tests {
             },
             built_at: "2025-01-01T00:00:00Z".to_string(),
             profile: profile.to_string(),
-            role: role.to_string(),
             vcpus: 2,
             mem_mib: 1024,
             data_disk_mib: 0,
@@ -329,40 +324,30 @@ mod tests {
 
     #[test]
     fn same_inputs_same_cache_key() {
-        let a = make_revision("lock1", "minimal", "worker");
-        let b = make_revision("lock1", "minimal", "worker");
+        let a = make_revision("lock1", "minimal");
+        let b = make_revision("lock1", "minimal");
         assert_eq!(a.cache_key(), b.cache_key());
     }
 
     #[test]
     fn different_profile_different_cache_key() {
-        let a = make_revision("lock1", "minimal", "worker");
-        let b = make_revision("lock1", "full", "worker");
+        let a = make_revision("lock1", "minimal");
+        let b = make_revision("lock1", "full");
         assert_ne!(a.cache_key(), b.cache_key());
     }
 
     #[test]
-    fn role_does_not_affect_cache_key() {
-        // role was dropped from the cache key. Two revisions
-        // that differ only in `role` (same flake.lock + profile) hash
-        // to the same key — they refer to the same build output.
-        let a = make_revision("lock1", "minimal", "worker");
-        let b = make_revision("lock1", "minimal", "gateway");
-        assert_eq!(a.cache_key(), b.cache_key());
-    }
-
-    #[test]
     fn different_flake_different_cache_key() {
-        let a = make_revision("lock1", "minimal", "worker");
-        let b = make_revision("lock2", "minimal", "worker");
+        let a = make_revision("lock1", "minimal");
+        let b = make_revision("lock2", "minimal");
         assert_ne!(a.cache_key(), b.cache_key());
     }
 
     #[test]
     fn cache_key_depends_on_flake_lock_not_revision_hash() {
-        let mut a = make_revision("same-lock", "minimal", "worker");
+        let mut a = make_revision("same-lock", "minimal");
         a.revision_hash = "rev-aaa".to_string();
-        let mut b = make_revision("same-lock", "minimal", "worker");
+        let mut b = make_revision("same-lock", "minimal");
         b.revision_hash = "rev-zzz".to_string();
         // Different revision hashes but same flake_lock/profile → same cache key
         assert_eq!(a.cache_key(), b.cache_key());
@@ -375,16 +360,16 @@ mod tests {
         // (flake_lock + profile) shouldn't care. Two revisions with
         // the same lockfile + profile but different build_mode strings
         // still hit the same cache slot.
-        let mut a = make_revision("lock1", "minimal", "worker");
+        let mut a = make_revision("lock1", "minimal");
         a.build_mode = Some("dev".to_string());
-        let mut b = make_revision("lock1", "minimal", "worker");
+        let mut b = make_revision("lock1", "minimal");
         b.build_mode = Some("prod".to_string());
         assert_eq!(a.cache_key(), b.cache_key());
     }
 
     #[test]
     fn build_mode_roundtrips_through_serde() {
-        let mut rev = make_revision("lock1", "minimal", "worker");
+        let mut rev = make_revision("lock1", "minimal");
         rev.build_mode = Some("dev".to_string());
         let json = serde_json::to_string(&rev).unwrap();
         assert!(json.contains("\"build_mode\":\"dev\""), "got: {json}");
@@ -398,7 +383,7 @@ mod tests {
         // `build_mode` field. Parsing must succeed and yield `None`
         // (consumers treat that as `BuildMode::Prod`, matching the
         // default `BuildModeFlags::resolve()`).
-        let mut rev = make_revision("lock1", "minimal", "worker");
+        let mut rev = make_revision("lock1", "minimal");
         rev.build_mode = None;
         let json = serde_json::to_string(&rev).unwrap();
         assert!(
@@ -525,7 +510,7 @@ mod tests {
 
     #[test]
     fn revision_with_snapshot_deserializes() {
-        let rev = make_revision("lock1", "minimal", "worker");
+        let rev = make_revision("lock1", "minimal");
         let mut rev = rev;
         rev.snapshot = Some(SnapshotInfo {
             created_at: "2025-03-01T00:00:00Z".to_string(),
@@ -607,7 +592,6 @@ mod tests {
             template_id: "claude-code-vm".to_string(),
             flake_ref: ".".to_string(),
             profile: "minimal".to_string(),
-            role: "agent".to_string(),
             vcpus: 2,
             mem_mib: 1024,
             mem_initial_mib: None,
