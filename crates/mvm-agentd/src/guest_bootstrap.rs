@@ -101,6 +101,7 @@ fn report_read_only_skips() {
 pub fn provision_guest_environment() -> Result<(), EgressClientMissing> {
     provision_hostname();
     ensure_runtime_dirs();
+    provision_pty_devices();
     provision_workload_identity();
     mount_mediated_tools();
     provision_egress_ca();
@@ -113,6 +114,35 @@ pub fn provision_guest_environment() -> Result<(), EgressClientMissing> {
     }
     report_read_only_skips();
     Ok(())
+}
+
+/// Make `/dev` complete enough for a shell.
+///
+/// Two gaps, both from the same cause: devtmpfs creates device nodes and
+/// nothing else, and this guest runs no udev, no mdev and no
+/// systemd-tmpfiles to fill in the rest.
+///
+/// Without the `devpts` mount `openpty(3)` has no slave filesystem to
+/// allocate from, so `machine run -it` and `machine console` fail with
+/// "openpty() failed" — a message that names the call and not the missing
+/// mount. Without the `/dev/fd` family bash process substitution fails with
+/// "/dev/fd/63: No such file or directory".
+///
+/// Both are loud on failure and neither is fatal: a non-interactive workload
+/// needs neither, and refusing to boot over a PTY it will never open would
+/// turn a degraded shell into a dead machine. Reported directly rather than
+/// through [`note_optional_step`] because both land on devtmpfs — a read-only
+/// image root is not an explanation here, so the failure is real either way.
+fn provision_pty_devices() {
+    if let Err(e) = crate::guest_mount::mount_pty_filesystem() {
+        eprintln!(
+            "mvm-guest-init: devpts not mounted at /dev/pts ({e}); \
+             interactive console sessions will fail at openpty()"
+        );
+    }
+    for failure in crate::guest_mount::link_dev_fd_family() {
+        eprintln!("mvm-guest-init: /dev symlink not created: {failure}");
+    }
 }
 
 /// Give the workload a home it owns and a name for its uid.

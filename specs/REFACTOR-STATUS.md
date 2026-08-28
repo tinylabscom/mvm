@@ -194,6 +194,16 @@ for detailed scope and acceptance criteria.
       missing-state behavior. See
       `specs/sprint/delivery/2824-stopped-vm-logs-error.md`.
 
+- [x] **Guest devpts and `/dev/fd` provisioning.** The universal-initramfs boot
+      path created `/dev/pts` and never mounted `devpts` onto it, so `openpty()`
+      failed for every `ConsoleOpen` and no OCI image could serve
+      `machine run -it` or `machine console`. PID 1 now mounts `devpts` and
+      links the `/dev/fd` family between the pivot and the privilege drop,
+      loudly but non-fatally, skipping a mount a container runtime already made.
+      A PTY-driven `@live` scenario reaches the interactive path the suite's
+      piped-stdin steps structurally could not. See
+      `specs/sprint/delivery/guest-devpts-interactive-console.md`.
+
 - [x] **Transient start console diagnostics.** A transient backend-start
       failure now prints the guest console diagnostic before deleting the
       machine state directory, preserving the guest-side cause while retaining

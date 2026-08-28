@@ -46,7 +46,17 @@ export MVM_EMBED_NO_CACHE="e2e-$(date +%s)"
 
 # Floor on scenarios that must actually execute. See the assertion after the
 # cucumber run for why a count, not just an exit status.
-MIN_SCENARIOS=17
+#
+# EXECUTED, not authored. The suite has 20 scenarios and one of them — the
+# launch-budget threshold — is gated on `MVM_BDD_PERF_BUDGET=1`, so 19 run on a
+# host that does not set it and 20 on one that does. A floor set from the
+# authored count fails everywhere the gated scenario is skipped, which is why
+# this number is 19 and not 20.
+#
+# It was 17 against an authored count of 17, so it had the same defect and had
+# simply never been reached: `pipefail` fails the cucumber pipeline the moment
+# any scenario fails, and the floor is only checked after a fully green run.
+MIN_SCENARIOS=19
 SCENARIO_LOG="$(mktemp -t mvm-e2e-scenarios)"
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 MVMCTL="$TARGET_DIR/debug/mvmctl"
