@@ -7,7 +7,7 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
 
 The runtime SDK is the application-facing sandbox API. It is the surface you use when your product needs to create a microVM, run generated code, exchange files, inspect output, and clean up.
 
-> **Status:** Partially implemented. `crates/mvm-sdk/sdks/python` and `crates/mvm-sdk/sdks/typescript` already expose `Sandbox.create(...)`, command start, file write, record mode, live mode, and cleanup helpers. The remaining lifecycle methods below are the parity target; do not treat every method name on this page as a shipped package API.
+> **Status:** Partially implemented. `crates/mvm-sdk/sdks/python` and `crates/mvm-sdk/sdks/typescript` already expose `Sandbox.create(...)`, `commands.start(...)`, the one-shot `sandbox.exec(...)`/`shell(...)` with a captured result, the full `files.write/read/list/stat/mkdir/remove/move(...)` API (everything but `write` is live-mode only), copy in/out, record mode, live mode, and cleanup helpers. The remaining lifecycle methods below are the parity target; do not treat every method name on this page as a shipped package API.
 
 For the execution-mode split between record, plan, live, and static declaration
 flows, see [Runtime modes](/sdk/runtime-modes/).
@@ -87,8 +87,8 @@ finally:
 </TabItem>
 <TabItem label="TypeScript">
 
-```ts
-import { NetworkPolicy, Sandbox, SecretRef } from "@mvm/sdk";
+```text
+import { NetworkPolicy, Sandbox, SecretRef } from "@runmvm/mvm";
 
 const sandbox = await Sandbox.create({
   image: "nix:./flake#agent-runtime",
@@ -111,6 +111,11 @@ try {
 
 </TabItem>
 </Tabs>
+
+Every name in the two blocks above is a target. Today `@runmvm/mvm` exports no
+`NetworkPolicy` value, `SecretRef` is a type-only interface with no `.from()`,
+and there is no `commands.run(...)` in either language — the shipped one-shot is
+`sandbox.exec(...)`, which returns a captured result.
 
 The same core operations should exist across Python, TypeScript, and Rust:
 

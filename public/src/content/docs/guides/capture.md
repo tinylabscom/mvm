@@ -5,7 +5,7 @@ description: Inspect a Linux project, resolve its environment, and render a revi
 
 # Capturing a Project Environment
 
-`mvm capture` inspects a project directory and the host environment required
+`mvmctl capture` inspects a project directory and the host environment required
 to build and run it, then produces a reviewable MVM definition. It is
 **project-scoped capture**, not lossless machine cloning.
 
@@ -47,29 +47,29 @@ to build and run it, then produces a reviewable MVM definition. It is
 
 ```bash
 # Capture the project environment.
-mvm capture project ./my-app \\
-  --run "cargo test" \\
+mvmctl capture project ./my-app \
+  --run "cargo test" \
   --output capture.json
 
 # Resolve the report into canonical MVM IR.
-mvm capture resolve capture.json \\
+mvmctl capture resolve capture.json \
   --output environment.json
 
 # Render Nix artifacts and record a verification command.
-mvm capture verify environment.json \\
-  --manifest-dir ./my-app \\
-  --run "cargo test" \\
+mvmctl capture verify environment.json \
+  --manifest-dir ./my-app \
+  --run "cargo test" \
   --out-dir ./mvm-verify
 
 # (Optional) Build the rendered flake in the Linux builder VM.
-mvm capture verify environment.json \\
-  --manifest-dir ./my-app \\
-  --run "cargo test" \\
-  --out-dir ./mvm-verify \\
+mvmctl capture verify environment.json \
+  --manifest-dir ./my-app \
+  --run "cargo test" \
+  --out-dir ./mvm-verify \
   --exec-in-builder-vm
 
 # (Optional) Boot a microVM in the builder VM and replay the command inside the guest.
-mvm capture verify environment.json \
+mvmctl capture verify environment.json \
   --manifest-dir ./my-app \
   --run "cargo test" \
   --out-dir ./mvm-verify \
@@ -81,7 +81,7 @@ for tracing and verification; they are not executed during capture.
 
 ## Verification status
 
-`mvm capture verify` writes `verification.json` to `--out-dir`. Each `--run`
+`mvmctl capture verify` writes `verification.json` to `--out-dir`. Each `--run`
 command produces a `VerificationRecord` with one of the following statuses:
 
 - `recorded` — command captured but not executed (default).

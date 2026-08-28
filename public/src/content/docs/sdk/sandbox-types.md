@@ -7,13 +7,16 @@ description: Product-level sandbox patterns and their current mvm implementation
 microVM with explicit policy, audit, and lifecycle state. Product-facing SDKs
 can layer specialized helpers over that substrate.
 
+`mvmctl machine fs` (below) is a hidden advanced verb: it works, but it does not
+appear in `mvmctl machine --help`.
+
 ## Type matrix
 
 | Type | Best for | Current path | SDK status |
 | --- | --- | --- | --- |
 | General sandbox | Commands, files, services, long-running work. | `mvmctl machine build`, `mvmctl machine run`, `mvmctl machine exec`, `mvmctl machine fs`, `mvmctl machine logs`. | Partial Python/TypeScript runtime surface. |
-| Code sandbox | Short code execution and interpreter-style tools. | `mvmctl run -- <cmd>` or a named Python manifest. | Planned convenience helper. |
-| Browser sandbox | Browser automation with Playwright/Puppeteer-like tooling. | Build a browser-capable Nix image, run automation inside the guest, forward explicit ports if needed. | Planned high-level helper. |
+| Code sandbox | Short code execution and interpreter-style tools. | `mvmctl run -- <cmd>`, a named Python manifest, or the `CodeSandbox` helper. | `CodeSandbox` ships in Python and TypeScript. |
+| Browser sandbox | Browser automation with Playwright/Puppeteer-like tooling. | Build a browser-capable Nix image, run automation inside the guest, declare any needed ports at boot, or use the `BrowserSandbox` helper. | `BrowserSandbox` ships in Python and TypeScript. |
 | Desktop sandbox | GUI or computer-use workflows. | Backend- and image-specific today; use explicit images and port/console access. | Planned high-level helper. |
 | Builder sandbox | Secure Linux image construction. | Project builder VM and persistent builder controls. | CLI-first today. |
 
@@ -32,7 +35,7 @@ Security properties:
 
 - guest code runs in a microVM backend where supported;
 - host files enter only through explicit transfer, mounts, or build inputs;
-- network exposure and port forwarding are explicit;
+- network exposure is explicit, and ingress ports are declared before boot;
 - audit records connect build, admission, launch, and lifecycle operations.
 
 ## Code sandbox

@@ -38,7 +38,7 @@ Feature: Transient sandbox boot
   # policy denial. This is that regression, as a scenario.
   @live @tls_tunnel_client
   Scenario: a workload reaches an admitted host over the mediated egress path
-    When I run mvmctl in an isolated live home with "machine run --name bdd-egress-https --image alpine --allow-host example.com --timeout 180 -- wget -q -O- https://example.com"
+    When I run mvmctl in an isolated live home with "machine run --name bdd-egress-https --image curlimages/curl:8.21.0 --allow-host example.com --timeout 180 -- curl -fsSL https://example.com"
     Then the command exits with code 0
     And the output contains "Example Domain"
 

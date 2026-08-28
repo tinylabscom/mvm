@@ -10,5 +10,5 @@ Feature: machine run --image workload-kernel precondition
     Given an isolated mvm home with a cached non-verity workload kernel
     When I run mvmctl in the isolated mvm home with "machine run --image alpine -- /bin/true"
     Then the command exits with code 1
-    And the output contains "discarding it and preparing a correct kernel"
+    And the error output contains "discarding it and preparing a correct kernel"
     And the incompatible workload kernel cache is evicted

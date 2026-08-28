@@ -91,7 +91,7 @@ allowed to run inside those layers at all.
 | 4   | A production-safe run cannot invoke DevOnly guest-agent verbs              | L4                       | Runtime profile + signed `VerbGrant` intersection; grant and conformance tests enforce the full DevOnly set                                              |
 | 5   | Vsock framing, supervisor-config JSON, and the datapath ingress are fuzzed | L2 / L4                  | `cargo-fuzz` targets over the host↔guest messages, the supervisor config parser, and the userspace datapath ingress; `deny_unknown_fields` on every type |
 | 6   | Pre-built dev image is hash-verified                                       | supply chain             | SHA-256 manifest streamed through the download; a mismatch rejects and deletes it                                                                        |
-| 7   | Cargo deps are audited on every PR                                         | supply chain             | `cargo-deny` + `cargo-audit` jobs; reproducibility double-build                                                                                          |
+| 7   | Cargo deps are audited nightly and on every release tag                    | supply chain             | `cargo-deny` + `cargo-audit` jobs in `security.yml`; reproducibility double-build                                                                        |
 | 8   | Every workload runs from a signed, audited `ExecutionPlan`                 | admission                | Ed25519 host-signer keypair; validity window + nonce replay-store; chain-signed admission entries                                                        |
 | 9   | Every published bundle is content-addressed and key_id-pinned              | supply chain             | A rejection ladder at fetch and at admit time: unknown key, tampered manifest, key_id mismatch, unsafe path, pin drift                                   |
 | 10  | No untrusted workload reaches the network unless policy admits it          | data containment         | Policy defaults to deny-all; the workload guest has no NIC, so egress leaves only over vsock to a host endpoint that authorizes it                       |
@@ -121,7 +121,7 @@ The plan now carries an `admission_profile`: a compact record of the workload's 
 - secret-release posture (`none`, plan-bound, or attestation-bound)
 - audit taxonomy and required labels
 
-This does **not** add a second seccomp implementation or new execution capability inside the sandbox. Runtime syscall filtering still comes from `mvm-security` and the guest `seccomp.json` manifest. The admission profile records the selected tier in the signed plan so the audit chain can prove which security posture the workload was admitted under.
+This does **not** add a second seccomp implementation or new execution capability inside the sandbox. Runtime syscall filtering still comes from `mvm-runtime`'s `security/seccomp.rs` filter selection and the `mvm_core::crypto::seccomp::SeccompTier` syscall tiers. The admission profile records the selected tier in the signed plan so the audit chain can prove which security posture the workload was admitted under.
 
 ## Per-backend tier matrix
 
@@ -129,8 +129,13 @@ mvm runs on multiple backends. Not all backends carry every claim. The tier you
 actually get depends on which backend mvm picks for your run.
 
 The columns below are the **nesting layers**, so this matrix covers the claims
-that defend a layer. The supply-chain and admission claims (6, 7, 8, 9, 11, 12, 14) are backend-independent — they gate what is allowed to run before any
-backend is chosen, and hold identically across all of them.
+that defend a layer. The supply-chain and admission claims (6, 7, 8, 9, 11, 12,
+14) are backend-independent *across the claim-bearing microVM backends* —
+Firecracker, HVF, and libkrun — where they gate what is allowed to run before a
+backend is chosen. They do not extend to every row below: QEMU is type-excluded
+from the admitted workload path, and the browser tier is claim-free and asserts
+none of the numbered claims. Both exclusions are restated in the rows
+themselves.
 
 | Backend                                          | L1  | L2  | L3  | L4  | L5  | Tier                                                                                                                                                                                                                                                                                                        |
 | ------------------------------------------------ | --- | --- | --- | --- | --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -138,7 +143,7 @@ backend is chosen, and hold identically across all of them.
 | **HVF** (macOS 26+ Apple Silicon — auto-default) | ✅  | ✅  | ⚠️  | ✅  | ✅  | Tier 2 — claim 3 (verified boot) partial; `Hypervisor.framework`, vsock-only egress (no guest NIC). The macOS-26 auto-default.                                                                                                                                                                              |
 | **libkrun** (Linux KVM, macOS Apple Silicon HVF) | ✅  | ✅  | ⚠️  | ✅  | ✅  | Tier 2 — same as HVF.                                                                                                                                                                                                                                                                                       |
 | **QEMU** (Linux KVM/TCG)                         | ✅  | ⚠️  | ⚠️  | ✅  | ✅  | Tier 2 — claim 3 partial; QEMU's larger device model raises L2 audit cost. Deliberately outside claim 10's egress enforcement, because it carries no untrusted multi-tenant workload. **Dev/test only** (`--hypervisor qemu`; the no-`/dev/kvm` path via TCG software emulation). Never selected by `mvmd`. |
-| **BrowserWasi** (browser tier)                   | —   | ❌  | ❌  | ❌  | ❌  | **Claim-free** — no numbered claims. The browser's sandbox/process isolation is the only boundary; there is no hypervisor, no guest kernel, no vsock, and no verified boot.                                                                                                                                 |
+| **WebLinux** (browser tier)                      | —   | ❌  | ❌  | ❌  | ❌  | **Claim-free** — no numbered claims. A real Nix-built Linux kernel boots under QEMU-Wasm, but the browser's sandbox and process isolation are the only boundary: there is no hypervisor and no verified boot.                                                                                                                                 |
 
 ✅ = layer fully enforced. ⚠️ = layer partial (named exception). ❌ = layer collapsed (claim does not apply). — = not applicable.
 
@@ -151,28 +156,28 @@ backend removed (Plan 329). A host without a usable microVM backend fails
 closed; mvm does not offer a shared-kernel container path on any default,
 production, or explicitly selected runtime path.
 
-### Browser-tier WASI backend
+### Browser-tier WebLinux backend
 
-The `BrowserWasi` backend runs workloads inside the browser's own WebAssembly engine. It has **no hypervisor boundary** and runs the guest workload directly as a WASI module. This makes it a claim-free tier: it cannot assert any of the numbered security claims because there is no hardware isolation.
+The `WebLinux` backend runs workloads inside the browser's own WebAssembly engine. It has **no hypervisor boundary**: a real Linux kernel boots, but under QEMU-Wasm rather than on hardware virtualization. This makes it a claim-free tier: it cannot assert any of the numbered security claims because there is no hardware isolation.
 
 The browser-tier backend:
 
-- Runs the workload as a WASI Preview 1 module inside the browser's WebAssembly engine
-- Has no Linux kernel, no initramfs, no vsock, and no virtual devices
-- Enforces isolation through the WASI capability model (preopened directories, host imports)
-- Mediates network egress through browser-native `fetch()` via the `mvm:egress` host import
-- Is **never auto-selected** and only available through explicit `--hypervisor browser-wasm`
+- Boots a real Nix-built Linux kernel under QEMU-Wasm inside a browser Worker
+- Has no hardware isolation boundary — the browser sandbox and process boundary are the only ones
+- Is **never auto-selected** and only available through explicit `--hypervisor web-linux`
 - Is for demos, playgrounds, and browser-local development only
 - Does **not** apply to production workloads
 
-When a browser-tier backend is selected, the same admission, policy, and audit semantics that apply to host backends are enforced inside the browser's own WebAssembly engine.
+On a native host the backend is a fail-closed stub: it is selectable so the catalog and CLI help can list it, but every lifecycle call refuses and it is barred from carrying an untrusted workload.
+
+Separately, the host-`wasmtime` `wasm` tier runs a user-supplied **WASI Preview 1** module directly with no Linux kernel at all. It is also claim-free and opt-in only, and its `mvm:egress` host import relays each request over a Unix socket to the same host-side substitution endpoint the vsock-backed tiers use — not to a browser `fetch()`.
 
 ### Choosing a tier
 
 - **Production / untrusted code** → Tier 1. Linux + KVM + Firecracker. No exceptions.
 - **macOS dev or CI on Apple Silicon** → Tier 2 (HVF or libkrun). Verified boot is the open item.
 - **Linux dev/test without `/dev/kvm`** → Tier 2 QEMU (`--hypervisor qemu`, TCG software emulation). A real microVM, slower; dev/test only.
-- **macOS Intel / native Windows** → unsupported for local microVM isolation today (no container fallback on any default path — only the explicitly selected ADR-034 dev tier). WSL2 with nested `/dev/kvm` is the supported Windows-adjacent libkrun workload path; a Hyper-V managed Linux builder remains future backend work.
+- **macOS Intel / native Windows** → unsupported for local microVM isolation today. There is no container fallback on any path: ADR-034 is retired, the Docker backend is removed, and `--hypervisor docker` is hard-refused. The one opt-in container-kernel tier is `apple-container`, which boots Apple's prebuilt container kernel on the in-house HVF VMM — a microVM, not a shared-kernel container. WSL2 with nested `/dev/kvm` is the supported Windows-adjacent libkrun workload path; a Hyper-V managed Linux builder remains future backend work.
 
 `mvmctl doctor` reports your current tier on the running host.
 
@@ -182,7 +187,7 @@ ADR-001 names three explicit non-goals so we don't accidentally commit to defend
 
 - **A malicious host.** mvm trusts the host with the hypervisor and the build keys. If your laptop or your server is compromised, every layer falls.
 - **Multi-tenant guests.** One guest = one workload. Sharing a single guest VM between mutually-distrusting tenants is out of scope.
-- **Hardware-backed key attestation** (TPM/SEV/etc.) is out of scope for v1.
+- **Hardware-backed key attestation _against a malicious host_.** An opt-in TPM2 provider ships (the `attestation-tpm2` feature), and its measured-boot quotes are a real host-measured attestation input. What it does not do is move the trusted-host boundary: the host still owns the TPM, the connection to it, and the launch material, so a compromised host stays out of scope. Real separation needs confidential-computing hardware (SEV-SNP/TDX), which no shipped backend targets.
 
 If your threat model needs any of those, mvm is not the right tool today. ADR-001 documents these limits explicitly.
 

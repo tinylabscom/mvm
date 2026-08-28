@@ -651,9 +651,18 @@ demo-build:
 weblinux-demo-build:
     ./web/weblinux-demo/build.sh
 
-# Stage the /demo assets only if they're missing; `just demo-build` forces a rebuild
+# Stage the browser WASM demo unless every generated asset class is present.
+# WebLinux is staged separately from its verified release pack by pages.yml.
 demo-assets:
-    [ -d public/public/demo ] || just demo-build
+    test -s public/public/demo/demo.js \
+      && test -s public/public/demo/worker.js \
+      && test -s public/public/demo/pkg/mvm_demo_web.js \
+      && test -s public/public/demo/pkg/mvm_demo_web_bg.wasm \
+      && test -s public/public/demo/guest/mvm-demo-guest.wasm \
+      && test -s public/public/demo/fixtures/allowed.opt.wasm \
+      && test -s public/public/demo/fixtures/denied.opt.wasm \
+      && test -s public/public/demo/fixtures/unbound.opt.wasm \
+      || just demo-build
 
 # Download the qemu-wasm-smoke-pack from GitHub releases.
 # This is faster than building from scratch (seconds vs 10-30 minutes).

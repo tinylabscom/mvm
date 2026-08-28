@@ -12,7 +12,7 @@ Browser automation is useful for agents, scraping, UI tests, and computer-use wo
 Use a Nix flake target that includes the browser runtime and automation library:
 
 ```sh
-cargo run -- build --flake . --profile browser
+cargo run -- machine build --flake . --profile browser
 ```
 
 The build runs through the builder VM. The browser runs later inside the runtime microVM.
@@ -20,9 +20,12 @@ The build runs through the builder VM. The browser runs later inside the runtime
 ## Run the automation
 
 ```sh
-cargo run -- up browserbox --flake . --profile browser
-cargo run -- exec browserbox -- node /work/automation.js
+cargo run -- machine run --flake . --flake-profile browser --name browserbox -d
+cargo run -- machine exec browserbox -- node /work/automation.js
 ```
+
+On `machine run` the flake package variant is `--flake-profile`; `--profile`
+there selects the security profile instead.
 
 ## Security checklist
 

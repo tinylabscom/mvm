@@ -41,6 +41,15 @@ pub(in crate::commands) struct Args {
     pub command: VolumeCmd,
 }
 
+/// Help for `--guest`. Kept in one place because it restates
+/// [`mvm_core::crypto::policy::MOUNT_ALLOW_ROOTS`], and the two drifted apart
+/// once already: this string still offered `/mnt` after the allow-root was
+/// removed, which is the shape that let a share mount over the runtime's
+/// config and secret drives. A doc comment cannot read the constant it
+/// restates, so a test asserts the two agree.
+const GUEST_MOUNT_HELP: &str = "Mount point inside the VM (must be under /data \
+     or /work; never /mnt, /etc, /usr, /lib, /proc, or /nix)";
+
 #[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum VolumeCmd {
     /// Create a managed encrypted local volume.
@@ -124,10 +133,7 @@ pub(in crate::commands) enum VolumeCmd {
         /// `mvmctl volume create`.
         #[arg(long)]
         host: Option<String>,
-        /// Mount point inside the VM (must be under /mnt, /data,
-        /// or /work; never under /etc, /usr, /lib, /proc, /nix,
-        /// etc.)
-        #[arg(long)]
+        #[arg(long, help = GUEST_MOUNT_HELP)]
         guest: String,
         /// Mount the volume read-write (default: read-only).
         #[arg(long)]
@@ -460,6 +466,33 @@ pub(super) fn merge_registered_volumes_for_launch(
 
 #[cfg(test)]
 mod tests {
+
+    /// The `--guest` help restates the allow-root policy, and a doc comment
+    /// cannot read the constant it restates. The two drifted once: the help
+    /// kept offering `/mnt` after it was removed from the allow-roots, and
+    /// four documentation pages copied the CLI and taught mounts that fail.
+    #[test]
+    fn the_guest_mount_help_matches_the_shipped_allow_roots() {
+        for root in mvm_core::crypto::policy::MOUNT_ALLOW_ROOTS {
+            assert!(
+                super::GUEST_MOUNT_HELP.contains(root),
+                "allow-root `{root}` is shipped but `--guest` help does not name it: {}",
+                super::GUEST_MOUNT_HELP
+            );
+        }
+        for reserved in ["/mnt/config", "/mnt/secrets"] {
+            let root = reserved
+                .split('/')
+                .nth(1)
+                .expect("reserved path has a root");
+            assert!(
+                !mvm_core::crypto::policy::MOUNT_ALLOW_ROOTS
+                    .iter()
+                    .any(|r| r.trim_start_matches('/') == root),
+                "/{root} became an allow-root again; a share there can shadow {reserved}"
+            );
+        }
+    }
     use std::fs::{self, File};
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::path::{Path, PathBuf};

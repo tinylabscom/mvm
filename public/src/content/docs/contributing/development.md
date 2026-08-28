@@ -13,12 +13,12 @@ description: Getting started as a contributor to mvm.
 ### Do I need to install libkrun?
 
 It depends on your machine. The builder VM (the headless Linux guest that runs
-`nix build` inside `mvmctl machine build` / `mvmctl machine build` / `mvmctl machine
-run`) auto-selects its host VMM:
+`nix build` inside `mvmctl machine build` / `mvmctl machine run`) auto-selects
+its host VMM:
 
 | Host | libkrun (`slp/krun/*`) needed? |
 |---|---|
-| macOS 26+ Apple Silicon | **No** — auto-detect picks the **HVF** builder (Hypervisor.framework, ships with the OS, no Homebrew deps); mvm transparently retries with libkrun if HVF fails to create its VM (ADR-093 auto-fallback). |
+| macOS 26+ Apple Silicon | **No** — auto-detect picks the **HVF** builder (Hypervisor.framework, ships with the OS, no Homebrew deps); mvm transparently retries with libkrun if HVF fails to create its VM (the ADR-007 builder auto-fallback). |
 | macOS 13–25 Apple Silicon | **Yes** — `brew install slp/krun/libkrun slp/krun/libkrunfw`. |
 | Linux + `/dev/kvm` | **No** — auto-detect picks the **QEMU** builder, so libkrun is not part of the default builder path on native Linux hosts. |
 
@@ -130,8 +130,7 @@ Notes:
   Stage 0 is libkrun-backed even on HVF-default hosts.
 - Editing `base.nix` or a variant delta? Just re-run the command — a
   custom config always compiles locally; downloads only ever return the
-  kernel that shipped with that exact `mvmctl` release. See ADR-046
-  §"Amendment: kernel acquisition".
+  kernel that shipped with that exact `mvmctl` release.
 
 #### Iterating on the kernel config (slimming, adding a driver)
 
@@ -313,28 +312,31 @@ When adding fields to structs in serialized state:
 Beyond the standard build/test/lint cycle, mvmctl provides commands for managing the dev environment:
 
 ```bash
-# First-time setup (installs deps, creates the dev VM, default network)
-just run -- init
+# First-time host setup (installs deps, stages the builder VM image)
+just run -- bootstrap
+# `init` is a different verb: it scaffolds mvm.toml + flake.nix in a project dir
+just run -- init ./my-app
 
-# Image catalog — browse and build images from Nix templates
-just run -- image list              # browse bundled catalog
-just run -- image search http       # search by name/tag
-just run -- image fetch minimal     # build from catalog entry
+# Bundled image catalog — browse the entries `init --catalog` can scaffold from
+just run -- catalog list            # browse bundled catalog
+just run -- catalog search http     # search by name/tag
+just run -- catalog info minimal    # show one entry
+# (`mvmctl image` is a different namespace: pull/ls/inspect/rm of cached OCI images.)
 
 # Named dev networks
 just run -- network create isolated # create a named network
 just run -- network list            # list all networks
 just run -- machine run --flake .  # attach VM to a network
 
-# Interactive console (PTY-over-vsock, no SSH)
-just run -- console myvm            # interactive shell
-just run -- console myvm --command "uname -a"  # one-shot exec
+# Interactive console (PTY-over-vsock, no SSH) — `console` lives under `machine`
+just run -- machine console myvm            # interactive shell
+just run -- machine console myvm --command "uname -a"  # one-shot exec
 
 # Cache and diagnostics
 just run -- cache info              # show cache dir and disk usage
 just run -- cache prune             # clean stale temp files
-just run -- security status         # security posture evaluation
-just run -- doctor                  # dependency checks
+just run -- doctor                  # dependency checks + security posture
+# There is no `security` verb — plan 40 folded it into `doctor`.
 ```
 
 ### Console Access
@@ -365,9 +367,27 @@ with `MVM_HOME`; `rm -rf ~/.mvm` removes every trace):
 | Workflow | Trigger | What it does |
 |----------|---------|--------------|
 | `ci.yml` | Push to main/feat/*, PRs | check, fmt, clippy, test (macOS + Linux), audit |
-| `release.yml` | Tags matching `v*` | Builds 4 platform binaries, creates GitHub Release |
+| `release.yml` | Tags matching `v*` | Builds 3 platform binaries (`aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`), creates GitHub Release |
 | `publish-crates.yml` | Release published | Publishes to crates.io in dependency order |
-| `pages.yml` | Push to main | Deploys docs to GitHub Pages |
+| `pages.yml` | Release, version tag, or manual dispatch | Deploys docs to Cloudflare Pages |
+
+### Website deployment
+
+Run the site commands from the repository root through the `public` workspace:
+
+```bash
+pnpm --dir public install --frozen-lockfile
+pnpm --dir public check
+pnpm --dir public deploy
+```
+
+`pnpm --dir public deploy` builds the Astro site and publishes it to the
+production branch of the existing `mvm` Pages project. Use
+`pnpm --dir public deploy:preview` for a preview deployment.
+
+Do not use `npx wrangler deploy` for this site. That is the Workers deployment
+command; this repository hosts the website as a Pages project and uses
+`wrangler pages deploy` through the scripts above.
 
 ## Release Process
 

@@ -3,7 +3,7 @@ title: Adding an architecture or backend
 description: How to extend the architecture-aware artifact model with a new CPU architecture or microVM backend.
 ---
 
-The artifact model (Plan 134) is **data-driven on purpose**: architecture and
+The artifact model is **data-driven on purpose**: architecture and
 backend capabilities live in typed enums and one compatibility table, so adding
 support is a small, local change — validation and config generation pick it up
 automatically because they both read the same table. You should never have to
@@ -87,9 +87,14 @@ no current backend needs it.
 
 ## What stays out of scope
 
-Production rootfs images are built **inside the builder VM** (`mke2fs`,
-ADR-017) — the artifact model validates and configures them, it does not build
-ext4 on the host. Pure-Rust host-side rootfs creation, QEMU/vfkit config
-writers, dynamic boot smoke-tests, and `microvm.nix` integration are tracked as
-their own follow-up slices (see `specs/plans/134-architecture-aware-artifact-model.md`
-§"Out of scope").
+The artifact model validates and configures rootfs images; it does not build
+them. Building is a separate seam, and pure-Rust host-side ext4 creation has
+**shipped** — `mvm_build::rootfs::materialize_ext4_pure` writes a mountable ext4
+image in-process with no `mkfs` and no subprocess, and is the default path.
+ADR-004 supersedes ADR-017's builder-VM `mke2fs` mechanism while preserving its
+roothash guarantee; the builder VM remains the automatic fallback for trees the
+pure writer cannot faithfully emit (for example ones carrying
+`security.capability` xattrs).
+
+Still out of scope for the artifact model: QEMU/vfkit config writers, dynamic
+boot smoke-tests, and `microvm.nix` integration.
