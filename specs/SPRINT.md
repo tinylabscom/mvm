@@ -10,14 +10,6 @@
 
 ## In progress
 
-- [ ] **Flake-built slot resolution — issue #2967.**
-      `specs/plans/2026-08-28-flake-slot-resolution.md`.
-      The shared manifest boundary now recognizes only strict, existing slot
-      addresses returned by `machine run --flake`; ordinary bare arguments
-      remain filesystem paths. Positive, unknown-slot, and mismatched-identity
-      resolver tests, workspace tests, gated-target compilation, and Clippy are
-      green; merge delivery remains.
-
 - [ ] **Audit root-history classification repair (issue #2940).**
       `specs/plans/2026-08-27-audit-root-history-classification.md`.
       The shared audit-directory classifier now excludes signed
@@ -91,6 +83,14 @@
       builder-pack download refusal names root Cargo features that exist.
       Implementation, focused tests, the full `mvm-sdk` suite, formatting, and
       package Clippy are green; merge-queue delivery remains.
+
+- [ ] **Flake-built slot resolution — issue #2967.**
+      `specs/plans/2026-08-28-flake-slot-resolution.md`.
+      The shared manifest boundary now recognizes only strict, existing slot
+      addresses returned by `machine run --flake`; ordinary bare arguments
+      remain filesystem paths. Positive, unknown-slot, and mismatched-identity
+      resolver tests, workspace tests, gated-target compilation, and Clippy are
+      green; merge delivery remains.
 
 - [x] **AI egress metering and token budgets.**
       `specs/plans/2026-08-21-ai-egress-metering-and-budget.md`.

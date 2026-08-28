@@ -4,13 +4,6 @@ Last updated: 2026-08-28
 
 ## In progress
 
-- [ ] **Flake-built slot resolution — issue #2967.**
-      `specs/plans/2026-08-28-flake-slot-resolution.md`.
-      Strict materialized slot addresses resolve through the existing registry;
-      unknown and identity-mismatched records fail closed. Focused and workspace
-      tests, gated-target compilation, and Clippy are green; merge delivery
-      remains.
-
 - [ ] **Audit root-history classification repair — issue #2940.**
       `specs/plans/2026-08-27-audit-root-history-classification.md`.
       Signed Merkle-root history files are excluded from lifecycle-chain
@@ -37,6 +30,13 @@ Last updated: 2026-08-28
       The README's `mvm.local_path` decorator source and the builder-pack Cargo
       feature remediation are implemented and locally green; merge-queue
       delivery remains.
+
+- [ ] **Flake-built slot resolution — issue #2967.**
+      `specs/plans/2026-08-28-flake-slot-resolution.md`.
+      Strict materialized slot addresses resolve through the existing registry;
+      unknown and identity-mismatched records fail closed. Focused and workspace
+      tests, gated-target compilation, and Clippy are green; merge delivery
+      remains.
 
 ## Completed
 
