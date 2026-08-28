@@ -13,34 +13,14 @@
 
 use std::path::Path;
 
-/// The C library a guest rootfs is built against.
+/// The guest's C library.
 ///
-/// [`GuestLibc::Unknown`] is not a neutral default. It means the tree carried
-/// no loader this code recognises, or carried more than one, and a caller
-/// gating on it must treat that as *unknown*, never as safe — the same
-/// convention the sidecar's `entrypoint_argv` follows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum GuestLibc {
-    /// GNU libc. Loader is `ld-linux-<arch>.so.<n>`.
-    Glibc,
-    /// musl libc, as used by Alpine. Loader is `ld-musl-<arch>.so.1`.
-    Musl,
-    /// No recognised loader, or more than one.
-    #[default]
-    Unknown,
-}
-
-impl GuestLibc {
-    /// The value as it appears in the sidecar and in operator-facing text.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Glibc => "glibc",
-            Self::Musl => "musl",
-            Self::Unknown => "unknown",
-        }
-    }
-}
+/// Defined in `mvm-contract` rather than here because two crates that cannot
+/// see each other both need it: this one detects it from an unpacked tree, and
+/// `mvm-fs` keys the SDK sidecar cache on it so a guest is offered the variant
+/// it can load. Those are siblings, so the vocabulary sits underneath both
+/// while the detection — which reads a filesystem — stays here.
+pub use mvm_contract::guest_libc::GuestLibc;
 
 /// Directories a dynamic loader lives in, relative to the rootfs.
 const LOADER_DIRS: [&str; 2] = ["lib", "lib64"];
@@ -159,21 +139,6 @@ mod tests {
         assert_eq!(
             detect_guest_libc(&dir.path().join("nope")),
             GuestLibc::Unknown
-        );
-    }
-
-    #[test]
-    fn unknown_is_the_default() {
-        assert_eq!(GuestLibc::default(), GuestLibc::Unknown);
-    }
-
-    #[test]
-    fn the_wire_form_is_lowercase() {
-        let json = serde_json::to_string(&GuestLibc::Musl).unwrap();
-        assert_eq!(json, "\"musl\"");
-        assert_eq!(
-            serde_json::from_str::<GuestLibc>("\"glibc\"").unwrap(),
-            GuestLibc::Glibc
         );
     }
 }

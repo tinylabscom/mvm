@@ -35,6 +35,10 @@ pub mod entrypoint;
 /// A workload's permission set — CPU, wall clock, egress destinations.
 #[cfg(feature = "protocol")]
 pub mod grants;
+/// Which C library a guest rootfs is built against. Shared vocabulary between
+/// the crate that detects it and the crate that keys the SDK sidecar cache on
+/// it; those are siblings, so it sits underneath both.
+pub mod guest_libc;
 #[cfg(feature = "protocol")]
 pub mod ir;
 /// Guest lifecycle markers + snapshot timing (the `mvm-init` ↔ host contract).
