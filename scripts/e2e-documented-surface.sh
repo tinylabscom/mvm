@@ -398,10 +398,16 @@ echo "==> documented examples + machine journey (cucumber, @live)"
 SUITE_STARTED=1
 echo "    deadline: ${E2E_TIMEOUT_SECS}s"
 set +e
+# Tee'd so the run can afterwards assert the suite actually produced a summary.
+# "no failures" is not the same as "nothing ran": the conformance binary
+# refuses to start against a stale `mvmctl`, and that refusal prints no
+# scenarios at all — which reads as a clean run to anyone counting failures.
+SUITE_LOG="$(mktemp "${TMPDIR:-/tmp}/mvm-e2e-suite.XXXXXX")"
 CARGO_BIN_EXE_mvmctl="$MVMCTL" \
 MVM_BDD_LIVE=1 \
 MVM_E2E_HOME="$E2E_HOME" \
-  ./scripts/cargo-fast.sh test -p mvm-conformance --test conformance --features bdd &
+  ./scripts/cargo-fast.sh test -p mvm-conformance --test conformance --features bdd \
+  2>&1 | tee "$SUITE_LOG" &
 SUITE_PID=$!
 
 waited=0
@@ -432,6 +438,19 @@ set -e
 echo
 echo "==> done. Read the 'did NOT run' tally above, not just the pass count:"
 echo "    a skipped @live scenario is a documented command nothing booted."
+# A run that produced no scenario summary proved nothing, whatever its failure
+# count says. This is the shape that fooled a reader once already: the suite was
+# invoked, refused to start against a stale binary, and the log showed zero
+# failures because it showed zero scenarios.
+if [[ -n "${SUITE_LOG:-}" ]] && ! grep -q '^\[Summary\]' "$SUITE_LOG"; then
+  echo
+  echo "!!! the suite produced no scenario summary — this run proves nothing." >&2
+  echo "!!! Zero failures here means zero scenarios, not a clean run." >&2
+  rm -f "$SUITE_LOG"
+  exit 70
+fi
+rm -f "${SUITE_LOG:-}"
+
 if [[ -z "${SUITE_STARTED:-}" ]]; then
   echo
   echo "!!! the suite never started — this run proves nothing." >&2
