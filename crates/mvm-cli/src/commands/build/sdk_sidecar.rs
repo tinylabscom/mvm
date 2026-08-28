@@ -90,7 +90,7 @@ fn run_build(args: BuildArgs) -> Result<()> {
 
     #[cfg(not(feature = "builder-vm"))]
     anyhow::bail!(
-        "SDK sidecar source build requires the `builder-vm` feature; rebuild mvmctl with that feature"
+        "SDK sidecar source build requires the `builder-vm` feature; rebuild the binary with that feature enabled"
     )
 }
 
