@@ -38,8 +38,8 @@ cargo install mvmctl
 \`\`\`
 
 You do not need Nix on the host. Flake-backed builds run inside a Linux builder
-VM that mvmctl starts and reuses for you. There is no self-update command —
-reinstall the way you installed.
+VM that mvmctl starts and reuses for you. Update in place with
+\`mvmctl env update\` (\`--check\` to check without installing).
 
 Host setup runs automatically on first use; run it explicitly with:
 
@@ -121,7 +121,7 @@ and it already audits every launch.
 | Linux with \`/dev/kvm\` | x86_64, aarch64 | Firecracker | Supported; strongest local target |
 | macOS Apple Silicon | aarch64 | HVF on macOS 26+, libkrun on 13–25 | Supported |
 | Linux without \`/dev/kvm\` | x86_64, aarch64 | QEMU (TCG) | Dev/test only, never auto-selected |
-| WSL2 with nested KVM | x86_64, aarch64 | libkrun | Supported workload path |
+| WSL2 with nested KVM | x86_64, aarch64 | none auto-selected | Experimental; \`doctor\` reports unsupported, only the dev/test QEMU tier runs |
 | Windows, native | any | none | Not supported; use WSL2 |
 | macOS, Intel | x86_64 | none | Not supported |
 
