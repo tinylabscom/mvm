@@ -26,6 +26,13 @@ Feature: SDK sidecar attaches only for admitted SDK host-service bindings
     And admission accepts the launch with the sidecar attachment
     And the assembled workload cmdline names the SDK sidecar device the backend attached
 
+  Scenario: wasm refuses SDK host services at admission in user terms
+    Given a verified SDK sidecar in the cache
+    And a workload plan that binds host service "host.time.v1"
+    When the launch path resolves the SDK sidecar
+    Then the SDK sidecar is attached read-only at "/mvm/sdk"
+    And wasm admission refuses the requested SDK host service before backend start
+
   Scenario: the SDK sidecar bypasses user-volume activation beside a wheel mount
     Given a verified SDK sidecar in the cache
     And a workload plan that binds host service "host.time.v1"

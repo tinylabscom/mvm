@@ -390,6 +390,25 @@ fn admission_accepts_with_sidecar(world: &mut CliWorld) {
         .expect("the resolved attachment must satisfy the admission gate");
 }
 
+#[then(expr = "wasm admission refuses the requested SDK host service before backend start")]
+fn wasm_admission_refuses_sdk_host_service(world: &mut CliWorld) {
+    let bound = world
+        .sdk_sidecar_services
+        .first()
+        .expect("a prior step must bind an SDK host service")
+        .as_str();
+    let err = mvm_hostd::plan_admission::enforce_sdk_sidecar_backend_compatibility(
+        mvm_core::vm_backend::BackendKind::Wasm,
+        plan_of(world),
+    )
+    .expect_err("wasm must refuse the native SDK sidecar delivery mechanism");
+    let message = err.to_string();
+    assert!(message.contains(bound), "{message}");
+    assert!(message.contains("wasm"), "{message}");
+    assert!(message.contains("SDK host service"), "{message}");
+    assert!(!message.contains("DiskVolumeNotSupported"), "{message}");
+}
+
 #[then(expr = "admission refuses a sidecar attachment for this plan")]
 fn admission_refuses_sidecar(world: &mut CliWorld) {
     // Hand the gate a well-formed sidecar volume the plan never authorized.

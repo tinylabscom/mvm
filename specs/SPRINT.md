@@ -27,6 +27,13 @@
       tests, workspace tests, and workspace Clippy are green; merge delivery
       remains.
 
+- [ ] **Wasm SDK host-service admission — issue #2977.**
+      `specs/plans/2026-08-28-wasm-sdk-host-service-admission.md`.
+      The SDK delivery gate now refuses wasm bindings with a typed,
+      service-specific reason before attachment validation or backend start.
+      Focused unit regressions and the BDD runner compile are green; full
+      validation and merge delivery remain.
+
 - [ ] **Recorded-backend pause and resume — issue #2929.**
       `specs/plans/2026-08-27-recorded-backend-pause-resume.md`.
       Existing-machine lifecycle operations resolve the VMM that owns the live
