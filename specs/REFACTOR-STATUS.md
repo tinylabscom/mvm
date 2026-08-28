@@ -4,18 +4,18 @@ Last updated: 2026-08-28
 
 ## In progress
 
+- [ ] **Audit root-history classification repair — issue #2940.**
+      `specs/plans/2026-08-27-audit-root-history-classification.md`.
+      Signed Merkle-root history files are excluded from lifecycle-chain
+      sweeps through one shared suffix; focused and workspace tests, doctests,
+      check, and Clippy are green, and merge-queue delivery remains.
+
 - [ ] **SDK sidecar source build — issue #2941.**
       `specs/plans/2026-08-27-sdk-sidecar-source-build.md`.
       Source checkouts can explicitly build the guest-facing glibc sidecar
       through the shared Stage 0 artifact runner and atomically bind it to the
       checkout fingerprint. The full local gates and a live aarch64 Stage 0/Nix
       artifact build are green; merge delivery remains.
-
-- [ ] **Audit root-history classification repair — issue #2940.**
-      `specs/plans/2026-08-27-audit-root-history-classification.md`.
-      Signed Merkle-root history files are excluded from lifecycle-chain
-      sweeps through one shared suffix; focused and workspace tests, doctests,
-      check, and Clippy are green, and merge-queue delivery remains.
 
 - [ ] **Issue #2942 — warm-launch gate contract repair.**
       `specs/plans/2026-08-27-warm-launch-gate-contract.md`.
