@@ -27,6 +27,8 @@ use std::path::{Path, PathBuf};
 
 use mvm_core::build_env::ShellEnvironment;
 use serde::{Deserialize, Serialize};
+
+use crate::guest_libc::GuestLibc;
 use thiserror::Error;
 
 /// Pinned Nix-bearing OCI image. Bumped deliberately; the per-bump
@@ -279,6 +281,20 @@ pub struct GuestSidecar {
     /// non-git flake input), which a Nix build cannot invent.
     #[serde(default)]
     pub generator_rev: String,
+    /// The C library this rootfs is built against, read off its dynamic loader
+    /// while the tree was still a directory.
+    ///
+    /// Load-bearing for the same reason as [`Self::entrypoint_argv`]: nothing
+    /// on the host opens the ext4 once it exists, so a host-side decision that
+    /// depends on the guest's libc can only be made from what was recorded
+    /// here. The SDK host-services cdylib is such a decision — it is built for
+    /// one libc, and a process under the other cannot load it at all.
+    ///
+    /// [`GuestLibc::Unknown`] covers both a sidecar written before this field
+    /// existed and a tree whose loader was unrecognisable. Neither is a
+    /// permissive default: a caller gating on this must refuse, not guess.
+    #[serde(default)]
+    pub libc: GuestLibc,
 }
 
 impl GuestSidecar {
@@ -367,6 +383,9 @@ impl GuestSidecar {
             built_at: String::new(),
             protocol_version: 0,
             generator_rev: String::new(),
+            // Read off the unpacked tree by the caller that still has it;
+            // this constructor has only a name. `with_libc` records it.
+            libc: GuestLibc::Unknown,
         }
     }
 
@@ -375,6 +394,15 @@ impl GuestSidecar {
     #[must_use]
     pub fn with_entrypoint_argv(mut self, argv: Vec<String>) -> Self {
         self.entrypoint_argv = argv;
+        self
+    }
+
+    /// Record the libc detected on the unpacked rootfs, for the same reason as
+    /// [`Self::with_entrypoint_argv`]: it is observable only while the tree is
+    /// a directory, and needed after it is not.
+    #[must_use]
+    pub fn with_libc(mut self, libc: GuestLibc) -> Self {
+        self.libc = libc;
         self
     }
 
@@ -1399,6 +1427,7 @@ mod tests {
             built_at: String::new(),
             protocol_version: 0,
             generator_rev: String::new(),
+            libc: GuestLibc::Glibc,
         }
     }
 

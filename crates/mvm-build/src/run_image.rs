@@ -135,17 +135,37 @@ pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Resul
     let rootfs_dir = output
         .parent()
         .ok_or_else(|| anyhow::anyhow!("rootfs path has no parent dir: {}", output.display()))?;
-    // Always runtime-lean: the overlay is the single source of the guest
-    // binaries, so an injected rootfs never carries a copy of them.
-    crate::builder_vm::GuestSidecar::for_oci_run(label, sealed, true)
-        // The same argv baked into `etc/mvm/image-runtime.json` above, put where
-        // the host can still read it: once this tree is an ext4 blob nothing on
-        // the host opens it, and admission has to know what the image runs before
-        // it decides whether anything may drive its stdin.
-        .with_entrypoint_argv(entrypoint.map(|e| e.argv.clone()).unwrap_or_default())
+    oci_run_sidecar(unpacked_root, label, sealed, entrypoint)
         .write_to_dir(rootfs_dir)
         .with_context(|| format!("write OCI sidecar in {}", rootfs_dir.display()))?;
     Ok(())
+}
+
+/// Build the sidecar describing a materialized OCI run rootfs.
+///
+/// Both recorded facts are things the host can establish only while
+/// `unpacked_root` is still a directory: once this tree is an ext4 blob nothing
+/// on the host opens it again. The argv is what admission needs to know an
+/// image runs before deciding whether anything may drive its stdin; the libc is
+/// what decides whether the SDK host-services cdylib can load in this image at
+/// all.
+///
+/// Reading the libc after `inject_mvm_runtime` is deliberate and safe: the
+/// injected guest binaries are statically linked and land in `usr/local/bin`,
+/// so they add no dynamic loader to `lib` or `lib64` and cannot change the
+/// verdict.
+///
+/// Always runtime-lean: the overlay is the single source of the guest binaries,
+/// so an injected rootfs never carries a copy of them.
+fn oci_run_sidecar(
+    unpacked_root: &Path,
+    label: &str,
+    sealed: bool,
+    entrypoint: Option<&ImageRuntimeConfig>,
+) -> crate::builder_vm::GuestSidecar {
+    crate::builder_vm::GuestSidecar::for_oci_run(label, sealed, true)
+        .with_entrypoint_argv(entrypoint.map(|e| e.argv.clone()).unwrap_or_default())
+        .with_libc(crate::guest_libc::detect_guest_libc(unpacked_root))
 }
 
 /// Materialize the admitted top-level guest volume roots into every sealed OCI
@@ -521,6 +541,64 @@ pub fn resolve_guest_runtime_identity(cache_root: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build an unpacked-rootfs tree whose `lib/` carries `loader`.
+    fn tree_with_loader(loader: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("lib")).unwrap();
+        std::fs::write(dir.path().join("lib").join(loader), b"").unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_sidecar_records_the_libc_of_the_tree_it_describes() {
+        let musl = tree_with_loader("ld-musl-aarch64.so.1");
+        assert_eq!(
+            oci_run_sidecar(musl.path(), "alpine:3", false, None).libc,
+            crate::guest_libc::GuestLibc::Musl
+        );
+
+        let glibc = tree_with_loader("ld-linux-aarch64.so.1");
+        assert_eq!(
+            oci_run_sidecar(glibc.path(), "debian:12", false, None).libc,
+            crate::guest_libc::GuestLibc::Glibc
+        );
+    }
+
+    /// An image whose loader we cannot identify must not be recorded as either
+    /// libc. A caller gating on this refuses on unknown, so mislabelling here
+    /// would turn a refusal into a mismatched load.
+    #[test]
+    fn a_tree_with_no_recognisable_loader_records_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            oci_run_sidecar(dir.path(), "scratch", false, None).libc,
+            crate::guest_libc::GuestLibc::Unknown
+        );
+    }
+
+    /// A sidecar written before the field existed must deserialize as unknown,
+    /// not as a libc that happens to sort first.
+    #[test]
+    fn a_sidecar_predating_the_libc_field_reads_as_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut json: serde_json::Value = serde_json::to_value(
+            crate::builder_vm::GuestSidecar::for_oci_run("old", false, true),
+        )
+        .unwrap();
+        json.as_object_mut().unwrap().remove("libc");
+        assert!(!json.as_object().unwrap().contains_key("libc"));
+        std::fs::write(
+            crate::builder_vm::GuestSidecar::path_in(dir.path()),
+            serde_json::to_string(&json).unwrap(),
+        )
+        .unwrap();
+
+        let read = crate::builder_vm::GuestSidecar::read_from_dir(dir.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(read.libc, crate::guest_libc::GuestLibc::Unknown);
+    }
 
     #[test]
     fn sealed_oci_tree_contains_volume_mount_roots() {
