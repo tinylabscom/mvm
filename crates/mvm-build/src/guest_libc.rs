@@ -22,6 +22,28 @@ use std::path::Path;
 /// while the detection — which reads a filesystem — stays here.
 pub use mvm_contract::guest_libc::GuestLibc;
 
+/// The libc `libmvm_host_services.so` is currently built against.
+///
+/// `nix/packages/mvm-sdk-cdylib.nix` builds one variant, for the nixpkgs Linux
+/// platform, which is glibc. A guest whose own libc differs cannot load it:
+/// musl's loader fails resolving glibc-only symbols such as `_dl_find_object`,
+/// and shipping a second loader alongside does not help, because the process
+/// doing the loading already has one.
+///
+/// This is the single place that changes when a second variant exists — the
+/// refusal keyed on it becomes a selection between them.
+pub const SIDECAR_CDYLIB_LIBC: GuestLibc = GuestLibc::Glibc;
+
+/// Whether a guest recording `image` can load the SDK host-services cdylib.
+///
+/// [`GuestLibc::Unknown`] is refused rather than attempted. It means the image
+/// carried no loader this code recognises, or carried more than one, and
+/// attaching on a guess turns a refusal the host can explain into a relocation
+/// error raised from inside the guest at `dlopen` time.
+pub fn sidecar_loads_in(image: GuestLibc) -> bool {
+    image == SIDECAR_CDYLIB_LIBC
+}
+
 /// Directories a dynamic loader lives in, relative to the rootfs.
 const LOADER_DIRS: [&str; 2] = ["lib", "lib64"];
 
@@ -140,5 +162,18 @@ mod tests {
             detect_guest_libc(&dir.path().join("nope")),
             GuestLibc::Unknown
         );
+    }
+    #[test]
+    fn only_a_matching_libc_can_load_the_sidecar() {
+        assert!(sidecar_loads_in(SIDECAR_CDYLIB_LIBC));
+        assert!(!sidecar_loads_in(GuestLibc::Musl));
+    }
+
+    /// Unknown must not load. It is the arm that would otherwise be attempted
+    /// on a guess, and guessing wrong costs a `dlopen` failure inside the guest
+    /// instead of a refusal the host can explain.
+    #[test]
+    fn an_unknown_libc_never_loads_the_sidecar() {
+        assert!(!sidecar_loads_in(GuestLibc::Unknown));
     }
 }
