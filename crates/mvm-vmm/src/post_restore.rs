@@ -223,6 +223,26 @@ pub struct VsockPostRestoreSignal {
 }
 
 impl VsockPostRestoreSignal {
+    /// Signal for a child brought up by resuming a captured parent.
+    ///
+    /// Carries no hostname. A resumed guest never boots, so `mvm.hostname=` —
+    /// which PID 1 applies from the kernel cmdline while it is still
+    /// privileged — cannot run a second time, and the unprivileged agent that
+    /// survives into the child has no capability to rename the guest. Asking
+    /// for one fails an otherwise good restore, so the child keeps the
+    /// parent's name and takes its identity from its own admitted plan,
+    /// nonce, and verb grant.
+    pub fn for_resumed_child(
+        token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+        grant_envelope: Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
+    ) -> Self {
+        Self {
+            token,
+            hostname: None,
+            grant_envelope,
+        }
+    }
+
     pub fn request(&self, host_epoch_secs: u64) -> mvm_agentd::vsock::GuestRequest {
         mvm_agentd::vsock::GuestRequest::PostRestore {
             token: self.token,
@@ -391,6 +411,32 @@ mod tests {
             });
         assert_eq!(outcome, PrimedOutcome::TimedOut);
     }
+    /// A resumed child is never asked to rename itself.
+    ///
+    /// The guest can only take a hostname from the kernel cmdline, applied by
+    /// PID 1 before it drops to the unprivileged agent identity. A restore
+    /// skips that boot entirely, so a hostname on this path can only fail —
+    /// and it fails the whole restore, not just the rename. Pinned here
+    /// because both the fork and the warm-claim path build their signal from
+    /// this constructor.
+    #[test]
+    fn a_resumed_child_is_asked_to_adopt_no_hostname() {
+        let signal = VsockPostRestoreSignal::for_resumed_child(
+            [3u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+            None,
+        );
+        assert_eq!(signal.hostname, None);
+
+        let mvm_agentd::vsock::GuestRequest::PostRestore { hostname, .. } = signal.request(1)
+        else {
+            panic!("expected a PostRestore request");
+        };
+        assert_eq!(
+            hostname, None,
+            "a restore must not carry a hostname the resumed guest cannot install"
+        );
+    }
+
     #[test]
     fn post_restore_request_carries_the_child_grant_envelope() {
         use mvm_core::plan::{Nonce, VerbGrant, VerbId};

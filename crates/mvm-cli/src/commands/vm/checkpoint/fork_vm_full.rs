@@ -598,11 +598,7 @@ fn deliver_hvf_fork_post_restore(
     let token = mvm_core::crypto::vmgenid::fresh_generation_token(parent_snapshot_digest).token;
     let outcome = mvm_vmm::post_restore::signal_post_restore(
         child_vm_name,
-        &mvm_vmm::post_restore::VsockPostRestoreSignal {
-            token,
-            hostname: Some(child_vm_name.to_string()),
-            grant_envelope,
-        },
+        &mvm_vmm::post_restore::VsockPostRestoreSignal::for_resumed_child(token, grant_envelope),
         mvm_vmm::post_restore::POST_RESTORE_READY_TIMEOUT,
     )
     .with_context(|| format!("sending PostRestore to '{child_vm_name}'"))?;
