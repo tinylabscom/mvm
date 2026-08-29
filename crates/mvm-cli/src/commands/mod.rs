@@ -524,26 +524,9 @@ fn apply_startup_env(cli: &Cli) {
     if let Some(ref backend) = cli.builder {
         set_cli_env("MVM_BUILDER_BACKEND", backend);
     }
-    if let Some(dir) = aux_bin_dir_to_apply(
-        env!("MVM_AUX_BIN_DIR"),
-        std::env::var_os("MVM_AUX_BIN_DIR").is_some(),
-    ) {
-        set_cli_env("MVM_AUX_BIN_DIR", dir);
-    }
     if let Some(ref source) = cli.kernel_source {
         set_cli_env("MVM_KERNEL_SOURCE", source);
     }
-}
-
-/// The value to write to `MVM_AUX_BIN_DIR`, or `None` to leave the env alone.
-/// The build script bakes in the dir where it compiled the per-VM helpers; we
-/// surface it to mvm-backend's resolver unless the caller already set it (an
-/// explicit override wins) or the build produced no path.
-fn aux_bin_dir_to_apply(baked: &str, already_set: bool) -> Option<String> {
-    if already_set || baked.is_empty() {
-        return None;
-    }
-    Some(baked.to_string())
 }
 
 /// Let a build start a persistent builder when it finds the store image busy.
@@ -647,6 +630,21 @@ fn interrupt_cleanup_message(stage0_active: bool) -> &'static str {
     }
 }
 
+/// Run the cheap reconcile-on-entry convergence for state-touching
+/// commands, unless `MVM_SKIP_RECONCILE=1`.
+/// Fail-open: `converge` collects errors internally and never returns an
+/// `Err`, so this can never block the requested command.
+fn maybe_converge_on_entry(command: &Commands) {
+    if !command.touches_vm_state() {
+        return;
+    }
+    if std::env::var("MVM_SKIP_RECONCILE").as_deref() == Ok("1") {
+        return;
+    }
+    let _ =
+        mvm_runtime::vm::reconcile::converge(&mvm_runtime::vm::reconcile::ConvergeOpts::default());
+}
+
 #[cfg(test)]
 mod interrupt_message_tests {
     use super::interrupt_cleanup_message;
@@ -665,33 +663,5 @@ mod interrupt_message_tests {
             interrupt_cleanup_message(false),
             "Interrupted, cleaning up..."
         );
-    }
-}
-
-/// Run the cheap reconcile-on-entry convergence for state-touching
-/// commands, unless `MVM_SKIP_RECONCILE=1`.
-/// Fail-open: `converge` collects errors internally and never returns an
-/// `Err`, so this can never block the requested command.
-fn maybe_converge_on_entry(command: &Commands) {
-    if !command.touches_vm_state() {
-        return;
-    }
-    if std::env::var("MVM_SKIP_RECONCILE").as_deref() == Ok("1") {
-        return;
-    }
-    let _ =
-        mvm_runtime::vm::reconcile::converge(&mvm_runtime::vm::reconcile::ConvergeOpts::default());
-}
-
-#[cfg(test)]
-mod aux_bin_dir_tests {
-    #[test]
-    fn aux_bin_dir_applied_only_when_unset_and_nonempty() {
-        assert_eq!(
-            super::aux_bin_dir_to_apply("/x/aux/debug", false),
-            Some("/x/aux/debug".to_string())
-        );
-        assert_eq!(super::aux_bin_dir_to_apply("/x/aux/debug", true), None);
-        assert_eq!(super::aux_bin_dir_to_apply("", false), None);
     }
 }

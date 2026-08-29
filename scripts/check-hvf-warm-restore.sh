@@ -90,7 +90,7 @@ HOST_AGENT_BIN="${MVM_HVF_WARM_HOST_AGENT:-${TARGET_DIR}/${PROFILE}/mvm-host-age
 SIGNER_HELPER_BIN="${MVM_HVF_WARM_SIGNER_HELPER:-${TARGET_DIR}/${PROFILE}/mvm-signer-helper}"
 
 if [[ "${SKIP_BUILD}" != "1" ]]; then
-  CARGO_TARGET_DIR="${TARGET_DIR}" cargo build -p mvmctl --features hvf-live-validation "${PROFILE_ARGS[@]}"
+  CARGO_TARGET_DIR="${TARGET_DIR}" cargo build -p mvmctl --features hvf-live-validation,embed-host-bins "${PROFILE_ARGS[@]}"
   CARGO_TARGET_DIR="${TARGET_DIR}" cargo build -p mvm-hostd --bin mvm-hvf-supervisor \
     --features hvf-live-validation "${PROFILE_ARGS[@]}"
   CARGO_TARGET_DIR="${TARGET_DIR}" cargo build -p mvm-hostd --bin mvm-network-endpoint \

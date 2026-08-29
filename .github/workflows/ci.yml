@@ -493,6 +493,22 @@ jobs:
           cargo nextest run -p mvm-agentd --features addons
           cargo check -p mvm-agentd --features addons --bins
 
+      # `embed-host-bins` is off by default, so the entire cross-compile leg of
+      # `mvm-cli/build.rs` — and every test that inspects the embedded payload —
+      # is absent from every other lane in this workflow. Only the tag-push
+      # release build turns it on, and a break there is invisible until a
+      # release is already being cut. This lane is the one place a pull request
+      # proves the leg still compiles and still produces the manifest's set.
+      #
+      # `--bins` matters: the payload is `include_bytes!`d into the binary, so a
+      # lib-only check would not link it and would not catch a bad path.
+      - name: embed-host-bins feature (cross-compiled payload)
+        run: |
+          cargo nextest run -p mvm-cli --features embed-host-bins \
+            --test embedded_binaries --test host_binaries_extract \
+            --test host_binaries_manifest --test dispatch_host_bin_dir
+          cargo check -p mvmctl --features embed-host-bins --bins
+
       # End-user release builds enable an acquisition policy that contributor
       # builds deliberately omit: checkout proximity must never select a local
       # compiler. Compile the CLI and execute the policy boundary tests on every

@@ -1,11 +1,21 @@
 # Cut the per-VM aux-helper leg off the inner loop
 
 Backing: shipped-source
-Validation: resolve_refuses_a_stale_helper_found_by_directory_search
+Validation: resolve_missing_helper_names_the_command_that_builds_it
 
-**Status:** DELIVERED
+**Status:** SUPERSEDED by
+`specs/plans/2026-08-28-build-script-drops-the-aux-helper-leg.md`
 **Date:** 2026-08-26
 **Owner:** mvm
+
+> **Superseded (2026-08-28).** This plan made the aux leg *cheap* by reusing a
+> previous build and refusing the reused binary at spawn. The leg has since been
+> deleted outright: those seven binaries are ordinary `[[bin]]`s of `mvm-hostd`
+> that a workspace `cargo build` already produces into `target/<profile>/`,
+> where `aux_bin::resolve` already looked. Reuse, the `.mvm-stale` marker and
+> the `MVM_ALLOW_STALE_AUX` escape hatch are all gone, because cargo owns
+> freshness and staleness is no longer representable. The measurements and the
+> reasoning below stand as the record of why the intermediate step was taken.
 
 ## Summary
 

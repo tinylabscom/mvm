@@ -24,20 +24,19 @@ E2E_HOME="${MVM_E2E_HOME:-$HOME/.mvm}"
 
 # A CHANGING value, exported for every cargo invocation below.
 #
-# `mvm-cli`'s build script reuses a previously-built per-VM helper whenever
-# `PROFILE == debug` and the binary is present, and marks it stale so mvmctl
-# refuses to spawn it. `MVM_EMBED_NO_CACHE` (any non-empty value) forces the
-# rebuild instead. Two traps, both of which produce a suite that fails at spawn
-# against a supervisor which may well be current:
+# `mvm-cli`'s build script reuses a previously cross-compiled embedded host
+# binary whenever `PROFILE == debug` and one is on disk. That reuse is sound for
+# ordinary development but not for a launch gate, which exists to measure this
+# tree: `MVM_EMBED_NO_CACHE` (any non-empty value) forces the rebuild. Two traps,
+# both of which produce a suite that passes against bytes it did not build:
 #
 #  * Set it on only the first build and the later `cargo build -p xtask` /
-#    `cargo test -p mvm-conformance` re-run the build script without it, find
-#    the freshly-built binary present, take the reuse branch, and re-write the
-#    stale marker the first build had just cleared.
+#    `cargo test -p mvm-conformance` re-run the build script without it and take
+#    the reuse branch again.
 #  * Export a constant `1` and the second run of this script is a no-op:
 #    `cargo:rerun-if-env-changed` compares the value, `1 == 1`, so the build
-#    script never re-runs and a marker left by an earlier run survives
-#    untouched. Setting a flag that is already set changes nothing.
+#    script never re-runs at all. Setting a flag that is already set changes
+#    nothing.
 #
 # A per-run value satisfies both: the value always differs from last run, so the
 # build script re-runs, and it is non-empty, so the rebuild is forced. Costs a
@@ -95,7 +94,7 @@ echo "    home:  $E2E_HOME"
 # 1. Build the binaries the suite drives.
 # ---------------------------------------------------------------------------
 echo "==> building mvmctl + host helpers"
-./scripts/cargo-fast.sh build --bin mvmctl
+./scripts/cargo-fast.sh build --bin mvmctl --features embed-host-bins
 ./scripts/cargo-fast.sh build -p xtask
 
 # ---------------------------------------------------------------------------
@@ -193,18 +192,20 @@ echo "==> Rust library seam (mvm-client, in-process)"
 KERNEL="$(find "$E2E_HOME/cache/builder-vm" -name vmlinux -path '*workload*' 2>/dev/null | head -1 || true)"
 ROOTFS="$(find "$E2E_HOME/cache/oci/rootfs" -name rootfs.ext4 2>/dev/null | head -1 || true)"
 
-# The supervisor is not in `target/<profile>/`. mvmctl's build script puts it in
-# a nested aux-helper target dir, and `aux_bin::resolve` finds it from the
-# *mvmctl* exe's neighbourhood — which a `cargo test -p mvm-client` binary is
-# not in. Without this the seam fails with "mvm-hvf-supervisor not found",
-# which reads as a missing build rather than a lookup that cannot reach it.
+# Passed explicitly rather than left to `aux_bin::resolve`, which searches the
+# running exe's neighbourhood — and a `cargo test -p mvm-client` binary lives in
+# `target/debug/deps/`, not beside the supervisor. Without this the seam fails
+# with "mvm-hvf-supervisor not found", which reads as a missing build rather
+# than a lookup that cannot reach it.
 #
 # Absolute, and scoped to the debug profile: the test binaries are debug, and a
 # release supervisor here fails as "not a file" once the test's own working
-# directory differs from this script's.
-SUPERVISOR="$(cd "$REPO" && find "$TARGET_DIR/debug" -type f -name mvm-hvf-supervisor \
-  -path '*aux-helper-target*' 2>/dev/null | head -1 || true)"
-[[ -n "$SUPERVISOR" ]] && SUPERVISOR="$REPO/$SUPERVISOR"
+# directory differs from this script's. Resolved by `cd`+`pwd` rather than by
+# prefixing `$REPO`, which would corrupt an absolute `CARGO_TARGET_DIR`.
+SUPERVISOR=""
+if [[ -f "$TARGET_DIR/debug/mvm-hvf-supervisor" ]]; then
+  SUPERVISOR="$(cd "$TARGET_DIR/debug" && pwd)/mvm-hvf-supervisor"
+fi
 
 if [[ -n "$KERNEL" && -n "$ROOTFS" && -n "$SUPERVISOR" ]]; then
   echo "    kernel:     $KERNEL"

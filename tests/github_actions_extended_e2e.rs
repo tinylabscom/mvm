@@ -92,11 +92,17 @@ fn signature_verifying_build_avoids_the_fast_codegen_link_path() {
     let script = documented_surface_script();
 
     assert!(
-        script.contains("cargo build --bin mvmctl --features \"$E2E_FEATURES\""),
+        script.contains("cargo build --bin mvmctl --features \"$E2E_FEATURES,embed-host-bins\""),
         "the aws-lc-backed user build must use Cargo's standard compiler and linker path"
     );
+    // Checks that `cargo-fast.sh` is never handed `$E2E_FEATURES`, not that it
+    // is never handed any feature at all. The blunt form of this assertion —
+    // "cargo-fast.sh is not invoked with `--features`" — held only while the
+    // featureless arm passed no features, and broke the moment
+    // `embed-host-bins` was added to both arms. That flag pulls no aws-lc, so
+    // it is fine on the fast path; `$E2E_FEATURES` is the one that is not.
     assert!(
-        !script.contains("./scripts/cargo-fast.sh build --bin mvmctl --features"),
+        !script.contains("./scripts/cargo-fast.sh build --bin mvmctl --features \"$E2E_FEATURES"),
         "the fast codegen wrapper leaves aws-lc native symbols unresolved"
     );
 }

@@ -37,10 +37,25 @@ guest NIC, or second endpoint path comes back.
 `mvmctl doctor` reports the libkrun install state and emits hints when it is missing.
 
 For source-checkout contributors only: a **pinned** zig + cargo-zigbuild are
-needed at `cargo build`-of-mvmctl time so `crates/mvm-cli/build.rs` can
-cross-compile the embedded host-vm binaries (`mvm-host-vm-init`,
-`mvm-egress-proxy`) as static `aarch64-unknown-linux-musl` (the
-builder VM rootfs has no dynamic loader). See Plan 115 / ADR-004.
+needed so `crates/mvm-cli/build.rs` can cross-compile the embedded host-vm
+binaries (`mvm-host-vm-init`, `mvm-egress-proxy`) as static
+`aarch64-unknown-linux-musl` (the builder VM rootfs has no dynamic loader).
+See Plan 115 / ADR-004.
+
+That cross-compile is **opt-in**, behind the `embed-host-bins` feature, and is
+the only work `build.rs` still does. A plain `cargo build` skips it: the build
+script then watches four files and writes an empty table, so cargo runs it once
+per fingerprint and never again on the inner loop. Build with the payload when
+you are about to boot a VM:
+
+```sh
+just embed          # cargo build --features embed-host-bins
+```
+
+Without it `mvmctl` runs every host-side verb but cannot bootstrap a builder
+VM — `host_binaries::extract` refuses and names this recipe rather than
+extracting an empty directory. The tag-push release workflow always turns the
+feature on, so a downloaded binary is self-sufficient.
 
 Provision it with one command — it installs the exact pinned zig (from the
 `ziglang` PyPI package, read out of `[workspace.metadata.mvm.toolchain]`) plus
