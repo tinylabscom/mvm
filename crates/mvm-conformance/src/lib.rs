@@ -196,6 +196,7 @@ impl ScenarioGate {
             Self::NeedsBundleFixture => "needs-bundle-fixture",
             Self::NeedsWorkloadKernel => "needs-workload-kernel",
             Self::NeedsMemorySnapshot => "needs-memory-snapshot",
+            Self::NeedsDirShare => "needs-dir-share",
             Self::NeedsGuestBinDir => "needs-guest-bin-dir",
             Self::NeedsSdkSidecar => "needs-sdk-sidecar",
             Self::NeedsPerfBudgetHost => "needs-perf-budget-host",
@@ -471,6 +472,7 @@ mod tests {
             },
         );
         assert_eq!(gate, ScenarioGate::NeedsDirShare);
+        assert_eq!(gate.as_str(), "needs-dir-share");
         assert!(gate.reason().is_some(), "a skip must name what is missing");
         assert!(scenario_should_run(&tags(&["live", "dir_share"]), ALL));
     }

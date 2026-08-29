@@ -218,7 +218,9 @@ for detailed scope and acceptance criteria.
 - [x] **Skipped scenarios fail a gating lane; website coverage ratcheted.**
       `MVM_BDD_STRICT_SKIPS` turns the skip tally into a gate with a per-lane
       allow-list, so a runner that quietly loses a capability reddens the lane
-      instead of reporting a pass that proved less than the last one. The
+      instead of reporting a pass that proved less than the last one. Stable
+      skip names cover the directory-share capability as well, so the mapping
+      remains exhaustive as backend capabilities grow. The
       website's 461 documented commands across 86 files are ratcheted rather
       than adjudicated — coverage is computed by the README gate's own rule and
       checked in at 170 covered / 267 uncovered, and cannot decay or accept a

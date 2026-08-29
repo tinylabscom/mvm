@@ -156,6 +156,10 @@ not existing.
 declare, naming the reason and pointing at the two ways to resolve it. The
 allow-list is per lane, spelled with the stable `ScenarioGate` names:
 
+The stable-name mapping is exhaustive over backend capabilities, including
+`needs-dir-share`, so adding a capability cannot silently evade the release
+lane's skip policy.
+
 - **launch lane** — `pending,needs-perf-budget-host`. Verified against a real
   run: those are the only two it skips.
 - **documented-surface lane** — additionally `needs-memory-snapshot` (Firecracker
