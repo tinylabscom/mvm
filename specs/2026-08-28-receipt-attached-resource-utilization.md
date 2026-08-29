@@ -100,9 +100,14 @@ capability and is not created.
 `ResourceControls::for_backend`
 (`crates/mvm-contract/src/protocol/resource_controls.rs:71`) answers whether a
 backend can *bound* a dimension. Usage needs a second, different question:
-whether it can *observe* one. The two do not coincide — Firecracker on macOS
-has `CpuControl::None` yet its VMM process RSS is observable, and HVF can
-measure CPU with no quota grant at all.
+whether it can *observe* one. The two do not coincide, and neither direction
+implies the other. libkrun off Linux has `CpuControl::None`, because there is
+no cgroup to bound it with, and its CPU is measurable all the same: the VMM
+runs inside our own supervisor process, whose usage reads without any quota
+controller. HVF likewise measures CPU with no quota grant at all. The converse
+holds too — Firecracker on Linux carries a real cgroup share and observes no
+CPU, because a usage reading needs a process we reaped and that VMM detaches
+before the launch returns.
 
 This adds a sibling `ResourceObservation::for_backend(kind)` in the same
 module, under the same exhaustive-match discipline, gated by the same xtask
@@ -121,10 +126,14 @@ Every observation is host-side; the guest can forge none of it.
    - *Libkrun*: the VMM is in-process in `mvm-libkrun-supervisor`, so the
      supervisor reads its own `/proc/self/stat` on Linux or Mach task info on
      macOS.
-   - *Firecracker / Qemu*: the VMM is a child process; `wait4`/`getrusage` on
-     that child before reaping.
-   - *Memory, all native tiers*: host RSS high-water of the VMM process — on
-     the in-process tiers, of the supervisor itself. The same measurement
+   - *Firecracker / Qemu*: nothing is observed and no sidecar is written.
+     Neither VMM is a child of ours — Firecracker detaches its session and is
+     orphaned to init before the launch returns, and qemu daemonizes itself —
+     so there is no process to take a reading from, and CPU and memory stay
+     unavailable on these tiers.
+   - *Memory, the in-process tiers*: host RSS high-water of the VMM process —
+     that is, of the supervisor itself, which is why it means anything about
+     the guest at all. The same measurement
      `memory_budget::MemoryCharge` already consumes. The kernel keeps the
      high-water mark, so this needs no sampling during the run: `VmHWM` from
      `/proc/<pid>/status` on Linux, `resident_size_max` from
@@ -208,7 +217,8 @@ extension.
 
 ## Per-backend observation coverage
 
-CPU is measurable on every native tier without cgroups. `bind_cpu_grant` leaves
+Wherever a tier runs its VMM in a process of ours, CPU is measurable without
+cgroups — which is the in-process tiers, not every native one. `bind_cpu_grant` leaves
 the spawn untouched when no share grant is present
 (`crates/mvm-core/src/cpu_scope.rs:780`), so on Linux no grant means no
 transient scope and therefore no cgroup to read. `/proc/self/stat` and

@@ -90,10 +90,12 @@ impl ResourceControls {
                 },
                 wall_clock: WallClockControl::SupervisorTimer,
             },
-            // A cgroup can bound any Linux process, so on Linux these tiers
-            // carry a real CPU quota. Their wall clock is a different story:
-            // the VMM is a bare child of a `mvmctl` that exits at launch, so
-            // there is no process of ours left to hold a deadline. Answering
+            // A cgroup can bound any Linux process — including one we never
+            // forked — so on Linux these tiers carry a real CPU quota. Their
+            // wall clock is a different story: neither VMM is a child of ours
+            // at all. Firecracker detaches its session and is orphaned to init
+            // before the launch returns, and qemu daemonizes itself, so there
+            // is no process of ours left to hold a deadline. Answering
             // `SupervisorTimer` here would be the same overstatement the macOS
             // CPU arm below exists to avoid — a bound accepted at admission and
             // enforced by nothing.
@@ -454,9 +456,9 @@ mod tests {
     /// Only a tier with a per-VM supervisor process of ours may claim a
     /// supervisor timer. A timer needs two things: a process that outlives the
     /// CLI, and the admitted plan to read a bound from. On the remaining VMM
-    /// tiers the VMM is a bare child of an `mvmctl` that has already exited —
-    /// so the answer there is `None`, not a bound that would be admitted and
-    /// never fire.
+    /// tiers the VMM is not a process of ours at all — it detaches or
+    /// daemonizes itself away from the launching `mvmctl` — so the answer there
+    /// is `None`, not a bound that would be admitted and never fire.
     #[test]
     fn only_a_tier_with_a_live_supervisor_claims_a_supervisor_timer() {
         for kind in [
