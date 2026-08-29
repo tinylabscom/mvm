@@ -12,6 +12,8 @@
       libkrun FFI/supervisor; Apple Silicon retains that existing path.
 - [x] The Linux documented-surface job makes the hosted kernel and initramfs
       readable before QEMU uses them for the Stage 0 SDK-sidecar build.
+- [x] The Linux job gives only the runner user read/write access to
+      `/dev/vhost-vsock` before the unprivileged Stage 0 QEMU process starts.
 - [x] Focused regressions, shared resolver tests, formatting, and package Clippy
       are green.
 - [x] Latest-main workspace tests, isolated doctests, workspace Clippy,

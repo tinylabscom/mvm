@@ -35,6 +35,9 @@ a competing BLAKE3 address or re-hash the archive.
   then QEMU could not read the hosted runner's protected `/boot` kernel. The
   workflow now grants unprivileged QEMU read access to the exact running kernel
   and initramfs before Stage 0 starts.
+- With those files readable, the same rerun reached QEMU device creation and
+  exposed that `/dev/vhost-vsock` was still root-owned. The job now transfers
+  that single device to the runner user with mode `0600` before Stage 0 starts.
 
 ## Delivery checklist
 
@@ -59,5 +62,7 @@ a competing BLAKE3 address or re-hash the archive.
       mismatch with structural regressions.
 - [x] Repair the Linux hosted-kernel permissions with a structural regression
       covering both Stage 0 boot files.
+- [x] Repair the Linux Stage 0 vhost-vsock permissions with a structural
+      regression covering ownership, mode, and read/write access.
 - [ ] Pass a fresh Extended CI run containing all repaired witness lanes.
 - [ ] Merge the corrective pull request and close #2979 through its linkage.

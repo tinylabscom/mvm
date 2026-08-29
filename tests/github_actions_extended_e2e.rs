@@ -116,6 +116,20 @@ fn linux_documented_surface_makes_the_stage0_boot_files_readable() {
 }
 
 #[test]
+fn linux_documented_surface_grants_stage0_vhost_vsock_access() {
+    let workflow = extended_ci();
+    let linux = job_block(&workflow, "e2e-docs-linux");
+
+    assert!(
+        linux.contains("test -c /dev/vhost-vsock")
+            && linux.contains("sudo chown \"$(id -u):$(id -g)\" /dev/vhost-vsock")
+            && linux.contains("sudo chmod 0600 /dev/vhost-vsock")
+            && linux.contains("test -r /dev/vhost-vsock && test -w /dev/vhost-vsock"),
+        "the unprivileged QEMU Stage 0 process must own and be able to open the hosted vhost-vsock device"
+    );
+}
+
+#[test]
 fn macos_documented_surface_uses_an_intel_runner_with_hvf_access() {
     let workflow = extended_ci();
     let macos = job_block(&workflow, "e2e-docs-macos");
