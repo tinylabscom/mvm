@@ -52,6 +52,16 @@
       tests, the isolated `mvm-agentd` doctest, workspace Clippy, formatting,
       and policy gates are green. Merge delivery remains.
 
+- [ ] **Security lane red repair — issues #2982 and #2986.**
+      `specs/plans/2026-08-28-security-lane-red-repair.md`.
+      The lockfile now resolves non-yanked `chacha20 0.10.2`, guarded by a
+      dependency regression. The libkrun capability test witnesses its vCPU
+      ceiling, and eight exemptions that CI already catches have been removed
+      from the mutation baseline. Focused tests, `cargo deny`, the static
+      mutation-surface gate, all ordinary workspace tests, the isolated
+      `mvm-agentd` doctest, workspace Clippy, formatting, and policy gates are
+      green. A fresh Security run and merge delivery remain.
+
 - [ ] **Recorded-backend pause and resume — issue #2929.**
       `specs/plans/2026-08-27-recorded-backend-pause-resume.md`.
       Existing-machine lifecycle operations resolve the VMM that owns the live
