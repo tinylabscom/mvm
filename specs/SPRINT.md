@@ -109,9 +109,10 @@
       regressions. The follow-on #2979 repair now scopes helper builds by host,
       installs `uv`, warms the source-matched sidecar, dispatches installed
       bundle SHA-256 addresses through the bundle registry, and moves the live
-      HVF witness to the Intel runner. Focused tests and zero-warning package
-      Clippy are green; latest-main full validation, live rerun, and merge
-      delivery remain.
+      HVF witness to the Intel runner. Focused tests, all ordinary workspace
+      tests, the isolated `mvm-agentd` doctest, workspace Clippy, formatting,
+      and repository policy gates are green. The live rerun and merge delivery
+      remain.
 
 - [ ] **Cloudflare Pages cutover.**
       `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.

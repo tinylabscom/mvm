@@ -44,9 +44,9 @@ Last updated: 2026-08-29
       Linux helper compilation is platform-scoped, clean runners install the
       SDK prerequisites and warm the source sidecar, installed bundle SHA-256
       values reach the shared slot-or-bundle dispatcher, and the live macOS
-      witness targets an Intel runner with HVF access. Focused tests and package
-      Clippy are green; latest-main full validation, a fresh Extended CI run,
-      and merge delivery remain.
+      witness targets an Intel runner with HVF access. Focused tests, workspace
+      tests, isolated doctests, workspace Clippy, formatting, and policy gates
+      are green. A fresh Extended CI run and merge delivery remain.
 
 - [ ] **HVF machine restore dispatch — issue #2961.**
       `specs/plans/2026-08-27-hvf-machine-restore-dispatch.md`.

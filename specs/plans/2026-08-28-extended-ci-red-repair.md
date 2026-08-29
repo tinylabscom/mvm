@@ -44,7 +44,7 @@ a competing BLAKE3 address or re-hash the archive.
       arm64 hosted VM selected by `macos-latest`.
 - [x] Pass focused Extended CI contracts, all shared resolver tests, formatting,
       and zero-warning `mvm-cli` Clippy.
-- [ ] Rebase onto the latest merged `main` and pass full workspace and repository
+- [x] Rebase onto the latest merged `main` and pass full workspace and repository
       gates.
 - [ ] Pass a fresh Extended CI run containing all repaired witness lanes.
 - [ ] Merge the corrective pull request and close #2979 through its linkage.

@@ -9,8 +9,9 @@
       environment that returned `HV_UNSUPPORTED`.
 - [x] Focused regressions, shared resolver tests, formatting, and package Clippy
       are green.
-- [ ] Latest-main full validation, a fresh Extended CI witness, and merge-queue
-      delivery remain.
+- [x] Latest-main workspace tests, isolated doctests, workspace Clippy,
+      formatting, and repository policy gates are green.
+- [ ] A fresh Extended CI witness and merge-queue delivery remain.
 
 Owning plan:
 `specs/plans/2026-08-28-extended-ci-red-repair.md`.
