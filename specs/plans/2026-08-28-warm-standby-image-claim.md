@@ -1,8 +1,8 @@
 # Warm standby image claim repair
 
-**Status:** IN PROGRESS  
+**Status:** IN PROGRESS
 **Issue:** #3002
-Backing: shipped-source  
+Backing: shipped-source
 Validation: check-sprint-append
 
 ## Problem
