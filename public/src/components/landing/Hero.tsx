@@ -129,33 +129,6 @@ export function Hero() {
               {/* The what-MVM-does callout — this sentence is the pitch, so
                   it gets an accent rule and emphasized key phrases instead
                   of reading as body copy. */}
-              {/* One idea per line, not one dense sentence: workload, then
-                  boundary, then contract. Each line scans on its own and
-                  the emphasized phrase sits at the end of its line where
-                  the eye lands. */}
-              <div
-                className="max-w-[46ch] space-y-2 border-l-2 border-accent-2/60 pl-4 text-base leading-relaxed text-body"
-                style={{ marginTop: "2rem" }}
-              >
-                <p>
-                  Any untrusted workload &mdash; an agent, a customer&rsquo;s
-                  code, a build job &mdash;
-                </p>
-                <p>
-                  in a{" "}
-                  <span className="font-semibold text-emphasis">
-                    sealed, hardware-isolated microVM
-                  </span>
-                  ,
-                </p>
-                <p>
-                  under a{" "}
-                  <span className="font-semibold text-emphasis">
-                    signed execution contract
-                  </span>
-                  .
-                </p>
-              </div>
               {/* Runs-anywhere facts as badge chips, in the same mono idiom
                   as the credibility row above. */}
               <div className="mt-4 flex flex-wrap gap-2 font-mono text-[11px] lowercase">
