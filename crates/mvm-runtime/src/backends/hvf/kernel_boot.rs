@@ -40,8 +40,12 @@ use crate::vmm::virtio::{DiskImage, VirtioBlk, VirtioFs};
 use crate::vmm::virtio_rng::VirtioRng;
 use crate::vmm::vsock::VirtioVsock;
 use crate::vmm::{fdt, kernel_image};
+use mvm_core::usage_capture::{Mechanism, Metric, UsageCapture};
 use mvm_core::vcpu_quota::VcpuQuotaRecord;
-use mvm_vmm::quota::{QuotaConfig, QuotaPolicy, SummedClock, ThreadCpuHandle, VcpuQuota};
+use mvm_vmm::host::process_usage;
+use mvm_vmm::quota::{
+    QuotaConfig, QuotaPolicy, SummedClock, ThreadCpuClock, ThreadCpuHandle, VcpuQuota,
+};
 
 /// Guest RAM base (2 GiB, per the aarch64 Linux boot convention). The GIC +
 /// PL011 sit below RAM so their accesses fault out as MMIO.
@@ -301,6 +305,12 @@ pub struct KernelBootResult {
     /// Internal supervisor shutdown spans. Present when the watchdog stopped a
     /// live run; absent for setup failures and ordinary guest exits.
     pub shutdown_timing: Option<KernelShutdownTiming>,
+    /// What the machine consumed, measured from inside the run.
+    ///
+    /// The vCPU CPU time can only be read while the vCPU threads are alive, so
+    /// it is taken here rather than by the caller; the caller persists it
+    /// beside the exit code, where it knows the VM's state directory.
+    pub usage: UsageCapture,
 }
 
 /// Internal spans between the watchdog observing stop and Hypervisor.framework
@@ -1306,6 +1316,36 @@ fn create_secondary_vcpu(
     Ok((vcpu, vcpu_id))
 }
 
+/// What the machine consumed, from the clocks its vCPU threads carried.
+///
+/// The sum across every vCPU is the machine's CPU; a single thread's reading
+/// would understate an SMP guest by its vCPU count.
+///
+/// An empty set means no vCPU's clock could be captured at all, which reports
+/// as unavailable rather than as zero. The two are not the same claim: zero is
+/// an observation that the workload burned no CPU, and stamping it `measured`
+/// would put a number nobody read onto a signed receipt.
+fn usage_from_clocks<C: ThreadCpuClock>(clocks: Vec<C>) -> UsageCapture {
+    let cpu_ms = if clocks.is_empty() {
+        Metric::unavailable()
+    } else {
+        Metric::measured(
+            u64::try_from(SummedClock::new(clocks).consumed().as_millis()).unwrap_or(u64::MAX),
+            Mechanism::HvfSummedVcpuClock,
+        )
+    };
+    UsageCapture {
+        cpu_ms,
+        // The VMM runs in this process, so the resident high-water mark covers
+        // the guest RAM mapping together with the device model holding it.
+        peak_rss_mib: process_usage::peak_rss_mib_self(),
+        // The host fills the state-dir size and the wall span when it reports
+        // the exit, and is better placed to; a number written here would be
+        // overwritten at best and contradict the host at worst.
+        ..UsageCapture::default()
+    }
+}
+
 /// Create, park, and then drive one secondary vCPU.
 ///
 /// Runs on its own thread for the length of the machine, because HVF requires a
@@ -1861,7 +1901,7 @@ unsafe fn run(
         // from outside. Declared out here because the boot result is assembled
         // below, after the vCPU threads it is set by have been joined.
         let guest_shutdown = AtomicBool::new(false);
-        let (outcome, mut quota) = {
+        let (outcome, mut quota, usage) = {
             let mut devices: Vec<&mut dyn RunDevice> = vec![&mut uart];
             for v in virtio_disks.iter_mut() {
                 devices.push(v);
@@ -1943,11 +1983,15 @@ unsafe fn run(
                 // once the kernel is running it will online that CPU, wait for
                 // it to reach its release point, and hang with no console
                 // output to say why.
-                let mut clocks: Vec<ThreadCpuHandle> = primary_clock.into_iter().collect();
+                // Shared rather than owned: the quota controller takes its
+                // clock onto its own thread, and the run still has to report
+                // what the machine consumed when no controller was started.
+                let mut clocks: Vec<Arc<ThreadCpuHandle>> =
+                    primary_clock.into_iter().map(Arc::new).collect();
                 let mut bring_up: Result<(), HvfError> = Ok(());
                 for _ in 1..vcpus {
                     match created_rx.recv() {
-                        Ok(Ok(clock)) => clocks.extend(clock),
+                        Ok(Ok(clock)) => clocks.extend(clock.map(Arc::new)),
                         Ok(Err(e)) => bring_up = bring_up.and(Err(e)),
                         // The thread died without reporting. Nothing else can
                         // say which CPU is missing, but the boot must not
@@ -1997,6 +2041,12 @@ unsafe fn run(
                 }
                 shared.run.release();
 
+                // The measurement's own view of the same clocks. Taken before
+                // the controller consumes them because a machine is measured
+                // whether or not it was bounded: a grant decides what to
+                // enforce, not whether the run reports what it used.
+                let measured_clocks = clocks.clone();
+
                 // Bound the machine only once every vCPU exists and has
                 // contributed its clock: a controller charging one thread of an
                 // SMP guest would see a fraction of what it is consuming and
@@ -2027,6 +2077,18 @@ unsafe fn run(
                 let outcome =
                     bring_up.and_then(|()| run_primary(primary, &shared, &bus, &mut diagnostics));
 
+                // Read here, with the boot CPU out of the guest and every
+                // secondary still alive, because a thread's CPU accounting does
+                // not outlive the thread: `thread_info` on the port of an
+                // exited thread fails, and a failed read is charged as zero. So
+                // measuring after the joins would silently report every
+                // secondary as having consumed nothing, understating an SMP
+                // guest by exactly the factor summing exists to avoid. What is
+                // given up instead is each secondary's teardown between here
+                // and its exit, which is microseconds of unwinding rather than
+                // guest execution.
+                let usage = usage_from_clocks(measured_clocks);
+
                 // The boot CPU is out of the guest, so the machine is over.
                 // Every secondary has to be released — including one the guest
                 // never onlined, which is parked on its gate and would
@@ -2046,7 +2108,7 @@ unsafe fn run(
                         Err(_) => {}
                     }
                 }
-                outcome.map(|outcome| (outcome, quota))
+                outcome.map(|outcome| (outcome, quota, usage))
             })?
         };
 
@@ -2112,6 +2174,7 @@ unsafe fn run(
             psci_fns: diagnostics.psci_fns,
             other_ecs: diagnostics.other_ecs,
             final_pc,
+            usage,
             shutdown_timing: stop_observed_at.map(|observed_at| KernelShutdownTiming {
                 watchdog_to_vcpu_exit: vcpu_exited_at.saturating_duration_since(observed_at),
                 watchdog_join,
@@ -2135,6 +2198,48 @@ unsafe fn run(
 
 #[cfg(test)]
 mod tests {
+    use mvm_vmm::quota::FixedClock;
+
+    /// A machine granted no CPU share is still measured.
+    ///
+    /// Measurement and enforcement are different questions. A workload with no
+    /// quota runs the same vCPU threads, and their clocks read the same; only
+    /// the controller depends on a grant.
+    #[test]
+    fn cpu_is_measured_on_a_machine_that_was_granted_no_share() {
+        let usage = super::usage_from_clocks(vec![
+            FixedClock::new(Duration::from_millis(2000)),
+            FixedClock::new(Duration::from_millis(2210)),
+        ]);
+        assert_eq!(
+            usage.cpu_ms,
+            Metric::measured(4210, Mechanism::HvfSummedVcpuClock)
+        );
+    }
+
+    /// The machine's CPU is every vCPU's, added up.
+    ///
+    /// A per-thread reading understates an SMP guest by its vCPU count, which
+    /// would bill a four-CPU workload for a quarter of what it consumed.
+    #[test]
+    fn cpu_is_summed_across_vcpus_rather_than_read_off_one() {
+        let one = super::usage_from_clocks(vec![FixedClock::new(Duration::from_millis(1000))]);
+        let four = super::usage_from_clocks(vec![FixedClock::new(Duration::from_millis(1000)); 4]);
+        assert_eq!(one.cpu_ms.value(), Some(1000));
+        assert_eq!(four.cpu_ms.value(), Some(4000));
+    }
+
+    /// Nothing readable is not a reading of nothing.
+    ///
+    /// An empty clock set means every capture failed, which has to report as
+    /// unavailable: a zero here would be indistinguishable from a workload that
+    /// genuinely burned no CPU, and would be stamped `measured` on the receipt.
+    #[test]
+    fn a_machine_with_no_readable_clocks_reports_cpu_unavailable() {
+        let usage = super::usage_from_clocks(Vec::<FixedClock>::new());
+        assert_eq!(usage.cpu_ms, Metric::unavailable());
+    }
+
     /// The device tree describes exactly the CPUs the VMM creates.
     ///
     /// Pinned against `effective_vcpus`, which is also what the vCPU bring-up

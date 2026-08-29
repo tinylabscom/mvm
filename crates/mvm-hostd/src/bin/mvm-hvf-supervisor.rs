@@ -428,6 +428,17 @@ fn main() -> anyhow::Result<()> {
         .workload_exit_code
         .map(|_| workload_exit_write_started.elapsed())
         .unwrap_or_default();
+    // What the machine consumed, beside the exit code it consumed it producing.
+    // The run measured it from inside — vCPU CPU time is only readable while
+    // those threads are alive — and this is where the VM's state directory is
+    // known, which is the directory the host reads the sidecar back from.
+    //
+    // Best-effort by contract: a workload that already ran must not lose its
+    // exit over a missing piece of evidence, so a write failure is swallowed
+    // exactly as the console and exit-code writes above swallow theirs.
+    if let Some(state_dir) = cfg.pid_file.parent() {
+        let _ = mvm_core::usage_capture::write_captured(state_dir, &r.usage);
+    }
     if let Some(timing) = r.shutdown_timing
         && let Some(state_dir) = cfg.pid_file.parent()
     {
