@@ -498,6 +498,9 @@ length-and-hash match, not an identity, and encoding, derivation and a
 window-straddling split defeat the scan permanently. ADR-001's ledger
 carries the full limits note, marked closed or open individually; do not
 paraphrase this row as enforced without it.
+The fleet stream-edge workflow in mvmd is now the input plane's second
+production caller; that closes no remaining limit and does not promote the
+claim.
 
 `Preview` claim 18 — **a workload's resource consumption is bounded at
 admission, and bound at spawn where the host has a mechanism**. Admission
