@@ -287,6 +287,12 @@ fn dispatch_config(mut cfg: SupervisorConfig) -> ExitCode {
         }
     };
 
+    // Registered here rather than at the top of `main`: everything above this
+    // line refuses to boot, and a refusal has no consumption worth recording.
+    // From here on the guest runs, so every way out of this process should
+    // leave a reading.
+    record_usage_at_exit(std::path::Path::new(&cfg.vm_state_dir));
+
     let outcome = run_legacy(&cfg);
 
     match outcome {
@@ -425,6 +431,60 @@ fn run_legacy(cfg: &SupervisorConfig) -> Result<std::convert::Infallible> {
     })
 }
 
+/// Where the exit-time usage reading is written. Set once, immediately before
+/// this process enters its VMM run loop, so the paths that refuse to boot leave
+/// no record at all — an absent sidecar already reads as "nothing observed",
+/// which is the honest answer for a machine that never started.
+static USAGE_STATE_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Persist what this supervisor consumed on behalf of its machine.
+///
+/// The VMM shares this process, so the reading covers guest execution together
+/// with device emulation and vsock pumping. Best-effort, like the exit capture
+/// beside it: a workload that already ran must not fail its teardown over
+/// evidence, and a failed probe yields an unavailable metric rather than a zero.
+///
+/// `host_state_bytes` and `wall_ms` are deliberately left unobserved — the host
+/// measures both when it reports the exit, and it is better placed to.
+fn record_self_usage(vm_state_dir: &std::path::Path) {
+    let usage = mvm_core::usage_capture::UsageCapture {
+        cpu_ms: mvm_vmm::host::process_usage::process_cpu_ms_self(),
+        peak_rss_mib: mvm_vmm::host::process_usage::peak_rss_mib_self(),
+        ..mvm_core::usage_capture::UsageCapture::default()
+    };
+    let _ = mvm_core::usage_capture::write_captured(vm_state_dir, &usage);
+}
+
+/// The `atexit` trampoline. Takes the reading against the directory the run loop
+/// was entered for; does nothing if no run loop was ever entered.
+extern "C" fn record_self_usage_at_exit() {
+    if let Some(dir) = USAGE_STATE_DIR.get() {
+        record_self_usage(dir);
+    }
+}
+
+/// Arrange for a usage reading however this process ends.
+///
+/// There is no "after the run loop returns" here to hang this off: libkrun calls
+/// `exit()` on this process from inside `krun_start_enter` when the guest powers
+/// off, so no Rust statement following [`run_legacy`] executes on the ordinary
+/// path. `atexit` is the hook that still fires there, and one registration also
+/// covers the wall-clock kill — which exits `124` from the timer thread, and is
+/// precisely the run whose consumption someone will want to read — and the
+/// VMM-error return through `main`.
+///
+/// The SIGTERM handler libkrun installs is the one exit this does not reach: it
+/// calls `_exit`, which skips `atexit` by design because nothing in this
+/// function is safe to run from a signal handler.
+fn record_usage_at_exit(vm_state_dir: &std::path::Path) {
+    if USAGE_STATE_DIR.set(vm_state_dir.to_path_buf()).is_ok() {
+        // SAFETY: `record_self_usage_at_exit` is an `extern "C"` function taking
+        // no arguments and returning nothing, which is the signature `atexit`
+        // requires.
+        unsafe { libc::atexit(record_self_usage_at_exit) };
+    }
+}
+
 fn append_supervisor_breadcrumb(vm_state_dir: &std::path::Path, stage: &str, detail: String) {
     let path = vm_state_dir.join("supervisor.lifecycle.log");
     if let Some(parent) = path.parent() {
@@ -445,8 +505,10 @@ fn append_supervisor_breadcrumb(vm_state_dir: &std::path::Path, stage: &str, det
 mod tests {
     use super::{
         append_supervisor_breadcrumb, apply_egress_relay_override, hold_exclusive_image_lock,
+        record_self_usage,
     };
     use libkrun_sys::{BridgeRestartPolicy, KrunContext, NetworkingMode, SupervisorConfig};
+    use mvm_core::usage_capture::{Mechanism, Metric, UsageSource};
 
     fn sample_cfg(networking: NetworkingMode, tenant_id: Option<&str>) -> SupervisorConfig {
         let mut krun = KrunContext::new("vm-1", "/k", "/r");
@@ -533,6 +595,37 @@ mod tests {
         let body = std::fs::read_to_string(dir.path().join("supervisor.lifecycle.log"))
             .expect("read lifecycle log");
         assert!(body.contains("dispatch_config: detail"), "body: {body}");
+    }
+
+    #[test]
+    fn the_supervisor_records_its_own_consumption_as_the_machines() {
+        // The VMM is in-process, so this process's CPU is the machine's CPU plus
+        // this process's own overhead — which is why the mechanism says so.
+        let dir = tempfile::tempdir().expect("tempdir");
+        record_self_usage(dir.path());
+        let captured = mvm_core::usage_capture::read_captured(dir.path());
+        assert_eq!(captured.cpu_ms.source(), UsageSource::Measured);
+        assert!(matches!(
+            captured.cpu_ms,
+            Metric::Measured {
+                mechanism: Mechanism::HostProcessCpu,
+                ..
+            }
+        ));
+        assert_eq!(captured.peak_rss_mib.source(), UsageSource::Measured);
+    }
+
+    #[test]
+    fn the_supervisor_claims_only_the_two_dimensions_it_observes() {
+        // The host fills the state-dir size and the wall span when it reports the
+        // exit. Writing a number for either here would be overwritten at best,
+        // and at worst would contradict the host's own reading.
+        let dir = tempfile::tempdir().expect("tempdir");
+        record_self_usage(dir.path());
+        let captured = mvm_core::usage_capture::read_captured(dir.path());
+        assert_eq!(captured.host_state_bytes, Metric::Unavailable);
+        assert_eq!(captured.wall_ms, Metric::Unavailable);
+        assert_eq!(captured.guest_peak_rss_kib, Metric::Unavailable);
     }
 
     #[test]
