@@ -204,30 +204,27 @@ impl MemoryObservation {
     }
 }
 
-/// How a backend observes host-side state growth, if it can.
+/// How a backend observes host-side state growth.
+///
+/// There is no `None`, for the same reason [`WallObservation`] has none: every
+/// run the host launches, it launches out of a state directory on its own
+/// disk, and reading that directory's size needs no cooperation from the VMM.
+/// A variant meaning "unobservable" would be declared by no backend, and would
+/// let the matrix disagree with a capture site that measures unconditionally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HostStateObservation {
-    /// Nothing about host-side state growth can be measured on this tier.
-    ///
-    /// No backend declares this today — every tier the host launches, it
-    /// launches out of a state directory on its own disk. It is kept as the
-    /// answer available to a future tier that owns no such directory, and it
-    /// asserts no capability, so an unused arm here cannot produce a false
-    /// measurement the way an unwritten metric slot would.
-    None,
     /// Byte total of the VM state directory tree.
     StateDirTreeBytes,
 }
 
 impl HostStateObservation {
-    /// The mechanism a capture site uses on a backend carrying this
-    /// observation, or `None` where there is nothing to measure.
+    /// The mechanism a capture site uses. Unconditional, because the host can
+    /// measure its own state directory on every tier.
     #[must_use]
-    pub const fn mechanism(self) -> Option<Mechanism> {
+    pub const fn mechanism(self) -> Mechanism {
         match self {
-            Self::None => None,
-            Self::StateDirTreeBytes => Some(Mechanism::StateDirTreeBytes),
+            Self::StateDirTreeBytes => Mechanism::StateDirTreeBytes,
         }
     }
 }
@@ -746,7 +743,7 @@ mod tests {
             CpuObservation::HvfSummedVcpuClock.mechanism(),
             CpuObservation::HostProcessCpu.mechanism(),
             MemoryObservation::HostProcessRss.mechanism(),
-            HostStateObservation::StateDirTreeBytes.mechanism(),
+            Some(HostStateObservation::StateDirTreeBytes.mechanism()),
             Some(WallObservation::HostLaunchSpan.mechanism()),
         ];
         for (i, a) in mapped.iter().enumerate() {
@@ -762,7 +759,6 @@ mod tests {
         }
         assert_eq!(CpuObservation::None.mechanism(), None);
         assert_eq!(MemoryObservation::None.mechanism(), None);
-        assert_eq!(HostStateObservation::None.mechanism(), None);
     }
 
     #[test]
@@ -813,16 +809,13 @@ mod tests {
                 memory
             );
         }
-        for host_state in [
-            HostStateObservation::None,
-            HostStateObservation::StateDirTreeBytes,
-        ] {
-            let json = serde_json::to_string(&host_state).expect("serialize");
-            assert_eq!(
-                serde_json::from_str::<HostStateObservation>(&json).expect("deserialize"),
-                host_state
-            );
-        }
+        let host_state =
+            serde_json::to_string(&HostStateObservation::StateDirTreeBytes).expect("serialize");
+        assert_eq!(host_state, r#""state_dir_tree_bytes""#);
+        assert_eq!(
+            serde_json::from_str::<HostStateObservation>(&host_state).expect("deserialize"),
+            HostStateObservation::StateDirTreeBytes
+        );
         let wall = serde_json::to_string(&WallObservation::HostLaunchSpan).expect("serialize");
         assert_eq!(wall, r#""host_launch_span""#);
         assert_eq!(

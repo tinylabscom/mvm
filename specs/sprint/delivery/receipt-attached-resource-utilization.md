@@ -17,11 +17,19 @@ ceiling, so the two become comparable inside one artifact.
   reader/writer mirroring the existing `exit_capture` convention, and the
   pure `host_state_bytes` / `wall_ms` helpers the host computes about itself.
   `Mechanism` lives in `mvm-contract` and is re-exported here.
-- `mvm_core::run_sidecars::clear_prior_run`, called by all four VMM drivers
-  at boot beside the `workload.exit` removal they already did. A state
-  directory is reused across starts and both sidecars are written
-  best-effort, so a leftover usage record would be read at face value by the
-  next run's exit report.
+- `mvm_core::run_sidecars::clear_prior_run`, called by all five boot sites —
+  the four VMM drivers, beside the `workload.exit` removal they already did,
+  plus the HVF same-identity restore. A state directory is reused across
+  starts and both sidecars are written best-effort, so a leftover usage
+  record would be read at face value by the next run's exit report. The
+  restore path is the sharpest case: a fork gets a child directory of its
+  own, but `HvfVmFullRestore::restore` lands back in the directory the
+  pre-checkpoint run wrote into.
+- `HostStateObservation` has no `None` variant, mirroring `WallObservation`
+  for the same reason: the host measures its own state directory on every
+  tier without cooperation from the VMM, so an "unobservable" answer would be
+  declared by no backend and would let the matrix disagree with a capture
+  site that measures unconditionally.
 - `ResourceObservation::for_backend` in `mvm-contract`, declaring what each
   `BackendKind` can honestly report, and a rewritten
   `xtask check-backend-resource-controls` that walks every `for_backend`

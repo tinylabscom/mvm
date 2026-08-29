@@ -224,6 +224,31 @@ fn bounded_restore_command(supervisor: &Path, req: &HvfRestoreRequest<'_>) -> Co
     )
 }
 
+/// Persist the child's own launch config, and clear the state the run this
+/// directory last held left behind.
+///
+/// The config is written before spawning because a later capture of this VM
+/// reads it back through `supervisor_config_path`, so a restored child is
+/// itself checkpointable.
+///
+/// The sidecar clear matters here for a reason the fork paths do not have: a
+/// same-identity restore lands back in the state directory the pre-checkpoint
+/// run wrote into, so that run's captured exit code and usage record are
+/// already sitting there. A restored run that is killed rather than reaching
+/// its own teardown writes neither, and the exit report would read the
+/// pre-checkpoint run's numbers and sign them as this run's measurement.
+fn prepare_child_state_dir(req: &HvfRestoreRequest<'_>, cfg: &HvfSupervisorConfig) -> Result<()> {
+    let config_path = req.state_dir.join("supervisor.json");
+    std::fs::write(
+        &config_path,
+        serde_json::to_vec(cfg).context("serializing the restored HVF launch config")?,
+    )
+    .with_context(|| format!("writing {}", config_path.display()))?;
+    mvm_core::run_sidecars::clear_prior_run(req.state_dir);
+    let _ = std::fs::remove_file(req.state_dir.join("pause.state"));
+    Ok(())
+}
+
 /// Start a supervisor that loads `req`'s materialized saved state instead of
 /// booting a kernel, and wait for it to confirm the VM is live.
 #[tracing::instrument(name = "hvf.restore", skip_all, fields(vm = %req.vm_name))]
@@ -239,17 +264,7 @@ pub fn restore_hvf_vm(req: &HvfRestoreRequest<'_>) -> Result<RestoredHvfVm> {
     let anchors = read_anchors(req.state_dir)?;
     let cfg = hvf_child_restore_config(&parent, &anchors, req)?;
 
-    // Persist the child's own launch config before spawning: a later capture of
-    // this VM reads it back through `supervisor_config_path`, so a restored
-    // child is itself checkpointable.
-    let config_path = req.state_dir.join("supervisor.json");
-    std::fs::write(
-        &config_path,
-        serde_json::to_vec(&cfg).context("serializing the restored HVF launch config")?,
-    )
-    .with_context(|| format!("writing {}", config_path.display()))?;
-    let _ = std::fs::remove_file(&cfg.workload_exit);
-    let _ = std::fs::remove_file(req.state_dir.join("pause.state"));
+    prepare_child_state_dir(req, &cfg)?;
 
     let supervisor = resolve_supervisor_path()?;
     let json = serde_json::to_string(&cfg).context("serializing HvfSupervisorConfig")?;
@@ -370,6 +385,55 @@ mod tests {
             state_dir: dir,
             cpu_grant: None,
         }
+    }
+
+    #[test]
+    fn preparing_the_child_state_dir_drops_the_pre_checkpoint_runs_exit_and_usage() {
+        // A same-identity restore lands back in the directory the
+        // pre-checkpoint run wrote into, unlike a fork, which gets a child dir
+        // of its own. Leaving that run's usage record here would let a restored
+        // run that is killed before its own teardown sign the pre-checkpoint
+        // run's CPU into its receipt as a measurement.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let anchors = materialized(dir);
+        let parent = parent_config(
+            dir,
+            vec![HvfDisk {
+                path: PathBuf::from("/parent/rootfs.ext4"),
+                read_only: true,
+                ephemeral: false,
+            }],
+        );
+        let req = request("restored", dir);
+        let cfg = hvf_child_restore_config(&parent, &anchors, &req).unwrap();
+
+        std::fs::write(mvm_core::exit_capture::exit_file_path(dir), b"0\n").unwrap();
+        mvm_core::usage_capture::write_captured(
+            dir,
+            &mvm_core::usage_capture::UsageCapture {
+                cpu_ms: mvm_core::usage_capture::Metric::measured(
+                    4210,
+                    mvm_core::usage_capture::Mechanism::HvfSummedVcpuClock,
+                ),
+                ..mvm_core::usage_capture::UsageCapture::default()
+            },
+        )
+        .unwrap();
+        std::fs::write(dir.join("pause.state"), b"paused").unwrap();
+
+        prepare_child_state_dir(&req, &cfg).unwrap();
+
+        assert_eq!(
+            mvm_core::usage_capture::read_captured(dir),
+            mvm_core::usage_capture::UsageCapture::default(),
+            "the pre-checkpoint run's usage must not survive the restore"
+        );
+        assert_eq!(mvm_core::exit_capture::read_captured(dir), None);
+        assert!(!dir.join("pause.state").exists());
+        // The half this function exists for is still done: a restored child is
+        // itself checkpointable only if its own launch config is on disk.
+        assert!(dir.join("supervisor.json").is_file());
     }
 
     #[test]
