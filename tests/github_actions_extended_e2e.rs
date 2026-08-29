@@ -259,7 +259,7 @@ fn documented_surface_warms_the_source_matched_sdk_sidecar() {
 }
 
 #[test]
-fn linux_supervisor_build_does_not_require_macos_libkrun_headers() {
+fn supervisor_build_requires_a_detected_libkrun_header() {
     let just = justfile();
     let recipe = just
         .split_once("build-supervisors:")
@@ -268,18 +268,19 @@ fn linux_supervisor_build_does_not_require_macos_libkrun_headers() {
         .split_once("\n# ")
         .map_or_else(|| just.as_str(), |(recipe, _)| recipe);
 
-    let darwin_gate = recipe
-        .find("if [[ \"$(uname -s)\" == \"Darwin\" ]]")
-        .expect("macOS-only helpers must be guarded by a Darwin check");
+    assert!(
+        recipe.contains("build -p mvm-hostd --bins"),
+        "portable helper binaries must still build on every host"
+    );
+    let header_gate = recipe
+        .find("if [[ -f \"$header\" ]]")
+        .expect("the optional libkrun helper must require a detected header");
     let libkrun_build = recipe
         .find("--bin mvm-libkrun-supervisor --features libkrun-sys")
-        .expect("the macOS helper build must remain present");
-    let arm64_gate = recipe
-        .find("if [[ \"$(uname -m)\" == \"arm64\" ]]")
-        .expect("libkrun helper must be guarded by an Apple Silicon check");
+        .expect("the optional libkrun helper build must remain present");
 
     assert!(
-        libkrun_build > darwin_gate && libkrun_build > arm64_gate,
-        "the libkrun-sys helper must only build inside the Darwin/arm64 branch"
+        libkrun_build > header_gate,
+        "the libkrun-sys helper must only build after a real header is found"
     );
 }

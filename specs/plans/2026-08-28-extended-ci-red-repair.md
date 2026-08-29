@@ -50,8 +50,9 @@ a competing BLAKE3 address or re-hash the archive.
       source-matched SDK sidecar, and the live macOS runner selection.
 - [x] Add a resolver regression proving an installed bundle SHA-256 reaches
       the bundle registry while materialized slots retain identity checking.
-- [x] Build the HVF helper on macOS, restrict the libkrun helper and FFI feature
-      to Apple Silicon, and retain the portable network endpoint on every host.
+- [x] Build the portable host helpers on every host, require a detected header
+      for the optional libkrun helper, and keep the Intel witness free of the
+      libkrun FFI feature and arm64-only firmware installation.
 - [x] Install a repository-pinned `uv` in both documented-surface jobs and build
       the checkout's SDK sidecar once before the live scenarios.
 - [x] Reuse `template_load_dispatched` for ambiguous 64-character slot or

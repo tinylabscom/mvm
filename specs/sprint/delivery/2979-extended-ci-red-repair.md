@@ -1,6 +1,7 @@
 # Extended CI red repair
 
-- [x] Linux no longer enables the macOS-only `libkrun-sys` helper build.
+- [x] Portable helpers build on Linux without `libkrun-sys`; the optional
+      libkrun supervisor requires an actually detected header.
 - [x] Both documented-surface jobs install the repository-pinned `uv` before the
       SDK drift witness.
 - [x] The live suite explicitly builds the source-matched SDK sidecar once.
