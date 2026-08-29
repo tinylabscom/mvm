@@ -306,6 +306,16 @@ async fn worker_restart_restores_journaled_registration_and_chain() {
     let worker_pid = fixture.worker_pid().expect("worker pid");
     kill_process_group(worker_pid);
 
+    // A successful kill(2) does not mean the old process has stopped
+    // accepting work yet. Under workspace load, connecting immediately can
+    // reach that dying worker after its signer helper has exited and observe
+    // a transient broker error. Wait for the supervisor's replacement
+    // identity before asserting restored registration and chain state.
+    let worker_deadline = Instant::now() + BROKER_RECOVERY_TIMEOUT;
+    fixture
+        .wait_for_worker_replacement(worker_pid, worker_deadline)
+        .await;
+
     let resp = fixture.wait_for_emit("after-worker-restart").await;
     assert!(matches!(resp, ServiceResponse::Ok { .. }));
     assert_eq!(fixture.chain_entries(), 2);

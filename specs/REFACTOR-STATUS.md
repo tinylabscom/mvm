@@ -16,6 +16,12 @@ Last updated: 2026-08-29
       focused regression, all 598 `mvm-vmm` tests, workspace tests, and
       workspace Clippy are green. Merge delivery remains.
 
+- [ ] **Worker restart identity barrier — issue #2976.**
+      `specs/plans/2026-08-28-worker-restart-identity-barrier.md`.
+      Recovery assertions now begin only after the old worker PID has been
+      replaced by a live supervisor-published identity. The focused and
+      workspace validation gates are green; merge delivery remains.
+
 - [ ] **Wasm SDK host-service admission — issue #2977.**
       `specs/plans/2026-08-28-wasm-sdk-host-service-admission.md`.
       Wasm now refuses the native SDK-sidecar mechanism at the backend-aware
