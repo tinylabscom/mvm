@@ -1,6 +1,5 @@
 //! A source of one thread's consumed CPU time (user + system).
 
-#[cfg(any(test, feature = "test-support"))]
 use std::sync::Arc;
 #[cfg(any(test, feature = "test-support"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -101,6 +100,21 @@ impl Drop for ThreadCpuHandle {
         unsafe {
             let _ = mach_port_deallocate(libc::mach_task_self(), self.port);
         }
+    }
+}
+
+/// A clock two owners read.
+///
+/// Enforcement and measurement are different questions asked of the same
+/// threads: a controller charges the machine while it runs, and the run that
+/// ends still has to report what it consumed even when no controller was
+/// started. The controller takes its clock by value onto its own thread, so
+/// sharing rather than duplicating is what lets one capture answer both — and
+/// duplication is not available anyway, since a captured thread handle owns a
+/// port right that cannot be copied.
+impl<C: ThreadCpuClock + Sync> ThreadCpuClock for Arc<C> {
+    fn consumed(&self) -> Duration {
+        C::consumed(self)
     }
 }
 
@@ -256,6 +270,19 @@ mod tests {
             FixedClock::new(Duration::from_millis(500)),
         ]);
         assert_eq!(clock.consumed(), Duration::from_millis(1000));
+    }
+
+    /// One capture answers both the controller and the measurement.
+    ///
+    /// A thread handle cannot be duplicated, so without this a run would have
+    /// to choose between bounding the machine and reporting what it consumed.
+    #[test]
+    fn a_shared_clock_reads_the_same_through_every_owner() {
+        let shared = Arc::new(FixedClock::new(Duration::from_millis(120)));
+        let held = Arc::clone(&shared);
+        let summed = SummedClock::new(vec![Arc::clone(&shared), Arc::clone(&shared)]);
+        assert_eq!(held.consumed(), Duration::from_millis(120));
+        assert_eq!(summed.consumed(), Duration::from_millis(240));
     }
 
     /// A one-vCPU machine reads exactly as it did before summing existed.

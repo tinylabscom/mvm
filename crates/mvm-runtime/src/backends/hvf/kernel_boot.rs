@@ -40,8 +40,12 @@ use crate::vmm::virtio::{DiskImage, VirtioBlk, VirtioFs};
 use crate::vmm::virtio_rng::VirtioRng;
 use crate::vmm::vsock::VirtioVsock;
 use crate::vmm::{fdt, kernel_image};
+use mvm_core::usage_capture::{Mechanism, Metric, UsageCapture};
 use mvm_core::vcpu_quota::VcpuQuotaRecord;
-use mvm_vmm::quota::{QuotaConfig, QuotaPolicy, SummedClock, ThreadCpuHandle, VcpuQuota};
+use mvm_vmm::host::process_usage;
+use mvm_vmm::quota::{
+    QuotaConfig, QuotaPolicy, SummedClock, ThreadCpuClock, ThreadCpuHandle, VcpuQuota,
+};
 
 /// Guest RAM base (2 GiB, per the aarch64 Linux boot convention). The GIC +
 /// PL011 sit below RAM so their accesses fault out as MMIO.
@@ -301,6 +305,12 @@ pub struct KernelBootResult {
     /// Internal supervisor shutdown spans. Present when the watchdog stopped a
     /// live run; absent for setup failures and ordinary guest exits.
     pub shutdown_timing: Option<KernelShutdownTiming>,
+    /// What the machine consumed, measured from inside the run.
+    ///
+    /// The vCPU CPU time can only be read while the vCPU threads are alive, so
+    /// it is taken here rather than by the caller; the caller persists it
+    /// beside the exit code, where it knows the VM's state directory.
+    pub usage: UsageCapture,
 }
 
 /// Internal spans between the watchdog observing stop and Hypervisor.framework
@@ -1022,12 +1032,44 @@ struct MachineShared<'a> {
     /// the thread that owns that vCPU to apply. Empty for a cold boot, where
     /// secondaries wait for the guest's own PSCI `CPU_ON` instead.
     restored_states: &'a Mutex<Vec<Option<HvfVcpuState>>>,
+    /// Each vCPU's total consumed CPU time, as that CPU reported it on its way
+    /// out of the machine.
+    ///
+    /// Published rather than collected, for a harder version of the reason
+    /// `parked_states` is: a thread's CPU accounting does not outlive the
+    /// thread. `thread_info` on the port of an exited thread fails, and a
+    /// failed read is charged as zero. Every vCPU observes the same stop flag,
+    /// so any sum the boot CPU takes by reading the other CPUs' clocks races
+    /// their exits — and a CPU that wins the race contributes zero rather than
+    /// what it consumed, silently shrinking a number that goes onto a signed
+    /// receipt. Each CPU instead reads its own clock while it is unambiguously
+    /// alive and leaves the answer here.
+    ///
+    /// Indexed by CPU number, slot 0 being the boot CPU. `None` means that CPU
+    /// never reported, which makes the machine's total unknowable rather than
+    /// smaller.
+    vcpu_time: &'a Mutex<Vec<Option<Duration>>>,
 }
 
 impl MachineShared<'_> {
     /// True once this run is over, for any reason.
     fn stopping(&self) -> bool {
         self.stop.load(Ordering::Relaxed) || self.machine_over.load(Ordering::Relaxed)
+    }
+
+    /// Record what `cpu` consumed, as read on `cpu`'s own thread.
+    ///
+    /// Must be called from the thread being measured and before it returns:
+    /// that is the whole point of publishing rather than collecting.
+    fn publish_vcpu_time(&self, cpu: u32, consumed: Duration) {
+        if let Some(slot) = self
+            .vcpu_time
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(cpu as usize)
+        {
+            *slot = Some(consumed);
+        }
     }
 
     /// Record that `cpu` is parked, with the registers it is parked at.
@@ -1306,6 +1348,47 @@ fn create_secondary_vcpu(
     Ok((vcpu, vcpu_id))
 }
 
+/// What the machine consumed, from what each of its vCPUs reported.
+///
+/// `reported` is indexed by CPU number, holding what that CPU read off its own
+/// clock on its way out. The sum across every vCPU is the machine's CPU; a
+/// single CPU's reading would understate an SMP guest by its vCPU count.
+///
+/// A CPU that reported nothing makes the whole machine unavailable rather than
+/// smaller. Summing what did arrive would produce a plausible number that is
+/// short by an entire vCPU's execution, stamped `measured` on a signed receipt
+/// with nothing to mark it as partial — strictly worse than declining to
+/// answer. The same rule covers the empty set: no reports at all is no
+/// measurement, not a measurement of zero.
+fn usage_from_vcpu_time(reported: &[Option<Duration>]) -> UsageCapture {
+    let total = if reported.is_empty() {
+        None
+    } else {
+        // Saturating: a machine cannot consume more than `Duration` holds, and
+        // a receipt is not worth an overflow panic on a teardown path.
+        reported.iter().try_fold(Duration::ZERO, |total, one| {
+            one.map(|one| total.saturating_add(one))
+        })
+    };
+    let cpu_ms = match total {
+        Some(total) => Metric::measured(
+            u64::try_from(total.as_millis()).unwrap_or(u64::MAX),
+            Mechanism::HvfSummedVcpuClock,
+        ),
+        None => Metric::unavailable(),
+    };
+    UsageCapture {
+        cpu_ms,
+        // The VMM runs in this process, so the resident high-water mark covers
+        // the guest RAM mapping together with the device model holding it.
+        peak_rss_mib: process_usage::peak_rss_mib_self(),
+        // The host fills the state-dir size and the wall span when it reports
+        // the exit, and is better placed to; a number written here would be
+        // overwritten at best and contradict the host at worst.
+        ..UsageCapture::default()
+    }
+}
+
 /// Create, park, and then drive one secondary vCPU.
 ///
 /// Runs on its own thread for the length of the machine, because HVF requires a
@@ -1316,7 +1399,7 @@ fn run_secondary<B: run::DeviceBus>(
     cpu: u32,
     shared: &MachineShared<'_>,
     bus: &B,
-    created: &std::sync::mpsc::Sender<Result<Option<ThreadCpuHandle>, HvfError>>,
+    created: &std::sync::mpsc::Sender<Result<Option<Arc<ThreadCpuHandle>>, HvfError>>,
     ready: &std::sync::mpsc::Sender<Result<(), HvfError>>,
 ) -> Result<CpuDiagnostics, HvfError> {
     // Ordered internally: HVF allocates GIC redistributor frames in
@@ -1335,9 +1418,12 @@ fn run_secondary<B: run::DeviceBus>(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .push(vcpu.exit_token());
-    // Captured here because it must be captured on the thread it measures.
-    let clock = ThreadCpuHandle::for_current_thread().ok();
-    let registered = created.send(Ok(clock)).is_ok();
+    // Captured here because it must be captured on the thread it measures, and
+    // shared rather than handed over: the boot CPU needs it to charge the quota
+    // controller while this CPU runs, and this CPU needs it to report what it
+    // consumed before its thread — and with it, its accounting — is gone.
+    let clock = ThreadCpuHandle::for_current_thread().ok().map(Arc::new);
+    let registered = created.send(Ok(clock.clone())).is_ok();
 
     let result = (|| {
         if !registered {
@@ -1426,6 +1512,12 @@ fn run_secondary<B: run::DeviceBus>(
         Ok((outcome, diagnostics))
     })();
 
+    // Report what this CPU consumed before anything else, because everything
+    // that follows moves it closer to the exit that destroys its accounting.
+    // Read on this thread, which is the only thread that can read it.
+    if let Some(clock) = &clock {
+        shared.publish_vcpu_time(cpu, clock.consumed());
+    }
     // This CPU is done, so the machine is: release every other CPU rather than
     // leaving them in a guest that has nothing left to run.
     shared.end();
@@ -1572,7 +1664,7 @@ unsafe fn run(
         // captured *on* the thread it measures, and this is that thread; the
         // controller it feeds is started further down, once every secondary has
         // contributed its own.
-        let primary_clock = ThreadCpuHandle::for_current_thread().ok();
+        let primary_clock = ThreadCpuHandle::for_current_thread().ok().map(Arc::new);
         let roster_w = Arc::clone(&roster);
 
         let watchdog = std::thread::spawn(move || {
@@ -1861,7 +1953,7 @@ unsafe fn run(
         // from outside. Declared out here because the boot result is assembled
         // below, after the vCPU threads it is set by have been joined.
         let guest_shutdown = AtomicBool::new(false);
-        let (outcome, mut quota) = {
+        let (outcome, mut quota, usage) = {
             let mut devices: Vec<&mut dyn RunDevice> = vec![&mut uart];
             for v in virtio_disks.iter_mut() {
                 devices.push(v);
@@ -1886,6 +1978,11 @@ unsafe fn run(
                 Mutex::new((0..vcpus).map(|_| None).collect());
             let restored_states: Mutex<Vec<Option<HvfVcpuState>>> =
                 Mutex::new(restored_secondaries);
+            // Indexed by CPU number, slot 0 being the boot CPU. Every CPU fills
+            // its own on its way out; a slot still `None` at the end names a
+            // CPU whose consumption nobody can account for.
+            let vcpu_time: Mutex<Vec<Option<Duration>>> =
+                Mutex::new((0..vcpus).map(|_| None).collect());
             // Created before any vCPU thread, because every one of them reads
             // it to know when to park. The quota controller that sets it starts
             // later, once each CPU has contributed its CPU clock.
@@ -1906,6 +2003,7 @@ unsafe fn run(
                 throttle: &throttle,
                 parked_states: &parked_states,
                 restored_states: &restored_states,
+                vcpu_time: &vcpu_time,
             };
             let primary = PrimaryRun {
                 vcpu: &vcpu,
@@ -1943,7 +2041,10 @@ unsafe fn run(
                 // once the kernel is running it will online that CPU, wait for
                 // it to reach its release point, and hang with no console
                 // output to say why.
-                let mut clocks: Vec<ThreadCpuHandle> = primary_clock.into_iter().collect();
+                // Shared rather than handed over: the quota controller takes
+                // this set onto its own thread, and each CPU keeps its own to
+                // report what it consumed on the way out.
+                let mut clocks: Vec<Arc<ThreadCpuHandle>> = primary_clock.iter().cloned().collect();
                 let mut bring_up: Result<(), HvfError> = Ok(());
                 for _ in 1..vcpus {
                     match created_rx.recv() {
@@ -2046,7 +2147,24 @@ unsafe fn run(
                         Err(_) => {}
                     }
                 }
-                outcome.map(|outcome| (outcome, quota))
+
+                // Every secondary has published and exited; the boot CPU
+                // publishes last, on its own thread, so its own teardown is
+                // counted too. Only now is the set complete, and nothing here
+                // reads another thread's clock — which is the whole point:
+                // every reading was taken by the CPU it belongs to while that
+                // CPU was unambiguously alive.
+                if let Some(clock) = &primary_clock {
+                    shared.publish_vcpu_time(0, clock.consumed());
+                }
+                let usage = usage_from_vcpu_time(
+                    &shared
+                        .vcpu_time
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                );
+
+                outcome.map(|outcome| (outcome, quota, usage))
             })?
         };
 
@@ -2112,6 +2230,7 @@ unsafe fn run(
             psci_fns: diagnostics.psci_fns,
             other_ecs: diagnostics.other_ecs,
             final_pc,
+            usage,
             shutdown_timing: stop_observed_at.map(|observed_at| KernelShutdownTiming {
                 watchdog_to_vcpu_exit: vcpu_exited_at.saturating_duration_since(observed_at),
                 watchdog_join,
@@ -2135,6 +2254,121 @@ unsafe fn run(
 
 #[cfg(test)]
 mod tests {
+    /// A machine granted no CPU share is still measured.
+    ///
+    /// Measurement and enforcement are different questions. A workload with no
+    /// quota runs the same vCPU threads, and each still reports what it used;
+    /// only the controller depends on a grant.
+    #[test]
+    fn cpu_is_measured_on_a_machine_that_was_granted_no_share() {
+        let usage = super::usage_from_vcpu_time(&[
+            Some(Duration::from_millis(2000)),
+            Some(Duration::from_millis(2210)),
+        ]);
+        assert_eq!(
+            usage.cpu_ms,
+            Metric::measured(4210, Mechanism::HvfSummedVcpuClock)
+        );
+    }
+
+    /// The machine's CPU is every vCPU's, added up.
+    ///
+    /// A single CPU's reading understates an SMP guest by its vCPU count, which
+    /// would bill a four-CPU workload for a quarter of what it consumed.
+    #[test]
+    fn cpu_is_summed_across_vcpus_rather_than_read_off_one() {
+        let one = super::usage_from_vcpu_time(&[Some(Duration::from_millis(1000))]);
+        let four = super::usage_from_vcpu_time(&[Some(Duration::from_millis(1000)); 4]);
+        assert_eq!(one.cpu_ms.value(), Some(1000));
+        assert_eq!(four.cpu_ms.value(), Some(4000));
+    }
+
+    /// Nothing reported is not a report of nothing.
+    ///
+    /// No CPU reported at all has to read as unavailable: a zero would be
+    /// indistinguishable from a workload that genuinely burned no CPU, and
+    /// would go onto the receipt stamped `measured`.
+    #[test]
+    fn a_machine_with_no_readable_clocks_reports_cpu_unavailable() {
+        assert_eq!(
+            super::usage_from_vcpu_time(&[]).cpu_ms,
+            Metric::unavailable()
+        );
+    }
+
+    /// A machine missing one CPU's report is unmeasured, not smaller.
+    ///
+    /// Summing what did arrive yields a plausible number short by an entire
+    /// vCPU's execution, stamped `measured` with nothing marking it partial.
+    /// Declining to answer is the honest option and the only recoverable one.
+    #[test]
+    fn a_machine_missing_one_vcpus_report_reports_cpu_unavailable() {
+        let usage = super::usage_from_vcpu_time(&[Some(Duration::from_millis(1000)), None]);
+        assert_eq!(usage.cpu_ms, Metric::unavailable());
+    }
+
+    /// A vCPU that genuinely burned nothing is measured as zero.
+    ///
+    /// The other side of the rule above: `None` is the absence of a report, not
+    /// a report of absence, and a CPU the guest onlined but never scheduled has
+    /// a real answer that happens to be small.
+    #[test]
+    fn a_vcpu_that_reported_zero_is_measured_rather_than_unavailable() {
+        let usage =
+            super::usage_from_vcpu_time(&[Some(Duration::from_millis(500)), Some(Duration::ZERO)]);
+        assert_eq!(
+            usage.cpu_ms,
+            Metric::measured(500, Mechanism::HvfSummedVcpuClock)
+        );
+    }
+
+    /// The reason every CPU reports itself instead of being read by the boot
+    /// CPU at the end.
+    ///
+    /// A thread's CPU accounting dies with the thread: `thread_info` on the
+    /// port of an exited thread fails, and the failure is charged as zero. This
+    /// witnesses both halves against the real Mach API — the value the thread
+    /// published survives it, and a read of the same handle after the join does
+    /// not. Deterministic in both directions: the busy loop guarantees a
+    /// non-zero reading, and a joined thread's port is unconditionally invalid.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_vcpus_time_survives_the_thread_that_earned_it() {
+        let published: Arc<Mutex<Option<Duration>>> = Arc::new(Mutex::new(None));
+        let retained: Arc<Mutex<Option<Arc<ThreadCpuHandle>>>> = Arc::new(Mutex::new(None));
+        let published_w = Arc::clone(&published);
+        let retained_w = Arc::clone(&retained);
+
+        std::thread::spawn(move || {
+            let clock = Arc::new(ThreadCpuHandle::for_current_thread().unwrap());
+            *retained_w.lock().unwrap() = Some(Arc::clone(&clock));
+            let started = Instant::now();
+            let mut x = 0u64;
+            while started.elapsed() < Duration::from_millis(50) {
+                x = x.wrapping_add(1);
+                std::hint::black_box(x);
+            }
+            // What every vCPU thread does on its way out.
+            *published_w.lock().unwrap() = Some(clock.consumed());
+        })
+        .join()
+        .expect("worker thread");
+
+        let published = published.lock().unwrap().expect("the thread reported");
+        assert!(
+            published > Duration::ZERO,
+            "a busy thread's own reading must be non-zero, got {published:?}"
+        );
+
+        let handle = retained.lock().unwrap().clone().expect("handle retained");
+        assert_eq!(
+            handle.consumed(),
+            Duration::ZERO,
+            "reading a joined thread's clock fails and is charged as zero — which \
+             is exactly why the reading is published rather than collected"
+        );
+    }
+
     /// The device tree describes exactly the CPUs the VMM creates.
     ///
     /// Pinned against `effective_vcpus`, which is also what the vCPU bring-up

@@ -377,10 +377,10 @@ impl VmmDriver for LibkrunDriver {
         std::fs::create_dir_all(&state_dir)
             .map_err(|e| anyhow!("create state dir {}: {e}", state_dir.display()))?;
         let console_log = state_dir.join("console.log");
-        // Clear any prior run's captured exit code so `wait` reads only this
-        // launch's, and the console capture so a stale panic isn't mistaken for
-        // this boot's.
-        let _ = std::fs::remove_file(mvm_core::exit_capture::exit_file_path(&state_dir));
+        // Clear any prior run's captured exit code and usage record so `wait`
+        // and the exit report read only this launch's, and the console capture
+        // so a stale panic isn't mistaken for this boot's.
+        mvm_core::run_sidecars::clear_prior_run(&state_dir);
         let _ = mvm_vmm::host::console_capture::open_console_capture(&console_log);
 
         let cfg = relay_libkrun_supervisor_config(spec, &state_dir)?;

@@ -247,6 +247,33 @@ async fn transient_exit_reports_code_and_cleanup_is_idempotent() {
 }
 
 #[tokio::test]
+async fn an_exit_records_the_host_state_size_even_when_the_backend_measured_nothing() {
+    // The host observes its own state directory and its own launch span
+    // without any cooperation from the VMM, so these are measured on every
+    // tier — including one that wrote no usage sidecar at all.
+    let home = Isolated::new();
+    let client = mock_client();
+
+    let request = transient_request(&home.rootfs())
+        .name("t-usage")
+        .build()
+        .expect("request");
+    let outcome = client.launch(request).await.expect("launch");
+    client
+        .stop_machine(&outcome.machine.id)
+        .await
+        .expect("stop");
+
+    client.report_exit(&outcome).expect("report exit");
+
+    let audit = home.audit_text();
+    assert!(audit.contains("state_dir_tree_bytes"), "got: {audit}");
+    assert!(audit.contains("host_launch_span"), "got: {audit}");
+    // Nothing wrote a sidecar, so CPU stays honestly unobserved.
+    assert!(audit.contains("unavailable"), "got: {audit}");
+}
+
+#[tokio::test]
 async fn transient_failed_launch_rolls_back_session_state() {
     let home = Isolated::new();
     let service = fixture_secret_service(&home);

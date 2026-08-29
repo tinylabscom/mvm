@@ -287,6 +287,12 @@ fn dispatch_config(mut cfg: SupervisorConfig) -> ExitCode {
         }
     };
 
+    // Registered here rather than at the top of `main`: everything above this
+    // line refuses to boot, and a refusal has no consumption worth recording.
+    // From here on the guest runs, so every way out of this process should
+    // leave a reading.
+    record_usage_at_exit(std::path::Path::new(&cfg.vm_state_dir));
+
     let outcome = run_legacy(&cfg);
 
     match outcome {
@@ -423,6 +429,46 @@ fn run_legacy(cfg: &SupervisorConfig) -> Result<std::convert::Infallible> {
         append_supervisor_breadcrumb(vm_state_dir, "run_legacy_error", e.to_string());
         anyhow!("run_supervisor failed: {e}")
     })
+}
+
+/// Where the exit-time usage reading is written. Set once, immediately before
+/// this process enters its VMM run loop, so the paths that refuse to boot leave
+/// no record at all — an absent sidecar already reads as "nothing observed",
+/// which is the honest answer for a machine that never started.
+static USAGE_STATE_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// The `atexit` trampoline. Takes the reading against the directory the run loop
+/// was entered for; does nothing if no run loop was ever entered.
+///
+/// The measurement itself lives in `mvm_hostd::supervisor::self_usage`, which is
+/// feature-independent: this binary compiles only under `libkrun-sys`, and a
+/// measurement tested only here would be tested in no lane at all.
+extern "C" fn record_self_usage_at_exit() {
+    if let Some(dir) = USAGE_STATE_DIR.get() {
+        mvm_hostd::supervisor::self_usage::record_self_usage(dir);
+    }
+}
+
+/// Arrange for a usage reading however this process ends.
+///
+/// There is no "after the run loop returns" here to hang this off: libkrun calls
+/// `exit()` on this process from inside `krun_start_enter` when the guest powers
+/// off, so no Rust statement following [`run_legacy`] executes on the ordinary
+/// path. `atexit` is the hook that still fires there, and one registration also
+/// covers the wall-clock kill — which exits `124` from the timer thread, and is
+/// precisely the run whose consumption someone will want to read — and the
+/// VMM-error return through `main`.
+///
+/// The SIGTERM handler libkrun installs is the one exit this does not reach: it
+/// calls `_exit`, which skips `atexit` by design because nothing in this
+/// function is safe to run from a signal handler.
+fn record_usage_at_exit(vm_state_dir: &std::path::Path) {
+    if USAGE_STATE_DIR.set(vm_state_dir.to_path_buf()).is_ok() {
+        // SAFETY: `record_self_usage_at_exit` is an `extern "C"` function taking
+        // no arguments and returning nothing, which is the signature `atexit`
+        // requires.
+        unsafe { libc::atexit(record_self_usage_at_exit) };
+    }
 }
 
 fn append_supervisor_breadcrumb(vm_state_dir: &std::path::Path, stage: &str, detail: String) {

@@ -56,6 +56,7 @@ use mvm_contract::provenance::{
 };
 use mvm_contract::verify::hash_line;
 use mvm_core::plan::ExecutionPlan;
+use mvm_core::usage_capture::UsageCapture;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -1049,33 +1050,63 @@ impl AuditEmitter {
         );
         self.emit_entry(&entry)
     }
+}
 
+/// What a finished run reports about itself.
+///
+/// A struct rather than a positional list because this grows with each
+/// dimension the host learns to observe, and a four-then-five-argument emit
+/// is the shape the workspace's argument-count rule exists to prevent.
+#[derive(Debug, Clone, Copy)]
+pub struct ExitRecord<'a> {
+    /// `None` when the guest never reported one.
+    pub exit_code: Option<i32>,
+    pub backend: &'a str,
+    pub usage: UsageCapture,
+}
+
+impl AuditEmitter {
     /// Emit `plan.exited` — fires after a waited-for workload powers off,
     /// carrying its captured exit code.
     pub fn emit_exited(&self, plan: &ExecutionPlan, exit_code: i32, backend: &str) -> Result<()> {
-        self.emit_exited_with_capture(plan, Some(exit_code), backend)
+        self.emit_exited_with_capture(
+            plan,
+            ExitRecord {
+                exit_code: Some(exit_code),
+                backend,
+                usage: UsageCapture::default(),
+            },
+        )
     }
 
     /// Emit `plan.exited` with capture fidelity: a missing exit capture is
     /// recorded as `exit_code=none` + `captured=false` rather than being
-    /// attested as a successful exit 0 the guest never reported.
+    /// attested as a successful exit 0 the guest never reported. The usage
+    /// record follows the same rule — a dimension nobody observed is written
+    /// as unavailable rather than left out, so a reader can tell an
+    /// unmeasured run from an unmeasurable one.
     pub fn emit_exited_with_capture(
         &self,
         plan: &ExecutionPlan,
-        exit_code: Option<i32>,
-        backend: &str,
+        record: ExitRecord<'_>,
     ) -> Result<()> {
-        let (code, captured) = match exit_code {
+        let (code, captured) = match record.exit_code {
             Some(code) => (code.to_string(), "true"),
             None => ("none".to_string(), "false"),
         };
+        // One label rather than a field per metric: the record is a typed
+        // document with its own validation, and flattening it here would put
+        // that validation on the far side of a string round trip.
+        let usage = serde_json::to_string(&record.usage)
+            .context("encoding the usage record for the audit chain")?;
         self.emit(
             plan,
             "plan.exited",
             [
                 ("exit_code".to_string(), code),
                 ("captured".to_string(), captured.to_string()),
-                ("backend".to_string(), backend.to_string()),
+                ("backend".to_string(), record.backend.to_string()),
+                ("usage".to_string(), usage),
             ],
         )
     }
@@ -1468,6 +1499,7 @@ fn append_root_history(audit_dir: &Path, tenant: &str, signed: &SignedAuditRoot)
 mod tests {
     use super::*;
     use crate::supervisor::verify_audit_chain;
+    use mvm_core::usage_capture::{Mechanism, Metric};
     use rand::Rng;
 
     #[test]
@@ -2187,11 +2219,25 @@ mod tests {
 
         // A captured exit records the code and captured=true.
         emitter
-            .emit_exited_with_capture(&plan, Some(0), "mock")
+            .emit_exited_with_capture(
+                &plan,
+                ExitRecord {
+                    exit_code: Some(0),
+                    backend: "mock",
+                    usage: UsageCapture::default(),
+                },
+            )
             .unwrap();
         // A missing capture must never be attested as exit 0.
         emitter
-            .emit_exited_with_capture(&plan, None, "mock")
+            .emit_exited_with_capture(
+                &plan,
+                ExitRecord {
+                    exit_code: None,
+                    backend: "mock",
+                    usage: UsageCapture::default(),
+                },
+            )
             .unwrap();
 
         let path = dir.path().join("local.jsonl");
@@ -2207,6 +2253,92 @@ mod tests {
             "uncaptured must not read as exit 0"
         );
         assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 2);
+    }
+
+    #[test]
+    fn an_exit_entry_carries_the_usage_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-USAGE");
+        let usage = UsageCapture {
+            cpu_ms: Metric::measured(4210, Mechanism::HostProcessCpu),
+            ..UsageCapture::default()
+        };
+
+        emitter
+            .emit_exited_with_capture(
+                &plan,
+                ExitRecord {
+                    exit_code: Some(0),
+                    backend: "libkrun",
+                    usage,
+                },
+            )
+            .unwrap();
+
+        // Parse the label back rather than substring-matching the line: the
+        // entry has to carry the number, the source, and the mechanism that
+        // produced it, and an `||` over two loose substrings would pass on any
+        // one of the three.
+        let content =
+            std::fs::read_to_string(dir.path().join("local.jsonl")).expect("audit file exists");
+        let entry: serde_json::Value = content
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("entry is json"))
+            .find(|line| line["entry"]["event"] == "plan.exited")
+            .expect("a plan.exited entry");
+        let recorded: UsageCapture = serde_json::from_str(
+            entry["entry"]["labels"]["usage"]
+                .as_str()
+                .expect("the usage label is a json string"),
+        )
+        .expect("the usage label parses back into a capture");
+        assert_eq!(recorded, usage);
+        assert_eq!(
+            recorded.cpu_ms,
+            Metric::measured(4210, Mechanism::HostProcessCpu)
+        );
+        // The dimensions this run did not observe stay unobserved rather than
+        // being filled in by the emitter.
+        assert_eq!(recorded.peak_rss_mib, Metric::unavailable());
+    }
+
+    #[test]
+    fn an_exit_that_measured_nothing_still_says_so_in_the_chain() {
+        // Absence of the label would be indistinguishable from an older
+        // entry; an explicit all-unavailable record is the attestable form.
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-USAGE-NONE");
+
+        emitter
+            .emit_exited_with_capture(
+                &plan,
+                ExitRecord {
+                    exit_code: None,
+                    backend: "firecracker",
+                    usage: UsageCapture::default(),
+                },
+            )
+            .unwrap();
+
+        let content =
+            std::fs::read_to_string(dir.path().join("local.jsonl")).expect("audit file exists");
+        assert!(content.contains("unavailable"), "got: {content}");
+        assert!(
+            content.contains("captured"),
+            "capture fidelity is unchanged"
+        );
     }
 
     #[test]

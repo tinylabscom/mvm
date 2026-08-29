@@ -104,6 +104,9 @@ pub mod reversible_replacement_resolve;
 /// audit events (claim 13: metadata only, never the secret value).
 pub mod secret_audit;
 pub mod secrets_scanner;
+/// What a per-VM supervisor consumed on behalf of its machine — the
+/// self-measurement the in-process VMM tiers record at teardown.
+pub mod self_usage;
 pub mod sensitive_detector;
 /// Transparent egress terminator primitives: original destination
 /// recovery after nft REDIRECT, plus the future forward/substitute
