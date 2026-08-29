@@ -579,6 +579,57 @@ pub fn read_verified_set(
     Ok(walked.contents)
 }
 
+/// The segment set's shape: which segments exist and where, read from the
+/// directory listing without opening any of them.
+///
+/// Deliberately weaker than every other entry point here, and only useful to a
+/// caller that gets its integrity from somewhere else. It answers "which
+/// segments exist" and nothing about what is in them: a removed segment changes
+/// the sealed list and is therefore visible, an edited one is not.
+///
+/// The Merkle root builder uses it to check that the set it cached against is
+/// still the set on disk before folding a host-signed statement about the
+/// contents. A caller without such a statement wants [`read_verified_set`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentShape {
+    /// Sealed segments, oldest first.
+    pub sealed: Vec<(u64, PathBuf)>,
+    /// The live segment.
+    pub active: (u64, PathBuf),
+}
+
+impl SegmentShape {
+    /// Sequence numbers, oldest first, the live segment last.
+    #[must_use]
+    pub fn seqs(&self) -> Vec<u64> {
+        self.sealed
+            .iter()
+            .map(|(seq, _)| *seq)
+            .chain(std::iter::once(self.active.0))
+            .collect()
+    }
+}
+
+/// Enumerate the segment set without reading any segment's contents.
+///
+/// See [`SegmentShape`] for what this does and does not establish.
+pub fn segment_shape(dir: &Path, base: &str) -> Result<SegmentShape, SegmentSetError> {
+    let located = locate(dir, base)?;
+    let (active, sealed) = located
+        .split_last()
+        .ok_or_else(|| SegmentSetError::Io(format!("{base}: no segments in {}", dir.display())))?;
+    if !active.active {
+        return Err(SegmentSetError::Io(format!(
+            "{base}: the last segment in {} is not the live one",
+            dir.display()
+        )));
+    }
+    Ok(SegmentShape {
+        sealed: sealed.iter().map(|s| (s.seq, s.path.clone())).collect(),
+        active: (active.seq, active.path.clone()),
+    })
+}
+
 /// Read the whole set with its structure verified but no interior walked.
 ///
 /// [`read_verified_set`] with the interiors left out: every handoff, boundary

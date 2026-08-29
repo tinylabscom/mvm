@@ -51,10 +51,12 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use ed25519_dalek::VerifyingKey;
 use mvm_contract::merkle::{
-    InclusionProof, SignedAuditRoot, build_inclusion_proof, merkle_root, verify_signed_root,
+    InclusionProof, SignedAuditRoot, build_inclusion_proof, leaf_hash, merkle_root,
+    merkle_root_of_leaf_hashes, verify_signed_root,
 };
 
 use crate::audit::emitter;
+use crate::audit::leaf_cache;
 use crate::supervisor::audit_file::verify_chain_bytes_resuming;
 use crate::supervisor::audit_set::{SegmentContent, read_topology_verified_set};
 use mvm_contract::verify::{hash_line, verify_audit_chain_bytes};
@@ -259,9 +261,163 @@ fn raw_line_index(content: &str, nth: usize) -> Option<usize> {
 /// returning the root hash and the number of leaves (`tree_size`). The chain
 /// is verified under `vk` first; a corrupt log yields no root.
 pub fn build_root_in(audit_dir: &Path, tenant: &str, vk: &VerifyingKey) -> Result<([u8; 32], u64)> {
+    if let Some(built) = root_over_cached_prefix(audit_dir, tenant, vk) {
+        return Ok(built);
+    }
     let leaves = read_leaves(audit_dir, tenant, vk)?;
     let tree_size = leaves.len() as u64;
-    Ok((merkle_root(&leaves), tree_size))
+    let root = merkle_root(&leaves);
+    seed_leaf_cache(audit_dir, tenant, &leaves);
+    Ok((root, tree_size))
+}
+
+/// The root, folded from cached leaf hashes plus whatever the live segment has
+/// gained since — without reading a sealed segment at all.
+///
+/// [`leaves_over_attested_prefix`] removed the *verification* of an unchanged
+/// prefix; this removes the *reading and hashing* of one. Both rest on the same
+/// signature, and the difference is what is asked of it: there, that the
+/// prefix's lines are the attested ones; here, that the cached hashes of those
+/// lines are. The fold is the check — a cache that does not reproduce the
+/// signed root is discarded, so the cache is never believed, only confirmed.
+///
+/// The live segment is still read in full every time, and its new lines are
+/// verified against the chain exactly as before. Only the part a published root
+/// already covers comes from cache.
+///
+/// Declines, never accuses — same contract as [`leaves_over_attested_prefix`],
+/// and for the same reason. Every path out of here that is not a fold over an
+/// attested prefix hands the question to the genesis walk.
+fn root_over_cached_prefix(
+    audit_dir: &Path,
+    tenant: &str,
+    vk: &VerifyingKey,
+) -> Option<([u8; 32], u64)> {
+    let published = read_published_root(audit_dir, tenant)?;
+    if published.tenant != tenant {
+        return None;
+    }
+    verify_signed_root(&published, vk).ok()?;
+
+    let cache = leaf_cache::read(audit_dir, tenant)?;
+    if cache.tree_size() != published.tree_size {
+        return None;
+    }
+
+    // The fold is the whole trust argument: these hashes are the ones the host
+    // signed for, or they are not used.
+    if !cache.folds_to(&published.root_hash) {
+        return None;
+    }
+
+    // The fold says nothing about the files those leaves came from. The set's
+    // shape does, cheaply — a lost segment must reach the genesis walk, which
+    // names it, rather than being folded over as though nothing were missing.
+    let shape = crate::supervisor::audit_set::segment_shape(audit_dir, tenant).ok()?;
+    if shape.active.0 != cache.active_seq || shape.sealed.len() != cache.sealed.len() {
+        return None;
+    }
+    if sealed_fingerprints(&shape)? != cache.sealed {
+        return None;
+    }
+
+    // The live segment is read in full whatever happens, so the portion the
+    // cache claims is checked line by line rather than assumed. Sealed
+    // segments buy their speed by not being read; this one does not, and an
+    // edit here is caught at publish time exactly as it was before.
+    let content = std::fs::read_to_string(&shape.active.1).ok()?;
+    let active_lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
+    let already = usize::try_from(cache.prefix_lines_in_active).ok()?;
+    if already > active_lines.len() {
+        return None;
+    }
+    let cached_active = cache.active_prefix_hashes()?;
+    if cached_active.len() != already
+        || active_lines[..already]
+            .iter()
+            .zip(cached_active)
+            .any(|(line, cached)| leaf_hash(line.as_bytes()) != *cached)
+    {
+        return None;
+    }
+
+    // The suffix is the part no published root covers, so it is verified in
+    // full, seeded from the attested prefix's final line.
+    let appended = &active_lines[already..];
+    if !appended.is_empty() {
+        // `already == 0` puts that final line in the *previous* segment, which
+        // this path deliberately did not read. That happens once per rotation;
+        // hand it to the genesis walk rather than growing a second seek path.
+        if already == 0 {
+            return None;
+        }
+        let seed = hash_line(active_lines[already - 1].as_bytes());
+        let resume = raw_line_index(&content, already)?;
+        verify_chain_bytes_resuming(&content, vk, resume, seed).ok()?;
+    }
+
+    let mut leaf_hashes = cache.leaf_hashes;
+    leaf_hashes.extend(appended.iter().map(|l| leaf_hash(l.as_bytes())));
+    let tree_size = leaf_hashes.len() as u64;
+    let root = merkle_root_of_leaf_hashes(&leaf_hashes);
+
+    leaf_cache::write(
+        audit_dir,
+        tenant,
+        &leaf_cache::LeafCache {
+            sealed: cache.sealed,
+            active_seq: shape.active.0,
+            prefix_lines_in_active: active_lines.len() as u64,
+            leaf_hashes,
+        },
+    );
+    Some((root, tree_size))
+}
+
+/// Fingerprint every sealed segment in `shape`, or `None` if any is gone.
+fn sealed_fingerprints(
+    shape: &crate::supervisor::audit_set::SegmentShape,
+) -> Option<Vec<leaf_cache::SealedFingerprint>> {
+    shape
+        .sealed
+        .iter()
+        .map(|(seq, path)| leaf_cache::SealedFingerprint::probe(*seq, path))
+        .collect()
+}
+
+/// Seed the cache from leaves a genesis walk just verified, so the next launch
+/// has something to fold.
+///
+/// Best effort throughout: every early return leaves no cache, which costs
+/// another genesis walk and nothing else.
+fn seed_leaf_cache(audit_dir: &Path, tenant: &str, leaves: &[String]) {
+    let Ok(shape) = crate::supervisor::audit_set::segment_shape(audit_dir, tenant) else {
+        return;
+    };
+    let Some(sealed) = sealed_fingerprints(&shape) else {
+        return;
+    };
+    let Ok(content) = std::fs::read_to_string(&shape.active.1) else {
+        return;
+    };
+    let active_lines = content.lines().filter(|l| !l.is_empty()).count();
+    // The cache describes a prefix ending inside the live segment. Fewer leaves
+    // than that segment holds means these two reads disagree about the log —
+    // most likely because it was appended to between them — and a cache built
+    // across that disagreement would mis-index its suffix.
+    if leaves.len() < active_lines {
+        return;
+    }
+    leaf_cache::write(
+        audit_dir,
+        tenant,
+        &leaf_cache::LeafCache {
+            sealed,
+            active_seq: shape.active.0,
+            prefix_lines_in_active: active_lines as u64,
+            leaf_hashes: leaves.iter().map(|l| leaf_hash(l.as_bytes())).collect(),
+        },
+    );
 }
 
 /// Build an inclusion proof for the leaf at `leaf_index` in `tenant`'s audit
@@ -590,6 +746,147 @@ mod tests {
         assert_eq!(raw_line_index(content, 2), Some(3));
         assert_eq!(raw_line_index(content, 3), Some(4));
         assert_eq!(raw_line_index(content, 4), None);
+    }
+
+    /// Every test below this one would pass by silently falling back to the
+    /// genesis walk, so the first thing to establish is that the cached path
+    /// runs at all — and that it lands on the same root.
+    #[test]
+    fn the_cached_prefix_path_engages_and_agrees_with_the_genesis_walk() {
+        let (dir, key, _) = seed_chain(4);
+        let vk = key.verifying_key();
+        grow_and_publish(dir.path(), &key, 2, "published");
+        grow_with_rotation(
+            dir.path(),
+            &key,
+            2,
+            "after",
+            crate::supervisor::RotationPolicy::never(),
+        );
+
+        let cached = root_over_cached_prefix(dir.path(), "local", &vk)
+            .expect("a published root plus its seeded cache must engage the fast path");
+        let leaves = read_leaves_from_genesis(dir.path(), "local", &vk).unwrap();
+        assert_eq!(cached, (merkle_root(&leaves), leaves.len() as u64));
+    }
+
+    #[test]
+    fn a_removed_sealed_segment_declines_the_cache() {
+        // The fold proves the cached hashes are the attested ones. It cannot
+        // prove the segments they came from are still there, which is why the
+        // set's shape is checked separately.
+        let (dir, key, _) = seed_chain(2);
+        let vk = key.verifying_key();
+        grow_with_rotation(
+            dir.path(),
+            &key,
+            4,
+            "post",
+            crate::supervisor::RotationPolicy::at_bytes(256),
+        );
+        grow_and_publish(dir.path(), &key, 1, "published");
+        assert!(root_over_cached_prefix(dir.path(), "local", &vk).is_some());
+
+        let sealed = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.to_string_lossy().contains(".seg-"))
+            .expect("the fixture must have rotated");
+        std::fs::remove_file(&sealed).unwrap();
+
+        assert!(
+            root_over_cached_prefix(dir.path(), "local", &vk).is_none(),
+            "a set missing a segment must reach the genesis walk, which names it"
+        );
+        assert!(build_root_in(dir.path(), "local", &vk).is_err());
+    }
+
+    #[test]
+    fn a_resized_sealed_segment_declines_the_cache() {
+        let (dir, key, _) = seed_chain(2);
+        let vk = key.verifying_key();
+        grow_with_rotation(
+            dir.path(),
+            &key,
+            4,
+            "post",
+            crate::supervisor::RotationPolicy::at_bytes(256),
+        );
+        grow_and_publish(dir.path(), &key, 1, "published");
+        assert!(root_over_cached_prefix(dir.path(), "local", &vk).is_some());
+
+        let sealed = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.to_string_lossy().contains(".seg-"))
+            .expect("the fixture must have rotated");
+        let mut content = std::fs::read_to_string(&sealed).unwrap();
+        content.push_str("{}\n");
+        std::fs::write(&sealed, content).unwrap();
+
+        assert!(
+            root_over_cached_prefix(dir.path(), "local", &vk).is_none(),
+            "a sealed segment that changed length must not be folded over"
+        );
+    }
+
+    /// The narrowing this cache buys its speed with, stated as a test so it
+    /// cannot quietly become something else.
+    ///
+    /// A sealed segment edited *in place*, preserving its length and mtime, is
+    /// not detected when a root is published: publishing no longer reads sealed
+    /// segments, and that is the entire saving. It is still detected by the
+    /// genesis walk — which is what `mvmctl trust audit verify` runs, what
+    /// `read_leaves` runs for an inclusion proof, and what any cache miss falls
+    /// back to.
+    ///
+    /// Note what the published root is over: the *cached* leaves, which are the
+    /// ones the log actually had. So this path never signs a statement blessing
+    /// the altered content — it fails to notice it, which is a weaker failure
+    /// than attesting it.
+    #[test]
+    fn an_in_place_sealed_edit_is_missed_at_publish_but_caught_by_the_genesis_walk() {
+        let (dir, key, _) = seed_chain(2);
+        let vk = key.verifying_key();
+        grow_with_rotation(
+            dir.path(),
+            &key,
+            4,
+            "post",
+            crate::supervisor::RotationPolicy::at_bytes(256),
+        );
+        grow_and_publish(dir.path(), &key, 1, "published");
+
+        let sealed = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.to_string_lossy().contains(".seg-"))
+            .expect("the fixture must have rotated");
+        let before = std::fs::metadata(&sealed).unwrap();
+        let content = std::fs::read_to_string(&sealed).unwrap();
+        // Same byte count, different bytes.
+        let edited = content.replacen("\"img\"", "\"IMG\"", 1);
+        assert_eq!(edited.len(), content.len(), "the edit must preserve length");
+        std::fs::write(&sealed, &edited).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&sealed)
+            .and_then(|f| f.set_modified(before.modified().unwrap()))
+            .expect("restore mtime so the fingerprint matches");
+
+        // Missed here, on purpose.
+        assert!(
+            root_over_cached_prefix(dir.path(), "local", &vk).is_some(),
+            "this test documents that the cached path does not read sealed segments"
+        );
+        // And caught the moment anything walks the chain.
+        assert!(
+            read_leaves_from_genesis(dir.path(), "local", &vk).is_err(),
+            "the genesis walk must still refuse an edited sealed segment"
+        );
     }
 
     #[test]
