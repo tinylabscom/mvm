@@ -17,6 +17,6 @@ worker and signer helper have completed their transition.
 - [x] Identify the missing state transition in the workspace-only failure.
 - [x] Wait for a live replacement PID before asserting restored registration.
 - [x] Pass the focused regression and complete host-agent restart suite.
-- [ ] Pass workspace tests, Clippy, formatting, and repository policy gates.
-- [ ] Record the completed implementation in the sprint and refactor rollup.
+- [x] Pass workspace tests, Clippy, formatting, and repository policy gates.
+- [x] Record the completed implementation in the sprint and refactor rollup.
 - [ ] Merge the tested pull request and close #2976 through its linkage.

@@ -19,8 +19,8 @@ Last updated: 2026-08-28
 - [ ] **Worker restart identity barrier — issue #2976.**
       `specs/plans/2026-08-28-worker-restart-identity-barrier.md`.
       Recovery assertions now begin only after the old worker PID has been
-      replaced by a live supervisor-published identity. Workspace validation
-      and merge delivery remain.
+      replaced by a live supervisor-published identity. The focused and
+      workspace validation gates are green; merge delivery remains.
 
 - [ ] **Wasm SDK host-service admission — issue #2977.**
       `specs/plans/2026-08-28-wasm-sdk-host-service-admission.md`.

@@ -38,8 +38,9 @@
       `specs/plans/2026-08-28-worker-restart-identity-barrier.md`.
       The restart regression now waits for the supervisor-published
       replacement PID before testing journal restoration and audit continuity.
-      The focused regression and full restart suite are green; workspace
-      validation and merge delivery remain.
+      The focused regression, full restart suite, ordinary workspace tests,
+      isolated `mvm-cli` doctests, workspace Clippy, formatting, and repository
+      policy gates are green; merge delivery remains.
 
 - [ ] **Wasm SDK host-service admission — issue #2977.**
       `specs/plans/2026-08-28-wasm-sdk-host-service-admission.md`.
