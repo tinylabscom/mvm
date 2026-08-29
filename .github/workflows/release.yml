@@ -36,6 +36,18 @@ jobs:
   bdd:
     uses: ./.github/workflows/bdd.yml
 
+  # Every documented example, booted on both backends, before anything is
+  # published. The hermetic `bdd` lane above drives `--help` and refusal paths
+  # and boots no guest, so on its own it cannot see a documented command that
+  # parses and then fails at runtime — which is exactly what `machine run -it`
+  # did, on every OCI image, while the README told readers to run it.
+  #
+  # This is a release blocker on purpose. It is the slowest thing here; a tag
+  # that cannot wait for it is a tag published without evidence that its own
+  # README works.
+  e2e-docs:
+    uses: ./.github/workflows/e2e-docs.yml
+
   build:
     strategy:
       # Each target publishes independently — one target's failure must not
@@ -322,7 +334,7 @@ jobs:
             staging/initramfs-${{ matrix.arch }}.tar.gz.sha256
 
   release:
-    needs: [bdd, build, initramfs-image]
+    needs: [bdd, e2e-docs, build, initramfs-image]
     # The CLI binary and universal initramfs form one usable release. Waiting
     # for the job is not enough under `!cancelled()`: its result must be a hard
     # success requirement or a failed initramfs build can still publish a tag

@@ -1240,3 +1240,182 @@ fn every_parse_tier_path_explains_itself(_world: &mut CliWorld) {
         unexplained.join("\n")
     );
 }
+
+// ── Website-docs coverage ratchet ────────────────────────────────────────────
+//
+// The README's 38 examples each carry a hand-written witness or exemption
+// (`s8_readme_contract/readme_examples.toml`). The website is 461 distinct
+// commands across 86 files, and hand-writing 400-odd justifications would
+// manufacture the appearance of review rather than perform it — an exemption is
+// a claim someone has to be able to disagree with, and nobody can disagree with
+// four hundred of them written in an afternoon.
+//
+// So the website is ratcheted rather than adjudicated. Coverage is computed
+// mechanically by the same rule the README gate uses — a scenario driving the
+// same verb with at least the same flags — and the partition is checked in.
+// From there:
+//
+//   * a command that is covered today may not become uncovered
+//   * a newly documented command must be classified before it merges
+//   * the uncovered list is visible debt, and it may only shrink
+//
+// That gives the website the property the README has (nothing is documented
+// without someone deciding how it is proven) without inventing the reasoning.
+
+/// The checked-in partition of documented commands into covered and not.
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct DocsCoverage {
+    /// Commands a scenario currently exercises. Losing one is a regression.
+    covered: Vec<String>,
+    /// Commands nothing exercises yet. Visible debt; may only shrink.
+    uncovered: Vec<String>,
+}
+
+fn docs_coverage_path() -> PathBuf {
+    repo_root()
+        .join("features")
+        .join("suites")
+        .join("s29_doc_examples")
+        .join("docs_coverage.toml")
+}
+
+/// Recompute which documented commands a scenario exercises today.
+fn compute_docs_coverage() -> (BTreeSet<String>, BTreeSet<String>) {
+    let root = repo_root();
+    let command_tree = mvm_cli::commands::cli_command();
+    let mut known_paths = Vec::new();
+    crate::steps::cli::collect_command_paths(&command_tree, &[], &mut known_paths);
+
+    let scenarios = crate::steps::readme_contract::all_scenario_commands();
+
+    let mut covered = BTreeSet::new();
+    let mut uncovered = BTreeSet::new();
+    for file in mvm_conformance::doc_examples::documentation_files(&root) {
+        let relative = file
+            .strip_prefix(&root)
+            .unwrap_or(&file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        // The README has its own per-example ledger; do not double-govern it.
+        if relative == "README.md" {
+            continue;
+        }
+        let Ok(contents) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        for example in mvm_conformance::doc_examples::doc_examples(&relative, &contents) {
+            if example.is_template()
+                || !matches!(
+                    example.source,
+                    mvm_conformance::doc_examples::ExampleSource::Fenced
+                )
+            {
+                continue;
+            }
+            let hit = scenarios.values().any(|scenario| {
+                scenario.commands.iter().any(|command| {
+                    crate::steps::readme_contract::witness_covers_example(
+                        &example.argv,
+                        command,
+                        &known_paths,
+                        &command_tree,
+                    )
+                })
+            });
+            if hit {
+                covered.insert(example.command.clone());
+            } else {
+                uncovered.insert(example.command.clone());
+            }
+        }
+    }
+    // A command printed in two files can be covered via one occurrence.
+    for command in &covered {
+        uncovered.remove(command);
+    }
+    (covered, uncovered)
+}
+
+#[then(expr = "documented website commands do not lose their coverage")]
+fn docs_coverage_ratchet(_world: &mut CliWorld) {
+    let (covered, uncovered) = compute_docs_coverage();
+    let path = docs_coverage_path();
+
+    if std::env::var_os("MVM_UPDATE_DOCS_COVERAGE").is_some() {
+        let ledger = DocsCoverage {
+            covered: covered.iter().cloned().collect(),
+            uncovered: uncovered.iter().cloned().collect(),
+        };
+        let header = "# Which documented website commands a scenario exercises.\n\
+                      #\n\
+                      # Generated, then reviewed. Regenerate with:\n\
+                      #   MVM_UPDATE_DOCS_COVERAGE=1 cargo test -p mvm-conformance \\\n\
+                      #     --test conformance --features bdd -- -i '<repo>/features/suites/s29_doc_examples/*.feature'\n\
+                      #\n\
+                      # `covered` may not shrink and `uncovered` may not grow: a documented\n\
+                      # command that loses its only scenario is a regression, and a newly\n\
+                      # documented one has to be classified before it merges. Moving a line from\n\
+                      # `uncovered` to `covered` is the point of the file.\n\n";
+        std::fs::write(
+            &path,
+            format!(
+                "{header}{}",
+                toml::to_string_pretty(&ledger).expect("serialize docs coverage")
+            ),
+        )
+        .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+        return;
+    }
+
+    let recorded: DocsCoverage = toml::from_str(
+        &std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display())),
+    )
+    .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+
+    let recorded_covered: BTreeSet<String> = recorded.covered.into_iter().collect();
+    let recorded_uncovered: BTreeSet<String> = recorded.uncovered.into_iter().collect();
+
+    let regressed: Vec<&String> = recorded_covered.difference(&covered).collect();
+    assert!(
+        regressed.is_empty(),
+        "these documented commands were exercised by a scenario and no longer \
+         are. A documented command losing its only witness is how a broken one \
+         reaches a release:\n{}",
+        regressed
+            .iter()
+            .map(|c| format!("  {c}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    let known: BTreeSet<&String> = recorded_covered.union(&recorded_uncovered).collect();
+    let unclassified: Vec<&String> = covered
+        .union(&uncovered)
+        .filter(|command| !known.contains(*command))
+        .collect();
+    assert!(
+        unclassified.is_empty(),
+        "these commands are newly documented and are not in the coverage \
+         ledger. Regenerate it so the decision about how they are proven is \
+         recorded rather than skipped:\n  MVM_UPDATE_DOCS_COVERAGE=1 <this suite>\n{}",
+        unclassified
+            .iter()
+            .map(|c| format!("  {c}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    let improved: Vec<&String> = recorded_uncovered.intersection(&covered).collect();
+    assert!(
+        improved.is_empty(),
+        "these commands are now exercised and the ledger still lists them as \
+         debt. Regenerate it — moving a line out of `uncovered` is the point of \
+         the file, and leaving it stale is how the number stops meaning \
+         anything:\n  MVM_UPDATE_DOCS_COVERAGE=1 <this suite>\n{}",
+        improved
+            .iter()
+            .map(|c| format!("  {c}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}

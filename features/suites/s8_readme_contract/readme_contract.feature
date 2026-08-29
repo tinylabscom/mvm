@@ -84,6 +84,13 @@ Feature: README CLI contract
   Scenario: every README code block declares its coverage witness
     Then every README code block has an explicit coverage witness
 
+  # Per example, not per command path. The tier ladder is keyed on the verb, so
+  # one live `machine run` discharged all twelve documented `machine run`
+  # variants — including the `-it` form, whose guest console was broken on every
+  # OCI image the whole time it looked covered.
+  Scenario: every README example is executed or carries a reviewed exemption
+    Then every README example is executed or carries a reviewed exemption
+
   Scenario: `build compile` exposes the documented IR flags
     When I run mvmctl with "build compile --help"
     Then the command exits with code 0

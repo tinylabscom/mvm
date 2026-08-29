@@ -2,8 +2,47 @@
 
 use std::fs;
 
+/// The workflow that defines the documented-surface jobs.
+///
+/// They used to be inline in `ci-full.yml`, which is why this file is named for
+/// Extended CI. They now live in a reusable workflow because `release.yml`
+/// needs the identical lane — a release used to be cut without them at all —
+/// and `ci-full.yml` calls it rather than declaring its own copy.
 fn extended_ci() -> String {
-    fs::read_to_string(".github/workflows/ci-full.yml").expect("read extended CI workflow")
+    fs::read_to_string(".github/workflows/e2e-docs.yml").expect("read documented-surface workflow")
+}
+
+/// Extended CI must still reach those jobs, by calling the shared workflow.
+///
+/// Without this, moving them out of `ci-full.yml` would satisfy every
+/// assertion below while the nightly run stopped exercising them.
+#[test]
+fn extended_ci_calls_the_shared_documented_surface_workflow() {
+    let workflow =
+        fs::read_to_string(".github/workflows/ci-full.yml").expect("read extended CI workflow");
+    assert!(
+        workflow.contains("uses: ./.github/workflows/e2e-docs.yml"),
+        "ci-full.yml must call the shared documented-surface workflow, or the \
+         nightly run no longer boots the documented examples"
+    );
+}
+
+/// So must the release workflow. This is the gate that did not exist: a tag
+/// could be cut with only the hermetic BDD lane green, and the hermetic lane
+/// boots no guest.
+#[test]
+fn the_release_workflow_waits_for_the_documented_surface() {
+    let workflow =
+        fs::read_to_string(".github/workflows/release.yml").expect("read release workflow");
+    assert!(
+        workflow.contains("uses: ./.github/workflows/e2e-docs.yml"),
+        "release.yml must call the shared documented-surface workflow"
+    );
+    assert!(
+        workflow.contains("needs: [bdd, e2e-docs, build, initramfs-image]"),
+        "the release job must wait on e2e-docs, or a tag is published without \
+         evidence that the documented examples run"
+    );
 }
 
 fn documented_surface_script() -> String {
@@ -14,7 +53,7 @@ fn job_block<'a>(workflow: &'a str, job: &str) -> &'a str {
     let marker = format!("  {job}:\n");
     let start = workflow
         .find(&marker)
-        .unwrap_or_else(|| panic!("extended CI workflow must define {job}"));
+        .unwrap_or_else(|| panic!("the documented-surface workflow must define {job}"));
     let rest_start = start + marker.len();
     let rest = &workflow[rest_start..];
     let end = rest

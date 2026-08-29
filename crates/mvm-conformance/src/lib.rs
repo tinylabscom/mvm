@@ -182,6 +182,31 @@ pub enum ScenarioGate {
     OutsideCiLiveSubset,
 }
 
+impl ScenarioGate {
+    /// A stable kebab-case name, so a lane can name the skips it tolerates in
+    /// its own configuration and a reviewer can read the policy without
+    /// consulting this enum's variant spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::Pending => "pending",
+            Self::NeedsLiveOptIn => "needs-live-opt-in",
+            Self::NeedsFirecracker => "needs-firecracker",
+            Self::NeedsBundleFixture => "needs-bundle-fixture",
+            Self::NeedsWorkloadKernel => "needs-workload-kernel",
+            Self::NeedsMemorySnapshot => "needs-memory-snapshot",
+            Self::NeedsDirShare => "needs-dir-share",
+            Self::NeedsGuestBinDir => "needs-guest-bin-dir",
+            Self::NeedsSdkSidecar => "needs-sdk-sidecar",
+            Self::NeedsPerfBudgetHost => "needs-perf-budget-host",
+            Self::NeedsTlsTunnelClient => "needs-tls-tunnel-client",
+            Self::NeedsNode => "needs-node",
+            Self::OutsideCiLiveSubset => "outside-ci-live-subset",
+        }
+    }
+}
+
 /// The reason behind [`scenario_should_run`]. Same order of checks, so the two
 /// cannot disagree about whether a scenario runs.
 pub fn scenario_gate(tags: &[String], caps: RuntimeCaps) -> ScenarioGate {
@@ -447,6 +472,7 @@ mod tests {
             },
         );
         assert_eq!(gate, ScenarioGate::NeedsDirShare);
+        assert_eq!(gate.as_str(), "needs-dir-share");
         assert!(gate.reason().is_some(), "a skip must name what is missing");
         assert!(scenario_should_run(&tags(&["live", "dir_share"]), ALL));
     }

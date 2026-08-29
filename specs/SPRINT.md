@@ -415,7 +415,9 @@ and nothing depends on it.
 - [x] README CLI/code-example contract — README shell examples and every
       declared CLI option have executable cucumber help witnesses; all 26
       fenced examples are covered by the test-owned manifest, and README
-      status text matches the shipped `deploy` and `watch` commands.
+      status text matches the shipped `deploy` and `watch` commands. Strict
+      skip reporting also names the directory-share capability exhaustively,
+      preserving the gate when backend capability variants grow.
 
 - [x] Automatic macOS VM entitlement signing — installers and self-update now
       sign `mvmctl` and shipped supervisors before reporting success, with

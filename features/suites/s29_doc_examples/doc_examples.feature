@@ -40,6 +40,13 @@ Feature: Documented examples work
   Scenario: nothing declared planned has quietly shipped
     Then no command declared planned has quietly shipped
 
+  # The README is adjudicated per example. The website is 461 commands across 86
+  # files, so it is ratcheted instead: coverage is computed by the same rule and
+  # the partition is checked in, so a covered command cannot quietly become
+  # uncovered and a newly documented one must be classified before it merges.
+  Scenario: documented website commands do not lose their coverage
+    Then documented website commands do not lose their coverage
+
   Scenario: every live-tier command has a live witness
     # A `live` tier says a real guest runs this command. Without a scenario
     # that does, the tier is a claim rather than evidence.
