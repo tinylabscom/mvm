@@ -35,7 +35,7 @@
 //! That last case is a narrowing, and it is deliberate. Re-reading the sealed
 //! set is the entire cost this module exists to remove, and the tamper it would
 //! catch is a malicious host writing under `~/.mvm/audit/` — explicitly outside
-//! ADR-001's threat model. It remains caught by `mvmctl trust audit verify`,
+//! the model where the host is trusted. It remains caught by `mvmctl trust audit verify`,
 //! which always walks every interior from genesis, by `doctor`, and by any
 //! inclusion proof, which re-hashes the real line. A root published over a
 //! stale cache commits to the leaves the log actually had, so nothing here ever
