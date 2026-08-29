@@ -19,6 +19,17 @@
       fleet-only controls have left the dormant-control ratchet. Focused
       connector, plane, and client compilation tests are green.
 
+- [ ] **Default-backend host-services broker witness — issue #2988.**
+      `specs/plans/2026-08-28-default-backend-broker-witness.md`.
+      The two live SDK broker scenarios now materialize their Python fixture
+      tree as a read-only ext4 disk volume, which Firecracker and HVF can both
+      attach. The negative witness also requires the guest-visible `not bound`
+      error so a pre-boot refusal cannot satisfy it. Focused fixture-image
+      coverage, the top-level mount/timeout documentation witness,
+      conformance-target compilation, the workspace suite, zero-warning
+      Clippy, formatting, and repository policy gates are green; live
+      default-backend witnesses and merge delivery remain.
+
 - [ ] **Linux 6.12.107 synchronized kernel pin — issue #2971.**
       `specs/plans/2026-08-28-kernel-6-12-107.md`.
       The custom workload/builder kernel and libkrunfw firmware build now use

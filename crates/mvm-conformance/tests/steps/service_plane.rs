@@ -15,7 +15,29 @@ use mvm_hostd::broker::handlers::host_kv_v1::HostKvV1Handler;
 use mvm_hostd::broker::registry::Registry;
 use mvm_vmm::vsock_egress_bridge::egress_gate::{EgressGate, EgressVerdict, Route};
 
+use crate::support::service_plane_fixture;
 use crate::world::CliWorld;
+
+#[given("the SDK service-plane fixture is materialized as a read-only disk image")]
+fn materialize_service_plane_fixture(world: &mut CliWorld) {
+    let fixture_root =
+        crate::steps::cli::workspace_root().join("features/suites/s30_service_plane/fixtures");
+    world.service_plane_fixture_disk = Some(service_plane_fixture::materialize(&fixture_root));
+}
+
+#[when(
+    regex = r#"^I run the SDK service-plane fixture in an isolated live home binding service "([^"]+)"$"#
+)]
+fn run_service_plane_fixture(world: &mut CliWorld, service: String) {
+    let args = {
+        let disk_root = world
+            .service_plane_fixture_disk
+            .as_ref()
+            .expect("fixture disk must be materialized before the live run");
+        service_plane_fixture::command(&service, &service_plane_fixture::image_path(disk_root))
+    };
+    crate::steps::cli::run_mvmctl_isolated_live_home(world, args);
+}
 
 fn ctx(workload_id: &str) -> ServiceCallCtx {
     ServiceCallCtx {

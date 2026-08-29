@@ -43,22 +43,23 @@ Feature: A workload reaches a key-value store without a network path
   # has guest code reach the store the way a real one does: through the sidecar
   # cdylib, over vsock, to the broker. It is `@live` because it needs a real
   # microVM.
-  # The guest-mount allow-roots are `/data` and `/work`. `/mnt` is mvm-owned
-  # (it carries the config and secret drives), so mounting there is refused —
-  # which is how the first live attempt of this scenario failed.
-  @live @sdk_sidecar @dir_share
+  # The fixture is delivered as a read-only ext4 volume rather than a host
+  # directory share, so this witness runs on the default Firecracker and HVF
+  # backends as well as libkrun.
+  @live @sdk_sidecar
   Scenario: a booted workload round-trips a key through the broker
-    When I run mvmctl in an isolated live home with "run --runtime python --host-service host.kv.v1 --mount features/suites/s30_service_plane/fixtures:/work/fixtures:ro --timeout 300 -- python /work/fixtures/kv_roundtrip.py"
+    Given the SDK service-plane fixture is materialized as a read-only disk image
+    When I run the SDK service-plane fixture in an isolated live home binding service "host.kv.v1"
     Then the command exits with code 0
     And the output contains "KV-OK"
 
   # Binding is what makes the store reachable, so the refusal has to be
   # observable from inside a guest too -- not only at the registry.
-  # `@dir_share` even though this asserts a *refusal*: the share is refused
-  # with the same exit code the scenario expects, and before the guest boots,
-  # so on a backend without virtio-fs it passed while witnessing nothing about
-  # binding.
-  @live @sdk_sidecar @dir_share
+  # The read-only fixture volume keeps this on the same in-guest broker path as
+  # the positive witness without requiring a backend-specific directory share.
+  @live @sdk_sidecar
   Scenario: an unbound workload is refused from inside the guest
-    When I run mvmctl in an isolated live home with "run --runtime python --host-service host.time.v1 --mount features/suites/s30_service_plane/fixtures:/work/fixtures:ro --timeout 300 -- python /work/fixtures/kv_roundtrip.py"
+    Given the SDK service-plane fixture is materialized as a read-only disk image
+    When I run the SDK service-plane fixture in an isolated live home binding service "host.time.v1"
     Then the command exits with code 1
+    And the output contains "not bound"
