@@ -142,12 +142,11 @@ fn resolve_virtiofs_root(
     sealed: bool,
     warm_pool_size: u32,
 ) -> Option<String> {
-    // A warm claim is bound to the immutable rootfs image twice: the pool key
-    // names its digest, and claim admission compares that digest with the
-    // parent's captured `rootfs.ext4`. A virtio-fs root boots a mutable host
-    // directory instead, outside both bindings. Keep warm-targeted launches on
-    // the block image so the bytes the guest boots are exactly the bytes the
-    // claim verifies. Zero-pool dev launches retain the faster virtio-fs path.
+    // A warm claim's pool key names the immutable rootfs digest, and admission
+    // compares it with the parent's captured `rootfs.ext4`. A virtio-fs root
+    // boots a mutable host directory outside both bindings, so warm-targeted
+    // launches stay on the block image whose bytes the claim verifies. Zero-pool
+    // development launches retain the faster virtio-fs path.
     if warm_pool_size > 0 {
         return None;
     }
