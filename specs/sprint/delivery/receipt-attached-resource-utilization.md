@@ -9,22 +9,28 @@ A microVM run's signed execution receipt now carries measured CPU, memory,
 host-side state growth, and wall-clock consumption alongside the admitted
 ceiling, so the two become comparable inside one artifact.
 
-- `mvm_core::usage_capture`: `Metric`, a sum type with exactly three
-  constructors — `measured(value, mechanism)`, `guest_reported(value)`, and
-  `unavailable()` — so no code path can stamp a guest self-report as a host
-  measurement. `UsageCapture` (`cpu_ms`, `peak_rss_mib`, `host_state_bytes`,
-  `wall_ms`, `guest_peak_rss_kib`) plus a `workload.usage` sidecar
+- `mvm_core::usage_capture`: `Metric`, a sum type with exactly two
+  constructors — `measured(value, mechanism)` and `unavailable()` — so a
+  number in the record is always a host observation naming the mechanism that
+  produced it. `UsageCapture` (`cpu_ms`, `peak_rss_mib`, `host_state_bytes`,
+  `wall_ms`) plus a `workload.usage` sidecar
   reader/writer mirroring the existing `exit_capture` convention, and the
   pure `host_state_bytes` / `wall_ms` helpers the host computes about itself.
   `Mechanism` lives in `mvm-contract` and is re-exported here.
+- `mvm_core::run_sidecars::clear_prior_run`, called by all four VMM drivers
+  at boot beside the `workload.exit` removal they already did. A state
+  directory is reused across starts and both sidecars are written
+  best-effort, so a leftover usage record would be read at face value by the
+  next run's exit report.
 - `ResourceObservation::for_backend` in `mvm-contract`, declaring what each
   `BackendKind` can honestly report, and a rewritten
   `xtask check-backend-resource-controls` that walks every `for_backend`
   block in the file rather than the first one it finds — the original
   first-match lookup would have left a second exhaustive matrix uninspected
   behind a green gate.
-- `mvm_vmm::host::process_usage`: `peak_rss_mib_self`, `process_cpu_ms_self`,
-  `child_cpu_ms`, the host-side readings every in-process-VMM backend uses.
+- `mvm_vmm::host::process_usage`: `peak_rss_mib_self` and
+  `process_cpu_ms_self`, the host-side readings every in-process-VMM backend
+  uses.
 - `ExitRecord` and a `usage` label on the chain-signed `plan.exited` audit
   entry, and `extensions["mvm.usage"]` on every `plan.exited` receipt — with
   every metric present as `unavailable` when nothing was observed, so "no
@@ -67,12 +73,20 @@ Checked directly rather than left as written:
   `HostStateObservation::StateDirTreeBytes` for `Wasm`, split out of the
   combined arm it previously shared with `WebLinux`/`Mock`, with a new test
   (`the_wasm_tier_observes_its_activation_state_directory`) pinning it.
-- **WebLinux and Mock do not.** `WebLinux` runs in a browser with no host
-  process at all — grepping `vm_state_dir` in
-  `crates/mvm-runtime/src/web_linux_backend.rs` returns nothing. `Mock`'s
-  test fixture points `vm_state_dir` at a hardcoded, deliberately
-  nonexistent path (`crates/mvm-runtime/src/mock.rs:614`). Both cells were
-  left at `None`.
+- **WebLinux and Mock write nothing of their own there** — `WebLinux` runs in
+  a browser with no host process at all (grepping `vm_state_dir` in
+  `crates/mvm-runtime/src/web_linux_backend.rs` returns nothing), and `Mock`'s
+  test fixture points `vm_state_dir` at a hardcoded, deliberately nonexistent
+  path (`crates/mvm-runtime/src/mock.rs:614`). Both cells were left at `None`
+  on that basis, and both were corrected to `StateDirTreeBytes` in the final
+  review pass: the question the cell answers is whether the *host* can take a
+  reading, not whether the tier populated the directory. `report_exit`
+  measures `vm_state_dir`'s tree size on every backend unconditionally, so a
+  `None` cell was a matrix that disagreed with the capture site — and a Mock
+  receipt was already carrying `measured(N, state_dir_tree_bytes)` for a
+  dimension the matrix called unobservable. Host state, like the wall span, is
+  observable on every tier without exception, and
+  `every_backend_observes_its_host_state_directory` pins that.
 
 The design spec's coverage table
 (`specs/2026-08-28-receipt-attached-resource-utilization.md`) and the
@@ -88,7 +102,7 @@ were both updated to record this.
 | `Libkrun` | `host_process_cpu` | `host_process_rss` | `state_dir_tree_bytes` | `host_launch_span` |
 | `Firecracker`, `Qemu` | unavailable | unavailable | `state_dir_tree_bytes` | `host_launch_span` |
 | `Wasm` | unavailable | unavailable | `state_dir_tree_bytes` | `host_launch_span` |
-| `WebLinux`, `Mock` | unavailable | unavailable | unavailable | `host_launch_span` |
+| `WebLinux`, `Mock` | unavailable | unavailable | `state_dir_tree_bytes` | `host_launch_span` |
 
 ## Limits, stated plainly
 
@@ -111,6 +125,18 @@ were both updated to record this.
   `atexit`, so `record_self_usage`'s hook never fires on that path. Only the
   guest-initiated poweroff, the wall-clock-timer kill (exit 124), and a VMM
   error return through `main` reach the `atexit` trampoline.
+- **No `mvmctl` verb produces a usage-bearing receipt yet.** `report_exit` is
+  the only `plan.exited` emission site there is, and `emit_exited` has exactly
+  one caller, which is a test. No CLI command — `mvmctl machine run`
+  included — currently reaches the exit-report path. Every leg is wired and
+  tested; the verb that walks the whole path end to end is not there, so a
+  reader should not assume a `mvmctl machine run` today produces a usage
+  extension.
+- **A `plan.failed` receipt always reports all-`unavailable`.** Only
+  `report_exit` reads the sidecar, and only `plan.exited` carries the usage
+  label. A libkrun run killed by its own wall-clock timer writes a real
+  `cpu_ms` on the way out and still reports nothing measured. Understating is
+  the safe direction and is the direction taken deliberately.
 - **No macOS PR lane exists, so the real-hardware HVF measurement is not
   gated on pull requests.** This repository's only macOS coverage is the
   nightly `ci-full.yml` cron; the HVF `SummedClock` path is otherwise

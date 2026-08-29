@@ -81,12 +81,6 @@ pub fn process_cpu_ms_self() -> Metric {
     Metric::measured(rusage_cpu_ms(&usage), Mechanism::HostProcessCpu)
 }
 
-/// CPU consumed by a reaped child, in milliseconds.
-#[must_use]
-pub fn child_cpu_ms(usage: &libc::rusage) -> Metric {
-    Metric::measured(rusage_cpu_ms(usage), Mechanism::HostChildRusage)
-}
-
 fn rusage_cpu_ms(usage: &libc::rusage) -> u64 {
     let to_ms = |timeval: libc::timeval| -> u64 {
         let seconds = u64::try_from(timeval.tv_sec).unwrap_or(0);
@@ -116,14 +110,14 @@ mod tests {
     }
 
     #[test]
-    fn a_reaped_childs_cpu_is_tagged_as_child_rusage() {
+    fn a_cpu_reading_sums_user_and_system_time() {
+        // Both halves are the process's own consumption; reporting only user
+        // time would understate a VMM that spends most of its life in the
+        // kernel servicing guest exits.
         // SAFETY: a zeroed rusage is a valid bit pattern for this POD struct.
         let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
         usage.ru_utime.tv_sec = 4;
         usage.ru_stime.tv_usec = 210_000;
-        assert_eq!(
-            child_cpu_ms(&usage),
-            Metric::measured(4210, Mechanism::HostChildRusage)
-        );
+        assert_eq!(rusage_cpu_ms(&usage), 4210);
     }
 }

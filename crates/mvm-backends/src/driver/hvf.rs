@@ -328,7 +328,9 @@ fn boot_with_handoff(
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
     let paths = SupervisorPaths::resolve(state_dir, timeout_secs);
-    let _ = std::fs::remove_file(&paths.workload_exit);
+    // Clear any prior run's captured exit code and usage record so `wait` and
+    // the exit report read only this launch's.
+    mvm_core::run_sidecars::clear_prior_run(&paths.state_dir);
     let cfg = relay_supervisor_config_with_handoff(spec, &paths, handoff, exclusive_image_lock)?;
     let config_path = paths.state_dir.join("supervisor.json");
     std::fs::write(
@@ -719,6 +721,16 @@ fn read_handoff_response(stream: &mut std::os::unix::net::UnixStream) -> std::io
     Ok(response)
 }
 
+/// Point a restored child's state files at the parent supervisor's, which is
+/// the process actually running the child's guest.
+///
+/// The captured usage record is deliberately not in this list. It is written
+/// once, at the owning process's teardown, describing the whole life of that
+/// process — so a symlink would hand the child the parent's CPU and resident
+/// numbers and let its exit report sign them as its own measurement. A child
+/// with no usage sidecar reads as unobserved, which is the honest answer:
+/// attributing a warm-forked child's consumption is an open question this
+/// version does not answer.
 fn link_child_state(child_dir: &Path, parent_dir: &Path) -> std::io::Result<()> {
     for name in [PID_FILE_NAME, "console.log", "workload.exit", "pause.state"] {
         let child_path = child_dir.join(name);

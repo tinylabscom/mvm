@@ -438,7 +438,7 @@ fn map_event_to_receipt_type(event: &str) -> Option<(&'static str, ReceiptOutcom
 fn build_action(entry: &PlanAuditEntry, receipt_type: &str) -> ReceiptAction {
     let mut params: BTreeMap<String, Value> = BTreeMap::new();
     for (k, v) in &entry.labels {
-        if is_top_level_label(k) {
+        if is_represented_elsewhere(k) {
             continue;
         }
         params.insert(k.clone(), Value::String(v.clone()));
@@ -469,9 +469,11 @@ fn build_action(entry: &PlanAuditEntry, receipt_type: &str) -> ReceiptAction {
     }
 }
 
-/// Labels that are hoisted to top-level receipt fields rather than being
-/// treated as generic action parameters.
-fn is_top_level_label(key: &str) -> bool {
+/// Labels the receipt represents somewhere of its own — a top-level field, or
+/// a namespaced entry under `extensions` — rather than as a generic action
+/// parameter. `usage` is the extensions case: it lands in
+/// `extensions["mvm.usage"]`, not on the receipt's own surface.
+fn is_represented_elsewhere(key: &str) -> bool {
     matches!(
         key,
         "agent_id"

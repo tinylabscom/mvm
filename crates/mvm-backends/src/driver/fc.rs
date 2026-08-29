@@ -358,10 +358,11 @@ fn spawn_workload_exit_capture(runtime_dir: &Path, state_dir: &Path) {
 /// endpoint, its broker, and its exit reporter the instant it resumes, whereas a
 /// cold-booted guest spends a kernel boot getting there.
 ///
-/// A prior run's captured exit code is cleared first, so a reader observes this
-/// launch's exit status and never a stale one.
+/// A prior run's captured exit code and usage record are cleared first, so a
+/// reader observes this launch's exit status and this launch's consumption,
+/// never a stale one.
 fn arm_host_channels(channels: &[VsockPort], state_dir: &Path, runtime_dir: &Path) -> Result<()> {
-    let _ = std::fs::remove_file(mvm_core::exit_capture::exit_file_path(state_dir));
+    mvm_core::run_sidecars::clear_prior_run(state_dir);
     wire_guest_dial_bridges(channels, runtime_dir)?;
     spawn_workload_exit_capture(runtime_dir, state_dir);
     Ok(())
@@ -1651,6 +1652,47 @@ mod tests {
         let status = mvm_vmm::host::workload_wait::wait_for_workload_exit(state_dir.path());
         assert_eq!(status.code, Some(3));
         assert!(!status.success);
+    }
+
+    #[test]
+    fn arming_the_host_channels_drops_the_previous_runs_exit_and_usage() {
+        // A state directory is reused across starts, and both sidecars are
+        // written best-effort — so a reader that finds one takes it at face
+        // value. Leaving the previous run's usage record here would let a run
+        // stopped by a signal, which writes nothing of its own, sign the
+        // previous run's CPU into its receipt as a measurement.
+        let state_dir = tempfile::tempdir().unwrap();
+        let runtime = state_dir.path().join("runtime");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::write(
+            mvm_core::exit_capture::exit_file_path(state_dir.path()),
+            b"0\n",
+        )
+        .unwrap();
+        mvm_core::usage_capture::write_captured(
+            state_dir.path(),
+            &mvm_core::usage_capture::UsageCapture {
+                cpu_ms: mvm_core::usage_capture::Metric::measured(
+                    4210,
+                    mvm_core::usage_capture::Mechanism::HostProcessCpu,
+                ),
+                ..mvm_core::usage_capture::UsageCapture::default()
+            },
+        )
+        .unwrap();
+
+        arm_host_channels(&[], state_dir.path(), &runtime).unwrap();
+
+        assert_eq!(
+            mvm_core::usage_capture::read_captured(state_dir.path()),
+            mvm_core::usage_capture::UsageCapture::default(),
+            "a prior run's usage must not survive into this launch"
+        );
+        assert_eq!(
+            mvm_core::exit_capture::read_captured(state_dir.path()),
+            None,
+            "a prior run's exit code must not survive into this launch"
+        );
     }
 
     #[test]

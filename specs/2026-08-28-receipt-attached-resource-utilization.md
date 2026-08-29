@@ -40,8 +40,10 @@ serve unrelated purposes, and none of them reaches a receipt:
 3. **Explicit per-field provenance.** A metric the host could not observe is
    recorded as unobservable, never as absent and never as zero.
 4. **Only host-side observations may be stamped `measured`.** The guest is
-   untrusted, so a guest self-report carries a distinct source label that no
-   consumer can conflate with a host observation.
+   untrusted, so a guest self-report would need a source label of its own that
+   no consumer could conflate with a host observation. This version defines no
+   such label, because it wires no guest reading — see "Out of scope". Every
+   source it does define is a host observation.
 5. **No ADR-001 claim number.** This is evidence, not enforcement. The claims
    ledger and Preview claim 18's row are untouched. The feature strengthens
    Preview 18 indirectly by making the admitted ceiling and the measured
@@ -118,11 +120,15 @@ check that forbids a wildcard arm.
 Every observation is host-side; the guest can forge none of it.
 
 1. **During the run**, the process owning the VM accumulates observations.
-   - *HVF / AppleContainer*: `SummedClock::new(clocks).consumed()`. Today the
-     clock is constructed only inside the `cpu_millicores.and_then(...)` arm at
-     `crates/mvm-runtime/src/backends/hvf/kernel_boot.rs:2013`, so CPU is
-     measured only when a grant exists. The clock is hoisted out of that arm:
-     the controller stays grant-gated, the measurement stops being.
+   - *HVF / AppleContainer*: each vCPU publishes its own consumed `Duration`
+     before its thread exits, and `usage_from_vcpu_time`
+     (`crates/mvm-runtime/src/backends/hvf/kernel_boot.rs`) sums those after
+     the joins. It is deliberately *not* `SummedClock::new(clocks).consumed()`,
+     which was this section's original design: a Mach thread clock is only
+     readable while the thread is alive, so a summed read taken after the vCPU
+     threads have exited returns zero. `SummedClock` survives on the quota
+     path, where it is read during the run. The measurement is not grant-gated
+     either way — the controller stays grant-gated, the reading does not.
    - *Libkrun*: the VMM is in-process in `mvm-libkrun-supervisor`, so the
      supervisor reads its own `/proc/self/stat` on Linux or Mach task info on
      macOS.
@@ -150,9 +156,11 @@ Every observation is host-side; the guest can forge none of it.
    and writer — so the HVF supervisor, the libkrun supervisor, and the
    in-process Firecracker driver all write it identically. Best-effort, exactly
    as `exit_capture` is: a failure leaves no file.
-3. **`report_exit`** (`crates/mvm-client/src/launch/mod.rs:971`) reads it
+3. **`report_exit`** (`crates/mvm-client/src/launch/mod.rs`) reads it
    immediately after the existing `exit_capture::read_captured` call. This is
-   the only production `plan.exited` emission site.
+   the only `plan.exited` emission site there is — but see the limits below:
+   no `mvmctl` verb reaches it today, so no CLI invocation currently produces a
+   usage-bearing receipt.
 4. **`emit_exited_with_capture`**
    (`crates/mvm-hostd/src/audit/emitter.rs:1062`) writes `usage.*` label pairs
    into the chain-signed `plan.exited` entry.
@@ -184,8 +192,7 @@ extension.
     "cpu_ms":             { "value": 4210,     "source": "measured", "mechanism": "hvf_summed_vcpu_clock" },
     "peak_rss_mib":       { "value": 312,      "source": "measured", "mechanism": "host_process_rss" },
     "host_state_bytes":   { "value": 91234304, "source": "measured", "mechanism": "state_dir_tree_bytes" },
-    "wall_ms":            { "value": 61004,    "source": "measured", "mechanism": "host_launch_span" },
-    "guest_peak_rss_kib": { "value": 204800,   "source": "guest_reported" }
+    "wall_ms":            { "value": 61004,    "source": "measured", "mechanism": "host_launch_span" }
   }
 }
 ```
@@ -200,10 +207,11 @@ extension.
   observed. This is load-bearing rather than decorative: a guest-vCPU time and
   a VMM-process total are different quantities, and without the mechanism they
   would be silently incomparable under one `cpu_ms` key.
-- `guest_reported` exists solely for the guest agent's `getrusage`
-  `peak_rss_kib` and carries no `mechanism`. It is a distinct source from
-  `measured` so that no consumer can conflate an untrusted self-report with a
-  host observation.
+- `measured` is the only source this version defines, and every source it
+  defines is a host observation. A reading the untrusted guest makes about
+  itself would need a source of its own, held distinct from `measured` so no
+  consumer could conflate the two — and, by the same rule the GPU section
+  states, that source is not defined until something produces one.
 - `host_state_bytes` is named for what it measures — host-side state-directory
   growth, which is overlay and copy-on-write growth — so it cannot be read as
   guest filesystem consumption.
@@ -211,9 +219,10 @@ extension.
   are namespaced, and unknown keys are preserved by verifiers.
 
 **Illegal states are unrepresentable.** The metric type exposes only
-`Metric::measured(value, mechanism)`, `Metric::guest_reported(value)`, and
-`Metric::unavailable()`. No code path can stamp a guest self-report as
-`measured`.
+`Metric::measured(value, mechanism)` and `Metric::unavailable()`, and the wire
+form refuses a value under `unavailable`, a `measured` without a mechanism, and
+any source it does not define. A number in the record is a host observation
+naming the mechanism that produced it, or it is not there at all.
 
 ## Per-backend observation coverage
 
@@ -231,7 +240,7 @@ therefore an optional later refinement, not the foundation.
 | `Libkrun` | `host_process_cpu` — process total: guest execution plus VMM overhead, vsock pumping, device emulation | `host_process_rss` | `state_dir_tree_bytes` | `host_launch_span` |
 | `Firecracker`, `Qemu` | unavailable | unavailable | `state_dir_tree_bytes` | `host_launch_span` |
 | `Wasm` | unavailable | unavailable | `state_dir_tree_bytes` | `host_launch_span` |
-| `WebLinux`, `Mock` | unavailable | unavailable | unavailable | `host_launch_span` |
+| `WebLinux`, `Mock` | unavailable | unavailable | `state_dir_tree_bytes` | `host_launch_span` |
 
 Wall is `host_launch_span` on every tier including the non-VM ones, because it
 measures the host's own observation of the run rather than anything the backend
@@ -259,9 +268,16 @@ does report host state: `WasmBackend::start_with_mode` unconditionally writes
 module, and that directory is not cleaned up when the synchronous run
 finishes, so a tree-size reading at exit observes something real. This cell
 was verified during Task 10 rather than left at the conservative guess this
-section originally carried; WebLinux and Mock were checked the same way and
-confirmed to touch no host-side state directory. WebLinux runs in a browser
-with no host VMM process to observe.
+section originally carried.
+
+WebLinux and Mock report no CPU and no memory for the same reason: neither has
+a host VMM process, so a reading would describe `mvmctl` rather than a guest.
+They do report host state. Every tier is launched out of a state directory on
+the host's own disk, and `report_exit` measures that directory's tree size on
+every backend without asking the tier for anything — so a `None` cell here
+would have been a matrix that disagreed with the capture site, which is the
+one thing the matrix exists to prevent. Host state, like the wall span, is
+therefore observable on every backend without exception.
 
 ## Testing and gates
 
@@ -282,6 +298,23 @@ with no host VMM process to observe.
   extended to forbid a wildcard arm in `ResourceObservation::for_backend`, so a
   new `BackendKind` is a gate failure until it answers what it can observe.
 
+**No `mvmctl` verb produces a usage-bearing receipt yet.** `report_exit` is the
+only `plan.exited` emission site, and `emit_exited` has exactly one caller,
+which is a test. Nothing in the CLI — `mvmctl machine run` included — currently
+reaches the exit-report path, so the end-to-end evidence this feature produces
+is exercised by tests and by non-CLI consumers of `mvm-client`, not by a
+command a user types. The capture sites, the sidecar, the chain entry and the
+receipt extension are all wired; the verb that walks the whole path is not.
+
+**A `plan.failed` receipt always reports all-unavailable.** Only `report_exit`
+reads the sidecar, and only `plan.exited` carries the usage label — so a run
+that ends on the failure path reports nothing measured even when a sidecar with
+real numbers is sitting in its state directory. The reachable case is a libkrun
+workload killed by its own wall-clock timer: the supervisor writes a genuine
+`cpu_ms` on its way out, and the receipt says `unavailable`. Understating is
+the safe direction, and it is the direction this version takes deliberately
+rather than by oversight.
+
 **Coverage limit, stated rather than discovered.** The HVF `SummedClock` path
 can only be unit-tested against a mock clock; `controller.rs` already provides
 `FixedClock` and `MockHandle` for this. This repository has no macOS PR lane —
@@ -294,6 +327,12 @@ measurement is not gated on pull requests.
 - Usage capture at checkpoint, restore, or fork boundaries, and any decision
   about how a warm-forked child's consumption is attributed to its parent.
 - Any GPU field.
+- A guest-reported dimension. The guest agent's per-exec `getrusage` reading
+  (`duration_ms` + `peak_rss_kib`) is real and is not plumbed into the usage
+  record here. Carrying it needs a `guest_reported` source held distinct from
+  `measured`, and the rule the GPU section states applies equally: a schema
+  slot that nothing writes reads as capability and is not created. The shape is
+  understood and the field is deliberately absent until a producer exists.
 - Cgroup `cpu.stat` refinement on Linux.
 - A live-process read for the detached VMM tiers: sampling `/proc/<pid>/stat`
   for `utime`+`stime` and `/proc/<pid>/status` for `VmHWM` off the known VMM pid

@@ -84,7 +84,6 @@ mod tests {
         let captured = read_captured(dir.path());
         assert_eq!(captured.host_state_bytes, Metric::Unavailable);
         assert_eq!(captured.wall_ms, Metric::Unavailable);
-        assert_eq!(captured.guest_peak_rss_kib, Metric::Unavailable);
     }
 
     #[test]

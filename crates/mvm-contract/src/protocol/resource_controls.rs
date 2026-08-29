@@ -167,20 +167,17 @@ pub enum CpuObservation {
     HvfSummedVcpuClock,
     /// The in-process VMM's own process CPU time: guest plus VMM overhead.
     HostProcessCpu,
-    /// `getrusage` over a reaped VMM child: guest plus VMM overhead.
-    HostChildRusage,
 }
 
 impl CpuObservation {
-    /// The mechanism a capture site uses on a backend carrying this control,
-    /// or `None` where there is nothing to measure.
+    /// The mechanism a capture site uses on a backend carrying this
+    /// observation, or `None` where there is nothing to measure.
     #[must_use]
     pub const fn mechanism(self) -> Option<Mechanism> {
         match self {
             Self::None => None,
             Self::HvfSummedVcpuClock => Some(Mechanism::HvfSummedVcpuClock),
             Self::HostProcessCpu => Some(Mechanism::HostProcessCpu),
-            Self::HostChildRusage => Some(Mechanism::HostChildRusage),
         }
     }
 }
@@ -196,8 +193,8 @@ pub enum MemoryObservation {
 }
 
 impl MemoryObservation {
-    /// The mechanism a capture site uses on a backend carrying this control,
-    /// or `None` where there is nothing to measure.
+    /// The mechanism a capture site uses on a backend carrying this
+    /// observation, or `None` where there is nothing to measure.
     #[must_use]
     pub const fn mechanism(self) -> Option<Mechanism> {
         match self {
@@ -212,14 +209,20 @@ impl MemoryObservation {
 #[serde(rename_all = "snake_case")]
 pub enum HostStateObservation {
     /// Nothing about host-side state growth can be measured on this tier.
+    ///
+    /// No backend declares this today — every tier the host launches, it
+    /// launches out of a state directory on its own disk. It is kept as the
+    /// answer available to a future tier that owns no such directory, and it
+    /// asserts no capability, so an unused arm here cannot produce a false
+    /// measurement the way an unwritten metric slot would.
     None,
     /// Byte total of the VM state directory tree.
     StateDirTreeBytes,
 }
 
 impl HostStateObservation {
-    /// The mechanism a capture site uses on a backend carrying this control,
-    /// or `None` where there is nothing to measure.
+    /// The mechanism a capture site uses on a backend carrying this
+    /// observation, or `None` where there is nothing to measure.
     #[must_use]
     pub const fn mechanism(self) -> Option<Mechanism> {
         match self {
@@ -327,12 +330,16 @@ impl ResourceObservation {
                 host_state: HostStateObservation::StateDirTreeBytes,
                 wall: WallObservation::HostLaunchSpan,
             },
-            // WebLinux runs in a browser with no host VMM process and no
-            // host-side state directory to observe. Mock boots nothing.
+            // WebLinux runs in a browser and Mock boots nothing, so neither
+            // has a host VMM process whose CPU or resident size says anything
+            // about a guest. The two dimensions the host takes for itself do
+            // still hold: every run is launched out of a state directory on
+            // our disk, whose tree size reads without any cooperation from the
+            // tier, and every run is timed on our clock.
             BackendKind::WebLinux | BackendKind::Mock => Self {
                 cpu: CpuObservation::None,
                 memory: MemoryObservation::None,
-                host_state: HostStateObservation::None,
+                host_state: HostStateObservation::StateDirTreeBytes,
                 wall: WallObservation::HostLaunchSpan,
             },
         }
@@ -349,8 +356,6 @@ pub enum Mechanism {
     HvfSummedVcpuClock,
     /// CPU time of the in-process VMM's own process: guest plus VMM overhead.
     HostProcessCpu,
-    /// `getrusage` over a reaped VMM child: guest plus VMM overhead.
-    HostChildRusage,
     /// Kernel-kept resident high-water mark of the VMM process.
     HostProcessRss,
     /// Byte total of the VM state directory tree.
@@ -434,6 +439,7 @@ mod tests {
             BackendKind::Mock,
             BackendKind::Hvf,
             BackendKind::Wasm,
+            BackendKind::WebLinux,
             BackendKind::AppleContainer,
         ] {
             let _ = ResourceControls::for_backend(kind);
@@ -641,17 +647,53 @@ mod tests {
     }
 
     #[test]
-    fn the_non_vm_tiers_observe_only_the_span_the_host_saw() {
-        // WebLinux runs in a browser and Mock boots nothing, so neither ever
-        // touches a host-side state directory. Wasm is excluded here — see
-        // `the_wasm_tier_observes_its_activation_state_directory` — because it
-        // does write one.
+    fn the_non_vm_tiers_observe_no_guest_process_only_what_the_host_owns() {
+        // The point being pinned is that these two tiers have no host VMM
+        // process: WebLinux runs in a browser and Mock boots nothing, so a CPU
+        // or resident-size reading would describe `mvmctl` rather than a
+        // guest. It is not a claim that nothing at all is observable — the
+        // state directory is the host's own and the span is on the host's own
+        // clock, and `report_exit` measures both on every tier without asking
+        // the backend for anything.
         for kind in [BackendKind::WebLinux, BackendKind::Mock] {
             let observation = ResourceObservation::for_backend(kind);
-            assert_eq!(observation.cpu, CpuObservation::None);
-            assert_eq!(observation.memory, MemoryObservation::None);
-            assert_eq!(observation.host_state, HostStateObservation::None);
-            assert_eq!(observation.wall, WallObservation::HostLaunchSpan);
+            assert_eq!(observation.cpu, CpuObservation::None, "{kind:?}");
+            assert_eq!(observation.memory, MemoryObservation::None, "{kind:?}");
+            assert_eq!(
+                observation.host_state,
+                HostStateObservation::StateDirTreeBytes,
+                "{kind:?}"
+            );
+            assert_eq!(
+                observation.wall,
+                WallObservation::HostLaunchSpan,
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_backend_observes_its_host_state_directory() {
+        // The host measures its own disk without cooperation from the tier, so
+        // — like the wall span — there is no backend for which this dimension
+        // is unobservable. Pinned as a matrix-wide property because
+        // `report_exit` assigns it unconditionally, and a `None` cell here
+        // would be a matrix that disagrees with the capture site.
+        for kind in [
+            BackendKind::Firecracker,
+            BackendKind::Libkrun,
+            BackendKind::Qemu,
+            BackendKind::Mock,
+            BackendKind::Hvf,
+            BackendKind::Wasm,
+            BackendKind::WebLinux,
+            BackendKind::AppleContainer,
+        ] {
+            assert_eq!(
+                ResourceObservation::for_backend(kind).host_state,
+                HostStateObservation::StateDirTreeBytes,
+                "{kind:?}"
+            );
         }
     }
 
@@ -703,7 +745,6 @@ mod tests {
         let mapped = [
             CpuObservation::HvfSummedVcpuClock.mechanism(),
             CpuObservation::HostProcessCpu.mechanism(),
-            CpuObservation::HostChildRusage.mechanism(),
             MemoryObservation::HostProcessRss.mechanism(),
             HostStateObservation::StateDirTreeBytes.mechanism(),
             Some(WallObservation::HostLaunchSpan.mechanism()),
@@ -722,5 +763,100 @@ mod tests {
         assert_eq!(CpuObservation::None.mechanism(), None);
         assert_eq!(MemoryObservation::None.mechanism(), None);
         assert_eq!(HostStateObservation::None.mechanism(), None);
+    }
+
+    #[test]
+    fn an_observation_round_trips_through_its_wire_form() {
+        // These names end up inside a signed receipt, so a rename that
+        // survives compilation still breaks every verifier that already
+        // parsed the old spelling.
+        let observation = ResourceObservation::for_backend(BackendKind::Libkrun);
+        let json = serde_json::to_string(&observation).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"cpu":"host_process_cpu","memory":"host_process_rss","host_state":"state_dir_tree_bytes","wall":"host_launch_span"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<ResourceObservation>(&json).expect("deserialize"),
+            observation
+        );
+    }
+
+    #[test]
+    fn an_observation_carrying_an_unknown_field_is_refused() {
+        // `deny_unknown_fields` is what stops a future dimension from being
+        // silently dropped by an older reader that then attests the rest as
+        // complete.
+        let err = serde_json::from_str::<ResourceObservation>(
+            r#"{"cpu":"none","memory":"none","host_state":"state_dir_tree_bytes","wall":"host_launch_span","gpu":"none"}"#,
+        );
+        assert!(err.is_err(), "an unknown observation field must not parse");
+    }
+
+    #[test]
+    fn every_observation_variant_round_trips_through_its_wire_string() {
+        for cpu in [
+            CpuObservation::None,
+            CpuObservation::HvfSummedVcpuClock,
+            CpuObservation::HostProcessCpu,
+        ] {
+            let json = serde_json::to_string(&cpu).expect("serialize");
+            assert_eq!(
+                serde_json::from_str::<CpuObservation>(&json).expect("deserialize"),
+                cpu
+            );
+        }
+        for memory in [MemoryObservation::None, MemoryObservation::HostProcessRss] {
+            let json = serde_json::to_string(&memory).expect("serialize");
+            assert_eq!(
+                serde_json::from_str::<MemoryObservation>(&json).expect("deserialize"),
+                memory
+            );
+        }
+        for host_state in [
+            HostStateObservation::None,
+            HostStateObservation::StateDirTreeBytes,
+        ] {
+            let json = serde_json::to_string(&host_state).expect("serialize");
+            assert_eq!(
+                serde_json::from_str::<HostStateObservation>(&json).expect("deserialize"),
+                host_state
+            );
+        }
+        let wall = serde_json::to_string(&WallObservation::HostLaunchSpan).expect("serialize");
+        assert_eq!(wall, r#""host_launch_span""#);
+        assert_eq!(
+            serde_json::from_str::<WallObservation>(&wall).expect("deserialize"),
+            WallObservation::HostLaunchSpan
+        );
+    }
+
+    #[test]
+    fn every_mechanism_round_trips_through_its_wire_string() {
+        for (mechanism, wire) in [
+            (Mechanism::HvfSummedVcpuClock, r#""hvf_summed_vcpu_clock""#),
+            (Mechanism::HostProcessCpu, r#""host_process_cpu""#),
+            (Mechanism::HostProcessRss, r#""host_process_rss""#),
+            (Mechanism::StateDirTreeBytes, r#""state_dir_tree_bytes""#),
+            (Mechanism::HostLaunchSpan, r#""host_launch_span""#),
+        ] {
+            assert_eq!(serde_json::to_string(&mechanism).expect("serialize"), wire);
+            assert_eq!(
+                serde_json::from_str::<Mechanism>(wire).expect("deserialize"),
+                mechanism
+            );
+        }
+    }
+
+    #[test]
+    fn the_default_controls_enforce_nothing_and_round_trip() {
+        let default = ResourceControls::default();
+        assert_eq!(default.cpu, CpuControl::None);
+        assert_eq!(default.wall_clock, WallClockControl::None);
+        let json = serde_json::to_string(&default).expect("serialize");
+        assert_eq!(
+            serde_json::from_str::<ResourceControls>(&json).expect("deserialize"),
+            default
+        );
     }
 }

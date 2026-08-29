@@ -1,11 +1,13 @@
 //! Measured resource consumption for one workload run, and the sidecar
 //! convention that carries it off the process that owned the VM.
 //!
-//! A metric is a three-way choice rather than a number plus flags, so a guest
-//! self-report cannot be spelled as a host observation and an unobservable
-//! dimension cannot carry a number that reads as zero. The wire form is flat
-//! (`source`/`value`/`mechanism`) and is validated on the way in, because the
-//! file is written by one process and read by another.
+//! A metric is a choice between a host observation and nothing, rather than a
+//! number plus flags, so an unobservable dimension cannot carry a number that
+//! reads as zero. Every source this version defines is a host observation;
+//! anything the untrusted guest says about itself would need a source of its
+//! own, and none is defined until something produces one. The wire form is
+//! flat (`source`/`value`/`mechanism`) and is validated on the way in, because
+//! the file is written by one process and read by another.
 
 use std::path::{Path, PathBuf};
 
@@ -19,8 +21,6 @@ pub use mvm_contract::protocol::resource_controls::Mechanism;
 pub enum UsageSource {
     /// Observed by the host. The only source a verifier may treat as attested.
     Measured,
-    /// Reported by the untrusted guest about itself.
-    GuestReported,
     /// This host could not observe this dimension on this backend.
     Unavailable,
 }
@@ -30,7 +30,6 @@ pub enum UsageSource {
 #[serde(into = "MetricWire", try_from = "MetricWire")]
 pub enum Metric {
     Measured { value: u64, mechanism: Mechanism },
-    GuestReported { value: u64 },
     Unavailable,
 }
 
@@ -38,11 +37,6 @@ impl Metric {
     #[must_use]
     pub const fn measured(value: u64, mechanism: Mechanism) -> Self {
         Self::Measured { value, mechanism }
-    }
-
-    #[must_use]
-    pub const fn guest_reported(value: u64) -> Self {
-        Self::GuestReported { value }
     }
 
     #[must_use]
@@ -54,7 +48,7 @@ impl Metric {
     #[must_use]
     pub const fn value(self) -> Option<u64> {
         match self {
-            Self::Measured { value, .. } | Self::GuestReported { value } => Some(value),
+            Self::Measured { value, .. } => Some(value),
             Self::Unavailable => None,
         }
     }
@@ -63,7 +57,6 @@ impl Metric {
     pub const fn source(self) -> UsageSource {
         match self {
             Self::Measured { .. } => UsageSource::Measured,
-            Self::GuestReported { .. } => UsageSource::GuestReported,
             Self::Unavailable => UsageSource::Unavailable,
         }
     }
@@ -88,11 +81,6 @@ impl From<Metric> for MetricWire {
                 value: Some(value),
                 mechanism: Some(mechanism),
             },
-            Metric::GuestReported { value } => Self {
-                source: UsageSource::GuestReported,
-                value: Some(value),
-                mechanism: None,
-            },
             Metric::Unavailable => Self {
                 source: UsageSource::Unavailable,
                 value: None,
@@ -113,10 +101,6 @@ impl TryFrom<MetricWire> for Metric {
             (UsageSource::Measured, _, _) => {
                 Err("a measured metric must carry both a value and a mechanism")
             }
-            (UsageSource::GuestReported, Some(value), None) => Ok(Self::GuestReported { value }),
-            (UsageSource::GuestReported, _, _) => {
-                Err("a guest-reported metric must carry a value and no host mechanism")
-            }
             (UsageSource::Unavailable, None, None) => Ok(Self::Unavailable),
             (UsageSource::Unavailable, _, _) => {
                 Err("an unavailable metric must carry neither a value nor a mechanism")
@@ -133,7 +117,6 @@ pub struct UsageCapture {
     pub peak_rss_mib: Metric,
     pub host_state_bytes: Metric,
     pub wall_ms: Metric,
-    pub guest_peak_rss_kib: Metric,
 }
 
 impl Default for UsageCapture {
@@ -144,7 +127,6 @@ impl Default for UsageCapture {
             peak_rss_mib: Metric::unavailable(),
             host_state_bytes: Metric::unavailable(),
             wall_ms: Metric::unavailable(),
-            guest_peak_rss_kib: Metric::unavailable(),
         }
     }
 }
@@ -220,12 +202,6 @@ mod tests {
     }
 
     #[test]
-    fn a_guest_report_is_a_distinct_source_and_names_no_mechanism() {
-        let json = serde_json::to_string(&Metric::guest_reported(204_800)).expect("serialize");
-        assert_eq!(json, r#"{"source":"guest_reported","value":204800}"#);
-    }
-
-    #[test]
     fn an_unavailable_metric_carrying_a_value_is_refused_on_the_wire() {
         // Presence of a number under `unavailable` is the exact ambiguity the
         // encoding exists to prevent, so it must not survive a round trip.
@@ -240,11 +216,84 @@ mod tests {
     }
 
     #[test]
-    fn a_guest_report_claiming_a_mechanism_is_refused_on_the_wire() {
-        let err = serde_json::from_str::<Metric>(
-            r#"{"source":"guest_reported","value":5,"mechanism":"host_process_rss"}"#,
+    fn a_source_this_version_does_not_define_is_refused_on_the_wire() {
+        // Only a host observation may be stamped with a source at all in this
+        // version. A record naming any other one — a guest self-report, a
+        // vendor provider reading — must not parse into something a consumer
+        // could mistake for an attested number.
+        let err = serde_json::from_str::<Metric>(r#"{"source":"guest_reported","value":204800}"#);
+        assert!(err.is_err(), "an undefined source must not parse");
+    }
+
+    #[test]
+    fn every_metric_shape_round_trips_through_the_wire_form() {
+        // The wire form is a flat struct that a validating `TryFrom` narrows,
+        // so a round trip is the only thing proving the narrowing and the
+        // widening agree on every shape rather than on the one the writer
+        // happened to test.
+        for metric in [
+            Metric::unavailable(),
+            Metric::measured(0, Mechanism::HostLaunchSpan),
+            Metric::measured(4210, Mechanism::HostProcessCpu),
+            Metric::measured(312, Mechanism::HostProcessRss),
+            Metric::measured(91_234_304, Mechanism::StateDirTreeBytes),
+            Metric::measured(u64::MAX, Mechanism::HvfSummedVcpuClock),
+        ] {
+            let json = serde_json::to_string(&metric).expect("serialize");
+            assert_eq!(
+                serde_json::from_str::<Metric>(&json).expect("deserialize"),
+                metric,
+                "{json}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_default_capture_says_nothing_was_observed_in_every_dimension() {
+        // Not an empty object and not zeros: the record a run that measured
+        // nothing produces still names each dimension and calls it
+        // unobserved.
+        let default = UsageCapture::default();
+        for metric in [
+            default.cpu_ms,
+            default.peak_rss_mib,
+            default.host_state_bytes,
+            default.wall_ms,
+        ] {
+            assert_eq!(metric, Metric::unavailable());
+            assert_eq!(metric.value(), None);
+            assert_eq!(metric.source(), UsageSource::Unavailable);
+        }
+        assert_eq!(
+            serde_json::to_string(&default).expect("serialize"),
+            r#"{"cpu_ms":{"source":"unavailable"},"peak_rss_mib":{"source":"unavailable"},"host_state_bytes":{"source":"unavailable"},"wall_ms":{"source":"unavailable"}}"#
         );
-        assert!(err.is_err(), "a guest report names no host mechanism");
+    }
+
+    #[test]
+    fn a_capture_carrying_an_unknown_dimension_is_refused() {
+        // `deny_unknown_fields` is what keeps a reader from accepting a record
+        // written by a newer producer and then attesting the subset it
+        // understood as the whole run.
+        let err = serde_json::from_str::<UsageCapture>(
+            r#"{"cpu_ms":{"source":"unavailable"},"peak_rss_mib":{"source":"unavailable"},"host_state_bytes":{"source":"unavailable"},"wall_ms":{"source":"unavailable"},"gpu_ms":{"source":"unavailable"}}"#,
+        );
+        assert!(err.is_err(), "an unknown dimension must not parse");
+    }
+
+    #[test]
+    fn a_fully_measured_capture_round_trips() {
+        let usage = UsageCapture {
+            cpu_ms: Metric::measured(4210, Mechanism::HvfSummedVcpuClock),
+            peak_rss_mib: Metric::measured(312, Mechanism::HostProcessRss),
+            host_state_bytes: Metric::measured(91_234_304, Mechanism::StateDirTreeBytes),
+            wall_ms: Metric::measured(61_004, Mechanism::HostLaunchSpan),
+        };
+        let json = serde_json::to_string(&usage).expect("serialize");
+        assert_eq!(
+            serde_json::from_str::<UsageCapture>(&json).expect("deserialize"),
+            usage
+        );
     }
 
     #[test]

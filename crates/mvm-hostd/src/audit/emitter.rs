@@ -2281,11 +2281,31 @@ mod tests {
             )
             .unwrap();
 
+        // Parse the label back rather than substring-matching the line: the
+        // entry has to carry the number, the source, and the mechanism that
+        // produced it, and an `||` over two loose substrings would pass on any
+        // one of the three.
         let content =
             std::fs::read_to_string(dir.path().join("local.jsonl")).expect("audit file exists");
-        assert!(
-            content.contains(r#"\"source\":\"measured\""#) || content.contains("host_process_cpu")
+        let entry: serde_json::Value = content
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("entry is json"))
+            .find(|line| line["entry"]["event"] == "plan.exited")
+            .expect("a plan.exited entry");
+        let recorded: UsageCapture = serde_json::from_str(
+            entry["entry"]["labels"]["usage"]
+                .as_str()
+                .expect("the usage label is a json string"),
+        )
+        .expect("the usage label parses back into a capture");
+        assert_eq!(recorded, usage);
+        assert_eq!(
+            recorded.cpu_ms,
+            Metric::measured(4210, Mechanism::HostProcessCpu)
         );
+        // The dimensions this run did not observe stay unobserved rather than
+        // being filled in by the emitter.
+        assert_eq!(recorded.peak_rss_mib, Metric::unavailable());
     }
 
     #[test]
