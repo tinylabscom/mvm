@@ -295,11 +295,18 @@ impl ResourceObservation {
                 host_state: HostStateObservation::StateDirTreeBytes,
                 wall: WallObservation::HostLaunchSpan,
             },
-            // The VMM is a child we reap, so its resource usage arrives with
-            // the reap itself.
+            // Neither VMM is a child of ours. Firecracker is launched
+            // session-detached and orphaned to init before the launch call
+            // returns, and usually runs as root while `mvmctl` does not; qemu
+            // daemonizes itself, so the process the launch reaps is not the one
+            // that ends up running the guest. Both are followed by pid through
+            // a process-exit observer rather than by a wait, which is exactly
+            // why the teardown path is written around an observer. There is no
+            // rusage to collect from a process we never reap, and no process of
+            // ours whose resident size says anything about the guest.
             BackendKind::Firecracker | BackendKind::Qemu => Self {
-                cpu: CpuObservation::HostChildRusage,
-                memory: MemoryObservation::HostProcessRss,
+                cpu: CpuObservation::None,
+                memory: MemoryObservation::None,
                 host_state: HostStateObservation::StateDirTreeBytes,
                 wall: WallObservation::HostLaunchSpan,
             },
@@ -564,16 +571,58 @@ mod tests {
     }
 
     #[test]
-    fn a_cpu_bound_a_backend_cannot_apply_does_not_stop_it_observing_memory() {
+    fn a_cpu_bound_a_backend_can_apply_does_not_mean_it_can_observe_one() {
         // The distinction the whole matrix exists for: a control is not an
-        // observation. Firecracker off Linux bounds no CPU and still has a
-        // resident process to measure.
-        let controls = ResourceControls::for_backend(BackendKind::Firecracker);
-        let observation = ResourceObservation::for_backend(BackendKind::Firecracker);
-        if !cfg!(target_os = "linux") {
-            assert_eq!(controls.cpu, CpuControl::None);
+        // observation, and neither direction implies the other.
+        //
+        // A cgroup bounds any process on Linux, including one we never forked,
+        // so Firecracker carries a real CPU quota there — and still observes no
+        // CPU, because a usage reading needs a process we reaped and that VMM
+        // detaches before the launch returns.
+        let firecracker_controls = ResourceControls::for_backend(BackendKind::Firecracker);
+        let firecracker = ResourceObservation::for_backend(BackendKind::Firecracker);
+        if cfg!(target_os = "linux") {
+            assert_eq!(firecracker_controls.cpu, CpuControl::CgroupShare);
         }
-        assert_eq!(observation.memory, MemoryObservation::HostProcessRss);
+        assert_eq!(firecracker.cpu, CpuObservation::None);
+
+        // The other direction, on libkrun: off Linux there is no cgroup to
+        // bound it with, and its CPU is still measurable — the VMM runs inside
+        // our own supervisor process, whose usage reads without any quota
+        // controller.
+        let libkrun_controls = ResourceControls::for_backend(BackendKind::Libkrun);
+        let libkrun = ResourceObservation::for_backend(BackendKind::Libkrun);
+        if !cfg!(target_os = "linux") {
+            assert_eq!(libkrun_controls.cpu, CpuControl::None);
+        }
+        assert_eq!(libkrun.cpu, CpuObservation::HostProcessCpu);
+    }
+
+    #[test]
+    fn a_backend_whose_vmm_is_not_our_child_observes_neither_cpu_nor_memory() {
+        // Firecracker launches session-detached and orphaned to init; qemu
+        // daemonizes itself. Neither is ever reaped, so there is no rusage, and
+        // the resident size of this process describes this process rather than
+        // the guest. Pinned because the alternative is a declaration nobody can
+        // honour: the capture site would have to fabricate a measurement or
+        // silently write nothing while the matrix promised a number.
+        for kind in [BackendKind::Firecracker, BackendKind::Qemu] {
+            let observation = ResourceObservation::for_backend(kind);
+            assert_eq!(observation.cpu, CpuObservation::None, "{kind:?}");
+            assert_eq!(observation.memory, MemoryObservation::None, "{kind:?}");
+            // The two the host takes for itself still hold: the state directory
+            // is on our disk and the launch span is on our clock.
+            assert_eq!(
+                observation.host_state,
+                HostStateObservation::StateDirTreeBytes,
+                "{kind:?}"
+            );
+            assert_eq!(
+                observation.wall,
+                WallObservation::HostLaunchSpan,
+                "{kind:?}"
+            );
+        }
     }
 
     #[test]

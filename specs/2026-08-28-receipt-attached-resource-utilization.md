@@ -219,7 +219,7 @@ therefore an optional later refinement, not the foundation.
 |---|---|---|---|---|
 | `Hvf`, `AppleContainer` | `hvf_summed_vcpu_clock` — guest vCPU time only, excluding host-side device emulation | `host_process_rss` | `state_dir_tree_bytes` | `host_launch_span` |
 | `Libkrun` | `host_process_cpu` — process total: guest execution plus VMM overhead, vsock pumping, device emulation | `host_process_rss` | `state_dir_tree_bytes` | `host_launch_span` |
-| `Firecracker`, `Qemu` | `host_child_rusage` — process total, same caveat | `host_process_rss` | `state_dir_tree_bytes` | `host_launch_span` |
+| `Firecracker`, `Qemu` | unavailable | unavailable | `state_dir_tree_bytes` | `host_launch_span` |
 | `Wasm`, `WebLinux`, `Mock` | unavailable | unavailable | unavailable | `host_launch_span` |
 
 Wall is `host_launch_span` on every tier including the non-VM ones, because it
@@ -227,6 +227,19 @@ measures the host's own observation of the run rather than anything the backend
 reports. Note that it is *not* the supervisor's wall-clock enforcement timer:
 that timer exists only on libkrun and HVF, bounds the run, and is a control
 rather than an observation.
+
+Firecracker and QEMU report neither CPU nor memory, and the reason is that
+neither VMM is a child of ours. Firecracker is launched session-detached and is
+orphaned to init before the launch call returns — and usually runs as root while
+`mvmctl` does not — while QEMU daemonizes itself, so the process the launch
+reaps is not the one that ends up running the guest. Both are followed by pid
+through a process-exit observer rather than by a wait, which is why the teardown
+path is written around an observer in the first place. A `getrusage` reading
+requires a process we reaped, and there is none; and the resident size of this
+process describes this process, not the guest. Reaping the daemonizing launcher
+would produce a near-zero number stamped as a measurement, which is worse than
+recording nothing. The two host-side dimensions still hold on these tiers: the
+state directory is on our disk and the launch span is on our clock.
 
 Wasm reports no CPU because its fuel counter is declared and unwired; claiming
 a fuel-derived `cpu_ms` would assert a measurement that does not happen.
@@ -264,6 +277,15 @@ measurement is not gated on pull requests.
   about how a warm-forked child's consumption is attributed to its parent.
 - Any GPU field.
 - Cgroup `cpu.stat` refinement on Linux.
+- A live-process read for the detached VMM tiers: sampling `/proc/<pid>/stat`
+  for `utime`+`stime` and `/proc/<pid>/status` for `VmHWM` off the known VMM pid
+  immediately *before* the teardown kill. That is a read of a process still
+  running rather than a reap of one that has exited, so it does not lose the
+  race the way a post-hoc read does, and it would give Firecracker real CPU and
+  memory on Linux. It would need its own `Mechanism` variant, since it is
+  neither a child rusage nor a reading of our own process, and it would have to
+  answer for the path a completed workload actually takes — a VMM that exits on
+  its own is never killed, so nothing would sample it. It is not built here.
 - A CLI surface for reading usage back; receipts are already exportable and
   offline-verifiable.
 - Billing, rating, or chargeback, which belong downstream of the signed
