@@ -94,6 +94,9 @@ mvmctl machine run --image python:3.12 -- python -c "print(2 + 2)"
 
 # Run a Python file from the host checkout (the mount is read-only).
 # Repeat --mount for additional host directories.
+# --mount needs a backend serving a virtio-fs directory share (libkrun, HVF).
+# Firecracker (the Linux default) has none and refuses before boot: pass a
+# disk-image volume instead, --volume HOST:/GUEST:SIZE.
 mvmctl machine run --image python:3.12 \
   --mount "$PWD:/work:ro" -- python /work/app.py
 

@@ -203,15 +203,20 @@ pub(crate) fn run_mvmctl_isolated_live_home(world: &mut CliWorld, args: String) 
     // are cached *under the home*, so every such scenario re-cross-compiles
     // them from scratch — minutes each, repeated across the live suite. The
     // warm home is what makes a live run finish in a sane time.
+    //
+    // A home the scenario declared for itself still wins: `Given an isolated
+    // mvm home` exists so a scenario can be hermetic, or can seed a cache and
+    // then assert on it, and honouring the warm home over that put `machine
+    // create` and `machine start` in two different directories.
     let warm_home = std::env::var_os("MVM_E2E_HOME").map(std::path::PathBuf::from);
     if warm_home.is_none() && world.isolated_home.is_none() {
         world.isolated_home = Some(tempfile::tempdir().expect("create isolated MVM_HOME"));
     }
-    let home: std::path::PathBuf = match (&warm_home, world.isolated_home.as_ref()) {
-        (Some(warm), _) => warm.clone(),
-        (None, Some(dir)) => dir.path().to_path_buf(),
-        (None, None) => unreachable!("one of the two is set above"),
-    };
+    let scenario_home = world.isolated_home.as_ref().map(|dir| dir.path());
+    let home: std::path::PathBuf =
+        mvm_conformance::live_home_precedence(scenario_home, warm_home.as_deref())
+            .expect("one of the two is set above")
+            .to_path_buf();
     let mut command = mvmctl_command();
     command
         .current_dir(workspace_root())
