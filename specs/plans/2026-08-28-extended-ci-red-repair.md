@@ -38,6 +38,10 @@ a competing BLAKE3 address or re-hash the archive.
 - With those files readable, the same rerun reached QEMU device creation and
   exposed that `/dev/vhost-vsock` was still root-owned. The job now transfers
   that single device to the runner user with mode `0600` before Stage 0 starts.
+- The next rerun completed the SDK-sidecar guest build, then the host extractor
+  tried to preserve root ownership with `debugfs rdump` and ignored the three
+  SDK-sidecar outputs. QEMU Stage 0 now dumps only the allow-listed artifacts
+  without ownership preservation, including the image, version, and checksums.
 
 ## Delivery checklist
 
@@ -64,5 +68,7 @@ a competing BLAKE3 address or re-hash the archive.
       covering both Stage 0 boot files.
 - [x] Repair the Linux Stage 0 vhost-vsock permissions with a structural
       regression covering ownership, mode, and read/write access.
+- [x] Make QEMU Stage 0 extraction ownership-neutral and include the complete
+      SDK-sidecar artifact contract in its allow-list.
 - [ ] Pass a fresh Extended CI run containing all repaired witness lanes.
 - [ ] Merge the corrective pull request and close #2979 through its linkage.

@@ -47,9 +47,11 @@ Last updated: 2026-08-29
       witness targets an Intel runner with HVF access without pulling the
       arm64-only libkrun firmware path. The Linux witness also grants QEMU read
       access to the hosted kernel and initramfs and takes ownership of the
-      vhost-vsock device before the Stage 0 sidecar build. Focused tests,
-      workspace tests, isolated doctests, workspace Clippy, formatting, and
-      policy gates are green. A fresh Extended CI run and merge delivery remain.
+      vhost-vsock device before the Stage 0 sidecar build. QEMU extraction now
+      copies the complete sidecar bundle without restoring guest ownership.
+      Focused tests, workspace tests, isolated doctests, workspace Clippy,
+      formatting, and policy gates are green. A fresh Extended CI run and merge
+      delivery remain.
 
 - [ ] **HVF machine restore dispatch — issue #2961.**
       `specs/plans/2026-08-27-hvf-machine-restore-dispatch.md`.

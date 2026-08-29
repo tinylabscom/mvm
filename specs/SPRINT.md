@@ -113,10 +113,11 @@
       firmware path. Both jobs use the repository-pinned uv action and tool
       version. The Linux job now also makes the hosted kernel and initramfs
       readable and transfers `/dev/vhost-vsock` to the runner user before
-      QEMU's Stage 0 sidecar build. Focused tests, all ordinary workspace tests,
-      the isolated `mvm-agentd` doctest, workspace Clippy, formatting, and
-      repository policy gates are green. The live rerun and merge delivery
-      remain.
+      QEMU's Stage 0 sidecar build. QEMU then extracts the complete sidecar
+      bundle through ownership-neutral, allow-listed `debugfs dump` calls.
+      Focused tests, all ordinary workspace tests, the isolated `mvm-agentd`
+      doctest, workspace Clippy, formatting, and repository policy gates are
+      green. The live rerun and merge delivery remain.
 
 - [ ] **Cloudflare Pages cutover.**
       `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.
