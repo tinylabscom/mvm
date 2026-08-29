@@ -18,7 +18,9 @@
       one parent in the artifact-warm home and checks request-state cleanup
       relative to a pre-run baseline. Workspace tests, all-target/all-feature
       Clippy, Linux- and BDD-gated checks, formatting, and policy gates are
-      green; live CI witnesses and merge delivery remain.
+      green. The eBPF lane's probabilistic signed-line substring assertion now
+      verifies the authenticated stream-label allowlist exactly; live CI
+      witnesses and merge delivery remain.
 
 - [x] **Fleet stream edge delivery handoff.** Plan 296's caller-driven
       connector now owns the production input route, so accepted records and

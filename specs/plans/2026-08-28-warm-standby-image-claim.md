@@ -37,6 +37,8 @@ baseline so shared runner state cannot hide a leak or force a cold rebuild.
       live home, with baseline-relative request-state cleanup.
 - [x] Pass host workspace tests, check, formatting, Clippy, gated compilation,
       and repository policy gates.
+- [x] Replace the probabilistic signed-audit substring assertion exposed by the
+      eBPF lane with exact verification of the authenticated stream labels.
 - [ ] Pass the macOS/HVF and Linux/Firecracker documented-surface witnesses.
 - [ ] Merge the issue-closing PR through the merge queue and confirm #3002 is
       closed by the merge.
