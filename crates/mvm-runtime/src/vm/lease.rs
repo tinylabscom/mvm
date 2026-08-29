@@ -211,6 +211,7 @@ mod tests {
             vcpus: 2,
             mem_mib: 512,
             image_sha256: None,
+            root_strategy: Default::default(),
             vsock_egress: false,
         }
     }
@@ -229,6 +230,7 @@ mod tests {
             spawned_unix_secs: 1,
             state: StandbyState::Idle,
             image_sha256: c.image_sha256,
+            root_strategy: c.root_strategy,
             parent_checkpoint: None,
             vsock_egress: c.vsock_egress,
             preloaded_child_vm_name: None,

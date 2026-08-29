@@ -1962,6 +1962,7 @@ mod tests {
                 spawned_unix_secs: 1,
                 state: StandbyState::Idle,
                 image_sha256: None,
+                root_strategy: Default::default(),
                 parent_checkpoint: None,
                 preloaded_child_vm_name: None,
                 vsock_egress: false,
@@ -2083,6 +2084,7 @@ mod tests {
                 vm_state_dir: "/tmp/does-not-exist".into(),
                 image_path: None,
                 image_sha256: None,
+                root_strategy: Default::default(),
                 vsock_egress: false,
             };
 

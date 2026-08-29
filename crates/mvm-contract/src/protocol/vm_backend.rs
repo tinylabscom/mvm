@@ -31,9 +31,11 @@ pub enum RuntimeSourceLaunchKind {
 }
 
 /// The selected rootfs strategy for a workload boot, when the caller knows it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RuntimeSourceRootStrategy {
     VirtiofsRoot,
+    #[default]
     BlockExt4,
 }
 
@@ -942,11 +944,15 @@ pub struct StandbySpec {
     pub control_socket: String,
     /// Per-VM state dir the standby writes its pid into.
     pub vm_state_dir: String,
-    /// Source rootfs image path for image-bound standbys. `None` for libkrun
-    /// (no rootfs is baked in at spawn; any workload rootfs attaches at claim time).
+    /// Resolved rootfs image path for image-bound standbys. Block parents boot
+    /// it directly; virtiofs parents use its digest as the image identity while
+    /// booting the resolved read-only tree carried by the launch config.
     pub image_path: Option<String>,
     /// Sha256 hex of `image_path` for the compat key. `None` for libkrun.
     pub image_sha256: Option<String>,
+    /// Root device model the parent boots. A restored child inherits this
+    /// device shape, so block and virtiofs roots are never interchangeable.
+    pub root_strategy: RuntimeSourceRootStrategy,
     /// Whether the parent boots the guest's vsock egress client on
     /// (see [`StandbyCompat::vsock_egress`]).
     ///
@@ -959,14 +965,11 @@ pub struct StandbySpec {
 /// The base-compat key — everything a standby fixes at spawn and must therefore match the
 /// workload exactly, else the launch cold-boots.
 ///
-/// `image_sha256` is `Some(sha)` for a standby captured from a rootfs — a saved-state
-/// standby is a frozen {rootfs, memory, machine-id} triple taken from one particular
-/// image, and every child is cloned from that captured content, so the image is part of
-/// the standby's identity rather than something attached to it later. It is `None` only
-/// for a standby carrying no rootfs at all (a bare pre-spawned supervisor any image could
-/// attach to). Compatibility is exact in both directions — `None == None` and
-/// `Some(a) == Some(b)` iff `a == b` — so a claim that computes this field differently
-/// from the spawn that recorded it matches nothing, silently and forever.
+/// `image_sha256` is `Some(sha)` for a standby resolved from an image. The root
+/// strategy says whether the parent booted that image as a block device or its
+/// read-only unpacked tree through virtiofs; a child inherits both the image and
+/// device model. Compatibility is exact in both directions, so a claim that
+/// computes either field differently from the spawn matches nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StandbyCompat {
     /// Registered template identity. Compatibility is exact, including the
@@ -978,6 +981,9 @@ pub struct StandbyCompat {
     /// `Some(sha256-hex)` for a standby captured from a rootfs; `None` only for
     /// one that carries no rootfs.
     pub image_sha256: Option<String>,
+    /// Root device model fixed when the parent boots.
+    #[serde(default)]
+    pub root_strategy: RuntimeSourceRootStrategy,
     /// Whether the guest boots with its in-guest vsock egress client started.
     ///
     /// A restored child inherits its kernel cmdline from the parent's saved
@@ -1020,6 +1026,10 @@ pub struct StandbyHandle {
     /// standbys.
     #[serde(default)]
     pub image_sha256: Option<String>,
+    /// Root device model the parent booted. Older records predate virtiofs
+    /// parents and therefore deserialize as block-backed.
+    #[serde(default)]
+    pub root_strategy: RuntimeSourceRootStrategy,
     /// The content-addressed checkpoint this parent was captured as, set once
     /// a spawn has captured it. `None` means the parent was never captured, so
     /// it cannot be claimed: a claim verifies content and lineage against this
@@ -1056,6 +1066,7 @@ impl StandbyHandle {
             vcpus: self.vcpus,
             mem_mib: self.mem_mib,
             image_sha256: self.image_sha256.clone(),
+            root_strategy: self.root_strategy,
             vsock_egress: self.vsock_egress,
         }
     }
@@ -1521,6 +1532,7 @@ mod tests {
             vcpus: 2,
             mem_mib: 128,
             image_sha256: Some("bb".repeat(32)),
+            root_strategy: RuntimeSourceRootStrategy::BlockExt4,
             vsock_egress: false,
         };
         let request = WarmServiceRequest::Claim {
@@ -1569,6 +1581,7 @@ mod tests {
                 vcpus: 2,
                 mem_mib: 128,
                 image_sha256: Some("dd".repeat(32)),
+                root_strategy: RuntimeSourceRootStrategy::BlockExt4,
                 vsock_egress: false,
             },
             target: 1,
@@ -1623,6 +1636,7 @@ mod tests {
             spawned_unix_secs: 1_700_000_000,
             state: StandbyState::Idle,
             image_sha256: None,
+            root_strategy: RuntimeSourceRootStrategy::BlockExt4,
             parent_checkpoint: None,
             vsock_egress: false,
             preloaded_child_vm_name: None,
@@ -1638,6 +1652,7 @@ mod tests {
             vcpus: 2,
             mem_mib: 1024,
             image_sha256: None,
+            root_strategy: RuntimeSourceRootStrategy::BlockExt4,
             vsock_egress: false,
         };
         assert!(back.is_compatible(&want));
@@ -1667,6 +1682,11 @@ mod tests {
         assert!(!hvf_handle.is_compatible(&want)); // None ≠ Some
         assert!(!hvf_handle.is_compatible(&StandbyCompat {
             image_sha256: Some("d".repeat(64)),
+            ..want.clone()
+        }));
+        assert!(!hvf_handle.is_compatible(&StandbyCompat {
+            image_sha256: Some("c".repeat(64)),
+            root_strategy: RuntimeSourceRootStrategy::VirtiofsRoot,
             ..want.clone()
         }));
         // Guest egress enablement partitions the pool in both directions: a
@@ -1729,6 +1749,11 @@ mod tests {
         }"#;
         let h: StandbyHandle = serde_json::from_str(old_json).unwrap();
         assert_eq!(h.image_sha256, None, "absent field must default to None");
+        assert_eq!(
+            h.root_strategy,
+            RuntimeSourceRootStrategy::BlockExt4,
+            "records predating virtiofs parents must default to block-backed"
+        );
         assert!(
             !h.vsock_egress,
             "a record from before the field existed booted no egress client"
@@ -1745,6 +1770,7 @@ mod tests {
             vcpus: 2,
             mem_mib: 1024,
             image_sha256: None,
+            root_strategy: RuntimeSourceRootStrategy::BlockExt4,
             vsock_egress: false,
         };
         assert!(h.is_compatible(&want));
@@ -1773,6 +1799,7 @@ mod tests {
             spawned_unix_secs: 1,
             state: StandbyState::Idle,
             image_sha256: Some("dd".repeat(32)),
+            root_strategy: RuntimeSourceRootStrategy::BlockExt4,
             parent_checkpoint: None,
             vsock_egress: false,
             preloaded_child_vm_name: None,

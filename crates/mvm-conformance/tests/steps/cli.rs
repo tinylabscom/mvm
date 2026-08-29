@@ -2,6 +2,7 @@
 //! its exit code / stdout. Covers the CLI-surface suite; scenarios that need
 //! a running microVM call through `mvm-client` instead as those suites land.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -190,6 +191,59 @@ fn warm_residency_enabled(world: &mut CliWorld) {
     world.warm_residency = true;
 }
 
+fn selected_live_home(world: &mut CliWorld) -> PathBuf {
+    let warm_home = std::env::var_os("MVM_E2E_HOME").map(PathBuf::from);
+    if warm_home.is_none() && world.isolated_home.is_none() {
+        world.isolated_home = Some(tempfile::tempdir().expect("create isolated MVM_HOME"));
+    }
+    let scenario_home = world.isolated_home.as_ref().map(|dir| dir.path());
+    mvm_conformance::live_home_precedence(scenario_home, warm_home.as_deref())
+        .expect("one of the two is set above")
+        .to_path_buf()
+}
+
+fn vm_state_dirs(home: &Path) -> std::io::Result<HashSet<PathBuf>> {
+    let vms_dir = home.join("vms");
+    let entries = match std::fs::read_dir(&vms_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(error) => return Err(error),
+    };
+
+    entries
+        .map(|entry| entry.map(|entry| entry.path()))
+        .filter_map(|entry| match entry {
+            Ok(path) if path.is_dir() => Some(Ok(path)),
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect()
+}
+
+fn transient_request_dirs(home: &Path) -> std::io::Result<HashSet<PathBuf>> {
+    Ok(vm_state_dirs(home)?
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_none_or(|name| !name.starts_with("standby-"))
+        })
+        .collect())
+}
+
+#[given(expr = "the live mvm home request state is recorded")]
+fn record_live_request_state(world: &mut CliWorld) {
+    let home = selected_live_home(world);
+    let request_dirs = vm_state_dirs(&home).unwrap_or_else(|error| {
+        panic!(
+            "read transient VM state under the live home {}: {error}",
+            home.display()
+        )
+    });
+    world.last_live_home = Some(home);
+    world.live_request_dirs_before = Some(request_dirs);
+}
+
 #[when(expr = "I run mvmctl in an isolated live home with {string}")]
 pub(crate) fn run_mvmctl_isolated_live_home(world: &mut CliWorld, args: String) {
     // Like `run_mvmctl_isolated_home`, but for scenarios that boot a real
@@ -208,15 +262,7 @@ pub(crate) fn run_mvmctl_isolated_live_home(world: &mut CliWorld, args: String) 
     // mvm home` exists so a scenario can be hermetic, or can seed a cache and
     // then assert on it, and honouring the warm home over that put `machine
     // create` and `machine start` in two different directories.
-    let warm_home = std::env::var_os("MVM_E2E_HOME").map(std::path::PathBuf::from);
-    if warm_home.is_none() && world.isolated_home.is_none() {
-        world.isolated_home = Some(tempfile::tempdir().expect("create isolated MVM_HOME"));
-    }
-    let scenario_home = world.isolated_home.as_ref().map(|dir| dir.path());
-    let home: std::path::PathBuf =
-        mvm_conformance::live_home_precedence(scenario_home, warm_home.as_deref())
-            .expect("one of the two is set above")
-            .to_path_buf();
+    let home = selected_live_home(world);
     let mut command = mvmctl_command();
     command
         .current_dir(workspace_root())
@@ -226,6 +272,7 @@ pub(crate) fn run_mvmctl_isolated_live_home(world: &mut CliWorld, args: String) 
         command.env("MVM_RESIDENCY", "warm");
     }
     let output = command.output().expect("failed to spawn mvmctl");
+    world.last_live_home = Some(home);
     world.last_run = Some(output);
 }
 
@@ -311,26 +358,38 @@ fn isolated_home_no_transient_request_dirs(world: &mut CliWorld) {
         .isolated_home
         .as_ref()
         .expect("isolated home must be created before checking it");
-    let vms_dir = home.path().join("vms");
-    let entries = match std::fs::read_dir(&vms_dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
-        Err(error) => panic!("read transient VM state directory {vms_dir:?}: {error}"),
-    };
-
-    let request_dirs = entries
-        .map(|entry| entry.expect("read transient VM state entry").path())
-        .filter(|path| {
-            path.is_dir()
-                && path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_none_or(|name| !name.starts_with("standby-"))
-        })
-        .collect::<Vec<_>>();
+    let request_dirs = transient_request_dirs(home.path()).unwrap_or_else(|error| {
+        panic!(
+            "read transient VM state under isolated home {}: {error}",
+            home.path().display()
+        )
+    });
     assert!(
         request_dirs.is_empty(),
         "generated transient request state directories remain: {request_dirs:?}"
+    );
+}
+
+#[then(expr = "the live mvm home has no new transient request state directories")]
+fn live_home_no_new_transient_request_dirs(world: &mut CliWorld) {
+    let home = world
+        .last_live_home
+        .as_ref()
+        .expect("a live command must run before checking its home");
+    let before = world
+        .live_request_dirs_before
+        .as_ref()
+        .expect("record the live request state before running the journey");
+    let after = vm_state_dirs(home).unwrap_or_else(|error| {
+        panic!(
+            "read transient VM state under live home {}: {error}",
+            home.display()
+        )
+    });
+    let leaked = after.difference(before).cloned().collect::<Vec<_>>();
+    assert!(
+        leaked.is_empty(),
+        "new transient request state directories remain: {leaked:?}"
     );
 }
 

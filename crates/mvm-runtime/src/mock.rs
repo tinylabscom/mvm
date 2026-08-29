@@ -267,6 +267,7 @@ impl VmBackend for MockBackend {
             spawned_unix_secs: 1,
             state: StandbyState::Idle,
             image_sha256: spec.image_sha256.clone(),
+            root_strategy: spec.root_strategy,
             vsock_egress: spec.vsock_egress,
             parent_checkpoint: None,
             preloaded_child_vm_name: None,
@@ -614,6 +615,7 @@ mod tests {
             vm_state_dir: "/tmp/does-not-exist".into(),
             image_path: None,
             image_sha256: None,
+            root_strategy: Default::default(),
             vsock_egress: false,
         }
     }

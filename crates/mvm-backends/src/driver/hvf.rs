@@ -552,6 +552,7 @@ impl VmmDriver for HvfDriver {
             spawned_unix_secs: mvm_core::time::now_unix_secs(),
             state: StandbyState::Idle,
             image_sha256: req.spec.image_sha256.clone(),
+            root_strategy: req.spec.root_strategy,
             parent_checkpoint: None,
             preloaded_child_vm_name: None,
             vsock_egress: req.spec.vsock_egress,

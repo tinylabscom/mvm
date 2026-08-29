@@ -16,7 +16,9 @@ use cucumber::{given, then, when};
 
 use mvm_core::checkpoint::{CheckpointDigest, CheckpointId, CheckpointMeta};
 use mvm_core::crypto::vmgenid::GENID_BYTES;
-use mvm_core::vm_backend::{StandbyClaim, StandbyHandle, StandbyState, VmStartConfig};
+use mvm_core::vm_backend::{
+    RuntimeSourceRootStrategy, StandbyClaim, StandbyHandle, StandbyState, VmStartConfig,
+};
 use mvm_fs::snapshot_store::{FsSnapshotStore, SnapshotId, SnapshotStore};
 use mvm_runtime::checkpoint::{
     CaptureFsQuickParams, CheckpointChainAnchor, CheckpointStore, capture_fs_quick,
@@ -98,6 +100,7 @@ fn seed_parent(world: &mut CliWorld, chain_carries_creation_entry: bool) {
         spawned_unix_secs: 1,
         state: StandbyState::Idle,
         image_sha256: None,
+        root_strategy: RuntimeSourceRootStrategy::BlockExt4,
         parent_checkpoint: None,
         vsock_egress: false,
         preloaded_child_vm_name: None,

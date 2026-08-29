@@ -7,8 +7,8 @@
 //!
 //! A standby is claimable by a launch whose kernel, resources, **rootfs image**
 //! and **guest egress enablement** all match (`StandbyCompat`, exact equality) and whose
-//! shape a shared parent can serve at all (`warm_eligible_launch` — no extra volumes, no
-//! virtio-fs root). Anything else cold-boots. Both halves of
+//! shape a shared parent can serve at all (`warm_eligible_launch` — no extra volumes).
+//! Anything else cold-boots. Both halves of
 //! the pool build that key and that eligibility test through one function each, because
 //! a spawn and a claim that compute them separately are free to disagree, and a
 //! disagreement is invisible: the pool fills and never drains. Multi-kernel keying and
@@ -21,8 +21,8 @@ use clap::{Args as ClapArgs, Subcommand};
 use mvm_core::checkpoint::CheckpointId;
 use mvm_core::user_config::MvmConfig;
 use mvm_core::vm_backend::{
-    StandbyClaim, StandbyCompat, StandbyError, StandbyHandle, StandbySpec, StandbyState, VmBackend,
-    VmId, VmStartConfig, WarmClaimRefusal, WarmLaunchMode,
+    RuntimeSourceRootStrategy, StandbyClaim, StandbyCompat, StandbyError, StandbyHandle,
+    StandbySpec, StandbyState, VmBackend, VmId, VmStartConfig, WarmClaimRefusal, WarmLaunchMode,
 };
 use mvm_fs::snapshot_store::FsSnapshotStore;
 use mvm_runtime::backend::AnyBackend;
@@ -101,15 +101,17 @@ pub struct StandbySpecParams<'a> {
     pub mem_mib: u32,
     pub signer_id: &'a str,
     pub signing_key_path: &'a Path,
-    /// Source rootfs image the parent boots and is captured from — the launch's
-    /// own rootfs, so a claim's compat key names the disk that actually booted.
-    /// `None` only when the caller has no launch to mirror, which the spawn
-    /// then refuses.
+    /// Resolved rootfs image for the parent. A block parent boots it directly;
+    /// a virtiofs parent uses its digest as the image identity while serving the
+    /// launch's read-only unpacked tree. `None` only when the caller has no
+    /// launch to mirror, which the spawn then refuses.
     pub image_path: Option<&'a Path>,
     /// Sha256 hex of that image — the compat key's image half, and the same
     /// digest a claim computes for its own launch. `None` only alongside an
     /// absent `image_path`.
     pub image_sha256: Option<&'a str>,
+    /// Root device model the parent boots and every restored child inherits.
+    pub root_strategy: RuntimeSourceRootStrategy,
     /// Whether the parent boots its guest's vsock egress client — the compat
     /// key's egress half, read off the launch's effective enablement. A restored
     /// child inherits the token from the parent's memory, so this is fixed here.
@@ -140,6 +142,7 @@ pub struct StandbySpecParamsBuilder<'a> {
     signing_key_path: Option<&'a Path>,
     image_path: Option<&'a Path>,
     image_sha256: Option<&'a str>,
+    root_strategy: Option<RuntimeSourceRootStrategy>,
     vsock_egress: Option<bool>,
 }
 
@@ -159,6 +162,7 @@ impl<'a> StandbySpecParamsBuilder<'a> {
             signing_key_path: None,
             image_path: None,
             image_sha256: None,
+            root_strategy: None,
             vsock_egress: None,
         }
     }
@@ -240,6 +244,13 @@ impl<'a> StandbySpecParamsBuilder<'a> {
         self
     }
 
+    /// Set `root_strategy`.
+    #[must_use]
+    pub fn root_strategy(mut self, root_strategy: RuntimeSourceRootStrategy) -> Self {
+        self.root_strategy = Some(root_strategy);
+        self
+    }
+
     /// Set `vsock_egress`.
     #[must_use]
     pub fn vsock_egress(mut self, vsock_egress: bool) -> Self {
@@ -278,6 +289,9 @@ impl<'a> StandbySpecParamsBuilder<'a> {
             ))?,
             image_path: self.image_path,
             image_sha256: self.image_sha256,
+            root_strategy: self
+                .root_strategy
+                .ok_or(BuilderError::missing("StandbySpecParams", "root_strategy"))?,
             vsock_egress: self
                 .vsock_egress
                 .ok_or(BuilderError::missing("StandbySpecParams", "vsock_egress"))?,
@@ -320,6 +334,7 @@ pub fn build_standby_spec(p: &StandbySpecParams<'_>) -> Result<StandbySpec> {
         binding_nonce: nonce,
         image_path: p.image_path.map(|p| p.to_string_lossy().into_owned()),
         image_sha256: p.image_sha256.map(str::to_string),
+        root_strategy: p.root_strategy,
         vsock_egress: p.vsock_egress,
         id,
     })
@@ -609,6 +624,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
                 .signing_key_path(p.signing_key_path)
                 .image_path(image)
                 .image_sha256(want.image_sha256.as_deref())
+                .root_strategy(want.root_strategy)
                 .vsock_egress(want.vsock_egress)
                 .build()?,
         )?;
@@ -902,6 +918,11 @@ fn compat_for_launch(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Result<Sta
         vcpus: u8::try_from(cfg.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX),
         mem_mib: cfg.memory_mib,
         image_sha256: Some(image_identity(Path::new(cfg.rootfs_path.as_str()))?),
+        root_strategy: if cfg.virtiofs_root.is_some() {
+            RuntimeSourceRootStrategy::VirtiofsRoot
+        } else {
+            RuntimeSourceRootStrategy::BlockExt4
+        },
         // Whether the guest boots an egress client, read off the launch's policy
         // and its admitted plan through the same derivation the guest cmdline
         // token comes from — never re-expressed here, because a second
@@ -923,7 +944,10 @@ fn compat_for_launch(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Result<Sta
 ///
 /// - **extra volumes** — the attach threads only the rootfs, so a volume disk
 ///   would be missing from the child;
-/// - **a virtio-fs root** — there is no rootfs image to capture.
+///
+/// A virtio-fs root is keyed rather than excluded. The parent boots the same
+/// read-only image tree and a restored child inherits that device model, so the
+/// compatibility key distinguishes it from a block-backed parent.
 ///
 /// An egress-allowing policy is *not* excluded. `mvm.vsock_egress=1` is a
 /// kernel-cmdline token, and a forked child inherits its parent's cmdline out of
@@ -940,7 +964,7 @@ fn compat_for_launch(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Result<Sta
 /// factory-parent path has no late attachment operation for a host path, so a
 /// live read-only share remains cold-path-only until the backend supplies one.
 fn warm_eligible_launch(cfg: &VmStartConfig) -> bool {
-    cfg.volumes.is_empty() && cfg.virtiofs_root.is_none()
+    cfg.volumes.is_empty()
 }
 
 /// Attempt a warm-pool claim for this launch. Returns the claimed `VmId` (the standby-id
@@ -1125,6 +1149,7 @@ mod tests {
             .signing_key_path(key)
             .image_path(image)
             .image_sha256("cafebabe")
+            .root_strategy(RuntimeSourceRootStrategy::VirtiofsRoot)
             .vsock_egress(true)
             .build()
         else {
@@ -1133,6 +1158,7 @@ mod tests {
         assert_eq!(built.template_id, Some("tpl-1"));
         assert_eq!(built.image_path, Some(image));
         assert_eq!(built.image_sha256, Some("cafebabe"));
+        assert_eq!(built.root_strategy, RuntimeSourceRootStrategy::VirtiofsRoot);
         assert!(built.vsock_egress);
     }
 
@@ -1193,6 +1219,7 @@ mod tests {
             parent_checkpoint: Some(ckpt.as_str().to_string()),
             kernel_sha256: "a".repeat(64),
             image_sha256: Some("b".repeat(64)),
+            root_strategy: RuntimeSourceRootStrategy::BlockExt4,
             vsock_egress: false,
             preloaded_child_vm_name: None,
         }
@@ -1374,11 +1401,29 @@ mod tests {
     }
 
     #[test]
-    fn try_warm_claim_cold_with_virtiofs_root() {
-        let b = AnyBackend::from_hypervisor("libkrun");
-        let mut c = eligible_cfg();
-        c.virtiofs_root = Some("/unpacked/root".into());
-        assert_eq!(try_warm_claim(&b, &c, false).unwrap(), None);
+    fn virtiofs_root_is_warm_eligible_and_partitioned_from_block_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"same-image").unwrap();
+        let backend = AnyBackend::from_hypervisor("libkrun");
+        let mut block = eligible_cfg();
+        block.rootfs_path = rootfs.to_string_lossy().into_owned();
+        let block_key = compat_for_launch(backend.as_vm_backend(), &block).unwrap();
+
+        let mut virtiofs = block;
+        virtiofs.virtiofs_root = Some("/unpacked/root".into());
+        let virtiofs_key = compat_for_launch(backend.as_vm_backend(), &virtiofs).unwrap();
+
+        assert!(warm_eligible_launch(&virtiofs));
+        assert_eq!(
+            block_key.root_strategy,
+            RuntimeSourceRootStrategy::BlockExt4
+        );
+        assert_eq!(
+            virtiofs_key.root_strategy,
+            RuntimeSourceRootStrategy::VirtiofsRoot
+        );
+        assert_ne!(block_key, virtiofs_key);
     }
 
     #[test]
@@ -1482,25 +1527,18 @@ mod tests {
     fn claim_and_replenish_agree_on_which_launch_shapes_a_warm_parent_can_serve() {
         use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
 
-        let ineligible = [
-            ("extra volume", {
-                let mut c = eligible_cfg();
-                c.volumes = vec![VmVolume {
-                    host: "/h".into(),
-                    guest: "/g".into(),
-                    size: String::new(),
-                    read_only: false,
-                    kind: VmVolumeKind::Disk,
-                    encrypted: false,
-                }];
-                c
-            }),
-            ("virtiofs root", {
-                let mut c = eligible_cfg();
-                c.virtiofs_root = Some("/unpacked/root".into());
-                c
-            }),
-        ];
+        let ineligible = [("extra volume", {
+            let mut c = eligible_cfg();
+            c.volumes = vec![VmVolume {
+                host: "/h".into(),
+                guest: "/g".into(),
+                size: String::new(),
+                read_only: false,
+                kind: VmVolumeKind::Disk,
+                encrypted: false,
+            }];
+            c
+        })];
 
         assert!(
             warm_eligible_launch(&eligible_cfg()),
@@ -1694,6 +1732,7 @@ mod tests {
             .mem_mib(1024)
             .signer_id("host:test")
             .signing_key_path(&key_path)
+            .root_strategy(RuntimeSourceRootStrategy::BlockExt4)
             .vsock_egress(false)
             .build()
         else {
@@ -1769,6 +1808,7 @@ mod tests {
             spawned_unix_secs: 1,
             state: StandbyState::Idle,
             image_sha256: None,
+            root_strategy: Default::default(),
             parent_checkpoint: None,
             vsock_egress: false,
             preloaded_child_vm_name: None,
@@ -1788,6 +1828,7 @@ mod tests {
             spawned_unix_secs: 1,
             state: StandbyState::Idle,
             image_sha256: Some(image.into()),
+            root_strategy: Default::default(),
             parent_checkpoint: None,
             vsock_egress: false,
             preloaded_child_vm_name: None,

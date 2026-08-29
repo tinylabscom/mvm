@@ -111,8 +111,7 @@ pub enum ImageSource {
         /// serving the unpacked+injected OCI tree instead of `rootfs_path`. Only
         /// the OCI `run --image` path sets it; the run-path tier gate
         /// ([`mvm_build::run_image::select_root_strategy`]) makes the final call
-        /// from this candidate, the backend capability, sealed state, and
-        /// whether the launch must match a captured warm parent.
+        /// from this candidate + the backend capability + sealed state.
         virtiofs_oci_root: Option<VirtiofsOciRoot>,
     },
     /// Pre-built `wasm32-wasip1` module run directly under the wasm backend.
@@ -140,16 +139,7 @@ fn resolve_virtiofs_root(
     image: &ImageSource,
     backend_virtiofs_root: bool,
     sealed: bool,
-    warm_pool_size: u32,
 ) -> Option<String> {
-    // A warm claim's pool key names the immutable rootfs digest, and admission
-    // compares it with the parent's captured `rootfs.ext4`. A virtio-fs root
-    // boots a mutable host directory outside both bindings, so warm-targeted
-    // launches stay on the block image whose bytes the claim verifies. Zero-pool
-    // development launches retain the faster virtio-fs path.
-    if warm_pool_size > 0 {
-        return None;
-    }
     let ImageSource::Prebuilt {
         virtiofs_oci_root: Some(candidate),
         ..
@@ -1185,7 +1175,6 @@ fn resolve_boot_strategy(
         shape.image,
         backend.capabilities().virtiofs_root,
         verity_path.is_some(),
-        shape.warm_pool_size,
     );
     let root_strategy = if virtiofs_root.is_some() {
         mvm_build::run_image::RootStrategy::VirtiofsRoot
@@ -2062,47 +2051,27 @@ mod tests {
         // The one cell that reaches virtiofs: OCI candidate, capable backend,
         // non-prod, non-sealed.
         assert_eq!(
-            resolve_virtiofs_root(&with(false), true, false, 0).as_deref(),
+            resolve_virtiofs_root(&with(false), true, false).as_deref(),
             Some("/tree")
         );
         // Every disqualifier keeps it on the block rootfs (claim 3):
         assert_eq!(
-            resolve_virtiofs_root(&with(true), true, false, 0),
+            resolve_virtiofs_root(&with(true), true, false),
             None,
             "prod"
         );
         assert_eq!(
-            resolve_virtiofs_root(&with(false), true, true, 0),
+            resolve_virtiofs_root(&with(false), true, true),
             None,
             "sealed"
         );
         assert_eq!(
-            resolve_virtiofs_root(&with(false), false, false, 0),
+            resolve_virtiofs_root(&with(false), false, false),
             None,
             "non-virtiofs backend (e.g. Firecracker)"
         );
         // A non-OCI image (flake/template/default) never reaches virtiofs.
-        assert_eq!(resolve_virtiofs_root(&prebuilt(), true, false, 0), None);
-    }
-
-    #[test]
-    fn a_warm_pool_launch_uses_the_image_bound_block_root() {
-        let image = ImageSource::Prebuilt {
-            kernel_path: "/k".into(),
-            rootfs_path: "/r".into(),
-            initrd_path: None,
-            label: "l".into(),
-            virtiofs_oci_root: Some(VirtiofsOciRoot {
-                tree_dir: "/tree".into(),
-                prod: false,
-            }),
-        };
-
-        assert_eq!(
-            resolve_virtiofs_root(&image, true, false, 1),
-            None,
-            "a captured warm parent must boot the immutable image whose digest the plan binds"
-        );
+        assert_eq!(resolve_virtiofs_root(&prebuilt(), true, false), None);
     }
 
     #[test]

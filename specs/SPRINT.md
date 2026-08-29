@@ -12,13 +12,13 @@
 
 - [ ] **Warm standby image claim repair — issue #3002.**
       `specs/plans/2026-08-28-warm-standby-image-claim.md`.
-      Warm-targeted OCI launches now use the immutable block image that the
-      pool key, checkpoint, and admitted plan all bind, while zero-pool dev
-      launches retain virtiofs-root. The live witness explicitly provisions
-      one parent instead of relying on removed teardown replenishment. Focused
-      regressions, workspace tests/check, all-feature Clippy, gated Linux/BDD
-      compilation, formatting, and policy gates are green; live CI witnesses
-      and merge delivery remain.
+      Standby compatibility now records the root device model, allowing HVF's
+      ordinary read-only virtiofs OCI launches to warm and claim without ever
+      matching a block-backed parent. The live witness explicitly provisions
+      one parent in the artifact-warm home and checks request-state cleanup
+      relative to a pre-run baseline. Workspace tests, all-target/all-feature
+      Clippy, Linux- and BDD-gated checks, formatting, and policy gates are
+      green; live CI witnesses and merge delivery remain.
 
 - [x] **Fleet stream edge delivery handoff.** Plan 296's caller-driven
       connector now owns the production input route, so accepted records and

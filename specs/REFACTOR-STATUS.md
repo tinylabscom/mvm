@@ -15,11 +15,13 @@ Last updated: 2026-08-29
 
 - [ ] **Warm standby image claim repair — issue #3002.**
       `specs/plans/2026-08-28-warm-standby-image-claim.md`.
-      Warm-targeted OCI launches select the image-bound block root, and the
-      cross-platform live witness explicitly warms capacity before claiming.
-      Host workspace tests/check, all-feature Clippy, gated Linux/BDD
-      compilation, formatting, and policy gates are green; live CI witnesses
-      and merge delivery remain.
+      Block and virtiofs roots are distinct standby compatibility shapes, so
+      HVF's read-only OCI dev root can claim only a parent that booted the same
+      device model. The cross-platform witness explicitly warms capacity in the
+      artifact-warm home and checks request-state cleanup against a baseline.
+      Workspace tests, all-target/all-feature Clippy, Linux- and BDD-gated
+      checks, formatting, and policy gates are green; live CI witnesses and
+      merge delivery remain.
 
 - [ ] **Linux 6.12.107 synchronized kernel pin — issue #2971.**
       `specs/plans/2026-08-28-kernel-6-12-107.md`.

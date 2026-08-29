@@ -2966,6 +2966,7 @@ mod tests {
             vm_state_dir: vm_state_dir.display().to_string(),
             image_path: Some(rootfs.display().to_string()),
             image_sha256: Some("c".repeat(64)),
+            root_strategy: Default::default(),
             vsock_egress: false,
         }
     }
@@ -3735,6 +3736,7 @@ mod tests {
             spawned_unix_secs: 1,
             state: StandbyState::Idle,
             image_sha256: None,
+            root_strategy: Default::default(),
             parent_checkpoint: None,
             preloaded_child_vm_name: None,
             vsock_egress: false,
@@ -5096,6 +5098,7 @@ mod tests {
             vcpus: _,
             mem_mib: _,
             image_sha256: _,
+            root_strategy: _,
             vsock_egress: _,
         } = handle.compat();
 
