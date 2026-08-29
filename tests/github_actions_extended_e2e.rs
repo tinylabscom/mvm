@@ -53,6 +53,10 @@ fn justfile() -> String {
     fs::read_to_string("Justfile").expect("read Justfile")
 }
 
+fn root_manifest() -> String {
+    fs::read_to_string("Cargo.toml").expect("read root Cargo manifest")
+}
+
 fn job_block<'a>(workflow: &'a str, job: &str) -> &'a str {
     let marker = format!("  {job}:\n");
     let start = workflow
@@ -124,13 +128,48 @@ fn documented_surface_builds_the_sdk_codegen_driver() {
 }
 
 #[test]
-fn macos_documented_surface_job_installs_its_target_gated_libkrun_dependency() {
+fn intel_hvf_witness_does_not_install_arm_only_libkrun_firmware() {
     let workflow = extended_ci();
     let macos = job_block(&workflow, "e2e-docs-macos");
 
     assert!(
-        macos.contains("uses: ./.github/actions/install-libkrun"),
-        "the macOS root binary enables libkrun-sys and needs the shared libkrun installer"
+        !macos.contains("uses: ./.github/actions/install-libkrun"),
+        "the Intel HVF witness cannot install libkrunfw, whose formula requires arm64"
+    );
+}
+
+#[test]
+fn root_manifest_enables_libkrun_only_on_apple_silicon() {
+    let manifest = root_manifest();
+
+    let arm64 = manifest
+        .split_once(
+            "[target.'cfg(all(target_os = \"macos\", target_arch = \"aarch64\"))'.dependencies]",
+        )
+        .expect("Apple Silicon dependency section")
+        .1
+        .split_once("\n[")
+        .map_or_else(|| manifest.as_str(), |(section, _)| section);
+    assert!(
+        arm64.contains("features = [\"builder-vm\", \"libkrun-sys\"]"),
+        "Apple Silicon keeps the libkrun-backed builder path"
+    );
+
+    let intel = manifest
+        .split_once(
+            "[target.'cfg(all(target_os = \"macos\", target_arch = \"x86_64\"))'.dependencies]",
+        )
+        .expect("Intel macOS dependency section")
+        .1
+        .split_once("\n[")
+        .map_or_else(|| manifest.as_str(), |(section, _)| section);
+    assert!(
+        intel.contains("features = [\"builder-vm\"]"),
+        "Intel HVF keeps builder orchestration without linking libkrun"
+    );
+    assert!(
+        !intel.contains("libkrun-sys"),
+        "Intel HVF must not enable the ARM-only libkrun dependency"
     );
 }
 
@@ -172,8 +211,12 @@ fn documented_surface_jobs_install_the_sdk_codegen_runtime() {
     for job in ["e2e-docs-linux", "e2e-docs-macos"] {
         let block = job_block(&workflow, job);
         assert!(
-            block.contains("uses: astral-sh/setup-uv@"),
-            "{job} invokes uvx through the SDK drift witness and must install uv"
+            block.contains("uses: astral-sh/setup-uv@v8.2.0"),
+            "{job} invokes uvx through the SDK drift witness and must use the repository-pinned action"
+        );
+        assert!(
+            block.contains("version: \"0.12.5\""),
+            "{job} must pin the uv tool version"
         );
     }
 }
@@ -204,9 +247,12 @@ fn linux_supervisor_build_does_not_require_macos_libkrun_headers() {
     let libkrun_build = recipe
         .find("--bin mvm-libkrun-supervisor --features libkrun-sys")
         .expect("the macOS helper build must remain present");
+    let arm64_gate = recipe
+        .find("if [[ \"$(uname -m)\" == \"arm64\" ]]")
+        .expect("libkrun helper must be guarded by an Apple Silicon check");
 
     assert!(
-        libkrun_build > darwin_gate,
-        "the libkrun-sys helper must only build inside the Darwin branch"
+        libkrun_build > darwin_gate && libkrun_build > arm64_gate,
+        "the libkrun-sys helper must only build inside the Darwin/arm64 branch"
     );
 }

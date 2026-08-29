@@ -26,6 +26,11 @@ a competing BLAKE3 address or re-hash the archive.
 - `macos-latest` selected an arm64 hosted VM whose Hypervisor.framework call
   returned `HV_UNSUPPORTED`. The live witness now uses the current Intel runner
   label rather than pretending a skipped arm64 boot is evidence.
+- The first repaired rerun exposed two follow-on portability gates: repository
+  policy rejected an unpinned `setup-uv`, and the Intel runner could not install
+  the arm64-only libkrun firmware. The workflow now pins the shared uv action and
+  tool version, while Intel builds the HVF path without the libkrun feature or
+  supervisor. Apple Silicon retains the existing libkrun-backed builder path.
 
 ## Delivery checklist
 
@@ -34,10 +39,10 @@ a competing BLAKE3 address or re-hash the archive.
       source-matched SDK sidecar, and the live macOS runner selection.
 - [x] Add a resolver regression proving an installed bundle SHA-256 reaches
       the bundle registry while materialized slots retain identity checking.
-- [x] Build libkrun and HVF helpers only on macOS while retaining the portable
-      network endpoint on every host.
-- [x] Install `uv` in both documented-surface jobs and build the checkout's SDK
-      sidecar once before the live scenarios.
+- [x] Build the HVF helper on macOS, restrict the libkrun helper and FFI feature
+      to Apple Silicon, and retain the portable network endpoint on every host.
+- [x] Install a repository-pinned `uv` in both documented-surface jobs and build
+      the checkout's SDK sidecar once before the live scenarios.
 - [x] Reuse `template_load_dispatched` for ambiguous 64-character slot or
       bundle addresses.
 - [x] Pin the live HVF witness to `macos-15-intel` instead of the unsupported
@@ -46,5 +51,7 @@ a competing BLAKE3 address or re-hash the archive.
       and zero-warning `mvm-cli` Clippy.
 - [x] Rebase onto the latest merged `main` and pass full workspace and repository
       gates.
+- [x] Repair the fresh rerun's action-pin invariant and Intel/arm64 libkrun
+      mismatch with structural regressions.
 - [ ] Pass a fresh Extended CI run containing all repaired witness lanes.
 - [ ] Merge the corrective pull request and close #2979 through its linkage.
