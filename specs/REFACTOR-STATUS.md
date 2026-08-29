@@ -19,8 +19,10 @@ Last updated: 2026-08-28
 - [ ] **Wasm SDK host-service admission — issue #2977.**
       `specs/plans/2026-08-28-wasm-sdk-host-service-admission.md`.
       Wasm now refuses the native SDK-sidecar mechanism at the backend-aware
-      admission seam instead of leaking a disk-volume backend error. Full
-      validation and merge delivery remain.
+      admission seam instead of leaking a disk-volume backend error. Focused
+      regressions, the gated BDD runner, workspace tests, isolated doctests,
+      workspace Clippy, formatting, and policy gates are green. Merge delivery
+      remains.
 
 - [ ] **HVF machine restore dispatch — issue #2961.**
       `specs/plans/2026-08-27-hvf-machine-restore-dispatch.md`.

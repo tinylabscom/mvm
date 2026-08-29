@@ -31,8 +31,9 @@
       `specs/plans/2026-08-28-wasm-sdk-host-service-admission.md`.
       The SDK delivery gate now refuses wasm bindings with a typed,
       service-specific reason before attachment validation or backend start.
-      Focused unit regressions and the BDD runner compile are green; full
-      validation and merge delivery remain.
+      Focused unit regressions, the gated BDD runner, all ordinary workspace
+      tests, the isolated `mvm-agentd` doctest, workspace Clippy, formatting,
+      and policy gates are green. Merge delivery remains.
 
 - [ ] **Recorded-backend pause and resume — issue #2929.**
       `specs/plans/2026-08-27-recorded-backend-pause-resume.md`.

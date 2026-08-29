@@ -19,6 +19,6 @@ volume error.
 - [x] Add a typed backend-compatibility refusal before attachment validation.
 - [x] Preserve native microVM SDK-sidecar delivery.
 - [x] Add a user-visible BDD scenario and compile the gated runner.
-- [ ] Pass the focused BDD scenario, workspace tests, Clippy, and policy gates.
-- [ ] Record the completed implementation in the sprint and refactor rollup.
+- [x] Pass the focused BDD scenario, workspace tests, Clippy, and policy gates.
+- [x] Record the completed implementation in the sprint and refactor rollup.
 - [ ] Merge the tested pull request and close #2977 through its linkage.

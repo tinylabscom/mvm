@@ -4,7 +4,7 @@
 - [x] Added a typed wasm refusal that names the requested SDK host services.
 - [x] Kept Firecracker and other native delivery paths admissible.
 - [x] Added the hermetic BDD scenario and compiled its gated runner.
-- [ ] Record full validation after it passes.
+- [x] Record full validation after it passes.
 - [ ] Merge the linked pull request through the queue.
 
 Owning plan: `specs/plans/2026-08-28-wasm-sdk-host-service-admission.md`.
