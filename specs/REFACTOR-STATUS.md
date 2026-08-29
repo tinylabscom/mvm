@@ -39,6 +39,23 @@ Last updated: 2026-08-29
       Clippy, formatting, `cargo deny`, and policy gates are green. A fresh
       Security run and merge delivery remain.
 
+- [ ] **Extended CI red repair — issue #2979.**
+      `specs/plans/2026-08-28-extended-ci-red-repair.md`.
+      Linux helper compilation is platform-scoped, clean runners install the
+      SDK prerequisites and warm the source sidecar, installed bundle SHA-256
+      values reach the shared slot-or-bundle dispatcher, and the live macOS
+      witness targets an Intel runner with HVF access without pulling the
+      arm64-only libkrun firmware path. The Linux witness also grants QEMU read
+      access to the hosted kernel and initramfs and takes ownership of the
+      vhost-vsock device before the Stage 0 sidecar build. QEMU extraction now
+      copies the complete sidecar bundle without restoring guest ownership.
+      The Intel witness installs QEMU and selects it for Stage 0 artifact
+      construction, retaining HVF for workload execution and avoiding the
+      unavailable libkrun host library.
+      Focused tests, workspace tests, isolated doctests, workspace Clippy,
+      formatting, and policy gates are green. A fresh Extended CI run and merge
+      delivery remain.
+
 - [ ] **HVF machine restore dispatch — issue #2961.**
       `specs/plans/2026-08-27-hvf-machine-restore-dispatch.md`.
       The `machine` fork/restore surfaces now share the backend-origin
@@ -74,15 +91,15 @@ Last updated: 2026-08-29
       and BDD compilation checks, workspace tests, check, Clippy, formatting,
       and repository gates are green; merge-queue delivery remains.
 
-- [ ] **Extended CI documented-surface repair — issue #2938.**
+- [ ] **Extended CI documented-surface repair — issues #2938 and #2979.**
       `specs/plans/2026-08-27-extended-ci-documented-surface.md`.
       Both scheduled platform witnesses now build signed-manifest verification
       through the standard link path, and the macOS HVF lane installs its
-      target-gated libkrun and embedded Linux cross-toolchain dependencies.
-      The explicit published-image choice now reaches builder bootstrap, macOS
-      downloads its workload kernel, and clean runners build the SDK codegen
-      driver. Focused tests, the exact feature build, and Clippy are green; the
-      source-sidecar warm-up, live rerun, and merge delivery remain.
+      embedded Linux cross toolchain. The explicit published-image choice now
+      reaches builder bootstrap, macOS downloads its workload kernel, and the
+      source-matched SDK-sidecar job runs inside that fetched image under HVF
+      instead of ARM-only libkrun or Linux-host QEMU Stage 0. Focused tests and
+      Clippy are green; the live rerun and merge delivery remain.
 
 - [ ] **Cloudflare Pages cutover.**
       `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.

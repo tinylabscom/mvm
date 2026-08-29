@@ -15,9 +15,9 @@
 //! — no libkrun, no libkrunfw, no custom kernel, no slirp. Proven end-to-end
 //! on x86_64 (the builder kernel compiled + `vmlinux` landed in `/out`).
 //!
-//! Host-side packing/extraction uses `mkfs.ext4 -d` + `debugfs rdump` rather
-//! than loop mounts, so the builder runs as a normal user in the `kvm` group —
-//! no root.
+//! Host-side packing/extraction uses `mkfs.ext4 -d` + allow-listed `debugfs
+//! dump` calls rather than loop mounts, so the builder runs as a normal user in
+//! the `kvm` group — no root and no guest-ownership restoration.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -34,6 +34,8 @@ use crate::libkrun_builder::{
     prepopulate_stage0_nix_store_image, require_runtime_overlay_ext4, stage0_nix_store_image_name,
 };
 use mvm_core::config::DEFAULT_MVM_HOME_DIR_NAME;
+use mvm_fs::overlay::CHECKSUM_MANIFEST_FILE;
+use mvm_fs::sdk_sidecar::{SDK_SIDECAR_IMAGE_FILE, SDK_SIDECAR_VERSION_FILE};
 use mvm_vmm::qemu_arch::{
     machine_for_arch as qemu_machine_for_arch, serial_console_for_arch as qemu_console_for_arch,
 };
@@ -117,6 +119,9 @@ const QEMU_STAGE0_OUT_ARTIFACT_NAMES: &[&str] = &[
     "manifest.json",
     "mvm-kernel.config",
     "nix-stderr.log",
+    SDK_SIDECAR_IMAGE_FILE,
+    SDK_SIDECAR_VERSION_FILE,
+    CHECKSUM_MANIFEST_FILE,
 ];
 
 /// Directories `copy_tree_filtered` drops when staging a `/work` tree for
@@ -309,8 +314,9 @@ fn run_stage0_qemu(
         )));
     }
 
-    // 4. Pull the artifacts back out of the /out ext4 into `artifact_out`
-    //    (debugfs rdump — no mount). The caller validates + promotes them.
+    // 4. Pull the allow-listed artifacts back out of the /out ext4 into
+    //    `artifact_out` (debugfs dump — no mount or ownership restoration).
+    //    The caller validates + promotes them.
     extract_out_artifacts(&vdc, artifact_out)?;
 
     // Best-effort: drop the (large) disk images now the build is done. Keep
@@ -590,35 +596,36 @@ fn pack_ext4(src_dir: &Path, img: &Path, size: u64) -> Result<(), BuilderVmError
 }
 
 /// Extract the builder artifacts from the `/out` ext4 image into `dest` using
-/// `debugfs rdump` (no mount). Copies the known artifact names if present.
+/// allow-listed `debugfs dump` calls (no mount). Omitting `dump -p` is
+/// deliberate: Stage 0 writes root-owned guest files, while the host extractor
+/// is an unprivileged process and must not attempt to restore guest ownership.
 fn extract_out_artifacts(out_img: &Path, dest: &Path) -> Result<(), BuilderVmError> {
     let tmp = dest.join(".qemu-out-extract");
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).map_err(|e| io_err("creating extract dir", &tmp, e))?;
-    let status = Command::new("debugfs")
-        .arg("-R")
-        .arg(format!("rdump / {}", tmp.display()))
-        .arg(out_img)
-        .status()
-        .map_err(|e| {
-            BuilderVmError::ExtractionFailed(format!("spawning debugfs (install e2fsprogs): {e}"))
-        })?;
-    if !status.success() {
-        return Err(BuilderVmError::ExtractionFailed(format!(
-            "debugfs rdump of {} exited {}",
-            out_img.display(),
-            status.code().unwrap_or(-1)
-        )));
-    }
     for name in QEMU_STAGE0_OUT_ARTIFACT_NAMES {
         let from = tmp.join(name);
-        if from.is_file() {
+        let status = Command::new("debugfs")
+            .arg("-R")
+            .arg(debugfs_dump_request(name, &from))
+            .arg(out_img)
+            .status()
+            .map_err(|e| {
+                BuilderVmError::ExtractionFailed(format!(
+                    "spawning debugfs (install e2fsprogs): {e}"
+                ))
+            })?;
+        if status.success() && from.is_file() {
             std::fs::copy(&from, dest.join(name))
                 .map_err(|e| io_err("copying extracted artifact", &from, e))?;
         }
     }
     let _ = std::fs::remove_dir_all(&tmp);
     Ok(())
+}
+
+fn debugfs_dump_request(name: &str, destination: &Path) -> String {
+    format!("dump /{name} {}", destination.display())
 }
 
 /// `qemu-system-<host-arch>` on `$PATH`. The builder/Stage 0 guest is always
@@ -716,7 +723,8 @@ mod tests {
         DEFAULT_MVM_HOME_DIR_NAME, DirStats, QEMU_STAGE0_OUT_ARTIFACT_NAMES,
         QEMU_STAGE0_VSOCK_GUEST_MODULES, WORK_EXT4_DIR_OVERHEAD_BYTES,
         WORK_EXT4_FILE_OVERHEAD_BYTES, WORK_EXT4_FIXED_HEADROOM_BYTES, WORK_TREE_EXCLUDE_DIRS,
-        attach_stage0_identity_and_store, copy_tree_filtered, dir_stats, locate_qemu_vsock_module,
+        attach_stage0_identity_and_store, copy_tree_filtered, debugfs_dump_request, dir_stats,
+        locate_qemu_vsock_module,
     };
     use std::fs;
 
@@ -766,6 +774,25 @@ mod tests {
             QEMU_STAGE0_OUT_ARTIFACT_NAMES.contains(&"mvm-kernel.config"),
             "QEMU Stage 0 must retain the config required for verified kernel publication"
         );
+    }
+
+    #[test]
+    fn qemu_stage0_extracts_sdk_sidecar_bundle() {
+        for artifact in ["sdk.ext4", "VERSION", "checksums-sha256.txt"] {
+            assert!(
+                QEMU_STAGE0_OUT_ARTIFACT_NAMES.contains(&artifact),
+                "QEMU Stage 0 must retain SDK-sidecar artifact {artifact}"
+            );
+        }
+    }
+
+    #[test]
+    fn qemu_stage0_dump_does_not_restore_guest_ownership() {
+        let request = debugfs_dump_request("sdk.ext4", std::path::Path::new("/tmp/sdk.ext4"));
+
+        assert_eq!(request, "dump /sdk.ext4 /tmp/sdk.ext4");
+        assert!(!request.contains("rdump"));
+        assert!(!request.contains(" -p"));
     }
 
     #[test]

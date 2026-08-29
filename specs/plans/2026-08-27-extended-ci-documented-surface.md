@@ -3,15 +3,16 @@
 Backing: shipped-source
 Validation: check-sprint-append
 
-**Issue:** [#2938](https://github.com/tinylabscom/mvm/issues/2938)
+**Issues:** [#2938](https://github.com/tinylabscom/mvm/issues/2938),
+[#2979](https://github.com/tinylabscom/mvm/issues/2979)
 
 ## Outcome
 
 Both scheduled documented-surface jobs build an `mvmctl` that verifies signed
 release manifests and can explicitly download their published boot artifacts
-through the standard link path. The macOS job also installs the target-gated
-libkrun dependency and embedded Linux cross toolchain required to compile the
-root binary before exercising HVF.
+through the standard link path. The macOS job installs the embedded Linux cross
+toolchain required to compile the root binary, fetches the verified builder
+image, and runs source-matched artifact builds inside its Linux guest under HVF.
 
 ## Delivery checklist
 
@@ -38,6 +39,10 @@ root binary before exercising HVF.
       published workload kernel on macOS.
 - [x] Build the SDK codegen driver before the clean-run drift scenario invokes
       it directly.
-- [ ] Warm the source-matched SDK sidecar after PR #2954 lands.
+- [x] Warm the source-matched SDK sidecar after PR #2954 lands.
+- [x] Reproduce the Intel runner's ARM-only libkrun installation failure and
+      the follow-up QEMU Stage 0 `/proc/sys/kernel/osrelease` failure.
+- [x] Route the source-matched sidecar build through the fetched steady-state
+      builder image under HVF, including closure seeding and artifact mirroring.
 - [ ] Pass the corrected live Extended CI witnesses.
-- [ ] Merge the corrective pull request and close #2938 through its linkage.
+- [ ] Merge the corrective pull request and close #2979 through its linkage.

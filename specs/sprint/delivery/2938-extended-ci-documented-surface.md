@@ -15,7 +15,7 @@
       kernel rather than cycling through the unavailable source builder.
 - [x] Clean runners build the SDK codegen driver before checking generated SDK
       drift.
-- [ ] Warm the source-matched SDK sidecar after PR #2954 supplies its Stage 0
+- [x] Warm the source-matched SDK sidecar after PR #2954 supplies its Stage 0
       build command.
 
 Owning plan:

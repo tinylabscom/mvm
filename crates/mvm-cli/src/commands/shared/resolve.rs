@@ -75,14 +75,16 @@ pub fn resolve_manifest_arg(arg: &str) -> Result<ManifestArgRef> {
     let path = std::path::Path::new(arg);
     if !path.exists() {
         if mvm_core::manifest::is_slot_hash_dirname(arg) {
-            let persisted = mvm_runtime::vm::template::lifecycle::template_load_slot(arg)
+            let spec = mvm_runtime::vm::template::lifecycle::template_load_dispatched(arg)
                 .with_context(|| {
-                    format!("Built slot {arg} is not present in the local registry")
+                    format!(
+                        "Built slot or installed bundle {arg} is not present in the local registry"
+                    )
                 })?;
-            if persisted.manifest_hash != arg {
+            if spec.template_id != arg {
                 anyhow::bail!(
-                    "Built slot {arg} records mismatched identity {}",
-                    persisted.manifest_hash
+                    "Built slot or installed bundle {arg} records mismatched identity {}",
+                    spec.template_id
                 );
             }
             return Ok(ManifestArgRef::Slot {
@@ -372,6 +374,45 @@ mod tests {
             .expect("persist flake slot");
     }
 
+    fn persist_installed_bundle(bundle_sha: &str) {
+        let bundle_dir = std::path::PathBuf::from(mvm_core::config::mvm_home())
+            .join("bundles")
+            .join(bundle_sha);
+        std::fs::create_dir_all(bundle_dir.join("artifacts")).expect("create bundle artifacts");
+        std::fs::write(bundle_dir.join("artifacts/vmlinux"), b"kernel")
+            .expect("write bundle kernel");
+        std::fs::write(bundle_dir.join("artifacts/rootfs.ext4"), b"rootfs")
+            .expect("write bundle rootfs");
+        let manifest = serde_json::json!({
+            "schema_version": mvm_core::plan::bundle::BUNDLE_SCHEMA_VERSION,
+            "publisher": "resolver-test",
+            "key_id": "0123456789abcdef0123456789abcdef",
+            "arch": mvm_core::arch::GuestArch::host().to_string(),
+            "created_at": "2026-08-28T00:00:00Z",
+            "artifacts": [
+                {
+                    "name": "kernel",
+                    "role": "kernel",
+                    "path": "artifacts/vmlinux",
+                    "sha256": "0".repeat(64),
+                    "size_bytes": 6
+                },
+                {
+                    "name": "rootfs",
+                    "role": "rootfs",
+                    "path": "artifacts/rootfs.ext4",
+                    "sha256": "1".repeat(64),
+                    "size_bytes": 6
+                }
+            ]
+        });
+        std::fs::write(
+            bundle_dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).expect("encode bundle manifest"),
+        )
+        .expect("write bundle manifest");
+    }
+
     #[test]
     fn a_materialized_flake_slot_hash_resolves_through_the_registry() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -383,6 +424,19 @@ mod tests {
         let resolved = resolve_manifest_arg(&slot_hash).expect("built slot must resolve");
 
         assert!(matches!(resolved, ManifestArgRef::Slot { slot_hash: got } if got == slot_hash));
+    }
+
+    #[test]
+    fn an_installed_bundle_hash_resolves_through_the_bundle_registry() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(tmp.path());
+        let bundle_sha = "e".repeat(64);
+        persist_installed_bundle(&bundle_sha);
+
+        let resolved = resolve_manifest_arg(&bundle_sha).expect("installed bundle must resolve");
+
+        assert!(matches!(resolved, ManifestArgRef::Slot { slot_hash } if slot_hash == bundle_sha));
     }
 
     #[test]

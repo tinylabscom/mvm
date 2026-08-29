@@ -117,7 +117,7 @@ impl HvfBuilderVm {
                 work_src: &job.work_dir,
                 host_bin_dir: &host_bin_dir,
                 runtime_overlay: Some(runtime_overlay.as_path()),
-                closure_nar: None,
+                closure_nar: self.closure_nar.as_deref(),
                 output_size: u64::from(self.output_mib) << 20,
                 vcpus: self.vcpus,
                 memory_mib: self.memory_mib,
@@ -133,6 +133,16 @@ impl HvfBuilderVm {
         let result = read_job_result_with_diagnostics(&outcome.output_dir, &vm_state_dir)?;
         if result.exit_code != 0 {
             return Err(shell_job_exit_error(result.exit_code, &result.stderr_tail));
+        }
+
+        if outcome.output_dir != job.artifact_out {
+            copy_tree(&outcome.output_dir, &job.artifact_out).map_err(|e| {
+                BuilderVmError::ExtractionFailed(format!(
+                    "mirroring builder shell artifacts {} -> {}: {e}",
+                    outcome.output_dir.display(),
+                    job.artifact_out.display()
+                ))
+            })?;
         }
 
         Ok(mvm_build::libkrun_builder::BuilderShellResult {

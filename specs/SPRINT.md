@@ -96,19 +96,33 @@
       workspace check/tests/doctests, and Clippy are green; merge-queue
       delivery remains.
 
-- [x] **Extended CI documented-surface repair — issue #2938.**
+- [ ] **Extended CI documented-surface repair — issues #2938 and #2979.**
       `specs/plans/2026-08-27-extended-ci-documented-surface.md`.
       Linux and macOS now build the live documented-surface binary with signed
       release-manifest verification enabled through Cargo's standard linker
-      path. The macOS witness installs both the root binary's target-gated
-      libkrun dependency and the embedded Linux cross toolchain through shared
-      installers. PR #2943 landed the first repair; the post-merge live run
+      path. The macOS witness installs the embedded Linux cross toolchain and
+      uses its fetched builder image under HVF for source-matched artifact
+      jobs. PR #2943 landed the first repair; the post-merge live run
       exposed the next clean-run blockers: the
       bootstrap ignored its explicit published-image choice and the SDK drift
       scenario had no compiled xtask. Both are fixed with resolver and workflow
-      regressions; the exact release-download build and zero-warning Clippy are
-      green. Remaining: warm the source sidecar after #2954, pass both live
-      witnesses, merge, and close #2938 through the PR link.
+      regressions. The follow-on #2979 repair now scopes helper builds by host,
+      installs `uv`, warms the source-matched sidecar, dispatches installed
+      bundle SHA-256 addresses through the bundle registry, and moves the live
+      HVF witness to the Intel runner without enabling the arm64-only libkrun
+      firmware path. Both jobs use the repository-pinned uv action and tool
+      version. The Linux job now also makes the hosted kernel and initramfs
+      readable and transfers `/dev/vhost-vsock` to the runner user before
+      QEMU's Stage 0 sidecar build. QEMU then extracts the complete sidecar
+      bundle through ownership-neutral, allow-listed `debugfs dump` calls. The
+      first full rerun then proved the Intel macOS job still auto-selected the
+      unavailable libkrun Stage 0 path; the next rerun proved QEMU Stage 0 is
+      Linux-host-only. The witness now runs the source-sidecar job inside the
+      fetched Linux builder image under HVF. Its cold-build deadline is bounded
+      at 90 minutes.
+      Focused tests, all ordinary workspace tests, the isolated `mvm-agentd`
+      doctest, workspace Clippy, formatting, and repository policy gates are
+      green. The live rerun and merge delivery remain.
 
 - [ ] **Cloudflare Pages cutover.**
       `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.

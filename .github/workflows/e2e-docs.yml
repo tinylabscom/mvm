@@ -66,6 +66,11 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          version: "0.12.5"
+
       - name: Install firecracker
         run: |
           set -euo pipefail
@@ -85,6 +90,22 @@ jobs:
             exit 1
           fi
           sudo chmod 666 /dev/kvm
+
+      - name: Grant QEMU Stage 0 access to vhost-vsock
+        run: |
+          set -euo pipefail
+          test -c /dev/vhost-vsock
+          sudo chown "$(id -u):$(id -g)" /dev/vhost-vsock
+          sudo chmod 0600 /dev/vhost-vsock
+          test -r /dev/vhost-vsock && test -w /dev/vhost-vsock
+
+      - name: Grant QEMU Stage 0 read access to the hosted kernel
+        run: |
+          set -euo pipefail
+          KERNEL_RELEASE="$(uname -r)"
+          sudo chmod a+r \
+            "/boot/vmlinuz-${KERNEL_RELEASE}" \
+            "/boot/initrd.img-${KERNEL_RELEASE}"
 
       - name: Run the documented surface end to end
         run: just e2e-docs
@@ -108,8 +129,11 @@ jobs:
     # The macOS default backend is HVF, and every guest-booting BDD scenario
     # before this one carried `@firecracker` — so the backend most users run
     # had no lane that booted anything. This is that lane.
-    runs-on: macos-latest
-    timeout-minutes: 60
+    # macos-latest selects an arm64 hosted VM where nested HVF reports
+    # HV_UNSUPPORTED. The Intel runner exposes the virtualization extensions
+    # needed by this live witness.
+    runs-on: macos-15-intel
+    timeout-minutes: 90
     env:
       # The documented surface includes signed release downloads. Build the
       # exact binary under test with their verifier enabled.
@@ -118,6 +142,9 @@ jobs:
       # witness deliberately fetches. Use the separately published, verified
       # workload kernel so the live lane never falls back into that cycle.
       MVM_KERNEL_SOURCE: download
+      # Intel cannot install ARM-only libkrun. The fetched builder image is
+      # self-contained, so source artifact jobs run inside it under HVF.
+      MVM_BUILDER_BACKEND: hvf
     steps:
       - uses: actions/checkout@v6
 
@@ -125,11 +152,6 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
 
       - uses: ./.github/actions/install-zigbuild
-
-      - name: Install libkrun
-        # The root package's macOS dependency enables libkrun-sys even when
-        # HVF is the selected runtime backend.
-        uses: ./.github/actions/install-libkrun
 
       - name: Install just
         uses: taiki-e/install-action@v2
@@ -144,6 +166,11 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: "22"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          version: "0.12.5"
 
       - name: Run the documented surface end to end
         # HVF reports snapshot tier `save-restore`, so the pause/resume and
