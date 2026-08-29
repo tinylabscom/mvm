@@ -117,18 +117,59 @@ export function Hero() {
                 className="max-w-[16rem] sm:max-w-[26rem] lg:max-w-xl lowercase font-display font-semibold leading-[1.05] tracking-[-0.03em] text-title"
                 style={{ fontSize: "clamp(2.5rem, 4.8vw, 3.9rem)" }}
               >
-                Run code you don&rsquo;t <span className="text-accent-2">trust</span>.
+                Run code you can&rsquo;t fully{" "}
+                <span className="text-accent-2">trust</span>.
               </h1>
             </Reveal>
 
             <Reveal delay={120}>
               <p className="font-display text-xl font-semibold leading-snug text-title sm:text-2xl">
-                Agent execution a security team can approve.
+                A secure execution layer, built security-first for AI agents.
               </p>
-              <p className="mt-2 max-w-[46ch] text-base leading-relaxed text-body">
-                Hardened microVMs under a signed execution contract.
-                Sub-150&nbsp;ms boot. Configurable to the kernel.
-              </p>
+              {/* The what-MVM-does callout — this sentence is the pitch, so
+                  it gets an accent rule and emphasized key phrases instead
+                  of reading as body copy. */}
+              {/* One idea per line, not one dense sentence: workload, then
+                  boundary, then contract. Each line scans on its own and
+                  the emphasized phrase sits at the end of its line where
+                  the eye lands. */}
+              <div
+                className="max-w-[46ch] space-y-2 border-l-2 border-accent-2/60 pl-4 text-base leading-relaxed text-body"
+                style={{ marginTop: "2rem" }}
+              >
+                <p>
+                  Any untrusted workload &mdash; an agent, a customer&rsquo;s
+                  code, a build job &mdash;
+                </p>
+                <p>
+                  in a{" "}
+                  <span className="font-semibold text-emphasis">
+                    sealed, hardware-isolated microVM
+                  </span>
+                  ,
+                </p>
+                <p>
+                  under a{" "}
+                  <span className="font-semibold text-emphasis">
+                    signed execution contract
+                  </span>
+                  .
+                </p>
+              </div>
+              {/* Runs-anywhere facts as badge chips, in the same mono idiom
+                  as the credibility row above. */}
+              <div className="mt-4 flex flex-wrap gap-2 font-mono text-[11px] lowercase">
+                {["sub-150 ms boot", "on a laptop", "in the cloud", "in a browser"].map(
+                  (chip) => (
+                    <span
+                      key={chip}
+                      className="rounded border border-edge/50 bg-raised/60 px-2.5 py-1 text-label"
+                    >
+                      {chip}
+                    </span>
+                  ),
+                )}
+              </div>
             </Reveal>
 
             {/* Platform-specific install — the single install affordance in
