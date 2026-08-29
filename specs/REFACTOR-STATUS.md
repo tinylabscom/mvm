@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-28
+Last updated: 2026-08-29
 
 ## In progress
 
@@ -105,7 +105,9 @@ Last updated: 2026-08-28
       withheld tail before EOF. `StreamPlane::subscribe` and
       `LaunchOutcome::admitted` provide the two narrow capabilities the
       external fleet supervisor needs without re-admission or guest
-      addressing.
+      addressing. mvmd PR #238 now drives those capabilities in a bounded
+      production workflow, and the three fleet-only dormant declarations have
+      been removed.
 
 - [x] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
       `specs/plans/2026-08-27-kernel-6-12-106.md`.

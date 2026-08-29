@@ -15,7 +15,9 @@
       the close tail reach the guest instead of stopping in the gate outbox.
       The host plane exposes a redacted per-VM reader and a successful local
       launch exposes its exact admitted plan for the external fleet caller.
-      Focused connector, plane, and client compilation tests are green.
+      mvmd PR #238 now drives the bounded workflow in production, so the three
+      fleet-only controls have left the dormant-control ratchet. Focused
+      connector, plane, and client compilation tests are green.
 
 - [ ] **Linux 6.12.107 synchronized kernel pin — issue #2971.**
       `specs/plans/2026-08-28-kernel-6-12-107.md`.

@@ -16,41 +16,10 @@
 # declaration is stale and the entry should go. The list may only shrink.
 
 [[control]]
-symbol = "validate_topology"
-file = "crates/mvm-contract/src/stream/mod.rs"
-dormant = true
-why = """
-Refuses a cyclic or fan-in edge topology. mvmd is the caller: it declares the \
-edges and holds the whole graph. mvm has no fleet, so a single-VM run has \
-nothing to validate. Pure function, no side effects, covered by its own tests, \
-and no claim in ADR-001 rests on it firing here."""
-
-[[control]]
-symbol = "check_plan_edges"
-file = "crates/mvm-contract/src/stream/edge.rs"
-dormant = true
-why = """
-Refuses a duplicate binding, a raw edge without the operator acknowledgement, \
-and an edge contending with operator stdin. Same reason as the topology \
-validator: mvmd declares the edges, so mvmd is where a plan carrying them is \
-admitted. Reachable from mvm only once mvm grows a caller that declares edges, \
-which it will not."""
-
-[[control]]
 symbol = "grants_input_for"
 file = "crates/mvm-contract/src/stream/input.rs"
 dormant = false
 why = "The input plane's default-deny check. Losing its caller reopens claim 17's grant."
-
-[[control]]
-symbol = "EdgeConnector"
-file = "crates/mvm-hostd/src/stream/edge_connector.rs"
-dormant = true
-why = """
-Pumps one workload's output into another's stdin. Caller-driven by design, and \
-the caller is mvmd: mvm has no fleet and so nothing here declares an edge to \
-drive. Covered by its own integration tests against the real broker, reader \
-and gate."""
 
 [[control]]
 symbol = "report_enforced_grants"
