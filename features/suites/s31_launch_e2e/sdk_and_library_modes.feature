@@ -48,20 +48,18 @@ Feature: the README's SDK entry points reach the same launch path
   # form the README tells a reader to use when they want those verbs to work, so
   # "the escape hatch is documented" and "the escape hatch functions" were never
   # the same statement.
-  # FAILS TODAY, and the failure is the point of writing it down.
+  # The README's own `--profile dev` line. The scenario above proves the same
+  # script is refused *without* it, which is the opposite claim: nothing ran the
+  # form the README tells a reader to use when they want those verbs to work, so
+  # "the escape hatch is documented" and "the escape hatch functions" were never
+  # the same statement.
   #
-  # `--profile dev` does clear the grant gate — the refusal above does not fire —
-  # and the script then dies on `mvmctl machine proc start` exit 1 against the
-  # guest it just booted. That is the residual named in the title of #2887,
-  # "dev-mode launches still cannot grant DevOnly verbs", which was closed on
-  # 2026-08-27 with the reporting half fixed and this half not.
-  #
-  # `@wip` rather than `@live` so a pre-existing defect does not red the release
-  # lane the moment that lane starts blocking releases. It is not `@live`, so it
-  # cannot serve as a `witness` in readme_examples.toml, and the manifest records
-  # this README line as unproven rather than covered. Retag `@live` when the verb
-  # works and the exemption goes away with it.
-  @wip
+  # It did not work when it was first written, and the reason was not the one
+  # #2887 recorded. The grant half of that issue is fixed — a `--profile dev`
+  # launch does carry the DevOnly verbs — and what was left was that the guest
+  # refused a bare `argv[0]`, which is the form the SDK sends and the README
+  # documents.
+  @live
   Scenario: a runtime-SDK script reaches DevOnly surfaces under an explicit dev profile
     When I launch "run --mode live --profile dev crates/mvm-conformance/fixtures/e2e/sandbox_script.py"
     Then the launch succeeds

@@ -215,6 +215,16 @@ for detailed scope and acceptance criteria.
       missing-state behavior. See
       `specs/sprint/delivery/2824-stopped-vm-logs-error.md`.
 
+- [x] **The guest resolves a bare `argv[0]`.** The README documents
+      `commands.start(["python", …])` and `exec("uname", …)`, the SDK forwards
+      argv verbatim, and the guest refused any non-absolute `argv[0]` — so the
+      documented form could not run, while its sibling `exec` accepted it. A
+      bare name now resolves against the image's declared `PATH` (the search
+      `exec` already used), a relative path stays refused, and the request's own
+      `PATH` is never consulted. #2887's grant half turned out to have been
+      fixed already, so the scenario is `@live` and its README example is a real
+      witness. See `specs/sprint/delivery/guest-resolves-bare-argv0.md`.
+
 - [x] **Skipped scenarios fail a gating lane; website coverage ratcheted.**
       `MVM_BDD_STRICT_SKIPS` turns the skip tally into a gate with a per-lane
       allow-list, so a runner that quietly loses a capability reddens the lane
