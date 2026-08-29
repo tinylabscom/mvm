@@ -1,8 +1,34 @@
 # Refactor status
 
-Last updated: 2026-08-28
+Last updated: 2026-08-29
 
 ## In progress
+
+- [ ] **Linux 6.12.107 synchronized kernel pin — issue #2971.**
+      `specs/plans/2026-08-28-kernel-6-12-107.md`.
+      Both kernel consumers use the kernel.org-verified archive and SRI hash;
+      structural tests and workspace Clippy are green. Linux Nix builds and
+      merge delivery remain.
+
+- [ ] **Portable dev-VM socket resolver test — issue #2973.**
+      `specs/plans/2026-08-28-portable-dev-vm-socket-test.md`.
+      The test now asserts the canonical state-or-short socket namespace; the
+      focused regression, all 598 `mvm-vmm` tests, workspace tests, and
+      workspace Clippy are green. Merge delivery remains.
+
+- [ ] **Worker restart identity barrier — issue #2976.**
+      `specs/plans/2026-08-28-worker-restart-identity-barrier.md`.
+      Recovery assertions now begin only after the old worker PID has been
+      replaced by a live supervisor-published identity. The focused and
+      workspace validation gates are green; merge delivery remains.
+
+- [ ] **Wasm SDK host-service admission — issue #2977.**
+      `specs/plans/2026-08-28-wasm-sdk-host-service-admission.md`.
+      Wasm now refuses the native SDK-sidecar mechanism at the backend-aware
+      admission seam instead of leaking a disk-volume backend error. Focused
+      regressions, the gated BDD runner, workspace tests, isolated doctests,
+      workspace Clippy, formatting, and policy gates are green. Merge delivery
+      remains.
 
 - [ ] **HVF machine restore dispatch — issue #2961.**
       `specs/plans/2026-08-27-hvf-machine-restore-dispatch.md`.
@@ -94,6 +120,15 @@ Last updated: 2026-08-28
       delivery remains.
 
 ## Completed
+
+- [x] **Fleet stream edge delivery handoff.** The edge pump now terminates in
+      the bounded, exactly-once guest input route; close carries the scanner's
+      withheld tail before EOF. `StreamPlane::subscribe` and
+      `LaunchOutcome::admitted` provide the two narrow capabilities the
+      external fleet supervisor needs without re-admission or guest
+      addressing. mvmd PR #238 now drives those capabilities in a bounded
+      production workflow, and the three fleet-only dormant declarations have
+      been removed.
 
 - [x] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
       `specs/plans/2026-08-27-kernel-6-12-106.md`.
@@ -202,6 +237,16 @@ for detailed scope and acceptance criteria.
       instead of surfacing the raw stream error. Focused CLI tests preserve the
       missing-state behavior. See
       `specs/sprint/delivery/2824-stopped-vm-logs-error.md`.
+
+- [x] **Guest devpts and `/dev/fd` provisioning.** The universal-initramfs boot
+      path created `/dev/pts` and never mounted `devpts` onto it, so `openpty()`
+      failed for every `ConsoleOpen` and no OCI image could serve
+      `machine run -it` or `machine console`. PID 1 now mounts `devpts` and
+      links the `/dev/fd` family between the pivot and the privilege drop,
+      loudly but non-fatally, skipping a mount a container runtime already made.
+      A PTY-driven `@live` scenario reaches the interactive path the suite's
+      piped-stdin steps structurally could not. See
+      `specs/sprint/delivery/guest-devpts-interactive-console.md`.
 
 - [x] **Transient start console diagnostics.** A transient backend-start
       failure now prints the guest console diagnostic before deleting the
@@ -916,16 +961,33 @@ resume` takes a `current_head` and refuses when it differs from the
       `cargo:warning=`. Supersedes the freshness half of
       `specs/plans/2026-08-15-aux-helper-binary-freshness.md`.
       The per-VM aux leg — the last unconditional rebuild, and by 2026-08-26
-      **17.8s of a 20.9s** inner-loop rebuild (85%) — is now closed too by
-      `specs/plans/2026-08-26-aux-helper-staleness-gate.md`: it reuses on a key
-      miss under the dev profile and marks the binary, and
-      `mvm_vmm::host::aux_bin::resolve` refuses to spawn a marked helper. That
-      keeps #2058's no-silently-stale-supervisor guarantee while charging its
-      cost only to builds that actually boot a VM. Measured **20.9s → 8.5s**.
-      STILL OPEN: Phase 3 (phantom build.rs tests, `MVM_LIBKRUN_HEADER`
-      rerun-if-env-changed), Phase 4 (dead crate edges; `deps_audit` and the
-      tree-sitter grammars off the serial path; the `mvm-hostd` audit cluster),
-      Phase 5 (sccache 4.2% Rust hit rate, worktree hygiene)
+      **17.8s of a 20.9s** inner-loop rebuild (85%) — was first made cheap by
+      `specs/plans/2026-08-26-aux-helper-staleness-gate.md` (reuse on a key
+      miss, plus a spawn-time refusal of the marked binary; **20.9s → 8.5s**),
+      and on 2026-08-28 **deleted outright** by
+      `specs/plans/2026-08-28-build-script-drops-the-aux-helper-leg.md`. Those
+      seven binaries are ordinary `mvm-hostd` `[[bin]]`s that a workspace
+      `cargo build` already produces where `aux_bin::resolve` already looked, so
+      the leg was a duplicate compile of `mvm-hostd`'s closure per worktree.
+      Build script on a key miss **60.37s → 0.13s**, nested cargo invocations
+      **7 → 0**, `rerun-if-changed` set **1013 → 648**, nested target dir
+      **13.6 GB → 649 MB**. The `.mvm-stale` marker and `MVM_ALLOW_STALE_AUX`
+      went with it — cargo owns freshness, so staleness is no longer
+      representable rather than merely detected.
+      The remaining musl leg then went opt-in behind `embed-host-bins` —
+      `specs/plans/2026-08-28-embedded-host-binaries-are-opt-in.md` — so the
+      script no longer runs on the inner loop **at all**: with the feature off
+      it watches four files and writes an empty table, and a `mvm-core` edit
+      produces zero build-script executions. `just embed` and the tag-push
+      release workflow turn it on; an unembedded `mvmctl` refuses to bootstrap
+      a builder VM with the recipe named.
+      STILL OPEN: Phase 3 (phantom build.rs tests — the `MVM_LIBKRUN_HEADER`
+      half is closed, its probe is deleted), Phase 4 (dead crate edges;
+      `deps_audit` and the tree-sitter grammars off the serial path; the
+      `mvm-hostd` audit cluster), Phase 5 (sccache 4.2% Rust hit rate, worktree
+      hygiene). Also open: the ten now-mostly-unnecessary `install-zigbuild`
+      steps in `ci.yml`, and the embed store sitting at 17 GB against its 4 GiB
+      ceiling.
 
 - [~] **Agent tool and memory planes**
       (`specs/plans/2026-08-18-agent-tool-and-memory-planes.md`). Opened

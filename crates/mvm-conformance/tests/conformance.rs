@@ -222,6 +222,7 @@ fn probe_caps() -> RuntimeCaps {
         perf_budget_host: std::env::var_os("MVM_BDD_PERF_BUDGET").is_some(),
         tls_tunnel_client: std::env::var_os("MVM_BDD_TLS_CLIENT").is_some(),
         memory_snapshot: memory_snapshot_supported(),
+        dir_share: dir_share_supported(),
     }
 }
 
@@ -232,17 +233,29 @@ fn probe_caps() -> RuntimeCaps {
 /// built. Globbed on version rather than hardcoded so a bump does not silently
 /// turn this into "never available".
 fn sdk_sidecar_cached() -> bool {
-    let root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("sdk-sidecar");
-    let Ok(versions) = std::fs::read_dir(&root) else {
-        return false;
-    };
-    versions.filter_map(Result::ok).any(|v| {
-        std::fs::read_dir(v.path()).is_ok_and(|arches| {
-            arches
-                .filter_map(Result::ok)
-                .any(|a| a.path().join("sdk.ext4").is_file())
-        })
-    })
+    let sidecar_root = mvm_core::config::mvm_cache_dir_at(live_home())
+        .join(mvm_fs::sdk_sidecar::SDK_SIDECAR_CACHE_DIR);
+    mvm_conformance::sidecar_image_cached_in(
+        &sidecar_root,
+        mvm_fs::sdk_sidecar::SDK_SIDECAR_IMAGE_FILE,
+    )
+}
+
+/// The mvm home the live scenarios actually run against.
+///
+/// The runner exports `MVM_E2E_HOME`; it does not set `MVM_HOME`. So
+/// `mvm_core::config`'s ambient helpers resolve the *default* home inside this
+/// process, which is a different directory from the one every live step hands
+/// to `mvmctl`. A capability probe reading the default home reports on
+/// artifacts the scenario will never see: where that home happens to hold the
+/// image, the gate says "available", the scenario runs against the isolated
+/// home, and admission refuses it there — a setup gap surfacing as a product
+/// failure. Both paths are the same on a developer laptop, so this is visible
+/// only in the isolated configuration the gate exists to serve.
+fn live_home() -> std::path::PathBuf {
+    std::env::var_os("MVM_E2E_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(mvm_core::config::mvm_home()))
 }
 
 /// Whether a prebuilt guest-binary directory was named and exists.
@@ -267,6 +280,17 @@ fn guest_bin_dir_available() -> bool {
 /// `mvmctl doctor` prints the matrix; a host whose active backend reports
 /// `save-restore` sets `MVM_BDD_SNAPSHOT=1`. Firecracker reports `unsupported`,
 /// which is why the Linux lane leaves it unset.
+/// Whether the active backend serves a live host-directory share (virtio-fs).
+///
+/// Declared by the operator rather than probed, matching
+/// `memory_snapshot_supported`: the answer depends on which backend a launch
+/// would actually select, and re-deriving that here would be a copy that
+/// drifts. libkrun and HVF serve a share; Firecracker has no virtio-fs device
+/// and refuses a `DirShare` volume before boot.
+fn dir_share_supported() -> bool {
+    std::env::var_os("MVM_BDD_DIR_SHARE").is_some()
+}
+
 fn memory_snapshot_supported() -> bool {
     std::env::var_os("MVM_BDD_SNAPSHOT").is_some()
 }

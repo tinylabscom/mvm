@@ -535,6 +535,104 @@ pub fn ensure_workload_home() -> Result<()> {
     Ok(())
 }
 
+/// Where the pseudo-terminal slave filesystem is mounted.
+pub const DEVPTS_MOUNT_POINT: &str = "/dev/pts";
+
+/// Standard tty-group layout for the slave nodes `devpts` hands out.
+///
+/// `gid=5` is the `tty` group and `mode=0620` is what every distro's
+/// `/etc/fstab` uses; a shell that wants `mesg y` needs both.
+pub const DEVPTS_OPTIONS: &str = "mode=0620,gid=5";
+
+/// Symlinks the guest needs under `/dev` that no filesystem provides.
+///
+/// devtmpfs creates device *nodes*; the `/dev/fd` family are symlinks into
+/// `/proc/self/fd` that udev or systemd-tmpfiles would normally lay down, and
+/// this guest runs neither. Without them bash process substitution
+/// (`< <(...)`) fails with "/dev/fd/63: No such file or directory" and
+/// anything opening `/dev/stdout` by name fails the same way.
+pub const DEV_FD_SYMLINKS: &[(&str, &str)] = &[
+    ("/proc/self/fd", "/dev/fd"),
+    ("/proc/self/fd/0", "/dev/stdin"),
+    ("/proc/self/fd/1", "/dev/stdout"),
+    ("/proc/self/fd/2", "/dev/stderr"),
+];
+
+/// Mount the pseudo-terminal slave filesystem an interactive console needs.
+///
+/// `openpty(3)` opens `/dev/ptmx` and then the slave the kernel allocated for
+/// it at `/dev/pts/N`. devtmpfs supplies the `ptmx` node but not the slave
+/// filesystem, so with `/dev/pts` an empty directory every `ConsoleOpen`
+/// request — `machine run -it`, `machine console` — dies at `openpty()`, and
+/// the caller is told only "openpty() failed".
+///
+/// Runs after the pivot, so the mount lands on the `/dev` the workload will
+/// actually see, and before the privilege drop, which is the last moment root
+/// is available to make it. The slave node is owned by whoever opened the
+/// master, so the unprivileged workload still gets a usable PTY.
+#[cfg(target_os = "linux")]
+pub fn mount_pty_filesystem() -> Result<()> {
+    if devpts_is_mounted(&std::fs::read_to_string("/proc/mounts").unwrap_or_default()) {
+        // A shared-kernel container runtime mounted it for the namespace and
+        // took CAP_SYS_ADMIN away afterwards; mounting again would fail for a
+        // reason that is not a defect.
+        return Ok(());
+    }
+    ensure_dir(DEVPTS_MOUNT_POINT)?;
+    mount(
+        "devpts",
+        DEVPTS_MOUNT_POINT,
+        "devpts",
+        libc::MS_NOSUID | libc::MS_NOEXEC,
+        DEVPTS_OPTIONS,
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn mount_pty_filesystem() -> Result<()> {
+    Ok(())
+}
+
+/// Whether `/proc/mounts` already shows a `devpts` at [`DEVPTS_MOUNT_POINT`].
+///
+/// Split from the mount so the container arm is testable without a guest:
+/// that arm is the only one a host test can never reach through the syscall.
+#[must_use]
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn devpts_is_mounted(mounts: &str) -> bool {
+    mounts.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        let (Some(_dev), Some(target), Some(fstype)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            return false;
+        };
+        target == DEVPTS_MOUNT_POINT && fstype == "devpts"
+    })
+}
+
+/// Lay down the [`DEV_FD_SYMLINKS`], reporting each one that could not be made.
+///
+/// Best-effort by construction: `/dev` is devtmpfs and writable on every guest
+/// that reaches here, but an image that already ships one of these gets an
+/// `AlreadyExists` that is the desired end state rather than a failure.
+pub fn link_dev_fd_family() -> Vec<String> {
+    let mut failures = Vec::new();
+    for (target, link) in DEV_FD_SYMLINKS {
+        if Path::new(link).exists() {
+            continue;
+        }
+        // `AlreadyExists` lost the race with something else creating it, which
+        // is the desired end state and not a failure.
+        if let Err(e) = std::os::unix::fs::symlink(target, link)
+            && e.kind() != std::io::ErrorKind::AlreadyExists
+        {
+            failures.push(format!("{link} -> {target}: {e}"));
+        }
+    }
+    failures
+}
+
 /// Lay a writable tmpfs over the workload's home.
 ///
 /// Every workload root is mounted read-only, so the baked-in home is an empty
@@ -1580,6 +1678,168 @@ mod tests {
         assert!(
             body.contains("uid={WORKLOAD_UID}"),
             "the workload must own its home: {body}"
+        );
+    }
+
+    /// `openpty(3)` needs the slave filesystem, not just the `ptmx` node.
+    ///
+    /// devtmpfs gives `/dev/ptmx` and the empty `/dev/pts` directory the image
+    /// happens to ship, which together look like a working PTY setup and are
+    /// not one: every `ConsoleOpen` fails at `openpty()` with no indication
+    /// that a mount is missing. `mount_pty_filesystem` must therefore mount
+    /// `devpts` — creating the directory is what the broken version did.
+    #[test]
+    fn the_pty_filesystem_is_mounted_not_merely_created() {
+        let src = include_str!("guest_mount.rs");
+        let body = src
+            .split("pub fn mount_pty_filesystem")
+            .nth(1)
+            .expect("mount_pty_filesystem must exist")
+            .split("\n#[cfg(not(target_os = \"linux\"))]")
+            .next()
+            .expect("the Linux arm is delimited by the non-Linux one");
+        assert!(
+            body.contains("mount(") && body.contains("\"devpts\""),
+            "a PTY comes from a devpts mount, not from mkdir: {body}"
+        );
+        let created = body
+            .find("ensure_dir(DEVPTS_MOUNT_POINT)")
+            .expect("the mount point must be created before it is mounted onto");
+        let mounted = body.find("mount(").expect("checked above");
+        assert!(created < mounted, "ensure_dir must precede the mount");
+    }
+
+    /// The tty-group layout the slave nodes are handed out with.
+    #[test]
+    fn devpts_uses_the_standard_tty_group_layout() {
+        assert_eq!(DEVPTS_MOUNT_POINT, "/dev/pts");
+        assert!(DEVPTS_OPTIONS.contains("mode=0620"));
+        assert!(DEVPTS_OPTIONS.contains("gid=5"));
+    }
+
+    /// A container runtime already mounted it, and took away the capability
+    /// to mount it again. Skipping is correct there and only there.
+    #[test]
+    fn an_existing_devpts_mount_is_recognised_and_not_remounted() {
+        let mounted = "\
+devtmpfs /dev devtmpfs rw,nosuid,relatime 0 0
+devpts /dev/pts devpts rw,nosuid,noexec,relatime,mode=620,gid=5 0 0
+";
+        assert!(devpts_is_mounted(mounted));
+    }
+
+    /// The empty directory is exactly the state that produced the bug, so a
+    /// probe that cannot tell it from a mount would skip the fix forever.
+    #[test]
+    fn a_dev_pts_directory_without_a_mount_is_not_a_mount() {
+        // devtmpfs carries /dev/pts as a plain directory: nothing in
+        // /proc/mounts names it, which is what this must report.
+        let unmounted = "\
+devtmpfs /dev devtmpfs rw,nosuid,relatime 0 0
+tmpfs /tmp tmpfs rw,nosuid,nodev,relatime 0 0
+";
+        assert!(!devpts_is_mounted(unmounted));
+        // A devpts mounted somewhere else is not this mount either.
+        let elsewhere = "devpts /mnt/root/dev/pts devpts rw,relatime 0 0\n";
+        assert!(!devpts_is_mounted(elsewhere));
+        // Nor is some other filesystem sitting on the mount point.
+        let wrong_fs = "tmpfs /dev/pts tmpfs rw,relatime 0 0\n";
+        assert!(!devpts_is_mounted(wrong_fs));
+    }
+
+    /// The `/dev/fd` family points into `/proc/self/fd` and nowhere else.
+    #[test]
+    fn the_dev_fd_family_resolves_through_proc_self_fd() {
+        let links: Vec<&str> = DEV_FD_SYMLINKS.iter().map(|(_, link)| *link).collect();
+        assert_eq!(
+            links,
+            ["/dev/fd", "/dev/stdin", "/dev/stdout", "/dev/stderr"]
+        );
+        for (target, link) in DEV_FD_SYMLINKS {
+            assert!(
+                target.starts_with("/proc/self/fd"),
+                "{link} must resolve through /proc/self/fd, not {target}"
+            );
+        }
+    }
+
+    // The two tests below assert how `guest_bootstrap` wires this module's
+    // mount into the boot path. They live here rather than beside that code
+    // because `mvm_agentd::guest_bootstrap` is `cfg(target_os = "linux")`, so
+    // its own test module is invisible on the macOS hosts most of this is
+    // developed on — which is where the missing mount would have been caught.
+    // Both read source text and need no guest.
+
+    /// The PTY mount has to be one of the provisioning steps, not something a
+    /// single init does on its way past.
+    ///
+    /// It shipped missing entirely — `ensure_runtime_dirs` created `/dev/pts`
+    /// and nothing ever mounted onto it — so `machine run -it` failed at
+    /// `openpty()` on every OCI image. `guest_bootstrap` exists so a step
+    /// cannot be quietly lost; this is that guarantee for this step.
+    #[test]
+    fn the_pty_filesystem_is_provisioned_before_the_workload_identity() {
+        let steps = provisioning_steps();
+        let dirs = steps
+            .iter()
+            .position(|s| s == "ensure_runtime_dirs()")
+            .expect("the runtime directories must still be created");
+        let pty = steps
+            .iter()
+            .position(|s| s == "provision_pty_devices()")
+            .expect(
+                "devpts must be mounted during provisioning, or every \
+                 interactive console fails at openpty()",
+            );
+        assert!(
+            dirs < pty,
+            "/dev/pts must exist before devpts is mounted onto it: {steps:?}"
+        );
+    }
+
+    /// The calls `provision_guest_environment` actually makes, in order.
+    ///
+    /// Comment lines are dropped first. A plain substring search over the
+    /// function body matches `// provision_pty_devices();` just as happily as
+    /// the call, so commenting the step out — the exact shape of losing it —
+    /// left the test green.
+    fn provisioning_steps() -> Vec<String> {
+        let src = include_str!("guest_bootstrap.rs");
+        let body = src
+            .split("pub fn provision_guest_environment")
+            .nth(1)
+            .expect("provision_guest_environment must exist")
+            .split("\n}")
+            .next()
+            .expect("the function body ends at the first closing brace");
+        body.lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//"))
+            .filter_map(|line| line.strip_suffix(';'))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Provisioning runs between the pivot and the privilege drop, and both
+    /// bounds matter: before the pivot the mount lands on a `/dev` the
+    /// workload never sees, and after the drop there is no CAP_SYS_ADMIN left
+    /// to mount with.
+    #[test]
+    fn provisioning_runs_after_the_pivot_and_before_the_privilege_drop() {
+        let init = include_str!("bin/mvm-guest-agent/init.rs");
+        let pivot = init
+            .find("pivot_to_root(")
+            .expect("activation must still pivot into the workload root");
+        let bootstrap = init
+            .find("bootstrap_guest_environment()?")
+            .expect("activation must still run the provisioning steps");
+        let drop = init
+            .find("drop_guest_agent_privilege(")
+            .expect("activation must still drop privilege");
+        assert!(pivot < bootstrap, "provisioning must follow the pivot");
+        assert!(
+            bootstrap < drop,
+            "provisioning must finish while root is still available"
         );
     }
 

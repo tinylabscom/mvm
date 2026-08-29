@@ -190,7 +190,18 @@ fn home_dir() -> String {
 /// Cache directory for build artifacts, images, VM runtime state:
 /// `<mvm_home>/cache`.
 pub fn mvm_cache_dir() -> String {
-    format!("{}/cache", mvm_home())
+    mvm_cache_dir_at(mvm_home()).to_string_lossy().into_owned()
+}
+
+/// Cache directory beneath an explicit mvm home: `<mvm_home>/cache`.
+///
+/// The pure variant of [`mvm_cache_dir`], for a caller holding an already
+/// resolved or isolated root rather than the one this process's `MVM_HOME`
+/// names. A harness that probes the home its subject will run against needs
+/// this: resolving its own home instead would report on a directory the
+/// subject never reads.
+pub fn mvm_cache_dir_at(mvm_home: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    mvm_home.as_ref().join("cache")
 }
 
 /// The cache directory of the *default* root (`$HOME/.mvm/cache`),
@@ -1699,6 +1710,17 @@ mod tests {
         }
 
         env.remove("MVM_HOME");
+    }
+
+    #[test]
+    fn mvm_cache_dir_at_uses_an_explicit_isolated_home() {
+        // The ambient `mvm_cache_dir()` reads this process's `MVM_HOME`. A
+        // caller probing a home it was handed — a harness checking the home
+        // its subject runs against — must not get this process's instead.
+        assert_eq!(
+            mvm_cache_dir_at("/isolated/mvm"),
+            std::path::PathBuf::from("/isolated/mvm/cache")
+        );
     }
 
     #[test]

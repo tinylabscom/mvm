@@ -28,7 +28,7 @@ use mvm_core::plan::ExecutionPlan;
 use mvm_core::protocol::vm_backend::{VmId, VmStatus};
 use mvm_core::rootfs_source::RootfsSource;
 use mvm_hostd::audit::emitter::{AuditEmitter, ExitRecord};
-use mvm_hostd::plan_admission::{InMemoryNonceLedger, StartedMachine, SystemClock};
+use mvm_hostd::plan_admission::{AdmittedPlan, InMemoryNonceLedger, StartedMachine, SystemClock};
 use mvm_hostd::run::{LocalRunContext, LocalRunRequest, admit_and_boot_local};
 use mvm_runtime::AnyBackend;
 use mvm_runtime::machine::persist as mp;
@@ -52,6 +52,13 @@ pub struct LaunchOutcome {
     pub machine: MachineState,
     /// Content-addressed id of the admitted plan.
     pub plan_id: String,
+    /// The admitted authority object used for this boot.
+    ///
+    /// Fleet stream orchestration needs the exact admitted plan to open the
+    /// consumer's default-deny input route. Exposing that object keeps the
+    /// caller from admitting a second copy with a second nonce merely to gain
+    /// an input capability.
+    pub admitted: AdmittedPlan,
     pub(crate) mode: LifecycleMode,
     pub(crate) plan: ExecutionPlan,
     /// When this process admitted the boot, for measuring the launch-to-exit
@@ -757,6 +764,7 @@ impl LocalBackend {
         transient: bool,
         launched_at: std::time::Instant,
     ) -> LaunchOutcome {
+        let plan = started.admitted.plan().clone();
         LaunchOutcome {
             machine: MachineState {
                 id: MachineId(started.vm_id.0.clone()),
@@ -773,12 +781,13 @@ impl LocalBackend {
                 ..Default::default()
             },
             plan_id: started.admitted.plan_id().0.clone(),
+            admitted: started.admitted,
             mode: if transient {
                 LifecycleMode::Transient
             } else {
                 LifecycleMode::Persistent
             },
-            plan: started.admitted.plan().clone(),
+            plan,
             launched_at: Some(launched_at),
         }
     }

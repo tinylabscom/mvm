@@ -204,6 +204,127 @@ fn launch_with_env(world: &mut CliWorld, args: String, key: String, value: Strin
     world.last_launch = Some(run_in_e2e_home(&args, &[(&key, &value)]));
 }
 
+/// How long an interactive launch is given before the PTY read is abandoned.
+///
+/// Generous on purpose: this is a real cold boot on whatever backend the host
+/// has, and a timeout that fires early would report a slow machine as a broken
+/// console. Nothing hangs on it in the passing case — the read ends when the
+/// child closes the PTY.
+const INTERACTIVE_LAUNCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(240);
+
+/// Run `mvmctl` with a real terminal on its stdin.
+///
+/// `-t`/`--tty` refuses outright without one — "interactive `-t`/`--tty` needs
+/// a terminal on stdin" — so every other step in this file, which drives
+/// `Command::output()` over piped stdin, stops at the CLI before the guest is
+/// ever asked to open a console. That is exactly why a guest whose `openpty()`
+/// failed on every OCI image passed this suite.
+///
+/// The child gets the PTY slave on all three descriptors and the parent keeps
+/// the master, reading until EOF. stdout and stderr are the same stream on a
+/// terminal, which is what a terminal is; the record carries the combined
+/// bytes in `stdout` and leaves `stderr` empty.
+fn run_interactive_in_e2e_home(args: &str) -> LaunchRecord {
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, OwnedFd};
+    use std::process::Stdio;
+
+    let pty =
+        nix::pty::openpty(None, None).expect("allocate a host PTY for the interactive launch");
+    let (master, slave): (OwnedFd, OwnedFd) = (pty.master, pty.slave);
+
+    let home = e2e_home();
+    let mut command: Command = mvmctl_command();
+    command
+        .current_dir(workspace_root())
+        .args(shell_split(args))
+        .isolated_home(&home)
+        .env("MVM_PHASE_TIMING", "1")
+        // A terminal the guest shell can actually address. Without it the
+        // shell falls back to `dumb` and some images print nothing at all,
+        // which would read as a console failure.
+        .env("TERM", "xterm")
+        .stdin(Stdio::from(
+            slave.try_clone().expect("dup the PTY slave for stdin"),
+        ))
+        .stdout(Stdio::from(
+            slave.try_clone().expect("dup the PTY slave for stdout"),
+        ))
+        .stderr(Stdio::from(slave));
+
+    let started = Instant::now();
+    let mut child = command.spawn().expect("failed to spawn mvmctl on a PTY");
+    // The parent's copy of the slave is gone once `command` is dropped; only
+    // the child holds one. Without that the master never sees EOF and the read
+    // below blocks for the full timeout on a *successful* run.
+    drop(command);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let master_fd = master.as_raw_fd();
+    std::thread::spawn(move || {
+        // SAFETY: `master_fd` is the live PTY master owned by `master` in the
+        // parent frame, which outlives this read: the frame joins on `rx`
+        // before dropping it.
+        let mut reader =
+            unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(master_fd) };
+        let mut buf = Vec::new();
+        // EIO is how a PTY master reports "the last slave closed" on Linux,
+        // and it arrives instead of EOF. Whatever was read before it is the
+        // session's output, not an error.
+        let _ = reader.read_to_end(&mut buf);
+        std::mem::forget(reader);
+        let _ = tx.send(buf);
+    });
+
+    let combined = rx
+        .recv_timeout(INTERACTIVE_LAUNCH_TIMEOUT)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_else(|_| {
+            let _ = child.kill();
+            String::new()
+        });
+    let status = child.wait().expect("wait for the interactive mvmctl");
+    let wall = started.elapsed();
+    drop(master);
+
+    let dispatch_window_ms = parse_dispatch_window_ms(&combined);
+    LaunchRecord {
+        stdout: combined,
+        stderr: String::new(),
+        exit_code: status.code().unwrap_or(-1),
+        dispatch_window_ms,
+        wall,
+    }
+}
+
+#[when(expr = "I launch {string} on a terminal")]
+fn launch_on_a_terminal(world: &mut CliWorld, args: String) {
+    world.last_launch = Some(run_interactive_in_e2e_home(&args));
+}
+
+/// The guest's controlling terminal must be a `devpts` slave.
+///
+/// `tty` printing `/dev/pts/N` is the whole claim: it means `openpty()` found
+/// the slave filesystem, which is the mount whose absence produced "console
+/// open failed: openpty() failed" on every OCI image. `not a tty` is the
+/// answer when the console was never allocated, and a bare path check would
+/// accept it.
+#[then(expr = "the guest console is a pseudo-terminal")]
+fn guest_console_is_a_pty(world: &mut CliWorld) {
+    let record = last(world);
+    let output = record.combined();
+    assert!(
+        output.contains("/dev/pts/"),
+        "the guest's controlling terminal must be a devpts slave (`/dev/pts/N`), \
+         which is what proves the guest mounted devpts and openpty() succeeded. \
+         Got:\n{output}"
+    );
+    assert!(
+        !output.contains("openpty() failed"),
+        "the guest could not allocate a PTY: {output}"
+    );
+}
+
 fn last(world: &CliWorld) -> &LaunchRecord {
     world
         .last_launch

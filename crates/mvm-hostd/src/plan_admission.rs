@@ -1316,28 +1316,48 @@ pub fn enforce_admitted_shares(
     Ok(())
 }
 
-/// Admission enforcement for the optional glibc SDK sidecar.
+/// Typed reasons the selected backend cannot carry the native SDK sidecar.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum SdkSidecarBackendCompatibilityError {
+    #[error(
+        "refusing to launch SDK host service(s) [{services}] on the wasm backend: the SDK \
+         host-services library is delivered as a native shared object on a read-only disk, but \
+         wasm has neither block devices nor a native dynamic loader. Remove these bindings or \
+         use a microVM backend; WASI host-service imports are not implemented"
+    )]
+    WasmHostServicesUnsupported { services: String },
+}
+
+/// Refuse a host-service delivery mechanism the selected backend cannot carry.
 ///
-/// The sidecar carries the host-services cdylib the language SDKs `dlopen`. It
-/// is not in the base rootfs or the static-musl runtime overlay, so it has to be
-/// attached per-workload — and the attachment is authorized by the plan's
-/// host-service bindings, never by an environment variable or a guess about
-/// application content.
+/// This gate runs before attachment-shape validation and backend start so an
+/// SDK host-service request cannot leak as an error about the synthetic disk
+/// volume used to carry its native library.
+pub fn enforce_sdk_sidecar_backend_compatibility(
+    backend: mvm_core::vm_backend::BackendKind,
+    plan: &ExecutionPlan,
+) -> std::result::Result<(), SdkSidecarBackendCompatibilityError> {
+    use mvm_core::plan::{sdk_host_services_in, sdk_sidecar_required};
+
+    if backend != mvm_core::vm_backend::BackendKind::Wasm || !sdk_sidecar_required(plan) {
+        return Ok(());
+    }
+
+    let services = sdk_host_services_in(&plan.services)
+        .iter()
+        .map(|service| service.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(SdkSidecarBackendCompatibilityError::WasmHostServicesUnsupported { services })
+}
+
+/// Admission enforcement for the optional glibc SDK sidecar attachment.
 ///
-/// Both directions fail closed, and both are checked on the one admission path
-/// every backend reaches — including the mock and dev-tier backends, so a
-/// dev/test launch can't quietly acquire a posture production wouldn't:
-///
-/// - The plan binds an SDK-served host service, but no read-only sidecar
-///   attachment is present → refuse. Booting anyway strands the workload with a
-///   `dlopen` failure it cannot act on.
-/// - The plan binds none, but something attached a volume at the sidecar mount
-///   point anyway → refuse. That would smuggle the glibc closure (and a
-///   host-services transport) into a workload the plan never authorized.
-///
-/// A sidecar attachment must additionally be read-only and a disk image: the
-/// guest never writes to it, and a writable or directory-share attachment is a
-/// different, unadmitted shape.
+/// The sidecar carries the host-services cdylib the language SDKs `dlopen`. Its
+/// attachment is authorized by the plan's host-service bindings, never by an
+/// environment variable or a guess about application content. Both directions
+/// fail closed: a bound SDK service requires exactly one read-only disk at the
+/// SDK mount point, and a plan with no SDK binding may not carry one.
 pub fn enforce_sdk_sidecar_attachment(
     volumes: &[mvm_core::vm_backend::VmVolume],
     plan: &ExecutionPlan,
@@ -1720,6 +1740,7 @@ fn apply_admitted_grants(
 fn run_post_admission_gates(
     mut config: VmStartConfig,
     admitted: &AdmittedPlan,
+    backend: BackendKind,
     policy_bundle: Option<&PolicyBundle>,
 ) -> std::result::Result<VmStartConfig, (&'static str, anyhow::Error)> {
     if let Err(e) = populate_audit_substrate(&mut config, admitted, policy_bundle) {
@@ -1733,6 +1754,9 @@ fn run_post_admission_gates(
         admitted.plan(),
     ) {
         return Err(("admitted-environment", e));
+    }
+    if let Err(e) = enforce_sdk_sidecar_backend_compatibility(backend, admitted.plan()) {
+        return Err(("sdk-sidecar", e.into()));
     }
     if let Err(e) = enforce_sdk_sidecar_attachment(&config.volumes, admitted.plan()) {
         return Err(("sdk-sidecar", e));
@@ -1908,8 +1932,12 @@ pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine>
     // A refusal in any post-admission gate must still terminate the chain:
     // `plan.admitted` already fired, so a gate refusal emits `plan.failed`
     // carrying the refusing stage rather than leaving a dangling admission.
-    let mut config = match run_post_admission_gates(params.config, &admitted, params.policy_bundle)
-    {
+    let mut config = match run_post_admission_gates(
+        params.config,
+        &admitted,
+        backend.kind(),
+        params.policy_bundle,
+    ) {
         Ok(config) => config,
         Err((stage, err)) => {
             if let Some(emitter) = params.emitter
@@ -2704,6 +2732,37 @@ mod tests {
                 "{service} bound + sidecar attached read-only must be admitted"
             );
         }
+    }
+
+    /// Wasm has neither block devices nor a native dynamic loader, so the
+    /// ext4-hosted SDK cdylib cannot reach that tier. Refuse in terms of the
+    /// requested service before the backend leaks a synthetic disk-volume
+    /// implementation detail.
+    #[test]
+    fn wasm_sdk_binding_is_refused_at_the_delivery_seam() {
+        let plan = plan_binding(&["host.time.v1"]);
+        let err = enforce_sdk_sidecar_backend_compatibility(
+            mvm_core::vm_backend::BackendKind::Wasm,
+            &plan,
+        )
+        .expect_err("wasm cannot receive or load the SDK sidecar");
+        let msg = err.to_string();
+        assert!(msg.contains("wasm"), "{msg}");
+        assert!(msg.contains("host.time.v1"), "{msg}");
+        assert!(msg.contains("SDK host service"), "{msg}");
+        assert!(!msg.contains("DiskVolumeNotSupported"), "{msg}");
+    }
+
+    #[test]
+    fn microvm_backend_keeps_the_sdk_sidecar_delivery_path() {
+        let plan = plan_binding(&["host.time.v1"]);
+        assert!(
+            enforce_sdk_sidecar_backend_compatibility(
+                mvm_core::vm_backend::BackendKind::Firecracker,
+                &plan,
+            )
+            .is_ok()
+        );
     }
 
     /// A bound SDK host service with no sidecar attachment fails closed, and the

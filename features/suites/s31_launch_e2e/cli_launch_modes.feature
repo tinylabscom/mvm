@@ -36,7 +36,49 @@ Feature: every README-documented CLI launch mode boots a real guest
     And the guest printed "ari"
     And the guest control plane came up
 
+  # The `-it` shape from the README, and the one every scenario above was
+  # structurally unable to reach: `-t` refuses without a terminal on stdin, so
+  # a suite driving `Command::output()` stops at the CLI's own gate and never
+  # asks the guest for a console. `openpty()` failed on every OCI image for as
+  # long as that was true.
+  #
+  # `tty` is asserted rather than just the echo: a console that was never
+  # allocated still runs the command and still prints, so only the `/dev/pts/N`
+  # answer distinguishes a real PTY from a pipe.
   @live
+  Scenario: an interactive run gets a real pseudo-terminal in the guest
+    When I launch "machine run --image alpine -it -- /bin/sh -c 'tty; echo console-ok'" on a terminal
+    Then the launch succeeds
+    And the guest console is a pseudo-terminal
+    And the guest printed "console-ok"
+    And the guest control plane came up
+
+  # The same defect stated as the mount it actually is, on the non-interactive
+  # path so it runs on a host with no terminal to give — a CI runner, or this
+  # suite under `just bdd`. devtmpfs supplies /dev/ptmx and the image supplies
+  # an empty /dev/pts directory, which together look like a working PTY setup
+  # and are not one; only /proc/mounts tells them apart.
+  @live
+  Scenario: the guest mounts devpts so a console can be opened
+    When I launch "machine run --image alpine -- sh -c 'grep /dev/pts /proc/mounts'"
+    Then the launch succeeds
+    And the guest printed "devpts /dev/pts devpts"
+    And the guest control plane came up
+
+  # The other half of what devtmpfs does not create. bash process substitution
+  # (`< <(...)`) opens /dev/fd/N, and a guest running no udev has no such
+  # symlink unless PID 1 lays it down.
+  @live
+  Scenario: the /dev/fd family resolves in the guest
+    When I launch "machine run --image alpine -- sh -c 'readlink /dev/fd && readlink /dev/stdout'"
+    Then the launch succeeds
+    And the guest printed "/proc/self/fd"
+    And the guest control plane came up
+
+  # The one scenario here that is *about* `--mount` rather than merely using it
+  # to deliver a file. libkrun and HVF both serve a virtio-fs share; Firecracker
+  # has no such device and refuses the volume before boot.
+  @live @dir_share
   Scenario: --mount shares a host directory the workload can read
     When I launch "machine run --image alpine --mount .:/work -- ls /work/README.md"
     Then the launch succeeds

@@ -579,6 +579,28 @@ pub fn read_verified_set(
     Ok(walked.contents)
 }
 
+/// Read the whole set with its structure verified but no interior walked.
+///
+/// [`read_verified_set`] with the interiors left out: every handoff, boundary
+/// signature, tip continuity and entry count is still checked, so a removed or
+/// spliced segment is still named — but no segment's interior lines are
+/// verified, and the returned [`SegmentContent::entries`] are all `None`.
+///
+/// This exists for the one caller that needs the *bytes* of the whole set for
+/// a reason other than verifying them — the Merkle leaf builder, which hashes
+/// every line into a tree and holds a separate, authenticated statement about
+/// the prefix. A caller that wants the set attested end to end wants
+/// [`read_verified_set`] and should pay for it.
+pub fn read_topology_verified_set(
+    dir: &Path,
+    base: &str,
+    vk: &VerifyingKey,
+) -> Result<Vec<SegmentContent>, SegmentSetError> {
+    let walked = walk(dir, base, vk, false)?;
+    adjudicate(&walked, vk)?;
+    Ok(walked.contents)
+}
+
 /// A completed walk: the segments read, and the front gap still to adjudicate.
 struct Walked {
     contents: Vec<SegmentContent>,

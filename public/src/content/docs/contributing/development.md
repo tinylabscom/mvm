@@ -40,8 +40,21 @@ just toolchain-embed
 
 cargo build
 cargo run -- doctor     # reports the builder backend + anything missing
-cargo run -- bootstrap  # pre-fetch the builder VM image (optional — builds auto-bootstrap it)
+
+# `bootstrap` and any VM boot need the embedded Linux host binaries, whose
+# cross-compile is opt-in. Build with them when you are about to boot:
+just embed
+cargo run --features embed-host-bins -- bootstrap
 ```
+
+> **Note — `just embed` vs `cargo build`.** The cross-compile of the embedded
+> Linux host binaries is the only work `mvm-cli`'s build script still does, and
+> it is off by default so it stays off the edit/check/test loop. A plain
+> `cargo build` gives you an `mvmctl` with every host-side verb; it just cannot
+> bootstrap a builder VM, and says so with this recipe named. The two write the
+> same `target/debug/mvmctl` under different feature sets, so alternating them
+> relinks `mvmctl` — run `just embed` when you are about to boot a VM, not as
+> part of the inner loop. Released binaries always carry the payload.
 
 > **Note — after a toolchain-version change.** `rust-toolchain.toml` pins an
 > exact Rust version, and rustup keys installed cross-targets per toolchain

@@ -29,7 +29,10 @@ mvm-client.workspace = true
 mvm-mcp.workspace = true
 # `mvmctl compile` reads the Workload IR (mvm_contract::ir, re-exported from
 # mvm_contract::ir) and routes it through the compile pipeline.
-mvm-sdk.workspace = true
+# `deploy-remote` carries the HTTPS upload behind `mvmctl deploy`. It is off by
+# default in `mvm-sdk` so the in-guest cdylib built from that crate's lib target
+# links no rustls/ring/tokio; the CLI is the one consumer that needs it.
+mvm-sdk = { workspace = true, features = ["deploy-remote"] }
 mvm-capture.workspace = true
 # Direct IR access (`mvm_contract::ir::…`) for the command surfaces that
 # only need the DTOs, not the rest of the SDK's build-time tooling.
@@ -94,6 +97,15 @@ name = "wasm_run"
 required-features = ["wasm-backend"]
 
 [features]
+# Cross-compile the Linux host binaries (`mvm-host-vm-init`, `stage0-init`, …)
+# and `include_bytes!` them into `mvmctl`. Off by default: it is the only thing
+# left in `build.rs`, it needs the pinned zig + cargo-zigbuild toolchain, and a
+# dev build that is not booting a VM does not need the payload. With it off the
+# build script watches four files and writes an empty table, so cargo runs it
+# once and never again on the inner loop. `just embed` and the release workflow
+
+# turn it on; `host_binaries::extract` refuses with that hint when it is off.
+embed-host-bins = []
 # Forward to `mvm-runtime/wasm-backend`: enables `mvmctl --hypervisor wasm`.
 # Off by default so the default workspace build carries no `wasmtime` dependency.
 wasm-backend = ["mvm-runtime/wasm-backend"]

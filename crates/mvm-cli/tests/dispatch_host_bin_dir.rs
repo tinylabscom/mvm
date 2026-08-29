@@ -1,3 +1,8 @@
+//! Only present when `embed-host-bins` is on: with the feature off there is no
+//! payload to populate the dir with, and `ensure_extracted` refuses by design —
+//! `unembedded_host_binaries.rs` asserts that refusal.
+#![cfg(feature = "embed-host-bins")]
+
 /// Integration test: ensure_extracted populates the host-bin dir that
 /// dispatch wires into BuilderMounts.host_bin_dir before launching the
 /// builder VM.

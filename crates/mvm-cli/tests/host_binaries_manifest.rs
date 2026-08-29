@@ -1,7 +1,6 @@
-use mvm_cli::host_binaries::{
-    embedded::EMBEDDED,
-    manifest::{BOOTSTRAP_SUPPORT_BINARIES, HOST_BINARIES, HostBinary},
-};
+#[cfg(feature = "embed-host-bins")]
+use mvm_cli::host_binaries::embedded::EMBEDDED;
+use mvm_cli::host_binaries::manifest::{BOOTSTRAP_SUPPORT_BINARIES, HOST_BINARIES, HostBinary};
 
 #[test]
 fn manifest_lists_expected_host_binaries() {
@@ -34,6 +33,10 @@ fn manifest_install_paths_match_adr_064() {
     assert_eq!(by_name("mvm-builderd").mode, 0o755);
 }
 
+/// The other tests here are about the manifest constants and hold in every
+/// configuration. This one is about the payload, so it exists only where there
+/// is a payload to inspect.
+#[cfg(feature = "embed-host-bins")]
 #[test]
 fn embedded_bootstrap_support_binaries_include_egress_client() {
     assert!(

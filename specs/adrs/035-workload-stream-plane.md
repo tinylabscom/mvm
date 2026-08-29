@@ -30,6 +30,13 @@ defeat the scan permanently.
 Three limits below (§"What this does not do") are stated as limits, not as
 future work. They are true of the shipped code.
 
+The input half now also has its second production caller: mvmd PR
+[#238](https://github.com/tinylabscom/mvmd/pull/238) validates fleet DAGs and
+signed edge grants before boot, resolves opaque bindings, and drives the
+caller-owned `EdgeConnector` into the exact admitted input route. This does not
+promote claim 17. Its remaining `Preview` limits are properties of fingerprint
+scanning and shell-entrypoint classification, not missing reachability.
+
 ## Context
 
 A production microVM has no shell. Claim 4 removes `do_exec` from the agent

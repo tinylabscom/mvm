@@ -76,6 +76,17 @@ pub const PERF_BUDGET_TAG: &str = "perf_budget";
 /// ignores `ALL_PROXY` and sends the absolute-URI form the proxy refuses rather
 /// than forward in cleartext) cannot satisfy it.
 pub const TLS_TUNNEL_CLIENT_TAG: &str = "tls_tunnel_client";
+/// A scenario that shares a live host directory into the guest over virtio-fs.
+/// libkrun and the in-house HVF VMM both serve one; Firecracker has no virtio-fs
+/// device at all and refuses a `DirShare` volume before boot. Declared rather
+/// than probed, for the same reason as
+/// [`SNAPSHOT_TAG`] — deciding it here would mean re-deriving backend
+/// auto-selection, a copy that drifts silently.
+///
+/// A refusal-shaped scenario needs this tag as much as a success-shaped one:
+/// the share is refused with the same exit code the scenario is asserting, so
+/// without the gate it passes while witnessing nothing.
+pub const DIR_SHARE_TAG: &str = "dir_share";
 
 /// Host capabilities a scenario may require, probed once by the harness.
 ///
@@ -113,6 +124,10 @@ pub struct RuntimeCaps {
     /// `machine checkpoint create --class vm-full` and the pause/resume
     /// round-trip can succeed rather than refusing by capability.
     pub memory_snapshot: bool,
+    /// The active backend serves a live host-directory share (virtio-fs), so a
+    /// scenario passing `--mount` reaches a guest instead of being refused
+    /// before boot.
+    pub dir_share: bool,
 }
 
 /// Decide whether a scenario with `tags` should run given the host `caps`.
@@ -150,6 +165,8 @@ pub enum ScenarioGate {
     NeedsWorkloadKernel,
     /// The backend cannot capture a full-VM memory snapshot on this host.
     NeedsMemorySnapshot,
+    /// The active backend serves no virtio-fs directory share.
+    NeedsDirShare,
     /// No prebuilt guest-binary directory was named.
     NeedsGuestBinDir,
     /// The SDK sidecar image is not in the cache.
@@ -194,6 +211,9 @@ pub fn scenario_gate(tags: &[String], caps: RuntimeCaps) -> ScenarioGate {
     }
     if tagged(SNAPSHOT_TAG) && !caps.memory_snapshot {
         return ScenarioGate::NeedsMemorySnapshot;
+    }
+    if tagged(DIR_SHARE_TAG) && !caps.dir_share {
+        return ScenarioGate::NeedsDirShare;
     }
     if tagged(GUEST_BINS_TAG) && !caps.guest_bin_dir {
         return ScenarioGate::NeedsGuestBinDir;
@@ -242,6 +262,11 @@ impl ScenarioGate {
                 "need a prebuilt workload kernel (MVM_BDD_WORKLOAD_KERNEL, or one \
                  in the host builder-VM cache)",
             ),
+            Self::NeedsDirShare => Some(
+                "need MVM_BDD_DIR_SHARE=1 on a host whose active backend serves \
+                 virtio-fs directory shares (libkrun and HVF do; Firecracker has \
+                 no virtio-fs device and refuses --mount before boot)",
+            ),
             Self::NeedsMemorySnapshot => Some(
                 "need MVM_BDD_SNAPSHOT=1 on a host whose active backend reports \
                  snapshot tier `save-restore` (see `mvmctl doctor`)",
@@ -270,6 +295,113 @@ impl ScenarioGate {
     }
 }
 
+/// Whether a version-keyed SDK sidecar cache under `sidecar_root` holds a
+/// built image.
+///
+/// Walks version and arch directories rather than hardcoding either, so a
+/// version bump cannot quietly turn this into "never available".
+///
+/// The root is an argument rather than resolved here, because the directory
+/// that decides the gate is the one the *scenarios* run against. A probe that
+/// resolves its own `MVM_HOME` reports on a home the subject never reads, and
+/// where that home happens to hold an image, the gate admits a scenario that
+/// then fails in the isolated home where it is absent.
+///
+/// Note what counts as present: the image file, not the version directory.
+/// Those two answers diverge exactly when a cache was created and never
+/// populated, which is the state that makes the distinction matter.
+pub fn sidecar_image_cached_in(sidecar_root: &std::path::Path, image_file: &str) -> bool {
+    let Ok(versions) = std::fs::read_dir(sidecar_root) else {
+        return false;
+    };
+    versions.filter_map(Result::ok).any(|version| {
+        std::fs::read_dir(version.path()).is_ok_and(|arches| {
+            arches
+                .filter_map(Result::ok)
+                .any(|arch| arch.path().join(image_file).is_file())
+        })
+    })
+}
+
+#[cfg(test)]
+mod sidecar_cache {
+    use super::sidecar_image_cached_in;
+
+    const IMAGE: &str = "sdk.ext4";
+
+    #[test]
+    fn a_missing_cache_root_is_not_cached() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(!sidecar_image_cached_in(&dir.path().join("absent"), IMAGE));
+    }
+
+    #[test]
+    fn a_version_directory_without_the_image_is_not_cached() {
+        // The shape that made the gate lie: the cache exists and is keyed
+        // correctly, but nothing ever wrote the image into it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("0.18.0").join("x86_64")).expect("create arch dir");
+        assert!(!sidecar_image_cached_in(dir.path(), IMAGE));
+    }
+
+    #[test]
+    fn an_image_under_any_version_and_arch_is_cached() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let arch = dir.path().join("9.9.9").join("aarch64");
+        std::fs::create_dir_all(&arch).expect("create arch dir");
+        std::fs::write(arch.join(IMAGE), b"image").expect("write image");
+        assert!(sidecar_image_cached_in(dir.path(), IMAGE));
+    }
+}
+
+/// Which mvm home a live step runs against.
+///
+/// A home the scenario declared for itself wins over the artifact-warm
+/// `MVM_E2E_HOME`. The two phrasings must agree: a scenario that creates a
+/// machine through one step and starts it through another is talking about one
+/// directory, and while they disagreed it failed with `machine "..." does not
+/// exist` — an error naming the machine and never the home it was looked for
+/// in, which is why it read as a product defect.
+///
+/// The warm home still applies to every scenario that declared none, which is
+/// what keeps a live run from re-cross-compiling the guest binaries once per
+/// scenario.
+pub fn live_home_precedence<'a>(
+    scenario_home: Option<&'a std::path::Path>,
+    warm_home: Option<&'a std::path::Path>,
+) -> Option<&'a std::path::Path> {
+    scenario_home.or(warm_home)
+}
+
+#[cfg(test)]
+mod live_home {
+    use super::live_home_precedence;
+    use std::path::Path;
+
+    #[test]
+    fn a_scenario_declared_home_wins_over_the_warm_one() {
+        // The case that broke: create ran against the scenario home, start
+        // against the warm one, and the machine was "missing".
+        assert_eq!(
+            live_home_precedence(Some(Path::new("/scenario")), Some(Path::new("/warm"))),
+            Some(Path::new("/scenario"))
+        );
+    }
+
+    #[test]
+    fn the_warm_home_is_used_when_the_scenario_declared_none() {
+        assert_eq!(
+            live_home_precedence(None, Some(Path::new("/warm"))),
+            Some(Path::new("/warm"))
+        );
+    }
+
+    #[test]
+    fn neither_home_yields_none_so_the_caller_must_create_one() {
+        assert_eq!(live_home_precedence(None, None), None);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,6 +420,7 @@ mod tests {
         perf_budget_host: false,
         tls_tunnel_client: false,
         memory_snapshot: false,
+        dir_share: false,
         workload_kernel: false,
     };
     const ALL: RuntimeCaps = RuntimeCaps {
@@ -300,8 +433,23 @@ mod tests {
         perf_budget_host: true,
         tls_tunnel_client: true,
         memory_snapshot: true,
+        dir_share: true,
         workload_kernel: true,
     };
+
+    #[test]
+    fn dir_share_scenario_skips_where_the_backend_serves_no_share() {
+        let gate = scenario_gate(
+            &tags(&["live", "dir_share"]),
+            RuntimeCaps {
+                dir_share: false,
+                ..ALL
+            },
+        );
+        assert_eq!(gate, ScenarioGate::NeedsDirShare);
+        assert!(gate.reason().is_some(), "a skip must name what is missing");
+        assert!(scenario_should_run(&tags(&["live", "dir_share"]), ALL));
+    }
 
     #[test]
     fn bundle_scenario_skips_without_a_fixture() {
@@ -333,6 +481,7 @@ mod tests {
                 perf_budget_host: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
+                dir_share: false,
                 workload_kernel: false,
                 ..ALL
             },
@@ -356,6 +505,7 @@ mod tests {
                 perf_budget_host: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
+                dir_share: false,
                 ..ALL
             },
         ));
@@ -372,6 +522,7 @@ mod tests {
                 perf_budget_host: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
+                dir_share: false,
                 ..ALL
             },
         );
@@ -474,6 +625,7 @@ mod tests {
                 perf_budget_host: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
+                dir_share: false,
                 workload_kernel: false,
             },
         ));
@@ -493,6 +645,7 @@ mod tests {
                 perf_budget_host: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
+                dir_share: false,
                 workload_kernel: false,
             },
         ));
@@ -514,6 +667,7 @@ mod tests {
                 perf_budget_host: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
+                dir_share: false,
                 workload_kernel: false,
             },
         ));
@@ -530,6 +684,7 @@ mod tests {
                 perf_budget_host: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
+                dir_share: false,
                 workload_kernel: false,
             },
         ));
@@ -553,6 +708,7 @@ mod tests {
                 perf_budget_host: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
+                dir_share: false,
                 workload_kernel: false,
             },
             RuntimeCaps {
@@ -565,6 +721,7 @@ mod tests {
                 perf_budget_host: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
+                dir_share: false,
                 workload_kernel: false,
             },
             RuntimeCaps {
@@ -577,6 +734,7 @@ mod tests {
                 perf_budget_host: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
+                dir_share: false,
                 workload_kernel: false,
             },
             RuntimeCaps {
@@ -589,6 +747,7 @@ mod tests {
                 perf_budget_host: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
+                dir_share: false,
                 workload_kernel: true,
             },
             RuntimeCaps {
@@ -601,6 +760,7 @@ mod tests {
                 perf_budget_host: false,
                 tls_tunnel_client: false,
                 memory_snapshot: false,
+                dir_share: false,
                 workload_kernel: true,
             },
         ];
@@ -639,6 +799,7 @@ mod tests {
             perf_budget_host: false,
             tls_tunnel_client: false,
             memory_snapshot: false,
+            dir_share: false,
             workload_kernel: false,
         };
         let live_only = RuntimeCaps {
@@ -651,6 +812,7 @@ mod tests {
             perf_budget_host: false,
             tls_tunnel_client: false,
             memory_snapshot: false,
+            dir_share: false,
             workload_kernel: false,
         };
         let bootable = RuntimeCaps {
@@ -663,6 +825,7 @@ mod tests {
             perf_budget_host: false,
             tls_tunnel_client: false,
             memory_snapshot: false,
+            dir_share: false,
             workload_kernel: false,
         };
 
@@ -719,6 +882,7 @@ mod tests {
                     perf_budget_host: false,
                     tls_tunnel_client: false,
                     memory_snapshot: false,
+                    dir_share: false,
                     workload_kernel: false,
                 },
                 true,

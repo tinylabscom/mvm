@@ -10,6 +10,48 @@
 
 ## In progress
 
+- [x] **Fleet stream edge delivery handoff.** Plan 296's caller-driven
+      connector now owns the production input route, so accepted records and
+      the close tail reach the guest instead of stopping in the gate outbox.
+      The host plane exposes a redacted per-VM reader and a successful local
+      launch exposes its exact admitted plan for the external fleet caller.
+      mvmd PR #238 now drives the bounded workflow in production, so the three
+      fleet-only controls have left the dormant-control ratchet. Focused
+      connector, plane, and client compilation tests are green.
+
+- [ ] **Linux 6.12.107 synchronized kernel pin — issue #2971.**
+      `specs/plans/2026-08-28-kernel-6-12-107.md`.
+      The custom workload/builder kernel and libkrunfw firmware build now use
+      the same kernel.org-verified Linux 6.12.107 archive and SRI hash.
+      The archive digest, structural synchronization suite, sprint/plan gates,
+      and workspace Clippy are green. The macOS workspace run reaches only the
+      independently tracked #2973 failure. Linux Nix builds and merge delivery
+      remain.
+
+- [ ] **Portable dev-VM socket resolver test — issue #2973.**
+      `specs/plans/2026-08-28-portable-dev-vm-socket-test.md`.
+      The libkrun per-port socket assertion now follows the canonical socket
+      directory resolver, preserving both the normal state-dir arm and the
+      macOS-safe shortened arm. The focused regression, all 598 `mvm-vmm`
+      tests, workspace tests, and workspace Clippy are green; merge delivery
+      remains.
+
+- [ ] **Worker restart identity barrier — issue #2976.**
+      `specs/plans/2026-08-28-worker-restart-identity-barrier.md`.
+      The restart regression now waits for the supervisor-published
+      replacement PID before testing journal restoration and audit continuity.
+      The focused regression, full restart suite, ordinary workspace tests,
+      isolated `mvm-cli` doctests, workspace Clippy, formatting, and repository
+      policy gates are green; merge delivery remains.
+
+- [ ] **Wasm SDK host-service admission — issue #2977.**
+      `specs/plans/2026-08-28-wasm-sdk-host-service-admission.md`.
+      The SDK delivery gate now refuses wasm bindings with a typed,
+      service-specific reason before attachment validation or backend start.
+      Focused unit regressions, the gated BDD runner, all ordinary workspace
+      tests, the isolated `mvm-agentd` doctest, workspace Clippy, formatting,
+      and policy gates are green. Merge delivery remains.
+
 - [ ] **Recorded-backend pause and resume — issue #2929.**
       `specs/plans/2026-08-27-recorded-backend-pause-resume.md`.
       Existing-machine lifecycle operations resolve the VMM that owns the live

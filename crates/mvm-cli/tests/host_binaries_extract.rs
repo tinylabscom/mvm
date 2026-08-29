@@ -1,3 +1,8 @@
+//! Properties of the embedded Linux host-binary payload. Only present when
+//! `embed-host-bins` is on; `unembedded_host_binaries.rs` covers the default
+//! build, so neither configuration is left asserting nothing.
+#![cfg(feature = "embed-host-bins")]
+
 use mvm_cli::host_binaries::extract::ensure_extracted;
 use sha2::Digest as _;
 use std::os::unix::fs::PermissionsExt;

@@ -9,6 +9,7 @@
 use mvm_contract::protocol::broker::ServiceId;
 use mvm_contract::stream::edge::{EdgeBackpressure, EdgeRedaction, StreamEdge};
 use mvm_contract::stream::input::INPUT_GRANT_SERVICE;
+use mvm_contract::stream::input::{CloseInput, InputFrame};
 use mvm_contract::stream::record::{StreamKind, StreamSource};
 use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy, SynthesisInput};
 use mvm_core::policy::RedactionPolicy;
@@ -17,11 +18,68 @@ use mvm_hostd::audit::emitter::AuditEmitter;
 use mvm_hostd::plan_admission::{AdmittedPlan, InMemoryNonceLedger, SystemClock, admit_for_run};
 use mvm_hostd::stream::{
     EdgeConnector, EdgeError, EdgeStep, InputAudit, InputBinding, InputGate, InputRefusal,
-    StreamBroker, StreamRedaction,
+    InputRoute, InputTransport, StreamBroker, StreamRedaction, WireSequence,
 };
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
+
+#[derive(Clone, Default)]
+struct CapturedInput {
+    bytes: Arc<Mutex<Vec<u8>>>,
+    close: Arc<Mutex<Option<CloseInput>>>,
+}
+
+impl CapturedInput {
+    fn bytes(&self) -> Vec<u8> {
+        self.bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn close(&self) -> Option<CloseInput> {
+        self.close
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl InputTransport for CapturedInput {
+    fn deliver(&mut self, frame: &InputFrame) -> anyhow::Result<()> {
+        self.bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend_from_slice(&frame.payload);
+        Ok(())
+    }
+
+    fn close(&mut self, close: &CloseInput) -> anyhow::Result<()> {
+        self.bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend_from_slice(&close.trailing);
+        *self
+            .close
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(close.clone());
+        Ok(())
+    }
+}
+
+fn input_route(vm: &str, admitted: &AdmittedPlan) -> (InputRoute, CapturedInput) {
+    let capture = CapturedInput::default();
+    let route = InputRoute::open(
+        vm,
+        admitted,
+        Box::new(capture.clone()),
+        WireSequence::default(),
+    )
+    .expect("the plan grants input");
+    (route, capture)
+}
 
 fn unique_vm(prefix: &str) -> String {
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -137,14 +195,14 @@ fn a_producers_output_reaches_a_consumers_stdin_in_order() {
     let consumer = unique_vm("consumer");
     let plan = admitted_with_grant(&consumer);
     let _chain = bind_chain(&consumer);
-    let session = InputGate::open(&consumer, &plan).expect("the plan grants input");
+    let (route, captured) = input_route(&consumer, &plan);
 
     let mut b = broker(&unique_vm("producer"));
     let reader = b.subscribe();
     ingest(&mut b, b"first\n");
     ingest(&mut b, b"second\n");
 
-    let mut edge = EdgeConnector::new(&StreamEdge::new("upstream"), session, reader)
+    let mut edge = EdgeConnector::new(&StreamEdge::new("upstream"), route, reader)
         .expect("a redacted edge is servable");
     match edge.step().expect("the pump runs") {
         EdgeStep::Delivered { records, bytes } => {
@@ -153,8 +211,10 @@ fn a_producers_output_reaches_a_consumers_stdin_in_order() {
         }
         other => panic!("expected delivery, got {other:?}"),
     }
+    assert_eq!(captured.bytes(), b"first\nsecond\n");
 
-    let closed = edge.close().expect("close");
+    edge.close().expect("close");
+    let closed = captured.close().expect("the transport saw EOF");
     assert_eq!(
         closed.after_seq,
         Some(1),
@@ -197,12 +257,11 @@ fn stepping_across_the_ttl_keeps_the_lease_from_a_competitor() {
                 AuditEmitter::with_dir(key, chain_dir.path()).expect("chain"),
             )),
     );
-    let session = InputGate::open(&consumer, &plan).expect("grant");
+    let (route, _captured) = input_route(&consumer, &plan);
 
     let mut b = broker(&unique_vm("producer-idle"));
     let reader = b.subscribe();
-    let mut edge =
-        EdgeConnector::new(&StreamEdge::new("quiet"), session, reader).expect("servable");
+    let mut edge = EdgeConnector::new(&StreamEdge::new("quiet"), route, reader).expect("servable");
 
     // Step across more than one whole TTL, with nothing to send. Six gaps of
     // this size outlast the TTL, while each one still leaves the next step room
@@ -239,12 +298,11 @@ fn an_unstepped_edge_lets_the_lease_lapse() {
                 AuditEmitter::with_dir(key, chain_dir.path()).expect("chain"),
             )),
     );
-    let session = InputGate::open(&consumer, &plan).expect("grant");
+    let (route, _captured) = input_route(&consumer, &plan);
 
     let mut b = broker(&unique_vm("producer-lapse"));
     let reader = b.subscribe();
-    let _edge =
-        EdgeConnector::new(&StreamEdge::new("abandoned"), session, reader).expect("servable");
+    let _edge = EdgeConnector::new(&StreamEdge::new("abandoned"), route, reader).expect("servable");
 
     std::thread::sleep(PAST_THE_LEASE);
     assert!(
@@ -262,7 +320,7 @@ fn records_buffered_before_the_edge_existed_are_delivered() {
     let consumer = unique_vm("consumer-backlog");
     let plan = admitted_with_grant(&consumer);
     let _chain = bind_chain(&consumer);
-    let session = InputGate::open(&consumer, &plan).expect("grant");
+    let (route, captured) = input_route(&consumer, &plan);
 
     let mut b = broker(&unique_vm("producer-backlog"));
     let reader = b.subscribe();
@@ -270,11 +328,15 @@ fn records_buffered_before_the_edge_existed_are_delivered() {
         ingest(&mut b, format!("line-{i}\n").as_bytes());
     }
 
-    let mut edge = EdgeConnector::new(&StreamEdge::new("backlog"), session, reader).expect("ok");
+    let mut edge = EdgeConnector::new(&StreamEdge::new("backlog"), route, reader).expect("ok");
     match edge.step().expect("pump") {
         EdgeStep::Delivered { records, .. } => assert_eq!(records, 5, "the backlog crossed whole"),
         other => panic!("expected delivery, got {other:?}"),
     }
+    assert_eq!(
+        captured.bytes(),
+        b"line-0\nline-1\nline-2\nline-3\nline-4\n"
+    );
 }
 
 /// Frame sequence must advance across steps, not restart. The gate rejects a
@@ -286,11 +348,11 @@ fn frame_sequence_advances_across_steps() {
     let consumer = unique_vm("consumer-seq");
     let plan = admitted_with_grant(&consumer);
     let _chain = bind_chain(&consumer);
-    let session = InputGate::open(&consumer, &plan).expect("grant");
+    let (route, captured) = input_route(&consumer, &plan);
 
     let mut b = broker(&unique_vm("producer-seq"));
     let reader = b.subscribe();
-    let mut edge = EdgeConnector::new(&StreamEdge::new("seq"), session, reader).expect("ok");
+    let mut edge = EdgeConnector::new(&StreamEdge::new("seq"), route, reader).expect("ok");
 
     ingest(&mut b, b"one\n");
     assert!(matches!(
@@ -306,7 +368,8 @@ fn frame_sequence_advances_across_steps() {
         "a restarted sequence would have been refused as a replay here"
     );
 
-    let closed = edge.close().expect("close");
+    edge.close().expect("close");
+    let closed = captured.close().expect("the transport saw EOF");
     assert_eq!(closed.after_seq, Some(1), "two frames, seq 0 and 1");
 }
 
@@ -317,7 +380,7 @@ fn a_raw_edge_is_refused_at_construction() {
     let consumer = unique_vm("consumer-raw");
     let plan = admitted_with_grant(&consumer);
     let _chain = bind_chain(&consumer);
-    let session = InputGate::open(&consumer, &plan).expect("grant");
+    let (route, _captured) = input_route(&consumer, &plan);
 
     let mut b = broker(&unique_vm("producer-raw"));
     let reader = b.subscribe();
@@ -326,7 +389,7 @@ fn a_raw_edge_is_refused_at_construction() {
         redaction: EdgeRedaction::Raw,
         backpressure: EdgeBackpressure::Lossy,
     };
-    match EdgeConnector::new(&edge, session, reader) {
+    match EdgeConnector::new(&edge, route, reader) {
         Err(EdgeError::RawUnavailable { binding }) => assert_eq!(binding, "fidelity"),
         Ok(_) => panic!("a raw edge must not be served from a post-seam reader"),
         Err(other) => panic!("expected RawUnavailable, got {other}"),

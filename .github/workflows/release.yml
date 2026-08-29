@@ -24,7 +24,13 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  MVMCTL_RELEASE_FEATURES: host,user,template-registry-s3,release-artifact-bootstrap,release-channel
+  # `embed-host-bins` is what makes a released binary self-sufficient: it
+  # cross-compiles the Linux host binaries and embeds them, so a downloaded
+  # mvmctl can bootstrap a builder VM with nothing else installed. It is off by
+  # default (a dev build does not need the payload and should not pay the
+  # cross-compile), which means the *only* place it gets turned on for a shipped
+  # artifact is here.
+  MVMCTL_RELEASE_FEATURES: host,user,template-registry-s3,release-artifact-bootstrap,release-channel,embed-host-bins
 
 jobs:
   bdd:

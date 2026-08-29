@@ -158,6 +158,10 @@ pub const GATES: &[Gate] = &[
         crate::check_core_runtime_free::run,
     ),
     (
+        "check-sdk-transport-free",
+        crate::check_sdk_transport_free::run,
+    ),
+    (
         "check-content-address-determinism",
         crate::check_content_address_determinism::run,
     ),

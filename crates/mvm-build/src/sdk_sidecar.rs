@@ -479,7 +479,7 @@ mod tests {
             "crates/mvm-contract/src",
             "crates/mvm-core/src",
             "crates/mvm-agentd/src",
-            "crates/mvm-sdk/src",
+            "crates/mvm-host-services/src",
         ] {
             std::fs::create_dir_all(root.join(rel)).unwrap();
             std::fs::write(root.join(rel).join("lib.rs"), "pub fn shared() {}\n").unwrap();
@@ -490,15 +490,11 @@ mod tests {
             "crates/mvm-contract/Cargo.toml",
             "crates/mvm-core/Cargo.toml",
             "crates/mvm-agentd/Cargo.toml",
-            "crates/mvm-sdk/Cargo.toml",
+            "crates/mvm-host-services/Cargo.toml",
         ] {
             std::fs::write(root.join(rel), "[package]\n").unwrap();
         }
-        std::fs::write(
-            root.join("crates/mvm-sdk/src/host_services_ffi.rs"),
-            sdk_src,
-        )
-        .unwrap();
+        std::fs::write(root.join("crates/mvm-host-services/src/lib.rs"), sdk_src).unwrap();
     }
 
     /// A downloaded sidecar carries no source marker, and that absence is the
@@ -563,9 +559,7 @@ mod tests {
 
         // The edit that motivated all of this: a new verb in the FFI dispatch.
         std::fs::write(
-            checkout
-                .path()
-                .join("crates/mvm-sdk/src/host_services_ffi.rs"),
+            checkout.path().join("crates/mvm-host-services/src/lib.rs"),
             "// v2 — adds host.kv.get\n",
         )
         .unwrap();

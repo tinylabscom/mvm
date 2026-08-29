@@ -138,10 +138,14 @@ populated it. Steady state after that is unchanged.
 - [ ] **Phase 3** — delete the ~120 lines of phantom `#[cfg(test)]` tests in
       `build.rs` (cargo never builds a build script as a test target, and they
       call `configured_embed_tools_from`, which is not in scope).
-- [ ] **Phase 3** — `MVM_LIBKRUN_HEADER` is read at `build.rs` to decide
-      whether the 6th helper builds, but has no `rerun-if-env-changed` there
-      (only in `libkrun-sys/build.rs`), so changing it does not re-select the
-      helper set.
+- [x] **Phase 3** — `MVM_LIBKRUN_HEADER` was read at `build.rs` to decide
+      whether the 6th helper builds, but had no `rerun-if-env-changed` there
+      (only in `libkrun-sys/build.rs`), so changing it did not re-select the
+      helper set. Closed 2026-08-28 by deleting the probe along with the whole
+      aux-helper leg —
+      `specs/plans/2026-08-28-build-script-drops-the-aux-helper-leg.md`. The
+      `libkrun.h` check now lives in `just build-supervisors`, where a host
+      probe belongs and where no fingerprint depends on it.
 - [ ] **Phase 4a** — dead edges: `mvm-runtime → libkrun-sys` has zero use
       sites; `mvm-cli → mvm-net` is used only from `#[cfg(test)]`;
       `mvm-hostd → mvm-fs` is used from one bin, not the lib.

@@ -3117,6 +3117,7 @@ dependencies = [
  "mvm-sdk",
  "mvm-vmm",
  "mvmctl",
+ "nix 0.29.0",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -3219,6 +3220,16 @@ dependencies = [
  "tracing",
  "uuid",
  "xattr",
+]
+
+[[package]]
+name = "mvm-host-services"
+version = "0.18.0"
+dependencies = [
+ "mvm-agentd",
+ "mvm-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3383,6 +3394,7 @@ dependencies = [
  "mvm-agentd",
  "mvm-contract",
  "mvm-core",
+ "mvm-host-services",
  "mvm-http",
  "schemars",
  "serde",

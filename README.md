@@ -94,6 +94,9 @@ mvmctl machine run --image python:3.12 -- python -c "print(2 + 2)"
 
 # Run a Python file from the host checkout (the mount is read-only).
 # Repeat --mount for additional host directories.
+# --mount needs a backend serving a virtio-fs directory share (libkrun, HVF).
+# Firecracker (the Linux default) has none and refuses before boot: pass a
+# disk-image volume instead, --volume HOST:/GUEST:SIZE.
 mvmctl machine run --image python:3.12 \
   --mount "$PWD:/work:ro" -- python /work/app.py
 
@@ -753,8 +756,9 @@ Claim 15 used to hold by _absence_: there was no host→guest byte path at all.
 The workload input channel built one, so refusing input is now a policy
 decision rather than a consequence of there being nothing to refuse. ADR-001
 carries that rewording, plus a `Preview` claim 17 for the input channel with
-the four limits that keep it a preview — including that it has no operator
-surface yet. See
+the fingerprint-scan and shell-classification limits that keep it a preview.
+Both the operator input surface and mvmd's fleet stream-edge workflow are now
+production callers; reachability is no longer the reason for the status. See
 [Workload input](public/src/content/docs/guides/workload-input.md).
 
     Separately, the restricted ProdSafe grant is issued only to a baked-entrypoint

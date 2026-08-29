@@ -7,10 +7,11 @@ A **stream edge** connects one workload's output to another's stdin, so a fleet
 can run a workflow. `mvm` provides the mechanism; `mvmd` declares the edges and
 resolves them. A single-VM `mvmctl` run has no edges.
 
-:::caution[Mechanism only, today]
-The pieces below are on `main` and tested, but nothing in `mvm` declares an
-edge — `mvmd` is the caller. Until it does, this page describes a surface you
-can build against rather than a feature you can drive from the CLI.
+:::note[Fleet-driven surface]
+The pieces below are on `main`, tested, and driven in production by mvmd's
+bounded workflow supervisor. Nothing in `mvm` declares an edge because a
+single-VM invocation has no fleet graph. There is intentionally no `mvmctl`
+command that accepts a fleet edge declaration.
 :::
 
 ## A consumer names a binding, never a VM
@@ -165,16 +166,14 @@ What holds by construction, and is tested:
 
 What is **not** claimed:
 
-- That the refusals fire in production. They have no caller in `mvm`; `mvmd`
-  is expected to call them, and until it does they are declared dormant in
-  `xtask/dormant-controls.toml` so CI notices if that changes.
 - Anything about a consumer's handling of what it receives. An edge delivers
   bytes to stdin; what the workload does with them is the workload's business.
 
-Claim 17 (the workload input plane) stays at `Preview`. An edge would be its
-second production caller, and reassessing that is deferred until one exists —
-promoting a claim on the strength of a caller that has not been written is the
-drift this project's gates exist to prevent.
+The pre-boot refusals and bounded delivery now fire through mvmd's production
+workflow supervisor. Claim 17 (the workload input plane) nevertheless stays at
+`Preview`: the reassessment found its remaining limits are the fingerprint
+scan and shell-entrypoint heuristic documented in the workload-input guide,
+not whether a second caller exists.
 
 ## See also
 

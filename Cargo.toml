@@ -15,6 +15,11 @@ members = [
     "crates/mvm-backends",
     "crates/mvm-build",
     "crates/mvm-agentd",
+    # The in-guest host-services C ABI. Its own crate so the object compiled
+    # into every guest carries no host-side toolchain: `mvm-sdk` holds the
+    # decorator parser (tree-sitter) and the deploy record (blake3), both C,
+    # and building the cdylib from that crate dragged them along.
+    "crates/mvm-host-services",
     "crates/mvm-cli",
     "crates/mvm-hostd",
     "crates/mvm-client",
@@ -356,6 +361,7 @@ mvm-core = { path = "crates/mvm-core", version = "0.18.0" }
 mvm-client = { path = "crates/mvm-client", version = "0.18.0" }
 mvm-mcp = { path = "crates/mvm-mcp", version = "0.18.0" }
 mvm-agentd = { path = "crates/mvm-agentd", version = "0.18.0" }
+mvm-host-services = { path = "crates/mvm-host-services", version = "0.18.0" }
 mvm-build = { path = "crates/mvm-build", version = "0.18.0", default-features = false }
 mvm-runtime = { path = "crates/mvm-runtime", version = "0.18.0", default-features = false }
 mvm-vmm = { path = "crates/mvm-vmm", version = "0.18.0" }
@@ -549,6 +555,15 @@ release-artifact-bootstrap = ["mvm-cli/release-artifact-bootstrap"]
 # Mark an official distribution separately so runtime artifact resolution uses
 # the published channel even when the binary runs from a source checkout.
 release-channel = ["mvm-cli/release-channel"]
+
+# Build-only: cross-compile the Linux host binaries and embed them in `mvmctl`.
+# Acquisition mechanics, not product behaviour — a build with this on and one
+# with it off expose exactly the same verbs; the difference is whether the
+# payload the builder VM needs travels inside the binary. Off by default so the
+# only remaining work in `mvm-cli`'s build script stays off the inner loop.
+
+# `just embed` and the tag-push release workflow turn it on.
+embed-host-bins = ["mvm-cli/embed-host-bins"]
 
 # Optional S3 storage backend for the template registry — a heavy cloud dep kept
 # opt-in (not part of the local host runtime; fleet/deployment use only).
