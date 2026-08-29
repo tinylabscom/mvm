@@ -25,8 +25,9 @@
       tree as a read-only ext4 disk volume, which Firecracker and HVF can both
       attach. The negative witness also requires the guest-visible `not bound`
       error so a pre-boot refusal cannot satisfy it. Focused fixture-image
-      coverage and conformance-target compilation are green; full validation,
-      live default-backend witnesses, and merge delivery remain.
+      coverage, conformance-target compilation, the workspace suite,
+      zero-warning Clippy, formatting, and repository policy gates are green;
+      live default-backend witnesses and merge delivery remain.
 
 - [ ] **Linux 6.12.107 synchronized kernel pin — issue #2971.**
       `specs/plans/2026-08-28-kernel-6-12-107.md`.

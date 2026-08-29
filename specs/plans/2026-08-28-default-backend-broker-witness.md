@@ -18,7 +18,7 @@ a pre-boot volume refusal satisfy the negative scenario.
       broker result in addition to its nonzero exit.
 - [x] Add focused coverage for ext4 materialization and the read-only block
       volume command, and compile the complete conformance target.
-- [ ] Run workspace tests, formatting, policy gates, and zero-warning Clippy.
+- [x] Run workspace tests, formatting, policy gates, and zero-warning Clippy.
 - [ ] Capture live Firecracker and HVF broker witnesses in CI.
 - [ ] Merge the tested pull request and close #2988 through its linkage.
 

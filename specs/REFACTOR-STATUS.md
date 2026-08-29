@@ -8,8 +8,9 @@ Last updated: 2026-08-29
       `specs/plans/2026-08-28-default-backend-broker-witness.md`.
       The live SDK broker fixture is now a read-only ext4 disk instead of a
       virtio-fs directory share, and the refusal scenario names the broker's
-      `not bound` result. Focused coverage and BDD compilation are green; full
-      gates, live Firecracker/HVF evidence, and merge delivery remain.
+      `not bound` result. Focused coverage, BDD compilation, workspace tests,
+      zero-warning Clippy, formatting, and policy gates are green; live
+      Firecracker/HVF evidence and merge delivery remain.
 
 - [ ] **Linux 6.12.107 synchronized kernel pin — issue #2971.**
       `specs/plans/2026-08-28-kernel-6-12-107.md`.

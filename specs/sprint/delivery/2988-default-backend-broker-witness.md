@@ -7,6 +7,6 @@
 - [x] Pin the negative witness to the guest-visible `not bound` broker result.
 - [x] Add and pass focused fixture-image coverage.
 - [x] Compile the complete BDD conformance target.
-- [ ] Pass the full workspace and repository gates.
+- [x] Pass the full workspace and repository gates.
 - [ ] Pass the live default-backend broker witnesses.
 - [ ] Merge through the queue and close #2988 through the PR link.
