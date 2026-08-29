@@ -49,6 +49,9 @@ Last updated: 2026-08-29
       access to the hosted kernel and initramfs and takes ownership of the
       vhost-vsock device before the Stage 0 sidecar build. QEMU extraction now
       copies the complete sidecar bundle without restoring guest ownership.
+      The Intel witness installs QEMU and selects it for Stage 0 artifact
+      construction, retaining HVF for workload execution and avoiding the
+      unavailable libkrun host library.
       Focused tests, workspace tests, isolated doctests, workspace Clippy,
       formatting, and policy gates are green. A fresh Extended CI run and merge
       delivery remain.

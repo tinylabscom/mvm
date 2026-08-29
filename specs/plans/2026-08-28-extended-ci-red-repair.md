@@ -42,6 +42,10 @@ a competing BLAKE3 address or re-hash the archive.
   tried to preserve root ownership with `debugfs rdump` and ignored the three
   SDK-sidecar outputs. QEMU Stage 0 now dumps only the allow-listed artifacts
   without ownership preservation, including the image, version, and checksums.
+- The first full rerun proved the Intel HVF witness still auto-selected
+  libkrun for Stage 0 even though libkrun is ARM-only on macOS. The job now
+  installs QEMU and explicitly selects it for Stage 0 artifact construction;
+  workload scenarios remain on HVF, with a bounded 90-minute cold-run deadline.
 
 ## Delivery checklist
 
@@ -71,5 +75,7 @@ a competing BLAKE3 address or re-hash the archive.
       regression covering ownership, mode, and read/write access.
 - [x] Make QEMU Stage 0 extraction ownership-neutral and include the complete
       SDK-sidecar artifact contract in its allow-list.
+- [x] Route Intel-hosted Stage 0 builds through an installed QEMU without
+      changing the workload backend from HVF.
 - [ ] Pass a fresh Extended CI run containing all repaired witness lanes.
 - [ ] Merge the corrective pull request and close #2979 through its linkage.

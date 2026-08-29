@@ -166,6 +166,25 @@ fn intel_hvf_witness_does_not_install_arm_only_libkrun_firmware() {
 }
 
 #[test]
+fn intel_hvf_witness_uses_qemu_for_stage0_builds() {
+    let workflow = extended_ci();
+    let macos = job_block(&workflow, "e2e-docs-macos");
+
+    assert!(
+        macos.contains("MVM_BUILDER_BACKEND: qemu"),
+        "the Intel HVF witness must route Stage 0 builds away from ARM-only libkrun"
+    );
+    assert!(
+        macos.contains("brew install qemu"),
+        "the Intel runner must install the QEMU binary selected for Stage 0"
+    );
+    assert!(
+        macos.contains("timeout-minutes: 90"),
+        "the cold QEMU Stage 0 build and live HVF scenarios need a bounded but realistic deadline"
+    );
+}
+
+#[test]
 fn root_manifest_enables_libkrun_only_on_apple_silicon() {
     let manifest = root_manifest();
 

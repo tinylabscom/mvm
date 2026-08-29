@@ -114,7 +114,11 @@
       version. The Linux job now also makes the hosted kernel and initramfs
       readable and transfers `/dev/vhost-vsock` to the runner user before
       QEMU's Stage 0 sidecar build. QEMU then extracts the complete sidecar
-      bundle through ownership-neutral, allow-listed `debugfs dump` calls.
+      bundle through ownership-neutral, allow-listed `debugfs dump` calls. The
+      first full rerun then proved the Intel macOS job still auto-selected the
+      unavailable libkrun Stage 0 path; that witness now installs QEMU and
+      selects it only for Stage 0 while keeping workload execution on HVF.
+      Its cold-build deadline is bounded at 90 minutes.
       Focused tests, all ordinary workspace tests, the isolated `mvm-agentd`
       doctest, workspace Clippy, formatting, and repository policy gates are
       green. The live rerun and merge delivery remain.

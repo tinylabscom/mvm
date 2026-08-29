@@ -17,6 +17,8 @@
       `/dev/vhost-vsock` before the unprivileged Stage 0 QEMU process starts.
 - [x] QEMU Stage 0 extracts the complete SDK-sidecar bundle through
       ownership-neutral, allow-listed `debugfs dump` calls.
+- [x] The Intel macOS witness installs QEMU for Stage 0 artifact construction
+      while retaining HVF for workload execution and avoiding ARM-only libkrun.
 - [x] Focused regressions, shared resolver tests, formatting, and package Clippy
       are green.
 - [x] Latest-main workspace tests, isolated doctests, workspace Clippy,
