@@ -1,5 +1,8 @@
 # Default-backend host-services broker witness
 
+Backing: shipped-source
+Validation: check-sprint-append
+
 **Status:** IN PROGRESS
 **Date:** 2026-08-28
 **Issue:** [#2988](https://github.com/tinylabscom/mvm/issues/2988)
