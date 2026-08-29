@@ -7,7 +7,9 @@
       mutation exemptions reported as caught by the Linux Security lane.
 - [x] Passed the focused regressions, `cargo deny`, and the static
       mutation-surface gate.
-- [ ] Pass the full validation matrix and Linux mutation-witness lane.
+- [x] Pass workspace tests, isolated doctests, workspace Clippy, formatting,
+      and repository policy gates.
+- [ ] Pass a fresh Security run, including the Linux mutation-witness lane.
 - [ ] Merge the linked pull request through the queue.
 
 Owning plan: `specs/plans/2026-08-28-security-lane-red-repair.md`.

@@ -3,7 +3,8 @@
 Backing: shipped-source
 Validation: check-sprint-append
 
-**Issue:** [#2982](https://github.com/tinylabscom/mvm/issues/2982)
+**Issues:** [#2982](https://github.com/tinylabscom/mvm/issues/2982),
+[#2986](https://github.com/tinylabscom/mvm/issues/2986)
 
 ## Outcome
 
@@ -21,6 +22,7 @@ removed so the baseline remains a ratchet rather than an archive.
       mutation exemptions reported by CI.
 - [x] Pass the focused dependency and libkrun regressions, `cargo deny`, and
       the static mutation-surface gate.
-- [ ] Pass workspace tests, zero-warning Clippy, policy gates, and the Linux
-      mutation-witness lane.
-- [ ] Merge the tested pull request and close #2982 through its linkage.
+- [x] Pass workspace tests, zero-warning Clippy, and policy gates.
+- [ ] Pass a fresh Security run, including the Linux mutation-witness lane.
+- [ ] Merge the tested pull request and close #2982 and #2986 through its
+      linkage.
