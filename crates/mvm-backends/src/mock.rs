@@ -296,6 +296,7 @@ impl VmmDriver for MockDriver {
             spawned_unix_secs: mvm_core::time::now_unix_secs(),
             state: StandbyState::Idle,
             image_sha256: spec.image_sha256.clone(),
+            root_strategy: spec.root_strategy,
             vsock_egress: spec.vsock_egress,
             parent_checkpoint: None,
             preloaded_child_vm_name: None,

@@ -238,6 +238,13 @@ pub struct CliWorld {
     pub initramfs_boot_initrd: Option<Result<Option<String>, String>>,
     /// Whether live CLI steps should keep one warm standby for the next run.
     pub warm_residency: bool,
+    /// Home selected by the most recent live CLI step. This is the shared
+    /// artifact-warm home when the live runner provides one.
+    pub last_live_home: Option<PathBuf>,
+    /// Transient request directories present before a live warm-claim journey.
+    /// The final assertion compares against this baseline so unrelated stale
+    /// state in a shared runner home cannot hide or falsely fail the cleanup.
+    pub live_request_dirs_before: Option<HashSet<PathBuf>>,
     /// Content address of the bundle a `bundle install` step registered, so the
     /// boot step can name it as `machine run --manifest <sha>`.
     pub bundle_sha: Option<String>,

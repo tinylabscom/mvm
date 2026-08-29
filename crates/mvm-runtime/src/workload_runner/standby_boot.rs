@@ -27,7 +27,7 @@
 use std::path::Path;
 
 use mvm_core::policy::network_policy::NetworkPolicy;
-use mvm_core::vm_backend::{StandbyError, StandbySpec, VmStartConfig};
+use mvm_core::vm_backend::{RuntimeSourceRootStrategy, StandbyError, StandbySpec, VmStartConfig};
 
 use crate::driver::VmmSpec;
 use mvm_vmm::host::cmdline;
@@ -162,6 +162,18 @@ pub fn factory_parent_config(
         runtime_overlay_version,
         mem_initial_mib,
     } = launch;
+
+    let launch_root_strategy = if virtiofs_root.is_some() {
+        RuntimeSourceRootStrategy::VirtiofsRoot
+    } else {
+        RuntimeSourceRootStrategy::BlockExt4
+    };
+    if spec.root_strategy != launch_root_strategy {
+        return Err(StandbyError::SpawnFailed(format!(
+            "standby '{}' records {:?} but its launch resolves {:?}",
+            spec.id, spec.root_strategy, launch_root_strategy
+        )));
+    }
 
     let parent = VmStartConfig {
         name: spec.id.clone(),
@@ -368,6 +380,11 @@ mod tests {
             vm_state_dir: dir.join("standby-abc").display().to_string(),
             image_path: Some(launch.rootfs_path.clone()),
             image_sha256: Some("e".repeat(64)),
+            root_strategy: if launch.virtiofs_root.is_some() {
+                mvm_core::vm_backend::RuntimeSourceRootStrategy::VirtiofsRoot
+            } else {
+                mvm_core::vm_backend::RuntimeSourceRootStrategy::BlockExt4
+            },
             vsock_egress: mvm_vmm::host::egress_shared::effective_vsock_egress(launch),
         }
     }
@@ -436,6 +453,31 @@ mod tests {
         assert_eq!(parent.vcpus, workload.vcpus);
         assert_eq!(parent.memory_mib, workload.memory_mib);
         assert_eq!(parent.mem_initial_mib, workload.mem_initial_mib);
+    }
+
+    #[test]
+    fn virtiofs_parent_boots_the_same_read_only_root_as_the_workload() {
+        let (_env, home, _lock) = isolated_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let tree = tmp.path().join("unpacked-oci");
+        std::fs::create_dir(&tree).unwrap();
+        let mut launch = sealed_launch(tmp.path(), home.path());
+        launch.virtiofs_root = Some(tree.display().to_string());
+        let spec = standby_spec_for(&launch, tmp.path());
+
+        assert_eq!(spec.root_strategy, RuntimeSourceRootStrategy::VirtiofsRoot);
+        let workload = workload_boot(&launch, &tmp.path().join("workload-a"));
+        let parent_cfg = factory_parent_config(&launch, &spec).unwrap();
+        let parent = factory_parent_spec(&parent_cfg, Path::new(&spec.vm_state_dir), fc_base);
+
+        assert_eq!(parent.shares, workload.shares);
+        assert!(
+            parent
+                .shares
+                .iter()
+                .any(|share| share.tag == "mvmroot" && share.host_path == tree),
+            "the parent must serve the same OCI tree the workload requested"
+        );
     }
 
     /// An egress-allowing launch: the parent must boot the same shape cmdline

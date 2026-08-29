@@ -80,6 +80,7 @@ fn standby_compat() -> StandbyCompat {
         vcpus: 2,
         mem_mib: 512,
         image_sha256: None,
+        root_strategy: Default::default(),
         vsock_egress: false,
     }
 }

@@ -10,6 +10,18 @@
 
 ## In progress
 
+- [ ] **Warm standby image claim repair — issue #3002.**
+      `specs/plans/2026-08-28-warm-standby-image-claim.md`.
+      Standby compatibility now records the root device model, allowing HVF's
+      ordinary read-only virtiofs OCI launches to warm and claim without ever
+      matching a block-backed parent. The live witness explicitly provisions
+      one parent in the artifact-warm home and checks request-state cleanup
+      relative to a pre-run baseline. Workspace tests, all-target/all-feature
+      Clippy, Linux- and BDD-gated checks, formatting, and policy gates are
+      green. The eBPF lane's probabilistic signed-line substring assertion now
+      verifies the authenticated stream-label allowlist exactly; live CI
+      witnesses and merge delivery remain.
+
 - [x] **Fleet stream edge delivery handoff.** Plan 296's caller-driven
       connector now owns the production input route, so accepted records and
       the close tail reach the guest instead of stopping in the gate outbox.

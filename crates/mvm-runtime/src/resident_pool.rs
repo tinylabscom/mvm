@@ -268,6 +268,7 @@ mod tests {
             vcpus: 2,
             mem_mib: 256,
             image_sha256: Some("image".into()),
+            root_strategy: Default::default(),
             vsock_egress: true,
         }
     }
@@ -286,6 +287,7 @@ mod tests {
             spawned_unix_secs: 1,
             state,
             image_sha256: compat.image_sha256,
+            root_strategy: compat.root_strategy,
             parent_checkpoint: Some(format!("checkpoint-{id}")),
             preloaded_child_vm_name: None,
             vsock_egress: compat.vsock_egress,

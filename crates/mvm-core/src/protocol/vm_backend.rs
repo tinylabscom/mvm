@@ -646,6 +646,7 @@ mod tests {
             vm_state_dir: "/p/standby-x".into(),
             image_path: None,
             image_sha256: None,
+            root_strategy: RuntimeSourceRootStrategy::BlockExt4,
             vsock_egress: false,
         }
     }
@@ -686,6 +687,7 @@ mod tests {
                 spawned_unix_secs: 1,
                 state: StandbyState::Idle,
                 image_sha256: None,
+                root_strategy: RuntimeSourceRootStrategy::BlockExt4,
                 parent_checkpoint: None,
                 vsock_egress: false,
                 preloaded_child_vm_name: None,

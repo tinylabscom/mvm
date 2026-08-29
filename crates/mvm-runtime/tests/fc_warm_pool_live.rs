@@ -28,7 +28,7 @@ use std::time::Instant;
 use mvm_agentd::vsock::connect_to;
 use mvm_core::checkpoint::CheckpointId;
 use mvm_core::crypto::vmgenid::fresh_generation_token;
-use mvm_core::vm_backend::{StandbySpec, StandbyState, StartMode};
+use mvm_core::vm_backend::{RuntimeSourceRootStrategy, StandbySpec, StandbyState, StartMode};
 use mvm_runtime::checkpoint::{CaptureVmFullParams, CheckpointStore, capture_vm_full};
 use mvm_runtime::driver::fc::FcDriver;
 use mvm_runtime::driver::{
@@ -127,6 +127,7 @@ fn standby_spec(id: &str, images: &LiveImages, home: &Path) -> StandbySpec {
             .into_owned(),
         image_path: Some(images.rootfs.to_string_lossy().into_owned()),
         image_sha256: Some(sha256(&images.rootfs)),
+        root_strategy: RuntimeSourceRootStrategy::BlockExt4,
         // The live launch this parent mirrors is deny-all, so the guest boots no
         // egress client.
         vsock_egress: false,

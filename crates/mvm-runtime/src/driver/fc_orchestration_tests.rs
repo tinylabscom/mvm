@@ -78,6 +78,7 @@ mod tests {
             vm_state_dir: tmp.path().join("standby-parent-1").display().to_string(),
             image_path: Some(image.display().to_string()),
             image_sha256: Some("c".repeat(64)),
+            root_strategy: Default::default(),
             vsock_egress: mvm_vmm::host::egress_shared::effective_vsock_egress(&launch),
         };
 
@@ -150,6 +151,7 @@ mod tests {
                 .to_string(),
             image_path: Some(image.display().to_string()),
             image_sha256: Some("c".repeat(64)),
+            root_strategy: Default::default(),
             vsock_egress: mvm_vmm::host::egress_shared::effective_vsock_egress(launch),
         };
         let parent_boot = |launch: &VmStartConfig| {

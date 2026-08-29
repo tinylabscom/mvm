@@ -331,6 +331,7 @@ mod tests {
             spawned_unix_secs: 1,
             state,
             image_sha256: None,
+            root_strategy: Default::default(),
             parent_checkpoint: None,
             preloaded_child_vm_name: None,
             vsock_egress: false,
@@ -352,6 +353,7 @@ mod tests {
             spawned_unix_secs: 1,
             state: StandbyState::Idle,
             image_sha256: None,
+            root_strategy: Default::default(),
             parent_checkpoint: None,
             preloaded_child_vm_name: None,
             vsock_egress: false,
@@ -365,6 +367,7 @@ mod tests {
             vcpus: 2,
             mem_mib: 1024,
             image_sha256: None,
+            root_strategy: Default::default(),
             vsock_egress: false,
         }
     }
@@ -642,6 +645,7 @@ mod tests {
             spawned_unix_secs: 1,
             state,
             image_sha256: Some(image.into()),
+            root_strategy: Default::default(),
             parent_checkpoint: None,
             preloaded_child_vm_name: None,
             vsock_egress: false,
@@ -655,6 +659,7 @@ mod tests {
             vcpus: 2,
             mem_mib: 1024,
             image_sha256: Some(image.into()),
+            root_strategy: Default::default(),
             vsock_egress: false,
         }
     }

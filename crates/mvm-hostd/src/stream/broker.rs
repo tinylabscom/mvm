@@ -493,10 +493,11 @@ impl StreamBroker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::emitter::stream_audit;
     use crate::stream::durable::DURABLE_QUEUE_DEPTH;
     use crate::stream::fanout::DEFAULT_READER_MAX_RECORDS;
     use crate::stream::redact::{Redacted, RedactionFailed, StreamRedactor};
-    use crate::supervisor::verify_audit_chain;
+    use crate::supervisor::verify_audit_chain_entries;
     use ed25519_dalek::SigningKey;
     use mvm_contract::stream::{verify_chain, verify_chain_from};
     use mvm_core::crypto::aead;
@@ -1417,23 +1418,24 @@ mod tests {
         }
 
         let chain = audit_dir.path().join("local.jsonl");
-        let content = std::fs::read_to_string(&chain).expect("audit chain");
+        let entries =
+            verify_audit_chain_entries(&chain, &verifying_key).expect("the entry is chain-signed");
         assert_eq!(
-            content.lines().count(),
+            entries.len(),
             1,
             "one entry per attach, never one per record"
         );
-        assert!(content.contains("stream.subscribed"));
-        assert!(content.contains("vm-a"));
-        assert!(
-            !content.contains("4111111111111111"),
-            "the audit chain must carry no payload bytes"
-        );
-        assert!(
-            !content.contains("XXX"),
-            "not even the redacted payload belongs in the chain"
+        let entry = entries.first().expect("one verified entry");
+        assert_eq!(entry.event, stream_audit::SUBSCRIBED_EVENT);
+        assert_eq!(
+            entry.labels,
+            std::collections::BTreeMap::from([
+                (stream_audit::LABEL_VM_NAME.to_string(), "vm-a".to_string()),
+                (stream_audit::LABEL_READER_ID.to_string(), "0".to_string()),
+                (stream_audit::LABEL_FROM_SEQ.to_string(), "0".to_string()),
+            ]),
+            "the signed entry must contain only attach metadata, never raw or redacted payload bytes"
         );
         assert_eq!(b.counters().audit_failures, 0);
-        verify_audit_chain(&chain, &verifying_key).expect("the entry is chain-signed");
     }
 }
