@@ -66,7 +66,7 @@ fn run_build(args: BuildArgs) -> Result<()> {
 
     #[cfg(feature = "builder-vm")]
     {
-        let artifact = crate::commands::env::builder_vm::build_sdk_sidecar_via_stage0(
+        let artifact = crate::commands::env::builder_vm::build_sdk_sidecar_from_checkout(
             &workspace_root,
             &cache_root,
             version,

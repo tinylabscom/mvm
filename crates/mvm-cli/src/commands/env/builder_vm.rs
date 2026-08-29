@@ -61,7 +61,7 @@ pub(crate) use kernel::{KernelVariant, build_kernel_via_stage0};
 #[cfg(all(test, feature = "builder-vm"))]
 use kernel::{format_compile_elapsed, format_compile_start};
 #[cfg(feature = "builder-vm")]
-pub(crate) use sdk_sidecar::build_sdk_sidecar_via_stage0;
+pub(crate) use sdk_sidecar::build_sdk_sidecar_from_checkout;
 #[cfg(feature = "builder-vm")]
 use stage0_cache::Stage0FailureStage;
 #[cfg(any(

@@ -91,16 +91,15 @@ Last updated: 2026-08-29
       and BDD compilation checks, workspace tests, check, Clippy, formatting,
       and repository gates are green; merge-queue delivery remains.
 
-- [ ] **Extended CI documented-surface repair — issue #2938.**
+- [ ] **Extended CI documented-surface repair — issues #2938 and #2979.**
       `specs/plans/2026-08-27-extended-ci-documented-surface.md`.
       Both scheduled platform witnesses now build signed-manifest verification
       through the standard link path, and the macOS HVF lane installs its
-      target-gated libkrun and embedded Linux cross-toolchain dependencies.
-      The explicit published-image choice now reaches builder bootstrap, macOS
-      downloads its workload kernel, and clean runners build the SDK codegen
-      driver, and the source-sidecar warm-up is now explicit. Focused tests, the
-      exact feature build, and Clippy are green; the live rerun and merge
-      delivery remain.
+      embedded Linux cross toolchain. The explicit published-image choice now
+      reaches builder bootstrap, macOS downloads its workload kernel, and the
+      source-matched SDK-sidecar job runs inside that fetched image under HVF
+      instead of ARM-only libkrun or Linux-host QEMU Stage 0. Focused tests and
+      Clippy are green; the live rerun and merge delivery remain.
 
 - [ ] **Cloudflare Pages cutover.**
       `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.
