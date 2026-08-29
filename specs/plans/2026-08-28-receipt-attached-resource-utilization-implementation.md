@@ -567,6 +567,14 @@ impl ResourceObservation {
                 host_state: HostStateObservation::StateDirTreeBytes,
                 wall: WallObservation::HostLaunchSpan,
             },
+            // Superseded during execution: neither VMM is actually a child we
+            // reap. Firecracker launches session-detached and is orphaned to
+            // init before the launch call returns, and QEMU daemonizes
+            // itself, so there is no rusage to collect. The shipped matrix
+            // declares `CpuObservation::None` / `MemoryObservation::None` for
+            // this arm; the spec's per-backend coverage table is the
+            // authoritative record.
+            //
             // The VMM is a child we reap, so its resource usage arrives with
             // the reap itself.
             BackendKind::Firecracker | BackendKind::Qemu => Self {

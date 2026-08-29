@@ -313,10 +313,23 @@ impl ResourceObservation {
                 wall: WallObservation::HostLaunchSpan,
             },
             // Wasm's fuel counter is declared and unwired, so a fuel-derived
-            // CPU number would assert a measurement that does not happen.
-            // WebLinux runs in a browser with no host VMM process to observe.
-            // Mock boots nothing.
-            BackendKind::Wasm | BackendKind::WebLinux | BackendKind::Mock => Self {
+            // CPU number would assert a measurement that does not happen, and
+            // the module runs in-process with no separate VMM to hold a
+            // resident size. It does keep a host-side state directory,
+            // though: `start_with_mode` unconditionally writes
+            // `wasm-activation/activation.json` under `vm_state_dir`, and
+            // that directory outlives the synchronous run (only the
+            // egress-endpoint subdirectory, when spawned, is reaped inline),
+            // so a tree-size reading at exit observes something real.
+            BackendKind::Wasm => Self {
+                cpu: CpuObservation::None,
+                memory: MemoryObservation::None,
+                host_state: HostStateObservation::StateDirTreeBytes,
+                wall: WallObservation::HostLaunchSpan,
+            },
+            // WebLinux runs in a browser with no host VMM process and no
+            // host-side state directory to observe. Mock boots nothing.
+            BackendKind::WebLinux | BackendKind::Mock => Self {
                 cpu: CpuObservation::None,
                 memory: MemoryObservation::None,
                 host_state: HostStateObservation::None,
@@ -629,13 +642,36 @@ mod tests {
 
     #[test]
     fn the_non_vm_tiers_observe_only_the_span_the_host_saw() {
-        for kind in [BackendKind::Wasm, BackendKind::WebLinux, BackendKind::Mock] {
+        // WebLinux runs in a browser and Mock boots nothing, so neither ever
+        // touches a host-side state directory. Wasm is excluded here — see
+        // `the_wasm_tier_observes_its_activation_state_directory` — because it
+        // does write one.
+        for kind in [BackendKind::WebLinux, BackendKind::Mock] {
             let observation = ResourceObservation::for_backend(kind);
             assert_eq!(observation.cpu, CpuObservation::None);
             assert_eq!(observation.memory, MemoryObservation::None);
             assert_eq!(observation.host_state, HostStateObservation::None);
             assert_eq!(observation.wall, WallObservation::HostLaunchSpan);
         }
+    }
+
+    #[test]
+    fn the_wasm_tier_observes_its_activation_state_directory() {
+        // `WasmBackend::start_with_mode` unconditionally writes
+        // `wasm-activation/activation.json` under `vm_state_dir` before
+        // running the module, and that directory is not cleaned up when the
+        // synchronous run finishes — only a spawned egress endpoint's own
+        // subdirectory is reaped inline. So unlike CPU and memory, which have
+        // no in-process VMM to observe, the state directory is real and
+        // measurable.
+        let observation = ResourceObservation::for_backend(BackendKind::Wasm);
+        assert_eq!(observation.cpu, CpuObservation::None);
+        assert_eq!(observation.memory, MemoryObservation::None);
+        assert_eq!(
+            observation.host_state,
+            HostStateObservation::StateDirTreeBytes
+        );
+        assert_eq!(observation.wall, WallObservation::HostLaunchSpan);
     }
 
     #[test]

@@ -230,7 +230,8 @@ therefore an optional later refinement, not the foundation.
 | `Hvf`, `AppleContainer` | `hvf_summed_vcpu_clock` — guest vCPU time only, excluding host-side device emulation | `host_process_rss` | `state_dir_tree_bytes` | `host_launch_span` |
 | `Libkrun` | `host_process_cpu` — process total: guest execution plus VMM overhead, vsock pumping, device emulation | `host_process_rss` | `state_dir_tree_bytes` | `host_launch_span` |
 | `Firecracker`, `Qemu` | unavailable | unavailable | `state_dir_tree_bytes` | `host_launch_span` |
-| `Wasm`, `WebLinux`, `Mock` | unavailable | unavailable | unavailable | `host_launch_span` |
+| `Wasm` | unavailable | unavailable | `state_dir_tree_bytes` | `host_launch_span` |
+| `WebLinux`, `Mock` | unavailable | unavailable | unavailable | `host_launch_span` |
 
 Wall is `host_launch_span` on every tier including the non-VM ones, because it
 measures the host's own observation of the run rather than anything the backend
@@ -252,8 +253,15 @@ recording nothing. The two host-side dimensions still hold on these tiers: the
 state directory is on our disk and the launch span is on our clock.
 
 Wasm reports no CPU because its fuel counter is declared and unwired; claiming
-a fuel-derived `cpu_ms` would assert a measurement that does not happen.
-WebLinux runs in a browser with no host VMM process to observe.
+a fuel-derived `cpu_ms` would assert a measurement that does not happen. It
+does report host state: `WasmBackend::start_with_mode` unconditionally writes
+`wasm-activation/activation.json` under `vm_state_dir` before running the
+module, and that directory is not cleaned up when the synchronous run
+finishes, so a tree-size reading at exit observes something real. This cell
+was verified during Task 10 rather than left at the conservative guess this
+section originally carried; WebLinux and Mock were checked the same way and
+confirmed to touch no host-side state directory. WebLinux runs in a browser
+with no host VMM process to observe.
 
 ## Testing and gates
 

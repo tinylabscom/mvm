@@ -78,6 +78,21 @@ Last updated: 2026-08-28
       tests, gated-target compilation, and Clippy are green; merge delivery
       remains.
 
+- [ ] **Receipt-attached resource utilization.**
+      `specs/2026-08-28-receipt-attached-resource-utilization.md` /
+      `specs/plans/2026-08-28-receipt-attached-resource-utilization-implementation.md`.
+      Every backend's `plan.exited` receipt now carries measured CPU, memory,
+      host-state, and wall-clock usage in `extensions["mvm.usage"]`, sourced
+      from a `workload.usage` sidecar the libkrun supervisor, HVF vCPU threads,
+      and the host's own exit report each populate. Firecracker and QEMU
+      observe neither CPU nor memory (neither VMM is a process this host
+      reaps). All ten tasks are implemented; see
+      `specs/sprint/delivery/receipt-attached-resource-utilization.md` for the
+      per-backend coverage table and stated limits. Full workspace gate green
+      apart from the pre-existing macOS-only
+      `dev_vm_connects_via_libkrun_per_port_socket` failure; merge-queue
+      delivery remains.
+
 ## Completed
 
 - [x] **Linux 6.12.106 synchronized kernel pin — issue #2931.**
