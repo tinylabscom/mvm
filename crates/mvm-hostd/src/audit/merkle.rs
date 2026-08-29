@@ -22,15 +22,42 @@
 //! [`verify_audit_chain`](crate::supervisor::verify_audit_chain) accepts.
 //! A tampered, reordered, or truncated chain refuses here rather than
 //! publishing a root that would attest a corrupt log.
+//!
+//! ## What the last root pays for
+//!
+//! Verifying every line from genesis costs `O(all history)`, and a root is
+//! published at every admission — so on a host that has launched a lot, the
+//! boot path was re-verifying tens of thousands of entries to add a handful.
+//! That is quadratic in a host's lifetime and it sat in the launch budget.
+//!
+//! A published [`SignedAuditRoot`](mvm_contract::merkle::SignedAuditRoot) is
+//! already a host-signed statement that the first `tree_size` leaves hash to
+//! `root_hash`. So when the leaves read now still hash to it under that
+//! signature, the prefix has been attested at the same strength a genesis walk
+//! would establish line by line, and only the lines appended since need
+//! walking. That is what
+//! `leaves_over_attested_prefix` does, and the seed it rests on is a host
+//! signature rather than a stored integer — a stronger anchor than the
+//! [`ChainCheckpoint`](crate::supervisor::audit_file::ChainCheckpoint) that
+//! `doctor` resumes from, and the reason this one is not confined to a health
+//! check.
+//!
+//! It never accuses. Every doubt — no root, a stale one, a prefix that no
+//! longer hashes to it — declines to the genesis walk, so every refusal this
+//! module emits is still anchored at genesis.
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use ed25519_dalek::VerifyingKey;
-use mvm_contract::merkle::{InclusionProof, build_inclusion_proof, merkle_root};
+use mvm_contract::merkle::{
+    InclusionProof, SignedAuditRoot, build_inclusion_proof, merkle_root, verify_signed_root,
+};
 
 use crate::audit::emitter;
-use mvm_contract::verify::verify_audit_chain_bytes;
+use crate::supervisor::audit_file::verify_chain_bytes_resuming;
+use crate::supervisor::audit_set::{SegmentContent, read_topology_verified_set};
+use mvm_contract::verify::{hash_line, verify_audit_chain_bytes};
 
 /// Read a tenant's audit lines as Merkle leaves, in file order, **after**
 /// verifying the chain is intact — from the SAME bytes. The file is read
@@ -44,7 +71,28 @@ use mvm_contract::verify::verify_audit_chain_bytes;
 /// never yields a root. Public so the CLI `prove` verb can resolve a
 /// selector against the identical leaf set the root and proofs are built
 /// over (a single reader, so indices can't drift).
+///
+/// Which lines are verified *here* depends on whether the last published root
+/// still describes this log — see [`leaves_over_attested_prefix`] for the seed
+/// that stands in for the prefix, and what makes it as strong as walking it.
+/// Either way the leaves are the same and a chain that does not verify still
+/// yields no root; only the work differs.
 pub fn read_leaves(audit_dir: &Path, tenant: &str, vk: &VerifyingKey) -> Result<Vec<String>> {
+    if let Some(leaves) = leaves_over_attested_prefix(audit_dir, tenant, vk) {
+        return Ok(leaves);
+    }
+    read_leaves_from_genesis(audit_dir, tenant, vk)
+}
+
+/// [`read_leaves`], always walking every interior from the genesis anchor.
+///
+/// The unconditional path, and the only one that ever produces a refusal — see
+/// [`leaves_over_attested_prefix`], which declines rather than accuses.
+fn read_leaves_from_genesis(
+    audit_dir: &Path,
+    tenant: &str,
+    vk: &VerifyingKey,
+) -> Result<Vec<String>> {
     // Spans the whole segment set, oldest first, not just the active segment.
     //
     // A root over the active segment alone would be a root that silently
@@ -85,6 +133,126 @@ pub fn read_leaves(audit_dir: &Path, tenant: &str, vk: &VerifyingKey) -> Result<
             "refusing to build a Merkle root over an unverified audit chain for {tenant}: {e}"
         )),
     }
+}
+
+/// Leaves for a chain whose prefix is attested by the last published root,
+/// verifying only what was appended after it.
+///
+/// A published [`SignedAuditRoot`] is already a host-signed statement of the
+/// form "the first `tree_size` leaves of this log hash to `root_hash`". So
+/// when the leaves read now still hash to that value under that signature,
+/// the prefix has been attested — by the same key, at the same strength, as
+/// the per-line signatures a genesis walk would check one at a time. Only the
+/// lines appended since need walking, which is what turns a cost that grows
+/// with the whole history into one that grows with a single run's entries.
+///
+/// This is deliberately a stronger seed than [`ChainCheckpoint`] — a stored
+/// integer, which is why that fast path is confined to `doctor`. Forging this
+/// one means forging a host signature, the same bar as forging the chain.
+///
+/// Returns `None` rather than an error on *every* doubt: no published root, a
+/// root for another tenant, a root that will not verify, one that reaches past
+/// the log or back before the live segment, a prefix that no longer hashes to
+/// it, or a suffix that will not walk. A mismatch is as consistent with a
+/// stale root or a rotation as with tampering, and only the genesis walk can
+/// tell those apart — so this path never accuses, it only declines, and every
+/// refusal the caller ever emits stays anchored at genesis.
+///
+/// [`ChainCheckpoint`]: crate::supervisor::audit_file::ChainCheckpoint
+fn leaves_over_attested_prefix(
+    audit_dir: &Path,
+    tenant: &str,
+    vk: &VerifyingKey,
+) -> Option<Vec<String>> {
+    let published = read_published_root(audit_dir, tenant)?;
+    if published.tenant != tenant {
+        return None;
+    }
+    verify_signed_root(&published, vk).ok()?;
+
+    // No interior is walked here. The structural checks still are, so a
+    // removed or spliced segment refuses exactly as it does on the full path;
+    // what the published root is standing in for is the per-line work.
+    let segments = read_segment_bytes(audit_dir, tenant, vk)?;
+    let active = segments.last().filter(|s| s.active)?;
+    let lines: Vec<&str> = segments.iter().flat_map(SegmentContent::lines).collect();
+    let active_start = lines.len() - active.lines().len();
+
+    let attested = usize::try_from(published.tree_size).ok()?;
+    // A root reaching past the log describes a different log. A root landing
+    // before the live segment would need a resume point inside a sealed one,
+    // which is reachable but not worth a second seek path: it happens once per
+    // rotation, and the genesis walk that follows re-establishes the prefix.
+    if attested == 0 || attested > lines.len() || attested < active_start {
+        return None;
+    }
+    if hex::encode(merkle_root(&lines[..attested])) != published.root_hash {
+        return None;
+    }
+
+    // The seed is the attested prefix's final line hash, which is what the
+    // next line's signature commits to. `walk_chain` numbers lines including
+    // blank ones; leaf indices skip them, so the resume point is translated
+    // rather than reused.
+    let seed = hash_line(lines[attested - 1].as_bytes());
+    let resume = raw_line_index(&active.content, attested - active_start)?;
+    verify_chain_bytes_resuming(&active.content, vk, resume, seed).ok()?;
+
+    Some(lines.into_iter().map(str::to_string).collect())
+}
+
+/// The segment set's bytes, oldest first, structurally verified.
+///
+/// An un-rotated host has no set to walk, and its single chain file is that
+/// same list with one element — so the fast path covers it too rather than
+/// leaving a cliff at the first rotation.
+fn read_segment_bytes(
+    audit_dir: &Path,
+    tenant: &str,
+    vk: &VerifyingKey,
+) -> Option<Vec<SegmentContent>> {
+    match read_topology_verified_set(audit_dir, tenant, vk) {
+        Ok(segments) => Some(segments),
+        Err(crate::supervisor::audit_set::SegmentSetError::NoChain { .. }) => {
+            let path = emitter::audit_path_for_tenant(audit_dir, tenant);
+            Some(vec![SegmentContent {
+                seq: 0,
+                content: std::fs::read_to_string(&path).ok()?,
+                path,
+                active: true,
+                entries: None,
+            }])
+        }
+        Err(_) => None,
+    }
+}
+
+/// The published root sidecar, or `None` when there is not a readable one.
+fn read_published_root(audit_dir: &Path, tenant: &str) -> Option<SignedAuditRoot> {
+    let path = emitter::audit_root_path_for_tenant(audit_dir, tenant);
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+/// Index into `content.lines()` of the `nth`-th non-blank line.
+///
+/// The two line numberings differ the moment a blank line exists: leaves skip
+/// them, `walk_chain` counts them. Resuming at the wrong index would verify
+/// the wrong suffix, so the translation is explicit.
+fn raw_line_index(content: &str, nth: usize) -> Option<usize> {
+    if nth == 0 {
+        return Some(0);
+    }
+    let mut seen = 0;
+    for (idx, line) in content.lines().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        seen += 1;
+        if seen == nth {
+            return Some(idx + 1);
+        }
+    }
+    (seen == nth).then_some(content.lines().count())
 }
 
 /// Build the Merkle root over `tenant`'s audit chain in `audit_dir`,
@@ -243,6 +411,185 @@ mod tests {
             .flatten()
             .filter(|e| e.file_name().to_string_lossy().contains(".seg-"))
             .count()
+    }
+
+    /// Re-sign `root` under `key` after mutating it, so a test can present a
+    /// root that is genuinely signed and still wrong about the log.
+    fn resign(mut root: SignedAuditRoot, key: &SigningKey) -> SignedAuditRoot {
+        use base64::Engine as _;
+        use ed25519_dalek::Signer as _;
+        let payload = mvm_contract::merkle::root_signing_bytes(
+            &root.tenant,
+            root.tree_size,
+            &root.root_hash,
+            &root.timestamp,
+        )
+        .unwrap();
+        root.signature =
+            base64::engine::general_purpose::STANDARD.encode(key.sign(&payload).to_bytes());
+        root.signer_pubkey = hex::encode(key.verifying_key().to_bytes());
+        root
+    }
+
+    fn write_root(dir: &Path, root: &SignedAuditRoot) {
+        std::fs::write(
+            emitter::audit_root_path_for_tenant(dir, "local"),
+            serde_json::to_vec(root).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Flip one field of the line at `idx` in `path`, keeping it valid JSON so
+    /// the failure is the chain's to report rather than the parser's.
+    fn tamper_line(path: &Path, idx: usize) {
+        let content = std::fs::read_to_string(path).unwrap();
+        let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+        lines[idx] = lines[idx].replacen("\"img\"", "\"IMG\"", 1);
+        std::fs::write(path, format!("{}\n", lines.join("\n"))).unwrap();
+    }
+
+    #[test]
+    fn the_fast_path_takes_the_published_root_at_its_word_and_agrees_with_genesis() {
+        // The whole point of the fast path is that it is *not* a different
+        // answer. Assert it engaged -- otherwise every test below it passes by
+        // silently falling back -- and that its leaves are the genesis walk's.
+        let (dir, key, _) = seed_chain(4);
+        let vk = key.verifying_key();
+        grow_and_publish(dir.path(), &key, 2, "published");
+        grow_and_publish(dir.path(), &key, 3, "after");
+
+        let fast = leaves_over_attested_prefix(dir.path(), "local", &vk)
+            .expect("a verifying published root must engage the fast path");
+        let full = read_leaves_from_genesis(dir.path(), "local", &vk).unwrap();
+        assert_eq!(fast, full);
+        assert_eq!(fast.len(), 9);
+    }
+
+    #[test]
+    fn a_line_appended_after_the_published_root_is_still_verified() {
+        // The suffix is the part the published root says nothing about, so it
+        // is the part this path must walk itself. If it did not, a tampered
+        // recent entry would be published into a root.
+        let (dir, key, _) = seed_chain(3);
+        let vk = key.verifying_key();
+        grow_and_publish(dir.path(), &key, 1, "published");
+        grow_with_rotation(
+            dir.path(),
+            &key,
+            2,
+            "after",
+            crate::supervisor::RotationPolicy::never(),
+        );
+
+        tamper_line(&dir.path().join("local.jsonl"), 5);
+
+        assert!(
+            leaves_over_attested_prefix(dir.path(), "local", &vk).is_none(),
+            "a tampered suffix line must not pass the resumed walk"
+        );
+        assert!(build_root_in(dir.path(), "local", &vk).is_err());
+    }
+
+    #[test]
+    fn a_tampered_attested_prefix_declines_the_shortcut_and_then_refuses() {
+        // The prefix is exactly what the published root vouches for, so the
+        // shortcut has to notice when the bytes stop hashing to it -- and then
+        // hand the refusal to the genesis walk rather than accusing itself.
+        let (dir, key, _) = seed_chain(4);
+        let vk = key.verifying_key();
+        grow_and_publish(dir.path(), &key, 2, "published");
+        grow_with_rotation(
+            dir.path(),
+            &key,
+            2,
+            "after",
+            crate::supervisor::RotationPolicy::never(),
+        );
+
+        tamper_line(&dir.path().join("local.jsonl"), 1);
+
+        assert!(
+            leaves_over_attested_prefix(dir.path(), "local", &vk).is_none(),
+            "a prefix that no longer hashes to the published root must decline"
+        );
+        assert!(build_root_in(dir.path(), "local", &vk).is_err());
+    }
+
+    #[test]
+    fn a_root_signed_by_another_key_does_not_shortcut_the_walk() {
+        // The seed's whole strength is the host signature over it. A root that
+        // verifies under some *other* key is not a statement this host made.
+        let (dir, key, _) = seed_chain(4);
+        let vk = key.verifying_key();
+        let root = grow_and_publish(dir.path(), &key, 2, "published");
+        write_root(dir.path(), &resign(root, &fresh_key()));
+
+        assert!(leaves_over_attested_prefix(dir.path(), "local", &vk).is_none());
+        // Declining is not refusing: the chain itself is intact, so the
+        // genesis walk still produces a root.
+        assert!(build_root_in(dir.path(), "local", &vk).is_ok());
+    }
+
+    #[test]
+    fn a_root_reaching_past_the_log_declines_rather_than_indexing_off_the_end() {
+        let (dir, key, _) = seed_chain(4);
+        let vk = key.verifying_key();
+        let mut root = grow_and_publish(dir.path(), &key, 2, "published");
+        root.tree_size += 1_000;
+        write_root(dir.path(), &resign(root, &key));
+
+        assert!(leaves_over_attested_prefix(dir.path(), "local", &vk).is_none());
+        assert!(build_root_in(dir.path(), "local", &vk).is_ok());
+    }
+
+    #[test]
+    fn no_published_root_leaves_the_genesis_walk_as_the_only_path() {
+        let (dir, key, _) = seed_chain(3);
+        let vk = key.verifying_key();
+        assert!(leaves_over_attested_prefix(dir.path(), "local", &vk).is_none());
+        assert_eq!(read_leaves(dir.path(), "local", &vk).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn the_fast_path_survives_a_rotation_by_falling_back_once() {
+        // A root published before a rotation lands before the live segment,
+        // which this path does not seek into. It must decline, not misindex --
+        // and the root published after it re-establishes the shortcut.
+        let (dir, key, _) = seed_chain(2);
+        let vk = key.verifying_key();
+        grow_and_publish(dir.path(), &key, 1, "published");
+        grow_with_rotation(
+            dir.path(),
+            &key,
+            4,
+            "post",
+            crate::supervisor::RotationPolicy::at_bytes(256),
+        );
+        assert!(segment_count(dir.path()) > 0, "the fixture must rotate");
+
+        let across = read_leaves(dir.path(), "local", &vk).unwrap();
+        assert_eq!(
+            across,
+            read_leaves_from_genesis(dir.path(), "local", &vk).unwrap()
+        );
+
+        grow_and_publish(dir.path(), &key, 1, "republished");
+        assert!(
+            leaves_over_attested_prefix(dir.path(), "local", &vk).is_some(),
+            "a root published after the rotation must re-engage the fast path"
+        );
+    }
+
+    #[test]
+    fn raw_line_index_translates_leaf_numbering_across_blank_lines() {
+        // Leaves skip blank lines; `walk_chain` counts them. Reusing a leaf
+        // index as a resume point would verify the wrong suffix.
+        let content = "a\n\nb\nc\n";
+        assert_eq!(raw_line_index(content, 0), Some(0));
+        assert_eq!(raw_line_index(content, 1), Some(1));
+        assert_eq!(raw_line_index(content, 2), Some(3));
+        assert_eq!(raw_line_index(content, 3), Some(4));
+        assert_eq!(raw_line_index(content, 4), None);
     }
 
     #[test]
