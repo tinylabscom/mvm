@@ -103,6 +103,19 @@ fn macos_documented_surface_uses_the_published_workload_kernel() {
 }
 
 #[test]
+fn linux_documented_surface_makes_the_stage0_boot_files_readable() {
+    let workflow = extended_ci();
+    let linux = job_block(&workflow, "e2e-docs-linux");
+
+    assert!(
+        linux.contains("sudo chmod a+r")
+            && linux.contains("/boot/vmlinuz-${KERNEL_RELEASE}")
+            && linux.contains("/boot/initrd.img-${KERNEL_RELEASE}"),
+        "the unprivileged QEMU Stage 0 process must be able to read the hosted runner kernel and initramfs"
+    );
+}
+
+#[test]
 fn macos_documented_surface_uses_an_intel_runner_with_hvf_access() {
     let workflow = extended_ci();
     let macos = job_block(&workflow, "e2e-docs-macos");

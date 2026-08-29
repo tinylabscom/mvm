@@ -31,6 +31,10 @@ a competing BLAKE3 address or re-hash the archive.
   the arm64-only libkrun firmware. The workflow now pins the shared uv action and
   tool version, while Intel builds the HVF path without the libkrun feature or
   supervisor. Apple Silicon retains the existing libkrun-backed builder path.
+- The next Linux documented-surface rerun reached the source SDK sidecar build,
+  then QEMU could not read the hosted runner's protected `/boot` kernel. The
+  workflow now grants unprivileged QEMU read access to the exact running kernel
+  and initramfs before Stage 0 starts.
 
 ## Delivery checklist
 
@@ -53,5 +57,7 @@ a competing BLAKE3 address or re-hash the archive.
       gates.
 - [x] Repair the fresh rerun's action-pin invariant and Intel/arm64 libkrun
       mismatch with structural regressions.
+- [x] Repair the Linux hosted-kernel permissions with a structural regression
+      covering both Stage 0 boot files.
 - [ ] Pass a fresh Extended CI run containing all repaired witness lanes.
 - [ ] Merge the corrective pull request and close #2979 through its linkage.

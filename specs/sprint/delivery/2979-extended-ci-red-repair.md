@@ -10,6 +10,8 @@
       environment that returned `HV_UNSUPPORTED`.
 - [x] Intel HVF no longer installs arm64-only libkrun firmware or enables the
       libkrun FFI/supervisor; Apple Silicon retains that existing path.
+- [x] The Linux documented-surface job makes the hosted kernel and initramfs
+      readable before QEMU uses them for the Stage 0 SDK-sidecar build.
 - [x] Focused regressions, shared resolver tests, formatting, and package Clippy
       are green.
 - [x] Latest-main workspace tests, isolated doctests, workspace Clippy,

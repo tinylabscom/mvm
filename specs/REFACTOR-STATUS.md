@@ -45,9 +45,11 @@ Last updated: 2026-08-29
       SDK prerequisites and warm the source sidecar, installed bundle SHA-256
       values reach the shared slot-or-bundle dispatcher, and the live macOS
       witness targets an Intel runner with HVF access without pulling the
-      arm64-only libkrun firmware path. Focused tests, workspace
-      tests, isolated doctests, workspace Clippy, formatting, and policy gates
-      are green. A fresh Extended CI run and merge delivery remain.
+      arm64-only libkrun firmware path. The Linux witness also grants QEMU read
+      access to the hosted kernel and initramfs before the Stage 0 sidecar build.
+      Focused tests, workspace tests, isolated doctests, workspace Clippy,
+      formatting, and policy gates are green. A fresh Extended CI run and merge
+      delivery remain.
 
 - [ ] **HVF machine restore dispatch — issue #2961.**
       `specs/plans/2026-08-27-hvf-machine-restore-dispatch.md`.

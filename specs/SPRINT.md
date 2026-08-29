@@ -111,10 +111,11 @@
       bundle SHA-256 addresses through the bundle registry, and moves the live
       HVF witness to the Intel runner without enabling the arm64-only libkrun
       firmware path. Both jobs use the repository-pinned uv action and tool
-      version. Focused tests, all ordinary workspace
-      tests, the isolated `mvm-agentd` doctest, workspace Clippy, formatting,
-      and repository policy gates are green. The live rerun and merge delivery
-      remain.
+      version. The Linux job now also makes the hosted kernel and initramfs
+      readable before QEMU's Stage 0 sidecar build. Focused tests, all ordinary
+      workspace tests, the isolated `mvm-agentd` doctest, workspace Clippy,
+      formatting, and repository policy gates are green. The live rerun and
+      merge delivery remain.
 
 - [ ] **Cloudflare Pages cutover.**
       `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.
