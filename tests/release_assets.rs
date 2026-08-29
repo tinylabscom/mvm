@@ -982,7 +982,7 @@ fn the_release_job_builds_and_attaches_the_initramfs() {
         "release.yml must define the initramfs-image job"
     );
     assert!(
-        workflow.contains("needs: [bdd, build, initramfs-image]"),
+        workflow.contains("needs: [bdd, e2e-docs, build, initramfs-image]"),
         "the release job must wait for initramfs-image, or it publishes without it"
     );
     let release = job_block(&workflow, "release");
