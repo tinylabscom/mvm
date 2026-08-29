@@ -49,7 +49,7 @@ Feature: SDK sidecar attaches only for admitted SDK host-service bindings
     Then the SDK receives a current host wall clock without a transport error
 
   Scenario: a wheel mount outside the guest allow-roots is refused before boot
-    When I run mvmctl with "machine run --image python:3.12 --mount .:/wheels:ro --dry-run -- /bin/true" and an isolated mvm home
+    When I run mvmctl with "run --image python:3.12 --mount .:/wheels:ro --timeout 10 --dry-run -- /bin/true" and an isolated mvm home
     Then the command exits with code 1
     And the error output contains "outside the allow-roots"
     And the error output does not contain "guest agent did not become reachable"

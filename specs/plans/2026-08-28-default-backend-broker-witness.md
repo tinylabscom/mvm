@@ -21,6 +21,8 @@ a pre-boot volume refusal satisfy the negative scenario.
       broker result in addition to its nonzero exit.
 - [x] Add focused coverage for ext4 materialization and the read-only block
       volume command, and compile the complete conformance target.
+- [x] Preserve a truthful top-level `run --mount --timeout` witness after the
+      broker fixture moved from a directory share to a block volume.
 - [x] Run workspace tests, formatting, policy gates, and zero-warning Clippy.
 - [ ] Capture live Firecracker and HVF broker witnesses in CI.
 - [ ] Merge the tested pull request and close #2988 through its linkage.
@@ -28,6 +30,7 @@ a pre-boot volume refusal satisfy the negative scenario.
 ## Validation
 
 - `cargo test -p mvm-conformance --test service_plane_fixture`
+- `cargo test -p mvm-conformance --test conformance --features bdd -- -i '<repo>/features/suites/s29_doc_examples/*.feature'`
 - `cargo test -p mvm-conformance --features bdd --test conformance --no-run`
 - `cargo test --workspace`
 - `cargo clippy --workspace --all-targets -- -D warnings`
