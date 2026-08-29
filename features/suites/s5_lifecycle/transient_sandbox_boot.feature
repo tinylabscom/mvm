@@ -74,7 +74,7 @@ Feature: Transient sandbox boot
   Scenario: machine run cleans the request state after claiming a warm standby
     Given an isolated mvm home
     And warm residency is enabled
-    When I run mvmctl in an isolated live home with "machine run --image alpine --timeout 120 -- /bin/echo mvm-bdd-warm-seed"
+    When I run mvmctl in an isolated live home with "pool warm 1 --image alpine"
     Then the command exits with code 0
     When I run mvmctl in an isolated live home with "machine run --image alpine --timeout 120 -- /bin/echo mvm-bdd-warm-claim"
     Then the command exits with code 0
