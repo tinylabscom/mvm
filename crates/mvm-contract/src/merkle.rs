@@ -369,7 +369,26 @@ pub fn merkle_root(leaf_lines: &[impl AsRef<[u8]>]) -> [u8; 32] {
     if leaf_lines.is_empty() {
         return hash_line(&[]);
     }
-    let mut level: Vec<[u8; 32]> = leaf_lines.iter().map(|l| leaf_hash(l.as_ref())).collect();
+    let level: Vec<[u8; 32]> = leaf_lines.iter().map(|l| leaf_hash(l.as_ref())).collect();
+    merkle_root_of_leaf_hashes(&level)
+}
+
+/// The Merkle root over leaves that have already been hashed.
+///
+/// [`merkle_root`] is this preceded by one [`leaf_hash`] per line. Splitting
+/// them lets a caller that holds the leaf hashes fold them without the lines:
+/// hashing the leaves is proportional to the log's bytes, folding them is
+/// proportional to its entries, and only the first has to be paid again when
+/// nothing about a prefix has changed.
+///
+/// Same tree as [`merkle_root`] over the same leaves — the empty case included,
+/// which is why it is stated here rather than left to the caller.
+#[must_use]
+pub fn merkle_root_of_leaf_hashes(leaf_hashes: &[[u8; 32]]) -> [u8; 32] {
+    if leaf_hashes.is_empty() {
+        return hash_line(&[]);
+    }
+    let mut level = leaf_hashes.to_vec();
     while level.len() > 1 {
         level = reduce_level(&level);
     }
@@ -867,6 +886,30 @@ pub fn verify_membership(
 
 #[cfg(test)]
 mod tests {
+
+    /// The split must be a refactor, not a second tree. Anything that folds
+    /// cached leaf hashes has to land on the byte-identical root the line-based
+    /// path produces, or a cached prefix would silently describe a different
+    /// log than the one the signed root committed to.
+    #[test]
+    fn folding_leaf_hashes_gives_the_same_root_as_folding_lines() {
+        for n in 0..40usize {
+            let lines: Vec<alloc::string::String> =
+                (0..n).map(|i| alloc::format!("line-{i}")).collect();
+            let hashes: Vec<[u8; 32]> = lines.iter().map(|l| leaf_hash(l.as_bytes())).collect();
+            assert_eq!(
+                merkle_root(&lines),
+                merkle_root_of_leaf_hashes(&hashes),
+                "tree of {n} leaves disagrees between the two entry points"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_leaf_hash_set_is_the_empty_tree() {
+        let no_lines: [&[u8]; 0] = [];
+        assert_eq!(merkle_root_of_leaf_hashes(&[]), merkle_root(&no_lines));
+    }
     use super::*;
     use alloc::string::ToString;
     use alloc::vec;

@@ -12,6 +12,7 @@ pub mod evidence;
 pub mod host_keypair;
 /// RFC 6962 Merkle transparency-log root + inclusion-proof builder over a
 /// tenant's chain-signed audit log.
+pub mod leaf_cache;
 pub mod merkle;
 pub mod plan_persist;
 /// Writer for `.mvmev` evidence archives over the chain-signed audit log.
