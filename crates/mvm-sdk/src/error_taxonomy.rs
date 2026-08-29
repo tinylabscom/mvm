@@ -2,7 +2,7 @@
 //!
 //! Both language SDKs mirror this hierarchy, and until now they mirrored
 //! it by hand. The host-services half was the worst case: the status
-//! codes live in [`crate::host_services_ffi`], and both SDKs re-declared
+//! codes live in [`mvm_host_services`], and both SDKs re-declared
 //! them as literals under a comment asking a human to keep them matching.
 //! They had already drifted in the prose — the Rust doc for
 //! `MVM_HSVC_BAD_REQUEST` says "audit cap" where the TypeScript copy says
@@ -139,35 +139,35 @@ sdk_errors! {
 
     /// The host rejected the record shape or size (audit cap).
     BadRequestError: ErrorBase::Named("HostServiceError"),
-        status = crate::host_services_ffi::MVM_HSVC_BAD_REQUEST; [Rust, Python, TypeScript]
+        status = mvm_host_services::MVM_HSVC_BAD_REQUEST; [Rust, Python, TypeScript]
 
     /// The per-workload audit emit rate limit is exhausted.
     RateLimitedError: ErrorBase::Named("HostServiceError"),
-        status = crate::host_services_ffi::MVM_HSVC_RATE_LIMITED; [Rust, Python, TypeScript]
+        status = mvm_host_services::MVM_HSVC_RATE_LIMITED; [Rust, Python, TypeScript]
 
     /// The host could not answer (handler down, broker not ready).
     UnavailableError: ErrorBase::Named("HostServiceError"),
-        status = crate::host_services_ffi::MVM_HSVC_UNAVAILABLE; [Rust, Python, TypeScript]
+        status = mvm_host_services::MVM_HSVC_UNAVAILABLE; [Rust, Python, TypeScript]
 
     /// The workload's `ExecutionPlan.services` did not bind the service.
     NotBoundError: ErrorBase::Named("HostServiceError"),
-        status = crate::host_services_ffi::MVM_HSVC_NOT_BOUND; [Rust, Python, TypeScript]
+        status = mvm_host_services::MVM_HSVC_NOT_BOUND; [Rust, Python, TypeScript]
 
     /// The verb is not implemented in this build.
     VerbNotImplementedError: ErrorBase::Named("HostServiceError"),
-        status = crate::host_services_ffi::MVM_HSVC_NOT_IMPLEMENTED; [Rust, Python, TypeScript]
+        status = mvm_host_services::MVM_HSVC_NOT_IMPLEMENTED; [Rust, Python, TypeScript]
 
     /// Any other typed broker error code.
     ServiceError: ErrorBase::Named("HostServiceError"),
-        status = crate::host_services_ffi::MVM_HSVC_SERVICE; [Rust, Python, TypeScript]
+        status = mvm_host_services::MVM_HSVC_SERVICE; [Rust, Python, TypeScript]
 
     /// Connect, framing, or (de)serialization failure on the vsock path.
     TransportError: ErrorBase::Named("HostServiceError"),
-        status = crate::host_services_ffi::MVM_HSVC_TRANSPORT; [Rust, Python, TypeScript]
+        status = mvm_host_services::MVM_HSVC_TRANSPORT; [Rust, Python, TypeScript]
 
     /// The request was malformed: unknown method or a body the verb rejects.
     InvalidInputError: ErrorBase::Named("HostServiceError"),
-        status = crate::host_services_ffi::MVM_HSVC_INVALID_INPUT; [Rust, Python, TypeScript]
+        status = mvm_host_services::MVM_HSVC_INVALID_INPUT; [Rust, Python, TypeScript]
 }
 
 /// The errors Tier C's remote-invocation machinery raises.
@@ -271,7 +271,7 @@ const TIER_C: &[SdkErrorType] = &[
 /// belongs to the same `MVM_HSVC_*` family the SDKs mirrored by hand, and
 /// generating the map while leaving this behind would leave the mirror
 /// half-alive.
-pub const STATUS_OK: i32 = crate::host_services_ffi::MVM_HSVC_OK;
+pub const STATUS_OK: i32 = mvm_host_services::MVM_HSVC_OK;
 
 /// The status → error-type mapping, in registry order. `MVM_HSVC_OK` has
 /// no entry: it is not a failure.
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn ok_is_not_an_error_type() {
         assert!(
-            !status_mapping().any(|(status, _)| status == crate::host_services_ffi::MVM_HSVC_OK),
+            !status_mapping().any(|(status, _)| status == mvm_host_services::MVM_HSVC_OK),
             "MVM_HSVC_OK must not map to an error type"
         );
     }
@@ -418,11 +418,11 @@ mod tests {
         let by_name = |n: &str| REGISTRY.iter().find(|e| e.name == n).unwrap();
         assert_eq!(
             by_name("BadRequestError").status,
-            Some(crate::host_services_ffi::MVM_HSVC_BAD_REQUEST)
+            Some(mvm_host_services::MVM_HSVC_BAD_REQUEST)
         );
         assert_eq!(
             by_name("InvalidInputError").status,
-            Some(crate::host_services_ffi::MVM_HSVC_INVALID_INPUT)
+            Some(mvm_host_services::MVM_HSVC_INVALID_INPUT)
         );
     }
 }
