@@ -258,6 +258,126 @@ fn fresh_token() -> String {
 // Building the security envelope around a `Command`
 // ============================================================================
 
+/// Fallback search directories for an image that declares no `PATH`.
+///
+/// The FHS order every distro ships. Only reached when the image's own runtime
+/// config is absent or carries no `PATH`.
+const FALLBACK_SEARCH_PATH: [&str; 6] = [
+    "/usr/local/sbin",
+    "/usr/local/bin",
+    "/usr/sbin",
+    "/usr/bin",
+    "/sbin",
+    "/bin",
+];
+
+/// Where a bare command name is looked up, most specific first.
+///
+/// The *image's* `PATH`, as `exec` already resolves it — an image that installs
+/// its interpreter somewhere unusual says so in its own runtime config, and
+/// honouring that is why `exec("uname", …)` worked here while
+/// `commands.start(["uname", …])` did not.
+///
+/// Deliberately **not** the request's `PATH`. The caller supplies that env, so
+/// honouring it would let the caller choose which binary a name resolves to,
+/// which is the ambiguity refusing a bare name outright used to avoid. The
+/// image is not the caller.
+fn program_search_dirs(image_path: Option<&str>) -> Vec<String> {
+    let from_image: Vec<String> = image_path
+        .unwrap_or_default()
+        .split(':')
+        .filter(|dir| dir.starts_with('/'))
+        .map(str::to_string)
+        .collect();
+    if from_image.is_empty() {
+        return FALLBACK_SEARCH_PATH
+            .iter()
+            .map(|d| (*d).to_string())
+            .collect();
+    }
+    from_image
+}
+
+/// The `PATH` the image declares for its own workloads, if any.
+fn image_declared_path() -> Option<String> {
+    let image = crate::workload_env::ImageRuntimeConfig::load().ok()?;
+    crate::workload_env::WorkloadEnvironment::builder()
+        .image(&image)
+        .build()
+        .vars()
+        .find(|(k, _)| *k == std::ffi::OsStr::new("PATH"))
+        .and_then(|(_, v)| v.to_str().map(str::to_string))
+}
+
+/// Whether a candidate path is something the guest can actually execute.
+///
+/// A trait so the resolution rules are unit-testable without laying down real
+/// executables: the interesting cases are "name matches a directory", "name
+/// matches a non-executable file", and search order, none of which need a
+/// filesystem to state.
+pub trait ProgramProbe {
+    /// True when `path` is a regular file carrying an executable bit.
+    fn is_executable_file(&self, path: &str) -> bool;
+}
+
+/// The production probe: `stat(2)` through `std::fs`.
+pub struct OsProgramProbe;
+
+impl ProgramProbe for OsProgramProbe {
+    fn is_executable_file(&self, path: &str) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+}
+
+/// Turn `argv[0]` into the absolute path that will be executed.
+///
+/// An absolute path is taken as given. A bare name — no `/` at all — is looked
+/// up in [`PROGRAM_SEARCH_PATH`], because that is the form the SDK documents
+/// (`commands.start(["python", "/app/main.py"])`) and the form every comparable
+/// runtime accepts. A *relative path* (`./run`, `bin/tool`) is still refused:
+/// it resolves against a working directory the request may also be setting, so
+/// the two together decide the binary in a way neither states on its own.
+///
+/// The absolute-path property the previous rule protected is unchanged. What
+/// reaches `execve` is still an absolute path chosen before the fork; the only
+/// difference is that a bare name now has a defined way to become one instead
+/// of being rejected.
+pub fn resolve_argv0(
+    argv0: &str,
+    search_dirs: &[String],
+    probe: &dyn ProgramProbe,
+) -> Result<String, (ProcErrorKind, String)> {
+    if std::path::Path::new(argv0).is_absolute() {
+        return Ok(argv0.to_string());
+    }
+    if argv0.contains('/') {
+        return Err((
+            ProcErrorKind::InvalidArgv,
+            format!(
+                "argv[0] {argv0:?} is a relative path; use an absolute path, or a \
+                 bare command name to search {}",
+                search_dirs.join(":")
+            ),
+        ));
+    }
+    for dir in search_dirs {
+        let candidate = format!("{dir}/{argv0}");
+        if probe.is_executable_file(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    Err((
+        ProcErrorKind::InvalidArgv,
+        format!(
+            "argv[0] {argv0:?} was not found as an executable in {}",
+            search_dirs.join(":")
+        ),
+    ))
+}
+
 /// Validate request inputs against the policy + caps and return a
 /// fully-constructed `Command` ready to spawn. Pure logic + path
 /// canonicalization — no actual fork or execve happens here.
@@ -283,12 +403,8 @@ fn build_command(
     if argv0.is_empty() {
         return Err((ProcErrorKind::InvalidArgv, "argv[0] is empty".to_string()));
     }
-    if !std::path::Path::new(argv0).is_absolute() {
-        return Err((
-            ProcErrorKind::InvalidArgv,
-            format!("argv[0] {argv0:?} must be an absolute path"),
-        ));
-    }
+    let search_dirs = program_search_dirs(image_declared_path().as_deref());
+    let argv0 = resolve_argv0(argv0, &search_dirs, &OsProgramProbe)?;
 
     for (k, v) in env {
         if k.is_empty() || k.contains('=') || k.as_bytes().contains(&0) {
@@ -774,6 +890,145 @@ pub fn handle_proc_wait<W: FnMut(ProcWaitEvent)>(
 
 #[cfg(test)]
 mod tests {
+    /// A probe backed by a fixed set of paths, so search order and the
+    /// non-executable case are stated without laying down real files.
+    struct FakeProbe(&'static [&'static str]);
+
+    /// The FHS fallback, as a bare-name lookup would use for an image that
+    /// declares no PATH of its own.
+    fn fhs() -> Vec<String> {
+        super::FALLBACK_SEARCH_PATH
+            .iter()
+            .map(|d| (*d).to_string())
+            .collect()
+    }
+
+    impl super::ProgramProbe for FakeProbe {
+        fn is_executable_file(&self, path: &str) -> bool {
+            self.0.contains(&path)
+        }
+    }
+
+    /// The form the README documents. `commands.start(["python", ...])` and
+    /// `exec("uname", "-sr")` both send a bare name, and the guest used to
+    /// refuse it outright — so the SDK example in the README could not run.
+    #[test]
+    fn a_bare_command_name_resolves_through_the_search_path() {
+        let probe = FakeProbe(&["/bin/uname"]);
+        assert_eq!(
+            super::resolve_argv0("uname", &fhs(), &probe).unwrap(),
+            "/bin/uname"
+        );
+    }
+
+    /// Most specific directory wins, so an image shipping its own build of a
+    /// tool under /usr/local gets that one rather than the distro's.
+    #[test]
+    fn the_search_path_is_ordered_most_specific_first() {
+        let probe = FakeProbe(&["/usr/local/bin/python", "/usr/bin/python"]);
+        assert_eq!(
+            super::resolve_argv0("python", &fhs(), &probe).unwrap(),
+            "/usr/local/bin/python"
+        );
+    }
+
+    /// A directory or a non-executable file with the right name is not a
+    /// program. The probe answers false for both, and resolution must keep
+    /// looking rather than returning the first name that merely exists.
+    #[test]
+    fn a_name_that_is_not_executable_is_skipped_not_returned() {
+        // /usr/bin/tool exists but is not executable, so the probe omits it;
+        // /bin/tool is.
+        let probe = FakeProbe(&["/bin/tool"]);
+        assert_eq!(
+            super::resolve_argv0("tool", &fhs(), &probe).unwrap(),
+            "/bin/tool"
+        );
+    }
+
+    /// An absolute path is taken as given — this is the pre-existing contract
+    /// and the only form that used to be accepted.
+    #[test]
+    fn an_absolute_path_is_used_verbatim() {
+        let probe = FakeProbe(&[]);
+        assert_eq!(
+            super::resolve_argv0("/opt/app/run", &fhs(), &probe).unwrap(),
+            "/opt/app/run"
+        );
+    }
+
+    /// A relative path stays refused. It resolves against a working directory
+    /// the same request may be setting, so the two together decide the binary
+    /// in a way neither states on its own — which is exactly the ambiguity the
+    /// absolute-only rule existed to avoid.
+    #[test]
+    fn a_relative_path_is_still_refused() {
+        let probe = FakeProbe(&["/bin/run"]);
+        for argv0 in ["./run", "bin/run", "../run"] {
+            let err = super::resolve_argv0(argv0, &fhs(), &probe).unwrap_err();
+            assert_eq!(err.0, super::ProcErrorKind::InvalidArgv);
+            assert!(
+                err.1.contains("relative path"),
+                "{argv0} should be refused as a relative path: {}",
+                err.1
+            );
+        }
+    }
+
+    /// A name nothing provides names the search path, so the caller can see
+    /// where it was looked for rather than guessing.
+    #[test]
+    fn an_unresolvable_name_reports_where_it_looked() {
+        let probe = FakeProbe(&[]);
+        let err = super::resolve_argv0("nosuchtool", &fhs(), &probe).unwrap_err();
+        assert_eq!(err.0, super::ProcErrorKind::InvalidArgv);
+        assert!(err.1.contains("/usr/local/bin"), "{}", err.1);
+        assert!(err.1.contains("/bin"), "{}", err.1);
+    }
+
+    /// An image that installs its interpreter somewhere unusual says so in its
+    /// own runtime config, and that is what a bare name searches. This is the
+    /// case a hardcoded FHS list gets wrong.
+    #[test]
+    fn the_image_declared_path_decides_the_search_order() {
+        let dirs = super::program_search_dirs(Some("/opt/app/bin:/usr/bin"));
+        assert_eq!(dirs, vec!["/opt/app/bin", "/usr/bin"]);
+        let probe = FakeProbe(&["/opt/app/bin/tool", "/usr/bin/tool"]);
+        assert_eq!(
+            super::resolve_argv0("tool", &dirs, &probe).unwrap(),
+            "/opt/app/bin/tool"
+        );
+    }
+
+    /// An image declaring no PATH falls back to the FHS order rather than
+    /// searching nothing, which would refuse every bare name.
+    #[test]
+    fn an_image_without_a_path_falls_back_to_the_fhs_order() {
+        assert_eq!(super::program_search_dirs(None), fhs());
+        assert_eq!(super::program_search_dirs(Some("")), fhs());
+        // A relative entry is not a search directory.
+        assert_eq!(super::program_search_dirs(Some("bin:.")), fhs());
+    }
+
+    /// The caller supplies the request's env, so honouring its PATH would let
+    /// the caller choose which binary a bare name resolves to. The search list
+    /// is fixed in the source and the resolver takes no env at all.
+    #[test]
+    fn resolution_does_not_consult_a_caller_supplied_path() {
+        let src = include_str!("process_rpc.rs");
+        let body = src
+            .split("pub fn resolve_argv0")
+            .nth(1)
+            .expect("resolve_argv0 must exist")
+            .split("\n}")
+            .next()
+            .expect("function body ends at the first closing brace");
+        assert!(
+            !body.contains("std::env") && !body.contains("var("),
+            "resolution must not read the process environment: {body}"
+        );
+    }
+
     use super::*;
 
     fn small_caps() -> Caps {
@@ -798,11 +1053,33 @@ mod tests {
         assert_eq!(err.0, ProcErrorKind::InvalidArgv);
     }
 
+    /// A relative *path* stays refused, because it resolves against a working
+    /// directory the same request may be setting.
+    ///
+    /// This used to assert that a bare `echo` was refused, under the name
+    /// `build_command_rejects_relative_argv0` — but a bare name is not a
+    /// relative path, and refusing it is what stopped the README's own SDK
+    /// example (`commands.start(["python", ...])`, `exec("uname", "-sr")`)
+    /// from running at all. A bare name now resolves; see
+    /// `a_bare_command_name_resolves_through_the_search_path`.
     #[test]
-    fn build_command_rejects_relative_argv0() {
+    fn build_command_rejects_a_relative_path_argv0() {
         let env = BTreeMap::new();
-        let err = build_command(&["echo".to_string()], &env, None).unwrap_err();
+        let err = build_command(&["./echo".to_string()], &env, None).unwrap_err();
         assert_eq!(err.0, ProcErrorKind::InvalidArgv);
+        assert!(err.1.contains("relative path"), "{}", err.1);
+    }
+
+    /// The bare-name form the SDK sends reaches a real program.
+    ///
+    /// `/bin/echo` is on every image this runs on, including the host running
+    /// the unit suite, so this exercises the production probe rather than a
+    /// stand-in.
+    #[test]
+    fn build_command_resolves_a_bare_command_name() {
+        let env = BTreeMap::new();
+        build_command(&["echo".to_string()], &env, None)
+            .expect("a bare command name on the search path must resolve");
     }
 
     #[test]

@@ -56,10 +56,18 @@ export MVM_EMBED_NO_CACHE="e2e-$(date +%s)"
 # deliberately absent: if one of those fires, the lane did not boot what it
 # claims to boot, and that has to be a failure rather than a footnote.
 #
-# `pending` is the @wip dev-profile scenario tracking the #2887 residual;
 # `needs-perf-budget-host` is a latency threshold that measures the disk on
-# rotational storage rather than the code.
-ALLOWED_SKIPS="pending,needs-perf-budget-host"
+# rotational storage rather than the code. Nothing here is @wip any more, so
+# `pending` is not tolerated: a scenario parked mid-change would otherwise
+# reduce this lane's coverage silently.
+#
+# `needs-dir-share` is set below rather than tolerated blindly: libkrun and HVF
+# serve virtio-fs directory shares and must run those scenarios, while
+# Firecracker has no virtio-fs device and cannot. Opting in means a capable
+# backend runs them and only a genuinely incapable one skips — the alternative,
+# tolerating the skip without opting in, silently dropped the witness for the
+# README's two `--mount` examples on a host that could have run it.
+ALLOWED_SKIPS="needs-perf-budget-host,needs-dir-share"
 
 # Floor on scenarios that must actually execute. See the assertion after the
 # cucumber run for why a count, not just an exit status.
@@ -68,13 +76,14 @@ ALLOWED_SKIPS="pending,needs-perf-budget-host"
 # launch-budget threshold — is gated on `MVM_BDD_PERF_BUDGET=1`, so 19 run on a
 # host that does not set it and 20 on one that does. A floor set from the
 # authored count fails everywhere the gated scenario is skipped, which is why
-# this number is 21: 23 authored, less the env-gated launch budget and the
-# @wip dev-profile scenario tracking the #2887 residual.
+# this number is 23: 23 authored. The launch-budget scenario stays env-gated,
+# so a host without MVM_BDD_PERF_BUDGET runs 22 — the floor is the executed
+# count on the least-capable host this lane is expected to pass on.
 #
 # It was 17 against an authored count of 17, so it had the same defect and had
 # simply never been reached: `pipefail` fails the cucumber pipeline the moment
 # any scenario fails, and the floor is only checked after a fully green run.
-MIN_SCENARIOS=21
+MIN_SCENARIOS=22
 SCENARIO_LOG="$(mktemp -t mvm-e2e-scenarios)"
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 MVMCTL="$TARGET_DIR/debug/mvmctl"
@@ -179,6 +188,7 @@ MVM_HOME="$E2E_HOME" "$MVMCTL" doctor || true
 echo "==> CLI + SDK launch modes (cucumber, @live)"
 CARGO_BIN_EXE_mvmctl="$MVMCTL" \
 MVM_BDD_LIVE=1 \
+MVM_BDD_DIR_SHARE=1 \
 MVM_BDD_STRICT_SKIPS=1 \
 MVM_BDD_ALLOWED_SKIPS="$ALLOWED_SKIPS" \
 MVM_E2E_HOME="$E2E_HOME" \

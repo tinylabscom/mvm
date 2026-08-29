@@ -1,9 +1,9 @@
 """Runtime-SDK fixture for the end-to-end launch suite.
 
 The README's runtime SDK shape, reduced to the operations the transport has to
-carry: create a sandbox and run a command in it.
+carry: create a sandbox, write a file into it, and run a command.
 
-Three deliberate departures from the README's illustrative snippet, each because
+Two deliberate departures from the README's illustrative snippet, each because
 this one has to actually execute on both the plan and the live path:
 
 * `commands.start` rather than `exec`. Both are real SDK surfaces, but `exec` is
@@ -16,13 +16,13 @@ this one has to actually execute on both the plan and the live path:
   A digest is content-addressed, so this does not rot with the upstream
   `alpine:latest` tag.
 
-* No `files.write`. The README shows one, and it is a real surface, but the
-  whole guest-RPC `fs`/`proc` verb family currently answers "Unexpected response
-  to ... verb" against a running HVF guest — see issue #2887, which predates
-  this suite. `commands.start` below hits the same wall, which is why the
-  live-mode scenario driving this fixture is tagged `@wip` on that issue. The
-  plan-mode scenario needs no guest and stays green. Restore `files.write` when
-  #2887 is fixed.
+`files.write` is back. It was removed when the whole guest-RPC `fs`/`proc` verb
+family answered "Unexpected response to ... verb" against a running HVF guest
+(#2887); that turned out to be a grant refusal misreported as a protocol
+mismatch, and the grant half is fixed too — a `--profile dev` launch now carries
+the DevOnly verbs. `/tmp` rather than the README's `/app`: the workload root is
+mounted read-only, so a tmpfs path is what a reader can actually write to
+without declaring a share.
 """
 
 import mvm
@@ -33,4 +33,5 @@ ALPINE = (
 )
 
 with mvm.Sandbox.create(image=ALPINE) as sb:
+    sb.files.write("/tmp/hello.txt", "hi from mvm")
     sb.commands.start(["uname", "-s"])
