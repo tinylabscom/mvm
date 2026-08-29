@@ -1,5 +1,8 @@
 # Receipt-attached resource utilization — implementation plan
 
+Backing: shipped-source
+Validation: none
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Record a microVM run's measured CPU, memory, host-state, and wall consumption as signed integers in the `ExecutionReceipt`'s `mvm.usage` extension, each carrying explicit provenance.
