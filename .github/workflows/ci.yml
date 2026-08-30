@@ -181,8 +181,6 @@ jobs:
         with:
           packages: lld
 
-      - uses: ./.github/actions/install-zigbuild
-
       - uses: ./.github/actions/rust-cache
 
       - name: Check formatting
@@ -275,8 +273,6 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: "22"
-
-      - uses: ./.github/actions/install-zigbuild
 
       - uses: ./.github/actions/rust-cache
 
@@ -454,6 +450,11 @@ jobs:
         with:
           packages: lld
 
+      # The only lane in this workflow that needs the pinned zig. Eight other
+      # jobs installed it because `mvm-cli`'s build script used to cross-compile
+      # the embedded Linux binaries on every build; that is now behind
+      # `embed-host-bins`, which only the step below turns on. If a second lane
+      # ever enables that feature, it needs this too.
       - uses: ./.github/actions/install-zigbuild
 
       - uses: ./.github/actions/rust-cache
@@ -666,8 +667,6 @@ jobs:
         with:
           packages: attr cryptsetup-bin lld
 
-      - uses: ./.github/actions/install-zigbuild
-
       - uses: ./.github/actions/rust-cache
 
       - name: Install cargo-nextest
@@ -739,8 +738,6 @@ jobs:
         with:
           packages: attr cryptsetup-bin libcap-ng-dev lld
 
-      - uses: ./.github/actions/install-zigbuild
-
       - uses: ./.github/actions/rust-cache
 
       - name: Install cargo-nextest
@@ -783,8 +780,6 @@ jobs:
       - uses: ./.github/actions/apt-deps
         with:
           packages: attr cryptsetup-bin lld
-
-      - uses: ./.github/actions/install-zigbuild
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
@@ -841,8 +836,6 @@ jobs:
       - uses: ./.github/actions/apt-deps
         with:
           packages: attr cryptsetup-bin lld
-
-      - uses: ./.github/actions/install-zigbuild
 
       - uses: ./.github/actions/rust-cache
 
@@ -977,11 +970,6 @@ jobs:
       # same reasoning that made these manifests signed in the first place.
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
-
-      # Building the root package runs `crates/mvm-cli/build.rs`, which
-      # cross-compiles the embedded host binaries and needs the pinned zig.
-      # Without it the lane fails before it ever boots anything.
-      - uses: ./.github/actions/install-zigbuild
 
       - uses: ./.github/actions/rust-cache
         with:
@@ -1234,13 +1222,6 @@ jobs:
         if: needs.scope.outputs.nix == 'true'
         with:
           packages: lld
-
-      # `cargo test` below builds mvmctl, whose build.rs cross-compiles the
-      # embedded host binaries as static musl and needs the pinned zig. Without
-      # it this dies at compile time, before it starts a guest — which reads as
-      # "the image does not boot" and is nothing of the kind.
-      - uses: ./.github/actions/install-zigbuild
-        if: needs.scope.outputs.nix == 'true'
 
       - name: Build the guest image from this tree
         if: needs.scope.outputs.nix == 'true'

@@ -105,13 +105,38 @@ the first time by a tag-push release — the same invisible-until-release gap th
 - [x] CLAUDE.md and the contributor development guide say the toolchain is
       needed at `just embed` time rather than at `cargo build` time.
 
-## Deliberately not done
+## The zig toolchain follows the feature
 
-- **The ten `install-zigbuild` steps in `ci.yml` are left alone.** Most are now
-  unnecessary, since only the `lint-features` lane cross-compiles. Removing them
-  is a straight CI-minutes win but touches jobs this change has not otherwise
-  traced, and a wrongly-removed one fails a lane rather than a test. Worth doing
-  as its own pass.
-- **The `~/.cache/mvm/embed` store is still over its ceiling** — 17 GB against a
-  4 GiB `DEFAULT_MAX_BYTES`, i.e. `prune` is not holding. Unrelated to this
-  change; carried over from the aux-leg plan's open list.
+`ci.yml` installed the pinned zig in nine jobs, because every `mvm-cli` build
+used to cross-compile. Only `lint-features` still does. Each of the other eight
+was traced to what it actually runs before its step was removed:
+
+| job | why it no longer needs zig |
+|---|---|
+| `lint-core`, `lint-policy` | workspace check/test, no `embed-host-bins` |
+| `test-workspace`, `test-workspace-aarch64` | same |
+| `test-release-witness` | builds `mvm-fs`/`core`/`contract`/`hostd`/`agentd` — never `mvm-cli` |
+| `test-linux` | `just bdd`, whose builder-VM scenarios are `@live`-gated and skipped |
+| `boot-latency`, `guest-image-boot` | `cargo test --test runtime_boot_bench`, which "deliberately excludes the builder VM and Nix image build path" |
+
+Tracing rather than pattern-matching found a defect in this change:
+`just bdd-live-ci` sets `MVM_BDD_LIVE=1`, which admits the `@live` scenarios
+that *do* boot real microVMs, and it built `--features user` — no payload. It
+now builds `user,embed-host-bins`, and `bdd.yml`'s live job keeps its zig step
+while its hermetic job drops one it never needed.
+
+## Deliberately not done
+- **`MVM_EMBED_CACHE_MAX_BYTES` and `MVM_EMBED_CACHE_DIR` have no
+  `rerun-if-env-changed`.** Changing the store's ceiling or its location does
+  not re-run the build script, so neither takes effect until something else
+  invalidates it. Small and real; left out of this change because it is about
+  the store rather than about whether the leg runs.
+
+  This is the *only* store finding that survived checking. The claim that
+  `prune` was not holding its ceiling — carried in an earlier revision of the
+  aux-leg plan and in that PR's description — was wrong; see that plan's
+  "Deliberately not done" for how. Separately, the rationale recorded in this
+  host's `~/.cargo/config.toml` for raising the ceiling to 64 GiB is a cache
+  miss costing "~17.8s of nested `cargo build` on the aux-helper leg". That leg
+  no longer exists, so the insurance the raise was buying is obsolete — a host
+  config decision, not a repo one.

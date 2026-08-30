@@ -38,8 +38,9 @@ jobs:
         with:
           packages: libcap-ng-dev lld
 
-      - uses: ./.github/actions/install-zigbuild
-
+      # No zig here: `just bdd` builds mvmctl without `embed-host-bins`, and the
+      # scenarios that would need the payload are `@live`-tagged, which this
+      # hermetic lane skips. The live job below does need it.
       - name: Install just
         uses: taiki-e/install-action@v2
         with:
@@ -103,6 +104,9 @@ jobs:
         with:
           packages: libcap-ng-dev lld qemu-system-x86 qemu-utils
 
+      # Kept: `just bdd-live-ci` builds with `embed-host-bins`, because the
+      # `@live` scenarios boot real microVMs and reach the builder VM. That is
+      # the cross-compile, and it needs the pinned zig.
       - uses: ./.github/actions/install-zigbuild
 
       - name: Install just
