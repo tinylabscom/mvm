@@ -2775,6 +2775,57 @@ mod tests {
 
     /// Claim 1: a volume that the signed plan didn't admit — or that
     /// mismatches the admitted ro/rw — is refused before launch.
+    /// Materializing a granted directory must not change what it has to be
+    /// granted *as*.
+    ///
+    /// `enforce_admitted_shares` is the trust-boundary hook for claim 1: a
+    /// volume reaches a guest only if the signed plan admitted that exact
+    /// host path, guest path and kind. `--mount` now attaches an ext4 image
+    /// rather than the directory, and the volume records which image in
+    /// `materialized_image` — but `host` stays the directory that was
+    /// granted, so the grant still matches.
+    ///
+    /// This is not cosmetic. Had the materialized mount become a `Disk` whose
+    /// `host` was the image under `~/.mvm`, this check would compare that path
+    /// against the granted directory and refuse the boot. The field exists so
+    /// the transport can change without the grant changing.
+    #[test]
+    fn a_materialized_grant_still_satisfies_the_directory_share_it_was_granted_as() {
+        let grant = mvm_core::plan::HostShareGrant {
+            tag: "uvol0".into(),
+            host_path: "/h/src".into(),
+            guest_path: "/data".into(),
+            kind: mvm_core::plan::ShareKind::DirShare,
+            read_only: true,
+            encrypted: false,
+        };
+        let mut input = fixture_input("vm-materialized-share");
+        input.shares = vec![grant];
+        let plan = synthesize_plan(&input).unwrap();
+
+        let materialized = mvm_core::vm_backend::VmVolume {
+            host: "/h/src".into(),
+            guest: "/data".into(),
+            read_only: true,
+            kind: mvm_core::vm_backend::VmVolumeKind::DirShare,
+            materialized_image: Some("/state/mount-0.ext4".into()),
+            ..Default::default()
+        };
+        enforce_admitted_shares(std::slice::from_ref(&materialized), &plan)
+            .expect("a materialized grant is still the grant that was admitted");
+
+        // And the image path is not what is checked: a volume claiming a host
+        // path nobody granted is refused whatever it materialized into.
+        let ungranted = mvm_core::vm_backend::VmVolume {
+            host: "/state/mount-0.ext4".into(),
+            ..materialized.clone()
+        };
+        assert!(
+            enforce_admitted_shares(std::slice::from_ref(&ungranted), &plan).is_err(),
+            "only the granted host path may reach a guest"
+        );
+    }
+
     #[test]
     fn enforce_admitted_shares_refuses_unadmitted_or_mismatched() {
         use mvm_core::vm_backend::{VmVolume, VmVolumeKind};

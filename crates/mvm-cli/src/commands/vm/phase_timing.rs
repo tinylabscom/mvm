@@ -428,7 +428,11 @@ pub fn within_warm_start_slo_ms(dispatch_window_ms: f64) -> bool {
 const SPAN_PARENTS: &[(&str, &str)] = &[
     ("mount_fingerprint", "drives"),
     ("mount_cache_lookup", "drives"),
-    ("mount_materialize", "drives"),
+    // Materialization happens while the start config is assembled, which is
+    // inside the admit window and not `drives`. Parenting it where it was
+    // *expected* to run rather than where it does would make the tree's
+    // arithmetic wrong in the one place it is checked.
+    ("mount_materialize", "admit"),
     ("artifact_verify", "drives"),
     ("admit_plan", "admit"),
     ("attach_overlay", "admit"),

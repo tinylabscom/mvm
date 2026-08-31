@@ -1207,10 +1207,19 @@ fn resolve_boot_strategy(
 /// it; `materialized_image` carries what the backend attaches. See
 /// [`mounts::materialize_mount_image`] for why the directory is not shared
 /// directly.
-fn mount_volumes(shape: &LaunchShape<'_>, vm_name: &str) -> Result<Vec<VmVolume>> {
+fn mount_volumes(
+    shape: &LaunchShape<'_>,
+    vm_name: &str,
+    sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
+) -> Result<Vec<VmVolume>> {
     if shape.dir_shares.is_empty() {
         return Ok(Vec::new());
     }
+    // Named because it is the one cost this change adds, and it scales with
+    // the mounted tree: ~100ms for a 30MB one. An unnamed span here would be
+    // the same hole `attach_initramfs` sat in — a launch able to say how long
+    // it took and not where.
+    sub.start(crate::commands::vm::phase_timing::SubPhase::MountMaterialize);
     let state_dir = mvm_core::config::vm_state_dir(vm_name);
     std::fs::create_dir_all(&state_dir).with_context(|| {
         format!(
@@ -1218,7 +1227,7 @@ fn mount_volumes(shape: &LaunchShape<'_>, vm_name: &str) -> Result<Vec<VmVolume>
             state_dir.display()
         )
     })?;
-    shape
+    let volumes: Result<Vec<VmVolume>> = shape
         .dir_shares
         .iter()
         .enumerate()
@@ -1233,7 +1242,9 @@ fn mount_volumes(shape: &LaunchShape<'_>, vm_name: &str) -> Result<Vec<VmVolume>
                 ..Default::default()
             })
         })
-        .collect()
+        .collect();
+    sub.finish(crate::commands::vm::phase_timing::SubPhase::MountMaterialize);
+    volumes
 }
 
 fn build_start_config(
@@ -1241,6 +1252,7 @@ fn build_start_config(
     vm_name: &str,
     resolved: &ResolvedImage,
     boot: &BootStrategy,
+    sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
 ) -> Result<VmStartConfig> {
     // Pre-open console data sockets for interactive PTY runs against
     // non-sealed images. OCI/dev images can carry verity sidecars and still be
@@ -1288,7 +1300,7 @@ fn build_start_config(
         ports: Vec::new(),
         // Live shares precede the SDK sidecar so their tags and admission
         // records remain stable across sidecar changes.
-        volumes: mount_volumes(shape, vm_name)?
+        volumes: mount_volumes(shape, vm_name, sub)?
             .into_iter()
             .chain(shape.disk_volumes.iter().cloned())
             .chain(shape.sdk_sidecar.iter().map(|a| a.volume.clone()))
@@ -1414,7 +1426,7 @@ pub fn resolve_launch(
     // spans account for roughly half the window, so the rest needs naming
     // before any of it can be acted on.
     let t_build = std::time::Instant::now();
-    let mut start_config = build_start_config(shape, &vm_name, &image, &boot)?;
+    let mut start_config = build_start_config(shape, &vm_name, &image, &boot, sub)?;
     tracing::debug!(
         ms = t_build.elapsed().as_secs_f64() * 1000.0,
         "admit window: build_start_config"
