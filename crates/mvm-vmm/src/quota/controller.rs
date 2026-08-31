@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::quota::clock::ThreadCpuClock;
+use crate::quota::clock::{MonotonicClock, ThreadCpuClock};
 use crate::quota::{PeriodVerdict, QuotaPolicy};
 use crate::vmm::hv::VcpuHandle;
 
@@ -75,6 +75,14 @@ impl<H: VcpuHandle> VcpuQuota<H> {
         let hold_thread = Arc::clone(&hold);
         let stop_thread = Arc::clone(&stop);
         let handles_for_thread = handles.clone();
+        // Wrapped here rather than by the caller so no controller can be built
+        // on a clock that is allowed to fall. A vCPU thread's CPU accounting
+        // dies with the thread and its next read is charged as zero, which
+        // reaches both the record and the policy: the record would attest a
+        // machine that consumed nothing, and the policy compares the total
+        // against an entitlement that only grows, so a fallen total releases
+        // the hold for the rest of the run.
+        let clock = MonotonicClock::new(clock);
         let join = thread::spawn(move || {
             run_controller(handles_for_thread, clock, policy, hold_thread, stop_thread)
         });
@@ -469,6 +477,68 @@ mod tests {
             "measured achievement {}/{} must reflect overshoot, not the target",
             achievement.achieved_millicores,
             achievement.target_millicores
+        );
+    }
+
+    /// The teardown shape, reproduced. Every vCPU thread exits before the
+    /// controller is stopped, so the summed read collapses to zero and the
+    /// last assignment would otherwise be the one that lands in the record —
+    /// attesting that a machine which burned CPU consumed none of it.
+    #[test]
+    fn a_machine_whose_vcpu_threads_have_exited_reports_what_it_consumed() {
+        let period = Duration::from_millis(10);
+        let policy = QuotaPolicy::new(crate::quota::QuotaConfig::new(500, period).unwrap());
+        // Four rising readings taken while the threads are alive, then the
+        // collapse: `ScriptedClock` yields ZERO once its script runs out,
+        // which is exactly what a dead thread's failed read contributes.
+        let clock = ScriptedClock::new(vec![
+            Duration::from_millis(5),
+            Duration::from_millis(10),
+            Duration::from_millis(15),
+            Duration::from_millis(20),
+        ]);
+        let handle = MockHandle::new();
+        let flag = Arc::new(AtomicBool::new(false));
+        handle.bind_flag(Arc::clone(&flag));
+        let quota = VcpuQuota::start_with_flag(vec![handle], clock, policy, Arc::clone(&flag));
+
+        // Long enough to run well past the script and sample the collapse.
+        std::thread::sleep(Duration::from_millis(120));
+        let achievement = quota.stop();
+
+        assert_eq!(
+            achievement.measured_cpu,
+            Duration::from_millis(20),
+            "the last reading taken while the threads were alive is the honest \
+             total; a later zero is a failed read, not a machine that un-ran"
+        );
+        assert!(
+            achievement.achieved_millicores > 0,
+            "a machine that consumed CPU cannot report an achieved share of zero"
+        );
+    }
+
+    /// The same collapse, seen by the policy rather than the record. The
+    /// entitlement grows every period, so a total that falls back below it
+    /// would release the hold permanently and stop bounding the machine.
+    #[test]
+    fn a_collapsed_reading_does_not_release_the_hold_for_the_rest_of_the_run() {
+        let period = Duration::from_millis(10);
+        let policy = QuotaPolicy::new(crate::quota::QuotaConfig::new(500, period).unwrap());
+        // Consumes far past its entitlement, then the threads die.
+        let clock = ScriptedClock::new(vec![Duration::from_millis(50), Duration::from_millis(100)]);
+        let handle = MockHandle::new();
+        let flag = Arc::new(AtomicBool::new(false));
+        handle.bind_flag(Arc::clone(&flag));
+        let quota = VcpuQuota::start_with_flag(vec![handle], clock, policy, Arc::clone(&flag));
+
+        std::thread::sleep(Duration::from_millis(90));
+        let achievement = quota.stop();
+
+        assert_eq!(
+            achievement.measured_cpu,
+            Duration::from_millis(100),
+            "the overshoot has to survive the threads that produced it"
         );
     }
 
