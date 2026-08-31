@@ -148,6 +148,38 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # Fail in seconds, naming the real constraint, instead of spending ~35
+      # minutes building and then dying on "pipe inject config to supervisor" —
+      # which reads as a supervisor bug rather than as a host that cannot run
+      # one.
+      #
+      # No GitHub-hosted macOS runner can boot an mvm guest today:
+      #
+      #   arm64 (macos-latest)  Hypervisor.framework is nested and reports
+      #                         HV_UNSUPPORTED. libkrun goes through the same
+      #                         framework, so it does not escape this either —
+      #                         the passing `libkrun (macOS Apple Silicon)` job
+      #                         builds, tests and lints, and never boots.
+      #   x86_64 (this runner)  has the virtualization extensions, but
+      #                         `mvm-hvf-supervisor` is Apple-Silicon-only and
+      #                         links as a stub, and the libkrun Homebrew
+      #                         formula is ARM-only so it cannot be installed.
+      #
+      # This lane needs a self-hosted Apple Silicon runner. Until one exists it
+      # is red by construction — see issue #3011 — and it is a release blocker on
+      # purpose: a tag
+      # cut without it is a tag with no evidence that the documented examples
+      # boot on macOS at all.
+      - name: Preflight — this host can run the workload backend
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          echo "runner arch: $arch"
+          if [ "$arch" != "arm64" ]; then
+            echo "::error::mvm-hvf-supervisor is Apple-Silicon-only and links as a stub on $arch, and the libkrun Homebrew formula is ARM-only. No workload backend can start here. This lane needs a self-hosted Apple Silicon runner; see issue #3011." >&2
+            exit 1
+          fi
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
