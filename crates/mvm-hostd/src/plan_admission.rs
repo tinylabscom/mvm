@@ -57,6 +57,7 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use ed25519_dalek::VerifyingKey;
+use mvm_build::guest_libc::GuestLibc;
 use mvm_contract::grants::ceiling::GrantCeiling;
 use mvm_contract::grants::{CpuGrant, Grants};
 use mvm_contract::protocol::capability_negotiation::negotiate_grants;
@@ -1361,6 +1362,7 @@ pub fn enforce_sdk_sidecar_backend_compatibility(
 pub fn enforce_sdk_sidecar_attachment(
     volumes: &[mvm_core::vm_backend::VmVolume],
     plan: &ExecutionPlan,
+    image_libc: GuestLibc,
 ) -> Result<()> {
     use mvm_core::plan::{SDK_SIDECAR_GUEST_PATH, sdk_host_services_in, sdk_sidecar_required};
     use mvm_core::vm_backend::VmVolumeKind;
@@ -1418,7 +1420,61 @@ pub fn enforce_sdk_sidecar_attachment(
             sidecar.host,
         );
     }
+    enforce_sidecar_libc(image_libc, &bound)?;
     Ok(())
+}
+
+/// The libc recorded beside a workload rootfs, or [`GuestLibc::Unknown`].
+///
+/// Anything unreadable — no sidecar, malformed JSON, a rootfs path with no
+/// parent — is `Unknown` rather than an error. The distinction the caller needs
+/// is "can this guest load the cdylib", and every one of those cases answers it
+/// the same way: we cannot say, so we will not attach.
+fn recorded_image_libc(rootfs_path: &str) -> GuestLibc {
+    std::path::Path::new(rootfs_path)
+        .parent()
+        .and_then(|dir| {
+            mvm_build::builder_vm::GuestSidecar::read_from_dir(dir)
+                .ok()
+                .flatten()
+        })
+        .map_or(GuestLibc::Unknown, |sidecar| sidecar.libc)
+}
+
+/// Refuse a sidecar the guest could not load.
+///
+/// The cdylib inside it is built for one libc, and a process under the other
+/// cannot `dlopen` it at all. Left unchecked, the boot succeeds and the failure
+/// lands inside the guest as a relocation error naming `_dl_find_object` — a
+/// symbol the operator never heard of, from a library they did not ask for.
+/// Refusing here is the same outcome, said where it can name the cause.
+///
+/// [`GuestLibc::Unknown`] refuses too. It covers an image whose loader was
+/// unrecognisable and a sidecar written before the field existed, and neither
+/// is evidence that loading would work.
+fn enforce_sidecar_libc(image_libc: GuestLibc, bound: &[&str]) -> Result<()> {
+    if mvm_build::guest_libc::sidecar_loads_in(image_libc) {
+        return Ok(());
+    }
+    let detail = match image_libc {
+        GuestLibc::Unknown => {
+            "the image records no libc this host recognises. An image materialized before mvm \
+             began recording it reads this way — re-pull or rebuild it and the sidecar is \
+             rewritten with the libc"
+        }
+        _ => {
+            "a process under one libc cannot dlopen an object built for the other — the guest \
+             would fail resolving symbols such as `_dl_find_object`"
+        }
+    };
+    anyhow::bail!(
+        "refusing to launch: the signed ExecutionPlan binds SDK host service(s) [{}], which are \
+         delivered by a shared object built for {}, but this image is {}. {detail}. Use an image \
+         whose libc matches, or drop the host-service binding.",
+        bound.join(", "),
+        mvm_build::guest_libc::SIDECAR_CDYLIB_LIBC.as_str(),
+        image_libc.as_str(),
+    )
 }
 
 /// Inputs for [`admit_and_start`]. The `synthesis` describes the plan to admit
@@ -1758,7 +1814,11 @@ fn run_post_admission_gates(
     if let Err(e) = enforce_sdk_sidecar_backend_compatibility(backend, admitted.plan()) {
         return Err(("sdk-sidecar", e.into()));
     }
-    if let Err(e) = enforce_sdk_sidecar_attachment(&config.volumes, admitted.plan()) {
+    if let Err(e) = enforce_sdk_sidecar_attachment(
+        &config.volumes,
+        admitted.plan(),
+        recorded_image_libc(&config.rootfs_path),
+    ) {
         return Err(("sdk-sidecar", e));
     }
     if let Err(e) = attach_admitted_extensions(&mut config, admitted) {
@@ -2624,6 +2684,64 @@ mod tests {
         assert!(error.to_string().contains("not executable"));
     }
 
+    /// A musl guest cannot load the glibc cdylib, and the failure would
+    /// otherwise land inside the guest at `dlopen` time as a relocation error
+    /// naming a symbol the operator never heard of. Refuse on the host, where
+    /// the cause can be named.
+    #[test]
+    fn a_sidecar_the_guest_cannot_load_is_refused_before_boot() {
+        let plan = plan_binding(&["host.kv.v1"]);
+        let err = enforce_sdk_sidecar_attachment(
+            &[sdk_sidecar_volume()],
+            &plan,
+            mvm_build::guest_libc::GuestLibc::Musl,
+        )
+        .expect_err("a musl image must not receive the glibc sidecar");
+        let msg = err.to_string();
+        assert!(msg.contains("musl"), "must name the image's libc: {msg}");
+        assert!(msg.contains("glibc"), "must name the sidecar's libc: {msg}");
+        assert!(
+            msg.contains("host.kv.v1"),
+            "must name the binding that asked for it: {msg}"
+        );
+    }
+
+    /// Unknown is the arm a permissive default would wave through. It covers an
+    /// image materialized before mvm recorded the libc, so the message has to
+    /// say how to make it known rather than just refusing.
+    #[test]
+    fn an_unknown_libc_is_refused_and_says_how_to_resolve_it() {
+        let plan = plan_binding(&["host.kv.v1"]);
+        let err = enforce_sdk_sidecar_attachment(
+            &[sdk_sidecar_volume()],
+            &plan,
+            mvm_build::guest_libc::GuestLibc::Unknown,
+        )
+        .expect_err("an unrecorded libc must not be attached on a guess");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("re-pull or rebuild"),
+            "must name the remedy: {msg}"
+        );
+    }
+
+    /// The libc gate must sit behind the binding check: a workload that binds
+    /// no SDK service carries no sidecar, so its libc is irrelevant and must
+    /// not refuse the boot.
+    #[test]
+    fn an_unbound_workload_is_unaffected_by_its_libc() {
+        let plan = plan_binding(&[]);
+        assert!(
+            enforce_sdk_sidecar_attachment(&[], &plan, mvm_build::guest_libc::GuestLibc::Unknown)
+                .is_ok()
+        );
+    }
+
+    /// The libc the shipped cdylib is built for. These tests assert attachment
+    /// *shape* — count, read-only, kind — so they hold the libc loadable and
+    /// let the dedicated libc tests vary it.
+    const LOADABLE_LIBC: GuestLibc = mvm_build::guest_libc::SIDECAR_CDYLIB_LIBC;
+
     fn sdk_sidecar_volume() -> mvm_core::vm_backend::VmVolume {
         use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
         VmVolume {
@@ -2705,9 +2823,9 @@ mod tests {
     #[test]
     fn no_sdk_binding_means_no_sidecar_attachment() {
         let plan = plan_binding(&[]);
-        assert!(enforce_sdk_sidecar_attachment(&[], &plan).is_ok());
+        assert!(enforce_sdk_sidecar_attachment(&[], &plan, LOADABLE_LIBC).is_ok());
 
-        let err = enforce_sdk_sidecar_attachment(&[sdk_sidecar_volume()], &plan)
+        let err = enforce_sdk_sidecar_attachment(&[sdk_sidecar_volume()], &plan, LOADABLE_LIBC)
             .expect_err("an unauthorized sidecar must be refused");
         let msg = err.to_string();
         assert!(msg.contains("binds no SDK host service"), "{msg}");
@@ -2718,8 +2836,10 @@ mod tests {
     #[test]
     fn unrelated_service_binding_does_not_require_the_sidecar() {
         let plan = plan_binding(&["broker.v1", "host.other.v1"]);
-        assert!(enforce_sdk_sidecar_attachment(&[], &plan).is_ok());
-        assert!(enforce_sdk_sidecar_attachment(&[sdk_sidecar_volume()], &plan).is_err());
+        assert!(enforce_sdk_sidecar_attachment(&[], &plan, LOADABLE_LIBC).is_ok());
+        assert!(
+            enforce_sdk_sidecar_attachment(&[sdk_sidecar_volume()], &plan, LOADABLE_LIBC).is_err()
+        );
     }
 
     /// A bound SDK host service with the sidecar attached read-only is admitted.
@@ -2728,7 +2848,8 @@ mod tests {
         for service in mvm_core::plan::SDK_HOST_SERVICES {
             let plan = plan_binding(&[service]);
             assert!(
-                enforce_sdk_sidecar_attachment(&[sdk_sidecar_volume()], &plan).is_ok(),
+                enforce_sdk_sidecar_attachment(&[sdk_sidecar_volume()], &plan, LOADABLE_LIBC)
+                    .is_ok(),
                 "{service} bound + sidecar attached read-only must be admitted"
             );
         }
@@ -2770,7 +2891,7 @@ mod tests {
     #[test]
     fn sdk_binding_without_the_sidecar_fails_closed() {
         let plan = plan_binding(&["host.secrets.v1"]);
-        let err = enforce_sdk_sidecar_attachment(&[], &plan)
+        let err = enforce_sdk_sidecar_attachment(&[], &plan, LOADABLE_LIBC)
             .expect_err("a required-but-absent sidecar must refuse the launch");
         let msg = err.to_string();
         assert!(msg.contains("host.secrets.v1"), "{msg}");
@@ -2791,14 +2912,16 @@ mod tests {
             read_only: false,
             ..sdk_sidecar_volume()
         };
-        let err = enforce_sdk_sidecar_attachment(&[writable], &plan).expect_err("rw refused");
+        let err = enforce_sdk_sidecar_attachment(&[writable], &plan, LOADABLE_LIBC)
+            .expect_err("rw refused");
         assert!(err.to_string().contains("read-only"), "{err}");
 
         let share = mvm_core::vm_backend::VmVolume {
             kind: VmVolumeKind::DirShare,
             ..sdk_sidecar_volume()
         };
-        let err = enforce_sdk_sidecar_attachment(&[share], &plan).expect_err("share refused");
+        let err = enforce_sdk_sidecar_attachment(&[share], &plan, LOADABLE_LIBC)
+            .expect_err("share refused");
         assert!(err.to_string().contains("disk image"), "{err}");
     }
 
@@ -2808,7 +2931,8 @@ mod tests {
     fn duplicate_sidecar_attachments_fail_closed() {
         let plan = plan_binding(&["host.time.v1"]);
         let dup = [sdk_sidecar_volume(), sdk_sidecar_volume()];
-        let err = enforce_sdk_sidecar_attachment(&dup, &plan).expect_err("duplicates refused");
+        let err = enforce_sdk_sidecar_attachment(&dup, &plan, LOADABLE_LIBC)
+            .expect_err("duplicates refused");
         assert!(err.to_string().contains("exactly one"), "{err}");
     }
 
@@ -2824,15 +2948,25 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            enforce_sdk_sidecar_attachment(std::slice::from_ref(&other), &plan_binding(&[]))
-                .is_ok()
+            enforce_sdk_sidecar_attachment(
+                std::slice::from_ref(&other),
+                &plan_binding(&[]),
+                LOADABLE_LIBC
+            )
+            .is_ok()
         );
         let bound = plan_binding(&["host.cost.v1"]);
         assert!(
-            enforce_sdk_sidecar_attachment(&[other.clone(), sdk_sidecar_volume()], &bound).is_ok()
+            enforce_sdk_sidecar_attachment(
+                &[other.clone(), sdk_sidecar_volume()],
+                &bound,
+                LOADABLE_LIBC
+            )
+            .is_ok()
         );
         assert!(
-            enforce_sdk_sidecar_attachment(std::slice::from_ref(&other), &bound).is_err(),
+            enforce_sdk_sidecar_attachment(std::slice::from_ref(&other), &bound, LOADABLE_LIBC)
+                .is_err(),
             "an unrelated volume must not satisfy the sidecar requirement"
         );
     }
@@ -2846,7 +2980,9 @@ mod tests {
         let back: ExecutionPlan = serde_json::from_str(&json).expect("plan round-trips");
         assert_eq!(back.services, plan.services);
         assert!(mvm_core::plan::sdk_sidecar_required(&back));
-        assert!(enforce_sdk_sidecar_attachment(&[sdk_sidecar_volume()], &back).is_ok());
+        assert!(
+            enforce_sdk_sidecar_attachment(&[sdk_sidecar_volume()], &back, LOADABLE_LIBC).is_ok()
+        );
     }
 
     // ---- grants: the ceiling, and what the tier can actually enforce ----

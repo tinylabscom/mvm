@@ -6,6 +6,7 @@
 //! populated cache can never make a scenario pass for the wrong reason.
 
 use cucumber::{given, then, when};
+use mvm_build::guest_libc::{GuestLibc, SIDECAR_CDYLIB_LIBC};
 use mvm_contract::protocol::broker::ServiceId;
 use mvm_core::arch::GuestArch;
 use mvm_core::plan::test_support::PlanFixture;
@@ -378,16 +379,24 @@ fn attached_volumes(world: &CliWorld) -> Vec<mvm_core::vm_backend::VmVolume> {
 
 #[then(expr = "admission accepts the launch with no sidecar attachment")]
 fn admission_accepts_without_sidecar(world: &mut CliWorld) {
-    mvm_hostd::plan_admission::enforce_sdk_sidecar_attachment(&[], plan_of(world))
-        .expect("a plan binding no SDK host service must admit with no sidecar");
+    mvm_hostd::plan_admission::enforce_sdk_sidecar_attachment(
+        &[],
+        plan_of(world),
+        GuestLibc::Unknown,
+    )
+    .expect("a plan binding no SDK host service must admit with no sidecar");
 }
 
 #[then(expr = "admission accepts the launch with the sidecar attachment")]
 fn admission_accepts_with_sidecar(world: &mut CliWorld) {
     let volumes = attached_volumes(world);
     assert!(!volumes.is_empty(), "no sidecar volume was resolved");
-    mvm_hostd::plan_admission::enforce_sdk_sidecar_attachment(&volumes, plan_of(world))
-        .expect("the resolved attachment must satisfy the admission gate");
+    mvm_hostd::plan_admission::enforce_sdk_sidecar_attachment(
+        &volumes,
+        plan_of(world),
+        SIDECAR_CDYLIB_LIBC,
+    )
+    .expect("the resolved attachment must satisfy the admission gate");
 }
 
 #[then(expr = "wasm admission refuses the requested SDK host service before backend start")]
@@ -420,9 +429,12 @@ fn admission_refuses_sidecar(world: &mut CliWorld) {
         kind: mvm_core::vm_backend::VmVolumeKind::Disk,
         encrypted: false,
     };
-    let err =
-        mvm_hostd::plan_admission::enforce_sdk_sidecar_attachment(&[smuggled], plan_of(world))
-            .expect_err("an unauthorized sidecar must be refused");
+    let err = mvm_hostd::plan_admission::enforce_sdk_sidecar_attachment(
+        &[smuggled],
+        plan_of(world),
+        GuestLibc::Unknown,
+    )
+    .expect_err("an unauthorized sidecar must be refused");
     assert!(
         err.to_string().contains("binds no SDK host service"),
         "unexpected refusal reason: {err}"
