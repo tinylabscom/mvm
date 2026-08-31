@@ -1,5 +1,8 @@
 # Plan 2026-08-31: RustCrypto 0.11 migration and aws-lc-rs removal (B4/C1)
 
+Backing: shipped-source
+Validation: none
+
 ## Gate that unblocked this plan
 
 This plan was gated on two upstream crates shipping STABLE (non-RC) releases:
