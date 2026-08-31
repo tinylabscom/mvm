@@ -154,6 +154,10 @@ echo "==> building mvmctl + host helpers"
 # cargo makes this a no-op when they are already current, so always doing it
 # costs a fingerprint check. The signing step below must follow it: a re-linked
 # supervisor loses its Hypervisor.framework entitlement.
+#
+# Not `just embed-refresh`: that clears the nested musl cross-compile of the
+# *embedded* host-vm binaries, a different set, and this gate boots no builder
+# VM that would rebuild them.
 echo "==> building the per-VM host helpers"
 just build-supervisors
 
