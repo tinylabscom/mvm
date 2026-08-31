@@ -1349,6 +1349,8 @@ pub fn resolve_launch(
     marks: &mut LaunchResolveMarks,
     sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
 ) -> Result<ResolvedLaunch> {
+    use crate::commands::vm::phase_timing::SubPhase;
+
     let backend = select_exec_backend(
         shape_uses_vsock_proxy_backend(shape),
         shape.network_policy,
@@ -1408,6 +1410,7 @@ pub fn resolve_launch(
     // `network_policy` and chain-audit the run. Force cold boot when admitted —
     // snapshot restore is unavailable for workload admission.
     let t_admission = std::time::Instant::now();
+    sub.start(SubPhase::AdmitPlan);
     if let Some(admit_fn) = admit
         && let Some(sub) = admit_fn(
             std::path::Path::new(&image.rootfs),
@@ -1424,6 +1427,7 @@ pub fn resolve_launch(
         start_config.config_files.extend(sub.config_files);
         use_snapshot = false;
     }
+    sub.finish(SubPhase::AdmitPlan);
     tracing::debug!(
         ms = t_admission.elapsed().as_secs_f64() * 1000.0,
         "admit window: admission"
@@ -1457,14 +1461,18 @@ pub fn resolve_launch(
     }
 
     let t_overlay = std::time::Instant::now();
+    sub.start(SubPhase::AttachOverlay);
     crate::commands::vm::up::attach_runtime_overlay_if_cached(&mut start_config, backend.name())?;
+    sub.finish(SubPhase::AttachOverlay);
     tracing::debug!(
         ms = t_overlay.elapsed().as_secs_f64() * 1000.0,
         "admit window: attach runtime overlay"
     );
 
     let t_initramfs = std::time::Instant::now();
+    sub.start(SubPhase::AttachInitramfs);
     crate::commands::vm::up::attach_universal_initramfs_if_cached(&mut start_config)?;
+    sub.finish(SubPhase::AttachInitramfs);
     tracing::debug!(
         ms = t_initramfs.elapsed().as_secs_f64() * 1000.0,
         "admit window: attach universal initramfs"
