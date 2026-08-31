@@ -2573,6 +2573,16 @@ resume` takes a `current_head` and refuses when it differs from the
         `xtask/src/check_duplicate_majors.rs` and `deny.toml` (workspace
         unified on rand 0.10 in a prior change; the allowlist never followed).
 
+- [x] Plan 2026-08-31 — RustCrypto 0.11 migration B4/C1
+      (`specs/plans/2026-08-31-rustcrypto-011-migration-b4c1.md`)
+      Gates cleared 2026-08-31: aes-gcm 0.11.1 stable; ed25519-dalek 3.0.0
+      stable. Workspace was already on the 0.11 line for all crypto crates;
+      this plan bumps aes-gcm lockfile 0.11.0 → 0.11.1 and records that
+      sha2 0.10.9 / aws-lc-rs remain only in the optional manifest-verify
+      path (blocked on sigstore-crypto > 0.11.0 upstream; default closure
+      is already clean). C1 (oci-client rustls-tls-no-provider) does not
+      apply: no oci-client dep in workspace.
+
 - [ ] Plan 313 — egress token accounting, streaming, and compaction
       (`specs/plans/313-egress-token-accounting-and-compaction.md`)
   - [x] Phase 0 — verified: the substitution path buffers the whole response

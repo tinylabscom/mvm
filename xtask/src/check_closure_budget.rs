@@ -67,7 +67,10 @@ const BUDGETS: &[ClosureBudget] = &[
 ///
 /// 229 (was 228): the same compile-time `syn` 3 transition recorded for the
 /// Linux closure below.
-const MACOS_CLOSURE_BUDGET: usize = 229;
+///
+/// 230 (was 229): aes-gcm 0.11.1 adds `ctutils` on both shipped targets; same
+/// reason as the Linux budget bump above.
+const MACOS_CLOSURE_BUDGET: usize = 230;
 
 /// Max distinct crates allowed in `mvmctl`'s default no-dev closure on
 /// `x86_64-unknown-linux-gnu`. Baseline measured 2026-06-17 against the audited default
@@ -193,7 +196,10 @@ const MACOS_CLOSURE_BUDGET: usize = 229;
 ///
 /// 238 (was 237): `async-trait` 0.1.92 removes a generated attribute rejected
 /// by current nightly Clippy and moves its compile-time parser to `syn` 3.
-pub(crate) const CLOSURE_BUDGET: usize = 238;
+///
+/// 239 (was 238): aes-gcm 0.11.1 adds `ctutils`, a small helper it did not
+/// carry in 0.11.0; this is the first stable (non-RC) aes-gcm 0.11 release.
+pub(crate) const CLOSURE_BUDGET: usize = 239;
 
 pub fn run(workspace: &Path) -> Result<()> {
     for budget in BUDGETS {
