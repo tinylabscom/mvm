@@ -106,54 +106,18 @@ pub enum ImageSource {
         initrd_path: Option<String>,
         /// Display label used in messages and `flake_ref` (no functional effect).
         label: String,
-        /// When set, a candidate to boot from a read-only **virtiofs root**
-        /// serving the unpacked+injected OCI tree instead of `rootfs_path`. Only
-        /// the OCI `run --image` path sets it; the run-path tier gate
-        /// ([`mvm_build::run_image::select_root_strategy`]) makes the final call
-        /// from this candidate + the backend capability + sealed state.
-        virtiofs_oci_root: Option<VirtiofsOciRoot>,
+        /// The unpacked+injected OCI tree behind this image, when it came from
+        /// one. Carried because it is what distinguishes an OCI-derived
+        /// prebuilt from the cached dev image, which take different initrds.
+        ///
+        /// It used to be a virtiofs-root *candidate*, and the tier gate read it
+        /// to decide whether to serve the tree over virtio-fs. That gate is
+        /// gone; the fact it recorded is not.
+        unpacked_oci_root: Option<String>,
     },
     /// Pre-built `wasm32-wasip1` module run directly under the wasm backend.
     /// No kernel, initrd, or rootfs — the module path is the workload.
     WasmModule { module_path: String, label: String },
-}
-
-/// A candidate unpacked OCI tree to boot as a virtiofs root, carried from OCI
-/// resolution to the run-path tier gate.
-#[derive(Debug, Clone)]
-pub struct VirtiofsOciRoot {
-    /// Host path of the unpacked+injected OCI tree to serve read-only.
-    pub tree_dir: String,
-    /// Whether this is a `--prod` run — a hard disqualifier for the dev-tier
-    /// virtiofs path (the gate keeps prod on Option B / block+ext4).
-    pub prod: bool,
-}
-
-/// The run-path tier gate: return the tree to boot as a virtiofs root, or `None`
-/// to use the block rootfs. `select_root_strategy` is the single authority — it
-/// can never yield virtiofs for a prod or sealed workload, nor on a
-/// non-virtiofs-capable backend. Only an OCI `Prebuilt` carrying a candidate can
-/// reach virtiofs at all; every other image source is `None`.
-fn resolve_virtiofs_root(
-    image: &ImageSource,
-    backend_virtiofs_root: bool,
-    sealed: bool,
-) -> Option<String> {
-    let ImageSource::Prebuilt {
-        virtiofs_oci_root: Some(candidate),
-        ..
-    } = image
-    else {
-        return None;
-    };
-    match mvm_build::run_image::select_root_strategy(mvm_build::run_image::RootStrategySelection {
-        backend_virtiofs_root,
-        prod: candidate.prod,
-        sealed,
-    }) {
-        mvm_build::run_image::RootStrategy::VirtiofsRoot => Some(candidate.tree_dir.clone()),
-        mvm_build::run_image::RootStrategy::BlockExt4 => None,
-    }
 }
 
 fn effective_transient_initrd(
@@ -169,7 +133,7 @@ fn effective_transient_initrd(
         return Ok(None);
     }
     let ImageSource::Prebuilt {
-        virtiofs_oci_root: Some(_),
+        unpacked_oci_root: Some(_),
         ..
     } = image
     else {
@@ -418,7 +382,7 @@ fn shape_uses_vsock_proxy_backend(shape: &LaunchShape<'_>) -> bool {
     matches!(
         shape.image,
         ImageSource::Prebuilt {
-            virtiofs_oci_root: Some(_),
+            unpacked_oci_root: Some(_),
             ..
         }
     ) && shape.network_policy.allows_egress()
@@ -1166,19 +1130,11 @@ fn resolve_boot_strategy(
     };
     sub.finish(SubPhase::ArtifactVerify);
 
-    // Run-path tier gate: a virtiofs-capable backend + a non-prod, non-sealed OCI
-    // dev run boots from the unpacked tree over virtio-fs (no ext4 materialize);
-    // prod, sealed, and block backends stay on the materialized rootfs (claim 3).
-    let virtiofs_root = resolve_virtiofs_root(
-        shape.image,
-        backend.capabilities().virtiofs_root,
-        verity_path.is_some(),
-    );
-    let root_strategy = if virtiofs_root.is_some() {
-        mvm_build::run_image::RootStrategy::VirtiofsRoot
-    } else {
-        mvm_build::run_image::RootStrategy::BlockExt4
-    };
+    // Every root is a materialized block ext4 image. The dev-tier virtiofs root
+    // could not be dm-verity sealed and exposed a host directory through a FUSE
+    // parser merely to avoid materialization, so it is not a valid boot mode.
+    let virtiofs_root: Option<String> = None;
+    let root_strategy = mvm_build::run_image::RootStrategy::BlockExt4;
     let effective_initrd = effective_transient_initrd(
         shape.image,
         resolved.initrd.as_deref(),
@@ -1746,7 +1702,7 @@ mod tests {
             rootfs_path: rootfs.display().to_string(),
             initrd_path: None,
             label: "fixture".into(),
-            virtiofs_oci_root: None,
+            unpacked_oci_root: None,
         };
         let policy = mvm_core::network_policy::NetworkPolicy::deny_all();
         let shape = LaunchShape {
@@ -2059,46 +2015,54 @@ mod tests {
             rootfs_path: "/r".into(),
             initrd_path: None,
             label: "lbl".into(),
-            virtiofs_oci_root: None,
+            unpacked_oci_root: None,
         }
     }
 
+    /// The virtiofs tier gate is gone, so what used to be tested here is that
+    /// it could never fire. What survived it is the distinction the gate's
+    /// input happened to encode: an OCI-derived prebuilt and the cached dev
+    /// image take different initrds, and only the first has an unpacked tree.
+    ///
+    /// Deleting the field outright would have quietly given every prebuilt the
+    /// OCI initrd, which nothing would have failed on.
     #[test]
-    fn virtiofs_gate_only_dev_capable_nonsealed_reaches_virtiofs() {
-        let with = |prod| ImageSource::Prebuilt {
+    fn only_an_oci_derived_prebuilt_resolves_the_oci_initrd() {
+        let oci = ImageSource::Prebuilt {
             kernel_path: "/k".into(),
             rootfs_path: "/r".into(),
             initrd_path: None,
-            label: "l".into(),
-            virtiofs_oci_root: Some(VirtiofsOciRoot {
-                tree_dir: "/tree".into(),
-                prod,
-            }),
+            label: "oci:sha256:abc".into(),
+            unpacked_oci_root: Some("/tree".into()),
         };
-        // The one cell that reaches virtiofs: OCI candidate, capable backend,
-        // non-prod, non-sealed.
+        // The cached dev image: a prebuilt with no unpacked tree behind it.
+        let dev = prebuilt();
+
+        // An explicit initrd always wins, whatever the image is.
         assert_eq!(
-            resolve_virtiofs_root(&with(false), true, false).as_deref(),
-            Some("/tree")
+            effective_transient_initrd(
+                &oci,
+                Some("/explicit"),
+                "/r",
+                mvm_build::run_image::RootStrategy::BlockExt4
+            )
+            .unwrap()
+            .as_deref(),
+            Some("/explicit")
         );
-        // Every disqualifier keeps it on the block rootfs (claim 3):
+
+        // The dev image never resolves an OCI initrd, whatever is on disk.
         assert_eq!(
-            resolve_virtiofs_root(&with(true), true, false),
+            effective_transient_initrd(
+                &dev,
+                None,
+                "/r",
+                mvm_build::run_image::RootStrategy::BlockExt4
+            )
+            .unwrap(),
             None,
-            "prod"
+            "a non-OCI prebuilt must not take the OCI initrd path"
         );
-        assert_eq!(
-            resolve_virtiofs_root(&with(false), true, true),
-            None,
-            "sealed"
-        );
-        assert_eq!(
-            resolve_virtiofs_root(&with(false), false, false),
-            None,
-            "non-virtiofs backend (e.g. Firecracker)"
-        );
-        // A non-OCI image (flake/template/default) never reaches virtiofs.
-        assert_eq!(resolve_virtiofs_root(&prebuilt(), true, false), None);
     }
 
     #[test]
@@ -2170,10 +2134,7 @@ mod tests {
             rootfs_path: rootfs.display().to_string(),
             initrd_path: None,
             label: "oci".into(),
-            virtiofs_oci_root: Some(VirtiofsOciRoot {
-                tree_dir: "/tree".into(),
-                prod: false,
-            }),
+            unpacked_oci_root: Some("/tree".to_string()),
         };
 
         let resolved = effective_transient_initrd(

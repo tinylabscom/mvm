@@ -121,12 +121,29 @@ property is mid-run visibility.
 
 ### Stage B — the dev-tier root
 
-- [ ] Delete virtiofs-root. The security-posture ADR already calls it a
-      dev-tier path with a weaker contract that does not witness claim 3; it is
-      the one boot mode that cannot be dm-verity sealed. Block+ext4 is the only
-      root.
-- [ ] Retire `VIRTIOFS_ROOT_TAG`, the `root=<tag>` cmdline knob, and the
-      `RootStrategy::Virtiofs` arm.
+**Evidence it costs nothing in practice:** across this host's entire recorded
+history — 1,278 launches — the audited `root_strategy` is `block-ext4` **1,278
+times and virtiofs-root zero times.** The dev-tier root was reachable in
+principle and taken never.
+
+- [x] Virtiofs-root is unreachable. `resolve_virtiofs_root` — the single
+      authority, gating on backend capability x prod x sealed — is deleted, and
+      the strategy is `BlockExt4` unconditionally. The security-posture ADR
+      already called this a weaker contract that does not witness claim 3; it
+      was the one boot mode that could not be dm-verity sealed.
+- [x] `ImageSource::Prebuilt`'s virtiofs candidate became
+      `unpacked_oci_root: Option<String>`. The field was doing double duty:
+      besides feeding the gate, it was the only thing distinguishing an
+      OCI-derived prebuilt from the cached dev image, and the two take
+      different initrds. Deleting it outright would have quietly given every
+      prebuilt the OCI initrd, and no test would have caught that —
+      `only_an_oci_derived_prebuilt_resolves_the_oci_initrd` covers it now.
+- [ ] Delete the machinery below the gate. Larger than it looked: ~117
+      `virtiofs_root` references (the `VmCapabilities` flag, the
+      `VmStartConfig` field, `VIRTIOFS_ROOT_TAG` and the `root=<tag>` cmdline
+      knob, `RootStrategy::VirtiofsRoot`, `select_root_strategy`), plus a
+      *separate* `RuntimeSourceRootStrategy::VirtiofsRoot` that warm-pool
+      compatibility keys on. A pass of its own.
 
 ### Stage C — the builder VM
 
