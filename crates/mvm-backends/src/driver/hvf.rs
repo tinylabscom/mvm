@@ -366,15 +366,17 @@ fn boot_with_handoff(
             .map_err(|e| anyhow!("poll supervisor: {e}"))?
         {
             bail!(
-                "hvf supervisor exited before writing its PID file (status: {status}); see {}",
-                paths.console_log.display()
+                "hvf supervisor exited before writing its PID file (status: {status}); see {}{}",
+                paths.console_log.display(),
+                mvm_vmm::host::console_capture::supervisor_stderr_detail(&paths.state_dir)
             );
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
             bail!(
-                "hvf supervisor did not confirm boot within {PID_FILE_TIMEOUT:?}; see {}",
-                paths.console_log.display()
+                "hvf supervisor did not confirm boot within {PID_FILE_TIMEOUT:?}; see {}{}",
+                paths.console_log.display(),
+                mvm_vmm::host::console_capture::supervisor_stderr_detail(&paths.state_dir)
             );
         }
         std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));

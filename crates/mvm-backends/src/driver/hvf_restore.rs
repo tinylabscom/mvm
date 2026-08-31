@@ -299,17 +299,19 @@ pub fn restore_hvf_vm(req: &HvfRestoreRequest<'_>) -> Result<RestoredHvfVm> {
         }
         if let Some(status) = child.try_wait().context("polling the HVF supervisor")? {
             bail!(
-                "HVF restore of '{}' exited before publishing its pid (status: {status}); see {}",
+                "HVF restore of '{}' exited before publishing its pid (status: {status}); see {}{}",
                 req.vm_name,
-                cfg.console_log.display()
+                cfg.console_log.display(),
+                mvm_vmm::host::console_capture::supervisor_stderr_detail(req.state_dir)
             );
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
             bail!(
-                "HVF restore of '{}' did not confirm within {PID_FILE_TIMEOUT:?}; see {}",
+                "HVF restore of '{}' did not confirm within {PID_FILE_TIMEOUT:?}; see {}{}",
                 req.vm_name,
-                cfg.console_log.display()
+                cfg.console_log.display(),
+                mvm_vmm::host::console_capture::supervisor_stderr_detail(req.state_dir)
             );
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
