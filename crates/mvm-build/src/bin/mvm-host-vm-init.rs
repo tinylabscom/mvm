@@ -3210,6 +3210,26 @@ mod linux {
     /// below is on this disk, not tmpfs.
     const DISK_INPUT_STAGE: &str = "/nix-store/builder-input";
 
+    /// Empty `dir`, creating it when it is absent.
+    ///
+    /// The staging root lives on the persistent nix-store disk, so it outlives
+    /// the build that wrote it. `tar x` merges into whatever it finds and never
+    /// removes an entry the new archive omits, so without this reset every
+    /// build reads a `/work` that is the union of every tree ever staged on
+    /// this host. A source file deleted upstream keeps being compiled: loudly
+    /// when it collides with what replaced it — a module turned into a
+    /// directory gives `E0761` — and silently when it does not, which is the
+    /// worse half, because the build then succeeds against sources that are not
+    /// the checkout's.
+    fn reset_stage_dir(dir: &str) -> Result<(), String> {
+        match std::fs::remove_dir_all(dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("clear {dir}: {e}")),
+        }
+        std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {dir}: {e}"))
+    }
+
     /// Populate `/job`, `/work`, `/mvm-bins`, and (when the host packed one)
     /// `/closure-seed` from the input disk, and back `/out` with a writable
     /// dir on the persistent nix-store disk. This is the disk-transport
@@ -3217,8 +3237,7 @@ mod linux {
     /// Rootfs-image libkrun builder VM, and the only option for the hvf VMM
     /// (which has no virtio-fs).
     fn stage_disk_transport_input(t: &crate::DiskTransport) -> Result<(), String> {
-        std::fs::create_dir_all(DISK_INPUT_STAGE)
-            .map_err(|e| format!("mkdir {DISK_INPUT_STAGE}: {e}"))?;
+        reset_stage_dir(DISK_INPUT_STAGE)?;
         // Extract the input tar straight off the raw block device; tar stops at
         // the archive EOF marker before the disk's zero padding.
         let status = Command::new("/bin/busybox")
@@ -3244,8 +3263,13 @@ mod linux {
                 disk_bind_mount(&src, target)?;
             }
         }
+        // `/out` carries this job's artifacts and nothing else. It is backed by
+        // the same persistent disk as the input stage, so without a reset the
+        // host reads back a tar of every artifact any earlier build left here —
+        // including `result-*` symlinks into guest-only store paths, which are
+        // dangling on the host and fail the extraction outright.
         let out_backing = format!("{NIX_STORE_MOUNT}/out");
-        std::fs::create_dir_all(&out_backing).map_err(|e| format!("mkdir {out_backing}: {e}"))?;
+        reset_stage_dir(&out_backing)?;
         std::fs::create_dir_all(OUT_DIR).map_err(|e| format!("mkdir {OUT_DIR}: {e}"))?;
         disk_bind_mount(&out_backing, OUT_DIR)?;
         Ok(())
@@ -4021,6 +4045,50 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// The staging root survives on the persistent nix-store disk, and
+        /// `tar x` only adds. A file the current archive does not carry — one
+        /// deleted upstream since the last build — has to be gone before the
+        /// extract, or the guest compiles a tree that is not the checkout's.
+        #[test]
+        fn reset_stage_dir_drops_a_tree_an_earlier_build_left() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let stage = dir.path().join("builder-input");
+            std::fs::create_dir_all(stage.join("work/crates/mvm-core/src/policy"))
+                .expect("seed a previous build's tree");
+            let stale = stage.join("work/crates/mvm-core/src/policy/audit.rs");
+            std::fs::write(&stale, b"// deleted upstream").expect("write stale source");
+
+            reset_stage_dir(stage.to_str().expect("utf-8 path")).expect("reset");
+
+            assert!(
+                stage.is_dir(),
+                "tar needs the staging root to exist to extract into"
+            );
+            assert!(
+                !stale.exists(),
+                "a source deleted upstream must not survive"
+            );
+            assert_eq!(
+                std::fs::read_dir(&stage)
+                    .expect("read staging root")
+                    .count(),
+                0,
+                "the staging root must be empty before the extract"
+            );
+        }
+
+        /// First boot on a fresh nix-store disk: nothing to clear, and the
+        /// root still has to exist afterwards.
+        #[test]
+        fn reset_stage_dir_creates_the_root_when_absent() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let stage = dir.path().join("builder-input");
+
+            reset_stage_dir(stage.to_str().expect("utf-8 path")).expect("reset");
+
+            assert!(stage.is_dir());
+        }
 
         #[test]
         fn json_escape_plain() {
