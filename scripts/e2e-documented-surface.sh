@@ -436,7 +436,14 @@ SUITE_STARTED=""
 # a backend with no memory-snapshot tier (Firecracker reports `unsupported`;
 # the macOS job sets MVM_BDD_SNAPSHOT and does not skip these), and the two
 # fixtures that need material this lane does not publish.
-ALLOWED_SKIPS="pending,needs-perf-budget-host,needs-memory-snapshot,needs-bundle-fixture,needs-tls-tunnel-client"
+#
+# `needs-dir-share` is set below rather than tolerated blindly: libkrun and HVF
+# serve virtio-fs directory shares and must run those scenarios, while
+# Firecracker has no virtio-fs device and cannot. Opting in means a capable
+# backend runs them and only a genuinely incapable one skips — the alternative,
+# tolerating the skip without opting in, silently dropped the witness for the
+# README's two `--mount` examples on a host that could have run it.
+ALLOWED_SKIPS="pending,needs-perf-budget-host,needs-memory-snapshot,needs-bundle-fixture,needs-tls-tunnel-client,needs-dir-share"
 
 echo "==> documented examples + machine journey (cucumber, @live)"
 SUITE_STARTED=1
@@ -449,6 +456,7 @@ set +e
 SUITE_LOG="$(mktemp "${TMPDIR:-/tmp}/mvm-e2e-suite.XXXXXX")"
 CARGO_BIN_EXE_mvmctl="$MVMCTL" \
 MVM_BDD_LIVE=1 \
+MVM_BDD_DIR_SHARE=1 \
 MVM_BDD_STRICT_SKIPS=1 \
 MVM_BDD_ALLOWED_SKIPS="$ALLOWED_SKIPS" \
 MVM_E2E_HOME="$E2E_HOME" \

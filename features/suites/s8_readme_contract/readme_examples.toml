@@ -181,7 +181,7 @@ witness = "suites/s31_launch_e2e/sdk_and_library_modes.feature::a runtime-SDK sc
 
 [[example]]
 command = "mvmctl run --mode live --profile dev ./script.py"
-exempt = "DOES NOT WORK TODAY. `--profile dev` clears the grant gate and the script then dies on `mvmctl machine proc start` exit 1 against the guest it just booted — the residual named in the title of #2887, closed 2026-08-27 with the reporting half fixed and this half not. `sdk_and_library_modes.feature::a runtime-SDK script reaches DevOnly surfaces under an explicit dev profile` drives it and is tagged @wip on that. This entry is an exemption and not a witness precisely because the README documents something that does not currently function; delete it and retag the scenario @live when it does."
+witness = "suites/s31_launch_e2e/sdk_and_library_modes.feature::a runtime-SDK script reaches DevOnly surfaces under an explicit dev profile"
 
 [[example]]
 command = "mvmctl run --peer db.mvm.peer:5432=127.0.0.1:34567 -- ./my-service"
