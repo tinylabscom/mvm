@@ -163,25 +163,6 @@ pub fn ensure_no_dir_share_volumes(config: &VmStartConfig) -> Result<()> {
     Ok(())
 }
 
-/// Refuse live directory shares when the selected driver cannot express them.
-/// The config-to-spec mapper still carries the shares explicitly so a capable
-/// driver cannot accidentally forget one.
-pub fn ensure_dir_share_support(config: &VmStartConfig, supported: bool) -> Result<()> {
-    if !supported {
-        return ensure_no_dir_share_volumes(config);
-    }
-    if let Some(v) = config.volumes.iter().find(|v| {
-        matches!(v.kind, VmVolumeKind::DirShare) && !v.attaches_as_block() && !v.read_only
-    }) {
-        bail!(
-            "directory-share volume '{}' -> '{}' requests read-write access, but this backend only supports read-only virtio-fs shares",
-            v.host,
-            v.guest
-        );
-    }
-    Ok(())
-}
-
 /// The host-side unix sockets a workload's standing vsock channels bind to.
 pub struct WorkloadSockets<'a> {
     /// Agent RPC: the host dials the guest agent listening on `GUEST_AGENT_PORT`.
@@ -367,9 +348,9 @@ const HOST_SIGNER_KEY_FILE: &str = "host-signer.ed25519";
 /// virtio-fs host directory shares derived from the launch config.
 ///
 /// A `virtiofs_root` boot produces a single read-only root share tagged
-/// `mvmroot`. Each `DirShare` volume becomes an additional share using the
-/// volume's tag/host path/read_only flags. Backends that cannot attach a
-/// virtio-fs device fail closed when this list is non-empty.
+/// `mvmroot`, and nothing else. A user volume never appears here: a granted
+/// directory is materialized into an image and attached as virtio-blk, so the
+/// only virtio-fs share left in the tree is the dev-tier root.
 pub fn workload_shares(config: &VmStartConfig) -> Vec<VirtioFsShare> {
     let mut shares = Vec::new();
     if let Some(root) = &config.virtiofs_root {
@@ -377,19 +358,6 @@ pub fn workload_shares(config: &VmStartConfig) -> Vec<VirtioFsShare> {
             tag: "mvmroot".into(),
             host_path: root.clone().into(),
             read_only: true,
-            dax: true,
-        });
-    }
-    for (idx, volume) in config
-        .volumes
-        .iter()
-        .enumerate()
-        .filter(|(_, v)| matches!(v.kind, VmVolumeKind::DirShare) && !v.attaches_as_block())
-    {
-        shares.push(VirtioFsShare {
-            tag: format!("uvol{idx}"),
-            host_path: volume.host.clone().into(),
-            read_only: volume.read_only,
             dax: true,
         });
     }
@@ -600,8 +568,11 @@ mod tests {
         assert!(shares[0].dax);
     }
 
+    /// Neither kind of directory volume produces a share any more — including
+    /// the read-write one, which used to be refused by a separate check rather
+    /// than being unrepresentable.
     #[test]
-    fn dir_share_volumes_map_to_dax_shares_with_read_only_preserved() {
+    fn no_directory_volume_produces_a_share_whatever_its_mode() {
         let cfg = VmStartConfig {
             volumes: vec![
                 VmVolume {
@@ -625,16 +596,9 @@ mod tests {
             ],
             ..base()
         };
-        let shares = workload_shares(&cfg);
-        assert_eq!(shares.len(), 2);
-        assert_eq!(shares[0].tag, "uvol0");
-        assert_eq!(shares[0].host_path, PathBuf::from("/host/rw"));
-        assert!(!shares[0].read_only);
-        assert!(shares[0].dax);
-        assert_eq!(shares[1].tag, "uvol1");
-        assert_eq!(shares[1].host_path, PathBuf::from("/host/ro"));
-        assert!(shares[1].read_only);
-        assert!(shares[1].dax);
+        assert!(workload_shares(&cfg).is_empty());
+        // And an unmaterialized grant still refuses rather than being dropped.
+        assert!(ensure_no_dir_share_volumes(&cfg).is_err());
     }
 
     #[test]
@@ -902,8 +866,12 @@ mod tests {
         assert_eq!(nodes(&workload_blocks(&cfg)), vec!["/dev/vda"]);
     }
 
+    /// The inverse of what this used to assert, and the property that matters
+    /// now: a user volume never becomes a virtio-fs share. A granted directory
+    /// is materialized into an image and attached as virtio-blk, so the only
+    /// share a workload spec can carry is the dev-tier root.
     #[test]
-    fn a_dir_share_maps_to_a_tagged_virtiofs_device() {
+    fn a_user_volume_never_becomes_a_virtiofs_share() {
         let cfg = VmStartConfig {
             volumes: vec![
                 disk_volume("/vol/data.img", "/data", true),
@@ -912,14 +880,10 @@ mod tests {
             ..base()
         };
         let spec = workload_device_spec(&cfg, "init=/init", Path::new("/tmp/console.log"));
-        assert_eq!(
-            spec.shares,
-            vec![VirtioFsShare {
-                tag: "uvol1".to_string(),
-                host_path: PathBuf::from("/host/dir"),
-                read_only: false,
-                dax: true,
-            }]
+        assert!(
+            spec.shares.is_empty(),
+            "no volume may produce a virtio-fs share: {:?}",
+            spec.shares
         );
     }
 

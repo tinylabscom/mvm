@@ -92,12 +92,16 @@ the legacy arm, not building the portable one.
       between "works" and "cannot silently mount the wrong device".
 - [x] `refuse_unsupported_dir_shares` and both its call sites deleted: every
       backend can serve a mount now, so it could only produce a false refusal.
-- [ ] Delete `LocalVolumeKind::Directory`, `VmVolumeKind::DirShare`,
-      `VirtioFsShare`, and every backend's handling of them. HVF's
-      `supports_directory_shares` returns false and `directory_shares` leaves
-      `VmCapabilities`. Deliberately a separate commit: the one above is a
-      behaviour change, this is a deletion, and reviewing them together hides
-      which is which.
+- [x] Deleted: the `supports_directory_shares` trait method (every driver
+      answered the same thing once mounts materialize), HVF's override and its
+      advertised `directory_shares` capability, the `directory_shares` field on
+      `VmCapabilities`, the two-arm `ensure_dir_share_support`, and
+      `workload_shares`' volume arm. 85 lines out, 10 in.
+- [ ] `VmVolumeKind::DirShare` and `LocalVolumeKind::Directory` stay for now:
+      `DirShare` is what records a *directory* grant in the plan, which claim 1
+      matches against, so removing it means moving that fact somewhere else
+      first. `VirtioFsShare` also stays — its only remaining producers are the
+      dev-tier root (Stage B) and the builder VM (Stage C).
 
 **Custom volumes are unaffected.** A managed volume is already a
 `BlockImage`/`Disk` today. Nothing about `mvmctl volume` changes.

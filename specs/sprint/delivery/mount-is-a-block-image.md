@@ -83,11 +83,49 @@ before this ships.
 `--mount` on backends without virtio-fs; every backend can serve a mount now,
 so the refusal could only produce a false one.
 
+## Deleted after the behaviour change
+
+Once every mount materializes, a pile of machinery had nothing left to decide:
+
+- `VmmDriver::supports_directory_shares` — every driver answered the same.
+- HVF's override and its advertised `directory_shares` capability.
+- `VmCapabilities::directory_shares`.
+- `ensure_dir_share_support`, whose two arms collapsed into the refusal.
+- `workload_shares`' volume arm: the only virtio-fs share a workload spec can
+  carry now is the dev-tier root.
+
+85 lines out, 10 in.
+
+Two tests asserted the deleted behaviour. They were **inverted rather than
+removed** — `a_user_volume_never_becomes_a_virtiofs_share` and
+`no_directory_volume_produces_a_share_whatever_its_mode` — because "this maps
+to virtio-fs" becoming "this never maps to virtio-fs" is the regression guard
+worth having, and deleting them would have left the new property untested.
+
+## Measured
+
+macOS/HVF, 30MB tree:
+
+| | admit | `mount_materialize` | dispatch window | total |
+|---|---|---|---|---|
+| no mount | 25–56 ms | — | 73–90 ms | 271–322 ms |
+| mount 30 MB | 133–149 ms | 105–127 ms | 70–77 ms | 370–384 ms |
+
+No-mount launches are unchanged, and the dispatch window — the number
+`PREPARED_COLD_HARD_MAX_MS` budgets — is unchanged, so the 200ms ceiling is
+untouched. `admit_plan` is identical either way: admission itself did not get
+slower.
+
+A mounted launch pays the materialization **every launch**. The image is
+written under `vm_state_dir(vm_name)` and a transient VM name is unique per
+run, so there is nothing to cache against without relocating images into a
+shared content-addressed store — which is the heavy feature this work avoided.
+
 ## Not done
 
-- **Backends still advertise `directory_shares`** and the virtio-fs plumbing is
-  still present, now unreachable from `--mount`. Deleting it is the next commit,
-  kept separate so this one is a behaviour change and that one is a deletion.
+- **`VmVolumeKind::DirShare` stays.** It is what records a *directory* grant in
+  the signed plan, which `enforce_admitted_shares` matches against for claim 1.
+  Removing it means moving that fact somewhere else first.
 - **`virtiofsd --sandbox none` is untouched.** It is on the QEMU path, which does
   not run on the macOS dev host, and landing a blind change to a sandbox flag is
   how it got there.

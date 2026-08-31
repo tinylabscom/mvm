@@ -522,19 +522,6 @@ pub struct VmCapabilities {
     /// non-prod, non-sealed; the virtiofs-root dev path carries a weaker
     /// integrity contract and does **not** witness the verified-boot claim.
     pub virtiofs_root: bool,
-    /// Backend can attach a live host **directory share** — the `--mount`
-    /// flag's `HOST:GUEST:ro` volumes — as a virtio-fs device.
-    ///
-    /// Distinct from [`virtiofs_root`](Self::virtiofs_root), which replaces the
-    /// root filesystem; this one adds a share alongside it. A backend can have
-    /// either without the other.
-    ///
-    /// Declared here, and not only on the driver, because the caller that has
-    /// to refuse a `--mount` holds an `AnyBackend` and never sees the driver.
-    /// Without it the refusal could only happen deep inside the runner's start,
-    /// after the image had been resolved and the VM directory built — work
-    /// discarded to reach a decision that was knowable from the arguments.
-    pub directory_shares: bool,
     /// Which resource dimensions this backend can actually bound. Declared
     /// separately from what a caller requests so a refusal can name the gap.
     #[serde(default)]

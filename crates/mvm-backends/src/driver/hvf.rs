@@ -452,13 +452,6 @@ impl VmmDriver for HvfDriver {
             // non-prod, non-sealed workloads. This stays gated on the launchable
             // supervisor path — it is a dev-tier boot capability, not egress.
             virtiofs_root: proxy_path_ready,
-            // The same fact `supports_directory_shares` states to the runner,
-            // restated where a caller holding an `AnyBackend` can read it. The
-            // two are asserted to agree by
-            // `advertised_directory_shares_match_the_driver`, because a matrix
-            // that disagreed with the driver would refuse a `--mount` the
-            // backend can serve, or accept one it cannot.
-            directory_shares: true,
             // Named explicitly rather than left to `..Default::default()`:
             // the honest HVF answer (no cgroup, but a supervisor wall-clock
             // timer) differs from the all-`None` default.
@@ -493,10 +486,6 @@ impl VmmDriver for HvfDriver {
                 "Pause/resume + snapshot land as they are wired onto the primitive.",
             ],
         }
-    }
-
-    fn supports_directory_shares(&self) -> bool {
-        true
     }
 
     fn supports_resident_handoff(&self) -> bool {
@@ -1065,25 +1054,6 @@ mod tests {
     use super::*;
     use mvm_core::vm_backend::SnapshotCapability;
     use mvm_vmm::driver::spec::{BlockDev, ConsoleCapture, VsockDirection, VsockPort};
-
-    /// The capability matrix and the driver state the same fact about
-    /// directory shares, and must not drift.
-    ///
-    /// They are read by different callers: the runner asks the driver just
-    /// before assembling the spec, while a preflight refusal asks the matrix
-    /// through `AnyBackend`, which cannot see the driver at all. If they
-    /// disagreed, one of the two answers would be wrong — either refusing a
-    /// `--mount` this backend can serve, or admitting one it cannot and
-    /// failing later, which is the behaviour the preflight exists to remove.
-    #[test]
-    fn advertised_directory_shares_match_the_driver() {
-        let driver = HvfDriver;
-        assert_eq!(
-            driver.capabilities().directory_shares,
-            driver.supports_directory_shares(),
-            "the capability matrix and the driver disagree about directory shares"
-        );
-    }
 
     #[test]
     fn handoff_response_reader_handles_a_ready_unix_stream() {

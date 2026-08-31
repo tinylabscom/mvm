@@ -52,7 +52,7 @@ use mvm_vmm::host::network_endpoint_spawn::{
     EndpointTransport, SubstitutionSpawnParams, reap_network_endpoint, spawn_network_endpoint,
 };
 use mvm_vmm::host::spec_map::{
-    WorkloadSpecInputs, ensure_dir_share_support, workload_spec, workload_vsock_ports,
+    WorkloadSpecInputs, ensure_no_dir_share_volumes, workload_spec, workload_vsock_ports,
 };
 use mvm_vmm::post_restore::PostRestoreOutcome;
 
@@ -352,7 +352,12 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // `DirShare` volume has no `VmmSpec` representation on this driver
         // seam, so refuse it here rather than silently dropping it later in
         // `workload_blocks`.
-        ensure_dir_share_support(inputs.config, self.driver.supports_directory_shares())?;
+        // No driver serves a live directory share any more: a `--mount` is
+        // materialized into an image before it reaches here. A volume still
+        // asking to be shared is one nothing materialized, and it must refuse
+        // rather than be dropped — a workload booting without its mount is
+        // worse than one that will not boot.
+        ensure_no_dir_share_volumes(inputs.config)?;
 
         // A caller times this call from outside and cannot see past it, yet the
         // VMM boot and every post-boot registration happen in here. Off unless
