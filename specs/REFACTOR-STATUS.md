@@ -11,6 +11,14 @@ Last updated: 2026-08-31
       boundaries and the bounded retry budget. Workspace validation and merge
       delivery remain.
 
+- [~] **Documented-example parse-tier promotion.**
+      `specs/plans/2026-08-30-doc-example-parse-tier-promotion.md`.
+      `machine diff` now reuses the authenticated control session and joins
+      `machine proc start` in the live journey; both website commands moved to
+      the covered ledger and the parse-tier pin fell from 65 to 63. The full
+      hermetic BDD gate is green (241 passed, one capability skip). Merge
+      delivery and the remaining five journey-batch A verbs remain.
+
 - [ ] **Wasmtime security update — issues #3018 and #3020.**
       `specs/plans/2026-08-31-wasmtime-security-update.md`.
       The complete optional Wasmtime dependency family is locked to patched
