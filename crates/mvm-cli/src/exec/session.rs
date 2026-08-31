@@ -190,6 +190,7 @@ pub fn dispatch_in_session(
         memory_mib: 0,
         mem_initial_mib: None,
         dir_shares: vec![],
+        disk_volumes: vec![],
         env: vec![],
         target: ExecTarget::Inline {
             argv: vec!["bash".to_string(), "-c".to_string(), code],

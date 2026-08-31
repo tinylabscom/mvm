@@ -215,6 +215,7 @@ mod tests {
             mem_initial_mib: None,
             // Live shares are attached by the guest activation path.
             dir_shares: Vec::new(),
+            disk_volumes: Vec::new(),
             env: vec![("TERM".into(), "xterm-256color".into())],
             target: ExecTarget::Inline {
                 argv: vec!["/bin/sh".into()],
@@ -245,6 +246,7 @@ mod tests {
             mem_initial_mib: None,
             // Live shares are attached by the guest activation path.
             dir_shares: Vec::new(),
+            disk_volumes: Vec::new(),
             env: Vec::new(),
             target: ExecTarget::Inline {
                 argv: vec!["htop".into()],

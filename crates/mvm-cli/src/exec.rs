@@ -179,15 +179,9 @@ fn effective_transient_initrd(
     crate::commands::vm::up::persistent_oci_effective_initrd(std::path::Path::new(rootfs_path))
 }
 
-/// The part of a request that decides a launch's **boot shape** — every field
-/// [`resolve_launch`] reads, and nothing about what the guest will then run.
-///
-/// It exists so a caller that has no command can still resolve a bootable
-/// config: `pool warm` warms ahead of any launch and has no argv, no timeout
-/// and no stdin, but must mirror the boot a real launch performs down to the
-/// verity sidecar and the cmdline-bearing policy fields. Threading an
-/// [`ExecRequest`] with a fabricated empty command would have said the opposite
-/// of what is true.
+/// Boot inputs consumed by [`resolve_launch`], excluding guest command details.
+/// This lets `pool warm` resolve the same verity and policy-bearing config as a
+/// real launch without fabricating an empty [`ExecRequest`].
 pub struct LaunchShape<'a> {
     /// Explicit VM name, or `None` to generate a throwaway one.
     pub name: Option<&'a str>,
@@ -196,6 +190,8 @@ pub struct LaunchShape<'a> {
     pub memory_mib: u32,
     pub mem_initial_mib: Option<u32>,
     pub dir_shares: &'a [DirShareSpec],
+    /// Block-device mounts supplied by transient `--mount` disk syntax.
+    pub disk_volumes: &'a [VmVolume],
     pub pty: bool,
     pub network_policy: &'a mvm_core::network_policy::NetworkPolicy,
     pub warm_pool_size: u32,
@@ -222,6 +218,8 @@ pub struct ExecRequest {
     pub mem_initial_mib: Option<u32>,
     /// Live read-only host-directory shares requested by `machine run --mount`.
     pub dir_shares: Vec<DirShareSpec>,
+    /// Materialized disk-image volumes requested by `machine run --mount`.
+    pub disk_volumes: Vec<VmVolume>,
     pub env: Vec<(String, String)>,
     pub target: ExecTarget,
     /// Timeout for the in-guest command in seconds. `None` ⇒ no per-command
@@ -271,6 +269,7 @@ impl ExecRequest {
             memory_mib: self.memory_mib,
             mem_initial_mib: self.mem_initial_mib,
             dir_shares: &self.dir_shares,
+            disk_volumes: &self.disk_volumes,
             pty: self.pty,
             network_policy: &self.network_policy,
             warm_pool_size: self.warm_pool_size,
@@ -1153,7 +1152,7 @@ fn resolve_boot_strategy(
         shape.dir_shares,
         resolved.snap_info.is_some(),
         backend.capabilities().snapshot_capability,
-    );
+    ) && shape.disk_volumes.is_empty();
 
     // Probe for the verity sidecar alongside the rootfs: production microVMs
     // ship `rootfs.verity` + `rootfs.roothash` next to `rootfs.ext4`. Their
@@ -1264,6 +1263,7 @@ fn build_start_config(
                 kind: mvm_core::vm_backend::VmVolumeKind::DirShare,
                 ..Default::default()
             })
+            .chain(shape.disk_volumes.iter().cloned())
             .chain(shape.sdk_sidecar.iter().map(|a| a.volume.clone()))
             .collect(),
         config_files: Vec::new(),
@@ -1528,6 +1528,7 @@ mod tests {
             memory_mib: 64,
             mem_initial_mib: None,
             dir_shares: &[],
+            disk_volumes: &[],
             pty: false,
             network_policy: &mvm_core::network_policy::NetworkPolicy::deny_all(),
             warm_pool_size: 0,
@@ -1675,6 +1676,14 @@ mod tests {
             memory_mib: 2048,
             mem_initial_mib: Some(512),
             dir_shares: vec![share.clone()],
+            disk_volumes: vec![VmVolume {
+                host: "/host/data.ext4".into(),
+                guest: "/work/data".into(),
+                size: "64M".into(),
+                read_only: true,
+                kind: mvm_core::vm_backend::VmVolumeKind::Disk,
+                ..Default::default()
+            }],
             env: vec![("K".into(), "V".into())],
             target: ExecTarget::Inline { argv: vec![] },
             timeout_secs: Some(30),
@@ -1695,6 +1704,8 @@ mod tests {
         assert_eq!(shape.mem_initial_mib, Some(512));
         assert_eq!(shape.dir_shares.len(), 1);
         assert_eq!(shape.dir_shares[0].guest_mount, share.guest_mount);
+        assert_eq!(shape.disk_volumes.len(), 1);
+        assert_eq!(shape.disk_volumes[0].guest, "/work/data");
         assert!(shape.pty);
         assert_eq!(shape.warm_pool_size, 3);
         assert_eq!(shape.hypervisor, Some("mock"));
@@ -1744,6 +1755,7 @@ mod tests {
             memory_mib: 1024,
             mem_initial_mib: None,
             dir_shares: &[],
+            disk_volumes: &[],
             pty: false,
             network_policy: &policy,
             warm_pool_size: 1,
@@ -1820,6 +1832,7 @@ mod tests {
             mem_initial_mib: None,
             // Live shares are attached by the guest activation path.
             dir_shares: Vec::new(),
+            disk_volumes: Vec::new(),
             env: Vec::new(),
             target: ExecTarget::Inline {
                 argv: vec!["uname".into(), "-a".into()],
@@ -1846,6 +1859,7 @@ mod tests {
             mem_initial_mib: None,
             // Live shares are attached by the guest activation path.
             dir_shares: Vec::new(),
+            disk_volumes: Vec::new(),
             env: Vec::new(),
             target: ExecTarget::Inline {
                 argv: vec!["true".into()],
@@ -1880,6 +1894,7 @@ mod tests {
             mem_initial_mib: None,
             // Live shares are attached by the guest activation path.
             dir_shares: Vec::new(),
+            disk_volumes: Vec::new(),
             env: vec![("PATH".into(), "/usr/bin".into())],
             target: ExecTarget::Inline {
                 argv: vec!["true".into()],
@@ -1929,6 +1944,7 @@ mod tests {
             mem_initial_mib: None,
             // Live shares are attached by the guest activation path.
             dir_shares: Vec::new(),
+            disk_volumes: Vec::new(),
             env: Vec::new(),
             target: ExecTarget::LaunchPlan {
                 entrypoint: LaunchEntrypoint {
@@ -1962,6 +1978,7 @@ mod tests {
             mem_initial_mib: None,
             // Live shares are attached by the guest activation path.
             dir_shares: Vec::new(),
+            disk_volumes: Vec::new(),
             env: vec![("CLI_OVER".to_string(), "wins".to_string())],
             target: ExecTarget::LaunchPlan {
                 entrypoint: LaunchEntrypoint {
@@ -2009,6 +2026,7 @@ mod tests {
             memory_mib: 256,
             mem_initial_mib: None,
             dir_shares: Vec::new(),
+            disk_volumes: Vec::new(),
             env: Vec::new(),
             target: ExecTarget::Inline {
                 argv: vec!["true".into()],

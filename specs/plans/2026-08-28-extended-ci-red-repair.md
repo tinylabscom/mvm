@@ -3,7 +3,8 @@
 Backing: shipped-source
 Validation: check-sprint-append
 
-**Issue:** [#2979](https://github.com/tinylabscom/mvm/issues/2979)
+**Issues:** [#2979](https://github.com/tinylabscom/mvm/issues/2979),
+[#3007](https://github.com/tinylabscom/mvm/issues/3007)
 
 ## Outcome
 
@@ -46,6 +47,14 @@ a competing BLAKE3 address or re-hash the archive.
   libkrun for Stage 0 even though libkrun is ARM-only on macOS. The job now
   installs QEMU and explicitly selects it for Stage 0 artifact construction;
   workload scenarios remain on HVF, with a bounded 90-minute cold-run deadline.
+- The next scheduled Linux rerun reached the documented service-plane witness
+  and exposed three clean-run prerequisites: the hosted runner lacked
+  `virtiofsd`, unprivileged ICMP sockets excluded the runner group, and
+  transient `--mount` treated a pre-materialized ext4 fixture as a live
+  directory share. The workflow now installs the missing daemon and grants the
+  runner group ICMP sockets. Transient launch resolution preserves disk-image
+  mounts as backend-agnostic block volumes while continuing to capability-gate
+  live directory shares.
 
 ## Delivery checklist
 
@@ -77,5 +86,11 @@ a competing BLAKE3 address or re-hash the archive.
       SDK-sidecar artifact contract in its allow-list.
 - [x] Route Intel-hosted Stage 0 builds through an installed QEMU without
       changing the workload backend from HVF.
+- [x] Install `virtiofsd` and grant unprivileged ICMP sockets on the hosted
+      Linux witness, with structural workflow regressions.
+- [x] Carry read-only disk-image `--mount` values through transient launch
+      resolution without weakening directory-share backend refusal.
+- [x] Pass the focused mount, receipt/preflight, workspace, gated, formatting,
+      and zero-warning Clippy checks for the follow-on repair.
 - [ ] Pass a fresh Extended CI run containing all repaired witness lanes.
-- [ ] Merge the corrective pull request and close #2979 through its linkage.
+- [ ] Merge the corrective pull request and close #3007 through its linkage.

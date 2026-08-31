@@ -1044,13 +1044,42 @@ fn validate_run_profile(args: &RunArgs) -> Result<()> {
     }
 
     for spec in &args.mounts {
-        let share = crate::commands::parse_dir_share_spec(spec)?;
-        if !share.read_only {
+        let parsed = super::shared::parse_volume_spec(spec)?;
+        let read_only = match parsed {
+            super::shared::VolumeSpec::DirShare { read_only, .. }
+            | super::shared::VolumeSpec::Disk { read_only, .. } => read_only,
+        };
+        if !read_only {
             anyhow::bail!("--mount '{spec}' requests rw, but transient live shares are read-only");
         }
     }
 
     Ok(())
+}
+
+struct TransientMounts {
+    dir_shares: Vec<crate::commands::DirShareSpec>,
+    disk_volumes: Vec<mvm_core::vm_backend::VmVolume>,
+}
+
+fn parse_transient_mounts(specs: &[String]) -> Result<TransientMounts> {
+    let mut dir_shares = Vec::new();
+    let mut disk_volumes = Vec::new();
+    for raw in specs {
+        let parsed = super::shared::parse_volume_spec(raw)?;
+        match parsed {
+            super::shared::VolumeSpec::DirShare { .. } => {
+                dir_shares.push(crate::commands::parse_dir_share_spec(raw)?);
+            }
+            super::shared::VolumeSpec::Disk { .. } => {
+                disk_volumes.push(super::shared::vm_volume_from_spec_validated(&parsed)?);
+            }
+        }
+    }
+    Ok(TransientMounts {
+        dir_shares,
+        disk_volumes,
+    })
 }
 
 /// The boot-time admission hook plus the plumbing needed to chain-audit the
@@ -1289,13 +1318,9 @@ fn build_exec_request(
         (None, false, _) => crate::exec::ExecTarget::Inline { argv: args.argv },
     };
     let memory_mib = parse_human_size(&args.memory).context("Invalid --memory")?;
-    let mut dir_shares = Vec::with_capacity(args.mounts.len());
-    for spec in &args.mounts {
-        let share = crate::commands::parse_dir_share_spec(spec)?;
-        if !share.read_only {
-            anyhow::bail!("--mount '{spec}' requests rw, but transient live shares are read-only");
-        }
-        dir_shares.push(share);
+    let mounts = parse_transient_mounts(&args.mounts)?;
+    for volume in &mounts.disk_volumes {
+        super::shared::materialize_disk_volume(volume)?;
     }
     let mut env_pairs = Vec::with_capacity(args.env.len());
     for kv in &args.env {
@@ -1313,7 +1338,7 @@ fn build_exec_request(
     crate::exec::refuse_unsupported_dir_shares(
         selected_backend.name(),
         selected_backend.capabilities().directory_shares,
-        &dir_shares,
+        &mounts.dir_shares,
     )?;
 
     let mut effective_env =
@@ -1369,7 +1394,8 @@ fn build_exec_request(
         // here yet. The manifest-driven path on mvmctl up is where
         // mem_initial gets sourced for long-running workloads.
         mem_initial_mib: None,
-        dir_shares,
+        dir_shares: mounts.dir_shares,
+        disk_volumes: mounts.disk_volumes,
         env: effective_env,
         target,
         timeout_secs: args.timeout,
@@ -1508,11 +1534,24 @@ impl ReceiptInput {
 
         let mut mounts = Vec::with_capacity(args.mounts.len());
         for spec in &args.mounts {
-            let parsed = crate::commands::parse_dir_share_spec(spec)?;
+            let parsed = super::shared::parse_volume_spec(spec)?;
+            let (host_path, guest_path, read_only) = match parsed {
+                super::shared::VolumeSpec::DirShare {
+                    host_dir,
+                    guest_mount,
+                    read_only,
+                } => (host_dir, guest_mount, read_only),
+                super::shared::VolumeSpec::Disk {
+                    host,
+                    guest,
+                    read_only,
+                    ..
+                } => (host, guest, read_only),
+            };
             mounts.push(ReceiptMount {
-                host_path_sha256: sha256_hex(parsed.host_dir.as_bytes()),
-                guest_path: parsed.guest_mount,
-                read_only: parsed.read_only,
+                host_path_sha256: sha256_hex(host_path.as_bytes()),
+                guest_path,
+                read_only,
             });
         }
 
@@ -2012,6 +2051,26 @@ mod tests {
             argv: vec!["/bin/true".to_string()],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn transient_mounts_keep_disk_images_separate_from_live_shares() {
+        let specs = vec![
+            "/host/project:/work:ro".to_string(),
+            "/host/fixtures.ext4:/work/fixtures:64M:ro".to_string(),
+        ];
+
+        let mounts = parse_transient_mounts(&specs).expect("parse transient mounts");
+
+        assert_eq!(mounts.dir_shares.len(), 1);
+        assert_eq!(mounts.dir_shares[0].guest_mount, "/work");
+        assert_eq!(mounts.disk_volumes.len(), 1);
+        assert_eq!(mounts.disk_volumes[0].guest, "/work/fixtures");
+        assert_eq!(mounts.disk_volumes[0].size, "64M");
+        assert!(matches!(
+            mounts.disk_volumes[0].kind,
+            mvm_core::vm_backend::VmVolumeKind::Disk
+        ));
     }
 
     /// The resolver decides which *source* a run boots from. These pin the

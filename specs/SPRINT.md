@@ -119,7 +119,7 @@
       workspace check/tests/doctests, and Clippy are green; merge-queue
       delivery remains.
 
-- [ ] **Extended CI documented-surface repair — issues #2938 and #2979.**
+- [ ] **Extended CI documented-surface repair — issues #2938, #2979, and #3007.**
       `specs/plans/2026-08-27-extended-ci-documented-surface.md`.
       Linux and macOS now build the live documented-surface binary with signed
       release-manifest verification enabled through Cargo's standard linker
@@ -143,6 +143,10 @@
       Linux-host-only. The witness now runs the source-sidecar job inside the
       fetched Linux builder image under HVF. Its cold-build deadline is bounded
       at 90 minutes.
+      The latest Linux rerun now installs `virtiofsd`, grants the runner group
+      unprivileged ICMP sockets, and carries the service-plane's read-only ext4
+      fixture through transient launch resolution as a block volume instead of
+      rejecting it as a directory share.
       Focused tests, all ordinary workspace tests, the isolated `mvm-agentd`
       doctest, workspace Clippy, formatting, and repository policy gates are
       green. The live rerun and merge delivery remain.

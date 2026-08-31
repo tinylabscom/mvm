@@ -24,7 +24,8 @@ pub(super) use hints::with_hints;
 pub(crate) use parse::{DirShareSpec, parse_dir_share_spec};
 pub(super) use parse::{
     VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec,
-    materialize_disk_volume, parse_port_spec, parse_volume_spec, vm_volume_from_spec_validated,
+    materialize_disk_volume, parse_port_spec, parse_volume_spec, validate_volume_spec,
+    vm_volume_from_spec_validated,
 };
 pub(super) use resolve::{
     ManifestArgRef, egress_enforcement_label, parse_peer_binding, resolve_effective_hypervisor,

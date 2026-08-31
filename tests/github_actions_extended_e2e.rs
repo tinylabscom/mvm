@@ -130,6 +130,33 @@ fn linux_documented_surface_grants_stage0_vhost_vsock_access() {
 }
 
 #[test]
+fn linux_documented_surface_installs_virtiofsd_for_stage0_shares() {
+    let workflow = extended_ci();
+    let linux = job_block(&workflow, "e2e-docs-linux");
+
+    assert!(
+        linux.contains("packages: libcap-ng-dev lld qemu-system-x86 qemu-utils virtiofsd"),
+        "the QEMU builder must install virtiofsd before sharing the checkout with Stage 0"
+    );
+}
+
+#[test]
+fn linux_documented_surface_grants_unprivileged_icmp_to_the_runner_group() {
+    let workflow = extended_ci();
+    let linux = job_block(&workflow, "e2e-docs-linux");
+
+    assert!(
+        linux.contains("sudo sysctl -w net.ipv4.ping_group_range=\"0 2147483647\"")
+            && linux.contains(
+                "read -r ping_gid_min ping_gid_max < <(sysctl -n net.ipv4.ping_group_range)"
+            )
+            && linux.contains("test \"$ping_gid_min\" = \"0\"")
+            && linux.contains("test \"$ping_gid_max\" = \"2147483647\""),
+        "the documented ping witnesses need the runner group admitted to unprivileged ICMP sockets"
+    );
+}
+
+#[test]
 fn macos_documented_surface_uses_an_intel_runner_with_hvf_access() {
     let workflow = extended_ci();
     let macos = job_block(&workflow, "e2e-docs-macos");
