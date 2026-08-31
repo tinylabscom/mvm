@@ -222,7 +222,7 @@
         let
           pkgs = import nixpkgs { inherit system; };
         in
-        import (workspace + "/nix/packages/mvm-sdk-cdylib.nix") {
+        import (workspaceRoot + "/nix/packages/mvm-sdk-cdylib.nix") {
           inherit pkgs libc;
           lib = pkgs.lib;
           mvmSrc = workspace;
