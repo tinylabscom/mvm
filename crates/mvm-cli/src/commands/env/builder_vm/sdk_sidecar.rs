@@ -45,7 +45,7 @@ pub(crate) fn build_sdk_sidecar_from_checkout(
 
     let request =
         super::stage0_artifact::Stage0ArtifactBuild::builder(workspace_root, &staging_dir)
-            .build_attr("sdk-sidecar-image")
+            .build_attr("sdk-sidecar-image-musl")
             .output_mode("sdk-sidecar")
             .verbose(verbose)
             .build()?;
@@ -122,7 +122,7 @@ build-users-group =
 substituters = https://cache.nixos.org/
 trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY='
 mkdir -p "$XDG_CACHE_HOME" "$XDG_STATE_HOME"
-out=$(/sbin/nix build 'path:/work/nix/images/builder-vm#packages.{arch}-linux.sdk-sidecar-image' \
+out=$(/sbin/nix build 'path:/work/nix/images/builder-vm#packages.{arch}-linux.sdk-sidecar-image-musl' \
   --no-link --print-out-paths --no-write-lock-file --impure --print-build-logs)
 test -n "$out"
 for name in '{image}' '{version}' '{checksums}'; do

@@ -557,6 +557,7 @@
         # sidecar to build guest workloads, so this exposes the runtime-overlay's
         # sdk-sidecar-image output through the builder-vm flake.
         sdk-sidecar-image = runtimeOverlay.packages.${system}.sdk-sidecar-image;
+        sdk-sidecar-image-musl = runtimeOverlay.packages.${system}.sdk-sidecar-image-musl;
       });
     };
 }
