@@ -1,4 +1,5 @@
 // Dedicated worker that boots the QEMU-Wasm engine inside the browser.
+// Uses OPFS for caching kernel, initramfs, and rootfs images.
 //
 // This is intentionally a classic (non-module) worker so that it can load the
 // Emscripten preload manifest (pack.js) and the xterm-pty UMD bundle with
@@ -9,6 +10,26 @@ const marker = "QEMU-WASM-SMOKE-READY";
 
 let inputCallback = null;
 let outputBuffer = "";
+let opfsStore = null;
+let blockDevice = null;
+
+// Initialize OPFS store and block device
+async function initOPFS() {
+  try {
+    // Dynamically import OPFS modules
+    const { OPFSStore } = await import("/web/common/opfs-store.ts");
+    const { OPFSBlockDevice } = await import("/web/common/opfs-block-file.ts");
+
+    opfsStore = await OPFSStore.getInstance();
+    blockDevice = new OPFSBlockDevice(opfsStore);
+
+    console.log("[worker] OPFS initialized successfully");
+    return true;
+  } catch (e) {
+    console.error("[worker] Failed to initialize OPFS:", e);
+    return false;
+  }
+}
 
 function flushOutputBuffer() {
   let newline;
@@ -48,10 +69,14 @@ async function loadCompressedWasm() {
 
   const response = await fetch(`${baseUrl}qemu-system-x86_64.wasm.gz`);
   if (!response.ok || !response.body) {
-    throw new Error(`failed to load compressed QEMU-WASM module (${response.status})`);
+    throw new Error(
+      `failed to load compressed QEMU-WASM module (${response.status})`,
+    );
   }
 
-  const decompressed = response.body.pipeThrough(new DecompressionStream("gzip"));
+  const decompressed = response.body.pipeThrough(
+    new DecompressionStream("gzip"),
+  );
   return new Response(decompressed).arrayBuffer();
 }
 
@@ -64,7 +89,10 @@ function createFakeTerminal() {
   const decoder = new TextDecoder();
   return {
     write: (data, callback) => {
-      let text = typeof data === "string" ? data : decoder.decode(data, { stream: true });
+      let text =
+        typeof data === "string"
+          ? data
+          : decoder.decode(data, { stream: true });
       outputBuffer += text;
       if (!markerSeen && outputBuffer.includes(marker)) {
         markerSeen = true;
@@ -96,11 +124,19 @@ self.onmessage = async (event) => {
     return;
   }
 
+  if (event.data.type === "init-opfs") {
+    const success = await initOPFS();
+    self.postMessage({ type: "opfs-ready", success });
+    return;
+  }
+
   if (event.data.type !== "run") {
     return;
   }
 
-  const allowHost = event.data.allowHost ? String(event.data.allowHost).trim() : "";
+  const allowHost = event.data.allowHost
+    ? String(event.data.allowHost).trim()
+    : "";
   console.log("[worker] allowHost received:", allowHost);
 
   try {
@@ -126,29 +162,40 @@ self.onmessage = async (event) => {
       postError(`abort: ${what}`);
     };
 
-    let kernelAppend = "earlyprintk=ttyS0 console=ttyS0 root=/dev/vda rw loglevel=4 nokaslr quiet";
+    let kernelAppend =
+      "earlyprintk=ttyS0 console=ttyS0 root=/dev/vda rw loglevel=4 nokaslr quiet";
     if (allowHost) {
       kernelAppend += ` mvm.allow_host=${allowHost}`;
     }
 
     self.Module.arguments = [
       "-nographic",
-      "-M", "pc",
-      "-m", "512M",
-      "-cpu", "qemu64",
+      "-M",
+      "pc",
+      "-m",
+      "512M",
+      "-cpu",
+      "qemu64",
       // NOTE: QEMU's user-mode LAN is wired up for completeness, but the
       // Emscripten build routes host-bound sockets through the browser's
       // WebSocket layer.  That path currently crashes the worker with a
       // divide-by-zero when SLIRP tries to forward ICMP/UDP/TCP to the host.
       // The smoke rootfs resolves mvm.allow_host to 127.0.0.1 so that ping/
       // fetch against the demo name stays on loopback and avoids SLIRP.
-      "-netdev", "user,id=net0",
-      "-device", "virtio-net-pci,netdev=net0,romfile=",
-      "-accel", "tcg,tb-size=500",
-      "-L", "pack/",
-      "-drive", "if=virtio,format=raw,file=pack/rootfs.bin",
-      "-kernel", "pack/kernel.img",
-      "-append", kernelAppend
+      "-netdev",
+      "user,id=net0",
+      "-device",
+      "virtio-net-pci,netdev=net0,romfile=",
+      "-accel",
+      "tcg,tb-size=500",
+      "-L",
+      "pack/",
+      "-drive",
+      "if=virtio,format=raw,file=pack/rootfs.bin",
+      "-kernel",
+      "pack/kernel.img",
+      "-append",
+      kernelAppend,
     ];
 
     const { master, slave } = self.openpty();
@@ -156,7 +203,8 @@ self.onmessage = async (event) => {
     master.activate(fakeTerm);
 
     self.Module.pty = slave;
-    self.Module["mainScriptUrlOrBlob"] = `${self.location.origin}${new URL("qemu-system-x86_64.js", self.location.href).pathname}`;
+    self.Module["mainScriptUrlOrBlob"] =
+      `${self.location.origin}${new URL("qemu-system-x86_64.js", self.location.href).pathname}`;
 
     // Patch the TTY poll to avoid blocking on the pty.  The original poll
     // expects (stream, timeout) and is called with stream_ops as |this|.
@@ -165,7 +213,8 @@ self.onmessage = async (event) => {
         clearInterval(interval);
         const streamOps = self.Module["TTY"].stream_ops;
         const oldPoll = streamOps.poll;
-        streamOps.poll = (stream, _timeout) => oldPoll.call(streamOps, stream, 0);
+        streamOps.poll = (stream, _timeout) =>
+          oldPoll.call(streamOps, stream, 0);
       }
     }, 10);
 
