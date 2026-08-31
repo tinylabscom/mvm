@@ -422,16 +422,18 @@ impl VmmDriver for LibkrunDriver {
                 .map_err(|e| anyhow!("poll supervisor: {e}"))?
             {
                 bail!(
-                    "libkrun supervisor exited before writing its PID file (status: {status}); see {}",
-                    console_log.display()
+                    "libkrun supervisor exited before writing its PID file (status: {status}); see {}{}",
+                    console_log.display(),
+                    mvm_vmm::host::console_capture::supervisor_stderr_detail(&state_dir)
                 );
             }
             if Instant::now() >= deadline {
                 let _ = child.kill();
                 bail!(
-                    "libkrun supervisor did not confirm boot within {:?}; see {}",
+                    "libkrun supervisor did not confirm boot within {:?}; see {}{}",
                     crate::driver::libkrun_process::PID_FILE_TIMEOUT,
-                    console_log.display()
+                    console_log.display(),
+                    mvm_vmm::host::console_capture::supervisor_stderr_detail(&state_dir)
                 );
             }
             std::thread::sleep(Duration::from_millis(50));
