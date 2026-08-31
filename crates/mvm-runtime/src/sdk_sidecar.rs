@@ -50,6 +50,7 @@ pub fn sdk_sidecar_attachment_for(
             encrypted: false,
         },
         volume: mvm_core::vm_backend::VmVolume {
+            materialized_image: None,
             host,
             guest,
             size: String::new(),

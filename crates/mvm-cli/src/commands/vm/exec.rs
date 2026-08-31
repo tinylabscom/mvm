@@ -1331,16 +1331,6 @@ fn build_exec_request(
         &network_policy,
         args.hypervisor.as_deref(),
     )?;
-    // Before the image is resolved. That step can cross-compile the guest
-    // runtime for this checkout — minutes on a cold cache — and none of it
-    // changes whether this backend can serve a `--mount`. `resolve_launch`
-    // checks again for the callers that do not come through here.
-    crate::exec::refuse_unsupported_dir_shares(
-        selected_backend.name(),
-        selected_backend.capabilities().directory_shares,
-        &mounts.dir_shares,
-    )?;
-
     let mut effective_env =
         oci_vsock_proxy_env_for_backend(&selected_backend, image_ref.is_some(), &network_policy);
     effective_env.extend(env_pairs);

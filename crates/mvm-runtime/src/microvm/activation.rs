@@ -13,7 +13,7 @@ use mvm_agentd::vsock::{
     ActivateEnvironment, ExtensionConfig, GuestRequest, GuestResponse, RootfsConfig,
     RuntimeOverlayConfig, VolumeConfig, VolumeConfigKind,
 };
-use mvm_core::protocol::vm_backend::{VerbGrantEnvelope, VmStartConfig, VmVolumeKind};
+use mvm_core::protocol::vm_backend::{VerbGrantEnvelope, VmStartConfig};
 
 use crate::driver::traits::RunningVm;
 
@@ -336,11 +336,15 @@ fn build_volume_configs(config: &VmStartConfig) -> Result<Vec<VolumeConfig>> {
         .filter(|(volume, _)| !mvm_vmm::host::spec_map::is_sdk_sidecar_volume(volume))
         .enumerate()
         .map(|(idx, (volume, device))| {
-            let (kind, device) = match volume.kind {
-                VmVolumeKind::DirShare => (VolumeConfigKind::VirtioFs, None),
-                VmVolumeKind::Disk => (VolumeConfigKind::Block, device),
+            // A granted directory that was materialized into an image reaches
+            // the guest as a block device like any other. The guest is told
+            // what it actually has, not what the operator asked for.
+            let (kind, device) = if volume.attaches_as_block() {
+                (VolumeConfigKind::Block, device)
+            } else {
+                (VolumeConfigKind::VirtioFs, None)
             };
-            if matches!(volume.kind, VmVolumeKind::Disk) && device.is_none() {
+            if volume.attaches_as_block() && device.is_none() {
                 bail!("missing VMM block device for user volume uvol{idx}");
             }
             Ok(VolumeConfig {
@@ -374,6 +378,7 @@ pub(crate) fn read_verb_grant_envelope(vm_name: &str) -> Result<Option<VerbGrant
 mod tests {
     use super::*;
     use mvm_core::net::session::SessionError;
+    use mvm_core::protocol::vm_backend::VmVolumeKind;
     use mvm_core::util::test_env::TestEnv;
 
     /// The first retry must not dominate the wait it is polling for.
@@ -741,6 +746,7 @@ mod tests {
             read_only: bool,
         ) -> mvm_core::protocol::vm_backend::VmVolume {
             mvm_core::protocol::vm_backend::VmVolume {
+                materialized_image: None,
                 host: host.into(),
                 guest: guest.into(),
                 size: String::new(),

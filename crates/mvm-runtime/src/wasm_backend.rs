@@ -1746,6 +1746,7 @@ mod tests {
     fn disk_volume_fails_closed_dir_share_passes() {
         let mut config = cfg("x", "/tmp/mod.wasm");
         config.volumes = vec![mvm_core::vm_backend::VmVolume {
+            materialized_image: None,
             host: "/host/disk.img".into(),
             guest: "/data/disk".into(),
             size: "1G".into(),
@@ -1769,6 +1770,7 @@ mod tests {
         for bad in ["mnt/relative", "/run/mvm", "/mvm/runtime"] {
             let mut config = cfg("x", "/tmp/mod.wasm");
             config.volumes = vec![mvm_core::vm_backend::VmVolume {
+                materialized_image: None,
                 host: "/host/share".into(),
                 guest: bad.into(),
                 size: String::new(),

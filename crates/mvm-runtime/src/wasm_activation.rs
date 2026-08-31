@@ -285,6 +285,7 @@ mod tests {
 
     fn dir_share(host: &str, guest: &str, read_only: bool) -> VmVolume {
         VmVolume {
+            materialized_image: None,
             host: host.into(),
             guest: guest.into(),
             size: String::new(),
@@ -296,6 +297,7 @@ mod tests {
 
     fn disk_volume(host: &str, guest: &str) -> VmVolume {
         VmVolume {
+            materialized_image: None,
             host: host.into(),
             guest: guest.into(),
             size: String::new(),

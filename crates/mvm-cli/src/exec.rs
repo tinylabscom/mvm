@@ -34,7 +34,6 @@ mod session;
 mod transient;
 
 pub use launch_plan::load_launch_plan;
-pub(crate) use mounts::refuse_unsupported_dir_shares;
 
 use guest_run::{emit_guest_console_diagnostic, run_in_guest, run_wasm_module};
 use session::wait_for_agent_timed;
@@ -1201,12 +1200,48 @@ fn resolve_boot_strategy(
 /// boot-strategy state. Admission (tenant/plan binding) and the runtime
 /// overlay attach happen in the caller, after this returns — this only
 /// assembles the struct.
+/// Turn each `--mount` into a volume, materializing the granted directory into
+/// an ext4 image first.
+///
+/// `host` stays the directory that was granted so the admission record names
+/// it; `materialized_image` carries what the backend attaches. See
+/// [`mounts::materialize_mount_image`] for why the directory is not shared
+/// directly.
+fn mount_volumes(shape: &LaunchShape<'_>, vm_name: &str) -> Result<Vec<VmVolume>> {
+    if shape.dir_shares.is_empty() {
+        return Ok(Vec::new());
+    }
+    let state_dir = mvm_core::config::vm_state_dir(vm_name);
+    std::fs::create_dir_all(&state_dir).with_context(|| {
+        format!(
+            "creating the VM state directory {} for --mount images",
+            state_dir.display()
+        )
+    })?;
+    shape
+        .dir_shares
+        .iter()
+        .enumerate()
+        .map(|(idx, share)| {
+            let image = mounts::materialize_mount_image(share, &state_dir, idx)?;
+            Ok(VmVolume {
+                host: share.host_dir.clone(),
+                guest: share.guest_mount.clone(),
+                read_only: share.read_only,
+                kind: mvm_core::vm_backend::VmVolumeKind::DirShare,
+                materialized_image: Some(image.display().to_string()),
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+
 fn build_start_config(
     shape: &LaunchShape<'_>,
     vm_name: &str,
     resolved: &ResolvedImage,
     boot: &BootStrategy,
-) -> VmStartConfig {
+) -> Result<VmStartConfig> {
     // Pre-open console data sockets for interactive PTY runs against
     // non-sealed images. OCI/dev images can carry verity sidecars and still be
     // interactive, so the sidecar's sealed bit is the load-bearing signal here.
@@ -1222,7 +1257,7 @@ fn build_start_config(
         transient_run_dev_console(shape.pty, image_sealed)
     };
 
-    VmStartConfig {
+    Ok(VmStartConfig {
         name: vm_name.to_string(),
         template_id: resolved.template_id.clone(),
         rootfs_path: resolved.rootfs.clone(),
@@ -1253,16 +1288,8 @@ fn build_start_config(
         ports: Vec::new(),
         // Live shares precede the SDK sidecar so their tags and admission
         // records remain stable across sidecar changes.
-        volumes: shape
-            .dir_shares
-            .iter()
-            .map(|share| VmVolume {
-                host: share.host_dir.clone(),
-                guest: share.guest_mount.clone(),
-                read_only: share.read_only,
-                kind: mvm_core::vm_backend::VmVolumeKind::DirShare,
-                ..Default::default()
-            })
+        volumes: mount_volumes(shape, vm_name)?
+            .into_iter()
             .chain(shape.disk_volumes.iter().cloned())
             .chain(shape.sdk_sidecar.iter().map(|a| a.volume.clone()))
             .collect(),
@@ -1272,7 +1299,7 @@ fn build_start_config(
         network_policy: shape.network_policy.clone(),
         warm_pool_size: shape.warm_pool_size,
         ..Default::default()
-    }
+    })
 }
 
 /// Host-monotonic marks the launch resolution crosses, handed back so the run
@@ -1357,17 +1384,6 @@ pub fn resolve_launch(
         shape.hypervisor,
     )?;
 
-    // Before any image work: a `--mount` this backend cannot serve is decidable
-    // from the arguments alone. The runner refuses it too, but only once the
-    // spec is being assembled — by then the image has been resolved and
-    // prepared and the VM directory built, all of it discarded to reach a
-    // conclusion that was available here.
-    refuse_unsupported_dir_shares(
-        backend.name(),
-        backend.capabilities().directory_shares,
-        shape.dir_shares,
-    )?;
-
     // Resolve image artifacts: either a named template or a pre-built pair.
     // For templates, also probe for a pre-built snapshot so we can skip the
     // cold-boot cost when the request is snapshot-eligible.
@@ -1398,7 +1414,7 @@ pub fn resolve_launch(
     // spans account for roughly half the window, so the rest needs naming
     // before any of it can be acted on.
     let t_build = std::time::Instant::now();
-    let mut start_config = build_start_config(shape, &vm_name, &image, &boot);
+    let mut start_config = build_start_config(shape, &vm_name, &image, &boot)?;
     tracing::debug!(
         ms = t_build.elapsed().as_secs_f64() * 1000.0,
         "admit window: build_start_config"

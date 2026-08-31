@@ -1,68 +1,89 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::commands::DirShareSpec;
 
-/// Refuse `--mount` on a backend with no virtio-fs share device, naming the
-/// backend and what to use instead.
+/// Materialize a granted host directory into an ext4 image and return its path.
 ///
-/// `--mount` is advertised without qualification but only one backend serves
-/// it, so on every other backend the flag is accepted, paid for, and then
-/// rejected mid-launch. Deciding here costs nothing and says which backend is
-/// the problem — the runner's own refusal names the volume but not the reason
-/// the caller can act on, which is *which backend they are on*.
-pub(crate) fn refuse_unsupported_dir_shares(
-    backend_name: &str,
-    supports_dir_shares: bool,
-    dir_shares: &[DirShareSpec],
-) -> Result<()> {
-    if dir_shares.is_empty() || supports_dir_shares {
-        return Ok(());
+/// `--mount` used to attach the directory itself over virtio-fs. That put a
+/// FUSE server on the host, parsing requests the guest composed, pointed at a
+/// host directory — the one mechanism by which a guest addressed host
+/// filesystem *structure* rather than opaque blocks. An image has no protocol
+/// for a guest to drive.
+///
+/// The image is written by the same pure-Rust ext4 writer that materializes
+/// every rootfs: no `mkfs`, no subprocess, and — the part that matters here —
+/// it reads host bytes rather than guest requests, so it is not a surface the
+/// guest can reach at all.
+///
+/// The directory is read as-is, unfiltered. The builder's own
+/// dir-to-image packer excludes build outputs because it is packing *this*
+/// workspace for a Nix build; a user who mounts a directory means the
+/// directory.
+///
+/// # What a caller loses
+///
+/// The image is a snapshot taken now. Host edits during the run are not
+/// visible to the guest. `--mount` was already read-only — the CLI refuses
+/// `rw` with "transient live shares are read-only" — so mid-run visibility is
+/// the only property that goes.
+pub(crate) fn materialize_mount_image(
+    share: &DirShareSpec,
+    state_dir: &std::path::Path,
+    index: usize,
+) -> Result<std::path::PathBuf> {
+    let host_dir = std::path::PathBuf::from(&share.host_dir);
+    if !host_dir.is_dir() {
+        anyhow::bail!(
+            "--mount {}:{}: the host path is not a directory",
+            share.host_dir,
+            share.guest_mount
+        );
     }
-    let shares = dir_shares
-        .iter()
-        .map(|share| format!("{}:{}", share.host_dir, share.guest_mount))
-        .collect::<Vec<_>>()
-        .join(", ");
-    anyhow::bail!(
-        "the {} backend cannot attach a host directory share, so --mount is \
-         unsupported here (requested: {shares}). Attach a disk-image volume \
-         instead (--volume HOST:GUEST:SIZE), or run on a backend with virtio-fs \
-         directory shares.",
-        backend_name,
-    )
+    let output = state_dir.join(format!("mount-{index}.ext4"));
+    // Labelled so the guest mounts by identity rather than by enumeration
+    // order, the same reason `stage0-init` reads its work disk by label.
+    let label = format!("mvmmnt{index}");
+    let input = mvm_build::rootfs::MaterializeExt4Input::builder()
+        .unpacked_root(host_dir.clone())
+        .output(output.clone())
+        .uncompressed_size_bytes(tree_size_bytes(&host_dir))
+        .volume_label(label)
+        .emit_verity(false)
+        // Only an OCI unpack on a case-folding host defers nodes; a host
+        // directory is read as it is.
+        .deferred_nodes(Vec::new())
+        .build()
+        .context("assembling the mount image inputs")?;
+    mvm_build::rootfs::materialize_ext4_pure(&input).with_context(|| {
+        format!(
+            "materializing --mount {} into an ext4 image",
+            share.host_dir
+        )
+    })?;
+    Ok(output)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_dir_share_is_refused_up_front_on_a_backend_without_virtiofs() {
-        let shares = vec![DirShareSpec {
-            host_dir: "/host/fixtures".into(),
-            guest_mount: "/work/fixtures".into(),
-            read_only: true,
-        }];
-
-        let err = refuse_unsupported_dir_shares("firecracker", false, &shares)
-            .expect_err("a backend without virtio-fs shares must refuse --mount");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("firecracker"),
-            "the refusal must name the backend, got: {msg}"
-        );
-        assert!(
-            msg.contains("/work/fixtures"),
-            "the refusal must name the requested share, got: {msg}"
-        );
-
-        refuse_unsupported_dir_shares("hvf", true, &shares)
-            .expect("a backend with virtio-fs shares must accept --mount");
+/// Sum of the regular-file bytes under `dir`, for sizing the image.
+///
+/// Best effort: an entry that cannot be read contributes nothing rather than
+/// failing the launch, because this only feeds a size *estimate* and the
+/// writer grows the image to fit what it actually writes. Symlinks are not
+/// followed, so a link out of the tree is counted as the link it is.
+fn tree_size_bytes(dir: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&next) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                pending.push(entry.path());
+            } else if meta.is_file() {
+                total = total.saturating_add(meta.len());
+            }
+        }
     }
-
-    #[test]
-    fn a_launch_without_mounts_is_not_refused() {
-        refuse_unsupported_dir_shares("firecracker", false, &[])
-            .expect("a launch with no --mount must not be refused");
-    }
+    total
 }

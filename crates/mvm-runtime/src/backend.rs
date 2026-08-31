@@ -1081,6 +1081,7 @@ mod tests {
             rootfs_path: "/images/rootfs.ext4".into(),
             kernel_path: Some("/kernels/vmlinux".into()),
             volumes: vec![mvm_core::vm_backend::VmVolume {
+                materialized_image: None,
                 host: "/host".into(),
                 guest: "/guest".into(),
                 size: String::new(),
