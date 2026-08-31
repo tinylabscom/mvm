@@ -427,6 +427,90 @@ mod live_home {
     }
 }
 
+/// The tier manifest, read only for the fields the ratchet needs.
+#[derive(serde::Deserialize)]
+struct TierManifest {
+    command: Vec<TierEntry>,
+}
+
+#[derive(serde::Deserialize)]
+struct TierEntry {
+    tier: String,
+}
+
+/// How many documented command paths sit at the weakest tier.
+///
+/// `parse` proves only that clap accepts the invocation. It cannot see a verb
+/// that parses and then refuses at runtime, which is the shape `machine
+/// forward` had already decayed into while the docs still told a reader to run
+/// it. Every entry there carries a written reason, so the tier is honest about
+/// itself; what it is not is stable. Documentation lands continuously, and an
+/// example whose tier nobody chose lands on the rung that asks least — the
+/// count went 61 -> 65 during a single week of unrelated work.
+///
+/// Counted from the parsed manifest rather than by matching text, because the
+/// obvious `tier = "parse"` grep also matches any reason string that quotes the
+/// tier it is explaining, and a ratchet that miscounts upward blocks the merge
+/// that was lowering it.
+pub fn parse_tier_count(manifest: &str) -> Result<usize, toml::de::Error> {
+    Ok(toml::from_str::<TierManifest>(manifest)?
+        .command
+        .iter()
+        .filter(|entry| entry.tier == "parse")
+        .count())
+}
+
+#[cfg(test)]
+mod parse_tier_ratchet {
+    use super::parse_tier_count;
+
+    #[test]
+    fn counts_only_entries_at_the_parse_tier() {
+        let manifest = r#"
+[[command]]
+path = "a"
+tier = "parse"
+reason = "r"
+
+[[command]]
+path = "b"
+tier = "exec"
+
+[[command]]
+path = "c"
+tier = "parse"
+reason = "r"
+"#;
+        assert_eq!(parse_tier_count(manifest).expect("parses"), 2);
+    }
+
+    #[test]
+    fn a_reason_that_quotes_the_tier_does_not_inflate_the_count() {
+        // The exact hazard a text match would hit: this entry is `exec`, and
+        // its prose explains what `tier = "parse"` would have meant.
+        let manifest = r#"
+[[command]]
+path = "a"
+tier = "exec"
+reason = "promoted from tier = \"parse\" once a fixture staged its input"
+"#;
+        assert_eq!(parse_tier_count(manifest).expect("parses"), 0);
+    }
+
+    #[test]
+    fn a_malformed_manifest_is_an_error_not_a_zero() {
+        // Zero would read as "nothing left at the weakest tier" — the best
+        // possible result — from a file that failed to parse.
+        assert!(
+            parse_tier_count(
+                "[[command]]
+tier ="
+            )
+            .is_err()
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

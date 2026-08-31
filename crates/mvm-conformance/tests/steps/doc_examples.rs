@@ -1419,3 +1419,32 @@ fn docs_coverage_ratchet(_world: &mut CliWorld) {
             .join("\n")
     );
 }
+
+/// The pinned ceiling on parse-tier command paths.
+///
+/// Lower it whenever a promotion lands — that is the point. Raising it is a
+/// deliberate act that should carry its reason in the commit, because the
+/// alternative is what happened before this existed: the count drifted up
+/// while everyone believed coverage was improving.
+const PARSE_TIER_PIN: usize = 65;
+
+#[then(expr = "no more command paths sit at the parse tier than the pinned count")]
+fn parse_tier_does_not_grow(_world: &mut CliWorld) {
+    let path = repo_root().join("features/suites/s29_doc_examples/tiers.toml");
+    let manifest = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+    let count = mvm_conformance::parse_tier_count(&manifest)
+        .unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()));
+    assert!(
+        count <= PARSE_TIER_PIN,
+        "{count} command paths sit at the `parse` tier, above the pinned {PARSE_TIER_PIN}. \
+         Parsing proves only that clap accepts the invocation; it cannot see a verb that \
+         parses and then refuses. Promote the new path to `exec` or `live`, or raise \
+         PARSE_TIER_PIN and say why in the commit."
+    );
+    if count < PARSE_TIER_PIN {
+        eprintln!(
+            "[bdd] parse tier is down to {count} (pin {PARSE_TIER_PIN}) — lower the pin to hold the gain."
+        );
+    }
+}
