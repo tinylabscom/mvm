@@ -103,6 +103,18 @@ fn build_sdk_sidecar_via_hvf(
     Ok(())
 }
 
+/// Render the `cmd.sh` the builder guest runs to produce the SDK sidecar
+/// image.
+///
+/// The flake reference names the whole staged workspace and selects the
+/// builder-VM flake with `?dir=`, rather than naming the subdirectory
+/// directly. The builder-VM flake reaches out of its own directory to import
+/// the workspace's runtime-overlay flake, and `path:` copies exactly the tree
+/// it names into the store: naming the subdirectory leaves that relative walk
+/// pointing at the store root's parent, so the import resolves to `/nix/...`
+/// and the build fails before it compiles anything. `?dir=` copies the
+/// workspace and evaluates the flake inside it, so the walk lands where the
+/// flake expects and the copy stays immutable.
 #[cfg(feature = "builder-vm")]
 fn sdk_sidecar_builder_script(arch: mvm_core::arch::GuestArch) -> String {
     let image = mvm_fs::sdk_sidecar::SDK_SIDECAR_IMAGE_FILE;
@@ -122,7 +134,7 @@ build-users-group =
 substituters = https://cache.nixos.org/
 trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY='
 mkdir -p "$XDG_CACHE_HOME" "$XDG_STATE_HOME"
-out=$(/sbin/nix build 'path:/work/nix/images/builder-vm#packages.{arch}-linux.sdk-sidecar-image' \
+out=$(/sbin/nix build 'path:/work?dir=nix/images/builder-vm#packages.{arch}-linux.sdk-sidecar-image' \
   --no-link --print-out-paths --no-write-lock-file --impure --print-build-logs)
 test -n "$out"
 for name in '{image}' '{version}' '{checksums}'; do
@@ -150,5 +162,30 @@ mod tests {
         assert!(script.contains("\"/out/$name\""));
         assert!(script.contains("--no-write-lock-file"));
         assert!(script.contains("--impure"));
+    }
+
+    /// The builder-VM flake imports the workspace's runtime-overlay flake by
+    /// walking out of its own directory, so the store copy has to be the whole
+    /// workspace. Naming the subdirectory directly copies only that
+    /// subdirectory and the walk escapes it — the build then dies on a missing
+    /// `/nix/images/runtime-overlay/flake.nix` before compiling anything.
+    #[test]
+    fn sidecar_flake_reference_copies_the_workspace_and_selects_the_subdirectory() {
+        for arch in [
+            mvm_core::arch::GuestArch::X86_64,
+            mvm_core::arch::GuestArch::Aarch64,
+        ] {
+            let script = sdk_sidecar_builder_script(arch);
+            assert!(
+                script.contains(&format!(
+                    "'path:/work?dir=nix/images/builder-vm#packages.{arch}-linux.sdk-sidecar-image'"
+                )),
+                "sidecar build must select the builder-VM flake out of a whole-workspace copy: {script}"
+            );
+            assert!(
+                !script.contains("path:/work/nix/images/builder-vm"),
+                "naming the flake subdirectory strands the runtime-overlay import: {script}"
+            );
+        }
     }
 }
