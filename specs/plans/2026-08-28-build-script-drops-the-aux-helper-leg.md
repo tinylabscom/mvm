@@ -129,6 +129,15 @@ binaries. The premise was wrong. Once cargo owns them:
   is still a second resolver that reimplements `aux_bin::resolve`. It does not
   reference the deleted target dir, so it keeps working; collapsing the two
   remains §1 of the freshness plan.
-- The `~/.cache/mvm/embed` store was measured at 17 GB against its 4 GiB
-  `DEFAULT_MAX_BYTES` ceiling, i.e. `prune` is not holding. Unrelated to this
-  leg and not investigated here.
+- An earlier revision of this plan claimed the `~/.cache/mvm/embed` store was
+  "17 GB against its 4 GiB `DEFAULT_MAX_BYTES`, i.e. `prune` is not holding."
+  **That was wrong on both numbers and on the conclusion**, and it is recorded
+  here rather than deleted because the way it was wrong is reusable. The 17 GB
+  came from `du -sh`; the figure `prune` actually sums is the apparent size,
+  6.11 GiB. And 4 GiB is the source default, not the effective ceiling — a
+  probe in the real code path reported
+  `keys=672 total=6562098608 max=68719476736 victims=0`, i.e. a 64 GiB cap set
+  deliberately in this host's *global* `~/.cargo/config.toml` `[env]` table.
+  Cargo's `[env]` injects into build scripts without appearing in `env`, so
+  `env | grep MVM_EMBED` came back empty and read as "no override". `prune`
+  works correctly and the store sits at ~10% of its configured cap.

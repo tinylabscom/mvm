@@ -1055,9 +1055,15 @@ resume` takes a `current_head` and refuses when it differs from the
       half is closed, its probe is deleted), Phase 4 (dead crate edges;
       `deps_audit` and the tree-sitter grammars off the serial path; the
       `mvm-hostd` audit cluster), Phase 5 (sccache 4.2% Rust hit rate, worktree
-      hygiene). Also open: the ten now-mostly-unnecessary `install-zigbuild`
-      steps in `ci.yml`, and the embed store sitting at 17 GB against its 4 GiB
-      ceiling.
+      hygiene). The pinned zig now follows the feature: eight of `ci.yml`'s nine
+      `install-zigbuild` steps are gone, each job traced to what it runs first,
+      and that trace caught `just bdd-live-ci` booting real microVMs without the
+      payload. Still open: the missing `rerun-if-env-changed` on
+      `MVM_EMBED_CACHE_MAX_BYTES` / `MVM_EMBED_CACHE_DIR`. An earlier revision
+      of this entry also listed "the embed store sitting at 17 GB against its
+      4 GiB ceiling" — that was wrong; `prune` holds, and the effective ceiling
+      on that host is a deliberate 64 GiB `[env]` override in a global cargo
+      config.
 
 - [~] **Agent tool and memory planes**
       (`specs/plans/2026-08-18-agent-tool-and-memory-planes.md`). Opened

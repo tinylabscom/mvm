@@ -357,7 +357,11 @@ e2e-docs-clean:
 
 # witness lanes while proving that the public commands operate a real guest.
 bdd-live-ci:
-    cargo build --bin mvmctl --features user
+    # `embed-host-bins` because these scenarios boot real microVMs: `MVM_BDD_LIVE=1`
+    # admits the `@live` set, which reaches the builder VM. Without the payload
+    # mvmctl refuses at bootstrap. The hermetic `just bdd` lane skips those
+    # scenarios and so deliberately does not pay the cross-compile.
+    cargo build --bin mvmctl --features user,embed-host-bins
     CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" MVM_BDD_LIVE=1 MVM_BDD_CI_LIVE_ONLY=1 cargo test -p mvm-conformance --test conformance --features bdd
 
 # Build the per-VM host helper bins into `target/<profile>/`, where
