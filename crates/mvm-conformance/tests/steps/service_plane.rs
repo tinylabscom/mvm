@@ -18,11 +18,11 @@ use mvm_vmm::vsock_egress_bridge::egress_gate::{EgressGate, EgressVerdict, Route
 use crate::support::service_plane_fixture;
 use crate::world::CliWorld;
 
-#[given("the SDK service-plane fixture is available as a read-only mount")]
+#[given("the SDK service-plane fixture is materialized as a read-only disk image")]
 fn materialize_service_plane_fixture(world: &mut CliWorld) {
     let fixture_root =
         crate::steps::cli::workspace_root().join("features/suites/s30_service_plane/fixtures");
-    world.service_plane_fixture_dir = Some(fixture_root);
+    world.service_plane_fixture_disk = Some(service_plane_fixture::materialize(&fixture_root));
 }
 
 #[when(
@@ -30,11 +30,11 @@ fn materialize_service_plane_fixture(world: &mut CliWorld) {
 )]
 fn run_service_plane_fixture(world: &mut CliWorld, service: String) {
     let args = {
-        let fixture_dir = world
-            .service_plane_fixture_dir
+        let disk_root = world
+            .service_plane_fixture_disk
             .as_ref()
-            .expect("fixture directory must be available before the live run");
-        service_plane_fixture::command(&service, fixture_dir)
+            .expect("fixture disk must be materialized before the live run");
+        service_plane_fixture::command(&service, &service_plane_fixture::image_path(disk_root))
     };
     crate::steps::cli::run_mvmctl_isolated_live_home(world, args);
 }

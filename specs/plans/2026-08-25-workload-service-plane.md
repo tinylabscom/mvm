@@ -204,18 +204,17 @@ gate (`crates/mvm-hostd/src/broker/registry.rs:274`).
       every method — including a method with no arm at all — because the vsock
       dial happens before dispatch. A missing arm would have been invisible.
       `an_unknown_method_is_not_routed` keeps that assertion from being vacuous.
-- [x] B-8.5 Deliver the live fixture through the transient `--mount` surface
-      instead of passing a sized `--volume` that transient runs refuse. The
-      launch path materializes that directory into a read-only ext4 block image,
-      preserving Firecracker, HVF, and libkrun coverage without virtio-fs.
+- [x] B-8.5 Keep the live fixture on its sized, read-only ext4 `--volume`.
+      The transient parser accepts that form and keeps the witness independent
+      of directory-sharing support on Firecracker, HVF, and libkrun.
 
 ### Known limits of B-8
 
-- **The `@live` scenarios have not been executed.** They need `MVM_BDD_LIVE`
-  and a host that can boot a microVM; this session had neither. Verified
-  without a VM: the ABI marshalling (the fixture loads the real cdylib,
-  marshals a call, and reads the error body back without crashing) and the arm
-  routing (through the mock broker). **The vsock hop itself is unwitnessed.**
+- **The `@live` bound-workload scenario is now witnessed.** On an Apple
+  Silicon host, the sized read-only ext4 fixture was accepted by the transient
+  path, the guest loaded the musl sidecar, and the broker round-trip returned
+  `KV-OK`. The unbound refusal scenario still needs a fresh live run before the
+  whole pair can be treated as current evidence.
 
 ### Definition of done for WS-B
 

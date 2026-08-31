@@ -3357,12 +3357,13 @@ to the configured ceiling and the first terse response immediately after it.
 
 ## 2026-08-31 host.kv live fixture delivery
 
-- [x] Replace the unrunnable sized `--volume` invocation with the transient
-      `--mount` surface that snapshots the fixture into a read-only block image.
-- [x] Preserve default-backend coverage without a virtio-fs capability tag and
-      pin the exact command shape with focused tests.
-- [ ] Run the live `host.kv.v1` scenarios on a microVM-capable host and merge
-      the repair through the queue, closing issue #3036 from the merged PR.
+- [x] Confirm the existing sized, read-only `--volume` fixture is accepted by
+      the transient parser added in #3017.
+- [x] Preserve default-backend coverage without a directory-sharing capability
+      tag and retain the exact ext4 command-shape regression.
+- [x] Run the bound `host.kv.v1` scenario on an Apple Silicon host and capture
+      its end-to-end `KV-OK` result.
+- [ ] Merge the corrected evidence record through the queue.
 
 ## 2026-08-27 HVF machine restore dispatch
 

@@ -876,11 +876,10 @@ for detailed scope and acceptance criteria.
       no-raw-secret channel property. WS-C: catalog entries gain a bound
       workload shape and a run edge through the existing `synthesize_plan`
       admission path. Not started; WS-C task C-4 depends on WS-A and WS-B
-      bindings. The `host.kv.v1` live fixture now uses transient `--mount`,
-      which snapshots the directory into a read-only block image rather than
-      passing the sized `--volume` form that transient runs refuse. Focused
-      command-shape tests are green; live microVM evidence and merge delivery
-      remain. A repository-to-signed-workload generator is noted as an
+      bindings. The `host.kv.v1` witness retains its sized, read-only ext4
+      `--volume`: the transient parser accepts it, and an Apple Silicon live run
+      reached the broker and returned `KV-OK`. The unbound live refusal still
+      needs a fresh run. A repository-to-signed-workload generator is noted as an
       unscheduled follow-up in `specs/SPRINT.md`.
 
 - [x] **Execution-receipt evidence archive**
