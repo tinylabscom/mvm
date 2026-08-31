@@ -2,7 +2,8 @@
 
 use std::sync::Arc;
 #[cfg(any(test, feature = "test-support"))]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 /// A source of one thread's consumed CPU time (user + system).
@@ -145,6 +146,60 @@ impl<C: ThreadCpuClock> ThreadCpuClock for SummedClock<C> {
             .iter()
             .map(ThreadCpuClock::consumed)
             .fold(Duration::ZERO, |total, one| total.saturating_add(one))
+    }
+}
+
+/// A clock that never reports less than it has already reported.
+///
+/// Consumed CPU only accumulates, so a reading below the previous one did not
+/// happen: it is a read that failed. The failure is not hypothetical — a
+/// thread's CPU accounting dies with the thread, [`ThreadCpuHandle::consumed`]
+/// charges an unreadable thread as zero, and [`SummedClock`] adds that zero
+/// into the machine's total. A machine whose vCPU threads have exited
+/// therefore reads as one that consumed nothing.
+///
+/// Holding the high-water mark keeps the reported total to the last one
+/// actually taken while the threads were alive. That under-reports whatever
+/// those threads spent in their final microseconds, and never over-reports —
+/// the safe direction for a number that is persisted as a measurement and
+/// used to decide whether a workload is over its share.
+pub struct MonotonicClock<C: ThreadCpuClock> {
+    inner: C,
+    /// Micros rather than a `Duration`: the high-water mark is updated from
+    /// whichever thread reads, so it has to be a lock-free cell, and
+    /// `Duration` is not atomic.
+    high_water_us: Arc<AtomicU64>,
+}
+
+impl<C: ThreadCpuClock> MonotonicClock<C> {
+    pub fn new(inner: C) -> Self {
+        Self {
+            inner,
+            high_water_us: Arc::new(AtomicU64::new(0)),
+        }
+    }
+}
+
+impl<C: ThreadCpuClock> ThreadCpuClock for MonotonicClock<C> {
+    fn consumed(&self) -> Duration {
+        let reading = u64::try_from(self.inner.consumed().as_micros()).unwrap_or(u64::MAX);
+        // `fetch_max` returns the value that was there before, so the total to
+        // report is the larger of that and this reading.
+        let previous = self.high_water_us.fetch_max(reading, Ordering::SeqCst);
+        Duration::from_micros(previous.max(reading))
+    }
+}
+
+impl<C: ThreadCpuClock + Clone> Clone for MonotonicClock<C> {
+    /// Clones share the high-water mark. Two readers of the same machine must
+    /// not be able to disagree about how much it has consumed, and one of them
+    /// observing a total the other has already passed is exactly that
+    /// disagreement.
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            high_water_us: Arc::clone(&self.high_water_us),
+        }
     }
 }
 
@@ -311,5 +366,65 @@ mod tests {
     fn capturing_a_thread_off_macos_fails_loudly_rather_than_reading_zero() {
         let err = ThreadCpuHandle::for_current_thread().unwrap_err();
         assert!(err.to_string().contains("macOS"), "{err}");
+    }
+
+    #[test]
+    fn a_monotonic_clock_passes_a_rising_sequence_through_unchanged() {
+        let clock = MonotonicClock::new(ScriptedClock::new(vec![
+            Duration::from_millis(10),
+            Duration::from_millis(25),
+            Duration::from_millis(40),
+        ]));
+        assert_eq!(clock.consumed(), Duration::from_millis(10));
+        assert_eq!(clock.consumed(), Duration::from_millis(25));
+        assert_eq!(clock.consumed(), Duration::from_millis(40));
+    }
+
+    /// The defect this type exists for. A thread's CPU accounting dies with
+    /// the thread, and the read that follows is charged as zero, so a
+    /// cumulative total appears to fall. Consumed CPU cannot fall.
+    #[test]
+    fn a_reading_that_falls_is_a_failed_read_and_never_lowers_the_total() {
+        let clock = MonotonicClock::new(ScriptedClock::new(vec![
+            Duration::from_millis(400),
+            Duration::from_millis(120),
+        ]));
+        assert_eq!(clock.consumed(), Duration::from_millis(400));
+        assert_eq!(
+            clock.consumed(),
+            Duration::from_millis(400),
+            "a lower reading is a lost thread, not a machine that un-ran"
+        );
+    }
+
+    /// The shape a real teardown produces: every vCPU thread is gone, so the
+    /// summed read collapses to zero. Reporting that verbatim would attest a
+    /// machine that consumed nothing.
+    #[test]
+    fn a_total_that_collapses_to_zero_holds_the_last_reading_taken_while_alive() {
+        let clock = MonotonicClock::new(ScriptedClock::new(vec![Duration::from_millis(900)]));
+        assert_eq!(clock.consumed(), Duration::from_millis(900));
+        assert_eq!(clock.consumed(), Duration::from_millis(900));
+        assert_eq!(clock.consumed(), Duration::from_millis(900));
+    }
+
+    #[test]
+    fn a_monotonic_clock_reads_zero_before_anything_has_been_measured() {
+        let clock = MonotonicClock::new(ScriptedClock::new(vec![]));
+        assert_eq!(clock.consumed(), Duration::ZERO);
+    }
+
+    /// The high-water mark is shared, not per-handle: the controller reads
+    /// through one clock while nothing else does, but a future second reader
+    /// must not be able to observe a total lower than one already reported.
+    #[test]
+    fn the_high_water_mark_is_shared_across_clones() {
+        let clock = MonotonicClock::new(ScriptedClock::new(vec![
+            Duration::from_millis(300),
+            Duration::from_millis(5),
+        ]));
+        let second = clock.clone();
+        assert_eq!(clock.consumed(), Duration::from_millis(300));
+        assert_eq!(second.consumed(), Duration::from_millis(300));
     }
 }
