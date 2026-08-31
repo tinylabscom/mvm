@@ -112,6 +112,13 @@ fn sdk_sidecar_builder_script(arch: mvm_core::arch::GuestArch) -> String {
         r#"#!/bin/sh
 set -eu
 export HOME=/tmp
+# The builder-vm flake resolves its workspace root from this, falling back to
+# `../../..`. That fallback is wrong here: the build names the flake as
+# `path:/work/nix/images/builder-vm`, so nix copies only that subdirectory into
+# the store and the relative walk lands on `/nix` — making every attribute
+# reached through the runtime-overlay import unresolvable. Stage 0's own
+# `stage0-init` already exports this; the builder-VM shell job did not.
+export MVM_WORKSPACE_PATH=/work
 export XDG_CACHE_HOME=/nix-store/.cache
 export XDG_STATE_HOME=/tmp/.local/state
 export NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt
@@ -149,6 +156,22 @@ mod tests {
         }
         assert!(script.contains("\"/out/$name\""));
         assert!(script.contains("--no-write-lock-file"));
+        assert!(script.contains("--impure"));
+    }
+
+    /// The flake reads this to find the workspace, falling back to a relative
+    /// walk that is wrong from a `path:`-named subdirectory: nix copies only
+    /// that subdirectory into the store, so the walk lands on `/nix` and every
+    /// attribute reached through the runtime-overlay import fails to resolve.
+    /// `--impure` is what makes the env var visible to `getEnv`, so both are
+    /// required together and asserted together.
+    #[test]
+    fn the_script_exports_the_workspace_root_the_flake_reads() {
+        let script = sdk_sidecar_builder_script(mvm_core::arch::GuestArch::X86_64);
+        assert!(
+            script.contains("export MVM_WORKSPACE_PATH=/work"),
+            "without this the builder-vm flake resolves its workspace to /nix"
+        );
         assert!(script.contains("--impure"));
     }
 }
