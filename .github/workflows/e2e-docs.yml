@@ -63,7 +63,7 @@ jobs:
 
       - uses: ./.github/actions/apt-deps
         with:
-          packages: libcap-ng-dev lld qemu-system-x86 qemu-utils
+          packages: libcap-ng-dev lld qemu-system-x86 qemu-utils virtiofsd
 
       - uses: ./.github/actions/install-zigbuild
 
@@ -105,6 +105,12 @@ jobs:
             exit 1
           fi
           sudo chmod 666 /dev/kvm
+
+      - name: Grant unprivileged ICMP sockets to the runner group
+        run: |
+          set -euo pipefail
+          sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
+          test "$(sysctl -n net.ipv4.ping_group_range)" = "0 2147483647"
 
       - name: Grant QEMU Stage 0 access to vhost-vsock
         run: |

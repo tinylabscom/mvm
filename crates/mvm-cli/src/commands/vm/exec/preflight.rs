@@ -114,7 +114,8 @@ impl RunPreflightSummary {
         // disallowed host-share specs as an actual run, without resolving an
         // image or touching the VM runtime.
         for spec in &args.mounts {
-            crate::commands::parse_dir_share_spec(spec)?;
+            let parsed = super::super::shared::parse_volume_spec(spec)?;
+            super::super::shared::validate_volume_spec(&parsed)?;
         }
         let image = match args.manifest.as_ref() {
             _ if args.runtime_pack => RunPreflightImage::RuntimePack,

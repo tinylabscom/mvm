@@ -412,6 +412,20 @@ fn validate_host_path(host: &str, expect_dir: bool) -> Result<String> {
 ///   resolved), checked against a protected-directory deny-list, and the
 ///   **resolved** path is pinned back onto the volume (TOCTOU-safe).
 pub fn vm_volume_from_spec_validated(spec: &VolumeSpec) -> Result<VmVolume> {
+    validate_volume_spec(spec)?;
+
+    let mut vmv = volume_spec_to_vm_volume(spec);
+    let expect_dir = matches!(vmv.kind, VmVolumeKind::DirShare);
+    vmv.host = validate_host_path(&vmv.host, expect_dir)?;
+    Ok(vmv)
+}
+
+/// Validate the security properties available from a parsed volume alone.
+///
+/// This deliberately does not inspect the host filesystem, so dry-run and
+/// receipt construction can reject encryption and guest-path violations
+/// without requiring a synthetic host path to exist.
+pub fn validate_volume_spec(spec: &VolumeSpec) -> Result<()> {
     if let VolumeSpec::Disk {
         encrypted: true, ..
     } = spec
@@ -422,16 +436,22 @@ pub fn vm_volume_from_spec_validated(spec: &VolumeSpec) -> Result<VmVolume> {
         );
     }
 
-    let mut vmv = volume_spec_to_vm_volume(spec);
+    let vmv = volume_spec_to_vm_volume(spec);
     validate_guest_mount(&vmv.guest)?;
-    let expect_dir = matches!(vmv.kind, VmVolumeKind::DirShare);
-    vmv.host = validate_host_path(&vmv.host, expect_dir)?;
-    Ok(vmv)
+    Ok(())
 }
 
 #[cfg(test)]
 mod volume_spec_tests {
     use super::*;
+
+    #[test]
+    fn pure_volume_validation_does_not_require_the_host_path_to_exist() {
+        let spec = parse_volume_spec("/missing/fixture.ext4:/work/fixtures:64M:ro")
+            .expect("parse disk volume");
+
+        validate_volume_spec(&spec).expect("pure validation");
+    }
 
     #[test]
     fn dir_share_two_part_defaults_ro() {

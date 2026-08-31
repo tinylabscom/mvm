@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-29
+Last updated: 2026-08-31
 
 ## In progress
 
@@ -59,7 +59,7 @@ Last updated: 2026-08-29
       Clippy, formatting, `cargo deny`, and policy gates are green. A fresh
       Security run and merge delivery remain.
 
-- [ ] **Extended CI red repair — issue #2979.**
+- [ ] **Extended CI red repair — issues #2979 and #3007.**
       `specs/plans/2026-08-28-extended-ci-red-repair.md`.
       Linux helper compilation is platform-scoped, clean runners install the
       SDK prerequisites and warm the source sidecar, installed bundle SHA-256
@@ -72,6 +72,10 @@ Last updated: 2026-08-29
       The Intel witness installs QEMU and selects it for Stage 0 artifact
       construction, retaining HVF for workload execution and avoiding the
       unavailable libkrun host library.
+      The newest Linux follow-on installs `virtiofsd`, grants unprivileged
+      ICMP sockets to the runner group, and threads the documented service-plane
+      ext4 fixture through transient launch resolution as a read-only block
+      volume while retaining fail-closed directory-share capability checks.
       Focused tests, workspace tests, isolated doctests, workspace Clippy,
       formatting, and policy gates are green. A fresh Extended CI run and merge
       delivery remain.
