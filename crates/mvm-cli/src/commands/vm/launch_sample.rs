@@ -263,6 +263,15 @@ pub struct LaunchSubTimings {
     pub mount_materialize_ms: Option<f64>,
     /// Verity sidecar probe and roothash read for the resolved rootfs.
     pub artifact_verify_ms: Option<f64>,
+    /// Synthesizing, signing and recording the admitted plan.
+    ///
+    /// The `admit` bucket was a window with no named parts, so a launch that
+    /// spent it somewhere unexpected could only say how long, never where.
+    pub admit_plan_ms: Option<f64>,
+    /// Attaching the cached runtime overlay.
+    pub attach_overlay_ms: Option<f64>,
+    /// Attaching the cached universal initramfs.
+    pub attach_initramfs_ms: Option<f64>,
     /// The backend's own VM creation call, start to return.
     ///
     /// How much of guest boot this contains is backend-defined: HVF's `start`
@@ -331,6 +340,9 @@ impl LaunchSubTimings {
             ("mount_cache_lookup", self.mount_cache_lookup_ms),
             ("mount_materialize", self.mount_materialize_ms),
             ("artifact_verify", self.artifact_verify_ms),
+            ("admit_plan", self.admit_plan_ms),
+            ("attach_overlay", self.attach_overlay_ms),
+            ("attach_initramfs", self.attach_initramfs_ms),
             ("vmm_create", self.vmm_create_ms),
             ("guest_kernel_entry", self.guest_kernel_entry_ms),
             ("agent_auth", self.agent_auth_ms),

@@ -180,6 +180,12 @@ pub enum SubPhase {
     MountCacheLookup,
     MountMaterialize,
     ArtifactVerify,
+    /// Synthesizing, signing and recording the admitted plan, inside admit.
+    AdmitPlan,
+    /// Attaching the cached runtime overlay, inside admit.
+    AttachOverlay,
+    /// Attaching the cached universal initramfs, inside admit.
+    AttachInitramfs,
     VmmCreate,
     GuestKernelEntry,
     AgentAuth,
@@ -221,6 +227,9 @@ pub struct LaunchSubMarks {
     mount_cache_lookup: SpanMark,
     mount_materialize: SpanMark,
     artifact_verify: SpanMark,
+    admit_plan: SpanMark,
+    attach_overlay: SpanMark,
+    attach_initramfs: SpanMark,
     vmm_create: SpanMark,
     guest_kernel_entry: SpanMark,
     agent_auth: SpanMark,
@@ -247,6 +256,9 @@ impl LaunchSubMarks {
             SubPhase::MountCacheLookup => &mut self.mount_cache_lookup,
             SubPhase::MountMaterialize => &mut self.mount_materialize,
             SubPhase::ArtifactVerify => &mut self.artifact_verify,
+            SubPhase::AdmitPlan => &mut self.admit_plan,
+            SubPhase::AttachOverlay => &mut self.attach_overlay,
+            SubPhase::AttachInitramfs => &mut self.attach_initramfs,
             SubPhase::VmmCreate => &mut self.vmm_create,
             SubPhase::GuestKernelEntry => &mut self.guest_kernel_entry,
             SubPhase::AgentAuth => &mut self.agent_auth,
@@ -306,6 +318,9 @@ impl LaunchSubMarks {
             mount_cache_lookup_ms: self.mount_cache_lookup.elapsed_ms(),
             mount_materialize_ms: self.mount_materialize.elapsed_ms(),
             artifact_verify_ms: self.artifact_verify.elapsed_ms(),
+            admit_plan_ms: self.admit_plan.elapsed_ms(),
+            attach_overlay_ms: self.attach_overlay.elapsed_ms(),
+            attach_initramfs_ms: self.attach_initramfs.elapsed_ms(),
             vmm_create_ms: self.vmm_create.elapsed_ms(),
             guest_kernel_entry_ms: self.guest_kernel_entry.elapsed_ms(),
             agent_auth_ms: self.agent_auth.elapsed_ms(),
@@ -415,6 +430,9 @@ const SPAN_PARENTS: &[(&str, &str)] = &[
     ("mount_cache_lookup", "drives"),
     ("mount_materialize", "drives"),
     ("artifact_verify", "drives"),
+    ("admit_plan", "admit"),
+    ("attach_overlay", "admit"),
+    ("attach_initramfs", "admit"),
     ("vmm_create", "backend start"),
     ("guest_kernel_entry", "guest ready"),
     ("agent_auth", "guest ready"),
@@ -895,11 +913,14 @@ mod tests {
 
     /// Every sub-phase, so a mis-wired `slot()` arm shows up as one phase
     /// overwriting another rather than as a silently wrong benchmark column.
-    const ALL_SUB_PHASES: [SubPhase; 12] = [
+    const ALL_SUB_PHASES: [SubPhase; 15] = [
         SubPhase::MountFingerprint,
         SubPhase::MountCacheLookup,
         SubPhase::MountMaterialize,
         SubPhase::ArtifactVerify,
+        SubPhase::AdmitPlan,
+        SubPhase::AttachOverlay,
+        SubPhase::AttachInitramfs,
         SubPhase::VmmCreate,
         SubPhase::GuestKernelEntry,
         SubPhase::AgentAuth,
@@ -1065,6 +1086,11 @@ mod tests {
         };
         let sub = LaunchSubTimings {
             artifact_verify_ms: Some(0.2),
+            // The admit window's parts must sum inside `admit_ms` above, so
+            // the tree-arithmetic assertions have a real partition to check.
+            admit_plan_ms: Some(45.9),
+            attach_overlay_ms: Some(0.9),
+            attach_initramfs_ms: Some(0.6),
             vmm_create_ms: Some(12.0),
             guest_kernel_entry_ms: Some(57.1),
             agent_auth_ms: Some(1.1),
@@ -1173,6 +1199,9 @@ mod tests {
             "  drives                             13.4ms    5%",
             "    artifact verify                   0.2ms",
             "  admit                              47.4ms   17%",
+            "    admit plan                       45.9ms",
+            "    attach overlay                    0.9ms",
+            "    attach initramfs                  0.6ms",
             "  backend start                      16.1ms    6%",
             "    vmm create                       12.0ms",
             "  guest ready                        58.2ms   20%",
@@ -1237,11 +1266,22 @@ mod tests {
         let (phases, sub) = observed_launch();
         let out = phases.render_tree(&sub);
         assert!(out.contains("p50 budget 200ms across 20 samples"));
-        for verdict in ["ok", "over", "pass", "fail", "PASS", "FAIL", "✓", "✗"] {
+        // Whole words, not substrings. A span is free to be named "attach
+        // overlay" or "mount cache lookup" without that being a verdict, and a
+        // substring search reads both as one — which it did, silently, for as
+        // long as neither span happened to be populated in this fixture.
+        let words: Vec<&str> = out
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .collect();
+        for verdict in ["ok", "over", "pass", "fail", "PASS", "FAIL"] {
             assert!(
-                !out.contains(verdict),
+                !words.contains(&verdict),
                 "tree renders a verdict token {verdict}"
             );
+        }
+        for mark in ["✓", "✗"] {
+            assert!(!out.contains(mark), "tree renders a verdict mark {mark}");
         }
     }
 
