@@ -19,13 +19,6 @@ Last updated: 2026-08-31
       policy gates are green; merge delivery and fresh scheduled Security and
       claim-freshness evidence remain.
 
-- [ ] **virtiofsd sandbox parity — issue #3022.**
-      `specs/plans/2026-08-31-virtiofsd-sandbox-parity.md`.
-      The shared QEMU helper now selects the namespace sandbox explicitly for
-      both Rust and C daemon flavours, and focused argv tests prevent either
-      implementation from silently losing confinement. Workspace validation
-      and merge delivery remain.
-
 - [ ] **Default-backend host-services broker witness — issue #2988.**
       `specs/plans/2026-08-28-default-backend-broker-witness.md`.
       The live SDK broker fixture is now a read-only ext4 disk instead of a
@@ -238,6 +231,13 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
+
+- [x] **virtiofsd sandbox parity — issue #3022.**
+      `specs/plans/2026-08-31-virtiofsd-sandbox-parity.md`.
+      The shared QEMU helper selects the namespace sandbox explicitly for both
+      Rust and C daemon flavours, and focused argv tests prevent either
+      implementation from silently losing confinement. PR #3026 passed its
+      merge-group gates and landed on 2026-08-31.
 
 - [x] **Issue #2951 — ad-hoc exec honors the image environment.** Streaming
       exec now uses the shared workload resolver, so image-declared `PATH`,
