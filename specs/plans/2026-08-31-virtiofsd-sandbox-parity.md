@@ -1,5 +1,8 @@
 # virtiofsd sandbox parity
 
+Backing: shipped-source
+Validation: check-sprint-append
+
 ## Goal
 
 Make QEMU's host-directory file server use the same explicit confinement policy
