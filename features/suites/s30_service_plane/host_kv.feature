@@ -43,12 +43,12 @@ Feature: A workload reaches a key-value store without a network path
   # has guest code reach the store the way a real one does: through the sidecar
   # cdylib, over vsock, to the broker. It is `@live` because it needs a real
   # microVM.
-  # The fixture is delivered as a read-only ext4 volume rather than a host
-  # directory share, so this witness runs on the default Firecracker and HVF
-  # backends as well as libkrun.
+  # The fixture uses `--mount`, whose transient path snapshots the directory
+  # into a read-only ext4 image before boot. The guest therefore receives a
+  # block device on Firecracker and HVF as well as libkrun, never virtio-fs.
   @live @sdk_sidecar
   Scenario: a booted workload round-trips a key through the broker
-    Given the SDK service-plane fixture is materialized as a read-only disk image
+    Given the SDK service-plane fixture is available as a read-only mount
     When I run the SDK service-plane fixture in an isolated live home binding service "host.kv.v1"
     Then the command exits with code 0
     And the output contains "KV-OK"

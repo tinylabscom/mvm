@@ -862,7 +862,7 @@ for detailed scope and acceptance criteria.
       deliberately disjoint from, the qualification plan's WS1, which landed in
       #2855.
 
-- [ ] **Workload service plane**
+- [~] **Workload service plane**
       (`specs/plans/2026-08-25-workload-service-plane.md`). Three workstreams
       taken from a 2026-08-25 survey of a commercial enterprise
       application-platform vendor, scoped deliberately as depth on existing
@@ -876,7 +876,11 @@ for detailed scope and acceptance criteria.
       no-raw-secret channel property. WS-C: catalog entries gain a bound
       workload shape and a run edge through the existing `synthesize_plan`
       admission path. Not started; WS-C task C-4 depends on WS-A and WS-B
-      bindings. A repository-to-signed-workload generator is noted as an
+      bindings. The `host.kv.v1` live fixture now uses transient `--mount`,
+      which snapshots the directory into a read-only block image rather than
+      passing the sized `--volume` form that transient runs refuse. Focused
+      command-shape tests are green; live microVM evidence and merge delivery
+      remain. A repository-to-signed-workload generator is noted as an
       unscheduled follow-up in `specs/SPRINT.md`.
 
 - [x] **Execution-receipt evidence archive**

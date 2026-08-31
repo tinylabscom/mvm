@@ -204,6 +204,10 @@ gate (`crates/mvm-hostd/src/broker/registry.rs:274`).
       every method — including a method with no arm at all — because the vsock
       dial happens before dispatch. A missing arm would have been invisible.
       `an_unknown_method_is_not_routed` keeps that assertion from being vacuous.
+- [x] B-8.5 Deliver the live fixture through the transient `--mount` surface
+      instead of passing a sized `--volume` that transient runs refuse. The
+      launch path materializes that directory into a read-only ext4 block image,
+      preserving Firecracker, HVF, and libkrun coverage without virtio-fs.
 
 ### Known limits of B-8
 
