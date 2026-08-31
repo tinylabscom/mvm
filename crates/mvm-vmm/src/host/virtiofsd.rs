@@ -14,9 +14,9 @@ use mvm_contract::builder::BuilderError;
 
 /// Which `virtiofsd` implementation is installed. The two share the
 /// `--socket-path` flag but nothing else: the QEMU-bundled **C** daemon takes
-/// `-o source=DIR` and sandboxes with `-o sandbox=...`; the standalone **Rust**
-/// daemon takes `--shared-dir=DIR --sandbox ...`. Detect once and build the
-/// right argv per flavour.
+/// `-o source=DIR` and `-o sandbox=...`; the standalone **Rust** daemon takes
+/// `--shared-dir=DIR --sandbox ...`. Both are explicitly confined with Linux
+/// namespaces; detect once and build the right argv per flavour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VirtiofsdFlavor {
     /// QEMU-bundled C virtiofsd (`-o source=`).
@@ -247,31 +247,7 @@ impl VirtiofsdGuard {
         } = params;
         let _ = std::fs::remove_file(sock);
         let mut cmd = Command::new(bin);
-        cmd.arg(format!("--socket-path={}", sock.display()));
-        match flavor {
-            VirtiofsdFlavor::Rust => {
-                cmd.arg(format!("--shared-dir={}", dir.display()))
-                    .args(["--sandbox", "none"]);
-                if read_only {
-                    cmd.arg("--readonly");
-                }
-                if dax {
-                    // DAX acceleration requires the daemon to keep host pages
-                    // mapped and answer FUSE_SETUPMAPPING.
-                    cmd.args(["--cache", "always"]);
-                }
-            }
-            VirtiofsdFlavor::C => {
-                let mut opt = format!("source={}", dir.display());
-                if read_only {
-                    opt.push_str(",readonly");
-                }
-                cmd.arg("-o").arg(opt);
-                if dax {
-                    cmd.arg("-o").arg("cache=always");
-                }
-            }
-        }
+        configure_command(&mut cmd, flavor, sock, dir, read_only, dax);
         let child = cmd
             .spawn()
             .with_context(|| format!("spawning {} for tag {tag}", bin.display()))?;
@@ -283,6 +259,41 @@ impl VirtiofsdGuard {
             )
         })?;
         Ok(())
+    }
+}
+
+fn configure_command(
+    cmd: &mut Command,
+    flavor: VirtiofsdFlavor,
+    sock: &Path,
+    dir: &Path,
+    read_only: bool,
+    dax: bool,
+) {
+    cmd.arg(format!("--socket-path={}", sock.display()));
+    match flavor {
+        VirtiofsdFlavor::Rust => {
+            cmd.arg(format!("--shared-dir={}", dir.display()))
+                .args(["--sandbox", "namespace"]);
+            if read_only {
+                cmd.arg("--readonly");
+            }
+            if dax {
+                // DAX acceleration requires the daemon to keep host pages
+                // mapped and answer FUSE_SETUPMAPPING.
+                cmd.args(["--cache", "always"]);
+            }
+        }
+        VirtiofsdFlavor::C => {
+            let mut opt = format!("source={}", dir.display());
+            if read_only {
+                opt.push_str(",readonly");
+            }
+            cmd.arg("-o").arg(opt).arg("-o").arg("sandbox=namespace");
+            if dax {
+                cmd.arg("-o").arg("cache=always");
+            }
+        }
     }
 }
 
@@ -311,6 +322,22 @@ fn wait_for_socket(sock: &Path, timeout: Duration) -> Result<()> {
 mod spawn_params_builder_tests {
     use super::*;
 
+    fn args_for(flavor: VirtiofsdFlavor) -> Vec<String> {
+        let mut command = Command::new("virtiofsd");
+        configure_command(
+            &mut command,
+            flavor,
+            Path::new("/tmp/virtiofs.sock"),
+            Path::new("/workspace"),
+            true,
+            true,
+        );
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
     /// An empty builder must refuse to finish, naming the first
     /// required field it is missing — never substituting a default.
     #[test]
@@ -319,5 +346,37 @@ mod spawn_params_builder_tests {
             panic!("an empty SpawnParams builder must not build");
         };
         assert_eq!(err, BuilderError::missing("SpawnParams", "bin"));
+    }
+
+    #[test]
+    fn rust_daemon_is_explicitly_namespace_sandboxed() {
+        assert_eq!(
+            args_for(VirtiofsdFlavor::Rust),
+            [
+                "--socket-path=/tmp/virtiofs.sock",
+                "--shared-dir=/workspace",
+                "--sandbox",
+                "namespace",
+                "--readonly",
+                "--cache",
+                "always",
+            ]
+        );
+    }
+
+    #[test]
+    fn c_daemon_is_explicitly_namespace_sandboxed() {
+        assert_eq!(
+            args_for(VirtiofsdFlavor::C),
+            [
+                "--socket-path=/tmp/virtiofs.sock",
+                "-o",
+                "source=/workspace,readonly",
+                "-o",
+                "sandbox=namespace",
+                "-o",
+                "cache=always",
+            ]
+        );
     }
 }
