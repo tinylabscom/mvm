@@ -208,6 +208,15 @@ impl LockWait {
     /// tempdir, so a waiting default lets one crate's test suite queue
     /// behind another process's builder for the full hour. A test that
     /// wants to exercise waiting passes [`Self::of`] explicitly.
+    ///
+    /// That flip covers **this crate's own test build and nothing else**.
+    /// `cfg!` is evaluated where it is compiled, so when this crate is built
+    /// as an ordinary dependency of another crate's test binary it is not
+    /// under `cfg(test)`, and that binary's tests inherit
+    /// [`DEFAULT_LOCK_WAIT`] — an hour, spent queueing rather than failing.
+    /// A test outside this crate therefore has to state its own budget; it
+    /// cannot borrow this one. `mvm-libkrun-supervisor` learned that the
+    /// expensive way and now takes its wait as an argument.
     pub fn from_env() -> Self {
         if cfg!(test) {
             return Self::none();
@@ -983,13 +992,35 @@ mod tests {
     }
 
     #[test]
-    fn the_test_build_never_queues_for_a_lock() {
+    fn this_crates_own_test_build_never_queues_for_a_lock() {
         // Unit tests reach production entry points that lock the
         // host-wide store image. Waiting there makes one suite queue
         // behind another process's builder — a 35-minute "passing"
-        // test. The default must stay fail-fast under cfg(test) no
-        // matter what the environment says.
+        // test. The default stays fail-fast under cfg(test) no matter
+        // what the environment says.
+        //
+        // Read what this does and does not prove. `cfg!(test)` is true
+        // here because *this crate* is being compiled as a test, so this
+        // asserts a property of this crate's test build alone. It says
+        // nothing about a test in a crate that merely depends on this
+        // one: there this crate is an ordinary library, the flip does not
+        // happen, and the caller gets the production hour. Reading this
+        // test as a workspace-wide guarantee is what let
+        // `mvm-libkrun-supervisor` ship a test that queued for an hour.
         assert_eq!(LockWait::from_env(), LockWait::none());
+    }
+
+    /// The other half of the same fact, asserted directly rather than left
+    /// to be inferred: the production default really is the long wait, so a
+    /// caller that does not state a budget and is not inside this crate's
+    /// test build gets an hour.
+    #[test]
+    fn the_production_default_is_the_long_wait() {
+        assert_eq!(
+            LockWait::of(DEFAULT_LOCK_WAIT),
+            LockWait::of(Duration::from_secs(60 * 60))
+        );
+        assert_ne!(LockWait::of(DEFAULT_LOCK_WAIT), LockWait::none());
     }
 
     #[test]
