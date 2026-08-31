@@ -1,5 +1,8 @@
 # machine diff handshake retry
 
+Backing: shipped-source
+Validation: check-sprint-append
+
 ## Goal
 
 Make `machine diff` tolerate a control peer that closes before completing the
