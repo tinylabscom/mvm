@@ -1,6 +1,6 @@
 # Remove virtio-fs
 
-**Status: PLAN — not started**
+**Status: IN PROGRESS — Stage A landed except the deletion pass**
 
 No guest gets a virtio-fs device. Not a workload, not the builder VM, not the
 dev-tier root. The host filesystem reaches a guest as a block image or it does
@@ -78,18 +78,23 @@ pub enum LocalVolumeKind {
 The code already calls one legacy and the other portable. The work is removing
 the legacy arm, not building the portable one.
 
-- [ ] `--mount <host>:<guest>` resolves to a `BlockImage` volume through the
-      existing registry rather than a `DirShare`. Materialization reuses
-      `pack_stage0_work_disk`'s shape — filtered copy → `MaterializeExt4Input`
-      → volume label — and `mvm_build::rootfs::materialize_ext4_pure`, the
-      memory-safe pure-Rust writer already used for rootfs.
-- [ ] The guest mounts by volume label, not enumeration order, as
-      `stage0-init` already does.
+- [x] `--mount <host>:<guest>` is materialized into an ext4 image by
+      `mvm_build::rootfs::materialize_ext4_pure` and attached as virtio-blk.
+      The volume stays `DirShare` so admission still records a *directory*
+      grant; the new `VmVolume.materialized_image` carries what is attached.
+      Landed as `feat(mount): deliver a granted directory as a block image`.
+- [ ] The guest mounts by volume label rather than by the device node
+      `workload_volume_devices` resolves. The image **is** labelled, but the
+      guest is still handed a node, so this is not done — it is the difference
+      between "works" and "cannot silently mount the wrong device".
+- [x] `refuse_unsupported_dir_shares` and both its call sites deleted: every
+      backend can serve a mount now, so it could only produce a false refusal.
 - [ ] Delete `LocalVolumeKind::Directory`, `VmVolumeKind::DirShare`,
       `VirtioFsShare`, and every backend's handling of them. HVF's
-      `supports_directory_shares` returns false; `directory_shares` leaves
-      `VmCapabilities`; `refuse_unsupported_dir_shares` and the rw refusal
-      collapse into one preflight that no longer branches per backend.
+      `supports_directory_shares` returns false and `directory_shares` leaves
+      `VmCapabilities`. Deliberately a separate commit: the one above is a
+      behaviour change, this is a deletion, and reviewing them together hides
+      which is which.
 
 **Custom volumes are unaffected.** A managed volume is already a
 `BlockImage`/`Disk` today. Nothing about `mvmctl volume` changes.
