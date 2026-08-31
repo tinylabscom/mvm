@@ -298,8 +298,7 @@ reason = "needs the live journey guest; not yet added to features/suites/s32_doc
 
 [[command]]
 path = "machine wait"
-tier = "parse"
-reason = "exits 65 against a guest that declares no mvm entrypoint: the readiness poll reports `entrypoint failed: read entrypoint marker /etc/mvm/entrypoint: No such file or directory` rather than treating the component as not applicable, with the default target as well as --for all"
+tier = "live"
 
 [[command]]
 path = "manifest info"

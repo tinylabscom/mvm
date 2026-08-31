@@ -92,6 +92,19 @@ Feature: The documented machine verbs operate a real guest
     Then the command exits with code 0
     Then the journey machine is still running
 
+  # `--timeout` because the documented form (`machine wait api-dev --for all`)
+  # has no bound of its own: a guest that never reports ready would hang the
+  # suite rather than fail it.
+  #
+  # This scenario passed once before, against a guest whose rootfs happened to
+  # carry an entrypoint marker, and failed the moment it met one without. The
+  # guest here declares no entrypoint, which is the case that was broken.
+  @live
+  Scenario: the host waits for guest readiness
+    When I run mvmctl against the journey machine with "machine wait bdd-journey --for all --timeout 60"
+    Then the command exits with code 0
+    Then the journey machine is still running
+
   @live
   Scenario: a process starts inside the guest
     # An absolute path: the verb takes the program plus its arguments, not a
