@@ -1,5 +1,8 @@
 # Remove virtio-fs
 
+Backing: shipped-source
+Validation: check-sprint-append
+
 **Status: IN PROGRESS — Stage A landed except the deletion pass**
 
 No guest gets a virtio-fs device. Not a workload, not the builder VM, not the
