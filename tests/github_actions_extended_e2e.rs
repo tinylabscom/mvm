@@ -147,7 +147,11 @@ fn linux_documented_surface_grants_unprivileged_icmp_to_the_runner_group() {
 
     assert!(
         linux.contains("sudo sysctl -w net.ipv4.ping_group_range=\"0 2147483647\"")
-            && linux.contains("test \"$(sysctl -n net.ipv4.ping_group_range)\" = \"0 2147483647\""),
+            && linux.contains(
+                "read -r ping_gid_min ping_gid_max < <(sysctl -n net.ipv4.ping_group_range)"
+            )
+            && linux.contains("test \"$ping_gid_min\" = \"0\"")
+            && linux.contains("test \"$ping_gid_max\" = \"2147483647\""),
         "the documented ping witnesses need the runner group admitted to unprivileged ICMP sockets"
     );
 }
