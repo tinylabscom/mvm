@@ -1,0 +1,171 @@
+# Remove virtio-fs
+
+**Status: PLAN — not started**
+
+No guest gets a virtio-fs device. Not a workload, not the builder VM, not the
+dev-tier root. The host filesystem reaches a guest as a block image or it does
+not reach it at all.
+
+## Why, beyond the flag that started this
+
+The immediate finding was `crates/mvm-vmm/src/host/virtiofsd.rs:253`:
+
+```rust
+.args(["--sandbox", "none"])
+```
+
+— virtiofsd's own namespace/seccomp confinement, disabled, with no comment, no
+ADR, and no mention in the commit that introduced it (`e54fd9769e`). The C
+flavour passes no `-o sandbox=` at all.
+
+But the flag is a symptom. virtio-fs puts a FUSE server on the host — in a
+daemon for QEMU, in the VMM's address space for libkrun and HVF — and points it
+at a host directory. Every request it parses comes from the guest. That is a
+large, guest-driven parser sitting on the wrong side of the boundary, and it is
+the one mechanism by which a guest addresses host filesystem *structure* rather
+than opaque blocks. A block device is a byte array with no protocol for a guest
+to attack.
+
+This also removes the awkwardness in claim 1. "No host-fs access from a guest
+beyond explicit shares" currently rests on virtio-fs behaving; afterwards the
+shares are images, and the claim rests on the guest having no channel to the
+host filesystem at all.
+
+## What already points this way
+
+- **Firecracker refuses virtio-fs outright** and has a test for it
+  (`fc.rs::boot_rejects_virtio_fs_shares`). The Linux production workload path
+  is already clean. This plan makes every backend match the one that is right.
+- **The builder already migrated its largest share to a disk.**
+  `pack_stage0_work_disk` copies the workspace tree, materializes an ext4 image
+  with a volume label, and attaches it as virtio-blk — because "`nix build`
+  reading a large workspace tree through virtio-fs-over-FUSE exhausts libkrun's
+  virtio-fs handle pool". Different motive, same destination, and the machinery
+  is written.
+- **`--mount` is already read-only.** `exec.rs` refuses rw:
+  "`--mount '{spec}'` requests rw, but transient live shares are read-only". So
+  the only property a materialized image loses is *host edits becoming visible
+  mid-run*, which a read-only mount consumed at boot barely has.
+- **The timing surface already has slots for the replacement.**
+  `mount_fingerprint`, `mount_cache_lookup` and `mount_materialize` are declared
+  in `SubPhase`, rendered by the report, and have **no producer**. The comment
+  says they exist because "a content-addressed mount image is what records
+  them". Someone designed this and did not build it.
+
+## Stages
+
+Ordered by security value per unit of work. Each stage leaves the tree shippable.
+
+### Stage A — workloads
+
+The whole security argument lives here: an untrusted guest driving a FUSE
+server. Everything below this is our own code.
+
+**This stage is a deletion, not a feature.** Both halves of the fork already
+exist and both are wired end to end:
+
+```rust
+pub enum LocalVolumeKind {
+    /// Legacy host directory exposed only by backends with directory sharing.
+    #[default]
+    Directory,
+    /// Portable ext4 image attached as a virtio block device.
+    BlockImage { size_mib: u32 },
+}
+```
+
+`as_vm_volume` maps those to `VmVolumeKind::DirShare` and `VmVolumeKind::Disk`.
+The code already calls one legacy and the other portable. The work is removing
+the legacy arm, not building the portable one.
+
+- [ ] `--mount <host>:<guest>` resolves to a `BlockImage` volume through the
+      existing registry rather than a `DirShare`. Materialization reuses
+      `pack_stage0_work_disk`'s shape — filtered copy → `MaterializeExt4Input`
+      → volume label — and `mvm_build::rootfs::materialize_ext4_pure`, the
+      memory-safe pure-Rust writer already used for rootfs.
+- [ ] The guest mounts by volume label, not enumeration order, as
+      `stage0-init` already does.
+- [ ] Delete `LocalVolumeKind::Directory`, `VmVolumeKind::DirShare`,
+      `VirtioFsShare`, and every backend's handling of them. HVF's
+      `supports_directory_shares` returns false; `directory_shares` leaves
+      `VmCapabilities`; `refuse_unsupported_dir_shares` and the rw refusal
+      collapse into one preflight that no longer branches per backend.
+
+**Custom volumes are unaffected.** A managed volume is already a
+`BlockImage`/`Disk` today. Nothing about `mvmctl volume` changes.
+
+**Deliberately not in this stage:** content-addressing and caching of the
+materialized image. The `mount_fingerprint` / `mount_cache_lookup` /
+`mount_materialize` spans exist for it and have never fired, so the slot is
+there — but adding a cache is the "heavy new feature" this work is supposed to
+avoid. Land the deletion, measure a cold `--mount`, and only then decide
+whether a cache is worth its own plan.
+
+**Semantic change to document, not hide:** a mount becomes a snapshot taken at
+boot. Host edits during the run are not visible. Say so in `--mount --help` and
+the README. The gap is small because `--mount` is already read-only — `exec.rs`
+refuses rw with "transient live shares are read-only" — so the only lost
+property is mid-run visibility.
+
+### Stage B — the dev-tier root
+
+- [ ] Delete virtiofs-root. ADR-107 already calls it a dev-tier path with a
+      weaker contract that does not witness claim 3; it is the one boot mode
+      that cannot be dm-verity sealed. Block+ext4 is the only root.
+- [ ] Retire `VIRTIOFS_ROOT_TAG`, the `root=<tag>` cmdline knob, and the
+      `RootStrategy::Virtiofs` arm.
+
+### Stage C — the builder VM
+
+Largest, least security value: the builder runs our own Nix builds, and my
+memory note already separates dev-builder from prod tiers. It is in scope
+because the goal is *nowhere*, not *nowhere that matters*.
+
+Remaining shares are `work`, `out`, `job`, `mvm-bins` and the closure seed.
+
+- [ ] `work`, `job`, `mvm-bins`, closure seed — inbound and read-only. Same
+      treatment as Stage A; `work` is already done on Stage 0.
+- [ ] `out` is the hard one and needs a decision: the guest **writes** artifacts
+      the host must read back. Options: a writable virtio-blk image the host
+      mounts read-only after poweroff (needs a host-side ext4 *reader*, which
+      `mvm-fs` does not have — it has a writer); or stream artifacts out over
+      the existing vsock channel. Neither is free. Do not start Stage C until
+      this is chosen.
+- [ ] Delete `crates/mvm-vmm/src/host/virtiofsd.rs`, both QEMU call sites, and
+      the `virtiofsd` host dependency from the Linux install docs.
+
+### Stage D — the gate
+
+- [ ] `xtask check-no-virtio-fs`, modelled on `check-single-network-path`:
+      fails on `virtio_fs` / `VirtioFs` / `virtiofsd` / `add_virtio_fs`
+      anywhere in the workspace outside the libkrun FFI bindings, which declare
+      the C API whether or not we call it.
+- [ ] Add it to the CI gate list. A removal without a gate grows back.
+
+## What this costs
+
+- **Every `--mount` pays a materialization**, proportional to the tree, until
+  something caches it. The `$PWD:/work` in this project's own README is a large
+  tree. This cost is **unmeasured** — measure a cold `--mount` before deciding
+  whether a cache is needed, rather than building one on the assumption.
+- **It does not touch the launch budget.** `PREPARED_COLD_HARD_MAX_MS` is 200ms
+  on the *dispatch window* (`backend_start + vsock_wait`), and the mount spans
+  are parented to `drives`, which is outside it. A launch with no `--mount` is
+  unchanged, and a custom volume is already a block image.
+- **Stage C is weeks**, most of it in `out`, for a guest that runs our code.
+- **The QEMU workload driver may simply lose directory shares** rather than gain
+  images — it is opt-in dev/test and `auto_select` never picks it, so it is the
+  one place where deleting the feature outright is defensible.
+
+## Stopgap
+
+Restoring virtiofsd's sandbox is a one-line change and Stages A–C are not
+one-line changes.
+
+- [ ] `--sandbox namespace` for the Rust flavour, explicit `-o sandbox=namespace`
+      for the C one. DAX needs `cache=always`, which is orthogonal to the
+      sandbox, so the reason it was disabled is probably not the reason it looks
+      like.
+- [ ] **Needs Linux validation before it lands.** The QEMU path does not run on
+      the macOS dev host, so this cannot be tested where it was written. Do not
+      land it blind on the strength of the argument above.
