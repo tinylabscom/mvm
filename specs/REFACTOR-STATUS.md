@@ -4,6 +4,14 @@ Last updated: 2026-08-31
 
 ## In progress
 
+- [ ] **Wasmtime security update — issues #3018 and #3020.**
+      `specs/plans/2026-08-31-wasmtime-security-update.md`.
+      The complete optional Wasmtime dependency family is locked to patched
+      46.0.3, removing the two vulnerabilities reported by the scheduled
+      Security lane. All 897 feature-enabled runtime tests, Clippy, and the 62
+      policy gates are green; merge delivery and fresh scheduled Security and
+      claim-freshness evidence remain.
+
 - [ ] **Default-backend host-services broker witness — issue #2988.**
       `specs/plans/2026-08-28-default-backend-broker-witness.md`.
       The live SDK broker fixture is now a read-only ext4 disk instead of a

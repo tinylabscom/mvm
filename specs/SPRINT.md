@@ -10,6 +10,15 @@
 
 ## In progress
 
+- [ ] **Wasmtime security update — issues #3018 and #3020.**
+      `specs/plans/2026-08-31-wasmtime-security-update.md`.
+      The optional Wasm backend's locked Wasmtime family is updated from
+      46.0.2 to 46.0.3, removing RUSTSEC-2026-0268 and RUSTSEC-2026-0269.
+      `cargo audit` is green apart from the existing allowed unmaintained
+      warning; all 897 feature-enabled runtime tests, zero-warning Clippy, and
+      all 62 repository gates are green. Merge delivery and fresh scheduled
+      evidence remain.
+
 - [ ] **Warm standby image claim repair — issue #3002.**
       `specs/plans/2026-08-28-warm-standby-image-claim.md`.
       Standby compatibility now records the root device model, allowing HVF's
