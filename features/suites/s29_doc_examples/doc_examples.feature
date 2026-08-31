@@ -21,6 +21,13 @@ Feature: Documented examples work
   Scenario: every documented command path carries a verification tier
     Then every documented command path carries a verification tier
 
+  # The weakest tier is the one an example reaches by nobody deciding
+  # anything, so left alone it grows: 61 -> 65 during a single week of
+  # unrelated documentation work. The count may fall freely; raising it
+  # means editing the pin and saying why.
+  Scenario: the parse tier does not grow
+    Then no more command paths sit at the parse tier than the pinned count
+
   Scenario: the tier manifest cannot drift into fiction
     Then the tier manifest names only real CLI commands
 
