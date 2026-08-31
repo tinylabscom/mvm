@@ -1196,17 +1196,8 @@ fn resolve_boot_strategy(
     })
 }
 
-/// Build the `VmStartConfig` for the transient boot from the resolved image +
-/// boot-strategy state. Admission (tenant/plan binding) and the runtime
-/// overlay attach happen in the caller, after this returns — this only
-/// assembles the struct.
 /// Turn each `--mount` into a volume, materializing the granted directory into
 /// an ext4 image first.
-///
-/// `host` stays the directory that was granted so the admission record names
-/// it; `materialized_image` carries what the backend attaches. See
-/// [`mounts::materialize_mount_image`] for why the directory is not shared
-/// directly.
 fn mount_volumes(
     shape: &LaunchShape<'_>,
     vm_name: &str,
@@ -1220,33 +1211,15 @@ fn mount_volumes(
     // the same hole `attach_initramfs` sat in — a launch able to say how long
     // it took and not where.
     sub.start(crate::commands::vm::phase_timing::SubPhase::MountMaterialize);
-    let state_dir = mvm_core::config::vm_state_dir(vm_name);
-    std::fs::create_dir_all(&state_dir).with_context(|| {
-        format!(
-            "creating the VM state directory {} for --mount images",
-            state_dir.display()
-        )
-    })?;
-    let volumes: Result<Vec<VmVolume>> = shape
-        .dir_shares
-        .iter()
-        .enumerate()
-        .map(|(idx, share)| {
-            let image = mounts::materialize_mount_image(share, &state_dir, idx)?;
-            Ok(VmVolume {
-                host: share.host_dir.clone(),
-                guest: share.guest_mount.clone(),
-                read_only: share.read_only,
-                kind: mvm_core::vm_backend::VmVolumeKind::DirShare,
-                materialized_image: Some(image.display().to_string()),
-                ..Default::default()
-            })
-        })
-        .collect();
+    let volumes = mounts::materialize_mount_volumes(shape.dir_shares, vm_name);
     sub.finish(crate::commands::vm::phase_timing::SubPhase::MountMaterialize);
     volumes
 }
 
+/// Build the `VmStartConfig` for the transient boot from the resolved image +
+/// boot-strategy state. Admission (tenant/plan binding) and the runtime
+/// overlay attach happen in the caller, after this returns — this only
+/// assembles the struct.
 fn build_start_config(
     shape: &LaunchShape<'_>,
     vm_name: &str,
