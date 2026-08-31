@@ -82,6 +82,24 @@ Feature: The documented machine verbs operate a real guest
     Then the command exits with code 0
     Then the journey machine is still running
 
+  # The scenario that found #3024. `machine diff` parsed and then died with
+  # `host session handshake failed` on a guest where exec, wait, fs ls and proc
+  # start all worked, because it opened its session on a different seam from
+  # every other filesystem verb. Nothing short of a live guest could see that.
+  @live
+  Scenario: the guest reports its filesystem changes
+    When I run mvmctl against the journey machine with "machine diff bdd-journey"
+    Then the command exits with code 0
+    Then the journey machine is still running
+
+  @live
+  Scenario: a process starts inside the guest
+    # An absolute path: the verb takes the program plus its arguments, not a
+    # shell line, so a bare `echo` resolves against nothing.
+    When I run mvmctl against the journey machine with "machine proc start bdd-journey -- /bin/echo journey-proc"
+    Then the command exits with code 0
+    Then the journey machine is still running
+
   @live
   Scenario: the documented teardown removes the guest
     # Last, because it destroys the machine every scenario above shares.

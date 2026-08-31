@@ -159,8 +159,7 @@ tier = "live"
 
 [[command]]
 path = "machine diff"
-tier = "parse"
-reason = "needs the live journey guest; not yet added to features/suites/s32_documented_surface/machine_journey.feature"
+tier = "live"
 
 [[command]]
 path = "machine exec"
@@ -198,8 +197,7 @@ tier = "live"
 
 [[command]]
 path = "machine proc start"
-tier = "parse"
-reason = "needs the live journey guest; not yet added to features/suites/s32_documented_surface/machine_journey.feature"
+tier = "live"
 
 [[command]]
 path = "machine reconfigure"
@@ -301,7 +299,7 @@ reason = "needs the live journey guest; not yet added to features/suites/s32_doc
 [[command]]
 path = "machine wait"
 tier = "parse"
-reason = "needs the live journey guest; not yet added to features/suites/s32_documented_surface/machine_journey.feature"
+reason = "exits 65 against a guest that declares no mvm entrypoint: the readiness poll reports `entrypoint failed: read entrypoint marker /etc/mvm/entrypoint: No such file or directory` rather than treating the component as not applicable, with the default target as well as --for all"
 
 [[command]]
 path = "manifest info"

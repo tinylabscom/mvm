@@ -321,7 +321,15 @@ pub fn query_fs_diff_at(vsock_uds_path: &str) -> Result<Vec<FsChange>> {
 /// which a hard-cutover agent would reject.
 pub fn query_fs_diff_on(stream: &mut UnixStream) -> Result<Vec<FsChange>> {
     require_capabilities(stream, &[GuestCapability::FilesystemRpc])?;
-    let resp = send_request(stream, &GuestRequest::FsDiff)?;
+    // `call_unary`, not `send_request`. Both open a session, but on different
+    // seams: `call_unary` uses `ControlSession::open`, which resumes the stream
+    // the hello prelude above has already advanced, while `send_request` routes
+    // to `open_authenticated_session_stream`, which expects a stream nobody has
+    // spoken on yet. Against a live guest the second waits for a handshake that
+    // already happened and fails with `failed to fill whole buffer` — reported
+    // to the caller as `host session handshake failed`, which names the symptom
+    // and not the doubled handshake.
+    let resp = call_unary(stream, &GuestRequest::FsDiff)?;
     match resp {
         GuestResponse::FsDiffResult { changes } => Ok(changes),
         GuestResponse::Error { message } => {
