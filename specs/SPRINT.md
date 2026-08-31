@@ -3408,4 +3408,14 @@ writes the plan:
       paths.
 - [x] Apply an explicit namespace sandbox to both supported daemon flavours.
 - [x] Cover the complete read-only, DAX, and sandbox argv for each flavour.
-- [ ] Merge the repair through the queue and close issue #3022.
+- [x] Merge the repair through the queue and close issue #3022.
+
+## 2026-08-31 machine diff handshake retry
+
+- [x] Keep the retry predicate typed to a peer hangup during the authenticated
+      handshake.
+- [x] Reconnect once only when no operational request could have reached the
+      guest.
+- [x] Prove response-read EOFs are returned without replay and repeated
+      handshake hangups exhaust a bounded budget.
+- [ ] Merge the repair through the queue and close issue #3024.

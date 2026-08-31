@@ -4,6 +4,13 @@ Last updated: 2026-08-31
 
 ## In progress
 
+- [ ] **machine diff handshake retry — issue #3024.**
+      `specs/plans/2026-08-31-machine-diff-handshake-retry.md`.
+      A typed pre-authentication peer hangup gets one fresh connection; an EOF
+      after authentication is never replayed. Focused regressions cover both
+      boundaries and the bounded retry budget. Workspace validation and merge
+      delivery remain.
+
 - [ ] **Wasmtime security update — issues #3018 and #3020.**
       `specs/plans/2026-08-31-wasmtime-security-update.md`.
       The complete optional Wasmtime dependency family is locked to patched
