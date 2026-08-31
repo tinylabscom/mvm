@@ -179,15 +179,9 @@ fn effective_transient_initrd(
     crate::commands::vm::up::persistent_oci_effective_initrd(std::path::Path::new(rootfs_path))
 }
 
-/// The part of a request that decides a launch's **boot shape** — every field
-/// [`resolve_launch`] reads, and nothing about what the guest will then run.
-///
-/// It exists so a caller that has no command can still resolve a bootable
-/// config: `pool warm` warms ahead of any launch and has no argv, no timeout
-/// and no stdin, but must mirror the boot a real launch performs down to the
-/// verity sidecar and the cmdline-bearing policy fields. Threading an
-/// [`ExecRequest`] with a fabricated empty command would have said the opposite
-/// of what is true.
+/// Boot inputs consumed by [`resolve_launch`], excluding guest command details.
+/// This lets `pool warm` resolve the same verity and policy-bearing config as a
+/// real launch without fabricating an empty [`ExecRequest`].
 pub struct LaunchShape<'a> {
     /// Explicit VM name, or `None` to generate a throwaway one.
     pub name: Option<&'a str>,
