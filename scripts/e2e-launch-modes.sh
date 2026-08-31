@@ -72,18 +72,18 @@ ALLOWED_SKIPS="needs-perf-budget-host,needs-dir-share"
 # Floor on scenarios that must actually execute. See the assertion after the
 # cucumber run for why a count, not just an exit status.
 #
-# EXECUTED, not authored. The suite has 20 scenarios and one of them — the
-# launch-budget threshold — is gated on `MVM_BDD_PERF_BUDGET=1`, so 19 run on a
-# host that does not set it and 20 on one that does. A floor set from the
-# authored count fails everywhere the gated scenario is skipped, which is why
-# this number is 23: 23 authored. The launch-budget scenario stays env-gated,
-# so a host without MVM_BDD_PERF_BUDGET runs 22 — the floor is the executed
-# count on the least-capable host this lane is expected to pass on.
+# EXECUTED, not authored. 26 scenarios are authored across the three feature
+# files. Two are capability-gated — the launch-budget threshold on
+# `MVM_BDD_PERF_BUDGET`, and the `--mount` share on `@dir_share`, which
+# Firecracker cannot serve. So the least-capable host this lane is expected to
+# pass on executes 24, and that is the floor. A floor set from the authored
+# count fails everywhere a gated scenario is legitimately skipped.
 #
-# It was 17 against an authored count of 17, so it had the same defect and had
-# simply never been reached: `pipefail` fails the cucumber pipeline the moment
-# any scenario fails, and the floor is only checked after a fully green run.
-MIN_SCENARIOS=22
+# Raise this with every scenario added. It was 17 against an authored count of
+# 17, so it had the same defect and had simply never been reached: `pipefail`
+# fails the cucumber pipeline the moment any scenario fails, and the floor is
+# only checked after a fully green run.
+MIN_SCENARIOS=24
 SCENARIO_LOG="$(mktemp -t mvm-e2e-scenarios)"
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 MVMCTL="$TARGET_DIR/debug/mvmctl"
@@ -121,9 +121,41 @@ echo "    home:  $E2E_HOME"
 # ---------------------------------------------------------------------------
 # 1. Build the binaries the suite drives.
 # ---------------------------------------------------------------------------
+# Deliberately no `just embed-refresh` here. That recipe clears the nested musl
+# cross-compile of the *embedded* host-vm binaries, which is a different set
+# from the per-VM helpers rebuilt below, and clearing it mid-tree makes the
+# nested build fail outright:
+#   could not write output to .../host-vm-target/.../deps/...: No such file or
+#   directory
+# The staleness this gate actually hits is the supervisor, handled below.
 echo "==> building mvmctl + host helpers"
 ./scripts/cargo-fast.sh build --bin mvmctl --features embed-host-bins
 ./scripts/cargo-fast.sh build -p xtask
+
+# Build the library-seam test targets here too, not when phase 2 reaches them.
+# `cargo build --bin mvmctl` does not build another crate's test targets, so
+# they were compiling *after* 23 scenarios had already booted guests — a minute
+# of build output in the middle of a run, and a compile error there arriving
+# only once the expensive part was already paid for.
+./scripts/cargo-fast.sh build -p mvm-client --tests
+
+# Always rebuild the per-VM helpers, never just check they exist.
+#
+# Presence is not freshness. `cargo build --bin mvmctl` regenerates some of them
+# and not others, so a stale `mvm-hvf-supervisor` from an earlier build survives
+# a refresh — and a stale one is worse than a missing one. It parses the config
+# `mvmctl` hands it with `deny_unknown_fields`, so a field added on the host
+# side makes it exit 1 with "unknown field", which the launch path reports only
+# as "hvf supervisor exited before writing its PID file". That message names
+# neither the binary nor its age, and the guest console is empty because the
+# supervisor died before the guest ever ran — so nothing in the output points
+# at the real cause.
+#
+# cargo makes this a no-op when they are already current, so always doing it
+# costs a fingerprint check. The signing step below must follow it: a re-linked
+# supervisor loses its Hypervisor.framework entitlement.
+echo "==> building the per-VM host helpers"
+just build-supervisors
 
 # ---------------------------------------------------------------------------
 # 2. Warm the shared artifact home.
@@ -142,9 +174,12 @@ echo "==> building mvmctl + host helpers"
 # macOS kills an unentitled Hypervisor.framework binary with SIGKILL, and the
 # only symptom is "hvf supervisor exited before writing its PID file (status:
 # signal: 9)" — which names neither the signature nor the rebuild that dropped
-# it. `cargo build` re-links the per-VM supervisor whenever its dependency graph
-# changes and does not re-sign it, so a build step must always be followed by
-# this one or every HVF boot dies.
+# it. Read the status: `signal: 9` is this, an unentitled binary; `exit status:
+# 1` is a *stale* supervisor refusing a config field it does not know. The two
+# arrive through the same message and have nothing else in common.
+#
+# Signing must follow the helper build above, because re-linking drops the
+# entitlement.
 echo "==> signing VMM binaries"
 "$MVMCTL" env sign
 

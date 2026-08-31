@@ -85,6 +85,38 @@ Feature: every README-documented CLI launch mode boots a real guest
     And the guest printed "/work/README.md"
     And the guest control plane came up
 
+  # The README's flagship transient example, and the only image it names that
+  # is not alpine. Booting alpine everywhere proved the launch path but never
+  # the image the documentation actually puts in front of a first-time reader.
+  @live
+  Scenario: the documented python image runs a one-liner
+    When I launch "machine run --image python:3.12 -- python -c 'print(2 + 2)'"
+    Then the launch succeeds
+    And the guest printed "4"
+    And the guest control plane came up
+
+  # The README's install-then-run workflow: admitted egress to a package index,
+  # a real install inside the guest, and the installed package imported back.
+  #
+  # The README form also mounts `$PWD` read-only and runs `/work/app.py` from
+  # it. That half is dropped here deliberately — `--mount` needs a virtio-fs
+  # directory share, which Firecracker has no device for, so keeping it would
+  # gate this behind `@dir_share` and lose the scenario on the Linux lane. The
+  # share itself is covered by its own scenario; what is unique here is that a
+  # workload can reach a package index only because two hosts were admitted,
+  # and can then run what it installed.
+  @live
+  Scenario: the documented pip install reaches an admitted package index
+    # No nested double quotes: the step tokenizer does not carry them through to
+    # the guest, so a `python -c "..."` payload arrives unquoted and the guest
+    # shell dies on the parentheses with `Syntax error: word unexpected`. The
+    # assertion is on the installed tree rather than an imported version string
+    # for the same reason.
+    When I launch "machine run --image python:3.12 --allow-host pypi.org:443 --allow-host files.pythonhosted.org:443 -- sh -c 'python -m pip install --no-cache-dir --target /tmp/python-deps pandas && ls /tmp/python-deps | grep -q pandas && echo pandas-installed'"
+    Then the launch succeeds
+    And the guest printed "pandas-installed"
+    And the guest control plane came up
+
   @live
   Scenario: --allow-host admits egress and the guest reaches it
     # The exact shape that regressed. `--allow-host` puts `mvm.vsock_egress=1` on
