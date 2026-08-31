@@ -174,13 +174,26 @@ fn apply_egress_relay_override(cfg: &mut SupervisorConfig) {
 /// booting it while another VM holds the lock is the filesystem corruption the
 /// lock exists to prevent.
 fn hold_exclusive_image_lock(cfg: &SupervisorConfig) -> Result<Option<std::fs::File>, ExitCode> {
+    hold_exclusive_image_lock_with(cfg, mvm_build::builder_vm_runtime::LockWait::from_env())
+}
+
+/// [`hold_exclusive_image_lock`] with the wait budget supplied rather than
+/// resolved from the environment.
+///
+/// A caller that asserts what happens under contention has to say how long it
+/// is willing to queue, because nothing else here can say it for them.
+/// `LockWait::from_env` falls back to fail-fast under `cfg!(test)`, but
+/// `cfg!` is evaluated in the crate being compiled — mvm-build — so a test
+/// living in this crate is not a test as far as that check is concerned, and
+/// inherits the production hour instead.
+fn hold_exclusive_image_lock_with(
+    cfg: &SupervisorConfig,
+    wait: mvm_build::builder_vm_runtime::LockWait,
+) -> Result<Option<std::fs::File>, ExitCode> {
     let Some(lock_path) = cfg.exclusive_image_lock.as_ref() else {
         return Ok(None);
     };
-    match mvm_build::builder_vm_runtime::hold_image_lock(
-        lock_path,
-        mvm_build::builder_vm_runtime::LockWait::from_env(),
-    ) {
+    match mvm_build::builder_vm_runtime::hold_image_lock(lock_path, wait) {
         Ok(file) => {
             append_supervisor_breadcrumb(
                 std::path::Path::new(&cfg.vm_state_dir),
@@ -491,6 +504,7 @@ fn append_supervisor_breadcrumb(vm_state_dir: &std::path::Path, stage: &str, det
 mod tests {
     use super::{
         append_supervisor_breadcrumb, apply_egress_relay_override, hold_exclusive_image_lock,
+        hold_exclusive_image_lock_with,
     };
     use libkrun_sys::{BridgeRestartPolicy, KrunContext, NetworkingMode, SupervisorConfig};
 
@@ -563,10 +577,13 @@ mod tests {
 
         let mut cfg = sample_cfg(NetworkingMode::VsockDirect, None);
         cfg.exclusive_image_lock = Some(lock_path);
-        // Under cfg(test) the wait budget is fail-fast, so this returns rather
-        // than queueing for the hour a real supervisor would wait.
+        // The budget is stated here rather than inherited. `cfg!(test)` is
+        // evaluated in whichever crate compiles it, so mvm-build's
+        // test-build default does not reach a test that lives here — this
+        // test queued for the production hour instead of refusing.
         assert!(
-            hold_exclusive_image_lock(&cfg).is_err(),
+            hold_exclusive_image_lock_with(&cfg, mvm_build::builder_vm_runtime::LockWait::none())
+                .is_err(),
             "a supervisor that cannot take the lock must refuse to boot"
         );
         drop(held);
