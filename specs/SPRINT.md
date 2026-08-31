@@ -3401,3 +3401,11 @@ writes the plan:
 - [x] Record why the 224.5 ms sample is inside the warm hard ceiling without
       relabeling it as a prepared-cold percentile result.
 - [ ] Merge the repair through the queue and close issue #2942.
+
+## 2026-08-31 virtiofsd sandbox parity
+
+- [x] Confirm the shared spawn helper is limited to QEMU workload and builder
+      paths.
+- [x] Apply an explicit namespace sandbox to both supported daemon flavours.
+- [x] Cover the complete read-only, DAX, and sandbox argv for each flavour.
+- [ ] Merge the repair through the queue and close issue #3022.
