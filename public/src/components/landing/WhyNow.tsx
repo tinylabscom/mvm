@@ -1,22 +1,25 @@
 import { Reveal } from "./primitives/Reveal";
 import { Section } from "./primitives/Section";
 
-// The "why now" narrative: AI writes and runs more of the code in
-// production, review doesn't scale with it, so the runtime has to assume
-// the code is hostile. This is the emotional core of the page — the
-// sections around it supply the mechanism (demo, boundary, claims).
+// The problem narrative, per the one-pager: AI is proliferating and
+// exploits are growing alongside it; teams want to lean on agents harder
+// but fear going hands-off, because the non-determinism that makes agents
+// useful is exactly what makes them dangerous. This is the emotional core
+// of the page — the sections around it supply the mechanism (demo,
+// boundary, claims). Kept qualitative on purpose: no third-party breach
+// stats, no regulator names.
 const SHIFTS = [
   {
-    label: "generated",
-    body: "Agents ship code faster than any review cycle.",
+    label: "non-deterministic",
+    body: "LLMs don't do the same thing twice. The creativity that makes agents useful is exactly what makes them dangerous.",
   },
   {
-    label: "unreviewed",
-    body: "Hallucinated packages and unvetted deps ride along.",
+    label: "hands-off",
+    body: "Teams want to lean on agents harder — and fear what happens when nobody is watching.",
   },
   {
     label: "exploitable",
-    body: "A prompt-injected agent with network access is an exfiltration path.",
+    body: "Exploits and CVEs are growing as fast as the AI that ships the code.",
   },
 ];
 
@@ -28,7 +31,7 @@ export function WhyNow() {
     <Section id="why-now" rule className="bg-raised">
       <Reveal>
         <h2 className="lowercase font-display tracking-tight text-2xl font-semibold leading-tight text-title sm:text-3xl">
-          code is getting cheaper to write.{" "}
+          ai is proliferating.{" "}
           <span className="text-accent-2">so are exploits.</span>
         </h2>
       </Reveal>

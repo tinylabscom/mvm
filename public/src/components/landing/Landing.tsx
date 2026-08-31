@@ -10,6 +10,7 @@ import { DeploymentTiers } from "./DeploymentTiers";
 // commented-out <Positioning /> below.
 // import { Positioning } from "./Positioning";
 import { RequestAccess } from "./RequestAccess";
+import { RiskControl } from "./RiskControl";
 import { WhyNow } from "./WhyNow";
 import { WhyMicrovm } from "./WhyMicrovm";
 import { FAQ } from "./FAQ";
@@ -32,6 +33,11 @@ import { Footer } from "./Footer";
 //                         the differentiator. Directly after the why-now
 //                         story so the claim lands while the problem is
 //                         fresh, before any how-to content.
+//   2d. Risk control     — the one-pager's operator section: start/stop,
+//                         kill on violation, and the audit trail that
+//                         compliance asks for. After the contract, because
+//                         the levers only make sense once the contract
+//                         they enforce has been introduced.
 //   3. Quickstart       — the shortest path from install to a running microVM.
 //   5. Positioning      — "one project, three ways to drive it": CLI,
 //                         Declare, Runtime, each given its own row.
@@ -79,6 +85,7 @@ export function Landing() {
       <DemoTeaser />
       <WhyNow />
       <ExecutionContract />
+      <RiskControl />
       <Quickstart />
       {/* Positioning ("one project. three ways to drive it.") is hidden for
           now, not deleted — restore by uncommenting here and re-adding its
