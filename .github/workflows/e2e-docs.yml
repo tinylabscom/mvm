@@ -26,7 +26,22 @@ jobs:
   e2e-docs-linux:
     name: Documented surface e2e (Linux, Firecracker)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 120, not 60. At 60 this job never once finished: it died at exactly
+    # 60m00s on three consecutive runs, which GitHub reports as `cancelled`
+    # rather than as a timeout — so it read as an infrastructure hiccup instead
+    # of a budget that was too small, and the Linux half of the release gate
+    # went unproven for as long as that was true.
+    #
+    # The arithmetic was never going to work: `e2e-documented-surface.sh` gives
+    # the cucumber suite alone a 3600s deadline, and the job must also check
+    # out, install the toolchain, build `mvmctl`, install Firecracker and warm
+    # the artifact home before the suite starts. The job budget has to exceed
+    # the suite budget by the whole of setup, and it did not exceed it at all.
+    #
+    # Keeping the suite's own deadline below the job's also means a genuine
+    # hang produces the script's "TIMEOUT after Ns — killing the suite" message,
+    # naming the scenario it stopped on, rather than an opaque cancellation.
+    timeout-minutes: 120
     env:
       # Must track `FC_VERSION_DEFAULT` in mvm-core. The workload launch path
       # passes flags older Firecracker releases reject before opening the API
