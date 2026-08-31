@@ -20,7 +20,18 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 REPO="$PWD"
 
-E2E_HOME="${MVM_E2E_HOME:-$HOME/.mvm}"
+# Prefer an explicit `MVM_E2E_HOME`, then `MVM_HOME`, then the real home.
+#
+# `scripts/dev-env.sh` gives each worktree its own `MVM_HOME` *and* its own
+# `CARGO_TARGET_DIR`. Defaulting straight to `$HOME/.mvm` honoured the second
+# half of that and ignored the first: a worktree built its own binaries and then
+# pointed them at the main checkout's artifacts. The guest boots and the host
+# session handshake dies with `Socket is not connected`, which reads as a broken
+# backend rather than as two trees sharing one home.
+#
+# That made worktree-based e2e work impossible by construction, so every
+# verification had to run in the main checkout.
+E2E_HOME="${MVM_E2E_HOME:-${MVM_HOME:-$HOME/.mvm}}"
 
 # A CHANGING value, exported for every cargo invocation below.
 #
