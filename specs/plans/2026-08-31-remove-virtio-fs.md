@@ -114,9 +114,10 @@ property is mid-run visibility.
 
 ### Stage B — the dev-tier root
 
-- [ ] Delete virtiofs-root. ADR-107 already calls it a dev-tier path with a
-      weaker contract that does not witness claim 3; it is the one boot mode
-      that cannot be dm-verity sealed. Block+ext4 is the only root.
+- [ ] Delete virtiofs-root. The security-posture ADR already calls it a
+      dev-tier path with a weaker contract that does not witness claim 3; it is
+      the one boot mode that cannot be dm-verity sealed. Block+ext4 is the only
+      root.
 - [ ] Retire `VIRTIOFS_ROOT_TAG`, the `root=<tag>` cmdline knob, and the
       `RootStrategy::Virtiofs` arm.
 

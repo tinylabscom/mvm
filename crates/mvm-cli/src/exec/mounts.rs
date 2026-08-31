@@ -1,6 +1,42 @@
 use anyhow::{Context, Result};
+use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
 
 use crate::commands::DirShareSpec;
+
+/// Turn each `--mount` into a volume backed by a materialized ext4 image.
+///
+/// `host` stays the directory that was granted so the admission record names
+/// it; `materialized_image` carries what the backend attaches.
+pub(crate) fn materialize_mount_volumes(
+    shares: &[DirShareSpec],
+    vm_name: &str,
+) -> Result<Vec<VmVolume>> {
+    if shares.is_empty() {
+        return Ok(Vec::new());
+    }
+    let state_dir = mvm_core::config::vm_state_dir(vm_name);
+    std::fs::create_dir_all(&state_dir).with_context(|| {
+        format!(
+            "creating the VM state directory {} for --mount images",
+            state_dir.display()
+        )
+    })?;
+    shares
+        .iter()
+        .enumerate()
+        .map(|(index, share)| {
+            let image = materialize_mount_image(share, &state_dir, index)?;
+            Ok(VmVolume {
+                host: share.host_dir.clone(),
+                guest: share.guest_mount.clone(),
+                read_only: share.read_only,
+                kind: VmVolumeKind::DirShare,
+                materialized_image: Some(image.display().to_string()),
+                ..Default::default()
+            })
+        })
+        .collect()
+}
 
 /// Materialize a granted host directory into an ext4 image and return its path.
 ///
@@ -86,4 +122,27 @@ fn tree_size_bytes(dir: &std::path::Path) -> u64 {
         }
     }
     total
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_mounts_create_no_state_or_volumes() {
+        assert!(materialize_mount_volumes(&[], "unused").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_missing_host_directory_is_refused() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let share = DirShareSpec {
+            host_dir: scratch.path().join("missing").display().to_string(),
+            guest_mount: "/work".to_string(),
+            read_only: true,
+        };
+        let err = materialize_mount_image(&share, scratch.path(), 0).unwrap_err();
+        assert!(err.to_string().contains("not a directory"), "{err:#}");
+        assert!(!scratch.path().join("mount-0.ext4").exists());
+    }
 }
