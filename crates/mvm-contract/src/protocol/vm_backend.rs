@@ -81,6 +81,41 @@ pub struct VmVolume {
     /// Fails closed at launch until that lands; never silently
     /// plaintext. Always false for a `DirShare`.
     pub encrypted: bool,
+    /// For a `DirShare`, the ext4 image the granted directory was
+    /// materialized into, which is what the backend actually attaches.
+    ///
+    /// `host` stays the directory that was *granted*, because that is the fact
+    /// an admission record has to carry: a chain entry naming an image under
+    /// `~/.mvm` would not tell a reviewer which host directory a workload was
+    /// given. The grant and its transport are different things, and only the
+    /// first belongs in the audit.
+    ///
+    /// `None` on a `Disk`, whose `host` is already the image.
+    pub materialized_image: Option<String>,
+}
+
+impl VmVolume {
+    /// Whether this volume reaches the guest as a virtio-blk device.
+    ///
+    /// Every volume does, now that a granted directory is delivered as an
+    /// image — but the two arrive at it differently, and three separate places
+    /// (the block list, the slot arithmetic, and the guest device mapping) have
+    /// to agree on which volumes are in that list and in what order. They agree
+    /// by calling this rather than by each matching on `kind`.
+    #[must_use]
+    pub fn attaches_as_block(&self) -> bool {
+        match self.kind {
+            VmVolumeKind::Disk => true,
+            VmVolumeKind::DirShare => self.materialized_image.is_some(),
+        }
+    }
+
+    /// The host file to attach: the materialized image when there is one, the
+    /// `host` path otherwise.
+    #[must_use]
+    pub fn block_source(&self) -> &str {
+        self.materialized_image.as_deref().unwrap_or(&self.host)
+    }
 }
 
 /// Encode user volumes as a kernel-cmdline parameter the guest init

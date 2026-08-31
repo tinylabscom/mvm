@@ -1390,6 +1390,7 @@ mod tests {
         let b = AnyBackend::from_hypervisor("libkrun");
         let mut c = eligible_cfg();
         c.volumes = vec![VmVolume {
+            materialized_image: None,
             host: "/h".into(),
             guest: "/g".into(),
             size: String::new(),
@@ -1530,6 +1531,7 @@ mod tests {
         let ineligible = [("extra volume", {
             let mut c = eligible_cfg();
             c.volumes = vec![VmVolume {
+                materialized_image: None,
                 host: "/h".into(),
                 guest: "/g".into(),
                 size: String::new(),

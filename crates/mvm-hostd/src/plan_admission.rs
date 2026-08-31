@@ -1845,6 +1845,7 @@ fn attach_admitted_extensions(config: &mut VmStartConfig, admitted: &AdmittedPla
             anyhow::bail!("extension mountpoint collision at {guest}");
         }
         config.volumes.push(mvm_core::vm_backend::VmVolume {
+            materialized_image: None,
             host: extension
                 .root
                 .join(&extension.binding.artifact)

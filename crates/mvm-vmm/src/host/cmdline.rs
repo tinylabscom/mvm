@@ -588,6 +588,7 @@ mod tests {
 
     fn disk_volume(host: &str, guest: &str) -> mvm_core::vm_backend::VmVolume {
         mvm_core::vm_backend::VmVolume {
+            materialized_image: None,
             host: host.into(),
             guest: guest.into(),
             size: String::new(),
