@@ -16,4 +16,4 @@ regardless of which supported `virtiofsd` implementation a host installed.
       sandbox and make the C daemon's matching policy explicit.
 - [x] Add focused argv regressions for both daemon flavours, including the
       read-only and DAX options that must compose with confinement.
-- [ ] Run workspace validation and merge the repair through the queue.
+- [x] Run workspace validation and merge the repair through the queue.
