@@ -321,14 +321,24 @@ just sdk-build-typescript
 # initramfs. Acquiring them inside a scenario would put minutes on each one, and
 # a scenario that times out reads as a launch failure rather than a cold cache.
 # ---------------------------------------------------------------------------
-# This suite verifies the documented CLI surface, not the builder VM image.
-# A source checkout otherwise rebuilds that image from the in-repo flake on
-# every cold run, which couples the whole suite to an unrelated Nix build —
-# and when that build cannot reach crates.io from inside Stage 0, nothing here
-# runs at all. Fetch the published image instead. A contributor working *on*
-# the image sets MVM_BOOT_IMAGE themselves and this defers to them.
-export MVM_BOOT_IMAGE="${MVM_BOOT_IMAGE:-fetch}"
-echo "    boot image: $MVM_BOOT_IMAGE"
+# This suite verifies the documented CLI surface, not the builder VM image, so
+# fetching a published image instead of rebuilding it from the in-repo flake is
+# the cheaper shape — a source checkout otherwise couples the whole suite to an
+# unrelated Nix build.
+#
+# But it is only cheaper where it works. A contributor `mvmctl` is built without
+# `release-artifact-bootstrap` and *cannot* fetch, so forcing `fetch` there does
+# not trade a slow build for a fast download; it trades a slow build for no
+# builder VM at all, and every flake-build scenario fails. That is the common
+# case, not the exotic one.
+#
+# So let the resolver decide from the checkout, which is the job it exists to
+# do: a source tree builds, an installed binary fetches. Anyone holding a
+# fetch-capable binary can still set MVM_BOOT_IMAGE=fetch and this defers to it.
+if [[ -n "${MVM_BOOT_IMAGE:-}" ]]; then
+  export MVM_BOOT_IMAGE
+fi
+echo "    boot image: ${MVM_BOOT_IMAGE:-auto (resolver decides from the checkout)}"
 
 # Bootstrap failure is reported, not fatal. It warms the builder VM image, which
 # the flake-build scenarios need and the OCI-image ones do not — so aborting here
