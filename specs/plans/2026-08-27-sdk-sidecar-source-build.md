@@ -42,4 +42,10 @@ inside Stage 0 through the project builder VM.
 - [x] Prove the Linux Stage 0 tests and Nix evaluation inside the builder VM.
 - [x] Run workspace tests/checks, gated-target checks, zero-warning Clippy, and
       repository policy gates.
+- [x] Repair the opt-in embedded-host-binary regression: an unembedded
+      SDK-sidecar command re-executes in the isolated source-checkout helper,
+      which is built with `embed-host-bins` before it performs Stage 0 and the
+      complete SDK build. Keep this cold-cache handoff in the documented-surface
+      E2E suite. A live aarch64 cold run completed Stage 0/Nix and cached both
+      glibc and musl sidecars through the HVF builder.
 - [ ] Merge the PR and close issue #2941 through the merged PR link.

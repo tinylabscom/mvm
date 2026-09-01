@@ -278,6 +278,28 @@ fn signature_verifying_build_avoids_the_fast_codegen_link_path() {
 }
 
 #[test]
+fn documented_surface_cold_builds_the_sidecar_through_an_unembedded_cli() {
+    let script = documented_surface_script();
+
+    let unembedded_build = script
+        .find("cargo build --bin mvmctl --features \"$E2E_FEATURES\"")
+        .expect("the release-feature lane must build an unembedded witness");
+    let embedded_build = script
+        .find("cargo build --bin mvmctl --features \"$E2E_FEATURES,embed-host-bins\"")
+        .expect("the live suite must restore its embedded binary");
+    let sidecar_warm = script
+        .find("\"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build")
+        .expect("the sidecar warm must execute the unembedded witness");
+    let explicit_bootstrap = script
+        .find("\"$MVMCTL\" bootstrap")
+        .expect("the suite must retain the explicit bootstrap check");
+
+    assert!(unembedded_build < embedded_build);
+    assert!(embedded_build < sidecar_warm);
+    assert!(sidecar_warm < explicit_bootstrap);
+}
+
+#[test]
 fn documented_surface_jobs_install_the_sdk_codegen_runtime() {
     let workflow = extended_ci();
 
@@ -299,7 +321,7 @@ fn documented_surface_warms_the_source_matched_sdk_sidecar() {
     let script = documented_surface_script();
 
     assert!(
-        script.contains("\"$MVMCTL\" build sdk-sidecar build"),
+        script.contains("\"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build"),
         "the live SDK scenarios must use a sidecar built from the checkout under test"
     );
 }

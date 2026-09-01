@@ -154,6 +154,31 @@ pub(super) fn stage0_locked_input_sources(
 }
 
 pub(in crate::commands) fn bootstrap_builder_vm_image() -> Result<()> {
+    #[cfg(feature = "builder-vm")]
+    return bootstrap_builder_vm_image_with(
+        || {
+            mvm_build::libkrun_builder::maybe_reexec_builder_vm_bootstrap_helper()
+                .map_err(anyhow::Error::from)
+        },
+        bootstrap_builder_vm_image_in_process,
+    );
+
+    #[cfg(not(feature = "builder-vm"))]
+    bootstrap_builder_vm_image_in_process()
+}
+
+#[cfg(feature = "builder-vm")]
+fn bootstrap_builder_vm_image_with(
+    maybe_reexec: impl FnOnce() -> Result<bool>,
+    bootstrap_in_process: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    if maybe_reexec()? {
+        return Ok(());
+    }
+    bootstrap_in_process()
+}
+
+fn bootstrap_builder_vm_image_in_process() -> Result<()> {
     let arch = builder_vm_host_arch();
     let out_dir = format!("{}/builder-vm/{arch}", mvm_core::config::mvm_cache_dir());
     let out_dir_path = std::path::Path::new(&out_dir);
@@ -229,6 +254,61 @@ pub(in crate::commands) fn bootstrap_builder_vm_image() -> Result<()> {
         BuilderVmBootstrapAction::DownloadPublished => {
             perform_builder_vm_download_published(arch, &out_dir)
         }
+    }
+}
+
+#[cfg(all(test, feature = "builder-vm"))]
+mod bootstrap_helper_routing_tests {
+    use super::bootstrap_builder_vm_image_with;
+    use std::cell::Cell;
+
+    #[test]
+    fn completed_source_helper_skips_in_process_bootstrap() {
+        let called = Cell::new(false);
+
+        bootstrap_builder_vm_image_with(
+            || Ok(true),
+            || {
+                called.set(true);
+                Ok(())
+            },
+        )
+        .expect("completed helper should satisfy bootstrap");
+
+        assert!(!called.get(), "bootstrap must not run twice");
+    }
+
+    #[test]
+    fn matching_source_helper_bootstraps_in_process() {
+        let called = Cell::new(false);
+
+        bootstrap_builder_vm_image_with(
+            || Ok(false),
+            || {
+                called.set(true);
+                Ok(())
+            },
+        )
+        .expect("matching helper should bootstrap in process");
+
+        assert!(called.get(), "matching helper must perform bootstrap");
+    }
+
+    #[test]
+    fn helper_resolution_error_prevents_bootstrap() {
+        let called = Cell::new(false);
+
+        let error = bootstrap_builder_vm_image_with(
+            || anyhow::bail!("helper build failed"),
+            || {
+                called.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("helper errors must fail closed");
+
+        assert!(error.to_string().contains("helper build failed"));
+        assert!(!called.get(), "bootstrap must not bypass a helper error");
     }
 }
 

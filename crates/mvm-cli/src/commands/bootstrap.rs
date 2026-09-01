@@ -37,10 +37,6 @@ pub(in crate::commands) fn run_builder_vm_bootstrap(
     _args: BuilderVmBootstrapArgs,
     _cfg: &MvmConfig,
 ) -> Result<()> {
-    #[cfg(feature = "builder-vm")]
-    if mvm_build::libkrun_builder::maybe_reexec_builder_vm_bootstrap_helper()? {
-        return Ok(());
-    }
     super::env::builder_vm::bootstrap_builder_vm_image()
 }
 

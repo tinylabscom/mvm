@@ -178,8 +178,13 @@ Last updated: 2026-09-01
       `specs/plans/2026-08-27-sdk-sidecar-source-build.md`.
       Source checkouts can explicitly build the guest-facing glibc sidecar
       through the shared Stage 0 artifact runner and atomically bind it to the
-      checkout fingerprint. The full local gates and a live aarch64 Stage 0/Nix
-      artifact build are green; merge delivery remains.
+      checkout fingerprint. An unembedded SDK-sidecar command now re-executes
+      its complete build in the isolated source helper carrying the opt-in
+      embedded Linux payload, and the documented-surface E2E suite exercises
+      that cold-cache handoff. A live aarch64 cold run completed Stage 0/Nix
+      and cached both libc variants through the HVF builder. Focused regressions
+      plus workspace check/tests, formatting, and zero-warning Clippy are green;
+      merge delivery remains.
 
 - [ ] **Issue #2942 — warm-launch gate contract repair.**
       `specs/plans/2026-08-27-warm-launch-gate-contract.md`.

@@ -33,6 +33,7 @@ REPO="$PWD"
 E2E_HOME="${MVM_E2E_HOME:-${MVM_HOME:-$HOME/.mvm}}"
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 MVMCTL="$TARGET_DIR/debug/mvmctl"
+UNEMBEDDED_MVMCTL="$E2E_HOME/mvmctl-unembedded-e2e"
 
 echo "==> e2e documented surface"
 echo "    repo: $REPO"
@@ -232,15 +233,22 @@ just embed-refresh
 # standard compiler/linker path: the nightly fast-codegen wrapper leaves the
 # native aws-lc symbols unresolved. The featureless local path can retain the
 # faster wrapper because it does not link that stack.
-# `embed-host-bins` is appended to both arms rather than left to the caller:
-# this suite boots builder VMs, and without the embedded payload every one of
-# them fails at bootstrap. A caller-supplied MVM_E2E_FEATURES is about which
-# acquisition channel to exercise, not about whether the guest binaries ship.
+# Preserve a feature-off binary first. Its SDK-sidecar warm is the regression
+# for the contributor path: that command must re-exec the isolated embedded
+# helper for the complete HVF/Nix build, not resume in this payload-free parent.
+# The main suite binary is then rebuilt with the payload because later workload
+# launches consume the extracted host helpers directly.
 E2E_FEATURES="${MVM_E2E_FEATURES-}"
 if [[ -n "$E2E_FEATURES" ]]; then
+  echo "==> building unembedded mvmctl (--features $E2E_FEATURES)"
+  cargo build --bin mvmctl --features "$E2E_FEATURES"
+  cp "$MVMCTL" "$UNEMBEDDED_MVMCTL"
   echo "==> building mvmctl (--features $E2E_FEATURES,embed-host-bins)"
   cargo build --bin mvmctl --features "$E2E_FEATURES,embed-host-bins"
 else
+  echo "==> building unembedded mvmctl"
+  ./scripts/cargo-fast.sh build --bin mvmctl
+  cp "$MVMCTL" "$UNEMBEDDED_MVMCTL"
   echo "==> building mvmctl"
   ./scripts/cargo-fast.sh build --bin mvmctl --features embed-host-bins
 fi
@@ -345,6 +353,13 @@ echo "    boot image: ${MVM_BOOT_IMAGE:-auto (resolver decides from the checkout
 # would throw away every result that does not depend on it. The scenarios that do
 # need it then fail on their own, naming themselves.
 echo "==> warming artifacts in $E2E_HOME"
+
+# This is deliberately before the explicit bootstrap. A cold cache proves the
+# unembedded public command can hand the entire source build to its embedded
+# helper, including Stage 0, HVF image baking, and both Nix sidecar variants.
+echo "==> warming source-matched SDK sidecar through unembedded mvmctl"
+MVM_HOME="$E2E_HOME" "$UNEMBEDDED_MVMCTL" build sdk-sidecar build
+
 if ! MVM_HOME="$E2E_HOME" "$MVMCTL" bootstrap; then
   echo
   echo "!!! bootstrap FAILED — the builder VM image is unavailable."
@@ -353,14 +368,6 @@ if ! MVM_HOME="$E2E_HOME" "$MVMCTL" bootstrap; then
   echo
   BOOTSTRAP_FAILED=1
 fi
-
-# SDK host-service scenarios must attach the sidecar built from this checkout.
-# A published sidecar can be version-compatible while still missing the source
-# changes under test, so warming only the general launch artifacts is not
-# enough. Build it once up front and fail here with the explicit prerequisite
-# rather than letting every dependent scenario refuse independently.
-echo "==> warming source-matched SDK sidecar"
-MVM_HOME="$E2E_HOME" "$MVMCTL" build sdk-sidecar build
 
 # ---------------------------------------------------------------------------
 # Warm the launch artifacts, even when bootstrap did not get that far.
