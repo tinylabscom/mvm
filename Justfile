@@ -474,45 +474,6 @@ honesty:
 deferrals:
     cargo run -p xtask -- check-deferrals
 
-# ── Agent memory (.agent-memory/notes) ───────────────────────────────────
-
-# Recall committed findings. Lexical, because at a few hundred terse,
-# keyword-dense notes a substring match beats anything with a model in it.
-# Terms are OR-ed: `just recall teardown ram` finds notes mentioning either.
-recall +TERMS:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    pattern=$(printf '%s' "{{ TERMS }}" | tr ' ' '|')
-    rg -il --sort path -e "$pattern" .agent-memory/notes | while read -r path; do
-        printf '%s\n    %s\n' \
-            "$(basename "$path" .md)" \
-            "$(sed -n 's/^title: //p' "$path")"
-    done
-
-# List every note, newest first.
-notes:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    for path in .agent-memory/notes/*.md; do
-        printf '%s  %s — %s\n' \
-            "$(sed -n 's/^date: //p' "$path")" \
-            "$(basename "$path" .md)" \
-            "$(sed -n 's/^title: //p' "$path")"
-    done | sort -r
-
-# Scaffold a note. Fill in the body, then commit it with the change it explains.
-remember SLUG:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    path=".agent-memory/notes/{{ SLUG }}.md"
-    if [ -e "$path" ]; then echo "note {{ SLUG }} already exists" >&2; exit 1; fi
-    printf -- '---\ntitle: \ndate: %s\ntags: []\n---\n\n' "$(date +%F)" > "$path"
-    echo "created $path"
-
-# Committed findings parse, are dated, and link to notes that exist.
-agent-notes:
-    cargo run -p xtask -- check-agent-notes
-
 # ── Lint & Format ────────────────────────────────────────────────────────
 
 # Format all code

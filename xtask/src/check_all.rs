@@ -105,7 +105,6 @@ pub const GATES: &[Gate] = &[
         crate::check_witness_citations::run,
     ),
     ("check-asserted-absence", crate::check_asserted_absence::run),
-    ("check-agent-notes", crate::check_agent_notes::run),
     ("check-dormant-controls", crate::check_dormant_controls::run),
     ("check-conformance", conformance_read_only),
     ("check-deferrals", crate::check_deferrals::run),
