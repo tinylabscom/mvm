@@ -198,15 +198,47 @@ Five coordinated changes, host and guest:
 
 - [ ] `persistent_builder_spec`: replace the four shares with an input and an
       output disk, and add the three transport cmdline tokens.
+- [x] `repack_input_disk_in_place` — **landed**. A persistent builder rewrites
+      its input disk between dispatches, and `pack_input_disk` cannot do it: it
+      calls `set_len`. A running VM's `DiskImage` captures the file length
+      **once, at open**, and zero-fills reads past it — so growing the file hands
+      the guest an archive it reads as short, and `tar` reports success on it.
+      The in-place form never changes the length and refuses an archive that
+      will not fit, because refusing is the only way that failure is visible.
 - [ ] `HvfPersistentHostVm::start`: `pack_input_disk` the boot-time inputs
       (`work`, `mvm-bins`, closure seed) and `create_output_disk`. Both helpers
-      already exist and are what the one-shot builder calls.
-- [ ] **Readiness has to move, and this is the non-obvious one.** The host waits
-      for the guest by polling for a `dispatch.ready` file *inside the `/job`
-      share* (`wait_until_dispatch_ready`). With no share the host cannot see
-      that marker at all. Replace it with connect-polling on the dispatch
-      socket: the guest listening on its vsock port is the readiness signal,
-      and it is one the host can observe without a shared filesystem.
+      already exist and are what the one-shot builder calls. Size the input disk
+      with headroom — the capacity is fixed for the VM's life. Per-dispatch
+      repacks carry only the `job` tree (the guest bind-mounted `work` and
+      `mvm-bins` at boot and never re-reads them), so they are always smaller
+      than the boot pack.
+- [ ] **Readiness has to move, and connect-polling is NOT the answer.** The host
+      waits for the guest by polling for a `dispatch.ready` file *inside the
+      `/job` share* (`wait_until_dispatch_ready`). With no share the host cannot
+      see that marker at all.
+
+      The obvious replacement — connect to the dispatch UDS and treat success as
+      readiness — is wrong, and the repo already knows it. `hvf.rs`'s agent probe
+      says so in as many words: *"Probe the authenticated RPC stream directly;
+      this waits for a real guest response rather than treating the host-side
+      listener as readiness."* The supervisor owns that UDS and accepts on it
+      whether or not the guest is listening on the vsock port behind it, so a
+      bare connect reports ready for a guest that never started.
+
+      Two options, neither free:
+
+      - Add a `Ping`/`Pong` pair to `HostVmRequest`/`HostVmResponse`. Crisp, but
+        a wire change on both sides — so the guest needs a second change and a
+        second image rebuild.
+      - Delete `wait_until_dispatch_ready` and let the **first dispatch** be the
+        readiness proof, with a bounded retry in the dispatch client that also
+        checks VM liveness — which is where the connection is made anyway, and
+        keeps the fail-fast-on-dead-VM behaviour the wait exists for. Smaller,
+        adds no protocol surface, but moves the failure from `start()` to the
+        first build.
+
+      Prefer the second unless the diagnostics loss bites. Do not ship a bare
+      connect-poll.
 - [ ] Host dispatch client: repack the input disk with the new job payload
       before each `Run`, and `read_output_disk` into the artifact dir after each
       `Result` — rather than once after poweroff.
