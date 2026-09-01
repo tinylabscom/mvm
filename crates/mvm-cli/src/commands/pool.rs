@@ -918,11 +918,10 @@ fn compat_for_launch(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Result<Sta
         vcpus: u8::try_from(cfg.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX),
         mem_mib: cfg.memory_mib,
         image_sha256: Some(image_identity(Path::new(cfg.rootfs_path.as_str()))?),
-        root_strategy: if cfg.virtiofs_root.is_some() {
-            RuntimeSourceRootStrategy::VirtiofsRoot
-        } else {
-            RuntimeSourceRootStrategy::BlockExt4
-        },
+        // Every launch resolves a block root; the field stays on the recorded
+        // spec so a parent warmed before that was true still declares what it
+        // was warmed under, and the claim's compat check can refuse it.
+        root_strategy: RuntimeSourceRootStrategy::BlockExt4,
         // Whether the guest boots an egress client, read off the launch's policy
         // and its admitted plan through the same derivation the guest cmdline
         // token comes from — never re-expressed here, because a second
@@ -1402,29 +1401,21 @@ mod tests {
     }
 
     #[test]
-    fn virtiofs_root_is_warm_eligible_and_partitioned_from_block_root() {
-        let tmp = tempfile::tempdir().unwrap();
-        let rootfs = tmp.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"same-image").unwrap();
+    fn every_launch_keys_as_a_block_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"root").unwrap();
         let backend = AnyBackend::from_hypervisor("libkrun");
-        let mut block = eligible_cfg();
-        block.rootfs_path = rootfs.to_string_lossy().into_owned();
-        let block_key = compat_for_launch(backend.as_vm_backend(), &block).unwrap();
+        let mut cfg = eligible_cfg();
+        cfg.rootfs_path = rootfs.to_string_lossy().into_owned();
 
-        let mut virtiofs = block;
-        virtiofs.virtiofs_root = Some("/unpacked/root".into());
-        let virtiofs_key = compat_for_launch(backend.as_vm_backend(), &virtiofs).unwrap();
+        let key = compat_for_launch(backend.as_vm_backend(), &cfg).unwrap();
 
-        assert!(warm_eligible_launch(&virtiofs));
-        assert_eq!(
-            block_key.root_strategy,
-            RuntimeSourceRootStrategy::BlockExt4
-        );
-        assert_eq!(
-            virtiofs_key.root_strategy,
-            RuntimeSourceRootStrategy::VirtiofsRoot
-        );
-        assert_ne!(block_key, virtiofs_key);
+        // There is one root shape now. A parent warmed under any other one
+        // still declares it on its recorded spec, so the compat check keeps
+        // comparing the field rather than assuming it.
+        assert_eq!(key.root_strategy, RuntimeSourceRootStrategy::BlockExt4);
+        assert!(warm_eligible_launch(&cfg));
     }
 
     #[test]

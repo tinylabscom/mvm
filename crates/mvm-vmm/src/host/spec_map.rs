@@ -11,8 +11,7 @@ use mvm_core::vm_backend::{VmStartConfig, VmVolumeKind};
 use mvm_net::channel::GuestService;
 
 use crate::driver::spec::{
-    BlockDev, ConsoleCapture, KernelImage, PlanBinding, VirtioFsShare, VmmSpec, VsockDirection,
-    VsockPort,
+    BlockDev, ConsoleCapture, KernelImage, PlanBinding, VmmSpec, VsockDirection, VsockPort,
 };
 
 /// The ordered virtio-blk list for a sealed workload: the read-only rootfs at
@@ -318,7 +317,11 @@ pub fn workload_device_spec(config: &VmStartConfig, cmdline: &str, console_log: 
         console: ConsoleCapture {
             log_path: console_log.to_path_buf(),
         },
-        shares: workload_shares(config),
+        // A workload carries no virtio-fs device. A granted directory is
+        // materialized into a block image, and the dev-tier virtiofs root is
+        // gone, so nothing is left to put in this list. `VmmSpec.shares` stays
+        // on the type because the builder VM still uses it.
+        shares: Vec::new(),
         trusted_builder: false,
         plan_binding: workload_plan_binding(config),
     }
@@ -344,25 +347,6 @@ fn workload_plan_binding(config: &VmStartConfig) -> Option<PlanBinding> {
 
 /// File name of the host signing key inside [`mvm_core::config::mvm_keys_dir`].
 const HOST_SIGNER_KEY_FILE: &str = "host-signer.ed25519";
-
-/// virtio-fs host directory shares derived from the launch config.
-///
-/// A `virtiofs_root` boot produces a single read-only root share tagged
-/// `mvmroot`, and nothing else. A user volume never appears here: a granted
-/// directory is materialized into an image and attached as virtio-blk, so the
-/// only virtio-fs share left in the tree is the dev-tier root.
-pub fn workload_shares(config: &VmStartConfig) -> Vec<VirtioFsShare> {
-    let mut shares = Vec::new();
-    if let Some(root) = &config.virtiofs_root {
-        shares.push(VirtioFsShare {
-            tag: "mvmroot".into(),
-            host_path: root.clone().into(),
-            read_only: true,
-            dax: true,
-        });
-    }
-    shares
-}
 
 /// Compose a `VmmSpec` from an admitted `VmStartConfig` and the runtime paths the
 /// role resolved: the shared device model plus the standing vsock channels a
@@ -433,8 +417,8 @@ mod tests {
             ..base()
         };
         assert!(
-            workload_shares(&cfg).is_empty(),
-            "a materialized grant must not produce a virtio-fs share"
+            ensure_no_dir_share_volumes(&cfg).is_ok(),
+            "a materialized grant is not a directory share"
         );
         let blocks = workload_blocks(&cfg);
         assert!(
@@ -554,20 +538,6 @@ mod tests {
         blocks.iter().map(BlockDev::device_node).collect()
     }
 
-    #[test]
-    fn virtiofs_root_maps_to_a_dax_read_only_mvmroot_share() {
-        let cfg = VmStartConfig {
-            virtiofs_root: Some("/host/root".into()),
-            ..base()
-        };
-        let shares = workload_shares(&cfg);
-        assert_eq!(shares.len(), 1);
-        assert_eq!(shares[0].tag, "mvmroot");
-        assert_eq!(shares[0].host_path, PathBuf::from("/host/root"));
-        assert!(shares[0].read_only);
-        assert!(shares[0].dax);
-    }
-
     /// Neither kind of directory volume produces a share any more — including
     /// the read-write one, which used to be refused by a separate check rather
     /// than being unrepresentable.
@@ -596,8 +566,7 @@ mod tests {
             ],
             ..base()
         };
-        assert!(workload_shares(&cfg).is_empty());
-        // And an unmaterialized grant still refuses rather than being dropped.
+        // An unmaterialized grant refuses rather than being silently dropped.
         assert!(ensure_no_dir_share_volumes(&cfg).is_err());
     }
 

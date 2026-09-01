@@ -222,7 +222,7 @@ fn runner_cmdline_for_hostname(
 ) -> String {
     let base = workload_cmdline_for_hostname(config, state_dir, &base_bootargs, guest_hostname);
     let mut tokens: Vec<String> = Vec::new();
-    if !config.rootfs_path.is_empty() || config.virtiofs_root.is_some() {
+    if !config.rootfs_path.is_empty() {
         // HVF/libkrun workload guests have no RTC. Seed their wall clock before
         // image processes perform TLS validation (for example, pip contacting
         // PyPI), using the same host epoch captured at boot time as the builder.

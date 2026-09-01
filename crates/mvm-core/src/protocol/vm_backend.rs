@@ -70,12 +70,6 @@ pub struct VmStartConfig {
     pub template_id: Option<String>,
     /// Absolute path to the root filesystem (ext4 image).
     pub rootfs_path: String,
-    /// When set, boot from a read-only **virtiofs root** serving this host
-    /// directory (the unpacked+injected OCI tree) instead of a block `rootfs_path`
-    /// — the Plan-223 dev-tier boot on a virtiofs-capable backend. The run-path
-    /// tier gate sets this only for non-prod, non-sealed dev workloads; other
-    /// backends/tiers leave it `None` and use `rootfs_path`.
-    pub virtiofs_root: Option<String>,
     /// Absolute path to the kernel image (Firecracker needs this; others may ignore).
     pub kernel_path: Option<String>,
     /// Absolute path to the initial ramdisk (NixOS stage-1), if present.

@@ -1086,13 +1086,12 @@ fn resolve_image_artifacts(image: &ImageSource) -> Result<ResolvedImage> {
 
 /// The run-path tier gate's outputs for one boot: whether the request is
 /// still snapshot-restore eligible, the dm-verity sidecar (if any), the
-/// virtiofs root candidate, the resolved rootfs strategy + runtime source
-/// policy, and the effective initrd.
+/// resolved rootfs strategy + runtime source policy, and the effective
+/// initrd.
 struct BootStrategy {
     use_snapshot: bool,
     verity_path: Option<String>,
     roothash: Option<String>,
-    virtiofs_root: Option<String>,
     root_strategy: mvm_build::run_image::RootStrategy,
     effective_initrd: Option<String>,
 }
@@ -1133,7 +1132,6 @@ fn resolve_boot_strategy(
     // Every root is a materialized block ext4 image. The dev-tier virtiofs root
     // could not be dm-verity sealed and exposed a host directory through a FUSE
     // parser merely to avoid materialization, so it is not a valid boot mode.
-    let virtiofs_root: Option<String> = None;
     let root_strategy = mvm_build::run_image::RootStrategy::BlockExt4;
     let effective_initrd = effective_transient_initrd(
         shape.image,
@@ -1146,7 +1144,6 @@ fn resolve_boot_strategy(
         use_snapshot,
         verity_path,
         roothash,
-        virtiofs_root,
         root_strategy,
         effective_initrd,
     })
@@ -1202,7 +1199,6 @@ fn build_start_config(
         name: vm_name.to_string(),
         template_id: resolved.template_id.clone(),
         rootfs_path: resolved.rootfs.clone(),
-        virtiofs_root: boot.virtiofs_root.clone(),
         kernel_path: if is_wasm {
             None
         } else {

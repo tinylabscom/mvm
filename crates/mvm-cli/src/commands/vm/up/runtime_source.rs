@@ -374,8 +374,7 @@ fn attach_universal_initramfs_with_resolver(
 /// binaries from the overlay. A kernel-less shape (wasm) has no initramfs leg
 /// at all, and is the only launch that can come up without one.
 fn initramfs_is_required(config: &mvm_core::vm_backend::VmStartConfig) -> bool {
-    config.kernel_path.is_some()
-        && (!config.rootfs_path.is_empty() || config.virtiofs_root.is_some())
+    config.kernel_path.is_some() && !config.rootfs_path.is_empty()
 }
 
 // ── SDK sidecar ──────────────────────────────────────────────────────────────
