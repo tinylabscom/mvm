@@ -170,7 +170,7 @@ seed_workload_kernel() {
   local dest
   local seed
   arch="$(host_kernel_arch)"
-  dest="${CACHE_DIR}/builder-vm/${arch}/kernels/workload/vmlinux"
+  dest="${CACHE_DIR}/kernels/${arch}/workload/vmlinux"
   if [[ -f "${dest}" ]]; then
     SEEDED_KERNEL_SOURCE="already-present:${dest}"
     return
@@ -178,7 +178,7 @@ seed_workload_kernel() {
 
   seed="${MVM_HVF_DENSITY_WORKLOAD_KERNEL:-}"
   if [[ -z "${seed}" && "${MVM_HVF_DENSITY_SEED_HOST_KERNEL:-1}" != "0" ]]; then
-    seed="${HOME}/.cache/mvm/builder-vm/${arch}/kernels/workload/vmlinux"
+    seed="${HOME}/.cache/mvm/kernels/${arch}/workload/vmlinux"
   fi
   if [[ -z "${seed}" || ! -f "${seed}" ]]; then
     return

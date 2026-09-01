@@ -78,12 +78,11 @@ pub(crate) fn resolve_kernel_source() -> Option<KernelSource> {
 /// into the per-arch kernel cache, returning its path.
 #[cfg(feature = "builder-vm")]
 pub(super) fn download_builder_kernel(arch: &str) -> Result<std::path::PathBuf> {
-    let dest = std::path::Path::new(&mvm_core::config::mvm_cache_dir())
-        .join("builder-vm")
-        .join(arch)
-        .join("kernels")
-        .join("builder")
-        .join("vmlinux");
+    let dest = mvm_build::kernel_fetch::cached_kernel_path(
+        std::path::Path::new(&mvm_core::config::mvm_cache_dir()),
+        arch,
+        "builder",
+    );
     crate::update::download_kernel(arch, "builder", &dest)?;
     Ok(dest)
 }
@@ -180,12 +179,13 @@ pub(crate) fn build_kernel_via_stage0(
     })?;
 
     let arch = builder_vm_host_arch();
-    let out_dir = format!(
-        "{}/builder-vm/{arch}/kernels/{}",
-        mvm_core::config::mvm_cache_dir(),
-        variant.label()
+    let out_dir_buf = mvm_build::kernel_fetch::kernel_cache_dir(
+        std::path::Path::new(&mvm_core::config::mvm_cache_dir()),
+        arch,
+        variant.label(),
     );
-    let out_dir_path = std::path::Path::new(&out_dir);
+    let out_dir_path = out_dir_buf.as_path();
+    let out_dir = out_dir_path.display().to_string();
     std::fs::create_dir_all(out_dir_path)
         .with_context(|| format!("creating kernel cache dir {out_dir}"))?;
 

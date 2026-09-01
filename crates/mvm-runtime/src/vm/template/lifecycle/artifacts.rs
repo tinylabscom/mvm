@@ -497,14 +497,11 @@ mod tests {
     fn slot_kernel_source_prefers_verified_workload_kernel_for_aarch64() {
         let tmp = tempfile::tempdir().unwrap();
         let built = tmp.path().join("build").join("vmlinux");
-        let workload = tmp
-            .path()
-            .join("cache")
-            .join("builder-vm")
-            .join("aarch64")
-            .join("kernels")
-            .join("workload")
-            .join("vmlinux");
+        let workload = mvm_build::kernel_fetch::cached_kernel_path(
+            &tmp.path().join("cache"),
+            "aarch64",
+            "workload",
+        );
         std::fs::create_dir_all(workload.parent().unwrap()).unwrap();
         std::fs::write(&workload, b"workload-kernel").unwrap();
         mvm_build::kernel_fetch::record_kernel_digest(&workload).unwrap();
@@ -521,12 +518,7 @@ mod tests {
         let built = tmp.path().join("build").join("vmlinux");
         let cache = tmp.path().join("cache");
         let builder = cache.join("builder-vm").join("x86_64").join("vmlinux");
-        let workload = cache
-            .join("builder-vm")
-            .join("x86_64")
-            .join("kernels")
-            .join("workload")
-            .join("vmlinux");
+        let workload = mvm_build::kernel_fetch::cached_kernel_path(&cache, "x86_64", "workload");
         std::fs::create_dir_all(builder.parent().unwrap()).unwrap();
         std::fs::write(&builder, b"builder-kernel").unwrap();
         std::fs::create_dir_all(workload.parent().unwrap()).unwrap();
@@ -543,12 +535,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let built = tmp.path().join("build").join("vmlinux");
         let cache = tmp.path().join("cache");
-        let workload = cache
-            .join("builder-vm")
-            .join("x86_64")
-            .join("kernels")
-            .join("workload")
-            .join("vmlinux");
+        let workload = mvm_build::kernel_fetch::cached_kernel_path(&cache, "x86_64", "workload");
         std::fs::create_dir_all(workload.parent().unwrap()).unwrap();
         std::fs::write(&workload, b"workload-kernel").unwrap();
         mvm_build::kernel_fetch::record_kernel_digest(&workload).unwrap();
@@ -586,7 +573,7 @@ mod tests {
             .to_string();
 
         assert!(err.contains("flake build produced no vmlinux"));
-        assert!(err.contains("builder-vm/x86_64/kernels/workload/vmlinux"));
+        assert!(err.contains("kernels/x86_64/workload/vmlinux"));
     }
 
     #[test]

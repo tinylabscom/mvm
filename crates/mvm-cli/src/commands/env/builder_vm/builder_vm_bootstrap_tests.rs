@@ -1200,6 +1200,40 @@ fn builder_vm_stage0_promotion_replaces_stale_valid_cache() {
     assert!(builder_vm_source_cache_ready(&final_dir, "new"));
 }
 
+#[test]
+fn stage0_promotion_leaves_the_cached_workload_kernel_alone() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cache_dir = tmp.path().join("cache");
+    let final_dir = cache_dir.join("builder-vm").join("aarch64");
+    let staging = cache_dir.join("builder-vm").join(".aarch64.stage0-test");
+
+    // A previously-built, verified workload kernel sits in the cache.
+    let kernel = mvm_build::kernel_fetch::cached_kernel_path(&cache_dir, "aarch64", "workload");
+    std::fs::create_dir_all(kernel.parent().expect("kernel parent")).expect("mkdir kernels");
+    std::fs::write(&kernel, b"a real workload kernel").expect("write kernel");
+    mvm_build::kernel_fetch::record_kernel_digest(&kernel).expect("record digest");
+    assert!(
+        matches!(
+            mvm_build::kernel_fetch::resolve_kernel(&cache_dir, "aarch64", "workload", true),
+            mvm_build::kernel_fetch::KernelResolution::Cached(_)
+        ),
+        "precondition: the planted kernel must resolve as a verified cache hit"
+    );
+
+    // The builder-VM source fingerprint changes, so Stage 0 rebuilds and promotes.
+    write_valid_builder_vm_artifacts(&final_dir);
+    write_builder_vm_source_cache_metadata(&final_dir, "old");
+    write_valid_builder_vm_artifacts(&staging);
+    write_builder_vm_source_cache_metadata(&staging, "new");
+    promote_builder_vm_stage0_cache(&staging, &final_dir, "new").expect("promote");
+
+    assert!(
+        kernel.exists(),
+        "promoting a new builder-VM image must not delete the cached workload kernel at {}",
+        kernel.display()
+    );
+}
+
 // -------------------------------------------------------------------
 // Stage 0 audit-emit helpers.
 //

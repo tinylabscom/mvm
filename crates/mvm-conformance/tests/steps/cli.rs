@@ -143,13 +143,8 @@ fn isolated_mvm_home(world: &mut CliWorld) {
 fn isolated_mvm_home_with_non_verity_kernel(world: &mut CliWorld) {
     let home = tempfile::tempdir().expect("create isolated MVM_HOME");
     let arch = std::env::consts::ARCH;
-    let kernel_dir = home
-        .path()
-        .join("cache")
-        .join("builder-vm")
-        .join(arch)
-        .join("kernels")
-        .join("workload");
+    let kernel_dir =
+        mvm_build::kernel_fetch::kernel_cache_dir(&home.path().join("cache"), arch, "workload");
     std::fs::create_dir_all(&kernel_dir).expect("create fake workload kernel cache dir");
     let kernel = kernel_dir.join("vmlinux");
     std::fs::write(&kernel, b"KALLSYMS-free fake kernel bytes\n")
@@ -171,13 +166,11 @@ fn incompatible_workload_kernel_cache_is_evicted(world: &mut CliWorld) {
         .isolated_home
         .as_ref()
         .expect("isolated home must remain available");
-    let kernel_dir = home
-        .path()
-        .join("cache")
-        .join("builder-vm")
-        .join(std::env::consts::ARCH)
-        .join("kernels")
-        .join("workload");
+    let kernel_dir = mvm_build::kernel_fetch::kernel_cache_dir(
+        &home.path().join("cache"),
+        std::env::consts::ARCH,
+        "workload",
+    );
     for name in ["vmlinux", "vmlinux.sha256", "config"] {
         assert!(
             !kernel_dir.join(name).exists(),

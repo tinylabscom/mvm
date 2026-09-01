@@ -189,15 +189,73 @@ pub enum KernelResolution {
     NeedsFetch(PathBuf),
 }
 
+/// Directory holding one cached kernel entry — the `vmlinux` plus its digest
+/// sidecar, `config`, and digest cache.
+///
+/// A sibling of `builder-vm/`, deliberately not a child of it. The entry used
+/// to live at `builder-vm/<arch>/kernels/<variant>/`, inside the directory
+/// Stage 0 `remove_dir_all`s whenever the builder-VM source fingerprint
+/// changes. Promoting a new builder image therefore destroyed an unrelated
+/// artifact that costs half an hour to rebuild, and the next boot rebuilt it
+/// from scratch. Nothing about a kernel's identity depends on which builder
+/// image compiled it, so it does not belong in a directory whose contract is
+/// "atomically replaceable".
+pub fn kernel_cache_dir(cache_dir: &Path, arch: &str, variant: &str) -> PathBuf {
+    cache_dir.join("kernels").join(arch).join(variant)
+}
+
 /// Per-arch, per-variant kernel cache path — the location
 /// `mvmctl kernel build` writes and the boot path reads.
 pub fn cached_kernel_path(cache_dir: &Path, arch: &str, variant: &str) -> PathBuf {
+    kernel_cache_dir(cache_dir, arch, variant).join("vmlinux")
+}
+
+/// Where a kernel entry lived before it was moved out of the Stage 0 blast
+/// radius. Read only by [`migrate_legacy_kernel_entry`].
+fn legacy_kernel_cache_dir(cache_dir: &Path, arch: &str, variant: &str) -> PathBuf {
     cache_dir
         .join("builder-vm")
         .join(arch)
         .join("kernels")
         .join(variant)
-        .join("vmlinux")
+}
+
+/// Adopt a kernel entry left at the pre-relocation path.
+///
+/// Renames the whole entry directory, so the digest sidecar and the
+/// size+mtime-keyed digest cache move with the bytes they describe and stay
+/// valid. Only ever moves *into* an absent destination: a kernel already at
+/// the current path is newer by construction and is never clobbered.
+///
+/// Best-effort. A failure here is not an error — the caller falls through to
+/// re-deriving the kernel, which is what would have happened anyway.
+fn migrate_legacy_kernel_entry(cache_dir: &Path, arch: &str, variant: &str) {
+    let destination = kernel_cache_dir(cache_dir, arch, variant);
+    if destination.exists() {
+        return;
+    }
+    let legacy = legacy_kernel_cache_dir(cache_dir, arch, variant);
+    if !legacy.join("vmlinux").is_file() {
+        return;
+    }
+    let Some(parent) = destination.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    match std::fs::rename(&legacy, &destination) {
+        Ok(()) => tracing::info!(
+            from = %legacy.display(),
+            to = %destination.display(),
+            "moved cached kernel out of the builder-VM cache directory"
+        ),
+        Err(e) => tracing::warn!(
+            from = %legacy.display(),
+            error = %e,
+            "could not move cached kernel to its current location; will re-derive"
+        ),
+    }
 }
 
 /// Decide how to obtain the `vmlinux` for a kernel pin without performing any
@@ -210,6 +268,9 @@ pub fn resolve_kernel(
     variant: &str,
     source_checkout: bool,
 ) -> KernelResolution {
+    // Every read of a cached kernel comes through here, so this is the one
+    // place an entry from the previous layout has to be adopted.
+    migrate_legacy_kernel_entry(cache_dir, arch, variant);
     let path = cached_kernel_path(cache_dir, arch, variant);
     if path.exists() {
         match verify_cached_kernel(&path) {
@@ -238,6 +299,74 @@ mod tests {
 
     use mvm_core::{kernel_artifact::compute_artifact_hash, util::test_env::TestEnv};
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn a_kernel_entry_is_not_stored_under_the_builder_vm_cache_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let entry = kernel_cache_dir(tmp.path(), "aarch64", "workload");
+
+        // Stage 0 replaces `builder-vm/<arch>` wholesale on a fingerprint
+        // change, so a kernel stored beneath it is collateral damage.
+        assert!(
+            !entry.starts_with(tmp.path().join("builder-vm")),
+            "kernel entry {} must not live under the builder-VM cache dir",
+            entry.display()
+        );
+        assert_eq!(
+            entry,
+            tmp.path().join("kernels").join("aarch64").join("workload")
+        );
+    }
+
+    #[test]
+    fn a_kernel_left_at_the_previous_location_is_adopted_not_rebuilt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = legacy_kernel_cache_dir(tmp.path(), "aarch64", "workload");
+        std::fs::create_dir_all(&legacy).unwrap();
+        let legacy_kernel = legacy.join("vmlinux");
+        std::fs::write(&legacy_kernel, b"previously built kernel").unwrap();
+        record_kernel_digest(&legacy_kernel).unwrap();
+
+        let resolved = resolve_kernel(tmp.path(), "aarch64", "workload", true);
+
+        let KernelResolution::Cached(verified) = resolved else {
+            panic!("a kernel at the previous location must be adopted, not rebuilt");
+        };
+        assert_eq!(
+            verified.path(),
+            cached_kernel_path(tmp.path(), "aarch64", "workload")
+        );
+        assert!(
+            !legacy.exists(),
+            "the previous entry should have been moved"
+        );
+    }
+
+    #[test]
+    fn adoption_never_clobbers_a_kernel_already_at_the_current_location() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let current = cached_kernel_path(tmp.path(), "aarch64", "workload");
+        std::fs::create_dir_all(current.parent().unwrap()).unwrap();
+        std::fs::write(&current, b"the current kernel").unwrap();
+        record_kernel_digest(&current).unwrap();
+
+        let legacy = legacy_kernel_cache_dir(tmp.path(), "aarch64", "workload");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("vmlinux"), b"a stale kernel").unwrap();
+        record_kernel_digest(&legacy.join("vmlinux")).unwrap();
+
+        let KernelResolution::Cached(verified) =
+            resolve_kernel(tmp.path(), "aarch64", "workload", true)
+        else {
+            panic!("the current kernel should still verify");
+        };
+        assert_eq!(
+            std::fs::read(verified.path()).unwrap(),
+            b"the current kernel",
+            "a stale entry must not overwrite the current one"
+        );
+    }
 
     fn write_temp(bytes: &[u8]) -> NamedTempFile {
         let f = NamedTempFile::new().unwrap();

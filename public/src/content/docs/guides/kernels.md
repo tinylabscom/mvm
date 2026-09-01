@@ -40,8 +40,10 @@ and `workload`. (A `workload-sizeopt-metrics` *flake output* still exists as a
 compatibility alias; see below.)
 
 The compiled or downloaded kernel is cached at
-`~/.mvm/cache/builder-vm/<arch>/kernels/<variant>/vmlinux` and reused by every
-later run that needs it. (There is no `mvmctl dev` command — it was removed.)
+`~/.mvm/cache/kernels/<arch>/<variant>/vmlinux` and reused by every
+later run that needs it. (A kernel left at the older
+`~/.mvm/cache/builder-vm/<arch>/kernels/<variant>/` path is moved to the
+current one the next time it is read, so an existing cache is not rebuilt.) (There is no `mvmctl dev` command — it was removed.)
 
 When the kernel was compiled locally, the cache directory also carries a
 resolved `config` sidecar and `kernel-metrics-<arch>.json`, so you can inspect
