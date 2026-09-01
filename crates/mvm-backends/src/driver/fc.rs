@@ -65,6 +65,22 @@ fn guest_ready_poll_delay(attempt: u32) -> Duration {
 /// down Firecracker until the guest confirms its filesystems are durable.
 const GUEST_STOP_DRAIN_TIMEOUT_SECS: u64 = 10;
 
+/// The most vCPUs Firecracker will boot a guest on.
+///
+/// A limit of the VMM, not of the wire format. This was `u8::MAX` on the
+/// reasoning that `vcpu_count` is a byte, which is true and irrelevant:
+/// `/machine-config` validates the value as well as deserializing it, and
+/// answers anything above 32 with *"The number of vCPUs must be greater than 0,
+/// less than 32 and must be 1 or an even number if SMT is enabled"*. So a
+/// request clamped to the protocol ceiling still failed to boot — the same
+/// launch, refused a step later with a second message instead of the first.
+/// Declaring the real ceiling is what makes the clamp above the backend produce
+/// a count that boots.
+///
+/// Probed against the API rather than read out of Firecracker's source: 32 is
+/// accepted (204) and 64 refused, on v1.14.1.
+const MAX_VCPUS: u32 = 32;
+
 /// The Firecracker VMM driver: pure VMM mechanics, no policy and no admission.
 /// It boots what a `VmmSpec` describes and relays the guest's egress port to the
 /// host-side bridge; the claim-10 gate and substitution live in that bridge,
@@ -233,9 +249,14 @@ pub fn fc_config_api_puts(
         body: boot_source_body(kernel_for_boot, &cmdline, initrd.as_deref()),
     });
 
+    // Hold the count to what the VMM accepts at the point it is serialized, the
+    // way the libkrun and qemu drivers do. The clamp that *reports* itself to
+    // the user lives above the backend, where the request is still the user's;
+    // this one is the floor under callers that never passed through it, and it
+    // keeps the declared ceiling and the emitted body from drifting apart.
     puts.push(FcApiPut {
         path: "/machine-config".to_string(),
-        body: machine_config_body(spec.vcpus, spec.memory_mib),
+        body: machine_config_body(spec.vcpus.clamp(1, MAX_VCPUS), spec.memory_mib),
     });
 
     // The guest creates a fresh signing identity before accepting its first
@@ -639,10 +660,10 @@ impl VmmDriver for FcDriver {
         // authenticated identity handshake still gates admission after
         // resume, so preloading changes placement of VMM work, not authority.
         VmCapabilities {
-            // Firecracker's machine-config wire field is an unsigned byte.
-            // Declare that protocol ceiling so portable oversized requests are
-            // clamped before serialization instead of failing at the API.
-            max_vcpus: Some(u32::from(u8::MAX)),
+            // What Firecracker will actually boot, so a portable oversized
+            // request is clamped to a count that runs rather than to one the
+            // API refuses a step later. See `MAX_VCPUS`.
+            max_vcpus: Some(MAX_VCPUS),
             pause_resume: true,
             snapshots: false,
             snapshot_capability: SnapshotCapability::Unsupported,
@@ -1399,7 +1420,7 @@ mod tests {
         assert!(caps.no_routable_guest_nic);
         assert!(caps.host_vsock_proxy);
         assert!(!caps.tap_networking);
-        assert_eq!(caps.max_vcpus, Some(u32::from(u8::MAX)));
+        assert_eq!(caps.max_vcpus, Some(MAX_VCPUS));
         assert_eq!(d.snapshot_capability(), SnapshotCapability::Unsupported);
         // The driver reports the claim-bearing tier itself now, rather than
         // asking a legacy shell for it.
@@ -1542,6 +1563,58 @@ mod tests {
                 "/vsock"
             ]
         );
+    }
+
+    /// The declared ceiling is the one the emitted body is held to.
+    ///
+    /// Both halves matter and neither is enough alone. `capabilities()` is what
+    /// the clamp above the backend measures the user's `--cpus` against, and
+    /// this body is what Firecracker parses — a ceiling naming a number the API
+    /// refuses is how `--cpus 9999` reached `/machine-config` verbatim and died
+    /// there, so the two are asserted against the same constant.
+    #[test]
+    fn an_oversized_vcpu_request_is_held_to_the_ceiling_the_driver_declares() {
+        let ceiling = FcDriver::new()
+            .capabilities()
+            .max_vcpus
+            .expect("the driver declares a vCPU ceiling");
+
+        for (requested, expected) in [(9999, ceiling), (ceiling + 1, ceiling), (0, 1)] {
+            let mut spec = spec_with(
+                KernelImage::Path("/img/vmlinux".into()),
+                vec![guest_dials(GuestService::NetworkFlow, "/run/egress.sock")],
+                vec![ro_block("/img/rootfs.ext4", 0)],
+            );
+            spec.vcpus = requested;
+
+            let puts = config_puts(&spec);
+            let machine = body_for(&puts, "/machine-config");
+            assert!(
+                machine.contains(&format!("\"vcpu_count\": {expected}")),
+                "{requested} vCPUs requested; expected {expected} on the wire, got {machine}"
+            );
+        }
+    }
+
+    /// A count at or under the ceiling reaches the API untouched — the bound
+    /// bounds the request rather than rewriting it.
+    #[test]
+    fn a_vcpu_request_within_the_ceiling_reaches_the_api_unchanged() {
+        for requested in [1u32, 2, MAX_VCPUS] {
+            let mut spec = spec_with(
+                KernelImage::Path("/img/vmlinux".into()),
+                vec![guest_dials(GuestService::NetworkFlow, "/run/egress.sock")],
+                vec![ro_block("/img/rootfs.ext4", 0)],
+            );
+            spec.vcpus = requested;
+
+            let puts = config_puts(&spec);
+            let machine = body_for(&puts, "/machine-config");
+            assert!(
+                machine.contains(&format!("\"vcpu_count\": {requested}")),
+                "{requested} vCPUs is within the ceiling and must not be rewritten: {machine}"
+            );
+        }
     }
 
     #[test]

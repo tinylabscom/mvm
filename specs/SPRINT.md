@@ -191,8 +191,10 @@
       The next fully merged rerun proved the artifact warm-up bypassed the
       initramfs source fingerprint whenever a cache file existed, so current
       host code booted a stale guest agent. The warm-up now always validates
-      and rebuilds source-stale guest binaries. Firecracker also advertises its
-      u8 vCPU wire ceiling before serialization, and the live refusal witnesses
+      and rebuilds source-stale guest binaries. Firecracker also advertises a
+      vCPU ceiling before serialization — the u8 wire ceiling at first, which
+      the API refuses above 32, corrected to the count the VMM actually boots
+      under issue #3051 — and the live refusal witnesses
       match child exit status, stderr ownership, and backend timeout admission.
       Focused tests, all ordinary workspace tests, the isolated `mvm-agentd`
       doctest, workspace Clippy, formatting, and repository policy gates are
