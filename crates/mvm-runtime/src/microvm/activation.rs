@@ -25,10 +25,6 @@ const ROOTFS_HASH_DEV: &str = "/dev/vdb";
 const RUNTIME_DATA_DEV: &str = "/dev/vdc";
 const RUNTIME_HASH_DEV: &str = "/dev/vdd";
 
-/// virtio-fs tag the backend assigns the root share on a block-less
-/// virtiofs-root dev boot.  Mirrors the driver's `root=<tag>` cmdline knob.
-const VIRTIOFS_ROOT_TAG: &str = "mvmroot";
-
 pub use mvm_vmm::host::boot_config::booted_with_universal_initramfs;
 
 /// How long activation waits for the guest agent to come up before failing.
@@ -198,15 +194,7 @@ fn build_activation_environment(config: &VmStartConfig) -> Result<ActivateEnviro
         find_block_device(&blocks, path).unwrap_or_else(|| ROOTFS_DATA_DEV.to_string())
     };
 
-    let rootfs = if config.virtiofs_root.is_some() {
-        RootfsConfig {
-            data_dev: String::new(),
-            hash_dev: None,
-            roothash: None,
-            virtiofs_tag: Some(VIRTIOFS_ROOT_TAG.to_string()),
-            in_place: false,
-        }
-    } else if config.verity_path.is_some() {
+    let rootfs = if config.verity_path.is_some() {
         let roothash = resolve_rootfs_roothash(config)
             .context("verity rootfs attached but no roothash in config or sidecar")?;
         RootfsConfig {
@@ -559,19 +547,20 @@ mod tests {
     }
 
     #[test]
-    fn build_env_for_virtiofs_root_mounts_the_root_tag() {
+    fn build_env_never_asks_the_guest_for_a_virtiofs_root() {
         let (_env, _dir) = test_env();
+        // The wire type still carries the tag, because the guest agent must
+        // keep refusing a spec that sets it. Nothing on the host emits one:
+        // every root the host builds is a block device.
         let config = VmStartConfig {
             name: "test-vm".into(),
             rootfs_path: String::new(),
-            virtiofs_root: Some("/host/unpacked-oci".into()),
             ..Default::default()
         };
 
         let env = build_activation_environment(&config).unwrap();
-        assert_eq!(env.rootfs.virtiofs_tag.as_deref(), Some("mvmroot"));
-        assert_eq!(env.rootfs.roothash, None);
-        assert!(env.runtime.is_none());
+        assert_eq!(env.rootfs.virtiofs_tag, None);
+        assert_eq!(env.rootfs.data_dev, "/dev/vda");
     }
 
     #[test]

@@ -181,10 +181,6 @@ pub fn hvf_endpoint_needed(
 }
 
 pub fn hvf_workload_disks(config: &VmStartConfig) -> Vec<HvfDisk> {
-    if config.virtiofs_root.is_some() {
-        return Vec::new();
-    }
-
     if cmdline::verity_enabled(config) {
         let mut disks = vec![
             HvfDisk {

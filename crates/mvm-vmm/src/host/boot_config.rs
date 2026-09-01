@@ -421,26 +421,23 @@ mod tests {
         assert_eq!(non_verity_overlay_ext4(&partial), None);
     }
 
-    /// The virtiofs-root shape used to be excluded from the block overlay,
-    /// because it declared `RootfsOnly` and reached its guest binaries from the
-    /// baked rootfs copy instead. With the overlay as the single runtime source
-    /// there is no baked copy to fall back to, so this shape has to carry the
-    /// same overlay device every other shape does.
+    /// With the overlay as the single runtime source there is no baked copy of
+    /// the guest binaries to fall back to, so a boot that declares no rootfs
+    /// verity still has to carry the overlay device.
     #[test]
-    fn a_virtiofs_root_boot_still_attaches_the_runtime_overlay() {
+    fn a_non_verity_boot_still_attaches_the_runtime_overlay() {
         use mvm_core::vm_backend::VmStartConfig;
 
-        let virtiofs = VmStartConfig {
-            virtiofs_root: Some("/host/unpacked-oci".into()),
+        let cfg = VmStartConfig {
             runtime_overlay_path: Some("/cache/runtime.ext4".into()),
             runtime_overlay_verity_path: Some("/cache/runtime.verity".into()),
             runtime_overlay_roothash: Some("b".repeat(64)),
             ..Default::default()
         };
         assert_eq!(
-            non_verity_overlay_ext4(&virtiofs),
+            non_verity_overlay_ext4(&cfg),
             Some("/cache/runtime.ext4"),
-            "a virtiofs-root guest has no baked binaries left to fall back to"
+            "there are no baked guest binaries left to fall back to"
         );
     }
 

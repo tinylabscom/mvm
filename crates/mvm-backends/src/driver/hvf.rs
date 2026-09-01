@@ -228,15 +228,9 @@ fn relay_supervisor_config_with_handoff(
         vcpus: spec.vcpus,
         initramfs: spec.initramfs.clone(),
         disks,
-        virtiofs_root: spec
-            .shares
-            .iter()
-            .find(|share| share.tag == "mvmroot")
-            .map(|share| share.host_path.clone()),
         virtiofs_shares: spec
             .shares
             .iter()
-            .filter(|share| share.tag != "mvmroot")
             .map(|share| HvfVirtioFsShare {
                 path: share.host_path.clone(),
                 tag: share.tag.clone(),
@@ -408,7 +402,6 @@ impl VmmDriver for HvfDriver {
     }
 
     fn capabilities(&self) -> VmCapabilities {
-        let proxy_path_ready = hvf_backend::hvf_workload_support_available();
         // vsock is live-proven through the unified run loop; the rest land as
         // pause/snapshot/networking are wired onto the primitive.
         VmCapabilities {
@@ -447,11 +440,6 @@ impl VmmDriver for HvfDriver {
             // and always routes egress through the per-VM endpoint over vsock.
             no_routable_guest_nic: true,
             host_vsock_proxy: true,
-            // The hvf VMM can serve the unpacked OCI tree as a read-only
-            // virtiofs root (dev tier); the run-path tier gate selects it only for
-            // non-prod, non-sealed workloads. This stays gated on the launchable
-            // supervisor path — it is a dev-tier boot capability, not egress.
-            virtiofs_root: proxy_path_ready,
             // Named explicitly rather than left to `..Default::default()`:
             // the honest HVF answer (no cgroup, but a supervisor wall-clock
             // timer) differs from the all-`None` default.
@@ -679,8 +667,8 @@ impl VmmDriver for HvfDriver {
         bail!("hvf does not provide guest channel info")
     }
 
-    fn workload_base_bootargs(&self, virtiofs_root: bool, has_disk: bool) -> String {
-        crate::driver::hvf_bootargs::workload_bootargs(virtiofs_root, has_disk)
+    fn workload_base_bootargs(&self, has_disk: bool) -> String {
+        crate::driver::hvf_bootargs::workload_bootargs(has_disk)
     }
 }
 
@@ -1175,12 +1163,12 @@ mod tests {
     fn workload_base_bootargs_delegates_to_hvf_bootargs() {
         let d = HvfDriver::new();
         assert_eq!(
-            d.workload_base_bootargs(false, true),
-            crate::driver::hvf_bootargs::workload_bootargs(false, true)
+            d.workload_base_bootargs(true),
+            crate::driver::hvf_bootargs::workload_bootargs(true)
         );
         assert_eq!(
-            d.workload_base_bootargs(true, false),
-            crate::driver::hvf_bootargs::workload_bootargs(true, false)
+            d.workload_base_bootargs(false),
+            crate::driver::hvf_bootargs::workload_bootargs(false)
         );
     }
 

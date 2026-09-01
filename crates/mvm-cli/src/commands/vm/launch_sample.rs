@@ -221,8 +221,6 @@ pub struct ArtifactPaths {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LaunchRootStrategy {
-    /// Boot the unpacked OCI tree through a read-only virtio-fs root.
-    VirtiofsRoot,
     /// Boot a materialized ext4 block image, optionally protected by dm-verity.
     BlockExt4,
 }
@@ -230,7 +228,6 @@ pub enum LaunchRootStrategy {
 impl From<mvm_build::run_image::RootStrategy> for LaunchRootStrategy {
     fn from(strategy: mvm_build::run_image::RootStrategy) -> Self {
         match strategy {
-            mvm_build::run_image::RootStrategy::VirtiofsRoot => Self::VirtiofsRoot,
             mvm_build::run_image::RootStrategy::BlockExt4 => Self::BlockExt4,
         }
     }
@@ -456,7 +453,7 @@ mod tests {
             os: "macos".to_string(),
             arch: "aarch64".to_string(),
             launch_mode: LaunchMode::Cold,
-            root_strategy: Some(LaunchRootStrategy::VirtiofsRoot),
+            root_strategy: Some(LaunchRootStrategy::BlockExt4),
             sizing: GuestSizing {
                 cpus: 2,
                 memory_mib: 512,
@@ -582,10 +579,6 @@ mod tests {
 
     #[test]
     fn root_strategy_mapping_preserves_the_security_tier() {
-        assert_eq!(
-            LaunchRootStrategy::from(mvm_build::run_image::RootStrategy::VirtiofsRoot),
-            LaunchRootStrategy::VirtiofsRoot
-        );
         assert_eq!(
             LaunchRootStrategy::from(mvm_build::run_image::RootStrategy::BlockExt4),
             LaunchRootStrategy::BlockExt4

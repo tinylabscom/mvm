@@ -68,7 +68,6 @@ fn parent_config(state_dir: &std::path::Path) -> HvfSupervisorConfig {
             read_only: true,
             ephemeral: false,
         }],
-        virtiofs_root: None,
         virtiofs_shares: Vec::new(),
         vsock: true,
         trusted_builder_egress: false,

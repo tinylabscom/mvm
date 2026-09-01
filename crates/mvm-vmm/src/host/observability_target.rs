@@ -208,7 +208,6 @@ mod tests {
             name: name.to_string(),
             template_id: None,
             rootfs_path: "/tmp/rootfs.ext4".to_string(),
-            virtiofs_root: None,
             kernel_path: None,
             initrd_path: None,
             verity_path: None,

@@ -263,10 +263,12 @@ pub trait VmmDriver: Send + Sync {
     }
 
     /// The VMM-specific base kernel bootargs (console, earlycon, root/init
-    /// selection) for a workload boot with the given root/disk shape. The
-    /// shared cmdline assembler (`workload_runner::cmdline`) layers every
-    /// other token — verity, grants, egress, uvols — on top of this.
-    fn workload_base_bootargs(&self, virtiofs_root: bool, has_disk: bool) -> String;
+    /// selection) for a workload boot. `has_disk` distinguishes a block root
+    /// from a verity/initramfs boot, where the initramfs PID 1 owns root/init
+    /// selection and the base carries only the console. The shared cmdline
+    /// assembler (`workload_runner::cmdline`) layers every other token —
+    /// verity, grants, egress, uvols — on top of this.
+    fn workload_base_bootargs(&self, has_disk: bool) -> String;
 
     /// Reconstruct a live handle for an already-running VM by id — the stateless
     /// lifecycle entry (stop/status/wait from a process that didn't boot it).

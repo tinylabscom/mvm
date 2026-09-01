@@ -60,15 +60,13 @@ impl Default for QemuDriver {
 /// no NIC tokens — the converged path attaches no guest NIC. The root/init
 /// selection follows the boot shape; the shared cmdline assembler layers
 /// verity/grants/egress/uvols tokens on top of this.
-fn qemu_base_bootargs_for_arch(arch: &str, virtiofs_root: bool, has_disk: bool) -> String {
+fn qemu_base_bootargs_for_arch(arch: &str, has_disk: bool) -> String {
     // Serial console + reboot/panic behavior + stable interface naming.
     let console = format!(
         "console={} reboot=k panic=1 net.ifnames=0",
         serial_console_for_arch(arch)
     );
-    if virtiofs_root {
-        format!("{console} rootfstype=virtiofs root=mvmroot ro init=/init")
-    } else if has_disk {
+    if has_disk {
         format!("{console} root=/dev/vda ro rootwait init=/init")
     } else {
         // Verity / initramfs boot: the initramfs PID 1 owns root/init selection,
@@ -77,8 +75,8 @@ fn qemu_base_bootargs_for_arch(arch: &str, virtiofs_root: bool, has_disk: bool) 
     }
 }
 
-fn qemu_base_bootargs(virtiofs_root: bool, has_disk: bool) -> String {
-    qemu_base_bootargs_for_arch(std::env::consts::ARCH, virtiofs_root, has_disk)
+fn qemu_base_bootargs(has_disk: bool) -> String {
+    qemu_base_bootargs_for_arch(std::env::consts::ARCH, has_disk)
 }
 
 /// AF_UNIX socket path QEMU uses to connect to `virtiofsd` for a given
@@ -154,7 +152,6 @@ fn qemu_boot_argv_for_arch(
         args.push("virt".into());
     }
 
-    let has_virtiofs_root = spec.shares.iter().any(|s| s.tag == "mvmroot");
     let mem_arg = format!("{}M", spec.memory_mib);
 
     args.push("-kernel".into());
@@ -169,7 +166,7 @@ fn qemu_boot_argv_for_arch(
     let has_disk = spec.initramfs.is_none() && !spec.blocks.is_empty();
     let trimmed = spec.cmdline.trim();
     let cmdline = if trimmed.is_empty() {
-        qemu_base_bootargs_for_arch(arch, has_virtiofs_root, has_disk)
+        qemu_base_bootargs_for_arch(arch, has_disk)
     } else {
         trimmed.to_string()
     };
@@ -376,8 +373,8 @@ impl VmmDriver for QemuDriver {
         }
     }
 
-    fn workload_base_bootargs(&self, virtiofs_root: bool, has_disk: bool) -> String {
-        qemu_base_bootargs(virtiofs_root, has_disk)
+    fn workload_base_bootargs(&self, has_disk: bool) -> String {
+        qemu_base_bootargs(has_disk)
     }
 
     #[tracing::instrument(
@@ -781,11 +778,14 @@ mod tests {
                 .any(|d| d.contains("chardev=vfs-uvol0") && d.contains("tag=uvol0"))
         );
 
-        // Default cmdline picks virtiofs root because a mvmroot share exists.
+        // A share no longer steers the root: an `mvmroot` share used to make the
+        // default cmdline boot from virtiofs, and that strategy is gone. Shares
+        // are still mapped to devices — the builder VM depends on it — but the
+        // root is always the block image.
         let append = argvalue(&argv, "-append").expect("-append");
         assert!(
-            append.contains("rootfstype=virtiofs") && append.contains("root=mvmroot"),
-            "expected virtiofs-root cmdline, got: {append}"
+            !append.contains("virtiofs") && !append.contains("root=mvmroot"),
+            "no cmdline may boot a virtiofs root: {append}"
         );
     }
 
@@ -843,7 +843,7 @@ mod tests {
             "console={}",
             serial_console_for_arch(std::env::consts::ARCH)
         );
-        let disk = d.workload_base_bootargs(false, true);
+        let disk = d.workload_base_bootargs(true);
         assert!(disk.contains(&console), "got: {disk}");
         assert!(disk.contains("root=/dev/vda"), "got: {disk}");
         assert!(disk.contains("init=/init"), "got: {disk}");
@@ -851,15 +851,13 @@ mod tests {
         assert!(!disk.contains("mvm.ip="), "got: {disk}");
 
         // Verity / initramfs base: serial console only, no root/init token.
-        let verity = d.workload_base_bootargs(false, false);
+        let verity = d.workload_base_bootargs(false);
         assert!(!verity.contains("root="), "got: {verity}");
         assert!(!verity.contains("init=/init"), "got: {verity}");
         assert!(verity.contains(&console), "got: {verity}");
 
-        let virtiofs = d.workload_base_bootargs(true, false);
-        assert!(virtiofs.contains(&console), "got: {virtiofs}");
-        assert!(virtiofs.contains("rootfstype=virtiofs"), "got: {virtiofs}");
-        assert!(virtiofs.contains("root=mvmroot"), "got: {virtiofs}");
+        // No third shape: the virtiofs-root base is gone.
+        assert!(!disk.contains("virtiofs") && !verity.contains("virtiofs"));
     }
 
     #[test]

@@ -515,13 +515,6 @@ pub struct VmCapabilities {
     /// Backend permits an in-guest SSH server (production SSH). Always `false`
     /// for every production backend; a plan requiring it is rejected.
     pub production_ssh: bool,
-    /// Backend can attach the unpacked OCI tree as a read-only **virtiofs root**
-    /// device, so a dev-tier boot skips ext4 materialization. `false` for
-    /// Firecracker (no virtiofs root device) and the default. The run-path tier
-    /// gate selects virtiofs-root only when this is `true` *and* the workload is
-    /// non-prod, non-sealed; the virtiofs-root dev path carries a weaker
-    /// integrity contract and does **not** witness the verified-boot claim.
-    pub virtiofs_root: bool,
     /// Which resource dimensions this backend can actually bound. Declared
     /// separately from what a caller requests so a refusal can name the gap.
     #[serde(default)]

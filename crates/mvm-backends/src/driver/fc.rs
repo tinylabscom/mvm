@@ -121,7 +121,7 @@ fn verbosity_token_for(requested: Option<&str>) -> &'static str {
     }
 }
 
-fn fc_base_bootargs(virtiofs_root: bool, has_disk: bool) -> String {
+fn fc_base_bootargs(has_disk: bool) -> String {
     // Serial console + reboot/panic behavior + stable interface naming. The NIC
     // fields the raw Firecracker TAP path appends here are deliberately absent.
     let console = format!(
@@ -129,9 +129,7 @@ fn fc_base_bootargs(virtiofs_root: bool, has_disk: bool) -> String {
         fc_console_verbosity()
     );
     let console = console.as_str();
-    if virtiofs_root {
-        format!("{console} rootfstype=virtiofs root=mvmroot ro init=/init")
-    } else if has_disk {
+    if has_disk {
         // No `root=` declaration here: Firecracker itself appends the
         // authoritative `root=/dev/vda ro|rw` to the boot args from the root
         // drive's `is_root_device`/`is_read_only` flags, so emitting our own
@@ -222,7 +220,7 @@ pub fn fc_config_api_puts(
     let has_disk = spec.initramfs.is_none() && !spec.blocks.is_empty();
     let trimmed = spec.cmdline.trim();
     let cmdline = if trimmed.is_empty() {
-        fc_base_bootargs(false, has_disk)
+        fc_base_bootargs(has_disk)
     } else {
         trimmed.to_string()
     };
@@ -681,8 +679,8 @@ impl VmmDriver for FcDriver {
         }
     }
 
-    fn workload_base_bootargs(&self, virtiofs_root: bool, has_disk: bool) -> String {
-        fc_base_bootargs(virtiofs_root, has_disk)
+    fn workload_base_bootargs(&self, has_disk: bool) -> String {
+        fc_base_bootargs(has_disk)
     }
 
     fn spawn_standby_parent(
@@ -1411,7 +1409,7 @@ mod tests {
     #[test]
     fn workload_base_bootargs_uses_ttys0_and_carries_no_nic_or_other_console() {
         let d = FcDriver::new();
-        let disk = d.workload_base_bootargs(false, true);
+        let disk = d.workload_base_bootargs(true);
         assert!(disk.contains("console=ttyS0"), "got: {disk}");
         // The disk base carries rootwait+init but NO `root=` declaration:
         // Firecracker appends the authoritative `root=/dev/vda ro|rw` from the
@@ -1426,15 +1424,13 @@ mod tests {
         assert!(!disk.contains("ttyAMA0"), "got: {disk}");
 
         // Verity / initramfs base: serial console only, no root/init token.
-        let verity = d.workload_base_bootargs(false, false);
+        let verity = d.workload_base_bootargs(false);
         assert_eq!(verity, "console=ttyS0 quiet reboot=k panic=1 net.ifnames=0");
         assert!(!verity.contains("root="), "got: {verity}");
 
-        // The virtiofs-root variant still uses ttyS0, not another VMM's console.
-        let virtiofs = d.workload_base_bootargs(true, false);
-        assert!(virtiofs.contains("console=ttyS0"), "got: {virtiofs}");
-        assert!(virtiofs.contains("rootfstype=virtiofs"), "got: {virtiofs}");
-        assert!(!virtiofs.contains("mvm.ip="), "got: {virtiofs}");
+        // There is no third shape: Firecracker never served a virtiofs root
+        // and no driver does now, so neither base can name one.
+        assert!(!disk.contains("virtiofs") && !verity.contains("virtiofs"));
     }
 
     #[test]
@@ -1559,7 +1555,7 @@ mod tests {
         let puts = config_puts(&spec);
         let boot = body_for(&puts, "/boot-source");
         assert!(
-            boot.contains(&fc_base_bootargs(false, true)),
+            boot.contains(&fc_base_bootargs(true)),
             "empty cmdline should default to the disk base: {boot}"
         );
         assert!(
@@ -2262,11 +2258,11 @@ mod console_verbosity_tests {
     /// not narrate itself across it.
     #[test]
     fn the_default_firecracker_cmdline_is_quiet() {
-        for (virtiofs_root, has_disk) in [(false, false), (false, true), (true, false)] {
-            let args = fc_base_bootargs(virtiofs_root, has_disk);
+        for has_disk in [false, true] {
+            let args = fc_base_bootargs(has_disk);
             assert!(
                 args.contains("console=ttyS0 quiet"),
-                "boot shape ({virtiofs_root}, {has_disk}) lost the quiet token: {args}"
+                "boot shape (has_disk={has_disk}) lost the quiet token: {args}"
             );
         }
     }
@@ -2276,13 +2272,15 @@ mod console_verbosity_tests {
     #[test]
     fn quiet_is_additive_and_leaves_the_boot_shape_tokens_alone() {
         assert_eq!(
-            fc_base_bootargs(false, true),
+            fc_base_bootargs(true),
             "console=ttyS0 quiet reboot=k panic=1 net.ifnames=0 rootwait init=/init"
         );
+        // The other shape is the verity/initramfs boot, where the initramfs
+        // PID 1 owns root/init selection. The virtiofs-root shape that used to
+        // be here is gone.
         assert_eq!(
-            fc_base_bootargs(true, false),
-            "console=ttyS0 quiet reboot=k panic=1 net.ifnames=0 \
-             rootfstype=virtiofs root=mvmroot ro init=/init"
+            fc_base_bootargs(false),
+            "console=ttyS0 quiet reboot=k panic=1 net.ifnames=0"
         );
     }
 

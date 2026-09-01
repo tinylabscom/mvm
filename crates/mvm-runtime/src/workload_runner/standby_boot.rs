@@ -152,7 +152,6 @@ pub fn factory_parent_config(
         dev_console: _,
         // ── The guest's boot shape: carried verbatim, because a child inherits
         // all of it from the parent's restored memory.
-        virtiofs_root,
         initrd_path,
         verity_path,
         roothash,
@@ -163,11 +162,12 @@ pub fn factory_parent_config(
         mem_initial_mib,
     } = launch;
 
-    let launch_root_strategy = if virtiofs_root.is_some() {
-        RuntimeSourceRootStrategy::VirtiofsRoot
-    } else {
-        RuntimeSourceRootStrategy::BlockExt4
-    };
+    // Every launch resolves a block root now. The comparison is kept rather
+    // than dropped because a standby spec written before that was true is
+    // still on disk, and it records the strategy it was warmed under: a parent
+    // recorded as a virtiofs root must be refused, not claimed by a child that
+    // will boot a different shape out of its restored memory.
+    let launch_root_strategy = RuntimeSourceRootStrategy::BlockExt4;
     if spec.root_strategy != launch_root_strategy {
         return Err(StandbyError::SpawnFailed(format!(
             "standby '{}' records {:?} but its launch resolves {:?}",
@@ -183,7 +183,6 @@ pub fn factory_parent_config(
         cpus: u32::from(spec.vcpus),
         cpu_grant: None,
         memory_mib: spec.mem_mib,
-        virtiofs_root: virtiofs_root.clone(),
         initrd_path: initrd_path.clone(),
         verity_path: verity_path.clone(),
         roothash: roothash.clone(),
@@ -248,7 +247,7 @@ pub fn factory_parent_config(
 pub fn factory_parent_spec(
     config: &VmStartConfig,
     state_dir: &Path,
-    base_bootargs: impl Fn(bool, bool) -> String,
+    base_bootargs: impl Fn(bool) -> String,
 ) -> VmmSpec {
     factory_parent_spec_inner(config, state_dir, base_bootargs, false)
 }
@@ -259,7 +258,7 @@ pub fn factory_parent_spec(
 pub fn factory_parent_spec_live(
     config: &VmStartConfig,
     state_dir: &Path,
-    base_bootargs: impl Fn(bool, bool) -> String,
+    base_bootargs: impl Fn(bool) -> String,
 ) -> VmmSpec {
     factory_parent_spec_inner(config, state_dir, base_bootargs, true)
 }
@@ -267,7 +266,7 @@ pub fn factory_parent_spec_live(
 fn factory_parent_spec_inner(
     config: &VmStartConfig,
     state_dir: &Path,
-    base_bootargs: impl Fn(bool, bool) -> String,
+    base_bootargs: impl Fn(bool) -> String,
     live_handoff: bool,
 ) -> VmmSpec {
     let cmdline = cmdline::runner_cmdline_without_hostname(config, state_dir, base_bootargs);
@@ -327,7 +326,7 @@ mod tests {
     /// the console, and the disk shape adds rootwait/init (never a `root=`
     /// declaration — Firecracker appends the authoritative one from the root
     /// drive's flags).
-    fn fc_base(_virtiofs_root: bool, has_disk: bool) -> String {
+    fn fc_base(has_disk: bool) -> String {
         let console = "console=ttyS0 reboot=k panic=1 net.ifnames=0";
         if has_disk {
             format!("{console} rootwait init=/init")
@@ -380,11 +379,7 @@ mod tests {
             vm_state_dir: dir.join("standby-abc").display().to_string(),
             image_path: Some(launch.rootfs_path.clone()),
             image_sha256: Some("e".repeat(64)),
-            root_strategy: if launch.virtiofs_root.is_some() {
-                mvm_core::vm_backend::RuntimeSourceRootStrategy::VirtiofsRoot
-            } else {
-                mvm_core::vm_backend::RuntimeSourceRootStrategy::BlockExt4
-            },
+            root_strategy: mvm_core::vm_backend::RuntimeSourceRootStrategy::BlockExt4,
             vsock_egress: mvm_vmm::host::egress_shared::effective_vsock_egress(launch),
         }
     }
@@ -456,28 +451,21 @@ mod tests {
     }
 
     #[test]
-    fn virtiofs_parent_boots_the_same_read_only_root_as_the_workload() {
+    fn a_parent_serves_no_shares_because_the_workload_asks_for_none() {
         let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let tree = tmp.path().join("unpacked-oci");
-        std::fs::create_dir(&tree).unwrap();
-        let mut launch = sealed_launch(tmp.path(), home.path());
-        launch.virtiofs_root = Some(tree.display().to_string());
+        let launch = sealed_launch(tmp.path(), home.path());
         let spec = standby_spec_for(&launch, tmp.path());
 
-        assert_eq!(spec.root_strategy, RuntimeSourceRootStrategy::VirtiofsRoot);
+        assert_eq!(spec.root_strategy, RuntimeSourceRootStrategy::BlockExt4);
         let workload = workload_boot(&launch, &tmp.path().join("workload-a"));
         let parent_cfg = factory_parent_config(&launch, &spec).unwrap();
         let parent = factory_parent_spec(&parent_cfg, Path::new(&spec.vm_state_dir), fc_base);
 
+        // The parent must boot the shape its children will be forked from, and
+        // that shape has no host directory in it at all.
         assert_eq!(parent.shares, workload.shares);
-        assert!(
-            parent
-                .shares
-                .iter()
-                .any(|share| share.tag == "mvmroot" && share.host_path == tree),
-            "the parent must serve the same OCI tree the workload requested"
-        );
+        assert!(parent.shares.is_empty());
     }
 
     /// An egress-allowing launch: the parent must boot the same shape cmdline

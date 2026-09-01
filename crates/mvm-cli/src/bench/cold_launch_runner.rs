@@ -795,7 +795,7 @@ tmpfs /tmp tmpfs rw 0 0
     fn the_runner_refuses_mixed_root_filesystem_strategies() {
         let tmp = tempfile::tempdir().unwrap();
         let mut different = sample_for(100.0);
-        different.root_strategy = Some(LaunchRootStrategy::VirtiofsRoot);
+        different.root_strategy = None;
         let mvmctl = fake_mvmctl(tmp.path(), &[sample_for(100.0), different]);
 
         let err = ColdLaunchBench::builder(&mvmctl, LaunchLane::PreparedCold)

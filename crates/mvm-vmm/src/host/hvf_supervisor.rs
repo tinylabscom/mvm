@@ -122,11 +122,6 @@ pub struct HvfSupervisorConfig {
     #[serde(default)]
     pub disks: Vec<HvfDisk>,
     /// When set, serve this host directory (the unpacked+injected OCI tree) to the
-    /// guest as a read-only **virtiofs root** — the Plan-223 dev-tier boot. No
-    /// virtio-blk rootfs is attached; the default cmdline becomes
-    /// `rootfstype=virtiofs root=mvmroot`.
-    #[serde(default)]
-    pub virtiofs_root: Option<PathBuf>,
     /// Read-only live host-directory shares mounted after the image root.
     #[serde(default)]
     pub virtiofs_shares: Vec<HvfVirtioFsShare>,
@@ -279,7 +274,6 @@ mod tests {
                     ephemeral: false,
                 },
             ],
-            virtiofs_root: None,
             virtiofs_shares: vec![],
             vsock: true,
             trusted_builder_egress: false,
@@ -383,7 +377,6 @@ mod tests {
             vcpus: 1,
             initramfs: None,
             disks: vec![],
-            virtiofs_root: None,
             virtiofs_shares: vec![],
             vsock: true,
             trusted_builder_egress: false,

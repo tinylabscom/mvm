@@ -67,11 +67,24 @@ Last updated: 2026-09-01
       workspace tests, zero-warning Clippy, formatting, and policy gates are
       green; live Firecracker/HVF evidence and merge delivery remain.
 
+- [ ] **Remove virtio-fs — `specs/plans/2026-08-31-remove-virtio-fs.md`.**
+      Stage A: `--mount` is materialized into an ext4 image and attached as
+      virtio-blk, and the directory-share capability seam is gone. Stage B: the
+      dev-tier virtio-fs root is deleted end to end — the tier gate, the
+      capability, the launch-config field, the driver bootargs arm, and the HVF
+      device model's root channel including the `MVM_HVF_VIRTIOFS_ROOT` env hook
+      that bypassed the gate. Stage C (the builder VM's `work`/`job`/`out`/
+      `mvm-bins` shares) is unstarted and blocked on deciding how `out` returns
+      artifacts; Stage D (`xtask check-no-virtio-fs`) follows it.
+
 - [ ] **Warm standby image claim repair — issue #3002.**
       `specs/plans/2026-08-28-warm-standby-image-claim.md`.
-      Block and virtiofs roots are distinct standby compatibility shapes, so
-      HVF's read-only OCI dev root can claim only a parent that booted the same
-      device model. The cross-platform witness explicitly warms capacity in the
+      Block and virtiofs roots were distinct standby compatibility shapes, so
+      HVF's read-only OCI dev root could claim only a parent that booted the
+      same device model. The virtiofs root has since been removed
+      (`specs/plans/2026-08-31-remove-virtio-fs.md` Stage B); the compat key
+      still compares the recorded strategy, because a parent warmed before that
+      removal declares its own on disk. The cross-platform witness explicitly warms capacity in the
       artifact-warm home and checks request-state cleanup against a baseline.
       Workspace tests, all-target/all-feature Clippy, Linux- and BDD-gated
       checks, formatting, and policy gates are green. The required eBPF lane's

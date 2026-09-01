@@ -151,8 +151,8 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
                 ),
             };
 
-        let cmdline = cmdline::runner_cmdline(config, &state_dir, |virtiofs_root, has_disk| {
-            self.driver.workload_base_bootargs(virtiofs_root, has_disk)
+        let cmdline = cmdline::runner_cmdline(config, &state_dir, |has_disk| {
+            self.driver.workload_base_bootargs(has_disk)
         });
         if let Some(problem) = cmdline::cmdline_overflow(&cmdline) {
             anyhow::bail!("refusing to start VM {}: {problem}", config.name);

@@ -3,7 +3,8 @@
 Backing: shipped-source
 Validation: check-sprint-append
 
-**Status: IN PROGRESS — Stage A landed except the deletion pass**
+**Status: IN PROGRESS — Stages A and B landed. Stage C (builder VM) is
+unstarted and gated on the `out` decision; Stage D (the gate) follows it.**
 
 No guest gets a virtio-fs device. Not a workload, not the builder VM, not the
 dev-tier root. The host filesystem reaches a guest as a block image or it does
@@ -138,12 +139,20 @@ principle and taken never.
       different initrds. Deleting it outright would have quietly given every
       prebuilt the OCI initrd, and no test would have caught that —
       `only_an_oci_derived_prebuilt_resolves_the_oci_initrd` covers it now.
-- [ ] Delete the machinery below the gate. Larger than it looked: ~117
-      `virtiofs_root` references (the `VmCapabilities` flag, the
-      `VmStartConfig` field, `VIRTIOFS_ROOT_TAG` and the `root=<tag>` cmdline
-      knob, `RootStrategy::VirtiofsRoot`, `select_root_strategy`), plus a
-      *separate* `RuntimeSourceRootStrategy::VirtiofsRoot` that warm-pool
-      compatibility keys on. A pass of its own.
+- [x] Deleted the machinery below the gate, in five units so a mistake is one
+      `git revert`: the driver bootargs arm and `VIRTIOFS_ROOT_TAG`; the
+      `VmStartConfig` field and `workload_shares`; the `VmCapabilities` flag
+      with `select_root_strategy` and `RootStrategy::VirtiofsRoot`; and the HVF
+      device model's root channel — its MMIO slot, the `mvmroot` tag the driver
+      lifted out of the share list, the restore path's inheritance of it, and
+      `MVM_HVF_VIRTIOFS_ROOT`, an env hook in `mvm-hvf-supervisor` that booted
+      a virtio-fs root without going through the run-path gate at all.
+- [x] `RuntimeSourceRootStrategy::VirtiofsRoot` **stays**, deliberately. It is
+      not a boot mode — it is a value recorded on a warm-pool parent's on-disk
+      spec. A parent warmed before this change still declares what it was
+      warmed under, and the compat check has to be able to read that and refuse
+      it. Deleting the variant would turn a clean refusal into a deserialization
+      failure. Nothing produces it.
 
 ### Stage C — the builder VM
 

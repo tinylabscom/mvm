@@ -926,7 +926,7 @@ fn the_cmdline_names_the_overlay_device_the_guest_init_mounts() {
     let cmdline = mvm_vmm::host::cmdline::workload_cmdline(
         &config,
         Path::new("/tmp/mvm-bench-state"),
-        |_virtiofs_root, _has_disk| "console=ttyS0".to_string(),
+        |_has_disk| "console=ttyS0".to_string(),
     )
     .expect("a boot declaring a runtime-source policy carries a cmdline");
 
@@ -950,7 +950,7 @@ fn an_overlay_backed_boot_names_the_overlay_device() {
     let cmdline = mvm_vmm::host::cmdline::workload_cmdline(
         &config,
         Path::new("/tmp/mvm-bench-state"),
-        |_virtiofs_root, _has_disk| "console=ttyS0".to_string(),
+        |_has_disk| "console=ttyS0".to_string(),
     );
 
     // The overlay is the single source of the guest binaries, so a boot that
