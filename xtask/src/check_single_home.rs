@@ -103,7 +103,7 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
          redirects at itself",
     ),
     (
-        "crates/mvm-cli/src/host_binaries/toolchain.rs",
+        "crates/mvm-build/src/embed_toolchain.rs",
         &[Rule::HomeRead],
         "host toolchain discovery (~/.cargo/bin/rustup, mise python installs) lives in the real $HOME",
     ),
