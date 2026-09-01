@@ -124,11 +124,6 @@ pub trait VmmDriver: Send + Sync {
     }
     /// Which of the CI-enforced security claims this VMM's boot path holds.
     fn security_profile(&self) -> BackendSecurityProfile;
-    /// Whether this VMM can attach live read-only host-directory shares.
-    /// Unsupported drivers must fail closed before boot.
-    fn supports_directory_shares(&self) -> bool {
-        false
-    }
     /// Whether a standby claim can hand a resident VMM directly to the child
     /// identity without starting a separate saved-state restore.
     fn supports_resident_handoff(&self) -> bool {

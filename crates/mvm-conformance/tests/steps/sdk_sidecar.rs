@@ -234,6 +234,7 @@ fn read_only_directory_mount(world: &mut CliWorld, guest_path: String) {
         read_only: true,
         kind: VmVolumeKind::DirShare,
         encrypted: false,
+        materialized_image: None,
     });
 }
 
@@ -428,6 +429,7 @@ fn admission_refuses_sidecar(world: &mut CliWorld) {
         read_only: true,
         kind: mvm_core::vm_backend::VmVolumeKind::Disk,
         encrypted: false,
+        materialized_image: None,
     };
     let err = mvm_hostd::plan_admission::enforce_sdk_sidecar_attachment(
         &[smuggled],

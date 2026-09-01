@@ -67,14 +67,10 @@ pub fn workload_blocks(config: &VmStartConfig) -> Vec<BlockDev> {
         blocks.push(ro(overlay_verity, blocks.len() as u8));
     }
 
-    for volume in config
-        .volumes
-        .iter()
-        .filter(|v| matches!(v.kind, VmVolumeKind::Disk))
-    {
+    for volume in config.volumes.iter().filter(|v| v.attaches_as_block()) {
         let slot = blocks.len() as u8;
         blocks.push(BlockDev {
-            source: volume.host.clone().into(),
+            source: volume.block_source().to_string().into(),
             read_only: volume.read_only,
             // A sealed app-dep / user-supplied disk persists to the host file
             // like the rootfs — never RAM-backed, so a writable volume's
@@ -99,7 +95,7 @@ pub fn workload_volume_devices(config: &VmStartConfig) -> Vec<Option<String>> {
     let disk_count = config
         .volumes
         .iter()
-        .filter(|volume| matches!(volume.kind, VmVolumeKind::Disk))
+        .filter(|volume| volume.attaches_as_block())
         .count();
     let first_user_block = blocks.len().saturating_sub(disk_count);
     let mut block_devices = blocks[first_user_block..].iter().map(BlockDev::device_node);
@@ -107,9 +103,12 @@ pub fn workload_volume_devices(config: &VmStartConfig) -> Vec<Option<String>> {
     config
         .volumes
         .iter()
-        .map(|volume| match volume.kind {
-            VmVolumeKind::DirShare => None,
-            VmVolumeKind::Disk => block_devices.next(),
+        .map(|volume| {
+            if volume.attaches_as_block() {
+                block_devices.next()
+            } else {
+                None
+            }
         })
         .collect()
 }
@@ -150,34 +149,13 @@ pub fn ensure_no_dir_share_volumes(config: &VmStartConfig) -> Result<()> {
     if let Some(v) = config
         .volumes
         .iter()
-        .find(|v| matches!(v.kind, VmVolumeKind::DirShare))
+        .find(|v| matches!(v.kind, VmVolumeKind::DirShare) && !v.attaches_as_block())
     {
         bail!(
             "directory-share volume '{}' -> '{}' cannot be attached: the WorkloadRunner has no \
              virtio-fs device yet, so a live host-directory share can't be expressed. Use a \
              disk-image volume instead (host:/guest:SIZE), or run this workload on a backend \
              with virtio-fs support.",
-            v.host,
-            v.guest
-        );
-    }
-    Ok(())
-}
-
-/// Refuse live directory shares when the selected driver cannot express them.
-/// The config-to-spec mapper still carries the shares explicitly so a capable
-/// driver cannot accidentally forget one.
-pub fn ensure_dir_share_support(config: &VmStartConfig, supported: bool) -> Result<()> {
-    if !supported {
-        return ensure_no_dir_share_volumes(config);
-    }
-    if let Some(v) = config
-        .volumes
-        .iter()
-        .find(|v| matches!(v.kind, VmVolumeKind::DirShare) && !v.read_only)
-    {
-        bail!(
-            "directory-share volume '{}' -> '{}' requests read-write access, but this backend only supports read-only virtio-fs shares",
             v.host,
             v.guest
         );
@@ -370,9 +348,9 @@ const HOST_SIGNER_KEY_FILE: &str = "host-signer.ed25519";
 /// virtio-fs host directory shares derived from the launch config.
 ///
 /// A `virtiofs_root` boot produces a single read-only root share tagged
-/// `mvmroot`. Each `DirShare` volume becomes an additional share using the
-/// volume's tag/host path/read_only flags. Backends that cannot attach a
-/// virtio-fs device fail closed when this list is non-empty.
+/// `mvmroot`, and nothing else. A user volume never appears here: a granted
+/// directory is materialized into an image and attached as virtio-blk, so the
+/// only virtio-fs share left in the tree is the dev-tier root.
 pub fn workload_shares(config: &VmStartConfig) -> Vec<VirtioFsShare> {
     let mut shares = Vec::new();
     if let Some(root) = &config.virtiofs_root {
@@ -380,19 +358,6 @@ pub fn workload_shares(config: &VmStartConfig) -> Vec<VirtioFsShare> {
             tag: "mvmroot".into(),
             host_path: root.clone().into(),
             read_only: true,
-            dax: true,
-        });
-    }
-    for (idx, volume) in config
-        .volumes
-        .iter()
-        .enumerate()
-        .filter(|(_, v)| matches!(v.kind, VmVolumeKind::DirShare))
-    {
-        shares.push(VirtioFsShare {
-            tag: format!("uvol{idx}"),
-            host_path: volume.host.clone().into(),
-            read_only: volume.read_only,
             dax: true,
         });
     }
@@ -434,6 +399,107 @@ mod tests {
             rootfs_path: "/img/rootfs.ext4".into(),
             ..Default::default()
         }
+    }
+
+    fn granted_dir(host: &str, guest: &str, image: Option<&str>) -> VmVolume {
+        VmVolume {
+            host: host.into(),
+            guest: guest.into(),
+            read_only: true,
+            kind: VmVolumeKind::DirShare,
+            materialized_image: image.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    fn disk(host: &str, guest: &str) -> VmVolume {
+        VmVolume {
+            host: host.into(),
+            guest: guest.into(),
+            kind: VmVolumeKind::Disk,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_materialized_grant_is_attached_as_a_block_device_and_not_as_a_share() {
+        // The point of the whole change: no virtio-fs device is asked for.
+        let cfg = VmStartConfig {
+            volumes: vec![granted_dir(
+                "/home/me/src",
+                "/work",
+                Some("/state/mount-0.ext4"),
+            )],
+            ..base()
+        };
+        assert!(
+            workload_shares(&cfg).is_empty(),
+            "a materialized grant must not produce a virtio-fs share"
+        );
+        let blocks = workload_blocks(&cfg);
+        assert!(
+            blocks
+                .iter()
+                .any(|b| b.source.as_path() == Path::new("/state/mount-0.ext4")),
+            "the image must be attached as a block device: {blocks:?}"
+        );
+        assert!(
+            !blocks
+                .iter()
+                .any(|b| b.source.as_path() == Path::new("/home/me/src")),
+            "the granted directory itself must never be attached"
+        );
+    }
+
+    #[test]
+    fn a_materialized_grant_resolves_to_the_block_node_the_vmm_created() {
+        // The three sites — block list, slot arithmetic, device mapping — have
+        // to agree. If they drift, the guest mounts a real device that holds
+        // someone else's data, which no error surfaces.
+        let cfg = VmStartConfig {
+            volumes: vec![
+                granted_dir("/src", "/work", Some("/state/mount-0.ext4")),
+                disk("/state/data.ext4", "/data"),
+            ],
+            ..base()
+        };
+        let devices = workload_volume_devices(&cfg);
+        assert_eq!(devices.len(), 2);
+        assert!(
+            devices.iter().all(Option::is_some),
+            "every attached volume resolves to a node: {devices:?}"
+        );
+        assert_ne!(
+            devices[0], devices[1],
+            "two volumes must not resolve to the same guest device"
+        );
+
+        let blocks = workload_blocks(&cfg);
+        let node_of = |src: &str| {
+            blocks
+                .iter()
+                .find(|b| b.source.as_path() == Path::new(src))
+                .map(BlockDev::device_node)
+        };
+        assert_eq!(devices[0], node_of("/state/mount-0.ext4"));
+        assert_eq!(devices[1], node_of("/state/data.ext4"));
+    }
+
+    #[test]
+    fn an_unmaterialized_grant_is_still_refused_rather_than_silently_dropped() {
+        // Nothing produces one now, but the refusal is what makes that true
+        // rather than assumed: a share with no image has no way to reach the
+        // guest, and dropping it would boot a workload without its mount.
+        let cfg = VmStartConfig {
+            volumes: vec![granted_dir("/src", "/work", None)],
+            ..base()
+        };
+        assert!(ensure_no_dir_share_volumes(&cfg).is_err());
+        assert!(
+            workload_blocks(&cfg)
+                .iter()
+                .all(|b| b.source.as_path() != Path::new("/src"))
+        );
     }
 
     #[test]
@@ -502,11 +568,15 @@ mod tests {
         assert!(shares[0].dax);
     }
 
+    /// Neither kind of directory volume produces a share any more — including
+    /// the read-write one, which used to be refused by a separate check rather
+    /// than being unrepresentable.
     #[test]
-    fn dir_share_volumes_map_to_dax_shares_with_read_only_preserved() {
+    fn no_directory_volume_produces_a_share_whatever_its_mode() {
         let cfg = VmStartConfig {
             volumes: vec![
                 VmVolume {
+                    materialized_image: None,
                     host: "/host/rw".into(),
                     guest: "/guest/rw".into(),
                     size: String::new(),
@@ -515,6 +585,7 @@ mod tests {
                     encrypted: false,
                 },
                 VmVolume {
+                    materialized_image: None,
                     host: "/host/ro".into(),
                     guest: "/guest/ro".into(),
                     size: String::new(),
@@ -525,16 +596,9 @@ mod tests {
             ],
             ..base()
         };
-        let shares = workload_shares(&cfg);
-        assert_eq!(shares.len(), 2);
-        assert_eq!(shares[0].tag, "uvol0");
-        assert_eq!(shares[0].host_path, PathBuf::from("/host/rw"));
-        assert!(!shares[0].read_only);
-        assert!(shares[0].dax);
-        assert_eq!(shares[1].tag, "uvol1");
-        assert_eq!(shares[1].host_path, PathBuf::from("/host/ro"));
-        assert!(shares[1].read_only);
-        assert!(shares[1].dax);
+        assert!(workload_shares(&cfg).is_empty());
+        // And an unmaterialized grant still refuses rather than being dropped.
+        assert!(ensure_no_dir_share_volumes(&cfg).is_err());
     }
 
     #[test]
@@ -600,6 +664,7 @@ mod tests {
 
     fn disk_volume(host: &str, guest: &str, read_only: bool) -> mvm_core::vm_backend::VmVolume {
         mvm_core::vm_backend::VmVolume {
+            materialized_image: None,
             host: host.into(),
             guest: guest.into(),
             size: String::new(),
@@ -611,6 +676,7 @@ mod tests {
 
     fn dir_share_volume(host: &str, guest: &str) -> mvm_core::vm_backend::VmVolume {
         mvm_core::vm_backend::VmVolume {
+            materialized_image: None,
             host: host.into(),
             guest: guest.into(),
             size: String::new(),
@@ -800,8 +866,12 @@ mod tests {
         assert_eq!(nodes(&workload_blocks(&cfg)), vec!["/dev/vda"]);
     }
 
+    /// The inverse of what this used to assert, and the property that matters
+    /// now: a user volume never becomes a virtio-fs share. A granted directory
+    /// is materialized into an image and attached as virtio-blk, so the only
+    /// share a workload spec can carry is the dev-tier root.
     #[test]
-    fn a_dir_share_maps_to_a_tagged_virtiofs_device() {
+    fn a_user_volume_never_becomes_a_virtiofs_share() {
         let cfg = VmStartConfig {
             volumes: vec![
                 disk_volume("/vol/data.img", "/data", true),
@@ -810,14 +880,10 @@ mod tests {
             ..base()
         };
         let spec = workload_device_spec(&cfg, "init=/init", Path::new("/tmp/console.log"));
-        assert_eq!(
-            spec.shares,
-            vec![VirtioFsShare {
-                tag: "uvol1".to_string(),
-                host_path: PathBuf::from("/host/dir"),
-                read_only: false,
-                dax: true,
-            }]
+        assert!(
+            spec.shares.is_empty(),
+            "no volume may produce a virtio-fs share: {:?}",
+            spec.shares
         );
     }
 

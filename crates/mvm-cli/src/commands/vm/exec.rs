@@ -1228,15 +1228,10 @@ pub(in crate::commands) fn resolve_launch_image_source(
         rootfs_path: cached.rootfs_path.display().to_string(),
         initrd_path: None,
         label: format!("oci:{}", cached.resolved_digest),
-        // Offer the unpacked+injected tree as a virtiofs-root candidate;
-        // the run-path tier gate (backend cap × prod × sealed) decides.
-        virtiofs_oci_root: cached
+        unpacked_oci_root: cached
             .unpacked_root
             .as_ref()
-            .map(|tree| crate::exec::VirtiofsOciRoot {
-                tree_dir: tree.display().to_string(),
-                prod,
-            }),
+            .map(|tree| tree.display().to_string()),
     })
 }
 
@@ -1273,7 +1268,7 @@ fn resolve_default_image_source(prod: bool) -> Result<crate::exec::ImageSource> 
         rootfs_path,
         initrd_path: None,
         label: "default-microvm".to_string(),
-        virtiofs_oci_root: None,
+        unpacked_oci_root: None,
     })
 }
 
@@ -1331,16 +1326,6 @@ fn build_exec_request(
         &network_policy,
         args.hypervisor.as_deref(),
     )?;
-    // Before the image is resolved. That step can cross-compile the guest
-    // runtime for this checkout — minutes on a cold cache — and none of it
-    // changes whether this backend can serve a `--mount`. `resolve_launch`
-    // checks again for the callers that do not come through here.
-    crate::exec::refuse_unsupported_dir_shares(
-        selected_backend.name(),
-        selected_backend.capabilities().directory_shares,
-        &mounts.dir_shares,
-    )?;
-
     let mut effective_env =
         oci_vsock_proxy_env_for_backend(&selected_backend, image_ref.is_some(), &network_policy);
     effective_env.extend(env_pairs);

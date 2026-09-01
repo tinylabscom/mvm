@@ -81,6 +81,41 @@ pub struct VmVolume {
     /// Fails closed at launch until that lands; never silently
     /// plaintext. Always false for a `DirShare`.
     pub encrypted: bool,
+    /// For a `DirShare`, the ext4 image the granted directory was
+    /// materialized into, which is what the backend actually attaches.
+    ///
+    /// `host` stays the directory that was *granted*, because that is the fact
+    /// an admission record has to carry: a chain entry naming an image under
+    /// `~/.mvm` would not tell a reviewer which host directory a workload was
+    /// given. The grant and its transport are different things, and only the
+    /// first belongs in the audit.
+    ///
+    /// `None` on a `Disk`, whose `host` is already the image.
+    pub materialized_image: Option<String>,
+}
+
+impl VmVolume {
+    /// Whether this volume reaches the guest as a virtio-blk device.
+    ///
+    /// Every volume does, now that a granted directory is delivered as an
+    /// image — but the two arrive at it differently, and three separate places
+    /// (the block list, the slot arithmetic, and the guest device mapping) have
+    /// to agree on which volumes are in that list and in what order. They agree
+    /// by calling this rather than by each matching on `kind`.
+    #[must_use]
+    pub fn attaches_as_block(&self) -> bool {
+        match self.kind {
+            VmVolumeKind::Disk => true,
+            VmVolumeKind::DirShare => self.materialized_image.is_some(),
+        }
+    }
+
+    /// The host file to attach: the materialized image when there is one, the
+    /// `host` path otherwise.
+    #[must_use]
+    pub fn block_source(&self) -> &str {
+        self.materialized_image.as_deref().unwrap_or(&self.host)
+    }
 }
 
 /// Encode user volumes as a kernel-cmdline parameter the guest init
@@ -487,19 +522,6 @@ pub struct VmCapabilities {
     /// non-prod, non-sealed; the virtiofs-root dev path carries a weaker
     /// integrity contract and does **not** witness the verified-boot claim.
     pub virtiofs_root: bool,
-    /// Backend can attach a live host **directory share** — the `--mount`
-    /// flag's `HOST:GUEST:ro` volumes — as a virtio-fs device.
-    ///
-    /// Distinct from [`virtiofs_root`](Self::virtiofs_root), which replaces the
-    /// root filesystem; this one adds a share alongside it. A backend can have
-    /// either without the other.
-    ///
-    /// Declared here, and not only on the driver, because the caller that has
-    /// to refuse a `--mount` holds an `AnyBackend` and never sees the driver.
-    /// Without it the refusal could only happen deep inside the runner's start,
-    /// after the image had been resolved and the VM directory built — work
-    /// discarded to reach a decision that was knowable from the arguments.
-    pub directory_shares: bool,
     /// Which resource dimensions this backend can actually bound. Declared
     /// separately from what a caller requests so a refusal can name the gap.
     #[serde(default)]

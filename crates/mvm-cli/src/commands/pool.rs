@@ -1390,6 +1390,7 @@ mod tests {
         let b = AnyBackend::from_hypervisor("libkrun");
         let mut c = eligible_cfg();
         c.volumes = vec![VmVolume {
+            materialized_image: None,
             host: "/h".into(),
             guest: "/g".into(),
             size: String::new(),
@@ -1530,6 +1531,7 @@ mod tests {
         let ineligible = [("extra volume", {
             let mut c = eligible_cfg();
             c.volumes = vec![VmVolume {
+                materialized_image: None,
                 host: "/h".into(),
                 guest: "/g".into(),
                 size: String::new(),
@@ -1992,7 +1994,7 @@ mod tests {
             rootfs_path: rootfs.display().to_string(),
             initrd_path: None,
             label: "fixture".into(),
-            virtiofs_oci_root: None,
+            unpacked_oci_root: None,
         };
         let policy = mvm_core::network_policy::NetworkPolicy::deny_all();
         let shape = |name: Option<&'static str>| crate::exec::LaunchShape {

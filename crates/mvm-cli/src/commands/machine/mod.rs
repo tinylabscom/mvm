@@ -481,7 +481,7 @@ pub(super) fn local_deployment_image_source(
         rootfs_path: deployment.rootfs.display().to_string(),
         initrd_path: None,
         label: format!("deployment:{}", deployment.directory.display()),
-        virtiofs_oci_root: None,
+        unpacked_oci_root: None,
     })
 }
 
