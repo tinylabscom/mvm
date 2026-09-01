@@ -15,6 +15,7 @@
 //! mutable reference before any network fetch, so a production run cannot
 //! inherit a detected tag — it has to name a digest.
 
+pub use mvm_contract::guest_libc::GuestLibc;
 use serde::{Deserialize, Serialize};
 
 /// One runtime the catalog can recognise.
@@ -26,6 +27,19 @@ pub struct RuntimeEntry {
     pub description: String,
     /// The OCI reference a detected run boots.
     pub image: String,
+    /// The C library `image` is built against.
+    ///
+    /// Declared rather than probed: the catalog pins the reference, so its libc
+    /// is known when the table is written and does not need the image
+    /// materialized to be read. That matters because the SDK sidecar is chosen
+    /// before the rootfs exists, and a guest can only `dlopen` the variant
+    /// matching its own libc.
+    ///
+    /// [`GuestLibc::Unknown`] is the serde default so a catalog written before
+    /// this field deserializes, and it means exactly what it says elsewhere:
+    /// not "assume the common case", but "we cannot say".
+    #[serde(default)]
+    pub libc: GuestLibc,
     /// argv[0] values that select this runtime, e.g. `python`, `python3`, `pip`.
     #[serde(default)]
     pub commands: Vec<String>,
@@ -111,6 +125,14 @@ pub struct Detection {
     pub runtime: String,
     /// The entry's `image`.
     pub image: String,
+    /// The entry's declared `libc`.
+    ///
+    /// Carried onto the detection so the SDK sidecar variant can be chosen
+    /// from it. The choice has to be made before the rootfs is materialized,
+    /// and for a catalogued runtime it can be: the entry pins the reference,
+    /// so its libc is a fact about the table rather than an observation of an
+    /// unpacked tree.
+    pub libc: GuestLibc,
     /// What selected it.
     pub via: DetectedVia,
     /// The entry's declared host-service bindings, validated.
@@ -201,6 +223,7 @@ impl RuntimeEntry {
         Ok(Detection {
             runtime: self.name.clone(),
             image: self.image.clone(),
+            libc: self.libc,
             via,
             services,
             peers,
@@ -216,12 +239,14 @@ impl RuntimeCatalog {
         let entry = |name: &str,
                      description: &str,
                      image: &str,
+                     libc: GuestLibc,
                      commands: &[&str],
                      project_files: &[&str],
                      tags: &[&str]| RuntimeEntry {
             name: name.to_string(),
             description: description.to_string(),
             image: image.to_string(),
+            libc,
             commands: commands.iter().map(|s| s.to_string()).collect(),
             project_files: project_files.iter().map(|s| s.to_string()).collect(),
             tags: tags.iter().map(|s| s.to_string()).collect(),
@@ -240,6 +265,7 @@ impl RuntimeCatalog {
                     "python",
                     "CPython with pip",
                     "python:3.12-alpine",
+                    GuestLibc::Musl,
                     &["python", "python3", "pip", "pip3", "pytest"],
                     &["pyproject.toml", "requirements.txt", "Pipfile", "setup.py"],
                     &["python", "script"],
@@ -248,6 +274,7 @@ impl RuntimeCatalog {
                     "node",
                     "Node.js with npm",
                     "node:22-alpine",
+                    GuestLibc::Musl,
                     &["node", "npm", "npx", "yarn", "pnpm"],
                     &["package.json"],
                     &["node", "javascript", "typescript"],
@@ -256,6 +283,7 @@ impl RuntimeCatalog {
                     "rust",
                     "Rust toolchain with cargo",
                     "rust:1-alpine",
+                    GuestLibc::Musl,
                     &["cargo", "rustc"],
                     &["Cargo.toml"],
                     &["rust", "compiled"],
@@ -264,6 +292,7 @@ impl RuntimeCatalog {
                     "go",
                     "Go toolchain",
                     "golang:1-alpine",
+                    GuestLibc::Musl,
                     &["go", "gofmt"],
                     &["go.mod"],
                     &["go", "compiled"],
@@ -272,6 +301,7 @@ impl RuntimeCatalog {
                     "ruby",
                     "Ruby with bundler",
                     "ruby:3-alpine",
+                    GuestLibc::Musl,
                     &["ruby", "bundle", "rake", "gem"],
                     &["Gemfile", "Rakefile"],
                     &["ruby", "script"],
@@ -280,6 +310,7 @@ impl RuntimeCatalog {
                     "shell",
                     "POSIX shell and core utilities",
                     "alpine:3",
+                    GuestLibc::Musl,
                     &["sh", "bash", "ash"],
                     &[],
                     &["shell", "minimal"],
@@ -563,6 +594,7 @@ mod tests {
             name: "svc".to_string(),
             description: "test".to_string(),
             image: "example:1".to_string(),
+            libc: GuestLibc::Musl,
             commands: vec!["svc".to_string()],
             project_files: vec!["svc.toml".to_string()],
             tags: Vec::new(),
@@ -575,6 +607,49 @@ mod tests {
         RuntimeCatalog {
             schema_version: 1,
             entries: vec![entry],
+        }
+    }
+
+    /// Every catalogued runtime states the libc of the image it pins.
+    ///
+    /// The sidecar variant is chosen from this, before the rootfs exists, so an
+    /// entry that leaves it `Unknown` silently costs its users `--host-service`
+    /// entirely: `Unknown` is refused rather than guessed. Adding a runtime
+    /// means saying which libc its image carries.
+    #[test]
+    fn every_builtin_runtime_declares_its_libc() {
+        for entry in RuntimeCatalog::builtin().entries {
+            assert_ne!(
+                entry.libc,
+                GuestLibc::Unknown,
+                "runtime '{}' ({}) must declare the libc of the image it pins",
+                entry.name,
+                entry.image
+            );
+        }
+    }
+
+    /// The declaration is only worth having if it matches the image. Every
+    /// pinned reference today is Alpine, which is musl; a future glibc entry
+    /// should fail this and be given its own arm rather than silently inherit.
+    #[test]
+    fn the_declared_libc_matches_the_pinned_image() {
+        for entry in RuntimeCatalog::builtin().entries {
+            assert!(
+                entry.image.contains("alpine"),
+                "runtime '{}' pins {}, which is not Alpine — state its libc \
+                 deliberately rather than letting this test assume musl",
+                entry.name,
+                entry.image
+            );
+            assert_eq!(
+                entry.libc,
+                GuestLibc::Musl,
+                "runtime '{}' pins the Alpine image {} but declares {}",
+                entry.name,
+                entry.image,
+                entry.libc
+            );
         }
     }
 

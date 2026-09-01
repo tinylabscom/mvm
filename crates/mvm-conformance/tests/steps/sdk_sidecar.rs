@@ -21,6 +21,13 @@ use crate::world::CliWorld;
 
 const FIXTURE_VERSION: &str = "1.2.3";
 
+/// The variant these scenarios stage and resolve.
+///
+/// The published release carries one archive per architecture, built against
+/// glibc, so the acquire-and-boot scenario is only meaningful for that variant
+/// — asking for the other is refused before any transport runs.
+const SCENARIO_LIBC: GuestLibc = GuestLibc::Glibc;
+
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(bytes))
@@ -56,7 +63,12 @@ fn cache_root(world: &mut CliWorld) -> std::path::PathBuf {
 
 fn layout(world: &mut CliWorld) -> SdkSidecarLayout {
     let root = cache_root(world);
-    SdkSidecarLayout::under(&root, FIXTURE_VERSION, &GuestArch::host().to_string())
+    SdkSidecarLayout::under(
+        &root,
+        FIXTURE_VERSION,
+        &GuestArch::host().to_string(),
+        SCENARIO_LIBC,
+    )
 }
 
 #[given(expr = "a verified SDK sidecar in the cache")]
@@ -183,17 +195,23 @@ fn acquire_sidecar_from_release(world: &mut CliWorld) {
     env.set(mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
 
     world.sdk_sidecar_result = Some(
-        mvm_build::sdk_sidecar::download_sdk_sidecar(FIXTURE_VERSION, GuestArch::host(), &cache)
+        mvm_build::sdk_sidecar::download_sdk_sidecar(
+            FIXTURE_VERSION,
+            GuestArch::host(),
+            SCENARIO_LIBC,
+            &cache,
+        )
+        .map_err(|e| format!("{e:#}"))
+        .and_then(|_installed| {
+            let resolver = SdkSidecarResolver::new(cache.clone(), FIXTURE_VERSION.to_string());
+            mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(
+                &services,
+                &resolver,
+                GuestArch::host(),
+                SCENARIO_LIBC,
+            )
             .map_err(|e| format!("{e:#}"))
-            .and_then(|_installed| {
-                let resolver = SdkSidecarResolver::new(cache.clone(), FIXTURE_VERSION.to_string());
-                mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(
-                    &services,
-                    &resolver,
-                    GuestArch::host(),
-                )
-                .map_err(|e| format!("{e:#}"))
-            }),
+        }),
     );
 }
 
@@ -248,6 +266,7 @@ fn resolve_sidecar(world: &mut CliWorld) {
             &services,
             &resolver,
             GuestArch::host(),
+            SCENARIO_LIBC,
         )
         .map_err(|e| format!("{e:#}")),
     );

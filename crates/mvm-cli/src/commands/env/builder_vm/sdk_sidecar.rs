@@ -10,6 +10,7 @@ pub(crate) fn build_sdk_sidecar_from_checkout(
     cache_root: &std::path::Path,
     version: &str,
     arch: mvm_core::arch::GuestArch,
+    libc: mvm_contract::guest_libc::GuestLibc,
     verbose: bool,
 ) -> Result<mvm_fs::sdk_sidecar::SdkSidecarArtifact> {
     if arch != mvm_core::arch::GuestArch::host() {
@@ -45,7 +46,7 @@ pub(crate) fn build_sdk_sidecar_from_checkout(
 
     let request =
         super::stage0_artifact::Stage0ArtifactBuild::builder(workspace_root, &staging_dir)
-            .build_attr("sdk-sidecar-image")
+            .build_attr(sidecar_build_attr(libc))
             .output_mode("sdk-sidecar")
             .verbose(verbose)
             .build()?;
@@ -56,7 +57,7 @@ pub(crate) fn build_sdk_sidecar_from_checkout(
                 "Building SDK sidecar for {arch} in the HVF builder from {}...",
                 workspace_root.display()
             ));
-            build_sdk_sidecar_via_hvf(workspace_root, &staging_dir, arch)
+            build_sdk_sidecar_via_hvf(workspace_root, &staging_dir, arch, libc)
         } else {
             ui::info(&format!(
                 "Building SDK sidecar for {arch} via Stage 0 from {}...",
@@ -74,6 +75,7 @@ pub(crate) fn build_sdk_sidecar_from_checkout(
         cache_root,
         version,
         arch,
+        libc,
         &fingerprint,
     )
     .context("validating and installing the source-built SDK sidecar");
@@ -81,11 +83,27 @@ pub(crate) fn build_sdk_sidecar_from_checkout(
     installed
 }
 
+/// The runtime-overlay flake attribute that builds `libc`'s sidecar image.
+///
+/// The glibc attribute is unsuffixed because it was the only one when the
+/// output was named; the musl one carries the suffix the flake exposes.
+/// `Unknown` cannot reach here — the build command enumerates the variants it
+/// knows — so it maps to glibc rather than growing a fallible return for a
+/// case the type permits and the caller cannot produce.
+#[cfg(feature = "builder-vm")]
+fn sidecar_build_attr(libc: mvm_contract::guest_libc::GuestLibc) -> &'static str {
+    match libc {
+        mvm_contract::guest_libc::GuestLibc::Musl => "sdk-sidecar-image-musl",
+        _ => "sdk-sidecar-image",
+    }
+}
+
 #[cfg(feature = "builder-vm")]
 fn build_sdk_sidecar_via_hvf(
     workspace_root: &std::path::Path,
     staging_dir: &std::path::Path,
     arch: mvm_core::arch::GuestArch,
+    libc: mvm_contract::guest_libc::GuestLibc,
 ) -> Result<()> {
     let (kernel, rootfs, closure_nar) =
         crate::commands::build::hvf_builder_image::resolve_hvf_builder_image()
@@ -93,7 +111,7 @@ fn build_sdk_sidecar_via_hvf(
     let job = mvm_build::libkrun_builder::BuilderShellJob {
         work_dir: workspace_root.to_path_buf(),
         artifact_out: staging_dir.to_path_buf(),
-        script: sdk_sidecar_builder_script(arch),
+        script: sdk_sidecar_builder_script(arch, libc),
         extra_disks: Vec::new(),
     };
     mvm_runtime::builder_runner::hvf_builder::HvfBuilderVm::new(kernel, rootfs)
@@ -116,7 +134,11 @@ fn build_sdk_sidecar_via_hvf(
 /// workspace and evaluates the flake inside it, so the walk lands where the
 /// flake expects and the copy stays immutable.
 #[cfg(feature = "builder-vm")]
-fn sdk_sidecar_builder_script(arch: mvm_core::arch::GuestArch) -> String {
+fn sdk_sidecar_builder_script(
+    arch: mvm_core::arch::GuestArch,
+    libc: mvm_contract::guest_libc::GuestLibc,
+) -> String {
+    let attr = sidecar_build_attr(libc);
     let image = mvm_fs::sdk_sidecar::SDK_SIDECAR_IMAGE_FILE;
     let version = mvm_fs::sdk_sidecar::SDK_SIDECAR_VERSION_FILE;
     let checksums = mvm_fs::overlay::CHECKSUM_MANIFEST_FILE;
@@ -134,7 +156,7 @@ build-users-group =
 substituters = https://cache.nixos.org/
 trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY='
 mkdir -p "$XDG_CACHE_HOME" "$XDG_STATE_HOME"
-out=$(/sbin/nix build 'path:/work?dir=nix/images/builder-vm#packages.{arch}-linux.sdk-sidecar-image' \
+out=$(/sbin/nix build 'path:/work?dir=nix/images/builder-vm#packages.{arch}-linux.{attr}' \
   --no-link --print-out-paths --no-write-lock-file --impure --print-build-logs)
 test -n "$out"
 for name in '{image}' '{version}' '{checksums}'; do
@@ -153,7 +175,10 @@ mod tests {
 
     #[test]
     fn hvf_builder_script_copies_the_complete_sidecar_contract() {
-        let script = sdk_sidecar_builder_script(mvm_core::arch::GuestArch::X86_64);
+        let script = sdk_sidecar_builder_script(
+            mvm_core::arch::GuestArch::X86_64,
+            mvm_contract::guest_libc::GuestLibc::Glibc,
+        );
 
         assert!(script.contains("packages.x86_64-linux.sdk-sidecar-image"));
         for name in ["sdk.ext4", "VERSION", "checksums-sha256.txt"] {
@@ -175,7 +200,8 @@ mod tests {
             mvm_core::arch::GuestArch::X86_64,
             mvm_core::arch::GuestArch::Aarch64,
         ] {
-            let script = sdk_sidecar_builder_script(arch);
+            let script =
+                sdk_sidecar_builder_script(arch, mvm_contract::guest_libc::GuestLibc::Glibc);
             assert!(
                 script.contains(&format!(
                     "'path:/work?dir=nix/images/builder-vm#packages.{arch}-linux.sdk-sidecar-image'"

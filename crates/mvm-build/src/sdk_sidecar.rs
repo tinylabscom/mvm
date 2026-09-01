@@ -16,6 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::guest_libc::GuestLibc;
 use mvm_core::arch::GuestArch;
 use thiserror::Error;
 
@@ -98,7 +99,32 @@ pub enum SdkSidecarBuildError {
         /// Human-readable description of the problem.
         reason: String,
     },
+
+    /// A variant was asked for that the published release does not carry.
+    #[error(
+        "the published release carries no {requested} SDK sidecar for {arch} \
+         (it publishes one archive per architecture, built against {published}); \
+         build it from a source checkout instead"
+    )]
+    VariantNotPublished {
+        /// The libc the caller asked for.
+        requested: GuestLibc,
+        /// The libc the published archive is actually built against.
+        published: GuestLibc,
+        /// The architecture the caller asked for.
+        arch: GuestArch,
+    },
 }
+
+/// The libc the published sidecar archive is built against.
+///
+/// The release workflow builds the runtime overlay's unsuffixed
+/// `sdk-sidecar-image` attribute and publishes exactly one
+/// `sdk-sidecar-<arch>.tar.gz` per architecture. Nothing in the asset name
+/// records which variant that is, so this constant is the only place the
+/// coupling is written down: change the attribute the release builds and this
+/// must change with it.
+const PUBLISHED_SIDECAR_LIBC: GuestLibc = GuestLibc::Glibc;
 
 /// Download the SDK sidecar for `version` + `arch` from the published release,
 /// verify it, and install it under `<cache_root>/sdk-sidecar/<version>/<arch>/`.
@@ -131,8 +157,23 @@ pub enum SdkSidecarBuildError {
 pub fn download_sdk_sidecar(
     version: &str,
     arch: GuestArch,
+    libc: GuestLibc,
     cache_root: &Path,
 ) -> Result<SdkSidecarArtifact, SdkSidecarBuildError> {
+    // Refused before the first byte moves, because the failure this guards is
+    // silent: the release asset name carries no libc, so a mismatched download
+    // would verify, install under the requested key and resolve — handing the
+    // guest a cdylib it cannot `dlopen`. That is the failure the libc-keyed
+    // cache exists to prevent, and laundering it through a mislabelled entry
+    // would be worse than not keying at all.
+    if libc != PUBLISHED_SIDECAR_LIBC {
+        return Err(SdkSidecarBuildError::VariantNotPublished {
+            requested: libc,
+            published: PUBLISHED_SIDECAR_LIBC,
+            arch,
+        });
+    }
+
     let arch_dir = arch.to_string();
     let names = SdkSidecarArtifactNames::for_arch(&arch_dir);
     let base = crate::runtime_overlay::release_base_url(version);
@@ -172,11 +213,11 @@ pub fn download_sdk_sidecar(
     )?;
     verify_sidecar_dir_integrity(&extracted)?;
 
-    install_sidecar_into_cache(&extracted, cache_root, version, &arch_dir)?;
+    install_sidecar_into_cache(&extracted, cache_root, version, &arch_dir, libc)?;
 
     Ok(
         SdkSidecarResolver::new(cache_root.to_path_buf(), version.to_string())
-            .resolve(&arch_dir)?,
+            .resolve(&arch_dir, libc)?,
     )
 }
 
@@ -191,8 +232,9 @@ pub fn install_sidecar_into_cache(
     cache_root: &Path,
     version: &str,
     arch: &str,
+    libc: GuestLibc,
 ) -> Result<SdkSidecarLayout, SdkSidecarBuildError> {
-    install_sidecar_with_fingerprint(source, cache_root, version, arch, None)
+    install_sidecar_with_fingerprint(source, cache_root, version, arch, libc, None)
 }
 
 /// Install a sidecar produced from the current checkout and publish its source
@@ -206,6 +248,7 @@ pub fn install_source_built_sidecar(
     cache_root: &Path,
     version: &str,
     arch: GuestArch,
+    libc: GuestLibc,
     fingerprint: &str,
 ) -> Result<SdkSidecarArtifact, SdkSidecarBuildError> {
     if fingerprint.trim().is_empty() {
@@ -229,11 +272,12 @@ pub fn install_source_built_sidecar(
         cache_root,
         version,
         &arch_dir,
+        libc,
         Some(fingerprint.trim()),
     )?;
     Ok(
         SdkSidecarResolver::new(cache_root.to_path_buf(), version.to_string())
-            .resolve(&arch_dir)?,
+            .resolve(&arch_dir, libc)?,
     )
 }
 
@@ -242,9 +286,10 @@ fn install_sidecar_with_fingerprint(
     cache_root: &Path,
     version: &str,
     arch: &str,
+    libc: GuestLibc,
     fingerprint: Option<&str>,
 ) -> Result<SdkSidecarLayout, SdkSidecarBuildError> {
-    let layout = SdkSidecarLayout::under(cache_root, version, arch);
+    let layout = SdkSidecarLayout::under(cache_root, version, arch, libc);
     let parent =
         layout
             .artifact_dir
@@ -339,9 +384,10 @@ pub fn record_source_fingerprint(
     cache_root: &Path,
     version: &str,
     arch: GuestArch,
+    libc: GuestLibc,
     fingerprint: &str,
 ) -> std::io::Result<()> {
-    let layout = SdkSidecarLayout::under(cache_root, version, &arch.to_string());
+    let layout = SdkSidecarLayout::under(cache_root, version, &arch.to_string(), libc);
     std::fs::create_dir_all(&layout.artifact_dir)?;
     std::fs::write(
         layout.artifact_dir.join(LOCAL_SOURCE_FINGERPRINT_FILE),
@@ -359,9 +405,10 @@ pub fn cached_sidecar_provenance(
     cache_root: &Path,
     version: &str,
     arch: GuestArch,
+    libc: GuestLibc,
     workspace_root: &Path,
 ) -> Result<SidecarProvenance, SdkSidecarBuildError> {
-    let layout = SdkSidecarLayout::under(cache_root, version, &arch.to_string());
+    let layout = SdkSidecarLayout::under(cache_root, version, &arch.to_string(), libc);
     let recorded = std::fs::read_to_string(layout.artifact_dir.join(LOCAL_SOURCE_FINGERPRINT_FILE));
     let Ok(recorded) = recorded else {
         return Ok(SidecarProvenance::Published);
@@ -386,13 +433,14 @@ pub fn cached_sidecar_provenance(
 pub fn resolve_or_seed_from_default_cache(
     resolver: &SdkSidecarResolver,
     arch: GuestArch,
+    libc: GuestLibc,
 ) -> Result<SdkSidecarArtifact, SdkSidecarBuildError> {
     let arch_dir = arch.to_string();
-    match resolver.resolve(&arch_dir) {
+    match resolver.resolve(&arch_dir, libc) {
         Ok(artifact) => Ok(artifact),
         Err(initial_error) => {
-            if seed_from_default_cache(resolver, &arch_dir)? {
-                return Ok(resolver.resolve(&arch_dir)?);
+            if seed_from_default_cache(resolver, &arch_dir, libc)? {
+                return Ok(resolver.resolve(&arch_dir, libc)?);
             }
             Err(initial_error.into())
         }
@@ -402,6 +450,7 @@ pub fn resolve_or_seed_from_default_cache(
 fn seed_from_default_cache(
     resolver: &SdkSidecarResolver,
     arch_dir: &str,
+    libc: GuestLibc,
 ) -> Result<bool, SdkSidecarBuildError> {
     let version = resolver.expected_version().to_string();
     let target_root = resolver.cache_root().to_path_buf();
@@ -410,9 +459,11 @@ fn seed_from_default_cache(
         &crate::cache_install::default_cache_root(),
         |root| {
             SdkSidecarResolver::new(root.to_path_buf(), version.clone())
-                .resolve(arch_dir)
+                .resolve(arch_dir, libc)
                 .ok()
-                .map(|artifact| SdkSidecarLayout::under(root, &artifact.version, &artifact.arch))
+                .map(|artifact| {
+                    SdkSidecarLayout::under(root, &artifact.version, &artifact.arch, artifact.libc)
+                })
         },
         |source| {
             install_sidecar_into_cache(
@@ -420,6 +471,7 @@ fn seed_from_default_cache(
                 &target_root,
                 &source.version,
                 &source.arch,
+                source.libc,
             )
             .map(|_| ())
         },
@@ -511,6 +563,7 @@ mod tests {
             cache.path(),
             FIXTURE_VERSION,
             &GuestArch::host().to_string(),
+            GuestLibc::Musl,
         );
         std::fs::create_dir_all(&layout.artifact_dir).unwrap();
 
@@ -519,6 +572,7 @@ mod tests {
                 cache.path(),
                 FIXTURE_VERSION,
                 GuestArch::host(),
+                GuestLibc::Musl,
                 checkout.path(),
             )
             .unwrap(),
@@ -542,6 +596,7 @@ mod tests {
             cache.path(),
             FIXTURE_VERSION,
             GuestArch::host(),
+            GuestLibc::Musl,
             &fingerprint,
         )
         .unwrap();
@@ -551,6 +606,7 @@ mod tests {
                 cache.path(),
                 FIXTURE_VERSION,
                 GuestArch::host(),
+                GuestLibc::Musl,
                 checkout.path(),
             )
             .unwrap(),
@@ -569,6 +625,7 @@ mod tests {
                 cache.path(),
                 FIXTURE_VERSION,
                 GuestArch::host(),
+                GuestLibc::Musl,
                 checkout.path(),
             )
             .unwrap(),
@@ -590,12 +647,13 @@ mod tests {
             cache.path(),
             FIXTURE_VERSION,
             GuestArch::host(),
+            GuestLibc::Musl,
             "source-digest",
         )
         .expect("install source-built sidecar");
 
         assert_eq!(artifact.version, FIXTURE_VERSION);
-        let layout = layout_of(cache.path());
+        let layout = layout_of(cache.path(), GuestLibc::Musl);
         assert_eq!(
             std::fs::read_to_string(layout.artifact_dir.join(LOCAL_SOURCE_FINGERPRINT_FILE))
                 .unwrap(),
@@ -618,6 +676,7 @@ mod tests {
             cache.path(),
             FIXTURE_VERSION,
             &GuestArch::host().to_string(),
+            GuestLibc::Musl,
         )
         .expect("seed existing cache");
 
@@ -626,6 +685,7 @@ mod tests {
             cache.path(),
             FIXTURE_VERSION,
             GuestArch::host(),
+            GuestLibc::Musl,
             "source-digest",
         )
         .expect_err("wrong VERSION must be rejected before promotion");
@@ -635,7 +695,7 @@ mod tests {
             "{error}"
         );
         assert_eq!(
-            std::fs::read(layout_of(cache.path()).image).unwrap(),
+            std::fs::read(layout_of(cache.path(), GuestLibc::Musl).image).unwrap(),
             old_image
         );
     }
@@ -651,6 +711,7 @@ mod tests {
             cache.path(),
             FIXTURE_VERSION,
             GuestArch::host(),
+            GuestLibc::Musl,
             "  ",
         )
         .expect_err("empty provenance must not be published");
@@ -659,7 +720,11 @@ mod tests {
             error.to_string().contains("fingerprint is empty"),
             "{error}"
         );
-        assert!(!layout_of(cache.path()).artifact_dir.exists());
+        assert!(
+            !layout_of(cache.path(), GuestLibc::Musl)
+                .artifact_dir
+                .exists()
+        );
     }
 
     fn append_file<W: std::io::Write>(tar: &mut tar::Builder<W>, path: &str, bytes: &[u8]) {
@@ -780,7 +845,8 @@ mod tests {
     ) -> Result<SdkSidecarArtifact, String> {
         env.set("MVM_OVERLAY_BASE_URL", fixture.base_url());
         env.set(crate::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
-        download_sdk_sidecar(FIXTURE_VERSION, GuestArch::host(), cache).map_err(|e| format!("{e}"))
+        download_sdk_sidecar(FIXTURE_VERSION, GuestArch::host(), GuestLibc::Glibc, cache)
+            .map_err(|e| format!("{e}"))
     }
 
     /// Same, but with the signature rung live — so a test can prove the
@@ -792,17 +858,65 @@ mod tests {
     ) -> Result<SdkSidecarArtifact, String> {
         env.set("MVM_OVERLAY_BASE_URL", fixture.base_url());
         env.remove(crate::release_signature::SKIP_COSIGN_VERIFY_ENV);
-        download_sdk_sidecar(FIXTURE_VERSION, GuestArch::host(), cache).map_err(|e| format!("{e}"))
+        download_sdk_sidecar(FIXTURE_VERSION, GuestArch::host(), GuestLibc::Glibc, cache)
+            .map_err(|e| format!("{e}"))
     }
 
-    fn layout_of(cache: &Path) -> SdkSidecarLayout {
-        SdkSidecarLayout::under(cache, FIXTURE_VERSION, &GuestArch::host().to_string())
+    /// The release asset name carries no libc, so a musl request would have
+    /// downloaded the glibc archive, verified it, installed it under the musl
+    /// key and resolved — handing a musl guest a cdylib it cannot `dlopen`.
+    /// The refusal has to come before the transport runs, or a mislabelled
+    /// entry is already on disk by the time anyone notices.
+    #[test]
+    fn an_unpublished_variant_is_refused_before_any_transport() {
+        let mut env = TestEnv::new();
+        let cache_dir = tempfile::tempdir().expect("tempdir");
+        let cache = cache_dir.path();
+        // Unreachable on purpose: reaching it at all is the failure.
+        env.set("MVM_OVERLAY_BASE_URL", "http://127.0.0.1:1/never");
+        env.set(crate::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
+
+        let err = download_sdk_sidecar(FIXTURE_VERSION, GuestArch::host(), GuestLibc::Musl, cache)
+            .expect_err("the published release carries no musl sidecar");
+
+        assert!(
+            matches!(
+                err,
+                SdkSidecarBuildError::VariantNotPublished {
+                    requested: GuestLibc::Musl,
+                    published: GuestLibc::Glibc,
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        assert!(
+            !SdkSidecarLayout::under(
+                cache,
+                FIXTURE_VERSION,
+                &GuestArch::host().to_string(),
+                GuestLibc::Musl,
+            )
+            .artifact_dir
+            .exists(),
+            "a refused download must leave nothing a resolver could pick up"
+        );
+    }
+
+    /// The cache layout a test staged, for the variant it staged.
+    ///
+    /// The libc is a parameter rather than a constant because this module
+    /// covers two acquisition paths that no longer agree on one: a source
+    /// build populates whichever variant it was asked for, while a download
+    /// can only ever install the one the release publishes.
+    fn layout_of(cache: &Path, libc: GuestLibc) -> SdkSidecarLayout {
+        SdkSidecarLayout::under(cache, FIXTURE_VERSION, &GuestArch::host().to_string(), libc)
     }
 
     /// Nothing a resolver could ever pick up was left behind — the only thing
     /// allowed to remain is an abandoned staging directory.
     fn assert_cache_holds_no_artifact(cache: &Path) {
-        let layout = layout_of(cache);
+        let layout = layout_of(cache, PUBLISHED_SIDECAR_LIBC);
         assert!(
             !layout.artifact_dir.exists(),
             "a refused download must leave no artifact dir at {}",
@@ -810,7 +924,7 @@ mod tests {
         );
         assert!(
             SdkSidecarResolver::new(cache.to_path_buf(), FIXTURE_VERSION.to_string())
-                .resolve(&GuestArch::host().to_string())
+                .resolve(&GuestArch::host().to_string(), PUBLISHED_SIDECAR_LIBC)
                 .is_err(),
             "a refused download must leave nothing the resolver accepts"
         );
@@ -882,7 +996,7 @@ mod tests {
         let artifact =
             download_from(&mut env, &fixture, cache.path()).expect("a sound release installs");
 
-        let layout = layout_of(cache.path());
+        let layout = layout_of(cache.path(), PUBLISHED_SIDECAR_LIBC);
         assert_eq!(artifact.image, layout.image);
         assert_eq!(artifact.version, FIXTURE_VERSION);
         assert_eq!(artifact.arch, GuestArch::host().to_string());
@@ -894,7 +1008,7 @@ mod tests {
         // The installed bytes satisfy the same contract the launch path
         // enforces — the transport cannot widen it.
         SdkSidecarResolver::new(cache.path().to_path_buf(), FIXTURE_VERSION.to_string())
-            .resolve(&GuestArch::host().to_string())
+            .resolve(&GuestArch::host().to_string(), PUBLISHED_SIDECAR_LIBC)
             .expect("the installed entry must resolve");
     }
 
@@ -1045,7 +1159,7 @@ mod tests {
     #[test]
     fn a_crash_between_stage_and_rename_leaves_no_partial_artifact() {
         let cache = tempfile::tempdir().unwrap();
-        let layout = layout_of(cache.path());
+        let layout = layout_of(cache.path(), PUBLISHED_SIDECAR_LIBC);
         let source = tempfile::tempdir().unwrap();
         let image = sidecar_ext4_bytes();
         let version_text = format!("{FIXTURE_VERSION}\n");
@@ -1082,7 +1196,7 @@ mod tests {
         // resolver's point of view.
         promote_staging(&staging, &layout.artifact_dir).expect("promotion must succeed");
         SdkSidecarResolver::new(cache.path().to_path_buf(), FIXTURE_VERSION.to_string())
-            .resolve(&layout.arch)
+            .resolve(&layout.arch, PUBLISHED_SIDECAR_LIBC)
             .expect("the promoted entry resolves");
     }
 
@@ -1094,7 +1208,7 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         let fixture = ReleaseFixture::sound();
         download_from(&mut env, &fixture, cache.path()).expect("first install");
-        let layout = layout_of(cache.path());
+        let layout = layout_of(cache.path(), PUBLISHED_SIDECAR_LIBC);
         std::fs::write(layout.artifact_dir.join("stale-residue"), b"x").unwrap();
 
         download_from(&mut env, &fixture, cache.path()).expect("second install");

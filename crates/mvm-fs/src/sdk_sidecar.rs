@@ -16,6 +16,7 @@
 //! Verification reuses [`crate::overlay`]'s manifest parser and digest helper
 //! rather than growing a second copy.
 
+use mvm_contract::guest_libc::GuestLibc;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -142,16 +143,28 @@ pub struct SdkSidecarLayout {
     pub arch: String,
     /// Version segment of the layout.
     pub version: String,
+    /// The libc the cached cdylib is built against.
+    pub libc: GuestLibc,
 }
 
 impl SdkSidecarLayout {
-    /// Compute the canonical layout for `(version, arch)` under `cache_root`.
+    /// Compute the canonical layout for `(version, arch, libc)` under
+    /// `cache_root`.
+    ///
+    /// The libc is a path segment rather than a field on one shared directory
+    /// because the two variants are different artifacts, not two encodings of
+    /// one: they carry different objects and different bundled libraries, and
+    /// they verify against different manifests. Keying the directory on it is
+    /// what stops the resolver handing back a sidecar the guest cannot
+    /// `dlopen` — a failure that otherwise surfaces inside the guest as a
+    /// relocation error naming a symbol the operator never asked for.
     #[must_use]
-    pub fn under(cache_root: &Path, version: &str, arch: &str) -> Self {
+    pub fn under(cache_root: &Path, version: &str, arch: &str, libc: GuestLibc) -> Self {
         let artifact_dir = cache_root
             .join(SDK_SIDECAR_CACHE_DIR)
             .join(version)
-            .join(arch);
+            .join(arch)
+            .join(libc.as_str());
         Self {
             image: artifact_dir.join(SDK_SIDECAR_IMAGE_FILE),
             version_file: artifact_dir.join(SDK_SIDECAR_VERSION_FILE),
@@ -159,6 +172,7 @@ impl SdkSidecarLayout {
             artifact_dir,
             arch: arch.to_string(),
             version: version.to_string(),
+            libc,
         }
     }
 }
@@ -176,6 +190,8 @@ pub struct SdkSidecarArtifact {
     pub arch: String,
     /// Version read from the artifact's `VERSION` file.
     pub version: String,
+    /// The libc this artifact's cdylib is built against.
+    pub libc: GuestLibc,
 }
 
 /// Resolver for the sidecar cache: cache root plus the version cached artifacts
@@ -210,10 +226,10 @@ impl SdkSidecarResolver {
         &self.expected_version
     }
 
-    /// Compute the cache layout for `arch` without doing any I/O.
+    /// Compute the cache layout for `(arch, libc)` without doing any I/O.
     #[must_use]
-    pub fn layout(&self, arch: &str) -> SdkSidecarLayout {
-        SdkSidecarLayout::under(&self.cache_root, &self.expected_version, arch)
+    pub fn layout(&self, arch: &str, libc: GuestLibc) -> SdkSidecarLayout {
+        SdkSidecarLayout::under(&self.cache_root, &self.expected_version, arch, libc)
     }
 
     /// Find and verify the sidecar artifact in cache.
@@ -222,8 +238,12 @@ impl SdkSidecarResolver {
     /// expected version; every canonical file matches its manifest digest; the
     /// ext4 payload carries the cdylib the SDKs load. Fails closed on every
     /// other path — there is no partial or degraded attachment.
-    pub fn resolve(&self, arch: &str) -> Result<SdkSidecarArtifact, SdkSidecarError> {
-        let layout = self.layout(arch);
+    pub fn resolve(
+        &self,
+        arch: &str,
+        libc: GuestLibc,
+    ) -> Result<SdkSidecarArtifact, SdkSidecarError> {
+        let layout = self.layout(arch, libc);
         for required in [
             &layout.image,
             &layout.version_file,
@@ -263,6 +283,7 @@ impl SdkSidecarResolver {
             image_sha256,
             arch: arch.to_string(),
             version,
+            libc,
         })
     }
 }
@@ -389,7 +410,7 @@ mod tests {
             let root = tempfile::tempdir().expect("tempdir");
             let cache = root.path().join("cache");
             let arch = "aarch64".to_string();
-            let layout = SdkSidecarLayout::under(&cache, version, &arch);
+            let layout = SdkSidecarLayout::under(&cache, version, &arch, GuestLibc::Musl);
             std::fs::create_dir_all(&layout.artifact_dir).expect("mkdir artifact dir");
 
             let image = sidecar_image_bytes(with_lib);
@@ -431,10 +452,11 @@ mod tests {
 
     #[test]
     fn layout_is_pure_path_construction() {
-        let layout = SdkSidecarLayout::under(Path::new("/cache"), "9.9.9", "x86_64");
+        let layout =
+            SdkSidecarLayout::under(Path::new("/cache"), "9.9.9", "x86_64", GuestLibc::Musl);
         assert_eq!(
             layout.artifact_dir,
-            Path::new("/cache/sdk-sidecar/9.9.9/x86_64")
+            Path::new("/cache/sdk-sidecar/9.9.9/x86_64/musl")
         );
         assert_eq!(layout.image.file_name().unwrap(), SDK_SIDECAR_IMAGE_FILE);
         assert_eq!(
@@ -443,6 +465,23 @@ mod tests {
         );
         assert_eq!(layout.version, "9.9.9");
         assert_eq!(layout.arch, "x86_64");
+        assert_eq!(layout.libc, GuestLibc::Musl);
+    }
+
+    /// The two variants carry different objects and verify against different
+    /// manifests, so they must not land in one directory. If they shared it,
+    /// whichever was built last would answer for both and a guest would be
+    /// handed a cdylib it cannot `dlopen` — the failure this key exists to
+    /// prevent, surfacing inside the guest instead of here.
+    #[test]
+    fn the_two_libc_variants_do_not_share_a_directory() {
+        let glibc =
+            SdkSidecarLayout::under(Path::new("/cache"), "9.9.9", "x86_64", GuestLibc::Glibc);
+        let musl = SdkSidecarLayout::under(Path::new("/cache"), "9.9.9", "x86_64", GuestLibc::Musl);
+
+        assert_ne!(glibc.artifact_dir, musl.artifact_dir);
+        assert_ne!(glibc.image, musl.image);
+        assert_ne!(glibc.checksum_manifest_file, musl.checksum_manifest_file);
     }
 
     #[test]
@@ -450,7 +489,7 @@ mod tests {
         let f = Fixture::seed("1.2.3", true, false);
         let artifact = f
             .resolver(&f.version)
-            .resolve(&f.arch)
+            .resolve(&f.arch, GuestLibc::Musl)
             .expect("a complete, matching artifact resolves");
         assert_eq!(artifact.version, "1.2.3");
         assert_eq!(artifact.arch, "aarch64");
@@ -462,7 +501,7 @@ mod tests {
     fn a_cold_cache_fails_closed() {
         let root = tempfile::tempdir().unwrap();
         let err = SdkSidecarResolver::new(root.path().join("cache"), "1.2.3".to_string())
-            .resolve("aarch64")
+            .resolve("aarch64", GuestLibc::Musl)
             .expect_err("an empty cache must not resolve");
         assert!(
             matches!(err, SdkSidecarError::ArtifactIncomplete { .. }),
@@ -473,11 +512,11 @@ mod tests {
     #[test]
     fn a_missing_manifest_fails_closed() {
         let f = Fixture::seed("1.2.3", true, false);
-        let layout = f.resolver(&f.version).layout(&f.arch);
+        let layout = f.resolver(&f.version).layout(&f.arch, GuestLibc::Musl);
         std::fs::remove_file(&layout.checksum_manifest_file).unwrap();
         let err = f
             .resolver(&f.version)
-            .resolve(&f.arch)
+            .resolve(&f.arch, GuestLibc::Musl)
             .expect_err("no manifest must not resolve");
         assert!(
             matches!(err, SdkSidecarError::ArtifactIncomplete { .. }),
@@ -490,7 +529,7 @@ mod tests {
         let f = Fixture::seed("1.2.3", true, true);
         let err = f
             .resolver(&f.version)
-            .resolve(&f.arch)
+            .resolve(&f.arch, GuestLibc::Musl)
             .expect_err("a byte-flipped image must not resolve");
         match err {
             SdkSidecarError::ChecksumManifestMismatch { name, .. } => {
@@ -508,7 +547,7 @@ mod tests {
         let f = Fixture::seed("1.2.3", true, false);
         let err = f
             .resolver("9.9.9")
-            .resolve(&f.arch)
+            .resolve(&f.arch, GuestLibc::Musl)
             .expect_err("a differently-versioned sidecar must not resolve");
         assert!(
             matches!(err, SdkSidecarError::ArtifactIncomplete { .. }),
@@ -522,7 +561,7 @@ mod tests {
     #[test]
     fn an_incompatible_version_marker_fails_closed() {
         let f = Fixture::seed("1.2.3", true, false);
-        let layout = f.resolver(&f.version).layout(&f.arch);
+        let layout = f.resolver(&f.version).layout(&f.arch, GuestLibc::Musl);
         let drifted = "0.0.1\n";
         std::fs::write(&layout.version_file, drifted).unwrap();
         // Re-stamp the manifest so integrity passes and the version gate is
@@ -539,7 +578,7 @@ mod tests {
         .unwrap();
         let err = f
             .resolver(&f.version)
-            .resolve(&f.arch)
+            .resolve(&f.arch, GuestLibc::Musl)
             .expect_err("a drifted VERSION must not resolve");
         match err {
             SdkSidecarError::VersionMismatch { expected, found } => {
@@ -555,7 +594,7 @@ mod tests {
         let f = Fixture::seed("1.2.3", false, false);
         let err = f
             .resolver(&f.version)
-            .resolve(&f.arch)
+            .resolve(&f.arch, GuestLibc::Musl)
             .expect_err("a sidecar with no cdylib must not resolve");
         match err {
             SdkSidecarError::PayloadIncomplete { missing_path, .. } => {
@@ -568,7 +607,7 @@ mod tests {
     #[test]
     fn a_non_ext4_payload_fails_closed() {
         let f = Fixture::seed("1.2.3", true, false);
-        let layout = f.resolver(&f.version).layout(&f.arch);
+        let layout = f.resolver(&f.version).layout(&f.arch, GuestLibc::Musl);
         let garbage = b"not an ext4 image".to_vec();
         std::fs::write(&layout.image, &garbage).unwrap();
         std::fs::write(
@@ -582,7 +621,7 @@ mod tests {
         .unwrap();
         let err = f
             .resolver(&f.version)
-            .resolve(&f.arch)
+            .resolve(&f.arch, GuestLibc::Musl)
             .expect_err("an unreadable payload must not resolve");
         assert!(
             matches!(err, SdkSidecarError::PayloadUnreadable { .. }),
@@ -593,11 +632,11 @@ mod tests {
     #[test]
     fn an_empty_version_file_fails_closed() {
         let f = Fixture::seed("1.2.3", true, false);
-        let layout = f.resolver(&f.version).layout(&f.arch);
+        let layout = f.resolver(&f.version).layout(&f.arch, GuestLibc::Musl);
         std::fs::write(&layout.version_file, b"   \n").unwrap();
         let err = f
             .resolver(&f.version)
-            .resolve(&f.arch)
+            .resolve(&f.arch, GuestLibc::Musl)
             .expect_err("a blank VERSION must not resolve");
         assert!(
             matches!(err, SdkSidecarError::InvalidVersionFile { .. }),
@@ -617,7 +656,10 @@ mod tests {
     #[test]
     fn error_messages_carry_no_file_contents() {
         let f = Fixture::seed("1.2.3", true, true);
-        let err = f.resolver(&f.version).resolve(&f.arch).unwrap_err();
+        let err = f
+            .resolver(&f.version)
+            .resolve(&f.arch, GuestLibc::Musl)
+            .unwrap_err();
         let rendered = err.to_string();
         assert!(rendered.contains("SDK sidecar"), "{rendered}");
         assert!(!rendered.contains("ELF"), "{rendered}");

@@ -36,12 +36,14 @@ pub(crate) fn parse_host_service_bindings(
 /// bound service is SDK-served.
 pub(crate) fn resolve_bindings_and_sidecar(
     raw: &[String],
+    libc: mvm_contract::guest_libc::GuestLibc,
 ) -> Result<(
     Vec<mvm_contract::protocol::broker::ServiceId>,
     Option<SdkSidecarAttachment>,
 )> {
     let bindings = parse_host_service_bindings(raw)?;
-    let attachment = crate::commands::vm::up::resolve_sdk_sidecar_attachment_for_host(&bindings)?;
+    let attachment =
+        crate::commands::vm::up::resolve_sdk_sidecar_attachment_for_host(&bindings, libc)?;
     Ok((bindings, attachment))
 }
 

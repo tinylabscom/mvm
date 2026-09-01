@@ -553,10 +553,17 @@
         workload-kernel-configfile = mkWorkloadKernelConfigfile system;
         workload-sizeopt-kernel = mkWorkloadKernelSizeopt system;
         workload-sizeopt-kernel-configfile = mkWorkloadKernelSizeoptConfigfile system;
-        # SDK sidecar image for Stage 0 builds. The builder VM needs the
+        # SDK sidecar images for Stage 0 builds. The builder VM needs the
         # sidecar to build guest workloads, so this exposes the runtime-overlay's
-        # sdk-sidecar-image output through the builder-vm flake.
+        # sdk-sidecar-image outputs through the builder-vm flake.
+        #
+        # Both libc variants are exposed, because which one a workload needs is
+        # a property of the guest image it boots, not of the builder. A guest
+        # linked against the other libc cannot dlopen the cdylib at all, and
+        # exposing only one moves that failure from this evaluation into the
+        # guest, where it surfaces as a relocation error.
         sdk-sidecar-image = runtimeOverlay.packages.${system}.sdk-sidecar-image;
+        sdk-sidecar-image-musl = runtimeOverlay.packages.${system}.sdk-sidecar-image-musl;
       });
     };
 }

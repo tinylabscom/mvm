@@ -281,6 +281,7 @@ fn declaring_catalog(service: &str) -> RuntimeCatalog {
             name: "bdd".to_string(),
             description: "bdd entry".to_string(),
             image: "example:1".to_string(),
+            libc: mvm_core::runtime_catalog::GuestLibc::Musl,
             commands: vec!["bdd".to_string()],
             project_files: vec!["bdd.toml".to_string()],
             tags: Vec::new(),

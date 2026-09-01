@@ -80,6 +80,7 @@ pub fn resolve_sdk_sidecar_attachment(
     services: &[mvm_contract::protocol::broker::ServiceId],
     resolver: &mvm_fs::sdk_sidecar::SdkSidecarResolver,
     arch: mvm_core::arch::GuestArch,
+    libc: mvm_contract::guest_libc::GuestLibc,
 ) -> Result<Option<SdkSidecarAttachment>> {
     if !mvm_core::plan::sdk_sidecar_required_for(services) {
         return Ok(None);
@@ -88,11 +89,22 @@ pub fn resolve_sdk_sidecar_attachment(
         .iter()
         .map(|s| s.as_str())
         .collect();
-    let layout = resolver.layout(&arch.to_string());
-    let artifact = resolver.resolve(&arch.to_string()).with_context(|| {
+    if libc == mvm_contract::guest_libc::GuestLibc::Unknown {
+        anyhow::bail!(
+            "this workload binds SDK host service(s) [{}], which are delivered by a shared \
+             object built for one C library, but the guest's libc is unknown. The cdylib is \
+             loaded with `dlopen`, and a process under one libc cannot load an object built \
+             for the other, so attaching on a guess would fail inside the guest as a \
+             relocation error instead of here. Use a runtime or image whose libc is known, \
+             or drop the host-service binding.",
+            bound.join(", "),
+        );
+    }
+    let layout = resolver.layout(&arch.to_string(), libc);
+    let artifact = resolver.resolve(&arch.to_string(), libc).with_context(|| {
         format!(
-            "this workload binds SDK host service(s) [{}], which need the SDK sidecar mounted \
-             read-only at {}. Populate {} from a source checkout with: \
+            "this workload binds SDK host service(s) [{}], which need the {libc} SDK sidecar \
+             mounted read-only at {}. Populate {} from a source checkout with: \
              mvmctl build sdk-sidecar build",
             bound.join(", "),
             mvm_core::plan::SDK_SIDECAR_GUEST_PATH,
@@ -148,7 +160,12 @@ mod tests {
     }
 
     fn seed_sidecar_cache(cache: &std::path::Path, version: &str, arch: GuestArch) {
-        let layout = SdkSidecarLayout::under(cache, version, &arch.to_string());
+        let layout = SdkSidecarLayout::under(
+            cache,
+            version,
+            &arch.to_string(),
+            mvm_contract::guest_libc::GuestLibc::Musl,
+        );
         std::fs::create_dir_all(&layout.artifact_dir).unwrap();
         let image = sidecar_ext4_bytes();
         let version_text = format!("{version}\n");
@@ -172,14 +189,21 @@ mod tests {
         // A cold cache is fine here: nothing needs the sidecar, so the resolver
         // is never consulted.
         assert_eq!(
-            resolve_sdk_sidecar_attachment(&[], &resolver, GuestArch::host()).unwrap(),
+            resolve_sdk_sidecar_attachment(
+                &[],
+                &resolver,
+                GuestArch::host(),
+                mvm_contract::guest_libc::GuestLibc::Musl
+            )
+            .unwrap(),
             None
         );
         assert_eq!(
             resolve_sdk_sidecar_attachment(
                 &[svc("broker.v1"), svc("host.other.v1")],
                 &resolver,
-                GuestArch::host()
+                GuestArch::host(),
+                mvm_contract::guest_libc::GuestLibc::Musl,
             )
             .unwrap(),
             None,
@@ -194,9 +218,14 @@ mod tests {
         seed_sidecar_cache(dir.path(), "1.2.3", arch);
         let resolver = SdkSidecarResolver::new(dir.path().to_path_buf(), "1.2.3".into());
 
-        let attached = resolve_sdk_sidecar_attachment(&[svc("host.audit.v1")], &resolver, arch)
-            .expect("a seeded cache resolves")
-            .expect("an SDK binding must attach the sidecar");
+        let attached = resolve_sdk_sidecar_attachment(
+            &[svc("host.audit.v1")],
+            &resolver,
+            arch,
+            mvm_contract::guest_libc::GuestLibc::Musl,
+        )
+        .expect("a seeded cache resolves")
+        .expect("an SDK binding must attach the sidecar");
 
         assert!(attached.volume.read_only, "the sidecar attaches read-only");
         assert_eq!(
@@ -228,9 +257,14 @@ mod tests {
         let resolver = SdkSidecarResolver::new(dir.path().to_path_buf(), "1.2.3".into());
         for service in mvm_core::plan::SDK_HOST_SERVICES {
             assert!(
-                resolve_sdk_sidecar_attachment(&[svc(service)], &resolver, arch)
-                    .unwrap()
-                    .is_some(),
+                resolve_sdk_sidecar_attachment(
+                    &[svc(service)],
+                    &resolver,
+                    arch,
+                    mvm_contract::guest_libc::GuestLibc::Musl
+                )
+                .unwrap()
+                .is_some(),
                 "{service} must attach the sidecar"
             );
         }
@@ -240,9 +274,13 @@ mod tests {
     fn a_required_but_missing_sidecar_fails_closed_with_an_actionable_message() {
         let dir = tempfile::tempdir().unwrap();
         let resolver = SdkSidecarResolver::new(dir.path().to_path_buf(), "1.2.3".into());
-        let err =
-            resolve_sdk_sidecar_attachment(&[svc("host.secrets.v1")], &resolver, GuestArch::host())
-                .expect_err("a cold cache must refuse a sidecar-requiring workload");
+        let err = resolve_sdk_sidecar_attachment(
+            &[svc("host.secrets.v1")],
+            &resolver,
+            GuestArch::host(),
+            mvm_contract::guest_libc::GuestLibc::Musl,
+        )
+        .expect_err("a cold cache must refuse a sidecar-requiring workload");
         let rendered = format!("{err:#}");
         assert!(rendered.contains("host.secrets.v1"), "{rendered}");
         assert!(
@@ -262,15 +300,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let arch = GuestArch::host();
         seed_sidecar_cache(dir.path(), "1.2.3", arch);
-        let layout = SdkSidecarLayout::under(dir.path(), "1.2.3", &arch.to_string());
+        let layout = SdkSidecarLayout::under(
+            dir.path(),
+            "1.2.3",
+            &arch.to_string(),
+            mvm_contract::guest_libc::GuestLibc::Musl,
+        );
         let mut image = std::fs::read(&layout.image).unwrap();
         let last = image.len() - 1;
         image[last] ^= 0xff;
         std::fs::write(&layout.image, &image).unwrap();
 
         let resolver = SdkSidecarResolver::new(dir.path().to_path_buf(), "1.2.3".into());
-        let err = resolve_sdk_sidecar_attachment(&[svc("host.time.v1")], &resolver, arch)
-            .expect_err("a byte-flipped sidecar must refuse the launch");
+        let err = resolve_sdk_sidecar_attachment(
+            &[svc("host.time.v1")],
+            &resolver,
+            arch,
+            mvm_contract::guest_libc::GuestLibc::Musl,
+        )
+        .expect_err("a byte-flipped sidecar must refuse the launch");
         assert!(format!("{err:#}").contains("integrity mismatch"), "{err:#}");
     }
 
@@ -282,7 +330,13 @@ mod tests {
         // The running build wants 9.9.9; only 1.2.3 was ever cached.
         let resolver = SdkSidecarResolver::new(dir.path().to_path_buf(), "9.9.9".into());
         assert!(
-            resolve_sdk_sidecar_attachment(&[svc("host.cost.v1")], &resolver, arch).is_err(),
+            resolve_sdk_sidecar_attachment(
+                &[svc("host.cost.v1")],
+                &resolver,
+                arch,
+                mvm_contract::guest_libc::GuestLibc::Musl
+            )
+            .is_err(),
             "a version-mismatched sidecar must refuse the launch"
         );
     }

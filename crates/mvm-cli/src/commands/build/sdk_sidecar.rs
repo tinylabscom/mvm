@@ -8,6 +8,7 @@ use clap::{Args as ClapArgs, Subcommand};
 
 use crate::commands::runtime_overlay::runtime_overlay_source_checkout_root;
 use crate::ui;
+use mvm_contract::guest_libc::GuestLibc;
 use mvm_core::arch::GuestArch;
 use mvm_core::user_config::MvmConfig;
 use mvm_fs::sdk_sidecar::SdkSidecarResolver;
@@ -49,14 +50,45 @@ fn run_build(args: BuildArgs) -> Result<()> {
     let version = env!("CARGO_PKG_VERSION");
     let arch = GuestArch::host();
 
-    if !args.force {
-        let resolver = SdkSidecarResolver::new(cache_root.clone(), version.to_string());
-        if let Ok(artifact) = resolver.resolve(&arch.to_string())
+    // Both variants, every time. Which one a workload needs is a property of
+    // the image it boots, not of this command, and a host that caches only one
+    // silently makes `--host-service` unusable for every guest carrying the
+    // other libc — the failure landing inside the guest at `dlopen` rather than
+    // here. The second build shares the first's closure, so it is far cheaper
+    // than the first.
+    for libc in SIDECAR_LIBC_VARIANTS {
+        build_one_variant(
+            &workspace_root,
+            &cache_root,
+            version,
+            arch,
+            libc,
+            args.force,
+        )?;
+    }
+    Ok(())
+}
+
+/// The sidecar variants a source build populates.
+const SIDECAR_LIBC_VARIANTS: [GuestLibc; 2] = [GuestLibc::Glibc, GuestLibc::Musl];
+
+fn build_one_variant(
+    workspace_root: &std::path::Path,
+    cache_root: &std::path::Path,
+    version: &str,
+    arch: GuestArch,
+    libc: GuestLibc,
+    force: bool,
+) -> Result<()> {
+    if !force {
+        let resolver = SdkSidecarResolver::new(cache_root.to_path_buf(), version.to_string());
+        if let Ok(artifact) = resolver.resolve(&arch.to_string(), libc)
             && mvm_build::sdk_sidecar::cached_sidecar_provenance(
-                &cache_root,
+                cache_root,
                 version,
                 arch,
-                &workspace_root,
+                libc,
+                workspace_root,
             )? == mvm_build::sdk_sidecar::SidecarProvenance::MatchesSource
         {
             announce_cached_sidecar(&artifact);
@@ -67,21 +99,23 @@ fn run_build(args: BuildArgs) -> Result<()> {
     #[cfg(feature = "builder-vm")]
     {
         let artifact = crate::commands::env::builder_vm::build_sdk_sidecar_from_checkout(
-            &workspace_root,
-            &cache_root,
+            workspace_root,
+            cache_root,
             version,
             arch,
+            libc,
             mvm_runtime::ui::is_verbose(),
         )
         .with_context(|| {
             format!(
-                "building SDK sidecar {version} for {arch} from {}",
+                "building {libc} SDK sidecar {version} for {arch} from {}",
                 workspace_root.display()
             )
         })?;
         ui::success(&format!(
-            "SDK sidecar {} for {} cached at {}",
+            "SDK sidecar {} ({}) for {} cached at {}",
             artifact.version,
+            artifact.libc,
             artifact.arch,
             artifact.image.display()
         ));
