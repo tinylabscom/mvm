@@ -216,6 +216,25 @@ Last updated: 2026-09-01
 
 ## Completed
 
+- [x] **Kernel cache moved out of the Stage 0 blast radius — PR #3038.**
+      `specs/sprint/delivery/kernel-cache-outside-stage0-blast-radius.md`.
+      The workload kernel was cached inside `builder-vm/<arch>`, the directory
+      Stage 0 `remove_dir_all`s on a source-fingerprint change, so promoting a
+      new builder image destroyed a half-hour artifact and the next boot rebuilt
+      it — blowing `just e2e-launch`'s 1800s cap. Entries now live at
+      `<cache>/kernels/<arch>/<variant>/`; `resolve_kernel` adopts an entry left
+      at the old path by renaming it. The layout was hand-rebuilt at nine call
+      sites, all now routed through `kernel_cache_dir`/`cached_kernel_path`. The
+      gate's builder cap is raised to 7200s, matching `ci-full.yml`. Merged
+      after a live macOS 26 `e2e-launch` run confirmed the migration is a rename
+      rather than a rebuild.
+
+- [x] **machine diff handshake retry — issue #3024, PR #3028.**
+      `specs/plans/2026-08-31-machine-diff-handshake-retry.md`.
+      A typed pre-authentication peer hangup gets one fresh connection; an EOF
+      after authentication is never replayed. Focused regressions cover both
+      boundaries and the bounded retry budget.
+
 - [x] **Fleet stream edge delivery handoff.** The edge pump now terminates in
       the bounded, exactly-once guest input route; close carries the scanner's
       withheld tail before EOF. `StreamPlane::subscribe` and
