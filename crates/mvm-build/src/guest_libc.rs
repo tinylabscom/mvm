@@ -51,6 +51,29 @@ pub fn sidecar_libc_of_image_path(image: &std::path::Path) -> GuestLibc {
     mvm_fs::sdk_sidecar::SdkSidecarLayout::libc_of_image_path(image)
 }
 
+/// The libc recorded beside a materialized workload rootfs, or
+/// [`GuestLibc::Unknown`].
+///
+/// Anything unreadable — no sidecar, malformed JSON, a rootfs path with no
+/// parent — is `Unknown` rather than an error. The distinction every caller
+/// needs is "which sidecar variant can this guest load", and each of those
+/// cases answers it the same way: we cannot say, so we will not attach one.
+///
+/// Lives here, beside the detector that writes the field, so the launch path
+/// that *chooses* a variant and the admission gate that *re-checks* the choice
+/// read it through one function rather than two that could drift.
+#[must_use]
+pub fn recorded_image_libc(rootfs_path: &Path) -> GuestLibc {
+    rootfs_path
+        .parent()
+        .and_then(|dir| {
+            crate::builder_vm::GuestSidecar::read_from_dir(dir)
+                .ok()
+                .flatten()
+        })
+        .map_or(GuestLibc::Unknown, |sidecar| sidecar.libc)
+}
+
 /// Directories a dynamic loader lives in, relative to the rootfs.
 const LOADER_DIRS: [&str; 2] = ["lib", "lib64"];
 
@@ -160,6 +183,32 @@ mod tests {
     fn a_tree_carrying_both_loaders_is_unknown() {
         let dir = rootfs_with(&["ld-musl-aarch64.so.1", "ld-linux-aarch64.so.1"]);
         assert_eq!(detect_guest_libc(dir.path()), GuestLibc::Unknown);
+    }
+
+    /// A rootfs whose sidecar records a libc reads back as that libc.
+    #[test]
+    fn a_recorded_libc_reads_back_off_the_image_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::builder_vm::GuestSidecar::for_oci_run("oci:sha256-fixture", false, true)
+            .with_libc(GuestLibc::Musl)
+            .write_to_dir(dir.path())
+            .unwrap();
+        assert_eq!(
+            recorded_image_libc(&dir.path().join("rootfs.ext4")),
+            GuestLibc::Musl
+        );
+    }
+
+    /// No sidecar is *unknown*, never a default. It is the arm that would
+    /// otherwise be attempted on a guess, and guessing wrong costs a `dlopen`
+    /// failure inside the guest instead of a refusal the host can explain.
+    #[test]
+    fn a_rootfs_with_no_sidecar_records_no_libc() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            recorded_image_libc(&dir.path().join("rootfs.ext4")),
+            GuestLibc::Unknown
+        );
     }
 
     #[test]

@@ -91,6 +91,9 @@ zeroize.workspace = true
 # Used by tests/phase3c_supervisor_dispatch.rs only; the lib never names it.
 libkrun-sys.workspace = true
 mvm-core = { workspace = true, features = ["test-support"] }
+# The sidecar resolver proves an artifact's libc from its `DT_NEEDED`, so a
+# test that seeds a sidecar cache needs a real ELF object, not a stub.
+mvm-fs = { workspace = true, features = ["test-support"] }
 mvm-vmm = { workspace = true, features = ["test-support"] }
 
 # KVM backend. Pre-generated bindings + safe ioctl wrappers;
@@ -119,7 +122,11 @@ apple-container = []
 # rootfs, no isolation) — never compiles into a production `mvmctl`
 # binary; only an explicit `--hypervisor mock` (itself refused outside this
 # feature) or the workspace test suite reaches it.
-test-support = ["mvm-core/test-support", "mvm-backends/test-support"]
+test-support = [
+    "mvm-core/test-support",
+    "mvm-backends/test-support",
+    "mvm-fs/test-support",
+]
 # Debug-only Apple Silicon validation lane. The capability also requires a
 # debug macOS/aarch64 build before it can advertise warm-claim support.
 hvf-live-validation = []

@@ -1008,10 +1008,16 @@ fn cmd_start(args: StartArgs) -> Result<()> {
     let is_dev = args.dev;
     let admit_ctx: Rc<RefCell<Option<super::up::AdmissionContext>>> = Rc::new(RefCell::new(None));
     let ctx_sink = Rc::clone(&admit_ctx);
-    let admit = move |rootfs: &std::path::Path,
-                      kernel: Option<&std::path::Path>,
-                      vm_name: &str|
+    let admit = move |inputs: crate::exec::AdmitInputs<'_>|
           -> Result<Option<crate::exec::SessionAuditSubstrate>> {
+        // This path binds no SDK host service, so the launch resolution has no
+        // sidecar to hand over and the plan admits no share for one.
+        let crate::exec::AdmitInputs {
+            rootfs,
+            kernel,
+            vm_name,
+            sdk_sidecar: _,
+        } = inputs;
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
         let ctx = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
             network_mode: crate::commands::machine::preflight_network(),

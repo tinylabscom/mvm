@@ -124,6 +124,12 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
         "shared backend-selection helpers (from_hypervisor / auto_select) the CLI dispatches through",
     ),
     (
+        "exec/backend_select.rs",
+        &[Rule::AnyBackend],
+        "the backend-selection helpers themselves, split out of exec.rs to keep it inside the \
+         file-size budget: this is the selection the exemption above names, not a new reach",
+    ),
+    (
         "exec/session.rs",
         &[Rule::AnyBackend],
         "same helpers as exec.rs: the warm-session lifecycle split out of it, not a new reach",

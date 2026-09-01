@@ -49,8 +49,30 @@ pub struct SessionAuditSubstrate {
 /// names the image but not the kernel pins what the workload *is* and nothing
 /// about what confines it, so the callback cannot bind the environment it was
 /// admitted onto unless it is told which kernel that is.
-pub type SessionAdmit<'a> = dyn Fn(&std::path::Path, Option<&std::path::Path>, &str) -> Result<Option<SessionAuditSubstrate>>
-    + 'a;
+pub type SessionAdmit<'a> = dyn Fn(AdmitInputs<'_>) -> Result<Option<SessionAuditSubstrate>> + 'a;
+
+/// What the launch resolution has established by the time admission runs.
+///
+/// A struct rather than a positional list because every field is something the
+/// resolution *discovered* — the rootfs it materialized, the kernel it chose,
+/// the name it generated, the sidecar variant that rootfs turned out to need.
+/// Each was added on finding that the plan could not describe the boot without
+/// it, and a fourth bare argument in a row is where they stop being readable.
+#[derive(Debug, Clone, Copy)]
+pub struct AdmitInputs<'a> {
+    /// The materialized rootfs the workload will boot.
+    pub rootfs: &'a std::path::Path,
+    /// The kernel confining it, when the tier has one.
+    pub kernel: Option<&'a std::path::Path>,
+    /// The name this VM will be started under.
+    pub vm_name: &'a str,
+    /// The SDK sidecar this boot will attach, or `None`.
+    ///
+    /// Resolved once, after the rootfs exists — the guest's own recorded libc
+    /// decides which variant it is — and handed to both halves from here, so
+    /// the plan grant and the attached volume cannot describe different bytes.
+    pub sdk_sidecar: Option<&'a crate::commands::vm::up::SdkSidecarAttachment>,
+}
 
 pub fn boot_session_vm(
     env: &str,
@@ -120,14 +142,17 @@ pub fn boot_session_vm(
     // bypasses the endpoint-spawn path. `None` admit ⇒ unchanged legacy path.
     let mut admitted_workload = false;
     if let Some(admit_fn) = admit
-        && let Some(sub) = admit_fn(
-            std::path::Path::new(&rootfs),
-            start_config
+        && let Some(sub) = admit_fn(AdmitInputs {
+            rootfs: std::path::Path::new(&rootfs),
+            kernel: start_config
                 .kernel_path
                 .as_deref()
                 .map(std::path::Path::new),
-            &vm_name,
-        )?
+            vm_name: &vm_name,
+            // A session VM binds no SDK host service; `invoke` is the only
+            // caller and it admits its own plan without one.
+            sdk_sidecar: None,
+        })?
     {
         start_config.tenant_id = Some(sub.tenant_id);
         start_config.plan_json = Some(sub.plan_json);
@@ -203,7 +228,8 @@ pub fn dispatch_in_session(
         stdin: Vec::new(),
         healthcheck: None,
         hypervisor: None,
-        sdk_sidecar: None,
+        sdk_host_services: Vec::new(),
+        declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
     };
     let wrapper = build_guest_wrapper(&req);
     let transport = vsock_transport::for_vm(&vm.vm_name)?;

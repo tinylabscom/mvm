@@ -24,6 +24,7 @@
 //! crate remains unsafe-free.
 
 pub mod clone;
+pub mod elf;
 pub mod ext4;
 pub mod extension_image;
 pub mod hash;

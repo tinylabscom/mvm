@@ -46,6 +46,13 @@ default = []
 # not part of the default build until its host privilege and live mount tests
 # are run on the target machine.
 trusted-apfs = []
+# Exposes `elf::test_fixture` — a synthetic ELF64 shared object builder — to
+# other crates' tests. The sidecar resolver proves an artifact's libc from its
+# `DT_NEEDED` list, so any test seeding a sidecar cache needs a *real* object
+# rather than a stub; without this the fixture would be copied into every crate
+# that seeds one, and a copy that drifts makes those tests pass for the wrong
+# reason. Off by default so it never ships in a release binary.
+test-support = []
 
 [lints]
 workspace = true

@@ -226,7 +226,8 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
-            sdk_sidecar: None,
+            sdk_host_services: Vec::new(),
+            declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         };
 
         let pty = pty_console_request(&req, "set -e\nexec '/bin/sh'\n".to_string());
@@ -257,7 +258,8 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
-            sdk_sidecar: None,
+            sdk_host_services: Vec::new(),
+            declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         };
         let wrapper = build_guest_wrapper(&req);
 

@@ -1446,24 +1446,11 @@ pub fn enforce_sdk_sidecar_for_launch(
     volumes: &[mvm_core::vm_backend::VmVolume],
     plan: &ExecutionPlan,
 ) -> Result<()> {
-    enforce_sdk_sidecar_attachment(volumes, plan, recorded_image_libc(rootfs_path))
-}
-
-/// The libc recorded beside a workload rootfs, or [`GuestLibc::Unknown`].
-///
-/// Anything unreadable — no sidecar, malformed JSON, a rootfs path with no
-/// parent — is `Unknown` rather than an error. The distinction the caller needs
-/// is "can this guest load the cdylib", and every one of those cases answers it
-/// the same way: we cannot say, so we will not attach.
-fn recorded_image_libc(rootfs_path: &str) -> GuestLibc {
-    std::path::Path::new(rootfs_path)
-        .parent()
-        .and_then(|dir| {
-            mvm_build::builder_vm::GuestSidecar::read_from_dir(dir)
-                .ok()
-                .flatten()
-        })
-        .map_or(GuestLibc::Unknown, |sidecar| sidecar.libc)
+    enforce_sdk_sidecar_attachment(
+        volumes,
+        plan,
+        mvm_build::guest_libc::recorded_image_libc(std::path::Path::new(rootfs_path)),
+    )
 }
 
 /// Refuse a sidecar the guest could not load.
@@ -1851,7 +1838,7 @@ fn run_post_admission_gates(
     if let Err(e) = enforce_sdk_sidecar_attachment(
         &config.volumes,
         admitted.plan(),
-        recorded_image_libc(&config.rootfs_path),
+        mvm_build::guest_libc::recorded_image_libc(std::path::Path::new(&config.rootfs_path)),
     ) {
         return Err(("sdk-sidecar", e));
     }

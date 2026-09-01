@@ -82,6 +82,9 @@ sha2.workspace = true
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
+# The sidecar resolver proves an artifact's libc from its `DT_NEEDED`, so a
+# test that seeds a sidecar cache needs a real ELF object, not a stub.
+mvm-fs = { workspace = true, features = ["test-support"] }
 assert_cmd.workspace = true
 ed25519-dalek.workspace = true
 rand.workspace = true
