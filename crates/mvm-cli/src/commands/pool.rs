@@ -1402,6 +1402,7 @@ mod tests {
         let mut c = eligible_cfg();
         c.volumes = vec![VmVolume {
             materialized_image: None,
+            volume_label: None,
             host: "/h".into(),
             guest: "/g".into(),
             size: String::new(),
@@ -1559,6 +1560,7 @@ mod tests {
             let mut c = eligible_cfg();
             c.volumes = vec![VmVolume {
                 materialized_image: None,
+                volume_label: None,
                 host: "/h".into(),
                 guest: "/g".into(),
                 size: String::new(),

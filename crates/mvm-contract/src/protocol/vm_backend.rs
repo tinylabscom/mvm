@@ -92,6 +92,15 @@ pub struct VmVolume {
     ///
     /// `None` on a `Disk`, whose `host` is already the image.
     pub materialized_image: Option<String>,
+    /// ext4 volume label written into the attached image, when the host set
+    /// one, so the guest can mount by identity rather than by enumeration
+    /// order.
+    ///
+    /// A device node is positional: it names whichever disk landed in that
+    /// slot, so a slot-order change mounts the wrong image and succeeds. A
+    /// label travels with the bytes. `None` for an image the host did not
+    /// label, which still mounts by node.
+    pub volume_label: Option<String>,
 }
 
 impl VmVolume {

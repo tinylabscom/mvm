@@ -90,10 +90,24 @@ the legacy arm, not building the portable one.
       The volume stays `DirShare` so admission still records a *directory*
       grant; the new `VmVolume.materialized_image` carries what is attached.
       Landed as `feat(mount): deliver a granted directory as a block image`.
-- [ ] The guest mounts by volume label rather than by the device node
-      `workload_volume_devices` resolves. The image **is** labelled, but the
-      guest is still handed a node, so this is not done — it is the difference
-      between "works" and "cannot silently mount the wrong device".
+- [x] The guest mounts by volume label rather than by the device node
+      `workload_volume_devices` resolves. `VmVolume.volume_label` is set from
+      the same authority that stamps the image, carried to the guest on
+      `VolumeConfig`, and preferred over the node — with resolution failure
+      **fatal rather than a fallback**, since falling back to the slot is the
+      silent wrong-device mount this exists to stop.
+
+      The resolver is `flowmux_drive`'s, not a new one: it already enumerated
+      from `/sys/class/block`, checked the ext4 magic before trusting the label
+      field, and was the decoder the writer's stamp is tested against. The first
+      draft of this change hand-rolled a second superblock parser over a guessed
+      `/dev/vd[a-z]` range and was replaced.
+
+      Only `--mount` images are labelled, so only they mount by label; managed
+      volumes carry `None` and keep the node path explicitly. Live-validated on
+      macOS 26 by reading `s_volume_name` off the image while the VM ran
+      (`magic 53ef`, `label mvmmnt0`) — a passing mount alone would not have
+      shown which path ran.
 - [x] `refuse_unsupported_dir_shares` and both its call sites deleted: every
       backend can serve a mount now, so it could only produce a false refusal.
 - [x] Deleted: the `supports_directory_shares` trait method (every driver

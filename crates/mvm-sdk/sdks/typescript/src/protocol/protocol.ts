@@ -901,6 +901,12 @@ device?: (string | null)
  */
 kind?: (VolumeConfigKind & string)
 /**
+ * ext4 volume label on the attached image, when the host wrote one.
+ * 
+ * Preferred over [`Self::device`] for a block volume: a device node names whichever image landed in that slot, so a slot-order change mounts the wrong one and succeeds. Matching the label proves the guest mounted the image the host meant. `None` falls back to the node.
+ */
+label?: (string | null)
+/**
  * Absolute guest mountpoint.  Must pass `MountPathPolicy`.
  */
 mountpoint: string

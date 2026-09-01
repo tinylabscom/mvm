@@ -673,6 +673,7 @@ mod tests {
                 read_only: false,
                 kind: crate::vsock::VolumeConfigKind::VirtioFs,
                 device: None,
+                label: None,
             }],
             extensions: Vec::new(),
             verb_grant_envelope: None,

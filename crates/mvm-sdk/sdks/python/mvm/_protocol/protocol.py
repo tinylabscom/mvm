@@ -1665,6 +1665,7 @@ class VolumeConfig:
     tag: str
     device: Optional[str] = None
     kind: Optional[VolumeConfigKind] = 'virtio_fs'
+    label: Optional[str] = None
     read_only: Optional[bool] = False
 
 
