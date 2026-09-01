@@ -270,8 +270,26 @@ Five coordinated changes, host and guest:
       makes it separately validatable and removes version skew from the host
       flip. Flipping the host first against an old baked guest hangs the
       dispatch loop with no useful error.
-- [ ] Delete `crates/mvm-vmm/src/host/virtiofsd.rs`, both QEMU call sites, and
-      the `virtiofsd` host dependency from the Linux install docs.
+- [ ] **The QEMU builder needs the same migration, and the plan missed it.**
+      `qemu_builder.rs` serves `work` / `out` / `job` / `mvm-bins` over
+      vhost-user/virtiofsd — not the disk transport — and QEMU is the *Linux
+      auto-detect default builder*. So this is not the "opt-in dev/test backend
+      we can just delete the feature from": deleting its shares breaks every
+      Linux build. It needs the same treatment as the persistent HVF builder,
+      and the guest side already supports it, so it should be mostly a spec and
+      client change. It is separately validatable on the Linux/KVM box, which
+      makes it the better of the two to do first.
+
+- [ ] The QEMU **workload** driver's share arm is a different matter and *is*
+      free: workload specs carry `shares: Vec::new()` unconditionally since
+      Stage A, so `qemu.rs`'s share handling is unreachable for workloads.
+
+- [ ] Only once both builders are on the disk transport can
+      `crates/mvm-vmm/src/host/virtiofsd.rs` (382 lines), its QEMU call sites,
+      and the `virtiofsd` host dependency in the Linux install docs go — and
+      with them the `--sandbox none` flag that started this plan. That is also
+      when `check-no-virtio-fs` drops to FFI-only rows and the ratchet becomes
+      an absolute rather than a ceiling.
 
 ### Stage D — the gate
 
