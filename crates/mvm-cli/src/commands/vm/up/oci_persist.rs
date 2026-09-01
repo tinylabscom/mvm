@@ -153,7 +153,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         resolved_digest,
         rootfs_path,
         profile,
-        cpus,
+        mut cpus,
         memory_mib,
         mem_initial_mib,
         volumes,
@@ -167,6 +167,18 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         grants,
     } = params;
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
+    if let Some(granted) = mvm_client::clamp_vcpus_for_backend(backend_name, cpus) {
+        crate::ui::warn(&format!(
+            "{backend_name} supports at most {granted} vCPU(s); {cpus} requested, booting with {granted}"
+        ));
+        tracing::info!(
+            backend = backend_name,
+            requested = cpus,
+            granted,
+            "vcpu request clamped to the backend ceiling"
+        );
+        cpus = granted;
+    }
     let mut prepared_volumes =
         super::super::volume::merge_registered_volumes_for_launch(name, volumes)
             .context("resolving registered local volumes before admission")?;

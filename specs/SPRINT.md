@@ -3508,3 +3508,12 @@ writes the plan:
       the example's unsupported CLI flag.
 - [x] Complete workspace and gated validation.
 - [ ] Merge the repair through the queue and close issue #3041.
+
+## 2026-09-01 Extended CI residual regressions
+
+- [x] Clamp persistent Firecracker vCPU requests before admission and API
+      serialization.
+- [x] Preserve typed `WouldBlock` control-frame errors for bounded retry during
+      sustained egress transfers.
+- [ ] Complete the broad validation matrix and merge the repair for #3051,
+      and #3052.

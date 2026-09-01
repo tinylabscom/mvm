@@ -4,7 +4,9 @@ Backing: shipped-source
 Validation: check-sprint-append
 
 **Issues:** [#2979](https://github.com/tinylabscom/mvm/issues/2979),
-[#3007](https://github.com/tinylabscom/mvm/issues/3007)
+[#3007](https://github.com/tinylabscom/mvm/issues/3007),
+[#3051](https://github.com/tinylabscom/mvm/issues/3051),
+[#3052](https://github.com/tinylabscom/mvm/issues/3052)
 
 ## Outcome
 
@@ -65,6 +67,10 @@ a competing BLAKE3 address or re-hash the archive.
   machine-config boundary and two stale BDD assertions; the backend now
   declares that vCPU ceiling, while the witnesses preserve child exit status
   and stderr ownership.
+- The next complete Linux witness exposed two residual boundaries: persistent
+  machine launches bypassed the backend vCPU clamp, and authenticated frame
+  reads erased the I/O source needed to recognize `EAGAIN`. The persistent path
+  now clamps before admission, and frame errors preserve their typed source.
 
 ## Delivery checklist
 
@@ -108,5 +114,11 @@ a competing BLAKE3 address or re-hash the archive.
       capability so oversized portable requests clamp before serialization.
 - [x] Reconcile the live refusal witnesses with the child process exit code,
       stderr channel, and fail-closed timeout-admission contracts.
+- [x] Clamp persistent-machine vCPU requests before admission and Firecracker
+      machine-config serialization.
+- [x] Preserve `WouldBlock` through authenticated control-frame context so the
+      existing bounded liveness loop can retry sustained transfers.
+- [ ] Pass focused formatting, Clippy, workspace, gated, and policy checks for
+      the residual repair.
 - [ ] Pass a fresh Extended CI run containing all repaired witness lanes.
 - [ ] Merge the corrective pull request and close #3007 through its linkage.
