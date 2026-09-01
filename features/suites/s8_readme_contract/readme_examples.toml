@@ -30,11 +30,11 @@ command = 'mvmctl machine run --image alpine -- sh -c "echo hello from a microVM
 witness = "suites/s31_launch_e2e/cli_launch_modes.feature::a transient run boots an OCI image and runs one command"
 
 [[example]]
-command = 'mvmctl machine run --image python:3.12 --mount "$PWD:/work:ro" -- python /work/app.py'
+command = 'mvmctl machine run --image python:3.12 --mount "$PWD/examples/python/hello-app:/work:ro" -- python /work/app.py'
 witness = "suites/s31_launch_e2e/cli_launch_modes.feature::--mount shares a host directory the workload can read"
 
 [[example]]
-command = "mvmctl machine run --image python:3.12 --allow-host pypi.org:443 --allow-host files.pythonhosted.org:443 --mount \"$PWD:/work:ro\" -- sh -c 'python -m pip install --no-cache-dir --target /tmp/python-deps pandas && PYTHONPATH=/tmp/python-deps python /work/app.py'"
+command = "mvmctl machine run --image python:3.12 --allow-host pypi.org:443 --allow-host files.pythonhosted.org:443 --mount \"$PWD/examples/python/hello-app:/work:ro\" -- sh -c 'python -m pip install --no-cache-dir --target /tmp/python-deps pandas && PYTHONPATH=/tmp/python-deps python /work/app.py'"
 witness = "suites/s31_launch_e2e/cli_launch_modes.feature::--allow-host and --mount together on one launch"
 
 [[example]]
@@ -58,7 +58,7 @@ command = "mvmctl machine run --flake . -- ./ask-model"
 witness = "suites/s5_lifecycle/transient_sandbox_boot.feature::machine run boots a transient sandbox from a Nix flake"
 
 [[example]]
-command = "mvmctl machine run --image alpine --mount .:/work -- ls /work"
+command = "mvmctl machine run --image alpine --mount ./src:/work -- ls /work"
 witness = "suites/s31_launch_e2e/cli_launch_modes.feature::--mount shares a host directory the workload can read"
 
 [[example]]

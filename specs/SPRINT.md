@@ -10,6 +10,25 @@
 
 ## In progress
 
+- [x] **Contributor SDK-sidecar recovery guidance.**
+      `specs/plans/2026-09-01-contributor-sidecar-recovery.md`.
+      Release embedding now repairs the pinned macOS LLVM tool loader path at
+      the rustc boundary, unembedded binaries name the matching profile and
+      executable, stale-sidecar warnings identify the real host-services owner
+      and provenance marker, unbound runs no longer probe a fake unknown-libc
+      sidecar path, and expected builder-egress SIGTERM teardown is quiet.
+      The embed recipe also builds native per-VM helpers in the selected
+      profile, keeping the HVF supervisor beside the resulting `mvmctl`.
+      Mount help and examples now disclose the unfiltered ext4 snapshot cost;
+      oversized trees fail before allocation, unsealed images stream to disk,
+      and live-tree races skip vanished entries. OCI injection semantics now
+      live directly in the rootfs cache tag, invalidating stale cached Rust
+      images even when the guest-binary identity sidecar remains valid, so
+      their declared toolchain environment reaches ad-hoc and interactive
+      commands. The release embed
+      witness, focused regressions, workspace suite, workspace check, and zero-
+      warning Clippy are green on macOS.
+
 - [ ] **Warm claim authenticated readiness — issue #3039.**
       `specs/plans/2026-08-31-warm-claim-authenticated-readiness.md`.
       Post-restore readiness now requires the existing authenticated guest-agent

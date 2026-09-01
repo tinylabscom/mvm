@@ -47,6 +47,20 @@ pub enum UnsupportedNodePolicy {
     Reject,
 }
 
+/// How [`collect_nodes`] handles an entry that disappears after directory
+/// enumeration but before its metadata or contents can be captured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VanishedNodePolicy {
+    /// Fail the snapshot. Immutable source trees use this so unexpected source
+    /// mutation cannot silently change a rootfs artifact.
+    #[default]
+    Reject,
+    /// Omit entries that vanished while the snapshot was being taken. A live
+    /// host-directory share uses this because build tools routinely replace
+    /// lockfiles and incremental artifacts during traversal.
+    Skip,
+}
+
 /// How [`collect_nodes`] treats extended attributes on walked entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum XattrPolicy {
@@ -69,6 +83,8 @@ pub struct WalkOptions {
     pub on_unsupported: UnsupportedNodePolicy,
     /// Extended-attribute capture behavior.
     pub xattrs: XattrPolicy,
+    /// Behavior when an enumerated entry disappears during the walk.
+    pub on_vanished: VanishedNodePolicy,
 }
 
 impl WalkOptions {
@@ -84,6 +100,12 @@ impl WalkOptions {
     /// Set the extended-attribute capture policy.
     pub fn with_xattr_policy(mut self, xattrs: XattrPolicy) -> Self {
         self.xattrs = xattrs;
+        self
+    }
+
+    /// Set the policy for entries that disappear during the snapshot.
+    pub fn with_vanished_node_policy(mut self, on_vanished: VanishedNodePolicy) -> Self {
+        self.on_vanished = on_vanished;
         self
     }
 }
@@ -176,6 +198,64 @@ struct WalkEntry {
     file_type: std::fs::FileType,
 }
 
+fn vanished_entry(
+    policy: VanishedNodePolicy,
+    path: &Path,
+    source: std::io::Error,
+) -> Result<Option<Node>, MaterializeError> {
+    if policy == VanishedNodePolicy::Skip && source.kind() == std::io::ErrorKind::NotFound {
+        Ok(None)
+    } else {
+        Err(MaterializeError::Walk {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+}
+
+fn should_skip_vanished(policy: VanishedNodePolicy, source: &std::io::Error) -> bool {
+    policy == VanishedNodePolicy::Skip && source.kind() == std::io::ErrorKind::NotFound
+}
+
+fn read_walk_entry(
+    entry: WalkEntry,
+    options: WalkOptions,
+) -> Result<Option<Node>, MaterializeError> {
+    let WalkEntry {
+        path,
+        guest_path,
+        file_type,
+    } = entry;
+    let node = if file_type.is_symlink() {
+        let target = match std::fs::read_link(&path) {
+            Ok(target) => target,
+            Err(source) => return vanished_entry(options.on_vanished, &path, source),
+        };
+        Node::Symlink {
+            path: guest_path,
+            target: target.to_string_lossy().into_owned(),
+        }
+    } else if file_type.is_dir() {
+        Node::Dir {
+            path: guest_path,
+            mode: mode_of(&path, 0o755),
+            xattrs: node_xattrs(options.xattrs, &path),
+        }
+    } else {
+        let data = match read_file_for_guest_image(&path) {
+            Ok(data) => data,
+            Err(source) => return vanished_entry(options.on_vanished, &path, source),
+        };
+        Node::File {
+            path: guest_path,
+            mode: mode_of(&path, 0o644),
+            data,
+            xattrs: node_xattrs(options.xattrs, &path),
+        }
+    };
+    Ok(Some(node))
+}
+
 /// Walk `root` into a flat [`Node`] list (guest-absolute paths), symlink-aware
 /// (never follows). Directories and their descendants, regular files (contents
 /// read in), and symlinks are captured; other inode types (fifo/socket/device)
@@ -190,21 +270,39 @@ pub fn collect_nodes(root: &Path, options: WalkOptions) -> Result<Vec<Node>, Mat
     let mut entries = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let read = std::fs::read_dir(&dir).map_err(|source| MaterializeError::Walk {
-            path: dir.clone(),
-            source,
-        })?;
+        let read = match std::fs::read_dir(&dir) {
+            Ok(read) => read,
+            Err(source) if should_skip_vanished(options.on_vanished, &source) => continue,
+            Err(source) => {
+                return Err(MaterializeError::Walk {
+                    path: dir.clone(),
+                    source,
+                });
+            }
+        };
         for entry in read {
-            let entry = entry.map_err(|source| MaterializeError::Walk {
-                path: dir.clone(),
-                source,
-            })?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(source) if should_skip_vanished(options.on_vanished, &source) => continue,
+                Err(source) => {
+                    return Err(MaterializeError::Walk {
+                        path: dir.clone(),
+                        source,
+                    });
+                }
+            };
             let path = entry.path();
             let guest_path = guest_path_of(root, &path);
-            let ft = entry.file_type().map_err(|source| MaterializeError::Walk {
-                path: path.clone(),
-                source,
-            })?;
+            let ft = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(source) if should_skip_vanished(options.on_vanished, &source) => continue,
+                Err(source) => {
+                    return Err(MaterializeError::Walk {
+                        path: path.clone(),
+                        source,
+                    });
+                }
+            };
             if ft.is_dir() {
                 stack.push(path.clone());
             } else if !(ft.is_symlink() || ft.is_file()) {
@@ -223,45 +321,12 @@ pub fn collect_nodes(root: &Path, options: WalkOptions) -> Result<Vec<Node>, Mat
         }
     }
 
-    let mut nodes: Vec<Node> = par_map(entries, |entry| -> Result<Node, MaterializeError> {
-        let WalkEntry {
-            path,
-            guest_path,
-            file_type,
-        } = entry;
-        if file_type.is_symlink() {
-            let target = std::fs::read_link(&path).map_err(|source| MaterializeError::Walk {
-                path: path.clone(),
-                source,
-            })?;
-            Ok(Node::Symlink {
-                path: guest_path,
-                target: target.to_string_lossy().into_owned(),
-            })
-        } else if file_type.is_dir() {
-            let xattrs = node_xattrs(options.xattrs, &path);
-            Ok(Node::Dir {
-                path: guest_path,
-                mode: mode_of(&path, 0o755),
-                xattrs,
-            })
-        } else {
-            let data =
-                read_file_for_guest_image(&path).map_err(|source| MaterializeError::Walk {
-                    path: path.clone(),
-                    source,
-                })?;
-            let xattrs = node_xattrs(options.xattrs, &path);
-            Ok(Node::File {
-                path: guest_path,
-                mode: mode_of(&path, 0o644),
-                data,
-                xattrs,
-            })
-        }
-    })
-    .into_iter()
-    .collect::<Result<Vec<_>, _>>()?;
+    let mut nodes: Vec<Node> = par_map(entries, |entry| read_walk_entry(entry, options))
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect();
 
     nodes.sort_by(|a, b| a.path().cmp(b.path()));
     Ok(nodes)
@@ -742,6 +807,34 @@ fn mode_of(path: &Path, default: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vanished_file_policy_skips_only_not_found_entries() {
+        let source = tempfile::TempDir::new().unwrap();
+        let path = source.path().join("gone");
+        std::fs::write(&path, b"temporary").unwrap();
+        let file_type = std::fs::symlink_metadata(&path).unwrap().file_type();
+        std::fs::remove_file(&path).unwrap();
+        let entry = WalkEntry {
+            path: path.clone(),
+            guest_path: "/gone".to_string(),
+            file_type,
+        };
+        let options = WalkOptions::default().with_vanished_node_policy(VanishedNodePolicy::Skip);
+
+        assert_eq!(read_walk_entry(entry, options).unwrap(), None);
+
+        let rejected = read_walk_entry(
+            WalkEntry {
+                path,
+                guest_path: "/gone".to_string(),
+                file_type,
+            },
+            WalkOptions::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(rejected, MaterializeError::Walk { .. }));
+    }
 
     const SUPERBLOCK: usize = 1024;
     const S_UUID: usize = SUPERBLOCK + 0x68;

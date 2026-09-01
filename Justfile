@@ -390,7 +390,8 @@ build-supervisors:
       echo "  Install it (brew install slp/krun/libkrun) if you need the libkrun backend."
     fi
 
-# Build an mvmctl that carries the Linux host binaries the builder VM needs.
+# Build an mvmctl that carries the Linux host binaries the builder VM needs,
+# plus the native per-VM helpers it spawns beside the resulting executable.
 #
 # The cross-compile is off by default, so a plain `cargo build` produces an
 # mvmctl that can run every host-side verb but cannot bootstrap a builder VM —
@@ -402,6 +403,31 @@ build-supervisors:
 # Bare, this writes `target/debug/mvmctl` — pass `--release` if the mvmctl you
 # invoke is the release one, or the release binary is left untouched.
 embed *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Some pinned macOS nightlies ship rust-objcopy with an RPATH relative to
+    # its rustlib bin directory even though libLLVM lives at the sysroot's lib
+    # directory. cargo-zigbuild only warns when stripping then continues with
+    # larger unstripped payloads, so make the library visible explicitly.
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+      # Build scripts are sibling processes launched by Cargo, while compiler
+      # helpers inherit from rustc. Seed the parent for the first case and use
+      # the wrapper for the second; either half alone leaves some rust-objcopy
+      # invocations unable to load libLLVM.
+      rust_channel="$(sed -n 's/^channel = "\([^"]*\)"$/\1/p' rust-toolchain.toml)"
+      rust_sysroot="$(rustup run "$rust_channel" rustc --print sysroot)"
+      if [[ -n "${DYLD_FALLBACK_LIBRARY_PATH:-}" ]]; then
+        export DYLD_FALLBACK_LIBRARY_PATH="$rust_sysroot/lib:$DYLD_FALLBACK_LIBRARY_PATH"
+      else
+        export DYLD_FALLBACK_LIBRARY_PATH="$rust_sysroot/lib"
+      fi
+      export RUSTC_WRAPPER="{{justfile_directory()}}/scripts/rustc-macos-loader.sh"
+    fi
+    # `mvmctl` and these `[[bin]]` targets live in different packages, so
+    # building one does not cause Cargo to build the others. Forward the same
+    # profile arguments (`--release`, `--profile ...`) so runtime's adjacent-
+    # executable lookup always finds the helper matching the selected mvmctl.
+    ./scripts/cargo-fast.sh build -p mvm-hostd --bins {{ARGS}}
     ./scripts/cargo-fast.sh build --features embed-host-bins {{ARGS}}
 
 # Drop the cached cross-compiled host binaries so the next build rebuilds them.

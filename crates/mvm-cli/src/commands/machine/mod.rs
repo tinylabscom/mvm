@@ -78,7 +78,10 @@ pub(in crate::commands) struct Args {
 #[allow(clippy::large_enum_variant)]
 pub(in crate::commands) enum MachineAction {
     /// Boot an OCI image, run a command, then tear the VM down
-    #[command(display_order = 1)]
+    #[command(
+        display_order = 1,
+        after_long_help = "MOUNTS:\n    --mount snapshots the whole host tree without honoring `.gitignore`. Stage or\n    narrow directories containing large build outputs before mounting them."
+    )]
     Run(MachineRunArgs),
     /// Build a microVM image from a manifest or Nix flake
     #[command(display_order = 2)]

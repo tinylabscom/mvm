@@ -407,10 +407,15 @@ pub(crate) fn resolve_sdk_sidecar_attachment_for_host(
     let cache_miss = match mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(
         services, &resolver, arch, libc,
     ) {
-        Ok(resolved) => {
+        Ok(Some(resolved)) => {
             warn_if_sidecar_predates_the_working_tree(&cache_root, version, arch, libc);
-            return Ok(resolved);
+            return Ok(Some(resolved));
         }
+        // No SDK-served binding means no sidecar was selected. In particular,
+        // an image whose libc has not been detected yet must not probe the
+        // synthetic `unknown/` cache path and mislabel its absence as a
+        // published artifact.
+        Ok(None) => return Ok(None),
         Err(e) => e,
     };
 
@@ -480,12 +485,15 @@ fn warn_if_sidecar_predates_the_working_tree(
                 mvm_build::sdk_sidecar::SidecarProvenance::Published => "is the published artifact",
                 _ => "was built from a different revision of this tree",
             };
-            ui::warn(&format!(
-                "SDK sidecar {origin}, so `libmvm_host_services.so` does not carry \
-                 changes to crates/mvm-sdk in this checkout. Host-service calls from \
-                 the guest use the verbs it shipped with; one added here answers \
-                 `unknown method`. Refresh it with `mvmctl build sdk-sidecar build`."
-            ));
+            let marker = mvm_fs::sdk_sidecar::SdkSidecarLayout::under(
+                cache_root,
+                version,
+                &arch.to_string(),
+                libc,
+            )
+            .artifact_dir
+            .join(mvm_build::sdk_sidecar::LOCAL_SOURCE_FINGERPRINT_FILE);
+            ui::warn(&sidecar_provenance_warning(origin, &marker));
         }
         // Provenance is a diagnostic. Failing to compute it must not fail a
         // launch that would otherwise proceed.
@@ -493,6 +501,17 @@ fn warn_if_sidecar_predates_the_working_tree(
             tracing::debug!(%error, "could not determine SDK sidecar provenance");
         }
     }
+}
+
+fn sidecar_provenance_warning(origin: &str, marker: &std::path::Path) -> String {
+    format!(
+        "SDK sidecar {origin}, so `libmvm_host_services.so` does not carry changes to \
+         crates/mvm-host-services in this checkout. Host-service calls from the guest use \
+         the verbs it shipped with; one added here answers `unknown method`. Run \
+         `mvmctl build sdk-sidecar build` and wait for both libc variants to report cached \
+         successfully. Provenance marker: {}.",
+        marker.display()
+    )
 }
 
 /// A failed download must read like the cache-miss refusal it replaces: name
@@ -531,6 +550,17 @@ mod sdk_sidecar_host_resolution_tests {
 
     fn sha256_hex(bytes: &[u8]) -> String {
         hex::encode(Sha256::digest(bytes))
+    }
+
+    #[test]
+    fn stale_sidecar_guidance_names_the_current_owner_and_completion_signal() {
+        let marker = std::path::Path::new("/cache/glibc/SOURCE_FINGERPRINT");
+        let warning = sidecar_provenance_warning("is the published artifact", marker);
+
+        assert!(warning.contains("crates/mvm-host-services"), "{warning}");
+        assert!(!warning.contains("changes to crates/mvm-sdk"), "{warning}");
+        assert!(warning.contains("both libc variants"), "{warning}");
+        assert!(warning.contains(&marker.display().to_string()), "{warning}");
     }
 
     /// `libc` is explicit at every call site: the resolver proves an
@@ -638,6 +668,15 @@ mod sdk_sidecar_host_resolution_tests {
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(dir.path());
+        assert_eq!(
+            resolve_sdk_sidecar_attachment_for_host(
+                &[],
+                mvm_contract::guest_libc::GuestLibc::Unknown
+            )
+            .unwrap(),
+            None,
+            "no binding must short-circuit before probing an unknown-libc cache path"
+        );
         assert_eq!(
             resolve_sdk_sidecar_attachment_for_host(&[], mvm_contract::guest_libc::GuestLibc::Musl)
                 .unwrap(),

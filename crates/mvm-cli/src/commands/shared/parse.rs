@@ -65,7 +65,7 @@ pub fn parse_port_spec(spec: &str) -> Result<(u16, u16)> {
 /// `--volume` alias, or the `MVM_VOLUMES` env var.
 ///
 /// Grammar (split on `:`):
-/// - `host:/guest`             — live host-directory share (virtio-fs)
+/// - `host:/guest`             — read-only directory snapshot (ext4 block image)
 /// - `host:/guest:ro|rw`       — dir share, explicit mode
 /// - `host:/guest:SIZE`        — persistent ext4 disk image (virtio-blk)
 /// - `host:/guest:SIZE:ro|rw`  — disk, explicit mode
@@ -83,7 +83,7 @@ pub fn parse_port_spec(spec: &str) -> Result<(u16, u16)> {
 /// never user-controllable (see `validate_guest_mount`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VolumeSpec {
-    /// Live host-directory share over virtio-fs (two-way unless `read_only`).
+    /// Host-directory snapshot materialized as a read-only ext4 block image.
     DirShare {
         host_dir: String,
         guest_mount: String,
@@ -101,10 +101,10 @@ pub enum VolumeSpec {
     },
 }
 
-/// A live host-directory share accepted by transient `machine run`.
+/// A host-directory snapshot accepted by transient `machine run`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirShareSpec {
-    /// Host directory served by virtio-fs.
+    /// Host directory materialized into the snapshot.
     pub host_dir: String,
     /// Absolute guest mount point.
     pub guest_mount: String,

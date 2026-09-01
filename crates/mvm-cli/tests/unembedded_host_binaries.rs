@@ -38,6 +38,7 @@ fn the_default_build_ships_only_a_payload_the_store_could_prove() {
             );
             assert!(err.contains("embed-host-bins"), "{err}");
             assert!(err.contains("just embed"), "{err}");
+            assert!(err.contains("./target/debug/mvmctl"), "{err}");
             assert!(!root.exists(), "refusal must not create {}", root.display());
         }
         // Warm: restored from the content store. A restore is all-or-nothing,

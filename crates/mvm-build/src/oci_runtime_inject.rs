@@ -51,6 +51,12 @@ pub struct MvmRuntimeBinaries {
 /// the bytes.
 const CONTENT_DIGEST_FRAMING: &str = "mvm-runtime-id-v1";
 
+/// Version of host-side injection behavior that cannot be inferred from the
+/// injected files or their destination paths. Bumping this invalidates cached
+/// rootfs images when interpretation changes, such as preserving image `Env`
+/// even when the image declares no command.
+pub const INJECT_SEMANTICS_VERSION: &str = "2";
+
 impl MvmRuntimeBinaries {
     /// The four artifacts in a fixed order, tagged with the name each is
     /// digested under.
@@ -126,6 +132,8 @@ impl MvmRuntimeBinaries {
 /// the production digest folded in.
 fn inject_shape_bytes() -> Vec<u8> {
     let mut out = b"inject-shape\0".to_vec();
+    out.extend_from_slice(INJECT_SEMANTICS_VERSION.as_bytes());
+    out.push(0);
     for (rel, mode) in INJECT_DIRS {
         out.extend_from_slice(rel.as_bytes());
         out.push(0);
@@ -514,6 +522,12 @@ mod tests {
     #[test]
     fn inject_shape_bytes_mentions_every_dir_and_dest() {
         let shape = inject_shape_bytes();
+        assert!(
+            shape
+                .windows(INJECT_SEMANTICS_VERSION.len())
+                .any(|window| window == INJECT_SEMANTICS_VERSION.as_bytes()),
+            "layout digest omits the host-side injection semantics version"
+        );
         for (rel, _) in INJECT_DIRS {
             assert!(
                 shape.windows(rel.len()).any(|w| w == rel.as_bytes()),
