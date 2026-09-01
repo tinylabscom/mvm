@@ -67,6 +67,7 @@ fn sample_audit_entry(event: &str, labels: BTreeMap<String, String>) -> PlanAudi
         image_name: "test-image".into(),
         image_sha256: "sha256:0000000000000000000000000000000000000000000000000000000000000002"
             .into(),
+        caller_commitment: None,
         event: event.into(),
         labels,
     }

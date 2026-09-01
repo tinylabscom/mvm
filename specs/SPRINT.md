@@ -10,6 +10,14 @@
 
 ## In progress
 
+- [ ] **Signed caller commitment — issue #3070.**
+      `specs/plans/2026-09-01-signed-caller-commitment.md`.
+      One typed opaque 32-byte commitment now reaches the signed execution
+      plan and every chain-signed plan audit entry from `run` and `machine
+      run`, including persistent-machine restarts. Workspace tests, Clippy,
+      Linux/BDD gated checks, formatting, frozen-wire compatibility, and the
+      243-scenario non-live BDD suite are green; merge delivery remains.
+
 - [ ] **Warm claim authenticated readiness — issue #3039.**
       `specs/plans/2026-08-31-warm-claim-authenticated-readiness.md`.
       Post-restore readiness now requires the existing authenticated guest-agent

@@ -1358,6 +1358,7 @@ mod tests {
                 capture_paths: vec!["/artifacts".to_string()],
                 retention_days: 30,
             },
+            caller_commitment: None,
             audit_labels: BTreeMap::new(),
             key_rotation: KeyRotationSpec { interval_days: 7 },
             attestation: AttestationRequirement {

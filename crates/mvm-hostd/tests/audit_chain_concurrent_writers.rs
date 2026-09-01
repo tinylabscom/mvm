@@ -173,6 +173,7 @@ fn entry(worker: usize, seq: usize) -> PlanAuditEntry {
         image_name: "concurrency-fixture".to_string(),
         image_sha256: "00".repeat(32),
         event: "plan.admitted".to_string(),
+        caller_commitment: None,
         labels,
     }
 }

@@ -266,6 +266,7 @@ mod tests {
             image_name: "<unbound>".to_string(),
             image_sha256: "0".repeat(64),
             event: event.to_string(),
+            caller_commitment: None,
             labels,
         }
     }

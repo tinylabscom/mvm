@@ -60,6 +60,7 @@ mod tests {
             image_name: "vm".to_string(),
             image_sha256: "a".repeat(64),
             event: event.to_string(),
+            caller_commitment: None,
             labels: Default::default(),
         }
     }

@@ -836,6 +836,7 @@ fn spec_fixture(name: &str) -> MachineSpec {
         volumes: vec![],
         init: vec![],
         agent_verb: vec![],
+        caller_commitment: None,
         created_at: None,
         last_started_at: None,
         health_check: None,
@@ -860,6 +861,8 @@ fn run_spec_maps_run_args_into_a_machine_spec() {
         "--net",
         "--allow-host",
         "api.example.com:443",
+        "--caller-commitment",
+        "abababababababababababababababababababababababababababababababab",
     ])
     .expect("parse");
     let spec = machine_run_spec(&args, "web".to_string(), None).expect("spec");
@@ -875,6 +878,10 @@ fn run_spec_maps_run_args_into_a_machine_spec() {
     assert!(spec.init.is_empty());
     // No --agent-verb: spec stores an empty list (computed default applies at start).
     assert!(spec.agent_verb.is_empty());
+    assert_eq!(
+        spec.caller_commitment.as_ref().map(ToString::to_string),
+        Some("ab".repeat(32))
+    );
 }
 
 #[test]
@@ -1760,6 +1767,7 @@ fn mark_machine_started_sets_digest_and_timestamp() {
         volumes: Vec::new(),
         init: Vec::new(),
         agent_verb: Vec::new(),
+        caller_commitment: None,
         created_at: Some("2026-06-18T00:00:00Z".to_string()),
         last_started_at: None,
         health_check: None,
@@ -1993,6 +2001,7 @@ fn machine_start_receipt_input_redacts_host_paths_and_surfaces_policy() {
         volumes: vec!["/Users/example/src:/work:rw".to_string()],
         init: vec!["pip install -r requirements.txt".to_string()],
         agent_verb: Vec::new(),
+        caller_commitment: None,
         created_at: Some("2026-06-18T00:00:00Z".to_string()),
         last_started_at: None,
         health_check: None,
@@ -2084,6 +2093,7 @@ fn machine_start_preflight_reports_uniform_l4_enforcement_for_oci_allow_host() {
         volumes: Vec::new(),
         init: Vec::new(),
         agent_verb: Vec::new(),
+        caller_commitment: None,
         created_at: Some("2026-06-18T00:00:00Z".to_string()),
         last_started_at: None,
         health_check: None,
@@ -2148,6 +2158,7 @@ fn create_refuses_overwrite_without_force() {
         volumes: Vec::new(),
         init: Vec::new(),
         agent_verb: Vec::new(),
+        caller_commitment: None,
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
         health_check: None,
@@ -2182,6 +2193,7 @@ fn remove_machine_spec_requires_confirmation_and_deletes_dir() {
         volumes: Vec::new(),
         init: Vec::new(),
         agent_verb: Vec::new(),
+        caller_commitment: None,
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
         health_check: None,
@@ -2218,6 +2230,7 @@ fn seed_machine_spec(name: &str) {
         volumes: Vec::new(),
         init: Vec::new(),
         agent_verb: Vec::new(),
+        caller_commitment: None,
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
         health_check: None,
@@ -2772,6 +2785,7 @@ fn reconfigure_spec_fixture() -> MachineSpec {
         volumes: vec!["/data:/data:ro".into()],
         init: vec![],
         agent_verb: vec![],
+        caller_commitment: None,
         created_at: None,
         last_started_at: None,
         health_check: None,

@@ -131,6 +131,7 @@ mod tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),

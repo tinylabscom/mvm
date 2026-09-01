@@ -333,6 +333,7 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
         memory_mib,
         from_workload_ir: args.from_workload_ir.clone(),
         agent_verb_override: args.run.agent_verb.clone(),
+        caller_commitment: args.run.caller_commitment.clone(),
         reset: args.reset,
         keep_alive: args.persistent(),
         keep_alive_dev: false,

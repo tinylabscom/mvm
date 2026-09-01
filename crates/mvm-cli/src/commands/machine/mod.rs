@@ -659,6 +659,7 @@ fn machine_run_spec(
         volumes: machine_run_volume_specs(args)?,
         init: Vec::new(),
         agent_verb: args.run.agent_verb.clone(),
+        caller_commitment: args.run.caller_commitment.clone(),
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
         health_check: crate::exec::build_healthcheck(
@@ -1193,6 +1194,7 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         volumes: inputs.volumes.to_vec(),
         init: inputs.init.to_vec(),
         agent_verb: Vec::new(),
+        caller_commitment: None,
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
         health_check: None,
