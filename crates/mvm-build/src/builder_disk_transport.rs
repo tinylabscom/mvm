@@ -20,6 +20,7 @@
 //! stops extraction before the disk's zero padding, so a fixed-size disk carrying
 //! a shorter archive round-trips cleanly.
 
+use std::os::unix::fs::FileExt;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -92,6 +93,62 @@ pub fn pack_input_disk(
         .with_context(|| format!("open {} to size", out_image.display()))?;
     f.set_len(disk_size)
         .with_context(|| format!("size input disk to {disk_size}"))?;
+    Ok(())
+}
+
+/// Rewrite a **already-attached** input disk in place, for one dispatch of a
+/// persistent builder.
+///
+/// [`pack_input_disk`] sizes the file to its contents with `set_len`, which is
+/// right before boot and wrong afterwards. A running VM's `DiskImage` captured
+/// the file's length **once, when it opened it**, and zero-fills every guest
+/// read past that offset. Grow the file mid-session and the guest sees a
+/// truncated archive — `tar` stops at whatever it finds, which is not an error
+/// it can report as one. So this never changes the length: it writes within the
+/// capacity the VM booted with, and refuses when the archive will not fit rather
+/// than producing a disk that reads as silently short.
+///
+/// Only the `job` tree is repacked in practice. `work` and `mvm-bins` were
+/// bind-mounted by the guest at boot and are never re-read, so re-archiving a
+/// large workspace on every dispatch would cost real time for no effect.
+///
+/// The trailing bytes of the previous dispatch's archive are left alone.
+/// `tar::Builder::finish` writes the end-of-archive marker (two zero blocks),
+/// and extraction stops there, so stale tail bytes are unreachable as archive
+/// content — the same property that lets a fixed-size disk carry a short
+/// archive at boot.
+pub fn repack_input_disk_in_place(inputs: &[InputTree<'_>], image: &Path) -> Result<()> {
+    let capacity = std::fs::metadata(image)
+        .with_context(|| format!("stat {} to learn its capacity", image.display()))?
+        .len();
+    let mut buf = Vec::new();
+    {
+        let mut b = tar::Builder::new(&mut buf);
+        for tree in inputs {
+            b.append_dir_all(tree.name, tree.src)
+                .with_context(|| format!("archive '{}' from {}", tree.name, tree.src.display()))?;
+        }
+        b.finish().context("finish dispatch input tar")?;
+    }
+    if buf.len() as u64 > capacity {
+        anyhow::bail!(
+            "dispatch inputs are {} bytes but the attached input disk holds {capacity}; \
+             the guest reads zeros past its booted capacity, so a larger archive would \
+             extract as silently truncated rather than fail",
+            buf.len()
+        );
+    }
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(image)
+        .with_context(|| format!("open {} to repack", image.display()))?;
+    f.write_all_at(&buf, 0)
+        .with_context(|| format!("write dispatch inputs to {}", image.display()))?;
+    // The guest reads this device on the next frame it is sent. Without the
+    // flush the write can still be in the host's page cache while the guest's
+    // pread races it, and the failure looks like a corrupt archive.
+    f.sync_data()
+        .with_context(|| format!("flush {}", image.display()))?;
     Ok(())
 }
 
@@ -276,5 +333,96 @@ mod tests {
         let bytes = fs::read(&image).unwrap();
         assert_eq!(bytes.len() as u64 % SECTOR, 0);
         assert!(bytes.iter().all(|&b| b == 0));
+    }
+
+    /// The invariant a running VM depends on: its `DiskImage` captured the
+    /// file's length when it opened it and zero-fills reads past that offset,
+    /// so a repack that changed the length would be read as a short archive.
+    #[test]
+    fn repacking_in_place_never_changes_the_disk_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("job-1");
+        fs::create_dir_all(&first).unwrap();
+        fs::write(first.join("cmd.sh"), vec![b'a'; 4096]).unwrap();
+        let image = dir.path().join("in.img");
+        pack_input_disk(
+            &[InputTree {
+                name: "job",
+                src: &first,
+            }],
+            None,
+            &image,
+            64 * 1024,
+        )
+        .unwrap();
+        let capacity = fs::metadata(&image).unwrap().len();
+
+        // A second dispatch with a much smaller payload.
+        let second = dir.path().join("job-2");
+        fs::create_dir_all(&second).unwrap();
+        fs::write(second.join("cmd.sh"), b"echo hi").unwrap();
+        repack_input_disk_in_place(
+            &[InputTree {
+                name: "job",
+                src: &second,
+            }],
+            &image,
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::metadata(&image).unwrap().len(),
+            capacity,
+            "the attached disk's length must not move under the running guest"
+        );
+        // And the new payload is what extracts — the previous dispatch's longer
+        // archive is past the end-of-archive marker and unreachable.
+        let dest = dir.path().join("x");
+        read_output_disk(&image, &dest).unwrap();
+        assert_eq!(fs::read(dest.join("job/cmd.sh")).unwrap(), b"echo hi");
+    }
+
+    /// Refusing is the whole point: a too-large archive written into a fixed
+    /// capacity extracts as silently truncated, which no layer below reports.
+    #[test]
+    fn repacking_refuses_inputs_larger_than_the_booted_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("job-small");
+        fs::create_dir_all(&small).unwrap();
+        fs::write(small.join("cmd.sh"), b"x").unwrap();
+        let image = dir.path().join("in.img");
+        pack_input_disk(
+            &[InputTree {
+                name: "job",
+                src: &small,
+            }],
+            None,
+            &image,
+            SECTOR,
+        )
+        .unwrap();
+        let capacity = fs::metadata(&image).unwrap().len();
+
+        let big = dir.path().join("job-big");
+        fs::create_dir_all(&big).unwrap();
+        fs::write(big.join("cmd.sh"), vec![b'z'; 512 * 1024]).unwrap();
+        let err = repack_input_disk_in_place(
+            &[InputTree {
+                name: "job",
+                src: &big,
+            }],
+            &image,
+        )
+        .expect_err("an oversized dispatch payload must refuse");
+
+        assert!(
+            err.to_string().contains("input disk holds"),
+            "the refusal must name the capacity: {err}"
+        );
+        assert_eq!(
+            fs::metadata(&image).unwrap().len(),
+            capacity,
+            "a refused repack must not have resized the disk on its way out"
+        );
     }
 }
