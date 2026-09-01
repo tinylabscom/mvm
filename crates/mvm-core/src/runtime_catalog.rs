@@ -35,10 +35,11 @@ pub struct RuntimeEntry {
     /// before the rootfs exists, and a guest can only `dlopen` the variant
     /// matching its own libc.
     ///
-    /// [`GuestLibc::Unknown`] is the serde default so a catalog written before
-    /// this field deserializes, and it means exactly what it says elsewhere:
-    /// not "assume the common case", but "we cannot say".
-    #[serde(default)]
+    /// Required, with no serde default. The catalog is built in-tree and never
+    /// read from a file, so there is no older shape to tolerate — and a default
+    /// here would silently be [`GuestLibc::Unknown`], which refuses
+    /// `--host-service` outright. An entry that forgets to say should fail to
+    /// parse, not boot into a refusal.
     pub libc: GuestLibc,
     /// argv[0] values that select this runtime, e.g. `python`, `python3`, `pip`.
     #[serde(default)]
@@ -733,10 +734,31 @@ mod tests {
         let parsed: RuntimeEntry = serde_json::from_value(serde_json::json!({
             "name": "python",
             "description": "CPython",
-            "image": "python:3.12-alpine"
+            "image": "python:3.12-alpine",
+            "libc": "musl"
         }))
-        .expect("legacy entry parses");
+        .expect("an entry declaring no bindings parses");
         assert!(parsed.services.is_empty());
         assert!(parsed.peers.is_empty());
+    }
+
+    /// Bindings are optional; the libc is not. An entry that omits it would
+    /// deserialize to `Unknown`, which refuses `--host-service` outright — a
+    /// runtime that silently cannot serve host services is worse than one that
+    /// fails to parse. There is no older catalog shape to accommodate: the
+    /// table is built in-tree and never read from a file.
+    #[test]
+    fn an_entry_omitting_its_libc_does_not_parse() {
+        let err = serde_json::from_value::<RuntimeEntry>(serde_json::json!({
+            "name": "python",
+            "description": "CPython",
+            "image": "python:3.12-alpine"
+        }))
+        .expect_err("an entry that does not say its libc must not parse");
+
+        assert!(
+            err.to_string().contains("libc"),
+            "the error must name the missing field: {err}"
+        );
     }
 }

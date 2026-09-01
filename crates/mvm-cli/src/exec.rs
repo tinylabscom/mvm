@@ -25,11 +25,14 @@ use std::path::Path;
 use crate::commands::DirShareSpec;
 use crate::ui;
 
+mod either;
 /// Exit code the CLI returns when a guest command exceeds its `--timeout`.
 /// Matches GNU `timeout(1)` so scripts can branch on it.
 mod guest_run;
 mod launch_plan;
 mod mounts;
+use either::Either;
+use mounts::refuse_unloadable_sidecar;
 mod session;
 mod transient;
 
@@ -620,27 +623,6 @@ pub fn run_with_posture(
 ) -> Result<i32> {
     run_inner(req, /* capture = */ false, admit, Some(posture))
         .map(|either| either.left().expect("streaming mode returns exit code"))
-}
-
-/// Tagged union for the two return shapes [`run`] and [`run_captured`]
-/// share. Internal — the public API exposes the unboxed variants.
-enum Either<L, R> {
-    Left(L),
-    Right(R),
-}
-impl<L, R> Either<L, R> {
-    fn left(self) -> Option<L> {
-        match self {
-            Either::Left(l) => Some(l),
-            Either::Right(_) => None,
-        }
-    }
-    fn right(self) -> Option<R> {
-        match self {
-            Either::Right(r) => Some(r),
-            Either::Left(_) => None,
-        }
-    }
 }
 
 fn boots_baked_entrypoint(req: &ExecRequest) -> bool {
@@ -1410,6 +1392,12 @@ pub fn resolve_launch(
         start_config.bundle_json = sub.bundle_json;
         start_config.config_files.extend(sub.config_files);
         use_snapshot = false;
+
+        refuse_unloadable_sidecar(
+            &image.rootfs,
+            &start_config.volumes,
+            start_config.plan_json.as_deref(),
+        )?;
     }
     sub.finish(SubPhase::AdmitPlan);
     tracing::debug!(

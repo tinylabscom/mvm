@@ -22,26 +22,33 @@ use std::path::Path;
 /// while the detection — which reads a filesystem — stays here.
 pub use mvm_contract::guest_libc::GuestLibc;
 
-/// The libc `libmvm_host_services.so` is currently built against.
+/// Whether a guest whose rootfs is `image` can load a sidecar built for
+/// `sidecar`.
 ///
-/// `nix/packages/mvm-sdk-cdylib.nix` builds one variant, for the nixpkgs Linux
-/// platform, which is glibc. A guest whose own libc differs cannot load it:
-/// musl's loader fails resolving glibc-only symbols such as `_dl_find_object`,
-/// and shipping a second loader alongside does not help, because the process
-/// doing the loading already has one.
+/// Both sides are now facts rather than assumptions: the image records its libc
+/// in its `mvm-meta.json`, and the sidecar records its own in the cache path it
+/// was filed under. A hardcoded constant stood here while only one variant was
+/// built, and it has to go rather than be updated — with two variants cached
+/// side by side, any fixed answer is wrong for one of them.
 ///
-/// This is the single place that changes when a second variant exists — the
-/// refusal keyed on it becomes a selection between them.
-pub const SIDECAR_CDYLIB_LIBC: GuestLibc = GuestLibc::Glibc;
+/// [`GuestLibc::Unknown`] on either side is refused rather than attempted. It
+/// means a loader this code does not recognise, or more than one, and attaching
+/// on a guess turns a refusal the host can explain into a relocation error
+/// raised from inside the guest at `dlopen` time.
+#[must_use]
+pub fn sidecar_loads_in(image: GuestLibc, sidecar: GuestLibc) -> bool {
+    image != GuestLibc::Unknown && image == sidecar
+}
 
-/// Whether a guest recording `image` can load the SDK host-services cdylib.
+/// The libc a cached sidecar image was filed under, by its path.
 ///
-/// [`GuestLibc::Unknown`] is refused rather than attempted. It means the image
-/// carried no loader this code recognises, or carried more than one, and
-/// attaching on a guess turns a refusal the host can explain into a relocation
-/// error raised from inside the guest at `dlopen` time.
-pub fn sidecar_loads_in(image: GuestLibc) -> bool {
-    image == SIDECAR_CDYLIB_LIBC
+/// Delegates to the layout that wrote the path, so the encoding has exactly one
+/// owner. Re-exposed here because the admission gate reads it and already
+/// depends on this module — routing through the owner beats either a second
+/// parser or a new dependency edge for one function.
+#[must_use]
+pub fn sidecar_libc_of_image_path(image: &std::path::Path) -> GuestLibc {
+    mvm_fs::sdk_sidecar::SdkSidecarLayout::libc_of_image_path(image)
 }
 
 /// Directories a dynamic loader lives in, relative to the rootfs.
@@ -165,8 +172,11 @@ mod tests {
     }
     #[test]
     fn only_a_matching_libc_can_load_the_sidecar() {
-        assert!(sidecar_loads_in(SIDECAR_CDYLIB_LIBC));
-        assert!(!sidecar_loads_in(GuestLibc::Musl));
+        assert!(sidecar_loads_in(GuestLibc::Glibc, GuestLibc::Glibc));
+        assert!(sidecar_loads_in(GuestLibc::Musl, GuestLibc::Musl));
+        // The mismatch this predicate exists to catch, both ways round.
+        assert!(!sidecar_loads_in(GuestLibc::Musl, GuestLibc::Glibc));
+        assert!(!sidecar_loads_in(GuestLibc::Glibc, GuestLibc::Musl));
     }
 
     /// Unknown must not load. It is the arm that would otherwise be attempted
@@ -174,6 +184,11 @@ mod tests {
     /// instead of a refusal the host can explain.
     #[test]
     fn an_unknown_libc_never_loads_the_sidecar() {
-        assert!(!sidecar_loads_in(GuestLibc::Unknown));
+        // Unknown on either side is refused, never treated as a match — even
+        // against itself, where "both unrecognised" is not evidence of
+        // agreement.
+        assert!(!sidecar_loads_in(GuestLibc::Unknown, GuestLibc::Glibc));
+        assert!(!sidecar_loads_in(GuestLibc::Glibc, GuestLibc::Unknown));
+        assert!(!sidecar_loads_in(GuestLibc::Unknown, GuestLibc::Unknown));
     }
 }

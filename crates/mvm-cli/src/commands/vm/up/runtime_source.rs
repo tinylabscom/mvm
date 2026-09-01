@@ -598,7 +598,7 @@ mod sdk_sidecar_host_resolution_tests {
         mvm_hostd::plan_admission::enforce_sdk_sidecar_attachment(
             std::slice::from_ref(&attached.volume),
             &plan,
-            mvm_build::guest_libc::SIDECAR_CDYLIB_LIBC,
+            mvm_contract::guest_libc::GuestLibc::Musl,
         )
         .expect("the resolved attachment must satisfy the admission gate");
 
@@ -608,7 +608,7 @@ mod sdk_sidecar_host_resolution_tests {
             mvm_hostd::plan_admission::enforce_sdk_sidecar_attachment(
                 std::slice::from_ref(&attached.volume),
                 &unbound,
-                mvm_build::guest_libc::SIDECAR_CDYLIB_LIBC,
+                mvm_contract::guest_libc::GuestLibc::Musl,
             )
             .is_err()
         );
