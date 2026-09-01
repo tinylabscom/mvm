@@ -334,6 +334,20 @@ for detailed scope and acceptance criteria.
 
 ## Completed issue closeouts
 
+- [x] **Issues #3051 and #3065 — a vCPU ceiling is the VMM's, not the wire
+      format's.** The Firecracker and libkrun drivers both declared
+      `max_vcpus: Some(u8::MAX)`, reasoning from the count being a byte on the
+      wire. Neither VMM boots that many, so the clamp above the backends
+      faithfully produced a count that would not run and `--cpus 9999` failed
+      on both while passing on HVF, which asks the host for its ceiling instead
+      of deriving one from a type. Each driver now declares what it actually
+      boots — Firecracker 32, probed against the API; libkrun 64, measured,
+      since `krun_get_max_vcpus()` forwards KVM's 4096 while libkrun aborts at
+      65 — and holds the value handed to the VMM to that same constant. The
+      reporting clamp stays a single call site above the backends.
+      Live-witnessed on x86_64 Linux/KVM. See
+      `specs/sprint/delivery/vcpu-ceilings-are-the-vmms-not-the-wires.md`.
+
 - [x] **virtiofsd sandbox parity — issue #3022.**
       `specs/plans/2026-08-31-virtiofsd-sandbox-parity.md`.
       The shared QEMU helper selects the namespace sandbox explicitly for both
