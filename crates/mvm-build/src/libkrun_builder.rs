@@ -2489,6 +2489,34 @@ fn auto_bootstrap_builder_vm_image(arch_dir: &Path) -> Result<bool, BuilderVmErr
 }
 
 pub fn maybe_reexec_builder_vm_bootstrap_helper() -> Result<bool, BuilderVmError> {
+    maybe_reexec_builder_vm_helper(BuilderVmHelperCommand::Bootstrap)
+}
+
+pub fn maybe_reexec_builder_vm_sdk_sidecar_helper(force: bool) -> Result<bool, BuilderVmError> {
+    maybe_reexec_builder_vm_helper(BuilderVmHelperCommand::SdkSidecarBuild { force })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuilderVmHelperCommand {
+    Bootstrap,
+    SdkSidecarBuild { force: bool },
+}
+
+impl BuilderVmHelperCommand {
+    fn args(self) -> Vec<&'static str> {
+        match self {
+            Self::Bootstrap => vec!["__builder-vm-bootstrap"],
+            Self::SdkSidecarBuild { force: false } => {
+                vec!["build", "sdk-sidecar", "build"]
+            }
+            Self::SdkSidecarBuild { force: true } => {
+                vec!["build", "sdk-sidecar", "build", "--force"]
+            }
+        }
+    }
+}
+
+fn maybe_reexec_builder_vm_helper(command: BuilderVmHelperCommand) -> Result<bool, BuilderVmError> {
     let Some(workspace_root) = builder_vm_source_checkout_root() else {
         return Ok(false);
     };
@@ -2499,8 +2527,7 @@ pub fn maybe_reexec_builder_vm_bootstrap_helper() -> Result<bool, BuilderVmError
     }
 
     let mut cmd = Command::new(&bootstrap_bin);
-    cmd.current_dir(&workspace_root)
-        .arg("__builder-vm-bootstrap");
+    cmd.current_dir(&workspace_root).args(command.args());
     #[cfg(target_os = "linux")]
     if std::env::var_os(crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV).is_none() {
         cmd.env(
@@ -2510,13 +2537,13 @@ pub fn maybe_reexec_builder_vm_bootstrap_helper() -> Result<bool, BuilderVmError
     }
     let status = cmd.status().map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
-            "spawn explicit builder VM bootstrap helper {}: {e}",
+            "spawn embedded builder VM helper {}: {e}",
             bootstrap_bin.display()
         ))
     })?;
     if !status.success() {
         return Err(BuilderVmError::ExtractionFailed(format!(
-            "explicit builder VM bootstrap helper {} exited with {}",
+            "embedded builder VM helper {} exited with {}",
             bootstrap_bin.display(),
             status.code().unwrap_or(-1),
         )));
@@ -2590,7 +2617,14 @@ fn builder_vm_bootstrap_helper_build_command(
     let mut cmd = Command::new(cargo);
     cmd.current_dir(workspace_root)
         .env("CARGO_TARGET_DIR", helper_target_dir)
-        .args(["build", "-q", "--bin", "mvmctl"]);
+        .args([
+            "build",
+            "-q",
+            "--bin",
+            "mvmctl",
+            "--features",
+            "embed-host-bins",
+        ]);
     cmd
 }
 
@@ -6325,7 +6359,17 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        assert_eq!(args, vec!["build", "-q", "--bin", "mvmctl"]);
+        assert_eq!(
+            args,
+            vec![
+                "build",
+                "-q",
+                "--bin",
+                "mvmctl",
+                "--features",
+                "embed-host-bins"
+            ]
+        );
 
         let envs = cmd
             .get_envs()
@@ -6339,6 +6383,22 @@ mod tests {
         assert_eq!(
             envs.get("CARGO_TARGET_DIR"),
             Some(&Some("/tmp/helper-target".to_string()))
+        );
+    }
+
+    #[test]
+    fn builder_vm_helper_commands_are_closed_and_preserve_force() {
+        assert_eq!(
+            BuilderVmHelperCommand::Bootstrap.args(),
+            ["__builder-vm-bootstrap"]
+        );
+        assert_eq!(
+            BuilderVmHelperCommand::SdkSidecarBuild { force: false }.args(),
+            ["build", "sdk-sidecar", "build"]
+        );
+        assert_eq!(
+            BuilderVmHelperCommand::SdkSidecarBuild { force: true }.args(),
+            ["build", "sdk-sidecar", "build", "--force"]
         );
     }
 

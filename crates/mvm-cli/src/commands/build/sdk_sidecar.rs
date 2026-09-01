@@ -46,6 +46,12 @@ fn run_build(args: BuildArgs) -> Result<()> {
             "SDK sidecar source build requires a source checkout with nix/images/runtime-overlay/flake.nix"
         )
     })?;
+
+    #[cfg(feature = "builder-vm")]
+    if mvm_build::libkrun_builder::maybe_reexec_builder_vm_sdk_sidecar_helper(args.force)? {
+        return Ok(());
+    }
+
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let version = env!("CARGO_PKG_VERSION");
     let arch = GuestArch::host();

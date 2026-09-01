@@ -141,10 +141,15 @@
       `specs/plans/2026-08-27-sdk-sidecar-source-build.md`.
       An explicit builder-VM command now realizes the existing glibc sidecar
       derivation through Stage 0, verifies its artifact contract, and promotes
-      the source fingerprint atomically with the image. Focused and workspace
-      tests, workspace check, gated Linux/BDD compilation, zero-warning Clippy,
-      all policy gates, and a live aarch64 Stage 0/Nix build are green; merge
-      delivery remains.
+      the source fingerprint atomically with the image. The source-checkout
+      SDK-sidecar command now re-executes in a source-checkout helper built with
+      its required embedded Linux host binaries, so a normal unembedded
+      developer `mvmctl` can cold-bootstrap and complete the SDK build. The
+      documented-surface E2E suite preserves that cold-cache path. A live
+      aarch64 cold run completed Stage 0/Nix and cached both glibc and musl
+      sidecars through the HVF builder. Focused regressions, workspace check and
+      tests, formatting, and zero-warning Clippy are green; merge delivery
+      remains.
 
 - [x] **FlowMux HTTPS live-client repair.**
       `specs/plans/2026-08-27-flowmux-https-live-client.md`.
