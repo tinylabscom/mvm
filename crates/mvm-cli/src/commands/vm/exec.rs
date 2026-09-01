@@ -36,9 +36,8 @@ pub(in crate::commands) struct Args {
     /// from `machine run` dispatch. `> 0` ⇒ eligible to claim a warm standby.
     #[arg(skip)]
     pub warm_pool_size: u32,
-    /// Internal (not a CLI flag): the libc of the image this run will boot,
-    /// carried across from [`RunArgs::detected_libc`] so the SDK sidecar
-    /// variant can be chosen before the rootfs exists.
+    /// Internal (not a CLI flag): carried across from
+    /// [`RunArgs::detected_libc`], which explains it.
     #[arg(skip)]
     pub detected_libc: mvm_contract::guest_libc::GuestLibc,
     /// Internal (not a CLI flag): attach the command to a PTY.
@@ -295,14 +294,11 @@ pub(in crate::commands) struct RunArgs {
     /// Attach a read-only host directory (needs virtio-fs, repeatable).
     #[arg(long = "mount", visible_alias = "volume", value_name = "HOST:GUEST:ro")]
     pub mounts: Vec<String>,
-    /// The libc of the image this run will boot, when it is known before the
-    /// rootfs exists.
-    ///
-    /// Not a flag. A catalogued `--runtime` pins its image, so the entry states
-    /// the libc and detection copies it here; an arbitrary `--image` reference
-    /// leaves it [`GuestLibc::Unknown`], because nothing has looked inside the
-    /// tree yet. The SDK sidecar variant is chosen from this, and `Unknown`
-    /// refuses rather than guessing.
+    /// Not a flag: the libc of the image this run will boot, when it is known
+    /// before the rootfs exists. A catalogued `--runtime` pins its image, so
+    /// the entry states the libc and detection copies it here; an arbitrary
+    /// `--image` leaves it `Unknown`, because nothing has read that tree yet.
+    /// The SDK sidecar variant is chosen from this, and `Unknown` refuses.
     #[arg(skip)]
     pub detected_libc: mvm_contract::guest_libc::GuestLibc,
     /// Inject an environment variable (KEY=VALUE, repeatable).
