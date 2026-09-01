@@ -110,7 +110,19 @@ from under you — unchanged, and now much harder to reach.
 Workspace suite, doctests, `cargo clippy --workspace --all-targets -D
 warnings`, `just check-gated`, `cargo run -p xtask -- check-all`.
 
-Live on the Linux/KVM box: `mvmctl machine build --builder qemu` from
-`examples/sleeper`, scratch `MVM_HOME`, cold builder-image cache, and
-`MVM_BUILDER_VM_BOOTSTRAP_BIN` unset — the env var is the workaround, so
-setting it hides the thing under test.
+Live on the Linux/KVM box, twice: `mvmctl machine build --builder qemu` from
+`examples/sleeper`, an `mvmctl` built with `--features embed-host-bins`, a
+scratch `MVM_HOME`, and `MVM_BUILDER_VM_BOOTSTRAP_BIN` unset — the env var is
+the workaround, so setting it would hide the thing under test. The host's
+shared `~/.mvm/cache/builder-vm/x86_64/` carries no image, so the opportunistic
+seed declines and auto-bootstrap is genuinely reached.
+
+Both runs completed in ~27 minutes with `{"exit_code":0}`: the builder image
+built from the checkout via Stage 0 (`.mvm-provenance.json` records
+`source_kind: source_checkout_stage0`), then the sleeper workload built and
+registered as a template revision with its `rootfs.ext4` + `vmlinux`.
+`target/mvm-builder-vm-bootstrap` was never created and the "cannot bootstrap a
+builder VM" refusal never appeared — the running binary was the helper.
+
+The one `cargo` compile visible in those logs is `mvm-network-endpoint`, a
+separate pre-existing source-checkout auto-build, not the helper.
