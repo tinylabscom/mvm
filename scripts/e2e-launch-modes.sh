@@ -279,7 +279,7 @@ echo "    $ran launch scenario(s) executed"
 # from the home we just warmed and run them.
 # ---------------------------------------------------------------------------
 echo "==> Rust library seam (mvm-client, in-process)"
-KERNEL="$(find "$E2E_HOME/cache/builder-vm" -name vmlinux -path '*workload*' 2>/dev/null | head -1 || true)"
+KERNEL="$(find "$E2E_HOME/cache/kernels" -name vmlinux -path '*workload*' 2>/dev/null | head -1 || true)"
 ROOTFS="$(find "$E2E_HOME/cache/oci/rootfs" -name rootfs.ext4 2>/dev/null | head -1 || true)"
 
 # Passed explicitly rather than left to `aux_bin::resolve`, which searches the
@@ -311,7 +311,7 @@ else
   # Loud, not silent: a skipped library seam is a coverage hole, and reporting
   # it as nothing is how the last one stayed open.
   echo "!!! SKIPPED the Rust library seam. Missing:" >&2
-  [[ -z "$KERNEL" ]]     && echo "!!!   workload kernel under $E2E_HOME/cache/builder-vm" >&2
+  [[ -z "$KERNEL" ]]     && echo "!!!   workload kernel under $E2E_HOME/cache/kernels" >&2
   [[ -z "$ROOTFS" ]]     && echo "!!!   OCI rootfs under $E2E_HOME/cache/oci/rootfs" >&2
   [[ -z "$SUPERVISOR" ]] && echo "!!!   mvm-hvf-supervisor under $TARGET_DIR" >&2
   echo "!!! A skipped seam is a coverage hole, not a pass." >&2
