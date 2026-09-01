@@ -228,15 +228,9 @@ fn relay_supervisor_config_with_handoff(
         vcpus: spec.vcpus,
         initramfs: spec.initramfs.clone(),
         disks,
-        virtiofs_root: spec
-            .shares
-            .iter()
-            .find(|share| share.tag == "mvmroot")
-            .map(|share| share.host_path.clone()),
         virtiofs_shares: spec
             .shares
             .iter()
-            .filter(|share| share.tag != "mvmroot")
             .map(|share| HvfVirtioFsShare {
                 path: share.host_path.clone(),
                 tag: share.tag.clone(),

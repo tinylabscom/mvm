@@ -378,11 +378,6 @@ pub struct HostChannels {
     /// describes more CPUs than the VMM creates hangs the boot waiting for
     /// secondaries; fewer, and the extra vCPUs are never onlined.
     pub vcpus: u32,
-    /// When set, serve this host directory (the unpacked+injected OCI tree) to
-    /// the guest as a read-only **virtiofs root** instead of a block rootfs — the
-    /// Plan-223 dev-tier boot. No virtio-blk disk is attached; the default
-    /// cmdline becomes `rootfstype=virtiofs root=mvmroot`.
-    pub virtiofs_root: Option<PathBuf>,
     /// Read-only live host-directory shares as `(virtio-fs tag, host path)`.
     pub virtiofs_shares: Vec<(String, PathBuf)>,
     /// Host console log to mirror guest output into as the guest emits it.
@@ -762,12 +757,11 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
     if vsock {
         virtio_nodes.push((VSOCK_MMIO_BASE, VSOCK_IRQ));
     }
-    let has_virtiofs_root = channels.virtiofs_root.is_some();
-    let fs_count = usize::from(has_virtiofs_root) + channels.virtiofs_shares.len();
-    if fs_count > MAX_VIRTIOFS_SHARES + 1 {
+    let fs_count = channels.virtiofs_shares.len();
+    if fs_count > MAX_VIRTIOFS_SHARES {
         return Err(HvfError::BadBoot(BootFault::TooManyFilesystems {
             given: fs_count,
-            max: MAX_VIRTIOFS_SHARES + 1,
+            max: MAX_VIRTIOFS_SHARES,
         }));
     }
     for index in 0..fs_count {
@@ -832,7 +826,6 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
                 broker_socket: channels.broker_socket,
                 console_data_sockets: channels.console_data_sockets,
                 builder_control_sockets: channels.builder_control_sockets,
-                virtiofs_root: channels.virtiofs_root,
                 virtiofs_shares: channels.virtiofs_shares,
                 console_log: channels.console_log,
                 pause_state: channels.pause_state,
@@ -898,8 +891,6 @@ struct RunInputs {
     /// data port). Empty for a sealed prod config — nothing bound (claim 15).
     console_data_sockets: Vec<(u32, PathBuf)>,
     builder_control_sockets: Vec<(u32, PathBuf)>,
-    /// When set, serve this host dir to the guest as a read-only virtiofs root.
-    virtiofs_root: Option<PathBuf>,
     virtiofs_shares: Vec<(String, PathBuf)>,
     /// Host console log the PL011 mirrors guest output into as it arrives.
     console_log: Option<PathBuf>,
@@ -1543,7 +1534,6 @@ unsafe fn run(
         broker_socket,
         console_data_sockets,
         builder_control_sockets,
-        virtiofs_root,
         virtiofs_shares,
         console_log,
         pause_state,
@@ -1737,26 +1727,13 @@ unsafe fn run(
             .collect();
         let mut vsock_dev =
             vsock.then(|| VirtioVsock::new(VSOCK_MMIO_BASE, VSOCK_IRQ, ram, RAM_BASE, ram_size));
-        // virtiofs-root dev boot: serve the unpacked+injected tree read-only.
-        let has_virtiofs_root = virtiofs_root.is_some();
-        let mut fs_devs =
-            Vec::with_capacity(usize::from(has_virtiofs_root) + virtiofs_shares.len());
-        if let Some(root) = virtiofs_root {
+        let mut fs_devs = Vec::with_capacity(virtiofs_shares.len());
+        for (index, (tag, root)) in virtiofs_shares.into_iter().enumerate() {
             // SAFETY: `ram` is the mapped guest RAM valid for the run (this fn body
             // is within an `unsafe` block), same contract as the other devices.
-            fs_devs.push(VirtioFs::new(
-                FS_MMIO_BASE,
-                FS_IRQ,
-                ram,
-                RAM_BASE,
-                ram_size,
-                root,
-            ));
-        }
-        for (index, (tag, root)) in virtiofs_shares.into_iter().enumerate() {
             fs_devs.push(VirtioFs::with_tag(
-                FS_MMIO_BASE + (index + usize::from(has_virtiofs_root)) as u64 * MMIO_STRIDE,
-                FS_IRQ + (index + usize::from(has_virtiofs_root)) as u32,
+                FS_MMIO_BASE + index as u64 * MMIO_STRIDE,
+                FS_IRQ + index as u32,
                 ram,
                 RAM_BASE,
                 ram_size,

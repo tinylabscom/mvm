@@ -380,11 +380,6 @@ fn main() -> anyhow::Result<()> {
                 cmdline: cfg.cmdline.clone(),
                 mem_mib: cfg.memory_mib,
                 vcpus: cfg.vcpus,
-                // Dev hook: `MVM_HVF_VIRTIOFS_ROOT=<dir>` boots a virtiofs root without
-                // the full run-path gate wiring, for live-mount iteration on HVF.
-                virtiofs_root: cfg.virtiofs_root.clone().or_else(|| {
-                    std::env::var_os("MVM_HVF_VIRTIOFS_ROOT").map(std::path::PathBuf::from)
-                }),
                 virtiofs_shares: cfg
                     .virtiofs_shares
                     .iter()
