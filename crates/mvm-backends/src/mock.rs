@@ -505,6 +505,7 @@ mod tests {
 
     fn sample_spec(name: &str) -> VmmSpec {
         VmmSpec {
+            builder_egress_endpoint: None,
             name: name.to_string(),
             kernel: KernelImage::Bundled,
             initramfs: None,

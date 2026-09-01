@@ -92,15 +92,38 @@ guest and warns about it).
 - The session record carries the transport, and `stop` tears the session down
   cleanly.
 
-**Not proven: a completed build, and therefore `read_dispatch_artifacts`
-against a real output disk** (it is unit-tested only). The blocker is not the
-transport — it is that the host-side `mvm-network-endpoint` this session spawns
-dies with the command that spawned it, so the guest's egress client loses its
-only route to the network mid-build (`FlowMux reconnect exhausted`). The
-one-shot builder never hits this because its endpoint's lifetime *is* the VM's
-lifetime; a persistent session inverts that. Fixing it means spawning the
-endpoint detached and reaping it on `stop`, which is lifecycle design in a
-claim-10 component and is deliberately not in this change.
+- **The guest's egress works for a whole build.** The supervisor-owned endpoint
+  stays up with the supervisor as its parent, serves Nix's fetches, and
+  self-reaps when the supervisor exits.
+
+**Still not proven: a completed build, and therefore `read_dispatch_artifacts`
+against a real output disk** (unit-tested only). The remaining blocker is the
+vsock bridge's 60-second idle eviction, not the transport — see the plan. The
+host loses its dispatch connection during a quiet `nix build` while the build
+itself proceeds normally inside the guest.
+
+## The endpoint lifetime fix
+
+Worth writing down because the obvious diagnosis was wrong twice. The endpoint
+was not leaking and was not missing a detach — `spawn_network_endpoint` already
+calls `setsid`. It self-reaps: `exit_when_orphaned`, armed in its own `main`,
+watches the parent and exits with status 0 the instant it is reparented, which
+is why its log simply stopped after a successful handshake.
+
+That guard is deliberate — the endpoint holds a workload's secrets in the clear
+and must not serve as an orphan. A persistent session is simply the first case
+where the VM outlives its spawner, so parent-death stopped being a good proxy
+for VM-death. The fix keeps the guard and gives it a better parent: the
+supervisor, whose death *is* the VM's.
+
+No key crosses the new wire. The endpoint's config carries the host signer by
+value and `supervisor.json` is persisted beside the VM, so the supervisor mints
+the FlowMux identity itself from the same `~/.mvm/keys/host-signer.ed25519` the
+config already names by path, and writes the identity drive before it opens
+disks. The egress policy and the empty secret set are fixed at that call site
+rather than taken from the wire, so nothing crossing it can widen what the
+endpoint serves — and a restored child never inherits the request, since it
+names the parent's VM, socket and identity drive.
 
 ## Pre-existing gaps this uncovered
 

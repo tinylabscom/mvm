@@ -56,6 +56,8 @@ pub fn inject_host_binaries(req: &InjectRequest<'_>) -> Result<()> {
 
     let console_log = req.work_dir.join("inject-console.log");
     let cfg = HvfSupervisorConfig {
+        // A one-shot inject VM; nothing outlives this process.
+        builder_egress_endpoint: None,
         // Irrelevant here: this helper VM carries no egress relay at all.
         trusted_builder_egress: false,
         kernel: req.kernel.to_path_buf(),

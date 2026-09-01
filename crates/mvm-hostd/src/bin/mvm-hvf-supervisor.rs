@@ -263,6 +263,18 @@ fn main() -> anyhow::Result<()> {
         .map(std::fs::read)
         .transpose()
         .context("read initramfs")?;
+    // A VM that outlives its launcher owns its egress endpoint *here*, because
+    // the endpoint self-reaps when orphaned and this process is the only one
+    // whose life is the VM's. It has to run before the disks below: the
+    // identity drive it writes is one of them, and the guest refuses to boot if
+    // its egress proxy is unbound.
+    if let Some(endpoint) = cfg.builder_egress_endpoint.as_ref()
+        && let Err(e) = spawn_owned_builder_endpoint(endpoint)
+    {
+        eprintln!("supervisor: refusing to boot a builder with no egress endpoint: {e:#}");
+        std::process::exit(8);
+    }
+
     // Build the virtio-blk backings in `/dev/vda`… order. A read-only disk is
     // file-served (hypervisor-enforced RO, no RAM cost); a read-write disk is
     // file-served and persists writes; an ephemeral disk is loaded into RAM and
@@ -460,6 +472,63 @@ fn main() -> anyhow::Result<()> {
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+/// Mint this boot's FlowMux identity, write the drive the guest reads it off,
+/// and spawn the trusted builder's egress endpoint as a child of this process.
+///
+/// The identity is minted **here** rather than handed over: the endpoint's
+/// config carries the host signer by value, and this supervisor's own config is
+/// persisted to disk beside the VM, so passing it through would put a signing
+/// key on disk. `mint_from_host_signer` reads the same
+/// `~/.mvm/keys/host-signer.ed25519` the config already names by path
+/// elsewhere, so nothing new becomes reachable — the key just never travels.
+///
+/// The policy and secret set are fixed at this call site, not taken from the
+/// wire: a trusted builder gets `trusted_build_egress` and no secrets, and no
+/// field on `BuilderEgressEndpoint` can widen either.
+fn spawn_owned_builder_endpoint(
+    endpoint: &mvm_vmm::host::hvf_supervisor::BuilderEgressEndpoint,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+
+    let identity = mvm_vmm::host::flowmux_identity::FlowMuxIdentityMaterial::mint_from_host_signer(
+        endpoint.vm_name.clone(),
+    )
+    .context("minting the builder's FlowMux identity")?;
+    identity
+        .write_drive(&endpoint.identity_drive)
+        .with_context(|| {
+            format!(
+                "writing the builder's FlowMux identity drive {}",
+                endpoint.identity_drive.display()
+            )
+        })?;
+
+    let policy = mvm_core::policy::network_policy::NetworkPolicy::trusted_build_egress();
+    mvm_vmm::host::network_endpoint_spawn::spawn_network_endpoint(
+        mvm_vmm::host::network_endpoint_spawn::SubstitutionSpawnParams {
+            vm_name: &endpoint.vm_name,
+            state_dir: &endpoint.state_dir,
+            tenant: "builder",
+            secrets: &[],
+            redaction: &mvm_core::policy::RedactionPolicy::default(),
+            transport: mvm_vmm::host::network_endpoint_spawn::EndpointTransport::Uds {
+                path: endpoint.socket.clone(),
+            },
+            terminator_listen: None,
+            egress_proxy: None,
+            tls_intermediate: None,
+            network_policy: Some(&policy),
+            network_limits: mvm_core::plan::NetworkLimits::default(),
+            ingress: &[],
+            resolver_remote: None,
+            binding_store_dir: None,
+            flowmux_identity: Some(identity.spawn_config().clone()),
+            session_marker: None,
+        },
+    )
+    .context("spawning the builder's egress endpoint")
+}
+
 fn duration_micros(duration: std::time::Duration) -> u64 {
     u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }

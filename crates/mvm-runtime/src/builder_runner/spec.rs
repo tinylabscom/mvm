@@ -127,6 +127,9 @@ pub fn builder_spec(inputs: &BuilderSpecInputs<'_>) -> VmmSpec {
         },
         shares: Vec::new(),
         trusted_builder: true,
+        // A one-shot build spawns its own endpoint and stays alive for the
+        // VM's whole life, so it needs no supervisor-owned one.
+        builder_egress_endpoint: None,
         // The builder VM boots from no admitted plan, so it carries no
         // wall-clock bound to enforce.
         plan_binding: None,
@@ -171,6 +174,11 @@ pub struct PersistentBuilderSpecInputs<'a> {
     pub dispatch_socket: PathBuf,
     /// Host UDS for the resident builder daemon's typed control plane.
     pub builderd_socket: PathBuf,
+    /// Ask the supervisor to own this session's egress endpoint and identity
+    /// drive. A session outlives the command that starts it, and the endpoint
+    /// self-reaps when orphaned, so the supervisor is the only process whose
+    /// life matches the VM's.
+    pub builder_egress_endpoint: mvm_vmm::host::hvf_supervisor::BuilderEgressEndpoint,
     pub vcpus: u32,
     pub memory_mib: u32,
 }
@@ -243,6 +251,7 @@ pub fn persistent_builder_spec(inputs: &PersistentBuilderSpecInputs<'_>) -> VmmS
         },
         shares: Vec::new(),
         trusted_builder: true,
+        builder_egress_endpoint: Some(inputs.builder_egress_endpoint.clone()),
         // The builder VM boots from no admitted plan, so it carries no
         // wall-clock bound to enforce.
         plan_binding: None,
@@ -267,6 +276,12 @@ mod tests {
             egress_socket: PathBuf::from("/state/vsock-5253.sock"),
             dispatch_socket: PathBuf::from("/state/vsock-21471.sock"),
             builderd_socket: PathBuf::from("/state/vsock-21473.sock"),
+            builder_egress_endpoint: mvm_vmm::host::hvf_supervisor::BuilderEgressEndpoint {
+                vm_name: "bld-persistent".into(),
+                state_dir: PathBuf::from("/state"),
+                socket: PathBuf::from("/state/vsock-5253.sock"),
+                identity_drive: PathBuf::from("/state/flowmux-identity.ext4"),
+            },
             vcpus: 4,
             memory_mib: 8192,
         }

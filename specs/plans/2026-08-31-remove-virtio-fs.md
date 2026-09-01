@@ -366,17 +366,51 @@ Five coordinated changes, host and guest:
       flip. Flipping the host first against an old baked guest hangs the
       dispatch loop with no useful error. Done: the guest half shipped first,
       and the builder image must be rebuilt before this host flip is exercised.
-- [ ] **The persistent builder's network endpoint does not outlive the command
-      that spawns it.** Found by the live run: the session boots, dispatches,
-      and re-stages correctly, but the guest's egress client loses its only
-      route to the network mid-build (`FlowMux reconnect exhausted`) because
-      the host-side `mvm-network-endpoint` has already exited. The one-shot
-      builder never hits this — its endpoint's lifetime *is* the VM's. Needs a
-      detached spawn plus a reap on `stop`; it is claim-10 infrastructure, so
-      it wants its own change rather than a rider on this one. **This is what
-      blocks a completed build through the persistent HVF builder**, and with
-      it the only unproven leg of the disk transport (`read_dispatch_artifacts`
-      against a real output disk).
+- [x] **The persistent builder's network endpoint did not outlive the command
+      that spawned it.** Fixed. The cause was not a leak or a missing detach —
+      `spawn_network_endpoint` already calls `setsid`. It is
+      `mvm_hostd::parent_death::exit_when_orphaned`, armed in the endpoint's own
+      `main`: it watches its parent and exits cleanly (status 0, hence the
+      silence) the moment it is reparented. That is deliberate — the endpoint
+      holds a workload's secrets in the clear and must not serve as an orphan —
+      and a persistent session is the first case where the VM outlives its
+      spawner, so parent-death stopped being a good proxy for VM-death.
+
+      The endpoint is now spawned by the **supervisor**, whose death *is* the
+      VM's, so the guard keeps enforcing the property it exists for. It carries
+      no key material: the endpoint's config needs the host signer by value and
+      `supervisor.json` is persisted beside the VM, so the supervisor mints the
+      FlowMux identity itself from the same `~/.mvm/keys/host-signer.ed25519`
+      the config already names by path elsewhere, and writes the identity drive
+      before opening disks. The policy and the empty secret set are fixed at
+      that call site, so nothing on the wire can widen them, and a restored
+      child never inherits the request (it names the parent's VM, socket and
+      drive).
+
+      Verified live: the endpoint stays up with the supervisor as its parent,
+      serves the guest's egress through a whole `nix build`, and self-reaps when
+      the supervisor exits.
+- [ ] **The HVF vsock bridge evicts the dispatch connection after 60s of
+      silence** (`CONNECTION_IDLE_TIMEOUT`, `vsock_transport.rs`). This is what
+      now blocks a completed build. The host sends `Run`, the guest starts
+      `nix build`, and any evaluation quiet for over a minute has its host-side
+      connection closed by `evict_idle_at` — the client sees a clean EOF and
+      reports `dispatch ended without Result frame after 0 stderr chunks` while
+      the build carries on fine inside the guest. Confirmed twice, including
+      with a connection the guest had not yet read, so it is the idle policy
+      rather than anything job-specific.
+
+      A one-shot builder never hits it: it holds no dispatch connection across a
+      build, it powers off and the host reads the output disk. Only a persistent
+      session keeps a control channel open across a long quiet operation.
+
+      Not a one-line raise: the timeout is a shared host resource boundary next
+      to `MAX_CONNECTIONS`, and it also governs workload console streams. The
+      options are a per-service idle policy (the builder dispatch port is
+      long-lived and legitimately quiet), or a keepalive on the dispatch channel.
+      **This is the last thing between Stage C and a completed live build**, and
+      with it the only unproven leg of the disk transport
+      (`read_dispatch_artifacts` against a real output disk).
 - [x] **The QEMU builder needs the same migration, and the plan missed it.**
       **Landed.** Both one-shot sites are on the disk transport; the `virtiofsd`
       spawn loops, the `memory-backend-memfd` + `-numa` object and the

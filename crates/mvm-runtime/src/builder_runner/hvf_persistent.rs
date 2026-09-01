@@ -44,12 +44,7 @@ use mvm_net::channel::GuestService;
 use super::hvf_builder::require_runtime_overlay_ext4;
 use super::spec::{PersistentBuilderSpecInputs, persistent_builder_spec};
 use crate::driver::traits::RunningVm;
-use crate::network_endpoint_spawn::{
-    EndpointTransport, SubstitutionSpawnParams, spawn_network_endpoint,
-};
 use mvm_backends::driver::hvf::HvfDriver;
-use mvm_core::policy::RedactionPolicy;
-use mvm_core::policy::network_policy::NetworkPolicy;
 
 /// Default persistent nix-store disk size (MiB), matching the one-shot builder.
 const DEFAULT_NIX_STORE_MIB: u32 = 64 * 1024;
@@ -233,19 +228,10 @@ impl HvfPersistentHostVm {
                 .context("resolving the runtime overlay for the persistent builder")?,
         };
 
-        // This session's FlowMux identity, minted the same way the one-shot
-        // builder mints its own. The guest reads it before starting the egress
-        // client and refuses to boot without it, and a builder with no NIC
-        // that cannot reach the proxy cannot fetch anything to build with.
-        let identity =
-            mvm_vmm::host::flowmux_identity::FlowMuxIdentityMaterial::mint_from_host_signer(
-                &vm_name,
-            )
-            .context("minting the persistent builder's FlowMux identity")?;
+        // The identity and the endpoint are the supervisor's to create, not
+        // this process's — see `builder_egress_endpoint` below. Only the drive
+        // *path* is needed here, because the spec attaches it as a disk.
         let identity_drive = state_dir.join(mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE);
-        identity
-            .write_drive(&identity_drive)
-            .context("writing the persistent builder's FlowMux identity drive")?;
 
         let spec = persistent_builder_spec(&PersistentBuilderSpecInputs {
             name: &vm_name,
@@ -260,44 +246,25 @@ impl HvfPersistentHostVm {
             egress_socket: socket_for(&state_dir, GuestService::NetworkFlow),
             dispatch_socket: socket_for(&state_dir, GuestService::BuilderDispatch),
             builderd_socket: socket_for(&state_dir, GuestService::BuilderdControl),
+            builder_egress_endpoint: mvm_vmm::host::hvf_supervisor::BuilderEgressEndpoint {
+                vm_name: vm_name.clone(),
+                state_dir: state_dir.clone(),
+                socket: socket_for(&state_dir, GuestService::NetworkFlow),
+                identity_drive: identity_drive.clone(),
+            },
             vcpus: self.vcpus,
             memory_mib: self.memory_mib,
         });
 
-        // The host end of the guest's only route to the network. The builder
-        // guest has no NIC and refuses to boot if its egress client cannot bind
-        // the local proxy, and the client cannot bind until something is
-        // listening here. Same policy and same spawn helper the one-shot
-        // builder uses — claim 10's single decision point is this endpoint, and
-        // routing a second builder tier around it is exactly what
-        // `check-single-network-path` exists to prevent.
-        //
-        // Deliberately not guarded: a session outlives the command that starts
-        // it, so an `EndpointGuard` would reap the endpoint at this function's
-        // return and leave the VM unable to fetch anything. `stop` reaps it.
-        let egress_socket = socket_for(&state_dir, GuestService::NetworkFlow);
-        let builder_policy = NetworkPolicy::trusted_build_egress();
-        spawn_network_endpoint(SubstitutionSpawnParams {
-            vm_name: &vm_name,
-            state_dir: &state_dir,
-            tenant: "builder",
-            secrets: &[],
-            redaction: &RedactionPolicy::default(),
-            transport: EndpointTransport::Uds {
-                path: egress_socket,
-            },
-            terminator_listen: None,
-            egress_proxy: None,
-            tls_intermediate: None,
-            network_policy: Some(&builder_policy),
-            network_limits: mvm_core::plan::NetworkLimits::default(),
-            ingress: &[],
-            resolver_remote: None,
-            binding_store_dir: None,
-            flowmux_identity: Some(identity.spawn_config().clone()),
-            session_marker: None,
-        })
-        .context("spawning the persistent builder's network endpoint")?;
+        // The endpoint is spawned by the *supervisor*, not here, and the reason
+        // is lifetime rather than capability. `mvm-network-endpoint` self-reaps
+        // the moment it is orphaned — correct for a one-shot build or a
+        // workload run, where the spawner owns the VM for its whole life. A
+        // session inverts that: this command exits and the VM outlives it, so
+        // an endpoint parented here died seconds after boot and the guest
+        // silently lost its only route to the network. The supervisor's life is
+        // the VM's, so parenting it there is what the orphan guard is actually
+        // protecting.
 
         // The supervisor holds the store lock, not this process.
         let vm = HvfDriver::new()

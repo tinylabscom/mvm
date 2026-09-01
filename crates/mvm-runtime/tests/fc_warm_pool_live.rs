@@ -78,6 +78,7 @@ fn host_signer_pub_cmdline_token() -> String {
 /// out of the saved memory.
 fn parent_boot_spec(name: &str, images: &LiveImages, state_dir: &Path) -> VmmSpec {
     VmmSpec {
+        builder_egress_endpoint: None,
         name: name.to_string(),
         kernel: KernelImage::Path(images.kernel.clone()),
         initramfs: None,
