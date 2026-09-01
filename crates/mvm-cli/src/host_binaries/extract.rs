@@ -15,17 +15,30 @@ use super::embedded::EMBEDDED;
 /// Without this the empty table extracts an empty directory and every caller
 /// fails later, somewhere else, as a missing file — the failure would be read
 /// as a corrupted cache rather than as a build that was never asked to embed
-/// anything. Named here so the message can say which build produced it.
+/// anything.
 fn require_embedded_payload() -> std::io::Result<()> {
     if !EMBEDDED.is_empty() {
         return Ok(());
     }
-    Err(std::io::Error::other(
+    Err(std::io::Error::other(no_payload_message(cfg!(
+        debug_assertions
+    ))))
+}
+
+/// The refusal, naming the rebuild for *this* binary's profile.
+///
+/// Bare `just embed` writes `target/debug/mvmctl`, so a release-profile binary
+/// sent to it is never replaced — and a `PATH` carrying `target/release` ahead
+/// of `target/debug` keeps resolving to the one that refused. The profile has
+/// to travel with the instruction or the instruction cannot work.
+fn no_payload_message(debug_profile: bool) -> String {
+    let profile = if debug_profile { "" } else { " --release" };
+    format!(
         "this mvmctl was built without the embedded Linux host binaries, so it \
-         cannot bootstrap a builder VM. Rebuild with `just embed` (or \
-         `cargo build --features embed-host-bins`); official release binaries \
-         always carry them.",
-    ))
+         cannot bootstrap a builder VM. Rebuild with `just embed{profile}` (or \
+         `cargo build{profile} --features embed-host-bins`); official release \
+         binaries always carry them."
+    )
 }
 
 pub fn ensure_extracted(cache_root: &Path) -> std::io::Result<PathBuf> {
@@ -107,12 +120,32 @@ fn rand_suffix() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::combined_hash_hex;
+    use super::{combined_hash_hex, no_payload_message};
 
     #[test]
     fn combined_hash_is_sha256_hex() {
         let hash = combined_hash_hex();
         assert_eq!(hash.len(), 64);
         assert!(hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    /// A release-profile binary told to run bare `just embed` gets a *debug*
+    /// binary, which never replaces the one that refused — so the same refusal
+    /// returns forever.
+    #[test]
+    fn a_release_build_is_told_to_rebuild_the_release_profile() {
+        let msg = no_payload_message(false);
+        assert!(msg.contains("just embed --release"), "{msg}");
+        assert!(
+            msg.contains("cargo build --release --features embed-host-bins"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn a_debug_build_is_told_to_rebuild_the_debug_profile() {
+        let msg = no_payload_message(true);
+        assert!(msg.contains("just embed"), "{msg}");
+        assert!(!msg.contains("--release"), "{msg}");
     }
 }

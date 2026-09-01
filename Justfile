@@ -399,6 +399,8 @@ build-supervisors:
 # `target/<profile>/mvmctl` under different feature sets, so alternating the two
 
 # relinks mvmctl; that is why this is a deliberate step and not part of `build`.
+# Bare, this writes `target/debug/mvmctl` — pass `--release` if the mvmctl you
+# invoke is the release one, or the release binary is left untouched.
 embed *ARGS:
     ./scripts/cargo-fast.sh build --features embed-host-bins {{ARGS}}
 
@@ -620,13 +622,17 @@ release-tag VERSION:
     git push origin "v$V"
     echo "==> Pushed tag v$V — the release pipeline will build + publish."
 
-# Build optimized release binary
+# Build optimized release binary. `embed-host-bins` matches the release
+# workflow's `MVMCTL_RELEASE_FEATURES`; without it this produces the one build
+# that looks finished and cannot bootstrap a builder VM. `release-channel` is
+# deliberately absent — it would resolve artifacts from the published channel
+# rather than this checkout.
 release-build:
-    cargo build --release --features host,user,template-registry-s3,release-artifact-bootstrap
+    cargo build --release --features host,user,template-registry-s3,release-artifact-bootstrap,embed-host-bins
 
 # Cross-compile release binary for a target
 release-build-target TARGET:
-    cargo build --release --target {{ TARGET }} --features host,user,template-registry-s3,release-artifact-bootstrap
+    cargo build --release --target {{ TARGET }} --features host,user,template-registry-s3,release-artifact-bootstrap,embed-host-bins
 
 # Dry-run crates.io publish (all crates in dependency order)
 publish-dry-run:
