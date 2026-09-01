@@ -397,6 +397,7 @@ fn initramfs_is_required(config: &mvm_core::vm_backend::VmStartConfig) -> bool {
 ///    silently downloads a sidecar.
 pub(crate) fn resolve_sdk_sidecar_attachment_for_host(
     services: &[mvm_contract::protocol::broker::ServiceId],
+    libc: mvm_contract::guest_libc::GuestLibc,
 ) -> Result<Option<SdkSidecarAttachment>> {
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let version = env!("CARGO_PKG_VERSION");
@@ -404,17 +405,20 @@ pub(crate) fn resolve_sdk_sidecar_attachment_for_host(
     let resolver =
         mvm_fs::sdk_sidecar::SdkSidecarResolver::new(cache_root.clone(), version.to_string());
 
-    let cache_miss =
-        match mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(services, &resolver, arch) {
-            Ok(resolved) => {
-                warn_if_sidecar_predates_the_working_tree(&cache_root, version, arch);
-                return Ok(resolved);
-            }
-            Err(e) => e,
-        };
+    let cache_miss = match mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(
+        services, &resolver, arch, libc,
+    ) {
+        Ok(resolved) => {
+            warn_if_sidecar_predates_the_working_tree(&cache_root, version, arch, libc);
+            return Ok(resolved);
+        }
+        Err(e) => e,
+    };
 
-    if mvm_build::sdk_sidecar::resolve_or_seed_from_default_cache(&resolver, arch).is_ok() {
-        return mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(services, &resolver, arch);
+    if mvm_build::sdk_sidecar::resolve_or_seed_from_default_cache(&resolver, arch, libc).is_ok() {
+        return mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(
+            services, &resolver, arch, libc,
+        );
     }
 
     match runtime_overlay_acquire_mode() {
@@ -424,9 +428,11 @@ pub(crate) fn resolve_sdk_sidecar_attachment_for_host(
         RuntimeOverlayAcquireMode::BuildFromSourceCheckout => Err(cache_miss),
         RuntimeOverlayAcquireMode::DownloadPublishedArtifact => {
             ui::info("SDK sidecar missing from cache; downloading the published artifact now...");
-            mvm_build::sdk_sidecar::download_sdk_sidecar(version, arch, &cache_root)
+            mvm_build::sdk_sidecar::download_sdk_sidecar(version, arch, libc, &cache_root)
                 .with_context(|| sdk_sidecar_download_failure_context(services, version, arch))?;
-            mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(services, &resolver, arch)
+            mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(
+                services, &resolver, arch, libc,
+            )
         }
     }
 }
@@ -452,6 +458,7 @@ fn warn_if_sidecar_predates_the_working_tree(
     cache_root: &std::path::Path,
     version: &str,
     arch: mvm_core::arch::GuestArch,
+    libc: mvm_contract::guest_libc::GuestLibc,
 ) {
     static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -464,6 +471,7 @@ fn warn_if_sidecar_predates_the_working_tree(
         cache_root,
         version,
         arch,
+        libc,
         &workspace_root,
     ) {
         Ok(mvm_build::sdk_sidecar::SidecarProvenance::MatchesSource) => {}
@@ -545,7 +553,12 @@ mod sdk_sidecar_host_resolution_tests {
     }
 
     fn seed_sidecar_cache(cache: &std::path::Path, version: &str, arch: GuestArch) {
-        let layout = SdkSidecarLayout::under(cache, version, &arch.to_string());
+        let layout = SdkSidecarLayout::under(
+            cache,
+            version,
+            &arch.to_string(),
+            mvm_contract::guest_libc::GuestLibc::Musl,
+        );
         std::fs::create_dir_all(&layout.artifact_dir).unwrap();
         let image = sidecar_ext4_bytes();
         let version_text = format!("{version}\n");
@@ -575,6 +588,7 @@ mod sdk_sidecar_host_resolution_tests {
             &[svc("host.audit.v1")],
             &resolver,
             arch,
+            mvm_contract::guest_libc::GuestLibc::Musl,
         )
         .unwrap()
         .unwrap();
@@ -609,9 +623,17 @@ mod sdk_sidecar_host_resolution_tests {
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(dir.path());
-        assert_eq!(resolve_sdk_sidecar_attachment_for_host(&[]).unwrap(), None);
         assert_eq!(
-            resolve_sdk_sidecar_attachment_for_host(&[svc("broker.v1")]).unwrap(),
+            resolve_sdk_sidecar_attachment_for_host(&[], mvm_contract::guest_libc::GuestLibc::Musl)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve_sdk_sidecar_attachment_for_host(
+                &[svc("broker.v1")],
+                mvm_contract::guest_libc::GuestLibc::Musl
+            )
+            .unwrap(),
             None
         );
     }
@@ -626,7 +648,11 @@ mod sdk_sidecar_host_resolution_tests {
             "build",
         );
         assert!(
-            resolve_sdk_sidecar_attachment_for_host(&[svc("host.audit.v1")]).is_err(),
+            resolve_sdk_sidecar_attachment_for_host(
+                &[svc("host.audit.v1")],
+                mvm_contract::guest_libc::GuestLibc::Musl
+            )
+            .is_err(),
             "a bound SDK service with no cached sidecar must refuse the launch"
         );
     }
@@ -698,11 +724,19 @@ mod sdk_sidecar_host_resolution_tests {
         // `mvm_build::release_signature`, not here.
         env.set(mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
 
-        let attached = resolve_sdk_sidecar_attachment_for_host(&[svc("host.audit.v1")])
-            .expect("a published sidecar must satisfy the binding")
-            .expect("a bound SDK service must attach the sidecar");
+        let attached = resolve_sdk_sidecar_attachment_for_host(
+            &[svc("host.audit.v1")],
+            mvm_contract::guest_libc::GuestLibc::Musl,
+        )
+        .expect("a published sidecar must satisfy the binding")
+        .expect("a bound SDK service must attach the sidecar");
 
-        let layout = SdkSidecarLayout::under(&dir.path().join("cache"), version, &arch.to_string());
+        let layout = SdkSidecarLayout::under(
+            &dir.path().join("cache"),
+            version,
+            &arch.to_string(),
+            mvm_contract::guest_libc::GuestLibc::Musl,
+        );
         assert_eq!(attached.volume.host, layout.image.display().to_string());
         assert!(attached.volume.read_only);
         assert_eq!(attached.version, version);
@@ -727,8 +761,11 @@ mod sdk_sidecar_host_resolution_tests {
         );
         env.set("MVM_OVERLAY_BASE_URL", UNREACHABLE_BASE_URL);
 
-        let err = resolve_sdk_sidecar_attachment_for_host(&[svc("host.secrets.v1")])
-            .expect_err("a source-checkout host must refuse rather than download");
+        let err = resolve_sdk_sidecar_attachment_for_host(
+            &[svc("host.secrets.v1")],
+            mvm_contract::guest_libc::GuestLibc::Musl,
+        )
+        .expect_err("a source-checkout host must refuse rather than download");
         let msg = format!("{err:#}");
 
         assert!(msg.contains("host.secrets.v1"), "{msg}");
@@ -756,8 +793,11 @@ mod sdk_sidecar_host_resolution_tests {
         );
         env.set("MVM_OVERLAY_BASE_URL", UNREACHABLE_BASE_URL);
 
-        let err = resolve_sdk_sidecar_attachment_for_host(&[svc("host.time.v1")])
-            .expect_err("an unreachable release must refuse the launch");
+        let err = resolve_sdk_sidecar_attachment_for_host(
+            &[svc("host.time.v1")],
+            mvm_contract::guest_libc::GuestLibc::Musl,
+        )
+        .expect_err("an unreachable release must refuse the launch");
         let msg = format!("{err:#}");
 
         assert!(msg.contains("host.time.v1"), "{msg}");
@@ -785,9 +825,12 @@ mod sdk_sidecar_host_resolution_tests {
         );
         env.set("MVM_OVERLAY_BASE_URL", UNREACHABLE_BASE_URL);
 
-        let attached = resolve_sdk_sidecar_attachment_for_host(&[svc("host.audit.v1")])
-            .expect("a warm cache resolves without any transport")
-            .expect("a bound SDK service must attach the sidecar");
+        let attached = resolve_sdk_sidecar_attachment_for_host(
+            &[svc("host.audit.v1")],
+            mvm_contract::guest_libc::GuestLibc::Musl,
+        )
+        .expect("a warm cache resolves without any transport")
+        .expect("a bound SDK service must attach the sidecar");
         assert_eq!(attached.version, version);
     }
 }

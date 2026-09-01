@@ -36,6 +36,11 @@ pub(in crate::commands) struct Args {
     /// from `machine run` dispatch. `> 0` ⇒ eligible to claim a warm standby.
     #[arg(skip)]
     pub warm_pool_size: u32,
+    /// Internal (not a CLI flag): the libc of the image this run will boot,
+    /// carried across from [`RunArgs::detected_libc`] so the SDK sidecar
+    /// variant can be chosen before the rootfs exists.
+    #[arg(skip)]
+    pub detected_libc: mvm_contract::guest_libc::GuestLibc,
     /// Internal (not a CLI flag): attach the command to a PTY.
     #[arg(skip)]
     pub pty: bool,
@@ -290,6 +295,16 @@ pub(in crate::commands) struct RunArgs {
     /// Attach a read-only host directory (needs virtio-fs, repeatable).
     #[arg(long = "mount", visible_alias = "volume", value_name = "HOST:GUEST:ro")]
     pub mounts: Vec<String>,
+    /// The libc of the image this run will boot, when it is known before the
+    /// rootfs exists.
+    ///
+    /// Not a flag. A catalogued `--runtime` pins its image, so the entry states
+    /// the libc and detection copies it here; an arbitrary `--image` reference
+    /// leaves it [`GuestLibc::Unknown`], because nothing has looked inside the
+    /// tree yet. The SDK sidecar variant is chosen from this, and `Unknown`
+    /// refuses rather than guessing.
+    #[arg(skip)]
+    pub detected_libc: mvm_contract::guest_libc::GuestLibc,
     /// Inject an environment variable (KEY=VALUE, repeatable).
     #[arg(short, long)]
     pub env: Vec<String>,
@@ -480,6 +495,7 @@ pub(in crate::commands) fn resolve_run_source(
 /// `parse_host_service_bindings`, so the count the user sees matches the count
 /// the plan carries.
 fn adopt_declared_bindings(args: &mut RunArgs, detection: &mvm_core::runtime_catalog::Detection) {
+    args.detected_libc = detection.libc;
     for service in &detection.services {
         let raw = service.as_str().to_string();
         if !args.host_service.contains(&raw) {
@@ -562,6 +578,7 @@ impl Default for RunArgs {
     fn default() -> Self {
         Self {
             network_mode: mvm_contract::plan::NetworkMode::default(),
+            detected_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
             manifest: None,
             image: None,
             flake: None,
@@ -646,6 +663,7 @@ impl RunArgs {
         Args {
             manifest: self.manifest,
             warm_pool_size: self.warm_pool_size,
+            detected_libc: self.detected_libc,
             pty: self.pty,
             vm_name: self.vm_name,
             cpus: self.cpus,
@@ -792,7 +810,7 @@ pub(in crate::commands) fn run_secure_with_source(
     let admit_network_policy = network_policy.clone();
     let admit_agent_verb = args.agent_verb.clone();
     let (admit_host_services, admit_sidecar) =
-        super::host_services::resolve_bindings_and_sidecar(&args.host_service)?;
+        super::host_services::resolve_bindings_and_sidecar(&args.host_service, args.detected_libc)?;
     let admit_sdk_sidecar_grant = admit_sidecar.map(|a| a.grant);
     let admit_pty = args.pty;
     let admit_has_argv = !args.argv.is_empty();
@@ -1384,7 +1402,8 @@ fn build_exec_request(
             }
         }
     };
-    let (_, sdk_sidecar) = super::host_services::resolve_bindings_and_sidecar(&args.host_service)?;
+    let (_, sdk_sidecar) =
+        super::host_services::resolve_bindings_and_sidecar(&args.host_service, args.detected_libc)?;
     Ok(crate::exec::ExecRequest {
         name: args.vm_name,
         image,
@@ -2838,6 +2857,7 @@ mod declared_binding_tests {
         mvm_core::runtime_catalog::Detection {
             runtime: "svc".to_string(),
             image: "example:1".to_string(),
+            libc: mvm_contract::guest_libc::GuestLibc::Musl,
             via: mvm_core::runtime_catalog::DetectedVia::Command("svc".to_string()),
             services: services
                 .iter()
