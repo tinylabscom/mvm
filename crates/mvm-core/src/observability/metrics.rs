@@ -54,9 +54,10 @@ pub struct Metrics {
 
     // ── Dev/builder image verification ──────────────────────────────
     // One counter per outcome of the cosign-signed manifest +
-    // SHA-256 verification pipeline at builder_vm.rs::download_dev_image.
-    // The duration gauge is the last observed wall-clock from
-    // try_fetch_signed_manifest entry through verify_artifact_hash exit.
+    // SHA-256 verification pipeline in
+    // mvm-cli/src/commands/env/artifact_verify.rs. The duration gauge is
+    // the last observed wall-clock from fetch_expected_hashes entry
+    // through verify_artifact_hash exit.
     // mvmd reads these via the prometheus exposition to alert
     // on attack-shaped failure spikes (sig_invalid / digest_mismatch).
     pub dev_image_verify_ok: AtomicU64,
