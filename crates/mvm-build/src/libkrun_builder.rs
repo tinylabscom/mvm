@@ -1154,9 +1154,7 @@ impl LibkrunBuilderVm {
                     src: work_staging.path(),
                 },
             ],
-            // The closure seed is still attached below as a virtio-fs share on
-            // this path, so it must not also ride the input disk.
-            None,
+            self.closure_nar.as_deref(),
             u64::from(BUILDER_OUTPUT_DISK_MIB) << 20,
         )?;
 
@@ -1184,12 +1182,8 @@ impl LibkrunBuilderVm {
                 attachment.read_only,
             );
         }
-        if let Some(share_dir) = self.closure_seed_share(&vm_state_dir)? {
-            krun = krun.add_virtio_fs(
-                CLOSURE_SEED_TAG,
-                path_to_str(&share_dir, "closure_seed_dir")?,
-            );
-        }
+        // No closure-seed share: the NAR rides the input disk above, landing at
+        // the same `/closure-seed/<CLOSURE_FILE>` the guest imports either way.
 
         for disk in &job.extra_disks {
             krun = krun.add_disk(
@@ -1683,9 +1677,7 @@ impl BuilderVm for LibkrunBuilderVm {
                     src: &mounts.host_bin_dir,
                 },
             ],
-            // The closure seed is still attached below as a virtio-fs share on
-            // this path, so it must not also ride the input disk.
-            None,
+            self.closure_nar.as_deref(),
             u64::from(BUILDER_OUTPUT_DISK_MIB) << 20,
         )?;
         let mut krun = krun_context_for_image(&vm_name, &image)?
@@ -1712,12 +1704,9 @@ impl BuilderVm for LibkrunBuilderVm {
                 attachment.read_only,
             );
         }
-        if let Some(share_dir) = self.closure_seed_share(&vm_state_dir)? {
-            krun = krun.add_virtio_fs(
-                CLOSURE_SEED_TAG,
-                path_to_str(&share_dir, "closure_seed_dir")?,
-            );
-        }
+        // No closure-seed share: the NAR rides the input disk above, landing at
+        // the same `/closure-seed/<CLOSURE_FILE>` the guest imports either way.
+
         // Builder VMs are NIC-less: egress goes over the vsock relay below, so
         // the libkrun networking mode must be the disconnected sink — the
         // supervisor rejects anything else. Matches the Stage 0 path.
@@ -5607,6 +5596,49 @@ mod tests {
             std::fs::read_to_string(dest.join("work/crates/mvm-build/src/lib.rs")).unwrap(),
             "// real source"
         );
+    }
+
+    /// The seeded closure reaches the guest at `/closure-seed/<CLOSURE_FILE>`
+    /// whether it arrived as a virtio-fs share or on the input disk — the guest
+    /// imports a fixed path and does not care which transport populated it.
+    /// This pins the disk arm, which is what the one-shot builders now use.
+    ///
+    /// The source file is deliberately named something else: `pack_input_disk`
+    /// renames to `CLOSURE_FILE` on the way in, and a differently-named source
+    /// silently landing under its own name would make the guest import a no-op.
+    #[test]
+    fn prepare_transport_disks_lands_the_closure_under_its_fixed_name() {
+        let vm_state_dir = tempfile::TempDir::new().unwrap();
+        let scratch = tempfile::TempDir::new().unwrap();
+        let job = scratch.path().join("job");
+        std::fs::create_dir_all(&job).unwrap();
+        std::fs::write(job.join("cmd.sh"), b"#!/bin/sh\n").unwrap();
+        let nar = scratch.path().join("some-other-name.nar");
+        std::fs::write(&nar, b"closure-bytes").unwrap();
+
+        let (input_disk, _output_disk) = prepare_builder_transport_disks(
+            vm_state_dir.path(),
+            &[InputTree {
+                name: "job",
+                src: &job,
+            }],
+            Some(nar.as_path()),
+            1 << 20,
+        )
+        .unwrap();
+
+        let dest = scratch.path().join("unpacked");
+        read_output_disk(&input_disk, &dest).unwrap();
+        assert_eq!(
+            std::fs::read(
+                dest.join(CLOSURE_SEED_TAG)
+                    .join(crate::builder_pack::CLOSURE_FILE)
+            )
+            .unwrap(),
+            b"closure-bytes"
+        );
+        // And nothing was staged as a share directory for it.
+        assert!(!vm_state_dir.path().join(CLOSURE_SEED_TAG).exists());
     }
 
     #[test]

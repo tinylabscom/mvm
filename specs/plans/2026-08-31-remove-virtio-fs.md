@@ -181,15 +181,25 @@ order and asks for no shares). What is left is narrower than "the builder VM":
 
 - [x] `work`, `job`, `mvm-bins` — inbound. Done for the one-shot builder via
       the disk transport; `work` was already done on Stage 0.
-- [ ] **The closure seed is not done, and this box used to claim it was.** It is
-      the one inbound tree still on virtio-fs in the one-shot libkrun builder:
-      `libkrun_builder.rs` calls `closure_seed_share` +
-      `add_virtio_fs(CLOSURE_SEED_TAG, …)` at both transport sites, while
-      `prepare_builder_transport_disks` passed a hardcoded `None`. The helper now
-      takes a real `closure_nar` — the QEMU builder uses it — so flipping libkrun
-      is two tokens. Held back only because it changes the macOS default builder
-      and the QEMU work was validated on Linux/KVM; it needs its own live
-      libkrun run.
+- [x] **The closure seed is done now.** This box used to claim it was done while
+      `prepare_builder_transport_disks` passed a hardcoded `None` and both
+      transport sites attached the NAR over virtio-fs a few lines later. Both
+      now pass `self.closure_nar.as_deref()` and attach no share, so the
+      one-shot libkrun builder boots with an empty `virtio_fs_mounts` list —
+      verified against the supervisor config a live `--builder libkrun` run
+      wrote, not just its exit status.
+
+      `run_stage0_impl` keeps its share deliberately: Stage 0 boots a virtio-fs
+      *root* and has no transport disks, so it predates this seam rather than
+      lagging it.
+
+      **The live run could not exercise the closure-carrying arm.** No builder
+      pack on the dev host emits a `nix-closure.nar`, so
+      `closure_nar_for_host_arch()` is `None` and old and new code produce
+      identical bytes. That arm is unit-tested instead
+      (`prepare_transport_disks_lands_the_closure_under_its_fixed_name`), which
+      also pins the rename to `CLOSURE_FILE` — a differently-named source
+      landing under its own name would make the guest's import a silent no-op.
 **The guest is already most of the way there.** `mvm-host-vm-init` has a
 complete disk-transport mode, selected by `mvm.builder_transport=disk` with
 `mvm.builder_input=` / `mvm.builder_output=` naming the devices:
