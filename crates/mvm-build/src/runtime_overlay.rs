@@ -895,9 +895,8 @@ const DEFAULT_RELEASE_BASE: &str = "https://github.com/tinylabscom/mvm/releases/
 
 /// Documented escape hatch — bypass the SHA-256
 /// integrity check when an emergency rotation requires it. Never set
-/// in CI. Matches the env var name used by `download_dev_image` and
-/// `download_builder_vm_image` so the operator runbook covers all
-/// three.
+/// in CI. Matches the env var name honoured by `verify_artifact_hash` on the
+/// CLI's download path, so the operator runbook covers both.
 pub(crate) const SKIP_HASH_VERIFY_ENV: &str = "MVM_SKIP_HASH_VERIFY";
 
 /// Construct the per-version release base URL the four artifacts
@@ -917,8 +916,8 @@ pub fn release_base_url(version: &str) -> String {
 /// `checksums-sha256.txt`, and install into `cache_root` under the canonical layout
 /// `<cache_root>/runtime-overlay/<version>/<arch>/`.
 ///
-/// Mirrors the integrity pattern of `download_dev_image` /
-/// `download_builder_vm_image`: fetch the archive checksum first; reject
+/// Mirrors the integrity pattern of `download_builder_vm_image`: fetch the
+/// archive checksum first; reject
 /// downloads whose hash isn't pre-committed there; honor
 /// `MVM_SKIP_HASH_VERIFY=1` only as a documented emergency
 /// rotation escape (never set in CI).
