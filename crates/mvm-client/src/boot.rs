@@ -166,6 +166,14 @@ pub fn start_prepared(
     Ok(())
 }
 
+/// Clamp a requested vCPU count against the selected backend before admission
+/// records the grant and before the backend serializes its machine config.
+#[must_use]
+pub fn clamp_vcpus_for_backend(backend_name: &str, requested: u32) -> Option<u32> {
+    let backend = mvm_runtime::backend::AnyBackend::from_hypervisor(backend_name);
+    mvm_core::vm_backend::clamp_vcpus(requested, backend.capabilities().max_vcpus)
+}
+
 /// Report what actually bounded the VM [`start_prepared`] just started.
 ///
 /// This is the seam that puts `VmBackend::apply_grants` on the path `mvmctl`
@@ -250,6 +258,15 @@ pub fn require_hypervisor_selectable(name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::ResumeBootLocalRequest;
+
+    #[test]
+    fn firecracker_vcpus_are_clamped_before_the_u8_api_boundary() {
+        assert_eq!(
+            super::clamp_vcpus_for_backend("firecracker", 9_999),
+            Some(u32::from(u8::MAX))
+        );
+        assert_eq!(super::clamp_vcpus_for_backend("firecracker", 2), None);
+    }
 
     #[test]
     fn resume_boot_builder_reports_the_first_missing_required_field() {

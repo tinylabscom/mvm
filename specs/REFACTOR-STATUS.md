@@ -4,6 +4,12 @@ Last updated: 2026-09-01
 
 ## In progress
 
+- [ ] **Extended CI residual regressions — issues #3051 and #3052.**
+      `specs/plans/2026-08-28-extended-ci-red-repair.md`.
+      Persistent launches clamp vCPUs before admission, authenticated frame
+      reads preserve retryable I/O sources. Focused regressions are green;
+      broad validation and merge delivery remain.
+
 - [ ] **Warm claim authenticated readiness — issue #3039.**
       `specs/plans/2026-08-31-warm-claim-authenticated-readiness.md`.
       A restored child advances only after an authenticated Ping proves its

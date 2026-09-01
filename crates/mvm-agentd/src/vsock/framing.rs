@@ -276,7 +276,8 @@ impl AuthenticatedSession {
     /// Read, authenticate, decrypt, and deserialize one control frame.
     pub fn read<T: serde::de::DeserializeOwned>(&mut self, stream: &mut impl Read) -> Result<T> {
         let sealed = read_sealed_frame(stream, MAX_SEALED_FRAME_SIZE)
-            .map_err(|error| anyhow::anyhow!("control frame read failed: {error}"))?;
+            .map_err(anyhow::Error::new)
+            .context("control frame read failed")?;
         let plaintext = self
             .inner
             .open(&sealed)
@@ -313,6 +314,28 @@ mod tests {
             rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         }
+    }
+
+    struct WouldBlockReader;
+
+    impl std::io::Read for WouldBlockReader {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::WouldBlock.into())
+        }
+    }
+
+    #[test]
+    fn control_frame_read_preserves_would_block_for_bounded_retry() {
+        let error = read_sealed_frame(&mut WouldBlockReader, MAX_SEALED_FRAME_SIZE)
+            .map_err(anyhow::Error::new)
+            .context("control frame read failed")
+            .expect_err("a would-block reader has no frame");
+
+        assert!(error.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::WouldBlock)
+        }));
     }
 
     // ========================================================================
