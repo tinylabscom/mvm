@@ -21,20 +21,6 @@ Last updated: 2026-09-01
       workspace suite, zero-warning Clippy, workspace check, and gated-target
       compilation are green; merge delivery remains.
 
-- [ ] **Kernel cache moved out of the Stage 0 blast radius.**
-      `specs/sprint/delivery/kernel-cache-outside-stage0-blast-radius.md`.
-      The workload kernel was cached inside `builder-vm/<arch>`, the directory
-      Stage 0 `remove_dir_all`s on a source-fingerprint change, so promoting a
-      new builder image destroyed a half-hour artifact and the next boot rebuilt
-      it — blowing `just e2e-launch`'s 1800s cap. Entries now live at
-      `<cache>/kernels/<arch>/<variant>/`; `resolve_kernel` adopts an entry left
-      at the old path by renaming it. The layout was hand-rebuilt at nine call
-      sites, all now routed through `kernel_cache_dir`/`cached_kernel_path`. The
-      gate's builder cap is raised to 7200s, matching `ci-full.yml`. Workspace
-      tests, Clippy, doctests, policy gates, and a live macOS 26 `e2e-launch`
-      run (migration confirmed a rename, not a rebuild) are green; merge
-      delivery remains.
-
 - [ ] **Egress refusal status contract — issue #3040.**
       `specs/plans/2026-09-01-egress-refusal-status.md`.
       FlowMux now distinguishes a policy refusal (`403 Forbidden`) from an
@@ -50,13 +36,6 @@ Last updated: 2026-09-01
       both architectures. Focused downloader, release-contract,
       workflow-syntax, consumer-example, workspace, Clippy, gated-target,
       formatting, and policy validation is green; merge delivery remains.
-
-- [ ] **machine diff handshake retry — issue #3024.**
-      `specs/plans/2026-08-31-machine-diff-handshake-retry.md`.
-      A typed pre-authentication peer hangup gets one fresh connection; an EOF
-      after authentication is never replayed. Focused regressions cover both
-      boundaries and the bounded retry budget. Workspace validation and merge
-      delivery remain.
 
 - [~] **Documented-example parse-tier promotion.**
       `specs/plans/2026-08-30-doc-example-parse-tier-promotion.md`.
