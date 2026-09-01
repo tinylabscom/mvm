@@ -58,16 +58,17 @@ pub fn guest_artifact_dir(transport: Option<&SessionDiskTransport>, job_id: &str
 /// were packed at boot and are bind-mounted in the guest, so re-sending a large
 /// workspace tree per dispatch would cost real time for no effect.
 ///
-/// The disk never shrinks. Its capacity was read by the guest's virtio-blk
-/// driver at boot and cannot be renegotiated, so the current file length is the
-/// floor every repack pads back up to.
+/// Written **in place**, never resized. The guest's `DiskImage` captured this
+/// device's length once, at open, and zero-fills reads past it, so a repack that
+/// grew the file would hand the guest an archive it reads as short — and `tar`
+/// reports success on a short archive. `repack_input_disk_in_place` refuses an
+/// over-capacity archive instead, because refusing is the only way that failure
+/// is visible.
 pub fn repack_dispatch_input(
     transport: &SessionDiskTransport,
     session_job_dir: &Path,
     job_id: &str,
 ) -> std::io::Result<()> {
-    let floor = std::fs::metadata(&transport.input_disk)?.len();
-
     // Stage this dispatch alone under a `job` root, and archive that root as a
     // tree. Two things depend on the shape:
     //
@@ -81,14 +82,12 @@ pub fn repack_dispatch_input(
     let staged_job = staging.path().join(job_id);
     copy_dir(&session_job_dir.join(job_id), &staged_job)?;
 
-    crate::builder_disk_transport::pack_input_disk(
+    crate::builder_disk_transport::repack_input_disk_in_place(
         &[crate::builder_disk_transport::InputTree {
             name: "job",
             src: staging.path(),
         }],
-        None,
         &transport.input_disk,
-        floor,
     )
     .map_err(std::io::Error::other)
 }
@@ -208,10 +207,10 @@ mod tests {
     }
 
     #[test]
-    fn a_repacked_input_disk_never_shrinks_below_its_boot_capacity() {
-        // The guest's virtio-blk driver read this device's capacity at boot and
-        // cannot renegotiate it. A repack that shortened the file would leave
-        // the guest reading past the end of it.
+    fn a_repacked_input_disk_keeps_the_capacity_the_guest_booted_with() {
+        // The guest's `DiskImage` captured this device's length once, at open.
+        // Any resize — either direction — desynchronises it from what the guest
+        // believes the capacity to be.
         let scratch = tempfile::tempdir().expect("tempdir");
         let job_dir = scratch.path().join("jobs");
         std::fs::create_dir_all(job_dir.join("j1")).unwrap();
@@ -226,8 +225,28 @@ mod tests {
         assert_eq!(
             std::fs::metadata(&t.input_disk).unwrap().len(),
             boot_len,
-            "the disk shrank under the guest's feet"
+            "the disk was resized under the guest's feet"
         );
+    }
+
+    #[test]
+    fn a_dispatch_too_large_for_the_disk_is_refused_rather_than_truncated() {
+        // The failure this guards is silent: the guest zero-fills reads past
+        // its booted capacity, and `tar` reports success on a short archive. So
+        // an over-capacity dispatch has to fail here, on the host, or it
+        // "succeeds" into a build that ran the wrong thing.
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let job_dir = scratch.path().join("jobs");
+        std::fs::create_dir_all(job_dir.join("big")).unwrap();
+        std::fs::write(job_dir.join("big").join("blob"), vec![7u8; 64 * 1024]).unwrap();
+        let t = transport_at(scratch.path());
+        // A disk far too small for that payload.
+        crate::builder_disk_transport::create_output_disk(&t.input_disk, 4096).unwrap();
+
+        let err = repack_dispatch_input(&t, &job_dir, "big")
+            .expect_err("an over-capacity dispatch must be refused");
+        let msg = format!("{err}");
+        assert!(msg.contains("input disk holds"), "{msg}");
     }
 
     #[test]
