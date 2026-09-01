@@ -280,6 +280,38 @@ Five coordinated changes, host and guest:
       client change. It is separately validatable on the Linux/KVM box, which
       makes it the better of the two to do first.
 
+      **Recipe, mapped against the tree.** Both QEMU sites are one-shot
+      (`run_shell_script_qemu` ~L1005 and `run_build_qemu` ~L1279 in
+      `qemu_builder.rs`), so this is the simple migration, not the persistent
+      one — no in-place repack, no per-dispatch staging. Two private helpers in
+      `libkrun_builder.rs` already do the work and need only widening to
+      `pub(crate)`: `prepare_builder_transport_disks` (packs the input disk,
+      creates the output disk) and `extract_builder_transport_output`.
+
+      Per site: build `[job, work, mvm-bins]` `InputTree`s the way
+      `libkrun_builder.rs` does at L1132 and L1654, call the prep helper, attach
+      the two images as ordinary `-drive`s, drop the `virtiofsd` spawn loop, the
+      `memory-backend-memfd` + `-numa` object (it exists only because
+      vhost-user-fs requires a shared memory backend whose size equals `-m`),
+      and the `vhost-user-fs-pci` device loop, then extract from the output disk
+      after QEMU exits.
+
+      **Disk order matters and should match the one-shot spec exactly**: vda
+      rootfs, vdb nix-store, vdc input, vdd output, vde runtime overlay,
+      identity last. That is what the guest's cmdline defaults
+      (`mvm.builder_input=/dev/vdc`, `mvm.builder_output=/dev/vdd`) and
+      `BUILDER_RUNTIME_DEVICE=/dev/vde` already assume. Today QEMU puts the
+      runtime overlay at vdc, so it moves — update the `mvm.runtime_data=` token
+      from `qemu_runtime_overlay_attachment` to match. The identity drive is
+      found by ext4 label, not slot, so it is unaffected.
+
+      **One open question**: QEMU carries `closure_share_dir`, a *directory*
+      share. The disk transport's closure support takes a NAR *file*
+      (`pack_input_disk`'s `closure_nar`, archived at
+      `closure-seed/<CLOSURE_FILE>`). libkrun passes `None` there, so the
+      existing helper has no closure path to copy. Resolve how
+      `closure_share_dir` is built before assuming it maps straight across.
+
 - [ ] The QEMU **workload** driver's share arm is a different matter and *is*
       free: workload specs carry `shares: Vec::new()` unconditionally since
       Stage A, so `qemu.rs`'s share handling is unreachable for workloads.
