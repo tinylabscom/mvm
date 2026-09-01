@@ -653,7 +653,7 @@ mod tests {
         .expect("install source-built sidecar");
 
         assert_eq!(artifact.version, FIXTURE_VERSION);
-        let layout = layout_of(cache.path());
+        let layout = layout_of(cache.path(), GuestLibc::Musl);
         assert_eq!(
             std::fs::read_to_string(layout.artifact_dir.join(LOCAL_SOURCE_FINGERPRINT_FILE))
                 .unwrap(),
@@ -695,7 +695,7 @@ mod tests {
             "{error}"
         );
         assert_eq!(
-            std::fs::read(layout_of(cache.path()).image).unwrap(),
+            std::fs::read(layout_of(cache.path(), GuestLibc::Musl).image).unwrap(),
             old_image
         );
     }
@@ -720,7 +720,11 @@ mod tests {
             error.to_string().contains("fingerprint is empty"),
             "{error}"
         );
-        assert!(!layout_of(cache.path()).artifact_dir.exists());
+        assert!(
+            !layout_of(cache.path(), GuestLibc::Musl)
+                .artifact_dir
+                .exists()
+        );
     }
 
     fn append_file<W: std::io::Write>(tar: &mut tar::Builder<W>, path: &str, bytes: &[u8]) {
@@ -899,19 +903,20 @@ mod tests {
         );
     }
 
-    fn layout_of(cache: &Path) -> SdkSidecarLayout {
-        SdkSidecarLayout::under(
-            cache,
-            FIXTURE_VERSION,
-            &GuestArch::host().to_string(),
-            GuestLibc::Glibc,
-        )
+    /// The cache layout a test staged, for the variant it staged.
+    ///
+    /// The libc is a parameter rather than a constant because this module
+    /// covers two acquisition paths that no longer agree on one: a source
+    /// build populates whichever variant it was asked for, while a download
+    /// can only ever install the one the release publishes.
+    fn layout_of(cache: &Path, libc: GuestLibc) -> SdkSidecarLayout {
+        SdkSidecarLayout::under(cache, FIXTURE_VERSION, &GuestArch::host().to_string(), libc)
     }
 
     /// Nothing a resolver could ever pick up was left behind — the only thing
     /// allowed to remain is an abandoned staging directory.
     fn assert_cache_holds_no_artifact(cache: &Path) {
-        let layout = layout_of(cache);
+        let layout = layout_of(cache, PUBLISHED_SIDECAR_LIBC);
         assert!(
             !layout.artifact_dir.exists(),
             "a refused download must leave no artifact dir at {}",
@@ -919,7 +924,7 @@ mod tests {
         );
         assert!(
             SdkSidecarResolver::new(cache.to_path_buf(), FIXTURE_VERSION.to_string())
-                .resolve(&GuestArch::host().to_string(), GuestLibc::Musl)
+                .resolve(&GuestArch::host().to_string(), PUBLISHED_SIDECAR_LIBC)
                 .is_err(),
             "a refused download must leave nothing the resolver accepts"
         );
@@ -991,7 +996,7 @@ mod tests {
         let artifact =
             download_from(&mut env, &fixture, cache.path()).expect("a sound release installs");
 
-        let layout = layout_of(cache.path());
+        let layout = layout_of(cache.path(), PUBLISHED_SIDECAR_LIBC);
         assert_eq!(artifact.image, layout.image);
         assert_eq!(artifact.version, FIXTURE_VERSION);
         assert_eq!(artifact.arch, GuestArch::host().to_string());
@@ -1003,7 +1008,7 @@ mod tests {
         // The installed bytes satisfy the same contract the launch path
         // enforces — the transport cannot widen it.
         SdkSidecarResolver::new(cache.path().to_path_buf(), FIXTURE_VERSION.to_string())
-            .resolve(&GuestArch::host().to_string(), GuestLibc::Musl)
+            .resolve(&GuestArch::host().to_string(), PUBLISHED_SIDECAR_LIBC)
             .expect("the installed entry must resolve");
     }
 
@@ -1154,7 +1159,7 @@ mod tests {
     #[test]
     fn a_crash_between_stage_and_rename_leaves_no_partial_artifact() {
         let cache = tempfile::tempdir().unwrap();
-        let layout = layout_of(cache.path());
+        let layout = layout_of(cache.path(), PUBLISHED_SIDECAR_LIBC);
         let source = tempfile::tempdir().unwrap();
         let image = sidecar_ext4_bytes();
         let version_text = format!("{FIXTURE_VERSION}\n");
@@ -1191,7 +1196,7 @@ mod tests {
         // resolver's point of view.
         promote_staging(&staging, &layout.artifact_dir).expect("promotion must succeed");
         SdkSidecarResolver::new(cache.path().to_path_buf(), FIXTURE_VERSION.to_string())
-            .resolve(&layout.arch, GuestLibc::Musl)
+            .resolve(&layout.arch, PUBLISHED_SIDECAR_LIBC)
             .expect("the promoted entry resolves");
     }
 
@@ -1203,7 +1208,7 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         let fixture = ReleaseFixture::sound();
         download_from(&mut env, &fixture, cache.path()).expect("first install");
-        let layout = layout_of(cache.path());
+        let layout = layout_of(cache.path(), PUBLISHED_SIDECAR_LIBC);
         std::fs::write(layout.artifact_dir.join("stale-residue"), b"x").unwrap();
 
         download_from(&mut env, &fixture, cache.path()).expect("second install");

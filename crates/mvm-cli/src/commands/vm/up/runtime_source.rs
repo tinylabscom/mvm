@@ -724,9 +724,12 @@ mod sdk_sidecar_host_resolution_tests {
         // `mvm_build::release_signature`, not here.
         env.set(mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
 
+        // The published variant, unlike the seeded-cache tests above: this is the
+        // one path that fetches a real release asset, and the release carries only
+        // the glibc archive. Asking for the other is refused before any transport.
         let attached = resolve_sdk_sidecar_attachment_for_host(
             &[svc("host.audit.v1")],
-            mvm_contract::guest_libc::GuestLibc::Musl,
+            mvm_contract::guest_libc::GuestLibc::Glibc,
         )
         .expect("a published sidecar must satisfy the binding")
         .expect("a bound SDK service must attach the sidecar");
@@ -735,7 +738,7 @@ mod sdk_sidecar_host_resolution_tests {
             &dir.path().join("cache"),
             version,
             &arch.to_string(),
-            mvm_contract::guest_libc::GuestLibc::Musl,
+            mvm_contract::guest_libc::GuestLibc::Glibc,
         );
         assert_eq!(attached.volume.host, layout.image.display().to_string());
         assert!(attached.volume.read_only);
