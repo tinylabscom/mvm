@@ -348,6 +348,11 @@ for detailed scope and acceptance criteria.
       reporting clamp stays a single call site above the backends.
       Live-witnessed on x86_64 Linux/KVM. See
       `specs/sprint/delivery/vcpu-ceilings-are-the-vmms-not-the-wires.md`.
+      Followed by `xtask check-vcpu-ceilings`, which refuses a `max_vcpus`
+      derived from an integer type's `MAX` so a fourth backend cannot reach the
+      same wrong conclusion two authors already reached independently. Wired
+      into `check-all`, so it runs on every PR. See
+      `specs/sprint/delivery/vcpu-ceiling-gate-refuses-wire-type-limits.md`.
 
 - [x] **virtiofsd sandbox parity — issue #3022.**
       `specs/plans/2026-08-31-virtiofsd-sandbox-parity.md`.
