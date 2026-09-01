@@ -177,6 +177,32 @@ impl SdkSidecarLayout {
     }
 }
 
+/// Recover the libc a cached sidecar image was filed under.
+///
+/// [`SdkSidecarLayout::under`] writes the libc as the last directory segment,
+/// and this reads it back. The pair is what lets a consumer holding only the
+/// attached volume's path — admission, which sees a launch config rather than
+/// the resolver that built it — say which variant it is looking at without a
+/// second source of truth to drift from. A round-trip test pins them together.
+///
+/// Anything that is not one of the two written names is [`GuestLibc::Unknown`],
+/// which every caller treats as "cannot say" rather than as a default.
+impl SdkSidecarLayout {
+    /// The libc segment of `image`, a path shaped like the one
+    /// [`SdkSidecarLayout::under`] produces.
+    #[must_use]
+    pub fn libc_of_image_path(image: &Path) -> GuestLibc {
+        let Some(segment) = image.parent().and_then(|d| d.file_name()) else {
+            return GuestLibc::Unknown;
+        };
+        match segment.to_str() {
+            Some(s) if s == GuestLibc::Glibc.as_str() => GuestLibc::Glibc,
+            Some(s) if s == GuestLibc::Musl.as_str() => GuestLibc::Musl,
+            _ => GuestLibc::Unknown,
+        }
+    }
+}
+
 /// A resolved, verified sidecar artifact ready to attach read-only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SdkSidecarArtifact {
@@ -466,6 +492,36 @@ mod tests {
         assert_eq!(layout.version, "9.9.9");
         assert_eq!(layout.arch, "x86_64");
         assert_eq!(layout.libc, GuestLibc::Musl);
+    }
+
+    /// The layout writes the libc into the path and `libc_of_image_path` reads
+    /// it back. They are two halves of one encoding, so a change to either
+    /// without the other has to fail here rather than in admission, where the
+    /// symptom would be a correctly-built sidecar refused as `Unknown`.
+    #[test]
+    fn the_libc_segment_round_trips_through_the_image_path() {
+        for libc in [GuestLibc::Glibc, GuestLibc::Musl] {
+            let layout = SdkSidecarLayout::under(Path::new("/cache"), "9.9.9", "x86_64", libc);
+            assert_eq!(SdkSidecarLayout::libc_of_image_path(&layout.image), libc);
+        }
+    }
+
+    /// A path that is not one this layout wrote reads as `Unknown`, never as a
+    /// guess. Admission refuses `Unknown`, so guessing here would turn a
+    /// missing answer into a wrong one.
+    #[test]
+    fn a_foreign_path_reads_as_unknown() {
+        for p in [
+            "/somewhere/sdk.ext4",
+            "/cache/sdk-sidecar/9.9.9/x86_64/sdk.ext4",
+            "sdk.ext4",
+        ] {
+            assert_eq!(
+                SdkSidecarLayout::libc_of_image_path(Path::new(p)),
+                GuestLibc::Unknown,
+                "{p}"
+            );
+        }
     }
 
     /// The two variants carry different objects and verify against different

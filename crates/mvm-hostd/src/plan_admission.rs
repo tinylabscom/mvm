@@ -1352,7 +1352,7 @@ pub fn enforce_sdk_sidecar_backend_compatibility(
     Err(SdkSidecarBackendCompatibilityError::WasmHostServicesUnsupported { services })
 }
 
-/// Admission enforcement for the optional glibc SDK sidecar attachment.
+/// Admission enforcement for the optional SDK sidecar attachment.
 ///
 /// The sidecar carries the host-services cdylib the language SDKs `dlopen`. Its
 /// attachment is authorized by the plan's host-service bindings, never by an
@@ -1420,7 +1420,13 @@ pub fn enforce_sdk_sidecar_attachment(
             sidecar.host,
         );
     }
-    enforce_sidecar_libc(image_libc, &bound)?;
+    // The sidecar's own libc comes from the path it was filed under, so both
+    // sides of the comparison are observed rather than assumed. Reading it here
+    // rather than threading it in keeps this a check on the launch config as
+    // presented — the thing admission is actually authorizing.
+    let sidecar_libc =
+        mvm_build::guest_libc::sidecar_libc_of_image_path(std::path::Path::new(&sidecar.host));
+    enforce_sidecar_libc(image_libc, sidecar_libc, &bound)?;
     Ok(())
 }
 
@@ -1452,15 +1458,24 @@ fn recorded_image_libc(rootfs_path: &str) -> GuestLibc {
 /// [`GuestLibc::Unknown`] refuses too. It covers an image whose loader was
 /// unrecognisable and a sidecar written before the field existed, and neither
 /// is evidence that loading would work.
-fn enforce_sidecar_libc(image_libc: GuestLibc, bound: &[&str]) -> Result<()> {
-    if mvm_build::guest_libc::sidecar_loads_in(image_libc) {
+fn enforce_sidecar_libc(
+    image_libc: GuestLibc,
+    sidecar_libc: GuestLibc,
+    bound: &[&str],
+) -> Result<()> {
+    if mvm_build::guest_libc::sidecar_loads_in(image_libc, sidecar_libc) {
         return Ok(());
     }
-    let detail = match image_libc {
-        GuestLibc::Unknown => {
+    let detail = match (image_libc, sidecar_libc) {
+        (GuestLibc::Unknown, _) => {
             "the image records no libc this host recognises. An image materialized before mvm \
              began recording it reads this way — re-pull or rebuild it and the sidecar is \
              rewritten with the libc"
+        }
+        (_, GuestLibc::Unknown) => {
+            "the attached sidecar is not filed under a libc this host recognises, so which \
+             variant it holds cannot be established. Rebuild the cache with \
+             `mvmctl build sdk-sidecar build`, which files each variant under its own libc"
         }
         _ => {
             "a process under one libc cannot dlopen an object built for the other — the guest \
@@ -1472,7 +1487,7 @@ fn enforce_sidecar_libc(image_libc: GuestLibc, bound: &[&str]) -> Result<()> {
          delivered by a shared object built for {}, but this image is {}. {detail}. Use an image \
          whose libc matches, or drop the host-service binding.",
         bound.join(", "),
-        mvm_build::guest_libc::SIDECAR_CDYLIB_LIBC.as_str(),
+        sidecar_libc.as_str(),
         image_libc.as_str(),
     )
 }
@@ -2689,13 +2704,37 @@ mod tests {
     /// otherwise land inside the guest at `dlopen` time as a relocation error
     /// naming a symbol the operator never heard of. Refuse on the host, where
     /// the cause can be named.
+    /// A sidecar whose path carries no libc segment cannot be identified, and
+    /// an unidentifiable variant is refused rather than assumed to match. This
+    /// is the shape a cache written before the layout was keyed leaves behind.
+    #[test]
+    fn a_sidecar_filed_under_no_libc_is_refused() {
+        use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
+        let plan = plan_binding(&["host.kv.v1"]);
+        let unkeyed = VmVolume {
+            host: "/cache/sdk-sidecar/1.2.3/aarch64/sdk.ext4".into(),
+            guest: mvm_core::plan::SDK_SIDECAR_GUEST_PATH.into(),
+            read_only: true,
+            kind: VmVolumeKind::Disk,
+            ..Default::default()
+        };
+
+        let err = enforce_sdk_sidecar_attachment(&[unkeyed], &plan, GuestLibc::Musl)
+            .expect_err("a sidecar of unknown variant must not be attached");
+
+        assert!(
+            err.to_string().contains("sdk-sidecar build"),
+            "the refusal must say how to repopulate the cache: {err}"
+        );
+    }
+
     #[test]
     fn a_sidecar_the_guest_cannot_load_is_refused_before_boot() {
         let plan = plan_binding(&["host.kv.v1"]);
         let err = enforce_sdk_sidecar_attachment(
-            &[sdk_sidecar_volume()],
+            &[sdk_sidecar_volume_for(GuestLibc::Glibc)],
             &plan,
-            mvm_build::guest_libc::GuestLibc::Musl,
+            GuestLibc::Musl,
         )
         .expect_err("a musl image must not receive the glibc sidecar");
         let msg = err.to_string();
@@ -2741,12 +2780,30 @@ mod tests {
     /// The libc the shipped cdylib is built for. These tests assert attachment
     /// *shape* — count, read-only, kind — so they hold the libc loadable and
     /// let the dedicated libc tests vary it.
-    const LOADABLE_LIBC: GuestLibc = mvm_build::guest_libc::SIDECAR_CDYLIB_LIBC;
+    /// One libc for both sides of the admission fixtures: what the image
+    /// records and what the sidecar was filed under have to agree for the
+    /// attachment to be admissible, and these tests are about the other rules.
+    const LOADABLE_LIBC: GuestLibc = GuestLibc::Musl;
 
+    /// A sidecar volume shaped the way the resolver actually hands one over:
+    /// filed under its libc, because that segment is where the gate reads the
+    /// variant from. A path without it is not a lesser fixture, it is a
+    /// different case — covered by
+    /// `a_sidecar_filed_under_no_libc_is_refused`.
     fn sdk_sidecar_volume() -> mvm_core::vm_backend::VmVolume {
+        sdk_sidecar_volume_for(LOADABLE_LIBC)
+    }
+
+    /// The same volume filed under an arbitrary libc, so a test can state both
+    /// sides of the comparison instead of leaning on which one the shared
+    /// fixture happens to use.
+    fn sdk_sidecar_volume_for(libc: GuestLibc) -> mvm_core::vm_backend::VmVolume {
         use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
         VmVolume {
-            host: "/cache/sdk-sidecar/1.2.3/aarch64/sdk.ext4".into(),
+            host: format!(
+                "/cache/sdk-sidecar/1.2.3/aarch64/{}/sdk.ext4",
+                libc.as_str()
+            ),
             guest: mvm_core::plan::SDK_SIDECAR_GUEST_PATH.into(),
             read_only: true,
             kind: VmVolumeKind::Disk,

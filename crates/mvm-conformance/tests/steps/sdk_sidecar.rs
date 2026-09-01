@@ -6,7 +6,7 @@
 //! populated cache can never make a scenario pass for the wrong reason.
 
 use cucumber::{given, then, when};
-use mvm_build::guest_libc::{GuestLibc, SIDECAR_CDYLIB_LIBC};
+use mvm_build::guest_libc::GuestLibc;
 use mvm_contract::protocol::broker::ServiceId;
 use mvm_core::arch::GuestArch;
 use mvm_core::plan::test_support::PlanFixture;
@@ -415,7 +415,7 @@ fn admission_accepts_with_sidecar(world: &mut CliWorld) {
     mvm_hostd::plan_admission::enforce_sdk_sidecar_attachment(
         &volumes,
         plan_of(world),
-        SIDECAR_CDYLIB_LIBC,
+        SCENARIO_LIBC,
     )
     .expect("the resolved attachment must satisfy the admission gate");
 }
