@@ -146,8 +146,7 @@ mod default_microvm_tests {
 
     #[test]
     fn missing_workload_kernel_message_explains_automatic_and_manual_paths() {
-        let msg =
-            missing_workload_kernel_message("/cache/builder-vm/aarch64/kernels/workload/vmlinux");
+        let msg = missing_workload_kernel_message("/cache/kernels/aarch64/workload/vmlinux");
         assert!(msg.contains("mvmctl kernel build --which workload"));
         assert!(msg.contains("just kernel-workload"));
         assert!(msg.contains("dm-verity-capable workload kernel"));

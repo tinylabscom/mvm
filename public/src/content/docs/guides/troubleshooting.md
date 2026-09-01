@@ -189,7 +189,7 @@ mvmctl build kernel build --which workload --source compile
 ```
 
 For a local compile, the cache also contains the resolved kernel config and
-metrics under `~/.mvm/cache/builder-vm/<arch>/kernels/workload/`. An empty
+metrics under `~/.mvm/cache/kernels/<arch>/workload/`. An empty
 config sidecar or a zero built-in-symbol count indicates that the generated
 kernel artifact is incomplete and should not be used for a sealed workload.
 

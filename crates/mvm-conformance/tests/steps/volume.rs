@@ -47,13 +47,11 @@ fn cached_live_workload_kernel(world: &mut CliWorld) {
     // operator mistake.
     let source = crate::workload_kernel_path()
         .expect("`@workload_kernel` scenarios only run when a kernel resolves");
-    let destination = isolated_home(world)
-        .join("cache")
-        .join("builder-vm")
-        .join(std::env::consts::ARCH)
-        .join("kernels")
-        .join("workload")
-        .join("vmlinux");
+    let destination = mvm_build::kernel_fetch::cached_kernel_path(
+        &isolated_home(world).join("cache"),
+        std::env::consts::ARCH,
+        "workload",
+    );
     fs::create_dir_all(
         destination
             .parent()

@@ -54,6 +54,19 @@ E2E_HOME="${MVM_E2E_HOME:-${MVM_HOME:-$HOME/.mvm}}"
 # cross-compile per gate run, which is the price of measuring the tree.
 export MVM_EMBED_NO_CACHE="e2e-$(date +%s)"
 
+# The builder VM's wall-clock cap, raised from its 30-minute default.
+#
+# This lane can legitimately face a cold workload-kernel build, which is a
+# half-hour of nix on an unloaded host and longer on a busy one. At the default
+# the gate fails on a slow build rather than a broken one — and fails ~30
+# minutes in, after the expensive part, which is the worst possible place to
+# learn nothing. `ci-full.yml` already runs its builder lane at 7200 for the
+# same reason; matching it keeps the two from disagreeing about how long a
+# build is allowed to take.
+#
+# Respects an operator override so a bisect can still set it lower.
+export MVM_BUILDER_VM_TIMEOUT_SECS="${MVM_BUILDER_VM_TIMEOUT_SECS:-7200}"
+
 # Skips this lane will not tolerate.
 #
 # The tally printed after the suite is advice, and advice is not read at the

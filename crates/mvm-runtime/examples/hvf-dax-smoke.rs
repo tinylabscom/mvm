@@ -6,7 +6,7 @@
 //!   --entitlements <(printf '%s' \
 //!     '<plist><dict><key>com.apple.security.hypervisor</key><true/></dict></plist>') \
 //!   target/debug/examples/hvf-dax-smoke
-//! MVM_HVF_KERNEL=.mvm-test/cache/builder-vm/aarch64/kernels/builder/vmlinux \
+//! MVM_HVF_KERNEL=.mvm-test/cache/kernels/aarch64/builder/vmlinux \
 //! MVM_HVF_INITRAMFS=/tmp/hvf-dax-guest/initramfs.cpio \
 //! MVM_HVF_VIRTIOFS_ROOT=/tmp/hvf-dax-root \
 //!   ./target/debug/examples/hvf-dax-smoke
@@ -21,9 +21,8 @@ fn main() {
 
         static STOP: AtomicBool = AtomicBool::new(false);
 
-        let kernel = std::env::var("MVM_HVF_KERNEL").unwrap_or_else(|_| {
-            ".mvm-test/cache/builder-vm/aarch64/kernels/builder/vmlinux".into()
-        });
+        let kernel = std::env::var("MVM_HVF_KERNEL")
+            .unwrap_or_else(|_| ".mvm-test/cache/kernels/aarch64/builder/vmlinux".into());
         let initramfs = std::env::var("MVM_HVF_INITRAMFS")
             .map(|p| std::fs::read(&p).expect("read initramfs"))
             .unwrap_or_else(|_| {

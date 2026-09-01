@@ -387,12 +387,11 @@ pub(crate) fn workload_kernel_path() -> Option<std::path::PathBuf> {
         let path = std::path::PathBuf::from(explicit);
         return path.is_file().then_some(path);
     }
-    let cached = std::path::PathBuf::from(mvm_core::config::default_mvm_cache_dir())
-        .join("builder-vm")
-        .join(std::env::consts::ARCH)
-        .join("kernels")
-        .join("workload")
-        .join("vmlinux");
+    let cached = mvm_build::kernel_fetch::cached_kernel_path(
+        std::path::Path::new(&mvm_core::config::default_mvm_cache_dir()),
+        std::env::consts::ARCH,
+        "workload",
+    );
     cached.is_file().then_some(cached)
 }
 

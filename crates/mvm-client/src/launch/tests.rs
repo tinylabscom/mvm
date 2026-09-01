@@ -768,7 +768,7 @@ fn firecracker_admitted_boot_receives_a_concrete_kernel_path() {
     );
 
     // Seed the exact cache location the CLI's machine-run boot path reads:
-    // `<cache>/builder-vm/<arch>/kernels/workload/vmlinux`.
+    // `<cache>/kernels/<arch>/workload/vmlinux`.
     let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let arch = mvm_core::arch::GuestArch::host().to_string();
     let cached = mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, "workload");

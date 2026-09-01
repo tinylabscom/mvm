@@ -1201,7 +1201,7 @@ fn builder_vm_stage0_promotion_replaces_stale_valid_cache() {
 }
 
 #[test]
-fn repro_stage0_promotion_destroys_the_cached_workload_kernel() {
+fn stage0_promotion_leaves_the_cached_workload_kernel_alone() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let cache_dir = tmp.path().join("cache");
     let final_dir = cache_dir.join("builder-vm").join("aarch64");
