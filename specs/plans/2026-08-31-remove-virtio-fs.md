@@ -210,13 +210,23 @@ Five coordinated changes, host and guest:
 - [ ] Host dispatch client: repack the input disk with the new job payload
       before each `Run`, and `read_output_disk` into the artifact dir after each
       `Result` — rather than once after poweroff.
-- [ ] Guest dispatch loop: re-stage `/job` from the input disk on each `Run`,
-      and call `collect_disk_transport_output` after each job. Today that
-      collection runs only on the one-shot path — `run_dispatch_loop` returns
-      straight into `power_off()` and never reaches it. `/out` must be reset per
-      dispatch for the reason the boot path already documents: otherwise the
-      host reads back a tar of every artifact any earlier build left behind,
-      including dangling `result-*` symlinks that fail extraction outright.
+- [x] Guest dispatch loop: re-stages `/job` from the input disk on each `Run`
+      and collects `/out` onto the output disk after each job — the collection
+      previously ran only on the one-shot path, since `run_dispatch_loop`
+      returns straight into `power_off()`. `/out` is reset per dispatch for the
+      reason the boot path documents: otherwise the host reads back a tar of
+      every artifact any earlier dispatch left, including dangling `result-*`
+      symlinks that fail extraction outright. Only the `job` member is
+      re-extracted; `work` and `mvm-bins` do not change between dispatches.
+
+      `clear_dir_contents` is new, and is why this could not reuse
+      `reset_stage_dir`: that one removes and recreates the directory, which is
+      right at boot and wrong afterwards, because `/job` and `/out` are
+      bind-mounted onto those inodes. Orphan the bind and every later write
+      lands somewhere nothing reads, silently. A test pins the surviving inode.
+
+      **Runs only in the Linux test lane.** The guest bin is `cfg`-gated, so
+      these tests compile on macOS via `just check-gated` but execute in CI.
 - [ ] **Cannot be validated in CI or on a non-macOS host.** Every guest-booting
       lane skips on hosted runners, and the persistent builder is what
       `mvmctl build` uses on macOS 26+. Land this only behind a real
