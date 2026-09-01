@@ -149,11 +149,11 @@ fn main() {
 
     emit_pinned_toolchain_env(&workspace_root);
 
-    // The cross-compile is opt-in. Off, this script watches four files and does
-    // nothing else, so cargo runs it once per fingerprint and never again on
-    // the inner loop — the point of the feature. On, it produces the real set.
+    // The cross-compile is opt-in. Off, this script never compiles anything —
+    // it only restores a payload the content store can already prove belongs to
+    // this tree. On, it produces the real set.
     if !embedding_requested() {
-        write_unembedded_table(&out_dir);
+        write_unembedded_table(&workspace_root, &out_dir);
         return;
     }
     embed_host_binaries(&workspace_root, &out_dir);
@@ -182,20 +182,127 @@ fn emit_pinned_toolchain_env(workspace_root: &Path) {
     println!("cargo:rustc-env=MVM_PINNED_TARGET={}", pin.target);
 }
 
-/// The unembedded arm: an empty `EMBEDDED` table plus the minimum watch set.
+/// The unembedded arm. It never cross-compiles — but it does reuse a payload
+/// the content store can prove belongs to this source tree.
 ///
-/// At least one `rerun-if-*` line is mandatory here. Emitting none does not
-/// mean "never re-run" — it restores cargo's default, which re-runs the script
-/// on *any* change to the package, i.e. every edit to `mvm-cli`'s 251 files.
-/// That is the opposite of what this arm is for. The four inputs below are the
-/// only ones that can change what it writes.
-fn write_unembedded_table(out_dir: &Path) {
-    std::fs::write(out_dir.join("embedded.rs"), render_embedded_rs(&[])).unwrap();
-    println!("cargo:rustc-env=MVM_EMBEDDED_BINS_REUSED=0");
+/// Both feature variants write the same `target/<profile>/mvmctl`, so whichever
+/// cargo invocation ran last decides whether the binary on `PATH` carries the
+/// payload. A cached, zero-compile `cargo build` is enough to take it away,
+/// which is why an unembedded `mvmctl` kept coming back after a `just embed`
+/// that had genuinely worked. Restoring here closes that: the key covers each
+/// binary's dependency closure, `Cargo.lock` and the pinned toolchain, so a hit
+/// is exactly the bytes this tree produces — the same proof the embedding arm
+/// relies on when it skips a rebuild.
+///
+/// A miss, an unreachable store, or `MVM_EMBED_NO_CACHE=1` writes the empty
+/// table as before. This arm compiles nothing, so a payload it cannot prove is
+/// one it does not ship.
+///
+/// At least one `rerun-if-*` line is mandatory. Emitting none does not mean
+/// "never re-run" — it restores cargo's default, which re-runs the script on
+/// *any* change to the package, i.e. every edit to `mvm-cli`'s 251 files.
+fn write_unembedded_table(workspace_root: &Path, out_dir: &Path) {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=build_support.rs");
     println!("cargo:rerun-if-changed=build_embed_cache.rs");
     println!("cargo:rerun-if-changed=src/host_binaries/manifest.rs");
+    println!("cargo:rerun-if-env-changed=MVM_EMBED_NO_CACHE");
+    println!("cargo:rerun-if-env-changed=MVM_EMBED_CACHE_DIR");
+
+    let entries = restore_embedded_from_store(workspace_root, out_dir);
+    std::fs::write(out_dir.join("embedded.rs"), render_embedded_rs(&entries)).unwrap();
+    println!(
+        "cargo:rustc-env=MVM_EMBEDDED_BINS_REUSED={}",
+        if entries.is_empty() { "0" } else { "1" }
+    );
+}
+
+/// Restore the whole embedded set from the content store, or nothing.
+///
+/// All-or-nothing on purpose: extraction verifies the table as a unit, and a
+/// builder VM missing one binary fails later and somewhere else, which reads as
+/// a corrupted cache rather than as a partial restore.
+fn restore_embedded_from_store(
+    workspace_root: &Path,
+    out_dir: &Path,
+) -> Vec<(String, PathBuf, String)> {
+    let mut cache = EmbedCache::discover(workspace_root);
+    let Some(store_root) = cache.root.clone() else {
+        return Vec::new();
+    };
+    // Watch the store itself, not just the sources. Publishing from a
+    // `just embed` changes no file this unit already watches, so without this
+    // the restore below would never re-run and the next plain build would keep
+    // shipping the empty table it cached — the exact swap this arm exists to
+    // stop. Created when absent so the watch is a stable directory rather than
+    // a missing path, which cargo treats as permanently dirty.
+    let _ = std::fs::create_dir_all(&store_root);
+    println!("cargo:rerun-if-changed={}", store_root.display());
+
+    let pin = read_pinned_toolchain(workspace_root);
+    let bins_out = out_dir.join("mvm-host-bins");
+    let mut entries = Vec::new();
+    for binary in read_embedded_manifest(workspace_root) {
+        let out_file = bins_out.join(&binary.name);
+        let key = artifact_key_for(&mut cache, &binary, &pin);
+        if !cache.restore(key.as_deref(), &binary.name, &out_file) {
+            // Watch the closure anyway: a later edit has to be able to bring
+            // this unit back for another look once the store carries the
+            // matching bytes.
+            cache.emit_rerun();
+            return Vec::new();
+        }
+        let sha = sha256_hex(&out_file);
+        entries.push((binary.name.clone(), out_file, sha));
+    }
+    // Editing any source the payload is built from must invalidate the restore,
+    // or this arm would keep serving bytes that no longer match the tree.
+    cache.emit_rerun();
+    eprintln!(
+        "[build.rs] embedded host binaries restored from the content store \
+         without `embed-host-bins` ({} binaries)",
+        entries.len()
+    );
+    entries
+}
+
+/// Every binary that gets cross-compiled and embedded.
+///
+/// `HOST_BINARIES` (installed into the builder/dev VM rootfs) and
+/// `SEED_BINARIES` (host-side only, e.g. the Stage 0 nix-seed's `/init`) are
+/// both `mvm-build` `[[bin]]`s; the bootstrap support list carries its own
+/// package names, so it cannot assume one.
+fn read_embedded_manifest(workspace_root: &Path) -> Vec<EmbeddedSourceBinary> {
+    let mut manifest: Vec<EmbeddedSourceBinary> = read_rust_manifest(workspace_root)
+        .into_iter()
+        .chain(read_seed_binaries(workspace_root))
+        .map(|name| EmbeddedSourceBinary {
+            package: "mvm-build".to_string(),
+            name,
+            features: String::new(),
+        })
+        .collect();
+    manifest.extend(read_bootstrap_support_binaries(workspace_root));
+    manifest
+}
+
+/// The content-store key for one embedded binary under the pinned toolchain.
+fn artifact_key_for(
+    cache: &mut EmbedCache,
+    binary: &EmbeddedSourceBinary,
+    pin: &Pin,
+) -> Option<String> {
+    cache.key_for(&KeyRequest {
+        package: &binary.package,
+        binary: &binary.name,
+        features: &binary.features,
+        target: &pin.target,
+        toolchain: &format!(
+            "rust={} zig={} zigbuild={}",
+            pin.rust, pin.zig, pin.cargo_zigbuild
+        ),
+        flavor: "musl-static",
+    })
 }
 
 fn embed_host_binaries(workspace_root: &Path, out_dir: &Path) {
@@ -224,21 +331,7 @@ fn embed_host_binaries(workspace_root: &Path, out_dir: &Path) {
     println!("cargo:rerun-if-env-changed=MVM_EMBED_ZIG");
     println!("cargo:rerun-if-env-changed=MVM_EMBED_NO_CACHE");
 
-    // HOST_BINARIES (installed into the builder/dev VM rootfs), SEED_BINARIES
-    // (host-side only, e.g. the Stage 0 nix-seed's /init), and bootstrap
-    // support binaries all get cross-compiled + embedded. The support list
-    // includes binaries owned by crates other than mvm-build, so retain the
-    // package name alongside each binary instead of assuming one package.
-    let mut manifest: Vec<EmbeddedSourceBinary> = read_rust_manifest(&workspace_root)
-        .into_iter()
-        .chain(read_seed_binaries(&workspace_root))
-        .map(|name| EmbeddedSourceBinary {
-            package: "mvm-build".to_string(),
-            name,
-            features: String::new(),
-        })
-        .collect();
-    manifest.extend(read_bootstrap_support_binaries(&workspace_root));
+    let manifest = read_embedded_manifest(&workspace_root);
     let mut entries = Vec::new();
 
     // The host-vm bins are statically musl-linked and embedded for the host
@@ -290,17 +383,7 @@ fn embed_host_binaries(workspace_root: &Path, out_dir: &Path) {
             .join(strip_glibc(&pin.target))
             .join("release")
             .join(&binary.name);
-        let key = cache.key_for(&KeyRequest {
-            package: &binary.package,
-            binary: &binary.name,
-            features: &binary.features,
-            target: &pin.target,
-            toolchain: &format!(
-                "rust={} zig={} zigbuild={}",
-                pin.rust, pin.zig, pin.cargo_zigbuild
-            ),
-            flavor: "musl-static",
-        });
+        let key = artifact_key_for(&mut cache, binary, &pin);
 
         if cache.restore(key.as_deref(), &binary.name, &out_file) {
             eprintln!(

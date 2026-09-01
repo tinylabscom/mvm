@@ -1,7 +1,7 @@
 # Take `mvm-cli`'s build script off the inner loop entirely
 
 Backing: shipped-source
-Validation: the_default_build_embeds_nothing
+Validation: the_default_build_ships_only_a_payload_the_store_could_prove
 
 **Status:** DELIVERED
 **Date:** 2026-08-28
@@ -20,6 +20,12 @@ feature off the script writes an empty `EMBEDDED` table, watches four files, and
 returns — so cargo runs it once per fingerprint and never again on the inner
 loop. `just embed` and the tag-push release workflow turn it on.
 
+Amended 2026-09-01 — see "Follow-up" below: the unembedded arm still never
+cross-compiles, but it now *restores* a payload the content store can prove
+belongs to this tree, because writing an empty table unconditionally turned an
+ordinary `cargo build` into something that silently un-embedded the binary on
+`PATH`.
+
 The argument is not wall time; at 0.13s there was little left to win. It is that
 a dev build should not carry hidden work, and that the one place a shipped
 artifact gets its payload should be a named, reviewable line in the release
@@ -37,7 +43,10 @@ it writes.
 
 Verified: with the feature off, `touch crates/mvm-core/src/lib.rs` followed by
 `cargo build -p mvmctl --bin mvmctl -vv` shows zero `build-script-build`
-executions.
+executions. The follow-up widens this: when the store can serve a payload the
+arm also watches that payload's dependency closure, so an edit to
+`mvm-core/src` does re-run the script. It still compiles nothing — it recomputes
+the key and either restores or writes the empty table.
 
 ## What an unembedded binary does
 
@@ -45,7 +54,14 @@ Every host-side verb works. What it cannot do is bootstrap a builder VM, so
 `host_binaries::extract::ensure_extracted` refuses up front:
 
 > this mvmctl was built without the embedded Linux host binaries, so it cannot
-> bootstrap a builder VM. Rebuild with `just embed` …
+> bootstrap a builder VM. Rebuild with `just embed --release` (or
+> `cargo build --release --features embed-host-bins`) …
+
+The rebuild command is profile-correct. Bare `just embed` writes
+`target/debug/mvmctl`, so a release-profile binary sent to it is never replaced
+— and a checkout carrying `target/release` ahead of `target/debug` on `PATH`
+keeps resolving to the stale one, which made the refusal recur for as long as
+the operator followed the instruction.
 
 It refuses *before* creating the cache directory. An empty extract would
 otherwise surface later as a missing file and read as a corrupted cache rather
@@ -57,9 +73,12 @@ Gating `embedded_binaries.rs` and `host_binaries_extract.rs` on the feature
 would leave the default configuration — the one nearly every `cargo test` uses —
 asserting nothing whatsoever about the embedded set. So the gating is paired:
 
-- `tests/unembedded_host_binaries.rs` (`#![cfg(not(feature = ...))]`) asserts the
-  table is empty, that both extraction entry points refuse, that the message
-  names the fix, and that no cache directory is left behind.
+- `tests/unembedded_host_binaries.rs` (`#![cfg(not(feature = ...))]`) asserts
+  whichever state the store left this build in: the cold arm must refuse from
+  both extraction entry points, name the fix and the binary it came from, and
+  leave no cache directory behind; the warm arm must carry the complete
+  manifest. It cannot assert the table is empty any more — after a `just embed`
+  on the same machine, it is not.
 - `tests/embedded_binaries.rs` + `tests/host_binaries_extract.rs`
   (`#![cfg(feature = ...)]`) keep the payload assertions.
 - In `host_binaries_manifest.rs` only the one payload test is gated; the three
@@ -140,3 +159,28 @@ while its hermetic job drops one it never needed.
   miss costing "~17.8s of nested `cargo build` on the aux-helper leg". That leg
   no longer exists, so the insurance the raise was buying is obsolete — a host
   config decision, not a repo one.
+
+## Follow-up (2026-09-01): the unembedded arm restores from the store
+
+Both variants write the same `target/<profile>/mvmctl`, so the last cargo
+invocation owns the file. Measured: 32,395,744 bytes with the feature,
+27,012,528 without, and the swap took 0.26s with **nothing compiled** — so a
+script, a test harness or another session could un-embed the binary on `PATH`
+between a `just embed` and the next command.
+
+`write_unembedded_table` now calls `restore_embedded_from_store`. It still
+compiles nothing; it asks the same store the embedding arm uses, under the same
+key, so a hit is proven to be the bytes this tree produces. All-or-nothing,
+because extraction verifies the table as a unit. A miss, `MVM_EMBED_NO_CACHE=1`
+or an unreachable store writes the empty table as before.
+
+The store root is watched, and created when absent so the watch is a stable
+directory rather than a permanently-dirty missing path. Without it a `just
+embed` changes no file this unit watches, so it would never re-run and the next
+plain build would keep serving its cached empty table.
+
+`tests/unembedded_host_binaries.rs` can no longer assert `EMBEDDED.is_empty()`
+— on a machine that has run `just embed` it is not. It matches on the extraction
+result and asserts the contract of whichever state it finds: cold must refuse,
+name the rebuild and leave no cache directory; warm must be the complete
+manifest. One test, no skip, both arms real.

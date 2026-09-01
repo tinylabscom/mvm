@@ -43,19 +43,30 @@ binaries (`mvm-host-vm-init`, `mvm-egress-proxy`) as static
 See Plan 115 / ADR-004.
 
 That cross-compile is **opt-in**, behind the `embed-host-bins` feature, and is
-the only work `build.rs` still does. A plain `cargo build` skips it: the build
-script then watches four files and writes an empty table, so cargo runs it once
-per fingerprint and never again on the inner loop. Build with the payload when
-you are about to boot a VM:
+the only work `build.rs` still does. Run it when you are about to boot a VM:
 
 ```sh
 just embed          # cargo build --features embed-host-bins
 ```
 
-Without it `mvmctl` runs every host-side verb but cannot bootstrap a builder
-VM — `host_binaries::extract` refuses and names this recipe rather than
+A plain `cargo build` never cross-compiles, but it does **restore** the payload
+from the content store at `~/.cache/mvm/embed` when the store holds bytes keyed
+to this tree — the same key (dependency closure + `Cargo.lock` + pinned
+toolchain) the embedding arm trusts when it skips a rebuild. That matters
+because both variants write the same `target/<profile>/mvmctl`: the last cargo
+invocation owns the file, and a cached zero-compile build is enough to swap it.
+Restoring means one `just embed` sticks. On a miss (fresh clone, an edit to the
+payload's own sources, `MVM_EMBED_NO_CACHE=1`) the arm writes the empty table as
+before — it compiles nothing, so a payload it cannot prove is one it does not
+ship.
+
+Bare `just embed` builds the **debug** profile; use `just embed --release` for a
+release binary, or the release one is left untouched. Without a payload `mvmctl`
+runs every host-side verb but cannot bootstrap a builder VM —
+`host_binaries::extract` refuses with the profile-correct rebuild rather than
 extracting an empty directory. The tag-push release workflow always turns the
-feature on, so a downloaded binary is self-sufficient.
+feature on, so a downloaded binary is self-sufficient; `just release-build`
+carries it too.
 
 Provision it with one command — it installs the exact pinned zig (from the
 `ziglang` PyPI package, read out of `[workspace.metadata.mvm.toolchain]`) plus

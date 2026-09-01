@@ -52,9 +52,15 @@ cargo run --features embed-host-bins -- bootstrap
 > it is off by default so it stays off the edit/check/test loop. A plain
 > `cargo build` gives you an `mvmctl` with every host-side verb; it just cannot
 > bootstrap a builder VM, and says so with this recipe named. The two write the
-> same `target/debug/mvmctl` under different feature sets, so alternating them
-> relinks `mvmctl` — run `just embed` when you are about to boot a VM, not as
-> part of the inner loop. Released binaries always carry the payload.
+> same `target/<profile>/mvmctl` under different feature sets, so alternating
+> them relinks `mvmctl` — run `just embed` when you are about to boot a VM, not
+> as part of the inner loop. Released binaries always carry the payload.
+>
+> Two things follow. Bare `just embed` builds the **debug** profile, so use
+> `just embed --release` if that is the binary you invoke. And a plain
+> `cargo build` restores the payload from `~/.cache/mvm/embed` when the store
+> has bytes keyed to this tree, so one `just embed` is not undone by the next
+> ordinary build.
 
 > **Note — after a toolchain-version change.** `rust-toolchain.toml` pins an
 > exact Rust version, and rustup keys installed cross-targets per toolchain
