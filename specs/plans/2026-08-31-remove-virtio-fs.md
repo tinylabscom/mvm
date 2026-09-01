@@ -3,9 +3,11 @@
 Backing: shipped-source
 Validation: check-sprint-append
 
-**Status: IN PROGRESS — Stages A, B and D landed. No workload tier reaches
-virtio-fs, and a ratchet gate keeps it that way. Stage C is down to one path:
-the persistent HVF builder, which needs live Apple Silicon validation.**
+**Status: IN PROGRESS — Stages A, B and D landed, and Stage C's QEMU builder
+with them. No workload tier reaches virtio-fs, and a ratchet gate keeps it that
+way. Stage C is down to two paths: the persistent HVF builder, which needs live
+Apple Silicon validation, and libkrun's seeded closure, which is two tokens once
+someone can run a live libkrun build.**
 
 No guest gets a virtio-fs device. Not a workload, not the builder VM, not the
 dev-tier root. The host filesystem reaches a guest as a block image or it does
@@ -177,8 +179,17 @@ zero padding, so a fixed-size disk carrying a shorter archive round-trips.
 disk and reads the output disk; `builder_spec` lays out four disks in vda–vdd
 order and asks for no shares). What is left is narrower than "the builder VM":
 
-- [x] `work`, `job`, `mvm-bins`, closure seed — inbound. Done for the one-shot
-      builder via the disk transport; `work` was already done on Stage 0.
+- [x] `work`, `job`, `mvm-bins` — inbound. Done for the one-shot builder via
+      the disk transport; `work` was already done on Stage 0.
+- [ ] **The closure seed is not done, and this box used to claim it was.** It is
+      the one inbound tree still on virtio-fs in the one-shot libkrun builder:
+      `libkrun_builder.rs` calls `closure_seed_share` +
+      `add_virtio_fs(CLOSURE_SEED_TAG, …)` at both transport sites, while
+      `prepare_builder_transport_disks` passed a hardcoded `None`. The helper now
+      takes a real `closure_nar` — the QEMU builder uses it — so flipping libkrun
+      is two tokens. Held back only because it changes the macOS default builder
+      and the QEMU work was validated on Linux/KVM; it needs its own live
+      libkrun run.
 **The guest is already most of the way there.** `mvm-host-vm-init` has a
 complete disk-transport mode, selected by `mvm.builder_transport=disk` with
 `mvm.builder_input=` / `mvm.builder_output=` naming the devices:
@@ -270,7 +281,33 @@ Five coordinated changes, host and guest:
       makes it separately validatable and removes version skew from the host
       flip. Flipping the host first against an old baked guest hangs the
       dispatch loop with no useful error.
-- [ ] **The QEMU builder needs the same migration, and the plan missed it.**
+- [x] **The QEMU builder needs the same migration, and the plan missed it.**
+      **Landed.** Both one-shot sites are on the disk transport; the `virtiofsd`
+      spawn loops, the `memory-backend-memfd` + `-numa` object and the
+      `vhost-user-fs-pci` loops are gone, along with `qemu_shares_with_closure_seed`
+      and `qemu_virtiofs_socket_path`. Three things the recipe below did not
+      predict, recorded because each would have cost a debugging session:
+
+      1. **The cmdline half is one delegate swap.**
+         `qemu_runtime_overlay_attachment` forwarded to
+         `builder_virtiofs_runtime_overlay_attachment`; pointing it at
+         `builder_runtime_overlay_attachment` emits `mvm.runtime_data=/dev/vde`
+         *and* all three transport tokens, because
+         `builder_runtime_overlay_cmdline` wraps `builder_disk_transport_cmdline`.
+         The vde move and the transport tokens are the same edit, not two.
+      2. **`work` has to go through `stage_filtered_work_input` first.** QEMU
+         shared `job.work_dir` / `mounts.flake_src` directly, which on a source
+         checkout is the repo root. A share tolerates that; a tar does not —
+         libkrun stages a filtered copy precisely because `target/` + `.git/` +
+         `.worktrees/` overflow the guest's RAM-capped extraction tmpfs.
+      3. **A test asserted the trap.** `qemu_runtime_overlay_keeps_virtiofs_transport`
+         asserted `mvm.runtime_data=/dev/vdc` and the *absence* of the transport
+         tokens — it would have stayed green while the guest mounted the input
+         tar as its runtime overlay. Now
+         `qemu_runtime_overlay_rides_the_disk_transport_at_vde`, asserting the
+         vde token and the absence of the vdc one.
+
+      Original entry, for the record:
       `qemu_builder.rs` serves `work` / `out` / `job` / `mvm-bins` over
       vhost-user/virtiofsd — not the disk transport — and QEMU is the *Linux
       auto-detect default builder*. So this is not the "opt-in dev/test backend
@@ -305,12 +342,29 @@ Five coordinated changes, host and guest:
       from `qemu_runtime_overlay_attachment` to match. The identity drive is
       found by ext4 label, not slot, so it is unaffected.
 
-      **One open question**: QEMU carries `closure_share_dir`, a *directory*
-      share. The disk transport's closure support takes a NAR *file*
-      (`pack_input_disk`'s `closure_nar`, archived at
-      `closure-seed/<CLOSURE_FILE>`). libkrun passes `None` there, so the
-      existing helper has no closure path to copy. Resolve how
-      `closure_share_dir` is built before assuming it maps straight across.
+      **The open closure-seed question, answered: it maps straight across, with
+      a step removed rather than added.** `closure_share_dir` is not a share of
+      anything durable. `stage_closure_seed_dir` copies a single file into
+      `<vm_state_dir>/closure-seed/<CLOSURE_FILE>` and returns the wrapper
+      directory; the wrapper exists only because virtio-fs shares directories
+      and not files, which its own doc comment says. The source is already a
+      file — `builder_pack::closure_nar_path(cache/<arch>)`, which QEMU computed
+      *before* staging — and that is exactly what `pack_input_disk`'s
+      `closure_nar` takes, archiving it at the same fixed
+      `closure-seed/<CLOSURE_FILE>`. So the QEMU path passes the NAR straight to
+      the transport and drops both `stage_closure_seed_dir` and
+      `qemu_shares_with_closure_seed`.
+
+      **The premise above was wrong, and the wrong part matters more than the
+      question.** libkrun does not pass `None` because it has no closure:
+      `builder_backend_select.rs` gives every libkrun builder
+      `with_closure_nar(closure_nar_for_host_arch())`.
+      `prepare_builder_transport_disks` hardcoded `None` because the closure was
+      **left on virtio-fs** — the one-shot transport paths still call
+      `closure_seed_share` and `add_virtio_fs(CLOSURE_SEED_TAG, …)` alongside
+      their transport disks. The helper now takes a real `closure_nar` and
+      libkrun's two sites pass `None` explicitly, with a comment saying why.
+      See the corrected checkbox at the top of this stage.
 
 - [ ] The QEMU **workload** driver's share arm is a different matter and *is*
       free: workload specs carry `shares: Vec::new()` unconditionally since
@@ -336,7 +390,20 @@ exactly as long as it took to finish — and the finishing is the slow part.
       originally described would have fired on ~70 files that merely discuss
       virtio-fs, and could have been satisfied by rewording a comment instead of
       deleting code.
-- [x] Pinned at **23 sites across 11 files**, each row carrying why it survives
+- [x] **The first pattern was blind to two spellings, and the QEMU builder
+      migration lowered no count because of it.** The libkrun C symbol is
+      `krun_add_virtiofs`, but the safe wrapper is `add_virtio_fs` — with an
+      underscore — so a pattern written for the C name walked past all 21 Rust
+      call sites in `context.rs`, `libkrun_builder.rs` and `libkrun_process.rs`.
+      Worse, the QEMU *builder* attached its shares through neither: it spawned
+      `virtiofsd` and passed a `vhost-user-fs-pci` device, so `qemu_builder.rs`
+      was not in the table at all and deleting ~60 lines of its wiring moved
+      nothing. The device name is a string literal, which
+      `blank_comments_and_strings` blanks before matching, so the spawn side is
+      caught by `VirtiofsdGuard` / `locate_virtiofsd` instead. Widening took the
+      gate from 23 sites across 11 files to **54 across 15** — 31 attach sites
+      it could not see, including every one this stage is removing.
+- [x] Pinned at **54 sites across 15 files**, each row carrying why it survives
       and what retires it. The count must match exactly: a new site fails as
       growth, and a *removed* one fails as a stale pin, so the table can only
       shrink and cannot drift into a ceiling nobody maintains. Four rows from

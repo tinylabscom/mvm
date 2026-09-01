@@ -28,7 +28,15 @@ use crate::rust_source::blank_comments_and_strings;
 
 /// Sites that attach a virtio-fs device to a guest, or build the share value
 /// that becomes one. Deliberately narrow — see the module comment.
-const ATTACH_PATTERN: &str = r"add_virtiofs[0-9]?\(|VirtioFs::(new|with_tag)|VirtioFsShare\s*\{|HvfVirtioFsShare\s*\{|krun_add_virtiofs";
+/// Two spellings are easy to miss and were both missed at first. The libkrun
+/// C symbol is `krun_add_virtiofs`, but the safe wrapper around it is
+/// `add_virtio_fs` — with an underscore — so a pattern written for the C name
+/// walks straight past every Rust call site. And the QEMU builder attaches its
+/// shares through neither: it spawns `virtiofsd` and passes a
+/// `vhost-user-fs-pci` device, which is a process and a string, not a method.
+/// `blank_comments_and_strings` blanks the device string before matching, so
+/// the spawn side has to be caught by its host-side types instead.
+const ATTACH_PATTERN: &str = r"add_virtiofs[0-9]?\(|add_virtio_fs(_full)?\(|VirtioFs::(new|with_tag)|VirtioFsShare\s*\{|HvfVirtioFsShare\s*\{|krun_add_virtiofs|VirtiofsdGuard|locate_virtiofsd";
 
 /// The pinned surface: `(path, count, why it is still here)`.
 ///
@@ -48,6 +56,19 @@ const PINNED: &[(&str, usize, &str)] = &[
         "crates/deps/libkrun-sys/src/start.rs",
         3,
         "maps SupervisorConfig mounts onto the libkrun C API for the builder VM",
+    ),
+    (
+        "crates/deps/libkrun-sys/src/context.rs",
+        7,
+        "the safe `add_virtio_fs` wrapper over the C symbol above, plus its tests",
+    ),
+    // ── the host-side virtiofsd daemon ──────────────────────────────────────
+    (
+        "crates/mvm-vmm/src/host/virtiofsd.rs",
+        4,
+        "the virtiofsd spawn/supervise module itself. Its last consumer is the \
+         QEMU *workload* driver below; the QEMU builder no longer uses it. \
+         Retired with that driver's share arm, which is already unreachable",
     ),
     // ── builder VM: the trusted tier, still exchanging files as shares ───────
     (
@@ -75,15 +96,30 @@ const PINNED: &[(&str, usize, &str)] = &[
     ),
     (
         "crates/mvm-backends/src/driver/libkrun.rs",
-        5,
+        6,
         "one mapper plus tests asserting a workload spec carries no shares",
     ),
     (
+        "crates/mvm-backends/src/driver/libkrun_process.rs",
+        1,
+        "the out-of-process libkrun driver's share mapper, same seam as above",
+    ),
+    (
         "crates/mvm-backends/src/driver/qemu.rs",
-        2,
-        "QEMU's vhost-user/virtiofsd wiring. Opt-in dev/test only — auto_select \
-         never returns it and it carries no untrusted workload, so this is the \
-         one backend where deleting the feature outright is defensible",
+        7,
+        "QEMU's vhost-user/virtiofsd wiring for *workloads*. Opt-in dev/test \
+         only — auto_select never returns it, and workload specs have carried \
+         `shares: Vec::new()` since Stage A, so this arm is already \
+         unreachable and can be deleted outright rather than migrated",
+    ),
+    // ── builder VM: our own trusted build engine ────────────────────────────
+    (
+        "crates/mvm-build/src/libkrun_builder.rs",
+        13,
+        "the libkrun builder's work/out/job/mvm-bins shares on the paths that \
+         predate the disk transport, plus the seeded-closure share the \
+         one-shot transport paths still attach. Retired by passing the NAR to \
+         `prepare_builder_transport_disks`, which now takes it",
     ),
     (
         "crates/mvm-backends/src/driver/fc.rs",

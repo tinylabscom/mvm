@@ -630,14 +630,30 @@ fn kill_pid(pid: libc::pid_t, sig: libc::c_int) {
     }
 }
 
-fn prepare_builder_transport_disks(
+/// Pack the inbound trees onto an input disk and create the output disk the
+/// guest writes its artifact tar onto — the host half of the disk transport,
+/// shared by every one-shot builder VMM.
+///
+/// `closure_nar` is the resolved builder image's optional seeded Nix store
+/// closure: a single file that rides the same input disk at
+/// `closure-seed/<CLOSURE_FILE>`. The guest imports that fixed path and does
+/// not care which transport populated it, so a caller still attaching the
+/// closure as a virtio-fs share passes `None` here instead.
+pub(crate) fn prepare_builder_transport_disks(
     vm_state_dir: &Path,
     input_trees: &[InputTree<'_>],
+    closure_nar: Option<&Path>,
     output_size: u64,
 ) -> Result<(PathBuf, PathBuf), BuilderVmError> {
     let input_disk = vm_state_dir.join("input.img");
     let output_disk = vm_state_dir.join("output.img");
-    pack_input_disk(input_trees, None, &input_disk, BUILDER_INPUT_DISK_MIN).map_err(|e| {
+    pack_input_disk(
+        input_trees,
+        closure_nar,
+        &input_disk,
+        BUILDER_INPUT_DISK_MIN,
+    )
+    .map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
             "pack builder input disk {}: {e}",
             input_disk.display()
@@ -652,7 +668,7 @@ fn prepare_builder_transport_disks(
     Ok((input_disk, output_disk))
 }
 
-fn extract_builder_transport_output(
+pub(crate) fn extract_builder_transport_output(
     output_disk: &Path,
     artifact_out: &Path,
     job_dir: &Path,
@@ -1138,6 +1154,9 @@ impl LibkrunBuilderVm {
                     src: work_staging.path(),
                 },
             ],
+            // The closure seed is still attached below as a virtio-fs share on
+            // this path, so it must not also ride the input disk.
+            None,
             u64::from(BUILDER_OUTPUT_DISK_MIB) << 20,
         )?;
 
@@ -1664,6 +1683,9 @@ impl BuilderVm for LibkrunBuilderVm {
                     src: &mounts.host_bin_dir,
                 },
             ],
+            // The closure seed is still attached below as a virtio-fs share on
+            // this path, so it must not also ride the input disk.
+            None,
             u64::from(BUILDER_OUTPUT_DISK_MIB) << 20,
         )?;
         let mut krun = krun_context_for_image(&vm_name, &image)?
