@@ -643,6 +643,30 @@ impl<L, R> Either<L, R> {
     }
 }
 
+fn boots_baked_entrypoint(req: &ExecRequest) -> bool {
+    matches!(&req.target, ExecTarget::Inline { argv } if argv.is_empty())
+}
+
+fn baked_entrypoint_result(
+    status: mvm_core::vm_backend::VmExitStatus,
+    capture: bool,
+    vm_name: &str,
+) -> Result<Either<i32, ExecOutput>> {
+    let code = status.code.with_context(|| {
+        format!("baked workload in {vm_name} stopped without reporting its exit code")
+    })?;
+    if capture {
+        Ok(Either::Right(ExecOutput {
+            exit_code: code,
+            stdout: String::new(),
+            stderr: String::new(),
+            phase_timing: None,
+        }))
+    } else {
+        Ok(Either::Left(code))
+    }
+}
+
 /// Side channel by which [`run_inner`] reports the resolved boot posture (which
 /// rootfs strategy the run-path tier gate selected) back to the command layer,
 /// which records it on the chain-signed admission log (`plan.boot_posture`).
@@ -749,6 +773,13 @@ fn run_inner(
             Ok(code) => Ok((Either::Left(code), None)),
             Err(e) => Err(e),
         }
+    } else if boots_baked_entrypoint(&req) {
+        let workload_started = timing.then(std::time::Instant::now);
+        backend
+            .wait(&mvm_core::vm_backend::VmId(vm_name.clone()))
+            .with_context(|| format!("waiting for baked workload in {vm_name}"))
+            .and_then(|status| baked_entrypoint_result(status, capture, &vm_name))
+            .map(|result| (result, workload_started))
     } else {
         run_in_guest(&vm_name, &req, capture, timing, &mut sub_marks)
     };
@@ -1454,6 +1485,68 @@ mod tests {
     use super::*;
 
     use mvm_core::util::test_env::TestEnv;
+
+    fn baked_entrypoint_request() -> ExecRequest {
+        ExecRequest {
+            name: None,
+            warm_pool_size: 0,
+            image: ImageSource::Template("flake-slot".into()),
+            cpus: 1,
+            memory_mib: 256,
+            mem_initial_mib: None,
+            dir_shares: Vec::new(),
+            disk_volumes: Vec::new(),
+            env: Vec::new(),
+            target: ExecTarget::Inline { argv: Vec::new() },
+            timeout_secs: Some(120),
+            pty: false,
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            stdin: Vec::new(),
+            healthcheck: None,
+            hypervisor: None,
+            sdk_sidecar: None,
+        }
+    }
+
+    #[test]
+    fn an_empty_inline_target_waits_for_the_images_baked_entrypoint() {
+        assert!(boots_baked_entrypoint(&baked_entrypoint_request()));
+
+        let mut request = baked_entrypoint_request();
+        request.target = ExecTarget::Inline {
+            argv: vec!["/bin/true".into()],
+        };
+        assert!(!boots_baked_entrypoint(&request));
+    }
+
+    #[test]
+    fn a_baked_entrypoint_preserves_its_reported_nonzero_exit_code() {
+        let status = mvm_core::vm_backend::VmExitStatus {
+            code: Some(7),
+            success: false,
+        };
+        let result = baked_entrypoint_result(status, false, "vm-flake")
+            .expect("reported exit code must be returned");
+        assert_eq!(result.left(), Some(7));
+    }
+
+    #[test]
+    fn a_baked_entrypoint_without_an_exit_report_fails_closed() {
+        let result = baked_entrypoint_result(
+            mvm_core::vm_backend::VmExitStatus::UNKNOWN,
+            false,
+            "vm-flake",
+        );
+        let error = match result {
+            Ok(_) => panic!("missing exit report must not become success"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("without reporting its exit code")
+        );
+    }
 
     #[test]
     fn build_healthcheck_wraps_shell_command() {
