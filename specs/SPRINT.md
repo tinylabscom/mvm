@@ -3451,5 +3451,6 @@ writes the plan:
       one another instead of disagreeing about the new outcome.
 - [x] Add focused host, guest, HTTP-status, opcode, state-machine, and handshake
       regressions.
-- [ ] Complete the full validation matrix, merge through the queue, and close
-      issue #3040 from landed evidence.
+- [x] Complete the full workspace, Clippy, formatting, gated-target, and
+      documentation validation matrix.
+- [ ] Merge through the queue and close issue #3040 from landed evidence.

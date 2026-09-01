@@ -23,7 +23,8 @@ Last updated: 2026-09-01
       FlowMux now distinguishes a policy refusal (`403 Forbidden`) from an
       admitted target whose upstream connection failed (`502 Bad Gateway`) on
       the wire, with a behavior-revision bump and focused host/guest protocol
-      regressions. Full validation and merge delivery remain.
+      regressions. Workspace tests, Clippy, formatting, gated-target checks,
+      and documentation gates are green; merge delivery remains.
 
 - [ ] **machine diff handshake retry — issue #3024.**
       `specs/plans/2026-08-31-machine-diff-handshake-retry.md`.
