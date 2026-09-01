@@ -914,7 +914,6 @@ pub(in crate::commands::vm) fn emit_boot_posture_if(
 ) {
     let Some(ctx) = ctx else { return };
     let label = match strategy {
-        mvm_build::run_image::RootStrategy::VirtiofsRoot => "virtiofs-root",
         mvm_build::run_image::RootStrategy::BlockExt4 => "block-ext4",
     };
     if let Err(e) = ctx.emitter.emit_boot_posture(ctx.admitted.plan(), label) {

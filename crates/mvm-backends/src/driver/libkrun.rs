@@ -299,9 +299,6 @@ impl VmmDriver for LibkrunDriver {
             // today; the upstream crate carries no `.balloon(...)`
             // builder. Declared `false` until wiring lands.
             balloon: false,
-            // libkrun's krun_add_virtiofs2/3 APIs can export a host directory
-            // as a virtio-fs share, including DAX and host-enforced read-only.
-            virtiofs_root: true,
             // libkrun runs on macOS but the rootfs lives in a regular
             // file, not an APFS clone-eligible volume mount; no
             // clonefile shortcut here.
@@ -714,7 +711,6 @@ mod tests {
         assert_eq!(d.name(), "libkrun");
         assert_eq!(d.kind(), BackendKind::Libkrun);
         let caps = d.capabilities();
-        assert!(caps.virtiofs_root, "libkrun must advertise virtiofs_root");
         assert!(caps.vsock);
         assert!(caps.no_routable_guest_nic);
         assert!(caps.host_vsock_proxy);

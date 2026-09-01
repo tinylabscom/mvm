@@ -408,7 +408,6 @@ impl VmmDriver for HvfDriver {
     }
 
     fn capabilities(&self) -> VmCapabilities {
-        let proxy_path_ready = hvf_backend::hvf_workload_support_available();
         // vsock is live-proven through the unified run loop; the rest land as
         // pause/snapshot/networking are wired onto the primitive.
         VmCapabilities {
@@ -447,11 +446,6 @@ impl VmmDriver for HvfDriver {
             // and always routes egress through the per-VM endpoint over vsock.
             no_routable_guest_nic: true,
             host_vsock_proxy: true,
-            // The hvf VMM can serve the unpacked OCI tree as a read-only
-            // virtiofs root (dev tier); the run-path tier gate selects it only for
-            // non-prod, non-sealed workloads. This stays gated on the launchable
-            // supervisor path — it is a dev-tier boot capability, not egress.
-            virtiofs_root: proxy_path_ready,
             // Named explicitly rather than left to `..Default::default()`:
             // the honest HVF answer (no cgroup, but a supervisor wall-clock
             // timer) differs from the all-`None` default.
