@@ -308,6 +308,7 @@ fn run_command() -> Result<()> {
         }
     };
     apply_startup_env(&cli);
+    declare_embedded_host_binaries();
     register_inhouse_builder();
     register_builder_session_starter();
     register_stream_plane();
@@ -544,6 +545,23 @@ fn register_builder_session_starter() {
 
 #[cfg(not(feature = "builder-vm"))]
 fn register_builder_session_starter() {}
+
+/// Tell `mvm-build` whether this binary carries the embedded Linux host
+/// binaries.
+///
+/// It cannot see the embed table itself — that lives here, above it — and on a
+/// source checkout it otherwise assumes it must compile a second `mvmctl` to
+/// get one. When this binary already has the payload, it *is* the bootstrap
+/// helper, and the compile is minutes spent reproducing what is already loaded.
+#[cfg(feature = "builder-vm")]
+fn declare_embedded_host_binaries() {
+    mvm_build::libkrun_builder::declare_current_exe_carries_host_binaries(
+        !crate::host_binaries::embedded::EMBEDDED.is_empty(),
+    );
+}
+
+#[cfg(not(feature = "builder-vm"))]
+fn declare_embedded_host_binaries() {}
 
 fn register_inhouse_builder() {
     // Wire the HVF builder constructor so that

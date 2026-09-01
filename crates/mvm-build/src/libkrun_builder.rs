@@ -150,7 +150,40 @@ const BUILDER_SUBST_PID_FILE: &str = "substitution.pid";
 const BUILDER_SUBST_STDERR_LOG_FILE: &str = "substitution.stderr.log";
 const BUILDER_VM_BOOTSTRAP_BIN_ENV: &str = "MVM_BUILDER_VM_BOOTSTRAP_BIN";
 const BUILDER_VM_AUTO_BOOTSTRAP_SKIP_ENV: &str = "MVM_SKIP_BUILDER_VM_AUTO_BOOTSTRAP";
+/// Set on every process this crate spawns to bootstrap the builder VM image.
+///
+/// A bootstrap that finishes without populating the cache must fail, not
+/// delegate: without this marker the child re-enters auto-bootstrap on the same
+/// cold cache and forks another child, forever. One level is all the delegation
+/// that can ever help, because the second level has nothing new to try.
+const BUILDER_VM_BOOTSTRAP_ACTIVE_ENV: &str = "MVM_BUILDER_VM_BOOTSTRAP_ACTIVE";
 const BUILDER_VM_CACHE_CONTRACT_VERSION: u32 = 4;
+
+/// Whether the running executable carries the embedded Linux host binaries.
+///
+/// The whole point of the bootstrap helper is to obtain a binary that has
+/// them, so when the running one already does it *is* the helper and there is
+/// nothing to build. This crate sits below the one that owns the embed table
+/// and cannot read it, so the binary that owns it says so once at startup.
+/// Default `false`: an undeclared caller (a test binary, a library embedder)
+/// gets the conservative build-a-helper path it had before.
+static CURRENT_EXE_CARRIES_HOST_BINARIES: AtomicBool = AtomicBool::new(false);
+
+/// Declare whether this process's executable carries the embedded Linux host
+/// binaries a builder-VM bootstrap needs. Called once by `mvmctl` at startup.
+pub fn declare_current_exe_carries_host_binaries(carries: bool) {
+    CURRENT_EXE_CARRIES_HOST_BINARIES.store(carries, Ordering::Relaxed);
+}
+
+/// The running executable, when it has declared a host-binary payload and the
+/// OS will name it. Both halves must hold: a declared payload we cannot point
+/// a `Command` at is no use as a helper.
+fn current_exe_as_bootstrap_helper() -> Option<PathBuf> {
+    CURRENT_EXE_CARRIES_HOST_BINARIES
+        .load(Ordering::Relaxed)
+        .then(|| std::env::current_exe().ok())
+        .flatten()
+}
 
 /// Resolve (or locally build) the runtime overlay ext4 the builder VM sources
 /// its guest binaries from, failing closed when it cannot be produced.
@@ -2467,6 +2500,12 @@ fn auto_bootstrap_builder_vm_image(arch_dir: &Path) -> Result<bool, BuilderVmErr
         return Ok(false);
     }
 
+    // This process *is* a bootstrap. Reporting the cold cache is the whole
+    // signal; spawning a third one would only lose it.
+    if std::env::var_os(BUILDER_VM_BOOTSTRAP_ACTIVE_ENV).is_some() {
+        return Ok(false);
+    }
+
     #[cfg(test)]
     if std::env::var_os(BUILDER_VM_BOOTSTRAP_BIN_ENV).is_none() {
         return Ok(false);
@@ -2479,7 +2518,8 @@ fn auto_bootstrap_builder_vm_image(arch_dir: &Path) -> Result<bool, BuilderVmErr
     let bootstrap_bin = resolve_builder_vm_bootstrap_bin(&workspace_root)?;
     let mut cmd = Command::new(&bootstrap_bin);
     cmd.current_dir(&workspace_root)
-        .arg("__builder-vm-bootstrap");
+        .arg("__builder-vm-bootstrap")
+        .env(BUILDER_VM_BOOTSTRAP_ACTIVE_ENV, "1");
     #[cfg(target_os = "linux")]
     if std::env::var_os(crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV).is_none() {
         // Source-checkout auto-bootstrap on Linux should follow the Linux
@@ -2550,6 +2590,9 @@ fn maybe_reexec_builder_vm_helper(command: BuilderVmHelperCommand) -> Result<boo
 
     let mut cmd = Command::new(&bootstrap_bin);
     cmd.current_dir(&workspace_root).args(command.args());
+    if command == BuilderVmHelperCommand::Bootstrap {
+        cmd.env(BUILDER_VM_BOOTSTRAP_ACTIVE_ENV, "1");
+    }
     #[cfg(target_os = "linux")]
     if std::env::var_os(crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV).is_none() {
         cmd.env(
@@ -2594,10 +2637,23 @@ fn resolve_builder_vm_bootstrap_bin(workspace_root: &Path) -> Result<PathBuf, Bu
         )));
     }
 
+    if let Some(current_exe) = current_exe_as_bootstrap_helper() {
+        return Ok(current_exe);
+    }
+
     let helper_target_dir = builder_vm_bootstrap_helper_target_dir(workspace_root);
     let helper_bin = helper_target_dir.join("debug").join("mvmctl");
     if helper_bin.is_file() && !bootstrap_helper_needs_rebuild(&helper_bin, workspace_root) {
         return Ok(helper_bin);
+    }
+    // The helper is built `--features embed-host-bins`, which cross-compiles
+    // the host binaries with the pinned zig + musl Rust. Ask for that toolchain
+    // before spending minutes on a compile whose build script would only panic
+    // about it at the very end.
+    if let Err(reason) = embed_toolchain_ready(workspace_root) {
+        return Err(BuilderVmError::ExtractionFailed(
+            bootstrap_helper_toolchain_refusal(&reason),
+        ));
     }
     std::fs::create_dir_all(&helper_target_dir).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
@@ -2616,8 +2672,10 @@ fn resolve_builder_vm_bootstrap_bin(workspace_root: &Path) -> Result<PathBuf, Bu
     })?;
     if !status.success() {
         return Err(BuilderVmError::ExtractionFailed(format!(
-            "cargo build --bin mvmctl exited with {} while preparing the builder VM bootstrap helper",
+            "cargo build --bin mvmctl --features embed-host-bins exited with {} while \
+             preparing the builder VM bootstrap helper. {}",
             status.code().unwrap_or(-1),
+            BOOTSTRAP_HELPER_WAYS_OUT,
         )));
     }
 
@@ -2629,6 +2687,41 @@ fn resolve_builder_vm_bootstrap_bin(workspace_root: &Path) -> Result<PathBuf, Bu
         "mvmctl bootstrap helper not found after build at {}",
         helper_bin.display()
     )))
+}
+
+/// The two supported ways past a helper this host cannot build.
+///
+/// `just embed` is the better one: it gives *this* binary the payload, after
+/// which the helper is not needed at all. The env var is the escape hatch for
+/// a helper someone else built.
+const BOOTSTRAP_HELPER_WAYS_OUT: &str = "Either run `just embed` so this mvmctl \
+     carries the embedded Linux host binaries itself (no helper needed), or set \
+     MVM_BUILDER_VM_BOOTSTRAP_BIN to an mvmctl that already carries them.";
+
+/// Whether this host can cross-compile the embedded Linux host binaries.
+///
+/// Runs the same two resolutions `mvm-cli`'s build script does and nothing
+/// else — it compiles no code. Asking first turns "wait five minutes, then read
+/// a build-script panic" into an immediate, actionable refusal.
+fn embed_toolchain_ready(workspace_root: &Path) -> Result<(), String> {
+    use crate::embed_toolchain;
+
+    let pin = embed_toolchain::try_read_pinned_toolchain(workspace_root, std::env::consts::ARCH)?;
+    embed_toolchain::resolve_pinned_zig(&pin.zig)?;
+    embed_toolchain::try_rustup_cargo_and_rustc(
+        embed_toolchain::strip_glibc(&pin.target),
+        &pin.rust,
+    )?;
+    Ok(())
+}
+
+fn bootstrap_helper_toolchain_refusal(reason: &str) -> String {
+    format!(
+        "this mvmctl carries no embedded Linux host binaries, and the pinned \
+         cross-compile toolchain needed to build a bootstrap helper that does is \
+         unavailable: {reason} Install it with `just toolchain-embed`. {}",
+        BOOTSTRAP_HELPER_WAYS_OUT,
+    )
 }
 
 fn builder_vm_bootstrap_helper_build_command(
@@ -6367,6 +6460,154 @@ mod tests {
             dir,
             PathBuf::from("/workspace/shared-target/mvm-builder-vm-bootstrap")
         );
+    }
+
+    /// Restore the process-wide payload declaration on drop.
+    ///
+    /// It is a static, so a test that leaves it set makes the next test in the
+    /// same process resolve *its* executable as a bootstrap helper.
+    struct DeclaredPayload(bool);
+
+    impl DeclaredPayload {
+        fn set(carries: bool) -> Self {
+            let previous = CURRENT_EXE_CARRIES_HOST_BINARIES.load(Ordering::Relaxed);
+            declare_current_exe_carries_host_binaries(carries);
+            Self(previous)
+        }
+    }
+
+    impl Drop for DeclaredPayload {
+        fn drop(&mut self) {
+            declare_current_exe_carries_host_binaries(self.0);
+        }
+    }
+
+    /// The point of the helper is to obtain a binary carrying the embedded
+    /// Linux host binaries. When the running one already carries them, building
+    /// a second `mvmctl` reproduces what is already loaded — minutes of
+    /// compile, plus a silent dependency on the pinned cross-compile toolchain,
+    /// for nothing.
+    #[test]
+    fn a_declared_payload_makes_this_binary_the_bootstrap_helper() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        env.remove(BUILDER_VM_BOOTSTRAP_BIN_ENV);
+        let _declared = DeclaredPayload::set(true);
+
+        let workspace_root =
+            builder_vm_source_checkout_root().expect("tests run from a source checkout");
+        let resolved =
+            resolve_builder_vm_bootstrap_bin(&workspace_root).expect("current exe resolves");
+
+        assert_eq!(resolved, std::env::current_exe().unwrap());
+        // `maybe_reexec_builder_vm_helper` reads this to decide it is already
+        // the helper and bootstraps in-process instead of forking.
+        assert!(current_exe_matches(&resolved));
+    }
+
+    /// The default has to be the conservative one: a library embedder or a test
+    /// binary that never declares anything must not be handed to `Command` as
+    /// an `mvmctl`.
+    #[test]
+    fn an_undeclared_binary_is_not_offered_as_the_helper() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _declared = DeclaredPayload::set(false);
+
+        assert!(current_exe_as_bootstrap_helper().is_none());
+    }
+
+    /// The explicit override outranks the running binary: someone who names a
+    /// helper is telling us theirs is the one to use.
+    #[test]
+    fn an_explicit_helper_outranks_a_declared_payload() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let scratch = TempDir::new().unwrap();
+        let explicit = scratch.path().join("mvmctl");
+        std::fs::write(&explicit, b"helper").unwrap();
+        env.set(BUILDER_VM_BOOTSTRAP_BIN_ENV, &explicit);
+        let _declared = DeclaredPayload::set(true);
+
+        let workspace_root =
+            builder_vm_source_checkout_root().expect("tests run from a source checkout");
+        assert_eq!(
+            resolve_builder_vm_bootstrap_bin(&workspace_root).unwrap(),
+            explicit
+        );
+    }
+
+    /// Every exit is named, because the one the reader reaches for depends on
+    /// what they have: the toolchain, a rebuild of this binary, or someone
+    /// else's helper.
+    #[test]
+    fn the_toolchain_refusal_names_every_way_past_it() {
+        let message = bootstrap_helper_toolchain_refusal("zig 0.13.0 was not found.");
+
+        assert!(message.contains("zig 0.13.0 was not found."), "{message}");
+        assert!(message.contains("just toolchain-embed"), "{message}");
+        assert!(message.contains("just embed"), "{message}");
+        assert!(message.contains(BUILDER_VM_BOOTSTRAP_BIN_ENV), "{message}");
+    }
+
+    /// A bootstrap child that still finds a cold cache has to report it. The
+    /// alternative is a fork bomb: each level spawns another child with nothing
+    /// new to try.
+    #[test]
+    fn a_running_bootstrap_does_not_spawn_another_one() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let scratch = TempDir::new().unwrap();
+        env.isolate_mvm_home(scratch.path());
+        env.set(BUILDER_VM_BOOTSTRAP_BIN_ENV, "/nonexistent/mvmctl");
+        env.set(BUILDER_VM_BOOTSTRAP_ACTIVE_ENV, "1");
+
+        let arch_dir = scratch
+            .path()
+            .join("cache")
+            .join("builder-vm")
+            .join(host_arch_tag());
+
+        assert!(
+            !auto_bootstrap_builder_vm_image(&arch_dir).expect("guard declines, it does not error")
+        );
+    }
+
+    /// The child has to be *told* it is a bootstrap; the guard above is dead
+    /// weight if the spawn site forgets to set the marker.
+    #[test]
+    fn the_spawned_bootstrap_is_marked_as_one() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let scratch = TempDir::new().unwrap();
+        env.isolate_mvm_home(scratch.path());
+
+        let observed = scratch.path().join("marker");
+        let script = scratch.path().join("bootstrap-builder-vm.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s' \"${{{}:-unset}}\" > {}\nexit 1\n",
+                BUILDER_VM_BOOTSTRAP_ACTIVE_ENV,
+                observed.display()
+            ),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+        env.set(BUILDER_VM_BOOTSTRAP_BIN_ENV, &script);
+
+        let arch_dir = scratch
+            .path()
+            .join("cache")
+            .join("builder-vm")
+            .join(host_arch_tag());
+        // The helper exits nonzero on purpose — this test is about what it was
+        // handed, not about it succeeding.
+        assert!(auto_bootstrap_builder_vm_image(&arch_dir).is_err());
+        assert_eq!(std::fs::read_to_string(&observed).unwrap(), "1");
     }
 
     #[test]

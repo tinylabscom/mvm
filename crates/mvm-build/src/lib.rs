@@ -45,6 +45,9 @@ pub mod cache_install;
 /// cross-platform.
 pub mod egress_proxy;
 pub mod egress_readiness;
+/// The pinned zig + Rust cross-compile toolchain behind `embed-host-bins`.
+/// Shared with `crates/mvm-cli/build.rs`, which `#[path]`-includes it.
+pub mod embed_toolchain;
 /// Extract an FC-loadable ELF `vmlinux` from a published x86_64 bzImage.
 pub mod firecracker;
 pub mod guest_elf;
