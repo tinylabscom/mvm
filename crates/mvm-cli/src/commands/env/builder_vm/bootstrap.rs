@@ -388,6 +388,22 @@ pub(super) fn perform_builder_vm_download_published(arch: &str, out_dir: &str) -
     #[cfg(not(feature = "release-artifact-bootstrap"))]
     {
         let _ = (arch, out_dir);
+        // Report which of the two situations this actually is. The message
+        // used to assert the in-repo flake was missing without ever looking
+        // for one, so a checkout that *had* the flake — and had simply been
+        // routed here by `MVM_BOOT_IMAGE=fetch` — sent the reader hunting for
+        // a file sitting in front of them. Two Linux baseline runs were lost
+        // to that before anyone checked whether the file existed.
+        if let Ok(flake_dir) = super::find_builder_vm_flake() {
+            anyhow::bail!(
+                "Builder VM image is missing and a fetch was requested, but this \
+                 `mvmctl` was built without the `release-artifact-bootstrap` \
+                 feature, so it cannot pull a published prebuilt. The in-repo \
+                 builder VM flake IS present at {flake_dir}/flake.nix — unset \
+                 `MVM_BOOT_IMAGE` (or set it to `build`) to build from it, \
+                 which is what a source checkout is expected to do."
+            );
+        }
         anyhow::bail!(
             "Builder VM image is missing and no in-repo builder VM flake \
              was found. This `mvmctl` binary was built without the \
