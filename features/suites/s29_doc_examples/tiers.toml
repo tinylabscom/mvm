@@ -159,8 +159,7 @@ tier = "live"
 
 [[command]]
 path = "machine diff"
-tier = "parse"
-reason = "needs the live journey guest; not yet added to features/suites/s32_documented_surface/machine_journey.feature"
+tier = "live"
 
 [[command]]
 path = "machine exec"
@@ -198,8 +197,7 @@ tier = "live"
 
 [[command]]
 path = "machine proc start"
-tier = "parse"
-reason = "needs the live journey guest; not yet added to features/suites/s32_documented_surface/machine_journey.feature"
+tier = "live"
 
 [[command]]
 path = "machine reconfigure"
@@ -300,8 +298,7 @@ reason = "needs the live journey guest; not yet added to features/suites/s32_doc
 
 [[command]]
 path = "machine wait"
-tier = "parse"
-reason = "needs the live journey guest; not yet added to features/suites/s32_documented_surface/machine_journey.feature"
+tier = "live"
 
 [[command]]
 path = "manifest info"

@@ -71,6 +71,9 @@ be promoted.
 ## Sequencing
 
 - [ ] Journey batch A — the read-only and volume verbs (7)
+  - [x] Promote `machine diff` and `machine proc start` with live journey
+        scenarios, including the session-seam repair that makes diff complete.
+  - [ ] Promote `machine wait` and the four volume verbs.
 - [ ] Journey batch B — checkpoint-dependent verbs (4)
 - [ ] Wire the three existing fixtures (6 paths)
 - [ ] Re-read the 12 "placeholder" doc sites and reclassify

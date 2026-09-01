@@ -91,6 +91,12 @@ impl EntrypointPolicy {
         let raw = std::fs::read_to_string(&self.marker_path).map_err(|e| {
             ValidationError::ReadMarker {
                 path: self.marker_path.clone(),
+                // The kind is kept alongside the rendered message: an absent
+                // marker means the image offers no entrypoint, while one that
+                // exists and cannot be read is a real misconfiguration. Only
+                // `to_string()` was retained before, so the two were
+                // indistinguishable downstream and both counted as failures.
+                kind: e.kind(),
                 source: e.to_string(),
             }
         })?;
@@ -300,6 +306,10 @@ impl ValidatedEntrypoint {
 pub enum ValidationError {
     ReadMarker {
         path: PathBuf,
+        /// Kind of the underlying I/O error. `NotFound` means the image
+        /// declares no entrypoint at all; anything else is a marker that
+        /// exists and could not be read.
+        kind: std::io::ErrorKind,
         source: String,
     },
     NotAbsolute {
@@ -362,19 +372,36 @@ impl ValidationError {
     /// wrapper — see the wrapper-model plan). This is a clean "RunEntrypoint
     /// not offered" state, NOT a failure.
     ///
-    /// Deliberately narrow: only a non-absolute marker (a script body or a
-    /// relative path, never a wrapper path) counts. A marker that *is* an
-    /// absolute path but fails the ownership / mode / prefix / same-fs checks
-    /// is a real misconfiguration or tamper and stays a hard failure.
+    /// Two shapes count, and only two. A non-absolute marker (a script body or
+    /// a relative path, never a wrapper path), and a marker that is not there
+    /// at all — an image declaring no entrypoint has no file to read, which is
+    /// the plainest form of "not offered" there is.
+    ///
+    /// Everything else stays a hard failure: a marker that exists and cannot be
+    /// read is a real misconfiguration, and one that *is* an absolute path but
+    /// fails the ownership / mode / prefix / same-fs checks is a
+    /// misconfiguration or a tamper.
+    ///
+    /// The absent case was missing, so `machine wait` exited 65 with
+    /// `entrypoint failed: read entrypoint marker /etc/mvm/entrypoint: No such
+    /// file or directory` against any guest that declares no entrypoint —
+    /// reporting a component that does not apply as one that failed.
     pub fn is_entrypoint_not_offered(&self) -> bool {
-        matches!(self, ValidationError::NotAbsolute { .. })
+        matches!(
+            self,
+            ValidationError::NotAbsolute { .. }
+                | ValidationError::ReadMarker {
+                    kind: std::io::ErrorKind::NotFound,
+                    ..
+                }
+        )
     }
 }
 
 impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ValidationError::ReadMarker { path, source } => {
+            ValidationError::ReadMarker { path, source, .. } => {
                 write!(f, "read entrypoint marker {}: {source}", path.display())
             }
             ValidationError::NotAbsolute { path } => {
@@ -1246,6 +1273,32 @@ mod tests {
             Err(ValidationError::ReadMarker { .. }) => {}
             other => panic!("expected ReadMarker, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_absent_marker_is_not_offered_rather_than_failed() {
+        // An image that declares no entrypoint has no marker file. That is the
+        // plainest "not offered" there is, and treating it as a failure made
+        // `machine wait` exit 65 on every such guest.
+        let err = ValidationError::ReadMarker {
+            path: PathBuf::from("/etc/mvm/entrypoint"),
+            kind: std::io::ErrorKind::NotFound,
+            source: "No such file or directory (os error 2)".to_string(),
+        };
+        assert!(err.is_entrypoint_not_offered());
+    }
+
+    #[test]
+    fn an_unreadable_marker_stays_a_failure() {
+        // The marker exists and cannot be read: a real misconfiguration, and
+        // the case that must not be swept into "not offered" along with the
+        // absent one.
+        let err = ValidationError::ReadMarker {
+            path: PathBuf::from("/etc/mvm/entrypoint"),
+            kind: std::io::ErrorKind::PermissionDenied,
+            source: "Permission denied (os error 13)".to_string(),
+        };
+        assert!(!err.is_entrypoint_not_offered());
     }
 
     #[test]

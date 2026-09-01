@@ -3344,6 +3344,17 @@ to the configured ceiling and the first terse response immediately after it.
       witness and record delivery in
       `specs/sprint/delivery/2951-ad-hoc-exec-image-environment.md`.
 
+## 2026-08-31 documented machine journey promotion
+
+- [x] Route `machine diff` through the authenticated session already opened by
+      the capability prelude instead of starting a second handshake.
+- [x] Exercise `machine diff` and `machine proc start` against the shared live
+      journey guest and move their website commands into the covered ledger.
+- [x] Lower the parse-tier pin from 65 to 63 and pass all 241 runnable BDD
+      scenarios; one backend-capability scenario remains skipped.
+- [ ] Merge the repair through the queue; the remaining five journey-batch A
+      verbs stay open in the owning plan.
+
 ## 2026-08-27 HVF machine restore dispatch
 
 - [x] Route `machine fork`, `machine restore`, and `machine warm-restore`
