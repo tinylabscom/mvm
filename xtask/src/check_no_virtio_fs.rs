@@ -62,14 +62,6 @@ const PINNED: &[(&str, usize, &str)] = &[
         7,
         "the safe `add_virtio_fs` wrapper over the C symbol above, plus its tests",
     ),
-    // ── the host-side virtiofsd daemon ──────────────────────────────────────
-    (
-        "crates/mvm-vmm/src/host/virtiofsd.rs",
-        4,
-        "the virtiofsd spawn/supervise module itself. Its last consumer is the \
-         QEMU *workload* driver below; the QEMU builder no longer uses it. \
-         Retired with that driver's share arm, which is already unreachable",
-    ),
     // ── builder VM: the trusted tier, still exchanging files as shares ───────
     (
         "crates/mvm-runtime/src/builder_runner/spec.rs",
@@ -106,11 +98,9 @@ const PINNED: &[(&str, usize, &str)] = &[
     ),
     (
         "crates/mvm-backends/src/driver/qemu.rs",
-        7,
-        "QEMU's vhost-user/virtiofsd wiring for *workloads*. Opt-in dev/test \
-         only — auto_select never returns it, and workload specs have carried \
-         `shares: Vec::new()` since Stage A, so this arm is already \
-         unreachable and can be deleted outright rather than migrated",
+        1,
+        "a test: QEMU must keep *refusing* a share, the same witness \
+         Firecracker carries. No wiring left to retire",
     ),
     // ── builder VM: our own trusted build engine ────────────────────────────
     (

@@ -105,8 +105,6 @@ pub mod libkrun_network_provider;
 /// on every host. Consumed by both `stage0-init` and `mvm-host-vm-init`.
 pub mod guest_net;
 
-pub use mvm_vmm::host::virtiofsd;
-
 pub mod qemu_builder;
 
 /// Builder-runtime selection. `MVM_BUILDER_BACKEND` picks among the

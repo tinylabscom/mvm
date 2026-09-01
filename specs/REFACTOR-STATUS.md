@@ -94,9 +94,16 @@ Last updated: 2026-09-01
       that transport, with the `virtiofsd` spawn loops, the shared memory
       backend and the `vhost-user-fs-pci` devices deleted. Widening the gate's
       pattern to the `add_virtio_fs` spelling and the `virtiofsd` spawn side
-      took it from 23 pinned sites to 54. Remaining: the persistent HVF builder
-      (needs live Apple Silicon) and libkrun's seeded closure, which is still a
-      virtio-fs share the transport helper can now carry.
+      took it from 23 pinned sites to 54. The QEMU *workload* driver's share arm
+      then became a refusal mirroring Firecracker's, which left
+      `crates/mvm-vmm/src/host/virtiofsd.rs` with no consumers: deleted, along
+      with `mvm-vmm`'s `which` dependency and the `--sandbox none` flag that
+      started the plan. `specs/plans/2026-08-31-virtiofsd-sandbox-parity.md` is
+      superseded by that deletion. Gate now at 44 sites across 14 files.
+      Remaining: the persistent HVF builder (needs live Apple Silicon, which the
+      dev host is) and libkrun's seeded closure, still a virtio-fs share the
+      transport helper can now carry. Both must land before the ratchet can
+      become an absolute rather than a ceiling.
 
 - [ ] **Warm standby image claim repair — issue #3002.**
       `specs/plans/2026-08-28-warm-standby-image-claim.md`.

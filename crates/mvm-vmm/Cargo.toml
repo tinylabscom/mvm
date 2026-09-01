@@ -45,9 +45,7 @@ libc.workspace = true
 ed25519-dalek.workspace = true
 hex.workspace = true
 base64.workspace = true
-# Binary lookup for host-side helpers (virtiofsd).
 flate2.workspace = true
-which.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

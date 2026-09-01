@@ -34,7 +34,6 @@ use crate::driver::qemu_process::{
 use mvm_vmm::driver::spec::{KernelImage, VmmSpec, VsockDirection, VsockPort};
 use mvm_vmm::driver::traits::{DuplexStream, RunningVm, VmmDriver};
 use mvm_vmm::host::ui;
-use mvm_vmm::host::virtiofsd::{SpawnParams, VirtiofsdGuard, locate_virtiofsd};
 use mvm_vmm::qemu_arch::{machine_for_arch, serial_console_for_arch};
 
 /// The QEMU VMM driver: pure VMM mechanics, no policy and no admission. It
@@ -77,13 +76,6 @@ fn qemu_base_bootargs_for_arch(arch: &str, has_disk: bool) -> String {
 
 fn qemu_base_bootargs(has_disk: bool) -> String {
     qemu_base_bootargs_for_arch(std::env::consts::ARCH, has_disk)
-}
-
-/// AF_UNIX socket path QEMU uses to connect to `virtiofsd` for a given
-/// share. Kept under `/tmp` so deeply-nested `MVM_HOME` paths don't bump into
-/// the ~108-byte Linux AF_UNIX path limit.
-fn qemu_virtiofs_socket_path(vm_name: &str, tag: &str) -> PathBuf {
-    PathBuf::from(format!("/tmp/mvm-vfs-{vm_name}-{tag}.sock"))
 }
 
 /// The qemu launch, bounded by whatever CPU share this VM was admitted under.
@@ -152,8 +144,6 @@ fn qemu_boot_argv_for_arch(
         args.push("virt".into());
     }
 
-    let mem_arg = format!("{}M", spec.memory_mib);
-
     args.push("-kernel".into());
     args.push(kernel.to_string_lossy().into_owned());
     if let Some(initramfs) = &spec.initramfs {
@@ -190,31 +180,10 @@ fn qemu_boot_argv_for_arch(
         args.push(drive);
     }
 
-    // virtio-fs shares: one virtiofsd per share, one vhost-user-fs-pci device
-    // per share, plus the shared memfd backend that makes vhost-user-fs work.
-    if !spec.shares.is_empty() {
-        args.push("-object".into());
-        args.push(format!(
-            "memory-backend-memfd,id=mem,size={mem_arg},share=on"
-        ));
-        args.push("-numa".into());
-        args.push("node,memdev=mem".into());
-        for share in &spec.shares {
-            let tag = &share.tag;
-            let sock = qemu_virtiofs_socket_path(&spec.name, tag);
-            args.push("-chardev".into());
-            args.push(format!("socket,id=vfs-{tag},path={}", sock.display()));
-            args.push("-device".into());
-            let mut fs_dev =
-                format!("vhost-user-fs-pci,queue-size=1024,chardev=vfs-{tag},tag={tag}");
-            if share.dax {
-                // DAX window size per share. 256 MiB matches the HVF/libkrun
-                // DAX window budget without ballooning the QEMU memory backend.
-                fs_dev.push_str(",cache-size=256M");
-            }
-            args.push(fs_dev);
-        }
-    }
+    // No virtio-fs devices. `boot` refuses a spec carrying shares before it
+    // reaches here, so there is nothing to map — and the `memory-backend-memfd`
+    // + `-numa` pair went with them, since it existed only because
+    // vhost-user-fs requires a shared memory backend whose size equals `-m`.
 
     // virtio-vsock on the per-VM guest CID. The host reaches the guest's
     // listeners through the AF_VSOCK↔UNIX bridge spawned after the boot.
@@ -383,6 +352,19 @@ impl VmmDriver for QemuDriver {
         fields(vm = %spec.name, vcpus = spec.vcpus, memory_mib = spec.memory_mib)
     )]
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
+        // Refuse rather than ignore. Every workload spec has carried no shares
+        // since the granted directory became a materialized block image, so
+        // this arm was already unreachable — but a driver that silently drops a
+        // share it was asked to serve would hand the guest a VM missing a
+        // filesystem it expected. Firecracker has refused on the same grounds
+        // from the start; this makes QEMU match.
+        if !spec.shares.is_empty() {
+            bail!(
+                "the QEMU backend does not support virtio-fs shares ({} requested); \
+                 a granted host directory is materialized into a block image instead",
+                spec.shares.len()
+            );
+        }
         // QEMU has no bundled kernel (libkrun's libkrunfw is the only
         // bundled-kernel backend): a `Bundled` spec takes the same cached
         // builder-kernel fallback the raw path uses for a kernel-less
@@ -423,31 +405,6 @@ impl VmmDriver for QemuDriver {
         let cid = qemu_process::allocate_cid(&spec.name)?;
         let pid_file = state_dir.join(QEMU_PID_FILE);
         let _ = std::fs::remove_file(&pid_file);
-
-        // Bring up one virtiofsd per share before QEMU. QEMU connects to the
-        // sockets as a client at launch, so they must exist first. The guard
-        // is moved into the running-VM handle and dropped on kill so daemons
-        // and sockets are cleaned up when the VM goes away.
-        let mut virtiofsd = None;
-        if !spec.shares.is_empty() {
-            let (virtiofsd_bin, virtiofsd_flavor) = locate_virtiofsd()?;
-            let mut guard = VirtiofsdGuard::default();
-            for share in &spec.shares {
-                let sock = qemu_virtiofs_socket_path(&spec.name, &share.tag);
-                guard.spawn(
-                    SpawnParams::new(
-                        &virtiofsd_bin,
-                        virtiofsd_flavor,
-                        &share.tag,
-                        &sock,
-                        &share.host_path,
-                    )
-                    .read_only(share.read_only)
-                    .dax(share.dax),
-                )?;
-            }
-            virtiofsd = Some(guard);
-        }
 
         let argv = qemu_boot_argv(spec, &kernel, cid, kvm, &pid_file);
         tracing::debug!(qemu_bin = %qemu_bin, argv = ?argv, "launching qemu-system");
@@ -498,7 +455,6 @@ impl VmmDriver for QemuDriver {
             id: VmId(spec.name.clone()),
             state_dir,
             pid_file,
-            virtiofsd: std::sync::Mutex::new(virtiofsd),
         }))
     }
 
@@ -512,7 +468,6 @@ impl VmmDriver for QemuDriver {
             pid_file: state_dir.join(QEMU_PID_FILE),
             state_dir,
             id: id.clone(),
-            virtiofsd: std::sync::Mutex::new(None),
         }))
     }
 
@@ -535,7 +490,6 @@ struct QemuRunningVm {
     id: VmId,
     state_dir: PathBuf,
     pid_file: PathBuf,
-    virtiofsd: std::sync::Mutex<Option<VirtiofsdGuard>>,
 }
 
 impl RunningVm for QemuRunningVm {
@@ -592,12 +546,6 @@ impl RunningVm for QemuRunningVm {
             }
         }
         let _ = std::fs::remove_file(&self.pid_file);
-
-        // Release the virtiofsd daemons now that QEMU is gone. Dropping the
-        // guard kills the children and removes their sockets.
-        if let Some(guard) = self.virtiofsd.lock().unwrap().take() {
-            drop(guard);
-        }
         Ok(())
     }
 
@@ -703,22 +651,39 @@ mod tests {
     }
 
     #[test]
-    fn argv_maps_virtio_fs_shares() {
+    fn boot_rejects_virtio_fs_shares() {
+        // Mirrors Firecracker's `boot_rejects_virtio_fs_shares`. Every workload
+        // spec has carried no shares since a granted directory became a
+        // materialized block image, so this arm is unreachable in practice —
+        // the refusal exists so a caller that wires one gets an error rather
+        // than a guest silently missing a filesystem it expected.
         let mut spec = spec_with(KernelImage::Path("/img/Image".into()), vec![], vec![]);
-        spec.shares = vec![
-            VirtioFsShare {
-                tag: "mvmroot".into(),
-                host_path: "/host/root".into(),
-                read_only: true,
-                dax: true,
-            },
-            VirtioFsShare {
-                tag: "uvol0".into(),
-                host_path: "/host/vol0".into(),
-                read_only: false,
-                dax: false,
-            },
-        ];
+        spec.shares.push(VirtioFsShare {
+            tag: "mvmroot".into(),
+            host_path: "/host/root".into(),
+            read_only: true,
+            dax: true,
+        });
+
+        // `Box<dyn RunningVm>` is not Debug, so the error comes out via
+        // `err()` rather than `expect_err`.
+        let msg = match QemuDriver::new().boot(&spec) {
+            Ok(_) => panic!("a spec carrying a virtio-fs share must be refused"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            msg.contains("does not support virtio-fs shares"),
+            "unexpected refusal: {msg}"
+        );
+    }
+
+    #[test]
+    fn argv_carries_no_virtio_fs_or_shared_memory_backend() {
+        // The memfd backend and its `-numa` node existed only to satisfy
+        // vhost-user-fs, whose size had to equal `-m`. Both go with the shares;
+        // a stray `-object` here would mean the shared-memory backend outlived
+        // its only reason to exist.
+        let spec = spec_with(KernelImage::Path("/img/Image".into()), vec![], vec![]);
         let argv = qemu_boot_argv(
             &spec,
             Path::new("/img/Image"),
@@ -727,65 +692,15 @@ mod tests {
             Path::new("/state/w/qemu.pid"),
         );
 
-        // Shared memory backend required by vhost-user-fs, sized to match -m.
-        let object = argvalue(&argv, "-object").expect("-object");
+        assert_eq!(argvalue(&argv, "-object"), None);
+        assert_eq!(argvalue(&argv, "-numa"), None);
         assert!(
-            object.contains("memory-backend-memfd"),
-            "expected memfd backend, got: {object}"
+            !argv.iter().any(|a| a.starts_with("vhost-user-fs-pci")),
+            "no vhost-user-fs device may be emitted: {argv:?}"
         );
         assert!(
-            object.contains("share=on"),
-            "expected share=on, got: {object}"
-        );
-        assert!(object.contains("size=512M"), "expected 512M, got: {object}");
-        assert_eq!(argvalue(&argv, "-numa"), Some("node,memdev=mem"));
-
-        // One chardev + one device per share, socket under /tmp.
-        let chardevs: Vec<&str> = argv
-            .iter()
-            .zip(argv.iter().skip(1))
-            .filter(|(flag, _)| flag.as_str() == "-chardev")
-            .map(|(_, value)| value.as_str())
-            .collect();
-        assert_eq!(chardevs.len(), 2);
-        assert!(
-            chardevs
-                .iter()
-                .any(|c| c.contains("id=vfs-mvmroot") && c.contains("/tmp/mvm-vfs-w-mvmroot.sock"))
-        );
-        assert!(
-            chardevs
-                .iter()
-                .any(|c| c.contains("id=vfs-uvol0") && c.contains("/tmp/mvm-vfs-w-uvol0.sock"))
-        );
-
-        let fs_devs: Vec<&str> = argv
-            .iter()
-            .zip(argv.iter().skip(1))
-            .filter(|(flag, _)| flag.as_str() == "-device")
-            .map(|(_, value)| value.as_str())
-            .filter(|v| v.starts_with("vhost-user-fs-pci"))
-            .collect();
-        assert_eq!(fs_devs.len(), 2);
-        assert!(
-            fs_devs
-                .iter()
-                .any(|d| d.contains("chardev=vfs-mvmroot") && d.contains("tag=mvmroot"))
-        );
-        assert!(
-            fs_devs
-                .iter()
-                .any(|d| d.contains("chardev=vfs-uvol0") && d.contains("tag=uvol0"))
-        );
-
-        // A share no longer steers the root: an `mvmroot` share used to make the
-        // default cmdline boot from virtiofs, and that strategy is gone. Shares
-        // are still mapped to devices — the builder VM depends on it — but the
-        // root is always the block image.
-        let append = argvalue(&argv, "-append").expect("-append");
-        assert!(
-            !append.contains("virtiofs") && !append.contains("root=mvmroot"),
-            "no cmdline may boot a virtiofs root: {append}"
+            !argv.iter().any(|a| a.contains("mvm-vfs-")),
+            "no virtiofsd socket may be referenced: {argv:?}"
         );
     }
 
@@ -1150,7 +1065,6 @@ mod tests {
             id: VmId("agent-vm".into()),
             state_dir: dir.path().to_path_buf(),
             pid_file: dir.path().join(QEMU_PID_FILE),
-            virtiofsd: std::sync::Mutex::new(None),
         };
 
         // The agent port connects + round-trips through the bridge socket —
