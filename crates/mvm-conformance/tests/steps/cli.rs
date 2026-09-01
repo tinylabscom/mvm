@@ -93,6 +93,47 @@ async fn run_mvmctl_with_timeout(world: &mut CliWorld, args: String, seconds: i6
     world.last_run = Some(output);
 }
 
+/// The warm-home counterpart of `... with a {int} second timeout`.
+///
+/// A `@live` scenario that boots a guest needs the artifact-warm home, or it
+/// re-acquires the workload kernel from cold and spends the run in a Stage 0
+/// build instead of reaching its assertion. The plain `I run mvmctl with` steps
+/// set no home at all and inherit the ambient one, so those scenarios passed or
+/// failed on whichever `MVM_HOME` the process happened to have — green from the
+/// main checkout against a warm `~/.mvm`, and a multi-minute kernel build from a
+/// worktree. This variant exists so a bounded live run does not have to make
+/// that trade.
+#[when(expr = "I run mvmctl in an isolated live home with {string} with a {int} second timeout")]
+async fn run_mvmctl_live_home_with_timeout(world: &mut CliWorld, args: String, seconds: i64) {
+    let duration =
+        Duration::from_secs(u64::try_from(seconds).expect("timeout must be non-negative"));
+    let warm_home = std::env::var_os("MVM_E2E_HOME").map(std::path::PathBuf::from);
+    if warm_home.is_none() && world.isolated_home.is_none() {
+        world.isolated_home = Some(tempfile::tempdir().expect("create isolated MVM_HOME"));
+    }
+    let scenario_home = world.isolated_home.as_ref().map(|dir| dir.path());
+    let home: std::path::PathBuf =
+        mvm_conformance::live_home_precedence(scenario_home, warm_home.as_deref())
+            .expect("one of the two is set above")
+            .to_path_buf();
+    let root = workspace_root();
+
+    let handle = spawn_blocking(move || {
+        mvmctl_command()
+            .current_dir(root)
+            .args(mvm_conformance::doc_examples::tokenize(&args))
+            .isolated_home(&home)
+            .output()
+            .expect("failed to spawn mvmctl")
+    });
+
+    let output = timeout(duration, handle)
+        .await
+        .unwrap_or_else(|_| panic!("mvmctl did not exit within {seconds}s"))
+        .expect("spawn_blocking task panicked");
+    world.last_run = Some(output);
+}
+
 #[when(expr = "I run mvmctl with {string} and an isolated mvm home")]
 fn run_mvmctl_isolated_home(world: &mut CliWorld, args: String) {
     // A fresh, empty MVM_HOME makes cache-precondition scenarios hermetic: every
