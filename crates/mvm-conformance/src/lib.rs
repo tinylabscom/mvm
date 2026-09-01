@@ -323,8 +323,15 @@ impl ScenarioGate {
 /// Whether a version-keyed SDK sidecar cache under `sidecar_root` holds a
 /// built image.
 ///
-/// Walks version and arch directories rather than hardcoding either, so a
-/// version bump cannot quietly turn this into "never available".
+/// Walks version, arch and libc directories rather than hardcoding any of
+/// them, so neither a version bump nor a new libc variant can quietly turn
+/// this into "never available".
+///
+/// The libc level matters as much as the other two. The cache grew that
+/// segment when the two variants stopped being interchangeable, and a probe
+/// that stops at the arch directory reports "absent" on a correctly populated
+/// cache — which skips every `@sdk_sidecar` scenario. A skipped scenario is
+/// reported as a pass, so the gate would go green having proved nothing.
 ///
 /// The root is an argument rather than resolved here, because the directory
 /// that decides the gate is the one the *scenarios* run against. A probe that
@@ -339,11 +346,21 @@ pub fn sidecar_image_cached_in(sidecar_root: &std::path::Path, image_file: &str)
     let Ok(versions) = std::fs::read_dir(sidecar_root) else {
         return false;
     };
-    versions.filter_map(Result::ok).any(|version| {
-        std::fs::read_dir(version.path()).is_ok_and(|arches| {
-            arches
+    versions
+        .filter_map(Result::ok)
+        .any(|version| holds_image_below(&version.path(), image_file))
+}
+
+/// Whether any `<arch>/<libc>/` directory below `version_dir` holds the image.
+fn holds_image_below(version_dir: &std::path::Path, image_file: &str) -> bool {
+    let Ok(arches) = std::fs::read_dir(version_dir) else {
+        return false;
+    };
+    arches.filter_map(Result::ok).any(|arch| {
+        std::fs::read_dir(arch.path()).is_ok_and(|libcs| {
+            libcs
                 .filter_map(Result::ok)
-                .any(|arch| arch.path().join(image_file).is_file())
+                .any(|libc| libc.path().join(image_file).is_file())
         })
     })
 }
@@ -370,12 +387,26 @@ mod sidecar_cache {
     }
 
     #[test]
-    fn an_image_under_any_version_and_arch_is_cached() {
+    fn an_image_under_any_version_arch_and_libc_is_cached() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let libc = dir.path().join("9.9.9").join("aarch64").join("musl");
+        std::fs::create_dir_all(&libc).expect("create libc dir");
+        std::fs::write(libc.join(IMAGE), b"image").expect("write image");
+        assert!(sidecar_image_cached_in(dir.path(), IMAGE));
+    }
+
+    /// The layout this probe reads is the one the resolver writes, and the
+    /// resolver stopped writing here when the cache gained its libc segment.
+    /// An image left at the old depth is a leftover, not a usable entry: the
+    /// launch path would refuse it, so reporting it as cached hands the gate a
+    /// scenario that cannot pass.
+    #[test]
+    fn an_image_at_the_old_unkeyed_depth_is_not_cached() {
         let dir = tempfile::tempdir().expect("tempdir");
         let arch = dir.path().join("9.9.9").join("aarch64");
         std::fs::create_dir_all(&arch).expect("create arch dir");
         std::fs::write(arch.join(IMAGE), b"image").expect("write image");
-        assert!(sidecar_image_cached_in(dir.path(), IMAGE));
+        assert!(!sidecar_image_cached_in(dir.path(), IMAGE));
     }
 }
 
