@@ -29,11 +29,14 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use mvm_build::builder_disk_transport::{
+    INPUT_DISK_MIN_BYTES, InputTree, OUTPUT_DISK_BYTES, create_output_disk, pack_input_disk,
+};
 use mvm_build::builder_vm::{BuilderVmError, builder_vm_cache_dir};
 use mvm_build::builder_vm_runtime::{
-    DISPATCH_READY_MARKER, PERSISTENT_BUILDER_READY_TIMEOUT, ensure_nix_store_image_unlocked,
-    stage_persistent_job_dir,
+    PERSISTENT_BUILDER_READY_TIMEOUT, ensure_nix_store_image_unlocked, stage_persistent_job_dir,
 };
+use mvm_build::persistent_builder::PersistentBuilderSupervisor;
 use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_state_dir};
 use mvm_net::channel::GuestService;
 
@@ -49,6 +52,17 @@ const DEFAULT_MEMORY_MIB: u32 = 16 * 1024;
 /// Poll interval while waiting for the guest to publish its dispatch listener.
 const READY_POLL: Duration = Duration::from_millis(50);
 
+/// How long one readiness probe waits for the guest's reply before being
+/// treated as "not up yet". Short, because a probe that gets no answer is the
+/// expected state for most of a cold boot and the loop simply tries again.
+const READY_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Workload id the readiness probe asks after. The nil UUID names nothing, and
+/// is not meant to: the probe cares that a well-formed reply *came back*, not
+/// what it said, so an id no spawn ever mints keeps the probe from disturbing a
+/// real workload.
+const READY_PROBE_WORKLOAD_ID: uuid::Uuid = uuid::Uuid::nil();
+
 /// Builder for a persistent HVF builder session.
 ///
 /// The image (an HVF-bootable kernel plus a rootfs whose baked
@@ -58,6 +72,7 @@ pub struct HvfPersistentHostVm {
     kernel: PathBuf,
     rootfs: PathBuf,
     runtime_overlay: Option<PathBuf>,
+    closure_nar: Option<PathBuf>,
     workspace_root: PathBuf,
     host_bin_dir: PathBuf,
     nix_store_mib: u32,
@@ -79,6 +94,7 @@ impl HvfPersistentHostVm {
             kernel: kernel.into(),
             rootfs: rootfs.into(),
             runtime_overlay: None,
+            closure_nar: None,
             workspace_root: workspace_root.into(),
             host_bin_dir: host_bin_dir.into(),
             nix_store_mib: DEFAULT_NIX_STORE_MIB,
@@ -89,6 +105,15 @@ impl HvfPersistentHostVm {
 
     pub fn with_runtime_overlay(mut self, overlay: impl Into<PathBuf>) -> Self {
         self.runtime_overlay = Some(overlay.into());
+        self
+    }
+
+    /// The builder image's optional seeded Nix store closure. Rides the input
+    /// disk so the guest can import it at boot instead of fetching the same
+    /// toolchain over the network. Absent for images that carry no seed, which
+    /// is the common case.
+    pub fn with_closure_nar(mut self, nar: impl Into<PathBuf>) -> Self {
+        self.closure_nar = Some(nar.into());
         self
     }
 
@@ -147,14 +172,44 @@ impl HvfPersistentHostVm {
             .map_err(|e: BuilderVmError| anyhow::anyhow!(e))
             .context("staging the dispatch marker")?;
 
+        // Boot-time inputs, packed once. `job` carries only the dispatch
+        // marker at this point — its presence is what makes the guest bind
+        // `/job` onto the input stage, which every later dispatch rewrites.
+        // `work` and `mvm-bins` are packed here and never again: the guest
+        // re-extracts only the `job` member per dispatch.
+        let input_disk = state_dir.join("input.img");
+        let output_disk = state_dir.join("output.img");
+        pack_input_disk(
+            &[
+                InputTree {
+                    name: "job",
+                    src: &job_dir,
+                },
+                InputTree {
+                    name: "work",
+                    src: &self.workspace_root,
+                },
+                InputTree {
+                    name: "mvm-bins",
+                    src: &self.host_bin_dir,
+                },
+            ],
+            self.closure_nar.as_deref(),
+            &input_disk,
+            INPUT_DISK_MIN_BYTES,
+        )
+        .with_context(|| format!("packing the builder input disk {}", input_disk.display()))?;
+        create_output_disk(&output_disk, OUTPUT_DISK_BYTES).with_context(|| {
+            format!("creating the builder output disk {}", output_disk.display())
+        })?;
+
         let spec = persistent_builder_spec(&PersistentBuilderSpecInputs {
             name: &vm_name,
             kernel: &self.kernel,
             rootfs: &self.rootfs,
             nix_store: nix_store.path(),
-            job_dir: &job_dir,
-            workspace_root: &self.workspace_root,
-            host_bin_dir: &self.host_bin_dir,
+            input_disk: &input_disk,
+            output_disk: &output_disk,
             runtime_overlay: self.runtime_overlay.as_deref(),
             console_log: state_dir.join("console.log"),
             egress_socket: socket_for(&state_dir, GuestService::NetworkFlow),
@@ -173,6 +228,8 @@ impl HvfPersistentHostVm {
             session_id: session_id.to_string(),
             state_dir,
             job_dir,
+            input_disk,
+            output_disk,
             vm,
         };
         session.wait_until_dispatch_ready(PERSISTENT_BUILDER_READY_TIMEOUT)?;
@@ -185,6 +242,28 @@ fn socket_for(state_dir: &Path, service: GuestService) -> PathBuf {
     vm_hvf_vsock_port_socket_at(state_dir, service.port())
 }
 
+/// One readiness probe: ask the dispatch loop about a workload that does not
+/// exist and see whether it answers.
+///
+/// Both outcomes the guest can produce — a status report saying `not_found`,
+/// or a typed failure — are answers, and either one means the loop is serving.
+/// Only a transport failure (nothing listening on the guest port yet, the
+/// bridge closing the connection, or no reply inside the probe window) means
+/// "not yet". The request has no side effect: it starts and stops nothing.
+fn dispatch_loop_answers(socket: &Path) -> bool {
+    use mvm_build::builder_protocol::WorkloadId;
+    use mvm_build::persistent_builder::PersistentBuilderError;
+
+    let probe =
+        PersistentBuilderSupervisor::new(socket).with_frame_read_timeout(READY_PROBE_TIMEOUT);
+    match probe.submit_workload_status(WorkloadId(READY_PROBE_WORKLOAD_ID)) {
+        Ok(_) => true,
+        // The guest framed a refusal for an id it does not know. It answered.
+        Err(PersistentBuilderError::WorkloadFailed { .. }) => true,
+        Err(_) => false,
+    }
+}
+
 /// A live persistent builder session.
 ///
 /// Holds no store lock: the supervisor took it and holds it until the VM
@@ -194,6 +273,8 @@ pub struct PersistentHvfSession {
     session_id: String,
     state_dir: PathBuf,
     job_dir: PathBuf,
+    input_disk: PathBuf,
+    output_disk: PathBuf,
     vm: Box<dyn RunningVm>,
 }
 
@@ -208,10 +289,24 @@ impl PersistentHvfSession {
         &self.state_dir
     }
 
-    /// Host dir bound at `/job`: where each dispatch is staged and its
-    /// artifacts read back.
+    /// Host-side staging dir for the session. Each dispatch's `cmd.sh` is
+    /// written under it and that dispatch's artifacts are read back into it.
+    /// The guest never sees this directory — the input and output disks carry
+    /// its contents across the boundary.
     pub fn job_dir(&self) -> &Path {
         &self.job_dir
+    }
+
+    /// Input transport disk. The dispatch client rewrites it with the next
+    /// job's payload before sending `Run`.
+    pub fn input_disk(&self) -> &Path {
+        &self.input_disk
+    }
+
+    /// Output transport disk. The guest writes each dispatch's artifact tar
+    /// here and the client reads it back after that dispatch's `Result`.
+    pub fn output_disk(&self) -> &Path {
+        &self.output_disk
     }
 
     /// Host socket the dispatch client dials to reach the guest's job loop.
@@ -243,15 +338,28 @@ impl PersistentHvfSession {
             .context("waiting on the persistent builder VM")
     }
 
-    /// Wait for the guest to publish `<job_dir>/dispatch.ready`.
+    /// Wait until the guest's dispatch loop answers on its vsock port.
+    ///
+    /// The guest still writes a `dispatch.ready` file, but it writes it into
+    /// `/job` — which under the disk transport is a bind onto the guest's own
+    /// input stage, not a host directory. The host cannot see it, and the
+    /// failure mode of waiting for it anyway is a hang at startup rather than
+    /// an error, so readiness moved onto the channel the dispatch client will
+    /// use regardless.
+    ///
+    /// The probe is a round trip, not a connect. The host UDS is bound by the
+    /// backend before the guest boots, so `connect` succeeds against a VM whose
+    /// vsock driver is not up yet and proves nothing. Asking a question and
+    /// getting *any* well-formed answer proves the loop is accepting and
+    /// framing — which is exactly the property the caller needs.
     ///
     /// Fails fast if the VM dies first: without this the caller would wait the
     /// full readiness window on a guest that panicked seconds in, and then
     /// report a timeout rather than the boot failure that actually happened.
     fn wait_until_dispatch_ready(&self, timeout: Duration) -> Result<()> {
-        let ready = self.job_dir.join(DISPATCH_READY_MARKER);
+        let socket = self.dispatch_socket_path();
         let deadline = Instant::now() + timeout;
-        while !ready.exists() {
+        while !dispatch_loop_answers(&socket) {
             if !matches!(
                 self.vm.status(),
                 Ok(mvm_core::vm_backend::VmStatus::Running)
@@ -265,9 +373,9 @@ impl PersistentHvfSession {
             if Instant::now() >= deadline {
                 let _ = self.vm.kill();
                 bail!(
-                    "the persistent builder VM did not publish {} within {timeout:?}; killed. \
+                    "the persistent builder VM did not answer on {} within {timeout:?}; killed. \
                      See {}",
-                    ready.display(),
+                    socket.display(),
                     self.state_dir.join("console.log").display()
                 );
             }

@@ -71,7 +71,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::builder_disk_transport::{
-    InputTree, create_output_disk, pack_input_disk, read_output_disk,
+    INPUT_DISK_MIN_BYTES, InputTree, OUTPUT_DISK_BYTES, create_output_disk, pack_input_disk,
+    read_output_disk,
 };
 use crate::builder_vm::{
     BuilderArtifacts, BuilderJob, BuilderMounts, BuilderVm, BuilderVmDisk, BuilderVmError,
@@ -89,7 +90,6 @@ use crate::builder_vm_runtime::{
     stage_filtered_work_input, stage_job_dir, stage_persistent_job_dir, stage_shell_job_dir,
     supervisor_exit_error, verbose_from_env,
 };
-use crate::pipeline::build::BUILDER_OUTPUT_DISK_MIB;
 
 /// Default vCPU count for the builder VM. Nix builds are
 /// embarrassingly parallel at the derivation level; 4 cores is the
@@ -144,7 +144,6 @@ const BUILDER_INPUT_DEVICE: &str = "/dev/vdc";
 const BUILDER_OUTPUT_DEVICE: &str = "/dev/vdd";
 const BUILDER_RUNTIME_DEVICE: &str = "/dev/vde";
 const BUILDER_VIRTIOFS_RUNTIME_DEVICE: &str = "/dev/vdc";
-const BUILDER_INPUT_DISK_MIN: u64 = 16 << 20;
 const BUILDER_VSOCK_EGRESS_TOKEN: &str = "mvm.vsock_egress=1";
 const BUILDER_SUBST_PID_FILE: &str = "substitution.pid";
 const BUILDER_SUBST_STDERR_LOG_FILE: &str = "substitution.stderr.log";
@@ -647,13 +646,7 @@ pub(crate) fn prepare_builder_transport_disks(
 ) -> Result<(PathBuf, PathBuf), BuilderVmError> {
     let input_disk = vm_state_dir.join("input.img");
     let output_disk = vm_state_dir.join("output.img");
-    pack_input_disk(
-        input_trees,
-        closure_nar,
-        &input_disk,
-        BUILDER_INPUT_DISK_MIN,
-    )
-    .map_err(|e| {
+    pack_input_disk(input_trees, closure_nar, &input_disk, INPUT_DISK_MIN_BYTES).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
             "pack builder input disk {}: {e}",
             input_disk.display()
@@ -1155,7 +1148,7 @@ impl LibkrunBuilderVm {
                 },
             ],
             self.closure_nar.as_deref(),
-            u64::from(BUILDER_OUTPUT_DISK_MIB) << 20,
+            OUTPUT_DISK_BYTES,
         )?;
 
         let mut krun = krun_context_for_image(&vm_name, &image)?
@@ -1678,7 +1671,7 @@ impl BuilderVm for LibkrunBuilderVm {
                 },
             ],
             self.closure_nar.as_deref(),
-            u64::from(BUILDER_OUTPUT_DISK_MIB) << 20,
+            OUTPUT_DISK_BYTES,
         )?;
         let mut krun = krun_context_for_image(&vm_name, &image)?
             .with_resources(self.vcpus, self.memory_mib)
