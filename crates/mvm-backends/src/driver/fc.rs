@@ -639,11 +639,10 @@ impl VmmDriver for FcDriver {
         // authenticated identity handshake still gates admission after
         // resume, so preloading changes placement of VMM work, not authority.
         VmCapabilities {
-            // None: this driver hands `vcpu_count` to Firecracker's
-            // machine-config API unmodified and imposes no ceiling of its own.
-            // `None` says exactly that — distinct from a backend that has a
-            // limit and has not declared one, which would read as `Some(large)`.
-            max_vcpus: None,
+            // Firecracker's machine-config wire field is an unsigned byte.
+            // Declare that protocol ceiling so portable oversized requests are
+            // clamped before serialization instead of failing at the API.
+            max_vcpus: Some(u32::from(u8::MAX)),
             pause_resume: true,
             snapshots: false,
             snapshot_capability: SnapshotCapability::Unsupported,
@@ -1400,6 +1399,7 @@ mod tests {
         assert!(caps.no_routable_guest_nic);
         assert!(caps.host_vsock_proxy);
         assert!(!caps.tap_networking);
+        assert_eq!(caps.max_vcpus, Some(u32::from(u8::MAX)));
         assert_eq!(d.snapshot_capability(), SnapshotCapability::Unsupported);
         // The driver reports the claim-bearing tier itself now, rather than
         // asking a legacy shell for it.

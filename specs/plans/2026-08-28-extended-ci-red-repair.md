@@ -55,6 +55,16 @@ a competing BLAKE3 address or re-hash the archive.
   runner group ICMP sockets. Transient launch resolution preserves disk-image
   mounts as backend-agnostic block volumes while continuing to capability-gate
   live directory shares.
+- The first rerun on the fully merged queue exposed a cross-checkout artifact
+  hole: the warm-up treated an existing initramfs file as current without
+  invoking the source-fingerprint gate. The lane therefore tested the latest
+  host binary against an older guest agent, producing dm-verity, FlowMux,
+  stop-drain, and warm-readiness failures that disagreed with the checked-in
+  guest code. The warm-up now always enters launch resolution so stale guest
+  binaries are evicted and rebuilt. The same run exposed Firecracker's u8
+  machine-config boundary and two stale BDD assertions; the backend now
+  declares that vCPU ceiling, while the witnesses preserve child exit status
+  and stderr ownership.
 
 ## Delivery checklist
 
@@ -92,5 +102,11 @@ a competing BLAKE3 address or re-hash the archive.
       resolution without weakening directory-share backend refusal.
 - [x] Pass the focused mount, receipt/preflight, workspace, gated, formatting,
       and zero-warning Clippy checks for the follow-on repair.
+- [x] Revalidate the universal initramfs source fingerprint on every live
+      warm-up, with a structural regression forbidding file-existence shortcuts.
+- [x] Declare Firecracker's u8 vCPU wire ceiling and cover the advertised
+      capability so oversized portable requests clamp before serialization.
+- [x] Reconcile the live refusal witnesses with the child process exit code,
+      stderr channel, and fail-closed timeout-admission contracts.
 - [ ] Pass a fresh Extended CI run containing all repaired witness lanes.
 - [ ] Merge the corrective pull request and close #3007 through its linkage.

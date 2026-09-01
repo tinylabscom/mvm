@@ -62,4 +62,4 @@ Feature: A workload reaches a key-value store without a network path
     Given the SDK service-plane fixture is materialized as a read-only disk image
     When I run the SDK service-plane fixture in an isolated live home binding service "host.time.v1"
     Then the command exits with code 1
-    And the output contains "not bound"
+    And the error output contains "not bound"

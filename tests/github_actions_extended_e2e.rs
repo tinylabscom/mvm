@@ -305,6 +305,28 @@ fn documented_surface_warms_the_source_matched_sdk_sidecar() {
 }
 
 #[test]
+fn documented_surface_revalidates_the_source_matched_initramfs() {
+    let script = documented_surface_script();
+    let warm = script
+        .split_once("warm_launch_artifacts() {")
+        .expect("warm_launch_artifacts function")
+        .1
+        .split_once("\n}")
+        .expect("warm_launch_artifacts body")
+        .0;
+
+    assert!(
+        warm.contains("\"$MVMCTL\" machine run --name bdd-warmup"),
+        "the warm-up must enter launch resolution so its source fingerprint can evict a stale initramfs"
+    );
+    assert!(
+        !warm.contains("universal initramfs already cached")
+            && !warm.contains("find \"$E2E_HOME/cache/initramfs\""),
+        "file existence is not freshness: a cached initramfs may contain a guest agent from an older checkout"
+    );
+}
+
+#[test]
 fn supervisor_build_requires_a_detected_libkrun_header() {
     let just = justfile();
     let recipe = just

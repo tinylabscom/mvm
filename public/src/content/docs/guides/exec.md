@@ -133,7 +133,10 @@ mvmctl machine run --flake . --timeout 300 -- ./long-running-task.sh
 ```
 
 Defaults: 2 vCPUs (`--cpus`), 512 MiB (`--memory`). **`--timeout` has no
-default** — omit it and the run is unbounded.
+default** — omit it and the run is unbounded. A sealed run fails closed when
+its selected backend cannot enforce a wall-clock grant; currently Firecracker
+and QEMU do not own a long-lived supervisor timer. Use `mvmctl doctor` to check
+the active backend before relying on `--timeout` for a sealed workload.
 
 ## Driving from a launch plan
 

@@ -159,6 +159,11 @@ Last updated: 2026-09-01
       ICMP sockets to the runner group, and threads the documented service-plane
       ext4 fixture through transient launch resolution as a read-only block
       volume while retaining fail-closed directory-share capability checks.
+      The latest rerun showed the warm-up reused an existing universal
+      initramfs without validating its guest-source fingerprint. It now always
+      enters launch resolution, evicting stale guest agents before the live
+      suite. Firecracker declares its u8 vCPU wire ceiling, and the refusal
+      witnesses now assert the actual child/status-channel contracts.
       Focused tests, workspace tests, isolated doctests, workspace Clippy,
       formatting, and policy gates are green. A fresh Extended CI run and merge
       delivery remain.
