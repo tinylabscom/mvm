@@ -32,6 +32,27 @@ pub enum GuestLibc {
 }
 
 impl GuestLibc {
+    /// The `DT_NEEDED` libc soname an object built for this libc records, or
+    /// `None` for [`GuestLibc::Unknown`], which names no libc to record one.
+    ///
+    /// This is the marker that distinguishes the two SDK-sidecar artifacts, and
+    /// the only one that cannot be faked by a build that merely *named* a musl
+    /// target: naming the target while linking through the host `cc` produces a
+    /// clean build of a glibc object, so the exit code, the target triple and
+    /// the filename all agree with each other and are all wrong. A check reads
+    /// this, never a path or a build's exit status.
+    ///
+    /// Note `libc.so` is a prefix of `libc.so.6`, so a comparison against these
+    /// must be exact.
+    #[must_use]
+    pub fn libc_soname(self) -> Option<&'static str> {
+        match self {
+            Self::Glibc => Some("libc.so.6"),
+            Self::Musl => Some("libc.so"),
+            Self::Unknown => None,
+        }
+    }
+
     /// The value as it appears in the image sidecar, in cache paths, and in
     /// operator-facing text.
     #[must_use]
@@ -66,6 +87,25 @@ mod tests {
             serde_json::from_str::<GuestLibc>("\"glibc\"").unwrap(),
             GuestLibc::Glibc
         );
+    }
+
+    /// The two sonames are what every artifact check reads, and `Unknown`
+    /// names none — there is no object it could describe.
+    #[test]
+    fn each_known_libc_names_the_soname_an_object_records() {
+        assert_eq!(GuestLibc::Glibc.libc_soname(), Some("libc.so.6"));
+        assert_eq!(GuestLibc::Musl.libc_soname(), Some("libc.so"));
+        assert_eq!(GuestLibc::Unknown.libc_soname(), None);
+    }
+
+    /// `libc.so` is a prefix of `libc.so.6`, so a check comparing them with
+    /// `starts_with` would accept a glibc object as musl.
+    #[test]
+    fn neither_soname_is_a_prefix_free_match_for_the_other() {
+        let glibc = GuestLibc::Glibc.libc_soname().unwrap();
+        let musl = GuestLibc::Musl.libc_soname().unwrap();
+        assert_ne!(glibc, musl);
+        assert!(glibc.starts_with(musl), "the prefix hazard is real");
     }
 
     /// The cache keys a directory segment on this, so it has to match the wire

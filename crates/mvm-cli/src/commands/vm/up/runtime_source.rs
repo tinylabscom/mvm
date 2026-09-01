@@ -533,7 +533,11 @@ mod sdk_sidecar_host_resolution_tests {
         hex::encode(Sha256::digest(bytes))
     }
 
-    fn sidecar_ext4_bytes() -> Vec<u8> {
+    /// `libc` is explicit at every call site: the resolver proves an
+    /// artifact's libc from its own `DT_NEEDED` and refuses one that disagrees
+    /// with the slot it was filed under, so a defaulted fixture could disagree
+    /// with its own slot silently.
+    fn sidecar_ext4_bytes(libc: mvm_contract::guest_libc::GuestLibc) -> Vec<u8> {
         use mvm_fs::ext4::Node;
         let nodes = vec![
             Node::Dir {
@@ -544,7 +548,10 @@ mod sdk_sidecar_host_resolution_tests {
             Node::File {
                 path: "/lib/libmvm_host_services.so".into(),
                 mode: 0o555,
-                data: b"\x7fELF-stub".to_vec(),
+                data: mvm_fs::elf::test_fixture::shared_object(&[
+                    "libgcc_s.so.1",
+                    libc.libc_soname().expect("a fixture names a real libc"),
+                ]),
                 xattrs: Vec::new(),
             },
         ];
@@ -552,14 +559,23 @@ mod sdk_sidecar_host_resolution_tests {
     }
 
     fn seed_sidecar_cache(cache: &std::path::Path, version: &str, arch: GuestArch) {
-        let layout = SdkSidecarLayout::under(
+        seed_sidecar_variant(
             cache,
             version,
-            &arch.to_string(),
+            arch,
             mvm_contract::guest_libc::GuestLibc::Musl,
         );
+    }
+
+    fn seed_sidecar_variant(
+        cache: &std::path::Path,
+        version: &str,
+        arch: GuestArch,
+        libc: mvm_contract::guest_libc::GuestLibc,
+    ) {
+        let layout = SdkSidecarLayout::under(cache, version, &arch.to_string(), libc);
         std::fs::create_dir_all(&layout.artifact_dir).unwrap();
-        let image = sidecar_ext4_bytes();
+        let image = sidecar_ext4_bytes(libc);
         let version_text = format!("{version}\n");
         std::fs::write(&layout.image, &image).unwrap();
         std::fs::write(&layout.version_file, &version_text).unwrap();
@@ -660,8 +676,8 @@ mod sdk_sidecar_host_resolution_tests {
     /// not touched" points here: if the acquire path ran, the call fails.
     const UNREACHABLE_BASE_URL: &str = "file:///nonexistent/mvm-sdk-sidecar-release-fixture";
 
-    fn sidecar_archive_bytes(version: &str) -> Vec<u8> {
-        let image = sidecar_ext4_bytes();
+    fn sidecar_archive_bytes(version: &str, libc: mvm_contract::guest_libc::GuestLibc) -> Vec<u8> {
+        let image = sidecar_ext4_bytes(libc);
         let version_text = format!("{version}\n").into_bytes();
         let manifest = format!(
             "{}  {SDK_SIDECAR_IMAGE_FILE}\n{}  {SDK_SIDECAR_VERSION_FILE}\n",
@@ -695,7 +711,9 @@ mod sdk_sidecar_host_resolution_tests {
         );
         let release_dir = base.join(format!("v{version}"));
         std::fs::create_dir_all(&release_dir).unwrap();
-        let archive = sidecar_archive_bytes(version);
+        // The release fixture carries the glibc variant, matching the asset
+        // names staged beside it.
+        let archive = sidecar_archive_bytes(version, mvm_contract::guest_libc::GuestLibc::Glibc);
         std::fs::write(release_dir.join(&names.archive), &archive).unwrap();
         std::fs::write(
             release_dir.join(&names.archive_checksum),

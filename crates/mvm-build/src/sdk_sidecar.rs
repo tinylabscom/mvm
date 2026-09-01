@@ -465,7 +465,13 @@ mod tests {
 
     /// A minimal sidecar ext4 carrying the one path the resolver proves present,
     /// built with the in-repo pure-Rust writer so the fixture needs no `mkfs`.
-    fn sidecar_ext4_bytes() -> Vec<u8> {
+    ///
+    /// `libc` is explicit at every call site rather than defaulted, because the
+    /// resolver proves an artifact's libc from the object's own `DT_NEEDED` and
+    /// refuses one that disagrees with the slot it was filed under. A default
+    /// here would let a fixture disagree with its own slot silently — the exact
+    /// mistake the check exists to catch.
+    fn sidecar_ext4_bytes(libc: GuestLibc) -> Vec<u8> {
         use mvm_fs::ext4::Node;
         let nodes = vec![
             Node::Dir {
@@ -476,7 +482,10 @@ mod tests {
             Node::File {
                 path: "/lib/libmvm_host_services.so".into(),
                 mode: 0o555,
-                data: b"\x7fELF-stub".to_vec(),
+                data: mvm_fs::elf::test_fixture::shared_object(&[
+                    "libgcc_s.so.1",
+                    libc.libc_soname().expect("a fixture names a real libc"),
+                ]),
                 xattrs: Vec::new(),
             },
         ];
@@ -612,7 +621,7 @@ mod tests {
         let _env = TestEnv::new();
         let cache = tempfile::tempdir().unwrap();
         let source = tempfile::tempdir().unwrap();
-        let image = sidecar_ext4_bytes();
+        let image = sidecar_ext4_bytes(GuestLibc::Musl);
         stage_sidecar_dir(source.path(), FIXTURE_VERSION, &image);
 
         let artifact = install_source_built_sidecar(
@@ -639,7 +648,7 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         let existing = tempfile::tempdir().unwrap();
         let candidate = tempfile::tempdir().unwrap();
-        let old_image = sidecar_ext4_bytes();
+        let old_image = sidecar_ext4_bytes(GuestLibc::Musl);
         let mut new_image = old_image.clone();
         new_image.push(0);
         stage_sidecar_dir(existing.path(), FIXTURE_VERSION, &old_image);
@@ -677,7 +686,11 @@ mod tests {
     fn source_built_install_rejects_an_empty_fingerprint() {
         let cache = tempfile::tempdir().unwrap();
         let source = tempfile::tempdir().unwrap();
-        stage_sidecar_dir(source.path(), FIXTURE_VERSION, &sidecar_ext4_bytes());
+        stage_sidecar_dir(
+            source.path(),
+            FIXTURE_VERSION,
+            &sidecar_ext4_bytes(GuestLibc::Musl),
+        );
 
         let error = install_source_built_sidecar(
             source.path(),
@@ -738,8 +751,8 @@ mod tests {
 
     /// The archive a well-formed release publishes: the image, the VERSION
     /// marker, and the derivation's own `sha256sum` manifest over both.
-    fn well_formed_archive(version: &str) -> Vec<u8> {
-        let image = sidecar_ext4_bytes();
+    fn well_formed_archive(version: &str, libc: GuestLibc) -> Vec<u8> {
+        let image = sidecar_ext4_bytes(libc);
         let version_text = format!("{version}\n").into_bytes();
         let manifest = format!(
             "{}  {SDK_SIDECAR_IMAGE_FILE}\n{}  {SDK_SIDECAR_VERSION_FILE}\n",
@@ -791,7 +804,7 @@ mod tests {
         }
 
         fn sound_for_libc(libc: GuestLibc) -> Self {
-            let archive = well_formed_archive(FIXTURE_VERSION);
+            let archive = well_formed_archive(FIXTURE_VERSION, libc);
             let checksum = archive.clone();
             Self::stage_for_libc(libc, &archive, Some(&checksum))
         }
@@ -1007,7 +1020,10 @@ mod tests {
     fn a_missing_archive_checksum_aborts_before_the_tarball_is_fetched() {
         let mut env = TestEnv::new();
         let cache = tempfile::tempdir().unwrap();
-        let fixture = ReleaseFixture::stage(&well_formed_archive(FIXTURE_VERSION), None);
+        let fixture = ReleaseFixture::stage(
+            &well_formed_archive(FIXTURE_VERSION, GuestLibc::Glibc),
+            None,
+        );
 
         let err =
             download_from(&mut env, &fixture, cache.path()).expect_err("no checksum, no download");
@@ -1045,7 +1061,10 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         // The checksum is computed over different bytes than the archive
         // carries — exactly the shape of a substituted payload.
-        let fixture = ReleaseFixture::stage(&well_formed_archive(FIXTURE_VERSION), Some(b"other"));
+        let fixture = ReleaseFixture::stage(
+            &well_formed_archive(FIXTURE_VERSION, GuestLibc::Glibc),
+            Some(b"other"),
+        );
 
         let err = download_from(&mut env, &fixture, cache.path())
             .expect_err("a drifted archive is refused");
@@ -1061,7 +1080,11 @@ mod tests {
             let cache = tempfile::tempdir().unwrap();
             let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
             let mut tar = tar::Builder::new(encoder);
-            append_file(&mut tar, SDK_SIDECAR_IMAGE_FILE, &sidecar_ext4_bytes());
+            append_file(
+                &mut tar,
+                SDK_SIDECAR_IMAGE_FILE,
+                &sidecar_ext4_bytes(GuestLibc::Glibc),
+            );
             append_file(
                 &mut tar,
                 SDK_SIDECAR_VERSION_FILE,
@@ -1121,7 +1144,7 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         let version_text = format!("{FIXTURE_VERSION}\n").into_bytes();
         let archive = gzip_tar(&[
-            (SDK_SIDECAR_IMAGE_FILE, sidecar_ext4_bytes()),
+            (SDK_SIDECAR_IMAGE_FILE, sidecar_ext4_bytes(GuestLibc::Glibc)),
             (SDK_SIDECAR_VERSION_FILE, version_text.clone()),
             (
                 CHECKSUM_MANIFEST_FILE,
@@ -1150,7 +1173,7 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         let layout = layout_of(cache.path(), GuestLibc::Glibc);
         let source = tempfile::tempdir().unwrap();
-        let image = sidecar_ext4_bytes();
+        let image = sidecar_ext4_bytes(GuestLibc::Glibc);
         let version_text = format!("{FIXTURE_VERSION}\n");
         std::fs::write(source.path().join(SDK_SIDECAR_IMAGE_FILE), &image).unwrap();
         std::fs::write(source.path().join(SDK_SIDECAR_VERSION_FILE), &version_text).unwrap();

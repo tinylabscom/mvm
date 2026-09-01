@@ -41,8 +41,8 @@ pub use launch_plan::load_launch_plan;
 use guest_run::{emit_guest_console_diagnostic, run_in_guest, run_wasm_module};
 use session::wait_for_agent_timed;
 pub use session::{
-    SessionAdmit, SessionAuditSubstrate, SessionVm, boot_session_vm, dispatch_in_session,
-    tear_down_session_vm, wait_for_agent,
+    AdmitInputs, SessionAdmit, SessionAuditSubstrate, SessionVm, boot_session_vm,
+    dispatch_in_session, tear_down_session_vm, wait_for_agent,
 };
 use transient::{BootAttempt, boot_transient_vm, install_ctrlc_teardown, teardown_transient_vm};
 
@@ -161,7 +161,18 @@ pub struct LaunchShape<'a> {
     pub pty: bool,
     pub network_policy: &'a mvm_core::network_policy::NetworkPolicy,
     pub warm_pool_size: u32,
-    pub sdk_sidecar: Option<&'a crate::commands::vm::up::SdkSidecarAttachment>,
+    /// SDK-served host services the signed plan will bind, if any.
+    ///
+    /// The *bindings*, not a resolved attachment: which of the two sidecar
+    /// artifacts they need depends on the guest's libc, and the guest does not
+    /// exist until this shape has been resolved into an image.
+    /// [`resolve_launch`] makes the choice once the rootfs is materialized and
+    /// hands the single result to both the launch config and admission.
+    pub sdk_host_services: &'a [mvm_contract::protocol::broker::ServiceId],
+    /// The libc a catalogued runtime *declares*, or `Unknown` for an image
+    /// this host has no declaration for. Cross-checked against what the
+    /// materialized rootfs turns out to record; it never selects.
+    pub declared_libc: mvm_contract::guest_libc::GuestLibc,
     pub hypervisor: Option<&'a str>,
 }
 
@@ -216,7 +227,18 @@ pub struct ExecRequest {
     /// before admission so the signed plan's grant and the launch config's
     /// volume describe the same bytes; the shared admission gate refuses the
     /// launch if they ever disagree.
-    pub sdk_sidecar: Option<crate::commands::vm::up::SdkSidecarAttachment>,
+    /// SDK-served host services this run binds, or empty.
+    ///
+    /// The sidecar they imply is resolved inside [`resolve_launch`], after the
+    /// image is materialized: there is one artifact per guest libc, and nothing
+    /// before materialization knows which libc an arbitrary `--image` has. One
+    /// resolution feeds both the signed plan's grant and the launch config's
+    /// volume, so they cannot describe different bytes; the shared admission
+    /// gate refuses the launch if they ever do.
+    pub sdk_host_services: Vec<mvm_contract::protocol::broker::ServiceId>,
+    /// The libc a catalogued runtime declared for this image, or `Unknown`.
+    /// A cross-check against the materialized image, never the selector.
+    pub declared_libc: mvm_contract::guest_libc::GuestLibc,
     /// Requested workload hypervisor (from `--hypervisor`), or `None` to
     /// auto-detect. Kept here so `run_inner`'s backend selection agrees with the
     /// admit/build sites that read it off `RunArgs`.
@@ -239,7 +261,8 @@ impl ExecRequest {
             pty: self.pty,
             network_policy: &self.network_policy,
             warm_pool_size: self.warm_pool_size,
-            sdk_sidecar: self.sdk_sidecar.as_ref(),
+            sdk_host_services: &self.sdk_host_services,
+            declared_libc: self.declared_libc,
             hypervisor: self.hypervisor.as_deref(),
         }
     }
@@ -1186,11 +1209,44 @@ fn mount_volumes(
 /// boot-strategy state. Admission (tenant/plan binding) and the runtime
 /// overlay attach happen in the caller, after this returns — this only
 /// assembles the struct.
+/// Refuse a catalogued runtime whose declared libc is not what its image
+/// turned out to record.
+///
+/// Two independent facts about the same guest: the catalog *declares* a libc
+/// for the image reference it pins, and the unpacker *observes* one in the tree
+/// that reference resolved to. They agree until the upstream tag moves — a
+/// `:alpine` image rebuilt on a glibc base, say — at which point the
+/// declaration is silently wrong about every guest booted from it.
+///
+/// Selection uses the observed value, so a disagreement is not itself a boot
+/// hazard; it is a catalog entry that has drifted from reality, and it is
+/// invisible from anywhere else. Refusing is the only way anyone finds out.
+///
+/// `Unknown` on either side is not a disagreement: an image the host has no
+/// declaration for is the ordinary `--image` case, and an image that recorded
+/// no libc is refused later, by the resolver, with a message about what to do.
+fn refuse_declared_libc_disagreement(
+    declared: mvm_contract::guest_libc::GuestLibc,
+    recorded: mvm_contract::guest_libc::GuestLibc,
+) -> Result<()> {
+    use mvm_contract::guest_libc::GuestLibc;
+    if declared == GuestLibc::Unknown || recorded == GuestLibc::Unknown || declared == recorded {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "refusing to launch: the runtime catalog declares this image is {declared}, but the \
+         materialized rootfs records {recorded}. The catalog entry has drifted from the image \
+         it pins — most likely the upstream tag was rebuilt on a different base. Report it; \
+         naming the image directly with --image bypasses the declaration."
+    )
+}
+
 fn build_start_config(
     shape: &LaunchShape<'_>,
     vm_name: &str,
     resolved: &ResolvedImage,
     boot: &BootStrategy,
+    sdk_sidecar: Option<&crate::commands::vm::up::SdkSidecarAttachment>,
     sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
 ) -> Result<VmStartConfig> {
     // Pre-open console data sockets for interactive PTY runs against
@@ -1241,7 +1297,7 @@ fn build_start_config(
         volumes: mount_volumes(shape, vm_name, sub)?
             .into_iter()
             .chain(shape.disk_volumes.iter().cloned())
-            .chain(shape.sdk_sidecar.iter().map(|a| a.volume.clone()))
+            .chain(sdk_sidecar.iter().map(|a| a.volume.clone()))
             .collect(),
         config_files: Vec::new(),
         secret_files: Vec::new(),
@@ -1363,8 +1419,36 @@ pub fn resolve_launch(
     // and the two artifact attachments. Admission instruments itself, and its
     // spans account for roughly half the window, so the rest needs naming
     // before any of it can be acted on.
+    // The SDK sidecar is chosen here, and only here, because this is the first
+    // point at which the guest exists. There is one artifact per guest libc and
+    // a musl process cannot `dlopen` the glibc one; the libc was observed when
+    // the rootfs was unpacked and recorded beside it, which is the only thing
+    // the host can still read once the tree is an ext4 blob.
+    //
+    // Selecting from the *recorded* value rather than a catalogued runtime's
+    // declaration is what makes an arbitrary `--image` work: nothing declares a
+    // libc for an image a user names themselves, and that is the case the
+    // catalog is a convenience over.
+    //
+    // Not asked on a tier that attaches no ELF sidecar. Wasm has no dynamic
+    // loader and never will, so "which libc" is the wrong question there: a
+    // wasm workload binding an SDK host service is refused by the
+    // backend-compatibility gate, which can say why.
+    let sdk_sidecar = if backend.kind() == mvm_core::vm_backend::BackendKind::Wasm {
+        None
+    } else {
+        let recorded =
+            mvm_build::guest_libc::recorded_image_libc(std::path::Path::new(&image.rootfs));
+        refuse_declared_libc_disagreement(shape.declared_libc, recorded)?;
+        crate::commands::vm::up::resolve_sdk_sidecar_attachment_for_host(
+            shape.sdk_host_services,
+            recorded,
+        )?
+    };
+
     let t_build = std::time::Instant::now();
-    let mut start_config = build_start_config(shape, &vm_name, &image, &boot, sub)?;
+    let mut start_config =
+        build_start_config(shape, &vm_name, &image, &boot, sdk_sidecar.as_ref(), sub)?;
     tracing::debug!(
         ms = t_build.elapsed().as_secs_f64() * 1000.0,
         "admit window: build_start_config"
@@ -1378,14 +1462,15 @@ pub fn resolve_launch(
     let t_admission = std::time::Instant::now();
     sub.start(SubPhase::AdmitPlan);
     if let Some(admit_fn) = admit
-        && let Some(sub) = admit_fn(
-            std::path::Path::new(&image.rootfs),
-            start_config
+        && let Some(sub) = admit_fn(AdmitInputs {
+            rootfs: std::path::Path::new(&image.rootfs),
+            kernel: start_config
                 .kernel_path
                 .as_deref()
                 .map(std::path::Path::new),
-            &vm_name,
-        )?
+            vm_name: &vm_name,
+            sdk_sidecar: sdk_sidecar.as_ref(),
+        })?
     {
         start_config.tenant_id = Some(sub.tenant_id);
         start_config.plan_json = Some(sub.plan_json);
@@ -1492,7 +1577,8 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
-            sdk_sidecar: None,
+            sdk_host_services: Vec::new(),
+            declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         }
     }
 
@@ -1566,7 +1652,8 @@ mod tests {
             pty: false,
             network_policy: &mvm_core::network_policy::NetworkPolicy::deny_all(),
             warm_pool_size: 0,
-            sdk_sidecar: None,
+            sdk_host_services: &[],
+            declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
             hypervisor: Some("wasm"),
         };
         let mut marks = LaunchResolveMarks::new(false);
@@ -1726,7 +1813,8 @@ mod tests {
             stdin: b"ignored".to_vec(),
             healthcheck: None,
             hypervisor: Some("mock".into()),
-            sdk_sidecar: None,
+            sdk_host_services: Vec::new(),
+            declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         };
 
         let shape = req.launch_shape();
@@ -1743,13 +1831,48 @@ mod tests {
         assert!(shape.pty);
         assert_eq!(shape.warm_pool_size, 3);
         assert_eq!(shape.hypervisor, Some("mock"));
-        assert!(shape.sdk_sidecar.is_none());
+        assert!(shape.sdk_host_services.is_empty());
         assert_eq!(*shape.network_policy, req.network_policy);
     }
 
     /// The whole point of the extraction: a bootable config, verity sidecars
     /// included, obtained without starting a VM. `pool warm` depends on this —
     /// a pre-warm that had to boot to learn its own boot shape would be no
+    /// The catalog declares a libc and the unpacker observes one. While they
+    /// agree there is nothing to say; the check exists for the day the
+    /// upstream tag is rebuilt on a different base and the declaration becomes
+    /// quietly wrong about every guest booted from it.
+    #[test]
+    fn a_declaration_matching_what_the_image_records_is_not_a_disagreement() {
+        use mvm_contract::guest_libc::GuestLibc;
+        for libc in [GuestLibc::Glibc, GuestLibc::Musl] {
+            assert!(refuse_declared_libc_disagreement(libc, libc).is_ok());
+        }
+    }
+
+    #[test]
+    fn a_declaration_the_image_contradicts_refuses_and_names_both() {
+        use mvm_contract::guest_libc::GuestLibc;
+        let err = refuse_declared_libc_disagreement(GuestLibc::Musl, GuestLibc::Glibc)
+            .expect_err("a drifted catalog entry must not boot silently");
+        let msg = err.to_string();
+        assert!(msg.contains("musl"), "must name the declaration: {msg}");
+        assert!(msg.contains("glibc"), "must name what was recorded: {msg}");
+    }
+
+    /// `Unknown` on either side is not a disagreement. An image the host has no
+    /// declaration for is the ordinary `--image` case — the one this whole
+    /// selection exists to serve — and an image that recorded no libc is
+    /// refused later by the resolver, with a message about what to do next.
+    /// Treating either as a conflict here would refuse both instead.
+    #[test]
+    fn an_unknown_on_either_side_is_not_a_disagreement() {
+        use mvm_contract::guest_libc::GuestLibc;
+        assert!(refuse_declared_libc_disagreement(GuestLibc::Unknown, GuestLibc::Musl).is_ok());
+        assert!(refuse_declared_libc_disagreement(GuestLibc::Musl, GuestLibc::Unknown).is_ok());
+        assert!(refuse_declared_libc_disagreement(GuestLibc::Unknown, GuestLibc::Unknown).is_ok());
+    }
+
     /// pre-warm at all.
     #[cfg(feature = "test-support")]
     #[test]
@@ -1793,7 +1916,8 @@ mod tests {
             pty: false,
             network_policy: &policy,
             warm_pool_size: 1,
-            sdk_sidecar: None,
+            sdk_host_services: Vec::new(),
+            declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
             hypervisor: Some("mock"),
         };
 
@@ -1877,7 +2001,8 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
-            sdk_sidecar: None,
+            sdk_host_services: Vec::new(),
+            declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         };
         assert_eq!(req.target_command(), "exec 'uname' '-a'");
     }
@@ -1904,7 +2029,8 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
-            sdk_sidecar: None,
+            sdk_host_services: Vec::new(),
+            declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         };
         let script = build_guest_wrapper(&req);
         assert!(script.starts_with("set -e\n"));
@@ -1939,7 +2065,8 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
-            sdk_sidecar: None,
+            sdk_host_services: Vec::new(),
+            declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         };
         let script = build_guest_wrapper(&req);
         let caller = script.find("export PATH='/usr/bin'").expect("caller PATH");
@@ -1993,7 +2120,8 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
-            sdk_sidecar: None,
+            sdk_host_services: Vec::new(),
+            declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         };
         assert_eq!(req.target_command(), "exec 'python' '-m' 'x'");
     }
@@ -2027,7 +2155,8 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
-            sdk_sidecar: None,
+            sdk_host_services: Vec::new(),
+            declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         };
         let script = build_guest_wrapper(&req);
         // Env from entrypoint exported.
@@ -2071,7 +2200,8 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
-            sdk_sidecar: None,
+            sdk_host_services: Vec::new(),
+            declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         };
         let script = build_guest_wrapper(&req);
         assert!(!script.contains("cd "));

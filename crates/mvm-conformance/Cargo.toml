@@ -48,7 +48,9 @@ serde_json.workspace = true
 # out of production builds.
 mvm-runtime = { workspace = true, features = ["test-support"] }
 mvm-core = { workspace = true, features = ["test-support"] }
-mvm-fs = { workspace = true }
+# `test-support` for `elf::test_fixture`: the sidecar resolver proves an
+# artifact's libc from its `DT_NEEDED`, so a staged fixture has to be a real ELF.
+mvm-fs = { workspace = true, features = ["test-support"] }
 # The overlay-aware guest sidecar (`GuestSidecar`) the warm-claim scenario
 # writes next to its synthetic parent rootfs, so the runner's overlay-contract
 # gate admits the cloned child exactly like a cold boot would. Same feature

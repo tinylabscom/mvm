@@ -45,7 +45,12 @@ fn sidecar_ext4_bytes() -> Vec<u8> {
         Node::File {
             path: "/lib/libmvm_host_services.so".into(),
             mode: 0o555,
-            data: b"\x7fELF-stub".to_vec(),
+            data: mvm_fs::elf::test_fixture::shared_object(&[
+                "libgcc_s.so.1",
+                SCENARIO_LIBC
+                    .libc_soname()
+                    .expect("a fixture names a real libc"),
+            ]),
             xattrs: Vec::new(),
         },
     ];

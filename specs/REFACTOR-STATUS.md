@@ -10,6 +10,18 @@ Last updated: 2026-09-01
       reads preserve retryable I/O sources. Focused regressions are green;
       broad validation and merge delivery remain.
 
+- [ ] **SDK sidecar selection from the image's own libc — issue #2969.**
+      `specs/sprint/delivery/sdk-sidecar-image-libc-selection.md`.
+      Closes the half #3044 named as remaining: the variant is chosen from the
+      libc the image recorded at materialization rather than from a catalogued
+      runtime's declaration, so an arbitrary `--image` selects correctly instead
+      of being refused as unknown. One resolution still feeds both the plan
+      grant and the attached volume, now through `AdmitInputs`. The declaration
+      keeps a job as a cross-check against the observed value, and the resolver
+      proves a cached artifact's libc from its own `DT_NEEDED` rather than from
+      the path it was filed under. Workspace tests, gated targets, Clippy and
+      the live `host.kv.v1` witness are green; merge delivery remains.
+
 - [ ] **Warm claim authenticated readiness — issue #3039.**
       `specs/plans/2026-08-31-warm-claim-authenticated-readiness.md`.
       A restored child advances only after an authenticated Ping proves its

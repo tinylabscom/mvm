@@ -1264,6 +1264,7 @@ mod tests {
                 "crates/mvm-cli/",
                 "crates/mvm-client/",
                 "crates/mvm-core/",
+                "crates/mvm-fs/",
                 "crates/mvm-runtime/",
                 "crates/mvm-backends/",
                 "crates/mvm-vmm/",

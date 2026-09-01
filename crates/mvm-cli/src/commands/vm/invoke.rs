@@ -451,10 +451,16 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
     let admit_ctx: std::rc::Rc<std::cell::RefCell<Option<super::up::AdmissionContext>>> =
         std::rc::Rc::new(std::cell::RefCell::new(None));
     let ctx_sink = std::rc::Rc::clone(&admit_ctx);
-    let admit = move |rootfs: &std::path::Path,
-                      kernel: Option<&std::path::Path>,
-                      vm_name: &str|
+    let admit = move |inputs: crate::exec::AdmitInputs<'_>|
           -> Result<Option<crate::exec::SessionAuditSubstrate>> {
+        // This path binds no SDK host service, so the launch resolution has no
+        // sidecar to hand over and the plan admits no share for one.
+        let crate::exec::AdmitInputs {
+            rootfs,
+            kernel,
+            vm_name,
+            sdk_sidecar: _,
+        } = inputs;
         let admitted = admit_entrypoint_boot(
             EntrypointAdmissionParams::builder(rootfs, kernel, vm_name, &admit_backend)
                 .cpus(cpus)

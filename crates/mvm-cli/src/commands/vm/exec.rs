@@ -638,9 +638,8 @@ pub(in crate::commands) fn run_secure_with_source(
     let admit_mem_mib = u64::from(parse_human_size(&args.memory).context("Invalid --memory")?);
     let admit_network_policy = network_policy.clone();
     let admit_agent_verb = args.agent_verb.clone();
-    let (admit_host_services, admit_sidecar) =
-        super::host_services::resolve_bindings_and_sidecar(&args.host_service, args.detected_libc)?;
-    let admit_sdk_sidecar_grant = admit_sidecar.map(|a| a.grant);
+    let admit_host_services =
+        super::host_services::parse_host_service_bindings(&args.host_service)?;
     let admit_pty = args.pty;
     let admit_has_argv = !args.argv.is_empty();
     let admit_is_dev = matches!(args.profile, RunProfile::Dev);
@@ -655,10 +654,14 @@ pub(in crate::commands) fn run_secure_with_source(
     // plan exists, so the provenance entry binds to the plan that booted.
     let oci_provenance: OciProvenanceSink = std::rc::Rc::new(std::cell::RefCell::new(None));
     let provenance_for_admit = std::rc::Rc::clone(&oci_provenance);
-    let admit = move |rootfs: &std::path::Path,
-                      kernel: Option<&std::path::Path>,
-                      vm_name: &str|
+    let admit = move |inputs: crate::exec::AdmitInputs<'_>|
           -> Result<Option<crate::exec::SessionAuditSubstrate>> {
+        let crate::exec::AdmitInputs {
+            rootfs,
+            kernel,
+            vm_name,
+            sdk_sidecar,
+        } = inputs;
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
         let ctx = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
             network_mode: admit_network_mode,
@@ -682,7 +685,14 @@ pub(in crate::commands) fn run_secure_with_source(
             policy_dir: None,
             bundle_pin: None,
             deps_volume: None,
-            shares: admit_sdk_sidecar_grant.clone().into_iter().collect(),
+            // The grant comes from the attachment the launch resolution chose,
+            // not from a second resolution here: one lookup produces the volume
+            // that is attached and the grant that admits it, so the plan cannot
+            // name bytes other than the ones mounted.
+            shares: sdk_sidecar
+                .map(|attachment| attachment.grant.clone())
+                .into_iter()
+                .collect(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: admit_network_policy.clone(),
             agent_verb_override: admit_agent_verb.clone(),
@@ -1216,8 +1226,7 @@ fn build_exec_request(
             }
         }
     };
-    let (_, sdk_sidecar) =
-        super::host_services::resolve_bindings_and_sidecar(&args.host_service, args.detected_libc)?;
+    let sdk_host_services = super::host_services::parse_host_service_bindings(&args.host_service)?;
     Ok(crate::exec::ExecRequest {
         name: args.vm_name,
         image,
@@ -1238,7 +1247,8 @@ fn build_exec_request(
         stdin: args.stdin,
         healthcheck: args.healthcheck,
         hypervisor: args.hypervisor,
-        sdk_sidecar,
+        sdk_host_services,
+        declared_libc: args.detected_libc,
     })
 }
 

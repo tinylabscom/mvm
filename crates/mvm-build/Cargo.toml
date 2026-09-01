@@ -149,6 +149,9 @@ required-features = ["manifest-verify"]
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
+# The sidecar resolver proves an artifact's libc from its `DT_NEEDED`, so a
+# test that seeds a sidecar cache needs a real ELF object, not a stub.
+mvm-fs = { workspace = true, features = ["test-support"] }
 # Test-only: `PackTrustConfig` (the operator trust config the producer's output
 # must verify against) stores publisher pubkeys base64-encoded, and there is no
 # constructor from a raw key. Already in the build graph via mvm-core; workspace-

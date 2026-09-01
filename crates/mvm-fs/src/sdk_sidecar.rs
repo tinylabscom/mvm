@@ -39,7 +39,11 @@ const MANIFEST_COVERED_FILES: [&str; 2] = [SDK_SIDECAR_IMAGE_FILE, SDK_SIDECAR_V
 /// the guest lookup path the language SDKs default to
 /// (`mvm_contract::plan::sdk_sidecar::SDK_SIDECAR_LIB_PATH`, mounted under
 /// `SDK_SIDECAR_GUEST_PATH`); the unit test below pins them together.
-const REQUIRED_SIDECAR_IMAGE_PATHS: &[&str] = &["/lib/libmvm_host_services.so"];
+const REQUIRED_SIDECAR_IMAGE_PATHS: &[&str] = &[SIDECAR_CDYLIB_IMAGE_PATH];
+
+/// In-image path of the host-services cdylib itself. Read to establish which
+/// libc the artifact was really built against.
+const SIDECAR_CDYLIB_IMAGE_PATH: &str = "/lib/libmvm_host_services.so";
 
 /// Failure resolving or validating a cached SDK-sidecar artifact.
 ///
@@ -119,6 +123,28 @@ pub enum SdkSidecarError {
         image: PathBuf,
         /// Human-readable description of the failure.
         reason: String,
+    },
+
+    /// The payload is not the libc variant its cache slot claims.
+    ///
+    /// The artifact itself is the only witness to this. A build can name a
+    /// musl target, link through the host `cc`, exit zero, and be installed
+    /// under `musl/` while carrying a glibc object — at which point the path,
+    /// the filename and the build log all agree and are all wrong. The guest
+    /// would report it as a relocation error from inside `dlopen`.
+    #[error(
+        "SDK sidecar at {image:?} is not a {expected} artifact: its cdylib records \
+         NEEDED {found:?}, expected {expected_soname:?}"
+    )]
+    PayloadLibcMismatch {
+        /// The image that was inspected.
+        image: PathBuf,
+        /// The variant the cache slot claims to hold.
+        expected: GuestLibc,
+        /// The libc soname that variant must record.
+        expected_soname: String,
+        /// The libc sonames the object actually records.
+        found: Vec<String>,
     },
 
     /// Underlying io failure during a file read.
@@ -294,7 +320,7 @@ impl SdkSidecarResolver {
         }
 
         let digests = verify_sidecar_dir_integrity(&layout.artifact_dir)?;
-        validate_sidecar_payload(&layout.image)?;
+        validate_sidecar_payload(&layout.image, libc)?;
 
         let image_sha256 = digests
             .into_iter()
@@ -342,9 +368,18 @@ pub fn verify_sidecar_dir_integrity(dir: &Path) -> Result<Vec<(String, String)>,
     Ok(verified)
 }
 
-/// Prove the sidecar ext4 payload carries every path the SDKs load from it.
+/// Prove the sidecar ext4 payload carries every path the SDKs load from it, and
+/// that its cdylib is built for `expected`.
+///
+/// The libc check reads the object's `DT_NEEDED` list. That is the only
+/// property of the artifact a mislabelled build cannot satisfy: the filename,
+/// the directory it sits in and the build's exit code all describe what was
+/// *asked for*, and this describes what was *produced*. `Unknown` names no
+/// soname and so cannot be proven — it is refused rather than waved through,
+/// for the same reason it is refused everywhere else.
+///
 /// Fails closed when the image can't be opened.
-pub fn validate_sidecar_payload(image: &Path) -> Result<(), SdkSidecarError> {
+pub fn validate_sidecar_payload(image: &Path, expected: GuestLibc) -> Result<(), SdkSidecarError> {
     let fs =
         ext4_view::Ext4::load_from_path(image).map_err(|e| SdkSidecarError::PayloadUnreadable {
             image: image.to_path_buf(),
@@ -363,6 +398,36 @@ pub fn validate_sidecar_payload(image: &Path) -> Result<(), SdkSidecarError> {
                 missing_path: (*required).to_string(),
             });
         }
+    }
+
+    let Some(expected_soname) = expected.libc_soname() else {
+        return Err(SdkSidecarError::PayloadLibcMismatch {
+            image: image.to_path_buf(),
+            expected,
+            expected_soname: String::new(),
+            found: Vec::new(),
+        });
+    };
+    let cdylib =
+        fs.read(SIDECAR_CDYLIB_IMAGE_PATH)
+            .map_err(|e| SdkSidecarError::PayloadUnreadable {
+                image: image.to_path_buf(),
+                reason: format!("read {SIDECAR_CDYLIB_IMAGE_PATH}: {e}"),
+            })?;
+    let needed =
+        crate::elf::needed_sonames(&cdylib).map_err(|e| SdkSidecarError::PayloadUnreadable {
+            image: image.to_path_buf(),
+            reason: format!("read the dynamic requirements of {SIDECAR_CDYLIB_IMAGE_PATH}: {e}"),
+        })?;
+    // Exact match, never a prefix: `libc.so` is a prefix of `libc.so.6`, so a
+    // `starts_with` here would accept a glibc object as musl.
+    if !needed.iter().any(|name| name == expected_soname) {
+        return Err(SdkSidecarError::PayloadLibcMismatch {
+            image: image.to_path_buf(),
+            expected,
+            expected_soname: expected_soname.to_string(),
+            found: needed,
+        });
     }
     Ok(())
 }
@@ -389,13 +454,23 @@ mod tests {
 
     /// A minimal ext4 image carrying `/lib/libmvm_host_services.so`, built with
     /// the in-repo pure-Rust writer so the fixture needs no `mkfs`.
-    fn sidecar_image_bytes(with_lib: bool) -> Vec<u8> {
+    ///
+    /// Every fixture below is `Musl` unless it says otherwise, matching the
+    /// slot the seeder files it under.
+    ///
+    /// The cdylib is a real little-endian ELF64 recording the `NEEDED` sonames
+    /// `libc` implies, because the resolver reads them. A stub would make every
+    /// libc assertion below pass for the wrong reason.
+    fn sidecar_image_bytes_for(with_lib: bool, libc: GuestLibc) -> Vec<u8> {
         use crate::ext4::Node;
         let payload = if with_lib {
             Node::File {
                 path: "/lib/libmvm_host_services.so".into(),
                 mode: 0o555,
-                data: b"\x7fELF-stub".to_vec(),
+                data: crate::elf::test_fixture::shared_object(&[
+                    "libgcc_s.so.1",
+                    libc.libc_soname().expect("a fixture names a real libc"),
+                ]),
                 xattrs: Vec::new(),
             }
         } else {
@@ -432,14 +507,37 @@ mod tests {
     }
 
     impl Fixture {
+        /// Seed the `slot` directory with an artifact built for `built_for`.
+        /// Passing two different values is how the mislabelled-artifact case is
+        /// reached — the one the build system can produce by accident.
+        fn seed_mislabelled(version: &str, slot: GuestLibc, built_for: GuestLibc) -> Self {
+            Self::seed_inner(version, true, false, slot, built_for)
+        }
+
         fn seed(version: &str, with_lib: bool, tamper_image: bool) -> Self {
+            Self::seed_inner(
+                version,
+                with_lib,
+                tamper_image,
+                GuestLibc::Musl,
+                GuestLibc::Musl,
+            )
+        }
+
+        fn seed_inner(
+            version: &str,
+            with_lib: bool,
+            tamper_image: bool,
+            slot: GuestLibc,
+            built_for: GuestLibc,
+        ) -> Self {
             let root = tempfile::tempdir().expect("tempdir");
             let cache = root.path().join("cache");
             let arch = "aarch64".to_string();
-            let layout = SdkSidecarLayout::under(&cache, version, &arch, GuestLibc::Musl);
+            let layout = SdkSidecarLayout::under(&cache, version, &arch, slot);
             std::fs::create_dir_all(&layout.artifact_dir).expect("mkdir artifact dir");
 
-            let image = sidecar_image_bytes(with_lib);
+            let image = sidecar_image_bytes_for(with_lib, built_for);
             let image_digest = sha256_hex(&image);
             let version_bytes = format!("{version}\n");
             let version_digest = sha256_hex(version_bytes.as_bytes());
@@ -698,6 +796,70 @@ mod tests {
             matches!(err, SdkSidecarError::InvalidVersionFile { .. }),
             "{err}"
         );
+    }
+
+    /// The artifact's own `DT_NEEDED` decides, not the directory it was found
+    /// in. A build that names a musl target and links through the host `cc`
+    /// exits zero and produces a glibc object; filed under `musl/` that would
+    /// otherwise be invisible until a guest failed to `dlopen` it.
+    #[test]
+    fn a_mislabelled_variant_fails_closed_on_its_own_soname() {
+        let f = Fixture::seed_mislabelled("1.2.3", GuestLibc::Musl, GuestLibc::Glibc);
+        let err = f
+            .resolver(&f.version)
+            .resolve(&f.arch, GuestLibc::Musl)
+            .expect_err("a glibc object in the musl slot must not resolve");
+        match err {
+            SdkSidecarError::PayloadLibcMismatch {
+                expected, found, ..
+            } => {
+                assert_eq!(expected, GuestLibc::Musl);
+                assert!(found.contains(&"libc.so.6".to_string()), "{found:?}");
+            }
+            other => panic!("expected a libc mismatch, got {other}"),
+        }
+    }
+
+    /// The mirror case, which a sloppy comparison would miss: `libc.so` is a
+    /// prefix of `libc.so.6`, so a `starts_with` check would accept a musl
+    /// object as glibc.
+    #[test]
+    fn a_musl_object_does_not_satisfy_the_glibc_slot() {
+        let f = Fixture::seed_mislabelled("1.2.3", GuestLibc::Glibc, GuestLibc::Musl);
+        assert!(matches!(
+            f.resolver(&f.version)
+                .resolve(&f.arch, GuestLibc::Glibc)
+                .expect_err("a musl object in the glibc slot must not resolve"),
+            SdkSidecarError::PayloadLibcMismatch { .. }
+        ));
+    }
+
+    /// A correctly-filed artifact still resolves. Without this the two tests
+    /// above would pass against a check that refused everything.
+    #[test]
+    fn a_correctly_built_variant_resolves_and_reports_its_libc() {
+        for libc in [GuestLibc::Glibc, GuestLibc::Musl] {
+            let f = Fixture::seed_mislabelled("1.2.3", libc, libc);
+            let artifact = f
+                .resolver(&f.version)
+                .resolve(&f.arch, libc)
+                .expect("a correctly built variant resolves");
+            assert_eq!(artifact.libc, libc);
+        }
+    }
+
+    /// `Unknown` names no soname, so no artifact can be proven to be it. The
+    /// resolver refuses rather than skipping the check for that arm — skipping
+    /// would make `Unknown` the one value that accepts any payload.
+    #[test]
+    fn an_unknown_slot_can_prove_nothing_and_is_refused() {
+        let f = Fixture::seed_mislabelled("1.2.3", GuestLibc::Unknown, GuestLibc::Musl);
+        assert!(matches!(
+            f.resolver(&f.version)
+                .resolve(&f.arch, GuestLibc::Unknown)
+                .expect_err("an unknown slot must not resolve"),
+            SdkSidecarError::PayloadLibcMismatch { .. }
+        ));
     }
 
     #[test]

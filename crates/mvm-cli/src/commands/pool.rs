@@ -2034,7 +2034,8 @@ mod tests {
             pty: false,
             network_policy: &policy,
             warm_pool_size: 1,
-            sdk_sidecar: None,
+            sdk_host_services: &[],
+            declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
             hypervisor: Some("mock"),
         };
         let resolve = |name| {
@@ -2372,7 +2373,10 @@ fn resolve_warm_launch(req: &WarmRequest) -> Result<crate::exec::ResolvedLaunch>
         pty: false,
         network_policy: &network_policy,
         warm_pool_size: req.target,
-        sdk_sidecar: None,
+        // A warm standby boots before any workload claims it, so it binds no
+        // host service and carries no sidecar.
+        sdk_host_services: &[],
+        declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         hypervisor: None,
     };
     crate::exec::resolve_launch(
