@@ -157,6 +157,23 @@ pub const POST_RESTORE_PROBE_INTERVAL: Duration = Duration::from_millis(50);
 /// another; tests pass their own.
 pub const POST_RESTORE_READY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Bound each authenticated readiness exchange so one accepted-but-unserved
+/// transport cannot consume the whole restore deadline in a blocking read.
+const POST_RESTORE_PROBE_IO_TIMEOUT: Duration = Duration::from_secs(1);
+
+fn authenticated_agent_is_ready(stream: &mut std::os::unix::net::UnixStream) -> bool {
+    if stream
+        .set_read_timeout(Some(POST_RESTORE_PROBE_IO_TIMEOUT))
+        .is_err()
+        || stream
+            .set_write_timeout(Some(POST_RESTORE_PROBE_IO_TIMEOUT))
+            .is_err()
+    {
+        return false;
+    }
+    mvm_agentd::vsock::probe_agent_ready(stream).is_ok()
+}
+
 /// After a snapshot restore resumes vCPUs, wait for the guest agent to be
 /// reachable (so a slow-to-reattach guest does not spuriously report
 /// `Undelivered`), then signal the guest to finish re-establishing itself.
@@ -258,9 +275,10 @@ impl PostRestoreSignal for VsockPostRestoreSignal {
         let Ok(transport) = crate::vsock_transport::for_vm(vm_name) else {
             return false;
         };
-        transport
-            .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
-            .is_ok()
+        let Ok(mut stream) = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT) else {
+            return false;
+        };
+        authenticated_agent_is_ready(&mut stream)
     }
 
     fn post_restore(&self, vm_name: &str) -> Result<PostRestoreOutcome> {
@@ -297,6 +315,63 @@ impl PostRestoreSignal for VsockPostRestoreSignal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::SigningKey;
+    use rand::Rng;
+    use std::os::unix::net::UnixStream;
+
+    fn seeded_host_signer(home: &std::path::Path) -> SigningKey {
+        let mut seed = [0u8; 32];
+        rand::rng().fill_bytes(&mut seed);
+        let keys = mvm_core::config::mvm_keys_dir();
+        assert!(keys.starts_with(home));
+        std::fs::create_dir_all(&keys).unwrap();
+        std::fs::write(keys.join("host-signer.ed25519"), seed).unwrap();
+        SigningKey::from_bytes(&seed)
+    }
+
+    #[test]
+    fn post_restore_readiness_rejects_a_connected_but_silent_guest() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let _host_key = seeded_host_signer(home.path());
+        let (mut host, guest) = UnixStream::pair().unwrap();
+        drop(guest);
+
+        assert!(!authenticated_agent_is_ready(&mut host));
+    }
+
+    #[test]
+    fn post_restore_readiness_accepts_an_authenticated_guest_ping() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let host_key = seeded_host_signer(home.path());
+        let anchor = host_key.verifying_key();
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        guest
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let guest_thread = std::thread::spawn(move || {
+            let mut guest_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut guest_seed);
+            let mut session = mvm_agentd::vsock::AuthenticatedSession::guest(
+                &mut guest,
+                SigningKey::from_bytes(&guest_seed),
+                &anchor,
+            )
+            .expect("guest handshake");
+            let request: mvm_agentd::vsock::GuestRequest =
+                session.read(&mut guest).expect("read readiness request");
+            assert!(matches!(request, mvm_agentd::vsock::GuestRequest::Ping));
+            session
+                .write(&mut guest, &mvm_agentd::vsock::GuestResponse::Pong)
+                .expect("write readiness response");
+        });
+
+        assert!(authenticated_agent_is_ready(&mut host));
+        guest_thread.join().unwrap();
+    }
 
     /// A mock signal source that becomes ready after a configurable number of
     /// probes so the "poll until ready, then send once" policy is testable

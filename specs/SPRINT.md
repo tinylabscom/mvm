@@ -10,6 +10,16 @@
 
 ## In progress
 
+- [ ] **Warm claim authenticated readiness — issue #3039.**
+      `specs/plans/2026-08-31-warm-claim-authenticated-readiness.md`.
+      Post-restore readiness now requires the existing authenticated guest-agent
+      Ping instead of a bare socket connection, with bounded per-probe I/O.
+      Explicit warm residency refuses a failed claim instead of silently
+      cold-booting; host-default warm residency remains best-effort. Focused
+      positive, silent-peer, and launch-policy regressions, workspace tests,
+      zero-warning Clippy, Linux/BDD gated compilation, and policy checks are
+      green. Merge delivery remains.
+
 - [ ] **Wasmtime security update — issues #3018 and #3020.**
       `specs/plans/2026-08-31-wasmtime-security-update.md`.
       The optional Wasm backend's locked Wasmtime family is updated from
