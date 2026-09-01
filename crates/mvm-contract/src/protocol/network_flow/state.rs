@@ -538,6 +538,7 @@ impl SessionValidator {
                 Ok(())
             }
             Opcode::Refused
+            | Opcode::ConnectFailed
             | Opcode::InboundRefused
             | Opcode::Reset
             | Opcode::CloseUdp

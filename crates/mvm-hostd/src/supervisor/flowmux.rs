@@ -722,7 +722,7 @@ impl FlowMuxSession {
             None => {
                 warn!(stream_id, %target, "FlowMux TCP connect failed");
                 let _ = lock_registry(&self.registry).retire(stream_id);
-                self.send_refused(stream_id, "connection failed")?;
+                self.send_connect_failed(stream_id, "connection failed")?;
                 self.emit_audit(
                     EventCategory::Host,
                     "host.flow.denied",
@@ -1380,6 +1380,13 @@ impl FlowMuxSession {
         warn!(stream_id, %reason, "FlowMux sending Refused");
         self.write_frame(Opcode::Refused, stream_id, reason.as_bytes())?;
         self.mark_sent(Opcode::Refused, stream_id);
+        Ok(())
+    }
+
+    fn send_connect_failed(&mut self, stream_id: u32, reason: &str) -> Result<(), FlowMuxError> {
+        warn!(stream_id, %reason, "FlowMux sending ConnectFailed");
+        self.write_frame(Opcode::ConnectFailed, stream_id, reason.as_bytes())?;
+        self.mark_sent(Opcode::ConnectFailed, stream_id);
         Ok(())
     }
 
@@ -2607,7 +2614,7 @@ mod tests {
             format!("{}:{}", ip, free_port).as_bytes(),
         );
         let (opcode, _stream_id, payload) = read_flowmux_frame(&mut guest, &mut guest_session);
-        assert_eq!(opcode, Opcode::Refused);
+        assert_eq!(opcode, Opcode::ConnectFailed);
         assert!(!payload.is_empty());
 
         drop(guest);

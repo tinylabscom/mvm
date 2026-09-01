@@ -527,7 +527,7 @@ mod tests {
 
     #[test]
     fn an_unknown_opcode_is_refused() {
-        for v in [0x00u8, 0x04, 0x17, 0x56, 0xff] {
+        for v in [0x00u8, 0x04, 0x18, 0x56, 0xff] {
             let mut bytes = encode(Opcode::Data, 1, b"x").expect("encode");
             bytes[LENGTH_PREFIX_LEN + 5] = v;
             assert_eq!(decode(&bytes), Err(FrameError::UnknownOpcode(v)));
@@ -748,6 +748,7 @@ mod tests {
             (Opcode::WindowUpdate, 0x14),
             (Opcode::HalfClose, 0x15),
             (Opcode::Reset, 0x16),
+            (Opcode::ConnectFailed, 0x17),
             (Opcode::OpenUdp, 0x20),
             (Opcode::UdpOpened, 0x21),
             (Opcode::UdpSend, 0x22),

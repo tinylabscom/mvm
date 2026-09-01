@@ -343,6 +343,12 @@ where
                     let _ = respond.send(Err(FlowMuxError::refused(reason)));
                 }
             }
+            Opcode::ConnectFailed => {
+                let reason = String::from_utf8_lossy(&payload).into_owned();
+                if let Some(pending) = self.pending_opens.remove(&stream_id) {
+                    complete_pending_open_error(pending, FlowMuxError::UpstreamConnect(reason));
+                }
+            }
             Opcode::Resolved => {
                 if let Some(respond) = self.pending_resolves.remove(&stream_id) {
                     let _ = respond.send(Ok(payload));
