@@ -373,16 +373,11 @@ warm_launch_artifacts() {
     && echo "    runtime overlay ready" \
     || echo "    runtime overlay: not warmed (scenarios needing it will say so)"
 
-  # Layout is cache/initramfs/<version>/<arch>/initramfs.cpio.gz. Globbed on
-  # version rather than hardcoded, so a version bump does not silently turn
-  # this check into "never cached" and pay the build every run.
-  if find "$E2E_HOME/cache/initramfs" -name initramfs.cpio.gz -size +0c 2>/dev/null \
-     | read -r _; then
-    echo "    universal initramfs already cached"
-    return 0
-  fi
-
-  echo "    building the universal initramfs once (cross-compiles guest binaries)"
+  # Always enter launch resolution. The initramfs cache key includes a source
+  # fingerprint that evicts an artifact containing guest binaries from an
+  # older checkout. A plain file-existence check bypasses that validation and
+  # can boot stale guest-agent behavior while testing a new host binary.
+  echo "    validating the source-matched universal initramfs"
   MVM_HOME="$E2E_HOME" "$MVMCTL" machine run --name bdd-warmup --image alpine \
     -- /bin/true >/dev/null 2>&1 &
   local warm_pid=$! waited=0

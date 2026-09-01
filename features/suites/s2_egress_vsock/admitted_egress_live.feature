@@ -20,7 +20,7 @@ Feature: Admitted egress completes end-to-end over the vsock seam
   @live
   Scenario: A non-admitted name is refused, not resolved
     When I run mvmctl with "machine run --image curlimages/curl:8.21.0 --allow-host example.com -- curl -fsSL https://not-admitted.test"
-    Then the command exits with code 1
+    Then the command exits with code 22
 
   @live @tls_tunnel_client
   Scenario: DNS queries land in the chain-signed audit log

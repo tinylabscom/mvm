@@ -27,8 +27,14 @@ Feature: Transient sandbox boot
 
   @live
   Scenario: machine run boots a transient sandbox from a Nix flake
-    When I run mvmctl in an isolated live home with "machine run --name bdd-nix-boot --flake examples/exit_code --timeout 120"
+    When I run mvmctl in an isolated live home with "machine run --name bdd-nix-boot --flake examples/exit_code"
     Then the command exits with code 7
+
+  @live
+  Scenario: a sealed flake refuses a timeout the backend cannot enforce
+    When I run mvmctl in an isolated live home with "machine run --name bdd-nix-timeout --flake examples/exit_code --timeout 120"
+    Then the command exits with code 1
+    And the error output contains "cannot enforce every declared grant"
 
   # The universal initramfs made the agent PID 1 and, for a while, carried over
   # only the mounting half of the older init. A workload booted with `lo` down

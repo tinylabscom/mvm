@@ -183,6 +183,12 @@
       unprivileged ICMP sockets, and carries the service-plane's read-only ext4
       fixture through transient launch resolution as a block volume instead of
       rejecting it as a directory share.
+      The next fully merged rerun proved the artifact warm-up bypassed the
+      initramfs source fingerprint whenever a cache file existed, so current
+      host code booted a stale guest agent. The warm-up now always validates
+      and rebuilds source-stale guest binaries. Firecracker also advertises its
+      u8 vCPU wire ceiling before serialization, and the live refusal witnesses
+      match child exit status, stderr ownership, and backend timeout admission.
       Focused tests, all ordinary workspace tests, the isolated `mvm-agentd`
       doctest, workspace Clippy, formatting, and repository policy gates are
       green. The live rerun and merge delivery remain.
