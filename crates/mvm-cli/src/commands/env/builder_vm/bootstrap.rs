@@ -399,7 +399,7 @@ pub(super) fn perform_builder_vm_download_published(arch: &str, out_dir: &str) -
                 "Builder VM image is missing and a fetch was requested, but this \
                  `mvmctl` was built without the `release-artifact-bootstrap` \
                  feature, so it cannot pull a published prebuilt. The in-repo \
-                 builder VM flake IS present at {flake_dir} — unset \
+                 builder VM flake IS present at {flake_dir}/flake.nix — unset \
                  `MVM_BOOT_IMAGE` (or set it to `build`) to build from it, \
                  which is what a source checkout is expected to do."
             );

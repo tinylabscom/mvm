@@ -310,6 +310,27 @@ fn stage0_locked_input_sources_read_builder_flake_lock() {
 /// it's the one contributors hit.
 #[cfg(not(feature = "release-artifact-bootstrap"))]
 #[test]
+fn the_refusal_says_the_flake_is_present_when_it_is() {
+    // The message used to assert the in-repo flake was missing without ever
+    // looking for one, so a checkout that had it — and had merely been routed
+    // down the fetch path by `MVM_BOOT_IMAGE=fetch` — sent the reader hunting
+    // for a file in front of them. These tests run from a source checkout, so
+    // this is the branch a contributor actually hits.
+    let err = perform_builder_vm_download_published("aarch64", "/tmp/mvm-flake-present-test")
+        .expect_err("download must refuse without release-artifact-bootstrap");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("IS present"),
+        "a checkout with the flake must not be told the flake is missing: {msg}"
+    );
+    assert!(
+        msg.contains("MVM_BOOT_IMAGE"),
+        "the message must name the knob that routed it here: {msg}"
+    );
+}
+
+#[cfg(not(feature = "release-artifact-bootstrap"))]
+#[test]
 fn perform_builder_vm_download_published_bails_without_feature() {
     let err = perform_builder_vm_download_published("aarch64", "/tmp/mvm-w4-test-out")
         .expect_err("download must refuse without release-artifact-bootstrap");
