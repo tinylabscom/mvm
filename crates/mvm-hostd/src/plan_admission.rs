@@ -2784,8 +2784,9 @@ mod tests {
     }
 
     /// A sidecar whose path carries no libc segment cannot be identified, and
-    /// an unidentifiable variant is refused rather than assumed to match. This
-    /// is the shape a cache written before the layout was keyed leaves behind.
+    /// an unidentifiable variant is refused rather than assumed to match. Any
+    /// path this layout did not write reads that way — the check is on what the
+    /// launch config presents, not on where it came from.
     #[test]
     fn a_sidecar_filed_under_no_libc_is_refused() {
         use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
