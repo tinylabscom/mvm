@@ -3,8 +3,9 @@
 Backing: shipped-source
 Validation: check-sprint-append
 
-**Status: IN PROGRESS — Stages A and B landed. Stage C (builder VM) is
-unstarted and gated on the `out` decision; Stage D (the gate) follows it.**
+**Status: IN PROGRESS — Stages A, B and D landed. No workload tier reaches
+virtio-fs, and a ratchet gate keeps it that way. Stage C is down to one path:
+the persistent HVF builder, which needs live Apple Silicon validation.**
 
 No guest gets a virtio-fs device. Not a workload, not the builder VM, not the
 dev-tier root. The host filesystem reaches a guest as a block image or it does
@@ -162,24 +163,59 @@ because the goal is *nowhere*, not *nowhere that matters*.
 
 Remaining shares are `work`, `out`, `job`, `mvm-bins` and the closure seed.
 
-- [ ] `work`, `job`, `mvm-bins`, closure seed — inbound and read-only. Same
-      treatment as Stage A; `work` is already done on Stage 0.
-- [ ] `out` is the hard one and needs a decision: the guest **writes** artifacts
-      the host must read back. Options: a writable virtio-blk image the host
-      mounts read-only after poweroff (needs a host-side ext4 *reader*, which
-      `mvm-fs` does not have — it has a writer); or stream artifacts out over
-      the existing vsock channel. Neither is free. Do not start Stage C until
-      this is chosen.
+**`out` is already solved, and this plan was wrong about it.** The decision it
+said to make — ext4 reader vs vsock stream — was moot before it was written.
+`mvm_build::builder_disk_transport` is a **raw tar written straight onto a disk
+image, no filesystem on the transport disk**: the host packs a tar and the guest
+`tar x`es it; the guest packs artifacts and the host `tar x`es them. Both sides
+only ever run `tar`, so no host-side ext4 reader is needed — which is exactly
+why it was built, since HVF's host is macOS and macOS can neither format nor
+read an ext4. tar's end-of-archive marker stops extraction before the disk's
+zero padding, so a fixed-size disk carrying a shorter archive round-trips.
+
+**The one-shot builder already uses it** (`libkrun_builder.rs` packs the input
+disk and reads the output disk; `builder_spec` lays out four disks in vda–vdd
+order and asks for no shares). What is left is narrower than "the builder VM":
+
+- [x] `work`, `job`, `mvm-bins`, closure seed — inbound. Done for the one-shot
+      builder via the disk transport; `work` was already done on Stage 0.
+- [ ] The **persistent** HVF builder (`persistent_builder_spec`) is the only
+      remaining share-based path. It is persistent — one VM, many dispatches,
+      exchanging files with the host *while running* — so a disk packed once at
+      boot does not drop in. It already carries a `GuestService::BuilderDispatch`
+      vsock channel and a `dispatch.ready` marker protocol, so the work is
+      extending a channel that exists rather than inventing a transport:
+      stream the per-dispatch job tar in and the artifact tar out over it.
+      Touches `mvm-host-vm-init`'s dispatch loop and the host dispatch client.
+- [ ] **Cannot be validated in CI or on a non-macOS host.** Every guest-booting
+      lane skips on hosted runners, and the persistent builder is what
+      `mvmctl build` uses on macOS 26+. Land this only behind a real
+      `mvmctl build` on Apple Silicon; a broken builder has no CI witness.
 - [ ] Delete `crates/mvm-vmm/src/host/virtiofsd.rs`, both QEMU call sites, and
       the `virtiofsd` host dependency from the Linux install docs.
 
 ### Stage D — the gate
 
-- [ ] `xtask check-no-virtio-fs`, modelled on `check-single-network-path`:
-      fails on `virtio_fs` / `VirtioFs` / `virtiofsd` / `add_virtio_fs`
-      anywhere in the workspace outside the libkrun FFI bindings, which declare
-      the C API whether or not we call it.
-- [ ] Add it to the CI gate list. A removal without a gate grows back.
+Landed **before** Stage C rather than after, as a ratchet. Waiting for the
+surface to reach zero before gating it meant the removal was unprotected for
+exactly as long as it took to finish — and the finishing is the slow part.
+
+- [x] `xtask check-no-virtio-fs`. It counts only sites that **attach a device or
+      construct a share** (`add_virtiofs*`, `VirtioFs::new`/`with_tag`,
+      `VirtioFsShare {`, `HvfVirtioFsShare {`, `krun_add_virtiofs`), with
+      comments and strings blanked first. The word-matching version the plan
+      originally described would have fired on ~70 files that merely discuss
+      virtio-fs, and could have been satisfied by rewording a comment instead of
+      deleting code.
+- [x] Pinned at **23 sites across 11 files**, each row carrying why it survives
+      and what retires it. The count must match exactly: a new site fails as
+      growth, and a *removed* one fails as a stale pin, so the table can only
+      shrink and cannot drift into a ceiling nobody maintains. Four rows from
+      the first draft turned out to be comment-only and were dropped — the gate
+      caught them itself.
+- [x] Added to `check-all`, which runs on every PR (`ci.yml`). Four tests ship
+      with it, including one asserting the pattern still matches every real
+      attach form: a gate that cannot fail is decoration.
 
 ## What this costs
 
@@ -191,7 +227,10 @@ Remaining shares are `work`, `out`, `job`, `mvm-bins` and the closure seed.
   on the *dispatch window* (`backend_start + vsock_wait`), and the mount spans
   are parented to `drives`, which is outside it. A launch with no `--mount` is
   unchanged, and a custom volume is already a block image.
-- **Stage C is weeks**, most of it in `out`, for a guest that runs our code.
+- **Stage C is smaller than "weeks"** — that estimate assumed `out` needed a
+  new mechanism, and it does not (see Stage C). What is left is one transport
+  swap on the persistent builder. The cost is not code volume; it is that no CI
+  lane can witness it.
 - **The QEMU workload driver may simply lose directory shares** rather than gain
   images — it is opt-in dev/test and `auto_select` never picks it, so it is the
   one place where deleting the feature outright is defensible.

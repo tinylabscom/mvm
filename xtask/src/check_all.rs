@@ -113,6 +113,7 @@ pub const GATES: &[Gate] = &[
         "check-single-network-path",
         crate::check_single_network_path::run,
     ),
+    ("check-no-virtio-fs", crate::check_no_virtio_fs::run),
     (
         "check-single-workload-env",
         crate::check_single_workload_env::run,
