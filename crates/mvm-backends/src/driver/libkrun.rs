@@ -51,11 +51,8 @@ impl Default for LibkrunDriver {
 /// use the virtio-console `console=hvc0` (there is no pl011 UART), and the
 /// root/init selection follows the boot shape. The shared cmdline assembler
 /// layers verity/grants/egress/uvols tokens on top of this.
-fn libkrun_base_bootargs(virtiofs_root: bool, has_disk: bool) -> String {
-    if virtiofs_root {
-        // Dev virtiofs-root boot: hvc0 console + the virtiofs guest root.
-        "console=hvc0 rootfstype=virtiofs root=mvmroot ro init=/init".to_string()
-    } else if has_disk {
+fn libkrun_base_bootargs(has_disk: bool) -> String {
+    if has_disk {
         "console=hvc0 root=/dev/vda ro init=/init".to_string()
     } else {
         // Verity / initramfs boot: the initramfs PID 1 owns root/init selection,
@@ -116,11 +113,10 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
     // (the shared assembler returns None when no extra tokens are needed); a
     // non-empty one already carries the console + root/init base plus every
     // layered token, so it is threaded verbatim.
-    let has_virtiofs_root = spec.shares.iter().any(|s| s.tag == "mvmroot");
     let has_disk = spec.initramfs.is_none() && !spec.blocks.is_empty();
     let trimmed = spec.cmdline.trim();
     let cmdline = if trimmed.is_empty() {
-        libkrun_base_bootargs(has_virtiofs_root, has_disk)
+        libkrun_base_bootargs(has_disk)
     } else {
         trimmed.to_string()
     };
@@ -130,17 +126,11 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
     // rootfs disk (plain-rootfs boot) or the first extra disk (initramfs boot,
     // where the initramfs PID 1 owns root selection), so an initramfs spec puts
     // every block in extra_disks and a plain spec pins slot 0 as the rootfs.
-    // A virtiofs-root boot has no block rootfs either; all blocks are extra disks.
     let mut ordered: Vec<&BlockDev> = spec.blocks.iter().collect();
     ordered.sort_by_key(|b| b.slot);
     match &spec.initramfs {
         Some(initramfs) => {
             krun.initramfs_path = Some(initramfs.to_string_lossy().into_owned());
-            for block in &ordered {
-                krun = attach_block(krun, block);
-            }
-        }
-        None if has_virtiofs_root => {
             for block in &ordered {
                 krun = attach_block(krun, block);
             }
@@ -363,8 +353,8 @@ impl VmmDriver for LibkrunDriver {
         }
     }
 
-    fn workload_base_bootargs(&self, virtiofs_root: bool, has_disk: bool) -> String {
-        libkrun_base_bootargs(virtiofs_root, has_disk)
+    fn workload_base_bootargs(&self, has_disk: bool) -> String {
+        libkrun_base_bootargs(has_disk)
     }
 
     #[tracing::instrument(
@@ -740,20 +730,18 @@ mod tests {
     #[test]
     fn workload_base_bootargs_uses_the_hvc0_console_not_ttyama0() {
         let d = LibkrunDriver::new();
-        let disk = d.workload_base_bootargs(false, true);
+        let disk = d.workload_base_bootargs(true);
         assert!(disk.contains("console=hvc0"), "got: {disk}");
         assert!(!disk.contains("ttyAMA0"), "got: {disk}");
         assert!(disk.contains("root=/dev/vda"), "got: {disk}");
 
         // Verity / initramfs base: hvc0 console only, no root/init token.
-        let verity = d.workload_base_bootargs(false, false);
+        let verity = d.workload_base_bootargs(false);
         assert_eq!(verity, "console=hvc0");
 
-        // The virtiofs-root variant still uses hvc0, not the pl011 UART.
-        let virtiofs = d.workload_base_bootargs(true, false);
-        assert!(virtiofs.contains("console=hvc0"), "got: {virtiofs}");
-        assert!(!virtiofs.contains("ttyAMA0"), "got: {virtiofs}");
-        assert!(virtiofs.contains("rootfstype=virtiofs"), "got: {virtiofs}");
+        // There is no third shape: the virtiofs-root variant is gone, so no
+        // base this driver produces can name a virtiofs root.
+        assert!(!disk.contains("virtiofs") && !verity.contains("virtiofs"));
     }
 
     #[test]
@@ -897,7 +885,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_config_treats_virtiofs_root_as_a_share_not_a_block() {
+    fn relay_config_maps_a_share_without_letting_it_steer_the_root() {
         let mut spec = spec_with(KernelImage::Path("/img/Image".into()), vec![], vec![]);
         spec.shares.push(VirtioFsShare {
             tag: "mvmroot".into(),
@@ -916,15 +904,18 @@ mod tests {
         assert_eq!(root.host_path, "/host/root");
         assert!(root.read_only);
         assert_eq!(root.shm_size, Some(VIRTIO_FS_DAX_SHM_SIZE));
-        // Empty cmdline ⇒ the driver supplies the virtiofs-root base.
-        assert_eq!(
-            cfg.krun.kernel_cmdline.as_deref(),
-            Some("console=hvc0 rootfstype=virtiofs root=mvmroot ro init=/init")
+        // A share no longer steers the root. It is still mapped — the builder
+        // VM depends on that — but the default cmdline names no virtiofs root,
+        // so a spec carrying only a share boots the console-only base.
+        let cmdline = cfg.krun.kernel_cmdline.as_deref().expect("cmdline");
+        assert!(
+            !cmdline.contains("virtiofs") && !cmdline.contains("root=mvmroot"),
+            "no default cmdline may boot a virtiofs root: {cmdline}"
         );
     }
 
     #[test]
-    fn relay_config_keeps_blocks_as_extras_when_virtiofs_root_is_present() {
+    fn relay_config_boots_the_block_rootfs_even_when_a_share_is_attached() {
         let mut spec = spec_with(
             KernelImage::Path("/img/Image".into()),
             vec![],
@@ -942,10 +933,11 @@ mod tests {
             dax: true,
         });
         let cfg = relay(&spec);
-        // The share is the root; the block is an extra disk, not /dev/vda rootfs.
-        assert_eq!(cfg.krun.rootfs_path, None);
-        assert_eq!(cfg.krun.extra_disks.len(), 1);
-        assert_eq!(cfg.krun.extra_disks[0].path, "/img/data.img");
+        // A share used to suppress the block rootfs so the guest booted from
+        // virtiofs. It no longer does: the first block is the rootfs whatever
+        // shares are attached, and the share is mounted alongside it.
+        assert_eq!(cfg.krun.rootfs_path.as_deref(), Some("/img/data.img"));
+        assert_eq!(cfg.krun.extra_disks.len(), 0);
         assert_eq!(cfg.krun.virtio_fs_mounts.len(), 1);
     }
 

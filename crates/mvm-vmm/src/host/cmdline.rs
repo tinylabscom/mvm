@@ -124,7 +124,7 @@ fn build_runtime_overlay_cmdline_args_for_layout(config: &VmStartConfig) -> Opti
 pub fn workload_cmdline(
     config: &VmStartConfig,
     state_dir: &Path,
-    base_bootargs: impl Fn(bool, bool) -> String,
+    base_bootargs: impl Fn(bool) -> String,
 ) -> Option<String> {
     workload_cmdline_for_hostname(config, state_dir, base_bootargs, Some(&config.name))
 }
@@ -132,7 +132,7 @@ pub fn workload_cmdline(
 fn workload_cmdline_for_hostname(
     config: &VmStartConfig,
     state_dir: &Path,
-    base_bootargs: impl Fn(bool, bool) -> String,
+    base_bootargs: impl Fn(bool) -> String,
     guest_hostname: Option<&str>,
 ) -> Option<String> {
     let egress = vsock_egress_cmdline_token(config, state_dir);
@@ -145,8 +145,7 @@ fn workload_cmdline_for_hostname(
     .into_iter()
     .flatten()
     .collect();
-    let virtiofs_root = config.virtiofs_root.is_some();
-    let has_disk = !virtiofs_root && !config.rootfs_path.is_empty();
+    let has_disk = !config.rootfs_path.is_empty();
     let verity_is_enabled = verity_enabled(config);
     if egress.is_none() && hostname.is_none() && grants.is_empty() && !verity_is_enabled {
         // Nothing mvm-specific to say and no initramfs boot: let the driver
@@ -160,9 +159,9 @@ fn workload_cmdline_for_hostname(
         // so the base carries only the VMM-specific console (has_disk=false).
         // Route through the driver seam — libkrun needs `console=hvc0`, HVF the
         // pl011 UART — instead of hardcoding one VMM's console onto every guest.
-        base_bootargs(virtiofs_root, false)
+        base_bootargs(false)
     } else {
-        base_bootargs(virtiofs_root, has_disk)
+        base_bootargs(has_disk)
     };
     // The universal initramfs receives the rootfs and runtime-overlay
     // roothashes/device paths over vsock via `ActivateEnvironment` after boot, so
@@ -199,7 +198,7 @@ fn workload_cmdline_for_hostname(
 pub fn runner_cmdline(
     config: &VmStartConfig,
     state_dir: &Path,
-    base_bootargs: impl Fn(bool, bool) -> String,
+    base_bootargs: impl Fn(bool) -> String,
 ) -> String {
     runner_cmdline_for_hostname(config, state_dir, base_bootargs, Some(&config.name))
 }
@@ -210,7 +209,7 @@ pub fn runner_cmdline(
 pub fn runner_cmdline_without_hostname(
     config: &VmStartConfig,
     state_dir: &Path,
-    base_bootargs: impl Fn(bool, bool) -> String,
+    base_bootargs: impl Fn(bool) -> String,
 ) -> String {
     runner_cmdline_for_hostname(config, state_dir, base_bootargs, None)
 }
@@ -218,7 +217,7 @@ pub fn runner_cmdline_without_hostname(
 fn runner_cmdline_for_hostname(
     config: &VmStartConfig,
     state_dir: &Path,
-    base_bootargs: impl Fn(bool, bool) -> String,
+    base_bootargs: impl Fn(bool) -> String,
     guest_hostname: Option<&str>,
 ) -> String {
     let base = workload_cmdline_for_hostname(config, state_dir, &base_bootargs, guest_hostname);
@@ -252,9 +251,8 @@ fn runner_cmdline_for_hostname(
     match base {
         Some(base) => format!("{base} {extra}"),
         None => {
-            let virtiofs_root = config.virtiofs_root.is_some();
-            let has_disk = !virtiofs_root && !config.rootfs_path.is_empty();
-            format!("{} {extra}", base_bootargs(virtiofs_root, has_disk))
+            let has_disk = !config.rootfs_path.is_empty();
+            format!("{} {extra}", base_bootargs(has_disk))
         }
     }
 }
@@ -283,13 +281,11 @@ mod tests {
 
     /// HVF-like base bootargs for tests (pl011 UART console). Keeps the
     /// cmdline tests independent of the HVF backend module.
-    fn hvf_like_workload_bootargs(virtiofs_root: bool, has_disk: bool) -> String {
+    fn hvf_like_workload_bootargs(has_disk: bool) -> String {
         const UART_BASE: u64 = 0x9000000; // matches fdt::SERIAL_MMIO_BASE historically
         let mut args =
             format!("earlycon=pl011,0x{UART_BASE:x} console=ttyAMA0 panic=-1 nokaslr loglevel=8");
-        if virtiofs_root {
-            args.push_str(" rootfstype=virtiofs root=mvmroot rw init=/init");
-        } else if has_disk {
+        if has_disk {
             args.push_str(" root=/dev/vda rw init=/init");
         }
         args
@@ -481,11 +477,11 @@ mod tests {
     }
 
     #[test]
-    fn workload_cmdline_appends_vsock_egress_token_for_virtiofs_root() {
+    fn workload_cmdline_appends_the_vsock_egress_token_for_a_block_root() {
         let dir = tempfile::tempdir().unwrap();
 
         let config = VmStartConfig {
-            virtiofs_root: Some("/tmp/root".to_string()),
+            rootfs_path: "/img/rootfs.ext4".to_string(),
             network_policy: mvm_core::network_policy::NetworkPolicy::allow_list(vec![
                 mvm_core::network_policy::HostPort::new("example.com", 443),
             ]),
@@ -493,9 +489,14 @@ mod tests {
         };
         let cmdline =
             workload_cmdline(&config, dir.path(), hvf_like_workload_bootargs).expect("cmdline");
-        assert!(cmdline.contains("rootfstype=virtiofs root=mvmroot"));
         assert!(cmdline.contains("init=/init"));
         assert!(cmdline.contains("mvm.vsock_egress=1"));
+        // The root strategy this was written around is gone; the egress token
+        // it also asserted is not, which is why the test survives it.
+        assert!(
+            !cmdline.contains("virtiofs"),
+            "no cmdline may name virtiofs: {cmdline}"
+        );
     }
 
     /// A verity boot whose initramfs is the *universal* one (resolved out of the
@@ -568,7 +569,7 @@ mod tests {
         };
         // libkrun's base: a verity boot (has_disk=false) carries only the
         // console; a disk boot adds root/init.
-        let libkrun_base = |_virtiofs: bool, has_disk: bool| {
+        let libkrun_base = |has_disk: bool| {
             if has_disk {
                 "console=hvc0 root=/dev/vda rw init=/init".to_string()
             } else {

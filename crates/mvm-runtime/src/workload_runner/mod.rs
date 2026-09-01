@@ -33,7 +33,7 @@ pub fn assemble_workload_cmdline_for_test(
     config: &mvm_core::vm_backend::VmStartConfig,
     state_dir: &std::path::Path,
 ) -> String {
-    mvm_vmm::host::cmdline::runner_cmdline(config, state_dir, |virtiofs_root, has_disk| {
-        driver.workload_base_bootargs(virtiofs_root, has_disk)
+    mvm_vmm::host::cmdline::runner_cmdline(config, state_dir, |has_disk| {
+        driver.workload_base_bootargs(has_disk)
     })
 }

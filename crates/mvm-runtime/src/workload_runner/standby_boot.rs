@@ -248,7 +248,7 @@ pub fn factory_parent_config(
 pub fn factory_parent_spec(
     config: &VmStartConfig,
     state_dir: &Path,
-    base_bootargs: impl Fn(bool, bool) -> String,
+    base_bootargs: impl Fn(bool) -> String,
 ) -> VmmSpec {
     factory_parent_spec_inner(config, state_dir, base_bootargs, false)
 }
@@ -259,7 +259,7 @@ pub fn factory_parent_spec(
 pub fn factory_parent_spec_live(
     config: &VmStartConfig,
     state_dir: &Path,
-    base_bootargs: impl Fn(bool, bool) -> String,
+    base_bootargs: impl Fn(bool) -> String,
 ) -> VmmSpec {
     factory_parent_spec_inner(config, state_dir, base_bootargs, true)
 }
@@ -267,7 +267,7 @@ pub fn factory_parent_spec_live(
 fn factory_parent_spec_inner(
     config: &VmStartConfig,
     state_dir: &Path,
-    base_bootargs: impl Fn(bool, bool) -> String,
+    base_bootargs: impl Fn(bool) -> String,
     live_handoff: bool,
 ) -> VmmSpec {
     let cmdline = cmdline::runner_cmdline_without_hostname(config, state_dir, base_bootargs);
@@ -327,7 +327,7 @@ mod tests {
     /// the console, and the disk shape adds rootwait/init (never a `root=`
     /// declaration — Firecracker appends the authoritative one from the root
     /// drive's flags).
-    fn fc_base(_virtiofs_root: bool, has_disk: bool) -> String {
+    fn fc_base(has_disk: bool) -> String {
         let console = "console=ttyS0 reboot=k panic=1 net.ifnames=0";
         if has_disk {
             format!("{console} rootwait init=/init")

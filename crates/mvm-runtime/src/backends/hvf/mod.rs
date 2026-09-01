@@ -14,9 +14,7 @@ mod sys;
 mod vcpu;
 
 pub use mvm_backends::driver::hvf::HvfDriver;
-pub use mvm_backends::driver::hvf_bootargs::{
-    default_bootargs, default_virtiofs_bootargs, workload_bootargs,
-};
+pub use mvm_backends::driver::hvf_bootargs::{default_bootargs, workload_bootargs};
 pub use mvm_vmm::vmm::virtio::DiskImage;
 
 pub use boot_smoke::{BootFault, BootProof, HvfError, MAGIC, boot_smoke, probe_available};

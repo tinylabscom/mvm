@@ -157,13 +157,10 @@ mod tests {
         let parent_boot = |launch: &VmStartConfig| {
             let spec = spec_for(launch);
             let cfg = factory_parent_config(launch, &spec).unwrap();
-            let boot = factory_parent_spec(
-                &cfg,
-                std::path::Path::new(&spec.vm_state_dir),
-                |virtiofs_root, has_disk| {
-                    FcDriver::new().workload_base_bootargs(virtiofs_root, has_disk)
-                },
-            );
+            let boot =
+                factory_parent_spec(&cfg, std::path::Path::new(&spec.vm_state_dir), |has_disk| {
+                    FcDriver::new().workload_base_bootargs(has_disk)
+                });
             (spec.vsock_egress, boot)
         };
 

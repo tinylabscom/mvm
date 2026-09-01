@@ -848,8 +848,8 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             ))
         })?;
 
-        let boot = factory_parent_spec(&parent_config, &state_dir, |virtiofs_root, has_disk| {
-            self.driver.workload_base_bootargs(virtiofs_root, has_disk)
+        let boot = factory_parent_spec(&parent_config, &state_dir, |has_disk| {
+            self.driver.workload_base_bootargs(has_disk)
         });
         // The same truncation refusal a workload boot gets, for the same reason
         // and then some: a child inherits its parent's cmdline out of restored
@@ -2374,7 +2374,7 @@ mod tests {
         assert_eq!(specs.len(), 1);
         let cmdline = &specs[0].cmdline;
 
-        let expected_base = driver.workload_base_bootargs(false, true);
+        let expected_base = driver.workload_base_bootargs(true);
         assert!(
             cmdline.starts_with(&expected_base),
             "cmdline did not start with the driver's base bootargs {expected_base:?}: {cmdline}"

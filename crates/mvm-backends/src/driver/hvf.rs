@@ -679,8 +679,8 @@ impl VmmDriver for HvfDriver {
         bail!("hvf does not provide guest channel info")
     }
 
-    fn workload_base_bootargs(&self, virtiofs_root: bool, has_disk: bool) -> String {
-        crate::driver::hvf_bootargs::workload_bootargs(virtiofs_root, has_disk)
+    fn workload_base_bootargs(&self, has_disk: bool) -> String {
+        crate::driver::hvf_bootargs::workload_bootargs(has_disk)
     }
 }
 
@@ -1175,12 +1175,12 @@ mod tests {
     fn workload_base_bootargs_delegates_to_hvf_bootargs() {
         let d = HvfDriver::new();
         assert_eq!(
-            d.workload_base_bootargs(false, true),
-            crate::driver::hvf_bootargs::workload_bootargs(false, true)
+            d.workload_base_bootargs(true),
+            crate::driver::hvf_bootargs::workload_bootargs(true)
         );
         assert_eq!(
-            d.workload_base_bootargs(true, false),
-            crate::driver::hvf_bootargs::workload_bootargs(true, false)
+            d.workload_base_bootargs(false),
+            crate::driver::hvf_bootargs::workload_bootargs(false)
         );
     }
 

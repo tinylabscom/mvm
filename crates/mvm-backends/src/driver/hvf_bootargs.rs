@@ -18,21 +18,9 @@ pub fn default_bootargs(has_disk: bool) -> String {
     args
 }
 
-/// Cmdline used for virtiofs-root dev boots.
-pub fn default_virtiofs_bootargs() -> String {
-    format!(
-        "earlycon=pl011,0x{UART_BASE:x} console=ttyAMA0 panic=-1 nokaslr loglevel=8 \
-         rootfstype=virtiofs root=mvmroot ro init=/init"
-    )
-}
-
-/// Default workload kernel cmdline for the chosen root strategy.
-pub fn workload_bootargs(virtiofs_root: bool, has_disk: bool) -> String {
-    if virtiofs_root {
-        default_virtiofs_bootargs()
-    } else {
-        default_bootargs(has_disk)
-    }
+/// Default workload kernel cmdline.
+pub fn workload_bootargs(has_disk: bool) -> String {
+    default_bootargs(has_disk)
 }
 
 #[cfg(test)]

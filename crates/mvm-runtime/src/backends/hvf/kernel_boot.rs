@@ -31,7 +31,7 @@ use super::smp::{CreationOrder, Release, SecondaryGates, VcpuStart, psci};
 use super::snapshot::{HVF_SNAPSHOT_BACKEND_KIND, HvfVcpuState};
 use super::sys::*;
 use super::vcpu::esr_ec;
-use super::{BootFault, default_bootargs, default_virtiofs_bootargs};
+use super::{BootFault, default_bootargs};
 use crate::vmm::device::Pl011;
 use crate::vmm::device_state::{SnapshotDeviceState, capture_device_states};
 use crate::vmm::hv::{CoreReg, HypervisorVcpu, SysReg, VcpuHandle};
@@ -741,13 +741,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
     let mut bootargs = std::env::var("MVM_HVF_BOOTARGS")
         .ok()
         .or_else(|| channels.cmdline.clone())
-        .unwrap_or_else(|| {
-            if channels.virtiofs_root.is_some() {
-                default_virtiofs_bootargs()
-            } else {
-                default_bootargs(!disks.is_empty())
-            }
-        });
+        .unwrap_or_else(|| default_bootargs(!disks.is_empty()));
     if let Ok(extra) = std::env::var("MVM_HVF_BOOTARGS_EXTRA") {
         let extra = extra.trim();
         if !extra.is_empty() {
