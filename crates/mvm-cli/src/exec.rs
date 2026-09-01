@@ -1410,6 +1410,24 @@ pub fn resolve_launch(
         start_config.bundle_json = sub.bundle_json;
         start_config.config_files.extend(sub.config_files);
         use_snapshot = false;
+
+        // The sidecar gate, on the path that actually reaches a guest.
+        //
+        // It lives with the other post-admission gates in `mvm-hostd`, which
+        // only `admit_and_start` runs; this path admits through `admit_for_run`
+        // and would otherwise skip it entirely. Here is the first point where
+        // both facts exist: the plan that authorized the binding, and the
+        // rootfs whose recorded libc says whether the attached sidecar can be
+        // loaded at all.
+        if let Some(plan_json) = start_config.plan_json.as_deref() {
+            let plan: mvm_core::plan::ExecutionPlan = serde_json::from_str(plan_json)
+                .context("re-reading the admitted plan to check the SDK sidecar attachment")?;
+            mvm_hostd::plan_admission::enforce_sdk_sidecar_for_launch(
+                &image.rootfs,
+                &start_config.volumes,
+                &plan,
+            )?;
+        }
     }
     sub.finish(SubPhase::AdmitPlan);
     tracing::debug!(

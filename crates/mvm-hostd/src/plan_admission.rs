@@ -1430,6 +1430,25 @@ pub fn enforce_sdk_sidecar_attachment(
     Ok(())
 }
 
+/// Refuse a launch whose SDK sidecar the guest could not load.
+///
+/// The launch-shaped entry point onto [`enforce_sdk_sidecar_attachment`], for
+/// callers that hold a rootfs path and a launch config rather than an
+/// `AdmittedPlan`. `mvmctl run` is one: it admits through `admit_for_run`, which
+/// does not run the post-admission gates, so without this the only thing
+/// standing between a libc mismatch and the guest is nothing at all — the boot
+/// succeeds and the workload dies on `dlopen` resolving `_dl_find_object`.
+///
+/// Takes the rootfs path rather than the libc so the caller cannot supply a
+/// libc that disagrees with the image it is about to boot.
+pub fn enforce_sdk_sidecar_for_launch(
+    rootfs_path: &str,
+    volumes: &[mvm_core::vm_backend::VmVolume],
+    plan: &ExecutionPlan,
+) -> Result<()> {
+    enforce_sdk_sidecar_attachment(volumes, plan, recorded_image_libc(rootfs_path))
+}
+
 /// The libc recorded beside a workload rootfs, or [`GuestLibc::Unknown`].
 ///
 /// Anything unreadable — no sidecar, malformed JSON, a rootfs path with no
@@ -2704,6 +2723,66 @@ mod tests {
     /// otherwise land inside the guest at `dlopen` time as a relocation error
     /// naming a symbol the operator never heard of. Refuse on the host, where
     /// the cause can be named.
+    /// Stage a rootfs whose `mvm-meta.json` records `libc`, and hand back the
+    /// rootfs path the launch would boot.
+    fn rootfs_recording_libc(dir: &std::path::Path, libc: GuestLibc) -> String {
+        let sidecar = mvm_build::builder_vm::GuestSidecar::for_oci_run("fixture", false, false)
+            .with_libc(libc);
+        sidecar.write_to_dir(dir).expect("write mvm-meta.json");
+        dir.join("rootfs.ext4").to_string_lossy().into_owned()
+    }
+
+    /// The launch-shaped entry point reads the image's libc off the rootfs
+    /// rather than taking it on trust, so a caller cannot pass a libc that
+    /// disagrees with the image it is about to boot.
+    #[test]
+    fn the_launch_gate_reads_the_libc_off_the_rootfs_it_is_given() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plan = plan_binding(&["host.kv.v1"]);
+
+        let musl_rootfs = rootfs_recording_libc(dir.path(), GuestLibc::Musl);
+        enforce_sdk_sidecar_for_launch(
+            &musl_rootfs,
+            &[sdk_sidecar_volume_for(GuestLibc::Musl)],
+            &plan,
+        )
+        .expect("a musl image may load the musl sidecar");
+
+        let err = enforce_sdk_sidecar_for_launch(
+            &musl_rootfs,
+            &[sdk_sidecar_volume_for(GuestLibc::Glibc)],
+            &plan,
+        )
+        .expect_err("a musl image must not receive the glibc sidecar");
+        let msg = err.to_string();
+        assert!(msg.contains("musl") && msg.contains("glibc"), "{msg}");
+    }
+
+    /// A rootfs with no sidecar beside it records nothing, and an image whose
+    /// libc cannot be established is refused rather than assumed loadable.
+    #[test]
+    fn the_launch_gate_refuses_an_image_recording_no_libc() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plan = plan_binding(&["host.kv.v1"]);
+        let rootfs = dir
+            .path()
+            .join("rootfs.ext4")
+            .to_string_lossy()
+            .into_owned();
+
+        let err = enforce_sdk_sidecar_for_launch(
+            &rootfs,
+            &[sdk_sidecar_volume_for(GuestLibc::Musl)],
+            &plan,
+        )
+        .expect_err("an image of unknown libc must not receive a sidecar");
+
+        assert!(
+            err.to_string().contains("records no libc"),
+            "the refusal must say the image is the unknown side: {err}"
+        );
+    }
+
     /// A sidecar whose path carries no libc segment cannot be identified, and
     /// an unidentifiable variant is refused rather than assumed to match. This
     /// is the shape a cache written before the layout was keyed leaves behind.
