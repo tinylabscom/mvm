@@ -68,9 +68,17 @@ Last updated: 2026-09-01
       dev-tier virtio-fs root is deleted end to end — the tier gate, the
       capability, the launch-config field, the driver bootargs arm, and the HVF
       device model's root channel including the `MVM_HVF_VIRTIOFS_ROOT` env hook
-      that bypassed the gate. Stage C (the builder VM's `work`/`job`/`out`/
-      `mvm-bins` shares) is unstarted and blocked on deciding how `out` returns
-      artifacts; Stage D (`xtask check-no-virtio-fs`) follows it.
+      that bypassed the gate. Stage D (`xtask check-no-virtio-fs`) landed early
+      as a ratchet rather than last. Stage C was never blocked on how `out`
+      returns artifacts — `builder_disk_transport` had already solved it as a
+      raw tar on a disk, needing no host-side ext4 reader — and its QEMU half
+      has landed: both one-shot QEMU builder sites carry job and artifacts over
+      that transport, with the `virtiofsd` spawn loops, the shared memory
+      backend and the `vhost-user-fs-pci` devices deleted. Widening the gate's
+      pattern to the `add_virtio_fs` spelling and the `virtiofsd` spawn side
+      took it from 23 pinned sites to 54. Remaining: the persistent HVF builder
+      (needs live Apple Silicon) and libkrun's seeded closure, which is still a
+      virtio-fs share the transport helper can now carry.
 
 - [ ] **Warm standby image claim repair — issue #3002.**
       `specs/plans/2026-08-28-warm-standby-image-claim.md`.

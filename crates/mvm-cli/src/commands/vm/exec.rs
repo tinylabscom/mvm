@@ -294,8 +294,23 @@ pub(in crate::commands) struct RunArgs {
     /// Select a security profile.
     #[arg(long, value_enum, default_value = "standard")]
     pub profile: RunProfile,
-    /// Attach a read-only host directory (needs virtio-fs, repeatable).
-    #[arg(long = "mount", visible_alias = "volume", value_name = "HOST:GUEST:ro")]
+    // One flag, two shapes, dispatched by `parse_volume_spec`:
+    // `HOST:/GUEST[:ro]` materializes the directory into an ext4 image and
+    // attaches it as a block device — every backend serves it, and the image is
+    // a snapshot taken at boot, so host edits mid-run are not visible.
+    // `HOST:/GUEST:SIZE[:ro][:enc]` attaches a disk instead, which is what the
+    // `--volume` spelling reads naturally as. A transient run is read-only
+    // either way.
+    //
+    // Deliberately a plain comment, not a doc comment: clap derives `long_help`
+    // from doc comments and `machine_run_option_summaries_stay_short` caps that
+    // at 64 characters too, so the detail belongs in the CLI reference.
+    /// Attach a host directory snapshot or a sized disk image.
+    #[arg(
+        long = "mount",
+        visible_alias = "volume",
+        value_name = "HOST:GUEST[:ro|SIZE]"
+    )]
     pub mounts: Vec<String>,
     /// Not a flag: the libc of the image this run will boot, when it is known
     /// before the rootfs exists. A catalogued `--runtime` pins its image, so

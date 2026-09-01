@@ -93,10 +93,11 @@ mvmctl machine run --image alpine -- sh -c "echo hello from a microVM && uname -
 mvmctl machine run --image python:3.12 -- python -c "print(2 + 2)"
 
 # Run a Python file from the host checkout (the mount is read-only).
-# Repeat --mount for additional host directories.
-# --mount needs a backend serving a virtio-fs directory share (libkrun, HVF).
-# Firecracker (the Linux default) has none and refuses before boot: pass a
-# disk-image volume instead, --volume HOST:/GUEST:SIZE.
+# Repeat --mount for additional host directories. Every backend serves it:
+# the directory is materialized into an ext4 image and attached as a block
+# device, so there is no virtio-fs requirement and Firecracker takes it too.
+# The image is a snapshot taken at boot — host edits mid-run are not visible.
+# For a sized disk instead of a directory, --volume HOST:/GUEST:SIZE.
 mvmctl machine run --image python:3.12 \
   --mount "$PWD:/work:ro" -- python /work/app.py
 
