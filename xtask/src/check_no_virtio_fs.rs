@@ -115,11 +115,11 @@ const PINNED: &[(&str, usize, &str)] = &[
     // ── builder VM: our own trusted build engine ────────────────────────────
     (
         "crates/mvm-build/src/libkrun_builder.rs",
-        13,
-        "the libkrun builder's work/out/job/mvm-bins shares on the paths that \
-         predate the disk transport, plus the seeded-closure share the \
-         one-shot transport paths still attach. Retired by passing the NAR to \
-         `prepare_builder_transport_disks`, which now takes it",
+        11,
+        "the libkrun builder's work/out/job/mvm-bins shares on the Stage 0 \
+         RootDir path, which boots a virtio-fs root and so predates the disk \
+         transport entirely. The one-shot transport paths carry nothing over \
+         virtio-fs now that the seeded closure rides the input disk",
     ),
     (
         "crates/mvm-backends/src/driver/fc.rs",
