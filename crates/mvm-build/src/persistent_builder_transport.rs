@@ -67,19 +67,47 @@ pub fn repack_dispatch_input(
     job_id: &str,
 ) -> std::io::Result<()> {
     let floor = std::fs::metadata(&transport.input_disk)?.len();
-    let job_sub = session_job_dir.join(job_id);
+
+    // Stage this dispatch alone under a `job` root, and archive that root as a
+    // tree. Two things depend on the shape:
+    //
+    // - The guest extracts with `tar xf <dev> -C <stage> job`, naming `job` as
+    //   a member. Archiving entries as `job/<job_id>/…` with no `job/` entry of
+    //   their own does not give it that member and the extraction fails.
+    // - Archiving `session_job_dir` directly would give it, but would also
+    //   carry every earlier dispatch — including the artifacts read back into
+    //   `<job_id>/out/`, which is a whole guest image by the second build.
+    let staging = tempfile::TempDir::new()?;
+    let staged_job = staging.path().join(job_id);
+    copy_dir(&session_job_dir.join(job_id), &staged_job)?;
+
     crate::builder_disk_transport::pack_input_disk(
         &[crate::builder_disk_transport::InputTree {
-            // Archived under the job id so the guest resolves the same
-            // `/job/<job_id>/cmd.sh` the `Run` frame's relpath names.
-            name: &format!("job/{job_id}"),
-            src: &job_sub,
+            name: "job",
+            src: staging.path(),
         }],
         None,
         &transport.input_disk,
         floor,
     )
     .map_err(std::io::Error::other)
+}
+
+/// Plain recursive copy of a dispatch's staged job dir. Deliberately not
+/// `copy_dir_filtered`: that one drops build-output directories, and a job dir
+/// legitimately contains a directory named `out`.
+fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &to)?;
+        } else {
+            std::fs::copy(entry.path(), &to)?;
+        }
+    }
+    Ok(())
 }
 
 /// Extract the artifact tar the guest wrote for this dispatch into the host
@@ -150,6 +178,32 @@ mod tests {
         assert!(
             !dest.join("job/old-job").exists(),
             "a repack must not carry the previous dispatch's artifacts"
+        );
+    }
+
+    #[test]
+    fn a_repacked_input_disk_carries_job_as_a_tree_the_guest_can_name() {
+        // The guest extracts with `tar xf <dev> -C <stage> job`, naming `job`
+        // as an archive member. Entries called `job/<id>/…` with no `job/`
+        // entry of their own do not give it that member, and the extraction
+        // fails with a message about the member rather than about the shape.
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let job_dir = scratch.path().join("jobs");
+        std::fs::create_dir_all(job_dir.join("j1")).unwrap();
+        std::fs::write(job_dir.join("j1").join("cmd.sh"), b"#!/bin/sh\n").unwrap();
+        let t = transport_at(scratch.path());
+        crate::builder_disk_transport::create_output_disk(&t.input_disk, 1 << 20).unwrap();
+
+        repack_dispatch_input(&t, &job_dir, "j1").expect("repack");
+
+        let names: Vec<String> = tar::Archive::new(std::fs::File::open(&t.input_disk).unwrap())
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().path().unwrap().display().to_string())
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "job" || n == "job/"),
+            "the archive must carry `job` as its own entry, got {names:?}"
         );
     }
 

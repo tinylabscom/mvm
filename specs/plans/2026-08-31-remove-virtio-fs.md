@@ -366,6 +366,17 @@ Five coordinated changes, host and guest:
       flip. Flipping the host first against an old baked guest hangs the
       dispatch loop with no useful error. Done: the guest half shipped first,
       and the builder image must be rebuilt before this host flip is exercised.
+- [ ] **The persistent builder's network endpoint does not outlive the command
+      that spawns it.** Found by the live run: the session boots, dispatches,
+      and re-stages correctly, but the guest's egress client loses its only
+      route to the network mid-build (`FlowMux reconnect exhausted`) because
+      the host-side `mvm-network-endpoint` has already exited. The one-shot
+      builder never hits this — its endpoint's lifetime *is* the VM's. Needs a
+      detached spawn plus a reap on `stop`; it is claim-10 infrastructure, so
+      it wants its own change rather than a rider on this one. **This is what
+      blocks a completed build through the persistent HVF builder**, and with
+      it the only unproven leg of the disk transport (`read_dispatch_artifacts`
+      against a real output disk).
 - [x] **The QEMU builder needs the same migration, and the plan missed it.**
       **Landed.** Both one-shot sites are on the disk transport; the `virtiofsd`
       spawn loops, the `memory-backend-memfd` + `-numa` object and the
@@ -462,7 +473,6 @@ Five coordinated changes, host and guest:
       with them the `--sandbox none` flag that started this plan. That is also
       when `check-no-virtio-fs` drops to FFI-only rows and the ratchet becomes
       an absolute rather than a ceiling.
-      and the builder image must be rebuilt before this host flip is exercised.
 - [ ] The **libkrun** persistent builder still serves `work`/`mvm-bins`/`job`/
       `out` as shares (`libkrun_builder.rs`). Its VMM has virtio-fs, so nothing
       forced the move; the session record already carries the two-state

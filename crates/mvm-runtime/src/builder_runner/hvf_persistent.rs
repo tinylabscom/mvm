@@ -34,15 +34,22 @@ use mvm_build::builder_disk_transport::{
 };
 use mvm_build::builder_vm::{BuilderVmError, builder_vm_cache_dir};
 use mvm_build::builder_vm_runtime::{
-    PERSISTENT_BUILDER_READY_TIMEOUT, ensure_nix_store_image_unlocked, stage_persistent_job_dir,
+    PERSISTENT_BUILDER_READY_TIMEOUT, ensure_nix_store_image_unlocked, stage_filtered_work_input,
+    stage_persistent_job_dir,
 };
 use mvm_build::persistent_builder::PersistentBuilderSupervisor;
 use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_state_dir};
 use mvm_net::channel::GuestService;
 
+use super::hvf_builder::require_runtime_overlay_ext4;
 use super::spec::{PersistentBuilderSpecInputs, persistent_builder_spec};
 use crate::driver::traits::RunningVm;
+use crate::network_endpoint_spawn::{
+    EndpointTransport, SubstitutionSpawnParams, spawn_network_endpoint,
+};
 use mvm_backends::driver::hvf::HvfDriver;
+use mvm_core::policy::RedactionPolicy;
+use mvm_core::policy::network_policy::NetworkPolicy;
 
 /// Default persistent nix-store disk size (MiB), matching the one-shot builder.
 const DEFAULT_NIX_STORE_MIB: u32 = 64 * 1024;
@@ -177,6 +184,16 @@ impl HvfPersistentHostVm {
         // `/job` onto the input stage, which every later dispatch rewrites.
         // `work` and `mvm-bins` are packed here and never again: the guest
         // re-extracts only the `job` member per dispatch.
+        //
+        // `work` is filtered first, exactly as the one-shot builder filters it.
+        // The raw tree carries `target/`, which on a developer's checkout is
+        // tens of gigabytes of build output the guest never reads — enough to
+        // fill the extraction disk and fail the boot with a `tar: write error`
+        // rather than anything naming the cause. The staging dir must outlive
+        // the pack.
+        let work_staging = stage_filtered_work_input(&self.workspace_root)
+            .map_err(|e: BuilderVmError| anyhow::anyhow!(e))
+            .context("staging the filtered workspace for the builder input disk")?;
         let input_disk = state_dir.join("input.img");
         let output_disk = state_dir.join("output.img");
         pack_input_disk(
@@ -187,7 +204,7 @@ impl HvfPersistentHostVm {
                 },
                 InputTree {
                     name: "work",
-                    src: &self.workspace_root,
+                    src: work_staging.path(),
                 },
                 InputTree {
                     name: "mvm-bins",
@@ -199,9 +216,36 @@ impl HvfPersistentHostVm {
             INPUT_DISK_MIN_BYTES,
         )
         .with_context(|| format!("packing the builder input disk {}", input_disk.display()))?;
+        drop(work_staging);
         create_output_disk(&output_disk, OUTPUT_DISK_BYTES).with_context(|| {
             format!("creating the builder output disk {}", output_disk.display())
         })?;
+
+        // Same requirement the one-shot HVF builder enforces, and for the same
+        // reason: this is a lean `Rootfs` builder whose baked image carries no
+        // guest binaries, so without the overlay the guest refuses to boot. A
+        // caller-supplied overlay wins; otherwise resolve the shared one rather
+        // than booting a guest that will only tell us it is missing.
+        let resolved_overlay = match self.runtime_overlay.clone() {
+            Some(path) => path,
+            None => require_runtime_overlay_ext4()
+                .map_err(|e: BuilderVmError| anyhow::anyhow!(e))
+                .context("resolving the runtime overlay for the persistent builder")?,
+        };
+
+        // This session's FlowMux identity, minted the same way the one-shot
+        // builder mints its own. The guest reads it before starting the egress
+        // client and refuses to boot without it, and a builder with no NIC
+        // that cannot reach the proxy cannot fetch anything to build with.
+        let identity =
+            mvm_vmm::host::flowmux_identity::FlowMuxIdentityMaterial::mint_from_host_signer(
+                &vm_name,
+            )
+            .context("minting the persistent builder's FlowMux identity")?;
+        let identity_drive = state_dir.join(mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE);
+        identity
+            .write_drive(&identity_drive)
+            .context("writing the persistent builder's FlowMux identity drive")?;
 
         let spec = persistent_builder_spec(&PersistentBuilderSpecInputs {
             name: &vm_name,
@@ -210,7 +254,8 @@ impl HvfPersistentHostVm {
             nix_store: nix_store.path(),
             input_disk: &input_disk,
             output_disk: &output_disk,
-            runtime_overlay: self.runtime_overlay.as_deref(),
+            runtime_overlay: Some(resolved_overlay.as_path()),
+            identity_drive: &identity_drive,
             console_log: state_dir.join("console.log"),
             egress_socket: socket_for(&state_dir, GuestService::NetworkFlow),
             dispatch_socket: socket_for(&state_dir, GuestService::BuilderDispatch),
@@ -218,6 +263,41 @@ impl HvfPersistentHostVm {
             vcpus: self.vcpus,
             memory_mib: self.memory_mib,
         });
+
+        // The host end of the guest's only route to the network. The builder
+        // guest has no NIC and refuses to boot if its egress client cannot bind
+        // the local proxy, and the client cannot bind until something is
+        // listening here. Same policy and same spawn helper the one-shot
+        // builder uses — claim 10's single decision point is this endpoint, and
+        // routing a second builder tier around it is exactly what
+        // `check-single-network-path` exists to prevent.
+        //
+        // Deliberately not guarded: a session outlives the command that starts
+        // it, so an `EndpointGuard` would reap the endpoint at this function's
+        // return and leave the VM unable to fetch anything. `stop` reaps it.
+        let egress_socket = socket_for(&state_dir, GuestService::NetworkFlow);
+        let builder_policy = NetworkPolicy::trusted_build_egress();
+        spawn_network_endpoint(SubstitutionSpawnParams {
+            vm_name: &vm_name,
+            state_dir: &state_dir,
+            tenant: "builder",
+            secrets: &[],
+            redaction: &RedactionPolicy::default(),
+            transport: EndpointTransport::Uds {
+                path: egress_socket,
+            },
+            terminator_listen: None,
+            egress_proxy: None,
+            tls_intermediate: None,
+            network_policy: Some(&builder_policy),
+            network_limits: mvm_core::plan::NetworkLimits::default(),
+            ingress: &[],
+            resolver_remote: None,
+            binding_store_dir: None,
+            flowmux_identity: Some(identity.spawn_config().clone()),
+            session_marker: None,
+        })
+        .context("spawning the persistent builder's network endpoint")?;
 
         // The supervisor holds the store lock, not this process.
         let vm = HvfDriver::new()
@@ -325,8 +405,17 @@ impl PersistentHvfSession {
         self.vm.host_process_id()
     }
 
-    /// Force-terminate the session. Releases the store lock with it.
+    /// Force-terminate the session. Releases the store lock with it, and reaps
+    /// the network endpoint the session spawned — it is deliberately unguarded
+    /// so it can outlive the starting command, so nothing else would.
     pub fn kill(self) -> Result<()> {
+        mvm_vmm::host::network_endpoint_spawn::reap_network_endpoint(
+            &self.state_dir,
+            &mvm_core::naming::persistent_builder_vm_name(
+                mvm_core::naming::BuilderVmSlot::Hvf,
+                &self.session_id,
+            ),
+        );
         self.vm.kill().context("killing the persistent builder VM")
     }
 

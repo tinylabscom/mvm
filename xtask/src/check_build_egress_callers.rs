@@ -43,6 +43,12 @@ const ALLOWED_CALLERS: &[&str] = &[
     "crates/mvm-runtime/src/builder_runner/runner.rs",
     // The libkrun builder's supervisor config.
     "crates/mvm-build/src/libkrun_builder.rs",
+    // The persistent HVF builder's endpoint, which is the same trusted builder
+    // tier as `runner.rs` above and differs only in lifetime: the session
+    // outlives the command that starts it, so it spawns its own endpoint
+    // rather than inheriting the one-shot runner's. It carries no untrusted
+    // workload — a workload microVM never boots from this policy.
+    "crates/mvm-runtime/src/builder_runner/hvf_persistent.rs",
 ];
 
 /// The file that defines the constructor, plus its own tests. Not a "caller"

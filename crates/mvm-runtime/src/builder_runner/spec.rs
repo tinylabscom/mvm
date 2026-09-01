@@ -161,6 +161,12 @@ pub struct PersistentBuilderSpecInputs<'a> {
     pub console_log: PathBuf,
     /// Host-side egress relay UDS wired to `EGRESS_PORT`.
     pub egress_socket: PathBuf,
+    /// This session's FlowMux identity drive (read-only). Same requirement the
+    /// one-shot builder has: the guest reads its signing key and the host
+    /// anchor off it before starting the egress client, which will not bind
+    /// without them — and a builder with no NIC that cannot reach the proxy
+    /// cannot build.
+    pub identity_drive: &'a Path,
     /// Host UDS for the guest's job-dispatch listener (the host dials).
     pub dispatch_socket: PathBuf,
     /// Host UDS for the resident builder daemon's typed control plane.
@@ -199,6 +205,10 @@ pub fn persistent_builder_spec(inputs: &PersistentBuilderSpecInputs<'_>) -> VmmS
     } else {
         BUILDER_CMDLINE.to_string()
     };
+    // Appended last and found in the guest by ext4 label rather than by slot,
+    // so the optional overlay above cannot shift it out from under the guest.
+    let identity_slot = blocks.len() as u8;
+    blocks.push(block(inputs.identity_drive, identity_slot, true));
     // Same RTC-less clock seed the one-shot builder takes: a cold store's HTTPS
     // fetch fails cert validation against a ~1970 clock.
     let cmdline = format!(
@@ -252,6 +262,7 @@ mod tests {
             input_disk: Path::new("/state/input.img"),
             output_disk: Path::new("/state/output.img"),
             runtime_overlay: None,
+            identity_drive: Path::new("/state/flowmux-identity.ext4"),
             console_log: PathBuf::from("/state/console.log"),
             egress_socket: PathBuf::from("/state/vsock-5253.sock"),
             dispatch_socket: PathBuf::from("/state/vsock-21471.sock"),
@@ -288,8 +299,9 @@ mod tests {
         );
 
         // Same vda–vdd order as the one-shot builder, so the cmdline device
-        // names above are true of the slots the backend attaches.
-        assert_eq!(spec.blocks.len(), 4);
+        // names above are true of the slots the backend attaches, plus this
+        // session's identity drive appended last.
+        assert_eq!(spec.blocks.len(), 5);
         assert_eq!(spec.blocks[0].device_node(), "/dev/vda");
         assert!(spec.blocks[0].read_only);
         assert_eq!(spec.blocks[1].device_node(), "/dev/vdb");
@@ -303,6 +315,14 @@ mod tests {
         assert_eq!(spec.blocks[3].device_node(), "/dev/vdd");
         assert_eq!(spec.blocks[3].source, PathBuf::from("/state/output.img"));
         assert!(!spec.blocks[3].read_only, "the guest writes its artifacts");
+        // Without this the guest's egress client cannot authenticate its
+        // session, and a builder with no NIC that cannot reach the proxy
+        // refuses to boot rather than building against nothing.
+        assert_eq!(
+            spec.blocks[4].source,
+            PathBuf::from("/state/flowmux-identity.ext4")
+        );
+        assert!(spec.blocks[4].read_only);
         // File-served, never RAM-backed: the output has to survive for the
         // host to read it back after each dispatch.
         assert!(spec.blocks.iter().all(|b| !b.ephemeral));
@@ -334,13 +354,19 @@ mod tests {
         inputs.runtime_overlay = Some(overlay);
         let spec = persistent_builder_spec(&inputs);
 
-        assert_eq!(spec.blocks.len(), 5);
+        assert_eq!(spec.blocks.len(), 6);
         assert_eq!(spec.blocks[4].device_node(), BUILDER_RUNTIME_DEVICE);
         assert_eq!(spec.blocks[4].source, overlay);
         assert!(spec.blocks[4].read_only);
         assert!(
             spec.cmdline
                 .contains(&format!("mvm.runtime_data={BUILDER_RUNTIME_DEVICE}"))
+        );
+        // The identity drive still lands after the overlay, and the guest
+        // finds it by ext4 label rather than by this position.
+        assert_eq!(
+            spec.blocks[5].source,
+            PathBuf::from("/state/flowmux-identity.ext4")
         );
     }
 

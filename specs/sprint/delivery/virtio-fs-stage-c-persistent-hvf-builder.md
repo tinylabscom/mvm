@@ -69,8 +69,55 @@ guest change and an image rebuild; it is tracked in the plan.
 warnings`, `cargo fmt --all --check`, and `cargo run -p xtask -- check-all`
 (63/63) are all clean.
 
-**Not yet verified live.** No CI lane boots a builder — every guest-booting lane
-skips on hosted runners — so this needs a real `mvmctl build` on macOS 26+ Apple
-Silicon against a **rebuilt** builder image. `mvm-host-vm-init` is
-cross-compiled and baked into the rootfs; a stale baked guest against this host
-hangs the dispatch loop with no useful error. Do not merge without it.
+## Live validation on macOS 26.5.2 / Apple Silicon
+
+Run against a rebuilt builder image (the image cache key includes the
+`mvm-host-vm-init` hash, so the guest change rotates it automatically — but
+`MVM_EMBED_NO_CACHE=1` is needed first, or `build.rs` reuses a stale baked
+guest and warns about it).
+
+**Proven end to end:**
+
+- The input disk packs and attaches as `vdc`, the output disk as `vdd`, and the
+  guest boots the disk transport off them (`mvm.builder_transport=disk` with
+  both device tokens on the observed cmdline).
+- The guest binds `/job`, `/work` and `/mvm-bins` from the input disk — Nix
+  evaluated a flake at `path:/work`, which is only possible if the workspace
+  crossed on that disk.
+- **The new readiness path works.** `start` returns when the dispatch loop
+  answers, with no `dispatch.ready` file anywhere the host can see.
+- **The per-dispatch repack works.** Two dispatches into one live session: the
+  host rewrote the input disk, the guest re-staged `/job/<job_id>` off it and
+  ran that dispatch's `cmd.sh`, streaming stderr back over the channel.
+- The session record carries the transport, and `stop` tears the session down
+  cleanly.
+
+**Not proven: a completed build, and therefore `read_dispatch_artifacts`
+against a real output disk** (it is unit-tested only). The blocker is not the
+transport — it is that the host-side `mvm-network-endpoint` this session spawns
+dies with the command that spawned it, so the guest's egress client loses its
+only route to the network mid-build (`FlowMux reconnect exhausted`). The
+one-shot builder never hits this because its endpoint's lifetime *is* the VM's
+lifetime; a persistent session inverts that. Fixing it means spawning the
+endpoint detached and reaping it on `stop`, which is lifecycle design in a
+claim-10 component and is deliberately not in this change.
+
+## Pre-existing gaps this uncovered
+
+The persistent HVF builder had never booted. Getting far enough to exercise
+Stage C at all required fixing three things that have nothing to do with
+virtio-fs, each by calling the helper the one-shot builder already calls:
+
+- No runtime overlay was ever resolved, so the guest refused to boot
+  (`require_runtime_overlay_ext4`).
+- No FlowMux identity drive was ever minted, so the egress client could not
+  authenticate and the guest refused to boot (`mint_from_host_signer`).
+- No network endpoint was ever spawned, so the egress client could not bind
+  (`spawn_network_endpoint`). This one is wired but, as above, does not yet
+  survive its spawning command.
+
+A fourth was mine: the input pack must use `stage_filtered_work_input`, as the
+one-shot pack does. Packing the raw workspace put 45 GB of `target/` on the
+input disk, filled the 64 GiB store image mid-extraction, and left every later
+boot failing at `setup_nix_store` for an unrelated-looking reason
+(`mvmctl cache repair --store-only` recovers).

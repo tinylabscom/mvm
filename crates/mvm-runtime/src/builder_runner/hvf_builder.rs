@@ -188,7 +188,7 @@ fn map_runner_failure(detail: String) -> BuilderVmError {
 /// layout and source-checkout rebuild policy stay single-sourced. Mapped to
 /// [`BuilderVmError::RuntimeOverlayUnavailable`] (not a VMM-level failure), so
 /// it surfaces unchanged with no auto-fallback to another builder backend.
-fn require_runtime_overlay_ext4() -> Result<PathBuf, BuilderVmError> {
+pub(super) fn require_runtime_overlay_ext4() -> Result<PathBuf, BuilderVmError> {
     mvm_build::libkrun_builder::require_runtime_overlay_ext4()
         .map_err(|e| BuilderVmError::RuntimeOverlayUnavailable(format!("{e:#}")))
 }

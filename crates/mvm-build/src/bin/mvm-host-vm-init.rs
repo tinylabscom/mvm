@@ -3336,8 +3336,37 @@ mod linux {
         // dangling on the host and fail the extraction outright.
         let out_backing = format!("{NIX_STORE_MOUNT}/out");
         reset_stage_dir(&out_backing)?;
+        // A dispatched job runs under `setpriv --reuid=BUILDER_UID`, and this
+        // directory is created by PID 1 as root. Under the virtio-fs transport
+        // the host made its side of `/out` group/other-writable before the
+        // guest ever saw it; on a disk there is no host side to do that, so it
+        // has to happen here or every dispatched write to `/out` fails with
+        // EACCES — including the artifacts the output disk exists to carry.
+        chown_builder(&out_backing)?;
         std::fs::create_dir_all(OUT_DIR).map_err(|e| format!("mkdir {OUT_DIR}: {e}"))?;
         disk_bind_mount(&out_backing, OUT_DIR)?;
+        Ok(())
+    }
+
+    /// Give the builder uid ownership of a directory PID 1 created.
+    ///
+    /// Ownership rather than a permissive mode: `clear_dir_contents` empties
+    /// `/out` between dispatches without recreating it, so the owner set here
+    /// survives the whole session, and nothing outside the build ever needs to
+    /// write there.
+    fn chown_builder(dir: &str) -> Result<(), String> {
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = std::ffi::CString::new(std::ffi::OsStr::new(dir).as_bytes())
+            .map_err(|e| format!("path {dir}: {e}"))?;
+        // SAFETY: `c_path` is a NUL-terminated path valid for this call, and
+        // chown takes it by const pointer without retaining it.
+        let rc = unsafe { libc::chown(c_path.as_ptr(), BUILDER_UID, BUILDER_GID) };
+        if rc != 0 {
+            return Err(format!(
+                "chown {dir} to {BUILDER_UID}:{BUILDER_GID}: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
         Ok(())
     }
 
