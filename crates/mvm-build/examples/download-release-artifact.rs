@@ -14,7 +14,7 @@
 //!
 //! ```text
 //! download-release-artifact --kind sidecar --base-url file:///abs/staging \
-//!   --version 0.18.0 --arch x86_64 --cache /tmp/verify-cache
+//!   --version 0.18.0 --arch x86_64 --libc musl --cache /tmp/verify-cache
 //! ```
 //!
 //! Exits 0 only when the artifact installs *and* resolves.
@@ -22,6 +22,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use mvm_contract::guest_libc::GuestLibc;
 use mvm_core::arch::GuestArch;
 
 enum Kind {
@@ -34,11 +35,13 @@ struct Args {
     base_url: String,
     version: String,
     arch: GuestArch,
+    libc: Option<GuestLibc>,
     cache: PathBuf,
 }
 
 fn parse_args() -> Result<Args, String> {
-    let (mut kind, mut base_url, mut version, mut arch, mut cache) = (None, None, None, None, None);
+    let (mut kind, mut base_url, mut version, mut arch, mut libc, mut cache) =
+        (None, None, None, None, None, None);
     let mut argv = std::env::args().skip(1);
     while let Some(flag) = argv.next() {
         let mut value = || {
@@ -63,15 +66,28 @@ fn parse_args() -> Result<Args, String> {
                     other => return Err(format!("--arch must be aarch64|x86_64, got {other}")),
                 })
             }
+            "--libc" => {
+                let raw = value()?;
+                libc = Some(match raw.as_str() {
+                    "glibc" => GuestLibc::Glibc,
+                    "musl" => GuestLibc::Musl,
+                    other => return Err(format!("--libc must be glibc|musl, got {other}")),
+                })
+            }
             "--cache" => cache = Some(PathBuf::from(value()?)),
             other => return Err(format!("unknown argument {other}")),
         }
     }
+    let kind = kind.ok_or("--kind is required")?;
+    if matches!(&kind, Kind::Sidecar) && libc.is_none() {
+        return Err("--libc is required for --kind sidecar".to_string());
+    }
     Ok(Args {
-        kind: kind.ok_or("--kind is required")?,
+        kind,
         base_url: base_url.ok_or("--base-url is required")?,
         version: version.ok_or("--version is required")?,
         arch: arch.ok_or("--arch is required")?,
+        libc,
         cache: cache.ok_or("--cache is required")?,
     })
 }
@@ -102,13 +118,14 @@ fn main() -> ExitCode {
         .map(|a| format!("runtime overlay {} roothash {}", a.version, a.roothash))
         .map_err(|e| e.to_string()),
         Kind::Sidecar => {
+            let Some(libc) = args.libc else {
+                eprintln!("error: --libc is required for --kind sidecar");
+                return ExitCode::FAILURE;
+            };
             mvm_build::sdk_sidecar::download_sdk_sidecar(
                 &args.version,
                 args.arch,
-                // The published release carries one variant; asking for the
-                // other is refused rather than mislabelled, so this example
-                // exercises the arm that actually has an asset behind it.
-                mvm_contract::guest_libc::GuestLibc::Glibc,
+                libc,
                 &args.cache,
             )
             .map(|a| format!("sdk sidecar {} sha256 {}", a.version, a.image_sha256))

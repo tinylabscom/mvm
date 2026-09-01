@@ -23,9 +23,8 @@ const FIXTURE_VERSION: &str = "1.2.3";
 
 /// The variant these scenarios stage and resolve.
 ///
-/// The published release carries one archive per architecture, built against
-/// glibc, so the acquire-and-boot scenario is only meaningful for that variant
-/// — asking for the other is refused before any transport runs.
+/// This scenario chooses glibc; the sibling musl acquisition path is covered by
+/// the downloader's focused release-fixture regression.
 const SCENARIO_LIBC: GuestLibc = GuestLibc::Glibc;
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -149,8 +148,10 @@ fn stage_release(world: &mut CliWorld, checksum_over: &[u8]) {
         .to_path_buf();
     let release_dir = base.join(format!("v{FIXTURE_VERSION}"));
     std::fs::create_dir_all(&release_dir).expect("create the versioned release dir");
-    let names =
-        mvm_build::sdk_sidecar::SdkSidecarArtifactNames::for_arch(&GuestArch::host().to_string());
+    let names = mvm_build::sdk_sidecar::SdkSidecarArtifactNames::for_target(
+        &GuestArch::host().to_string(),
+        GuestLibc::Glibc,
+    );
     std::fs::write(release_dir.join(&names.archive), &archive).expect("write the release archive");
     std::fs::write(
         release_dir.join(&names.archive_checksum),

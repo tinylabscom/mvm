@@ -59,10 +59,15 @@ fn assert_publishes(workflow: &str, asset: &str) {
 #[test]
 fn release_publishes_every_sdk_sidecar_asset_the_downloader_requests() {
     let workflow = boot_image_workflow();
-    for token in [SHELL_ARCH_TOKEN, MATRIX_ARCH_TOKEN] {
-        let names = mvmctl::build::sdk_sidecar::SdkSidecarArtifactNames::for_arch(token);
-        assert_publishes(&workflow, &names.archive);
-        assert_publishes(&workflow, &names.archive_checksum);
+    for arch in ["aarch64", "x86_64"] {
+        for libc in [
+            mvmctl::build::guest_libc::GuestLibc::Glibc,
+            mvmctl::build::guest_libc::GuestLibc::Musl,
+        ] {
+            let names = mvmctl::build::sdk_sidecar::SdkSidecarArtifactNames::for_target(arch, libc);
+            assert_publishes(&workflow, &names.archive);
+            assert_publishes(&workflow, &names.archive_checksum);
+        }
     }
 }
 
@@ -125,8 +130,10 @@ fn the_release_job_attaches_the_sdk_sidecar_assets() {
     // fresh install before the boot image tag is ever consulted.
     for workflow in [&boot_image, &release_workflow()] {
         for pattern in [
-            "artifacts/sdk-sidecar-*.tar.gz",
-            "artifacts/sdk-sidecar-*.tar.gz.sha256",
+            "artifacts/sdk-sidecar-*-glibc.tar.gz",
+            "artifacts/sdk-sidecar-*-glibc.tar.gz.sha256",
+            "artifacts/sdk-sidecar-*-musl.tar.gz",
+            "artifacts/sdk-sidecar-*-musl.tar.gz.sha256",
         ] {
             assert!(
                 workflow.contains(pattern),
@@ -141,9 +148,17 @@ fn the_release_job_attaches_the_sdk_sidecar_assets() {
 #[test]
 fn release_attaches_the_signature_bundle_the_verifier_fetches() {
     let workflow = release_workflow();
-    let sidecar = mvmctl::build::sdk_sidecar::SdkSidecarArtifactNames::for_arch("*");
     let overlay = mvmctl::build::runtime_overlay::RuntimeOverlayArtifactNames::for_arch("*");
-    for asset in [sidecar.archive, overlay.archive] {
+    let mut assets = vec![overlay.archive];
+    for libc in [
+        mvmctl::build::guest_libc::GuestLibc::Glibc,
+        mvmctl::build::guest_libc::GuestLibc::Musl,
+    ] {
+        assets.push(
+            mvmctl::build::sdk_sidecar::SdkSidecarArtifactNames::for_target("*", libc).archive,
+        );
+    }
+    for asset in assets {
         let bundle = mvmctl::build::release_signature::bundle_asset_name(&asset);
         assert!(
             workflow.contains(&format!("artifacts/{bundle}")),
@@ -218,7 +233,7 @@ fn the_release_consumes_its_own_artifacts_before_publishing_them() {
 /// Both published architectures must be built, or a whole platform's users get
 /// the fail-closed refusal this artifact exists to prevent.
 #[test]
-fn the_sdk_sidecar_job_builds_both_published_arches() {
+fn the_sdk_sidecar_job_builds_every_published_arch_and_libc() {
     let workflow = boot_image_workflow();
     let job = workflow
         .split("  sdk-sidecar-image:")
@@ -232,6 +247,18 @@ fn the_sdk_sidecar_job_builds_both_published_arches() {
         assert!(
             job.contains(&format!("arch: {arch}")),
             "the sdk-sidecar-image matrix must build {arch}"
+        );
+    }
+    for libc in ["glibc", "musl"] {
+        assert!(
+            job.contains(&format!("libc: {libc}")),
+            "the sdk-sidecar-image matrix must build {libc}"
+        );
+    }
+    for package in ["sdk-sidecar-image", "sdk-sidecar-image-musl"] {
+        assert!(
+            job.contains(&format!("package: {package}")),
+            "the sdk-sidecar-image matrix must build {package}"
         );
     }
 }

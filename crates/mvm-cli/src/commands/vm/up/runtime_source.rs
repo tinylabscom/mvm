@@ -690,7 +690,10 @@ mod sdk_sidecar_host_resolution_tests {
     /// Stage the two assets `release.yml` publishes for this arch, so the
     /// download path runs end to end against local bytes instead of the network.
     fn seed_sidecar_release_fixture(base: &std::path::Path, version: &str, arch: GuestArch) {
-        let names = mvm_build::sdk_sidecar::SdkSidecarArtifactNames::for_arch(&arch.to_string());
+        let names = mvm_build::sdk_sidecar::SdkSidecarArtifactNames::for_target(
+            &arch.to_string(),
+            mvm_contract::guest_libc::GuestLibc::Glibc,
+        );
         let release_dir = base.join(format!("v{version}"));
         std::fs::create_dir_all(&release_dir).unwrap();
         let archive = sidecar_archive_bytes(version);
