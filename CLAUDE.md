@@ -227,7 +227,26 @@ prose below is the narrative and the table is the ledger — and when the
 two disagree, **the table is right**: it is gated and the prose is not.
 Do not name a test here without checking it exists (`rg 'fn <name>'`);
 several of the names below were fabricated and survived for months
-precisely because nothing checks this file.
+precisely because nothing checks this file. `check-witness-citations`
+checks it now — a backticked symbol in this file must appear in code,
+and a comment or a string literal mentioning it does not count.
+
+The opposite direction is checked too. Prose recording that a name was
+**never written** goes inside an absence region:
+
+```markdown
+<!-- absent:begin -->
+
+`a_name_that_does_not_exist`
+
+<!-- absent:end -->
+```
+
+`check-asserted-absence` fails if anything in there starts resolving, so
+a correction cannot rot into a stale denial, and it fails on a region
+that names nothing — a region asserting nothing would pass forever.
+Inside a region the citation gate stands down, so the two can never
+demand opposite things of the same name.
 
 Claim lineage:
 
@@ -289,8 +308,16 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
    path, so there is no in-tree caller and no frame for them to parse.
    `specs/adrs/003-hypervisor-egress-policy.md` is written around the
    vsock-only chokepoint.
-6. **Pre-built dev image is hash-verified.** No function named
-   `download_dev_image` exists; the real pipeline is
+6. **Pre-built dev image is hash-verified.** No such function exists —
+
+   <!-- absent:begin -->
+
+   `download_dev_image`
+
+   <!-- absent:end -->
+
+   is named only by five stale doc comments across `mvm-core`, `mvm-cli`,
+   `mvm-build` and `xtask`, and defines nothing. The real pipeline is
    `fetch_expected_hashes` + `verify_artifact_hash`
    (`crates/mvm-cli/src/commands/env/artifact_verify.rs`), which fetch
    the per-arch `*-checksums-sha256.txt` manifest, stream the
@@ -353,9 +380,17 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     `MVM_ACK_UNRESTRICTED_NETWORK=1`. **None of that exists.** `up` is not a
     dispatched verb — `up::Args` is not a `Commands` variant, so its
     `--network-preset` and `--network-allow` fields are unreachable CLI
-    surface. `MVM_ACK_UNRESTRICTED_NETWORK` is read nowhere in the workspace;
+    surface. The acknowledgement env var is read nowhere in the workspace;
     its only occurrence is a doc comment in `mvm-contract::stream::edge`
-    saying another mechanism is "shaped after" it. There is no unrestricted
+    saying another mechanism is "shaped after" it:
+
+    <!-- absent:begin -->
+
+    `MVM_ACK_UNRESTRICTED_NETWORK`.
+
+    <!-- absent:end -->
+
+    There is no unrestricted
     acknowledgement, so nothing is being bypassed — but nothing warns either,
     and `specs/plans/296` cites the non-existent hatch as prior art for its
     E7 redaction opt-out. Building the acknowledgement is Plan 306 WS5.
@@ -403,15 +438,24 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     `unbound_service_returns_not_bound` and
     `service_call_rejects_unknown_envelope_fields`.
 
-    Earlier revisions of this bullet named — in quotes rather than
-    backticks, because backticks assert a real identifier and these are
-    names nobody ever wrote —
-    "service_call_denied_when_unbound",
-    "service_call_denied_outside_profile",
-    "audit_chain_contains_service_call_entries",
-    `audit_chain_carries_no_payload_bytes`, a `fuzz_service_call.rs`
-    target, and three `xtask check-handler-*` gates. **None of them
-    exist**, and none ever did on this branch. The ADR-001 row was
+    Earlier revisions of this bullet named four tests, a fuzz target, and
+    three `xtask check-handler-*` gates that **do not exist** and never did
+    on this branch:
+
+    <!-- absent:begin -->
+
+    `service_call_denied_when_unbound`,
+    `service_call_denied_outside_profile`,
+    `audit_chain_contains_service_call_entries`,
+    `audit_chain_carries_no_payload_bytes`, and a
+    `fuzz_service_call.rs` target.
+
+    <!-- absent:end -->
+
+    That list used to be held in quotes rather than backticks, by hand,
+    because backticks assert a real identifier. It is now a gate:
+    `check-asserted-absence` fails if any of those names appears in the
+    tree, so the correction cannot decay into a stale denial. The ADR-001 row was
     always correct, so `check-claim-catalog` never went red — only this
     file was wrong, which is why the ledger and not the narrative is
     authoritative. Payload-freedom for the stream plane's own audit
@@ -431,14 +475,19 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     cmdline token remains in tree as designed-but-unwired. Note the shape
     of that failure, because `check-claim-catalog` cannot catch it: the
     gate proves a named witness *exists*, never that anything calls the
-    code it tests. The six test names this bullet used to list
-    ("host_secrets_v1_denied_outside_allowed_destinations",
-    "zeroize_drop_zeros_secret_bytes",
-    "handler_inter_call_memory_hygiene",
-    "host_secrets_v1_signed_payload_jcs_roundtrip",
-    "secrets_subprocess_cannot_reach_supervisor_memory",
-    "placeholder_in_outbound_request_dropped_and_audited") do not exist
-    in the tree — same failure as claim 12's.
+    code it tests. The six test names this bullet used to list do not
+    exist in the tree — same failure as claim 12's:
+
+    <!-- absent:begin -->
+
+    `host_secrets_v1_denied_outside_allowed_destinations`,
+    `zeroize_drop_zeros_secret_bytes`,
+    `handler_inter_call_memory_hygiene`,
+    `host_secrets_v1_signed_payload_jcs_roundtrip`,
+    `secrets_subprocess_cannot_reach_supervisor_memory`,
+    `placeholder_in_outbound_request_dropped_and_audited`.
+
+    <!-- absent:end -->
 14. **Every `mvmctl run --image <oci-ref>` admission records the OCI
     image provenance in the chain-signed audit log.** Row 14 of the
     ADR-001 table. Plan 85 Phase E + F wire the user-facing OCI image
@@ -632,6 +681,37 @@ Every new module, type, or function needs test coverage:
 ## Scratch & temporary files
 
 Never write scratch, temporary, or intermediate files anywhere inside the repo working tree — not the root, not a subdirectory, not a hidden dotfile, not a gitignored path. This covers **every** kind of agent-created scratch (analysis lists, command output, intermediate JSON/TSV, logs, ad-hoc scripts, `git merge-file` inputs), not just screenshots/binaries. Write them under `/tmp/` instead. See AGENTS.md §"Screenshots & Temporary Files" for the full rule.
+
+`.agent-memory/notes/` is the one exception, and it is not an exception to the
+rule so much as a different thing: those are committed findings, reviewed in a
+PR like any other file. Scratch is what you produce while working; a note is
+what you learned.
+
+## Committed findings (`.agent-memory/`)
+
+One finding per file under `.agent-memory/notes/<slug>.md`, with `title`,
+`date` and `tags` frontmatter. `just recall <terms>` searches them, `just
+notes` lists them, `just remember <slug>` scaffolds one. `xtask
+check-agent-notes` holds the shape and refuses a `[[link]]` to a note that does
+not exist.
+
+**Recall before you investigate.** A measurement already in there is one you do
+not have to pay for twice.
+
+Write one when you learn something the diff will not say — and especially when
+you learn something is *false*. The falsifications are the notes that earn
+their keep: `teardown-scales-with-guest-ram` records the obvious fix, the A/B
+that refuted it, and why it could not have worked, which is the difference
+between a day spent and a paragraph read. Say what not to retry, and say why.
+Commit the note with the change it explains.
+
+Machine-specific context — host names, fleet layout, ssh targets, local paths —
+does not go here. It belongs in your own agent memory; in the repository it
+just confuses contributors.
+
+These notes are observations, not authority. `specs/adrs/` owns decisions and
+the claims ledger owns what is enforced; where a note disagrees with one of
+those, the owner wins and the note is stale.
 
 ## Build and Run
 
