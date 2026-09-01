@@ -99,7 +99,32 @@ pub enum SdkSidecarBuildError {
         /// Human-readable description of the problem.
         reason: String,
     },
+
+    /// A variant was asked for that the published release does not carry.
+    #[error(
+        "the published release carries no {requested} SDK sidecar for {arch} \
+         (it publishes one archive per architecture, built against {published}); \
+         build it from a source checkout instead"
+    )]
+    VariantNotPublished {
+        /// The libc the caller asked for.
+        requested: GuestLibc,
+        /// The libc the published archive is actually built against.
+        published: GuestLibc,
+        /// The architecture the caller asked for.
+        arch: GuestArch,
+    },
 }
+
+/// The libc the published sidecar archive is built against.
+///
+/// The release workflow builds the runtime overlay's unsuffixed
+/// `sdk-sidecar-image` attribute and publishes exactly one
+/// `sdk-sidecar-<arch>.tar.gz` per architecture. Nothing in the asset name
+/// records which variant that is, so this constant is the only place the
+/// coupling is written down: change the attribute the release builds and this
+/// must change with it.
+const PUBLISHED_SIDECAR_LIBC: GuestLibc = GuestLibc::Glibc;
 
 /// Download the SDK sidecar for `version` + `arch` from the published release,
 /// verify it, and install it under `<cache_root>/sdk-sidecar/<version>/<arch>/`.
@@ -135,6 +160,20 @@ pub fn download_sdk_sidecar(
     libc: GuestLibc,
     cache_root: &Path,
 ) -> Result<SdkSidecarArtifact, SdkSidecarBuildError> {
+    // Refused before the first byte moves, because the failure this guards is
+    // silent: the release asset name carries no libc, so a mismatched download
+    // would verify, install under the requested key and resolve — handing the
+    // guest a cdylib it cannot `dlopen`. That is the failure the libc-keyed
+    // cache exists to prevent, and laundering it through a mislabelled entry
+    // would be worse than not keying at all.
+    if libc != PUBLISHED_SIDECAR_LIBC {
+        return Err(SdkSidecarBuildError::VariantNotPublished {
+            requested: libc,
+            published: PUBLISHED_SIDECAR_LIBC,
+            arch,
+        });
+    }
+
     let arch_dir = arch.to_string();
     let names = SdkSidecarArtifactNames::for_arch(&arch_dir);
     let base = crate::runtime_overlay::release_base_url(version);
@@ -802,7 +841,7 @@ mod tests {
     ) -> Result<SdkSidecarArtifact, String> {
         env.set("MVM_OVERLAY_BASE_URL", fixture.base_url());
         env.set(crate::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
-        download_sdk_sidecar(FIXTURE_VERSION, GuestArch::host(), GuestLibc::Musl, cache)
+        download_sdk_sidecar(FIXTURE_VERSION, GuestArch::host(), GuestLibc::Glibc, cache)
             .map_err(|e| format!("{e}"))
     }
 
@@ -815,8 +854,49 @@ mod tests {
     ) -> Result<SdkSidecarArtifact, String> {
         env.set("MVM_OVERLAY_BASE_URL", fixture.base_url());
         env.remove(crate::release_signature::SKIP_COSIGN_VERIFY_ENV);
-        download_sdk_sidecar(FIXTURE_VERSION, GuestArch::host(), GuestLibc::Musl, cache)
+        download_sdk_sidecar(FIXTURE_VERSION, GuestArch::host(), GuestLibc::Glibc, cache)
             .map_err(|e| format!("{e}"))
+    }
+
+    /// The release asset name carries no libc, so a musl request would have
+    /// downloaded the glibc archive, verified it, installed it under the musl
+    /// key and resolved — handing a musl guest a cdylib it cannot `dlopen`.
+    /// The refusal has to come before the transport runs, or a mislabelled
+    /// entry is already on disk by the time anyone notices.
+    #[test]
+    fn an_unpublished_variant_is_refused_before_any_transport() {
+        let mut env = TestEnv::new();
+        let cache_dir = tempfile::tempdir().expect("tempdir");
+        let cache = cache_dir.path();
+        // Unreachable on purpose: reaching it at all is the failure.
+        env.set("MVM_OVERLAY_BASE_URL", "http://127.0.0.1:1/never");
+        env.set(crate::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
+
+        let err = download_sdk_sidecar(FIXTURE_VERSION, GuestArch::host(), GuestLibc::Musl, cache)
+            .expect_err("the published release carries no musl sidecar");
+
+        assert!(
+            matches!(
+                err,
+                SdkSidecarBuildError::VariantNotPublished {
+                    requested: GuestLibc::Musl,
+                    published: GuestLibc::Glibc,
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        assert!(
+            !SdkSidecarLayout::under(
+                cache,
+                FIXTURE_VERSION,
+                &GuestArch::host().to_string(),
+                GuestLibc::Musl,
+            )
+            .artifact_dir
+            .exists(),
+            "a refused download must leave nothing a resolver could pick up"
+        );
     }
 
     fn layout_of(cache: &Path) -> SdkSidecarLayout {
@@ -824,7 +904,7 @@ mod tests {
             cache,
             FIXTURE_VERSION,
             &GuestArch::host().to_string(),
-            GuestLibc::Musl,
+            GuestLibc::Glibc,
         )
     }
 

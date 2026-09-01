@@ -102,9 +102,17 @@ fn main() -> ExitCode {
         .map(|a| format!("runtime overlay {} roothash {}", a.version, a.roothash))
         .map_err(|e| e.to_string()),
         Kind::Sidecar => {
-            mvm_build::sdk_sidecar::download_sdk_sidecar(&args.version, args.arch, &args.cache)
-                .map(|a| format!("sdk sidecar {} sha256 {}", a.version, a.image_sha256))
-                .map_err(|e| e.to_string())
+            mvm_build::sdk_sidecar::download_sdk_sidecar(
+                &args.version,
+                args.arch,
+                // The published release carries one variant; asking for the
+                // other is refused rather than mislabelled, so this example
+                // exercises the arm that actually has an asset behind it.
+                mvm_contract::guest_libc::GuestLibc::Glibc,
+                &args.cache,
+            )
+            .map(|a| format!("sdk sidecar {} sha256 {}", a.version, a.image_sha256))
+            .map_err(|e| e.to_string())
         }
     };
 
