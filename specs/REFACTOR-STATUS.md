@@ -35,6 +35,14 @@ Last updated: 2026-09-01
       regressions. Workspace tests, Clippy, formatting, gated-target checks,
       and documentation gates are green; merge delivery remains.
 
+- [ ] **Published musl SDK sidecar — issue #3045.**
+      `specs/plans/2026-08-31-publish-musl-sdk-sidecar.md`.
+      SDK sidecar release names now bind architecture and libc; both release
+      trains require, attach, sign, and consume glibc and musl artifacts for
+      both architectures. Focused downloader, release-contract,
+      workflow-syntax, consumer-example, workspace, Clippy, gated-target,
+      formatting, and policy validation is green; merge delivery remains.
+
 - [ ] **machine diff handshake retry — issue #3024.**
       `specs/plans/2026-08-31-machine-diff-handshake-retry.md`.
       A typed pre-authentication peer hangup gets one fresh connection; an EOF

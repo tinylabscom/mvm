@@ -20,6 +20,15 @@
       zero-warning Clippy, Linux/BDD gated compilation, and policy checks are
       green. Merge delivery remains.
 
+- [ ] **Published musl SDK sidecar — issue #3045.**
+      `specs/plans/2026-08-31-publish-musl-sdk-sidecar.md`.
+      Release assets now bind both architecture and libc, the image matrix
+      builds all four supported combinations, and both release trains require
+      and consume the glibc and musl archives before publishing. Focused
+      downloader, release-contract, workflow-syntax, consumer-example,
+      workspace, Clippy, gated-target, formatting, and policy validation is
+      green; merge delivery remains.
+
 - [ ] **Wasmtime security update — issues #3018 and #3020.**
       `specs/plans/2026-08-31-wasmtime-security-update.md`.
       The optional Wasm backend's locked Wasmtime family is updated from
@@ -3464,3 +3473,13 @@ writes the plan:
 - [x] Complete the full workspace, Clippy, formatting, gated-target, and
       documentation validation matrix.
 - [ ] Merge through the queue and close issue #3040 from landed evidence.
+
+## 2026-08-31 published musl SDK sidecar
+
+- [x] Put architecture and libc in every SDK sidecar archive name.
+- [x] Build and upload the glibc and musl derivations for both architectures.
+- [x] Select the requested variant without a single-published-libc constant.
+- [x] Require and exercise both variants before either release train publishes.
+- [x] Cover musl acquisition, unknown-libc refusal, and release-name coupling.
+- [x] Complete workspace and gated validation.
+- [ ] Merge the repair through the queue and close issue #3045.

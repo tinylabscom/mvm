@@ -444,8 +444,16 @@ jobs:
               "default-microvm-${arch}-checksums-sha256.txt" \
               "builder-vm-vmlinux-${arch}" \
               "builder-vm-rootfs-${arch}.ext4" \
-              "builder-vm-${arch}-checksums-sha256.txt"; do
+              "builder-vm-${arch}-checksums-sha256.txt" \
+              "runtime-overlay-${arch}.tar.gz"; do
               [ -s "artifacts/${f}" ] || missing+=("${f}")
+            done
+            for libc in glibc musl; do
+              for f in \
+                "sdk-sidecar-${arch}-${libc}.tar.gz" \
+                "sdk-sidecar-${arch}-${libc}.tar.gz.sha256"; do
+                [ -s "artifacts/${f}" ] || missing+=("${f}")
+              done
             done
           done
           if [ ${#missing[@]} -gt 0 ]; then
@@ -544,32 +552,48 @@ jobs:
           mkdir -p "${STAGE}"
 
           checked=0
-          for kind in runtime-overlay sdk-sidecar; do
-            for arch in aarch64 x86_64; do
-              archive="artifacts/${kind}-${arch}.tar.gz"
-              [ -f "${archive}" ] || continue
-              for suffix in "" ".sha256" ".bundle"; do
-                src="${archive}${suffix}"
-                if [ ! -f "${src}" ]; then
-                  echo "::error::${src} is missing — a published archive without its checksum and signature cannot be acquired" >&2
-                  exit 1
-                fi
-                cp "${src}" "${STAGE}/"
-              done
+          verify_archive() {
+            local kind="$1"
+            local arch="$2"
+            local libc="${3:-}"
+            local archive example_kind
+            if [ "${kind}" = sdk-sidecar ]; then
+              archive="artifacts/sdk-sidecar-${arch}-${libc}.tar.gz"
+              example_kind=sidecar
+            else
+              archive="artifacts/runtime-overlay-${arch}.tar.gz"
+              example_kind=overlay
+            fi
+            [ -f "${archive}" ] || return 0
+            for suffix in "" ".sha256" ".bundle"; do
+              src="${archive}${suffix}"
+              if [ ! -f "${src}" ]; then
+                echo "::error::${src} is missing — a published archive without its checksum and signature cannot be acquired" >&2
+                exit 1
+              fi
+              cp "${src}" "${STAGE}/"
+            done
 
-              case "${kind}" in
-                runtime-overlay) example_kind=overlay ;;
-                sdk-sidecar)     example_kind=sidecar ;;
-              esac
-              echo "Consuming ${kind}-${arch} through the production download path..."
-              cargo run --release -p mvm-build --example download-release-artifact \
-                --features manifest-verify -- \
-                --kind "${example_kind}" \
-                --base-url "file://$(pwd)/consumer-check" \
-                --version "${VERSION}" \
-                --arch "${arch}" \
-                --cache "$(mktemp -d)"
-              checked=$((checked + 1))
+            consumer_args=(
+              --kind "${example_kind}"
+              --base-url "file://$(pwd)/consumer-check"
+              --version "${VERSION}"
+              --arch "${arch}"
+              --cache "$(mktemp -d)"
+            )
+            if [ -n "${libc}" ]; then
+              consumer_args+=(--libc "${libc}")
+            fi
+            echo "Consuming ${kind}-${arch}${libc:+-${libc}} through the production download path..."
+            cargo run --release -p mvm-build --example download-release-artifact \
+              --features manifest-verify -- "${consumer_args[@]}"
+            checked=$((checked + 1))
+          }
+
+          for arch in aarch64 x86_64; do
+            verify_archive runtime-overlay "${arch}"
+            for libc in glibc musl; do
+              verify_archive sdk-sidecar "${arch}" "${libc}"
             done
           done
 
@@ -641,10 +665,13 @@ jobs:
             artifacts/runtime-overlay-*.tar.gz.sha256
             artifacts/initramfs-*.tar.gz
             artifacts/initramfs-*.tar.gz.sha256
-            artifacts/sdk-sidecar-*.tar.gz
-            artifacts/sdk-sidecar-*.tar.gz.sha256
+            artifacts/sdk-sidecar-*-glibc.tar.gz
+            artifacts/sdk-sidecar-*-glibc.tar.gz.sha256
+            artifacts/sdk-sidecar-*-musl.tar.gz
+            artifacts/sdk-sidecar-*-musl.tar.gz.sha256
             artifacts/runtime-overlay-*.tar.gz.bundle
-            artifacts/sdk-sidecar-*.tar.gz.bundle
+            artifacts/sdk-sidecar-*-glibc.tar.gz.bundle
+            artifacts/sdk-sidecar-*-musl.tar.gz.bundle
             artifacts/default-microvm-vmlinux-*
             artifacts/default-microvm-rootfs-*
             artifacts/default-microvm-meta-*
