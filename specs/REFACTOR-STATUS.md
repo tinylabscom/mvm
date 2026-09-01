@@ -4,6 +4,15 @@ Last updated: 2026-08-31
 
 ## In progress
 
+- [ ] **Warm claim authenticated readiness — issue #3039.**
+      `specs/plans/2026-08-31-warm-claim-authenticated-readiness.md`.
+      A restored child advances only after an authenticated Ping proves its
+      guest agent is serving; accepted-but-silent transports stay in the bounded
+      readiness loop. Explicit warm residency now fails closed on a rejected
+      claim, while auto-detected warm residency may retain its cold fallback.
+      Workspace tests, zero-warning Clippy, Linux/BDD gated compilation, and
+      policy checks are green; merge delivery remains.
+
 - [ ] **Kernel cache moved out of the Stage 0 blast radius.**
       `specs/sprint/delivery/kernel-cache-outside-stage0-blast-radius.md`.
       The workload kernel was cached inside `builder-vm/<arch>`, the directory

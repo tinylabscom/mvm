@@ -564,6 +564,18 @@ fn residency_source() -> mvm_core::residency::ResidencySource {
     mvm_core::residency::resolve_residency().1
 }
 
+fn warm_launch_mode(
+    source: mvm_core::residency::ResidencySource,
+    require_claim_override: bool,
+) -> WarmLaunchMode {
+    if require_claim_override || matches!(source, mvm_core::residency::ResidencySource::EnvOverride)
+    {
+        WarmLaunchMode::Required
+    } else {
+        WarmLaunchMode::Optional
+    }
+}
+
 pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Result<WarmResult> {
     if p.target == 0 {
         return Ok(WarmResult {
@@ -1017,11 +1029,10 @@ pub fn try_warm_claim(
     let bundle_json = cfg.bundle_json.clone();
     let claim_start_config = cfg.clone();
     let pool = SupervisorStandbyPool::open()?;
-    let claim_mode = if std::env::var("MVM_HVF_WARM_REQUIRE_CLAIM").as_deref() == Ok("1") {
-        WarmLaunchMode::Required
-    } else {
-        WarmLaunchMode::Optional
-    };
+    let claim_mode = warm_launch_mode(
+        residency_source(),
+        std::env::var("MVM_HVF_WARM_REQUIRE_CLAIM").as_deref() == Ok("1"),
+    );
     let make_claim = |handle: &StandbyHandle| {
         // The audit substrate (`gateway-<vm>.sock`) is name-keyed; the claimed VM runs
         // under the standby-id, so compute it for `handle.id`.
@@ -1515,6 +1526,30 @@ mod tests {
         assert!(unsupported_standby_pool_is_fatal(
             mvm_core::residency::ResidencySource::EnvOverride
         ));
+    }
+
+    #[test]
+    fn an_operator_requested_warm_launch_refuses_a_failed_claim() {
+        assert_eq!(
+            warm_launch_mode(mvm_core::residency::ResidencySource::EnvOverride, false),
+            WarmLaunchMode::Required
+        );
+    }
+
+    #[test]
+    fn a_host_default_warm_launch_may_fall_back_to_cold() {
+        assert_eq!(
+            warm_launch_mode(mvm_core::residency::ResidencySource::AutoDetect, false),
+            WarmLaunchMode::Optional
+        );
+    }
+
+    #[test]
+    fn a_required_claim_override_remains_fail_closed() {
+        assert_eq!(
+            warm_launch_mode(mvm_core::residency::ResidencySource::AutoDetect, true),
+            WarmLaunchMode::Required
+        );
     }
 
     #[test]
