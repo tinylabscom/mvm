@@ -86,6 +86,16 @@ puts the door in plain sight. Every spawned bootstrap now carries
 cache instead of forking another child. One level of delegation is all that can
 ever help — the second level has nothing new to try.
 
+## Where it lives now
+
+The helper logic moved out of `libkrun_builder.rs` into
+`mvm_build::builder_vm_bootstrap` — acquisition, the declaration seam, the
+re-exec, the preflight and their tests. `libkrun_builder.rs` was at 1491 of the
+1500 production lines `check-file-size` allows, so this change did not fit
+beside it, and the helper is not libkrun's anyway: `ensure_builder_vm_image`
+calls it on every backend. `builder_vm_source_checkout_root` is now
+`pub(crate)`; the three `mvm-cli` call sites moved to the new path.
+
 ## What is still true
 
 `bootstrap_helper_build_command_uses_isolated_target_dir` still pins the
