@@ -259,13 +259,28 @@ pub fn require_hypervisor_selectable(name: &str) -> Result<()> {
 mod tests {
     use super::ResumeBootLocalRequest;
 
+    /// An oversized request is granted the largest count the backend will
+    /// actually boot — 32 for Firecracker, which is what `/machine-config`
+    /// accepts, not the 255 its `u8` `vcpu_count` field can carry. Clamping to
+    /// the wire type's ceiling produced a request the API refused, so the
+    /// number is written out here rather than read back off the same
+    /// `capabilities()` this delegates to, which would assert nothing.
     #[test]
-    fn firecracker_vcpus_are_clamped_before_the_u8_api_boundary() {
+    fn firecracker_vcpus_are_clamped_to_a_count_the_vmm_boots() {
         assert_eq!(
             super::clamp_vcpus_for_backend("firecracker", 9_999),
-            Some(u32::from(u8::MAX))
+            Some(32)
         );
         assert_eq!(super::clamp_vcpus_for_backend("firecracker", 2), None);
+    }
+
+    /// The same contract on the other backend that declared the wire ceiling.
+    /// libkrun accepts every count its config call can carry and aborts at
+    /// start on the ones it cannot honour, so 64 is the measured bound.
+    #[test]
+    fn libkrun_vcpus_are_clamped_to_a_count_the_vmm_boots() {
+        assert_eq!(super::clamp_vcpus_for_backend("libkrun", 9_999), Some(64));
+        assert_eq!(super::clamp_vcpus_for_backend("libkrun", 2), None);
     }
 
     #[test]

@@ -194,7 +194,8 @@
       and rebuilds source-stale guest binaries. Firecracker also advertises a
       vCPU ceiling before serialization — the u8 wire ceiling at first, which
       the API refuses above 32, corrected to the count the VMM actually boots
-      under issue #3051 — and the live refusal witnesses
+      under issue #3051, alongside libkrun's under #3065 — and the live refusal
+      witnesses
       match child exit status, stderr ownership, and backend timeout admission.
       Focused tests, all ordinary workspace tests, the isolated `mvm-agentd`
       doctest, workspace Clippy, formatting, and repository policy gates are
