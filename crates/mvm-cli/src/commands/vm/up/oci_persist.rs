@@ -85,6 +85,8 @@ pub(in crate::commands) struct PersistentImageStartParams<'a> {
     /// Raw `--agent-verb` strings from the CLI. Empty ⇒ use the computed
     /// sealed-prod default.
     pub agent_verb: Vec<String>,
+    /// Opaque commitment persisted with and admitted for this machine.
+    pub caller_commitment: Option<mvm_core::plan::CallerCommitment>,
     /// True when the caller will run a trailing `-- argv` command after boot
     /// (i.e. the machine is booted only to exec an ad-hoc command). An ad-hoc
     /// command issues the DevOnly `Exec` verb, so the admitted plan must NOT
@@ -163,6 +165,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         no_supervisor,
         kernel_path,
         agent_verb,
+        caller_commitment,
         has_ad_hoc_argv,
         grants,
     } = params;
@@ -218,6 +221,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::default(),
             secrets: vec![],
+            caller_commitment,
             no_supervisor,
             ledger: &admission_ledger,
             keys_dir: None,

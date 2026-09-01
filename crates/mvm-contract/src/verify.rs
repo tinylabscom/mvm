@@ -73,6 +73,9 @@ pub struct PlanAuditEntry<Tenant = String, Plan = String, Bundle = String, Time 
     pub image_sha256: String,
     /// Audit event name (e.g. `plan.admitted`).
     pub event: String,
+    /// Opaque caller commitment copied from the exact admitted plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_commitment: Option<crate::plan::CallerCommitment>,
     /// Free-form labels; a `BTreeMap` so key order is canonical.
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
@@ -474,6 +477,7 @@ mod tests {
             image_name: "worker".to_string(),
             image_sha256: "abc123".to_string(),
             event: event.to_string(),
+            caller_commitment: None,
             labels: BTreeMap::new(),
         }
     }
@@ -535,6 +539,24 @@ mod tests {
         assert_eq!(out.count, 3);
         assert_eq!(out.entries[1].event, "plan.launched");
         assert_eq!(out.entries[0].line, 0);
+    }
+
+    #[test]
+    fn caller_commitment_is_covered_by_the_audit_signature() {
+        let key = signing_key();
+        let mut committed = entry("plan.admitted", None);
+        committed.caller_commitment = Some(crate::plan::CallerCommitment::from_bytes([1; 32]));
+        let chain = build_chain(&key, &[committed]);
+        assert!(verify_audit_chain_bytes(&chain, &key.verifying_key()).is_ok());
+
+        let mut envelope: SignedEnvelope =
+            serde_json::from_str(chain.trim()).expect("envelope parses");
+        envelope.entry.caller_commitment = Some(crate::plan::CallerCommitment::from_bytes([2; 32]));
+        let tampered = format!(
+            "{}\n",
+            serde_json::to_string(&envelope).expect("tampered envelope serializes")
+        );
+        assert!(verify_audit_chain_bytes(&tampered, &key.verifying_key()).is_err());
     }
 
     #[test]

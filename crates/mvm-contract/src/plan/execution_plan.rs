@@ -16,10 +16,11 @@ use crate::lifecycle::SnapshotAt;
 use crate::plan::bundle::PlanArtifact;
 use crate::plan::types::{
     AdmissionProfile, ArtifactPolicy, AttestationRequirement, AuditLabels, BuildProvenance,
-    DepsVolumeBinding, EnvironmentRef, FsPolicyRef, HostShareGrant, IngressMapping,
-    IngressMappingsError, KeyRotationSpec, NetworkLimits, NetworkMode, Nonce, PlanId, PolicyRef,
-    PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding, SignedImageRef,
-    StreamRetention, TenantId, WorkloadId, validate_ingress_mappings, validate_ingress_material,
+    CallerCommitment, DepsVolumeBinding, EnvironmentRef, FsPolicyRef, HostShareGrant,
+    IngressMapping, IngressMappingsError, KeyRotationSpec, NetworkLimits, NetworkMode, Nonce,
+    PlanId, PolicyRef, PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding,
+    SignedImageRef, StreamRetention, TenantId, WorkloadId, validate_ingress_mappings,
+    validate_ingress_material,
 };
 use crate::plan::verb::VerbId;
 use crate::protocol::broker::ServiceId;
@@ -171,6 +172,12 @@ pub struct ExecutionPlan {
     pub tool_policy: PolicyRef,
 
     pub artifact_policy: ArtifactPolicy,
+
+    /// Optional opaque caller commitment fixed before execution. The bytes are
+    /// part of the plan content address and host signature; MVM deliberately
+    /// assigns them no semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_commitment: Option<CallerCommitment>,
 
     /// Free-form audit labels copied verbatim into every audit entry
     /// generated for this plan. Usually carries tenant-meaningful
@@ -359,6 +366,7 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
             capture_paths: Vec::new(),
             retention_days: 0,
         },
+        caller_commitment: None,
         audit_labels: BTreeMap::new(),
         key_rotation: KeyRotationSpec { interval_days: 0 },
         attestation: AttestationRequirement {
@@ -400,6 +408,21 @@ mod tests {
         value.as_object_mut().unwrap().remove("network_limits");
         let back: ExecutionPlan = serde_json::from_value(value).unwrap();
         assert_eq!(back.network_limits, NetworkLimits::default());
+    }
+
+    #[test]
+    fn absent_caller_commitment_preserves_existing_plan_bytes() {
+        let plan = minimal_plan();
+        let json = serde_json::to_string(&plan).expect("plan serializes");
+        assert!(
+            !json.contains("caller_commitment"),
+            "default leaked: {json}"
+        );
+
+        let mut committed = plan;
+        committed.caller_commitment = Some(CallerCommitment::from_bytes([0x44; 32]));
+        let json = serde_json::to_string(&committed).expect("committed plan serializes");
+        assert!(json.contains(&format!("\"caller_commitment\":\"{}\"", "44".repeat(32))));
     }
 
     #[test]

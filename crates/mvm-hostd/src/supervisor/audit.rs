@@ -49,6 +49,7 @@ pub fn for_plan(
         image_name: plan.image.name.clone(),
         image_sha256: plan.image.sha256.to_ascii_lowercase(),
         event: event.into(),
+        caller_commitment: plan.caller_commitment.clone(),
         labels,
     }
 }
@@ -370,6 +371,7 @@ pub(crate) mod tests {
                 capture_paths: vec![],
                 retention_days: 0,
             },
+            caller_commitment: None,
             audit_labels: BTreeMap::from([("workflow".to_string(), "etl-1".to_string())]),
             key_rotation: KeyRotationSpec { interval_days: 0 },
             attestation: AttestationRequirement {
@@ -429,6 +431,7 @@ pub(crate) mod tests {
             image_name: "img".to_string(),
             image_sha256: "deadbeef".to_string(),
             event: "plan.verified".to_string(),
+            caller_commitment: None,
             labels: BTreeMap::from([("actor".to_string(), "supervisor".to_string())]),
         };
         let bytes = serde_json::to_vec(&entry).unwrap();
@@ -452,6 +455,15 @@ pub(crate) mod tests {
         assert_eq!(entry.event, "plan.verified");
         // Plan's audit_labels merged in.
         assert_eq!(entry.labels.get("workflow"), Some(&"etl-1".to_string()));
+    }
+
+    #[test]
+    fn entry_for_plan_copies_the_typed_caller_commitment() {
+        let mut plan = sample_plan();
+        let commitment = mvm_core::plan::CallerCommitment::from_bytes([0x5a; 32]);
+        plan.caller_commitment = Some(commitment.clone());
+        let entry = for_plan(&plan, None, "plan.admitted", []);
+        assert_eq!(entry.caller_commitment, Some(commitment));
     }
 
     #[test]

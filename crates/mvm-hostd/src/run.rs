@@ -234,6 +234,7 @@ pub fn admit_and_boot_local(
         shares: shares_from_vm_volumes(&req.volumes),
         redaction: Default::default(),
         reversible_replacement: Default::default(),
+        caller_commitment: None,
         audit_labels: Default::default(),
         agent_verbs: None,
         services: Vec::new(),

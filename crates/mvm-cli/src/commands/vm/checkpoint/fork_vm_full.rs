@@ -402,6 +402,7 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
                 p.declared_secrets,
             ),
             secrets: p.declared_secrets.to_vec(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: None,

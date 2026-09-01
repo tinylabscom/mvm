@@ -11,6 +11,9 @@ use mvm_hostd::audit::{
 
 use crate::world::CliWorld;
 
+const CALLER_COMMITMENT_HEX: &str =
+    "abababababababababababababababababababababababababababababababab";
+
 fn isolated_home(world: &CliWorld) -> &std::path::Path {
     world
         .isolated_home
@@ -40,6 +43,42 @@ fn admit_plan_to_audit_chain(world: &mut CliWorld) {
     emitter
         .emit_admitted(&plan, "host:test")
         .expect("emit plan.admitted entry");
+}
+
+#[given("a caller-committed workload plan was admitted in the audit chain")]
+fn admit_caller_committed_plan_to_audit_chain(world: &mut CliWorld) {
+    let home = isolated_home(world).to_path_buf();
+    let signer = host_signer(world);
+    let emitter = AuditEmitter::with_dir(signer.signing, &home.join("audit"))
+        .expect("open audit emitter in isolated home");
+    let commitment = mvm_core::plan::CallerCommitment::from_hex(CALLER_COMMITMENT_HEX)
+        .expect("fixture commitment is canonical");
+    let plan = PlanFixture::new()
+        .tenant("local")
+        .plan_id("bdd-caller-committed")
+        .caller_commitment(commitment)
+        .build();
+    emitter
+        .emit_admitted(&plan, "host:test")
+        .expect("emit committed plan.admitted entry");
+}
+
+#[then("the audit entry carries the exact caller commitment")]
+fn audit_entry_carries_caller_commitment(world: &mut CliWorld) {
+    let chain = std::fs::read_to_string(isolated_home(world).join("audit/local.jsonl"))
+        .expect("read audit chain");
+    let envelope: mvm_contract::verify::SignedEnvelope =
+        serde_json::from_str(chain.lines().next().expect("one audit entry"))
+            .expect("parse signed audit entry");
+    assert_eq!(
+        envelope
+            .entry
+            .caller_commitment
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some(CALLER_COMMITMENT_HEX)
+    );
 }
 
 #[when("the audit chain is tampered")]

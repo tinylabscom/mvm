@@ -261,6 +261,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         no_supervisor: args.no_supervisor,
         kernel_path,
         agent_verb: spec.agent_verb.clone(),
+        caller_commitment: spec.caller_commitment.clone(),
         has_ad_hoc_argv: args.has_ad_hoc_argv,
         grants: spec.grants.clone(),
     })?;

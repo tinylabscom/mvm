@@ -1033,6 +1033,7 @@ fn cmd_start(args: StartArgs) -> Result<()> {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::default(),
             secrets: vec![],
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: None,

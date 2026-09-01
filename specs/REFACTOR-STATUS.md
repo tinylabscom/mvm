@@ -4,6 +4,14 @@ Last updated: 2026-09-01
 
 ## In progress
 
+- [ ] **Signed caller commitment — issue #3070.**
+      `specs/plans/2026-09-01-signed-caller-commitment.md`.
+      Replaces reliance on overwriteable free-form audit labels with one typed,
+      opaque 32-byte commitment covered by the plan identity/signature and
+      copied into chain-signed audit entries. Workspace tests, zero-warning
+      Clippy, Linux/BDD gated checks, frozen-wire compatibility, and the full
+      non-live BDD suite are green; merge delivery remains.
+
 - [ ] **Extended CI residual regressions — issues #3051 and #3052.**
       `specs/plans/2026-08-28-extended-ci-red-repair.md`.
       Persistent launches clamp vCPUs before admission, authenticated frame

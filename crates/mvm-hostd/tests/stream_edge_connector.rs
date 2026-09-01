@@ -122,6 +122,7 @@ fn admitted_with_grant(vm: &str) -> AdmittedPlan {
         shares: Vec::new(),
         redaction: RedactionPolicy::default(),
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
+        caller_commitment: None,
         audit_labels: Default::default(),
         agent_verbs: None,
         services: vec![ServiceId::parse(INPUT_GRANT_SERVICE).expect("the grant token parses")],

@@ -70,6 +70,8 @@ pub(in crate::commands::vm) struct AdmitPlanForBootParams<'a> {
     pub seccomp_tier: mvm_core::plan::PlanSeccompTier,
     pub secret_release: mvm_core::plan::SecretReleasePolicy,
     pub secrets: Vec<mvm_core::plan::SecretBinding>,
+    /// Opaque caller commitment copied into the plan and its audit entries.
+    pub caller_commitment: Option<mvm_core::plan::CallerCommitment>,
     pub no_supervisor: bool,
     pub ledger: &'a InMemoryNonceLedger,
     /// Override for the host-signer keys directory. Production callers
@@ -419,6 +421,7 @@ pub(in crate::commands::vm) fn admit_plan_for_boot_with_ingress(
         shares: p.shares.clone(),
         redaction: p.redaction.clone(),
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
+        caller_commitment: p.caller_commitment.clone(),
         audit_labels: Default::default(),
         agent_verbs: crate::commands::vm::agent_verbs::parse_agent_verb_override(
             &p.agent_verb_override,
@@ -1204,6 +1207,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger,
             keys_dir: None,
@@ -1221,6 +1225,25 @@ mod admit_plan_tests {
             backend_kind: None,
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         }
+    }
+
+    #[test]
+    fn admission_binds_the_caller_commitment_into_the_plan() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rootfs = write_rootfs(dir.path(), b"committed rootfs");
+        let keys_dir = dir.path().join("keys");
+        let audit_dir = dir.path().join("audit");
+        let ledger = InMemoryNonceLedger::new();
+        let commitment = mvm_core::plan::CallerCommitment::from_bytes([0x33; 32]);
+        let mut params = pinning_params(&rootfs, &ledger);
+        params.keys_dir = Some(&keys_dir);
+        params.audit_dir = Some(&audit_dir);
+        params.caller_commitment = Some(commitment.clone());
+
+        let admitted = admit_plan_for_boot(params)
+            .expect("admission succeeds")
+            .expect("supervisor admission is enabled");
+        assert_eq!(admitted.admitted.plan().caller_commitment, Some(commitment));
     }
 
     /// The image digest says what the workload *is* and nothing about what
@@ -1322,6 +1345,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: true,
             ledger: &ledger,
             keys_dir: None, // not read — short-circuit returns first
@@ -1365,6 +1389,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Network,
             secret_release: mvm_core::plan::SecretReleasePolicy::PlanBound,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -1429,6 +1454,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -1509,6 +1535,7 @@ mod admit_plan_tests {
                 seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
                 secret_release: mvm_core::plan::SecretReleasePolicy::None,
                 secrets: Vec::new(),
+                caller_commitment: None,
                 no_supervisor: false,
                 ledger: &ledger,
                 keys_dir: Some(keys_dir.path()),
@@ -1562,6 +1589,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -1595,6 +1623,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -1653,6 +1682,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -1729,6 +1759,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -1787,6 +1818,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -1852,6 +1884,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -1943,6 +1976,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -2005,6 +2039,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -2057,6 +2092,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -2117,6 +2153,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -2173,6 +2210,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -2222,6 +2260,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -2424,6 +2463,7 @@ allow_hosts = ["localhost:8443"]
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -2592,6 +2632,7 @@ allow_hosts = ["localhost:8443"]
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -2655,6 +2696,7 @@ allow_hosts = ["localhost:8443"]
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
