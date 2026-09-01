@@ -47,6 +47,10 @@ const ALLOWED_UNVERIFIED: &[&str] = &[
     // `resolve_workload_kernel` will serve. It names the location because
     // that is the fixture it writes.
     "crates/mvm-client/src/launch/tests.rs",
+    // Names the location as the *destination* it copies an already-resolved
+    // kernel into, so the scenario's home carries one. The kernel it copies
+    // came from `workload_kernel_path`, which resolves through the seam.
+    "crates/mvm-conformance/tests/steps/volume.rs",
 ];
 
 pub fn run(workspace: &Path) -> Result<()> {
