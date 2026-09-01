@@ -29,6 +29,14 @@
       workspace, Clippy, gated-target, formatting, and policy validation is
       green; merge delivery remains.
 
+- [ ] **Flake workload exit-code propagation — issue #3041.**
+      `specs/plans/2026-08-31-flake-exit-code-propagation.md`.
+      A manifest slot with no inline argv now waits on the backend's sealed
+      workload result, preserves nonzero exit codes, and fails closed when the
+      guest supplies no exit report. Focused regressions, the workspace suite,
+      zero-warning Clippy, workspace check, and gated-target compilation are
+      green; merge delivery remains.
+
 - [ ] **Wasmtime security update — issues #3018 and #3020.**
       `specs/plans/2026-08-31-wasmtime-security-update.md`.
       The optional Wasm backend's locked Wasmtime family is updated from
@@ -3483,3 +3491,14 @@ writes the plan:
 - [x] Cover musl acquisition, unknown-libc refusal, and release-name coupling.
 - [x] Complete workspace and gated validation.
 - [ ] Merge the repair through the queue and close issue #3045.
+
+## 2026-08-31 flake workload exit-code propagation
+
+- [x] Identify the empty inline target emitted for an image-baked flake
+      workload without changing explicit command dispatch.
+- [x] Wait through the selected backend and preserve its reported nonzero exit
+      code.
+- [x] Fail closed when the workload stops without an exit report and correct
+      the example's unsupported CLI flag.
+- [x] Complete workspace and gated validation.
+- [ ] Merge the repair through the queue and close issue #3041.

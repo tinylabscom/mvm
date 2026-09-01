@@ -13,6 +13,14 @@ Last updated: 2026-09-01
       Workspace tests, zero-warning Clippy, Linux/BDD gated compilation, and
       policy checks are green; merge delivery remains.
 
+- [ ] **Flake workload exit-code propagation — issue #3041.**
+      `specs/plans/2026-08-31-flake-exit-code-propagation.md`.
+      Empty manifest argv now means the image owns execution: the run path
+      waits for the backend's sealed workload result, preserves its nonzero
+      exit code, and rejects a missing report. Focused regressions, the
+      workspace suite, zero-warning Clippy, workspace check, and gated-target
+      compilation are green; merge delivery remains.
+
 - [ ] **Kernel cache moved out of the Stage 0 blast radius.**
       `specs/sprint/delivery/kernel-cache-outside-stage0-blast-radius.md`.
       The workload kernel was cached inside `builder-vm/<arch>`, the directory
