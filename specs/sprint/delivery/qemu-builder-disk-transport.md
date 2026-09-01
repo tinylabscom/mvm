@@ -90,5 +90,33 @@ Gates green on macOS: `just check-gated`, the workspace suite, doctests,
 `clippy --workspace --all-targets -D warnings`, `xtask check-all`.
 
 The behaviour itself is not CI-testable — no hosted runner boots a guest — so it
-requires a live `mvmctl build --builder qemu` on the Linux/KVM box before merge.
-Record the result here rather than assuming it.
+was validated with a live `mvmctl machine build --builder qemu` on the
+Linux/KVM box, from a cold `MVM_HOME` so Stage 0 built the builder image too.
+It completed:
+
+    [mvm] Step 2/2: Build complete
+    [mvm]   Slot:     032e844447f7d53080ec7f9f8c32fe9184498db09ba2a61ddb0564cce891242a
+
+A green build is not on its own proof that the new path ran, so four things were
+checked directly rather than inferred:
+
+- The guest booted with all four tokens — `mvm.builder_transport=disk`,
+  `mvm.builder_input=/dev/vdc`, `mvm.builder_output=/dev/vdd` and
+  `mvm.runtime_data=/dev/vde` — confirming the delegate swap emits the vde move
+  and the transport tokens together.
+- The guest enumerated the devices in the intended order: `vdc` 613 MB (the
+  input tar), `vdd` 8.00 GiB (the output disk), `vde` 10.7 MiB mounted `ro`
+  (the runtime overlay). Had the order been wrong, `vde` would have carried the
+  input tar rather than an ext4 the guest could mount.
+- `virtiofsd`, `vhost-user-fs` and `memory-backend-memfd` appear **zero** times
+  in the run log.
+- The input disk is 613 MB, not tens of GB, so `stage_filtered_work_input`
+  pruned `target/`, `.git/` and `.worktrees/` as intended — the failure mode
+  this migration was most exposed to.
+
+Reproducing it needs two things that are easy to lose an hour to. The bootstrap
+helper must be pinned with `MVM_BUILDER_VM_BOOTSTRAP_BIN` at a binary built
+`--features embed-host-bins`, because the helper mvmctl builds for itself
+carries no embedded host binaries and cannot bootstrap (issue #3067). And the
+process needs `/usr/sbin` on `PATH`, or Stage 0 reports `mkfs.ext4` missing when
+it is installed.
