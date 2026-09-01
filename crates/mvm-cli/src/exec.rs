@@ -11,11 +11,9 @@
 //! without `interactive`, so the handler is not present and `exec` returns
 //! "exec not available" regardless of any runtime configuration.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use mvm_core::launch_trace::PhaseTimingMode;
-use mvm_core::vm_backend::{
-    RequiredCapabilities, SnapshotCapability, VmId, VmStartConfig, VmVolume,
-};
+use mvm_core::vm_backend::{SnapshotCapability, VmId, VmStartConfig, VmVolume};
 use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::vsock_transport;
 use serde::Deserialize;
@@ -33,11 +31,16 @@ mod launch_plan;
 mod mounts;
 use either::Either;
 use mounts::refuse_unloadable_sidecar;
+mod backend_select;
 mod session;
+mod sidecar_selection;
 mod transient;
 
 pub use launch_plan::load_launch_plan;
 
+pub(crate) use backend_select::{
+    select_exec_backend, validate_image_egress_backend, validate_image_egress_backend_name,
+};
 use guest_run::{emit_guest_console_diagnostic, run_in_guest, run_wasm_module};
 use session::wait_for_agent_timed;
 pub use session::{
@@ -266,142 +269,6 @@ impl ExecRequest {
             hypervisor: self.hypervisor.as_deref(),
         }
     }
-}
-
-pub(crate) fn select_exec_backend(
-    image_requested: bool,
-    network_policy: &mvm_core::network_policy::NetworkPolicy,
-    requested: Option<&str>,
-) -> Result<AnyBackend> {
-    // CLI `--hypervisor` wins over the MVM_HYPERVISOR/MVM_BACKEND env override.
-    let backend_override = requested
-        .and_then(normalize_backend_override)
-        .or_else(explicit_hypervisor_override);
-    let backend_name = select_backend_name_for_egress(
-        backend_override.as_deref(),
-        image_requested,
-        network_policy,
-        "OCI --image runs with outbound egress enabled",
-    )?;
-    AnyBackend::require_hypervisor_selectable(&backend_name)?;
-    Ok(AnyBackend::from_hypervisor(&backend_name))
-}
-
-/// An explicit workload-backend override from the environment. The transient
-/// run path otherwise auto-detects the backend; this lets `MVM_HYPERVISOR`
-/// (or `MVM_BACKEND`) pin it — e.g. `libkrun`, whose vsock-tunnel egress path
-/// the auto-detected default would otherwise never select on this host. Every
-/// `select_exec_backend` call site reads the same value, so the admitted plan's
-/// backend and the boot backend agree.
-fn explicit_hypervisor_override() -> Option<String> {
-    ["MVM_HYPERVISOR", "MVM_BACKEND"]
-        .into_iter()
-        .filter_map(std::env::var_os)
-        .find_map(|raw| normalize_backend_override(&raw.to_string_lossy()))
-}
-
-/// Normalize a backend-override string (trim + lowercase); a blank value yields
-/// `None` so an empty env var is treated as "unset" rather than an invalid
-/// backend name.
-fn normalize_backend_override(raw: &str) -> Option<String> {
-    let value = raw.trim().to_ascii_lowercase();
-    (!value.is_empty()).then_some(value)
-}
-
-pub(crate) fn select_backend_name_for_egress(
-    backend_override: Option<&str>,
-    image_requested: bool,
-    network_policy: &mvm_core::network_policy::NetworkPolicy,
-    workload: &str,
-) -> Result<String> {
-    if let Some(backend_name) = backend_override {
-        validate_backend_for_egress(backend_name, image_requested, network_policy, workload)?;
-        return Ok(backend_name.to_string());
-    }
-
-    if !requires_vsock_proxy_backend(image_requested, network_policy) {
-        return Ok(AnyBackend::auto_select().name().to_string());
-    }
-
-    AnyBackend::select_capable_available(&vsock_proxy_backend_requirements())
-        .map(|backend| backend.name().to_string())
-        .map_err(|e| anyhow!("{workload} require a NIC-less host-vsock-proxy backend: {e}"))
-}
-
-pub(crate) fn validate_backend_for_egress(
-    backend_name: &str,
-    image_requested: bool,
-    network_policy: &mvm_core::network_policy::NetworkPolicy,
-    workload: &str,
-) -> Result<()> {
-    if !requires_vsock_proxy_backend(image_requested, network_policy) {
-        return Ok(());
-    }
-
-    let backend = AnyBackend::from_hypervisor(backend_name);
-    let missing = backend
-        .capabilities()
-        .shortfall(&vsock_proxy_backend_requirements());
-    if missing.is_empty() {
-        let available = backend
-            .is_available()
-            .with_context(|| format!("probing backend {backend_name} availability"))?;
-        if available {
-            return Ok(());
-        }
-        anyhow::bail!(
-            "{workload} require a NIC-less host-vsock-proxy backend; backend {backend_name} is unavailable on this host"
-        );
-    }
-
-    anyhow::bail!(
-        "{workload} require a NIC-less host-vsock-proxy backend; backend {backend_name} lacks [{}]",
-        missing.join(", ")
-    );
-}
-
-fn requires_vsock_proxy_backend(
-    image_requested: bool,
-    network_policy: &mvm_core::network_policy::NetworkPolicy,
-) -> bool {
-    image_requested && network_policy.allows_egress()
-}
-
-fn vsock_proxy_backend_requirements() -> RequiredCapabilities {
-    RequiredCapabilities {
-        vsock: true,
-        no_routable_guest_nic: true,
-        host_vsock_proxy: true,
-        ..Default::default()
-    }
-}
-
-pub(crate) fn validate_image_egress_backend(
-    backend: &AnyBackend,
-    image_requested: bool,
-    network_policy: &mvm_core::network_policy::NetworkPolicy,
-) -> Result<()> {
-    if !image_requested || !network_policy.allows_egress() {
-        return Ok(());
-    }
-    let caps = backend.capabilities();
-    if caps.vsock && caps.no_routable_guest_nic && caps.host_vsock_proxy {
-        return Ok(());
-    }
-    anyhow::bail!(
-        "OCI --image runs with outbound egress enabled require a NIC-less host-vsock-proxy backend; \
-         backend {} does not advertise {{vsock,no_routable_guest_nic,host_vsock_proxy}}",
-        backend.name()
-    );
-}
-
-pub(crate) fn validate_image_egress_backend_name(
-    backend_name: &str,
-    image_requested: bool,
-    network_policy: &mvm_core::network_policy::NetworkPolicy,
-) -> Result<()> {
-    let backend = AnyBackend::from_hypervisor(backend_name);
-    validate_image_egress_backend(&backend, image_requested, network_policy)
 }
 
 fn shape_uses_vsock_proxy_backend(shape: &LaunchShape<'_>) -> bool {
@@ -1209,38 +1076,6 @@ fn mount_volumes(
 /// boot-strategy state. Admission (tenant/plan binding) and the runtime
 /// overlay attach happen in the caller, after this returns — this only
 /// assembles the struct.
-/// Refuse a catalogued runtime whose declared libc is not what its image
-/// turned out to record.
-///
-/// Two independent facts about the same guest: the catalog *declares* a libc
-/// for the image reference it pins, and the unpacker *observes* one in the tree
-/// that reference resolved to. They agree until the upstream tag moves — a
-/// `:alpine` image rebuilt on a glibc base, say — at which point the
-/// declaration is silently wrong about every guest booted from it.
-///
-/// Selection uses the observed value, so a disagreement is not itself a boot
-/// hazard; it is a catalog entry that has drifted from reality, and it is
-/// invisible from anywhere else. Refusing is the only way anyone finds out.
-///
-/// `Unknown` on either side is not a disagreement: an image the host has no
-/// declaration for is the ordinary `--image` case, and an image that recorded
-/// no libc is refused later, by the resolver, with a message about what to do.
-fn refuse_declared_libc_disagreement(
-    declared: mvm_contract::guest_libc::GuestLibc,
-    recorded: mvm_contract::guest_libc::GuestLibc,
-) -> Result<()> {
-    use mvm_contract::guest_libc::GuestLibc;
-    if declared == GuestLibc::Unknown || recorded == GuestLibc::Unknown || declared == recorded {
-        return Ok(());
-    }
-    anyhow::bail!(
-        "refusing to launch: the runtime catalog declares this image is {declared}, but the \
-         materialized rootfs records {recorded}. The catalog entry has drifted from the image \
-         it pins — most likely the upstream tag was rebuilt on a different base. Report it; \
-         naming the image directly with --image bypasses the declaration."
-    )
-}
-
 fn build_start_config(
     shape: &LaunchShape<'_>,
     vm_name: &str,
@@ -1419,32 +1254,18 @@ pub fn resolve_launch(
     // and the two artifact attachments. Admission instruments itself, and its
     // spans account for roughly half the window, so the rest needs naming
     // before any of it can be acted on.
-    // The SDK sidecar is chosen here, and only here, because this is the first
-    // point at which the guest exists. There is one artifact per guest libc and
-    // a musl process cannot `dlopen` the glibc one; the libc was observed when
-    // the rootfs was unpacked and recorded beside it, which is the only thing
-    // the host can still read once the tree is an ext4 blob.
-    //
-    // Selecting from the *recorded* value rather than a catalogued runtime's
-    // declaration is what makes an arbitrary `--image` work: nothing declares a
-    // libc for an image a user names themselves, and that is the case the
-    // catalog is a convenience over.
-    //
-    // Not asked on a tier that attaches no ELF sidecar. Wasm has no dynamic
-    // loader and never will, so "which libc" is the wrong question there: a
-    // wasm workload binding an SDK host service is refused by the
-    // backend-compatibility gate, which can say why.
-    let sdk_sidecar = if backend.kind() == mvm_core::vm_backend::BackendKind::Wasm {
-        None
-    } else {
-        let recorded =
-            mvm_build::guest_libc::recorded_image_libc(std::path::Path::new(&image.rootfs));
-        refuse_declared_libc_disagreement(shape.declared_libc, recorded)?;
-        crate::commands::vm::up::resolve_sdk_sidecar_attachment_for_host(
-            shape.sdk_host_services,
-            recorded,
-        )?
-    };
+    // Chosen here, and only here, because this is the first point at which the
+    // guest exists: the variant follows the libc its rootfs recorded when it
+    // was unpacked. Resolved once and used twice — the volume goes into the
+    // launch config below, and the same attachment reaches admission a few
+    // lines further down, so the signed plan's grant names the bytes that were
+    // actually attached.
+    let sdk_sidecar = sidecar_selection::select_for_launch(
+        backend.kind(),
+        std::path::Path::new(&image.rootfs),
+        shape.sdk_host_services,
+        shape.declared_libc,
+    )?;
 
     let t_build = std::time::Instant::now();
     let mut start_config =
@@ -1721,62 +1542,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn validate_backend_for_egress_refuses_unavailable_hvf_before_boot_work() {
-        let _guard = mvm_runtime::base::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let mut env = TestEnv::new();
-        let policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
-            mvm_core::network_policy::HostPort::new("example.com", 443),
-        ]);
-        env.set("MVM_HVF_SUPERVISOR_PATH", "/no/such/mvm-hvf-supervisor");
-        let err = validate_backend_for_egress(
-            "hvf",
-            true,
-            &policy,
-            "OCI --image runs with outbound egress enabled",
-        )
-        .expect_err("unavailable hvf must fail closed before OCI work");
-        // SAFETY: test-only env mutation.
-        unsafe {
-            std::env::remove_var("MVM_HVF_SUPERVISOR_PATH");
-        }
-        // HVF always advertises the NIC-less host-vsock-proxy egress caps (they
-        // are unconditional — the fail-closed posture), so the capability
-        // shortfall is empty and the refusal comes from the availability probe:
-        // a host whose supervisor can't launch is unavailable, not egress-capable.
-        let msg = err.to_string();
-        assert!(msg.contains("NIC-less host-vsock-proxy backend"));
-        assert!(msg.contains("backend hvf is unavailable on this host"));
-    }
-
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    #[test]
-    fn select_backend_name_for_egress_picks_hvf_when_proxy_support_is_available() {
-        let _guard = mvm_runtime::base::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let mut env = TestEnv::new();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let supervisor = dir.path().join("mvm-hvf-supervisor");
-        std::fs::write(&supervisor, b"stub").expect("stub supervisor");
-        let policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
-            mvm_core::network_policy::HostPort::new("example.com", 443),
-        ]);
-
-        env.set("MVM_HVF_SUPERVISOR_PATH", &supervisor);
-        let selected = select_backend_name_for_egress(
-            None,
-            true,
-            &policy,
-            "OCI --image runs with outbound egress enabled",
-        )
-        .expect("hvf should satisfy the proxy backend requirement");
-
-        assert_eq!(selected, "hvf");
-    }
-
     /// A launch shape resolved from an `ExecRequest` must carry every field the
     /// resolution reads. If one is dropped here, a `pool warm` that builds its
     /// shape by hand and a run that builds one from its request resolve
@@ -1838,41 +1603,6 @@ mod tests {
     /// The whole point of the extraction: a bootable config, verity sidecars
     /// included, obtained without starting a VM. `pool warm` depends on this —
     /// a pre-warm that had to boot to learn its own boot shape would be no
-    /// The catalog declares a libc and the unpacker observes one. While they
-    /// agree there is nothing to say; the check exists for the day the
-    /// upstream tag is rebuilt on a different base and the declaration becomes
-    /// quietly wrong about every guest booted from it.
-    #[test]
-    fn a_declaration_matching_what_the_image_records_is_not_a_disagreement() {
-        use mvm_contract::guest_libc::GuestLibc;
-        for libc in [GuestLibc::Glibc, GuestLibc::Musl] {
-            assert!(refuse_declared_libc_disagreement(libc, libc).is_ok());
-        }
-    }
-
-    #[test]
-    fn a_declaration_the_image_contradicts_refuses_and_names_both() {
-        use mvm_contract::guest_libc::GuestLibc;
-        let err = refuse_declared_libc_disagreement(GuestLibc::Musl, GuestLibc::Glibc)
-            .expect_err("a drifted catalog entry must not boot silently");
-        let msg = err.to_string();
-        assert!(msg.contains("musl"), "must name the declaration: {msg}");
-        assert!(msg.contains("glibc"), "must name what was recorded: {msg}");
-    }
-
-    /// `Unknown` on either side is not a disagreement. An image the host has no
-    /// declaration for is the ordinary `--image` case — the one this whole
-    /// selection exists to serve — and an image that recorded no libc is
-    /// refused later by the resolver, with a message about what to do next.
-    /// Treating either as a conflict here would refuse both instead.
-    #[test]
-    fn an_unknown_on_either_side_is_not_a_disagreement() {
-        use mvm_contract::guest_libc::GuestLibc;
-        assert!(refuse_declared_libc_disagreement(GuestLibc::Unknown, GuestLibc::Musl).is_ok());
-        assert!(refuse_declared_libc_disagreement(GuestLibc::Musl, GuestLibc::Unknown).is_ok());
-        assert!(refuse_declared_libc_disagreement(GuestLibc::Unknown, GuestLibc::Unknown).is_ok());
-    }
-
     /// pre-warm at all.
     #[cfg(feature = "test-support")]
     #[test]
@@ -1916,7 +1646,7 @@ mod tests {
             pty: false,
             network_policy: &policy,
             warm_pool_size: 1,
-            sdk_host_services: Vec::new(),
+            sdk_host_services: &[],
             declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
             hypervisor: Some("mock"),
         };
@@ -2438,19 +2168,5 @@ mod tests {
         // Best-effort: an already-gone dir (or a boot that never created one) is
         // a clean no-op, never a panic.
         remove_transient_state_dir("/nonexistent/mvm/vms/never-created");
-    }
-
-    #[test]
-    fn normalize_backend_override_trims_lowercases_and_drops_blank() {
-        assert_eq!(
-            normalize_backend_override("  LibKrun \n"),
-            Some("libkrun".to_string())
-        );
-        assert_eq!(
-            normalize_backend_override("firecracker"),
-            Some("firecracker".to_string())
-        );
-        assert_eq!(normalize_backend_override("   "), None);
-        assert_eq!(normalize_backend_override(""), None);
     }
 }
