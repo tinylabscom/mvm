@@ -61,6 +61,9 @@ pub enum FlowMuxError {
     /// The host refused an operation.
     #[error("refused: {0}")]
     Refused(String),
+    /// Policy admitted the target, but the host could not connect upstream.
+    #[error("upstream connect failed: {0}")]
+    UpstreamConnect(String),
     /// An internal channel was closed unexpectedly.
     #[error("client channel closed")]
     ChannelClosed,
@@ -1175,6 +1178,52 @@ mod tests {
         host.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn guest_client_distinguishes_an_upstream_connect_failure() {
+        let (guest_stream, host_stream) = tokio::io::duplex(4096);
+        let (guest_key, _guest_anchor) = generate_keypair();
+        let (host_key, host_anchor) = generate_keypair();
+
+        let host = tokio::spawn(async move {
+            let (mut host_stream, mut host_session) = host_handshake(host_stream, host_key).await;
+
+            let _hello = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::HelloAck,
+                0,
+                &Handshake::local("test-host").encode(),
+            )
+            .await;
+
+            let (_opcode, sid, _len, _payload) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::ConnectFailed,
+                sid,
+                b"connection failed",
+            )
+            .await;
+        });
+
+        let client = FlowMuxClient::connect(guest_stream, guest_key, host_anchor)
+            .await
+            .expect("guest handshake");
+        let err = client.open_tcp("example.com:80").await.unwrap_err();
+        assert!(
+            matches!(err, FlowMuxError::UpstreamConnect(_)),
+            "unexpected err: {err}"
+        );
+
+        host.await.unwrap();
+    }
+
     /// A fresh client has not handshaken yet. Publishing `Ready` at
     /// construction let a caller open a flow into a session that had agreed
     /// nothing, so a mismatched host looked healthy until the flow failed.
@@ -1451,6 +1500,7 @@ mod connect_retry_tests {
         for err in [
             FlowMuxError::Handshake("bad signature".into()),
             FlowMuxError::Refused("not admitted".into()),
+            FlowMuxError::UpstreamConnect("connection failed".into()),
             FlowMuxError::Frame("bad length prefix".into()),
             FlowMuxError::SessionClosed("go away".into()),
             FlowMuxError::ChannelClosed,

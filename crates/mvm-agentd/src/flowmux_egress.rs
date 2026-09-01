@@ -37,6 +37,18 @@ fn flowmux_to_io(error: FlowMuxError) -> io::Error {
     io::Error::new(io::ErrorKind::ConnectionAborted, error.to_string())
 }
 
+fn http_failure_status(error: &FlowMuxError) -> &'static str {
+    match error {
+        FlowMuxError::Refused(_) => "403 Forbidden",
+        FlowMuxError::Handshake(_)
+        | FlowMuxError::Frame(_)
+        | FlowMuxError::SessionClosed(_)
+        | FlowMuxError::Transport(_)
+        | FlowMuxError::UpstreamConnect(_)
+        | FlowMuxError::ChannelClosed => "502 Bad Gateway",
+    }
+}
+
 /// Bind the loopback proxy at `listen` and serve egress over one FlowMux
 /// session indefinitely.
 pub async fn run(listen: SocketAddr, flowmux: FlowMuxReconnectClient) -> io::Result<()> {
@@ -135,7 +147,7 @@ async fn serve_http_connect(
         }
         Err(error) => {
             let mut client = client;
-            write_connect_reply(&mut client, ProxyReplyStyle::HttpConnect, ConnectAck::Fail)
+            write_http_response(&mut client, http_failure_status(&error))
                 .await
                 .ok();
             Err(flowmux_to_io(error))
@@ -194,7 +206,7 @@ async fn serve_http_forward(
         }
         Err(error) => {
             let mut client = client;
-            write_http_response(&mut client, "502 Bad Gateway")
+            write_http_response(&mut client, http_failure_status(&error))
                 .await
                 .ok();
             Err(flowmux_to_io(error))
@@ -600,6 +612,18 @@ mod http_forward_tests {
         let signing = SigningKey::from_bytes(&bytes);
         let verifying = signing.verifying_key();
         (signing, verifying)
+    }
+
+    #[test]
+    fn policy_refusal_and_upstream_failure_have_distinct_http_statuses() {
+        assert_eq!(
+            http_failure_status(&FlowMuxError::Refused("not admitted".into())),
+            "403 Forbidden"
+        );
+        assert_eq!(
+            http_failure_status(&FlowMuxError::UpstreamConnect("connection failed".into())),
+            "502 Bad Gateway"
+        );
     }
 
     async fn send_frame<S>(

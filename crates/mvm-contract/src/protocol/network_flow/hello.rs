@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 /// different fail-closed rule. Leave it alone for changes a peer cannot
 /// observe. It is a declaration, not a derivation — nothing computes it,
 /// which is exactly why the bump belongs in the diff that earns it.
-pub const BEHAVIOR_REVISION: u32 = 2;
+pub const BEHAVIOR_REVISION: u32 = 3;
 
 /// The longest build label a peer may send. Long enough for a crate name
 /// and a version, short enough that it can never be the interesting part

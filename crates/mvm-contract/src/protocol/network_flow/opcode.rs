@@ -33,6 +33,8 @@ pub enum Opcode {
     HalfClose = 0x15,
     /// both: abortive teardown.
     Reset = 0x16,
+    /// host→guest: policy admitted the target, but the upstream connect failed.
+    ConnectFailed = 0x17,
 
     // ── UDP ──────────────────────────────────────────────────────────
     /// guest→host: open a UDP association.
@@ -140,6 +142,7 @@ impl Opcode {
             0x14 => Self::WindowUpdate,
             0x15 => Self::HalfClose,
             0x16 => Self::Reset,
+            0x17 => Self::ConnectFailed,
             0x20 => Self::OpenUdp,
             0x21 => Self::UdpOpened,
             0x22 => Self::UdpSend,
@@ -177,6 +180,7 @@ impl Opcode {
         Self::WindowUpdate,
         Self::HalfClose,
         Self::Reset,
+        Self::ConnectFailed,
         Self::OpenUdp,
         Self::UdpOpened,
         Self::UdpSend,
@@ -219,6 +223,7 @@ impl Opcode {
             Self::IcmpEcho | Self::IcmpReply | Self::IcmpRefused => FlowClass::Icmp,
             Self::Opened
             | Self::Refused
+            | Self::ConnectFailed
             | Self::Data
             | Self::WindowUpdate
             | Self::HalfClose
@@ -239,7 +244,7 @@ impl Opcode {
     pub const fn confirming_classes(self) -> Option<&'static [FlowClass]> {
         Some(match self {
             Self::Opened => &[FlowClass::Tcp, FlowClass::Http],
-            Self::Refused => &[
+            Self::Refused | Self::ConnectFailed => &[
                 FlowClass::Tcp,
                 FlowClass::Http,
                 FlowClass::Udp,
@@ -277,6 +282,7 @@ impl Opcode {
             self,
             Self::Reset
                 | Self::Refused
+                | Self::ConnectFailed
                 | Self::CloseUdp
                 | Self::Resolved
                 | Self::ResolveRefused
@@ -314,6 +320,7 @@ impl Opcode {
             Self::HelloAck
             | Self::Opened
             | Self::Refused
+            | Self::ConnectFailed
             | Self::UdpOpened
             | Self::UdpRecv
             | Self::Resolved
@@ -394,7 +401,7 @@ mod tests {
 
     #[test]
     fn unknown_discriminants_are_rejected_rather_than_passed_through() {
-        for v in [0x00u8, 0x04, 0x0f, 0x17, 0x25, 0x33, 0x43, 0x56, 0x7f, 0xff] {
+        for v in [0x00u8, 0x04, 0x0f, 0x18, 0x25, 0x33, 0x43, 0x56, 0x7f, 0xff] {
             assert_eq!(Opcode::from_u8(v), None, "{v:#04x} should be unknown");
         }
     }

@@ -3440,3 +3440,17 @@ writes the plan:
 - [x] Prove response-read EOFs are returned without replay and repeated
       handshake hangups exhaust a bounded budget.
 - [ ] Merge the repair through the queue and close issue #3024.
+
+## 2026-09-01 egress refusal status contract
+
+- [x] Give an admitted target whose upstream connection fails its own
+      wire-stable FlowMux `ConnectFailed` outcome.
+- [x] Keep policy refusal distinct and translate it to HTTP 403 while genuine
+      upstream/transport failure remains HTTP 502.
+- [x] Bump the FlowMux behavior revision so stale host and guest halves refuse
+      one another instead of disagreeing about the new outcome.
+- [x] Add focused host, guest, HTTP-status, opcode, state-machine, and handshake
+      regressions.
+- [x] Complete the full workspace, Clippy, formatting, gated-target, and
+      documentation validation matrix.
+- [ ] Merge through the queue and close issue #3040 from landed evidence.

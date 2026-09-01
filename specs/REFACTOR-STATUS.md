@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-31
+Last updated: 2026-09-01
 
 ## In progress
 
@@ -17,6 +17,14 @@ Last updated: 2026-08-31
       tests, Clippy, doctests, policy gates, and a live macOS 26 `e2e-launch`
       run (migration confirmed a rename, not a rebuild) are green; merge
       delivery remains.
+
+- [ ] **Egress refusal status contract — issue #3040.**
+      `specs/plans/2026-09-01-egress-refusal-status.md`.
+      FlowMux now distinguishes a policy refusal (`403 Forbidden`) from an
+      admitted target whose upstream connection failed (`502 Bad Gateway`) on
+      the wire, with a behavior-revision bump and focused host/guest protocol
+      regressions. Workspace tests, Clippy, formatting, gated-target checks,
+      and documentation gates are green; merge delivery remains.
 
 - [ ] **machine diff handshake retry — issue #3024.**
       `specs/plans/2026-08-31-machine-diff-handshake-retry.md`.
