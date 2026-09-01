@@ -1790,7 +1790,7 @@ mod linux {
                     None
                 }
             };
-            let _exit_code = run_dispatch_loop(cold_boot_timings);
+            let _exit_code = run_dispatch_loop(cold_boot_timings, disk_transport);
             stamp(&timings, |t| {
                 t.poweroff_start_ms = Some(BootTimings::ms_since(anchor))
             });
@@ -2215,7 +2215,14 @@ mod linux {
     ///
     /// Returns `0` on graceful `Shutdown`, non-zero on listener
     /// setup failure (caller `power_off`s either way).
-    fn run_dispatch_loop(mut cold_boot_timings: Option<BootTimings>) -> i32 {
+    /// `disk_transport` is `Some` when the host staged this VM's inputs on a
+    /// raw block device rather than virtio-fs shares. A persistent builder then
+    /// re-reads `/job` off that device per dispatch and writes each dispatch's
+    /// artifacts back onto the output device — see [`restage_disk_transport_job`].
+    fn run_dispatch_loop(
+        mut cold_boot_timings: Option<BootTimings>,
+        disk_transport: Option<crate::DiskTransport>,
+    ) -> i32 {
         // No accept timeout — the dispatch loop is persistent and
         // blocks waiting for the supervisor's next submit. The
         // outer `mvmctl persistent-builder stop` signals shutdown via a
@@ -2277,6 +2284,28 @@ mod linux {
                     eprintln!(
                         "mvm-host-vm-init: dispatch loop: starting job {job_id} at {job_dir_relpath}"
                     );
+                    // Disk transport: this dispatch's `/job` contents are on the
+                    // input disk the host just rewrote. Fatal for the dispatch
+                    // rather than the VM — a persistent builder must survive one
+                    // bad job, so this reports a failed Result and keeps serving.
+                    if let Some(t) = &disk_transport
+                        && let Err(e) = restage_disk_transport_job(t)
+                    {
+                        eprintln!("mvm-host-vm-init: dispatch loop: job staging failed: {e}");
+                        let failed = crate::dispatch_response::DispatchResponse {
+                            job_id: job_id.clone(),
+                            exit_code: 2,
+                            stderr_tail: format!("disk-transport job staging failed: {e}"),
+                            boot_timings: cold_boot_timings.take(),
+                            build_ms: 0,
+                        };
+                        if !write_frame(&mut conn, failed.to_json().as_bytes()) {
+                            eprintln!(
+                                "mvm-host-vm-init: dispatch loop: write staging-failure Result failed"
+                            );
+                        }
+                        continue;
+                    }
                     let response = execute_dispatched_job(
                         &mut conn,
                         job_id,
@@ -2284,6 +2313,14 @@ mod linux {
                         &job_dir_relpath,
                         cold_boot_timings.take(),
                     );
+                    // Publish this dispatch's artifacts before the host is told
+                    // the job is done: the host reads the output disk as soon as
+                    // it sees the Result, so collecting afterwards would race it.
+                    if let Some(t) = &disk_transport
+                        && let Err(e) = collect_disk_transport_output(t)
+                    {
+                        eprintln!("mvm-host-vm-init: dispatch loop: output collection failed: {e}");
+                    }
                     eprintln!("mvm-host-vm-init: dispatch loop: job completed; writing Result");
                     if !write_frame(&mut conn, response.as_bytes()) {
                         eprintln!("mvm-host-vm-init: dispatch loop: write Result failed mid-frame");
@@ -3230,6 +3267,35 @@ mod linux {
         std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {dir}: {e}"))
     }
 
+    /// Empty `dir` **without replacing the directory itself**.
+    ///
+    /// [`reset_stage_dir`] removes and recreates, which is right at boot and
+    /// wrong for anything already bind-mounted: `/job` and `/out` are binds onto
+    /// these inodes, so removing the source leaves the mount pointing at a
+    /// deleted directory and every later write lands somewhere nothing reads.
+    /// A persistent builder re-stages between dispatches, after the binds exist,
+    /// so it needs this form.
+    fn clear_dir_contents(dir: &str) -> Result<(), String> {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {dir}: {e}"));
+            }
+            Err(e) => return Err(format!("read {dir}: {e}")),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("read entry under {dir}: {e}"))?;
+            let path = entry.path();
+            let removed = if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            removed.map_err(|e| format!("remove {}: {e}", path.display()))?;
+        }
+        Ok(())
+    }
+
     /// Populate `/job`, `/work`, `/mvm-bins`, and (when the host packed one)
     /// `/closure-seed` from the input disk, and back `/out` with a writable
     /// dir on the persistent nix-store disk. This is the disk-transport
@@ -3272,6 +3338,44 @@ mod linux {
         reset_stage_dir(&out_backing)?;
         std::fs::create_dir_all(OUT_DIR).map_err(|e| format!("mkdir {OUT_DIR}: {e}"))?;
         disk_bind_mount(&out_backing, OUT_DIR)?;
+        Ok(())
+    }
+
+    /// Re-stage `/job` for one dispatch of a *persistent* builder.
+    ///
+    /// The one-shot path stages once at boot and powers off after a single job.
+    /// A persistent VM takes many, and each carries its own `cmd.sh` /
+    /// `install_spec.json`. The host rewrites the input disk — a raw tar, so it
+    /// can be replaced wholesale — before it sends the `Run` frame, and this
+    /// re-reads the `job` member off the device. Ordering is what makes it safe:
+    /// the host finishes writing before it sends, and dispatches serialize
+    /// behind the supervisor's mutex, so no read ever straddles a write.
+    ///
+    /// Only the `job` member is extracted. `work`, `mvm-bins` and the closure
+    /// seed are boot-time inputs that do not change between dispatches, and
+    /// re-extracting a large `work` tree per job would cost real time for no
+    /// effect.
+    fn restage_disk_transport_job(t: &crate::DiskTransport) -> Result<(), String> {
+        let job_stage = format!("{DISK_INPUT_STAGE}/job");
+        // Contents-only: `/job` is bind-mounted onto this directory.
+        clear_dir_contents(&job_stage)?;
+        let status = Command::new("/bin/busybox")
+            .args(["tar", "xf", &t.input_dev, "-C", DISK_INPUT_STAGE, "job"])
+            .status()
+            .map_err(|e| format!("spawn tar x job {}: {e}", t.input_dev))?;
+        if !status.success() {
+            return Err(format!(
+                "tar x job {} exited {:?}",
+                t.input_dev,
+                status.code()
+            ));
+        }
+        // `/out` accumulates across dispatches the same way it accumulates
+        // across builds, and for the same reason the boot path resets it: the
+        // host would otherwise read back a tar of every artifact any earlier
+        // dispatch left behind, including `result-*` symlinks into guest-only
+        // store paths that are dangling on the host and fail extraction.
+        clear_dir_contents(&format!("{NIX_STORE_MOUNT}/out"))?;
         Ok(())
     }
 
@@ -4086,6 +4190,48 @@ mod linux {
             let stage = dir.path().join("builder-input");
 
             reset_stage_dir(stage.to_str().expect("utf-8 path")).expect("reset");
+
+            assert!(stage.is_dir());
+        }
+
+        /// The property the persistent path depends on, and the reason it
+        /// cannot reuse `reset_stage_dir`: `/job` is bind-mounted onto the
+        /// staging directory, so the directory must survive being emptied.
+        /// Remove and recreate and the bind points at a deleted inode — every
+        /// later write lands somewhere nothing reads, silently.
+        #[test]
+        fn clear_dir_contents_empties_without_replacing_the_directory() {
+            use std::os::unix::fs::MetadataExt;
+
+            let dir = tempfile::tempdir().expect("tempdir");
+            let stage = dir.path().join("job");
+            std::fs::create_dir_all(stage.join("nested")).expect("nested");
+            std::fs::write(stage.join("cmd.sh"), b"old").expect("file");
+            std::fs::write(stage.join("nested/leftover"), b"old").expect("nested file");
+            let before = std::fs::metadata(&stage).expect("stat").ino();
+
+            clear_dir_contents(stage.to_str().expect("utf-8 path")).expect("clear");
+
+            assert_eq!(
+                std::fs::metadata(&stage).expect("stat").ino(),
+                before,
+                "the directory itself must survive, or the bind mount is orphaned"
+            );
+            assert_eq!(
+                std::fs::read_dir(&stage).expect("read").count(),
+                0,
+                "a previous dispatch's files must not leak into the next one"
+            );
+        }
+
+        /// Same first-boot tolerance `reset_stage_dir` has: a persistent VM
+        /// re-stages before the directory necessarily exists.
+        #[test]
+        fn clear_dir_contents_creates_the_directory_when_absent() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let stage = dir.path().join("job");
+
+            clear_dir_contents(stage.to_str().expect("utf-8 path")).expect("clear");
 
             assert!(stage.is_dir());
         }
