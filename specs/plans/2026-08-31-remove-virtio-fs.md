@@ -3,8 +3,9 @@
 Backing: shipped-source
 Validation: check-sprint-append
 
-**Status: IN PROGRESS — Stages A and B landed. Stage C (builder VM) is
-unstarted and gated on the `out` decision; Stage D (the gate) follows it.**
+**Status: IN PROGRESS — Stages A, B and D landed. No workload tier reaches
+virtio-fs, and a ratchet gate keeps it that way. Stage C is down to one path:
+the persistent HVF builder, which needs live Apple Silicon validation.**
 
 No guest gets a virtio-fs device. Not a workload, not the builder VM, not the
 dev-tier root. The host filesystem reaches a guest as a block image or it does
@@ -162,24 +163,188 @@ because the goal is *nowhere*, not *nowhere that matters*.
 
 Remaining shares are `work`, `out`, `job`, `mvm-bins` and the closure seed.
 
-- [ ] `work`, `job`, `mvm-bins`, closure seed — inbound and read-only. Same
-      treatment as Stage A; `work` is already done on Stage 0.
-- [ ] `out` is the hard one and needs a decision: the guest **writes** artifacts
-      the host must read back. Options: a writable virtio-blk image the host
-      mounts read-only after poweroff (needs a host-side ext4 *reader*, which
-      `mvm-fs` does not have — it has a writer); or stream artifacts out over
-      the existing vsock channel. Neither is free. Do not start Stage C until
-      this is chosen.
-- [ ] Delete `crates/mvm-vmm/src/host/virtiofsd.rs`, both QEMU call sites, and
-      the `virtiofsd` host dependency from the Linux install docs.
+**`out` is already solved, and this plan was wrong about it.** The decision it
+said to make — ext4 reader vs vsock stream — was moot before it was written.
+`mvm_build::builder_disk_transport` is a **raw tar written straight onto a disk
+image, no filesystem on the transport disk**: the host packs a tar and the guest
+`tar x`es it; the guest packs artifacts and the host `tar x`es them. Both sides
+only ever run `tar`, so no host-side ext4 reader is needed — which is exactly
+why it was built, since HVF's host is macOS and macOS can neither format nor
+read an ext4. tar's end-of-archive marker stops extraction before the disk's
+zero padding, so a fixed-size disk carrying a shorter archive round-trips.
+
+**The one-shot builder already uses it** (`libkrun_builder.rs` packs the input
+disk and reads the output disk; `builder_spec` lays out four disks in vda–vdd
+order and asks for no shares). What is left is narrower than "the builder VM":
+
+- [x] `work`, `job`, `mvm-bins`, closure seed — inbound. Done for the one-shot
+      builder via the disk transport; `work` was already done on Stage 0.
+**The guest is already most of the way there.** `mvm-host-vm-init` has a
+complete disk-transport mode, selected by `mvm.builder_transport=disk` with
+`mvm.builder_input=` / `mvm.builder_output=` naming the devices:
+`stage_disk_transport_input` extracts `job`/`work`/`mvm-bins`/`closure-seed`
+off the raw input disk and bind-mounts them at the same paths the shares used,
+and `setup_modules_and_virtiofs` skips every virtio-fs mount when it is active.
+The one-shot builder runs this way today. Nothing new has to be invented — the
+persistent case just does not use it yet.
+
+No protocol change is needed either. The input disk is a raw tar the host can
+rewrite between dispatches; the guest re-reads it with `tar xf` per dispatch, so
+`Run.job_dir_relpath` keeps working and stays pointing into `/job`. Sequencing is
+already safe: the host finishes writing before it sends `Run`, and V1 serializes
+dispatches behind the supervisor's mutex.
+
+Five coordinated changes, host and guest:
+
+- [ ] `persistent_builder_spec`: replace the four shares with an input and an
+      output disk, and add the three transport cmdline tokens.
+- [x] `repack_input_disk_in_place` — **landed**. A persistent builder rewrites
+      its input disk between dispatches, and `pack_input_disk` cannot do it: it
+      calls `set_len`. A running VM's `DiskImage` captures the file length
+      **once, at open**, and zero-fills reads past it — so growing the file hands
+      the guest an archive it reads as short, and `tar` reports success on it.
+      The in-place form never changes the length and refuses an archive that
+      will not fit, because refusing is the only way that failure is visible.
+- [ ] `HvfPersistentHostVm::start`: `pack_input_disk` the boot-time inputs
+      (`work`, `mvm-bins`, closure seed) and `create_output_disk`. Both helpers
+      already exist and are what the one-shot builder calls. Size the input disk
+      with headroom — the capacity is fixed for the VM's life. Per-dispatch
+      repacks carry only the `job` tree (the guest bind-mounted `work` and
+      `mvm-bins` at boot and never re-reads them), so they are always smaller
+      than the boot pack.
+- [ ] **Readiness has to move, and connect-polling is NOT the answer.** The host
+      waits for the guest by polling for a `dispatch.ready` file *inside the
+      `/job` share* (`wait_until_dispatch_ready`). With no share the host cannot
+      see that marker at all.
+
+      The obvious replacement — connect to the dispatch UDS and treat success as
+      readiness — is wrong, and the repo already knows it. `hvf.rs`'s agent probe
+      says so in as many words: *"Probe the authenticated RPC stream directly;
+      this waits for a real guest response rather than treating the host-side
+      listener as readiness."* The supervisor owns that UDS and accepts on it
+      whether or not the guest is listening on the vsock port behind it, so a
+      bare connect reports ready for a guest that never started.
+
+      Two options, neither free:
+
+      - Add a `Ping`/`Pong` pair to `HostVmRequest`/`HostVmResponse`. Crisp, but
+        a wire change on both sides — so the guest needs a second change and a
+        second image rebuild.
+      - Delete `wait_until_dispatch_ready` and let the **first dispatch** be the
+        readiness proof, with a bounded retry in the dispatch client that also
+        checks VM liveness — which is where the connection is made anyway, and
+        keeps the fail-fast-on-dead-VM behaviour the wait exists for. Smaller,
+        adds no protocol surface, but moves the failure from `start()` to the
+        first build.
+
+      Prefer the second unless the diagnostics loss bites. Do not ship a bare
+      connect-poll.
+- [ ] Host dispatch client: repack the input disk with the new job payload
+      before each `Run`, and `read_output_disk` into the artifact dir after each
+      `Result` — rather than once after poweroff.
+- [x] Guest dispatch loop: re-stages `/job` from the input disk on each `Run`
+      and collects `/out` onto the output disk after each job — the collection
+      previously ran only on the one-shot path, since `run_dispatch_loop`
+      returns straight into `power_off()`. `/out` is reset per dispatch for the
+      reason the boot path documents: otherwise the host reads back a tar of
+      every artifact any earlier dispatch left, including dangling `result-*`
+      symlinks that fail extraction outright. Only the `job` member is
+      re-extracted; `work` and `mvm-bins` do not change between dispatches.
+
+      `clear_dir_contents` is new, and is why this could not reuse
+      `reset_stage_dir`: that one removes and recreates the directory, which is
+      right at boot and wrong afterwards, because `/job` and `/out` are
+      bind-mounted onto those inodes. Orphan the bind and every later write
+      lands somewhere nothing reads, silently. A test pins the surviving inode.
+
+      **Runs only in the Linux test lane.** The guest bin is `cfg`-gated, so
+      these tests compile on macOS via `just check-gated` but execute in CI.
+- [ ] **Cannot be validated in CI or on a non-macOS host.** Every guest-booting
+      lane skips on hosted runners, and the persistent builder is what
+      `mvmctl build` uses on macOS 26+. Land this only behind a real
+      `mvmctl build` on Apple Silicon; a broken builder has no CI witness.
+- [ ] **Sequence the guest half first.** `mvm-host-vm-init` is cross-compiled and
+      baked into the builder rootfs, so a guest change only takes effect after
+      the image is rebuilt. Landing the guest's per-dispatch staging while the
+      host still declares shares is inert — disk transport stays off — which
+      makes it separately validatable and removes version skew from the host
+      flip. Flipping the host first against an old baked guest hangs the
+      dispatch loop with no useful error.
+- [ ] **The QEMU builder needs the same migration, and the plan missed it.**
+      `qemu_builder.rs` serves `work` / `out` / `job` / `mvm-bins` over
+      vhost-user/virtiofsd — not the disk transport — and QEMU is the *Linux
+      auto-detect default builder*. So this is not the "opt-in dev/test backend
+      we can just delete the feature from": deleting its shares breaks every
+      Linux build. It needs the same treatment as the persistent HVF builder,
+      and the guest side already supports it, so it should be mostly a spec and
+      client change. It is separately validatable on the Linux/KVM box, which
+      makes it the better of the two to do first.
+
+      **Recipe, mapped against the tree.** Both QEMU sites are one-shot
+      (`run_shell_script_qemu` ~L1005 and `run_build_qemu` ~L1279 in
+      `qemu_builder.rs`), so this is the simple migration, not the persistent
+      one — no in-place repack, no per-dispatch staging. Two private helpers in
+      `libkrun_builder.rs` already do the work and need only widening to
+      `pub(crate)`: `prepare_builder_transport_disks` (packs the input disk,
+      creates the output disk) and `extract_builder_transport_output`.
+
+      Per site: build `[job, work, mvm-bins]` `InputTree`s the way
+      `libkrun_builder.rs` does at L1132 and L1654, call the prep helper, attach
+      the two images as ordinary `-drive`s, drop the `virtiofsd` spawn loop, the
+      `memory-backend-memfd` + `-numa` object (it exists only because
+      vhost-user-fs requires a shared memory backend whose size equals `-m`),
+      and the `vhost-user-fs-pci` device loop, then extract from the output disk
+      after QEMU exits.
+
+      **Disk order matters and should match the one-shot spec exactly**: vda
+      rootfs, vdb nix-store, vdc input, vdd output, vde runtime overlay,
+      identity last. That is what the guest's cmdline defaults
+      (`mvm.builder_input=/dev/vdc`, `mvm.builder_output=/dev/vdd`) and
+      `BUILDER_RUNTIME_DEVICE=/dev/vde` already assume. Today QEMU puts the
+      runtime overlay at vdc, so it moves — update the `mvm.runtime_data=` token
+      from `qemu_runtime_overlay_attachment` to match. The identity drive is
+      found by ext4 label, not slot, so it is unaffected.
+
+      **One open question**: QEMU carries `closure_share_dir`, a *directory*
+      share. The disk transport's closure support takes a NAR *file*
+      (`pack_input_disk`'s `closure_nar`, archived at
+      `closure-seed/<CLOSURE_FILE>`). libkrun passes `None` there, so the
+      existing helper has no closure path to copy. Resolve how
+      `closure_share_dir` is built before assuming it maps straight across.
+
+- [ ] The QEMU **workload** driver's share arm is a different matter and *is*
+      free: workload specs carry `shares: Vec::new()` unconditionally since
+      Stage A, so `qemu.rs`'s share handling is unreachable for workloads.
+
+- [ ] Only once both builders are on the disk transport can
+      `crates/mvm-vmm/src/host/virtiofsd.rs` (382 lines), its QEMU call sites,
+      and the `virtiofsd` host dependency in the Linux install docs go — and
+      with them the `--sandbox none` flag that started this plan. That is also
+      when `check-no-virtio-fs` drops to FFI-only rows and the ratchet becomes
+      an absolute rather than a ceiling.
 
 ### Stage D — the gate
 
-- [ ] `xtask check-no-virtio-fs`, modelled on `check-single-network-path`:
-      fails on `virtio_fs` / `VirtioFs` / `virtiofsd` / `add_virtio_fs`
-      anywhere in the workspace outside the libkrun FFI bindings, which declare
-      the C API whether or not we call it.
-- [ ] Add it to the CI gate list. A removal without a gate grows back.
+Landed **before** Stage C rather than after, as a ratchet. Waiting for the
+surface to reach zero before gating it meant the removal was unprotected for
+exactly as long as it took to finish — and the finishing is the slow part.
+
+- [x] `xtask check-no-virtio-fs`. It counts only sites that **attach a device or
+      construct a share** (`add_virtiofs*`, `VirtioFs::new`/`with_tag`,
+      `VirtioFsShare {`, `HvfVirtioFsShare {`, `krun_add_virtiofs`), with
+      comments and strings blanked first. The word-matching version the plan
+      originally described would have fired on ~70 files that merely discuss
+      virtio-fs, and could have been satisfied by rewording a comment instead of
+      deleting code.
+- [x] Pinned at **23 sites across 11 files**, each row carrying why it survives
+      and what retires it. The count must match exactly: a new site fails as
+      growth, and a *removed* one fails as a stale pin, so the table can only
+      shrink and cannot drift into a ceiling nobody maintains. Four rows from
+      the first draft turned out to be comment-only and were dropped — the gate
+      caught them itself.
+- [x] Added to `check-all`, which runs on every PR (`ci.yml`). Four tests ship
+      with it, including one asserting the pattern still matches every real
+      attach form: a gate that cannot fail is decoration.
 
 ## What this costs
 
@@ -191,7 +356,10 @@ Remaining shares are `work`, `out`, `job`, `mvm-bins` and the closure seed.
   on the *dispatch window* (`backend_start + vsock_wait`), and the mount spans
   are parented to `drives`, which is outside it. A launch with no `--mount` is
   unchanged, and a custom volume is already a block image.
-- **Stage C is weeks**, most of it in `out`, for a guest that runs our code.
+- **Stage C is smaller than "weeks"** — that estimate assumed `out` needed a
+  new mechanism, and it does not (see Stage C). What is left is one transport
+  swap on the persistent builder. The cost is not code volume; it is that no CI
+  lane can witness it.
 - **The QEMU workload driver may simply lose directory shares** rather than gain
   images — it is opt-in dev/test and `auto_select` never picks it, so it is the
   one place where deleting the feature outright is defensible.
