@@ -179,18 +179,55 @@ order and asks for no shares). What is left is narrower than "the builder VM":
 
 - [x] `work`, `job`, `mvm-bins`, closure seed — inbound. Done for the one-shot
       builder via the disk transport; `work` was already done on Stage 0.
-- [ ] The **persistent** HVF builder (`persistent_builder_spec`) is the only
-      remaining share-based path. It is persistent — one VM, many dispatches,
-      exchanging files with the host *while running* — so a disk packed once at
-      boot does not drop in. It already carries a `GuestService::BuilderDispatch`
-      vsock channel and a `dispatch.ready` marker protocol, so the work is
-      extending a channel that exists rather than inventing a transport:
-      stream the per-dispatch job tar in and the artifact tar out over it.
-      Touches `mvm-host-vm-init`'s dispatch loop and the host dispatch client.
+**The guest is already most of the way there.** `mvm-host-vm-init` has a
+complete disk-transport mode, selected by `mvm.builder_transport=disk` with
+`mvm.builder_input=` / `mvm.builder_output=` naming the devices:
+`stage_disk_transport_input` extracts `job`/`work`/`mvm-bins`/`closure-seed`
+off the raw input disk and bind-mounts them at the same paths the shares used,
+and `setup_modules_and_virtiofs` skips every virtio-fs mount when it is active.
+The one-shot builder runs this way today. Nothing new has to be invented — the
+persistent case just does not use it yet.
+
+No protocol change is needed either. The input disk is a raw tar the host can
+rewrite between dispatches; the guest re-reads it with `tar xf` per dispatch, so
+`Run.job_dir_relpath` keeps working and stays pointing into `/job`. Sequencing is
+already safe: the host finishes writing before it sends `Run`, and V1 serializes
+dispatches behind the supervisor's mutex.
+
+Five coordinated changes, host and guest:
+
+- [ ] `persistent_builder_spec`: replace the four shares with an input and an
+      output disk, and add the three transport cmdline tokens.
+- [ ] `HvfPersistentHostVm::start`: `pack_input_disk` the boot-time inputs
+      (`work`, `mvm-bins`, closure seed) and `create_output_disk`. Both helpers
+      already exist and are what the one-shot builder calls.
+- [ ] **Readiness has to move, and this is the non-obvious one.** The host waits
+      for the guest by polling for a `dispatch.ready` file *inside the `/job`
+      share* (`wait_until_dispatch_ready`). With no share the host cannot see
+      that marker at all. Replace it with connect-polling on the dispatch
+      socket: the guest listening on its vsock port is the readiness signal,
+      and it is one the host can observe without a shared filesystem.
+- [ ] Host dispatch client: repack the input disk with the new job payload
+      before each `Run`, and `read_output_disk` into the artifact dir after each
+      `Result` — rather than once after poweroff.
+- [ ] Guest dispatch loop: re-stage `/job` from the input disk on each `Run`,
+      and call `collect_disk_transport_output` after each job. Today that
+      collection runs only on the one-shot path — `run_dispatch_loop` returns
+      straight into `power_off()` and never reaches it. `/out` must be reset per
+      dispatch for the reason the boot path already documents: otherwise the
+      host reads back a tar of every artifact any earlier build left behind,
+      including dangling `result-*` symlinks that fail extraction outright.
 - [ ] **Cannot be validated in CI or on a non-macOS host.** Every guest-booting
       lane skips on hosted runners, and the persistent builder is what
       `mvmctl build` uses on macOS 26+. Land this only behind a real
       `mvmctl build` on Apple Silicon; a broken builder has no CI witness.
+- [ ] **Sequence the guest half first.** `mvm-host-vm-init` is cross-compiled and
+      baked into the builder rootfs, so a guest change only takes effect after
+      the image is rebuilt. Landing the guest's per-dispatch staging while the
+      host still declares shares is inert — disk transport stays off — which
+      makes it separately validatable and removes version skew from the host
+      flip. Flipping the host first against an old baked guest hangs the
+      dispatch loop with no useful error.
 - [ ] Delete `crates/mvm-vmm/src/host/virtiofsd.rs`, both QEMU call sites, and
       the `virtiofsd` host dependency from the Linux install docs.
 
