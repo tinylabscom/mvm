@@ -239,6 +239,7 @@ pub fn volume_spec_to_vm_volume(spec: &VolumeSpec) -> VmVolume {
             read_only,
         } => VmVolume {
             materialized_image: None,
+            volume_label: None,
             host: host_dir.clone(),
             guest: guest_mount.clone(),
             size: String::new(),
@@ -254,6 +255,7 @@ pub fn volume_spec_to_vm_volume(spec: &VolumeSpec) -> VmVolume {
             encrypted,
         } => VmVolume {
             materialized_image: None,
+            volume_label: None,
             host: host.clone(),
             guest: guest.clone(),
             size: size.clone(),
@@ -783,6 +785,7 @@ mod volume_spec_tests {
         let host = tmp.path().join("data.img");
         let volume = VmVolume {
             materialized_image: None,
+            volume_label: None,
             host: host.to_string_lossy().into_owned(),
             guest: "/data".to_string(),
             size: "10M".to_string(),
@@ -811,6 +814,7 @@ mod volume_spec_tests {
         let share_host = tmp.path().join("share");
         let share = VmVolume {
             materialized_image: None,
+            volume_label: None,
             host: share_host.to_string_lossy().into_owned(),
             guest: "/share".to_string(),
             size: "10M".to_string(),

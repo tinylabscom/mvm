@@ -2533,6 +2533,7 @@ mod tests {
     fn disk_volume(host: &str, guest: &str, read_only: bool) -> mvm_core::vm_backend::VmVolume {
         mvm_core::vm_backend::VmVolume {
             materialized_image: None,
+            volume_label: None,
             host: host.into(),
             guest: guest.into(),
             size: String::new(),
@@ -2545,6 +2546,7 @@ mod tests {
     fn dir_share_volume(host: &str, guest: &str) -> mvm_core::vm_backend::VmVolume {
         mvm_core::vm_backend::VmVolume {
             materialized_image: None,
+            volume_label: None,
             host: host.into(),
             guest: guest.into(),
             size: String::new(),

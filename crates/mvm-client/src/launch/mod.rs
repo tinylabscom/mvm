@@ -709,6 +709,7 @@ impl LocalBackend {
             .iter()
             .map(|volume| mvm_core::vm_backend::VmVolume {
                 materialized_image: None,
+                volume_label: None,
                 host: volume.host.clone(),
                 guest: volume.guest.clone(),
                 size: volume.size.clone(),
