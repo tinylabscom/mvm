@@ -336,20 +336,63 @@ pub(crate) fn require_local_volume_host_path_encrypted(path: &std::path::Path) -
     )
 }
 
+/// The device node of the volume containing `path`, e.g. `/dev/disk3s5`.
+///
+/// `diskutil info` takes a device or a volume, **not an arbitrary directory**:
+/// `diskutil info /Users/auser` exits 1 with "Could not find disk". Every
+/// caller of the probe passes a directory, so without this resolution the
+/// macOS arm could never succeed — and it reported the tool as unavailable
+/// when the tool had run perfectly and simply rejected its argument.
+#[cfg(target_os = "macos")]
+fn macos_containing_device(path: &std::path::Path) -> Option<String> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: `c_path` is a valid NUL-terminated string for the duration of the
+    // call, and `buf` is a correctly-sized zeroed `statfs` the kernel fills in.
+    let mut buf: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(c_path.as_ptr(), &mut buf) } != 0 {
+        return None;
+    }
+    // SAFETY: on success the kernel leaves `f_mntfromname` NUL-terminated.
+    let device = unsafe { std::ffi::CStr::from_ptr(buf.f_mntfromname.as_ptr()) };
+    device
+        .to_str()
+        .ok()
+        .map(str::to_string)
+        .filter(|d| !d.is_empty())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_containing_device(_path: &std::path::Path) -> Option<String> {
+    None
+}
+
 pub(crate) fn detect_host_path_encryption_status(path: &std::path::Path) -> HostFdeStatus {
     let plat = platform::current();
     if matches!(plat, Platform::MacOS) {
+        // Ask about the volume that holds the directory, not the directory.
+        // Falling back to the path itself keeps the old behaviour when the
+        // resolution fails rather than refusing outright.
+        let target = macos_containing_device(path).unwrap_or_else(|| path.display().to_string());
         match std::process::Command::new("diskutil")
             .arg("info")
-            .arg(path)
+            .arg(&target)
             .output()
         {
             Ok(out) if out.status.success() => {
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 parse_macos_diskutil_encryption_status(path, &stdout)
             }
-            _ => HostFdeStatus::not_enabled(format!(
-                "could not determine encryption state for {} (diskutil unavailable)",
+            // Ran, but rejected the argument. Distinct from "could not run it",
+            // and conflating the two is what made this look environmental.
+            Ok(out) => HostFdeStatus::not_enabled(format!(
+                "diskutil could not report on {target} (for {}): {}",
+                path.display(),
+                String::from_utf8_lossy(&out.stderr).trim(),
+            )),
+            Err(e) => HostFdeStatus::not_enabled(format!(
+                "could not run diskutil to check {}: {e}",
                 path.display()
             )),
         }
@@ -1400,6 +1443,33 @@ mod tests {
             status.info.contains("does NOT appear"),
             "expected encrypted-backing refusal, got: {}",
             status.info
+        );
+    }
+
+    /// The bug this guards: `diskutil info` takes a device or a volume, not a
+    /// directory. Every caller passes a directory, so before this resolution
+    /// the probe reported "diskutil unavailable" on every macOS host — for a
+    /// tool that ran fine and rejected its argument. `mvmctl machine volume
+    /// mount` refused every directory as a result.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_directory_resolves_to_the_device_of_its_containing_volume() {
+        // A plain directory that is not itself a mount point is the shape that
+        // failed; `/` is the shape that happened to work and hid it.
+        let device = macos_containing_device(std::path::Path::new("/System/Volumes/Data"))
+            .expect("a real directory resolves to a device");
+        assert!(
+            device.starts_with("/dev/"),
+            "expected a device node, got {device}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_unresolvable_path_yields_no_device_rather_than_a_wrong_one() {
+        assert_eq!(
+            macos_containing_device(std::path::Path::new("/no/such/path/anywhere")),
+            None
         );
     }
 
