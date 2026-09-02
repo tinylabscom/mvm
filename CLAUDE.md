@@ -145,7 +145,7 @@ Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, disting
 
 ### Workspace Structure
 
-17-crate Cargo workspace (Bar-A consolidation took 32→16; `mvm-vmm`, `mvm-backends`, and `mvm-http` were split back out afterwards). Root facade (`src/lib.rs`) re-exports the libraries.
+19-crate Cargo workspace under `crates/` (Bar-A consolidation took 32→16; `mvm-vmm`, `mvm-backends`, and `mvm-http` were split back out afterwards, and `mvm-host-services` was split out of `mvm-sdk`), plus the root `mvmctl` package, `xtask`, and `mvm-conformance` — 22 packages by `cargo metadata`. Root facade (`src/lib.rs`) re-exports the libraries.
 
 **Libraries, low → high:**
 
@@ -160,6 +160,10 @@ Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, disting
 - `mvm-runtime` -- the big runtime crate (absorbs `mvm` + `mvm-backend` + `mvm-base`): the `VmBackend` trait and the `AnyBackend` dispatch over every backend, VM lifecycle (`vm/` templates + checkpoints), `microvm/` (Firecracker driver), `base/` (shell/ui/linux_env/cow host substrate), `storage/` (dm-thin), `network/` (the TAP/gateway impl behind the `mvm-net` seam). Re-exports the `mvmctl::runtime`/`::backend` contract.
 - `mvm-client` -- the local/remote client facade: `LocalBackend` (default) + `GatewayBackend` (the `remote` feature), the canonical host-wide machine inventory (`inventory`, which backs `mvmctl machine ls` and non-CLI consumers), plus a re-export of `mvm-core`'s `MvmClient` trait and its `stream` reader. There is **no `dyn MvmClient` facade in the CLI** — `mvm-cli` uses `AnyBackend` directly for the backend surface, and the routing-everything-through-the-client refactor has not landed. Say what the code does, not what the plan said.
 - `mvm-cli` -- Clap CLI (the `mvmctl` surface), bootstrap/doctor/build/run/machine commands; `build.rs` embeds the host binaries.
+- `mvm-host-services` -- the in-guest host-services C ABI: one JSON-in/JSON-out entry point over the vsock broker, built as the `libmvm_host_services.so` cdylib every language SDK `dlopen`s. The package name is what makes cargo emit that filename directly. Its closure is deliberately tiny (no C, no async runtime) because it is compiled into every guest — `check-sdk-transport-free` holds that line, and the SDK sidecar's staleness fingerprint watches this crate and its dependencies rather than `mvm-sdk`.
+- `mvm-observability` -- tracing subscriber assembly for the host-side binaries.
+- `mvm-capture` -- project-environment capture frontend.
+- `mvm-mcp` -- bounded stdio MCP adapter over the `MvmClient` facade.
 
 **Top of graph (daemons, SDK, FFI):**
 
