@@ -245,6 +245,10 @@ impl VsockShared {
         self.handlers.set_host_dial_sockets(ports)
     }
 
+    pub fn set_long_lived_host_dial_ports(&mut self, ports: impl IntoIterator<Item = u32>) {
+        self.handlers.set_long_lived_host_dial_ports(ports);
+    }
+
     pub fn set_host_dial_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
         self.handlers.set_host_dial_activity(counter);
     }
@@ -424,6 +428,11 @@ impl VirtioVsock {
     pub fn capture_workload_exit(&mut self, stop: &'static std::sync::atomic::AtomicBool) {
         self.lock().capture_workload_exit(stop);
         self.host_runtime.workload_exit_stop = Some(stop);
+        self.notify_io();
+    }
+
+    pub fn set_long_lived_host_dial_ports(&mut self, ports: impl IntoIterator<Item = u32>) {
+        self.lock().set_long_lived_host_dial_ports(ports);
         self.notify_io();
     }
 
