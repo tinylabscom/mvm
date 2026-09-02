@@ -19,6 +19,21 @@
       `enforce_sdk_sidecar_attachment`) have been updated to respect this flag.
       Workspace, Clippy, formatting, and validation are green. Merge delivery remains.
 
+- [ ] **Extended CI red repair — issues #2979, #3007, #3051, #3052.**
+      `specs/plans/2026-08-28-extended-ci-red-repair.md`. Multiple build,
+      permissions, and workflow issues have been repaired including platform-scoped
+      helper builds, uv installation, SDK sidecar warm-up, and host permissions.
+      Linux witnessed boot and service-plane flows through HVF and QEMU. Merge
+      delivery remains.
+
+- [ ] **macOS self-hosted runner — issue #3011.**
+      `specs/sprint/delivery/extended-ci-red-must-mean-a-regression.md`.
+      The Extended CI lane requires a self-hosted Apple Silicon runner to run
+      live macOS evidence. GitHub-hosted runners detect they cannot boot guests
+      and fail on purpose. Acquiring and provisioning a self-hosted Apple
+      Silicon runner is the prerequisite for running live macOS e2e tests.
+      Work in progress.
+
 - [ ] **Mounted PTY image environment.**
       `specs/plans/2026-09-01-mounted-pty-image-environment.md`.
       Absolute PTY commands now bypass the login-shell wrapper even when the
@@ -32,7 +47,7 @@
       `specs/plans/2026-09-01-signed-caller-commitment.md`.
       One typed opaque 32-byte commitment now reaches the signed execution
       plan and every chain-signed plan audit entry from `run` and `machine
-    run`, including persistent-machine restarts. Workspace tests, Clippy,
+  run`, including persistent-machine restarts. Workspace tests, Clippy,
       Linux/BDD gated checks, formatting, frozen-wire compatibility, and the
       243-scenario non-live BDD suite were green before merge. Landed on main
       as `8623950746`; issue #3070 is closed.
@@ -504,15 +519,15 @@ and nothing depends on it.
       behind the Plan 311 findings below.
 
       Instrumentation then extends to the launch critical path — `mvm-cli` had
-          none at all, and it owns the orchestration upstream of where
-          `launch_trace`'s six marks begin. `sha256_file` and its cached wrapper are
-          timed separately so the re-hash below is a row in the profile rather than
-          an inference, and the `ps` process-table scan and OCI pull/layer paths are
-          named. Daemon and build entry points (`admit_for_run`, `admit_and_start`,
-          `verify_audit_chain_entries`, `pool_build_with_opts`, `build_via_vsock`,
-          `workload_build_fingerprint`, `launch_transient`) follow. Guest-side
-          `mvm-agentd` is deliberately excluded — its spans would land on the
-          guest's stderr, which needs a collection path that does not exist yet.
+              none at all, and it owns the orchestration upstream of where
+              `launch_trace`'s six marks begin. `sha256_file` and its cached wrapper are
+              timed separately so the re-hash below is a row in the profile rather than
+              an inference, and the `ps` process-table scan and OCI pull/layer paths are
+              named. Daemon and build entry points (`admit_for_run`, `admit_and_start`,
+              `verify_audit_chain_entries`, `pool_build_with_opts`, `build_via_vsock`,
+              `workload_build_fingerprint`, `launch_transient`) follow. Guest-side
+              `mvm-agentd` is deliberately excluded — its spans would land on the
+              guest's stderr, which needs a collection path that does not exist yet.
 
 - [ ] Launch critical-path waste on real-sized images — **issues #2273–#2276,
       plan 311**. Plan 299's prepared-cold baseline runs `alpine`, whose cached
@@ -743,7 +758,7 @@ and nothing depends on it.
       merge-group Test, Lint, and Nix gates and merged into main.
 - [x] `mvmctl deps install` runs the lockfile-pinned development install in the
       builder boundary and publishes its sealed volume. `mvmctl deps
-    capture-live` exports bounded guest content and sidecars before handing
+  capture-live` exports bounded guest content and sidecars before handing
       them to the atomic reseal path, and requires a running development VM;
       implementation is merged through PR #2132, whose branch and merge-group
       Test, Lint, and Nix gates passed.
@@ -939,14 +954,14 @@ updates only its own entry below.
       `BindingStore` egress bindings, a new per-machine secret-reference
       sidecar (`secret-refs.json`, metadata only), and JSONL +
       chain-signed audit (`secret.create/replace/bind/unbind/remove/
-    remove_refused`). Inputs are `SecretValueInput` (zeroize-on-drop,
+  remove_refused`). Inputs are `SecretValueInput` (zeroize-on-drop,
       redacted Debug, crate-private accessor); no reveal method or
       value-carrying response type exists. `remove` refuses while an
       existing persistent machine references the secret (no force path);
       `validate_for_admission` fails closed on missing secrets,
       missing/malformed bindings, unauthorized destinations (via
       `host_matches`), and cross-scope references. `mvmctl secret
-    put/set/get/ls/rm` now consumes the service (`get` is a pure
+  put/set/get/ls/rm` now consumes the service (`get` is a pure
       presence check — no decryption). 53 new/ported tests (36 in
       mvm-client, 17 in mvm-cli) including no-leak assertions across
       responses, serialization, Debug, errors, audit records, and
@@ -1116,7 +1131,7 @@ test --workspace --no-fail-fast` gate passes with zero failures after the
         HTTPS-or-loopback `GatewayBackend` now carries tenant volume create,
         list, attach, detach, checkpoint, restore, and delete operations with
         typed failures and percent-encoded resource IDs. `mvmctl volume
-    --remote` reads its URL, in-memory-only bearer token, and tenant from
+--remote` reads its URL, in-memory-only bearer token, and tenant from
         dedicated environment variables while local behavior stays unchanged.
         Twenty-one gateway client tests, including one real loopback HTTP request, nine CLI
         lifecycle parser tests, touched-crate checks, all-target Clippy, and the
@@ -1201,7 +1216,7 @@ test --workspace --no-fail-fast` gate passes with zero failures after the
       reported `clean (16 claims, 48 witnesses verified)`.
 
 - [~] Build cache verify-on-read — **plan 276 WS6**. `~/.mvm/dev/builds/
-    <rev>/` was served on a hit if `rootfs.ext4` merely existed as a file: no
+  <rev>/` was served on a hit if `rootfs.ext4` merely existed as a file: no
   digest, no signature, so content substitution went undetected and the
   provenance recorder then signed whatever bytes were on disk — the audit
   log faithfully recording a substituted image as legitimate.
@@ -1281,7 +1296,7 @@ test --workspace --no-fail-fast` gate passes with zero failures after the
   user-facing prose that still asserted claim 15 in its absence form.
   T17 made it reachable and did so with a live entrypoint resolver in the
   same change, which the plan required: `machine run --entrypoint --stdin
-    -` opens the route under the plan that boot was admitted under, pumps the
+  -` opens the route under the plan that boot was admitted under, pumps the
   caller's stdin through the gate in acceptance order on its own thread,
   keeps the lease alive on a ticker, and closes the workload's stdin on the
   caller's EOF; the grant is minted only for a call that asked. The
@@ -1293,7 +1308,7 @@ test --workspace --no-fail-fast` gate passes with zero failures after the
   Plan 293 WS1 then closed the last dormant leg: the per-VM substitution
   endpoint — the one process holding a workload's credentials in the clear
   — fingerprints each secret it resolves and reports `(length, rolling
-    hash, category)` on its ready handshake, and `StreamPlane::open_input`
+  hash, category)` on its ready handshake, and `StreamPlane::open_input`
   installs that set on the gate. No plaintext crosses into `mvmctl`.
   Holding fingerprints instead of values costs the scan its live-prefix
   precision, so it withholds a blanket `longest_secret - 1` tail — a
@@ -1342,7 +1357,7 @@ test --workspace --no-fail-fast` gate passes with zero failures after the
       workspace tests, check, clippy, and formatting pass. Published as PR
       #1845 for review.
 - [x] #1813 workload-lifetime firewall state: key installs by `(tenant,
-    workload)` so hot plan revisions replace prior rules without orphaning
+  workload)` so hot plan revisions replace prior rules without orphaning
       firewalls. Focused regression coverage, workspace check, full tests,
       clippy, and formatting pass; published as PR #1847 for review.
 - [x] #1827 vsock overload hardening is complete: guest-selected connection
@@ -1377,17 +1392,17 @@ test --workspace --no-fail-fast` gate passes with zero failures after the
       307/307 xtask nextest.
 
       **Now also owns the witnesses this gate cannot reach,** folded in from
-          plan 274 whose WS3/WS4 are struck. That plan's prose named three such
-          claims; the gate derives four. The fourth, MVM-SEC-16, is qualitatively
-          different — its witnesses are ordinary Rust functions skipped only for
-          living in `crates/mvm-hostd/tests/`, so it needs a planted defect in the
-          enforcement code rather than a CI-lane falsification. Keeping the sweep
-          beside the gate that computes the list is what stops the two diverging
-          again. #1946 was closed by #1958, which exports `HOME`/`MVM_HOME` to a
-          runner temp dir in the nightly job and carries `CARGO_HOME`/
-          `RUSTUP_HOME` across. That covers the CI lane; `just
-          mutation-witnesses` still runs against a developer's real `~/.mvm`,
-          which is the entry point #1946 called the sharper of the two.
+              plan 274 whose WS3/WS4 are struck. That plan's prose named three such
+              claims; the gate derives four. The fourth, MVM-SEC-16, is qualitatively
+              different — its witnesses are ordinary Rust functions skipped only for
+              living in `crates/mvm-hostd/tests/`, so it needs a planted defect in the
+              enforcement code rather than a CI-lane falsification. Keeping the sweep
+              beside the gate that computes the list is what stops the two diverging
+              again. #1946 was closed by #1958, which exports `HOME`/`MVM_HOME` to a
+              runner temp dir in the nightly job and carries `CARGO_HOME`/
+              `RUSTUP_HOME` across. That covers the CI lane; `just
+              mutation-witnesses` still runs against a developer's real `~/.mvm`,
+              which is the entry point #1946 called the sharper of the two.
 
 - [x] Non-hermetic `$HOME` test class closed. `default_mvm_cache_dir` is the
       only resolver that reads `$HOME` while `MVM_HOME` is set (it seeds the
@@ -1402,7 +1417,7 @@ test --workspace --no-fail-fast` gate passes with zero failures after the
       empty vs. a populated fixture `$HOME` rather than inferred from the call
       graph. 8021/8021 nextest on a host with a populated `~/.mvm`.
       **Deferred → closed.** `mvmctl::audit_emissions_live
-    update_check_does_not_emit_audit_entry` failed intermittently under full
+  update_check_does_not_emit_audit_entry` failed intermittently under full
       workspace concurrency and was correctly ruled out of the `$HOME` class.
       Triaged in the nextest-profile work: not a concurrency flake but a bug in
       the shared `serve_release_latest_fixture` helper it and its sibling use.
@@ -1455,55 +1470,55 @@ test --workspace --no-fail-fast` gate passes with zero failures after the
       time, not merely noisy.
 
       **MVM-SEC-05's only witness ran nothing at all.** The fuzz lane's
-          first step still declared `working-directory: crates/mvm-guest`, a
-          crate the consolidation deleted; the step failed to *start*, and
-          because the fourteen targets were sequential steps in one job, every
-          later target was skipped too. Four of the nine directories were stale
-          (`mvm-guest`, `mvm-oci`, `mvm-vm-host`, `mvm-ext4`); the corpus-upload
-          block had been updated to the new paths, so the rename was done
-          halfway. Fixed independently and first in #1958, which corrected the
-          fourteen `working-directory` values in place; this branch's matrix
-          rebuild was dropped in favour of it.
-          **Residual, since closed:** the targets remain sequential steps in
-          one job, but the nightly budget was `secs=1800` with no
-          `timeout-minutes`, so 14 x 1800s was 7 hours of fuzzing against
-          GitHub's 6-hour ceiling — before per-target sanitizer builds. That is
-          exactly what happened: by 2026-08-16 the lane had grown to seventeen
-          targets and every cron run was killed partway down the list. The
-          budget is now 720s per target under `timeout-minutes: 300`, and
-          `xtask check-workflow-paths` multiplies the two so target eighteen
-          fails a PR rather than silently pushing the lane back over the
-          ceiling. A matrix (one cell per target, `fail-fast: false`) remains
-          the shape that would also stop one stale entry skipping every target
-          after it.
+              first step still declared `working-directory: crates/mvm-guest`, a
+              crate the consolidation deleted; the step failed to *start*, and
+              because the fourteen targets were sequential steps in one job, every
+              later target was skipped too. Four of the nine directories were stale
+              (`mvm-guest`, `mvm-oci`, `mvm-vm-host`, `mvm-ext4`); the corpus-upload
+              block had been updated to the new paths, so the rename was done
+              halfway. Fixed independently and first in #1958, which corrected the
+              fourteen `working-directory` values in place; this branch's matrix
+              rebuild was dropped in favour of it.
+              **Residual, since closed:** the targets remain sequential steps in
+              one job, but the nightly budget was `secs=1800` with no
+              `timeout-minutes`, so 14 x 1800s was 7 hours of fuzzing against
+              GitHub's 6-hour ceiling — before per-target sanitizer builds. That is
+              exactly what happened: by 2026-08-16 the lane had grown to seventeen
+              targets and every cron run was killed partway down the list. The
+              budget is now 720s per target under `timeout-minutes: 300`, and
+              `xtask check-workflow-paths` multiplies the two so target eighteen
+              fails a PR rather than silently pushing the lane back over the
+              ceiling. A matrix (one cell per target, `fail-fast: false`) remains
+              the shape that would also stop one stale entry skipping every target
+              after it.
 
-          **MVM-SEC-07's two witnesses failed for unrelated reasons.**
-          `cargo-audit`: `quick-xml 0.37.5` carried RUSTSEC-2026-0194/0195 (both
-          7.5) via `object_store 0.11`; bumped to `object_store 0.14`, the first
-          release requiring `quick-xml >= 0.41`. Fixed, not ignored — and the
-          step's ten `--ignore` flags, whose comment claimed to mirror
-          `deny.toml`'s `ignore = []`, were removed after confirming none still
-          matched anything in the graph. `cargo-deny`'s duplicate-dalek failure
-          was diagnosed independently and fixed first in #1952; `deny.toml` had
-          never carried those entries while `check-duplicate-majors` had — the
-          two-gate drift that let the PR-visible gate stay green while the
-          nightly stayed red.
+              **MVM-SEC-07's two witnesses failed for unrelated reasons.**
+              `cargo-audit`: `quick-xml 0.37.5` carried RUSTSEC-2026-0194/0195 (both
+              7.5) via `object_store 0.11`; bumped to `object_store 0.14`, the first
+              release requiring `quick-xml >= 0.41`. Fixed, not ignored — and the
+              step's ten `--ignore` flags, whose comment claimed to mirror
+              `deny.toml`'s `ignore = []`, were removed after confirming none still
+              matched anything in the graph. `cargo-deny`'s duplicate-dalek failure
+              was diagnosed independently and fixed first in #1952; `deny.toml` had
+              never carried those entries while `check-duplicate-majors` had — the
+              two-gate drift that let the PR-visible gate stay green while the
+              nightly stayed red.
 
-          Also restored: the flake-lock gate (two probe examples pinning
-          `inputs.mvm` to this repo were missing from a hardcoded exclusion list
-          — replaced with a check for the property itself, anchored so
-          `nix/flake.nix`'s documentation comment does not match) and
-          builder-VM reproducibility (`mvm-builderd` joined the host-binary
-          manifest but not the cross-compile step).
+              Also restored: the flake-lock gate (two probe examples pinning
+              `inputs.mvm` to this repo were missing from a hardcoded exclusion list
+              — replaced with a check for the property itself, anchored so
+              `nix/flake.nix`'s documentation comment does not match) and
+              builder-VM reproducibility (`mvm-builderd` joined the host-binary
+              manifest but not the cross-compile step).
 
-          Two new gates make both rot classes PR-visible, each with a planted
-          defect recorded in `specs/VERIFICATION.md`:
-          `check-workflow-paths` resolves every workflow `working-directory`
-          and `cargo fuzz run` target against the tree, and
-          `check-mvm-host-binaries-sync` now treats the cross-compile step as a
-          third mirror of the binary manifest. Claim 5's witness was retyped
-          from `ci:fuzz` — which matched the job key and stayed green through
-          all ten dead nightlies — to the three fuzz targets it actually names.
+              Two new gates make both rot classes PR-visible, each with a planted
+              defect recorded in `specs/VERIFICATION.md`:
+              `check-workflow-paths` resolves every workflow `working-directory`
+              and `cargo fuzz run` target against the tree, and
+              `check-mvm-host-binaries-sync` now treats the cross-compile step as a
+              third mirror of the binary manifest. Claim 5's witness was retyped
+              from `ci:fuzz` — which matched the job key and stayed green through
+              all ten dead nightlies — to the three fuzz targets it actually names.
 
 - [x] A claim-bearing CI lane can stop backing its claim two ways, and only
       one was watched. #1970 reports a _red_ Security lane, but it triggers on
@@ -1515,23 +1530,23 @@ test --workspace --no-fail-fast` gate passes with zero failures after the
       them, and no watcher could have said so.
 
       `xtask check-claim-witness-freshness` covers absence, on its own
-          schedule rather than on `workflow_run`, because the whole point is to
-          notice a lane that never ran. It maps each `ci:` witness onto the
-          workflow anchoring it (reusing #1980's resolver, lifted into
-          `claims_ledger` so one implementation serves both gates), derives the
-          allowance from the cron, and fails when the newest run is older than
-          three missed firings. It deliberately does *not* re-check conclusions —
-          that is #1970's job, and two gates on one property would eventually
-          disagree. Lanes with no daily-or-better cron are reported as notes, not
-          judged: a pull-request lane is legitimately idle. Falsified by making
-          Security's cron hourly, which reported it 14h stale and named all eight
-          claims it backs.
+              schedule rather than on `workflow_run`, because the whole point is to
+              notice a lane that never ran. It maps each `ci:` witness onto the
+              workflow anchoring it (reusing #1980's resolver, lifted into
+              `claims_ledger` so one implementation serves both gates), derives the
+              allowance from the cron, and fails when the newest run is older than
+              three missed firings. It deliberately does *not* re-check conclusions —
+              that is #1970's job, and two gates on one property would eventually
+              disagree. Lanes with no daily-or-better cron are reported as notes, not
+              judged: a pull-request lane is legitimately idle. Falsified by making
+              Security's cron hourly, which reported it 14h stale and named all eight
+              claims it backs.
 
-          Bundled: `ci-full.yml` now `cargo check`s the cargo-fuzz crates. They
-          are workspace-excluded, so no lane compiled them and the nightly aborts
-          on its first failure — which is how a syntactically invalid harness
-          survived eleven days. Run against main the step rediscovered both real
-          defects in seconds.
+              Bundled: `ci-full.yml` now `cargo check`s the cargo-fuzz crates. They
+              are workspace-excluded, so no lane compiled them and the nightly aborts
+              on its first failure — which is how a syntactically invalid harness
+              survived eleven days. Run against main the step rediscovered both real
+              defects in seconds.
 
 - [ ] Witness rigor (`specs/plans/274-witness-rigor.md`). **WS1 shipped
       (#1940):** 13 of 17 `#[repr(C)]` types carried no compile-time layout
@@ -1575,51 +1590,51 @@ test --workspace --no-fail-fast` gate passes with zero failures after the
       Most of the finding is not the survivors.
 
       **Eight of the twenty-six files could not be measured at all.** The
-          lane is package-scoped, and three packages were green under
-          `--workspace` and red alone: `mvm-sdk` never enabled
-          `mvm-core/test-support`, so its tests did not compile; `mvm-cli` has
-          42 tests driving the root package's `mvmctl`, so
-          `CARGO_BIN_EXE_mvmctl` is unset; `mvm-runtime` had a test spawning
-          an `mvm-hostd` binary. Claims 1, 3, 10, 11, 14 and 15 were affected.
-          Two of the eight reported `total=0 missed=0 caught=0` — what a
-          fully-covered file reports — because `ensure_mutants_actually_ran`
-          enumerated the one baseline verdict it had seen (`Failure`) and a
-          timed-out baseline reports `Timeout`. It now requires `Success` and
-          a nonzero count.
+              lane is package-scoped, and three packages were green under
+              `--workspace` and red alone: `mvm-sdk` never enabled
+              `mvm-core/test-support`, so its tests did not compile; `mvm-cli` has
+              42 tests driving the root package's `mvmctl`, so
+              `CARGO_BIN_EXE_mvmctl` is unset; `mvm-runtime` had a test spawning
+              an `mvm-hostd` binary. Claims 1, 3, 10, 11, 14 and 15 were affected.
+              Two of the eight reported `total=0 missed=0 caught=0` — what a
+              fully-covered file reports — because `ensure_mutants_actually_ran`
+              enumerated the one baseline verdict it had seen (`Failure`) and a
+              timed-out baseline reports `Timeout`. It now requires `Success` and
+              a nonzero count.
 
-          **Two files carry 242 of the 359 survivors**, both the same shape: a
-          witness resolving to a large multi-purpose file. `mvm-host-vm-init.rs`
-          (claim 2, 164) and `console.rs` (claim 15, 78) each have their own
-          witness fully caught while the rest of the file answers to no claim.
-          Both are scoped through the new `SurfaceScope`, which cannot be
-          produced by resolution, demands a written reason and a tracking
-          issue, and survives a re-pin — so narrowing a claim's surface costs
-          an argued diff. Filed as #2006 and #2021 with the measurements.
+              **Two files carry 242 of the 359 survivors**, both the same shape: a
+              witness resolving to a large multi-purpose file. `mvm-host-vm-init.rs`
+              (claim 2, 164) and `console.rs` (claim 15, 78) each have their own
+              witness fully caught while the rest of the file answers to no claim.
+              Both are scoped through the new `SurfaceScope`, which cannot be
+              produced by resolution, demands a written reason and a tracking
+              issue, and survives a re-pin — so narrowing a claim's surface costs
+              an argued diff. Filed as #2006 and #2021 with the measurements.
 
-          **The in-claim survivors were nearly all real holes**, closed with
-          tests and each verified by planting its mutant. The sharpest:
-          `validate_guest_mount` and `denied_host_roots` — claim 1's Tier-0
-          host-filesystem guard, which would have admitted any guest mount
-          path and made the host signer key, the audit chain and `~/.ssh`
-          shareable into a guest — and `set_no_new_privs`, claim 2's own named
-          `fn:` witness, which had no test at all. Also two fail-open egress
-          mutants in `stages.rs` (the L4 allow-list's DNS carve-out widened to
-          pass every UDP packet; the SSH banner detector silently ceasing to
-          detect) and two in `plan_admission.rs` (a size cap that admits
-          everything above it, and a stale verb-grant that survives into a
-          reused VM name).
+              **The in-claim survivors were nearly all real holes**, closed with
+              tests and each verified by planting its mutant. The sharpest:
+              `validate_guest_mount` and `denied_host_roots` — claim 1's Tier-0
+              host-filesystem guard, which would have admitted any guest mount
+              path and made the host signer key, the audit chain and `~/.ssh`
+              shareable into a guest — and `set_no_new_privs`, claim 2's own named
+              `fn:` witness, which had no test at all. Also two fail-open egress
+              mutants in `stages.rs` (the L4 allow-list's DNS carve-out widened to
+              pass every UDP packet; the SSH banner detector silently ceasing to
+              detect) and two in `plan_admission.rs` (a size cap that admits
+              everything above it, and a stale verb-grant that survives into a
+              reused VM name).
 
-          Three affordability defects fixed alongside: the flat 300s
-          per-mutant timeout (too short for three packages, 5× too long for
-          another — now derived from each package's baseline);
-          `seed_guest_runtime_cache` seeding the guest-binary cache under a
-          key the resolver never reads, so three `pull_core` tests
-          cross-compiled the guest agent at 55s each (mvm-cli's suite 86s →
-          2s); and `just mutation-witnesses` running `--run` against the
-          developer's real `~/.mvm` — the isolation now lives at the single
-          cargo-mutants spawn site, which is what the entry above already
-          claimed. Detail in `specs/VERIFICATION.md` §"Mutation-tested
-          witnesses".
+              Three affordability defects fixed alongside: the flat 300s
+              per-mutant timeout (too short for three packages, 5× too long for
+              another — now derived from each package's baseline);
+              `seed_guest_runtime_cache` seeding the guest-binary cache under a
+              key the resolver never reads, so three `pull_core` tests
+              cross-compiled the guest agent at 55s each (mvm-cli's suite 86s →
+              2s); and `just mutation-witnesses` running `--run` against the
+              developer's real `~/.mvm` — the isolation now lives at the single
+              cargo-mutants spawn site, which is what the entry above already
+              claimed. Detail in `specs/VERIFICATION.md` §"Mutation-tested
+              witnesses".
 
 - [ ] Tier-1 edge path: the build → sign → export → install-on-another-host →
       admit → boot chain now runs end to end on aarch64, delivered through
@@ -1645,7 +1660,7 @@ test --workspace --no-fail-fast` gate passes with zero failures after the
       macOS (`mvmctl` + `mvm-hostd` per-VM set), copied to the Pi, and the
       signed `examples/sleeper` bundle installed and verified. The correct CLI
       invocation is transient `machine run --manifest <bundle-sha> --hypervisor
-    firecracker -- <cmd>`; `--detach` / named-machine paths still expect a
+  firecracker -- <cmd>`; `--detach` / named-machine paths still expect a
       templates slot and fail. Two host-side prerequisites surfaced:
       `firecracker` must be on `root`'s `PATH` (the launch script uses `sudo`),
       and the `0.18.0/aarch64` runtime overlay must be seeded in
