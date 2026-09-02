@@ -262,14 +262,31 @@ dispatches behind the supervisor's mutex.
 > because in that mode the host declares no tags at all and each attempt would
 > fail with "tag not found". A hybrid needs a guest change and an image rebuild.
 >
-> **So the remaining work is a protocol question, not a spec change:** how does
-> the typed `mvm-builderd` export return artifacts without a writable host
-> directory? Candidates are (a) builderd writes the artifact tar onto the output
-> disk itself, which needs the device inside the guest and a raw-tar writer in
-> the daemon; or (b) the dispatch loop collects `/job/<uuid>/out` onto the
-> output disk on a new request, which reintroduces a dependency on that loop
-> running alongside the daemon. Neither is a line-edit, and (a) is the shape
-> that matches how every other tier now works. Resolve this before writing code.
+> **Superseded on the spec side: the migration landed in #3061**, concurrently
+> with this analysis and independently of it. `persistent_builder_spec` declares
+> no shares, the two builder cmdlines collapsed into one vda–vdd contract, and
+> `check-no-virtio-fs` dropped `builder_runner/spec.rs` from its table. The
+> paragraph that stood here — "the remaining work is a protocol question,
+> resolve before writing code" — was true of the tree it was written against and
+> is not true now. It is struck rather than deleted so the reasoning survives:
+> the question it posed (how a typed export returns artifacts without a writable
+> host directory) is the one #3061 answered with `repack_dispatch_input` /
+> `read_dispatch_artifacts` on the CLI dispatch path.
+>
+> **What this analysis got right and #3061 did not cover:** the typed
+> `dev_build` route is a *second* consumer of `/job`, and #3061 does not touch
+> `dev_build.rs`. `try_typed_persistent_build` still stages into
+> `record.job_dir` on the host and tells the daemon to export to
+> `/job/<uuid>/out`, with a comment that still calls it "the session's `/job`
+> share". Whether that path still works against a disk-transport session, or
+> silently reads an empty artifact dir and falls through to the single-shot
+> safety net, is **open and worth checking before relying on the persistent
+> builder for a real build**. Tracked separately; the fallback means a failure
+> here costs build time rather than correctness.
+>
+> The two framing corrections above stand: the blast radius really is a hidden
+> opt-in subcommand with a fallback, and the guest's transport token really is
+> all-or-nothing.
 >
 > Everything below is preserved as the original recipe, and is accurate only for
 > the `Run` dispatch path it was written against.
