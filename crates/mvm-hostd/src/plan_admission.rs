@@ -3089,6 +3089,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn direct_protocol_binding_requires_no_sidecar_and_refuses_a_stray_one() {
+        let mut plan = plan_binding(&["host.kv.v1"]);
+        plan.sdk_uses_sidecar = false;
+
+        assert!(
+            enforce_sdk_sidecar_backend_compatibility(
+                mvm_core::vm_backend::BackendKind::Wasm,
+                &plan,
+            )
+            .is_ok()
+        );
+        assert!(enforce_sdk_sidecar_attachment(&[], &plan, LOADABLE_LIBC).is_ok());
+
+        let err = enforce_sdk_sidecar_attachment(&[sdk_sidecar_volume()], &plan, LOADABLE_LIBC)
+            .expect_err("a direct-protocol plan must refuse a stray sidecar");
+        assert!(err.to_string().contains("sdk_uses_sidecar=false"), "{err}");
+    }
+
     /// A bound SDK host service with no sidecar attachment fails closed, and the
     /// message names the binding that demanded it without leaking file bytes.
     #[test]

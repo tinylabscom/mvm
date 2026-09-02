@@ -302,8 +302,12 @@ pub struct ExecutionPlan {
     ///
     /// Always serialized so a plan that doesn't set it still states the
     /// default in the signed bytes.
-    #[serde(default)]
+    #[serde(default = "default_sdk_uses_sidecar")]
     pub sdk_uses_sidecar: bool,
+}
+
+const fn default_sdk_uses_sidecar() -> bool {
+    true
 }
 
 impl ExecutionPlan {
@@ -477,6 +481,26 @@ mod tests {
         assert_eq!(round.services, bound.services);
         assert!(crate::plan::sdk_sidecar::sdk_sidecar_required(&round));
         assert!(!crate::plan::sdk_sidecar::sdk_sidecar_required(&plan));
+    }
+
+    #[test]
+    fn sdk_sidecar_defaults_on_for_legacy_plans_and_roundtrips_opt_out() {
+        let plan = minimal_plan();
+        let mut legacy = serde_json::to_value(&plan).expect("plan serializes");
+        legacy
+            .as_object_mut()
+            .expect("plan serializes as an object")
+            .remove("sdk_uses_sidecar");
+        let restored: ExecutionPlan =
+            serde_json::from_value(legacy).expect("legacy plan deserializes");
+        assert!(restored.sdk_uses_sidecar);
+
+        let mut direct = plan;
+        direct.sdk_uses_sidecar = false;
+        let round: ExecutionPlan =
+            serde_json::from_str(&serde_json::to_string(&direct).expect("direct plan serializes"))
+                .expect("direct plan deserializes");
+        assert!(!round.sdk_uses_sidecar);
     }
 
     #[test]

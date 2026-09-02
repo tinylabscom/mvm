@@ -83,6 +83,7 @@ mod tests {
     use alloc::vec;
 
     use super::*;
+    use crate::plan::execution_plan::minimal_plan;
 
     fn svc(raw: &str) -> ServiceId {
         ServiceId::parse(raw).expect("fixture service id parses")
@@ -129,6 +130,17 @@ mod tests {
         let matched = sdk_host_services_in(&bound);
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].as_str(), "host.time.v1");
+    }
+
+    #[test]
+    fn a_direct_protocol_workload_needs_no_sidecar() {
+        let bound = vec![svc("host.kv.v1")];
+        assert!(!sdk_sidecar_required_for(&bound, false));
+
+        let mut plan = minimal_plan();
+        plan.services = bound;
+        plan.sdk_uses_sidecar = false;
+        assert!(!sdk_sidecar_required(&plan));
     }
 
     #[test]
