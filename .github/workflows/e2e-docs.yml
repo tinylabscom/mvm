@@ -17,16 +17,6 @@ name: Documented surface e2e
 
 on:
   workflow_call:
-    inputs:
-      macos_blocks_on_unusable_host:
-        description: >-
-          Whether a macOS host that cannot run any workload backend fails this
-          workflow. `release.yml` leaves it true so a tag still cannot be cut
-          without live macOS evidence. Extended CI passes false so its nightly
-          red means a regression rather than the standing hardware gap.
-        type: boolean
-        required: false
-        default: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -157,72 +147,17 @@ jobs:
             done
           done
 
-  # Split out of the job below so the same detection can mean two things to two
-  # callers. Releases must still stop dead on a macOS host that cannot boot a
-  # guest; a nightly that stops dead on it every single night reports the same
-  # red for a standing hardware gap as for a real regression, and a lane whose
-  # red never varies is one nobody reads. Neither caller gets to weaken the
-  # other: this job fails for `release.yml` and reports `supported=false` for
-  # Extended CI, off one probe.
-  e2e-docs-macos-host-check:
-    name: Documented surface e2e (macOS, host check)
-    runs-on: macos-15-intel
-    timeout-minutes: 10
-    outputs:
-      supported: ${{ steps.preflight.outputs.supported }}
-    steps:
-      # Fail in seconds, naming the real constraint, instead of spending ~35
-      # minutes building and then dying on "pipe inject config to supervisor" —
-      # which reads as a supervisor bug rather than as a host that cannot run
-      # one.
-      #
-      # No GitHub-hosted macOS runner can boot an mvm guest today:
-      #
-      #   arm64 (macos-latest)  Hypervisor.framework is nested and reports
-      #                         HV_UNSUPPORTED. libkrun goes through the same
-      #                         framework, so it does not escape this either —
-      #                         the passing `libkrun (macOS Apple Silicon)` job
-      #                         builds, tests and lints, and never boots.
-      #   x86_64 (this runner)  has the virtualization extensions, but
-      #                         `mvm-hvf-supervisor` is Apple-Silicon-only and
-      #                         links as a stub, and the libkrun Homebrew
-      #                         formula is ARM-only so it cannot be installed.
-      #
-      # This lane needs a self-hosted Apple Silicon runner — see issue #3011.
-      # The probe is a live `uname`, not the `runs-on` label, so pointing this
-      # workflow at such a runner is the whole change: the lane starts running
-      # for both callers with nothing here to remember to flip back.
-      - name: Preflight — this host can run the workload backend
-        id: preflight
-        env:
-          BLOCKS: ${{ inputs.macos_blocks_on_unusable_host }}
-        run: |
-          set -euo pipefail
-          arch="$(uname -m)"
-          echo "runner arch: $arch"
-          if [ "$arch" = "arm64" ]; then
-            echo "supported=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "supported=false" >> "$GITHUB_OUTPUT"
-          reason="mvm-hvf-supervisor is Apple-Silicon-only and links as a stub on $arch, and the libkrun Homebrew formula is ARM-only. No workload backend can start here. This lane needs a self-hosted Apple Silicon runner; see issue #3011."
-          if [ "$BLOCKS" = "true" ]; then
-            echo "::error::$reason" >&2
-            exit 1
-          fi
-          echo "::warning::$reason Skipping the macOS documented-surface lane for this caller; it remains a hard requirement for releases."
-
   e2e-docs-macos:
     name: Documented surface e2e (macOS, HVF)
-    needs: e2e-docs-macos-host-check
-    if: needs.e2e-docs-macos-host-check.outputs.supported == 'true'
-    # The macOS default backend is HVF, and every guest-booting BDD scenario
-    # before this one carried `@firecracker` — so the backend most users run
-    # had no lane that booted anything. This is that lane.
-    # macos-latest selects an arm64 hosted VM where nested HVF reports
-    # HV_UNSUPPORTED. The Intel runner exposes the virtualization extensions
-    # needed by this live witness.
-    runs-on: macos-15-intel
+    # Run on Apple Silicon runners only. The macOS default backend is HVF,
+    # and every guest-booting BDD scenario before this one carried `@firecracker`
+    # — so the backend most users run had no lane that booted anything. This is
+    # that lane.
+    #
+    # On Apple Silicon (arm64): HVF works, run the e2e.
+    # On Intel (x86_64): HVF is not available (mvm-hvf-supervisor is Apple-Silicon-only),
+    # so skip this lane and let the Linux lane cover the documented surface.
+    runs-on: [macos-latest, arm64]
     timeout-minutes: 90
     env:
       # The documented surface includes signed release downloads. Build the
