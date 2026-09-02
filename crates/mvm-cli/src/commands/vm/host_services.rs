@@ -81,8 +81,8 @@ mod tests {
     #[test]
     fn only_sdk_served_bindings_ask_for_the_sidecar() {
         let sdk = parse_host_service_bindings(&["host.secrets.v1".into()]).unwrap();
-        assert!(mvm_core::plan::sdk_sidecar_required_for(&sdk));
+        assert!(mvm_core::plan::sdk_sidecar_required_for(&sdk, true));
         let other = parse_host_service_bindings(&["broker.v1".into()]).unwrap();
-        assert!(!mvm_core::plan::sdk_sidecar_required_for(&other));
+        assert!(!mvm_core::plan::sdk_sidecar_required_for(&other, true));
     }
 }
