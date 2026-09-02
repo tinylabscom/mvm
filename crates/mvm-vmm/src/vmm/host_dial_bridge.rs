@@ -40,7 +40,7 @@
 //! and the builder ports it now also carries are builder-tier only — a workload
 //! guest, sealed or not, is handed neither list.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -89,6 +89,16 @@ pub(crate) struct HostDialBridge {
     active: Option<Arc<AtomicUsize>>,
     /// Host-side EOF/error/idle closures waiting for a guest `OP_RST`.
     host_closed: Vec<(u32, u32)>,
+    /// Guest ports whose connections are exempt from idle eviction.
+    ///
+    /// Idle eviction reclaims a slot from a connection that is *alive but
+    /// quiet*; a connection whose peer has actually gone is already reclaimed by
+    /// the EOF arm in [`Self::drain_host`]. That distinction is what makes the
+    /// exemption safe, and it is why silence is the wrong signal for a
+    /// request/response control channel: a builder holding one open across a
+    /// `nix build` is silent for exactly as long as the build takes, and
+    /// severing it reports a dispatch failure for a build that is running fine.
+    long_lived: HashSet<u32>,
 }
 
 impl HostDialBridge {
@@ -99,7 +109,17 @@ impl HostDialBridge {
             next_port: FIRST_HOST_DIAL_PORT,
             active: None,
             host_closed: Vec::new(),
+            long_lived: HashSet::new(),
         }
+    }
+
+    /// Mark guest ports whose connections must not be evicted for being idle.
+    ///
+    /// Callers pass the long-lived *control* ports (the builder's dispatch and
+    /// daemon channels). Console data ports are deliberately left evictable: an
+    /// abandoned-but-open console is exactly the case idle reclaim is for.
+    pub fn set_long_lived_ports(&mut self, ports: impl IntoIterator<Item = u32>) {
+        self.long_lived = ports.into_iter().collect();
     }
 
     /// Bind one non-blocking host listener per `(guest_port, path)`, replacing any
@@ -289,7 +309,8 @@ impl HostDialBridge {
             .conns
             .iter()
             .filter(|(_, conn)| {
-                now.saturating_duration_since(conn.last_activity) >= CONNECTION_IDLE_TIMEOUT
+                !self.long_lived.contains(&conn.guest_port)
+                    && now.saturating_duration_since(conn.last_activity) >= CONNECTION_IDLE_TIMEOUT
             })
             .map(|(&conn_id, conn)| (conn_id, conn.guest_port))
             .collect();
@@ -573,6 +594,91 @@ mod tests {
         bridge.drain_host();
 
         assert_eq!(bridge.take_host_closed(), vec![(conn_id, 20_001)]);
+        assert!(!bridge.is_host_dial_stream(conn_id));
+    }
+
+    /// A long-lived control channel is silent for exactly as long as the
+    /// operation it is waiting on. Evicting it reports a failure for work that
+    /// is still running — which is what happened to a builder dispatch across a
+    /// `nix build`.
+    #[test]
+    fn a_long_lived_port_survives_being_idle_past_the_timeout() {
+        let mut bridge = HostDialBridge::new();
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        // `accept_new` does this for a real connection; a test that inserts one
+        // directly and then survives eviction reaches `drain_host`'s read, and
+        // a blocking socket with a live peer never returns from it.
+        stream.set_nonblocking(true).unwrap();
+        let conn_id = FIRST_HOST_DIAL_PORT;
+        let dispatch_port = 21_471;
+        bridge.set_long_lived_ports([dispatch_port]);
+        bridge.conns.insert(
+            conn_id,
+            HostDialConn {
+                stream,
+                guest_port: dispatch_port,
+                established: true,
+                last_activity: Instant::now() - CONNECTION_IDLE_TIMEOUT - Duration::from_secs(1),
+            },
+        );
+
+        bridge.drain_host();
+
+        assert!(
+            bridge.take_host_closed().is_empty(),
+            "a long-lived control channel must not be evicted for being quiet"
+        );
+        assert!(bridge.is_host_dial_stream(conn_id));
+    }
+
+    /// The exemption is per port, not global: a console on the same bridge is
+    /// still reclaimed, which is the case idle eviction exists for.
+    #[test]
+    fn exempting_one_port_leaves_the_others_evictable() {
+        let mut bridge = HostDialBridge::new();
+        bridge.set_long_lived_ports([21_471]);
+        let (console, _console_peer) = UnixStream::pair().unwrap();
+        let console_id = FIRST_HOST_DIAL_PORT + 1;
+        bridge.conns.insert(
+            console_id,
+            HostDialConn {
+                stream: console,
+                guest_port: 20_001,
+                established: true,
+                last_activity: Instant::now() - CONNECTION_IDLE_TIMEOUT - Duration::from_secs(1),
+            },
+        );
+
+        bridge.drain_host();
+
+        assert_eq!(bridge.take_host_closed(), vec![(console_id, 20_001)]);
+    }
+
+    /// The property that makes the exemption safe: a peer that has actually
+    /// gone is reclaimed by the EOF arm, not by the idle sweep. Without this,
+    /// exempting a port would leak its slot for the VM's lifetime.
+    #[test]
+    fn a_long_lived_port_is_still_reclaimed_when_its_peer_hangs_up() {
+        let mut bridge = HostDialBridge::new();
+        let (stream, peer) = UnixStream::pair().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let conn_id = FIRST_HOST_DIAL_PORT;
+        let dispatch_port = 21_471;
+        bridge.set_long_lived_ports([dispatch_port]);
+        bridge.conns.insert(
+            conn_id,
+            HostDialConn {
+                stream,
+                guest_port: dispatch_port,
+                established: true,
+                last_activity: Instant::now(),
+            },
+        );
+        drop(peer);
+
+        bridge.drain_host();
+
+        assert_eq!(bridge.take_host_closed(), vec![(conn_id, dispatch_port)]);
         assert!(!bridge.is_host_dial_stream(conn_id));
     }
 }

@@ -1818,6 +1818,20 @@ unsafe fn run(
                 if let Err(e) = v.set_host_dial_sockets(ports) {
                     eprintln!("mvm-hvf: host-dial socket bind failed: {e}");
                 }
+                // The builder's control channels are exempt from idle
+                // eviction; the console ports above are not. A dispatch client
+                // holds its connection open across a whole `nix build` and is
+                // silent for exactly as long as the build takes, so reclaiming
+                // it for being quiet severs a healthy request mid-flight and
+                // reports a dispatch failure for a build that is running fine.
+                // A console, by contrast, is the case idle reclaim is for.
+                //
+                // Nothing leaks: a peer that has actually gone is still
+                // reclaimed by the bridge's EOF arm, which is what detects a
+                // dead client. Idle only ever described a live quiet one.
+                v.set_long_lived_host_dial_ports(
+                    builder_control_sockets.iter().map(|(port, _)| *port),
+                );
             }
             if v.set_handoff_control(
                 handoff_socket.as_deref(),

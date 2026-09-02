@@ -7,11 +7,13 @@
 //! mechanism by which a guest addresses host filesystem *structure* rather than
 //! opaque blocks. A block device is a byte array with no protocol to attack.
 //!
-//! No workload tier reaches it any more. What is left is builder-VM plumbing
-//! and the libkrun C FFI, each pinned below with the reason it survives and
-//! what would retire it. This check does not assert the surface is gone — it asserts
-//! nothing has been *added* to it, and that entries disappear from the table as
-//! the code disappears.
+//! No workload tier reaches it any more, and no builder *spec* constructs a
+//! share: both the one-shot and the persistent builder exchange jobs and
+//! artifacts over raw transport disks. What is left is the backend plumbing
+//! that would map a share if one existed, and the libkrun C FFI, each pinned
+//! below with the reason it survives and what would retire it. This check does
+//! not assert the surface is gone — it asserts nothing has been *added* to it,
+//! and that entries disappear from the table as the code disappears.
 //!
 //! The check counts only sites that **attach a device or construct a share**.
 //! Prose mentioning virtio-fs is not counted: ~70 files discuss it, and a gate
@@ -70,14 +72,6 @@ const PINNED: &[(&str, usize, &str)] = &[
          QEMU *workload* driver below; the QEMU builder no longer uses it. \
          Retired with that driver's share arm, which is already unreachable",
     ),
-    // ── builder VM: the trusted tier, still exchanging files as shares ───────
-    (
-        "crates/mvm-runtime/src/builder_runner/spec.rs",
-        1,
-        "the HVF *persistent* builder's work/mvm-bins/job/out shares. Retired by \
-         moving the per-dispatch exchange onto the BuilderDispatch vsock channel \
-         that already exists; the one-shot builder already uses the disk transport",
-    ),
     // ── the seam every backend maps its shares through ───────────────────────
     (
         "crates/mvm-vmm/src/driver/spec.rs",
@@ -87,12 +81,15 @@ const PINNED: &[(&str, usize, &str)] = &[
     (
         "crates/mvm-vmm/src/host/hvf_supervisor.rs",
         1,
-        "HvfVirtioFsShare on the supervisor wire config, builder VMs only",
+        "HvfVirtioFsShare on the supervisor wire config. No spec constructs a \
+         share any more, so nothing populates this field; it goes when the \
+         HVF device model does",
     ),
     (
         "crates/mvm-backends/src/driver/hvf.rs",
         1,
-        "maps spec shares onto the HVF supervisor config",
+        "maps spec shares onto the HVF supervisor config. Every HVF spec now \
+         carries an empty share list, so this maps nothing",
     ),
     (
         "crates/mvm-backends/src/driver/libkrun.rs",
@@ -130,13 +127,14 @@ const PINNED: &[(&str, usize, &str)] = &[
     (
         "crates/mvm-vmm/src/vmm/virtio.rs",
         1,
-        "the VirtioFs MMIO device. Reachable only from a builder VM now that the \
-         dev-tier virtio-fs root is gone",
+        "the VirtioFs MMIO device. No longer reachable: the builder VMs that were \
+         its last callers moved to the disk transport",
     ),
     (
         "crates/mvm-runtime/src/backends/hvf/kernel_boot.rs",
         1,
-        "attaches the builder's shares to the HVF device model",
+        "attaches spec shares to the HVF device model. The builder no longer \
+         declares any, so this attaches nothing",
     ),
 ];
 

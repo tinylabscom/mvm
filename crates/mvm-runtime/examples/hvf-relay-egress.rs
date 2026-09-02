@@ -161,6 +161,7 @@ fn main() {
         }
 
         let spec = VmmSpec {
+            builder_egress_endpoint: None,
             name: name.to_string(),
             kernel: KernelImage::Path(kernel.into()),
             initramfs: Some(initramfs.into()),

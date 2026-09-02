@@ -69,6 +69,7 @@ pub mod packed_artifact;
 /// libkrun creates; spawning the libkrun VM itself lives in
 /// `LibkrunPersistentHostVm`.
 pub mod persistent_builder;
+pub mod persistent_builder_transport;
 /// Build-provenance recorder: content-addresses produced artifacts into the
 /// signed plan's `BuildProvenance`.
 pub mod provenance;

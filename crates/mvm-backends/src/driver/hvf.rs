@@ -238,6 +238,9 @@ fn relay_supervisor_config_with_handoff(
             .collect(),
         vsock: true,
         trusted_builder_egress: spec.trusted_builder,
+        // Only a VM that outlives its launcher sets this; everyone else spawns
+        // their own endpoint and stays alive to parent it.
+        builder_egress_endpoint: spec.builder_egress_endpoint.clone(),
         console_log: paths.console_log.clone(),
         pid_file: paths.pid_file.clone(),
         workload_exit: paths.workload_exit.clone(),
@@ -1081,6 +1084,7 @@ mod tests {
 
     fn spec_with(kernel: KernelImage, vsock: Vec<VsockPort>, blocks: Vec<BlockDev>) -> VmmSpec {
         VmmSpec {
+            builder_egress_endpoint: None,
             name: "w".into(),
             kernel,
             initramfs: Some("/img/initrd.cpio".into()),

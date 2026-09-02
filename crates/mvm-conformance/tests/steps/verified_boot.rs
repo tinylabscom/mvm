@@ -110,6 +110,7 @@ fn map_elf_kernel(world: &mut CliWorld) {
     let kernel = state.path().join("vmlinux");
     std::fs::write(&kernel, b"\x7fELFconformance-kernel").expect("write ELF kernel fixture");
     let spec = VmmSpec {
+        builder_egress_endpoint: None,
         name: "bdd-libkrun-kernel-format".to_string(),
         kernel: KernelImage::Path(kernel.clone()),
         initramfs: None,

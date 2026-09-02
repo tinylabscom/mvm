@@ -1,0 +1,165 @@
+# Stage C — the persistent HVF builder moves off virtio-fs
+
+Plan: `specs/plans/2026-08-31-remove-virtio-fs.md`, Stage C.
+Follows the guest half (PR #3056), which was inert until this flip.
+
+## What landed
+
+The persistent HVF builder exchanges jobs and artifacts over two raw block
+devices instead of four virtio-fs shares. `persistent_builder_spec` declares no
+shares at all, so `check-no-virtio-fs` dropped `builder_runner/spec.rs` from its
+pinned table — the signal Stage C names for itself. The gate now ratchets 22
+sites across 10 files, none of them a builder spec.
+
+The two builder cmdlines collapsed into one. A persistent builder now boots the
+same contract as a one-shot — `vda` rootfs, `vdb` nix-store, `vdc` input, `vdd`
+output, optional `vde` overlay — so `PERSISTENT_BUILDER_CMDLINE` and its
+separate runtime-overlay device constant went away with the shares rather than
+being maintained as a second copy of the same string.
+
+Per-dispatch lifetime lives in a new `persistent_builder_transport` module:
+`SessionDiskTransport`, `guest_artifact_dir`, `repack_dispatch_input`,
+`read_dispatch_artifacts`. Both dispatch clients use it —
+`PersistentBuilderVm::run_build` (what `mvmctl build` routes through) and the
+`persistent-builder submit` verb. The session record carries
+`disk_transport: Option<…>`, which is a real two-state distinction rather than
+backcompat padding: the libkrun persistent builder still uses shares.
+
+## Three things that were not in the plan
+
+**Readiness could not be connect-polling.** The plan called for it, and it does
+not work here. The backend binds the host UDS during VM setup, before the guest
+boots, so `connect` succeeds against a guest whose vsock driver is not up. The
+bridge only closes that connection when the guest kernel answers `OP_RST`, so
+early in boot a probe neither connects-and-fails nor gets refused — it hangs
+open and reads as ready, which is the same silent hang the plan was trying to
+remove. Readiness is a round trip instead: `submit_workload_status` for the nil
+UUID. Any well-formed reply proves the loop is accepting and framing. Existing
+request, no side effect, no protocol change.
+
+**A fifth coordinated change, and the one that would have shipped broken.** The
+guest tars `/out` — and only `/out` — onto the output disk. Both host stagers
+rendered a `cmd.sh` writing to `/job/<job_id>/out`, which under the disk
+transport is the guest's own input stage on the nix-store disk, never read back.
+The four planned changes alone would have produced a build that reported success
+and emitted nothing. The guest-visible artifact dir is now chosen per transport,
+and the host reads the output disk into the same `artifact_dir_for` path a
+share-backed session writes to, so everything downstream is transport-blind.
+
+**The install arm has the same shape and no host-side fix.** The guest hardcodes
+`/job/<job_id>/out` for install jobs. Rather than lose a claim-11 sealed
+volume's SBOM and CVE sidecars silently, an install dispatch on a disk-backed
+session is refused with a message naming the missing half. Fixing it needs a
+guest change and an image rebuild; it is tracked in the plan.
+
+## Smaller notes
+
+- Transport disk sizes moved into `builder_disk_transport` so the one-shot and
+  persistent paths size from one source instead of two copies of the number.
+- The Nix diagnostic log moved from `$JOB_DIR` to `$OUT_DIR`, which is
+  host-readable on *both* transports; the output disk is now read back whether
+  or not the dispatch succeeded, since a failed build is when its log matters.
+- `mvm-build/src/persistent_builder.rs` crossed the 1500-line production cap, so
+  the transport helpers became their own module rather than an `#[allow]`.
+
+## Verification
+
+`just check-gated`, `cargo nextest run --workspace` (12853 passed),
+`cargo test --workspace --doc`, `cargo clippy --workspace --all-targets -D
+warnings`, `cargo fmt --all --check`, and `cargo run -p xtask -- check-all`
+(63/63) are all clean.
+
+## Live validation on macOS 26.5.2 / Apple Silicon
+
+Run against a rebuilt builder image (the image cache key includes the
+`mvm-host-vm-init` hash, so the guest change rotates it automatically — but
+`MVM_EMBED_NO_CACHE=1` is needed first, or `build.rs` reuses a stale baked
+guest and warns about it).
+
+**Proven end to end:**
+
+- The input disk packs and attaches as `vdc`, the output disk as `vdd`, and the
+  guest boots the disk transport off them (`mvm.builder_transport=disk` with
+  both device tokens on the observed cmdline).
+- The guest binds `/job`, `/work` and `/mvm-bins` from the input disk — Nix
+  evaluated a flake at `path:/work`, which is only possible if the workspace
+  crossed on that disk.
+- **The new readiness path works.** `start` returns when the dispatch loop
+  answers, with no `dispatch.ready` file anywhere the host can see.
+- **The per-dispatch repack works.** Two dispatches into one live session: the
+  host rewrote the input disk, the guest re-staged `/job/<job_id>` off it and
+  ran that dispatch's `cmd.sh`, streaming stderr back over the channel.
+- The session record carries the transport, and `stop` tears the session down
+  cleanly.
+
+- **The guest's egress works for a whole build.** The supervisor-owned endpoint
+  stays up with the supervisor as its parent, serves Nix's fetches, and
+  self-reaps when the supervisor exits.
+
+- **A whole build, twice.** Two `nix build` dispatches into one live session,
+  both `exit_code: 0`, each reading its artifacts off the output disk into its
+  own artifact dir. The first took 465s cold; the second 797ms off the warm
+  store, which is the point of a persistent session. `vmlinux` and
+  `rootfs.ext4` both land at their real sizes, alongside the verity sidecars.
+
+That closes the last unproven leg: `read_dispatch_artifacts` against a real
+output disk, from a real build.
+
+## The idle-eviction fix, and why one layer was not enough
+
+A quiet `nix build` lost its dispatch connection after 60 seconds. The cause was
+`CONNECTION_IDLE_TIMEOUT`, applied in **two** independent places:
+`host_dial_bridge::evict_idle_at` closes the host socket, and the transport's
+credit table sends the guest an `OP_RST`. Exempting the port in the bridge alone
+still let the transport tear the stream down — visible live as the guest logging
+`write StderrChunk failed` while its build ran happily to completion.
+
+Both layers now take a per-port exemption: builder control ports are exempt,
+console data ports are not. The property that makes it safe is that idle was
+never what reclaims a dead peer — `drain_host`'s EOF arm is, and it still runs
+for every connection. Idle only ever described a stream that is alive and quiet,
+which for a request/response control channel is indistinguishable from working
+normally.
+
+## The endpoint lifetime fix
+
+Worth writing down because the obvious diagnosis was wrong twice. The endpoint
+was not leaking and was not missing a detach — `spawn_network_endpoint` already
+calls `setsid`. It self-reaps: `exit_when_orphaned`, armed in its own `main`,
+watches the parent and exits with status 0 the instant it is reparented, which
+is why its log simply stopped after a successful handshake.
+
+That guard is deliberate — the endpoint holds a workload's secrets in the clear
+and must not serve as an orphan. A persistent session is simply the first case
+where the VM outlives its spawner, so parent-death stopped being a good proxy
+for VM-death. The fix keeps the guard and gives it a better parent: the
+supervisor, whose death *is* the VM's.
+
+No key crosses the new wire. The endpoint's config carries the host signer by
+value and `supervisor.json` is persisted beside the VM, so the supervisor mints
+the FlowMux identity itself from the same `~/.mvm/keys/host-signer.ed25519` the
+config already names by path, and writes the identity drive before it opens
+disks. The egress policy and the empty secret set are fixed at that call site
+rather than taken from the wire, so nothing crossing it can widen what the
+endpoint serves — and a restored child never inherits the request, since it
+names the parent's VM, socket and identity drive.
+
+## Pre-existing gaps this uncovered
+
+The persistent HVF builder had never booted. Getting far enough to exercise
+Stage C at all required fixing three things that have nothing to do with
+virtio-fs, each by calling the helper the one-shot builder already calls:
+
+- No runtime overlay was ever resolved, so the guest refused to boot
+  (`require_runtime_overlay_ext4`).
+- No FlowMux identity drive was ever minted, so the egress client could not
+  authenticate and the guest refused to boot (`mint_from_host_signer`).
+- No network endpoint was ever spawned, so the egress client could not bind
+  (`spawn_network_endpoint`). This one is wired but, as above, does not yet
+  survive its spawning command.
+
+A fourth was mine: the input pack must use `stage_filtered_work_input`, as the
+one-shot pack does. Packing the raw workspace put 45 GB of `target/` on the
+input disk, filled the 64 GiB store image mid-extraction, and left every later
+boot failing at `setup_nix_store` for an unrelated-looking reason
+(`mvmctl cache repair --store-only` recovers).
