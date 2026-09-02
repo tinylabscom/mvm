@@ -32,12 +32,18 @@ fn require_embedded_payload() -> std::io::Result<()> {
 /// of `target/debug` keeps resolving to the one that refused. The profile has
 /// to travel with the instruction or the instruction cannot work.
 fn no_payload_message(debug_profile: bool) -> String {
-    let profile = if debug_profile { "" } else { " --release" };
+    let (profile, binary) = if debug_profile {
+        ("", "./target/debug/mvmctl")
+    } else {
+        (" --release", "./target/release/mvmctl")
+    };
     format!(
         "this mvmctl was built without the embedded Linux host binaries, so it \
-         cannot bootstrap a builder VM. Rebuild with `just embed{profile}` (or \
-         `cargo build{profile} --features embed-host-bins`); official release \
-         binaries always carry them."
+         cannot bootstrap a builder VM. Rebuild and invoke the same profile: \
+         `just embed{profile}` then `{binary}` (or \
+         `cargo build{profile} --features embed-host-bins`). Official release \
+         binaries always carry them. Invoke the rebuilt path explicitly so PATH \
+         cannot select the other profile."
     )
 }
 
@@ -136,6 +142,7 @@ mod tests {
     fn a_release_build_is_told_to_rebuild_the_release_profile() {
         let msg = no_payload_message(false);
         assert!(msg.contains("just embed --release"), "{msg}");
+        assert!(msg.contains("./target/release/mvmctl"), "{msg}");
         assert!(
             msg.contains("cargo build --release --features embed-host-bins"),
             "{msg}"
@@ -146,6 +153,7 @@ mod tests {
     fn a_debug_build_is_told_to_rebuild_the_debug_profile() {
         let msg = no_payload_message(true);
         assert!(msg.contains("just embed"), "{msg}");
+        assert!(msg.contains("./target/debug/mvmctl"), "{msg}");
         assert!(!msg.contains("--release"), "{msg}");
     }
 }

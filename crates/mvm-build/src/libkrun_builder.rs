@@ -77,6 +77,10 @@ use crate::builder_vm::{
     BuilderArtifacts, BuilderJob, BuilderMounts, BuilderVm, BuilderVmDisk, BuilderVmError,
     BuilderVmExitInfo, BuilderVmMount, BuilderVmRunConfig, VmBackendForBuilder,
 };
+
+mod egress_process;
+
+use egress_process::{builder_egress_endpoint_was_terminated, builder_egress_supervisor_command};
 // These items previously lived in this file; they migrated to
 // `builder_vm_runtime` so the future VzBuilderVm path can reuse the
 // same logic without duplicating it. `INSTALL_SPEC_FILENAME` and
@@ -428,8 +432,15 @@ impl BuilderVsockEgressEndpoint {
 
         let child_pid = child.id();
         std::thread::spawn(move || match child.wait() {
+            Ok(status) if builder_egress_endpoint_was_terminated(&status) => {
+                tracing::debug!(
+                    pid = child_pid,
+                    %status,
+                    "builder egress endpoint stopped during teardown"
+                );
+            }
             Ok(status) => eprintln!(
-                "builder egress endpoint pid={} exited with status {}",
+                "builder egress endpoint pid={} exited unexpectedly with status {}",
                 child_pid, status
             ),
             Err(e) => eprintln!("builder egress endpoint pid={} wait failed: {e}", child_pid),
@@ -443,22 +454,6 @@ impl BuilderVsockEgressEndpoint {
     fn reap(&self) {
         reap_builder_vsock_egress_endpoint(&self.state_dir);
     }
-}
-
-fn builder_egress_supervisor_command(mvmctl_path: &Path, endpoint_path: &Path) -> Command {
-    let mut command = Command::new(mvmctl_path);
-    command
-        .arg("__builder-egress-supervisor")
-        .arg("--endpoint")
-        .arg(endpoint_path)
-        // This child's stdout is a typed JSON handshake channel. The parent
-        // CLI's verbose RUST_LOG value must not turn tracing records into
-        // protocol bytes before the wrapper execs the endpoint.
-        .env("RUST_LOG", "off")
-        .env_remove(mvm_core::observability::span_timing::ENV_ENABLE)
-        .env_remove(mvm_core::observability::span_timing::ENV_OUT)
-        .env_remove(mvm_core::observability::span_timing::ENV_FILTER);
-    command
 }
 
 fn builder_vsock_socket_dir(state_dir: &Path) -> Result<PathBuf, BuilderVmError> {

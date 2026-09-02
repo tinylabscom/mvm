@@ -94,3 +94,7 @@ graft/
 # Generated document output (`output/pdf`). Regenerable, and large enough that
 # committing it once would be hard to undo.
 output/
+
+# Local generated output and QA scratch data.
+/artifacts/
+/qa/

@@ -4,6 +4,28 @@ Last updated: 2026-09-01
 
 ## In progress
 
+- [ ] **Signed caller commitment — issue #3070.**
+      `specs/plans/2026-09-01-signed-caller-commitment.md`.
+      Replaces reliance on overwriteable free-form audit labels with one typed,
+      opaque 32-byte commitment covered by the plan identity/signature and
+      copied into chain-signed audit entries. Workspace tests, zero-warning
+      Clippy, Linux/BDD gated checks, frozen-wire compatibility, and the full
+      non-live BDD suite are green; merge delivery remains.
+
+- [x] **Contributor SDK-sidecar recovery guidance.**
+      `specs/plans/2026-09-01-contributor-sidecar-recovery.md`.
+      The source-checkout recovery path now distinguishes debug and release
+      embedded binaries, repairs the pinned macOS rust-objcopy loader at the
+      compiler boundary, reports actionable sidecar provenance only when a
+      sidecar is actually selected, treats owned endpoint SIGTERM as teardown,
+      builds the native HVF helper beside the same-profile embedded `mvmctl`,
+      bounds and streams unfiltered directory snapshots, tolerates vanished
+      live-tree entries, and versions host-side injection semantics directly
+      in the cached OCI root tag so a still-valid guest-binary digest sidecar
+      cannot leave Rust's Cargo environment stale. Host
+      workspace validation and the release embed witness are green; no live VM
+      command was run outside the builder VM.
+
 - [ ] **Extended CI residual regressions — issues #3051 and #3052.**
       `specs/plans/2026-08-28-extended-ci-red-repair.md`.
       Persistent launches clamp vCPUs before admission, authenticated frame

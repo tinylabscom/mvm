@@ -3107,6 +3107,26 @@ fn the_cpu_flags_help_text_tells_them_apart() {
 }
 
 #[test]
+fn mount_help_discloses_snapshot_and_unfiltered_tree_semantics() {
+    let help = {
+        let mut cmd = Cli::command();
+        cmd.find_subcommand_mut("machine")
+            .expect("machine noun")
+            .find_subcommand_mut("run")
+            .expect("run verb")
+            .render_long_help()
+            .to_string()
+    };
+
+    assert!(
+        help.contains("host directory snapshot or a sized disk"),
+        "{help}"
+    );
+    assert!(help.contains("without honoring `.gitignore`"), "{help}");
+    assert!(help.contains("large build outputs"), "{help}");
+}
+
+#[test]
 fn a_grants_file_is_accepted_on_run_and_create() {
     let run = parse_run(&["run", "--image", "alpine", "--grants-file", "/tmp/g.json"])
         .expect("run accepts --grants-file");

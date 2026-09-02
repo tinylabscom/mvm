@@ -46,7 +46,8 @@ That cross-compile is **opt-in**, behind the `embed-host-bins` feature, and is
 the only work `build.rs` still does. Run it when you are about to boot a VM:
 
 ```sh
-just embed          # cargo build --features embed-host-bins
+just embed                    # build and invoke ./target/debug/mvmctl
+just embed --release          # build and invoke ./target/release/mvmctl
 ```
 
 A plain `cargo build` never cross-compiles, but it does **restore** the payload
@@ -67,6 +68,35 @@ runs every host-side verb but cannot bootstrap a builder VM —
 extracting an empty directory. The tag-push release workflow always turns the
 feature on, so a downloaded binary is self-sufficient; `just release-build`
 carries it too.
+
+On macOS the recipe also replaces any globally configured compiler-cache
+wrapper with `scripts/rustc-macos-loader.sh` for this explicit build. Cargo
+constructs a new dynamic-library search path before invoking rustc, so the
+wrapper restores the pinned Rust sysroot's `lib/` directory through
+`DYLD_FALLBACK_LIBRARY_PATH` at the compiler boundary; ordinary builds keep
+their configured wrapper. Some nightly distributions give `rust-objcopy` an
+incorrect RPATH; without the repair cargo-zigbuild repeatedly warns that
+`libLLVM.dylib` is missing and embeds larger, unstripped binaries even though
+the library exists. Cargo may replay warning text cached by compilation units
+built before this repair; a new warning has a new `dyld[PID]` and indicates the
+current strip step still failed.
+
+Without embedding, `mvmctl` runs every host-side verb but cannot bootstrap a
+builder VM. Rebuild and invoke the same profile: a bare `mvmctl` that resolves
+to `target/release/mvmctl` is not repaired by a debug-only `just embed`. The
+tag-push release workflow always turns the feature on, so a downloaded binary
+is self-sufficient.
+
+After changing the guest-facing C ABI in `crates/mvm-host-services`, refresh
+the source sidecar explicitly:
+
+```sh
+./target/release/mvmctl build sdk-sidecar build
+```
+
+The command is complete only after both glibc and musl variants report that
+they were cached successfully. A builder-egress endpoint exiting on SIGTERM is
+normal one-shot teardown, not a failed sidecar build.
 
 Provision it with one command — it installs the exact pinned zig (from the
 `ziglang` PyPI package, read out of `[workspace.metadata.mvm.toolchain]`) plus

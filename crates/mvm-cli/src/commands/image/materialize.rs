@@ -31,11 +31,7 @@ const RUNTIME_TAG_PREFIX_LEN: usize = 16;
 /// reads a sidecar rather than the artifacts, and never triggers a build.
 pub(super) fn oci_runtime_tag(cache_root: &Path) -> String {
     match mvm_build::run_image::resolve_guest_runtime_identity(cache_root) {
-        Ok(identity) => format!(
-            "{}-guest-{}",
-            env!("CARGO_PKG_VERSION"),
-            runtime_tag_prefix(&identity)
-        ),
+        Ok(identity) => oci_runtime_tag_from_identity(&identity),
         Err(err) => {
             // Degrade to a version-only tag rather than fail the run, but leave
             // a breadcrumb: a silent drop here can reuse a stale injected
@@ -46,9 +42,18 @@ pub(super) fn oci_runtime_tag(cache_root: &Path) -> String {
                 "could not identify the injected guest runtime; \
                  a cached rootfs may reuse a stale injected runtime"
             );
-            format!("{}-guest-unidentified", env!("CARGO_PKG_VERSION"))
+            oci_runtime_tag_from_identity("unidentified")
         }
     }
+}
+
+fn oci_runtime_tag_from_identity(identity: &str) -> String {
+    format!(
+        "{}-inject-{}-guest-{}",
+        env!("CARGO_PKG_VERSION"),
+        mvm_build::oci_runtime_inject::INJECT_SEMANTICS_VERSION,
+        runtime_tag_prefix(identity)
+    )
 }
 
 /// The identity prefix used in a cache tag.
@@ -393,6 +398,24 @@ mod tests {
         assert!(identity.starts_with(got));
     }
 
+    #[test]
+    fn runtime_tag_carries_host_injection_semantics_outside_the_binary_sidecar() {
+        let tag = oci_runtime_tag_from_identity("0123456789abcdef-rest");
+        assert_eq!(
+            tag,
+            format!(
+                "{}-inject-{}-guest-0123456789abcdef",
+                env!("CARGO_PKG_VERSION"),
+                mvm_build::oci_runtime_inject::INJECT_SEMANTICS_VERSION
+            )
+        );
+        assert_ne!(
+            tag,
+            format!("{}-guest-0123456789abcdef", env!("CARGO_PKG_VERSION")),
+            "the pre-semantics cache tag must become stale"
+        );
+    }
+
     fn sample_image(reference: &str, digest: &str, layer_path: &str) -> CachedOciImage {
         CachedOciImage {
             reference: reference.to_string(),
@@ -471,7 +494,11 @@ mod tests {
         seed_guest_artifacts(tmp.path(), b"v1");
         let tag = oci_runtime_tag(tmp.path());
         assert!(
-            tag.starts_with(concat!(env!("CARGO_PKG_VERSION"), "-guest-")),
+            tag.starts_with(&format!(
+                "{}-inject-{}-guest-",
+                env!("CARGO_PKG_VERSION"),
+                mvm_build::oci_runtime_inject::INJECT_SEMANTICS_VERSION
+            )),
             "unexpected runtime tag: {tag}"
         );
         assert_eq!(

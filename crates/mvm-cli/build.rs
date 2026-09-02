@@ -715,6 +715,7 @@ fn run_cargo_zigbuild(spec: ZigbuildSpec<'_>) {
     // value propagates into the nested `cargo build` that cargo-zigbuild
     // spawns. Using the rustup cargo avoids that.
     let (cargo, rustc) = rustup_cargo_and_rustc(strip_glibc(spec.target), spec.rust_pin);
+    let rust_sysroot = rustc_sysroot(&rustc);
     let mut cmd = Command::new(&cargo);
     cmd.args([
         "zigbuild",
@@ -729,7 +730,7 @@ fn run_cargo_zigbuild(spec: ZigbuildSpec<'_>) {
     if !spec.features.is_empty() {
         cmd.args(["--features", spec.features]);
     }
-    apply_nested_rust_env(&mut cmd, &rustc, spec.target_dir);
+    apply_nested_rust_env(&mut cmd, &rustc, spec.target_dir, spec.root, &rust_sysroot);
     cmd.current_dir(spec.root);
     apply_zigbuild_env(&mut cmd, spec.target_dir);
     // Pin the zig binary cargo-zigbuild uses. Left to PATH, a Homebrew-upgraded
@@ -756,19 +757,68 @@ fn run_cargo_zigbuild(spec: ZigbuildSpec<'_>) {
         .unwrap_or_else(|e| panic!("copy {} → {}: {e}", built.display(), spec.output.display()));
 }
 
-fn apply_nested_rust_env(cmd: &mut Command, rustc: &str, target_dir: &Path) {
+fn apply_nested_rust_env(
+    cmd: &mut Command,
+    rustc: &str,
+    target_dir: &Path,
+    workspace_root: &Path,
+    rust_sysroot: &Path,
+) {
     cmd.env("RUSTC", rustc)
         // Dedicated target dir — see the deadlock note in main().
         .env("CARGO_TARGET_DIR", target_dir)
-        // Empty values override host Cargo configuration; removing them would
-        // allow a global sccache wrapper to reappear in the nested build.
-        .env("RUSTC_WRAPPER", "")
         .env("RUSTC_WORKSPACE_WRAPPER", "")
         .env_remove("RUSTUP_TOOLCHAIN")
         // The outer nightly's frontend flags are incompatible with the pinned
         // stable compiler used for reproducible embedded binaries.
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_ENCODED_RUSTFLAGS");
+    // Empty values normally prevent a global sccache wrapper from leaking
+    // into the reproducible nested build. On macOS the pinned rust-objcopy
+    // binary needs the sysroot loader wrapper after nested Cargo reconstructs
+    // its dynamic-library environment.
+    #[cfg(target_os = "macos")]
+    {
+        cmd.env(
+            "RUSTC_WRAPPER",
+            workspace_root.join("scripts/rustc-macos-loader.sh"),
+        );
+        let loader_path = std::env::join_paths(
+            std::iter::once(rust_sysroot.join("lib")).chain(
+                std::env::var_os("DYLD_FALLBACK_LIBRARY_PATH")
+                    .iter()
+                    .flat_map(std::env::split_paths),
+            ),
+        )
+        .expect("Rust sysroot paths are valid DYLD_FALLBACK_LIBRARY_PATH entries");
+        // cargo-zigbuild invokes rust-objcopy itself after compilation, so the
+        // wrapper alone cannot repair that process. Seed the nested command as
+        // well; its own Cargo children inherit this value.
+        cmd.env("DYLD_FALLBACK_LIBRARY_PATH", loader_path);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (workspace_root, rust_sysroot);
+        cmd.env("RUSTC_WRAPPER", "");
+    }
+}
+
+fn rustc_sysroot(rustc: &str) -> PathBuf {
+    let output = Command::new(rustc)
+        .args(["--print", "sysroot"])
+        .output()
+        .unwrap_or_else(|error| panic!("run {rustc} --print sysroot: {error}"));
+    assert!(
+        output.status.success(),
+        "{rustc} --print sysroot failed with {}",
+        output.status
+    );
+    let path = String::from_utf8(output.stdout)
+        .expect("rustc sysroot is UTF-8")
+        .trim()
+        .to_string();
+    assert!(!path.is_empty(), "{rustc} returned an empty sysroot");
+    PathBuf::from(path)
 }
 
 fn apply_zigbuild_env(cmd: &mut Command, target_dir: &Path) {
@@ -850,13 +900,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nested_rust_env_drops_outer_nightly_flags_and_wrappers() {
+    fn nested_rust_env_drops_outer_nightly_flags_and_selects_safe_wrapper() {
         let mut cmd = Command::new("cargo");
         cmd.env("RUSTFLAGS", "-Zthreads=8")
             .env("CARGO_ENCODED_RUSTFLAGS", "-Zthreads=8")
             .env("RUSTC_WRAPPER", "sccache");
 
-        apply_nested_rust_env(&mut cmd, "/toolchain/rustc", Path::new("/nested-target"));
+        apply_nested_rust_env(
+            &mut cmd,
+            "/toolchain/rustc",
+            Path::new("/nested-target"),
+            Path::new("/workspace"),
+            Path::new("/toolchain"),
+        );
 
         let env = cmd
             .get_envs()
@@ -872,6 +928,21 @@ mod tests {
             env.get("CARGO_TARGET_DIR"),
             Some(&Some("/nested-target".into()))
         );
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(
+                env.get("RUSTC_WRAPPER"),
+                Some(&Some(
+                    "/workspace/scripts/rustc-macos-loader.sh".to_string()
+                ))
+            );
+            let loader_path = env
+                .get("DYLD_FALLBACK_LIBRARY_PATH")
+                .and_then(Option::as_deref)
+                .expect("nested loader path");
+            assert!(loader_path.starts_with("/toolchain/lib"), "{loader_path}");
+        }
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(env.get("RUSTC_WRAPPER"), Some(&Some(String::new())));
         assert_eq!(
             env.get("RUSTC_WORKSPACE_WRAPPER"),

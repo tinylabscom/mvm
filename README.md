@@ -97,16 +97,18 @@ mvmctl machine run --image python:3.12 -- python -c "print(2 + 2)"
 # the directory is materialized into an ext4 image and attached as a block
 # device, so there is no virtio-fs requirement and Firecracker takes it too.
 # The image is a snapshot taken at boot — host edits mid-run are not visible.
+# The complete tree is copied and .gitignore is not consulted, so mount a
+# narrow source tree or stage a filtered copy instead of a large checkout.
 # For a sized disk instead of a directory, --volume HOST:/GUEST:SIZE.
 mvmctl machine run --image python:3.12 \
-  --mount "$PWD:/work:ro" -- python /work/app.py
+  --mount "$PWD/examples/python/hello-app:/work:ro" -- python /work/app.py
 
 # Install pandas and run the file in the same transient VM.
 # The install disappears when this VM is torn down.
 mvmctl machine run --image python:3.12 \
   --allow-host pypi.org:443 \
   --allow-host files.pythonhosted.org:443 \
-  --mount "$PWD:/work:ro" \
+  --mount "$PWD/examples/python/hello-app:/work:ro" \
   -- sh -c 'python -m pip install --no-cache-dir --target /tmp/python-deps pandas && PYTHONPATH=/tmp/python-deps python /work/app.py'
 
 # Interactive dev shell (dev-tier images) — still transient
@@ -120,8 +122,8 @@ mvmctl machine run --image alpine --cpus 2 --memory 512M \
 # Build a Nix flake and run it transiently in one step
 mvmctl machine run --flake . -- ./app
 
-# Share a host directory read-only; use :rw only with --profile dev/permissive
-mvmctl machine run --image alpine --mount .:/work -- ls /work
+# Snapshot a small host directory read-only into the guest.
+mvmctl machine run --image alpine --mount ./src:/work -- ls /work
 
 # Increase logging globally; RUST_LOG still overrides the generated filter
 mvmctl machine run --image alpine -vvv --allow-host api.example.com -- ps aux
@@ -182,13 +184,11 @@ On the first image-backed run from a contributor build, mvm may prepare and
 cache the guest runtime and workload kernel from local sources. The guest
 runtime phase is concise by default; pass `-v` to show Cargo's raw compilation
 progress. Official binaries download these version-matched artifacts instead.
-If the output includes `builder egress endpoint ... exited
-with status signal: 15 (SIGTERM)`, that line is normally cleanup: the
-host-side builder egress endpoint is terminated after the one-shot Stage 0
-build exits. The actionable error is the following one. In particular, a
-message saying that the resolved workload kernel has no device-mapper/dm-verity
-support means the cached kernel cannot boot a verity-sealed workload. Rebuild
-or download the workload kernel explicitly:
+The host-side builder egress endpoint is terminated after a one-shot Stage 0
+build exits; this expected SIGTERM is hidden unless verbose diagnostics are
+enabled. In particular, a message saying that the resolved workload kernel has
+no device-mapper/dm-verity support means the cached kernel cannot boot a
+verity-sealed workload. Rebuild or download the workload kernel explicitly:
 
 ```bash
 # Use the release's hash-verified kernel
