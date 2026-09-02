@@ -197,10 +197,19 @@ jobs:
                      scripts/check-no-orchestration-server.sh \
                      scripts/check-no-orchestration-server.test.sh \
                      scripts/security-lane-verdict.sh \
-                     scripts/security-lane-verdict.test.sh
+                     scripts/security-lane-verdict.test.sh \
+                     .githooks/pre-commit \
+                     .githooks/pre-commit.test.sh
 
       - name: Release-asset verifier gate tests
         run: bash nix/packaging/release/verify-release-assets.test.sh
+
+      # The hook narrows clippy to the packages owning the staged files. When
+      # it picked a package cargo cannot address with `-p`, it reported that as
+      # "clippy failed" while clippy was fine. These tests pin the scoping
+      # decision; they do not run clippy.
+      - name: Pre-commit hook scoping tests
+        run: bash .githooks/pre-commit.test.sh
 
 
       - name: Clippy

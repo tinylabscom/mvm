@@ -55,6 +55,36 @@ owning_package() {
     fi
 }
 
+# Package names `cargo -p` can address from this workspace root: the root
+# package plus every path in the root manifest's `members` list.
+#
+# `owning_package` walks up to the nearest Cargo.toml, and several real
+# packages in this tree are not workspace members — `web/mvm-demo/` declares
+# `mvm-demo-web`, and each detached fuzz crate declares its own name. For any
+# of those `cargo clippy -p <name>` exits with "did not match any packages",
+# and this hook reported that as **"clippy failed"** — the one thing a lint
+# hook must never say when lint is fine. Any merge commit carrying changes
+# under `web/` hit it.
+#
+# Deliberately not "every Cargo.toml under the tree": that glob matches the
+# fuzz crates and `mvm-hostd-ebpf`, which is the same mistake in a new place.
+workspace_members() {
+    [ -f Cargo.toml ] || return 0
+    sed -n 's/^name[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' Cargo.toml | head -1
+    sed -n '/^members[[:space:]]*=[[:space:]]*\[/,/^\]/p' Cargo.toml \
+        | sed -n 's/^[[:space:]]*"\([^"]*\)".*/\1/p' \
+        | while IFS= read -r dir; do
+            [ -f "$dir/Cargo.toml" ] || continue
+            sed -n 's/^name[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' \
+                "$dir/Cargo.toml" | head -1
+        done
+}
+
+# True when $1 is one of the names workspace_members prints.
+is_workspace_member() {
+    printf '%s\n' "$WORKSPACE_MEMBERS" | grep -qxF "$1"
+}
+
 # True when no other manifest in the tree declares $1 as a dependency.
 #
 # This is the whole basis for narrowing clippy's scope: changing a crate
@@ -162,11 +192,18 @@ if [ "$has_rust" -eq 1 ]; then
         else
             pkgs=""
             unresolved=0
+            unresolved_reason="a staged Rust file belongs to no package"
+            WORKSPACE_MEMBERS="$(workspace_members)"
             while IFS= read -r f; do
                 [ -z "$f" ] && continue
                 pkg="$(owning_package "$f")"
                 if [ -z "$pkg" ]; then
                     unresolved=1
+                    break
+                fi
+                if ! is_workspace_member "$pkg"; then
+                    unresolved=1
+                    unresolved_reason="$pkg is not a workspace member, so -p cannot address it"
                     break
                 fi
                 case " $pkgs " in
@@ -176,7 +213,7 @@ if [ "$has_rust" -eq 1 ]; then
             done <<< "$staged_rust"
 
             if [ "$unresolved" -eq 1 ]; then
-                scope_reason="a staged Rust file belongs to no package"
+                scope_reason="$unresolved_reason"
             else
                 all_leaf=1
                 for pkg in $pkgs; do
