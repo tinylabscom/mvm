@@ -931,12 +931,21 @@ fn validate_run_profile(args: &RunArgs) -> Result<()> {
 
     for spec in &args.mounts {
         let parsed = super::shared::parse_volume_spec(spec)?;
-        let read_only = match parsed {
-            super::shared::VolumeSpec::DirShare { read_only, .. }
-            | super::shared::VolumeSpec::Disk { read_only, .. } => read_only,
+        // The shape matters to the message. "live share" is the right noun for
+        // a directory and the wrong one for a sized disk image, and this
+        // refusal fires for both — so a user asking "then what *is* writable?"
+        // was told their 2G disk was a live share.
+        let (read_only, shape) = match parsed {
+            super::shared::VolumeSpec::DirShare { read_only, .. } => (read_only, "directory"),
+            super::shared::VolumeSpec::Disk { read_only, .. } => (read_only, "disk"),
         };
         if !read_only {
-            anyhow::bail!("--mount '{spec}' requests rw, but transient live shares are read-only");
+            anyhow::bail!(
+                "--mount '{spec}' requests rw, but a transient run attaches every {shape} \
+                 read-only. Nothing a transient guest writes reaches the host. For a writable \
+                 volume, register one with `mvmctl machine volume mount` and boot the machine \
+                 with `mvmctl machine start`."
+            );
         }
     }
 
@@ -2058,6 +2067,45 @@ mod tests {
                 profile.as_str()
             );
         }
+    }
+
+    /// A transient run refuses `rw` for **both** mount shapes, and the message
+    /// has to name the one it got. It used to say "transient live shares are
+    /// read-only" for a sized disk image too, which told a user asking "then
+    /// what is writable?" that their 2G disk was a live share.
+    #[test]
+    fn a_transient_rw_refusal_names_the_shape_it_refused() {
+        let dir_err = {
+            let mut args = run_args(RunProfile::Standard);
+            args.mounts.push("/h/src:/work:rw".to_string());
+            validate_run_profile(&args).expect_err("rw must be refused")
+        };
+        let msg = dir_err.to_string();
+        assert!(msg.contains("directory"), "{msg}");
+        assert!(!msg.contains("disk read-only"), "{msg}");
+
+        let disk_err = {
+            let mut args = run_args(RunProfile::Standard);
+            args.mounts.push("/h/src:/work:2G:rw".to_string());
+            validate_run_profile(&args).expect_err("rw must be refused")
+        };
+        let msg = disk_err.to_string();
+        assert!(msg.contains("disk"), "{msg}");
+        assert!(
+            !msg.contains("live share"),
+            "a sized disk is not a live share: {msg}"
+        );
+    }
+
+    /// The refusal is a dead end unless it says where writable volumes live.
+    #[test]
+    fn the_rw_refusal_points_at_the_path_that_can_write() {
+        let mut args = run_args(RunProfile::Standard);
+        args.mounts.push("/h/src:/work:rw".to_string());
+        let msg = validate_run_profile(&args)
+            .expect_err("rw must be refused")
+            .to_string();
+        assert!(msg.contains("machine start"), "{msg}");
     }
 
     /// `Default` is hand-written, so it can drift from the `default_value`
