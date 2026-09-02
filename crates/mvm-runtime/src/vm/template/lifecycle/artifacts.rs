@@ -35,27 +35,27 @@ pub(super) fn slot_kernel_source(
         | mvm_build::kernel_fetch::KernelResolution::NeedsFetch(_) => None,
     };
 
-    // AArch64 guests need the workload kernel's platform and dm-verity support.
-    // The x86_64 builder kernel is the established persistent-machine kernel;
-    // keep it first there so an unrelated cached workload kernel cannot change
-    // a previously working boot path.
-    match arch {
-        GuestArch::Aarch64 => {
-            if let Some(workload_kernel) = verified_workload_kernel() {
-                return Ok(workload_kernel);
-            }
-            if builder_kernel.is_file() {
-                return Ok(builder_kernel);
-            }
-        }
-        GuestArch::X86_64 => {
-            if builder_kernel.is_file() {
-                return Ok(builder_kernel);
-            }
-            if let Some(workload_kernel) = verified_workload_kernel() {
-                return Ok(workload_kernel);
-            }
-        }
+    // A workload guest needs the workload kernel, on every arch.
+    //
+    // The builder kernel has no device-mapper, and not by accident:
+    // `nix/images/kernel/builder.nix` lists `BLK_DEV_DM` and `DM_VERITY` among
+    // the options it force-drops, because the builder VM boots `ro` with no
+    // roothash and never opens a dm device — "verified boot is a
+    // workload-kernel concern", in its words. So a workload booted on it dies
+    // in activation the moment dm-verity reaches for /dev/mapper/control, which
+    // is a device its kernel was deliberately built without.
+    //
+    // AArch64 already preferred the workload kernel and said dm-verity was why.
+    // x86_64 preferred the builder kernel to avoid disturbing an established
+    // boot path — but the path it protected cannot mount a sealed rootfs, so
+    // what it preserved was the failure. The builder kernel stays as the
+    // fallback: a host with no workload kernel cached is better served booting
+    // something than refusing, and an unsealed guest never opens dm at all.
+    if let Some(workload_kernel) = verified_workload_kernel() {
+        return Ok(workload_kernel);
+    }
+    if builder_kernel.is_file() {
+        return Ok(builder_kernel);
     }
     let workload_path =
         mvm_build::kernel_fetch::cached_kernel_path(cache_root, &arch_str, "workload");
@@ -512,8 +512,22 @@ mod tests {
         assert_eq!(selected, workload);
     }
 
+    /// x86_64 takes the workload kernel over the builder kernel, same as
+    /// aarch64.
+    ///
+    /// This test asserted the opposite, and the behaviour it pinned is the
+    /// bug: `nix/images/kernel/builder.nix` force-drops `BLK_DEV_DM` and
+    /// `DM_VERITY` because the builder VM boots `ro` with no roothash and
+    /// never opens a dm device — "verified boot is a workload-kernel concern".
+    /// So a sealed workload booted on the builder kernel died in activation on
+    /// `open /dev/mapper/control: No such file or directory`, a device its
+    /// kernel was deliberately built without, and the nightly
+    /// documented-surface lane was red on it.
+    ///
+    /// The preference existed to avoid disturbing an established boot path.
+    /// What it preserved was the failure.
     #[test]
-    fn slot_kernel_source_prefers_builder_kernel_for_x86_64() {
+    fn slot_kernel_source_prefers_the_workload_kernel_on_x86_64_too() {
         let tmp = tempfile::tempdir().unwrap();
         let built = tmp.path().join("build").join("vmlinux");
         let cache = tmp.path().join("cache");
@@ -524,6 +538,29 @@ mod tests {
         std::fs::create_dir_all(workload.parent().unwrap()).unwrap();
         std::fs::write(&workload, b"workload-kernel").unwrap();
         mvm_build::kernel_fetch::record_kernel_digest(&workload).unwrap();
+
+        let selected = slot_kernel_source(&built, &cache, GuestArch::X86_64).unwrap();
+
+        assert_eq!(
+            selected, workload,
+            "a workload guest needs the kernel that carries device-mapper"
+        );
+    }
+
+    /// The builder kernel remains the fallback when no workload kernel is
+    /// cached.
+    ///
+    /// Refusing outright would strand a host that can still boot an unsealed
+    /// guest, which never opens a dm device at all. The ordering is a
+    /// preference, not a requirement.
+    #[test]
+    fn slot_kernel_source_falls_back_to_the_builder_kernel_when_no_workload_kernel_is_cached() {
+        let tmp = tempfile::tempdir().unwrap();
+        let built = tmp.path().join("build").join("vmlinux");
+        let cache = tmp.path().join("cache");
+        let builder = cache.join("builder-vm").join("x86_64").join("vmlinux");
+        std::fs::create_dir_all(builder.parent().unwrap()).unwrap();
+        std::fs::write(&builder, b"builder-kernel").unwrap();
 
         let selected = slot_kernel_source(&built, &cache, GuestArch::X86_64).unwrap();
 
