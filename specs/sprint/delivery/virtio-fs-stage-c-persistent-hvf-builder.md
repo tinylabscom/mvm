@@ -96,11 +96,30 @@ guest and warns about it).
   stays up with the supervisor as its parent, serves Nix's fetches, and
   self-reaps when the supervisor exits.
 
-**Still not proven: a completed build, and therefore `read_dispatch_artifacts`
-against a real output disk** (unit-tested only). The remaining blocker is the
-vsock bridge's 60-second idle eviction, not the transport — see the plan. The
-host loses its dispatch connection during a quiet `nix build` while the build
-itself proceeds normally inside the guest.
+- **A whole build, twice.** Two `nix build` dispatches into one live session,
+  both `exit_code: 0`, each reading its artifacts off the output disk into its
+  own artifact dir. The first took 465s cold; the second 797ms off the warm
+  store, which is the point of a persistent session. `vmlinux` and
+  `rootfs.ext4` both land at their real sizes, alongside the verity sidecars.
+
+That closes the last unproven leg: `read_dispatch_artifacts` against a real
+output disk, from a real build.
+
+## The idle-eviction fix, and why one layer was not enough
+
+A quiet `nix build` lost its dispatch connection after 60 seconds. The cause was
+`CONNECTION_IDLE_TIMEOUT`, applied in **two** independent places:
+`host_dial_bridge::evict_idle_at` closes the host socket, and the transport's
+credit table sends the guest an `OP_RST`. Exempting the port in the bridge alone
+still let the transport tear the stream down — visible live as the guest logging
+`write StderrChunk failed` while its build ran happily to completion.
+
+Both layers now take a per-port exemption: builder control ports are exempt,
+console data ports are not. The property that makes it safe is that idle was
+never what reclaims a dead peer — `drain_host`'s EOF arm is, and it still runs
+for every connection. Idle only ever described a stream that is alive and quiet,
+which for a request/response control channel is indistinguishable from working
+normally.
 
 ## The endpoint lifetime fix
 

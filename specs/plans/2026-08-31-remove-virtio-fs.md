@@ -3,11 +3,14 @@
 Backing: shipped-source
 Validation: check-sprint-append
 
-**Status: IN PROGRESS — Stages A, B and D landed, and Stage C's QEMU builder
-with them. No workload tier reaches virtio-fs, and a ratchet gate keeps it that
-way. Stage C is down to two paths: the persistent HVF builder, which needs live
-Apple Silicon validation, and libkrun's seeded closure, which is two tokens once
-someone can run a live libkrun build.**
+**Status: IN PROGRESS — Stages A, B and D landed, and with them Stage C's QEMU
+builder *and* its persistent HVF builder. The HVF half is live-validated: two
+`nix build` dispatches into one session on macOS 26.5.2 / Apple Silicon, both
+exit 0, artifacts read off the output disk. No workload tier reaches virtio-fs,
+no builder *spec* constructs a share, and a ratchet gate keeps it that way.
+Stage C is down to libkrun's seeded closure (two tokens once someone can run a
+live libkrun build), the guest's install arm, and deleting the now-dead share
+plumbing.**
 
 No guest gets a virtio-fs device. Not a workload, not the builder VM, not the
 dev-tier root. The host filesystem reaches a guest as a block image or it does
@@ -390,27 +393,21 @@ Five coordinated changes, host and guest:
       Verified live: the endpoint stays up with the supervisor as its parent,
       serves the guest's egress through a whole `nix build`, and self-reaps when
       the supervisor exits.
-- [ ] **The HVF vsock bridge evicts the dispatch connection after 60s of
-      silence** (`CONNECTION_IDLE_TIMEOUT`, `vsock_transport.rs`). This is what
-      now blocks a completed build. The host sends `Run`, the guest starts
-      `nix build`, and any evaluation quiet for over a minute has its host-side
-      connection closed by `evict_idle_at` — the client sees a clean EOF and
-      reports `dispatch ended without Result frame after 0 stderr chunks` while
-      the build carries on fine inside the guest. Confirmed twice, including
-      with a connection the guest had not yet read, so it is the idle policy
-      rather than anything job-specific.
+- [x] **The HVF vsock idle eviction severed the dispatch connection.** Fixed,
+      and it was in **two** layers, which is why fixing one was not enough:
+      `host_dial_bridge::evict_idle_at` closes the host socket, and the
+      transport's credit table (`vsock_transport::evict_idle_connections_at`)
+      sends the guest an `OP_RST`. Exempting the port in the bridge alone still
+      let the transport tear the stream down — observed live as the guest
+      logging `write StderrChunk failed` while its build ran to completion.
 
-      A one-shot builder never hits it: it holds no dispatch connection across a
-      build, it powers off and the host reads the output disk. Only a persistent
-      session keeps a control channel open across a long quiet operation.
+      Idle eviction is now per guest port in both layers, with the builder's
+      control ports exempt and console data ports still evictable. What makes
+      that safe is that idle was never the mechanism that reclaims a dead peer —
+      `drain_host`'s EOF arm is, and it still runs for every connection. Idle
+      only ever described a stream that is alive and quiet, which for a
+      request/response control channel is indistinguishable from working.
 
-      Not a one-line raise: the timeout is a shared host resource boundary next
-      to `MAX_CONNECTIONS`, and it also governs workload console streams. The
-      options are a per-service idle policy (the builder dispatch port is
-      long-lived and legitimately quiet), or a keepalive on the dispatch channel.
-      **This is the last thing between Stage C and a completed live build**, and
-      with it the only unproven leg of the disk transport
-      (`read_dispatch_artifacts` against a real output disk).
 - [x] **The QEMU builder needs the same migration, and the plan missed it.**
       **Landed.** Both one-shot sites are on the disk transport; the `virtiofsd`
       spawn loops, the `memory-backend-memfd` + `-numa` object and the
