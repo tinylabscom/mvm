@@ -45,8 +45,6 @@ env:
 #     one toolchain install. Save ~3 min wall-clock + 2 runner-
 #     minutes per PR run.
 jobs:
-
-
   e2e:
     name: E2E Tests
     runs-on: ubuntu-latest
@@ -90,13 +88,6 @@ jobs:
   e2e-docs:
     name: Documented surface e2e
     uses: ./.github/workflows/e2e-docs.yml
-    with:
-      # No hosted macOS runner can boot a guest (issue #3011), so blocking here
-      # would paint this run red every night for a reason no commit caused —
-      # and a lane that is always red is one nobody reads, which is how the
-      # claim-bearing lanes went stale before. Releases still block on it.
-      macos_blocks_on_unusable_host: false
-
 
   sdk-release-dry-run:
     name: SDK release dry-run
@@ -106,10 +97,6 @@ jobs:
     uses: ./.github/workflows/publish-sdk.yml
     with:
       dry_run: true
-
-
-
-
 
   # ── Lane: Builder VM image build (Linux, Plan 100 W2) ────────────
   # Plan 100 W2 — "ensure `nix/images/builder-vm/` builds on Linux

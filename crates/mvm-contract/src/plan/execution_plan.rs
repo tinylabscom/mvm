@@ -312,14 +312,8 @@ pub struct ExecutionPlan {
     /// can speak the broker protocol natively (e.g., Python with AF_VSOCK,
     /// Go with golang.org/x/sys/unix).
     ///
-    /// Always serialized so a plan that doesn't set it still states the
-    /// default in the signed bytes.
-    #[serde(default = "default_sdk_uses_sidecar")]
     pub sdk_uses_sidecar: bool,
-}
-
-const fn default_sdk_uses_sidecar() -> bool {
-    true
+>>>>>>> c16c96c4cf (fix(content-id): update plan address fixtures for sdk_uses_sidecar field)
 }
 
 impl ExecutionPlan {
