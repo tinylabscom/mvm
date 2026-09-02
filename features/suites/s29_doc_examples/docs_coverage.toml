@@ -345,6 +345,7 @@ uncovered = [
     "mvmctl machine run --flake examples/python/hello-app-with-deps/ --prod --entrypoint",
     "mvmctl machine run --healthcheck 'curl -fsS localhost/health' --name svc --image ghcr.io/example/service:1.4",
     "mvmctl machine run --hypervisor qemu --image alpine --net -- sh -c 'wget -qO- https://example.com'",
+    "mvmctl machine run --hypervisor wasm",
     "mvmctl machine run --manifest .",
     "mvmctl machine run --manifest . --name my-vm --port 8080:8080",
     "mvmctl machine run --manifest . --name servicebox --port 8080:8000 -- python -m http.server 8000",
