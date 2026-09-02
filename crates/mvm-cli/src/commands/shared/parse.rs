@@ -119,6 +119,47 @@ fn is_volume_keyword(tok: &str) -> bool {
     matches!(tok.to_ascii_lowercase().as_str(), "ro" | "rw" | "enc")
 }
 
+/// A declared asset accepted by `--asset KIND:HOST_PATH`: a file or
+/// directory tree the run binds by content identity without attaching it
+/// to the guest (unlike a `--mount`, nothing is materialized or shared —
+/// the asset's canonical hash is recorded in the signed plan and the
+/// chain-signed audit log).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetSpec {
+    pub kind: mvm_contract::plan::AssetKind,
+    /// Host file or directory to hash. Must exist at admission time.
+    pub host_path: String,
+}
+
+const ASSET_GRAMMAR_HINT: &str = "expected KIND:HOST_PATH with KIND one of dataset, model, prompt, agent, policy, compute_environment, other";
+
+/// Parse `--asset KIND:HOST_PATH`. The kind is a caller label (it decides
+/// how audit readers group the identity); the path must be non-empty.
+pub fn parse_asset_spec(spec: &str) -> Result<AssetSpec> {
+    let (kind, path) = spec
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("invalid asset '{spec}' — {ASSET_GRAMMAR_HINT}"))?;
+    let kind = match kind.to_ascii_lowercase().as_str() {
+        "dataset" => mvm_contract::plan::AssetKind::Dataset,
+        "model" => mvm_contract::plan::AssetKind::Model,
+        "prompt" => mvm_contract::plan::AssetKind::Prompt,
+        "agent" => mvm_contract::plan::AssetKind::Agent,
+        "policy" => mvm_contract::plan::AssetKind::Policy,
+        "compute_environment" | "compute-environment" | "environment" => {
+            mvm_contract::plan::AssetKind::ComputeEnvironment
+        }
+        "other" => mvm_contract::plan::AssetKind::Other,
+        _ => anyhow::bail!("invalid asset kind '{kind}' in '{spec}' — {ASSET_GRAMMAR_HINT}"),
+    };
+    if path.is_empty() {
+        anyhow::bail!("invalid asset '{spec}' — empty host path; {ASSET_GRAMMAR_HINT}");
+    }
+    Ok(AssetSpec {
+        kind,
+        host_path: path.to_string(),
+    })
+}
+
 pub fn parse_volume_spec(spec: &str) -> Result<VolumeSpec> {
     if spec.is_empty() {
         anyhow::bail!("volume spec must not be empty");
@@ -827,5 +868,43 @@ mod volume_spec_tests {
             !share_host.exists(),
             "a directory share must not materialise a disk image"
         );
+    }
+}
+
+#[cfg(test)]
+mod asset_spec_tests {
+    use super::*;
+
+    #[test]
+    fn parses_each_supported_kind() {
+        for (token, want) in [
+            ("dataset", mvm_contract::plan::AssetKind::Dataset),
+            ("model", mvm_contract::plan::AssetKind::Model),
+            ("prompt", mvm_contract::plan::AssetKind::Prompt),
+            ("agent", mvm_contract::plan::AssetKind::Agent),
+            ("policy", mvm_contract::plan::AssetKind::Policy),
+            (
+                "compute_environment",
+                mvm_contract::plan::AssetKind::ComputeEnvironment,
+            ),
+            ("other", mvm_contract::plan::AssetKind::Other),
+        ] {
+            let spec = parse_asset_spec(&format!("{token}:/data/file.bin")).expect("parse");
+            assert_eq!(spec.kind, want, "kind for {token}");
+            assert_eq!(spec.host_path, "/data/file.bin");
+        }
+    }
+
+    #[test]
+    fn kind_matching_is_case_insensitive() {
+        let spec = parse_asset_spec("DATASET:/d").expect("parse");
+        assert_eq!(spec.kind, mvm_contract::plan::AssetKind::Dataset);
+    }
+
+    #[test]
+    fn refuses_unknown_kind_empty_path_and_missing_colon() {
+        for bad in ["", "model", "model:", "bogus:/x", ":x", "kindx:/y"] {
+            let _ = parse_asset_spec(bad).expect_err("refused");
+        }
     }
 }

@@ -252,6 +252,18 @@ pub struct ExecutionPlan {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shares: Vec<HostShareGrant>,
 
+    /// Content-derived identities of every asset bound to this run: the
+    /// compute environment (image), the workload code (bundle), any mounted
+    /// or declared dataset/model/prompt assets, and the admitted policies.
+    /// Comparing two identities answers "is this the asset that was
+    /// admitted?" without consulting mvm's local state. Empty for plans
+    /// written before the field existed. Skip-serialized when empty so those
+    /// plans stay byte-identical — the field is inside the signed payload
+    /// and inside the content address, and emitting `[]` would move every
+    /// existing plan's identity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub asset_identities: Vec<crate::plan::types::AssetIdentity>,
+
     /// Host services this workload is authorized to call over the broker
     /// channel. The broker's dispatch gate refuses any service that is not
     /// listed here, and the launch path reads the same list to decide whether
@@ -385,6 +397,7 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
         bundle: None,
         deps_volume: None,
         shares: Vec::new(),
+        asset_identities: Vec::new(),
         services: Vec::new(),
         extensions: Vec::new(),
         stream_edges: Vec::new(),

@@ -301,6 +301,26 @@ witnesses = [
 ]
 
 [[claim]]
+id = "MVM-SEC-19"
+level = "build"
+witness_kinds = ["fn"]
+suite = "asset_identity"
+statement = "Every workload asset and pinned host share is content-identified in the signed plan, and share drift after admission fails closed"
+# The digest type boundary validates 64-hex; admission pins each directory
+# share's content digest and `enforce_admitted_shares` re-verifies it at
+# mount time, closing the host-dir TOCTOU window; synthesis auto-derives the
+# compute environment from measured image/kernel/verity state; the emitter
+# writes a chain-signed `plan.asset_identities` entry; the CLI recomputes
+# the same digest offline for comparison against the log labels.
+witnesses = [
+    "fn:admitted_share_digest_refuses_directory_changed_after_admission",
+    "fn:synthesized_plan_records_share_and_caller_asset_identities",
+    "fn:asset_identities_event_carries_kind_name_digest_labels",
+    "fn:asset_identity_rejects_malformed_digests",
+    "fn:test_audit_asset_id_parses",
+]
+
+[[claim]]
 id = "MVM-SEC-18"
 level = "build"
 witness_kinds = ["fn"]

@@ -426,6 +426,7 @@ fn admit_standby_parent_plan(
         bundle_pin: None,
         deps_volume: None,
         shares: Vec::new(),
+        assets: Vec::new(),
         redaction: mvm_core::policy::RedactionPolicy::default(),
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
         caller_commitment: None,
@@ -2375,6 +2376,7 @@ fn resolve_warm_launch(req: &WarmRequest) -> Result<crate::exec::ResolvedLaunch>
         disk_volumes: &[],
         pty: false,
         network_policy: &network_policy,
+        assets: &[],
         warm_pool_size: req.target,
         // A warm standby boots before any workload claims it, so it binds no
         // host service and carries no sidecar.

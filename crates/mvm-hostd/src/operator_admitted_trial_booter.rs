@@ -446,6 +446,7 @@ impl OperatorConfiguredTrialBooter {
             bundle_pin: None,
             deps_volume: None,
             shares: Vec::new(),
+            assets: Vec::new(),
             redaction: Default::default(),
             reversible_replacement: Default::default(),
             caller_commitment: None,

@@ -393,6 +393,7 @@ fn synthesis_input_for_app<'a>(
         // deps_volume is wired into the live `mvmctl up` path only.
         deps_volume: None,
         shares: Vec::new(),
+        assets: Vec::new(),
         redaction: mvm_core::policy::RedactionPolicy::default(),
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
         caller_commitment,

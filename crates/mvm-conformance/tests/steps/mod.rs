@@ -4,6 +4,7 @@ mod admission_audit;
 mod agent_capability;
 mod agent_session;
 mod apple_container;
+mod asset_identity;
 mod claim;
 pub(crate) mod cli;
 mod cold_launch;

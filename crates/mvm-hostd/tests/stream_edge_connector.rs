@@ -120,6 +120,7 @@ fn admitted_with_grant(vm: &str) -> AdmittedPlan {
         bundle_pin: None,
         deps_volume: None,
         shares: Vec::new(),
+        assets: Vec::new(),
         redaction: RedactionPolicy::default(),
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
         caller_commitment: None,

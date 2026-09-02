@@ -195,6 +195,9 @@ pub struct CliWorld {
     /// An isolated `MVM_HOME` created by a `Given` step and reused by later
     /// steps that need to inspect the filesystem after a run.
     pub isolated_home: Option<tempfile::TempDir>,
+    /// Tempdir holding the file/directory trees the asset-identity
+    /// scenarios hash; held so it outlives the scenario.
+    pub asset_fixture_dir: Option<tempfile::TempDir>,
     /// Force workload-kernel reacquisition through a closed local endpoint so
     /// invalid-cache scenarios prove eviction without network or Stage 0.
     pub kernel_reacquisition_must_fail: bool,

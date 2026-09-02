@@ -61,15 +61,15 @@ pub use synthesis::{
     VALIDITY_WINDOW_MINUTES, synthesize_plan,
 };
 pub use types::{
-    AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, AuditLabels,
-    AuditTaxonomy, CallerCommitment, CallerCommitmentParseError, DepsVolumeBinding,
-    DepsVolumeBindingError, EnvironmentRef, FsPolicyRef, HostShareGrant, IngressMapping,
-    IngressMappingBuildError, IngressMappingBuilder, IngressMappingError, IngressMappingsError,
-    IngressProtocol, IngressTransform, KeyRotationSpec, NetworkLimits, NetworkLimitsBuilder,
-    NetworkLimitsError, NetworkMode, Nonce, NonceParseError, PlanId, PlanSeccompTier,
-    PlanSeccompTierParseError, PolicyRef, PostRunLifecycle, ReleasePin, Resources,
-    RuntimeProfileRef, SecretBinding, SecretReleasePolicy, SecretSource, ShareKind, SignedImageRef,
-    StreamRetention, TenantId, TimeoutSpec, Variant, WorkloadId, WorkloadIntent,
+    AdmissionProfile, ArtifactPolicy, AssetIdentity, AssetKind, AttestationMode,
+    AttestationRequirement, AuditLabels, AuditTaxonomy, CallerCommitment,
+    CallerCommitmentParseError, DepsVolumeBinding, DepsVolumeBindingError, EnvironmentRef,
+    FsPolicyRef, HostShareGrant, IngressMapping, IngressMappingBuildError, IngressMappingBuilder,
+    IngressMappingError, IngressMappingsError, IngressProtocol, IngressTransform, KeyRotationSpec,
+    NetworkLimits, NetworkLimitsBuilder, NetworkLimitsError, NetworkMode, Nonce, NonceParseError,
+    PlanId, PlanSeccompTier, PlanSeccompTierParseError, PolicyRef, PostRunLifecycle, ReleasePin,
+    Resources, RuntimeProfileRef, SecretBinding, SecretReleasePolicy, SecretSource, ShareKind,
+    SignedImageRef, StreamRetention, TenantId, TimeoutSpec, Variant, WorkloadId, WorkloadIntent,
     validate_ingress_mappings, validate_ingress_material,
 };
 pub use validity::{

@@ -31,6 +31,19 @@ pub(in crate::commands) struct Args {
 }
 
 #[derive(Subcommand, Debug, Clone)]
+pub(in crate::commands) enum AssetAction {
+    /// Print the canonical content identity of a file or directory tree —
+    /// the same digest admission records for a bound asset. Compare it
+    /// against `plan.asset_identities` labels in the chain-signed log.
+    Id {
+        /// File or directory to hash. Directories hash as the deterministic
+        /// manifest of their complete tree (sorted relative paths; symlinks
+        /// hashed by target; the same walk the mount materializer copies).
+        path: PathBuf,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum AuditAction {
     /// Show the last N audit events (default: 20). Reads the legacy
     /// `~/.mvm/log/audit.jsonl` LocalAudit stream; pass `--chain` to
@@ -57,6 +70,14 @@ pub(in crate::commands) enum AuditAction {
         /// Tenant whose chain to verify. Defaults to `"local"`.
         #[arg(long, default_value = "local")]
         tenant: String,
+    },
+    /// Asset content identities: recompute the canonical digest of a file
+    /// or directory tree so it can be compared against the identities
+    /// recorded in a run's signed plan or audit chain — `mvmctl audit
+    /// tail --chain` shows them; comparing digests is the whole check.
+    Asset {
+        #[command(subcommand)]
+        action: AssetAction,
     },
     /// Delete retired audit segments, recording the removal in the chain.
     ///
@@ -376,6 +397,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             }
         }
         AuditAction::Verify { tenant } => audit_verify(&tenant),
+        AuditAction::Asset { action } => match action {
+            AssetAction::Id { path } => asset_id(&path),
+        },
         AuditAction::Prune {
             through,
             tenant,
@@ -1294,6 +1318,22 @@ fn report_append_only(dir: &std::path::Path, tenant: &str, vk: &ed25519_dalek::V
         )),
         Err(e) => ui::error(&format!("witness comparison failed: {e:#}")),
     }
+}
+
+/// Recompute the canonical content identity of a file or directory and
+/// print it. This is the offline half of the asset-identity claim: the
+/// digest admission records comes from the same `mvm_fs::hash::hash_source`
+/// implementation, so `audit asset id <path>` output must equal the
+/// `asset_N_digest` label for that asset in the chain-signed log.
+fn asset_id(path: &std::path::Path) -> Result<()> {
+    // Canonicalize so a symlink alias (macOS `/tmp`) yields the same digest
+    // admission recorded for the resolved tree.
+    let resolved = std::fs::canonicalize(path)
+        .with_context(|| format!("resolving {} for its content identity", path.display()))?;
+    let digest = mvm_fs::hash::hash_source(&resolved)
+        .with_context(|| format!("hashing {} for its content identity", path.display()))?;
+    println!("{digest}");
+    Ok(())
 }
 
 fn audit_verify(tenant: &str) -> Result<()> {

@@ -807,6 +807,37 @@ impl AuditEmitter {
         self.emit(plan, "plan.shares_admitted", labels)
     }
 
+    /// Emit `plan.asset_identities` — the content-derived identity of every
+    /// asset bound to this run (environment, code, deps volume, shares,
+    /// declared assets, policies). Skipped when the plan records none, so
+    /// plans written before the field existed produce no new event kind.
+    /// The labels carry kind/name/digest triples an external verifier can
+    /// compare against a recomputed hash without any mvm-local state.
+    pub fn emit_asset_identities(&self, plan: &ExecutionPlan) -> Result<()> {
+        if plan.asset_identities.is_empty() {
+            return Ok(());
+        }
+        let mut labels: Vec<(String, String)> = vec![(
+            "asset_count".to_string(),
+            plan.asset_identities.len().to_string(),
+        )];
+        for (i, a) in plan.asset_identities.iter().enumerate() {
+            let kind = match a.kind {
+                mvm_core::plan::AssetKind::Dataset => "dataset",
+                mvm_core::plan::AssetKind::Model => "model",
+                mvm_core::plan::AssetKind::Prompt => "prompt",
+                mvm_core::plan::AssetKind::Agent => "agent",
+                mvm_core::plan::AssetKind::Policy => "policy",
+                mvm_core::plan::AssetKind::ComputeEnvironment => "compute_environment",
+                mvm_core::plan::AssetKind::Other => "other",
+            };
+            labels.push((format!("asset_{i}_kind"), kind.to_string()));
+            labels.push((format!("asset_{i}_name"), a.name.clone()));
+            labels.push((format!("asset_{i}_digest"), a.digest.clone()));
+        }
+        self.emit(plan, "plan.asset_identities", labels)
+    }
+
     /// Emit `plan.oci_provenance` — binds an OCI image admission to the same
     /// plan id as the launch decision. The caller supplies the digest-oriented
     /// labels; raw registry credentials are never recorded.
@@ -2994,5 +3025,80 @@ mod tests {
             .unwrap();
         assert_eq!(decisions.len(), 1);
         assert_eq!(decisions[0].decision_id, id);
+    }
+}
+
+#[cfg(test)]
+mod asset_identities_emit_tests {
+    use super::*;
+
+    const DIGEST64: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn fixture_plan(tenant: &str, plan_id: &str) -> ExecutionPlan {
+        mvm_core::plan::test_support::PlanFixture::new()
+            .tenant(tenant)
+            .plan_id(plan_id)
+            .build()
+    }
+
+    fn plan_with_assets() -> ExecutionPlan {
+        let mut plan = fixture_plan("local", "plan-asset-emit");
+        plan.asset_identities = vec![
+            mvm_core::plan::AssetIdentity::new(
+                mvm_core::plan::AssetKind::ComputeEnvironment,
+                "myimage",
+                DIGEST64,
+            )
+            .expect("valid digest"),
+            mvm_core::plan::AssetIdentity::new(
+                mvm_core::plan::AssetKind::Dataset,
+                "train-set",
+                DIGEST64,
+            )
+            .expect("valid digest"),
+        ];
+        plan
+    }
+
+    #[test]
+    fn asset_identities_event_carries_kind_name_digest_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[41; 32]);
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+
+        emitter.emit_asset_identities(&plan_with_assets()).unwrap();
+
+        let content =
+            std::fs::read_to_string(dir.path().join("local.jsonl")).expect("read the chain");
+        let line = content.lines().next().expect("one entry");
+        let envelope: serde_json::Value = serde_json::from_str(line).expect("envelope json");
+        let entry = &envelope["entry"];
+        assert_eq!(entry["event"], "plan.asset_identities");
+        let labels = entry["labels"].as_object().expect("labels object");
+        assert_eq!(labels["asset_count"].as_str().expect("count"), "2");
+        assert_eq!(
+            labels["asset_0_kind"].as_str().expect("kind"),
+            "compute_environment"
+        );
+        assert_eq!(labels["asset_0_name"].as_str().expect("name"), "myimage");
+        assert_eq!(labels["asset_0_digest"].as_str().expect("digest"), DIGEST64);
+        assert_eq!(labels["asset_1_kind"].as_str().expect("kind"), "dataset");
+        assert_eq!(labels["asset_1_name"].as_str().expect("name"), "train-set");
+        assert_eq!(labels["asset_1_digest"].as_str().expect("digest"), DIGEST64);
+    }
+
+    #[test]
+    fn asset_identities_event_skipped_when_plan_has_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[42; 32]);
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-no-assets");
+
+        emitter.emit_asset_identities(&plan).unwrap();
+
+        assert!(
+            !dir.path().join("local.jsonl").exists(),
+            "no event kind is invented for plans without assets"
+        );
     }
 }

@@ -104,6 +104,12 @@ pub(in crate::commands::vm) struct AdmitPlanForBootParams<'a> {
     /// into the signed plan + emitted to the chain-signed audit log
     /// (claim 1 / claim 8). Empty for the common no-volume case.
     pub shares: Vec<mvm_core::plan::HostShareGrant>,
+    /// Declared `--asset KIND:HOST_PATH` bindings hashed into content
+    /// identities at admission and recorded in the signed plan's
+    /// `asset_identities` (with the environment, bundle, deps volume,
+    /// digested shares, and the resolved network policy). Empty for runs
+    /// that declare no assets.
+    pub assets: Vec<crate::commands::shared::AssetSpec>,
     /// Per-destination egress redaction authored by `--redact HOST[=audit]`.
     /// Default (all-off) preserves the curated-only baseline.
     pub redaction: mvm_core::policy::RedactionPolicy,
@@ -387,6 +393,56 @@ pub(in crate::commands::vm) fn admit_plan_for_boot_with_ingress(
         .as_ref()
         .map(|(policy_ref, _)| policy_ref.as_str());
 
+    // Content-derived asset identities. Directory shares that don't carry a
+    // digest yet are hashed here, at admission, so the signed plan records
+    // what the granted tree actually was; enforcement re-hashes at attach
+    // time and refuses drift (hostd `enforce_admitted_shares`). The path is
+    // canonicalized first so a symlink alias (macOS `/tmp`) hashes the same
+    // tree `hash_source` would refuse as a symlink root.
+    let mut shares = p.shares.clone();
+    for grant in &mut shares {
+        if grant.kind == mvm_core::plan::ShareKind::DirShare && grant.content_sha256.is_none() {
+            let resolved = std::fs::canonicalize(&grant.host_path)?;
+            let digest = mvm_fs::hash::hash_source(&resolved).with_context(|| {
+                format!(
+                    "hashing admitted share {} for its content identity",
+                    grant.host_path
+                )
+            })?;
+            grant.content_sha256 = Some(digest);
+        }
+    }
+
+    // Caller-declared `--asset` files/dirs: the canonical tree hash is the
+    // asset's identity. A missing path fails admission here, before signing.
+    let mut caller_assets = Vec::with_capacity(p.assets.len());
+    for spec in &p.assets {
+        let resolved = std::fs::canonicalize(&spec.host_path)?;
+        let digest = mvm_fs::hash::hash_source(&resolved).with_context(|| {
+            format!(
+                "hashing declared {} asset {} for its content identity",
+                serde_json::to_string(&spec.kind).expect("asset kind serializes"),
+                spec.host_path
+            )
+        })?;
+        let name = std::path::Path::new(&spec.host_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| spec.host_path.clone());
+        caller_assets.push(mvm_core::plan::AssetIdentity::new(spec.kind, name, digest)?);
+    }
+
+    // The resolved network policy's identity: the plan pins policies by
+    // reference name, so the caller adds the resolved bytes' hash — an
+    // operator comparing identities sees which exact policy content was
+    // admitted, not just its name.
+    let network_policy_digest = {
+        use sha2::Digest as _;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(serde_json::to_vec(&p.network_policy).expect("policy serializes"));
+        hex::encode(hasher.finalize())
+    };
+
     let input = SynthesisInput {
         // The resolved permission set rides into the plan body, so the ceiling
         // check below measures what the user actually asked for and the
@@ -418,7 +474,19 @@ pub(in crate::commands::vm) fn admit_plan_for_boot_with_ingress(
         destroy_on_exit: true,
         bundle_pin: bundle_pin.clone(),
         deps_volume: p.deps_volume.clone(),
-        shares: p.shares.clone(),
+        shares: shares.clone(),
+        assets: {
+            let mut assets = caller_assets;
+            let policy_name = generated_policy_ref
+                .map(str::to_string)
+                .unwrap_or_else(|| "network_policy".to_string());
+            assets.push(mvm_core::plan::AssetIdentity::new(
+                mvm_core::plan::AssetKind::Policy,
+                policy_name,
+                network_policy_digest.clone(),
+            )?);
+            assets
+        },
         redaction: p.redaction.clone(),
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
         caller_commitment: p.caller_commitment.clone(),
@@ -604,6 +672,12 @@ pub(in crate::commands::vm) fn admit_plan_for_boot_with_ingress(
         // chain-signed log (no-op when there are none).
         if let Err(e) = emitter.emit_shares_admitted(admitted.plan()) {
             tracing::warn!(error = %e, "audit emit_shares_admitted failed (non-fatal)");
+        }
+        // Record every bound asset's content-derived identity in the
+        // chain-signed log alongside the grants (no-op when the plan
+        // records none).
+        if let Err(e) = emitter.emit_asset_identities(admitted.plan()) {
+            tracing::warn!(error = %e, "audit emit_asset_identities failed (non-fatal)");
         }
         Ok(())
     })?;
@@ -1224,6 +1298,7 @@ mod admit_plan_tests {
             grants: None,
             backend_kind: None,
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
+            assets: Vec::new(),
         }
     }
 
@@ -1354,6 +1429,7 @@ mod admit_plan_tests {
             bundle_pin: None,
             deps_volume: None,
             shares: Vec::new(),
+            assets: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             agent_verb_override: vec![],
@@ -1398,6 +1474,7 @@ mod admit_plan_tests {
             bundle_pin: None,
             deps_volume: None,
             shares: Vec::new(),
+            assets: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             agent_verb_override: vec![],
@@ -1463,6 +1540,7 @@ mod admit_plan_tests {
             bundle_pin: None,
             deps_volume: None,
             shares: Vec::new(),
+            assets: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             agent_verb_override: vec![],
@@ -1544,6 +1622,7 @@ mod admit_plan_tests {
                 bundle_pin: None,
                 deps_volume: None,
                 shares: Vec::new(),
+                assets: Vec::new(),
                 redaction: mvm_core::policy::RedactionPolicy::default(),
                 network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
                 agent_verb_override: vec![],
@@ -1598,11 +1677,12 @@ mod admit_plan_tests {
             bundle_pin: None,
             deps_volume: None,
             shares: Vec::new(),
+            services: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             agent_verb_override: vec![],
+            assets: Vec::new(),
             restrict_agent_verbs: true,
-            services: Vec::new(),
             grants: None,
             backend_kind: None,
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
@@ -1640,6 +1720,7 @@ mod admit_plan_tests {
             grants: None,
             backend_kind: None,
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
+            assets: Vec::new(),
         })
         .unwrap()
         .unwrap();
@@ -1699,6 +1780,7 @@ mod admit_plan_tests {
             grants: None,
             backend_kind: None,
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
+            assets: Vec::new(),
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -1776,6 +1858,7 @@ mod admit_plan_tests {
             grants: None,
             backend_kind: None,
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
+            assets: Vec::new(),
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -1835,6 +1918,7 @@ mod admit_plan_tests {
             grants: None,
             backend_kind: None,
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
+            assets: Vec::new(),
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -1901,6 +1985,7 @@ mod admit_plan_tests {
             grants: None,
             backend_kind: None,
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
+            assets: Vec::new(),
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -1991,7 +2076,9 @@ mod admit_plan_tests {
                 kind: mvm_core::plan::ShareKind::DirShare,
                 read_only: true,
                 encrypted: false,
+                content_sha256: None,
             }],
+            assets: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             agent_verb_override: vec![],
@@ -2048,6 +2135,7 @@ mod admit_plan_tests {
             bundle_pin: None,
             deps_volume: None,
             shares: Vec::new(),
+            assets: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             agent_verb_override: vec![],
@@ -2101,6 +2189,7 @@ mod admit_plan_tests {
             bundle_pin: None,
             deps_volume: None,
             shares: Vec::new(),
+            assets: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             agent_verb_override: vec![],
@@ -2162,6 +2251,7 @@ mod admit_plan_tests {
             bundle_pin: None,
             deps_volume: None,
             shares: Vec::new(),
+            assets: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             agent_verb_override: vec![],
@@ -2219,6 +2309,7 @@ mod admit_plan_tests {
             bundle_pin: None,
             deps_volume: None,
             shares: Vec::new(),
+            assets: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             agent_verb_override: vec![],
@@ -2261,14 +2352,15 @@ mod admit_plan_tests {
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
             caller_commitment: None,
+            assets: Vec::new(),
             no_supervisor: false,
-            ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
             policy_dir: None,
             bundle_pin: None,
             deps_volume: None,
             shares: Vec::new(),
+            ledger: &ledger,
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             agent_verb_override: vec![],
@@ -2483,6 +2575,7 @@ allow_hosts = ["localhost:8443"]
             grants: resolved.plan_grants.clone(),
             backend_kind: Some(mvm_contract::protocol::vm_backend::BackendKind::Firecracker),
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
+            assets: Vec::new(),
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -2649,6 +2742,7 @@ allow_hosts = ["localhost:8443"]
             grants: resolved.plan_grants.clone(),
             backend_kind: Some(mvm_contract::protocol::vm_backend::BackendKind::Firecracker),
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
+            assets: Vec::new(),
         })
         .expect_err("1500 millicores on a 1000-millicore host must be refused");
         assert!(
@@ -2713,6 +2807,7 @@ allow_hosts = ["localhost:8443"]
             grants: resolved.plan_grants.clone(),
             backend_kind: Some(mvm_contract::protocol::vm_backend::BackendKind::Firecracker),
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
+            assets: Vec::new(),
         })
         .expect("admission")
         .expect("Some when admission ran");
