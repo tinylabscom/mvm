@@ -392,11 +392,6 @@ fn main() -> anyhow::Result<()> {
                 cmdline: cfg.cmdline.clone(),
                 mem_mib: cfg.memory_mib,
                 vcpus: cfg.vcpus,
-                virtiofs_shares: cfg
-                    .virtiofs_shares
-                    .iter()
-                    .map(|share| (share.tag.clone(), share.path.clone()))
-                    .collect(),
                 // Streamed as the guest emits it, so the log is readable while
                 // the VM is still running — which is when a boot that never
                 // reaches the agent has to be diagnosed. The authoritative

@@ -71,19 +71,6 @@ const PINNED: &[(&str, usize, &str)] = &[
         "the VirtioFsShare type itself; empty for every workload spec",
     ),
     (
-        "crates/mvm-vmm/src/host/hvf_supervisor.rs",
-        1,
-        "HvfVirtioFsShare on the supervisor wire config. No spec constructs a \
-         share any more, so nothing populates this field; it goes when the \
-         HVF device model does",
-    ),
-    (
-        "crates/mvm-backends/src/driver/hvf.rs",
-        1,
-        "maps spec shares onto the HVF supervisor config. Every HVF spec now \
-         carries an empty share list, so this maps nothing",
-    ),
-    (
         "crates/mvm-backends/src/driver/libkrun.rs",
         6,
         "one mapper plus tests asserting a workload spec carries no shares",
@@ -117,14 +104,10 @@ const PINNED: &[(&str, usize, &str)] = &[
     (
         "crates/mvm-vmm/src/vmm/virtio.rs",
         1,
-        "the VirtioFs MMIO device. No longer reachable: the builder VMs that were \
-         its last callers moved to the disk transport",
-    ),
-    (
-        "crates/mvm-runtime/src/backends/hvf/kernel_boot.rs",
-        1,
-        "attaches spec shares to the HVF device model. The builder no longer \
-         declares any, so this attaches nothing",
+        "the VirtioFs MMIO device and its tests. Now unreachable by construction, \
+         not just by policy: the HVF backend no longer maps a share, the wire \
+         config no longer carries one, and nothing attaches the device. It goes \
+         with `virtio_fs.rs`'s FuseServer and that module's fuzz target",
     ),
 ];
 
