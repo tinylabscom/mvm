@@ -88,8 +88,8 @@ fn profile_mismatch_warning(bin: &str, mismatch: &ProfileMismatch) -> String {
          Helpers are searched in target/release before target/debug, so a missing helper \
          beside the running binary is answered silently by the other profile's — at \
          whatever revision it was last built. If their config contract has moved since, \
-         {bin} will refuse to start. Build the matching one with `cargo build{flag} \
-         -p mvm-hostd --bins`.",
+         {bin} will refuse to start. Build the matching one with \
+         `just build-supervisors{flag}`.",
         exe = mismatch.exe.as_str(),
         helper = mismatch.helper.as_str(),
         path = mismatch.helper_path.display(),
@@ -423,7 +423,7 @@ mod tests {
             "naming the file is what makes it checkable: {warning}"
         );
         assert!(
-            warning.contains("cargo build --release -p mvm-hostd --bins"),
+            warning.contains("just build-supervisors --release"),
             "the rebuild must name the running binary's profile, not the helper's: {warning}"
         );
     }
