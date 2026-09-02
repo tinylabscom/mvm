@@ -29,6 +29,21 @@ Tracing runs only a command the user explicitly supplied. Linux-specific ELF
 and process collectors are runtime-gated; portable collection returns clear
 unsupported evidence rather than pretending it inspected Linux state.
 
+## Public entry points
+
+- `CollectOptions` and `collect_project` define a bounded, read-only scan and
+  return a `CaptureReportV1` containing observations and their evidence.
+- `RecordOnlyVerifier`, `BuilderVmVerifier`, and `BootReplayVerifier` apply
+  progressively stronger verification without changing the report format.
+- `resolve_report` lowers only verified observations into a `ResolutionResult`
+  and canonical `mvm_contract::ir::Workload`.
+- The types in `report` are serializable so the CLI can retain the evidence,
+  verification decisions, unresolved items, and chosen resolution strategy.
+
+Callers should keep collection, verification, and resolution as distinct
+steps. That separation lets users inspect what was observed and prevents an
+unverified guess from silently becoming a build instruction.
+
 ## Main modules
 
 | Module | Responsibility |

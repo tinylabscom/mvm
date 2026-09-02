@@ -326,6 +326,11 @@ jobs:
       - name: Fast/stable toolchain split is pinned
         run: ./scripts/check-fast-cargo.sh
 
+      - name: Every Cargo crate has a detailed README
+        run: |
+          bash scripts/test-check-crate-readmes.sh
+          bash scripts/check-crate-readmes.sh
+
 
 
 
