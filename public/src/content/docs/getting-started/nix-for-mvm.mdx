@@ -367,10 +367,12 @@ filesystem *structure* rather than opaque blocks. A disk image has no protocol
 for a guest to drive. The snapshot is also read-only under every profile for a
 transient run, so mid-run visibility is the only thing that changed.
 
-Because the image is assembled in memory, a two-part mount is capped at 2 GiB
-of regular-file data and refuses a larger tree rather than risking the host
-killing `mvmctl`. Mount a narrower directory, or stage a copy that excludes
-generated trees like `target/`.
+There is no size limit: the walk records each file's path and size and the
+bytes are streamed into the image as it is written, so peak memory is a block
+per file rather than the whole tree. Mounting a directory does still *copy* it,
+and `.gitignore` is deliberately not consulted — a user who mounts a directory
+means the directory — so mounting a large build tree costs the time and disk to
+write it.
 
 Your entrypoint can read config and write data at runtime — no rebuild needed:
 

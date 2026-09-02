@@ -85,6 +85,29 @@ pub struct WalkOptions {
     pub xattrs: XattrPolicy,
     /// Behavior when an enumerated entry disappears during the walk.
     pub on_vanished: VanishedNodePolicy,
+    /// Whether a regular file's bytes are read during the walk or left on the
+    /// host until the image is emitted.
+    pub file_contents: FileContentPolicy,
+}
+
+/// When a regular file's bytes are read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FileContentPolicy {
+    /// Read every file during the walk. Peak memory is the tree's size; in
+    /// exchange the node list is self-contained, so callers can hash it, cache
+    /// it, or build from it after the source directory is gone.
+    #[default]
+    ReadDuringWalk,
+    /// Record each file's path and stat'd size, and read it during the emit
+    /// pass instead. Peak memory is one block per file rather than the whole
+    /// tree, which is what makes a multi-gigabyte host directory materializable
+    /// at all.
+    ///
+    /// The cost is that the node list now *refers to* the tree rather than
+    /// containing it: the source must still exist, and unchanged, while the
+    /// image is written. A tree that changes underneath is tolerated rather
+    /// than detected — see `Node::FileFromHost`.
+    DeferToEmit,
 }
 
 impl WalkOptions {
@@ -106,6 +129,12 @@ impl WalkOptions {
     /// Set the policy for entries that disappear during the snapshot.
     pub fn with_vanished_node_policy(mut self, on_vanished: VanishedNodePolicy) -> Self {
         self.on_vanished = on_vanished;
+        self
+    }
+
+    /// Set when regular-file contents are read.
+    pub fn with_file_content_policy(mut self, file_contents: FileContentPolicy) -> Self {
+        self.file_contents = file_contents;
         self
     }
 }
@@ -241,6 +270,16 @@ fn read_walk_entry(
             mode: mode_of(&path, 0o755),
             xattrs: node_xattrs(options.xattrs, &path),
         }
+    } else if options.file_contents == FileContentPolicy::DeferToEmit
+        && let Some(len) = deferrable_file_len(&path)
+    {
+        Node::FileFromHost {
+            path: guest_path,
+            mode: mode_of(&path, 0o644),
+            source: path.clone(),
+            len,
+            xattrs: node_xattrs(options.xattrs, &path),
+        }
     } else {
         let data = match read_file_for_guest_image(&path) {
             Ok(data) => data,
@@ -254,6 +293,32 @@ fn read_walk_entry(
         }
     };
     Ok(Some(node))
+}
+
+/// The file's size, if the emit pass will be able to reopen and read it.
+///
+/// `None` sends the file down the eager path instead. Two cases need that, and
+/// both are about fidelity rather than deferral being unsafe:
+///
+/// * **An owner-unreadable file** (a 0000 `/etc/shadow` is the real example).
+///   [`read_file_for_guest_image`] widens the mode, reads, and restores it. The
+///   emit pass has no such affordance — it would fail the open and leave a hole,
+///   silently turning the file's contents into zeros. Reading it now costs its
+///   size in memory, and a file nobody can read is not the reason a tree is
+///   large.
+/// * **Anything that is not a plain regular file by the time we stat it.** The
+///   caller already filtered on the directory entry's type; this re-checks
+///   against the file itself, because the deferred path stores a path and will
+///   follow it again later.
+fn deferrable_file_len(path: &Path) -> Option<u64> {
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    // Probe readability now rather than discovering it during emit, when the
+    // layout is already committed and the only recourse is a hole.
+    std::fs::File::open(path).ok()?;
+    Some(metadata.len())
 }
 
 /// Walk `root` into a flat [`Node`] list (guest-absolute paths), symlink-aware
@@ -465,6 +530,11 @@ fn count_nodes(nodes: &[Node]) -> MaterializationNodeCounts {
             Node::File { data, xattrs, .. } => {
                 counts.files += 1;
                 counts.file_bytes = counts.file_bytes.saturating_add(data.len() as u64);
+                counts.xattrs = counts.xattrs.saturating_add(xattrs.len() as u64);
+            }
+            Node::FileFromHost { len, xattrs, .. } => {
+                counts.files += 1;
+                counts.file_bytes = counts.file_bytes.saturating_add(*len);
                 counts.xattrs = counts.xattrs.saturating_add(xattrs.len() as u64);
             }
             Node::Symlink { .. } => counts.symlinks += 1,
@@ -807,6 +877,156 @@ fn mode_of(path: &Path, default: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a tree whose files span the interesting shapes: empty, sub-block,
+    /// exactly one block, multi-block, and one large enough to need several
+    /// extents. The deferred reader chunks by block, so an off-by-one in its
+    /// cursor shows up as a corrupted file rather than as a build failure.
+    fn spread_of_file_sizes(root: &Path) {
+        std::fs::create_dir_all(root.join("nested/deeper")).unwrap();
+        std::fs::write(root.join("empty"), b"").unwrap();
+        std::fs::write(root.join("tiny"), b"hi\n").unwrap();
+        std::fs::write(root.join("exactly-one-block"), vec![b'a'; 4096]).unwrap();
+        std::fs::write(root.join("one-block-plus-one"), vec![b'b'; 4097]).unwrap();
+        std::fs::write(root.join("nested/many-blocks"), vec![b'c'; 4096 * 37 + 11]).unwrap();
+        // Not a uniform fill: a cursor that reuses a buffer without tracking how
+        // much it read would still pass against a single repeated byte.
+        let varied: Vec<u8> = (0..(4096 * 5 + 1234)).map(|i| (i % 251) as u8).collect();
+        std::fs::write(root.join("nested/deeper/varied"), varied).unwrap();
+        std::os::unix::fs::symlink("../../tiny", root.join("nested/deeper/link")).unwrap();
+    }
+
+    fn nodes_with(root: &Path, policy: FileContentPolicy) -> Vec<Node> {
+        collect_nodes(
+            root,
+            WalkOptions::default().with_file_content_policy(policy),
+        )
+        .expect("collect nodes")
+    }
+
+    /// The property the whole deferred path rests on: reading a file during the
+    /// emit pass must produce the *same image bytes* as reading it during the
+    /// walk. Not merely a mountable image, and not merely the same size — the
+    /// identical byte string, because this writer's output feeds dm-verity and a
+    /// difference of one byte is a different roothash.
+    #[test]
+    fn deferred_file_contents_produce_a_byte_identical_image() {
+        let src = tempfile::tempdir().unwrap();
+        spread_of_file_sizes(src.path());
+
+        let eager =
+            crate::ext4::build_image(nodes_with(src.path(), FileContentPolicy::ReadDuringWalk))
+                .expect("eager image");
+        let deferred =
+            crate::ext4::build_image(nodes_with(src.path(), FileContentPolicy::DeferToEmit))
+                .expect("deferred image");
+
+        assert_eq!(
+            eager.len(),
+            deferred.len(),
+            "the layout must not depend on when the bytes are read"
+        );
+        assert_eq!(
+            eager, deferred,
+            "a deferred read produced different image bytes than an eager one"
+        );
+    }
+
+    /// The deferred walk must not read file contents. Without this, the policy
+    /// could quietly regress to eager and every other test here would still
+    /// pass — the images would be identical, which is exactly the point.
+    #[test]
+    fn the_deferred_walk_holds_no_file_bytes() {
+        let src = tempfile::tempdir().unwrap();
+        spread_of_file_sizes(src.path());
+
+        let nodes = nodes_with(src.path(), FileContentPolicy::DeferToEmit);
+        let inline_files: Vec<&str> = nodes
+            .iter()
+            .filter_map(|n| match n {
+                Node::File { path, .. } => Some(path.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            inline_files.is_empty(),
+            "these files were read into memory by a walk that promised not to: {inline_files:?}"
+        );
+        assert!(
+            nodes.iter().any(|n| matches!(n, Node::FileFromHost { .. })),
+            "the deferred walk produced no deferred files at all"
+        );
+    }
+
+    /// An owner-unreadable file falls back to the eager path rather than
+    /// becoming a hole.
+    ///
+    /// The emit pass cannot widen a mode the way the walk can, so a 0000 file
+    /// would open-fail during emit and silently read back as zeros — the
+    /// content replaced by plausible-looking data, which is worse than a
+    /// failure. `deferrable_file_len` probes readability so this one file pays
+    /// memory and keeps its bytes.
+    #[test]
+    fn an_unreadable_file_is_read_eagerly_even_when_deferring() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let src = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(src.path().join("etc")).unwrap();
+        let shadow = src.path().join("etc/shadow");
+        std::fs::write(&shadow, b"root:*:19793:0:99999:7:::\n").unwrap();
+        std::fs::write(src.path().join("readable"), vec![b'z'; 9000]).unwrap();
+        std::fs::set_permissions(&shadow, std::fs::Permissions::from_mode(0o0)).unwrap();
+
+        let nodes = nodes_with(src.path(), FileContentPolicy::DeferToEmit);
+
+        let shadow_node = nodes
+            .iter()
+            .find(|n| n.path() == "/etc/shadow")
+            .expect("the unreadable file is still captured");
+        assert!(
+            matches!(shadow_node, Node::File { data, .. } if !data.is_empty()),
+            "an unreadable file must be read eagerly, with its bytes, not deferred"
+        );
+        let readable = nodes
+            .iter()
+            .find(|n| n.path() == "/readable")
+            .expect("the readable file is captured");
+        assert!(
+            matches!(readable, Node::FileFromHost { .. }),
+            "a readable file must still take the deferred path"
+        );
+
+        // Restore so the tempdir can be cleaned up.
+        std::fs::set_permissions(&shadow, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    /// A file that shrinks between walk and emit yields a prefix padded with
+    /// zeros, never another file's bytes.
+    ///
+    /// The layout is committed from the stat'd size, so the blocks are already
+    /// reserved. What matters is that the shortfall stays inside this file's own
+    /// extents — the failure worth preventing is one file's tail landing in the
+    /// next file's blocks.
+    #[test]
+    fn a_file_truncated_after_the_walk_stays_within_its_own_extents() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("a-shrinks"), vec![b'a'; 4096 * 3]).unwrap();
+        std::fs::write(src.path().join("b-stable"), vec![b'b'; 4096 * 2]).unwrap();
+
+        let nodes = nodes_with(src.path(), FileContentPolicy::DeferToEmit);
+        // Shrink after the walk has stat'd it, before the image is emitted.
+        std::fs::write(src.path().join("a-shrinks"), vec![b'a'; 10]).unwrap();
+
+        let image = crate::ext4::build_image(nodes).expect("image still builds");
+        assert!(
+            !image.windows(4096).any(|w| w.iter().all(|b| *b == b'a')),
+            "a full block of the shrunk file's bytes survived, so it was not re-read"
+        );
+        assert!(
+            image.windows(4096).any(|w| w.iter().all(|b| *b == b'b')),
+            "the untouched neighbour's bytes must be intact"
+        );
+    }
 
     #[test]
     fn vanished_file_policy_skips_only_not_found_entries() {
