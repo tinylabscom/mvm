@@ -45,6 +45,88 @@ fn the_release_workflow_waits_for_the_documented_surface() {
     );
 }
 
+/// The release gate must be stated at the release call site, not inherited.
+///
+/// No GitHub-hosted macOS runner can boot an mvm guest (issue #3011), so the
+/// macOS lane fails on every hosted host. Extended CI opts out of that failure
+/// nightly — otherwise its red never varies and stops being read at all — and
+/// the danger in having an opt-out is that the release caller quietly acquires
+/// it too. Then a tag cuts with no live macOS evidence and nothing says so,
+/// which is the same silent-gate failure that let `machine run -it` ship broken
+/// on every OCI image.
+#[test]
+fn releases_still_block_on_a_macos_host_that_cannot_boot_a_guest() {
+    let workflow =
+        fs::read_to_string(".github/workflows/release.yml").expect("read release workflow");
+    assert!(
+        workflow.contains("macos_blocks_on_unusable_host: true"),
+        "release.yml must block on an unusable macOS host, or a tag is cut with \
+         no evidence the documented examples boot on macOS"
+    );
+
+    let extended =
+        fs::read_to_string(".github/workflows/ci-full.yml").expect("read extended CI workflow");
+    assert!(
+        extended.contains("macos_blocks_on_unusable_host: false"),
+        "Extended CI must tolerate the standing hardware gap, or its nightly red \
+         reports the same thing for a missing runner as for a regression"
+    );
+}
+
+/// The two callers must disagree, and the default must be the safe one.
+///
+/// A `workflow_call` input that defaults to false would make every future
+/// caller non-blocking by omission — the failure mode this split exists to
+/// prevent, reintroduced one level up.
+#[test]
+fn the_macos_host_gate_defaults_to_blocking() {
+    let workflow = extended_ci();
+    let inputs = workflow
+        .split("jobs:")
+        .next()
+        .expect("the workflow must declare its triggers before its jobs");
+    assert!(
+        inputs.contains("macos_blocks_on_unusable_host:"),
+        "the shared workflow must declare the macOS host gate as an input"
+    );
+    assert!(
+        inputs.contains("default: true"),
+        "the macOS host gate must default to blocking, so a caller that says \
+         nothing gets the release-safe behaviour"
+    );
+}
+
+/// The lane is skipped by the host check, never by a hardcoded runner label.
+///
+/// Pointing `runs-on` at a self-hosted Apple Silicon runner has to be the whole
+/// of resolving #3011. If the skip were keyed to the label rather than to a
+/// live `uname`, the lane would keep skipping on hardware that can run it, and
+/// the gap would close without anyone noticing the evidence never came back.
+#[test]
+fn the_macos_lane_runs_whenever_the_host_probe_says_the_host_can_boot() {
+    let workflow = extended_ci();
+    let check = job_block(&workflow, "e2e-docs-macos-host-check");
+    assert!(
+        check.contains("uname -m"),
+        "the host check must probe the live host, not the runner label"
+    );
+    assert!(
+        check.contains("supported=true"),
+        "the host check must report a usable host to its dependents"
+    );
+
+    let macos = job_block(&workflow, "e2e-docs-macos");
+    assert!(
+        macos.contains("needs: e2e-docs-macos-host-check"),
+        "the macOS lane must wait on the host check"
+    );
+    assert!(
+        macos.contains("if: needs.e2e-docs-macos-host-check.outputs.supported == 'true'"),
+        "the macOS lane must run exactly when the host probe says the host can \
+         boot a guest"
+    );
+}
+
 fn documented_surface_script() -> String {
     fs::read_to_string("scripts/e2e-documented-surface.sh").expect("read documented-surface runner")
 }
