@@ -2827,6 +2827,7 @@ mod tests {
                 child_vm_name: "fc-childvm".into(),
                 dest_dir: tmp.path().join("bound-child-state"),
                 created_unix: 2,
+                parent_liveness: ForkParentLiveness::MayBeRunning,
                 child_plan_json: Some(child_plan_json),
                 child_tenant_id: Some(child_tenant_id),
             },
