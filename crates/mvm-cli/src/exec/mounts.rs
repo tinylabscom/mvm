@@ -81,9 +81,13 @@ pub(crate) fn materialize_mount_volumes(
 /// # What a caller loses
 ///
 /// The image is a snapshot taken now. Host edits during the run are not
-/// visible to the guest. `--mount` was already read-only — the CLI refuses
-/// `rw` with "transient live shares are read-only" — so mid-run visibility is
-/// the only property that goes.
+/// visible to the guest. `--mount` was already read-only — a transient run
+/// refuses `rw` for every shape, directory and sized disk alike — so mid-run
+/// visibility is the only property that goes.
+///
+/// Nothing a transient guest writes reaches the host either, in any shape. A
+/// workload that has to hand results back needs a registered volume and
+/// `mvmctl machine start`, not this path.
 pub(crate) fn materialize_mount_image(
     share: &DirShareSpec,
     state_dir: &std::path::Path,

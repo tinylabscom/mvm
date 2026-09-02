@@ -447,6 +447,18 @@ pub(super) type PreparedLaunchVolumes = mvm_client::volume::LaunchPreparation;
 
 /// Merge persisted local registrations into the volume list used to construct
 /// both signed admission grants and the backend launch configuration.
+/// The attachments registered against `vm_name`, without taking a lease.
+///
+/// Distinct from [`merge_registered_volumes_for_launch`], which acquires the
+/// exclusive launch lease. This is for callers that only need to *know*
+/// registrations exist — a transient run that will not attach them, for
+/// instance — and must not disturb a persistent machine that holds them.
+pub(crate) fn list_registered_attachments(
+    vm_name: &str,
+) -> Result<Vec<mvm_client::volume::AttachmentRecord>> {
+    service().list_attachments(vm_name)
+}
+
 pub(super) fn merge_registered_volumes_for_launch(
     vm_name: &str,
     explicit: &[mvm_runtime::image::RuntimeVolume],
