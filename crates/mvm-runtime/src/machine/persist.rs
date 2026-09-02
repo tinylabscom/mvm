@@ -79,6 +79,9 @@ pub struct MachineSpec {
     /// computed sealed-prod default at each start.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_verb: Vec<String>,
+    /// Opaque commitment bound into every execution plan for this machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_commitment: Option<mvm_contract::plan::CallerCommitment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -400,6 +403,7 @@ mod tests {
             volumes: vec![],
             init: vec![],
             agent_verb: vec![],
+            caller_commitment: None,
             created_at: None,
             last_started_at: None,
             health_check: None,
@@ -425,6 +429,7 @@ mod tests {
         .to_string();
         let spec: MachineSpec =
             serde_json::from_str(&legacy).expect("a pre-grants spec still loads");
+        assert_eq!(spec.caller_commitment, None);
         assert_eq!(spec.grants, None);
         // And a spec that granted nothing must not start emitting the key, so
         // rewriting an old spec does not gratuitously change its bytes.
@@ -634,6 +639,7 @@ mod tests {
             volumes: vec!["/data:/data:ro".into()],
             init: vec![],
             agent_verb: vec![],
+            caller_commitment: None,
             created_at: None,
             last_started_at: None,
             health_check: None,

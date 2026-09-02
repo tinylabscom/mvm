@@ -173,6 +173,15 @@ mod tests {
     }
 
     #[test]
+    fn caller_commitment_is_load_bearing() {
+        let base_plan = plan();
+        let base = compute_plan_id(&base_plan);
+        let mut committed = base_plan;
+        committed.caller_commitment = Some(crate::plan::CallerCommitment::from_bytes([7; 32]));
+        assert_ne!(base, compute_plan_id(&committed));
+    }
+
+    #[test]
     fn verify_accepts_a_content_addressed_plan() {
         let mut p = plan();
         p.plan_id = compute_plan_id(&p);

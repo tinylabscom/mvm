@@ -743,6 +743,13 @@ pub fn dispatch_socket_path(vm_state_dir: &Path) -> PathBuf {
 // on every build and routes through `PersistentBuilderVm` (which
 // implements `BuilderVm` via the wire) when a session is alive.
 
+// The disk transport is a session concern, so it is re-exported here: callers
+// reach it through the session type that carries it, not through a second
+// module they have to know about.
+pub use crate::persistent_builder_transport::{
+    SessionDiskTransport, guest_artifact_dir, read_dispatch_artifacts, repack_dispatch_input,
+};
+
 /// Session record format mirroring
 /// `mvm_cli::commands::build::persistent_builder::SessionRecord`.
 /// Duplicated here to keep mvm-build off the mvm-cli direction in
@@ -754,9 +761,15 @@ pub struct SessionRecord {
     pub session_id: String,
     /// libkrun-managed Unix socket the supervisor connects to.
     pub dispatch_socket_path: PathBuf,
-    /// Per-session job dir (bound at `/job` in the guest). Hosts
-    /// stage per-dispatch artifacts here before submitting.
+    /// Per-session job dir. Hosts stage each dispatch here before submitting
+    /// and read its artifacts back here afterwards. Reaches the guest as a
+    /// `/job` share, or — when [`SessionRecord::disk_transport`] is set — over
+    /// the transport disks, in which case the guest never sees this path.
     pub job_dir: PathBuf,
+    /// Set when this session exchanges jobs over raw disks rather than shares.
+    /// Absent means shares, which is what a libkrun-backed session uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_transport: Option<SessionDiskTransport>,
     /// Workspace bound at `/work`. Recorded for `mvmctl
     /// persistent-builder status`; not load-bearing here.
     pub workspace_root: PathBuf,
@@ -1081,15 +1094,17 @@ pub fn stage_flake_dispatch_job(
     session_job_dir: &Path,
     flake_ref: &str,
     attr: &str,
+    transport: Option<&SessionDiskTransport>,
 ) -> std::io::Result<String> {
     let job_id = uuid::Uuid::new_v4().to_string();
     let sub = session_job_dir.join(&job_id);
     let artifact_dir = sub.join(ARTIFACT_SUBDIR);
     std::fs::create_dir_all(&artifact_dir)?;
+    let out_dir = guest_artifact_dir(transport, &job_id);
     let script = format!(
         "#!/bin/sh\n\
          set -eu\n\
-         OUT_DIR='/job/{job_id}/{artifact_subdir}'\n\
+         OUT_DIR='{out_dir}'\n\
          mkdir -p \"$OUT_DIR\"\n\
          STORE_PATH=$(nix --extra-experimental-features 'nix-command flakes' \\\n\
              build --no-link --print-out-paths \\\n\
@@ -1124,7 +1139,6 @@ pub fn stage_flake_dispatch_job(
          if [ -f \"$STORE_PATH/manifest.json\" ]; then\n\
              cp -L \"$STORE_PATH/manifest.json\" \"$OUT_DIR/manifest.json\"\n\
          fi\n",
-        artifact_subdir = ARTIFACT_SUBDIR,
         store_path_sidecar = STORE_PATH_SIDECAR,
         flake_ref = shell_single_quote(flake_ref),
         attr = shell_single_quote(attr),
@@ -1226,10 +1240,24 @@ impl crate::builder_vm::BuilderVm for PersistentBuilderVm {
         };
 
         let _ = touch_active_session(current_unix_secs());
-        let job_id = stage_flake_dispatch_job(&self.session.job_dir, flake_ref, attr_path)
-            .map_err(|e| {
-                BuilderVmError::ExtractionFailed(format!("staging persistent dispatch job: {e}"))
+        let transport = self.session.disk_transport.as_ref();
+        let job_id =
+            stage_flake_dispatch_job(&self.session.job_dir, flake_ref, attr_path, transport)
+                .map_err(|e| {
+                    BuilderVmError::ExtractionFailed(format!(
+                        "staging persistent dispatch job: {e}"
+                    ))
+                })?;
+
+        // Disk-backed session: put this job on the input disk before the guest
+        // is told to run it. The guest re-reads the disk on `Run`, so the write
+        // has to be complete by then — which it is, because `submit` below is
+        // what sends the frame.
+        if let Some(t) = transport {
+            repack_dispatch_input(t, &self.session.job_dir, &job_id).map_err(|e| {
+                BuilderVmError::ExtractionFailed(format!("packing the dispatch input disk: {e}"))
             })?;
+        }
 
         let supervisor = PersistentBuilderSupervisor::new(&self.session.dispatch_socket_path)
             .with_frame_read_timeout(Duration::from_secs(60));
@@ -1242,6 +1270,15 @@ impl crate::builder_vm::BuilderVm for PersistentBuilderVm {
                 "persistent dispatch exit {} — stderr tail:\n{}",
                 outcome.exit_code, outcome.stderr_tail
             )));
+        }
+
+        // The guest wrote this dispatch's artifact tar before it answered, so
+        // reading now cannot race it. Landing them under `artifact_dir_for`
+        // makes the rest of this function transport-blind.
+        if let Some(t) = transport {
+            read_dispatch_artifacts(t, &self.session.job_dir, &job_id).map_err(|e| {
+                BuilderVmError::ExtractionFailed(format!("reading the dispatch output disk: {e}"))
+            })?;
         }
 
         let artifact_dir = artifact_dir_for(&self.session.job_dir, &job_id);
@@ -1299,6 +1336,23 @@ impl PersistentBuilderVm {
         mounts: &crate::builder_vm::BuilderMounts,
     ) -> Result<crate::builder_vm::BuilderArtifacts, crate::builder_vm::BuilderVmError> {
         use crate::builder_vm::{BuilderArtifacts, BuilderJob, BuilderVmError};
+
+        // The guest's install arm writes its result and sealed-volume sidecars
+        // into `/job/<job_id>/out`, which the disk transport does not collect —
+        // it collects `/out` and nothing else. Running anyway would report a
+        // clean dispatch and then find no `result.json`, and worse, a claim-11
+        // sealed volume would lose the SBOM and CVE sidecars its verification
+        // depends on. Refuse instead, and say which half is missing.
+        if self.session.disk_transport.is_some() {
+            return Err(BuilderVmError::VmmUnavailable {
+                requested: "persistent-builder install".to_string(),
+                reason: "the guest writes install artifacts to /job/<job_id>/out, which the \
+                         disk transport does not read back — it collects /out and nothing \
+                         else. Run the install through a one-shot builder until the guest's \
+                         install arm writes to /out."
+                    .to_string(),
+            });
+        }
 
         let job_id =
             stage_install_dispatch_job(&self.session.job_dir, host_spec_path).map_err(|e| {
@@ -1442,6 +1496,7 @@ mod tests {
         let record = SessionRecord {
             session_id: "abc".to_string(),
             dispatch_socket_path: PathBuf::from("/tmp/sock"),
+            disk_transport: None,
             job_dir: PathBuf::from("/tmp/jobs"),
             workspace_root: PathBuf::from("/work"),
             supervisor_pid: 4242,
@@ -1501,6 +1556,7 @@ mod tests {
         let record = SessionRecord {
             session_id: "abc".to_string(),
             dispatch_socket_path: PathBuf::from("/tmp/sock"),
+            disk_transport: None,
             job_dir: PathBuf::from("/tmp/jobs"),
             workspace_root: PathBuf::from("/work"),
             supervisor_pid: 4242,
@@ -1521,6 +1577,7 @@ mod tests {
         let record = SessionRecord {
             session_id: "abc".to_string(),
             dispatch_socket_path: PathBuf::from("/tmp/sock"),
+            disk_transport: None,
             job_dir: PathBuf::from("/tmp/jobs"),
             workspace_root: PathBuf::from("/work"),
             supervisor_pid: 4242,
@@ -1541,6 +1598,7 @@ mod tests {
         let record = SessionRecord {
             session_id: "abc".to_string(),
             dispatch_socket_path: PathBuf::from("/tmp/sock"),
+            disk_transport: None,
             job_dir: PathBuf::from("/tmp/jobs"),
             workspace_root: PathBuf::from("/work"),
             supervisor_pid: 4242,
@@ -1567,6 +1625,7 @@ mod tests {
         let record = SessionRecord {
             session_id: "x".to_string(),
             dispatch_socket_path: PathBuf::from("/dev/null"),
+            disk_transport: None,
             job_dir: PathBuf::from("/tmp"),
             workspace_root: PathBuf::from("/tmp"),
             supervisor_pid: std::process::id(),
@@ -1596,6 +1655,7 @@ mod tests {
         let record = SessionRecord {
             session_id: "live".into(),
             dispatch_socket_path: run_dir.join("dispatch.sock"),
+            disk_transport: None,
             job_dir: run_dir.join("jobs"),
             workspace_root: scratch.path().to_path_buf(),
             // This process: alive by construction.
@@ -1681,6 +1741,7 @@ mod tests {
         let record = SessionRecord {
             session_id: "x".to_string(),
             dispatch_socket_path: PathBuf::from("/dev/null"),
+            disk_transport: None,
             job_dir: PathBuf::from("/tmp"),
             workspace_root: PathBuf::from("/tmp"),
             supervisor_pid: DEFINITELY_DEAD_PID,
@@ -1706,9 +1767,13 @@ mod tests {
         // actual VM dispatch.
         let scratch = tempfile::tempdir().expect("tempdir");
         let job_dir = scratch.path().to_path_buf();
-        let job_id =
-            stage_flake_dispatch_job(&job_dir, "path:/work", "packages.aarch64-linux.default")
-                .expect("stage");
+        let job_id = stage_flake_dispatch_job(
+            &job_dir,
+            "path:/work",
+            "packages.aarch64-linux.default",
+            None,
+        )
+        .expect("stage");
         let cmd_path = job_dir.join(&job_id).join("cmd.sh");
         assert!(cmd_path.is_file(), "{}", cmd_path.display());
         let body = std::fs::read_to_string(&cmd_path).expect("read");
@@ -1728,9 +1793,13 @@ mod tests {
     fn stage_flake_dispatch_job_seals_final_artifact_without_a_new_builder_subcommand() {
         let scratch = tempfile::tempdir().expect("tempdir");
         let job_dir = scratch.path().to_path_buf();
-        let job_id =
-            stage_flake_dispatch_job(&job_dir, "path:/work", "packages.aarch64-linux.default")
-                .expect("stage");
+        let job_id = stage_flake_dispatch_job(
+            &job_dir,
+            "path:/work",
+            "packages.aarch64-linux.default",
+            None,
+        )
+        .expect("stage");
         let body = std::fs::read_to_string(job_dir.join(&job_id).join("cmd.sh")).expect("read");
         assert!(
             body.contains("/sbin/mvm-host-vm-init run-before-build-hook"),

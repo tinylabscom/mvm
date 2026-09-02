@@ -251,6 +251,13 @@ impl VsockHandlerRegistry {
             .bind_ports(ports)
     }
 
+    pub(crate) fn set_long_lived_host_dial_ports(&mut self, ports: impl IntoIterator<Item = u32>) {
+        self.host_handler_mut::<HostDialVsockHandler>()
+            .expect("console handler present")
+            .bridge
+            .set_long_lived_ports(ports);
+    }
+
     pub(crate) fn set_host_dial_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
         self.host_handler_mut::<HostDialVsockHandler>()
             .expect("console handler present")

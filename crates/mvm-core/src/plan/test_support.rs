@@ -37,6 +37,7 @@ pub struct PlanFixture {
     stream_edges: Vec<mvm_contract::stream::StreamEdge>,
     stream_retention: StreamRetention,
     audit_labels: BTreeMap<String, String>,
+    caller_commitment: Option<crate::plan::CallerCommitment>,
     grants: Option<mvm_contract::grants::Grants>,
 }
 
@@ -56,6 +57,7 @@ impl Default for PlanFixture {
             stream_edges: Vec::new(),
             stream_retention: StreamRetention::default(),
             audit_labels: BTreeMap::new(),
+            caller_commitment: None,
             grants: None,
         }
     }
@@ -128,6 +130,12 @@ impl PlanFixture {
         self
     }
 
+    /// Opaque caller commitment copied into the signed plan and audit chain.
+    pub fn caller_commitment(mut self, commitment: crate::plan::CallerCommitment) -> Self {
+        self.caller_commitment = Some(commitment);
+        self
+    }
+
     /// The permission set this plan is admitted under. Default `None`, which a
     /// restore reads as unbounded CPU and wall clock but deny-all egress.
     pub fn grants(mut self, grants: Option<mvm_contract::grants::Grants>) -> Self {
@@ -189,6 +197,7 @@ impl PlanFixture {
                 capture_paths: Vec::new(),
                 retention_days: 0,
             },
+            caller_commitment: self.caller_commitment,
             audit_labels: self.audit_labels,
             key_rotation: KeyRotationSpec { interval_days: 0 },
             attestation: AttestationRequirement {

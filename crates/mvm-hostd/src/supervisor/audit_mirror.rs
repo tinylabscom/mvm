@@ -86,6 +86,7 @@ mod tests {
             image_name: "alpine".into(),
             image_sha256: "deadbeef".into(),
             event: event.into(),
+            caller_commitment: None,
             labels: BTreeMap::from([("secret_key".into(), "secret_value".into())]),
         }
     }

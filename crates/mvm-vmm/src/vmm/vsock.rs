@@ -245,6 +245,17 @@ impl VsockShared {
         self.handlers.set_host_dial_sockets(ports)
     }
 
+    /// Exempt these guest ports from idle eviction in **both** layers that can
+    /// reclaim a quiet stream: the host-dial bridge, which closes the host
+    /// socket, and the transport's credit table, which sends the guest an
+    /// `OP_RST`. Fixing only one leaves the other to sever the connection.
+    pub fn set_long_lived_host_dial_ports(&mut self, ports: impl IntoIterator<Item = u32>) {
+        let ports: Vec<u32> = ports.into_iter().collect();
+        self.handlers
+            .set_long_lived_host_dial_ports(ports.iter().copied());
+        self.transport.set_long_lived_ports(ports);
+    }
+
     pub fn set_host_dial_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
         self.handlers.set_host_dial_activity(counter);
     }
@@ -424,6 +435,11 @@ impl VirtioVsock {
     pub fn capture_workload_exit(&mut self, stop: &'static std::sync::atomic::AtomicBool) {
         self.lock().capture_workload_exit(stop);
         self.host_runtime.workload_exit_stop = Some(stop);
+        self.notify_io();
+    }
+
+    pub fn set_long_lived_host_dial_ports(&mut self, ports: impl IntoIterator<Item = u32>) {
+        self.lock().set_long_lived_host_dial_ports(ports);
         self.notify_io();
     }
 

@@ -55,6 +55,29 @@ pub struct HostDialSocket {
     pub host_socket: PathBuf,
 }
 
+/// What the supervisor needs to stand up a trusted builder's egress endpoint
+/// and the identity drive that boot's guest reads its keys off.
+///
+/// Deliberately narrow: it names paths and a VM, and grants no ability to spawn
+/// an endpoint for any other tier or policy. The supervisor applies the
+/// trusted-builder egress policy and an empty secret set unconditionally, so
+/// nothing on this wire can widen what the endpoint serves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuilderEgressEndpoint {
+    /// VM name; keys the endpoint's per-VM env path and its FlowMux session.
+    pub vm_name: String,
+    /// Per-VM state dir; the endpoint's pid file and session marker land here.
+    pub state_dir: PathBuf,
+    /// UDS the endpoint binds — the same path `egress_relay_socket` names, so
+    /// the supervisor's relay finds it.
+    pub socket: PathBuf,
+    /// Where to write this boot's FlowMux identity drive. The guest reads its
+    /// signing key and the host anchor off it and will not start its egress
+    /// client without them, so it has to exist before the VM boots.
+    pub identity_drive: PathBuf,
+}
+
 pub use crate::hvf_handoff::HvfHandoffRequest;
 
 /// Filename for the optional supervisor-internal shutdown profile.
@@ -183,6 +206,26 @@ pub struct HvfSupervisorConfig {
     /// `~/.mvm/keys/host-signer.ed25519` — the key that chain is signed under.
     #[serde(default)]
     pub signing_key_path: Option<PathBuf>,
+    /// Ask the supervisor to spawn — and therefore own — the trusted builder's
+    /// egress endpoint, instead of inheriting one a caller spawned.
+    ///
+    /// This exists because of a lifetime mismatch, not a capability one. The
+    /// endpoint self-reaps the instant it is orphaned
+    /// (`mvm_hostd::parent_death::exit_when_orphaned`), which is right when the
+    /// spawner owns the VM — a one-shot build, a workload run. A *persistent*
+    /// builder session inverts that: the command that starts it exits and the
+    /// VM outlives it, so an endpoint parented to that command dies seconds
+    /// after boot and the guest silently loses its only route to the network.
+    /// Parenting it to the supervisor restores the invariant the guard is
+    /// really for: the endpoint dies exactly when the VM does.
+    ///
+    /// Carries no key material. The endpoint's config needs the host signer by
+    /// *value*, and this struct is persisted to disk beside the VM — so the
+    /// supervisor mints the FlowMux identity itself from
+    /// `~/.mvm/keys/host-signer.ed25519`, the same key [`Self::signing_key_path`]
+    /// already names by path.
+    #[serde(default)]
+    pub builder_egress_endpoint: Option<BuilderEgressEndpoint>,
     /// Per-VM host→guest agent RPC socket. The supervisor binds it so host clients
     /// (`machine invoke`) reach the guest agent over vsock. `None` ⇒ no agent
     /// listener (the supervisor falls back to the `MVM_HVF_AGENT_SOCKET` dev hook).
@@ -277,6 +320,7 @@ mod tests {
             virtiofs_shares: vec![],
             vsock: true,
             trusted_builder_egress: false,
+            builder_egress_endpoint: None,
             console_log: "/state/console.log".into(),
             pid_file: "/state/hvf.pid".into(),
             workload_exit: "/state/workload.exit".into(),
@@ -380,6 +424,7 @@ mod tests {
             virtiofs_shares: vec![],
             vsock: true,
             trusted_builder_egress: false,
+            builder_egress_endpoint: None,
             console_log: "/state/console.log".into(),
             pid_file: "/state/hvf.pid".into(),
             workload_exit: "/state/workload.exit".into(),

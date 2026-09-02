@@ -36,6 +36,7 @@ fn lifecycle_entry(tenant: &str, event: &str, at: DateTime<Utc>) -> PlanAuditEnt
         bundle_version: None,
         image_name: "worker-img".to_string(),
         image_sha256: "abc123".to_string(),
+        caller_commitment: None,
         event: event.to_string(),
         labels: BTreeMap::new(),
     }

@@ -1581,6 +1581,7 @@ mod tests {
             MACHINE_SPEC_SCHEMA_VERSION, MachineSpec as PersistSpec, save_machine_spec,
         };
         let spec = PersistSpec {
+            caller_commitment: None,
             schema_version: MACHINE_SPEC_SCHEMA_VERSION,
             name: name.to_string(),
             image: Some("alpine:latest".to_string()),

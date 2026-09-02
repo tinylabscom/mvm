@@ -10,6 +10,15 @@
 
 ## In progress
 
+- [x] **Signed caller commitment — issue #3070, PR #3076.**
+      `specs/plans/2026-09-01-signed-caller-commitment.md`.
+      One typed opaque 32-byte commitment now reaches the signed execution
+      plan and every chain-signed plan audit entry from `run` and `machine
+      run`, including persistent-machine restarts. Workspace tests, Clippy,
+      Linux/BDD gated checks, formatting, frozen-wire compatibility, and the
+      243-scenario non-live BDD suite were green before merge. Landed on main
+      as `8623950746`; issue #3070 is closed.
+
 - [ ] **Warm claim authenticated readiness — issue #3039.**
       `specs/plans/2026-08-31-warm-claim-authenticated-readiness.md`.
       Post-restore readiness now requires the existing authenticated guest-agent
@@ -191,8 +200,11 @@
       The next fully merged rerun proved the artifact warm-up bypassed the
       initramfs source fingerprint whenever a cache file existed, so current
       host code booted a stale guest agent. The warm-up now always validates
-      and rebuilds source-stale guest binaries. Firecracker also advertises its
-      u8 vCPU wire ceiling before serialization, and the live refusal witnesses
+      and rebuilds source-stale guest binaries. Firecracker also advertises a
+      vCPU ceiling before serialization — the u8 wire ceiling at first, which
+      the API refuses above 32, corrected to the count the VMM actually boots
+      under issue #3051, alongside libkrun's under #3065 — and the live refusal
+      witnesses
       match child exit status, stderr ownership, and backend timeout admission.
       Focused tests, all ordinary workspace tests, the isolated `mvm-agentd`
       doctest, workspace Clippy, formatting, and repository policy gates are

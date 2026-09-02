@@ -3,11 +3,14 @@
 Backing: shipped-source
 Validation: check-sprint-append
 
-**Status: IN PROGRESS — Stages A, B and D landed, and Stage C's QEMU builder
-with them. No workload tier reaches virtio-fs, and a ratchet gate keeps it that
-way. Stage C is down to two paths: the persistent HVF builder, which needs live
-Apple Silicon validation, and libkrun's seeded closure, which is two tokens once
-someone can run a live libkrun build.**
+**Status: IN PROGRESS — Stages A, B and D landed, and with them Stage C's QEMU
+builder *and* its persistent HVF builder. The HVF half is live-validated: two
+`nix build` dispatches into one session on macOS 26.5.2 / Apple Silicon, both
+exit 0, artifacts read off the output disk. No workload tier reaches virtio-fs,
+no builder *spec* constructs a share, and a ratchet gate keeps it that way.
+Stage C is down to libkrun's seeded closure (two tokens once someone can run a
+live libkrun build), the guest's install arm, and deleting the now-dead share
+plumbing.**
 
 No guest gets a virtio-fs device. Not a workload, not the builder VM, not the
 dev-tier root. The host filesystem reaches a guest as a block image or it does
@@ -90,10 +93,24 @@ the legacy arm, not building the portable one.
       The volume stays `DirShare` so admission still records a *directory*
       grant; the new `VmVolume.materialized_image` carries what is attached.
       Landed as `feat(mount): deliver a granted directory as a block image`.
-- [ ] The guest mounts by volume label rather than by the device node
-      `workload_volume_devices` resolves. The image **is** labelled, but the
-      guest is still handed a node, so this is not done — it is the difference
-      between "works" and "cannot silently mount the wrong device".
+- [x] The guest mounts by volume label rather than by the device node
+      `workload_volume_devices` resolves. `VmVolume.volume_label` is set from
+      the same authority that stamps the image, carried to the guest on
+      `VolumeConfig`, and preferred over the node — with resolution failure
+      **fatal rather than a fallback**, since falling back to the slot is the
+      silent wrong-device mount this exists to stop.
+
+      The resolver is `flowmux_drive`'s, not a new one: it already enumerated
+      from `/sys/class/block`, checked the ext4 magic before trusting the label
+      field, and was the decoder the writer's stamp is tested against. The first
+      draft of this change hand-rolled a second superblock parser over a guessed
+      `/dev/vd[a-z]` range and was replaced.
+
+      Only `--mount` images are labelled, so only they mount by label; managed
+      volumes carry `None` and keep the node path explicitly. Live-validated on
+      macOS 26 by reading `s_volume_name` off the image while the VM ran
+      (`magic 53ef`, `label mvmmnt0`) — a passing mount alone would not have
+      shown which path ran.
 - [x] `refuse_unsupported_dir_shares` and both its call sites deleted: every
       backend can serve a mount now, so it could only produce a false refusal.
 - [x] Deleted: the `supports_directory_shares` trait method (every driver
@@ -181,15 +198,25 @@ order and asks for no shares). What is left is narrower than "the builder VM":
 
 - [x] `work`, `job`, `mvm-bins` — inbound. Done for the one-shot builder via
       the disk transport; `work` was already done on Stage 0.
-- [ ] **The closure seed is not done, and this box used to claim it was.** It is
-      the one inbound tree still on virtio-fs in the one-shot libkrun builder:
-      `libkrun_builder.rs` calls `closure_seed_share` +
-      `add_virtio_fs(CLOSURE_SEED_TAG, …)` at both transport sites, while
-      `prepare_builder_transport_disks` passed a hardcoded `None`. The helper now
-      takes a real `closure_nar` — the QEMU builder uses it — so flipping libkrun
-      is two tokens. Held back only because it changes the macOS default builder
-      and the QEMU work was validated on Linux/KVM; it needs its own live
-      libkrun run.
+- [x] **The closure seed is done now.** This box used to claim it was done while
+      `prepare_builder_transport_disks` passed a hardcoded `None` and both
+      transport sites attached the NAR over virtio-fs a few lines later. Both
+      now pass `self.closure_nar.as_deref()` and attach no share, so the
+      one-shot libkrun builder boots with an empty `virtio_fs_mounts` list —
+      verified against the supervisor config a live `--builder libkrun` run
+      wrote, not just its exit status.
+
+      `run_stage0_impl` keeps its share deliberately: Stage 0 boots a virtio-fs
+      *root* and has no transport disks, so it predates this seam rather than
+      lagging it.
+
+      **The live run could not exercise the closure-carrying arm.** No builder
+      pack on the dev host emits a `nix-closure.nar`, so
+      `closure_nar_for_host_arch()` is `None` and old and new code produce
+      identical bytes. That arm is unit-tested instead
+      (`prepare_transport_disks_lands_the_closure_under_its_fixed_name`), which
+      also pins the rename to `CLOSURE_FILE` — a differently-named source
+      landing under its own name would make the guest's import a silent no-op.
 **The guest is already most of the way there.** `mvm-host-vm-init` has a
 complete disk-transport mode, selected by `mvm.builder_transport=disk` with
 `mvm.builder_input=` / `mvm.builder_output=` naming the devices:
@@ -205,10 +232,55 @@ rewrite between dispatches; the guest re-reads it with `tar xf` per dispatch, so
 already safe: the host finishes writing before it sends `Run`, and V1 serializes
 dispatches behind the supervisor's mutex.
 
+> **Re-scoped against the tree. Read this before the five boxes below.**
+>
+> The recipe that follows targets the `HostVmRequest::Run` shell-job dispatch.
+> **A build does not take that path any more.** `dev_build.rs` says so in as
+> many words — *"The legacy in-VM shell-job dispatch was removed; typed is the
+> only persistent path"* — and routes through `try_typed_persistent_build`,
+> where a reachable `mvm-builderd` builds `/work#<attr>` and **exports its
+> artifacts into `/job/<uuid>/out`**, which the host then reads from the host
+> side of that same share. `PersistentBuilderSupervisor::submit` still exists
+> and is still called by the hidden `mvmctl persistent-builder` subcommand, but
+> migrating it would move a path no build takes while leaving the live one on
+> virtio-fs.
+>
+> **Two more corrections to this stage's framing:**
+>
+> *The blast radius is far smaller than stated.* The box below claiming "the
+> persistent builder is what `mvmctl build` uses on macOS 26+" is wrong.
+> `HvfPersistentHostVm` has exactly one caller, `mvmctl persistent-builder`,
+> declared `#[command(hide = true)]`. `dev_build` routes through it only when a
+> session record exists *and* residency policy allows, and **any** dispatch
+> failure falls back to the single-shot builder — which the code itself calls
+> "the safety net". This is opt-in, hidden, and already has a fallback.
+>
+> *The inbound half is not separately shippable.* "Move `work` and `mvm-bins`
+> to the input disk, keep `/job` as a share" is not expressible:
+> `mvm.builder_transport=disk` is all-or-nothing in the guest.
+> `setup_modules_and_virtiofs` skips **every** virtio-fs mount when it is set,
+> because in that mode the host declares no tags at all and each attempt would
+> fail with "tag not found". A hybrid needs a guest change and an image rebuild.
+>
+> **So the remaining work is a protocol question, not a spec change:** how does
+> the typed `mvm-builderd` export return artifacts without a writable host
+> directory? Candidates are (a) builderd writes the artifact tar onto the output
+> disk itself, which needs the device inside the guest and a raw-tar writer in
+> the daemon; or (b) the dispatch loop collects `/job/<uuid>/out` onto the
+> output disk on a new request, which reintroduces a dependency on that loop
+> running alongside the daemon. Neither is a line-edit, and (a) is the shape
+> that matches how every other tier now works. Resolve this before writing code.
+>
+> Everything below is preserved as the original recipe, and is accurate only for
+> the `Run` dispatch path it was written against.
+
 Five coordinated changes, host and guest:
 
-- [ ] `persistent_builder_spec`: replace the four shares with an input and an
-      output disk, and add the three transport cmdline tokens.
+- [x] `persistent_builder_spec`: replace the four shares with an input and an
+      output disk, and add the three transport cmdline tokens. The two cmdlines
+      collapsed into one — a persistent builder now boots the same contract as
+      a one-shot, `vda`–`vdd` in the same order, so `PERSISTENT_BUILDER_CMDLINE`
+      and its runtime-overlay device constant went with the shares.
 - [x] `repack_input_disk_in_place` — **landed**. A persistent builder rewrites
       its input disk between dispatches, and `pack_input_disk` cannot do it: it
       calls `set_len`. A running VM's `DiskImage` captures the file length
@@ -216,43 +288,69 @@ Five coordinated changes, host and guest:
       the guest an archive it reads as short, and `tar` reports success on it.
       The in-place form never changes the length and refuses an archive that
       will not fit, because refusing is the only way that failure is visible.
-- [ ] `HvfPersistentHostVm::start`: `pack_input_disk` the boot-time inputs
+- [x] `HvfPersistentHostVm::start`: `pack_input_disk` the boot-time inputs
       (`work`, `mvm-bins`, closure seed) and `create_output_disk`. Both helpers
-      already exist and are what the one-shot builder calls. Size the input disk
-      with headroom — the capacity is fixed for the VM's life. Per-dispatch
-      repacks carry only the `job` tree (the guest bind-mounted `work` and
-      `mvm-bins` at boot and never re-reads them), so they are always smaller
-      than the boot pack.
-- [ ] **Readiness has to move, and connect-polling is NOT the answer.** The host
+      already exist and are what the one-shot builder calls. `job` is packed
+      too, carrying only `dispatch.sock.marker`: its presence in the archive is
+      what makes the guest bind `/job`, and the marker is what makes it enter
+      the dispatch loop rather than run one job and power off.
+
+      `work` is filtered through `stage_filtered_work_input` first, as the
+      one-shot pack filters it. Packing the raw tree put 45 GB of `target/` on
+      the input disk, filled the 64 GiB store image mid-extraction, and left
+      every later boot failing at `setup_nix_store` — a failure naming neither
+      the disk nor the cause. `mvmctl cache repair --store-only` recovers.
+
+      The capacity is fixed for the VM's life, so the boot pack sets the size
+      every later repack has to live inside. Per-dispatch repacks carry only the
+      `job` tree (the guest bind-mounted `work` and `mvm-bins` at boot and never
+      re-reads them), so they are always far smaller than the boot pack.
+- [x] **Readiness has to move, and connect-polling is NOT the answer.** The host
       waits for the guest by polling for a `dispatch.ready` file *inside the
       `/job` share* (`wait_until_dispatch_ready`). With no share the host cannot
       see that marker at all.
 
       The obvious replacement — connect to the dispatch UDS and treat success as
-      readiness — is wrong, and the repo already knows it. `hvf.rs`'s agent probe
+      readiness — is wrong, and the repo already knew it. `hvf.rs`'s agent probe
       says so in as many words: *"Probe the authenticated RPC stream directly;
       this waits for a real guest response rather than treating the host-side
-      listener as readiness."* The supervisor owns that UDS and accepts on it
-      whether or not the guest is listening on the vsock port behind it, so a
-      bare connect reports ready for a guest that never started.
+      listener as readiness."* Confirmed live: the backend binds that UDS during
+      VM setup, before the guest boots, and the bridge only closes the
+      connection when the *guest kernel* answers `OP_RST` — so early in boot a
+      probe neither connects-and-fails nor gets refused. It hangs open and reads
+      as ready.
 
-      Two options, neither free:
+      This plan offered two fixes: add a `Ping`/`Pong` pair (a wire change on
+      both sides, so a second guest change and a second image rebuild), or delete
+      the wait and let the first dispatch prove readiness (moves the failure out
+      of `start()`).
 
-      - Add a `Ping`/`Pong` pair to `HostVmRequest`/`HostVmResponse`. Crisp, but
-        a wire change on both sides — so the guest needs a second change and a
-        second image rebuild.
-      - Delete `wait_until_dispatch_ready` and let the **first dispatch** be the
-        readiness proof, with a bounded retry in the dispatch client that also
-        checks VM liveness — which is where the connection is made anyway, and
-        keeps the fail-fast-on-dead-VM behaviour the wait exists for. Smaller,
-        adds no protocol surface, but moves the failure from `start()` to the
-        first build.
-
-      Prefer the second unless the diagnostics loss bites. Do not ship a bare
-      connect-poll.
-- [ ] Host dispatch client: repack the input disk with the new job payload
+      **What shipped is a third option that costs neither:** a round trip on an
+      existing request — `submit_workload_status` for the nil UUID. Any
+      well-formed reply, a `not_found` report or a typed failure, proves the loop
+      is accepting and framing. No protocol surface is added, and the
+      fail-fast-on-dead-VM diagnostics stay in `start()` where they were.
+- [x] Host dispatch client: repack the input disk with the new job payload
       before each `Run`, and `read_output_disk` into the artifact dir after each
-      `Result` — rather than once after poweroff.
+      `Result` — rather than once after poweroff. Both dispatch clients are
+      wired: `PersistentBuilderVm::run_build` (what `mvmctl build` uses) and the
+      `persistent-builder submit` verb. The repack pads back up to the disk's
+      current length, because the guest's virtio-blk driver read that capacity
+      at boot and cannot renegotiate it.
+- [x] **A fifth change the plan missed, and the one that would have shipped
+      broken.** The guest collects `/out` and only `/out` onto the output disk,
+      but both host stagers rendered a `cmd.sh` writing to `/job/<job_id>/out` —
+      which under the disk transport is the guest's own input stage, never read
+      back. A build would have reported success and produced nothing. The
+      guest-visible artifact dir is now chosen per transport
+      (`guest_artifact_dir`), and the host reads the output disk into the same
+      `artifact_dir_for` path a share-backed session writes to, so every caller
+      downstream is transport-blind.
+
+      The guest's **install** arm has the same shape and no host-side fix: it
+      hardcodes `/job/<job_id>/out`. Rather than lose a claim-11 sealed volume's
+      SBOM and CVE sidecars silently, an install dispatch on a disk-backed
+      session is refused with a message naming the missing half.
 - [x] Guest dispatch loop: re-stages `/job` from the input disk on each `Run`
       and collects `/out` onto the output disk after each job — the collection
       previously ran only on the one-shot path, since `run_dispatch_loop`
@@ -270,17 +368,60 @@ Five coordinated changes, host and guest:
 
       **Runs only in the Linux test lane.** The guest bin is `cfg`-gated, so
       these tests compile on macOS via `just check-gated` but execute in CI.
-- [ ] **Cannot be validated in CI or on a non-macOS host.** Every guest-booting
-      lane skips on hosted runners, and the persistent builder is what
-      `mvmctl build` uses on macOS 26+. Land this only behind a real
-      `mvmctl build` on Apple Silicon; a broken builder has no CI witness.
-- [ ] **Sequence the guest half first.** `mvm-host-vm-init` is cross-compiled and
+- [x] **Cannot be validated in CI**, though it is validatable by hand: every
+      guest-booting lane skips on hosted runners, so this needs a real Apple
+      Silicon run. The rest of this box was wrong and is struck — the persistent
+      builder is **not** what `mvmctl build` uses on macOS 26+. It is a hidden,
+      opt-in subcommand with a single-shot fallback, so a break here degrades to
+      a slower build rather than a broken one. **Done:** two `nix build`
+      dispatches into one session on macOS 26.5.2, both exit 0.
+- [x] **Sequence the guest half first.** `mvm-host-vm-init` is cross-compiled and
       baked into the builder rootfs, so a guest change only takes effect after
       the image is rebuilt. Landing the guest's per-dispatch staging while the
       host still declares shares is inert — disk transport stays off — which
       makes it separately validatable and removes version skew from the host
       flip. Flipping the host first against an old baked guest hangs the
-      dispatch loop with no useful error.
+      dispatch loop with no useful error. Done: the guest half shipped first,
+      and the builder image must be rebuilt before this host flip is exercised.
+- [x] **The persistent builder's network endpoint did not outlive the command
+      that spawned it.** Fixed. The cause was not a leak or a missing detach —
+      `spawn_network_endpoint` already calls `setsid`. It is
+      `mvm_hostd::parent_death::exit_when_orphaned`, armed in the endpoint's own
+      `main`: it watches its parent and exits cleanly (status 0, hence the
+      silence) the moment it is reparented. That is deliberate — the endpoint
+      holds a workload's secrets in the clear and must not serve as an orphan —
+      and a persistent session is the first case where the VM outlives its
+      spawner, so parent-death stopped being a good proxy for VM-death.
+
+      The endpoint is now spawned by the **supervisor**, whose death *is* the
+      VM's, so the guard keeps enforcing the property it exists for. It carries
+      no key material: the endpoint's config needs the host signer by value and
+      `supervisor.json` is persisted beside the VM, so the supervisor mints the
+      FlowMux identity itself from the same `~/.mvm/keys/host-signer.ed25519`
+      the config already names by path elsewhere, and writes the identity drive
+      before opening disks. The policy and the empty secret set are fixed at
+      that call site, so nothing on the wire can widen them, and a restored
+      child never inherits the request (it names the parent's VM, socket and
+      drive).
+
+      Verified live: the endpoint stays up with the supervisor as its parent,
+      serves the guest's egress through a whole `nix build`, and self-reaps when
+      the supervisor exits.
+- [x] **The HVF vsock idle eviction severed the dispatch connection.** Fixed,
+      and it was in **two** layers, which is why fixing one was not enough:
+      `host_dial_bridge::evict_idle_at` closes the host socket, and the
+      transport's credit table (`vsock_transport::evict_idle_connections_at`)
+      sends the guest an `OP_RST`. Exempting the port in the bridge alone still
+      let the transport tear the stream down — observed live as the guest
+      logging `write StderrChunk failed` while its build ran to completion.
+
+      Idle eviction is now per guest port in both layers, with the builder's
+      control ports exempt and console data ports still evictable. What makes
+      that safe is that idle was never the mechanism that reclaims a dead peer —
+      `drain_host`'s EOF arm is, and it still runs for every connection. Idle
+      only ever described a stream that is alive and quiet, which for a
+      request/response control channel is indistinguishable from working.
+
 - [x] **The QEMU builder needs the same migration, and the plan missed it.**
       **Landed.** Both one-shot sites are on the disk transport; the `virtiofsd`
       spawn loops, the `memory-backend-memfd` + `-numa` object and the
@@ -308,6 +449,7 @@ Five coordinated changes, host and guest:
          vde token and the absence of the vdc one.
 
       Original entry, for the record:
+
       `qemu_builder.rs` serves `work` / `out` / `job` / `mvm-bins` over
       vhost-user/virtiofsd — not the disk transport — and QEMU is the *Linux
       auto-detect default builder*. So this is not the "opt-in dev/test backend
@@ -385,9 +527,23 @@ Five coordinated changes, host and guest:
       There was no `virtiofsd` dependency in the Linux install docs to remove;
       that line of the plan described a doc that does not exist.
 
-      The ratchet does **not** drop to FFI-only rows yet — that needs the
-      persistent HVF builder and libkrun's seeded closure. It went from 54
-      sites across 15 files to **44 across 14**.
+      The ratchet does **not** drop to FFI-only rows yet — that needs libkrun's
+      seeded closure and the remaining dead plumbing below. With the persistent
+      HVF builder also on the disk transport, it went from 54 sites across 15
+      files to **41 across 13**.
+- [ ] The **libkrun** persistent builder still serves `work`/`mvm-bins`/`job`/
+      `out` as shares (`libkrun_builder.rs`). Its VMM has virtio-fs, so nothing
+      forced the move; the session record already carries the two-state
+      distinction (`disk_transport: Option<…>`), so flipping it is a matter of
+      packing disks in `LibkrunPersistentHostVm::start` and recording them.
+- [ ] The guest's **install** arm writes to `/job/<job_id>/out`, which the disk
+      transport does not collect. Point it at `/out` like the flake arm, then
+      drop the refusal in `PersistentBuilderVm::run_install_dispatch`. Needs a
+      guest change and therefore an image rebuild.
+- [ ] Now-dead HVF share plumbing: `HvfVirtioFsShare`, the `hvf.rs` mapper, the
+      `virtio.rs` VirtioFs MMIO device, and `kernel_boot.rs`'s attach. No spec
+      constructs a share any more, so these map and attach nothing. Pinned in
+      `check-no-virtio-fs` with that reason.
 
 ### Stage D — the gate
 

@@ -48,7 +48,7 @@ fn run_build(args: BuildArgs) -> Result<()> {
     })?;
 
     #[cfg(feature = "builder-vm")]
-    if mvm_build::libkrun_builder::maybe_reexec_builder_vm_sdk_sidecar_helper(args.force)? {
+    if mvm_build::builder_vm_bootstrap::maybe_reexec_builder_vm_sdk_sidecar_helper(args.force)? {
         return Ok(());
     }
 

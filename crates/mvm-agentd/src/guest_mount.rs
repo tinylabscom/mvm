@@ -388,7 +388,26 @@ fn ensure_volume_mount_target(
     }
 }
 
-fn resolve_volume_mount_source(volume: &VolumeConfig) -> Result<(&str, &'static str)> {
+/// Find the attached block device whose ext4 label is `label`.
+///
+/// Delegates to `flowmux_drive`, which already solved this for the FlowMux
+/// identity disk: it enumerates from `/sys/class/block` rather than guessing a
+/// `/dev/vd[a-z]` range, checks the ext4 magic before trusting the label field,
+/// and is the same decoder the writer's stamp is tested against. A second
+/// superblock parser here would be a second thing to keep in sync with the
+/// on-disk format.
+fn device_for_label(label: &str) -> Result<String> {
+    crate::flowmux_drive::find_labeled_ext4_disk_among(
+        crate::flowmux_drive::virtio_block_devices(),
+        label,
+    )
+    .map(|path| path.to_string_lossy().into_owned())
+    .ok_or_else(|| {
+        MountError::InvalidConfig(format!("no block device carries volume label {label:?}"))
+    })
+}
+
+fn resolve_volume_mount_source(volume: &VolumeConfig) -> Result<(String, &'static str)> {
     if volume.tag.is_empty() {
         return Err(MountError::InvalidConfig(
             "volume tag must not be empty".to_string(),
@@ -402,7 +421,13 @@ fn resolve_volume_mount_source(volume: &VolumeConfig) -> Result<(&str, &'static 
                     volume.tag
                 )));
             }
-            Ok((&volume.tag, "virtiofs"))
+            if volume.label.is_some() {
+                return Err(MountError::InvalidConfig(format!(
+                    "virtio-fs volume {:?} must not carry a volume label",
+                    volume.tag
+                )));
+            }
+            Ok((volume.tag.clone(), "virtiofs"))
         }
         VolumeConfigKind::Block => {
             let device = volume.device.as_deref().ok_or_else(|| {
@@ -412,7 +437,14 @@ fn resolve_volume_mount_source(volume: &VolumeConfig) -> Result<(&str, &'static 
                 ))
             })?;
             validate_virtio_block_device(device, "block volume")?;
-            Ok((device, "ext4"))
+            // A label, when the host wrote one, wins over the node. Resolution
+            // failure is fatal rather than a fallback to `device`: the host
+            // asserted an identity, and mounting the slot anyway would be
+            // exactly the silent wrong-image mount the label exists to stop.
+            match volume.label.as_deref() {
+                Some(label) => Ok((device_for_label(label)?, "ext4")),
+                None => Ok((device.to_string(), "ext4")),
+            }
         }
     }
 }
@@ -450,7 +482,7 @@ pub fn mount_volumes(volumes: &[VolumeConfig], root: &Path) -> Result<()> {
         #[cfg(target_os = "linux")]
         {
             let flags = if vol.read_only { libc::MS_RDONLY } else { 0 };
-            mount(source, &target.to_string_lossy(), filesystem, flags, "")?;
+            mount(&source, &target.to_string_lossy(), filesystem, flags, "")?;
             if let Some((uid, gid)) = writable_block_volume_owner(vol) {
                 chown(&target.to_string_lossy(), uid, gid)?;
             }
@@ -2017,6 +2049,41 @@ tmpfs /tmp tmpfs rw,nosuid,nodev,relatime 0 0
     }
 
     #[test]
+    fn a_virtiofs_volume_may_not_carry_a_volume_label() {
+        // A share is addressed by tag and has no filesystem to read a label
+        // from, so a label here means the host built a contradictory config.
+        let volume = VolumeConfig {
+            tag: "uvol0".to_string(),
+            mountpoint: "/mnt/data".to_string(),
+            read_only: true,
+            kind: VolumeConfigKind::VirtioFs,
+            device: None,
+            label: Some("mvmmnt0".to_string()),
+        };
+        assert!(resolve_volume_mount_source(&volume).is_err());
+    }
+
+    #[test]
+    fn a_labelled_block_volume_that_matches_no_device_refuses() {
+        // Fail closed. Falling back to the device node would mount whatever
+        // landed in that slot, which is the failure the label prevents.
+        let volume = VolumeConfig {
+            tag: "uvol0".to_string(),
+            mountpoint: "/mnt/data".to_string(),
+            read_only: true,
+            kind: VolumeConfigKind::Block,
+            device: Some("/dev/vdb".to_string()),
+            label: Some("mvm-no-such-label".to_string()),
+        };
+        let err = resolve_volume_mount_source(&volume)
+            .expect_err("an unmatched label must refuse rather than fall back");
+        assert!(
+            err.to_string().contains("mvm-no-such-label"),
+            "error should name the label: {err}"
+        );
+    }
+
+    #[test]
     fn volume_mount_source_distinguishes_virtiofs_and_block() {
         let share = VolumeConfig {
             tag: "uvol0".to_string(),
@@ -2024,10 +2091,11 @@ tmpfs /tmp tmpfs rw,nosuid,nodev,relatime 0 0
             read_only: true,
             kind: crate::vsock::VolumeConfigKind::VirtioFs,
             device: None,
+            label: None,
         };
         assert_eq!(
             resolve_volume_mount_source(&share).unwrap(),
-            ("uvol0", "virtiofs")
+            ("uvol0".to_string(), "virtiofs")
         );
 
         let block = VolumeConfig {
@@ -2036,10 +2104,11 @@ tmpfs /tmp tmpfs rw,nosuid,nodev,relatime 0 0
             read_only: false,
             kind: crate::vsock::VolumeConfigKind::Block,
             device: Some("/dev/vdb".to_string()),
+            label: None,
         };
         assert_eq!(
             resolve_volume_mount_source(&block).unwrap(),
-            ("/dev/vdb", "ext4")
+            ("/dev/vdb".to_string(), "ext4")
         );
     }
 
@@ -2051,6 +2120,7 @@ tmpfs /tmp tmpfs rw,nosuid,nodev,relatime 0 0
             read_only: false,
             kind: crate::vsock::VolumeConfigKind::VirtioFs,
             device: Some("/dev/vdb".to_string()),
+            label: None,
         };
         assert!(resolve_volume_mount_source(&share_with_device).is_err());
 
@@ -2060,6 +2130,7 @@ tmpfs /tmp tmpfs rw,nosuid,nodev,relatime 0 0
             read_only: false,
             kind: crate::vsock::VolumeConfigKind::Block,
             device: Some("/dev/sda".to_string()),
+            label: None,
         };
         assert!(resolve_volume_mount_source(&invalid_block).is_err());
     }
@@ -2080,6 +2151,7 @@ tmpfs /tmp tmpfs rw,nosuid,nodev,relatime 0 0
             read_only: false,
             kind: crate::vsock::VolumeConfigKind::Block,
             device: Some("/dev/vdb".to_string()),
+            label: None,
         };
 
         assert_eq!(
@@ -2096,6 +2168,7 @@ tmpfs /tmp tmpfs rw,nosuid,nodev,relatime 0 0
             read_only: true,
             kind: crate::vsock::VolumeConfigKind::Block,
             device: Some("/dev/vdb".to_string()),
+            label: None,
         };
         let writable_share = VolumeConfig {
             tag: "uvol1".to_string(),
@@ -2103,6 +2176,7 @@ tmpfs /tmp tmpfs rw,nosuid,nodev,relatime 0 0
             read_only: false,
             kind: crate::vsock::VolumeConfigKind::VirtioFs,
             device: None,
+            label: None,
         };
 
         assert_eq!(writable_block_volume_owner(&read_only_block), None);

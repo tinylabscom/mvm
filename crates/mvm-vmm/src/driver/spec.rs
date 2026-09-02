@@ -121,6 +121,11 @@ pub struct VmmSpec {
     /// without an egress relay. Workload launches leave this false so a
     /// missing relay fails closed rather than booting ungated.
     pub trusted_builder: bool,
+    /// Set when the VM outlives the process that launches it, so its egress
+    /// endpoint must be parented to the supervisor rather than to that process.
+    /// Only the persistent builder sets it; every other launch spawns its own
+    /// endpoint and stays alive for the VM's whole life.
+    pub builder_egress_endpoint: Option<crate::host::hvf_supervisor::BuilderEgressEndpoint>,
     /// What a supervisor needs to enforce the plan's wall-clock bound and
     /// record the kill. `None` on the boot paths that carry no plan — Stage 0
     /// and the builder VM — which therefore have no bound to enforce.

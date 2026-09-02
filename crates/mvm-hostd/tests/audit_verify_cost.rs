@@ -54,6 +54,7 @@ fn entry(seq: usize) -> PlanAuditEntry {
         image_sha256: "e7a1a92a5bfe6a2fdbcbbbd0e0e0b4d7b6a5c4d3e2f1a0b9c8d7e6f5a4b3c2d1"
             .to_string(),
         event: "plan.admitted".to_string(),
+        caller_commitment: None,
         labels,
     }
 }

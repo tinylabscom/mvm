@@ -61,7 +61,6 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::{fs, io};
 
 use libkrun_sys::{KernelFormat, KrunContext, SupervisorConfig};
 use mvm_vmm::host::network_endpoint_spawn::{
@@ -71,7 +70,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::builder_disk_transport::{
-    InputTree, create_output_disk, pack_input_disk, read_output_disk,
+    INPUT_DISK_MIN_BYTES, InputTree, OUTPUT_DISK_BYTES, create_output_disk, pack_input_disk,
+    read_output_disk,
 };
 use crate::builder_vm::{
     BuilderArtifacts, BuilderJob, BuilderMounts, BuilderVm, BuilderVmDisk, BuilderVmError,
@@ -89,7 +89,6 @@ use crate::builder_vm_runtime::{
     stage_filtered_work_input, stage_job_dir, stage_persistent_job_dir, stage_shell_job_dir,
     supervisor_exit_error, verbose_from_env,
 };
-use crate::pipeline::build::BUILDER_OUTPUT_DISK_MIB;
 
 /// Default vCPU count for the builder VM. Nix builds are
 /// embarrassingly parallel at the derivation level; 4 cores is the
@@ -144,14 +143,10 @@ const BUILDER_INPUT_DEVICE: &str = "/dev/vdc";
 const BUILDER_OUTPUT_DEVICE: &str = "/dev/vdd";
 const BUILDER_RUNTIME_DEVICE: &str = "/dev/vde";
 const BUILDER_VIRTIOFS_RUNTIME_DEVICE: &str = "/dev/vdc";
-const BUILDER_INPUT_DISK_MIN: u64 = 16 << 20;
 const BUILDER_VSOCK_EGRESS_TOKEN: &str = "mvm.vsock_egress=1";
 const BUILDER_SUBST_PID_FILE: &str = "substitution.pid";
 const BUILDER_SUBST_STDERR_LOG_FILE: &str = "substitution.stderr.log";
-const BUILDER_VM_BOOTSTRAP_BIN_ENV: &str = "MVM_BUILDER_VM_BOOTSTRAP_BIN";
-const BUILDER_VM_AUTO_BOOTSTRAP_SKIP_ENV: &str = "MVM_SKIP_BUILDER_VM_AUTO_BOOTSTRAP";
 const BUILDER_VM_CACHE_CONTRACT_VERSION: u32 = 4;
-
 /// Resolve (or locally build) the runtime overlay ext4 the builder VM sources
 /// its guest binaries from, failing closed when it cannot be produced.
 ///
@@ -647,13 +642,7 @@ pub(crate) fn prepare_builder_transport_disks(
 ) -> Result<(PathBuf, PathBuf), BuilderVmError> {
     let input_disk = vm_state_dir.join("input.img");
     let output_disk = vm_state_dir.join("output.img");
-    pack_input_disk(
-        input_trees,
-        closure_nar,
-        &input_disk,
-        BUILDER_INPUT_DISK_MIN,
-    )
-    .map_err(|e| {
+    pack_input_disk(input_trees, closure_nar, &input_disk, INPUT_DISK_MIN_BYTES).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
             "pack builder input disk {}: {e}",
             input_disk.display()
@@ -1154,10 +1143,8 @@ impl LibkrunBuilderVm {
                     src: work_staging.path(),
                 },
             ],
-            // The closure seed is still attached below as a virtio-fs share on
-            // this path, so it must not also ride the input disk.
-            None,
-            u64::from(BUILDER_OUTPUT_DISK_MIB) << 20,
+            self.closure_nar.as_deref(),
+            OUTPUT_DISK_BYTES,
         )?;
 
         let mut krun = krun_context_for_image(&vm_name, &image)?
@@ -1184,12 +1171,8 @@ impl LibkrunBuilderVm {
                 attachment.read_only,
             );
         }
-        if let Some(share_dir) = self.closure_seed_share(&vm_state_dir)? {
-            krun = krun.add_virtio_fs(
-                CLOSURE_SEED_TAG,
-                path_to_str(&share_dir, "closure_seed_dir")?,
-            );
-        }
+        // No closure-seed share: the NAR rides the input disk above, landing at
+        // the same `/closure-seed/<CLOSURE_FILE>` the guest imports either way.
 
         for disk in &job.extra_disks {
             krun = krun.add_disk(
@@ -1683,10 +1666,8 @@ impl BuilderVm for LibkrunBuilderVm {
                     src: &mounts.host_bin_dir,
                 },
             ],
-            // The closure seed is still attached below as a virtio-fs share on
-            // this path, so it must not also ride the input disk.
-            None,
-            u64::from(BUILDER_OUTPUT_DISK_MIB) << 20,
+            self.closure_nar.as_deref(),
+            OUTPUT_DISK_BYTES,
         )?;
         let mut krun = krun_context_for_image(&vm_name, &image)?
             .with_resources(self.vcpus, self.memory_mib)
@@ -1712,12 +1693,9 @@ impl BuilderVm for LibkrunBuilderVm {
                 attachment.read_only,
             );
         }
-        if let Some(share_dir) = self.closure_seed_share(&vm_state_dir)? {
-            krun = krun.add_virtio_fs(
-                CLOSURE_SEED_TAG,
-                path_to_str(&share_dir, "closure_seed_dir")?,
-            );
-        }
+        // No closure-seed share: the NAR rides the input disk above, landing at
+        // the same `/closure-seed/<CLOSURE_FILE>` the guest imports either way.
+
         // Builder VMs are NIC-less: egress goes over the vsock relay below, so
         // the libkrun networking mode must be the disconnected sink — the
         // supervisor rejects anything else. Matches the Stage 0 path.
@@ -2360,7 +2338,7 @@ fn read_builder_vm_cache_manifest(
     })
 }
 
-fn builder_vm_source_checkout_root() -> Option<PathBuf> {
+pub(crate) fn builder_vm_source_checkout_root() -> Option<PathBuf> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir.parent()?.parent()?.to_path_buf();
     workspace_root
@@ -2460,269 +2438,6 @@ fn copy_builder_vm_image_files(
         }
     }
     Ok(())
-}
-
-fn auto_bootstrap_builder_vm_image(arch_dir: &Path) -> Result<bool, BuilderVmError> {
-    if std::env::var_os(BUILDER_VM_AUTO_BOOTSTRAP_SKIP_ENV).is_some() {
-        return Ok(false);
-    }
-
-    #[cfg(test)]
-    if std::env::var_os(BUILDER_VM_BOOTSTRAP_BIN_ENV).is_none() {
-        return Ok(false);
-    }
-
-    let Some(workspace_root) = builder_vm_source_checkout_root() else {
-        return Ok(false);
-    };
-
-    let bootstrap_bin = resolve_builder_vm_bootstrap_bin(&workspace_root)?;
-    let mut cmd = Command::new(&bootstrap_bin);
-    cmd.current_dir(&workspace_root)
-        .arg("__builder-vm-bootstrap");
-    #[cfg(target_os = "linux")]
-    if std::env::var_os(crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV).is_none() {
-        // Source-checkout auto-bootstrap on Linux should follow the Linux
-        // builder path, not the libkrun-default host path. The runtime-overlay
-        // source-build flow already uses QEMU shell jobs on Linux; keep Stage 0
-        // aligned so a cold builder-image cache does not fall into a libkrun
-        // networking prerequisite that the Linux builder path itself does not
-        // require.
-        cmd.env(
-            crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV,
-            "qemu",
-        );
-    }
-    let status = cmd.status().map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "spawn builder VM bootstrap helper {}: {e}",
-            bootstrap_bin.display()
-        ))
-    })?;
-    if !status.success() {
-        return Err(BuilderVmError::ExtractionFailed(format!(
-            "builder VM bootstrap helper {} exited with {} while refreshing {}",
-            bootstrap_bin.display(),
-            status.code().unwrap_or(-1),
-            arch_dir.display(),
-        )));
-    }
-    Ok(true)
-}
-
-pub fn maybe_reexec_builder_vm_bootstrap_helper() -> Result<bool, BuilderVmError> {
-    maybe_reexec_builder_vm_helper(BuilderVmHelperCommand::Bootstrap)
-}
-
-pub fn maybe_reexec_builder_vm_sdk_sidecar_helper(force: bool) -> Result<bool, BuilderVmError> {
-    maybe_reexec_builder_vm_helper(BuilderVmHelperCommand::SdkSidecarBuild { force })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BuilderVmHelperCommand {
-    Bootstrap,
-    SdkSidecarBuild { force: bool },
-}
-
-impl BuilderVmHelperCommand {
-    fn args(self) -> Vec<&'static str> {
-        match self {
-            Self::Bootstrap => vec!["__builder-vm-bootstrap"],
-            Self::SdkSidecarBuild { force: false } => {
-                vec!["build", "sdk-sidecar", "build"]
-            }
-            Self::SdkSidecarBuild { force: true } => {
-                vec!["build", "sdk-sidecar", "build", "--force"]
-            }
-        }
-    }
-}
-
-fn maybe_reexec_builder_vm_helper(command: BuilderVmHelperCommand) -> Result<bool, BuilderVmError> {
-    let Some(workspace_root) = builder_vm_source_checkout_root() else {
-        return Ok(false);
-    };
-
-    let bootstrap_bin = resolve_builder_vm_bootstrap_bin(&workspace_root)?;
-    if current_exe_matches(&bootstrap_bin) {
-        return Ok(false);
-    }
-
-    let mut cmd = Command::new(&bootstrap_bin);
-    cmd.current_dir(&workspace_root).args(command.args());
-    #[cfg(target_os = "linux")]
-    if std::env::var_os(crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV).is_none() {
-        cmd.env(
-            crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV,
-            "qemu",
-        );
-    }
-    let status = cmd.status().map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "spawn embedded builder VM helper {}: {e}",
-            bootstrap_bin.display()
-        ))
-    })?;
-    if !status.success() {
-        return Err(BuilderVmError::ExtractionFailed(format!(
-            "embedded builder VM helper {} exited with {}",
-            bootstrap_bin.display(),
-            status.code().unwrap_or(-1),
-        )));
-    }
-    Ok(true)
-}
-
-fn current_exe_matches(path: &Path) -> bool {
-    let Ok(current_exe) = std::env::current_exe() else {
-        return false;
-    };
-    let current = current_exe.canonicalize().unwrap_or(current_exe);
-    let expected = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    current == expected
-}
-
-fn resolve_builder_vm_bootstrap_bin(workspace_root: &Path) -> Result<PathBuf, BuilderVmError> {
-    if let Some(path) = std::env::var_os(BUILDER_VM_BOOTSTRAP_BIN_ENV).map(PathBuf::from) {
-        if path.is_file() {
-            return Ok(path);
-        }
-        return Err(BuilderVmError::ExtractionFailed(format!(
-            "{} points at {} which is not a file",
-            BUILDER_VM_BOOTSTRAP_BIN_ENV,
-            path.display(),
-        )));
-    }
-
-    let helper_target_dir = builder_vm_bootstrap_helper_target_dir(workspace_root);
-    let helper_bin = helper_target_dir.join("debug").join("mvmctl");
-    if helper_bin.is_file() && !bootstrap_helper_needs_rebuild(&helper_bin, workspace_root) {
-        return Ok(helper_bin);
-    }
-    std::fs::create_dir_all(&helper_target_dir).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "create builder VM bootstrap helper target dir {}: {e}",
-            helper_target_dir.display()
-        ))
-    })?;
-
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let mut cmd =
-        builder_vm_bootstrap_helper_build_command(&cargo, workspace_root, &helper_target_dir);
-    let status = cmd.status().map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "spawn cargo to build mvmctl bootstrap helper: {e}"
-        ))
-    })?;
-    if !status.success() {
-        return Err(BuilderVmError::ExtractionFailed(format!(
-            "cargo build --bin mvmctl exited with {} while preparing the builder VM bootstrap helper",
-            status.code().unwrap_or(-1),
-        )));
-    }
-
-    if helper_bin.is_file() {
-        return Ok(helper_bin);
-    }
-
-    Err(BuilderVmError::ExtractionFailed(format!(
-        "mvmctl bootstrap helper not found after build at {}",
-        helper_bin.display()
-    )))
-}
-
-fn builder_vm_bootstrap_helper_build_command(
-    cargo: &std::ffi::OsStr,
-    workspace_root: &Path,
-    helper_target_dir: &Path,
-) -> Command {
-    let mut cmd = Command::new(cargo);
-    cmd.current_dir(workspace_root)
-        .env("CARGO_TARGET_DIR", helper_target_dir)
-        .args([
-            "build",
-            "-q",
-            "--bin",
-            "mvmctl",
-            "--features",
-            "embed-host-bins",
-        ]);
-    cmd
-}
-
-fn bootstrap_helper_needs_rebuild(helper_bin: &Path, workspace_root: &Path) -> bool {
-    let Ok(helper_metadata) = fs::metadata(helper_bin) else {
-        return true;
-    };
-    let Ok(helper_modified) = helper_metadata.modified() else {
-        return true;
-    };
-
-    bootstrap_helper_inputs(workspace_root)
-        .into_iter()
-        .any(|path| {
-            newest_path_mtime(&path)
-                .map(|mtime| mtime > helper_modified)
-                .unwrap_or(true)
-        })
-}
-
-fn bootstrap_helper_inputs(workspace_root: &Path) -> Vec<PathBuf> {
-    [
-        workspace_root.join("Cargo.toml"),
-        workspace_root.join("Cargo.lock"),
-        workspace_root.join("crates/mvm-build/Cargo.toml"),
-        workspace_root.join("crates/mvm-cli/Cargo.toml"),
-        workspace_root.join("crates/mvm-build/src"),
-        workspace_root.join("crates/mvm-cli/src"),
-    ]
-    .into_iter()
-    .collect()
-}
-
-fn newest_path_mtime(path: &Path) -> io::Result<std::time::SystemTime> {
-    let metadata = fs::metadata(path)?;
-    if metadata.is_file() {
-        return metadata.modified();
-    }
-    if !metadata.is_dir() {
-        return Err(io::Error::other(format!(
-            "{} is neither a file nor a directory",
-            path.display()
-        )));
-    }
-
-    let mut newest = None;
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let child_mtime = newest_path_mtime(&entry.path())?;
-        match newest {
-            Some(current) if child_mtime <= current => {}
-            _ => newest = Some(child_mtime),
-        }
-    }
-    newest.or_else(|| metadata.modified().ok()).ok_or_else(|| {
-        io::Error::other(format!(
-            "failed to read modified time for {}",
-            path.display()
-        ))
-    })
-}
-
-fn builder_vm_bootstrap_helper_target_dir(workspace_root: &Path) -> PathBuf {
-    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR").filter(|dir| !dir.is_empty()) {
-        let target_dir = PathBuf::from(target_dir);
-        let base = if target_dir.is_absolute() {
-            target_dir
-        } else {
-            workspace_root.join(target_dir)
-        };
-        return base.join("mvm-builder-vm-bootstrap");
-    }
-
-    workspace_root
-        .join("target")
-        .join("mvm-builder-vm-bootstrap")
 }
 
 fn validate_builder_vm_image_cache(arch_dir: &Path) -> Result<String, BuilderVmError> {
@@ -3103,7 +2818,7 @@ pub fn ensure_builder_vm_image() -> Result<BuilderVmImage, BuilderVmError> {
             if seed_builder_vm_image_from_default_cache(&arch_dir)? {
                 return load_builder_vm_image_from_cache(&arch_dir);
             }
-            if !auto_bootstrap_builder_vm_image(&arch_dir)? {
+            if !crate::builder_vm_bootstrap::auto_bootstrap_builder_vm_image(&arch_dir)? {
                 return Err(initial_error);
             }
             load_builder_vm_image_from_cache(&arch_dir)
@@ -4873,6 +4588,9 @@ impl PersistentVmHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::builder_vm_bootstrap::{
+        BUILDER_VM_BOOTSTRAP_BIN_ENV, resolve_builder_vm_bootstrap_bin,
+    };
 
     #[test]
     fn builder_egress_supervisor_keeps_protocol_stdout_free_of_tracing() {
@@ -5607,6 +5325,49 @@ mod tests {
             std::fs::read_to_string(dest.join("work/crates/mvm-build/src/lib.rs")).unwrap(),
             "// real source"
         );
+    }
+
+    /// The seeded closure reaches the guest at `/closure-seed/<CLOSURE_FILE>`
+    /// whether it arrived as a virtio-fs share or on the input disk — the guest
+    /// imports a fixed path and does not care which transport populated it.
+    /// This pins the disk arm, which is what the one-shot builders now use.
+    ///
+    /// The source file is deliberately named something else: `pack_input_disk`
+    /// renames to `CLOSURE_FILE` on the way in, and a differently-named source
+    /// silently landing under its own name would make the guest import a no-op.
+    #[test]
+    fn prepare_transport_disks_lands_the_closure_under_its_fixed_name() {
+        let vm_state_dir = tempfile::TempDir::new().unwrap();
+        let scratch = tempfile::TempDir::new().unwrap();
+        let job = scratch.path().join("job");
+        std::fs::create_dir_all(&job).unwrap();
+        std::fs::write(job.join("cmd.sh"), b"#!/bin/sh\n").unwrap();
+        let nar = scratch.path().join("some-other-name.nar");
+        std::fs::write(&nar, b"closure-bytes").unwrap();
+
+        let (input_disk, _output_disk) = prepare_builder_transport_disks(
+            vm_state_dir.path(),
+            &[InputTree {
+                name: "job",
+                src: &job,
+            }],
+            Some(nar.as_path()),
+            1 << 20,
+        )
+        .unwrap();
+
+        let dest = scratch.path().join("unpacked");
+        read_output_disk(&input_disk, &dest).unwrap();
+        assert_eq!(
+            std::fs::read(
+                dest.join(CLOSURE_SEED_TAG)
+                    .join(crate::builder_pack::CLOSURE_FILE)
+            )
+            .unwrap(),
+            b"closure-bytes"
+        );
+        // And nothing was staged as a share directory for it.
+        assert!(!vm_state_dir.path().join(CLOSURE_SEED_TAG).exists());
     }
 
     #[test]
@@ -6344,219 +6105,11 @@ mod tests {
     }
 
     #[test]
-    fn builder_vm_bootstrap_helper_target_dir_is_dedicated() {
-        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut env = TestEnv::new();
-        env.remove("CARGO_TARGET_DIR");
-
-        let dir = builder_vm_bootstrap_helper_target_dir(Path::new("/workspace"));
-        assert_eq!(
-            dir,
-            PathBuf::from("/workspace/target/mvm-builder-vm-bootstrap")
-        );
-    }
-
-    #[test]
-    fn builder_vm_bootstrap_helper_target_dir_honors_cargo_target_dir() {
-        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut env = TestEnv::new();
-        env.set("CARGO_TARGET_DIR", "shared-target");
-
-        let dir = builder_vm_bootstrap_helper_target_dir(Path::new("/workspace"));
-        assert_eq!(
-            dir,
-            PathBuf::from("/workspace/shared-target/mvm-builder-vm-bootstrap")
-        );
-    }
-
-    #[test]
-    fn bootstrap_helper_build_command_uses_isolated_target_dir() {
-        let cmd = builder_vm_bootstrap_helper_build_command(
-            std::ffi::OsStr::new("cargo"),
-            Path::new("/workspace"),
-            Path::new("/tmp/helper-target"),
-        );
-
-        let args = cmd
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            args,
-            vec![
-                "build",
-                "-q",
-                "--bin",
-                "mvmctl",
-                "--features",
-                "embed-host-bins"
-            ]
-        );
-
-        let envs = cmd
-            .get_envs()
-            .map(|(key, value)| {
-                (
-                    key.to_string_lossy().into_owned(),
-                    value.map(|v| v.to_string_lossy().into_owned()),
-                )
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
-        assert_eq!(
-            envs.get("CARGO_TARGET_DIR"),
-            Some(&Some("/tmp/helper-target".to_string()))
-        );
-    }
-
-    #[test]
-    fn builder_vm_helper_commands_are_closed_and_preserve_force() {
-        assert_eq!(
-            BuilderVmHelperCommand::Bootstrap.args(),
-            ["__builder-vm-bootstrap"]
-        );
-        assert_eq!(
-            BuilderVmHelperCommand::SdkSidecarBuild { force: false }.args(),
-            ["build", "sdk-sidecar", "build"]
-        );
-        assert_eq!(
-            BuilderVmHelperCommand::SdkSidecarBuild { force: true }.args(),
-            ["build", "sdk-sidecar", "build", "--force"]
-        );
-    }
-
-    #[test]
     fn builder_vm_source_checkout_root_detects_workspace() {
         let root = builder_vm_source_checkout_root().expect("source checkout root");
         assert!(
             root.join("nix/images/builder-vm/flake.nix").is_file(),
             "workspace root must contain the builder-vm flake"
-        );
-    }
-
-    #[test]
-    fn resolve_builder_vm_bootstrap_bin_prefers_env_override() {
-        let dir = TempDir::new().unwrap();
-        let helper = dir.path().join("mvmctl-helper");
-        std::fs::write(&helper, b"#!/bin/sh\n").unwrap();
-
-        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut env = TestEnv::new();
-        env.set(
-            BUILDER_VM_BOOTSTRAP_BIN_ENV,
-            helper.display().to_string().as_str(),
-        );
-
-        let got = resolve_builder_vm_bootstrap_bin(dir.path()).expect("helper path");
-        assert_eq!(got, helper);
-    }
-
-    #[test]
-    fn resolve_builder_vm_bootstrap_bin_rejects_missing_env_override() {
-        let dir = TempDir::new().unwrap();
-        let missing = dir.path().join("missing-helper");
-
-        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut env = TestEnv::new();
-        env.set(
-            BUILDER_VM_BOOTSTRAP_BIN_ENV,
-            missing.display().to_string().as_str(),
-        );
-
-        let err =
-            resolve_builder_vm_bootstrap_bin(dir.path()).expect_err("missing helper must fail");
-        assert!(err.to_string().contains("not a file"), "{err}");
-        assert!(
-            err.to_string().contains(BUILDER_VM_BOOTSTRAP_BIN_ENV),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn bootstrap_helper_needs_rebuild_when_tracked_source_is_newer() {
-        let workspace = TempDir::new().unwrap();
-        let helper = workspace
-            .path()
-            .join("target/mvm-builder-vm-bootstrap/debug/mvmctl");
-        let helper_parent = helper.parent().expect("helper parent");
-        std::fs::create_dir_all(helper_parent).unwrap();
-        std::fs::write(&helper, b"helper").unwrap();
-
-        let cargo_toml = workspace.path().join("Cargo.toml");
-        std::fs::write(&cargo_toml, "[workspace]\n").unwrap();
-        let cargo_lock = workspace.path().join("Cargo.lock");
-        std::fs::write(&cargo_lock, "# lock\n").unwrap();
-        let build_toml = workspace.path().join("crates/mvm-build/Cargo.toml");
-        std::fs::create_dir_all(build_toml.parent().expect("mvm-build manifest parent")).unwrap();
-        std::fs::write(&build_toml, "[package]\nname = \"mvm-build\"\n").unwrap();
-        let cli_toml = workspace.path().join("crates/mvm-cli/Cargo.toml");
-        std::fs::create_dir_all(cli_toml.parent().expect("mvm-cli manifest parent")).unwrap();
-        std::fs::write(&cli_toml, "[package]\nname = \"mvm-cli\"\n").unwrap();
-        let build_src = workspace.path().join("crates/mvm-build/src/lib.rs");
-        std::fs::create_dir_all(build_src.parent().expect("mvm-build src parent")).unwrap();
-        std::fs::write(&build_src, "pub fn build() {}\n").unwrap();
-        let cli_src = workspace.path().join("crates/mvm-cli/src/main.rs");
-        std::fs::create_dir_all(cli_src.parent().expect("mvm-cli src parent")).unwrap();
-        std::fs::write(&cli_src, "fn main() {}\n").unwrap();
-
-        let older = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(10);
-        let newer = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(20);
-        set_mtime(&helper, older);
-        set_mtime(&cargo_toml, older);
-        set_mtime(&cargo_lock, older);
-        set_mtime(&build_toml, older);
-        set_mtime(&cli_toml, older);
-        set_mtime(&build_src, older);
-        set_mtime(&cli_src, newer);
-
-        assert!(bootstrap_helper_needs_rebuild(&helper, workspace.path()));
-    }
-
-    #[test]
-    fn bootstrap_helper_needs_rebuild_skips_fresh_helper() {
-        let workspace = TempDir::new().unwrap();
-        let helper = workspace
-            .path()
-            .join("target/mvm-builder-vm-bootstrap/debug/mvmctl");
-        let helper_parent = helper.parent().expect("helper parent");
-        std::fs::create_dir_all(helper_parent).unwrap();
-        std::fs::write(&helper, b"helper").unwrap();
-
-        let cargo_toml = workspace.path().join("Cargo.toml");
-        std::fs::write(&cargo_toml, "[workspace]\n").unwrap();
-        let cargo_lock = workspace.path().join("Cargo.lock");
-        std::fs::write(&cargo_lock, "# lock\n").unwrap();
-        let build_toml = workspace.path().join("crates/mvm-build/Cargo.toml");
-        std::fs::create_dir_all(build_toml.parent().expect("mvm-build manifest parent")).unwrap();
-        std::fs::write(&build_toml, "[package]\nname = \"mvm-build\"\n").unwrap();
-        let cli_toml = workspace.path().join("crates/mvm-cli/Cargo.toml");
-        std::fs::create_dir_all(cli_toml.parent().expect("mvm-cli manifest parent")).unwrap();
-        std::fs::write(&cli_toml, "[package]\nname = \"mvm-cli\"\n").unwrap();
-        let build_src = workspace.path().join("crates/mvm-build/src/lib.rs");
-        std::fs::create_dir_all(build_src.parent().expect("mvm-build src parent")).unwrap();
-        std::fs::write(&build_src, "pub fn build() {}\n").unwrap();
-        let cli_src = workspace.path().join("crates/mvm-cli/src/main.rs");
-        std::fs::create_dir_all(cli_src.parent().expect("mvm-cli src parent")).unwrap();
-        std::fs::write(&cli_src, "fn main() {}\n").unwrap();
-
-        let older = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(10);
-        let newer = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(20);
-        set_mtime(&cargo_toml, older);
-        set_mtime(&cargo_lock, older);
-        set_mtime(&build_toml, older);
-        set_mtime(&cli_toml, older);
-        set_mtime(&build_src, older);
-        set_mtime(&cli_src, older);
-        set_mtime(&helper, newer);
-
-        assert!(!bootstrap_helper_needs_rebuild(&helper, workspace.path()));
-    }
-
-    #[test]
-    fn current_exe_matches_current_binary() {
-        let current = std::env::current_exe().expect("current exe");
-        assert!(
-            current_exe_matches(&current),
-            "current executable should match itself"
         );
     }
 

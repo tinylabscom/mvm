@@ -57,6 +57,7 @@ fn fixture_plan(nonce: [u8; 16]) -> ExecutionPlan {
             capture_paths: vec![],
             retention_days: 0,
         },
+        caller_commitment: None,
         audit_labels: BTreeMap::new(),
         key_rotation: KeyRotationSpec { interval_days: 0 },
         attestation: AttestationRequirement {

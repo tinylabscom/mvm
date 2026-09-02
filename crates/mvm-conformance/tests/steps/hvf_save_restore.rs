@@ -58,6 +58,7 @@ impl mvm_runtime::checkpoint::VmFullRestore for NeverReachedRestore {
 /// the parent — the shape a live, admitted, dev-console HVF workload has.
 fn parent_config(state_dir: &std::path::Path) -> HvfSupervisorConfig {
     HvfSupervisorConfig {
+        builder_egress_endpoint: None,
         kernel: state_dir.join("Image"),
         cmdline: Some("console=ttyAMA0 root=/dev/vda ro".into()),
         memory_mib: 512,

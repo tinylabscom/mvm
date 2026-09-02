@@ -545,6 +545,7 @@ mod tests {
                 image_name: "img".into(),
                 image_sha256: "abc".into(),
                 event: format!("{tag}-{i}"),
+                caller_commitment: None,
                 labels: std::collections::BTreeMap::new(),
             };
             rt.block_on(signer.sign_and_emit(&e)).unwrap();

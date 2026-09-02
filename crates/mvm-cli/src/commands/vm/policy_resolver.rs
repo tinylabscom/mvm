@@ -648,6 +648,7 @@ mod tests {
                 capture_paths: Vec::new(),
                 retention_days: 0,
             },
+            caller_commitment: None,
             audit_labels: BTreeMap::new(),
             key_rotation: KeyRotationSpec { interval_days: 0 },
             attestation: AttestationRequirement {

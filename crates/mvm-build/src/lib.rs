@@ -45,6 +45,9 @@ pub mod cache_install;
 /// cross-platform.
 pub mod egress_proxy;
 pub mod egress_readiness;
+/// The pinned zig + Rust cross-compile toolchain behind `embed-host-bins`.
+/// Shared with `crates/mvm-cli/build.rs`, which `#[path]`-includes it.
+pub mod embed_toolchain;
 /// Extract an FC-loadable ELF `vmlinux` from a published x86_64 bzImage.
 pub mod firecracker;
 pub mod guest_elf;
@@ -66,6 +69,7 @@ pub mod packed_artifact;
 /// libkrun creates; spawning the libkrun VM itself lives in
 /// `LibkrunPersistentHostVm`.
 pub mod persistent_builder;
+pub mod persistent_builder_transport;
 /// Build-provenance recorder: content-addresses produced artifacts into the
 /// signed plan's `BuildProvenance`.
 pub mod provenance;
@@ -86,6 +90,10 @@ pub mod template_reuse;
 /// Persistent ext4 image materialization for user-attached block volumes.
 pub mod volume_image;
 
+/// Acquiring and running the builder-VM bootstrap helper (gated by
+/// `builder-vm`). See module-level docs.
+#[cfg(feature = "builder-vm")]
+pub mod builder_vm_bootstrap;
 /// libkrun-backed builder VM (gated by `builder-vm`). See module-level
 /// docs.
 #[cfg(feature = "builder-vm")]

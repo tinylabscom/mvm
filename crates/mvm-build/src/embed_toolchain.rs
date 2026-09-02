@@ -1,6 +1,17 @@
+//! The pinned cross-compile toolchain that produces mvmctl's embedded Linux
+//! host binaries: which zig, which Rust, which musl target.
+//!
+//! Two consumers, which is why this sits in `mvm-build` rather than in the
+//! crate that owns the embed table. `crates/mvm-cli/build.rs` `#[path]`-includes
+//! it to *run* the cross-compile, and panics are the right failure there — a
+//! build script that cannot find its toolchain has nothing to fall back on.
+//! `libkrun_builder`'s bootstrap-helper resolution calls the `try_` variants to
+//! decide, in milliseconds, whether spawning that build is worth the wait.
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[derive(Debug)]
 pub struct Pin {
     pub rust: String,
     pub zig: String,
@@ -17,35 +28,61 @@ pub fn workspace_root_from_manifest_dir(manifest_dir: &Path) -> PathBuf {
 }
 
 pub fn read_pinned_toolchain(root: &Path, arch: &str) -> Pin {
-    let toml_str = std::fs::read_to_string(root.join("Cargo.toml"))
-        .unwrap_or_else(|e| panic!("read {}: {e}", root.join("Cargo.toml").display()));
-    let v: toml::Value =
-        toml::from_str(&toml_str).unwrap_or_else(|e| panic!("parse workspace Cargo.toml: {e}"));
-    let p = &v["workspace"]["metadata"]["mvm"]["toolchain"];
-    Pin {
-        rust: p["rust"]
-            .as_str()
-            .expect("workspace embedded Rust toolchain pin")
-            .to_string(),
-        zig: p["zig"].as_str().unwrap().to_string(),
-        cargo_zigbuild: p["cargo-zigbuild"].as_str().unwrap().to_string(),
-        target: resolve_target_for_arch(p, arch),
-    }
+    try_read_pinned_toolchain(root, arch).unwrap_or_else(|reason| panic!("{reason}"))
 }
 
-pub fn resolve_target_for_arch(toolchain: &toml::Value, arch: &str) -> String {
+/// `read_pinned_toolchain` for a caller that has somewhere to go on failure.
+pub fn try_read_pinned_toolchain(root: &Path, arch: &str) -> Result<Pin, String> {
+    let manifest = root.join("Cargo.toml");
+    let toml_str = std::fs::read_to_string(&manifest)
+        .map_err(|e| format!("read {}: {e}", manifest.display()))?;
+    let v: toml::Value =
+        toml::from_str(&toml_str).map_err(|e| format!("parse workspace Cargo.toml: {e}"))?;
+    let pinned = v
+        .get("workspace")
+        .and_then(|item| item.get("metadata"))
+        .and_then(|item| item.get("mvm"))
+        .and_then(|item| item.get("toolchain"))
+        .ok_or_else(|| {
+            format!(
+                "{} is missing [workspace.metadata.mvm.toolchain]",
+                manifest.display()
+            )
+        })?;
+    Ok(Pin {
+        rust: pinned_string(pinned, "rust", &manifest)?,
+        zig: pinned_string(pinned, "zig", &manifest)?,
+        cargo_zigbuild: pinned_string(pinned, "cargo-zigbuild", &manifest)?,
+        target: resolve_target_for_arch(pinned, arch)?,
+    })
+}
+
+fn pinned_string(toolchain: &toml::Value, key: &str, manifest: &Path) -> Result<String, String> {
+    toolchain
+        .get(key)
+        .and_then(toml::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            format!(
+                "{} is missing workspace.metadata.mvm.toolchain.{key}",
+                manifest.display()
+            )
+        })
+}
+
+pub fn resolve_target_for_arch(toolchain: &toml::Value, arch: &str) -> Result<String, String> {
     toolchain
         .get("targets")
         .and_then(|t| t.get(arch))
         .and_then(|t| t.as_str())
-        .unwrap_or_else(|| {
-            panic!(
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            format!(
                 "no embedded-host-binary target pinned for arch `{arch}` in \
                  [workspace.metadata.mvm.toolchain.targets] — mvmctl does not yet \
-                 support this guest arch (Plan 164). Add a `{arch} = \"...-musl\"` entry."
+                 support this guest arch. Add a `{arch} = \"...-musl\"` entry."
             )
         })
-        .to_string()
 }
 
 pub fn strip_glibc(t: &str) -> &str {
@@ -53,34 +90,51 @@ pub fn strip_glibc(t: &str) -> &str {
 }
 
 pub fn pinned_zig_path_or_fail(zig_pin: &str) -> Option<String> {
+    resolve_pinned_zig(zig_pin).unwrap_or_else(|reason| panic!("{reason}"))
+}
+
+/// The pinned zig, or why it could not be found.
+///
+/// `Ok(None)` means a matching zig is already on `PATH`: nothing to pin
+/// explicitly, which is what leaving `CARGO_ZIGBUILD_ZIG_PATH` unset says.
+pub fn resolve_pinned_zig(zig_pin: &str) -> Result<Option<String>, String> {
     if let Ok(p) = std::env::var("MVM_EMBED_ZIG")
         && !p.is_empty()
     {
-        return Some(p);
+        return Ok(Some(p));
     }
     if let Some(path) = ziglang_zig_path(zig_pin) {
-        return Some(path);
+        return Ok(Some(path));
     }
     if zig_on_path_matches(zig_pin) {
-        return None;
+        return Ok(None);
     }
-    panic!(
+    Err(format!(
         "zig {zig_pin} is required to cross-compile the embedded host binaries but was not \
-         found. Install it with `pip install ziglang=={zig_pin}` (recommended — the build \
-         auto-detects it), put zig {zig_pin} on PATH, or set MVM_EMBED_ZIG=/path/to/zig. \
-         Homebrew's `zig` is usually a newer, incompatible release that fails downstream with \
-         `CacheCheckFailed`."
-    );
+         found. Install it with `just toolchain-embed` (recommended — it installs the exact \
+         pinned zig and the musl Rust targets), put zig {zig_pin} on PATH, or set \
+         MVM_EMBED_ZIG=/path/to/zig. Homebrew's `zig` is usually a newer, incompatible \
+         release that fails downstream with `CacheCheckFailed`."
+    ))
 }
 
 pub fn rustup_cargo_and_rustc(target: &str, toolchain: &str) -> (String, String) {
-    if let Some((cargo, rustc)) = configured_embed_tools() {
-        assert!(
-            rustc_has_target(&rustc, target),
-            "MVM_EMBED_RUSTC={rustc:?} does not provide target {target}; \
-             unset MVM_EMBED_RUSTC or point it at a Rust toolchain with that std target"
-        );
-        return (cargo, rustc);
+    try_rustup_cargo_and_rustc(target, toolchain).unwrap_or_else(|reason| panic!("{reason}"))
+}
+
+/// `rustup_cargo_and_rustc` for a caller that has somewhere to go on failure.
+pub fn try_rustup_cargo_and_rustc(
+    target: &str,
+    toolchain: &str,
+) -> Result<(String, String), String> {
+    if let Some((cargo, rustc)) = configured_embed_tools()? {
+        if !rustc_has_target(&rustc, target) {
+            return Err(format!(
+                "MVM_EMBED_RUSTC={rustc:?} does not provide target {target}; \
+                 unset MVM_EMBED_RUSTC or point it at a Rust toolchain with that std target"
+            ));
+        }
+        return Ok((cargo, rustc));
     }
 
     let home = std::env::var("HOME").unwrap_or_default();
@@ -99,17 +153,17 @@ pub fn rustup_cargo_and_rustc(target: &str, toolchain: &str) -> (String, String)
             let rc_path = String::from_utf8_lossy(&rc.stdout).trim().to_string();
             let ca_path = String::from_utf8_lossy(&ca.stdout).trim().to_string();
             if !rc_path.is_empty() && !ca_path.is_empty() && rustc_has_target(&rc_path, target) {
-                return (ca_path, rc_path);
+                return Ok((ca_path, rc_path));
             }
         }
     }
 
-    panic!(
+    Err(format!(
         "Rust toolchain {toolchain} with target {target} is required for embedded host binaries. \
-         Install it with `rustup toolchain install {toolchain} --profile minimal` followed by \
-         `rustup target add {target} --toolchain {toolchain}`, or set MVM_EMBED_CARGO and \
-         MVM_EMBED_RUSTC to an equivalent pinned toolchain"
-    )
+         Install it with `just toolchain-embed`, or with `rustup toolchain install {toolchain} \
+         --profile minimal` followed by `rustup target add {target} --toolchain {toolchain}`, or \
+         set MVM_EMBED_CARGO and MVM_EMBED_RUSTC to an equivalent pinned toolchain"
+    ))
 }
 
 fn ziglang_zig_path(zig_pin: &str) -> Option<String> {
@@ -145,7 +199,7 @@ fn zig_on_path_matches(zig_pin: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn configured_embed_tools() -> Option<(String, String)> {
+fn configured_embed_tools() -> Result<Option<(String, String)>, String> {
     configured_embed_tools_from(
         std::env::var("MVM_EMBED_CARGO").ok(),
         std::env::var("MVM_EMBED_RUSTC").ok(),
@@ -188,17 +242,19 @@ pub(crate) fn ziglang_mise_path(zig_pin: &str, home: &Path) -> Option<String> {
 fn configured_embed_tools_from(
     embed_cargo: Option<String>,
     embed_rustc: Option<String>,
-) -> Option<(String, String)> {
-    let rustc = embed_rustc?.trim().to_string();
-    assert!(
-        !rustc.is_empty(),
-        "MVM_EMBED_RUSTC must not be empty when set"
-    );
+) -> Result<Option<(String, String)>, String> {
+    let Some(rustc) = embed_rustc else {
+        return Ok(None);
+    };
+    let rustc = rustc.trim().to_string();
+    if rustc.is_empty() {
+        return Err("MVM_EMBED_RUSTC must not be empty when set".to_string());
+    }
     let cargo = embed_cargo
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "cargo".to_string());
-    Some((cargo, rustc))
+    Ok(Some((cargo, rustc)))
 }
 
 fn rustc_has_target(rustc: &str, target: &str) -> bool {
@@ -244,23 +300,67 @@ aarch64 = "aarch64-unknown-linux-musl"
         assert_eq!(pin.target, "aarch64-unknown-linux-musl");
     }
 
+    /// The readiness probe reports rather than panics, so its caller has to be
+    /// able to say *what* is wrong — a bare "toolchain unavailable" sends a
+    /// contributor looking in the wrong place.
+    #[test]
+    fn a_manifest_without_the_toolchain_table_names_what_is_missing() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(tmp.path().join("Cargo.toml"), "[workspace]\nmembers = []\n")
+            .expect("write Cargo.toml");
+
+        let reason = try_read_pinned_toolchain(tmp.path(), "aarch64").unwrap_err();
+        assert!(
+            reason.contains("[workspace.metadata.mvm.toolchain]"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn a_toolchain_table_missing_a_pin_names_the_key() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            r#"
+[workspace.metadata.mvm.toolchain]
+rust = "1.91.1"
+
+[workspace.metadata.mvm.toolchain.targets]
+aarch64 = "aarch64-unknown-linux-musl"
+"#,
+        )
+        .expect("write Cargo.toml");
+
+        let reason = try_read_pinned_toolchain(tmp.path(), "aarch64").unwrap_err();
+        assert!(reason.contains("toolchain.zig"), "{reason}");
+    }
+
+    #[test]
+    fn an_unreadable_manifest_is_reported_by_path() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+
+        let reason = try_read_pinned_toolchain(tmp.path(), "aarch64").unwrap_err();
+        assert!(reason.contains("Cargo.toml"), "{reason}");
+    }
+
     #[test]
     fn configured_embed_tools_require_rustc_and_default_cargo() {
-        assert_eq!(configured_embed_tools_from(None, None), None);
+        assert_eq!(configured_embed_tools_from(None, None), Ok(None));
         assert_eq!(
             configured_embed_tools_from(None, Some(" /toolchain/rustc ".to_string())),
-            Some(("cargo".to_string(), "/toolchain/rustc".to_string()))
+            Ok(Some(("cargo".to_string(), "/toolchain/rustc".to_string())))
         );
         assert_eq!(
             configured_embed_tools_from(
                 Some(" /toolchain/cargo ".to_string()),
                 Some(" /toolchain/rustc ".to_string())
             ),
-            Some((
+            Ok(Some((
                 "/toolchain/cargo".to_string(),
                 "/toolchain/rustc".to_string()
-            ))
+            )))
         );
+        assert!(configured_embed_tools_from(None, Some("   ".to_string())).is_err());
     }
 
     #[test]

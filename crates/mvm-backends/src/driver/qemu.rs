@@ -630,6 +630,8 @@ mod tests {
                 log_path: "/state/w/console.log".into(),
             },
             trusted_builder: false,
+            // Not a persistent builder: nothing here outlives its launcher.
+            builder_egress_endpoint: None,
             plan_binding: None,
         }
     }

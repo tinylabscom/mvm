@@ -273,6 +273,7 @@ impl ResolvedVolumeAttachment {
         };
         VmVolume {
             materialized_image: None,
+            volume_label: None,
             host: self.host_path.display().to_string(),
             guest: self.guest_path.as_str().to_string(),
             size,

@@ -29,6 +29,25 @@ use mvm_vmm::driver::traits::{DuplexStream, RunningVm, VmmDriver};
 /// for typical workload roots without overcommitting guest address space.
 const VIRTIO_FS_DAX_SHM_SIZE: u64 = 256 * 1024 * 1024;
 
+/// The most vCPUs libkrun will boot a guest on.
+///
+/// A limit of the VMM, not of the wire format. This was `u8::MAX` on the
+/// reasoning that `krun_set_vm_config` takes the count as a byte, which is true
+/// and does not bound anything: the call accepts every value from 1 to 255, and
+/// the ones it cannot honour abort the process inside `krun_start_enter`,
+/// killing the supervisor before it binds its vsock socket. So a request
+/// clamped to the protocol ceiling did not boot — it died with a message about
+/// a missing socket, naming neither vCPUs nor the count it was given.
+///
+/// Neither the library nor the host reports the real bound. On Linux/KVM
+/// `krun_get_max_vcpus()` answers 4096, which is KVM's own `KVM_CAP_MAX_VCPUS`
+/// forwarded verbatim, and the host agrees; libkrun aborts at 65 regardless.
+/// The number is therefore measured, and measured as a constant rather than a
+/// resource limit: 64 boots and 65 aborts, unchanged when the guest is given
+/// eight times the memory — so it is not a layout artifact that a bigger
+/// machine would move.
+const MAX_VCPUS: u32 = 64;
+
 /// The libkrun VMM driver: pure VMM mechanics, no policy and no admission. It
 /// boots what a `VmmSpec` describes and relays the guest's egress port to the
 /// host-side bridge; the claim-10 gate and substitution live in that bridge,
@@ -92,7 +111,12 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
     let (kernel, kernel_format) =
         crate::driver::libkrun_process::libkrun_kernel_for_host(&kernel_path)?;
 
-    let vcpus = u8::try_from(spec.vcpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
+    // Hold the count to what the VMM will boot at the point it is handed over.
+    // The clamp that *reports* itself to the user lives above the backend,
+    // where the request is still the user's; this one is the floor under
+    // callers that never passed through it, and it keeps the declared ceiling
+    // and the value libkrun receives from drifting apart.
+    let vcpus = u8::try_from(spec.vcpus.clamp(1, MAX_VCPUS)).unwrap_or(u8::MAX);
     let state_dir_str = state_dir.to_string_lossy().into_owned();
     let console_log = state_dir.join("console.log");
 
@@ -278,7 +302,10 @@ impl VmmDriver for LibkrunDriver {
         // admission and endpoint guards, so the runner-facing capability set
         // reports both snapshot and standby pool as unsupported.
         let mut capabilities = VmCapabilities {
-            max_vcpus: Some(u32::from(u8::MAX)),
+            // What libkrun will actually boot, so a portable oversized request
+            // is clamped to a count that runs rather than to one that aborts
+            // the supervisor. See `MAX_VCPUS`.
+            max_vcpus: Some(MAX_VCPUS),
             pause_resume: false,
             snapshots: false,
             // Both of the next two are overwritten below — see the
@@ -639,6 +666,8 @@ mod tests {
                 log_path: "/tmp/console.log".into(),
             },
             trusted_builder: false,
+            // Not a persistent builder: nothing here outlives its launcher.
+            builder_egress_endpoint: None,
             plan_binding: None,
         }
     }
@@ -716,8 +745,9 @@ mod tests {
         assert!(caps.host_vsock_proxy);
         assert_eq!(
             caps.max_vcpus,
-            Some(u32::from(u8::MAX)),
-            "libkrun's u8 vCPU boundary must remain visible to admission"
+            Some(MAX_VCPUS),
+            "the ceiling admission clamps to must be one libkrun will boot, \
+             not the u8 the config call happens to take"
         );
         assert_eq!(d.snapshot_capability(), SnapshotCapability::Unsupported);
         assert_eq!(d.security_profile().tier, "Tier 2");
@@ -792,6 +822,49 @@ mod tests {
         assert_eq!(cfg.krun.kernel_path.as_deref(), Some("/img/Image"));
         assert_eq!(cfg.vm_state_dir, "/state/w");
         assert_eq!(cfg.pid_file_name, None);
+    }
+
+    /// The declared ceiling is the one the supervisor config is held to.
+    ///
+    /// Both halves matter and neither is enough alone. `capabilities()` is what
+    /// the clamp above the backend measures the user's `--cpus` against, and
+    /// this config is what libkrun receives — a ceiling naming a count libkrun
+    /// aborts on is how `--cpus 9999` became a supervisor that died before
+    /// binding its vsock socket, so the two are asserted against one constant.
+    #[test]
+    fn an_oversized_vcpu_request_is_held_to_the_ceiling_the_driver_declares() {
+        let ceiling = LibkrunDriver::new()
+            .capabilities()
+            .max_vcpus
+            .expect("the driver declares a vCPU ceiling");
+        let ceiling_u8 = u8::try_from(ceiling).expect("the ceiling fits the config's byte field");
+
+        for (requested, expected) in [(9999, ceiling_u8), (ceiling + 1, ceiling_u8), (0, 1)] {
+            let mut spec = spec_with(KernelImage::Path("/img/Image".into()), vec![], vec![]);
+            spec.vcpus = requested;
+
+            assert_eq!(
+                relay(&spec).krun.vcpus,
+                expected,
+                "{requested} vCPUs requested; expected {expected} handed to libkrun"
+            );
+        }
+    }
+
+    /// A count at or under the ceiling reaches libkrun untouched — the bound
+    /// bounds the request rather than rewriting it.
+    #[test]
+    fn a_vcpu_request_within_the_ceiling_reaches_libkrun_unchanged() {
+        for requested in [1u32, 2, MAX_VCPUS] {
+            let mut spec = spec_with(KernelImage::Path("/img/Image".into()), vec![], vec![]);
+            spec.vcpus = requested;
+
+            assert_eq!(
+                u32::from(relay(&spec).krun.vcpus),
+                requested,
+                "{requested} vCPUs is within the ceiling and must not be rewritten"
+            );
+        }
     }
 
     #[test]

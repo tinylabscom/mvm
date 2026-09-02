@@ -286,6 +286,7 @@ fn audit_entry(
     let mut labels = labels.unwrap_or_default();
     labels.insert("scenario".to_string(), scenario.to_string());
     PlanAuditEntry {
+        caller_commitment: None,
         timestamp: timestamp.to_string(),
         tenant: "demo".to_string(),
         plan_id: "plan-browser-demo".to_string(),

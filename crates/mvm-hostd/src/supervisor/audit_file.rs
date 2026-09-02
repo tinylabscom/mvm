@@ -572,6 +572,7 @@ impl FileAuditSigner {
             image_name: crate::supervisor::audit_recorder::UNBOUND_IMAGE_NAME.to_string(),
             image_sha256: crate::supervisor::audit_recorder::UNBOUND_IMAGE_SHA256.to_string(),
             event: event.to_string(),
+            caller_commitment: None,
             labels,
         }
     }
@@ -1395,6 +1396,7 @@ mod tests {
             image_name: "img".to_string(),
             image_sha256: "abc123".to_string(),
             event: event.to_string(),
+            caller_commitment: None,
             labels: BTreeMap::new(),
         }
     }
@@ -1681,6 +1683,7 @@ mod tests {
                 image_name: "img".to_string(),
                 image_sha256: "d".repeat(64),
                 event: event.to_string(),
+                caller_commitment: None,
                 labels: BTreeMap::new(),
             }
         }
