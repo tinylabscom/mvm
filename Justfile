@@ -371,12 +371,21 @@ bdd-live-ci:
 # `mvm-libkrun-supervisor` needs its own invocation because it carries
 # `required-features = ["libkrun-sys"]`, which a plain `--bins` does not enable,
 # and that feature makes `libkrun-sys`'s build script demand a real `libkrun.h`.
-
 # So it is probed for, on the same three paths that build script checks.
-build-supervisors:
+#
+# Bare, this writes the debug helpers. Pass `--release` if the mvmctl you invoke
+# is the release one: `aux_bin::resolve` searches `target/release` before
+# `target/debug` and takes the first hit, so a release mvmctl with no release
+# helper beside it silently falls through to whichever debug helper was built
+# last. That one is stale as soon as the config contract moves, and a stale
+# helper refuses the config the current mvmctl sends.
+#
+
+# Build the per-VM supervisor bins (--release to match a release mvmctl)
+build-supervisors *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
-    ./scripts/cargo-fast.sh build -p mvm-hostd --bins
+    ./scripts/cargo-fast.sh build -p mvm-hostd --bins {{ARGS}}
     header="${MVM_LIBKRUN_HEADER:-}"
     if [[ -z "$header" ]]; then
       for candidate in /opt/homebrew/include/libkrun.h /usr/local/include/libkrun.h /usr/include/libkrun.h; do
@@ -384,7 +393,7 @@ build-supervisors:
       done
     fi
     if [[ -f "$header" ]]; then
-      ./scripts/cargo-fast.sh build -p mvm-hostd --bin mvm-libkrun-supervisor --features libkrun-sys
+      ./scripts/cargo-fast.sh build -p mvm-hostd --bin mvm-libkrun-supervisor --features libkrun-sys {{ARGS}}
     else
       echo "build-supervisors: no libkrun.h — skipping mvm-libkrun-supervisor."
       echo "  Install it (brew install slp/krun/libkrun) if you need the libkrun backend."

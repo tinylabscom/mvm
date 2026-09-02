@@ -351,8 +351,11 @@ fn documented_surface_revalidates_the_source_matched_initramfs() {
 #[test]
 fn supervisor_build_requires_a_detected_libkrun_header() {
     let just = justfile();
+    // Anchored on the newline so this finds the recipe header at column 0 and
+    // not the `build-supervisors:` prefix the skip message inside the body
+    // prints, nor the parameter list the header carries.
     let recipe = just
-        .split_once("build-supervisors:")
+        .split_once("\nbuild-supervisors")
         .expect("build-supervisors recipe")
         .1
         .split_once("\n# ")
