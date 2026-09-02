@@ -26,6 +26,13 @@ Last updated: 2026-09-01
       workspace validation and the release embed witness are green; no live VM
       command was run outside the builder VM.
 
+- [ ] **Mounted PTY image environment.**
+      `specs/plans/2026-09-01-mounted-pty-image-environment.md`.
+      Mounted absolute PTY commands now reach the guest console directly, so
+      an image login profile cannot erase the OCI-declared `PATH`. Focused,
+      workspace, Clippy, gated-target, formatting, and non-live BDD checks are
+      green; the live Rust directory-share witness and merge remain.
+
 - [ ] **Extended CI residual regressions — issues #3051 and #3052.**
       `specs/plans/2026-08-28-extended-ci-red-repair.md`.
       Persistent launches clamp vCPUs before admission, authenticated frame

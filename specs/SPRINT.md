@@ -10,6 +10,15 @@
 
 ## In progress
 
+- [ ] **Mounted PTY image environment.**
+      `specs/plans/2026-09-01-mounted-pty-image-environment.md`.
+      Absolute PTY commands now bypass the login-shell wrapper even when the
+      launch carries `--mount`, preserving the OCI image environment and its
+      declared `PATH`. A focused dispatch regression is green, and a live Rust
+      scenario covers the PTY, mount, CLI env, and Cargo path together.
+      Workspace, Clippy, gated-target, formatting, and non-live BDD validation
+      are green; merge delivery remains.
+
 - [x] **Signed caller commitment — issue #3070, PR #3076.**
       `specs/plans/2026-09-01-signed-caller-commitment.md`.
       One typed opaque 32-byte commitment now reaches the signed execution
