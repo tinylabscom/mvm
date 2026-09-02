@@ -49,6 +49,47 @@ service and lifecycle both read ext4 images on the host with it. Raw tar
 remains the simpler transport, but "the host cannot read an ext4 image" is not
 the reason to prefer it.
 
+## Measured: the mechanism already works, and one missing flush makes it unsafe
+
+Before designing anything new, the existing `--mount HOST:/GUEST:SIZE` path was
+tried with the `rw` refusal lifted. **It works end to end.** On macOS 26:
+
+    machine run --mount /tmp/wb/data.img:/data:64M:rw \
+        -- sh -c "echo x > /data/proof.txt; sync"
+    machine run --mount /tmp/wb/data.img:/data:64M -- cat /data/proof.txt
+    → x
+
+The guest mounts it genuinely read-write (`/dev/vde on /data type ext4
+(rw,relatime)`), `materialize_disk_volume` creates the image at the caller's own
+path, and the bytes survive into a *different* VM. No new affordance is needed
+for the round trip itself.
+
+**Without the explicit `sync`, the write is silently lost.** The identical run
+minus `sync` produced no file on re-attach. `mk-guest.nix` runs
+`/bin/busybox sync` before `poweroff -f`, so a mkGuest guest is safe — but an
+**OCI guest (`--image …`) does not take that path**, and nothing flushes it. The
+common case is the unsafe one.
+
+So the blocker on `rw` is not policy, and not the lock. It is that a workload's
+writes are not durable unless it happens to sync, and losing data quietly is
+worse than refusing to write.
+
+- [ ] **Flush the OCI guest before teardown.** That is the whole prerequisite
+      for making `HOST:/GUEST:SIZE:rw` safe, and it makes this plan's remaining
+      scope much smaller: with a durable writable disk, a workload hands results
+      back through an ordinary ext4 image the host reads with `ext4-view`, and
+      the tar-on-a-disk design below is largely unnecessary.
+
+      `mvm-exit-report` gained a `sync(2)` in this change, which covers the
+      **detached** path (its reaper is the only caller) and is correct there.
+      The non-detached OCI run does not go through it — that is the gap.
+
+**Groundwork already landed** so the flag is one flush away rather than a
+rewrite: `materialize_disk_volume` now returns the `VolumeImageLock` instead of
+discarding it, and the transient run holds it for the VM's lifetime. The
+exclusion always existed and was released before boot, which was harmless only
+because every transient mount was read-only.
+
 ## Shape to build
 
 - [ ] **Decide the surface.** An explicit output affordance on the transient
