@@ -124,6 +124,15 @@ the legacy arm, not building the portable one.
       first. `VirtioFsShare` also stays — its only remaining producers are the
       dev-tier root (Stage B) and the builder VM (Stage C).
 
+      **Designed out into its own plan:**
+      `specs/plans/2026-09-02-retire-dirshare.md`. The fact lives in
+      `enforce_admitted_shares`, which derives the `ShareKind` it demands from
+      the runtime enum; the resolution is to derive it from
+      `materialized_image` instead and keep `ShareKind::DirShare` in the signed
+      plan. The blocker is that `LocalVolumeKind::Directory` can still produce
+      an *unmaterialized* `DirShare`, so what a managed directory volume is has
+      to be settled first.
+
 **Custom volumes are unaffected.** A managed volume is already a
 `BlockImage`/`Disk` today. Nothing about `mvmctl volume` changes.
 
