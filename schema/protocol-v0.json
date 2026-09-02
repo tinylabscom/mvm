@@ -4407,6 +4407,13 @@
             }
           ]
         },
+        "label": {
+          "description": "ext4 volume label on the attached image, when the host wrote one.\n\nPreferred over [`Self::device`] for a block volume: a device node names whichever image landed in that slot, so a slot-order change mounts the wrong one and succeeds. Matching the label proves the guest mounted the image the host meant. `None` falls back to the node.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "mountpoint": {
           "description": "Absolute guest mountpoint.  Must pass `MountPathPolicy`.",
           "type": "string"

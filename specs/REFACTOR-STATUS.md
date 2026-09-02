@@ -279,6 +279,15 @@ Last updated: 2026-09-01
 
 ## Completed
 
+- [x] **Signed caller commitment — issue #3070, PR #3076.**
+      `specs/plans/2026-09-01-signed-caller-commitment.md`.
+      Replaces reliance on overwriteable free-form audit labels with one typed,
+      opaque 32-byte commitment covered by the plan identity/signature and
+      copied into chain-signed audit entries. Workspace tests, zero-warning
+      Clippy, Linux/BDD gated checks, frozen-wire compatibility, and the full
+      non-live BDD suite were green before merge. Landed on main as
+      `8623950746`; issue #3070 is closed.
+
 - [x] **SDK sidecar selection from the image's own libc — issue #2969, PR #3060.**
       `specs/sprint/delivery/sdk-sidecar-image-libc-selection.md`.
       Closes the half #3044 named as remaining: the variant is chosen from the
@@ -370,6 +379,11 @@ for detailed scope and acceptance criteria.
       reporting clamp stays a single call site above the backends.
       Live-witnessed on x86_64 Linux/KVM. See
       `specs/sprint/delivery/vcpu-ceilings-are-the-vmms-not-the-wires.md`.
+      Followed by `xtask check-vcpu-ceilings`, which refuses a `max_vcpus`
+      derived from an integer type's `MAX` so a fourth backend cannot reach the
+      same wrong conclusion two authors already reached independently. Wired
+      into `check-all`, so it runs on every PR. See
+      `specs/sprint/delivery/vcpu-ceiling-gate-refuses-wire-type-limits.md`.
 
 - [x] **virtiofsd sandbox parity — issue #3022.**
       `specs/plans/2026-08-31-virtiofsd-sandbox-parity.md`.

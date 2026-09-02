@@ -341,6 +341,13 @@ fn build_volume_configs(config: &VmStartConfig) -> Result<Vec<VolumeConfig>> {
                 read_only: volume.read_only,
                 kind,
                 device,
+                // Only a block volume can be found by label; a virtio-fs share
+                // is addressed by tag and has no filesystem the guest reads a
+                // label from.
+                label: volume
+                    .attaches_as_block()
+                    .then(|| volume.volume_label.clone())
+                    .flatten(),
             })
         })
         .collect()
@@ -736,6 +743,7 @@ mod tests {
         ) -> mvm_core::protocol::vm_backend::VmVolume {
             mvm_core::protocol::vm_backend::VmVolume {
                 materialized_image: None,
+                volume_label: None,
                 host: host.into(),
                 guest: guest.into(),
                 size: String::new(),

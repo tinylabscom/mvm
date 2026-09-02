@@ -346,8 +346,9 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
 
    <!-- absent:end -->
 
-   is named only by five stale doc comments across `mvm-core`, `mvm-cli`,
-   `mvm-build` and `xtask`, and defines nothing. The real pipeline is
+   defines nothing and never did; the five doc comments that named it were
+   corrected on 2026-09-01, along with a second fabricated name they carried.
+   The real pipeline is
    `fetch_expected_hashes` + `verify_artifact_hash`
    (`crates/mvm-cli/src/commands/env/artifact_verify.rs`), which fetch
    the per-arch `*-checksums-sha256.txt` manifest, stream the

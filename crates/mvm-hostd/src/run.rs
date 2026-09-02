@@ -439,6 +439,7 @@ mod tests {
         let volumes = vec![
             VmVolume {
                 materialized_image: None,
+                volume_label: None,
                 host: "/h/work.ext4".into(),
                 guest: "/data/work".into(),
                 size: "16M".into(),
@@ -448,6 +449,7 @@ mod tests {
             },
             VmVolume {
                 materialized_image: None,
+                volume_label: None,
                 host: "/h/src".into(),
                 guest: "/data/src".into(),
                 size: String::new(),
@@ -502,6 +504,7 @@ mod tests {
             backend_name: "mock".into(),
             volumes: vec![VmVolume {
                 materialized_image: None,
+                volume_label: None,
                 host: volume.to_string_lossy().into_owned(),
                 guest: "/data/work".into(),
                 size: String::new(),
@@ -570,6 +573,7 @@ mod tests {
             backend_name: "mock".into(),
             volumes: vec![VmVolume {
                 materialized_image: None,
+                volume_label: None,
                 host: sidecar.to_string_lossy().into_owned(),
                 guest: mvm_core::plan::SDK_SIDECAR_GUEST_PATH.into(),
                 size: String::new(),

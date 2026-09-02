@@ -9,6 +9,19 @@ use crate::commands::DirShareSpec;
 /// node source, not an opt-out that restores the SIGKILL failure mode.
 const MAX_IN_MEMORY_MOUNT_TREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
+/// The ext4 volume label for the `index`-th `--mount` image.
+///
+/// One authority, called both when the image is written and when the volume
+/// that describes it is built: if those two disagreed the guest would look for
+/// a label that is not on the bytes and fall back to the device node, silently
+/// losing the identity check this exists to provide.
+///
+/// ext4 caps a volume label at 16 bytes; `mvmmnt` plus a `usize` stays inside
+/// that for any plausible mount count.
+pub(crate) fn mount_volume_label(index: usize) -> String {
+    format!("mvmmnt{index}")
+}
+
 /// Turn each `--mount` into a volume backed by a materialized ext4 image.
 ///
 /// `host` stays the directory that was granted so the admission record names
@@ -38,6 +51,9 @@ pub(crate) fn materialize_mount_volumes(
                 read_only: share.read_only,
                 kind: VmVolumeKind::DirShare,
                 materialized_image: Some(image.display().to_string()),
+                // Same authority the image was written with, so the guest
+                // mounts the label that is actually on the bytes.
+                volume_label: Some(mount_volume_label(index)),
                 ..Default::default()
             })
         })
@@ -93,7 +109,7 @@ pub(crate) fn materialize_mount_image(
     }
     // Labelled so the guest mounts by identity rather than by enumeration
     // order, the same reason `stage0-init` reads its work disk by label.
-    let label = format!("mvmmnt{index}");
+    let label = mount_volume_label(index);
     let input = mvm_build::rootfs::MaterializeExt4Input::builder()
         .unpacked_root(host_dir.clone())
         .output(output.clone())

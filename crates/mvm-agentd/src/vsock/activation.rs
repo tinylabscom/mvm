@@ -193,6 +193,14 @@ pub struct VolumeConfig {
     /// virtio-fs and is validated against the bounded `/dev/vd[a-z]` range.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
+    /// ext4 volume label on the attached image, when the host wrote one.
+    ///
+    /// Preferred over [`Self::device`] for a block volume: a device node names
+    /// whichever image landed in that slot, so a slot-order change mounts the
+    /// wrong one and succeeds. Matching the label proves the guest mounted the
+    /// image the host meant. `None` falls back to the node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[cfg(test)]
@@ -220,6 +228,7 @@ mod tests {
                 read_only: true,
                 kind: VolumeConfigKind::VirtioFs,
                 device: None,
+                label: None,
             }],
             extensions: Vec::new(),
             verb_grant_envelope: None,

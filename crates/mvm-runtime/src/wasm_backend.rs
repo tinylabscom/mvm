@@ -1747,6 +1747,7 @@ mod tests {
         let mut config = cfg("x", "/tmp/mod.wasm");
         config.volumes = vec![mvm_core::vm_backend::VmVolume {
             materialized_image: None,
+            volume_label: None,
             host: "/host/disk.img".into(),
             guest: "/data/disk".into(),
             size: "1G".into(),
@@ -1771,6 +1772,7 @@ mod tests {
             let mut config = cfg("x", "/tmp/mod.wasm");
             config.volumes = vec![mvm_core::vm_backend::VmVolume {
                 materialized_image: None,
+                volume_label: None,
                 host: "/host/share".into(),
                 guest: bad.into(),
                 size: String::new(),

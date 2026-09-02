@@ -70,8 +70,8 @@ Prerequisites:
 ";
 
 /// Map the host arch to the matching Linux-system identifier used by
-/// `mvmctl`'s download path (`download_dev_image` uses the same mapping
-/// at `apple_container.rs`).
+/// `mvmctl`'s download path — the same `arch` string
+/// `download_builder_vm_image` threads into `builder_vm_artifact_names`.
 fn host_arch_for_linux() -> &'static str {
     if cfg!(target_arch = "aarch64") {
         "aarch64"

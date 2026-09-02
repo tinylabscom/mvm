@@ -721,6 +721,7 @@ mod tests {
         launch.network_policy = NetworkPolicy::unrestricted();
         launch.volumes = vec![VmVolume {
             materialized_image: None,
+            volume_label: None,
             host: tmp.path().join("data.img").display().to_string(),
             guest: "/data".into(),
             size: String::new(),
