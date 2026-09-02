@@ -47,13 +47,14 @@ fn the_release_workflow_waits_for_the_documented_surface() {
 
 /// The release gate must be stated at the release call site, not inherited.
 ///
-/// No GitHub-hosted macOS runner can boot an mvm guest (issue #3011), so the
-/// macOS lane fails on every hosted host. Extended CI opts out of that failure
-/// nightly — otherwise its red never varies and stops being read at all — and
-/// the danger in having an opt-out is that the release caller quietly acquires
-/// it too. Then a tag cuts with no live macOS evidence and nothing says so,
-/// which is the same silent-gate failure that let `machine run -it` ship broken
-/// on every OCI image.
+/// No GitHub-hosted macOS runner can boot an mvm guest (issue #3011), so on
+/// every hosted host the macOS lane is skipped and the release caller falls
+/// back to a committed evidence record instead. Extended CI opts out of that
+/// requirement nightly — otherwise its red never varies and stops being read at
+/// all — and the danger in having an opt-out is that the release caller quietly
+/// acquires it too. Then a tag cuts with no macOS evidence of any kind and
+/// nothing says so, which is the same silent-gate failure that let `machine run
+/// -it` ship broken on every OCI image.
 #[test]
 fn releases_still_block_on_a_macos_host_that_cannot_boot_a_guest() {
     let workflow =
@@ -125,6 +126,92 @@ fn the_macos_lane_runs_whenever_the_host_probe_says_the_host_can_boot() {
         "the macOS lane must run exactly when the host probe says the host can \
          boot a guest"
     );
+}
+
+/// When no runner can produce macOS evidence live, a release must still get it
+/// from somewhere.
+///
+/// The host check used to fail the workflow outright for the release caller.
+/// That was honest but terminal: it made a release impossible rather than
+/// evidence-backed, and the obvious way out — flipping the input to false —
+/// buys a green release by deleting the requirement. The evidence job is the
+/// third option: a recorded local run, machine-checked against the tree being
+/// tagged. Without this test the job can be deleted and the release goes quiet
+/// again, which is the exact failure this file exists to prevent.
+#[test]
+fn an_unusable_macos_host_falls_back_to_a_checked_evidence_record() {
+    let workflow = extended_ci();
+    let evidence = job_block(&workflow, "e2e-docs-macos-evidence");
+
+    assert!(
+        evidence.contains("needs: e2e-docs-macos-host-check"),
+        "the evidence job must wait on the host check, or it cannot know whether \
+         a live run was possible"
+    );
+    assert!(
+        evidence.contains("inputs.macos_blocks_on_unusable_host"),
+        "the evidence job must be gated on the same input the release caller \
+         sets, or Extended CI's nightly starts failing on evidence staleness"
+    );
+    assert!(
+        evidence.contains("needs.e2e-docs-macos-host-check.outputs.supported != 'true'"),
+        "the evidence job must run exactly when the live lane could not, so it \
+         retires itself the day a self-hosted Apple Silicon runner lands"
+    );
+    assert!(
+        evidence.contains("check-release-evidence macos-hvf"),
+        "the evidence job must actually run the gate that verifies the record \
+         covers this tree — a job that only asserts the file exists proves that \
+         someone committed a file"
+    );
+    assert!(
+        evidence.contains("fetch-depth: 0"),
+        "the gate diffs the recorded commit against HEAD to name what changed; \
+         a shallow clone reduces that to 'could not diff the two trees'"
+    );
+}
+
+/// The Linux job budget must exceed the suite's own deadline.
+///
+/// These are one budget and they drifted apart twice. At `timeout-minutes: 60`
+/// against a 3600s suite the job had zero seconds for setup and died at exactly
+/// 60m00s three runs running; at 120 against the same 3600s it had 60 minutes
+/// of setup and 60 of suite, spent them, and was killed mid-scenario. A killed
+/// suite prints no summary, so both readings were "this run proves nothing".
+#[test]
+fn the_linux_job_budget_exceeds_the_suite_deadline() {
+    let workflow = extended_ci();
+    let linux = job_block(&workflow, "e2e-docs-linux");
+
+    let job_minutes: u32 = field_after(linux, "timeout-minutes:")
+        .expect("the Linux lane must declare a job timeout")
+        .parse()
+        .expect("timeout-minutes must be a number");
+    let suite_seconds: u32 = field_after(linux, "MVM_E2E_TIMEOUT_SECS:")
+        .expect("the Linux lane must pin the suite deadline rather than inherit the default")
+        .trim_matches('"')
+        .parse()
+        .expect("MVM_E2E_TIMEOUT_SECS must be a number");
+
+    assert!(
+        job_minutes * 60 > suite_seconds,
+        "the job budget ({job_minutes}m) must exceed the suite deadline \
+         ({suite_seconds}s) by the whole of setup, or the job is cancelled \
+         before the suite can report — and a cancellation names no scenario"
+    );
+    assert!(
+        job_minutes * 60 - suite_seconds >= 3600,
+        "setup measured 54 minutes on 2026-09-02; leave at least an hour of the \
+         job budget for it, or the next slow checkout repeats the failure"
+    );
+}
+
+/// First `key value` occurrence in a job block, as a trimmed string.
+fn field_after(block: &str, key: &str) -> Option<String> {
+    block
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(key))
+        .map(|rest| rest.trim().to_string())
 }
 
 fn documented_surface_script() -> String {

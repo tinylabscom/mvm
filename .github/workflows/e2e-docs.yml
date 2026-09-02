@@ -20,10 +20,13 @@ on:
     inputs:
       macos_blocks_on_unusable_host:
         description: >-
-          Whether a macOS host that cannot run any workload backend fails this
-          workflow. `release.yml` leaves it true so a tag still cannot be cut
-          without live macOS evidence. Extended CI passes false so its nightly
-          red means a regression rather than the standing hardware gap.
+          Whether a macOS host that cannot run any workload backend has to be
+          backed by a committed evidence record before this workflow passes.
+          `release.yml` leaves it true, so a tag still cannot be cut without
+          live macOS evidence — either from a runner that booted a guest, or
+          from a recorded local run covering this exact tree. Extended CI
+          passes false so its nightly red means a regression rather than the
+          standing hardware gap.
         type: boolean
         required: false
         default: true
@@ -51,8 +54,21 @@ jobs:
     # Keeping the suite's own deadline below the job's also means a genuine
     # hang produces the script's "TIMEOUT after Ns — killing the suite" message,
     # naming the scenario it stopped on, rather than an opaque cancellation.
-    timeout-minutes: 120
+    #
+    # 180, not 120, and the suite's own deadline raised to match. At 120 the
+    # arithmetic was still short, just less obviously: setup measured 54 minutes
+    # on 2026-09-02, which left the suite the 60 it was given and no more. It
+    # spent them and was killed inside `README persistent machine lifecycle
+    # works end to end` — far enough in to have proven most of the surface, and
+    # still a red run that proved none of it, because a killed suite prints no
+    # summary. 54 + 120 = 174 keeps the whole run inside the job with headroom,
+    # and the suite deadline stays strictly below the job budget so a genuine
+    # hang still names its scenario.
+    timeout-minutes: 180
     env:
+      # Raised with `timeout-minutes` above; the two are one budget and drifted
+      # apart once already.
+      MVM_E2E_TIMEOUT_SECS: "7200"
       # Must track `FC_VERSION_DEFAULT` in mvm-core. The workload launch path
       # passes flags older Firecracker releases reject before opening the API
       # socket, which otherwise surfaces as an unhelpful socket timeout.
@@ -158,12 +174,11 @@ jobs:
           done
 
   # Split out of the job below so the same detection can mean two things to two
-  # callers. Releases must still stop dead on a macOS host that cannot boot a
-  # guest; a nightly that stops dead on it every single night reports the same
-  # red for a standing hardware gap as for a real regression, and a lane whose
-  # red never varies is one nobody reads. Neither caller gets to weaken the
-  # other: this job fails for `release.yml` and reports `supported=false` for
-  # Extended CI, off one probe.
+  # callers. A nightly that stops dead on the hardware gap every single night
+  # reports the same red for it as for a real regression, and a lane whose red
+  # never varies is one nobody reads. Neither caller gets to weaken the other:
+  # this job reports `supported=false` off one probe, and what that costs is
+  # decided by `macos_blocks_on_unusable_host` in the evidence job below.
   e2e-docs-macos-host-check:
     name: Documented surface e2e (macOS, host check)
     runs-on: macos-15-intel
@@ -194,8 +209,6 @@ jobs:
       # for both callers with nothing here to remember to flip back.
       - name: Preflight — this host can run the workload backend
         id: preflight
-        env:
-          BLOCKS: ${{ inputs.macos_blocks_on_unusable_host }}
         run: |
           set -euo pipefail
           arch="$(uname -m)"
@@ -205,12 +218,46 @@ jobs:
             exit 0
           fi
           echo "supported=false" >> "$GITHUB_OUTPUT"
-          reason="mvm-hvf-supervisor is Apple-Silicon-only and links as a stub on $arch, and the libkrun Homebrew formula is ARM-only. No workload backend can start here. This lane needs a self-hosted Apple Silicon runner; see issue #3011."
-          if [ "$BLOCKS" = "true" ]; then
-            echo "::error::$reason" >&2
-            exit 1
-          fi
-          echo "::warning::$reason Skipping the macOS documented-surface lane for this caller; it remains a hard requirement for releases."
+          echo "::warning::mvm-hvf-supervisor is Apple-Silicon-only and links as a stub on $arch, and the libkrun Homebrew formula is ARM-only. No workload backend can start here. This lane needs a self-hosted Apple Silicon runner; see issue #3011. A release still requires a recorded local run — see the evidence job."
+
+  # The macOS half of the release gate, when no runner can produce it live.
+  #
+  # Until issue #3011 lands there is no hosted macOS runner that can boot an mvm
+  # guest, so the run happens on a maintainer's Apple Silicon machine and gets
+  # committed as `specs/evidence/e2e/macos-hvf.json`. This job is what stops
+  # that from being a promise: `check-release-evidence` recomputes a digest over
+  # every path that could change what the suite proves — `crates/`, `features/`,
+  # `examples/`, `nix/`, `src/`, `scripts/`, the README, the manifests — and
+  # fails unless the record describes this exact tree.
+  #
+  # It retires itself. The moment the host check above reports `supported=true`,
+  # the real lane runs and this one is skipped, with nothing to remember to
+  # flip back.
+  e2e-docs-macos-evidence:
+    name: Documented surface e2e (macOS, recorded local run)
+    needs: e2e-docs-macos-host-check
+    if: >-
+      inputs.macos_blocks_on_unusable_host &&
+      needs.e2e-docs-macos-host-check.outputs.supported != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # Full history: on a mismatch the gate diffs the recorded commit against
+      # HEAD to name the files that moved, and a shallow clone reduces that to
+      # "could not diff the two trees".
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - uses: ./.github/actions/rust-cache
+        with:
+          key: e2e-docs-evidence
+
+      - name: The macOS lane's evidence covers this tree
+        run: cargo run -p xtask -- check-release-evidence macos-hvf
 
   e2e-docs-macos:
     name: Documented surface e2e (macOS, HVF)
