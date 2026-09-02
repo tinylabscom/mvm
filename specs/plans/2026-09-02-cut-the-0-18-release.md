@@ -64,56 +64,59 @@ the macOS host check within seconds.**
 
 ## Blockers, in the order they have to fall
 
-### P0-1 — A self-hosted Apple Silicon runner (issue #3011)
+### P0-1 — macOS evidence without a runner (issue #3011) — DONE
 
-Nothing else matters until this exists. `release.yml` will not publish without
-live macOS evidence and no hosted runner can produce it. A Mac mini is
-sufficient; the job's probe is a live `uname -m`, not the `runs-on` label, so
-pointing `e2e-docs-macos-host-check` and `e2e-docs-macos` at the new label is
-the entire code change.
+`release.yml` would not publish without live macOS evidence, and no hosted
+runner can produce it. Rather than weaken the gate or wait on hardware, the
+release now accepts a *recorded local run*, machine-checked.
 
-- [ ] Provision an Apple Silicon host (macOS 26+ preferred so HVF is the
-      auto-detect default) and register it as a repository self-hosted runner.
-- [ ] Label it (`self-hosted, macOS, ARM64`) and confirm `brew install
-      slp/krun/libkrun slp/krun/libkrunfw` succeeds for the libkrun fallback.
-- [ ] Repoint `runs-on` for both macOS jobs in `.github/workflows/e2e-docs.yml`.
-- [ ] Harden the runner for a public repo: ephemeral workspace per job, no
-      `pull_request` trigger from forks reaching it, `~/.mvm` scrubbed between
-      runs (`just e2e-docs-clean` on entry).
-- [ ] Get one green `Documented surface e2e (macOS, HVF)` run on `main`.
-- [ ] Close #3011.
+- [x] `xtask record-release-evidence <lane> <log>` parses the suite's own
+      `[Summary]` block, refuses a run with failing scenarios or no summary at
+      all, and writes `specs/evidence/e2e/<lane>.json` naming the commit, the
+      host, and a digest over every material path.
+- [x] `xtask check-release-evidence` recomputes that digest and fails unless the
+      record describes the tree being tagged. The commit SHA is recorded only so
+      a mismatch can name the files that moved; a rebase moves history under a
+      SHA, so the digest is what is trusted.
+- [x] `e2e-docs.yml` gains `e2e-docs-macos-evidence`, which runs exactly when
+      the host probe says no guest could boot. Pointing `runs-on` at a
+      self-hosted Apple Silicon runner therefore retires it with nothing to
+      remember to flip back.
+- [x] `tests/github_actions_extended_e2e.rs` pins all of the above, so the job
+      cannot be deleted and the release go quiet again.
+- [ ] Provision the self-hosted Apple Silicon runner anyway and close #3011.
+      The evidence path is scaffolding for a missing runner, not a destination:
+      it proves the tested tree and the tagged tree are identical, and cannot
+      detect a hand-edited record.
 
-**Fallback if hardware slips:** do not weaken the gate to `false` for
-releases. Cut 0.18 as a **pre-release** with the macOS lane recorded as
-unproven in the release notes, and hold the `latest` promotion until the runner
-lands. Silently flipping the flag reintroduces exactly the failure that
-shipped a broken `machine run -it` on every OCI image.
+**Sequencing constraint this creates.** Any change under `crates/`, `src/`,
+`features/`, `examples/`, `nix/`, `scripts/`, `Justfile`, `README.md` or the
+manifests invalidates the evidence. `specs/`, `CHANGELOG.md`, `public/`,
+`.github/` and the root `tests/` directory deliberately do not — so release
+notes, and the evidence file itself, can land after the run. **The suite run
+must therefore be the last material step before the tag**, with only the
+evidence commit between it and `release-tag`.
 
-### P0-2 — Make the Linux documented-surface lane finish
+### P0-2 — Make the Linux documented-surface lane finish — PARTLY DONE
 
-Two separable problems: the budget is wrong, and the suite is slow.
+The budget was the same arithmetic error twice: at 60 minutes the job had no
+time for setup, at 120 it had 54 minutes of setup and the suite spent its 60
+and was killed mid-scenario. A killed suite prints no summary, so both read as
+"this run proves nothing".
 
-- [ ] Raise `timeout-minutes` on `e2e-docs-linux` from 120 and set
-      `MVM_E2E_TIMEOUT_SECS` so that *suite deadline + observed setup cost* fits
-      inside it with headroom. Setup measured at ~54 min on 2026-09-02; the
-      suite needs more than the 60 min it has. Size both from a measured run,
-      not a guess, and keep the suite deadline strictly below the job budget so
-      a hang still produces the script's named-scenario message instead of an
-      opaque cancellation.
-- [ ] Instrument one run to attribute the 7–8 min per live transient scenario:
-      OCI pull, ext4 materialization, Firecracker boot, guest agent handshake,
-      teardown. The warm-home optimization in
-      `crates/mvm-conformance/tests/steps/cli.rs:240` is already in place, so
-      this is real per-boot cost, not a caching bug — but it has never been
-      broken down.
-- [ ] Act on whatever dominates. Candidates worth checking before inventing
-      anything: pre-pulling the handful of OCI images the suite uses into the
-      warm home during setup, and whether teardown is serialized behind a
-      timeout that could be a wait.
-- [ ] Consider splitting the Linux lane into two parallel jobs (setup is the
-      fixed cost; the artifact home can be cached between them) if the suite
-      still will not fit.
-- [ ] Get one green `Documented surface e2e (Linux, Firecracker)` run.
+- [x] Raise the Linux job to `timeout-minutes: 180` and pin
+      `MVM_E2E_TIMEOUT_SECS: 7200` beside it.
+- [x] Add `the_linux_job_budget_exceeds_the_suite_deadline`, asserting the job
+      budget exceeds the suite deadline by at least an hour, so the two cannot
+      drift apart a third time.
+- [ ] Confirm one green `Documented surface e2e (Linux, Firecracker)` run.
+      Until that lands this is a sized guess, not a measurement.
+- [ ] If it still will not fit, attribute the 7-8 min per live transient
+      scenario before adding more budget: OCI pull, ext4 materialization,
+      Firecracker boot, agent handshake, teardown. The warm-home optimization
+      in `crates/mvm-conformance/tests/steps/cli.rs` is already in place, so
+      this is real per-boot cost rather than a caching bug — but it has never
+      been broken down.
 
 ### P0-3 — Resolve the stale `v0.18.0` tag
 
@@ -132,8 +135,11 @@ the tag matching `Cargo.toml`.
 bump and has been touched once since (`9bb65cea1a`, 2026-08-22). Everything
 merged after that is unrecorded.
 
-- [ ] Regenerate the 0.18.0 section from `git log v0.17.0..main`, grouped
-      Added/Changed/Fixed/Removed as the existing sections are.
+- [ ] Regenerate the section with `git-cliff`, which is what `just
+      _release-prep` already uses. Because the stale tag caps
+      `--unreleased` at 2026-08-17, delete it *first* (P0-3), drop the
+      existing `## [0.18.0]` block, and regenerate the whole `v0.17.0..HEAD`
+      range in one pass — otherwise you get two `## [0.18.0]` sections.
 - [ ] Re-date the heading to the actual release date.
 - [ ] Call out the user-visible breaks explicitly: the Virtualization.framework
       backend removal (Plan 226 R1P1, `--hypervisor` value gone), the
@@ -205,10 +211,15 @@ Run in order; each step's evidence is named so nothing is claimed unproven.
 1. [ ] `main` is green: `ci.yml` on the merge queue, `security.yml` nightly,
        `Extended CI` (or its remaining failures explicitly accepted and
        recorded).
+   [ ] Every material change is already landed — see the sequencing
+       constraint under P0-1. Anything that lands after the suite run
+       invalidates its evidence and the run has to be repeated.
 2. [ ] Local gate on a clean checkout of the release commit: `just ci` (lint +
        test + doctests + bdd), then `just check-gated`.
 3. [ ] `just e2e-launch` and `just e2e-docs` pass locally on an Apple Silicon
-       host.
+       host, and `just record-e2e-evidence macos-hvf <log>` writes the record.
+       Commit only that file; it is deliberately non-material, so committing
+       it does not invalidate itself.
 4. [ ] CHANGELOG regenerated and merged (P1-1).
 5. [ ] `pages.yml` dispatched green from `main` (P1-2).
 6. [ ] `publish-sdk.yml` dry-run green (P1-3).
@@ -216,7 +227,8 @@ Run in order; each step's evidence is named so nothing is claimed unproven.
        packages, host-bin bundling and the Linux cross-build on the real
        runners, publishing nothing.
 8. [ ] Delete the stale origin tag (P0-3).
-9. [ ] Tag and push `v0.18.0`.
+9. [ ] `just check-e2e-evidence` passes against the exact commit to be
+       tagged, then `just release-tag 0.18.0`.
 10. [ ] Watch `release.yml` through `bdd` → `e2e-docs` → `build` →
         `initramfs-image` → `release` → `verify-release`. `verify-release` is
         the one that proves the published asset set is complete and signed;
