@@ -494,13 +494,19 @@ SUITE_STARTED=""
 # the macOS job sets MVM_BDD_SNAPSHOT and does not skip these), and the two
 # fixtures that need material this lane does not publish.
 #
+# `needs-unenforceable-wall-clock` is the inverse of the others and is
+# tolerated for that reason: it fires on a backend that *has* the mechanism, so
+# the scenario it guards asserts a refusal with no occasion to happen. The
+# behaviour on this tier is not lost — the same flake without `--timeout` runs
+# and returns its exit code in the scenario immediately above it.
+#
 # `needs-dir-share` is set below rather than tolerated blindly: libkrun and HVF
 # serve virtio-fs directory shares and must run those scenarios, while
 # Firecracker has no virtio-fs device and cannot. Opting in means a capable
 # backend runs them and only a genuinely incapable one skips — the alternative,
 # tolerating the skip without opting in, silently dropped the witness for the
 # README's two `--mount` examples on a host that could have run it.
-ALLOWED_SKIPS="pending,needs-perf-budget-host,needs-memory-snapshot,needs-bundle-fixture,needs-tls-tunnel-client,needs-dir-share"
+ALLOWED_SKIPS="pending,needs-perf-budget-host,needs-memory-snapshot,needs-bundle-fixture,needs-tls-tunnel-client,needs-dir-share,needs-unenforceable-wall-clock"
 
 echo "==> documented examples + machine journey (cucumber, @live)"
 SUITE_STARTED=1
