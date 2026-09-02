@@ -1,5 +1,8 @@
 # Cut the 0.18 release
 
+Backing: shipped-source
+Validation: check-declared-backing
+
 **Opened:** 2026-09-02
 **Target:** a published `v0.18.0` GitHub release with signed artifacts, a
 matching Homebrew formula, published SDKs, and a docs site deployed from the
