@@ -494,6 +494,7 @@ mod tests {
             image_name: "img".to_string(),
             image_sha256: "abc123".to_string(),
             event: event.to_string(),
+            caller_commitment: None,
             labels: BTreeMap::new(),
         }
     }

@@ -29,6 +29,17 @@ use anyhow::{Context, Result};
 /// sector boundary so the guest sees an exact capacity.
 const SECTOR: u64 = 512;
 
+/// Floor for an input disk. [`pack_input_disk`] grows past it to hold the
+/// archive, so this only matters when the inputs are small — it keeps a
+/// persistent session's disk from shrinking to nothing between dispatches,
+/// which would change the capacity a running guest already read.
+pub const INPUT_DISK_MIN_BYTES: u64 = 16 << 20;
+
+/// Capacity for an output disk. Has to hold a whole guest image tar — a
+/// `rootfs.ext4` plus a kernel — since the guest writes the archive raw and
+/// cannot grow the device it was handed.
+pub const OUTPUT_DISK_BYTES: u64 = 8192 << 20;
+
 /// Archive directory the optional seeded-closure NAR rides under, mirroring
 /// the guest's `/closure-seed` mount point
 /// (`mvm-host-vm-init`'s `CLOSURE_SEED_NAR` contract). Kept in sync with the

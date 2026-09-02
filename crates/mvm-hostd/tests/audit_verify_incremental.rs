@@ -31,6 +31,7 @@ fn entry(seq: usize) -> PlanAuditEntry {
         image_name: "img".to_string(),
         image_sha256: "abc123".to_string(),
         event: "plan.admitted".to_string(),
+        caller_commitment: None,
         labels: BTreeMap::new(),
     }
 }

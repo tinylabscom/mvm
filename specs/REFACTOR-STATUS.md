@@ -85,6 +85,15 @@ Last updated: 2026-09-01
       took it from 23 pinned sites to 54. Remaining: the persistent HVF builder
       (needs live Apple Silicon) and libkrun's seeded closure, which is still a
       virtio-fs share the transport helper can now carry.
+      The persistent HVF builder has since moved too: `persistent_builder_spec`
+      declares no shares, readiness moved from a marker file inside the (now
+      unshared) `/job` onto a dispatch round trip, and the host rewrites the
+      input disk per `Run` and reads the output disk per `Result`. Live-validated
+      on macOS 26.5.2 — two `nix build` dispatches into one session, both exit 0.
+      Remaining: libkrun's seeded closure, the guest's install arm (which writes
+      to `/job/<job_id>/out` and is refused on a disk-backed session rather than
+      silently losing its claim-11 sidecars), and deleting the now-dead share
+      plumbing.
 
 - [ ] **Warm standby image claim repair — issue #3002.**
       `specs/plans/2026-08-28-warm-standby-image-claim.md`.
@@ -257,6 +266,15 @@ Last updated: 2026-09-01
 
 ## Completed
 
+- [x] **Signed caller commitment — issue #3070, PR #3076.**
+      `specs/plans/2026-09-01-signed-caller-commitment.md`.
+      Replaces reliance on overwriteable free-form audit labels with one typed,
+      opaque 32-byte commitment covered by the plan identity/signature and
+      copied into chain-signed audit entries. Workspace tests, zero-warning
+      Clippy, Linux/BDD gated checks, frozen-wire compatibility, and the full
+      non-live BDD suite were green before merge. Landed on main as
+      `8623950746`; issue #3070 is closed.
+
 - [x] **SDK sidecar selection from the image's own libc — issue #2969, PR #3060.**
       `specs/sprint/delivery/sdk-sidecar-image-libc-selection.md`.
       Closes the half #3044 named as remaining: the variant is chosen from the
@@ -348,6 +366,11 @@ for detailed scope and acceptance criteria.
       reporting clamp stays a single call site above the backends.
       Live-witnessed on x86_64 Linux/KVM. See
       `specs/sprint/delivery/vcpu-ceilings-are-the-vmms-not-the-wires.md`.
+      Followed by `xtask check-vcpu-ceilings`, which refuses a `max_vcpus`
+      derived from an integer type's `MAX` so a fourth backend cannot reach the
+      same wrong conclusion two authors already reached independently. Wired
+      into `check-all`, so it runs on every PR. See
+      `specs/sprint/delivery/vcpu-ceiling-gate-refuses-wire-type-limits.md`.
 
 - [x] **virtiofsd sandbox parity — issue #3022.**
       `specs/plans/2026-08-31-virtiofsd-sandbox-parity.md`.
@@ -1286,9 +1309,10 @@ resume` takes a `current_head` and refuses when it differs from the
         pid and command) instead of failing the second build outright;
         `MVM_BUILDER_LOCK_WAIT_SECS` bounds the wait and `0` restores
         fail-fast for CI
-  - [x] Phase 2 — `HvfPersistentHostVm` uses the virtio-fs persistent-builder
-        spec (`work`, `mvm-bins`, `job`, `out` shares) so the multiplexing
-        path exists on the macOS 26+ default backend
+  - [x] Phase 2 — `HvfPersistentHostVm` uses the persistent-builder spec so the
+        multiplexing path exists on the macOS 26+ default backend. It carried
+        `work`/`mvm-bins`/`job`/`out` as virtio-fs shares until the remove-
+        virtio-fs plan's Stage C moved it onto the disk transport
   - [x] Phase 3 — a contended store image adopts a live persistent session or
         auto-starts one (arbitrated by a start marker), so concurrent builds
         share one VM instead of queueing

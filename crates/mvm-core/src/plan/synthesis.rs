@@ -44,10 +44,11 @@
 
 use crate::plan::{
     AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, AuditLabels,
-    AuditTaxonomy, DepsVolumeBinding, EnvironmentRef, ExecutionPlan, FsPolicyRef, IngressMapping,
-    KeyRotationSpec, NetworkMode, Nonce, PlanId, PlanSeccompTier, PolicyRef, PostRunLifecycle,
-    Resources, RuntimeProfileRef, SCHEMA_VERSION, SecretBinding, SecretReleasePolicy,
-    SignedImageRef, StreamRetention, TenantId, TimeoutSpec, WorkloadId, WorkloadIntent,
+    AuditTaxonomy, CallerCommitment, DepsVolumeBinding, EnvironmentRef, ExecutionPlan, FsPolicyRef,
+    IngressMapping, KeyRotationSpec, NetworkMode, Nonce, PlanId, PlanSeccompTier, PolicyRef,
+    PostRunLifecycle, Resources, RuntimeProfileRef, SCHEMA_VERSION, SecretBinding,
+    SecretReleasePolicy, SignedImageRef, StreamRetention, TenantId, TimeoutSpec, WorkloadId,
+    WorkloadIntent,
 };
 use anyhow::Result;
 use chrono::{Duration, Utc};
@@ -180,6 +181,9 @@ pub struct SynthesisInput<'a> {
     /// (unconstrained); supervisor-injected per-event extras are applied
     /// separately at audit-emit time and do not modify the plan's stored labels.
     pub audit_labels: AuditLabels,
+    /// Opaque 32-byte caller commitment bound into the plan identity and
+    /// signature. `None` keeps the legacy plan bytes unchanged.
+    pub caller_commitment: Option<CallerCommitment>,
     /// Per-workload agent verb allow-list threaded verbatim into the plan.
     /// `None` preserves the current class/profile-gate-only behavior.
     pub agent_verbs: Option<Vec<crate::plan::VerbId>>,
@@ -251,6 +255,7 @@ pub struct SynthesisInputBuilder<'a> {
     redaction: Option<crate::policy::RedactionPolicy>,
     reversible_replacement: Option<crate::policy::ReversibleReplacementPolicy>,
     audit_labels: Option<AuditLabels>,
+    caller_commitment: Option<CallerCommitment>,
     agent_verbs: Option<Vec<crate::plan::VerbId>>,
     services: Option<Vec<mvm_contract::protocol::broker::ServiceId>>,
     extensions: Option<Vec<mvm_contract::protocol::extension_pack::ExtensionPlanBinding>>,
@@ -294,6 +299,7 @@ impl<'a> SynthesisInputBuilder<'a> {
             redaction: None,
             reversible_replacement: None,
             audit_labels: None,
+            caller_commitment: None,
             agent_verbs: None,
             services: None,
             extensions: None,
@@ -519,6 +525,16 @@ impl<'a> SynthesisInputBuilder<'a> {
         self
     }
 
+    /// Set the optional opaque caller commitment.
+    #[must_use]
+    pub fn caller_commitment(
+        mut self,
+        caller_commitment: impl Into<Option<CallerCommitment>>,
+    ) -> Self {
+        self.caller_commitment = caller_commitment.into();
+        self
+    }
+
     /// Set `agent_verbs`. Takes a value or an `Option`; unset means `None`.
     #[must_use]
     pub fn agent_verbs(mut self, agent_verbs: impl Into<Option<Vec<crate::plan::VerbId>>>) -> Self {
@@ -632,6 +648,7 @@ impl<'a> SynthesisInputBuilder<'a> {
             audit_labels: self
                 .audit_labels
                 .ok_or(BuilderError::missing("SynthesisInput", "audit_labels"))?,
+            caller_commitment: self.caller_commitment,
             agent_verbs: self.agent_verbs,
             services: self
                 .services
@@ -775,6 +792,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
             capture_paths: Vec::new(),
             retention_days: 0,
         },
+        caller_commitment: input.caller_commitment.clone(),
         audit_labels,
         key_rotation: KeyRotationSpec { interval_days: 0 },
         attestation: AttestationRequirement {
@@ -914,6 +932,7 @@ mod tests {
             shares: Vec::new(),
             redaction: crate::policy::RedactionPolicy::default(),
             reversible_replacement: crate::policy::ReversibleReplacementPolicy::default(),
+            caller_commitment: None,
             audit_labels: Default::default(),
             agent_verbs: None,
             services: Vec::new(),
@@ -1260,6 +1279,21 @@ mod tests {
         let recovered =
             crate::plan::verify_plan(&signed, &[("host:test", &key.verifying_key())]).unwrap();
         assert_eq!(recovered.audit_labels["origin.descriptor"], "blake3:abc");
+    }
+
+    #[test]
+    fn caller_commitment_survives_synthesis_and_plan_signature() {
+        let commitment = crate::plan::CallerCommitment::from_bytes([0x42; 32]);
+        let mut inp = input("vm");
+        inp.caller_commitment = Some(commitment.clone());
+        let plan = synthesize_plan(&inp).expect("plan synthesizes");
+        assert_eq!(plan.caller_commitment, Some(commitment.clone()));
+
+        let key = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]);
+        let signed = crate::plan::sign_plan(&plan, &key, "host:test");
+        let recovered = crate::plan::verify_plan(&signed, &[("host:test", &key.verifying_key())])
+            .expect("signed plan verifies");
+        assert_eq!(recovered.caller_commitment, Some(commitment));
     }
 }
 

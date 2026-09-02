@@ -157,7 +157,7 @@ pub(in crate::commands) fn bootstrap_builder_vm_image() -> Result<()> {
     #[cfg(feature = "builder-vm")]
     return bootstrap_builder_vm_image_with(
         || {
-            mvm_build::libkrun_builder::maybe_reexec_builder_vm_bootstrap_helper()
+            mvm_build::builder_vm_bootstrap::maybe_reexec_builder_vm_bootstrap_helper()
                 .map_err(anyhow::Error::from)
         },
         bootstrap_builder_vm_image_in_process,

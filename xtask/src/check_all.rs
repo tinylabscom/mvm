@@ -220,6 +220,7 @@ pub const GATES: &[Gate] = &[
         "check-backend-resource-controls",
         crate::check_backend_resource_controls::run,
     ),
+    ("check-vcpu-ceilings", crate::check_vcpu_ceilings::run),
     (
         "check-single-fixture-corpus",
         crate::check_single_fixture_corpus::run,

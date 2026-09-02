@@ -494,6 +494,7 @@ fn persisted_spec_from_request(request: &LaunchRequest, name: &str) -> mp::Machi
         volumes: vec![],
         init: vec![],
         agent_verb: vec![],
+        caller_commitment: None,
         created_at: Some(mvm_core::util::time::utc_now()),
         last_started_at: None,
         health_check: None,
@@ -709,6 +710,7 @@ impl LocalBackend {
             .iter()
             .map(|volume| mvm_core::vm_backend::VmVolume {
                 materialized_image: None,
+                volume_label: None,
                 host: volume.host.clone(),
                 guest: volume.guest.clone(),
                 size: volume.size.clone(),

@@ -879,9 +879,9 @@ pub(super) fn promote_builder_vm_stage0_cache(
 /// `builder-vm-image` release-workflow job into the local cache dir,
 /// SHA-256-verified.
 ///
-/// Mirrors `download_dev_image_inner` for the interactive image: the checksum
-/// manifest is signature-verified before it is parsed, and every artifact is
-/// then held to the digest it pins. The required artifacts are `vmlinux`,
+/// Uses the shared verification pipeline: `fetch_expected_hashes` reads the
+/// checksum manifest, and `verify_artifact_hash` then holds every artifact to
+/// the digest that manifest pins. The required artifacts are `vmlinux`,
 /// `rootfs.ext4`, `cmdline.txt`, and `manifest.json`; the runtime
 /// builder-image loader rejects caches that do not carry the full
 /// contract.

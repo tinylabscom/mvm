@@ -106,21 +106,37 @@ gate that cries wolf gets deleted. Tracked below, not built here.
 
 ## Follow-on
 
-- [ ] Extend `check-dormant-controls` to the `fn:` witnesses in the claims
-      ledger. It already implements the rule — a caller is a mention in
-      production Rust outside the defining file and outside any `#[cfg(test)]`
-      module or `tests/` tree, declared per symbol in
-      `xtask/dormant-controls.toml`, on a list that may only shrink. Pointing
-      it at the 86 ledger witnesses is a smaller change than a new gate, and it
-      keeps one definition of "reachable" rather than two. Measure against the
-      current ledger before turning it on.
-- [ ] Blank comments and literals in `check-dormant-controls`' haystack. Its
-      own docs record the limit — "a symbol named in a comment counts as a
-      caller" — and that is the same defect this change fixed in the citation
-      resolver, with the same one-line answer
-      (`rust_source::blank_comments_and_strings`). A control whose only
-      "caller" is a doc comment is precisely the dormant control it hunts.
-- [ ] Fix the five doc comments in `mvm-core`, `mvm-cli`, `mvm-build` and
-      `xtask` that reference `download_dev_image`, a function that does not
-      exist. Surfaced by this change; left out of it to keep the diff to one
-      concern.
+- [x] Fix the doc comments in `mvm-core`, `mvm-cli`, `mvm-build` and `xtask`
+      that reference `download_dev_image`, a function that does not exist.
+      Surfaced by this change; done separately to keep the diff to one concern.
+
+### Measured and refused
+
+Both reachability follow-ons were measured over all 84 `fn:` witnesses before
+being built, using `check-dormant-controls`' exact caller rule. Neither is worth
+building. Full method and numbers in
+`.agent-memory/notes/witness-reachability-gate-measured-and-refuted.md`.
+
+- ~~Extend `check-dormant-controls` to the ledger's `fn:` witnesses.~~ Zero
+  genuine findings. Of 84 witnesses, 21 flagged, 4 survived removing the two
+  dominant noise classes, and reading all six survivor symbols found every one
+  correct as written. The failures are structural, not tunable: the
+  defining-file exclusion hides a caller twelve lines above the definition
+  (`set_no_new_privs`, claim 2's own witness), trait dispatch is invisible to a
+  text rule (`teardown_paused`), name collisions merge distinct symbols
+  (`tier_for_vm`), and cross-crate test helpers must be `pub` and outside
+  `#[cfg(test)]` to be visible at all. Inferring a witness's *subject* is the
+  part that cannot be fixed by tightening. `check-dormant-controls` escapes all
+  of this only because a human hand-picks each control.
+- ~~Blank comments in that gate's haystack.~~ Its docs record the limit "a
+  symbol named in a comment counts as a caller", and the fix is the same one
+  that closed the citation-resolver defect. On this population it changes
+  **zero** verdicts — no witness's only caller was a comment. Possibly still
+  worth doing for the hand-declared controls in `xtask/dormant-controls.toml`;
+  it is not the lever it looked like.
+
+What would close the hole is a real call graph, or the ledger declaring each
+witness's subject the way `dormant-controls.toml` declares a control and its
+defining file — 84 hand-written declarations and an owner for them. That is a
+different and much larger piece of work. Until it is done the hole stays open,
+and `CLAUDE.md` continues to say so.

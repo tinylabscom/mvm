@@ -1,13 +1,12 @@
 //! Maps a builder VM's resolved host artifacts onto the backend-agnostic
 //! `VmmSpec` a `VmmDriver` boots. The builder is the disk-only, trusted sibling
 //! of the workload path: four virtio-blk disks (no virtio-fs), booting the
-//! builder's PID 1 with no claim-10 egress gate.
+//! builder's PID 1 with no claim-10 egress gate. One-shot and persistent
+//! builders take the same boot contract and differ only in lifetime.
 
 use std::path::{Path, PathBuf};
 
-use crate::driver::{
-    BlockDev, ConsoleCapture, KernelImage, VirtioFsShare, VmmSpec, VsockDirection, VsockPort,
-};
+use crate::driver::{BlockDev, ConsoleCapture, KernelImage, VmmSpec, VsockDirection, VsockPort};
 use mvm_net::channel::GuestService;
 
 /// Kernel cmdline for the disk-transport builder on the HVF VMM. Mirrors
@@ -21,22 +20,6 @@ pub const BUILDER_CMDLINE: &str = "earlycon=pl011,0x9000000 console=ttyAMA0 pani
      mvm.builder_transport=disk mvm.builder_input=/dev/vdc mvm.builder_output=/dev/vdd \
      mvm.vsock_egress=1";
 const BUILDER_RUNTIME_DEVICE: &str = "/dev/vde";
-
-/// Kernel cmdline for a **persistent** builder: the same boot contract as
-/// [`BUILDER_CMDLINE`], minus the disk-transport selection.
-///
-/// Omitting `mvm.builder_transport=disk` is the whole switch. `mvm-host-vm-init`
-/// reads that token and, when it is absent, mounts `/job`, `/work`, `/out` and
-/// `/mvm-bins` from virtio-fs instead of unpacking them off a block device. A
-/// long-lived session needs exactly that: the input disk is packed once, before
-/// boot, so a second dispatch would have nowhere to put its inputs.
-pub const PERSISTENT_BUILDER_CMDLINE: &str = "earlycon=pl011,0x9000000 console=ttyAMA0 panic=-1 nokaslr \
-     loglevel=8 root=/dev/vda ro rootfstype=ext4 init=/sbin/mvm-host-vm-init \
-     mvm.vsock_egress=1";
-
-/// Runtime-overlay device for the persistent layout. With no input/output
-/// disks the overlay is the third block, not the fifth.
-const PERSISTENT_BUILDER_RUNTIME_DEVICE: &str = "/dev/vdc";
 
 /// The resolved host artifacts a builder VM boots with. Disk slots are fixed:
 /// `vda` rootfs (RO), `vdb` nix-store (RW, persistent), `vdc` input (RO), `vdd`
@@ -144,16 +127,21 @@ pub fn builder_spec(inputs: &BuilderSpecInputs<'_>) -> VmmSpec {
         },
         shares: Vec::new(),
         trusted_builder: true,
+        // A one-shot build spawns its own endpoint and stays alive for the
+        // VM's whole life, so it needs no supervisor-owned one.
+        builder_egress_endpoint: None,
         // The builder VM boots from no admitted plan, so it carries no
         // wall-clock bound to enforce.
         plan_binding: None,
     }
 }
 
-/// The resolved host artifacts a **persistent** builder VM boots with. No
-/// input/output disks: per-dispatch payloads ride live virtio-fs shares, so the
-/// block layout is `vda` rootfs (RO), `vdb` nix-store (RW), and — when present —
-/// `vdc` runtime overlay (RO).
+/// The resolved host artifacts a **persistent** builder VM boots with. Same
+/// disk layout as [`BuilderSpecInputs`] — `vda` rootfs (RO), `vdb` nix-store
+/// (RW), `vdc` input (RO), `vdd` output (RW), optional `vde` overlay (RO) —
+/// because a session takes the same boot contract as a one-shot build. What
+/// differs is lifetime: the host rewrites the input disk and re-reads the
+/// output disk once per dispatch instead of once per VM.
 pub struct PersistentBuilderSpecInputs<'a> {
     pub name: &'a str,
     /// arm64 boot `Image` for the builder VM.
@@ -163,38 +151,48 @@ pub struct PersistentBuilderSpecInputs<'a> {
     /// Persistent nix-store disk (writable; survives across builds *and*
     /// across dispatches, which is the point of the session).
     pub nix_store: &'a Path,
-    /// Host dir served at `/job` — where the host stages each dispatch and
-    /// reads its artifacts back.
-    pub job_dir: &'a Path,
-    /// Host dir served at `/work` — the live source tree, reflecting host
-    /// edits for the session's lifetime.
-    pub workspace_root: &'a Path,
-    /// Host dir served at `/mvm-bins` — the extracted host binaries.
-    pub host_bin_dir: &'a Path,
+    /// Input disk: the packed `{job, work, mvm-bins}` tar (read-only to the
+    /// guest). The host rewrites it in place before each `Run`, and the guest
+    /// re-extracts only the `job` member per dispatch.
+    pub input_disk: &'a Path,
+    /// Output disk: the guest writes each dispatch's artifact tar here, and
+    /// the host reads it back after that dispatch's `Result`.
+    pub output_disk: &'a Path,
     /// Optional read-only runtime overlay ext4 for the builder guest.
     pub runtime_overlay: Option<&'a Path>,
     /// Write-only console capture path.
     pub console_log: PathBuf,
     /// Host-side egress relay UDS wired to `EGRESS_PORT`.
     pub egress_socket: PathBuf,
+    /// This session's FlowMux identity drive (read-only). Same requirement the
+    /// one-shot builder has: the guest reads its signing key and the host
+    /// anchor off it before starting the egress client, which will not bind
+    /// without them — and a builder with no NIC that cannot reach the proxy
+    /// cannot build.
+    pub identity_drive: &'a Path,
     /// Host UDS for the guest's job-dispatch listener (the host dials).
     pub dispatch_socket: PathBuf,
     /// Host UDS for the resident builder daemon's typed control plane.
     pub builderd_socket: PathBuf,
+    /// Ask the supervisor to own this session's egress endpoint and identity
+    /// drive. A session outlives the command that starts it, and the endpoint
+    /// self-reaps when orphaned, so the supervisor is the only process whose
+    /// life matches the VM's.
+    pub builder_egress_endpoint: mvm_vmm::host::hvf_supervisor::BuilderEgressEndpoint,
     pub vcpus: u32,
     pub memory_mib: u32,
 }
 
 /// Compose the persistent builder `VmmSpec`.
 ///
-/// Two differences from [`builder_spec`], and both are what make a session
-/// possible rather than a single run:
+/// One difference from [`builder_spec`], and it is what makes a session
+/// possible rather than a single run: the spec names the builder control
+/// ports, so the backend binds host sockets the dispatch client can dial.
 ///
-/// 1. The cmdline omits `mvm.builder_transport=disk`, so the guest mounts its
-///    job directories from virtio-fs and each dispatch can stage fresh inputs
-///    into a running VM.
-/// 2. The spec names the builder control ports, so the backend binds host
-///    sockets the dispatch client can dial.
+/// The boot contract is otherwise identical, disk transport included. A
+/// persistent guest re-reads the `job` member off the input disk on every
+/// `Run` and re-writes the output disk after every job, so one pair of
+/// transport disks serves the whole session rather than one build.
 pub fn persistent_builder_spec(inputs: &PersistentBuilderSpecInputs<'_>) -> VmmSpec {
     let block = |source: &Path, slot: u8, read_only: bool| BlockDev {
         source: source.to_path_buf(),
@@ -204,45 +202,27 @@ pub fn persistent_builder_spec(inputs: &PersistentBuilderSpecInputs<'_>) -> VmmS
     };
 
     let mut blocks = vec![
-        block(inputs.rootfs, 0, true),     // vda: rootfs, RO
-        block(inputs.nix_store, 1, false), // vdb: nix-store, RW persist
+        block(inputs.rootfs, 0, true),       // vda: rootfs, RO
+        block(inputs.nix_store, 1, false),   // vdb: nix-store, RW persist
+        block(inputs.input_disk, 2, true),   // vdc: input tar, RO
+        block(inputs.output_disk, 3, false), // vdd: output tar, RW persist
     ];
     let cmdline = if let Some(runtime_overlay) = inputs.runtime_overlay {
-        blocks.push(block(runtime_overlay, 2, true)); // vdc: runtime overlay, RO
-        format!(
-            "{PERSISTENT_BUILDER_CMDLINE} \
-             mvm.runtime_data={PERSISTENT_BUILDER_RUNTIME_DEVICE}"
-        )
+        blocks.push(block(runtime_overlay, 4, true)); // vde: runtime overlay, RO
+        format!("{BUILDER_CMDLINE} mvm.runtime_data={BUILDER_RUNTIME_DEVICE}")
     } else {
-        PERSISTENT_BUILDER_CMDLINE.to_string()
+        BUILDER_CMDLINE.to_string()
     };
+    // Appended last and found in the guest by ext4 label rather than by slot,
+    // so the optional overlay above cannot shift it out from under the guest.
+    let identity_slot = blocks.len() as u8;
+    blocks.push(block(inputs.identity_drive, identity_slot, true));
     // Same RTC-less clock seed the one-shot builder takes: a cold store's HTTPS
     // fetch fails cert validation against a ~1970 clock.
     let cmdline = format!(
         "{cmdline} {}",
         mvm_build::builder_vm::builder_hostepoch_cmdline_token()
     );
-
-    let share = |tag: &str, host_path: &Path, read_only: bool| VirtioFsShare {
-        tag: tag.to_string(),
-        host_path: host_path.to_path_buf(),
-        read_only,
-        dax: false,
-    };
-    // The read-only split mirrors `mvm-host-vm-init`'s
-    // `virtiofs_tag_is_read_only`: `work` and `mvm-bins` are inputs the guest
-    // must not write back, while `job` and `out` carry per-dispatch payloads
-    // and artifacts in the other direction. Marking one wrongly fails the
-    // dispatch inside the guest, so a test pins the exact split.
-    let shares = vec![
-        share("work", inputs.workspace_root, true),
-        share("mvm-bins", inputs.host_bin_dir, true),
-        share("job", inputs.job_dir, false),
-        // `/out` is the same host directory as `/job`: the guest writes each
-        // dispatch's artifacts into the job dir the host is already watching,
-        // which is the arrangement the libkrun persistent VM uses.
-        share("out", inputs.job_dir, false),
-    ];
 
     let host_dials = |service: GuestService, host_uds: &PathBuf| VsockPort {
         service,
@@ -269,8 +249,9 @@ pub fn persistent_builder_spec(inputs: &PersistentBuilderSpecInputs<'_>) -> VmmS
         console: ConsoleCapture {
             log_path: inputs.console_log.clone(),
         },
-        shares,
+        shares: Vec::new(),
         trusted_builder: true,
+        builder_egress_endpoint: Some(inputs.builder_egress_endpoint.clone()),
         // The builder VM boots from no admitted plan, so it carries no
         // wall-clock bound to enforce.
         plan_binding: None,
@@ -287,53 +268,79 @@ mod tests {
             kernel: Path::new("/img/Image"),
             rootfs: Path::new("/img/builder-rootfs.ext4"),
             nix_store: Path::new("/cache/nix-store.img"),
-            job_dir: Path::new("/cache/jobs/s1"),
-            workspace_root: Path::new("/src/repo"),
-            host_bin_dir: Path::new("/cache/host-bins"),
+            input_disk: Path::new("/state/input.img"),
+            output_disk: Path::new("/state/output.img"),
             runtime_overlay: None,
+            identity_drive: Path::new("/state/flowmux-identity.ext4"),
             console_log: PathBuf::from("/state/console.log"),
             egress_socket: PathBuf::from("/state/vsock-5253.sock"),
             dispatch_socket: PathBuf::from("/state/vsock-21471.sock"),
             builderd_socket: PathBuf::from("/state/vsock-21473.sock"),
+            builder_egress_endpoint: mvm_vmm::host::hvf_supervisor::BuilderEgressEndpoint {
+                vm_name: "bld-persistent".into(),
+                state_dir: PathBuf::from("/state"),
+                socket: PathBuf::from("/state/vsock-5253.sock"),
+                identity_drive: PathBuf::from("/state/flowmux-identity.ext4"),
+            },
             vcpus: 4,
             memory_mib: 8192,
         }
     }
 
     #[test]
-    fn a_persistent_builder_does_not_select_the_disk_transport() {
-        // The one token that decides it: with `mvm.builder_transport=disk` the
-        // guest unpacks a block device staged before boot, and a second
-        // dispatch has nowhere to put its inputs.
+    fn a_persistent_builder_selects_the_disk_transport() {
+        // The token that decides it: with `mvm.builder_transport=disk` the
+        // guest unpacks `/job`, `/work` and `/mvm-bins` off a block device
+        // instead of mounting virtio-fs shares. A persistent session works
+        // because the host rewrites that device between dispatches.
         let spec = persistent_builder_spec(&persistent_inputs());
-        assert!(!spec.cmdline.contains("mvm.builder_transport"));
-        assert!(!spec.cmdline.contains("mvm.builder_input"));
-        assert!(!spec.cmdline.contains("mvm.builder_output"));
+        assert!(spec.cmdline.contains("mvm.builder_transport=disk"));
+        assert!(spec.cmdline.contains("mvm.builder_input=/dev/vdc"));
+        assert!(spec.cmdline.contains("mvm.builder_output=/dev/vdd"));
         // Still the builder's PID 1 and the same egress posture.
         assert!(spec.cmdline.contains("init=/sbin/mvm-host-vm-init"));
         assert!(spec.cmdline.contains("mvm.vsock_egress=1"));
     }
 
     #[test]
-    fn a_persistent_builder_carries_live_shares_instead_of_transport_disks() {
+    fn a_persistent_builder_carries_transport_disks_and_no_shares() {
         let spec = persistent_builder_spec(&persistent_inputs());
 
-        // Only rootfs + nix-store: no input/output disks to go stale.
-        assert_eq!(spec.blocks.len(), 2);
+        // The claim this whole stage exists for: a builder guest gets no
+        // virtio-fs device, so it has no channel to host filesystem structure.
+        assert!(
+            spec.shares.is_empty(),
+            "a persistent builder must declare no virtio-fs shares"
+        );
+
+        // Same vda–vdd order as the one-shot builder, so the cmdline device
+        // names above are true of the slots the backend attaches, plus this
+        // session's identity drive appended last.
+        assert_eq!(spec.blocks.len(), 5);
         assert_eq!(spec.blocks[0].device_node(), "/dev/vda");
         assert!(spec.blocks[0].read_only);
         assert_eq!(spec.blocks[1].device_node(), "/dev/vdb");
         assert!(!spec.blocks[1].read_only, "the store must stay writable");
-
-        let tags: Vec<&str> = spec.shares.iter().map(|s| s.tag.as_str()).collect();
-        assert_eq!(tags, vec!["work", "mvm-bins", "job", "out"]);
-
-        // The read-only split must match what the guest init expects, or a
-        // dispatch write into /job fails inside the VM.
-        for share in &spec.shares {
-            let expect_ro = matches!(share.tag.as_str(), "work" | "mvm-bins");
-            assert_eq!(share.read_only, expect_ro, "tag {}", share.tag);
-        }
+        assert_eq!(spec.blocks[2].device_node(), "/dev/vdc");
+        assert_eq!(spec.blocks[2].source, PathBuf::from("/state/input.img"));
+        assert!(
+            spec.blocks[2].read_only,
+            "the guest never writes its inputs"
+        );
+        assert_eq!(spec.blocks[3].device_node(), "/dev/vdd");
+        assert_eq!(spec.blocks[3].source, PathBuf::from("/state/output.img"));
+        assert!(!spec.blocks[3].read_only, "the guest writes its artifacts");
+        // Without this the guest's egress client cannot authenticate its
+        // session, and a builder with no NIC that cannot reach the proxy
+        // refuses to boot rather than building against nothing.
+        assert_eq!(
+            spec.blocks[4].source,
+            PathBuf::from("/state/flowmux-identity.ext4")
+        );
+        assert!(spec.blocks[4].read_only);
+        // File-served, never RAM-backed: the output has to survive for the
+        // host to read it back after each dispatch.
+        assert!(spec.blocks.iter().all(|b| !b.ephemeral));
     }
 
     #[test]
@@ -354,23 +361,28 @@ mod tests {
 
     #[test]
     fn the_persistent_runtime_overlay_lands_where_its_cmdline_says() {
-        // With no input/output disks the overlay is the third block, so the
-        // cmdline device must move with it — a stale /dev/vde would mount
-        // nothing and fail the required-overlay policy.
+        // The overlay follows the transport disks, so it is the fifth block —
+        // a cmdline naming any other device would mount nothing and fail the
+        // required-overlay policy.
         let mut inputs = persistent_inputs();
         let overlay = Path::new("/img/runtime-overlay.ext4");
         inputs.runtime_overlay = Some(overlay);
         let spec = persistent_builder_spec(&inputs);
 
-        assert_eq!(spec.blocks.len(), 3);
-        assert_eq!(
-            spec.blocks[2].device_node(),
-            PERSISTENT_BUILDER_RUNTIME_DEVICE
+        assert_eq!(spec.blocks.len(), 6);
+        assert_eq!(spec.blocks[4].device_node(), BUILDER_RUNTIME_DEVICE);
+        assert_eq!(spec.blocks[4].source, overlay);
+        assert!(spec.blocks[4].read_only);
+        assert!(
+            spec.cmdline
+                .contains(&format!("mvm.runtime_data={BUILDER_RUNTIME_DEVICE}"))
         );
-        assert!(spec.blocks[2].read_only);
-        assert!(spec.cmdline.contains(&format!(
-            "mvm.runtime_data={PERSISTENT_BUILDER_RUNTIME_DEVICE}"
-        )));
+        // The identity drive still lands after the overlay, and the guest
+        // finds it by ext4 label rather than by this position.
+        assert_eq!(
+            spec.blocks[5].source,
+            PathBuf::from("/state/flowmux-identity.ext4")
+        );
     }
 
     fn inputs() -> BuilderSpecInputs<'static> {

@@ -323,6 +323,9 @@ pub fn workload_device_spec(config: &VmStartConfig, cmdline: &str, console_log: 
         // on the type because the builder VM still uses it.
         shares: Vec::new(),
         trusted_builder: false,
+        // Workload launches spawn their own endpoint and stay alive for the
+        // VM's whole life, so there is no supervisor-owned one to ask for.
+        builder_egress_endpoint: None,
         plan_binding: workload_plan_binding(config),
     }
 }
@@ -392,6 +395,7 @@ mod tests {
             read_only: true,
             kind: VmVolumeKind::DirShare,
             materialized_image: image.map(str::to_string),
+            volume_label: None,
             ..Default::default()
         }
     }
@@ -547,6 +551,7 @@ mod tests {
             volumes: vec![
                 VmVolume {
                     materialized_image: None,
+                    volume_label: None,
                     host: "/host/rw".into(),
                     guest: "/guest/rw".into(),
                     size: String::new(),
@@ -556,6 +561,7 @@ mod tests {
                 },
                 VmVolume {
                     materialized_image: None,
+                    volume_label: None,
                     host: "/host/ro".into(),
                     guest: "/guest/ro".into(),
                     size: String::new(),
@@ -634,6 +640,7 @@ mod tests {
     fn disk_volume(host: &str, guest: &str, read_only: bool) -> mvm_core::vm_backend::VmVolume {
         mvm_core::vm_backend::VmVolume {
             materialized_image: None,
+            volume_label: None,
             host: host.into(),
             guest: guest.into(),
             size: String::new(),
@@ -646,6 +653,7 @@ mod tests {
     fn dir_share_volume(host: &str, guest: &str) -> mvm_core::vm_backend::VmVolume {
         mvm_core::vm_backend::VmVolume {
             materialized_image: None,
+            volume_label: None,
             host: host.into(),
             guest: guest.into(),
             size: String::new(),

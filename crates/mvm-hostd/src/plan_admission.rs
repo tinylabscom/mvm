@@ -1867,6 +1867,7 @@ fn attach_admitted_extensions(config: &mut VmStartConfig, admitted: &AdmittedPla
         }
         config.volumes.push(mvm_core::vm_backend::VmVolume {
             materialized_image: None,
+            volume_label: None,
             host: extension
                 .root
                 .join(&extension.binding.artifact)
@@ -2416,6 +2417,7 @@ mod tests {
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
+            caller_commitment: None,
             audit_labels: Default::default(),
             agent_verbs: None,
             services: Vec::new(),
@@ -2933,6 +2935,7 @@ mod tests {
             read_only: true,
             kind: mvm_core::vm_backend::VmVolumeKind::DirShare,
             materialized_image: Some("/state/mount-0.ext4".into()),
+            volume_label: None,
             ..Default::default()
         };
         enforce_admitted_shares(std::slice::from_ref(&materialized), &plan)

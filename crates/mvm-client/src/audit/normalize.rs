@@ -293,6 +293,7 @@ mod tests {
             bundle_version: None,
             image_name: "worker-img".into(),
             image_sha256: "abc123".into(),
+            caller_commitment: None,
             event: event.into(),
             labels: BTreeMap::new(),
         }

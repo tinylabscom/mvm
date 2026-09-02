@@ -1638,6 +1638,7 @@ mod verify_cert_tests {
                 image_name: mvm_hostd::supervisor::UNBOUND_IMAGE_NAME.to_string(),
                 image_sha256: mvm_hostd::supervisor::UNBOUND_IMAGE_SHA256.to_string(),
                 event: "lifecycle.tenant.destroyed".to_string(),
+                caller_commitment: None,
                 labels,
             };
             rt.block_on(signer.sign_and_emit(&entry)).unwrap();
@@ -1766,6 +1767,7 @@ mod verify_cert_tests {
             image_name: mvm_hostd::supervisor::UNBOUND_IMAGE_NAME.to_string(),
             image_sha256: mvm_hostd::supervisor::UNBOUND_IMAGE_SHA256.to_string(),
             event: "lifecycle.tenant.destroyed".to_string(),
+            caller_commitment: None,
             labels,
         };
         rt.block_on(signer.sign_and_emit(&destroy_entry)).unwrap();
@@ -1783,6 +1785,7 @@ mod verify_cert_tests {
             image_name: mvm_hostd::supervisor::UNBOUND_IMAGE_NAME.to_string(),
             image_sha256: mvm_hostd::supervisor::UNBOUND_IMAGE_SHA256.to_string(),
             event: "cmd.up.completed".to_string(),
+            caller_commitment: None,
             labels: other_labels,
         };
         rt.block_on(signer.sign_and_emit(&other_entry)).unwrap();
@@ -2008,6 +2011,7 @@ mod merkle_verb_tests {
                 image_name: "img".to_string(),
                 image_sha256: "abc".to_string(),
                 event: format!("e-{i}"),
+                caller_commitment: None,
                 labels: BTreeMap::new(),
             };
             rt.block_on(signer.sign_and_emit(&entry)).unwrap();

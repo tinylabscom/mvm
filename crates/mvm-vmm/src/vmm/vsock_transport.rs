@@ -143,6 +143,11 @@ pub(crate) struct VsockTransportCore {
     pub(crate) recv_cnt: HashMap<VsockConnectionKey, RecvCredit>,
     pub(crate) pending_rx: VecDeque<(VsockHdr, Vec<u8>)>,
     tx_credit: HashMap<VsockConnectionKey, TxCredit>,
+    /// Guest ports whose streams are exempt from idle eviction. Evicting one
+    /// sends the guest an `OP_RST`, which tears down a stream that is merely
+    /// quiet — and a request/response control channel is quiet for exactly as
+    /// long as the operation it is waiting on.
+    long_lived: std::collections::HashSet<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -178,6 +183,7 @@ impl VsockTransportCore {
             recv_cnt: HashMap::new(),
             pending_rx: VecDeque::new(),
             tx_credit: HashMap::new(),
+            long_lived: std::collections::HashSet::new(),
         }
     }
 
@@ -313,6 +319,10 @@ impl VsockTransportCore {
         true
     }
 
+    pub(crate) fn set_long_lived_ports(&mut self, ports: impl IntoIterator<Item = u32>) {
+        self.long_lived = ports.into_iter().collect();
+    }
+
     pub(crate) fn evict_idle_connections(&mut self) -> Vec<VsockConnectionKey> {
         self.evict_idle_connections_at(Instant::now())
     }
@@ -333,7 +343,9 @@ impl VsockTransportCore {
         let mut expired: Vec<_> = latest_activity
             .into_iter()
             .filter_map(|(key, activity)| {
-                (now.saturating_duration_since(activity) >= CONNECTION_IDLE_TIMEOUT).then_some(key)
+                (!self.long_lived.contains(&key.guest_port)
+                    && now.saturating_duration_since(activity) >= CONNECTION_IDLE_TIMEOUT)
+                    .then_some(key)
             })
             .collect();
         expired.sort_unstable_by_key(|key| (key.host_port, key.guest_port));
@@ -1048,6 +1060,32 @@ mod tests {
         }));
         assert_eq!(core.tx_credit_available(9000, refused_port), 0);
         assert_eq!(core.tx_credit.len(), MAX_CONNECTIONS);
+    }
+
+    /// The transport is the *second* layer that can reclaim a quiet stream, and
+    /// it does so by sending the guest an `OP_RST`. Exempting a port in the
+    /// host-dial bridge alone still let this one tear the stream down — which
+    /// is exactly what severed a builder dispatch across a `nix build`.
+    #[test]
+    fn a_long_lived_guest_port_is_not_evicted_for_being_idle() {
+        let mut core = transport();
+        let now = Instant::now();
+        let header = VsockHdr {
+            dst_port: 9000,
+            src_port: 21_471,
+            buf_alloc: 64,
+            ..Default::default()
+        };
+        core.set_long_lived_ports([21_471]);
+        assert!(core.record_tx_credit_at(
+            &header,
+            now - CONNECTION_IDLE_TIMEOUT - Duration::from_secs(1)
+        ));
+
+        assert!(
+            core.evict_idle_connections_at(now).is_empty(),
+            "a long-lived control port must not be reset for being quiet"
+        );
     }
 
     #[test]

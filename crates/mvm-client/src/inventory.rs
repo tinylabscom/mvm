@@ -352,6 +352,7 @@ mod tests {
             volumes: vec![],
             init: vec![],
             agent_verb: vec![],
+            caller_commitment: None,
             created_at: Some("2026-07-01T00:00:00Z".to_string()),
             last_started_at: None,
             health_check: None,

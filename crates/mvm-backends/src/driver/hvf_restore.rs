@@ -153,6 +153,11 @@ pub fn hvf_child_restore_config(
     Ok(HvfSupervisorConfig {
         // Same tier as the parent it forked from.
         trusted_builder_egress: parent.trusted_builder_egress,
+        // Never inherited. The request names the *parent's* VM, state dir and
+        // identity drive; a child adopting it would spawn a second endpoint
+        // over the parent's socket and overwrite the identity drive of a VM
+        // that is still running off it. A restored child is not a builder.
+        builder_egress_endpoint: None,
         kernel: parent.kernel.clone(),
         cmdline: parent.cmdline.clone(),
         memory_mib: parent.memory_mib,
@@ -324,6 +329,7 @@ mod tests {
     fn parent_config(state: &Path, disks: Vec<HvfDisk>) -> HvfSupervisorConfig {
         HvfSupervisorConfig {
             trusted_builder_egress: false,
+            builder_egress_endpoint: None,
             kernel: state.join("Image"),
             cmdline: Some("console=ttyAMA0 root=/dev/vda ro".into()),
             memory_mib: 512,
@@ -434,6 +440,34 @@ mod tests {
         // The half this function exists for is still done: a restored child is
         // itself checkpointable only if its own launch config is on disk.
         assert!(dir.join("supervisor.json").is_file());
+    }
+
+    #[test]
+    fn a_restored_child_never_inherits_the_parents_egress_endpoint_request() {
+        // The request names the *parent's* vm, state dir, socket and identity
+        // drive. A child that inherited it would spawn a second endpoint over
+        // the running parent's socket and rewrite the identity drive that
+        // parent's guest is still authenticating against — so this is the same
+        // family as the relay drop the module docs describe, not an
+        // optimisation.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let anchors = materialized(dir);
+        let mut parent = parent_config(dir, vec![]);
+        parent.builder_egress_endpoint =
+            Some(mvm_vmm::host::hvf_supervisor::BuilderEgressEndpoint {
+                vm_name: "the-parent".into(),
+                state_dir: dir.join("parent-state"),
+                socket: dir.join("parent.sock"),
+                identity_drive: dir.join("parent-identity.ext4"),
+            });
+
+        let cfg = hvf_child_restore_config(&parent, &anchors, &request("child", dir)).unwrap();
+
+        assert!(
+            cfg.builder_egress_endpoint.is_none(),
+            "a restored child must not adopt its parent's endpoint request"
+        );
     }
 
     #[test]

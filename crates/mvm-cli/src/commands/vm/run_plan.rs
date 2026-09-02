@@ -215,7 +215,8 @@ fn run_plan_mode(args: &RunArgs, sdk: &super::exec::SdkTransportArgs) -> Result<
 
     for app in &workload.apps {
         let network_mode = crate::commands::machine::preflight_network();
-        let input = synthesis_input_for_app(&workload, app, network_mode)?;
+        let input =
+            synthesis_input_for_app(&workload, app, network_mode, args.caller_commitment.clone())?;
         // A recorded sandbox run is a developer artifact; nothing here is
         // sealed, so an unenforceable grant is reported, not fatal.
         match admit_for_run(
@@ -339,6 +340,7 @@ fn synthesis_input_for_app<'a>(
     workload: &'a Workload,
     app: &'a App,
     network_mode: mvm_contract::plan::NetworkMode,
+    caller_commitment: Option<mvm_core::plan::CallerCommitment>,
 ) -> Result<SynthesisInput<'a>> {
     let lowered_secrets = lower_app_secrets(app);
     // `SynthesisInput` borrows `image_sha256` as `&str`; we need a
@@ -393,6 +395,7 @@ fn synthesis_input_for_app<'a>(
         shares: Vec::new(),
         redaction: mvm_core::policy::RedactionPolicy::default(),
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
+        caller_commitment,
         audit_labels: Default::default(),
         agent_verbs: None,
         services: Vec::new(),

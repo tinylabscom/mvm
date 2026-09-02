@@ -234,6 +234,7 @@ pub fn admit_and_boot_local(
         shares: shares_from_vm_volumes(&req.volumes),
         redaction: Default::default(),
         reversible_replacement: Default::default(),
+        caller_commitment: None,
         audit_labels: Default::default(),
         agent_verbs: None,
         services: Vec::new(),
@@ -438,6 +439,7 @@ mod tests {
         let volumes = vec![
             VmVolume {
                 materialized_image: None,
+                volume_label: None,
                 host: "/h/work.ext4".into(),
                 guest: "/data/work".into(),
                 size: "16M".into(),
@@ -447,6 +449,7 @@ mod tests {
             },
             VmVolume {
                 materialized_image: None,
+                volume_label: None,
                 host: "/h/src".into(),
                 guest: "/data/src".into(),
                 size: String::new(),
@@ -501,6 +504,7 @@ mod tests {
             backend_name: "mock".into(),
             volumes: vec![VmVolume {
                 materialized_image: None,
+                volume_label: None,
                 host: volume.to_string_lossy().into_owned(),
                 guest: "/data/work".into(),
                 size: String::new(),
@@ -569,6 +573,7 @@ mod tests {
             backend_name: "mock".into(),
             volumes: vec![VmVolume {
                 materialized_image: None,
+                volume_label: None,
                 host: sidecar.to_string_lossy().into_owned(),
                 guest: mvm_core::plan::SDK_SIDECAR_GUEST_PATH.into(),
                 size: String::new(),
