@@ -90,14 +90,43 @@ pub fn supervisor_stderr_detail(state_dir: &Path) -> String {
 /// supervisor does not recognise means its binary predates the `mvmctl` that
 /// wrote the config — not a bad value. Nothing in the exit status the launch
 /// path sees distinguishes that from any other refusal; only the stderr can.
-fn stale_supervisor_hint(stderr_tail: &str) -> &'static str {
-    if stderr_tail.contains("unknown field") {
-        "\n\nThat supervisor binary is older than this mvmctl: it refused a config field \
-         this build sends. Rebuild it with `just build-supervisors`, then re-sign with \
-         `mvmctl env sign`."
-    } else {
-        ""
+///
+/// The rebuild it names carries the running binary's own profile. Advising a
+/// bare `cargo build` from a release `mvmctl` rebuilds the debug helper the
+/// release one does not use, so the command appears to succeed and the next
+/// launch fails identically.
+///
+/// It no longer advises re-signing. Both supervisors sign themselves on first
+/// launch — `mvm-hvf-supervisor` from its own `main`, `mvm-libkrun-supervisor`
+/// through `codesign::ensure_signed` — so a separate signing step was a fourth
+/// instruction that never had to be followed, in a message read by someone
+/// already several layers from the cause.
+fn stale_supervisor_hint(stderr_tail: &str) -> String {
+    if !stderr_tail.contains("unknown field") {
+        return String::new();
     }
+    let profile = std::env::current_exe()
+        .ok()
+        .as_deref()
+        .and_then(crate::host::aux_bin::build_profile_of);
+    format!(
+        "\n\nThat supervisor binary is older than this mvmctl: it refused a config field \
+         this build sends. Rebuild it with `{}`. It signs itself on first launch, so no \
+         separate signing step is needed.",
+        helper_rebuild_command(profile)
+    )
+}
+
+/// The rebuild command to print, for a running binary of `profile`.
+///
+/// `None` — an installed binary, or a test harness under `target/<p>/deps` —
+/// falls back to cargo's default profile. That is the safe direction: the debug
+/// form is what a contributor most often wants, and naming `--release` to
+/// someone who is not running a release binary would have them rebuild a helper
+/// they do not use and watch the next launch fail identically.
+fn helper_rebuild_command(profile: Option<crate::host::aux_bin::BuildProfile>) -> String {
+    let flag = profile.map_or("", crate::host::aux_bin::BuildProfile::cargo_flag);
+    format!("cargo build{flag} -p mvm-hostd --bins")
 }
 
 #[cfg(test)]
@@ -187,8 +216,36 @@ mod tests {
         .unwrap();
         let detail = supervisor_stderr_detail(dir.path());
         assert!(
-            detail.contains("just build-supervisors"),
+            detail.contains("-p mvm-hostd --bins"),
             "an unknown field must name the rebuild: {detail}"
+        );
+        assert!(
+            !detail.contains("mvmctl env sign"),
+            "both supervisors self-sign; a signing step is an instruction that \
+             never has to be followed: {detail}"
+        );
+    }
+
+    /// A bare `cargo build` run from a release mvmctl rebuilds the debug helper
+    /// the release one does not use: the command succeeds and the next launch
+    /// fails identically. The flag has to follow the binary being run.
+    #[test]
+    fn the_rebuild_command_carries_the_running_binarys_profile() {
+        use crate::host::aux_bin::BuildProfile;
+
+        assert_eq!(
+            helper_rebuild_command(Some(BuildProfile::Release)),
+            "cargo build --release -p mvm-hostd --bins"
+        );
+        assert_eq!(
+            helper_rebuild_command(Some(BuildProfile::Debug)),
+            "cargo build -p mvm-hostd --bins"
+        );
+        // An installed binary, or this very test harness, which sits under
+        // `target/<profile>/deps` and so reads as no profile at all.
+        assert_eq!(
+            helper_rebuild_command(None),
+            "cargo build -p mvm-hostd --bins"
         );
     }
 
@@ -201,7 +258,7 @@ mod tests {
         )
         .unwrap();
         let detail = supervisor_stderr_detail(dir.path());
-        assert!(!detail.contains("just build-supervisors"), "got: {detail}");
+        assert!(!detail.contains("-p mvm-hostd --bins"), "got: {detail}");
         assert!(detail.contains("HV_ERROR"), "got: {detail}");
     }
 }
