@@ -133,6 +133,46 @@ fn write_managed_volume_marker(world: &mut CliWorld, value: i64, volume_name: St
     image.sync_all().expect("sync volume marker");
 }
 
+/// Register a **host directory** volume — the `--host <dir>` arm, which is
+/// `LocalVolumeKind::Directory` rather than the `machine volume create` block
+/// image every other live scenario here uses.
+///
+/// The directory is created under the isolated home and seeded with a marker,
+/// so a guest that can read it proves the registration reached the VM and a
+/// guest that cannot proves it did not. Keeping the directory inside the home
+/// means the scenario leaves nothing behind and cannot collide with a
+/// concurrent run.
+#[when(expr = "I register host directory volume {string} at {string} for machine {string}")]
+fn register_host_directory_volume(
+    world: &mut CliWorld,
+    volume_name: String,
+    guest_path: String,
+    machine: String,
+) {
+    let host_dir = isolated_home(world).join("dir-volumes").join(&volume_name);
+    fs::create_dir_all(&host_dir)
+        .unwrap_or_else(|error| panic!("create host directory {host_dir:?}: {error}"));
+    fs::write(host_dir.join("marker"), b"dir-volume-visible\n")
+        .expect("seed the host directory marker");
+
+    let home = isolated_home(world).to_path_buf();
+    let mut cmd = mvmctl_command();
+    cmd.args([
+        "machine",
+        "volume",
+        "mount",
+        &machine,
+        "--volume",
+        &volume_name,
+        "--host",
+        &host_dir.to_string_lossy(),
+        "--guest",
+        &guest_path,
+    ])
+    .isolated_home(&home);
+    world.last_run = Some(cmd.output().expect("failed to spawn mvmctl"));
+}
+
 #[then(expr = "managed volume {string} ends with byte {int}")]
 fn managed_volume_has_marker(world: &mut CliWorld, volume_name: String, value: i64) {
     let expected = u8::try_from(value).expect("volume marker must fit in one byte");
