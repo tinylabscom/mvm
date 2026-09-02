@@ -398,6 +398,18 @@ for detailed scope and acceptance criteria.
       same wrong conclusion two authors already reached independently. Wired
       into `check-all`, so it runs on every PR. See
       `specs/sprint/delivery/vcpu-ceiling-gate-refuses-wire-type-limits.md`.
+      Closed out by issue #3099, which asked the same question of the fourth
+      backend and answered it the other way: QEMU declares no ceiling on
+      purpose. Its limit belongs to the machine type (255 on the x86_64
+      default, 288 reported for q35, 512 on aarch64 `virt`) and the driver
+      names no machine on x86_64, so any constant is the distribution's to
+      change; querying is worse, since `query-machines` reports a `cpu-max` for
+      q35 that the same machine refuses to start; and no host-side ceiling is
+      observable anyway, because the guest kernel's `CONFIG_NR_CPUS` binds
+      first at 64. A clamp warning is truthful only where the declared ceiling
+      is the binding one, which is true on Firecracker and libkrun and never on
+      QEMU. See
+      `specs/sprint/delivery/qemu-declares-no-vcpu-ceiling-on-purpose.md`.
 
 - [x] **virtiofsd sandbox parity — issue #3022.**
       `specs/plans/2026-08-31-virtiofsd-sandbox-parity.md`.

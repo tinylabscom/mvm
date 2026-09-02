@@ -47,6 +47,11 @@ jobs:
   # README works.
   e2e-docs:
     uses: ./.github/workflows/e2e-docs.yml
+    with:
+      # Stated rather than inherited. A tag must not be cut without live macOS
+      # evidence, so a macOS host that cannot boot a guest fails this workflow
+      # here even though Extended CI tolerates it nightly.
+      macos_blocks_on_unusable_host: true
 
   build:
     strategy:
