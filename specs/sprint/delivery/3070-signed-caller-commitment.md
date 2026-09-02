@@ -30,4 +30,5 @@ Validation completed on 2026-09-01:
   one existing unsupported Docker block-attachment scenario skipped), including
   an end-to-end caller-commitment audit-chain verification scenario.
 
-Merge delivery and closing #3070 remain.
+Landed through the merge queue in PR #3076 as `8623950746` on 2026-09-01;
+issue #3070 closed from the landed evidence.
