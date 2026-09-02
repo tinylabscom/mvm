@@ -16,6 +16,28 @@ user-facing language SDKs it generates types for, co-located here:
 See `python/README.md` and `typescript/README.md` for the per-language
 package docs.
 
+## Role in the workspace
+
+`mvm-sdk` is used by `mvm-build` to compile workload declarations and sidecar
+metadata, by `mvm-cli` for generated/project workflows, and by `mvm-hostd` when
+it validates SDK-originated execution data. `mvm-capture` and
+`mvm-conformance` use it in tests. The crate re-exports the canonical IR from
+`mvm-contract`; it does not maintain a second workload schema.
+
+## How it works: the Rust layer
+
+The builder API constructs a validated `mvm_contract::ir::Workload`. `emit`
+canonicalizes that IR and writes it to `MVM_IR_OUT` or stdout for the build
+tooling to consume. Decorator parsing and runtime-recording modules translate
+language authoring constructs into the same IR. Machine wrappers build
+`mvmctl machine ...` argument vectors and delegate lifecycle, admission,
+artifact verification, and persistence to the CLI instead of reimplementing
+those security-sensitive paths.
+
+Optional features keep secondary surfaces out of the base closure:
+`schema` enables schema emission, `client-facade` exposes the shared
+`MvmClient` contract, and `deploy-remote` enables the HTTP deployment path.
+
 ## Machine lifecycle wrappers
 
 Python, TypeScript, and Rust expose machine-oriented lifecycle wrappers that

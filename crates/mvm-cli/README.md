@@ -1,40 +1,57 @@
 # mvm-cli
 
-Clap-based CLI commands, bootstrap workflow, diagnostics, update mechanism, and template management. This is a **pure library crate** — the `mvmctl` binary lives in the root package and calls `mvm_cli::run()`.
+`mvm-cli` implements the `mvmctl` command-line product as a library. It owns
+argument parsing, command dispatch, terminal/JSON presentation, bootstrap and
+diagnostics, but the executable entry point remains in the root `mvmctl`
+package.
 
-## Modules
+## Who uses it
 
-| Module | Purpose |
-|--------|---------|
-| `commands` | Main CLI entry point (`run()`), all command definitions and handlers |
-| `bootstrap` | Full environment setup and machine infrastructure readiness |
-| `doctor` | System diagnostics and dependency checks (`mvmctl doctor`) |
-| `update` | Self-update from GitHub releases |
-| `template_cmd` | Template CRUD commands (create, list, build, delete, push, pull) |
-| `logging` | Log format configuration (`LogFormat::Human` / `LogFormat::Json`) |
-| `ui` | Terminal UI helpers (colored messages, spinners, prompts, status tables) |
-| `fleet` | Fleet management commands |
-| `http` | HTTP client utilities (for update checks) |
+The root binary calls `mvm_cli::run()`. `xtask` enables it only to generate man
+pages, and `mvm-conformance` invokes the resulting command surface. No
+lower-level runtime crate depends on the CLI, which keeps presentation and
+process-exit behavior out of reusable libraries.
 
-## Commands
+## How it works
 
-| Command | Description |
-|---------|-------------|
-| `mvmctl bootstrap` | Full setup plus builder VM and workload-kernel acquisition |
-| `mvmctl build image --flake .` | Build a microVM image from a Nix flake |
-| `mvmctl run --flake .` | Build + start a microVM |
-| `mvmctl console <name>` | Interactive PTY over vsock (dev-mode only) |
-| `mvmctl template <action>` | Manage global templates (`create`, `build`, `list`) |
-| `mvmctl image <action>` | Browse / search / fetch the bundled image catalog |
-| `mvmctl network <action>` | Manage named dev networks |
-| `mvmctl doctor [--json]` | System diagnostics |
-| `mvmctl update` | Check for and install latest version |
+1. Clap parses the command tree and global output/settings flags.
+2. Dispatch converts raw arguments into validated domain requests.
+3. Handlers call `mvm-client`, build, runtime, capture, MCP, host-daemon, and
+   filesystem APIs rather than duplicating their business rules.
+4. Results are rendered through one human/JSON output boundary.
+5. Signals and cleanup guards coordinate cancellation without losing the
+   underlying lifecycle result.
 
-## Global Flags
+Bootstrap and `doctor` inspect host capabilities and explain missing
+dependencies. Machine commands perform admission preview and artifact checks
+before mutation. Embedded host binaries are extracted from a verified manifest
+when that release feature is enabled.
 
-- `--log-format <human|json>` — Output format (default: human)
-- `--fc-version <version>` — Override Firecracker version
+## Main areas
 
-## Dependencies
+| Area | Representative modules |
+|---|---|
+| Command surface | `commands`, `commands::dispatch` |
+| Machine execution | `exec`, `exec::launch_plan`, `exec::session` |
+| Setup and diagnosis | `bootstrap`, `doctor` |
+| Presentation | `ui`, `display`, `json_out`, `logging` |
+| Templates and registry | `template_cmd`, `template_registry` |
+| Host assets | `host_binaries`, `runtime_overlay` command helpers |
+| Automation | `commands::ops::mcp`, `watch`, completions commands, `ts_runner` |
+| Performance | `bench`, launch-contract exports |
 
-- `mvm-core`, `mvm`, `mvm-build`, `mvm-agentd`
+## Features
+
+Default features enable the builder VM and pure image writer used by normal
+local workflows. Optional features cover test support, release channels,
+embedded host binaries, libkrun, trusted APFS, S3 template registries, the wasm
+backend, custom DNS, and live HVF validation. Feature selection must preserve
+the distinction between user, host, and development closures in the root
+package.
+
+## Developing
+
+Run `cargo test -p mvm-cli`. Every new flag or subcommand needs parser/help and
+integration coverage, including JSON output and invalid input. Commands that
+boot or manage microVMs run in the approved runtime environment; ordinary
+library tests run on the host.
