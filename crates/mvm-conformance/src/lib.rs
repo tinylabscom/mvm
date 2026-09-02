@@ -88,6 +88,28 @@ pub const TLS_TUNNEL_CLIENT_TAG: &str = "tls_tunnel_client";
 /// without the gate it passes while witnessing nothing.
 pub const DIR_SHARE_TAG: &str = "dir_share";
 
+/// A scenario that asserts a **refusal** which only happens on a tier with no
+/// wall-clock mechanism — so, unusually, it needs the capability to be
+/// *absent*.
+///
+/// `ResourceControls::for_backend` gives libkrun and HVF
+/// `WallClockControl::SupervisorTimer`: both have a per-VM supervisor process
+/// of ours that outlives the launch and can hold a deadline. Firecracker
+/// detaches its session and QEMU daemonizes, so neither leaves a process to
+/// fire a timer, and `negotiate_grants` reports a gap that admission refuses.
+///
+/// Declared rather than probed, for the same reason as [`SNAPSHOT_TAG`] and
+/// [`DIR_SHARE_TAG`]: the answer depends on which backend a launch would
+/// actually select, and re-deriving that here would be a copy that drifts.
+///
+/// The inversion is the point, and it is why this exists at all. Tagged with a
+/// normal capability gate the scenario would run on an enforcing tier and fail;
+/// left untagged it did exactly that, and passed for a while anyway because the
+/// exit code it asserts (1) was also what a *separate* bug produced. A gate
+/// that can only require presence cannot express "this refusal has no occasion
+/// to happen here".
+pub const UNENFORCEABLE_WALL_CLOCK_TAG: &str = "unenforceable_wall_clock";
+
 /// Host capabilities a scenario may require, probed once by the harness.
 ///
 /// Plain data so [`scenario_should_run`] is a pure decision the harness can
@@ -128,6 +150,14 @@ pub struct RuntimeCaps {
     /// scenario passing `--mount` reaches a guest instead of being refused
     /// before boot.
     pub dir_share: bool,
+    /// The active backend can hold a wall-clock deadline for the workload's
+    /// whole life (`WallClockControl::SupervisorTimer`), so `--timeout` is
+    /// admitted rather than refused as an unenforceable grant.
+    ///
+    /// Read by [`UNENFORCEABLE_WALL_CLOCK_TAG`], which skips when this is
+    /// *true* — the only inverted gate here, because the scenario it guards
+    /// asserts a refusal that an enforcing tier has no occasion to make.
+    pub wall_clock_enforced: bool,
 }
 
 /// Decide whether a scenario with `tags` should run given the host `caps`.
@@ -177,6 +207,9 @@ pub enum ScenarioGate {
     NeedsTlsTunnelClient,
     /// No `node` on `PATH`, so the TypeScript example checkers cannot run.
     NeedsNode,
+    /// The active backend *can* enforce a wall-clock bound, so the refusal
+    /// this scenario asserts never fires here.
+    NeedsUnenforceableWallClock,
     /// The merge-queue lane selected only `@ci_live` scenarios, and this
     /// scenario is outside that deliberately narrow subset.
     OutsideCiLiveSubset,
@@ -202,6 +235,7 @@ impl ScenarioGate {
             Self::NeedsPerfBudgetHost => "needs-perf-budget-host",
             Self::NeedsTlsTunnelClient => "needs-tls-tunnel-client",
             Self::NeedsNode => "needs-node",
+            Self::NeedsUnenforceableWallClock => "needs-unenforceable-wall-clock",
             Self::OutsideCiLiveSubset => "outside-ci-live-subset",
         }
     }
@@ -239,6 +273,12 @@ pub fn scenario_gate(tags: &[String], caps: RuntimeCaps) -> ScenarioGate {
     }
     if tagged(DIR_SHARE_TAG) && !caps.dir_share {
         return ScenarioGate::NeedsDirShare;
+    }
+    // Inverted, and the only one: this scenario asserts a refusal that an
+    // enforcing tier never makes. Reading it as `&& !caps` like every arm above
+    // would run it exactly where its premise is false.
+    if tagged(UNENFORCEABLE_WALL_CLOCK_TAG) && caps.wall_clock_enforced {
+        return ScenarioGate::NeedsUnenforceableWallClock;
     }
     if tagged(GUEST_BINS_TAG) && !caps.guest_bin_dir {
         return ScenarioGate::NeedsGuestBinDir;
@@ -291,6 +331,11 @@ impl ScenarioGate {
                 "need MVM_BDD_DIR_SHARE=1 on a host whose active backend serves \
                  virtio-fs directory shares (libkrun and HVF do; Firecracker has \
                  no virtio-fs device and refuses --mount before boot)",
+            ),
+            Self::NeedsUnenforceableWallClock => Some(
+                "need a backend with no wall-clock mechanism, so the refusal this \
+                 asserts can happen (Firecracker and QEMU leave no process to hold \
+                 a deadline; libkrun and HVF do, and admit the grant instead)",
             ),
             Self::NeedsMemorySnapshot => Some(
                 "need MVM_BDD_SNAPSHOT=1 on a host whose active backend reports \
@@ -562,6 +607,7 @@ mod tests {
         memory_snapshot: false,
         dir_share: false,
         workload_kernel: false,
+        wall_clock_enforced: false,
     };
     const ALL: RuntimeCaps = RuntimeCaps {
         live_opted_in: true,
@@ -575,6 +621,7 @@ mod tests {
         memory_snapshot: true,
         dir_share: true,
         workload_kernel: true,
+        wall_clock_enforced: true,
     };
 
     #[test]
@@ -590,6 +637,48 @@ mod tests {
         assert_eq!(gate.as_str(), "needs-dir-share");
         assert!(gate.reason().is_some(), "a skip must name what is missing");
         assert!(scenario_should_run(&tags(&["live", "dir_share"]), ALL));
+    }
+
+    /// The one inverted gate: it skips where the capability is *present*.
+    ///
+    /// Written as `&& !caps` like every other arm, this scenario would run on a
+    /// tier that enforces wall clock and assert a refusal that never comes.
+    /// That is not hypothetical — it is what happened on HVF, and it read as
+    /// passing for a while because the exit code it asserts (1) was also what a
+    /// separate baked-entrypoint bug produced.
+    #[test]
+    fn the_wall_clock_refusal_skips_where_the_backend_can_enforce_it() {
+        let tagged = tags(&["live", "unenforceable_wall_clock"]);
+
+        // Enforcing tier (libkrun, HVF): no refusal to witness, so skip.
+        let gate = scenario_gate(&tagged, ALL);
+        assert_eq!(gate, ScenarioGate::NeedsUnenforceableWallClock);
+        assert_eq!(gate.as_str(), "needs-unenforceable-wall-clock");
+        assert!(gate.reason().is_some(), "a skip must name what is missing");
+
+        // Non-enforcing tier (Firecracker, QEMU): the refusal is real, so run.
+        assert!(scenario_should_run(
+            &tagged,
+            RuntimeCaps {
+                wall_clock_enforced: false,
+                ..ALL
+            }
+        ));
+    }
+
+    /// The inversion must not leak: an untagged scenario is unaffected by the
+    /// capability either way.
+    #[test]
+    fn the_wall_clock_capability_only_gates_scenarios_that_ask_for_it() {
+        for enforced in [true, false] {
+            assert!(scenario_should_run(
+                &tags(&["live"]),
+                RuntimeCaps {
+                    wall_clock_enforced: enforced,
+                    ..ALL
+                }
+            ));
+        }
     }
 
     #[test]
@@ -768,6 +857,7 @@ mod tests {
                 memory_snapshot: false,
                 dir_share: false,
                 workload_kernel: false,
+                wall_clock_enforced: false,
             },
         ));
     }
@@ -788,6 +878,7 @@ mod tests {
                 memory_snapshot: false,
                 dir_share: false,
                 workload_kernel: false,
+                wall_clock_enforced: false,
             },
         ));
         assert!(scenario_should_run(&tags(&["live", "firecracker"]), ALL));
@@ -810,6 +901,7 @@ mod tests {
                 memory_snapshot: false,
                 dir_share: false,
                 workload_kernel: false,
+                wall_clock_enforced: false,
             },
         ));
         // Live opt-in but missing capability → skipped.
@@ -827,6 +919,7 @@ mod tests {
                 memory_snapshot: false,
                 dir_share: false,
                 workload_kernel: false,
+                wall_clock_enforced: false,
             },
         ));
         // Both present → runs.
@@ -851,6 +944,7 @@ mod tests {
                 memory_snapshot: false,
                 dir_share: false,
                 workload_kernel: false,
+                wall_clock_enforced: false,
             },
             RuntimeCaps {
                 live_opted_in: true,
@@ -864,6 +958,7 @@ mod tests {
                 memory_snapshot: false,
                 dir_share: false,
                 workload_kernel: false,
+                wall_clock_enforced: false,
             },
             RuntimeCaps {
                 live_opted_in: true,
@@ -877,6 +972,7 @@ mod tests {
                 memory_snapshot: false,
                 dir_share: false,
                 workload_kernel: false,
+                wall_clock_enforced: false,
             },
             RuntimeCaps {
                 live_opted_in: true,
@@ -890,6 +986,7 @@ mod tests {
                 memory_snapshot: false,
                 dir_share: false,
                 workload_kernel: true,
+                wall_clock_enforced: false,
             },
             RuntimeCaps {
                 live_opted_in: false,
@@ -903,6 +1000,7 @@ mod tests {
                 memory_snapshot: false,
                 dir_share: false,
                 workload_kernel: true,
+                wall_clock_enforced: false,
             },
         ];
         let shapes = [
@@ -942,6 +1040,7 @@ mod tests {
             memory_snapshot: false,
             dir_share: false,
             workload_kernel: false,
+            wall_clock_enforced: false,
         };
         let live_only = RuntimeCaps {
             live_opted_in: true,
@@ -955,6 +1054,7 @@ mod tests {
             memory_snapshot: false,
             dir_share: false,
             workload_kernel: false,
+            wall_clock_enforced: false,
         };
         let bootable = RuntimeCaps {
             live_opted_in: true,
@@ -968,6 +1068,7 @@ mod tests {
             memory_snapshot: false,
             dir_share: false,
             workload_kernel: false,
+            wall_clock_enforced: false,
         };
 
         assert_eq!(
@@ -1025,6 +1126,7 @@ mod tests {
                     memory_snapshot: false,
                     dir_share: false,
                     workload_kernel: false,
+                    wall_clock_enforced: false,
                 },
                 true,
             ),
