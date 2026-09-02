@@ -350,10 +350,27 @@ Inside the guest, the files appear at the mount paths:
 default. `:rw` needs `--profile dev` or `--profile permissive`; a *transient*
 run's share is read-only under every profile.
 
-The three-part form `host:guest:SIZE` selects a **disk image**, not a directory
-share: the host path is a file mvm creates and attaches as virtio-blk, sized in
-MB. Two-part `host:guest` is a live directory share over virtio-fs. Add `:rw`
+The three-part form `host:guest:SIZE` selects an **empty disk image**: the host
+path is a file mvm creates and attaches as virtio-blk, sized in MB. Add `:rw`
 after the size for a writable disk.
+
+Two-part `host:guest` shares the contents of an existing host directory. mvm
+copies the directory into an ext4 image at launch and attaches that, so the
+guest sees a **point-in-time snapshot** rather than a live view: edits you make
+on the host while the VM is running are not visible inside it, and the guest
+never writes back. Re-run to pick up changes.
+
+This replaced a live virtio-fs share, and the reason is the security model —
+virtio-fs put a FUSE server on the host parsing requests an untrusted guest
+composed, which was the one mechanism by which a guest addressed host
+filesystem *structure* rather than opaque blocks. A disk image has no protocol
+for a guest to drive. The snapshot is also read-only under every profile for a
+transient run, so mid-run visibility is the only thing that changed.
+
+Because the image is assembled in memory, a two-part mount is capped at 2 GiB
+of regular-file data and refuses a larger tree rather than risking the host
+killing `mvmctl`. Mount a narrower directory, or stage a copy that excludes
+generated trees like `target/`.
 
 Your entrypoint can read config and write data at runtime — no rebuild needed:
 

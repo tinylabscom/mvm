@@ -595,14 +595,14 @@ Guest (its own Linux kernel)
     2. waits fail-closed for a signed ActivateEnvironment
     3. mounts the dm-verity rootfs + runtime overlay, pivots root, drops to uid 901
   no sshd · no SSH keys · setpriv + seccomp service isolation
-  rootfs: ext4 (dm-verity sealed in prod) or read-only virtio-fs
+  rootfs: ext4 block root, dm-verity sealed in prod
 ```
 
 On boots that attach the universal initramfs, the kernel cmdline carries no
 roothash tokens. The guest PID 1 waits fail-closed for a signed
 `ActivateEnvironment` over vsock, then mounts the root — dm-verity for a
-sealed boot, plain-block for an unverified dev boot, or a virtio-fs tag for a
-block-less boot — plus the runtime overlay when one is attached, pivots into
+sealed boot, plain-block for an unverified dev boot — plus the runtime overlay
+when one is attached, pivots into
 it, and drops to the workload uid before serving operational RPCs. The same
 initramfs serves Nix-built and OCI images on every runner backend
 (Firecracker, libkrun, HVF). See

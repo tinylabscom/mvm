@@ -168,7 +168,8 @@ their changes against.
 
 ### `filesystem-backends` — Planned
 
-mvm has volume primitives (virtio-fs `--mount`, named volumes)
+mvm has volume primitives (`--mount`, which materializes a granted
+host directory into an ext4 image attached as virtio-blk; named volumes)
 and an instance-snapshot path with HMAC-sealed monotonic-epoch
 replay protection. There is no shared `VolumeBackend` conformance
 suite and no encrypted, object-store, or in-memory backend.
