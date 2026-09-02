@@ -385,6 +385,9 @@ bdd-live-ci:
 build-supervisors *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
+    # This recipe links the same `mvm-hostd` binaries `embed` does and needs the
+    # same rust-objcopy repair; without it every supervisor ships unstripped.
+    source "{{justfile_directory()}}/scripts/macos-objcopy-env.sh" "{{justfile_directory()}}"
     ./scripts/cargo-fast.sh build -p mvm-hostd --bins {{ARGS}}
     header="${MVM_LIBKRUN_HEADER:-}"
     if [[ -z "$header" ]]; then
@@ -417,24 +420,9 @@ build-supervisors *ARGS:
 embed *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
-    # Some pinned macOS nightlies ship rust-objcopy with an RPATH relative to
-    # its rustlib bin directory even though libLLVM lives at the sysroot's lib
-    # directory. cargo-zigbuild only warns when stripping then continues with
-    # larger unstripped payloads, so make the library visible explicitly.
-    if [[ "$(uname -s)" == "Darwin" ]]; then
-      # Build scripts are sibling processes launched by Cargo, while compiler
-      # helpers inherit from rustc. Seed the parent for the first case and use
-      # the wrapper for the second; either half alone leaves some rust-objcopy
-      # invocations unable to load libLLVM.
-      rust_channel="$(sed -n 's/^channel = "\([^"]*\)"$/\1/p' rust-toolchain.toml)"
-      rust_sysroot="$(rustup run "$rust_channel" rustc --print sysroot)"
-      if [[ -n "${DYLD_FALLBACK_LIBRARY_PATH:-}" ]]; then
-        export DYLD_FALLBACK_LIBRARY_PATH="$rust_sysroot/lib:$DYLD_FALLBACK_LIBRARY_PATH"
-      else
-        export DYLD_FALLBACK_LIBRARY_PATH="$rust_sysroot/lib"
-      fi
-      export RUSTC_WRAPPER="{{justfile_directory()}}/scripts/rustc-macos-loader.sh"
-    fi
+    # Make rust-objcopy able to load libLLVM, or the strip step aborts and every
+    # binary this recipe links is emitted unstripped.
+    source "{{justfile_directory()}}/scripts/macos-objcopy-env.sh" "{{justfile_directory()}}"
     # `mvmctl` and these `[[bin]]` targets live in different packages, so
     # building one does not cause Cargo to build the others. Forward the same
     # profile arguments (`--release`, `--profile ...`) so runtime's adjacent-
