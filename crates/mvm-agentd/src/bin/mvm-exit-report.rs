@@ -15,6 +15,22 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // Flush before the host is told we are done, and before `/init` runs
+    // `poweroff -f`. The `-f` is a *forced* poweroff: no shutdown scripts, no
+    // unmount, no implicit sync — so anything still in the page cache for a
+    // writable block volume dies with the VM.
+    //
+    // Measured, which is why this is here rather than assumed: a guest wrote a
+    // file to a `--mount HOST:/GUEST:SIZE:rw` disk and the file was absent when
+    // the same image was re-attached to a fresh VM. The identical write with an
+    // explicit `sync` survived. Without this, "writable" silently means
+    // "writable if the workload remembers to sync", and losing data quietly is
+    // worse than refusing to write at all.
+    //
+    // Ordered before `report` so the bytes are on their way to the disk while
+    // the exit round-trip is in flight, and unconditional: the guest cannot
+    // know which of its mounts the host cares about.
+    flush_filesystems();
     match report(code) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -23,6 +39,21 @@ fn main() -> ExitCode {
         }
     }
 }
+
+/// `sync(2)` — schedule every dirty page for writeback.
+///
+/// Best-effort and infallible by design: `sync` cannot fail in a way this
+/// helper could act on, and a guest must never block or abort its exit path
+/// over a flush.
+#[cfg(target_os = "linux")]
+fn flush_filesystems() {
+    // SAFETY: `sync` takes no arguments, returns nothing, and has no failure
+    // mode to check.
+    unsafe { libc::sync() };
+}
+
+#[cfg(not(target_os = "linux"))]
+fn flush_filesystems() {}
 
 #[cfg(target_os = "linux")]
 fn report(code: i32) -> std::io::Result<()> {

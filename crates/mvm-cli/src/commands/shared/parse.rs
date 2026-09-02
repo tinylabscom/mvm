@@ -276,20 +276,28 @@ pub fn volume_spec_to_vm_volume(spec: &VolumeSpec) -> VmVolume {
 /// on a RW disk at start, and a daemon-launched workload can't hold a host-side
 /// guard for the VM's lifetime anyway. The guard's value is serializing
 /// concurrent *creation*, which this still does.
-pub fn materialize_disk_volume(v: &VmVolume) -> Result<()> {
+/// Materialize a disk volume's backing image and **return its sidecar lock**.
+///
+/// The lock is the caller's to hold. Dropping it immediately — which this
+/// function used to do by discarding the return value — releases the exclusion
+/// before the VM ever boots, so two runs naming one image can both format and
+/// write it. That was invisible while every transient mount was read-only.
+pub fn materialize_disk_volume(
+    v: &VmVolume,
+) -> Result<Option<mvm_build::volume_image::VolumeImageLock>> {
     if !matches!(v.kind, VmVolumeKind::Disk) {
-        return Ok(());
+        return Ok(None);
     }
     let size_mib = mvm_core::util::parse_human_size(&v.size)
         .with_context(|| format!("disk volume '{}' size '{}'", v.guest, v.size))?;
     let size_bytes = u64::from(size_mib) * 1024 * 1024;
-    mvm_build::builder_vm_runtime::ensure_persistent_volume_image(
+    let lock = mvm_build::builder_vm_runtime::ensure_persistent_volume_image(
         std::path::Path::new(&v.host),
         size_bytes,
         v.read_only,
     )
     .with_context(|| format!("materializing disk volume image '{}'", v.host))?;
-    Ok(())
+    Ok(Some(lock))
 }
 
 /// Enforce the guest-mount policy: the guest path must sit under one of

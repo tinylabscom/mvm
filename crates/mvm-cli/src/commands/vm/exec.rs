@@ -930,12 +930,23 @@ fn validate_run_profile(args: &RunArgs) -> Result<()> {
     }
 
     for spec in &args.mounts {
-        let parsed = super::shared::parse_volume_spec(spec)?;
-        // The shape matters to the message. "live share" is the right noun for
-        // a directory and the wrong one for a sized disk image, and this
-        // refusal fires for both — so a user asking "then what *is* writable?"
-        // was told their 2G disk was a live share.
-        let (read_only, shape) = match parsed {
+        // Only the *directory* shape is refused `rw`, and only because a
+        // granted directory is materialized into a throwaway image at boot: a
+        // write would land in that image, be discarded with the VM, and never
+        // reach the directory the user named. Refusing is the honest answer.
+        //
+        // A sized disk is the opposite. Its host path is what the caller
+        // named, `materialize_disk_volume` creates it there if absent, and it
+        // outlives the VM — so a write is exactly as durable as the caller
+        // asked for.
+        //
+        // These were refused together by accident, not by design. The check
+        // was introduced parsing `parse_dir_share_spec` and could only ever
+        // see directories; widening the loop to `parse_volume_spec` extended a
+        // directory-specific rule to disks without revisiting it, and the
+        // message it carried ("transient live shares are read-only") described
+        // only the case it was written for.
+        let (read_only, shape) = match super::shared::parse_volume_spec(spec)? {
             super::shared::VolumeSpec::DirShare { read_only, .. } => (read_only, "directory"),
             super::shared::VolumeSpec::Disk { read_only, .. } => (read_only, "disk"),
         };
@@ -1209,9 +1220,18 @@ fn build_exec_request(
     };
     let memory_mib = parse_human_size(&args.memory).context("Invalid --memory")?;
     let mounts = parse_transient_mounts(&args.mounts)?;
-    for volume in &mounts.disk_volumes {
-        super::shared::materialize_disk_volume(volume)?;
-    }
+    // Hold every disk image's sidecar lock for as long as this run owns the
+    // VM. `ensure_persistent_volume_image` has always taken the lock, and
+    // `materialize_disk_volume` has always dropped it on the way out — which
+    // was harmless while every transient mount was read-only, and is not once
+    // a disk can be attached `rw`: two runs naming one image would both format
+    // and write it. `_disk_locks` must outlive the boot, so it is bound rather
+    // than discarded.
+    let _disk_locks: Vec<_> = mounts
+        .disk_volumes
+        .iter()
+        .map(super::shared::materialize_disk_volume)
+        .collect::<Result<Vec<_>>>()?;
     let mut env_pairs = Vec::with_capacity(args.env.len());
     for kv in &args.env {
         env_pairs.push(parse_env_pair(kv)?);
@@ -2069,10 +2089,12 @@ mod tests {
         }
     }
 
-    /// A transient run refuses `rw` for **both** mount shapes, and the message
-    /// has to name the one it got. It used to say "transient live shares are
-    /// read-only" for a sized disk image too, which told a user asking "then
-    /// what is writable?" that their 2G disk was a live share.
+    /// Both shapes are refused `rw`, and the message names the one it got.
+    ///
+    /// Enabling `rw` for the *disk* shape is a live question, not a hypothetical
+    /// — it was measured working end to end and then reverted, because an OCI
+    /// guest has no flush on teardown and the write is lost unless the workload
+    /// syncs. See `specs/plans/2026-09-02-workload-output-affordance.md`.
     #[test]
     fn a_transient_rw_refusal_names_the_shape_it_refused() {
         let dir_err = {
@@ -2080,13 +2102,11 @@ mod tests {
             args.mounts.push("/h/src:/work:rw".to_string());
             validate_run_profile(&args).expect_err("rw must be refused")
         };
-        let msg = dir_err.to_string();
-        assert!(msg.contains("directory"), "{msg}");
-        assert!(!msg.contains("disk read-only"), "{msg}");
+        assert!(dir_err.to_string().contains("directory"), "{dir_err}");
 
         let disk_err = {
             let mut args = run_args(RunProfile::Standard);
-            args.mounts.push("/h/src:/work:2G:rw".to_string());
+            args.mounts.push("/h/data.img:/work:2G:rw".to_string());
             validate_run_profile(&args).expect_err("rw must be refused")
         };
         let msg = disk_err.to_string();
