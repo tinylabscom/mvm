@@ -20,11 +20,7 @@ target. Two of the four need live hardware to validate.
 The end state is **FFI-only rows, not zero**: 16 of the remaining sites declare
 libkrun's C API, which exports `krun_add_virtiofs` whether or not we call it,
 and three more are the `VirtioFsShare` type plus the QEMU and Firecracker tests
-that assert a share is *refused*.**libkrun's
-Stage 0 still boots a virtio-fs root** — the plan's headline is not yet true of
-that path. The others: the libkrun persistent builder's shares, the guest's
-install arm, and the HVF VirtioFs device + its 1,108-line FuseServer and fuzz
-target. Two of the four need live hardware to validate.**
+that assert a share is *refused*.
 
 No guest gets a virtio-fs device. Not a workload, not the builder VM, not the
 dev-tier root. The host filesystem reaches a guest as a block image or it does
