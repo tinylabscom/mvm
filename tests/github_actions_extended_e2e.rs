@@ -43,6 +43,30 @@ fn the_release_workflow_waits_for_the_documented_surface() {
         "the release job must wait on e2e-docs, or a tag is published without \
          evidence that the documented examples run"
     );
+
+    // Listing a job in `needs` is not the gate. The publish job runs under
+    // `!cancelled()`, which overrides the implicit all-needs-succeeded rule, so
+    // a need whose result is not named in the condition is waited for and then
+    // ignored. `e2e-docs` was in `needs` and absent from the condition from the
+    // day the documented-surface gate landed: the gate existed, was listed, was
+    // asserted by the line above, and would have published a release over a
+    // completely red lane.
+    //
+    // Checking the whole `needs` list against the condition, rather than
+    // e2e-docs alone, is what makes this catch the *next* one too.
+    let condition = workflow
+        .lines()
+        .find(|line| line.trim_start().starts_with("if: ${{ !cancelled()"))
+        .expect("the release job must gate publication on an explicit condition");
+    for need in ["bdd", "e2e-docs", "build", "initramfs-image"] {
+        assert!(
+            condition.contains(&format!("needs.{need}.result == 'success'")),
+            "`{need}` is in the release job's `needs` but its result is not \
+             required by the publish condition. Under `!cancelled()` that means \
+             the job is waited for and its failure ignored — a gate that reads \
+             as covered and enforces nothing."
+        );
+    }
 }
 
 /// The release gate must be stated at the release call site, not inherited.
