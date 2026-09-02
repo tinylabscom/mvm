@@ -3,14 +3,28 @@
 Backing: shipped-source
 Validation: check-sprint-append
 
-**Status: IN PROGRESS — Stages A, B and D landed, and with them Stage C's QEMU
-builder *and* its persistent HVF builder. The HVF half is live-validated: two
-`nix build` dispatches into one session on macOS 26.5.2 / Apple Silicon, both
-exit 0, artifacts read off the output disk. No workload tier reaches virtio-fs,
-no builder *spec* constructs a share, and a ratchet gate keeps it that way.
-Stage C is down to libkrun's seeded closure (two tokens once someone can run a
-live libkrun build), the guest's install arm, and deleting the now-dead share
-plumbing.**
+**Status: IN PROGRESS — Stages A, B and D landed, and Stage C has taken every
+backend it can reach without live hardware. Both builders are on the disk
+transport, the host-side `virtiofsd` daemon is deleted (and with it the
+`--sandbox none` flag this plan opened on), QEMU now *refuses* a spec carrying
+shares rather than ignoring one, and the HVF backend can no longer express a
+share at all. `check-no-virtio-fs` is down from 46 sites across 14 files to 38
+across 10.
+
+Four items remain, and none is a tidy-up. The largest is that **libkrun's
+Stage 0 still boots a virtio-fs root** — the plan's headline is not yet true of
+that path. The others: the libkrun persistent builder's shares, the guest's
+install arm, and the HVF VirtioFs device with its 1,108-line FuseServer and fuzz
+target. Two of the four need live hardware to validate.
+
+The end state is **FFI-only rows, not zero**: 16 of the remaining sites declare
+libkrun's C API, which exports `krun_add_virtiofs` whether or not we call it,
+and three more are the `VirtioFsShare` type plus the QEMU and Firecracker tests
+that assert a share is *refused*.**libkrun's
+Stage 0 still boots a virtio-fs root** — the plan's headline is not yet true of
+that path. The others: the libkrun persistent builder's shares, the guest's
+install arm, and the HVF VirtioFs device + its 1,108-line FuseServer and fuzz
+target. Two of the four need live hardware to validate.**
 
 No guest gets a virtio-fs device. Not a workload, not the builder VM, not the
 dev-tier root. The host filesystem reaches a guest as a block image or it does
@@ -557,10 +571,32 @@ Five coordinated changes, host and guest:
       transport does not collect. Point it at `/out` like the flake arm, then
       drop the refusal in `PersistentBuilderVm::run_install_dispatch`. Needs a
       guest change and therefore an image rebuild.
-- [ ] Now-dead HVF share plumbing: `HvfVirtioFsShare`, the `hvf.rs` mapper, the
-      `virtio.rs` VirtioFs MMIO device, and `kernel_boot.rs`'s attach. No spec
-      constructs a share any more, so these map and attach nothing. Pinned in
-      `check-no-virtio-fs` with that reason.
+- [x] Now-dead HVF share **wiring**: `HvfVirtioFsShare` and its config field,
+      the `hvf.rs` mapper, the supervisor's pass-through, the restore path's
+      copy, and `kernel_boot.rs`'s FDT nodes + device construction. The HVF
+      backend can no longer express a share at all, so the device is unreachable
+      by construction rather than by policy.
+
+      **The MMIO hole stays, deliberately.** `RNG_MMIO_BASE`/`RNG_IRQ` are
+      computed from `FS_MMIO_BASE`/`MAX_VIRTIOFS_SHARES`; collapsing the range
+      would silently move the entropy device to a different address and SPI,
+      changing the device tree a guest boots against and the layout a saved
+      snapshot was captured under. The constants are now documented as a
+      reserved hole, and `RNG_MMIO_BASE` derives *from* it so the dependency is
+      stated once instead of restated. Same address as before.
+- [ ] The `virtio.rs` VirtioFs MMIO **device** itself, its test suite, the
+      1,108-line `virtio_fs.rs` FuseServer, and that module's fuzz target
+      (`fuzz-backend/fuzz_targets/fuse_dispatch.rs`). Split out of the wiring
+      above once the size became clear: it is a much larger deletion that also
+      removes a fuzzing harness, and the fuzz crate carries its own lockfile
+      that a dep change has to refresh. The FUSE parser is not cited as a claim
+      witness in ADR-001 or `model/claims.toml`, so this does not touch the
+      ledger — but deleting a guest-driven parser's fuzzer deserves its own
+      reviewable change rather than riding along.
+- [x] Delete `crates/mvm-vmm/src/host/virtiofsd.rs`, both QEMU call sites, and
+      the `virtiofsd` host dependency from the Linux install docs. (Duplicate of
+      the entry above; both were open. Done — and the install docs turned out to
+      carry no `virtiofsd` prerequisite to remove.)
 
 ### Stage D — the gate
 
