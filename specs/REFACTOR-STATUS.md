@@ -104,18 +104,23 @@ Last updated: 2026-09-01
       that transport, with the `virtiofsd` spawn loops, the shared memory
       backend and the `vhost-user-fs-pci` devices deleted. Widening the gate's
       pattern to the `add_virtio_fs` spelling and the `virtiofsd` spawn side
-      took it from 23 pinned sites to 54. Remaining: the persistent HVF builder
-      (needs live Apple Silicon) and libkrun's seeded closure, which is still a
-      virtio-fs share the transport helper can now carry.
-      The persistent HVF builder has since moved too: `persistent_builder_spec`
+      took it from 23 pinned sites to 54. The QEMU *workload* driver's share arm
+      then became a refusal mirroring Firecracker's, which left
+      `crates/mvm-vmm/src/host/virtiofsd.rs` with no consumers: deleted, along
+      with `mvm-vmm`'s `which` dependency and the `--sandbox none` flag that
+      started the plan. `specs/plans/2026-08-31-virtiofsd-sandbox-parity.md` is
+      superseded by that deletion.
+      The persistent HVF builder has moved too: `persistent_builder_spec`
       declares no shares, readiness moved from a marker file inside the (now
       unshared) `/job` onto a dispatch round trip, and the host rewrites the
       input disk per `Run` and reads the output disk per `Result`. Live-validated
       on macOS 26.5.2 — two `nix build` dispatches into one session, both exit 0.
+      Gate now at 41 sites across 13 files.
       Remaining: libkrun's seeded closure, the guest's install arm (which writes
       to `/job/<job_id>/out` and is refused on a disk-backed session rather than
       silently losing its claim-11 sidecars), and deleting the now-dead share
-      plumbing.
+      plumbing. All three must land before the ratchet can become an absolute
+      rather than a ceiling.
 
 - [ ] **Warm standby image claim repair — issue #3002.**
       `specs/plans/2026-08-28-warm-standby-image-claim.md`.

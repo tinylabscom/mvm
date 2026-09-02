@@ -1354,7 +1354,6 @@ dependencies = [
  "virtio-queue",
  "virtio-vsock",
  "vm-memory",
- "which",
 ]
 
 [[package]]

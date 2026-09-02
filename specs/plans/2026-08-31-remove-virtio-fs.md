@@ -508,16 +508,29 @@ Five coordinated changes, host and guest:
       libkrun's two sites pass `None` explicitly, with a comment saying why.
       See the corrected checkbox at the top of this stage.
 
-- [ ] The QEMU **workload** driver's share arm is a different matter and *is*
+- [x] The QEMU **workload** driver's share arm is a different matter and *is*
       free: workload specs carry `shares: Vec::new()` unconditionally since
       Stage A, so `qemu.rs`'s share handling is unreachable for workloads.
+      **Deleted — but as a refusal, not a silent drop.** `QemuDriver::boot` now
+      bails on a non-empty `spec.shares`, mirroring Firecracker's
+      `boot_rejects_virtio_fs_shares`, because a driver that quietly ignores a
+      share it was asked to serve hands the guest a VM missing a filesystem it
+      expected. `argv_carries_no_virtio_fs_or_shared_memory_backend` pins the
+      absence of the `-object`/`-numa` pair, which existed only because
+      vhost-user-fs needs a shared memory backend sized to `-m`.
 
-- [ ] Only once both builders are on the disk transport can
-      `crates/mvm-vmm/src/host/virtiofsd.rs` (382 lines), its QEMU call sites,
-      and the `virtiofsd` host dependency in the Linux install docs go — and
-      with them the `--sandbox none` flag that started this plan. That is also
-      when `check-no-virtio-fs` drops to FFI-only rows and the ratchet becomes
-      an absolute rather than a ceiling.
+- [x] `crates/mvm-vmm/src/host/virtiofsd.rs` is **deleted**, along with its
+      re-export from `mvm-build`, the module declaration, and `mvm-vmm`'s
+      `which` dependency — which the manifest's own comment said was there for
+      "binary lookup for host-side helpers (virtiofsd)" and which had no other
+      user. With it goes the `--sandbox none` flag that started this plan.
+      There was no `virtiofsd` dependency in the Linux install docs to remove;
+      that line of the plan described a doc that does not exist.
+
+      The ratchet does **not** drop to FFI-only rows yet — that needs libkrun's
+      seeded closure and the remaining dead plumbing below. With the persistent
+      HVF builder also on the disk transport, it went from 54 sites across 15
+      files to **41 across 13**.
 - [ ] The **libkrun** persistent builder still serves `work`/`mvm-bins`/`job`/
       `out` as shares (`libkrun_builder.rs`). Its VMM has virtio-fs, so nothing
       forced the move; the session record already carries the two-state
@@ -531,8 +544,6 @@ Five coordinated changes, host and guest:
       `virtio.rs` VirtioFs MMIO device, and `kernel_boot.rs`'s attach. No spec
       constructs a share any more, so these map and attach nothing. Pinned in
       `check-no-virtio-fs` with that reason.
-- [ ] Delete `crates/mvm-vmm/src/host/virtiofsd.rs`, both QEMU call sites, and
-      the `virtiofsd` host dependency from the Linux install docs.
 
 ### Stage D — the gate
 
@@ -588,15 +599,18 @@ exactly as long as it took to finish — and the finishing is the slow part.
   images — it is opt-in dev/test and `auto_select` never picks it, so it is the
   one place where deleting the feature outright is defensible.
 
-## Stopgap
+## Stopgap — **moot, do not do this**
 
-Restoring virtiofsd's sandbox is a one-line change and Stages A–C are not
-one-line changes.
+The stopgap was to restore virtiofsd's sandbox because that was a one-line
+change and Stages A–C were not. Both boxes are struck: `virtiofsd.rs` is gone,
+so there is no `--sandbox` argument left to pass and no flavour left to pass it
+to. Doing this work now would reintroduce the file.
 
-- [ ] `--sandbox namespace` for the Rust flavour, explicit `-o sandbox=namespace`
-      for the C one. DAX needs `cache=always`, which is orthogonal to the
-      sandbox, so the reason it was disabled is probably not the reason it looks
-      like.
-- [ ] **Needs Linux validation before it lands.** The QEMU path does not run on
-      the macOS dev host, so this cannot be tested where it was written. Do not
-      land it blind on the strength of the argument above.
+- [x] ~~`--sandbox namespace` for the Rust flavour, explicit
+      `-o sandbox=namespace` for the C one.~~ Struck: the spawn helper that
+      built these arguments no longer exists.
+- [x] ~~**Needs Linux validation before it lands.**~~ Struck with the box above;
+      nothing left to validate.
+
+`specs/plans/2026-08-31-virtiofsd-sandbox-parity.md` is the standalone plan for
+this same stopgap and is superseded for the same reason.
