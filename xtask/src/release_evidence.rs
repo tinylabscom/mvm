@@ -5,8 +5,8 @@
 //! on macOS, where no GitHub-hosted runner can produce it: `macos-latest` is
 //! arm64 with a nested Hypervisor.framework that reports `HV_UNSUPPORTED`, and
 //! on `macos-15-intel` the HVF supervisor is Apple-Silicon-only and links as a
-//! stub while the libkrun formula is ARM-only. Issue #3011 tracks the
-//! self-hosted Apple Silicon runner that fixes this properly.
+//! stub while the libkrun formula is ARM-only. A self-hosted Apple Silicon
+//! runner is the durable fix because it can expose Hypervisor.framework.
 //!
 //! Until that runner exists the run happens on a maintainer's machine. This
 //! module is what stops "we ran it locally" from being a promise. The run
