@@ -1,5 +1,8 @@
 # Content-Addressed Asset Identity
 
+Backing: shipped-source
+Validation: check-sprint-append
+
 **Date:** 2026-09-02
 **Status:** In progress
 **Branch:** `feat/asset-identity`
