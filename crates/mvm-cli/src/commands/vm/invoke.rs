@@ -832,7 +832,7 @@ pub(in crate::commands) fn read_auto_stdin() -> anyhow::Result<Vec<u8>> {
 /// I/O error. This is host-side synthesis — the agent itself can't
 /// emit `SessionKilled` because by the time the kill takes effect
 /// it's already going down.
-pub(in crate::commands) fn dispatch(call: EntrypointDispatch<'_>) -> Result<i32> {
+pub(crate) fn dispatch(call: EntrypointDispatch<'_>) -> Result<i32> {
     let session_id = call.session_id;
     match dispatch_inner(call) {
         Ok(code) => Ok(code),
@@ -853,7 +853,7 @@ pub(in crate::commands) fn dispatch(call: EntrypointDispatch<'_>) -> Result<i32>
 }
 
 /// One `RunEntrypoint` dispatch against a reachable guest agent.
-pub(in crate::commands) struct EntrypointDispatch<'a> {
+pub(crate) struct EntrypointDispatch<'a> {
     /// The running microVM to dispatch into.
     pub vm_name: &'a str,
     /// What reaches the workload's stdin.
@@ -867,7 +867,7 @@ pub(in crate::commands) struct EntrypointDispatch<'a> {
 
 /// Stdin as the dispatch sees it, once the caller's request has been resolved
 /// against a real admission.
-pub(in crate::commands) enum DispatchStdin<'a> {
+pub(crate) enum DispatchStdin<'a> {
     /// The complete payload, carried in the `RunEntrypoint` frame itself.
     OneShot(Vec<u8>),
     /// A live stream opened under this boot's admitted plan.
