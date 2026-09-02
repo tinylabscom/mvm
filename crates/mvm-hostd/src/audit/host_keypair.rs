@@ -72,10 +72,10 @@ pub fn host_signer_id() -> String {
 /// Load the host signer, creating both halves on first use.
 ///
 /// Idempotent: a subsequent call reloads from disk. Refuses if the
-/// secret-half file has perms looser than `SECRET_MODE`. Caller is
-/// responsible for ensuring `~/.mvm/` itself is mode `0700` (the
-/// `mvm_core::config::ensure_home_dir` helper handles that already
-/// for the parent).
+/// secret-half file has perms looser than `SECRET_MODE`. The caller is
+/// not responsible for `~/.mvm` itself: `load_or_init_at` locks the whole
+/// chain from the home root down. It used to say the caller was, and
+/// pointed at a helper with no callers, so in practice nobody was.
 pub fn load_or_init() -> Result<HostSigner> {
     load_or_init_at(&default_keys_dir()?)
 }
@@ -83,19 +83,14 @@ pub fn load_or_init() -> Result<HostSigner> {
 /// Same as [`load_or_init`] but accepts an explicit keys directory.
 /// Test seam.
 pub fn load_or_init_at(keys_dir: &Path) -> Result<HostSigner> {
-    std::fs::create_dir_all(keys_dir)
-        .with_context(|| format!("creating {}", keys_dir.display()))?;
-    #[cfg(unix)]
-    {
-        let mut perms = std::fs::metadata(keys_dir)
-            .with_context(|| format!("stat {}", keys_dir.display()))?
-            .permissions();
-        if perms.mode() & 0o777 != 0o700 {
-            perms.set_mode(0o700);
-            std::fs::set_permissions(keys_dir, perms)
-                .with_context(|| format!("chmod 0700 {}", keys_dir.display()))?;
-        }
-    }
+    // Locks the whole chain from the mvm home down, not just this leaf. The
+    // hand-rolled version here chmodded `keys/` and left whatever
+    // `create_dir_all` had made above it at the process umask — so the
+    // directory holding the host signing key could sit inside a
+    // world-traversable `~/.mvm`, with the tight mode on the leaf reading as
+    // though that had been handled.
+    mvm_core::config::create_private_dir(keys_dir)
+        .with_context(|| format!("creating {} privately", keys_dir.display()))?;
 
     let secret_path = keys_dir.join(SECRET_FILENAME);
     let public_path = keys_dir.join(PUBLIC_FILENAME);

@@ -98,8 +98,9 @@ impl WitnessSink for FileWitnessSink {
             buf.push(b'\n');
         }
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating witness directory {}", parent.display()))?;
+            mvm_core::config::create_private_dir(parent).with_context(|| {
+                format!("creating witness directory {} privately", parent.display())
+            })?;
         }
         let mut file = std::fs::OpenOptions::new()
             .create(true)

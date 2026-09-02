@@ -65,11 +65,16 @@ pub(crate) fn lock_staging_path(ciphertext_path: &Path) -> PathBuf {
     ciphertext_path.with_extension("locking")
 }
 
+/// Create a volume directory with the whole chain under the mvm home private.
+///
+/// A second copy of this used to live here, chmodding only the leaf. That is
+/// the ancestor bug: `create_dir_all` makes every missing parent at the
+/// process umask, so `~/.mvm/volumes/<id>/ciphertext` could arrive with two
+/// world-readable directories above it holding the same encrypted state.
+/// Delegating keeps one implementation of the rule rather than two that drift.
 pub(crate) fn ensure_private_dir(path: &Path) -> Result<()> {
-    fs::create_dir_all(path).with_context(|| format!("creating {}", path.display()))?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-        .with_context(|| format!("chmod 0700 {}", path.display()))?;
-    Ok(())
+    mvm_core::config::create_private_dir(path)
+        .with_context(|| format!("creating {} privately", path.display()))
 }
 
 /// Volume-name shape check for creation: the name doubles as the virtio-fs
@@ -273,7 +278,7 @@ pub(crate) fn create_host_backed(
             root.display()
         );
     }
-    fs::create_dir_all(&root)
+    ensure_private_dir(&root)
         .with_context(|| format!("creating managed volume root {}", root.display()))?;
     probe.require_encrypted(&root)?;
 
@@ -284,7 +289,7 @@ pub(crate) fn create_host_backed(
             host_path.display()
         );
     }
-    fs::create_dir_all(&host_path)
+    ensure_private_dir(&host_path)
         .with_context(|| format!("creating managed volume {}", host_path.display()))?;
     probe.require_encrypted(&host_path)?;
 

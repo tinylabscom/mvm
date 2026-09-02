@@ -52,8 +52,8 @@ pub fn plan_path(vm_name: &str) -> Result<PathBuf> {
 /// wins). Overwrites any prior file.
 pub fn write_plan(vm_name: &str, plan: &ExecutionPlan) -> Result<PathBuf> {
     let dir = vm_state_dir(vm_name)?;
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating VM state dir {}", dir.display()))?;
+    mvm_core::config::create_private_dir(&dir)
+        .with_context(|| format!("creating VM state dir {} privately", dir.display()))?;
     let path = dir.join(PLAN_FILENAME);
 
     let bytes =

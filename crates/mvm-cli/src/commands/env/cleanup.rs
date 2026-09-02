@@ -437,8 +437,11 @@ fn selective_plan(data_root: &Path, cache_root: &Path, tier: Tier) -> CleanupPla
 
 /// The `--nuclear` plan: every entry under the mvm root, minus the
 /// identity material `--keep-identity` spares. The root directory
-/// itself survives so its 0700 mode cannot be re-established
-/// wrong by whichever command next calls `ensure_home_dir()`.
+/// itself survives so its 0700 mode cannot be re-established wrong by
+/// whichever command next writes under it. That used to name a helper
+/// which nothing called, so the re-establishment it described never
+/// happened; `mvm_core::config::create_private_dir` is what performs it
+/// now, on the whole chain, from any writer.
 ///
 /// This is deliberately defined by subtraction. The enumerated version
 /// it replaced named thirteen paths and therefore spared every state

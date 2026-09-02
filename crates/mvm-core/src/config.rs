@@ -128,43 +128,26 @@ pub fn mvm_home_strict() -> std::io::Result<std::path::PathBuf> {
     Ok(std::path::PathBuf::from(home).join(".mvm"))
 }
 
-/// Create `~/.mvm` (or whatever `mvm_home()` resolves to) with
-/// mode `0700` and return its path. Idempotent: if the dir already
-/// exists with looser perms, chmod it to `0700` so a host that was
-/// created before this lockdown still gets locked down on the next
-/// run.
-///
-/// `~/.mvm` holds the dev VM's GC root, the host-backed Nix store
-/// disk image, the per-VM `vsock.sock` proxy listener path, build
-/// artifacts in `dev/builds/<rev>/`, and (for production microVMs)
-/// any persisted volumes — every secret-shaped piece of state in
-/// the project. Defaulting to umask perms (typ. 0755) means a
-/// same-host other user can read all of it; this is the project's
-/// privacy boundary.
-#[cfg(unix)]
-pub fn ensure_home_dir() -> std::io::Result<String> {
-    let dir = mvm_home();
-    ensure_private_dir(&dir)?;
-    Ok(dir)
-}
+// `~/.mvm` holds the dev VM's GC root, the host-backed Nix store disk image,
+// the per-VM `vsock.sock` proxy listener path, build artifacts, the host
+// signing key, the audit chain, and every persisted volume. Defaulting to
+// umask perms (typically 0755) means a same-host other user can read all of
+// it; 0700 on the whole tree is the project's privacy boundary, and one of
+// the numbered security claims states exactly that.
+//
+// This used to be `ensure_home_dir` and `ensure_cache_dir`, one per root.
+// Both were correct and neither was ever called — two `pub fn`s asserting an
+// invariant that no code path established, while a comment elsewhere
+// described the repair as something that happened on the next command. What
+// replaced them is a single helper called at the seam where directories are
+// actually made, because that is also the only place the *ancestors* can be
+// got right.
 
-/// Create `~/.mvm/cache` (or wherever `mvm_cache_dir()` resolves to)
-/// with mode `0700`. Same rationale as `ensure_home_dir`. The cache
-/// holds the dev image kernel/rootfs, daemon stdout/stderr logs,
-/// and the GC sentinel — none of it is secret on its own, but the
-/// daemon logs *do* capture guest stdout, which can leak whatever
-/// the guest prints. Lock it down by default.
+/// Chmod one directory to `0700`, leaving it alone if it is already
+/// there. Split out so [`create_private_dir`] can walk a chain of them
+/// without re-deciding the policy at each step.
 #[cfg(unix)]
-pub fn ensure_cache_dir() -> std::io::Result<String> {
-    let dir = mvm_cache_dir();
-    ensure_private_dir(&dir)?;
-    Ok(dir)
-}
-
-/// Create `dir` (and parents) and chmod it to mode `0700`. Both the
-/// initial create and the chmod are idempotent.
-#[cfg(unix)]
-fn ensure_private_dir(dir: &str) -> std::io::Result<()> {
+fn chmod_private(dir: &std::path::Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::create_dir_all(dir)?;
     let mut perms = std::fs::metadata(dir)?.permissions();
@@ -173,6 +156,58 @@ fn ensure_private_dir(dir: &str) -> std::io::Result<()> {
         std::fs::set_permissions(dir, perms)?;
     }
     Ok(())
+}
+
+/// Create a directory under the mvm home, with every component from the
+/// home root down to the leaf at mode `0700`.
+///
+/// This is the only correct way to make a directory under `mvm_home()`, and
+/// the reason is `create_dir_all`'s ancestor behaviour: asked for
+/// `~/.mvm/cache/builder-vm/x86_64` it happily creates `cache` and
+/// `builder-vm` at the process umask — typically `0755` — and chmodding
+/// only the leaf leaves two world-readable directories above it holding the
+/// same state. The claimed posture is "`~/.mvm` **and every child**", so the
+/// leaf alone was never the invariant.
+///
+/// Existing components are repaired rather than skipped, which is what makes
+/// this fix a home that arrived loose: created by a bare `mkdir`, restored
+/// from an archive, or left behind by a build of this tree from before the
+/// helper existed. The first command that writes anything puts the whole
+/// chain right, so no separate startup pass — and no write on `--help` — is
+/// needed.
+///
+/// The target itself is always locked, wherever it is. Only the *ancestor*
+/// walk is confined to the home, because above the home the path stops being
+/// ours: chmodding `$HOME` or `/tmp` on the way to a directory inside them
+/// would be a side effect on someone else's property. A keys or audit
+/// directory relocated outside the home by a test seam or an explicit
+/// override is still a directory full of secrets, and gets the same mode it
+/// would have had inside.
+///
+/// This is for state mvm owns. Do not point it at a location the operator
+/// named — an `--out` export target — where quietly tightening the mode would
+/// be a surprise rather than a guarantee.
+#[cfg(unix)]
+pub fn create_private_dir(dir: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+    let dir = dir.as_ref();
+    let home = std::path::PathBuf::from(mvm_home());
+    let Ok(under_home) = dir.strip_prefix(&home) else {
+        return chmod_private(dir);
+    };
+
+    chmod_private(&home)?;
+    let mut walked = home;
+    for component in under_home.components() {
+        walked.push(component);
+        chmod_private(&walked)?;
+    }
+    Ok(())
+}
+
+/// Non-unix hosts get plain creation: there is no mode to set.
+#[cfg(not(unix))]
+pub fn create_private_dir(dir: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)
 }
 
 // ============================================================================
@@ -245,7 +280,7 @@ pub fn mvm_runtime_dir() -> String {
 #[cfg(unix)]
 pub fn ensure_runtime_dir() -> std::io::Result<String> {
     let dir = mvm_runtime_dir();
-    ensure_private_dir(&dir)?;
+    create_private_dir(&dir)?;
     Ok(dir)
 }
 
@@ -1520,18 +1555,27 @@ mod tests {
         assert_eq!(vms_dir(), std::path::PathBuf::from("/home/user/.mvm/vms"));
     }
 
-    /// `ensure_home_dir` / `ensure_cache_dir` create their
-    /// directories with mode 0700, AND chmod existing dirs
-    /// with looser perms down to 0700 — that's the upgrade path
-    /// for hosts created before this change landed.
+    /// Every component from the home root down is 0700, including a root
+    /// that already existed with looser perms.
+    ///
+    /// The ancestor half is the point. `create_dir_all` makes each missing
+    /// parent at the process umask, so a helper that chmodded only the leaf
+    /// left `~/.mvm` and `~/.mvm/audit` world-traversable while the tight
+    /// mode on `<tenant>/` made it look handled — and the leaf is the one
+    /// component the mode does not need to be on, since traversal is denied
+    /// at the first ancestor that refuses it.
+    ///
+    /// The loose-root half is the upgrade path: a home created by a bare
+    /// `mkdir`, restored from an archive, or left by an older build is
+    /// repaired by the first command that writes, which is what replaces the
+    /// startup pass this project never had.
     #[cfg(unix)]
     #[test]
-    fn test_ensure_private_dir_locks_existing_loose_perms() {
+    fn create_private_dir_locks_every_component_including_a_pre_existing_loose_root() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        // Pick a stable temp path; tests share env-var state so we
-        // serialise via a unique-id suffix.
-        let temp = format!(
+        let mut env = TestEnv::new();
+        let home = format!(
             "/tmp/mvm-private-dir-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
@@ -1539,20 +1583,88 @@ mod tests {
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         );
-        std::fs::create_dir_all(&temp).expect("create temp");
-        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755))
+        env.set("MVM_HOME", &home);
+
+        // The exact starting state the CI runner was in: a home that already
+        // exists, world-readable, made by something that was not us.
+        std::fs::create_dir_all(&home).expect("create home");
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755))
             .expect("loosen for setup");
 
-        ensure_private_dir(&temp).expect("ensure_private_dir");
+        let leaf = std::path::Path::new(&home).join("audit").join("acme");
+        create_private_dir(&leaf).expect("create_private_dir");
 
-        let mode = std::fs::metadata(&temp)
-            .expect("temp exists")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o700, "expected 0700, got 0{:o}", mode);
+        let mode_of = |p: &std::path::Path| {
+            std::fs::metadata(p)
+                .unwrap_or_else(|e| panic!("stat {}: {e}", p.display()))
+                .permissions()
+                .mode()
+                & 0o777
+        };
 
-        let _ = std::fs::remove_dir_all(&temp);
+        for dir in [
+            std::path::Path::new(&home),
+            &std::path::Path::new(&home).join("audit"),
+            &leaf,
+        ] {
+            assert_eq!(
+                mode_of(dir),
+                0o700,
+                "expected 0700 on {}, got 0{:o}",
+                dir.display(),
+                mode_of(dir)
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A target outside the home is still locked; its ancestors are not.
+    ///
+    /// Both halves matter. A keys or audit directory relocated by a test seam
+    /// or an explicit override is still full of secrets, so skipping the mode
+    /// because the path sits elsewhere would quietly downgrade exactly the
+    /// directories this exists for — which is what a first cut of this did,
+    /// and two mode assertions in `mvm-hostd` caught it. Walking *up* is the
+    /// opposite error: chmodding `/tmp` on the way to a directory inside it
+    /// would be a side effect on something that is not ours.
+    #[cfg(unix)]
+    #[test]
+    fn create_private_dir_locks_a_target_outside_the_home_but_not_its_parents() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mut env = TestEnv::new();
+        let home = format!("/tmp/mvm-private-home-{}", std::process::id());
+        env.set("MVM_HOME", &home);
+
+        let parent = format!("/tmp/mvm-private-outside-{}", std::process::id());
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&parent).expect("create parent");
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755))
+            .expect("loosen parent");
+
+        let target = std::path::Path::new(&parent).join("keys");
+        create_private_dir(&target).expect("create_private_dir outside the home");
+
+        let mode_of = |p: &std::path::Path| {
+            std::fs::metadata(p)
+                .unwrap_or_else(|e| panic!("stat {}: {e}", p.display()))
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        assert_eq!(
+            mode_of(&target),
+            0o700,
+            "a secret-bearing directory is locked wherever it lives"
+        );
+        assert_eq!(
+            mode_of(std::path::Path::new(&parent)),
+            0o755,
+            "a directory above the target is not ours to tighten"
+        );
+
+        let _ = std::fs::remove_dir_all(&parent);
     }
 
     #[test]

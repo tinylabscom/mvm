@@ -60,15 +60,8 @@ impl ReceiptStore {
     /// `audit_dir`.
     pub fn open(audit_dir: &Path, tenant: &str) -> Result<Self> {
         let tenant_dir = audit_dir.join("receipts").join(tenant);
-        std::fs::create_dir_all(&tenant_dir)
-            .with_context(|| format!("creating receipt dir {}", tenant_dir.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o700);
-            std::fs::set_permissions(&tenant_dir, perms)
-                .with_context(|| format!("setting 0700 on {}", tenant_dir.display()))?;
-        }
+        mvm_core::config::create_private_dir(&tenant_dir)
+            .with_context(|| format!("creating receipt dir {} privately", tenant_dir.display()))?;
         let lock_path = tenant_dir.join(".lock");
         let head_path = tenant_dir.join("head.json");
         Ok(Self {
