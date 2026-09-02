@@ -14,7 +14,8 @@ The runtime is language-agnostic. Python and TypeScript SDKs are authoring surfa
 
 Example command entrypoint in Workload IR authoring:
 
-```rust
+```rust,ignore
+// illustrative: one builder call shown on its own, without the surrounding workload
 entrypoint_command(["bash", "-lc", "your-runtime your-program"])
 ```
 

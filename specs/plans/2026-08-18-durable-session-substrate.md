@@ -756,7 +756,12 @@ their absence as an oversight:
 - D3 park path, `ParkReason`, quiesce sequencing (spec WS3).
 - D5 `resume_session`, incremental ledger-head verification, fresh-plan
   synthesis (spec WS4).
-- D4 retention ladder enforcement and the first GC over `checkpoints_dir()`
-  (spec WS5). Task 2's `SessionBinding` and Task 4's `parent_checkpoint` are
-  what a later GC reads to refuse reaping a referenced checkpoint.
+- D4 retention ladder enforcement and teaching the existing `checkpoints_dir()`
+  sweep about sessions (spec WS5; the sweep itself, `sweep_untagged_checkpoints`
+  in `crates/mvm-cli/src/commands/ops/cache.rs`, predates this branch — it is
+  not new). Task 2's `SessionBinding` and Task 4's `parent_checkpoint` are
+  what a later GC reads to refuse reaping a referenced checkpoint. Delivered
+  by `specs/plans/2026-08-18-session-retention.md`, which also adds the
+  one-way `demote` transition; retention classes, expiry, and a scheduler
+  that calls `demote` remain undelivered.
 - CLI surface (spec WS6), chain records (spec WS7), BDD scenarios (spec WS8).

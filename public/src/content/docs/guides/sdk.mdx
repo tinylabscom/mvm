@@ -55,7 +55,7 @@ echo '[[], {"name":"ari"}]' | mvmctl machine run --entrypoint --flake /tmp/hello
 <TabItem label="TypeScript">
 
 ```ts
-import * as mvm from "mvm-sdk";
+import * as mvm from "@runmvm/mvm";
 
 export const greet = mvm.app({
   name: "hello-app",
@@ -91,9 +91,9 @@ recognizes. Anything else in decorator kwarg position is rejected:
 | `python_image(python=)` | `Image::NixPackages`     | `python="3.12"` → `python312` nix attribute    |
 | `node_image(node=)`     | `Image::NixPackages`     | `node="22"` → `nodejs_22` nix attribute        |
 | `nix_packages([...])`   | `Image::NixPackages`     | direct passthrough                             |
-| `resources(...)`        | `Resources`              | `cpu`/`memory_mb`/`rootfs_size_mb`             |
+| `resources(...)`        | `Resources`              | Python: `cpu_cores`/`memory_mb`/`rootfs_size_mb`, all required. TypeScript also accepts `cpu` and defaults all three. |
 | `network(mode=, ports=)`| `Network`                | `none` \| `bridge` \| `host`                   |
-| `secret(name, var=)`    | `EnvValue::SecretRef`    | host-mediated secret ref; guest sees opaque token only |
+| `secret(name, type=, hosts=, var=)` | `EnvValue::SecretRef` | host-mediated secret ref; `type` and `hosts` are required, `var` defaults to `name` |
 | `literal(value)`        | `EnvValue::Literal`      | parity with `secret(...)`                      |
 | `hook(cmd)`             | `HookCmd`                | str → Shell; list → Argv                       |
 
@@ -129,7 +129,9 @@ value.
   value.
 - The raw secret stays on the host side.
 - Request-time release is supported only on host-mediated outbound
-  surfaces such as `mvm.web_fetch` and `mvm.web_search`.
+  surfaces such as the `mvm.web_fetch` and `mvm.web_search` broker verbs.
+  Those are host-side broker tool names, not functions exported by the
+  Python or TypeScript SDK.
 - Guest HTTPS CONNECT egress is not a managed-secret substitution
   path.
 
@@ -138,7 +140,7 @@ value.
 `mvmctl build compile app.ts` walks the AST statically for `mvm.app({...})`
 calls and does not run user code. When a `.ts` script uses the
 record-mode `Sandbox` API instead (no `mvm.app` decorator), `mvmctl
-compile` falls back to **auto-run**: it spawns the script on the host
+build compile` falls back to **auto-run**: it spawns the script on the host
 with `MVM_SDK_MODE=record` set, and the SDK's atexit hook writes a
 recording JSON that the CLI then lowers into a `Workload`.
 
@@ -165,7 +167,7 @@ npm install --save-dev tsx
 ```
 
 That puts the binary at `./node_modules/.bin/tsx`, and `mvmctl
-compile` picks it up automatically — see the resolution order below.
+build compile` picks it up automatically — see the resolution order below.
 
 ### Resolution order
 

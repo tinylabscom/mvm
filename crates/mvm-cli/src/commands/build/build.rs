@@ -282,7 +282,10 @@ fn build_manifest(
         ui::step(2, 2, "Build complete");
         ui::info(&format!("  Slot:     {}", persisted.manifest_hash));
         ui::info(&format!("  Revision: {}", revision.revision_hash));
-        ui::info(&format!("\nRun with: mvmctl up {}", canonical.display()));
+        ui::info(&format!(
+            "\nRun with: mvmctl machine run --manifest {}",
+            canonical.display()
+        ));
     }
 
     Ok(())
@@ -401,7 +404,6 @@ fn build_mvmfile(path: &str, output: Option<&str>) -> Result<()> {
     };
     audit_build_ok("mvmfile", path, "", &elf_path);
     ui::success(&format!("\nImage ready: {}", elf_path));
-    ui::info(&format!("Run with: mvmctl start {}", elf_path));
     Ok(())
 }
 

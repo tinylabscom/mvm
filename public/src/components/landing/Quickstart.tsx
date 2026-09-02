@@ -31,7 +31,7 @@ function TerminalAnimation() {
   }, []);
 
   return (
-    <div className="w-full overflow-hidden rounded-xl border border-code-border bg-code-canvas shadow-2xl shadow-black/30">
+    <div className="w-full overflow-hidden rounded-xl border border-code-border bg-code-canvas shadow-lg shadow-black/20">
       <div className="flex items-center gap-2 border-b border-code-border bg-code-header px-4 py-3">
         <span className="h-3 w-3 rounded-full bg-dot-close/80" />
         <span className="h-3 w-3 rounded-full bg-dot-minimize/80" />
@@ -75,7 +75,7 @@ export function Quickstart() {
         <div className="lg:sticky lg:top-32">
           <Reveal>
             <Eyebrow>Quickstart</Eyebrow>
-            <h2 className="max-w-sm lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
+            <h2 className="max-w-sm lowercase font-display tracking-tight text-2xl font-semibold leading-tight text-title sm:text-3xl">
               file in.
               <br />
               running microVM out.

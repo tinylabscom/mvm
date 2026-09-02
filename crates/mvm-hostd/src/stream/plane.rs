@@ -69,9 +69,13 @@ use mvm_core::transcript::{
 use mvm_core::util::atomic_io::atomic_write;
 use mvm_runtime::workload_runner::{ConsoleCapture, ConsoleStreamer};
 
+use crate::audit::emitter::AuditEmitter;
+use crate::audit::host_keypair;
+use crate::audit::plan_persist;
 use crate::stream::broker::{StreamBroker, StreamCaptureIdentity, stream_capture_config};
 use crate::stream::console_source::{ConsoleSource, ConsoleSourceHandle, SharedBroker};
 use crate::stream::entrypoint_source::EntrypointSink;
+use crate::stream::fanout::ReaderHandle;
 use crate::stream::input_gate::InputRefusal;
 use crate::stream::input_route::{InputRoute, InputRouteError, InputTransport, WireSequence};
 use crate::stream::journal;
@@ -159,6 +163,22 @@ impl StreamPlane {
         let mut names: Vec<String> = self.registry().keys().cloned().collect();
         names.sort();
         names
+    }
+
+    /// Subscribe to the redacted output of a VM this plane owns.
+    ///
+    /// Returns `None` for every absent source. Authorization and binding
+    /// resolution belong to the fleet caller; this method deliberately does
+    /// not expose why a name failed to resolve. A successful subscription is
+    /// recorded by the broker in the source workload's chain-signed audit
+    /// log.
+    pub fn subscribe(&self, vm: &str) -> Option<ReaderHandle> {
+        let broker = {
+            let registry = self.registry();
+            Arc::clone(&registry.get(vm)?.broker)
+        };
+        let mut broker = broker.lock().unwrap_or_else(PoisonError::into_inner);
+        Some(broker.subscribe())
     }
 
     /// Stand up `vm`'s capture under `redaction` and start following its
@@ -648,6 +668,76 @@ fn seal_capture(vm: &str, stream: VmStream) {
             error = %format!("{error:#}"),
             "output transcript could not be sealed; recorded output for this run is unreadable"
         );
+        return;
+    }
+    anchor_sealed_transcript(vm, &manifest);
+}
+
+/// Bind a sealed transcript's ciphertext-manifest root into the host audit
+/// chain, so the chain-signed log commits to the recorded output and not only
+/// to the control-plane events around it.
+///
+/// **Only the root crosses.** The chain carries no payload bytes and no
+/// plaintext digest by construction; what lands here is the same
+/// authenticated root a reader verifies before decrypting anything, which is
+/// enough to detect a substituted transcript and nothing more.
+///
+/// **Best-effort, and loud when it fails.** A workload that ran must not fail
+/// its teardown because the chain could not be written, but an unanchored
+/// transcript is a real gap in the evidence: it stays verifiable on its own
+/// terms and is no longer tied to the run that produced it. So every arm
+/// warns rather than returning, and none of them is silent.
+///
+/// **No signer is minted here.** Teardown loads the host signer that admitted
+/// the run; it never creates one. A host with no signer never admitted a plan
+/// under it, so there is no chain this transcript belongs in.
+fn anchor_sealed_transcript(vm: &str, manifest: &TranscriptManifest) {
+    let plan = match plan_persist::read_plan(vm) {
+        Ok(plan) => plan,
+        Err(error) => {
+            tracing::warn!(
+                vm = %vm,
+                error = %format!("{error:#}"),
+                "no admitted plan for this workload; its sealed transcript is not anchored in                  the audit chain"
+            );
+            return;
+        }
+    };
+    let keys_dir = mvm_core::config::mvm_keys_dir();
+    if !keys_dir.join(host_keypair::SECRET_FILENAME).exists() {
+        tracing::warn!(
+            vm = %vm,
+            "no host signer on this host; the sealed transcript is not anchored in the audit chain"
+        );
+        return;
+    }
+    let signer = match host_keypair::load_or_init_at(&keys_dir) {
+        Ok(signer) => signer,
+        Err(error) => {
+            tracing::warn!(
+                vm = %vm,
+                error = %format!("{error:#}"),
+                "the host signer could not be loaded; the sealed transcript is not anchored in                  the audit chain"
+            );
+            return;
+        }
+    };
+    let emitted = AuditEmitter::new(signer.signing).and_then(|emitter| {
+        emitter.emit_transcript_sealed(
+            &plan,
+            &manifest.capture_id,
+            &manifest.binding.vm_name,
+            &manifest.sealed_root_hex,
+            manifest.chunks.len(),
+            manifest.adopted,
+        )
+    });
+    if let Err(error) = emitted {
+        tracing::warn!(
+            vm = %vm,
+            error = %format!("{error:#}"),
+            "the sealed transcript could not be anchored in the audit chain; its recorded              output is still verifiable on its own but is no longer bound to this run"
+        );
     }
 }
 
@@ -711,6 +801,7 @@ fn adopt_capture(vm: &str) {
                 "sealed the transcript of a workload this process did not start; it is marked \
                  as an incomplete record because the capturing process is gone"
             );
+            anchor_sealed_transcript(vm, &replayed.manifest);
         }
         Ok(false) => tracing::debug!(
             vm = %vm,
@@ -983,6 +1074,9 @@ mod tests {
         assert!(config::vm_stream_socket("plane-vm").exists());
 
         let follower = Follower::attach("plane-vm");
+        let mut edge_reader = plane
+            .subscribe("plane-vm")
+            .expect("an attached VM is subscribable");
         assert_eq!(follower.availability, StreamAvailability::LiveOnly);
 
         std::fs::write(&console, b"from the console\n").expect("write the console capture");
@@ -993,6 +1087,17 @@ mod tests {
             record.origin
         );
         assert_eq!(record.payload, b"from the console\n");
+        assert_eq!(
+            edge_reader
+                .recv()
+                .expect("the edge reader saw the frame")
+                .payload,
+            b"from the console\n"
+        );
+        assert!(
+            plane.subscribe("not-attached").is_none(),
+            "all absent sources have the same result"
+        );
 
         plane.release("plane-vm");
     }
@@ -1306,6 +1411,109 @@ mod tests {
         }
         std::thread::sleep(ACCEPT_SETTLE);
         drop(plane);
+    }
+
+    /// Stand up what an anchor needs: a host signer and the admitted plan the
+    /// run was launched under, both where the seal path looks for them.
+    fn admitted_plan_for(vm: &str) -> mvm_core::plan::ExecutionPlan {
+        host_keypair::load_or_init_at(&mvm_core::config::mvm_keys_dir())
+            .expect("mint a host signer under the isolated home");
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("local")
+            .plan_id("plane-anchor-plan")
+            .build();
+        plan_persist::write_plan(vm, &plan).expect("persist the admitted plan");
+        plan
+    }
+
+    fn chain_entries(tenant: &str) -> Vec<serde_json::Value> {
+        let dir = crate::audit::emitter::default_audit_dir().expect("audit dir");
+        let path = crate::audit::emitter::audit_path_for_tenant(&dir, tenant);
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            return Vec::new();
+        };
+        content
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_str(l).expect("an audit line is JSON"))
+            .collect()
+    }
+
+    /// The chain stores each entry inside a `SignedEnvelope`; anchors are
+    /// returned unwrapped so a caller reads labels off the entry itself.
+    fn transcript_anchors(tenant: &str) -> Vec<serde_json::Value> {
+        chain_entries(tenant)
+            .into_iter()
+            .map(|e| e["entry"].clone())
+            .filter(|e| e["event"] == crate::supervisor::audit::TRANSCRIPT_SEALED_EVENT)
+            .collect()
+    }
+
+    #[test]
+    fn sealing_a_transcript_anchors_its_root_in_the_audit_chain() {
+        // Without this the chain commits to the control-plane events around a
+        // run and to nothing the workload actually produced: the transcript
+        // stays verifiable on its own terms and unbound to the run.
+        let (_env, _tmp) = isolated_home();
+        let vm = "plane-anchored";
+        admitted_plan_for(vm);
+
+        let console = console_log_for(vm);
+        let plane = StreamPlane::new();
+        plane.attach(&capture(vm, &console)).expect("attach");
+        std::fs::write(&console, b"work happened\n").expect("write console");
+        std::thread::sleep(ACCEPT_SETTLE);
+        plane.release(vm);
+
+        let manifest = manifest_of(vm).expect("the capture sealed");
+        let anchors = transcript_anchors("local");
+        assert_eq!(anchors.len(), 1, "exactly one anchor per sealed capture");
+
+        let labels = &anchors[0]["labels"];
+        assert_eq!(
+            labels[crate::supervisor::audit::LABEL_TRANSCRIPT_ROOT],
+            manifest.sealed_root_hex,
+            "the anchored root must be the root a reader verifies"
+        );
+        assert_eq!(labels[crate::supervisor::audit::LABEL_ADOPTED], "false");
+
+        // The whole point of anchoring a ciphertext root: no payload reaches
+        // the chain. A byte the workload printed must not appear in any entry.
+        let raw = serde_json::to_string(&chain_entries("local")).expect("serialize");
+        assert!(
+            !raw.contains("work happened"),
+            "captured output must never reach the audit chain"
+        );
+    }
+
+    #[test]
+    fn an_adopted_seal_anchors_itself_as_an_incomplete_record() {
+        // A rebuilt seal is a floor, not a full account. Anchoring it as
+        // though its writer produced it would write a wrong entry rather than
+        // leave a missing one.
+        let (_env, _tmp) = isolated_home();
+        let vm = "plane-anchored-adopted";
+        admitted_plan_for(vm);
+
+        let console = console_log_for(vm);
+        detached_start(vm, &console, b"nobody was watching\n");
+        assert_eq!(manifest_of(vm), None, "the fixture leaves it unsealed");
+        assert!(
+            transcript_anchors("local").is_empty(),
+            "an unsealed capture has nothing to anchor"
+        );
+
+        StreamPlane::new().release(vm);
+
+        let manifest = manifest_of(vm).expect("the adopted seal wrote a manifest");
+        assert!(manifest.adopted);
+        let anchors = transcript_anchors("local");
+        assert_eq!(anchors.len(), 1);
+        assert_eq!(
+            anchors[0]["labels"][crate::supervisor::audit::LABEL_ADOPTED],
+            "true",
+            "an adopted seal must be distinguishable in the chain"
+        );
     }
 
     #[test]

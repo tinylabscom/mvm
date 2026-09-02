@@ -139,8 +139,79 @@ in
 # exits at boot → kernel panic. `null` (the default) keeps the legacy
 # single-file behaviour: PID 1 runs `/etc/mvm/entrypoint`.
 , bootCommand    ? null
+# Declared-but-unenforced surface. `mvmctl generate template` emits
+# `healthChecks` into its app/web/postgres/worker scaffolds and the mkGuest
+# guide teaches all three, but the multi-service supervisor they depend on is
+# still the stub below (`entrypointKind == "services"`). Rejecting them made
+# every scaffolded project fail to evaluate; accepting them silently would be
+# worse, so they are recorded in `passthru.mvm` and warned about at eval time.
+# When the supervisor lands, wire these in and drop the warning — the
+# conformance suite fails if the docs still call them unimplemented.
+, healthChecks   ? { }
+, volumeMounts   ? { }
+, serviceGroup   ? null
 }:
 let
+  # Shape checks. `healthChecks` is consumed (rendered into the guest's probe
+  # drop-in directory below); the rest are recorded only, so a typo in them
+  # would otherwise be invisible.
+  declaredButUnenforced =
+    (if builtins.isAttrs healthChecks then [ ] else throw "mkGuest: healthChecks must be an attribute set")
+    ++ (if builtins.isAttrs volumeMounts then [ ] else throw "mkGuest: volumeMounts must be an attribute set")
+    ++ (if serviceGroup == null || builtins.isString serviceGroup then [ ] else throw "mkGuest: serviceGroup must be a string or null");
+
+  # `healthChecks.<name> = { healthCmd; healthIntervalSecs?; healthTimeoutSecs?; }`
+  # becomes one `/etc/mvm/probes.d/<name>.json` drop-in per check.
+  #
+  # The guest agent already scans that directory at boot and runs each entry on
+  # its own interval (`probes::load_probe_dropin_dir`, then `probe_health_loop`),
+  # serving the results back over vsock as `ProbeStatus`. Every piece of that
+  # existed; nothing wrote the drop-ins, so the directory was always empty and a
+  # declared health check did nothing at all. This is the missing link.
+  probeDropIns = lib.mapAttrs'
+    (checkName: check:
+      let
+        cmd =
+          if check ? healthCmd then check.healthCmd
+          else throw "mkGuest: healthChecks.${checkName} must set `healthCmd`";
+        interval = if check ? healthIntervalSecs then check.healthIntervalSecs else 30;
+        timeout = if check ? healthTimeoutSecs then check.healthTimeoutSecs else 10;
+      in
+      lib.nameValuePair "/etc/mvm/probes.d/${checkName}.json" {
+        content = builtins.toJSON {
+          name = checkName;
+          inherit cmd;
+          interval_secs = interval;
+          timeout_secs = timeout;
+          output_format = "exit_code";
+        };
+        mode = "0444";
+      })
+    healthChecks;
+
+  # The caller's own files win: a flake that hand-writes a drop-in for the same
+  # path meant to, and silently replacing it would be worse than the collision.
+  extraFilesWithProbes = probeDropIns // extraFiles;
+
+  unenforcedNames =
+    (if services == { } then [ ] else [ "services" ])
+    ++ (if volumeMounts == { } then [ ] else [ "volumeMounts" ])
+    ++ (if serviceGroup == null then [ ] else [ "serviceGroup" ]);
+
+  # `seq` on the validation first: a shape error must surface regardless of
+  # which thunk the evaluator happens to force earliest, not only when some
+  # later binding drags it in.
+  warnUnenforced = value:
+    builtins.seq declaredButUnenforced (
+    if unenforcedNames == [ ] then
+      value
+    else
+      builtins.trace
+        ("mkGuest: ${builtins.concatStringsSep ", " unenforcedNames} "
+          + "declared but NOT enforced — the multi-service supervisor is not wired yet. "
+          + "The values are recorded in passthru.mvm for the host; nothing acts on them.")
+        value);
+
   entrypointKind = classifyEntrypoint entrypoint;
   isDev =
     if dev == null then entrypointKind == "shell"
@@ -153,7 +224,7 @@ let
 
   extraFileLabel = path:
     let
-      rawSpec = extraFiles.${path};
+      rawSpec = extraFilesWithProbes.${path};
       spec =
         if builtins.isString rawSpec then { source = rawSpec; }
         else rawSpec;
@@ -165,13 +236,13 @@ let
   extraFileSourceRoots = lib.filter (source: source != "") (map
     (path:
       let
-        rawSpec = extraFiles.${path};
+        rawSpec = extraFilesWithProbes.${path};
         spec =
           if builtins.isString rawSpec then { source = rawSpec; }
           else rawSpec;
       in
       if spec ? source then spec.source else "")
-    (lib.attrNames extraFiles));
+    (lib.attrNames extraFilesWithProbes));
 
   sshClosureInfo = pkgs.closureInfo {
     rootPaths = packages ++ extraFileSourceRoots;
@@ -190,7 +261,7 @@ let
   assertNoSshTemplateInputs =
     let
       badPackages = lib.filter (pkg: containsSshMarker (packageLabel pkg)) packages;
-      badFiles = lib.filter (path: containsSshMarker (extraFileLabel path)) (lib.attrNames extraFiles);
+      badFiles = lib.filter (path: containsSshMarker (extraFileLabel path)) (lib.attrNames extraFilesWithProbes);
       badPackageNames = map (pkg: packageLabel pkg) badPackages;
       badFileNames = map (path: path) badFiles;
     in
@@ -230,6 +301,7 @@ let
   # util-linux setpriv closure while preserving the exact privilege flags
   # emitted by the generated init script.
   setprivPkg = import ../packages/mvm-setpriv.nix {
+    inherit pkgs;
     rustPlatform = pkgs.pkgsStatic.rustPlatform;
     lib = pkgs.lib;
     inherit mvmSrc;
@@ -277,6 +349,17 @@ let
   # Per-service derived gids come later; for now we keep it simple.
   agentUid = resolvedUids.agent;
   entrypointUid = resolvedUids.entrypoint;
+  # Dedicated owner for the root-provisioned FlowMux signing key. It must not
+  # overlap the workload, agent, or optional builder: only the egress service
+  # may read the 0400 key after init drops its mount privilege.
+  egressUid = 989;
+  assertDedicatedEgressUid =
+    if egressUid == 0
+      || egressUid == agentUid
+      || egressUid == entrypointUid
+      || (builderUid != null && egressUid == builderUid)
+    then throw "mkGuest: uid 989 is reserved for the FlowMux egress service"
+    else true;
 
   # Wrap a command-line in `setpriv` when the target uid is non-zero.
   #
@@ -323,16 +406,33 @@ let
   # The full /etc/mvm/entrypoint body. For shell + command forms,
   # setpriv-wrap as appropriate. For services (still stubbed),
   # bail out with a clear note + recovery shell.
+  #
+  # The entrypoint is invoked both by PID 1 (as root) and by the guest
+  # agent (as the agent uid). When already non-root, skip the setpriv
+  # drop: the agent has already applied the desired isolation and no
+  # longer holds CAP_SETGID, so a second setpriv would fail on
+  # setgroups(clear). PID 1 still uses the explicit drop to enforce the
+  # entrypoint uid.
   entrypointCmd =
     if entrypointKind == "services" then
       ''
         echo "mkGuest: entrypoint.services is not yet wired in this iteration"
         echo "  (W5.2 ports the multi-service supervisor binary)"
         echo "  Falling through to a recovery shell for triage."
-        ${setprivWrap entrypointUid "/bin/sh -i"}
+        if [ "$(/bin/busybox id -u)" -eq 0 ]; then
+          ${setprivWrap entrypointUid "/bin/sh -i"}
+        else
+          /bin/sh -i
+        fi
       ''
     else
-      "${setprivWrap entrypointUid rawEntrypointCmd}";
+      ''
+        if [ "$(/bin/busybox id -u)" -eq 0 ]; then
+          ${setprivWrap entrypointUid rawEntrypointCmd}
+        else
+          ${rawEntrypointCmd}
+        fi
+      '';
 
   # /init — our PID 1. Pure POSIX shell; busybox provides every
   # utility used here. Boot-time-critical path so kept terse and
@@ -415,9 +515,10 @@ let
       /bin/busybox modprobe vmw_vsock_virtio_transport 2>/dev/null || true
     fi
 
-    # Stage 2.27 — bring up the loopback interface. The kernel creates `lo`
-    # administratively DOWN; nothing else in this init ups it, so `127.0.0.1`
-    # has no route and ANY guest-internal loopback service is unreachable
+    # Stage 2.27 — configure the loopback interface. The kernel creates `lo`
+    # administratively DOWN and without an IPv4 address; merely raising the
+    # link still leaves `127.0.0.1` unavailable, so ANY guest-internal
+    # loopback service is unreachable
     # (`connect()` → ENETUNREACH) — the egress forward proxy on
     # 127.0.0.1:18080, the in-guest addon-dns resolver, and any local service a
     # workload binds. Must run before the agent (which binds the forward proxy)
@@ -425,9 +526,11 @@ let
     # busybox applets in the defconfig this image already relies on for
     # `modprobe`. Non-fatal: a failure logs and leaves loopback down (the prior
     # behaviour), never wedges PID 1.
-    /bin/busybox ip link set lo up 2>/dev/null \
-      || /bin/busybox ifconfig lo up 2>/dev/null \
-      || echo "mvm-init: WARNING could not bring up loopback (no ip/ifconfig applet); guest-internal loopback (egress forward proxy, addon-dns) will be unreachable"
+    if ! /bin/busybox ip addr replace 127.0.0.1/8 dev lo 2>/dev/null \
+      || ! /bin/busybox ip link set lo up 2>/dev/null; then
+      /bin/busybox ifconfig lo 127.0.0.1 netmask 255.0.0.0 up 2>/dev/null \
+        || echo "mvm-init: WARNING could not configure loopback (no ip/ifconfig applet); guest-internal loopback (egress forward proxy, addon-dns) will be unreachable"
+    fi
 
     # Stage 2.45 — mount the optional config/secrets drives. The host uses a
     # deterministic block order: vdb=config, vdc=secrets. These mounts are
@@ -619,12 +722,10 @@ let
       echo "mvm-init: provisioned verb-grant"
     fi
 
-    # The per-boot FlowMux identity is NOT provisioned here. The host attaches
-    # it as a small read-only ext4 drive labelled `mvm-identity`, and
-    # `mvm-egress-client` mounts it itself before loading its keys -- one
-    # implementation, in Rust, shared by every guest tier. Doing it here too
-    # would mean a second copy of the superblock-label probe written in shell,
-    # against busybox applets this image does not otherwise use.
+    # The per-boot FlowMux identity is provisioned after the runtime overlay is
+    # mounted and its Rust helper is resolved. The mount stays in one Rust
+    # implementation; the shell only orders that short privileged action before
+    # the long-lived service drops to its dedicated uid.
 
     # Stage 2.476 — declared runtime-source policy. The host carries
     # the per-boot runtime contract on the kernel cmdline; when
@@ -808,7 +909,19 @@ let
     elif [ -x /usr/local/bin/mvm-egress-client ]; then
       MVM_EGRESS_CLIENT_BIN=/usr/local/bin/mvm-egress-client
     fi
+    if [ -n "$MVM_EGRESS_CLIENT_BIN" ]; then
+      if [ -n "''${MVM_VSOCK_EGRESS:-}" ]; then
+        MVM_IDENTITY_PROVISION_COMMAND=provision-identity-for
+      else
+        MVM_IDENTITY_PROVISION_COMMAND=provision-identity-for-if-present
+      fi
+      if ! "$MVM_EGRESS_CLIENT_BIN" "$MVM_IDENTITY_PROVISION_COMMAND" ${toString egressUid}; then
+        echo "mvm-init: failed to provision FlowMux identity for the egress service"
+        exit 1
+      fi
+    fi
     if [ -n "''${MVM_VSOCK_EGRESS:-}" ] && [ -n "$MVM_EGRESS_CLIENT_BIN" ]; then
+      /bin/busybox ip addr replace 127.0.0.1/8 dev lo 2>/dev/null || true
       /bin/busybox ip link set lo up 2>/dev/null || true
       /bin/busybox mkdir -p /run/mvm
       printf 'nameserver 127.0.0.1\n' > /run/mvm/resolv.conf
@@ -820,7 +933,7 @@ let
         /bin/busybox cp /run/mvm/resolv.conf /etc/resolv.conf
       fi
       /bin/busybox setsid ${setpriv} \
-        --reuid=${toString agentUid} --regid=${toString agentUid} \
+        --reuid=${toString egressUid} --regid=${toString egressUid} \
         --clear-groups --no-new-privs \
         --inh-caps=+net_bind_service --ambient-caps=+net_bind_service \
         -- "$MVM_EGRESS_CLIENT_BIN" &
@@ -829,6 +942,35 @@ let
       export HTTPS_PROXY="$ALL_PROXY"
       export http_proxy="$ALL_PROXY"
       export https_proxy="$ALL_PROXY"
+    fi
+
+    # Stage 2.49 — loopback forward proxy for secret-bearing egress. Started
+    # unconditionally and, unlike every other helper here, as root: relaying
+    # opens an authenticated FlowMux session, which reads the root-only guest
+    # signing key. The workload must not be able to read that key, so the
+    # process that must cannot be the workload's own uid.
+    #
+    # Not gated on MVM_VSOCK_EGRESS. That token is *off* for exactly the
+    # launches that need this: a secret-bearing workload's egress goes through
+    # the host substitution endpoint, so its guest starts no vsock egress
+    # client and this listener is the whole of its egress. A workload with no
+    # placeholders has no HTTP_PROXY pointed here and it sees no connections.
+    MVM_FORWARD_PROXY_BIN=
+    if [ "$MVM_RUNTIME_SOURCE_POLICY" = rootfs_only ]; then
+      if [ -x /usr/local/bin/mvm-forward-proxy ]; then
+        MVM_FORWARD_PROXY_BIN=/usr/local/bin/mvm-forward-proxy
+      fi
+    elif [ -x /mvm/runtime/forward-proxy ]; then
+      MVM_FORWARD_PROXY_BIN=/mvm/runtime/forward-proxy
+    elif [ -x /usr/local/bin/mvm-forward-proxy ]; then
+      MVM_FORWARD_PROXY_BIN=/usr/local/bin/mvm-forward-proxy
+    fi
+    if [ -n "$MVM_FORWARD_PROXY_BIN" ]; then
+      /bin/busybox ip addr replace 127.0.0.1/8 dev lo 2>/dev/null || true
+      /bin/busybox ip link set lo up 2>/dev/null || true
+      /bin/busybox setsid "$MVM_FORWARD_PROXY_BIN" &
+    else
+      echo "mvm-init: no forward proxy resolved; secret-bearing egress has nothing to relay through"
     fi
 
     # Stage 2.5 — guest agent supervisor. Fork the agent into
@@ -840,7 +982,7 @@ let
     # agent shows up in `mvmctl status`.
     #
     # The agent rides the runtime overlay: on a verity boot
-    # `mvm-verity-init` bind-mounts it at /mvm/runtime before
+    # the guest agent bind-mounts it at /mvm/runtime before
     # switch_root, and on a non-verity boot the overlay is mounted
     # there directly, so /mvm/runtime/agent is the canonical binary
     # location. mkGuest no longer bakes a /usr/local/bin fallback, so ANY
@@ -986,14 +1128,15 @@ let
   # one under-indented line anywhere in the block above silently moves every
   # other line — including the shebang — one column right. Assert the rendered
   # bytes instead of trusting the indentation to stay uniform.
-  initScript =
+  initScript = builtins.seq assertDedicatedEgressUid (
     lib.throwIf (!lib.hasPrefix "#!/bin/sh\n" initText) ''
       mkGuest: the rendered /init does not start with the "#!/bin/sh" shebang.
       The kernel exec()s /init and will panic with ENOEXEC. This almost always
       means a line inside the /init block of nix/lib/mk-guest.nix is indented
       less than its neighbours, which moves the whole script one or more
       columns right. Re-align that line.
-    '' (pkgs.writeScript "mvm-init" initText);
+    '' (pkgs.writeScript "mvm-init" initText)
+  );
 
   # Render the entrypoint as a shell-sourced fragment. /init does
   # `. /etc/mvm/entrypoint`, so this is just a script.
@@ -1046,21 +1189,14 @@ let
   # Side-binaries from the guest-agent derivation. The agent, netinit,
   # addon-dns, exit-report, and egress-client the guest execs at boot now
   # come exclusively from the mounted runtime overlay at `/mvm/runtime`, so
-  # mkGuest no longer bakes them into the rootfs. These two are still needed
-  # off the overlay path: `mvm-seccomp-apply` on the per-service launch line,
-  # and `mvm-verity-init` as PID 1 of the verity initramfs.
+  # mkGuest no longer bakes them into the rootfs. This one is still needed
+  # off the overlay path: `mvm-seccomp-apply` on the per-service launch line.
   #
   # `mvm-seccomp-apply` ships in the same Cargo workspace member and
   # derivation as the agent. The per-service launch line in
   # `mkServiceBlock` execs it via setpriv to apply the tier's seccomp
   # filter before handing control to the workload.
   seccompApplyBinary = "${guestAgentPkg}/bin/mvm-seccomp-apply";
-
-  # `mvm-verity-init` is the PID 1 of the verity initramfs.
-  # Baked into the verity-initrd cpio.gz, not into the rootfs
-  # directly — wired here as a passthru export so the initramfs
-  # builder can reach it without duplicating the agent derivation.
-  verityInitBinary = "${guestAgentPkg}/bin/mvm-verity-init";
 
   mvmAuditProbeBinary = "${auditProbePkg}/bin/audit-probe";
 
@@ -1082,7 +1218,7 @@ let
   extraFilePopulation = lib.concatMapStringsSep "\n"
     (path:
       let
-        rawSpec = extraFiles.${path};
+        rawSpec = extraFilesWithProbes.${path};
         spec =
           if builtins.isString rawSpec then { source = rawSpec; }
           else rawSpec;
@@ -1111,7 +1247,7 @@ let
           "$out${path}"
       ''
     )
-    (lib.attrNames extraFiles);
+    (lib.attrNames extraFilesWithProbes);
 
   # ── Rootfs tree population ────────────────────────────────────
   #
@@ -1144,12 +1280,12 @@ let
     chmod 0444 "$out/nix-path-registration"
 
     # The mvm runtime overlay is
-    # bind-mounted at /mvm/runtime by `mvm-verity-init` before
+    # bind-mounted at /mvm/runtime by the universal initramfs agent before
     # switch_root. The directory must exist in the rootfs so the
     # bind-mount has a target. Mode 0755 (owner root); the overlay
     # itself is mounted read-only over it, so contents can't be
     # written by the guest regardless. Outside the verity-boot
-    # path (dev-mode VMs that don't run `mvm-verity-init`) the
+    # path (dev-mode VMs that mount no overlay) the
     # directory is empty — /init below falls back to the baked-in
     # agent. `/mvm/` is reserved (an admission-time check
     # rejects OCI images that carry content under this path).
@@ -1169,6 +1305,12 @@ let
     for applet in $(${busybox}/bin/busybox --list); do
       ln -sf /bin/busybox "$out/bin/$applet"
     done
+    # mvm-setpriv is a dedicated static-musl helper used by the guest
+    # PID 1 and by mvm-host-vm-init. Install it alongside busybox so it
+    # is on PATH; keep the busybox "setpriv" applet available for any
+    # ad-hoc use that does not need the custom flags.
+    cp ${setprivPkg}/bin/mvm-setpriv "$out/bin/mvm-setpriv"
+    chmod 0755 "$out/bin/mvm-setpriv"
     # /sbin/init is what the kernel actually execs at boot (when
     # there's no init=/init kernel param). We point both at our
     # custom init script so either path works.
@@ -1208,7 +1350,7 @@ let
     '' else ""}
 
     # /etc/passwd + /etc/group provision root (mandatory for PID 1)
-    # plus the agent + entrypoint uids resolved at build time.
+    # plus the egress service, agent, and entrypoint uids resolved at build time.
     # These become read-only via bind-mount once the security
     # overlay lands; for now they're plain mode 0644.
     #
@@ -1219,6 +1361,7 @@ let
     cat > "$out/etc/passwd" <<EOF
     root:x:0:0:root:/root:/bin/sh
     EOF
+    printf 'mvm-egress:x:${toString egressUid}:${toString egressUid}:mvm FlowMux egress:/var/empty:/bin/false\n' >> "$out/etc/passwd"
     if [ "${toString agentUid}" != "0" ]; then
       printf 'mvm-agent:x:${toString agentUid}:${toString agentUid}:mvm guest agent:/var/empty:/bin/false\n' >> "$out/etc/passwd"
     fi
@@ -1235,6 +1378,7 @@ let
     cat > "$out/etc/group" <<EOF
     root:x:0:
     EOF
+    printf 'mvm-egress:x:${toString egressUid}:\n' >> "$out/etc/group"
     if [ "${toString agentUid}" != "0" ]; then
       printf 'mvm-agent:x:${toString agentUid}:\n' >> "$out/etc/group"
     fi
@@ -1498,9 +1642,29 @@ let
     # that could silently degrade to a baked agent/netinit pair.
     runtimeLean = true;
     sshTemplateBan = builtins.seq assertNoSshTemplateInputs true;
+    # The probe drop-ins this guest carries, as `<path> -> <decoded entry>`.
+    # Exposed so a host (or a test) can see what the guest will actually run
+    # without building the rootfs to go and read the files.
+    #
+    # Read back out of `extraFilesWithProbes` — the exact set the rootfs
+    # population loop iterates — rather than out of `probeDropIns`. Deriving it
+    # from the rendering instead would report drop-ins that never reached the
+    # image: a first version of this did, and breaking the merge outright
+    # changed no assertion at all.
+    probes = lib.mapAttrs
+      (_: spec: builtins.fromJSON spec.content)
+      (lib.filterAttrs
+        (path: _: lib.hasPrefix "/etc/mvm/probes.d/" path)
+        extraFilesWithProbes);
+    # Declared-but-unenforced, recorded so a host or an audit can see the gap
+    # between what the flake asked for and what the guest actually does.
+    unenforced = {
+      inherit services healthChecks volumeMounts serviceGroup;
+      names = unenforcedNames;
+    };
   };
 in
-rootfsImage.overrideAttrs (old: {
+warnUnenforced (rootfsImage.overrideAttrs (old: {
   passthru = (old.passthru or { }) // {
     mvm = mvmMeta;
     inherit rootfsTree;
@@ -1512,9 +1676,9 @@ rootfsImage.overrideAttrs (old: {
     inherit hypervisor;
     resources = { inherit vcpus memory_mib; };
     # Expose the side-binaries from the guest-agent build so
-    # downstream derivations (verity-initrd, per-service launch line
+    # downstream derivations (per-service launch line
     # in `mkServiceBlock`) can reach `mvm-seccomp-apply` and
-    # `mvm-verity-init` without re-running the cargo build.
-    inherit guestAgentPkg seccompApplyBinary verityInitBinary;
+    # `mvm-seccomp-apply` without re-running the cargo build.
+    inherit guestAgentPkg seccompApplyBinary;
   };
-})
+}))

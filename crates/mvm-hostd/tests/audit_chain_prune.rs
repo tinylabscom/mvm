@@ -28,6 +28,7 @@ fn entry(n: usize) -> PlanAuditEntry {
         image_name: "img".to_string(),
         image_sha256: "0".repeat(64),
         event: "plan.launched".to_string(),
+        caller_commitment: None,
         labels: std::collections::BTreeMap::from([("n".to_string(), n.to_string())]),
     }
 }
@@ -70,9 +71,20 @@ async fn a_pruned_chain_verifies_and_reports_its_gap() {
     let signer = rotated(dir.path(), 90).await;
     assert!(dir.path().join("local.seg-000002.jsonl").exists());
 
+    let expected_entries = u64::try_from(
+        verify_segment_set(dir.path(), "local", &key().verifying_key())
+            .unwrap()
+            .segments
+            .iter()
+            .filter(|segment| segment.seq <= 2 && !segment.active)
+            .filter_map(|segment| segment.entries)
+            .sum::<usize>(),
+    )
+    .expect("fixture entry count fits in u64");
+
     let pruned = signer.prune_through(&tenant(), 2).unwrap();
     assert_eq!(pruned.through, 2);
-    assert!(pruned.entries > 0);
+    assert_eq!(pruned.entries, expected_entries);
 
     assert!(!dir.path().join("local.seg-000001.jsonl").exists());
     assert!(!dir.path().join("local.seg-000002.jsonl").exists());

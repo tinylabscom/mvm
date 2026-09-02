@@ -1,0 +1,11 @@
+#!/bin/sh
+# zig cc wants the target as "aarch64-linux-gnu", not the Rust triple
+# "aarch64-unknown-linux-gnu" that cc-rs appends, so strip the latter.
+filtered=""
+for arg in "$@"; do
+    case "$arg" in
+        --target=aarch64-unknown-linux-gnu) ;;
+        *) filtered="$filtered $arg" ;;
+    esac
+done
+exec zig cc -target aarch64-linux-gnu $filtered

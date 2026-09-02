@@ -41,6 +41,16 @@ pub enum Error {
     /// The server closed the connection before the declared body arrived.
     #[error("connection closed with {remaining} body bytes outstanding")]
     IncompleteBody { remaining: u64 },
+    /// A streaming request producer ended before its declared body length.
+    #[error("request body stream ended with {remaining} bytes outstanding")]
+    IncompleteRequestBody { remaining: u64 },
+    /// A streaming request producer exceeded the length committed in the head.
+    #[error("request body stream exceeded its declared {declared} bytes")]
+    RequestBodyTooLarge { declared: u64 },
+    /// A transform or other request-body producer failed after streaming had
+    /// started. The connection is closed without a chunked terminator.
+    #[error("request body producer failed: {0}")]
+    RequestBodyProducer(String),
     #[error("response body exceeded the {limit} byte limit")]
     BodyTooLarge { limit: u64 },
     #[error("invalid header: {0}")]

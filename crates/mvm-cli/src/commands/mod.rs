@@ -1,9 +1,11 @@
+mod agent_session;
 mod bench;
 mod bootstrap;
 mod build;
 #[cfg(feature = "builder-vm")]
 mod builder_shell_job;
 mod bundle;
+mod capture;
 pub mod catalog;
 mod cmd_audit;
 mod completions;
@@ -212,7 +214,7 @@ pub(in crate::commands) enum Commands {
     /// Print shell configuration (completions + dev aliases) to stdout
     #[command(display_order = 14)]
     ShellInit(env::shell_init::Args),
-    /// Operational / observability commands (metrics, config)
+    /// Operational / observability commands (metrics, config, MCP)
     #[command(display_order = 14)]
     Ops(ops::group::Args),
     /// Manage named dev networks
@@ -239,9 +241,15 @@ pub(in crate::commands) enum Commands {
     /// Manage trusted bundle publishers
     #[command(display_order = 13)]
     Trust(trust::Args),
+    /// Inspect, park, and resume durable agent sessions
+    #[command(name = "agent-session", display_order = 12)]
+    AgentSession(agent_session::Args),
     /// Inspect cached application dependencies
     #[command(display_order = 14)]
     Deps(deps::Args),
+    /// Capture a project environment and resolve it to MVM IR
+    #[command(display_order = 14)]
+    Capture(capture::Args),
     /// Pack or verify signed `.mvm` artifacts
     #[command(display_order = 13)]
     Artifact(vm::artifact::Args),
@@ -300,6 +308,7 @@ fn run_command() -> Result<()> {
         }
     };
     apply_startup_env(&cli);
+    declare_embedded_host_binaries();
     register_inhouse_builder();
     register_builder_session_starter();
     register_stream_plane();
@@ -317,13 +326,14 @@ fn run_command() -> Result<()> {
     maybe_converge_on_entry(&cli.command);
 
     let cfg = mvm_core::user_config::load(None);
-    let cmd_recorder = cmd_audit::build_cmd_recorder();
+    let cmd_audit = cmd_audit::build_cmd_recorder();
+    let cmd_recorder = cmd_audit.as_ref().map(cmd_audit::CommandAudit::recorder);
     let verb = cli.command.verb_name();
-    cmd_audit::emit_cmd_invoked(cmd_recorder.as_ref(), verb);
+    cmd_audit::emit_cmd_invoked(cmd_recorder, verb);
 
     let result = cli.command.clone().run(&cli, &cfg);
 
-    cmd_audit::emit_cmd_outcome(cmd_recorder.as_ref(), verb, &result);
+    cmd_audit::emit_cmd_outcome(cmd_recorder, verb, &result);
 
     with_hints(result)
 }
@@ -515,26 +525,9 @@ fn apply_startup_env(cli: &Cli) {
     if let Some(ref backend) = cli.builder {
         set_cli_env("MVM_BUILDER_BACKEND", backend);
     }
-    if let Some(dir) = aux_bin_dir_to_apply(
-        env!("MVM_AUX_BIN_DIR"),
-        std::env::var_os("MVM_AUX_BIN_DIR").is_some(),
-    ) {
-        set_cli_env("MVM_AUX_BIN_DIR", dir);
-    }
     if let Some(ref source) = cli.kernel_source {
         set_cli_env("MVM_KERNEL_SOURCE", source);
     }
-}
-
-/// The value to write to `MVM_AUX_BIN_DIR`, or `None` to leave the env alone.
-/// The build script bakes in the dir where it compiled the per-VM helpers; we
-/// surface it to mvm-backend's resolver unless the caller already set it (an
-/// explicit override wins) or the build produced no path.
-fn aux_bin_dir_to_apply(baked: &str, already_set: bool) -> Option<String> {
-    if already_set || baked.is_empty() {
-        return None;
-    }
-    Some(baked.to_string())
 }
 
 /// Let a build start a persistent builder when it finds the store image busy.
@@ -552,6 +545,23 @@ fn register_builder_session_starter() {
 
 #[cfg(not(feature = "builder-vm"))]
 fn register_builder_session_starter() {}
+
+/// Tell `mvm-build` whether this binary carries the embedded Linux host
+/// binaries.
+///
+/// It cannot see the embed table itself — that lives here, above it — and on a
+/// source checkout it otherwise assumes it must compile a second `mvmctl` to
+/// get one. When this binary already has the payload, it *is* the bootstrap
+/// helper, and the compile is minutes spent reproducing what is already loaded.
+#[cfg(feature = "builder-vm")]
+fn declare_embedded_host_binaries() {
+    mvm_build::builder_vm_bootstrap::declare_current_exe_carries_host_binaries(
+        !crate::host_binaries::embedded::EMBEDDED.is_empty(),
+    );
+}
+
+#[cfg(not(feature = "builder-vm"))]
+fn declare_embedded_host_binaries() {}
 
 fn register_inhouse_builder() {
     // Wire the HVF builder constructor so that
@@ -587,6 +597,9 @@ fn register_stream_plane() {
 fn configure_runtime_logging(cli: &Cli) {
     let verbose = cli.verbose > 0 || std::env::var_os("RUST_LOG").is_some();
     mvm_runtime::ui::set_verbose(verbose);
+    if cli.verbose > 0 {
+        set_cli_env(mvm_build::guest_agent_build::GUEST_BUILD_VERBOSE_ENV, "1");
+    }
     if cli.verbose > 0 && std::env::var_os("RUST_LOG").is_none() {
         set_cli_env("RUST_LOG", logging::filter_for_verbosity(cli.verbose));
     }
@@ -635,6 +648,21 @@ fn interrupt_cleanup_message(stage0_active: bool) -> &'static str {
     }
 }
 
+/// Run the cheap reconcile-on-entry convergence for state-touching
+/// commands, unless `MVM_SKIP_RECONCILE=1`.
+/// Fail-open: `converge` collects errors internally and never returns an
+/// `Err`, so this can never block the requested command.
+fn maybe_converge_on_entry(command: &Commands) {
+    if !command.touches_vm_state() {
+        return;
+    }
+    if std::env::var("MVM_SKIP_RECONCILE").as_deref() == Ok("1") {
+        return;
+    }
+    let _ =
+        mvm_runtime::vm::reconcile::converge(&mvm_runtime::vm::reconcile::ConvergeOpts::default());
+}
+
 #[cfg(test)]
 mod interrupt_message_tests {
     use super::interrupt_cleanup_message;
@@ -653,33 +681,5 @@ mod interrupt_message_tests {
             interrupt_cleanup_message(false),
             "Interrupted, cleaning up..."
         );
-    }
-}
-
-/// Run the cheap reconcile-on-entry convergence for state-touching
-/// commands, unless `MVM_SKIP_RECONCILE=1`.
-/// Fail-open: `converge` collects errors internally and never returns an
-/// `Err`, so this can never block the requested command.
-fn maybe_converge_on_entry(command: &Commands) {
-    if !command.touches_vm_state() {
-        return;
-    }
-    if std::env::var("MVM_SKIP_RECONCILE").as_deref() == Ok("1") {
-        return;
-    }
-    let _ =
-        mvm_runtime::vm::reconcile::converge(&mvm_runtime::vm::reconcile::ConvergeOpts::default());
-}
-
-#[cfg(test)]
-mod aux_bin_dir_tests {
-    #[test]
-    fn aux_bin_dir_applied_only_when_unset_and_nonempty() {
-        assert_eq!(
-            super::aux_bin_dir_to_apply("/x/aux/debug", false),
-            Some("/x/aux/debug".to_string())
-        );
-        assert_eq!(super::aux_bin_dir_to_apply("/x/aux/debug", true), None);
-        assert_eq!(super::aux_bin_dir_to_apply("", false), None);
     }
 }

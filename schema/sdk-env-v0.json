@@ -29,6 +29,16 @@
       ]
     },
     {
+      "doc": "Carries an explicitly selected security profile from `mvmctl run` into the live SDK's nested `mvmctl machine run` invocation.",
+      "ident": "MVM_SDK_RUN_PROFILE_ENV",
+      "name": "MVM_SDK_RUN_PROFILE",
+      "surfaces": [
+        "rust",
+        "python",
+        "typescript"
+      ]
+    },
+    {
       "doc": "When set, the SDK writes its wire-shape recording JSON to this path on exit, so a caller need not parse stdout.",
       "ident": "MVM_SDK_OUT_PATH_ENV",
       "name": "MVM_SDK_OUT_PATH",

@@ -98,7 +98,7 @@ sandbox is running but its resume point is still what a later park would rest
 on; a `Hibernated` session's is the thing it resumes from. `Closed` does not
 pin — a closed session is sealed and not resumable, so its resume point is free.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `agent_session/mod.rs`:
 
@@ -148,13 +148,13 @@ alone even when it is untagged and past the age cut, and still reaps an
 unpinned one in the same run. Read the file's existing checkpoint-sweep tests
 first and follow their fixture style.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 `export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-sessions/target && ~/.cargo/bin/cargo nextest run -p mvm-runtime pinned_checkpoints`
 
 Expected: FAIL to compile — no `pinned_checkpoints`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```rust
 /// Every checkpoint a live or hibernated session names as its resume point.
@@ -191,15 +191,15 @@ site via `mvm_runtime::agent_session::pinned_checkpoints`. Report a skipped
 checkpoint in the file's existing style so the operator sees why a stale entry
 stayed.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
-- [ ] **Step 5: Verify the guard is not vacuous**
+- [x] **Step 5: Verify the guard is not vacuous**
 
 Temporarily drop the `pinned` check from the sweep, confirm the cache test goes
 RED, then restore. Report that RED with command and output. If it does not go
 red, say so and stop rather than reporting one you did not observe.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-sessions/target
@@ -232,7 +232,7 @@ rather than a silent success, so a caller looping over sessions can tell the
 difference between "moved" and "already at the bottom". A session that is not
 `Hibernated` cannot be demoted at all.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
     #[test]
@@ -288,9 +288,9 @@ The last test's double-demote is awkward as written — simplify it to whatever
 reaches `Cold` cleanly given your implementation, keeping the property it
 asserts.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Add an `AlreadyColdest` variant to `SessionTransitionError`, then:
 
@@ -324,9 +324,9 @@ Add an `AlreadyColdest` variant to `SessionTransitionError`, then:
     }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-sessions/target
@@ -345,7 +345,7 @@ git commit -m "feat(runtime): add one-way demotion down the session storage ladd
 - Create: `specs/sprint/delivery/session-retention.md`
 - Modify: this plan's checkboxes
 
-- [ ] **Step 1: Correct D4 and the record of what GCs checkpoints**
+- [x] **Step 1: Correct D4 and the record of what GCs checkpoints**
 
 D4 and the earlier delivery records say nothing GCs `checkpoints_dir()`. That
 is false and was false when written: `sweep_untagged_checkpoints` in
@@ -355,19 +355,19 @@ claim appears — search exhaustively for it rather than fixing the first hit �
 say what this plan changed: the sweep now consults the sessions that pin a
 resume point.
 
-- [ ] **Step 2: Update WS5's state, naming what remains**
+- [x] **Step 2: Update WS5's state, naming what remains**
 
 This plan delivers the GC refusal and the demotion transition. It does NOT
 deliver: retention classes or expiry on the record, a scheduler that calls
 `demote`, or any actual movement of bytes between tiers — demoting sets a field,
 nothing relocates a memory image. Say so; do not tick WS5.
 
-- [ ] **Step 3: Update `specs/REFACTOR-STATUS.md`** and its "Last updated".
+- [x] **Step 3: Update `specs/REFACTOR-STATUS.md`** and its "Last updated".
 
-- [ ] **Step 4: Write `specs/sprint/delivery/session-retention.md`**,
+- [x] **Step 4: Write `specs/sprint/delivery/session-retention.md`**,
 style-matching that directory. Do NOT append to `specs/SPRINT.md`.
 
-- [ ] **Step 5: Tick this plan's checkboxes and run the doc gates**
+- [x] **Step 5: Tick this plan's checkboxes and run the doc gates**
 
 ```bash
 export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-sessions/target
@@ -380,7 +380,7 @@ export CARGO_TARGET_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-durable-
 These files carry `Backing: preview`, which bars a short list of assertive verbs
 matched as whole words — quoting one trips the gate. The gate names the word.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add specs/

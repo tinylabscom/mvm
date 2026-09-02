@@ -344,12 +344,11 @@ fn compile_host_arch(
 /// `build_kernel_via_stage0`'s output location.
 #[cfg(feature = "builder-vm")]
 fn kernel_cache_path(arch: &str, label: &str) -> std::path::PathBuf {
-    std::path::Path::new(&mvm_core::config::mvm_cache_dir())
-        .join("builder-vm")
-        .join(arch)
-        .join("kernels")
-        .join(label)
-        .join("vmlinux")
+    mvm_build::kernel_fetch::cached_kernel_path(
+        std::path::Path::new(&mvm_core::config::mvm_cache_dir()),
+        arch,
+        label,
+    )
 }
 
 #[cfg(not(feature = "builder-vm"))]

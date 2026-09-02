@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::path::PathBuf;
+use xtask::network_perf;
 
 // Only the gen-man path (gated behind `man`) uses these.
 #[cfg(feature = "man")]
@@ -10,6 +11,9 @@ use std::path::Path;
 mod build_dev_image;
 mod check_abi_layout;
 mod check_adr_coverage;
+mod check_agent_notes;
+mod check_all;
+mod check_asserted_absence;
 mod check_audit_positional;
 mod check_backend_resource_controls;
 mod check_binary_size;
@@ -40,37 +44,40 @@ mod check_guest_init_parity;
 mod check_honesty;
 pub(crate) mod check_kernel_config_budget;
 mod check_kernel_pin_freshness;
-mod check_l3_expansion_freeze;
 mod check_machine_doc_guards;
 mod check_mutation_witnesses;
 mod check_mvm_host_binaries_sync;
 mod check_nextest_groups;
 mod check_no_display_on_secret_types;
-mod check_no_gateway_names;
+mod check_no_guest_tool_client;
 mod check_no_host_nix;
 mod check_no_network_literals;
 mod check_no_overclaim;
 mod check_no_spec_refs_in_comments;
 mod check_no_string_backend_dispatch;
+mod check_no_virtio_fs;
 mod check_no_vz;
 mod check_one_guest_protocol;
 mod check_per_vm_host_binaries_sync;
 mod check_plan_names;
 mod check_require_grant_token_allowlist;
 mod check_runtime_overlay_version;
+mod check_sdk_cdylib_deps;
+mod check_sdk_transport_free;
 mod check_single_exec_secs_writer;
 mod check_single_fixture_corpus;
 mod check_single_grants_projection;
 mod check_single_home;
 mod check_single_host_predicate;
+mod check_single_network_path;
+mod check_single_workload_env;
 mod check_sprint_append;
 mod check_stream_redaction_seam;
 mod check_test_home_isolation;
 mod check_trust_gradient;
 mod check_two_surfaces;
-mod check_uniform_vsock_egress;
+mod check_vcpu_ceilings;
 mod check_verified_kernel_reads;
-mod check_vsock_only_egress;
 mod check_witness_citations;
 mod check_workflow_paths;
 mod check_workspace_dep_inheritance;
@@ -80,6 +87,7 @@ mod gen_sdk_surface;
 mod gen_stubs;
 mod ir_parity;
 mod perf;
+mod prose_citations;
 mod rust_source;
 mod sprint;
 
@@ -191,6 +199,10 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_guest_agent_runtime_free::run(&workspace)
         }
+        Some("check-sdk-transport-free") => {
+            let workspace = workspace_root();
+            check_sdk_transport_free::run(&workspace)
+        }
         Some("check-guest-agent-in-all-images") => {
             let workspace = workspace_root();
             check_guest_agent_in_all_images::run(&workspace)
@@ -265,11 +277,26 @@ fn main() -> Result<()> {
         }
         Some("check-claim-witness-freshness") => {
             let workspace = workspace_root();
-            check_claim_witness_freshness::run(&workspace)
+            // Reporting-chain checks are for the scheduled run; see the
+            // module docs for why a pull request must not fail on them.
+            let reporting = args.iter().any(|a| a == "--check-reporting");
+            check_claim_witness_freshness::run(&workspace, reporting)
+        }
+        Some("check-sdk-cdylib-deps") => {
+            let workspace = workspace_root();
+            check_sdk_cdylib_deps::run(&workspace)
         }
         Some("check-witness-citations") => {
             let workspace = workspace_root();
             check_witness_citations::run(&workspace)
+        }
+        Some("check-asserted-absence") => {
+            let workspace = workspace_root();
+            check_asserted_absence::run(&workspace)
+        }
+        Some("check-agent-notes") => {
+            let workspace = workspace_root();
+            check_agent_notes::run(&workspace)
         }
         Some("check-declared-backing") => {
             let workspace = workspace_root();
@@ -332,29 +359,33 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_trust_gradient::run(&workspace)
         }
-        Some("check-no-gateway-names") => {
-            let workspace = workspace_root();
-            check_no_gateway_names::run(&workspace)
-        }
         Some("check-one-guest-protocol") => {
             let workspace = workspace_root();
             check_one_guest_protocol::run(&workspace)
         }
-        Some("check-vsock-only-egress") => {
+        Some("check-no-guest-tool-client") => {
             let workspace = workspace_root();
-            check_vsock_only_egress::run(&workspace)
+            check_no_guest_tool_client::run(&workspace)
+        }
+        Some("check-no-virtio-fs") => {
+            let workspace = workspace_root();
+            check_no_virtio_fs::run(&workspace)
+        }
+        Some("check-single-network-path") => {
+            let workspace = workspace_root();
+            check_single_network_path::run(&workspace)
+        }
+        Some("check-vcpu-ceilings") => {
+            let workspace = workspace_root();
+            check_vcpu_ceilings::run(&workspace)
         }
         Some("check-guest-init-parity") => {
             let workspace = workspace_root();
             check_guest_init_parity::run(&workspace)
         }
-        Some("check-l3-expansion-freeze") => {
+        Some("check-single-workload-env") => {
             let workspace = workspace_root();
-            check_l3_expansion_freeze::run(&workspace)
-        }
-        Some("check-uniform-vsock-egress") => {
-            let workspace = workspace_root();
-            check_uniform_vsock_egress::run(&workspace)
+            check_single_workload_env::run(&workspace)
         }
         Some("check-stream-redaction-seam") => {
             let workspace = workspace_root();
@@ -391,6 +422,7 @@ fn main() -> Result<()> {
             check_kernel_pin_freshness::run(&workspace, &args[2..])
         }
         Some("perf") => perf::run(&args[2..]),
+        Some("network-perf") => network_perf::run(&args[2..]),
         Some("build-dev-image") => {
             let workspace = workspace_root();
             build_dev_image::run(&args[2..], &workspace)
@@ -411,8 +443,12 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             ir_parity::check(&workspace)
         }
+        Some("check-all") => {
+            let workspace = workspace_root();
+            check_all::run_all(&workspace)
+        }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-content-address-determinism, check-deferrals, check-honesty, check-closure-budget, check-workspace-dep-inheritance, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-plan-names, check-single-home, check-single-fixture-corpus, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-cli-help-matches-docs, check-claim-catalog, check-sprint-append, sprint, check-dormant-controls, check-witness-citations, check-declared-backing, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-nextest-groups, check-conformance, check-trust-gradient, check-vsock-only-egress, check-one-guest-protocol, check-no-gateway-names, check-uniform-vsock-egress, check-l3-expansion-freeze, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-per-vm-host-binaries-sync, check-workflow-paths, check-runtime-overlay-version, check-single-grants-projection, check-single-exec-secs-writer, check-single-host-predicate, check-backend-resource-controls, perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
+            "Unknown xtask: {:?}. Available: gen-man, check-all, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-sdk-transport-free, check-sdk-cdylib-deps, check-content-address-determinism, check-deferrals, check-honesty, check-closure-budget, check-workspace-dep-inheritance, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-plan-names, check-single-home, check-single-fixture-corpus, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-cli-help-matches-docs, check-claim-catalog, check-sprint-append, sprint, check-dormant-controls, check-witness-citations, check-asserted-absence, check-agent-notes, check-declared-backing, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-nextest-groups, check-conformance, check-trust-gradient, check-single-network-path, check-no-virtio-fs, check-no-guest-tool-client, check-one-guest-protocol, check-single-workload-env, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-per-vm-host-binaries-sync, check-workflow-paths, check-runtime-overlay-version, check-single-grants-projection, check-single-exec-secs-writer, check-single-host-predicate, check-backend-resource-controls, check-vcpu-ceilings, perf, network-perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
             other
         ),
         None => {
@@ -444,6 +480,9 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-core-runtime-free                 Plan 126 B5: assert mvm-core's default build pulls no tokio"
+            );
+            eprintln!(
+                "  check-sdk-transport-free                Assert mvm-sdk's default build (the cdylib closure) pulls no mvm-http/rustls/ring/tokio"
             );
             eprintln!(
                 "  check-content-address-determinism       Assert serde_json in mvm-core/mvm-contract has no preserve_order (stable key order → deterministic plan_id/checkpoint digests)"
@@ -517,8 +556,17 @@ fn main() -> Result<()> {
             eprintln!(
                 "  sprint                                 Render specs/sprint/delivery/ as one document, newest first"
             );
+            println!(
+                "  check-sdk-cdylib-deps                  mvm-sdk's default closure carries no host HTTP/TLS/async stack"
+            );
             eprintln!(
                 "  check-witness-citations                Prose that names a witness must name one that exists"
+            );
+            println!(
+                "  check-asserted-absence                 Prose that says a name was never written must stay right about that"
+            );
+            println!(
+                "  check-agent-notes                      Committed agent findings parse, are dated, and link to notes that exist"
             );
             println!(
                 "  check-declared-backing                 Claim-bearing prose declares what backs it (--self-test)"
@@ -551,13 +599,22 @@ fn main() -> Result<()> {
                 "  check-per-vm-host-binaries-sync         assert release.yml builds+packages every spawnable per-VM binary"
             );
             eprintln!(
-                "  check-no-gateway-names                  assert no reference to a removed userspace network gateway"
+                "  check-single-network-path              assert one endpoint, one NetworkFlow channel, no guest NIC/L3 path, and one workload socket owner"
+            );
+            eprintln!(
+                "  check-vcpu-ceilings                    assert no backend derives its declared vCPU ceiling from a wire type's MAX"
+            );
+            println!(
+                "  check-no-virtio-fs                     ratchet the virtio-fs attach surface: builder VM and FFI only, may shrink but never grow"
             );
             eprintln!(
                 "  check-workflow-paths                    assert every workflow working-directory and cargo-fuzz target still exists"
             );
             eprintln!(
                 "  perf <subcommand>                       Plan 60 Phase 9 perf gates (rootfs-size, boot)"
+            );
+            eprintln!(
+                "  network-perf <subcommand>               Validate and compare labelled network benchmark reports"
             );
             eprintln!(
                 "  build-dev-image [--arch <arch>]         Build the dev VM image and drop it into nix/images/dev-prebuilt/<arch>/"

@@ -44,6 +44,14 @@ already depends on `mvm-vmm` (`crates/mvm-build/Cargo.toml`), so it can call
 
 ## 2. The build script's watch list has two holes
 
+> **Moot (2026-08-28).** `build_native_aux_helpers` no longer exists —
+> `specs/plans/2026-08-28-build-script-drops-the-aux-helper-leg.md` deleted the
+> leg, so there is no watch list here to hole. The observed consequence (two
+> `mvm-network-endpoint` binaries from different commits under one target dir)
+> cannot recur either: cargo builds exactly one and rebuilds it when its
+> sources change. The three boxes below are left unticked because they describe
+> work that was removed rather than done.
+
 `build_native_aux_helpers` in `crates/mvm-cli/build.rs` watches
 `crates/mvm-hostd/src` and `crates/mvm-core/src` with a bare directory-level
 `rerun-if-changed`. The same file's own comment on `emit_rerun_for_tree` states

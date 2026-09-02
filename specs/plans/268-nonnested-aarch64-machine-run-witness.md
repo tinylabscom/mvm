@@ -26,6 +26,39 @@
 >   aarch64-unknown-linux-gnu` for `mvmctl`, and `-p mvm-hostd` for the
 >   `PER_VM_HOST_BINARIES` set.
 >
+> **Witness execution update (2026-08-20).** The cross-built aarch64 GNU
+> binaries (`mvmctl` + `mvm-hostd` per-VM set) were carried to `rpi1.local`,
+> and the signed `examples/sleeper` bundle (`824b4600…`) was installed
+> successfully against the pre-staged trusted publisher key. The run command
+> that resolves an installed `.mvmpkg` is a **transient** `machine run`:
+>
+> ```bash
+> mvmctl machine run --manifest 824b4600e8c907485a459335df5e45812b284f435c4ffc5aee81a9e79fac4dc3 \
+>   --hypervisor firecracker -- /bin/true
+> ```
+>
+> (Use `--entrypoint --timeout 120` instead of `-- /bin/true` when the bundle
+> carries a baked entrypoint.) The bundle SHA is treated as a legacy name by
+> `resolve_manifest_arg`, falls through to
+> `template_artifacts_dispatched`, and resolves from `~/.mvm/bundles/<sha>`
+> because no templates slot with that hash exists.
+>
+> Two environment prerequisites surfaced on the Pi:
+>
+> - `firecracker` must be on `root`'s `PATH` because the launch script uses
+>   `sudo setsid … exec firecracker`. On this box that required copying the
+>   binary into `/usr/local/bin/firecracker`.
+> - The `runtime-overlay` cache for `0.18.0/aarch64` must be present under
+>   `~/.mvm/cache` before the first boot; the release download URL 404s. The
+>   overlay was built/seeded on the dev Mac and rsynced to the Pi.
+>
+> With those in place the VM boots and Firecracker reaches `InstanceStart`,
+> but the HVF-builder-produced bundle kernel does not attach Firecracker's
+> PCI virtio-blk/vsock devices (`probe with driver virtio_blk failed with
+> error -524`). A Mac-built bundle intended for a Pi Firecracker host must be
+> produced with a Firecracker-compatible workload kernel, or the kernel must
+> be overridden at run time; the CLI invocation itself is now known.
+>
 > **What now blocks the witness is not hardware — it is two supply problems,
 > both filed:**
 >
@@ -117,19 +150,25 @@ aarch64 `mvmctl`, and the `mvm-hostd` subprocess bins).
 - [ ] Copy that directory to the target and `chmod +x` the binaries.
 - [ ] Put the `mvm-hostd` bins on `PATH` beside `mvmctl` — the Firecracker path
       spawns them as separate processes.
-- [ ] If the bundle is stale or gone, rebuild on the Mac:
-      `mvmctl machine build --flake ./examples/sleeper --builder hvf`, then
-      `mvmctl machine build ./examples/sleeper` to register a slot, then
-      `mvmctl bundle export <FULL 64-char slot hash> --out sleeper.mvmpkg`.
+- [x] If the bundle is stale or gone, rebuild on the Mac:
+      `mvmctl machine run --flake ./examples/exit_code --builder hvf --hypervisor hvf`
+      (builds and registers the slot), then
+      `mvmctl bundle export <FULL 64-char slot hash> --out exit-code.mvmpkg`.
+      Done: exported `/tmp/exit-code.mvmpkg` (24 MiB) with a freshly compiled
+      Firecracker-compatible workload kernel (`virtio_pci`, `virtio_vsock`
+      built-in).
 
 ### 4. Run the witness
 
 - [ ] `export MVM_HOME=/tmp/mvm-edge` and place the host-signer public key at
       `$MVM_HOME/trusted-publishers/<key_id>.pub`, or `bundle install` refuses
       the archive.
-- [ ] `mvmctl bundle install ./sleeper-meta.mvmpkg` — expect **3 artifacts**
+- [ ] `mvmctl bundle install ./exit-code.mvmpkg` — expect **3 artifacts**
       (kernel, rootfs, guest sidecar) and capture the printed content address.
-- [ ] `mvmctl machine run --manifest <sha> --entrypoint --timeout 120`.
+- [ ] `mvmctl machine run --manifest <sha> --hypervisor firecracker -- /bin/true`.
+
+> **2026-08-20 blocker:** `rpi1.local` no longer resolves via mDNS, so the
+> Pi-side install/run validation is on hold until network access returns.
 
 ### 5. Confirm and record
 

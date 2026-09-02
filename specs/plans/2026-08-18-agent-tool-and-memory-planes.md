@@ -59,54 +59,126 @@ The memory plane has no existing piece beyond the broker it rides on.
 
 ## Part A — The tool plane
 
+**Where the ticked boxes live:** WS1, WS2 and WS4 are implemented in PR #2705
+and WS3's gate in its own change. A ticked box here means implemented and
+verified, not merged — check the PR before relying on it being on `main`.
+
 ### WS1 — Catalog derivation
 
-- [ ] **WS1 — Derive the presented catalog from the plan.** One function from
+- [x] **WS1 — Derive the presented catalog from the plan.** One function from
       an admitted `ExecutionPlan` to the tool descriptor set a guest may see,
       in `mvm-hostd`'s broker. No other path produces a catalog. A guest asking
       what tools it has receives the projection of its own binding.
-- [ ] Descriptor content — name, argument schema, human description — is
+- [x] Descriptor content — name, argument schema, human description — is
       host-held and versioned with the `ServiceId`, so what the model reads
       cannot be authored by the guest.
 
 ### WS2 — Per-tool argument policy
 
-- [ ] **WS2 — Typed argument policy per `ServiceId`.** ADR-045 section 19 is
+- [x] **WS2 — Typed argument policy per `ServiceId`.** ADR-045 section 19 is
       explicit that binding gates the tool while argument policy constrains the
       call. Today each handler validates its own arguments; a bound tool with
       an unconstrained argument is an unbound tool wearing a name.
-- [ ] One host-side schema per service — destination allow-lists, path scoping,
+- [x] One host-side schema per service — destination allow-lists, path scoping,
       size bounds — enforced before handler dispatch, beside the binding check
       rather than inside each handler.
-- [ ] Refusals audited with the service, the rejected field, and no argument
+- [x] Refusals audited with the service, the rejected field, and no argument
       values.
 
 ### WS3 — Host-side dynamic tool adapter
 
-- [ ] **WS3 — Compile an upstream tool namespace at admission.** The host runs
-      the client. Each upstream tool compiles to a `ServiceId` recorded inside
-      the plan digest, so the surface is fixed for the admission's lifetime.
-- [ ] Discovery verbs answer from the plan binding. An upstream server that
-      adds or redefines a tool mid-session cannot widen a running guest.
-- [ ] A gate — in the `xtask check-*` family — refusing an outbound tool
+**Status: the compilation seam and the gate are in; the transport is not.**
+The seam is `mvm_contract::protocol::upstream_tools::compile_namespace` — pure,
+no I/O, no clock — which is where an upstream server's claims become
+descriptors this host is willing to bind. The protocol client that *fetches*
+those claims is deliberately still absent: it is transport behind a seam that
+already refuses everything a malformed or hostile namespace can express, and
+building it first would have meant testing the security properties through a
+socket.
+
+- [x] **WS3 — Compile an upstream tool namespace at admission.** Each upstream
+      tool compiles to a `CapabilityId` under one `ServiceId`, and the result is
+      sorted so an identical namespace always compiles to identical bytes —
+      admission binds a digest, and a digest that depended on upstream ordering
+      would admit differently run to run.
+- [x] An upstream name this host cannot represent as a verb is refused rather
+      than repaired. Lowercasing and substituting would collapse `getWeather`,
+      `get_weather` and `Get Weather` onto one capability, which merges their
+      authority. Duplicate verbs refuse the namespace instead of last-one-wins.
+- [x] Discovery verbs answer from the plan binding — that is WS1's
+      `admitted_catalog`. A namespace that gains a tool compiles to different
+      bindings, so it cannot widen an admission already in flight.
+- [ ] **WS3c — The transport.** Fully specified below; implementing it is
+      mechanical. It is last on purpose: it is the only part with no security
+      properties of its own, and putting it behind a seam that already refuses
+      everything a hostile namespace can express means none of those refusals
+      have to be tested through a socket.
+- [x] A gate — in the `xtask check-*` family — refusing an outbound tool
       protocol client on any guest-reachable path, in the manner of
       `check-vsock-only-egress`. Without it this decision decays the first time
       a framework is vendored into a guest image.
-- [ ] The gate must catch a guest *originating a connection to a remote tool
+- [x] The gate must catch a guest *originating a connection to a remote tool
       server*, and must not catch a tool server running wholly inside the
       guest over stdio or loopback — that is a supported in-guest tool, and a
       gate that greps for the protocol's name rather than for outbound
       connection setup would refuse it. A gate written the lazy way here
       breaks the common packaging of that ecosystem.
 
+#### WS3c design — the transport, specified
+
+**A namespace comes from operator configuration, not from discovery.** The host
+reads a declared list of upstream servers; it does not go looking for them.
+Discovery would make the set of things a workload might be offered depend on
+the network at boot time, which is the mutable-namespace problem wearing a
+different hat.
+
+**One `ServiceHandler` per namespace.** `compile_namespace` yields the
+descriptors; the handler owns the client and routes `verb` to the matching
+upstream tool. It needs no new gate: `dispatch_capability` already enforces the
+binding, the descriptor digest, the argument policy, the size bounds, the
+timeout and replay, and it does that before the handler is reached.
+
+**Prefer a host-side subprocess over stdio to a network client.** A subprocess
+adds no network surface, no new dependency, and no destination to admit, and it
+is how most of that ecosystem ships anyway. A remote server is not a second
+transport — it is a *destination*, and it goes through the ordinary egress
+policy like any other, which is what keeps one rule instead of two.
+
+**Admission is fail-closed.** A namespace that cannot be fetched, cannot be
+parsed, or fails `compile_namespace` refuses the admission rather than booting
+a workload whose catalog advertises tools that will error on first call. A
+planner that is told a tool exists and then finds it does not is worse off than
+one never told: it will retry, and the retry is indistinguishable from the
+enumeration the refusal path is bounding.
+
+**Never re-fetch inside an admission.** If an upstream server dies mid-session,
+its calls fail and the catalog does not change; the surface is fixed for the
+admission's lifetime and a new surface requires a new admission. A handler that
+re-fetched on failure would reintroduce exactly the mid-epoch mutation the
+compile-once rule exists to prevent.
+
+**Upstream text is `Observed`, in ADR-047's sense.** Names and descriptions are
+authored by a third party and land directly in a model's context window. They
+are bounded at compile time and they never become identifiers beyond the verb,
+which is why an unrepresentable name is refused rather than repaired. When the
+memory plane lands, a description quoted into a memory record carries the
+`Observed` class for the same reason.
+
+Tests worth having, none of which need a live server: a namespace that fails to
+fetch refuses the admission; a namespace that compiles registers exactly its
+compiled verbs and no others; a verb absent from the compiled set is `NotBound`
+through the shipped path; an upstream process that dies leaves the catalog
+unchanged; and a call whose upstream response exceeds the descriptor's output
+bound is refused by the existing gate rather than by the handler.
+
 ### WS4 — Refusal is a signal
 
-- [ ] **WS4 — Unbound calls are planning signals, not errors.** The existing
+- [x] **WS4 — Unbound calls are planning signals, not errors.** The existing
       `NotBound` path already refuses. Add the audit entry shape and a
       structured refusal the agent runtime can hand back to the model, so an
       unbound call teaches the model its actual surface instead of surfacing as
       an opaque failure.
-- [ ] Repeated unbound calls to the same name are rate-bounded; a model in a
+- [x] Repeated unbound calls to the same name are rate-bounded; a model in a
       retry loop is a denial-of-service against the broker.
 
 ## Part B — The memory plane

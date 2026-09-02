@@ -19,6 +19,9 @@
         # Add packages available inside the microVM.
         packages = [ pkgs.curl pkgs.bash ];
 
+        # PID 1. Replace with your own program.
+        entrypoint.command = [ "/bin/sh" "-c" "echo mvm guest ready; exec sleep infinity" ];
+
         # Add supervised services:
         # services.my-service = {
         #   command = "${pkgs.somePackage}/bin/my-binary --flag";

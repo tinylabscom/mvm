@@ -72,8 +72,13 @@ protocol, not a claim that every verb has a dedicated socket. The agent
 classifies every verb exhaustively, caps every encoded request and response at
 256 KiB, admits at most 64 concurrent sessions, and reserves 16 of those slots
 for control-plane work by limiting data-plane requests to 48. Filesystem
-payloads and process output use 48 KiB chunks so JSON encoding cannot consume
-the frame headroom. Dedicated raw transports, such as console and port-forward
+payloads and process output use 15.5 KiB chunks so JSON encoding cannot consume
+the frame headroom. That figure is derived, not chosen: content crosses two
+nested `Vec<u8>` JSON encodings before it reaches the wire — the request or
+response body, and then the sealed envelope's ciphertext — and the worst-case
+four-bytes-per-byte expansions multiply. Sizing the chunk against a single
+encoding is what previously let a chunk pass the handler's own frame check and
+fail the identical check on the sealed envelope. Dedicated raw transports, such as console and port-forward
 sockets, remain separate and accept only the host vsock CID.
 
 ### Backpressure is typed, non-terminal product state

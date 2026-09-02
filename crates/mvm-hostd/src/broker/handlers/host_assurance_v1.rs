@@ -18,12 +18,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use mvm_contract::assurance::{
     AssuranceId, EffectiveAuthority, EvidenceRef, HostObservation, MvmBinding,
     PROBE_OBSERVATION_SCHEMA, ProbeInvocation, ProbeObservation, ProbeRefusal, ProbeRequest,
+    SessionRef, Sha256Digest, TrialVerdict, probe_capability_descriptor,
 };
+use mvm_contract::protocol::agent_capability::CapabilityDescriptor;
 
-use crate::audit::assurance::{AssuranceLedger, ProbeRecord};
-use crate::audit::emitter::AuditEmitter;
+use crate::audit::assurance::{
+    AssuranceAuditSink, AssuranceLedger, AttestationRecord, LedgerRefs, PlanIdentity, ProbeRecord,
+    SessionIdentity,
+};
 use mvm_core::egress_broker::{EgressRequest, EgressVerdict, decide_egress};
-use mvm_core::plan::ExecutionPlan;
 use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::policy::security::AgentProfile;
 use mvm_core::protocol::broker::{AuditDurability, Idempotency, ServiceErrorCode, ServiceId};
@@ -32,7 +35,7 @@ use mvm_core::protocol::handler::{
 };
 
 /// Wire name of this service.
-pub const HOST_ASSURANCE_SERVICE: &str = "host.assurance.v1";
+pub use mvm_contract::assurance::HOST_ASSURANCE_SERVICE;
 
 /// A destination the operator declared for a campaign.
 ///
@@ -51,6 +54,10 @@ pub struct AssuranceSessionSpec {
     pub workload_session_id: String,
     /// The admitted binding this session runs under.
     pub binding: MvmBinding,
+    /// Provider/campaign identity joined to this admitted session.
+    pub session: SessionRef,
+    /// Scanned source identity joined during admission.
+    pub source_digest: Sha256Digest,
     /// Authority already intersected down from all five sources.
     pub authority: EffectiveAuthority,
     /// The trial this session is opened for.
@@ -59,16 +66,18 @@ pub struct AssuranceSessionSpec {
     pub policy: NetworkPolicy,
     /// Destinations the campaign declared.
     pub destinations: Vec<DeclaredDestination>,
-    /// The admitted plan every record is written against.
-    pub plan: ExecutionPlan,
+    /// The admitted plan's identity — the only part of it a record quotes.
+    pub identity: PlanIdentity,
     /// Where probe records go. `None` disables recording, which also disables
     /// probing: an unrecorded boundary attempt is not one this service will
     /// perform.
-    pub emitter: Option<Arc<AuditEmitter>>,
+    pub sink: Option<Arc<dyn AssuranceAuditSink + Send + Sync>>,
 }
 
 struct AssuranceSession {
     binding: MvmBinding,
+    session: SessionRef,
+    source_digest: Sha256Digest,
     authority: EffectiveAuthority,
     trial_id: AssuranceId,
     policy: NetworkPolicy,
@@ -80,8 +89,8 @@ struct AssuranceSession {
     attempted_effect: bool,
     effect_observed_in_guest: bool,
     boundary_crossed: bool,
-    plan: ExecutionPlan,
-    emitter: Option<Arc<AuditEmitter>>,
+    identity: PlanIdentity,
+    sink: Option<Arc<dyn AssuranceAuditSink + Send + Sync>>,
     evidence_refs: Vec<EvidenceRef>,
 }
 
@@ -94,7 +103,7 @@ impl std::fmt::Debug for AssuranceSessionSpec {
             .field("workload_session_id", &self.workload_session_id)
             .field("trial_id", &self.trial_id)
             .field("destinations", &self.destinations)
-            .field("recording", &self.emitter.is_some())
+            .field("recording", &self.sink.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -106,7 +115,7 @@ impl std::fmt::Debug for AssuranceSession {
             .field("trial_id", &self.trial_id)
             .field("steps_used", &self.steps_used)
             .field("blocked_edges", &self.blocked_edges)
-            .field("recording", &self.emitter.is_some())
+            .field("recording", &self.sink.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -115,11 +124,32 @@ impl AssuranceSession {
     fn steps_remaining(&self) -> u32 {
         self.authority.max_steps().saturating_sub(self.steps_used)
     }
+
+    fn matches_open_identity(
+        &self,
+        binding: &MvmBinding,
+        session: &SessionRef,
+        source_digest: &Sha256Digest,
+    ) -> bool {
+        &self.binding == binding
+            && &self.session == session
+            && self.trial_id == session.trial_id
+            && &self.source_digest == source_digest
+    }
 }
 
 /// Handler for `host.assurance.v1`.
 pub struct HostAssuranceV1Handler {
     sessions: Mutex<BTreeMap<String, AssuranceSession>>,
+}
+
+/// Host-authored observer evidence for one exact assurance session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VerifiedObservation {
+    pub observation: HostObservation,
+    pub probe_refs: Vec<EvidenceRef>,
+    pub audit_ref: EvidenceRef,
+    pub receipt_ref: EvidenceRef,
 }
 
 impl HostAssuranceV1Handler {
@@ -131,6 +161,13 @@ impl HostAssuranceV1Handler {
         }
     }
 
+    /// Typed descriptor for the single production assurance verb. Semantic
+    /// destination authorization remains session-specific in the handler;
+    /// this descriptor additionally bounds the label before dispatch.
+    pub fn capability_descriptor() -> CapabilityDescriptor {
+        probe_capability_descriptor()
+    }
+
     /// Open a session from an admitted plan. Host-side only.
     pub fn open_session(&self, spec: AssuranceSessionSpec) {
         let destinations = spec
@@ -140,6 +177,8 @@ impl HostAssuranceV1Handler {
             .collect();
         let session = AssuranceSession {
             binding: spec.binding,
+            session: spec.session,
+            source_digest: spec.source_digest,
             authority: spec.authority,
             trial_id: spec.trial_id,
             policy: spec.policy,
@@ -151,8 +190,8 @@ impl HostAssuranceV1Handler {
             attempted_effect: false,
             effect_observed_in_guest: false,
             boundary_crossed: false,
-            plan: spec.plan,
-            emitter: spec.emitter,
+            identity: spec.identity,
+            sink: spec.sink,
             evidence_refs: Vec::new(),
         };
         self.sessions
@@ -169,6 +208,38 @@ impl HostAssuranceV1Handler {
             .expect("assurance session map is not poisoned")
             .get(workload_session_id)
             .map(|session| session.binding.clone())
+    }
+
+    /// Verify the complete provider/campaign identity before a controller
+    /// sends any guest-side cancellation effect.
+    pub(crate) fn verify_open_identity(
+        &self,
+        workload_session_id: &str,
+        binding: &MvmBinding,
+        session_ref: &SessionRef,
+        source_digest: &Sha256Digest,
+    ) -> anyhow::Result<()> {
+        let sessions = self
+            .sessions
+            .lock()
+            .expect("assurance session map is not poisoned");
+        let session = sessions
+            .get(workload_session_id)
+            .ok_or_else(|| anyhow::anyhow!("the assurance session is not open"))?;
+        if !session.matches_open_identity(binding, session_ref, source_digest) {
+            anyhow::bail!("cancellation identity does not match the open session");
+        }
+        Ok(())
+    }
+
+    /// Effective authority stored for a session. Host-controller only.
+    #[must_use]
+    pub fn authority_for(&self, workload_session_id: &str) -> Option<EffectiveAuthority> {
+        self.sessions
+            .lock()
+            .expect("assurance session map is not poisoned")
+            .get(workload_session_id)
+            .map(|session| session.authority.clone())
     }
 
     /// What the host observed across the session, for the evaluator.
@@ -200,6 +271,206 @@ impl HostAssuranceV1Handler {
             .unwrap_or_default()
     }
 
+    /// Record a conservative completion for a dispatch recovered after a
+    /// controller or host crash.
+    ///
+    /// Every identity is rejoined to the currently open admitted session
+    /// before the signed record is emitted. A stale marker therefore cannot
+    /// manufacture evidence for a different session or plan.
+    pub(crate) fn complete_trial(
+        &self,
+        workload_session_id: &str,
+        binding: &MvmBinding,
+        identity: &SessionIdentity,
+        verdict: &TrialVerdict,
+    ) -> anyhow::Result<LedgerRefs> {
+        let (sink, plan_identity) = {
+            let sessions = self
+                .sessions
+                .lock()
+                .expect("assurance session map is not poisoned");
+            let session = sessions
+                .get(workload_session_id)
+                .ok_or_else(|| anyhow::anyhow!("the assurance session is not open"))?;
+            if session.binding.session_id != identity.session_id
+                || session.session.campaign_id != identity.campaign_id
+                || session.trial_id != identity.trial_id
+                || session.source_digest != identity.source_digest
+                || &session.binding != binding
+            {
+                anyhow::bail!("recovered dispatch identity does not match the open session");
+            }
+            let sink = session
+                .sink
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("assurance audit recording is unavailable"))?;
+            (Arc::clone(sink), session.identity.clone())
+        };
+        AssuranceLedger::new(sink.as_ref(), &plan_identity).complete_trial(identity, verdict)
+    }
+
+    /// Commit the observation accumulated by the typed host broker.
+    ///
+    /// The caller cannot supply observed booleans or evidence references; it
+    /// supplies only the identities to rejoin, and this method snapshots the
+    /// values the host recorded while mediating probe calls.
+    pub(crate) fn finalize_observation(
+        &self,
+        workload_session_id: &str,
+        binding: &MvmBinding,
+        identity: &SessionIdentity,
+    ) -> anyhow::Result<VerifiedObservation> {
+        let (sink, plan_identity, observation, probe_refs) = {
+            let sessions = self
+                .sessions
+                .lock()
+                .expect("assurance session map is not poisoned");
+            let session = sessions
+                .get(workload_session_id)
+                .ok_or_else(|| anyhow::anyhow!("the assurance session is not open"))?;
+            if &session.binding != binding
+                || session.binding.session_id != identity.session_id
+                || session.session.campaign_id != identity.campaign_id
+                || session.trial_id != identity.trial_id
+                || session.source_digest != identity.source_digest
+            {
+                anyhow::bail!("observer identity does not match the open session");
+            }
+            let sink = session
+                .sink
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("assurance audit recording is unavailable"))?;
+            let observation = HostObservation {
+                attempted_effect: session.attempted_effect,
+                effect_observed_in_guest: session.effect_observed_in_guest,
+                boundary_crossed: session.boundary_crossed,
+                blocked_edges: session.blocked_edges.clone(),
+            };
+            (
+                Arc::clone(sink),
+                session.identity.clone(),
+                observation,
+                session.evidence_refs.clone(),
+            )
+        };
+        let refs = AssuranceLedger::new(sink.as_ref(), &plan_identity).record_observation(
+            identity,
+            &observation,
+            &probe_refs,
+        )?;
+        let receipt_ref = refs
+            .receipt
+            .ok_or_else(|| anyhow::anyhow!("observer completion produced no receipt"))?;
+        Ok(VerifiedObservation {
+            observation,
+            probe_refs: probe_refs.to_vec(),
+            audit_ref: refs.audit,
+            receipt_ref,
+        })
+    }
+
+    /// Sign cancellation only after the guest acknowledged the exact active
+    /// invocation and every session identity rejoins.
+    pub(crate) fn record_cancellation(
+        &self,
+        workload_session_id: &str,
+        binding: &MvmBinding,
+        identity: &SessionIdentity,
+    ) -> anyhow::Result<LedgerRefs> {
+        let (sink, plan_identity) = {
+            let sessions = self
+                .sessions
+                .lock()
+                .expect("assurance session map is not poisoned");
+            let session = sessions
+                .get(workload_session_id)
+                .ok_or_else(|| anyhow::anyhow!("the assurance session is not open"))?;
+            if &session.binding != binding
+                || session.binding.session_id != identity.session_id
+                || session.session.campaign_id != identity.campaign_id
+                || session.trial_id != identity.trial_id
+                || session.source_digest != identity.source_digest
+            {
+                anyhow::bail!("cancellation identity does not match the open session");
+            }
+            let sink = session
+                .sink
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("assurance audit recording is unavailable"))?;
+            (Arc::clone(sink), session.identity.clone())
+        };
+        AssuranceLedger::new(sink.as_ref(), &plan_identity).record_cancellation(identity)
+    }
+
+    /// Sign cleanup evidence after the caller has stopped and read back the
+    /// exact admitted VM. This method still rejoins every session identity;
+    /// the runtime confirmation alone cannot be applied to another trial.
+    pub(crate) fn record_confirmed_cleanup(
+        &self,
+        workload_session_id: &str,
+        binding: &MvmBinding,
+        identity: &SessionIdentity,
+    ) -> anyhow::Result<LedgerRefs> {
+        let (sink, plan_identity) = {
+            let sessions = self
+                .sessions
+                .lock()
+                .expect("assurance session map is not poisoned");
+            let session = sessions
+                .get(workload_session_id)
+                .ok_or_else(|| anyhow::anyhow!("the assurance session is not open"))?;
+            if &session.binding != binding
+                || session.binding.session_id != identity.session_id
+                || session.session.campaign_id != identity.campaign_id
+                || session.trial_id != identity.trial_id
+                || session.source_digest != identity.source_digest
+            {
+                anyhow::bail!("cleanup identity does not match the open session");
+            }
+            let sink = session
+                .sink
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("assurance audit recording is unavailable"))?;
+            (Arc::clone(sink), session.identity.clone())
+        };
+        AssuranceLedger::new(sink.as_ref(), &plan_identity).record_cleanup(identity)
+    }
+
+    /// Sign attestation evidence after the trusted runtime verifier has
+    /// accepted a quote for the exact open session.
+    pub(crate) fn record_verified_attestation(
+        &self,
+        workload_session_id: &str,
+        binding: &MvmBinding,
+        identity: &SessionIdentity,
+        attestation: &AttestationRecord<'_>,
+    ) -> anyhow::Result<LedgerRefs> {
+        let (sink, plan_identity) = {
+            let sessions = self
+                .sessions
+                .lock()
+                .expect("assurance session map is not poisoned");
+            let session = sessions
+                .get(workload_session_id)
+                .ok_or_else(|| anyhow::anyhow!("the assurance session is not open"))?;
+            if &session.binding != binding
+                || session.binding.session_id != identity.session_id
+                || session.session.campaign_id != identity.campaign_id
+                || session.trial_id != identity.trial_id
+                || session.source_digest != identity.source_digest
+            {
+                anyhow::bail!("attestation identity does not match the open session");
+            }
+            let sink = session
+                .sink
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("assurance audit recording is unavailable"))?;
+            (Arc::clone(sink), session.identity.clone())
+        };
+        AssuranceLedger::new(sink.as_ref(), &plan_identity)
+            .record_attestation(identity, attestation)
+    }
+
     /// Close a session, dropping its nonce ledger and recorded results.
     pub fn close_session(&self, workload_session_id: &str) {
         self.sessions
@@ -208,7 +479,7 @@ impl HostAssuranceV1Handler {
             .remove(workload_session_id);
     }
 
-    fn now_unix_ms() -> u64 {
+    pub(crate) fn now_unix_ms() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
@@ -255,8 +526,26 @@ impl HostAssuranceV1Handler {
         if request.session_id != session.binding.session_id {
             return Err(ProbeRefusal::SessionMismatch);
         }
+        if request.request_id != session.session.request_id {
+            return Err(ProbeRefusal::RequestMismatch);
+        }
+        if request.campaign_id != session.session.campaign_id {
+            return Err(ProbeRefusal::CampaignMismatch);
+        }
         if request.trial_id != session.trial_id {
             return Err(ProbeRefusal::TrialMismatch);
+        }
+        if request.plan_id != session.binding.plan_id {
+            return Err(ProbeRefusal::PlanMismatch);
+        }
+        if request.campaign_idempotency_key != session.session.idempotency_key {
+            return Err(ProbeRefusal::CampaignIdempotencyMismatch);
+        }
+        if request.session_grant_digest != session.binding.grant.grant_digest {
+            return Err(ProbeRefusal::GrantMismatch);
+        }
+        if request.session_grant_nonce != session.binding.grant.nonce {
+            return Err(ProbeRefusal::GrantNonceMismatch);
         }
 
         // Idempotency precedes every other check that could mutate state: a
@@ -340,11 +629,11 @@ impl HostAssuranceV1Handler {
         admitted: bool,
         destination_label: &AssuranceId,
     ) -> Result<Vec<EvidenceRef>, ProbeRefusal> {
-        let emitter = session
-            .emitter
+        let sink = session
+            .sink
             .as_ref()
             .ok_or(ProbeRefusal::AuditUnavailable)?;
-        let ledger = AssuranceLedger::new(emitter, &session.plan);
+        let ledger = AssuranceLedger::new(sink.as_ref(), &session.identity);
         let refs = ledger
             .record_probe(&ProbeRecord {
                 session_id: &request.session_id,
@@ -433,12 +722,15 @@ impl ServiceHandler for HostAssuranceV1Handler {
 mod tests {
     use super::*;
 
+    use crate::audit::assurance::identity_of;
     use crate::audit::assurance::{audit_citations_resolve, resolve_audit_ref};
+    use crate::audit::emitter::AuditEmitter;
     use mvm_contract::assurance::{
         ApprovalSet, AuthorityCeiling, AuthorityInputs, EvidenceRef, ObservationScope,
         PROBE_REQUEST_SCHEMA, RequestedAuthority, SessionGrant, Sha256Digest, ToolId,
     };
     use mvm_contract::policy::network_policy::HostPort;
+    use mvm_core::plan::ExecutionPlan;
     use mvm_core::plan::test_support::PlanFixture;
     use mvm_core::protocol::broker::CorrelationId;
 
@@ -446,6 +738,8 @@ mod tests {
         "sha256:1111111111111111111111111111111111111111111111111111111111111111";
     const POLICY_DIGEST: &str =
         "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+    const SOURCE_DIGEST: &str =
+        "sha256:3333333333333333333333333333333333333333333333333333333333333333";
     const GRANT_DIGEST: &str =
         "sha256:4444444444444444444444444444444444444444444444444444444444444444";
 
@@ -472,6 +766,8 @@ mod tests {
             nonce: id("grant-nonce"),
             allowed_tools: vec![ToolId::CampaignProbeV1],
             observation_scopes: vec![ObservationScope::HostAuditRefs],
+            max_steps: 64,
+            max_output_bytes: 1024 * 1024,
         }
     }
 
@@ -515,7 +811,7 @@ mod tests {
         let handler = HostAssuranceV1Handler::new();
         let mut session = spec(policy, max_steps);
         session.authority = authority_expiring_at(max_steps, expiry, now);
-        session.emitter = Some(Arc::new(emitter));
+        session.sink = Some(Arc::new(emitter) as Arc<dyn AssuranceAuditSink + Send + Sync>);
         handler.open_session(session);
         // The tempdir is deliberately leaked: these tests only assert on the
         // dispatch result, and keeping the guard alive would mean threading it
@@ -543,6 +839,8 @@ mod tests {
         AssuranceSessionSpec {
             workload_session_id: SESSION.to_string(),
             binding: binding(),
+            session: session_ref(),
+            source_digest: digest(SOURCE_DIGEST),
             authority: authority(max_steps),
             trial_id: id("trial-1"),
             policy,
@@ -551,8 +849,8 @@ mod tests {
                 host: "attacker.example.com".to_string(),
                 port: 443,
             }],
-            plan: PlanFixture::new().build(),
-            emitter: None,
+            identity: identity_of(&PlanFixture::new().build()),
+            sink: None,
         }
     }
 
@@ -569,7 +867,7 @@ mod tests {
             .with_receipts();
         let handler = HostAssuranceV1Handler::new();
         let mut session = spec(policy, max_steps);
-        session.emitter = Some(Arc::new(emitter));
+        session.sink = Some(Arc::new(emitter) as Arc<dyn AssuranceAuditSink + Send + Sync>);
         handler.open_session(session);
         (handler, dir)
     }
@@ -584,6 +882,16 @@ mod tests {
         handler
     }
 
+    fn session_ref() -> SessionRef {
+        SessionRef {
+            request_id: id("mvm-request-1"),
+            idempotency_key: id("campaign-retry-1"),
+            source_run_id: id("scout-1"),
+            campaign_id: id("mvm-campaign-1"),
+            trial_id: id("trial-1"),
+        }
+    }
+
     fn context() -> ServiceCallCtx {
         ServiceCallCtx {
             workload_id: "workload".into(),
@@ -596,11 +904,52 @@ mod tests {
         }
     }
 
+    fn identity() -> SessionIdentity {
+        SessionIdentity {
+            session_id: id(SESSION),
+            campaign_id: id("mvm-campaign-1"),
+            trial_id: id("trial-1"),
+            source_digest: digest(SOURCE_DIGEST),
+        }
+    }
+
+    #[test]
+    fn cancellation_identity_is_fully_joined_before_the_guest_effect() {
+        let handler = handler(NetworkPolicy::deny_all(), 1);
+        handler
+            .verify_open_identity(SESSION, &binding(), &session_ref(), &digest(SOURCE_DIGEST))
+            .expect("exact identity joins");
+
+        let mut foreign_request = session_ref();
+        foreign_request.request_id = id("mvm-request-foreign");
+        assert!(
+            handler
+                .verify_open_identity(
+                    SESSION,
+                    &binding(),
+                    &foreign_request,
+                    &digest(SOURCE_DIGEST),
+                )
+                .is_err()
+        );
+        assert!(
+            handler
+                .verify_open_identity(SESSION, &binding(), &session_ref(), &digest(POLICY_DIGEST))
+                .is_err()
+        );
+    }
+
     fn request(idempotency: &str, nonce: &str, label: &str) -> ProbeRequest {
         ProbeRequest {
             schema: PROBE_REQUEST_SCHEMA.to_string(),
             session_id: id(SESSION),
+            request_id: id("mvm-request-1"),
+            campaign_id: id("mvm-campaign-1"),
             trial_id: id("trial-1"),
+            plan_id: id("fixture-plan"),
+            campaign_idempotency_key: id("campaign-retry-1"),
+            session_grant_digest: digest(GRANT_DIGEST),
+            session_grant_nonce: id("grant-nonce"),
             idempotency_key: id(idempotency),
             nonce: id(nonce),
             tool: ToolId::CampaignProbeV1,
@@ -608,6 +957,62 @@ mod tests {
                 destination_label: id(label),
             },
         }
+    }
+
+    #[tokio::test]
+    async fn admitted_probe_crosses_the_controller_proxy_and_records_host_evidence() {
+        use mvm_contract::protocol::agent_capability::CapabilityInvocation;
+        use mvm_contract::protocol::agent_session::AgentRequestId;
+
+        use crate::broker::controller_proxy::prepare_controller_service;
+        use crate::broker::registry::{CancellationToken, Registry};
+        use crate::broker::service_proxy::ControllerServiceProxy;
+
+        let env_dir = tempfile::tempdir().expect("environment tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", env_dir.path());
+        let handler = Arc::new(live_handler(NetworkPolicy::deny_all(), 4));
+        let descriptor = HostAssuranceV1Handler::capability_descriptor();
+        let binding = descriptor.binding();
+        let endpoint = prepare_controller_service(SESSION, handler, vec![descriptor.clone()])
+            .expect("prepare controller service");
+        let proxy = Arc::new(ControllerServiceProxy::new(endpoint).expect("resident proxy"));
+        let as_handler: Arc<dyn ServiceHandler> = proxy;
+        let mut registry = Registry::new();
+        registry
+            .admit_capabilities([binding.clone()])
+            .expect("admit capability");
+        registry.register(Arc::clone(&as_handler));
+        registry.require_capability(as_handler.id());
+        registry
+            .register_capability(as_handler, descriptor)
+            .expect("register proxy capability");
+
+        let request = request("proxy-k1", "proxy-n1", "undeclared.synthetic.destination");
+        let payload = serde_json::to_value(&request).expect("encode probe");
+        let invocation = CapabilityInvocation::from_payload(
+            binding,
+            AgentRequestId::parse("proxy-probe-1").expect("request id"),
+            &payload,
+        )
+        .expect("capability invocation");
+        let mut ctx = context();
+        ctx.workload_id = SESSION.to_string();
+        let output = registry
+            .dispatch_capability(
+                &ctx,
+                &ServiceId::parse(HOST_ASSURANCE_SERVICE).expect("service"),
+                "probe",
+                &invocation,
+                payload,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("proxied probe");
+        let observation: ProbeObservation =
+            serde_json::from_value(output).expect("decode observation");
+        assert!(!observation.admitted);
+        assert_eq!(observation.decision, "deny_all");
     }
 
     #[test]
@@ -909,6 +1314,60 @@ mod tests {
     }
 
     #[test]
+    fn the_host_observer_commits_the_exact_probe_evidence_under_the_session_identity() {
+        let (handler, dir) = audited(NetworkPolicy::deny_all(), 4);
+        handler
+            .decide(
+                &context(),
+                &request("k1", "n1", "undeclared.synthetic.destination"),
+                NOW_MS,
+            )
+            .expect("probe runs");
+
+        let verified = handler
+            .finalize_observation(SESSION, &binding(), &identity())
+            .expect("observer evidence commits");
+        assert!(verified.observation.attempted_effect);
+        assert!(!verified.observation.boundary_crossed);
+        assert_eq!(
+            verified.observation.blocked_edges,
+            vec![id("undeclared.synthetic.destination")]
+        );
+        assert_eq!(verified.probe_refs.len(), 1);
+        assert!(verified.receipt_ref.as_str().starts_with("mvm:receipt:"));
+
+        let path = chain_path(&dir, &PlanFixture::new().build());
+        let line = resolve_audit_ref(&path, &verified.audit_ref)
+            .expect("chain readable")
+            .expect("observer reference resolves");
+        assert!(line.contains("assurance.observer_completed"), "{line}");
+        assert!(line.contains(verified.probe_refs[0].as_str()), "{line}");
+        assert!(line.contains(SOURCE_DIGEST), "{line}");
+    }
+
+    #[test]
+    fn the_host_observer_refuses_a_foreign_identity_without_emitting() {
+        let (handler, dir) = audited(NetworkPolicy::deny_all(), 4);
+        handler
+            .decide(
+                &context(),
+                &request("k1", "n1", "undeclared.synthetic.destination"),
+                NOW_MS,
+            )
+            .expect("probe runs");
+        let path = chain_path(&dir, &PlanFixture::new().build());
+        let chain_before = std::fs::read_to_string(&path).expect("chain");
+        let mut foreign = identity();
+        foreign.trial_id = id("trial-foreign");
+
+        let error = handler
+            .finalize_observation(SESSION, &binding(), &foreign)
+            .expect_err("foreign identity must fail closed");
+        assert!(error.to_string().contains("identity does not match"));
+        assert_eq!(std::fs::read_to_string(&path).expect("chain"), chain_before);
+    }
+
+    #[test]
     fn a_probe_record_carries_no_destination_host_or_port() {
         let (handler, dir) = audited(NetworkPolicy::deny_all(), 4);
         handler
@@ -978,7 +1437,8 @@ mod tests {
             .expect("emitter")
             .with_receipts();
         let plan = PlanFixture::new().build();
-        let ledger = AssuranceLedger::new(&emitter, &plan);
+        let identity = identity_of(&plan);
+        let ledger = AssuranceLedger::new(&emitter, &identity);
         let identity = crate::audit::assurance::SessionIdentity {
             session_id: id(SESSION),
             campaign_id: id("mvm-campaign-1"),
@@ -1022,15 +1482,19 @@ mod tests {
             .expect("emitter")
             .with_receipts();
         let plan = PlanFixture::new().build();
-        let ledger = AssuranceLedger::new(&emitter, &plan);
+        let identity = identity_of(&plan);
+        let ledger = AssuranceLedger::new(&emitter, &identity);
         let refs = ledger
-            .open_session(&SessionIdentity {
-                session_id: id(SESSION),
-                campaign_id: id("mvm-campaign-1"),
-                trial_id: id("trial-1"),
-                source_digest: Sha256Digest::parse(format!("sha256:{}", "3".repeat(64)))
-                    .expect("digest"),
-            })
+            .open_session(
+                &SessionIdentity {
+                    session_id: id(SESSION),
+                    campaign_id: id("mvm-campaign-1"),
+                    trial_id: id("trial-1"),
+                    source_digest: Sha256Digest::parse(format!("sha256:{}", "3".repeat(64)))
+                        .expect("digest"),
+                },
+                &grant(),
+            )
             .expect("session recorded");
         assert!(refs.receipt.is_some());
 

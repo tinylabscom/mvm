@@ -63,6 +63,11 @@ pub(crate) const SIOCSIFFLAGS_REQUEST: libc::Ioctl = target_ioctl_request(libc::
 pub(crate) const SIOCADDRT_REQUEST: libc::Ioctl = target_ioctl_request(libc::SIOCADDRT);
 const RESOLVER_CMDLINE_PREFIX: &str = "mvm.resolver=";
 
+#[cfg(any(target_os = "linux", test))]
+const fn loopback_ipv4_config() -> ([u8; 4], [u8; 4]) {
+    ([127, 0, 0, 1], [255, 0, 0, 0])
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) const fn target_ioctl_request(request: u64) -> libc::Ioctl {
     assert!(request <= target_ioctl_request_max());
@@ -197,6 +202,26 @@ pub fn configure_static(
     res
 }
 
+/// Assign the canonical IPv4 loopback address and bring `lo` up without
+/// installing any route outside `127.0.0.0/8`.
+#[cfg(target_os = "linux")]
+pub fn configure_loopback() -> Result<(), String> {
+    let (addr, netmask) = loopback_ipv4_config();
+    // SAFETY: socket(2) returns -1 on error (checked below) or a valid fd.
+    // We close it on every return path.
+    let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+    if sock < 0 {
+        return Err(format!(
+            "socket(AF_INET, SOCK_DGRAM) for lo: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let result = apply_interface_address(sock, "lo", addr, netmask);
+    // SAFETY: sock is valid, and this function owns it.
+    unsafe { libc::close(sock) };
+    result
+}
+
 /// Run the SIOCSIF* / SIOCADDRT sequence on an already-opened socket.
 #[cfg(target_os = "linux")]
 fn apply_ioctls(
@@ -206,8 +231,29 @@ fn apply_ioctls(
     netmask: [u8; 4],
     gateway: [u8; 4],
 ) -> Result<(), String> {
+    apply_interface_address(sock, iface, addr, netmask)?;
     unsafe {
-        // address
+        // default route
+        let mut rt: libc::rtentry = std::mem::zeroed();
+        set_sockaddr_in(&mut rt.rt_dst, [0, 0, 0, 0]);
+        set_sockaddr_in(&mut rt.rt_genmask, [0, 0, 0, 0]);
+        set_sockaddr_in(&mut rt.rt_gateway, gateway);
+        rt.rt_flags = (libc::RTF_UP | libc::RTF_GATEWAY) as libc::c_ushort;
+        if libc::ioctl(sock, SIOCADDRT_REQUEST, &rt) < 0 {
+            return Err(format!("SIOCADDRT: {}", std::io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn apply_interface_address(
+    sock: libc::c_int,
+    iface: &str,
+    addr: [u8; 4],
+    netmask: [u8; 4],
+) -> Result<(), String> {
+    unsafe {
         let mut ifr = ifreq_for(iface);
         set_sockaddr_in(&mut ifr.ifr_ifru.ifru_addr, addr);
         if libc::ioctl(sock, SIOCSIFADDR_REQUEST, &ifr) < 0 {
@@ -216,7 +262,7 @@ fn apply_ioctls(
                 std::io::Error::last_os_error()
             ));
         }
-        // netmask
+
         let mut ifr = ifreq_for(iface);
         set_sockaddr_in(&mut ifr.ifr_ifru.ifru_netmask, netmask);
         if libc::ioctl(sock, SIOCSIFNETMASK_REQUEST, &ifr) < 0 {
@@ -225,7 +271,7 @@ fn apply_ioctls(
                 std::io::Error::last_os_error()
             ));
         }
-        // flags: read current then OR in UP|RUNNING
+
         let mut ifr = ifreq_for(iface);
         if libc::ioctl(sock, SIOCGIFFLAGS_REQUEST, &mut ifr) < 0 {
             return Err(format!(
@@ -240,17 +286,8 @@ fn apply_ioctls(
                 std::io::Error::last_os_error()
             ));
         }
-        // default route
-        let mut rt: libc::rtentry = std::mem::zeroed();
-        set_sockaddr_in(&mut rt.rt_dst, [0, 0, 0, 0]);
-        set_sockaddr_in(&mut rt.rt_genmask, [0, 0, 0, 0]);
-        set_sockaddr_in(&mut rt.rt_gateway, gateway);
-        rt.rt_flags = (libc::RTF_UP | libc::RTF_GATEWAY) as libc::c_ushort;
-        if libc::ioctl(sock, SIOCADDRT_REQUEST, &rt) < 0 {
-            return Err(format!("SIOCADDRT: {}", std::io::Error::last_os_error()));
-        }
-        Ok(())
     }
+    Ok(())
 }
 
 /// Build an `ifreq` with the interface name pre-filled and all other fields
@@ -471,6 +508,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn loopback_configuration_assigns_ipv4_localhost_over_eight() {
+        assert_eq!(loopback_ipv4_config(), ([127, 0, 0, 1], [255, 0, 0, 0]));
+    }
+
+    #[test]
     fn parse_ipv4_valid_addresses() {
         assert_eq!(parse_ipv4("192.168.127.1"), Some([192, 168, 127, 1]));
         assert_eq!(parse_ipv4("10.0.2.15"), Some([10, 0, 2, 15]));
@@ -491,10 +533,11 @@ mod tests {
     #[test]
     fn encode_iface_name_eth0_pads_with_nul() {
         let buf = encode_iface_name("eth0").expect("eth0 fits");
-        assert_eq!(buf[0] as u8, b'e');
-        assert_eq!(buf[3] as u8, b'0');
-        assert_eq!(buf[4] as u8, 0, "remainder NUL-padded");
-        assert_eq!(buf[libc::IFNAMSIZ - 1] as u8, 0);
+        let byte = |value: libc::c_char| u8::from_ne_bytes(value.to_ne_bytes());
+        assert_eq!(byte(buf[0]), b'e');
+        assert_eq!(byte(buf[3]), b'0');
+        assert_eq!(byte(buf[4]), 0, "remainder NUL-padded");
+        assert_eq!(byte(buf[libc::IFNAMSIZ - 1]), 0);
     }
 
     #[test]

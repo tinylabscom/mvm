@@ -26,7 +26,7 @@ use anyhow::{Context, Result};
 use ed25519_dalek::VerifyingKey;
 use mvm_contract::provenance::{DecisionId, DecisionRecord, DecisionScenario};
 
-use crate::audit::emitter::write_atomic;
+use crate::audit::emitter::write_atomic_unsynced;
 use crate::supervisor::audit_file::{flock_exclusive, verify_audit_chain_entries};
 
 /// File-backed content-addressed store for one tenant's decision records.
@@ -72,6 +72,10 @@ impl DecisionStore {
     /// Verifies the content-address before writing so a corrupted or
     /// tampered record cannot enter the cache.
     pub fn put(&self, record: &DecisionRecord) -> Result<DecisionId> {
+        self.put_inner(record)
+    }
+
+    fn put_inner(&self, record: &DecisionRecord) -> Result<DecisionId> {
         let _guard = self.lock()?;
         if !record.verify_id() {
             anyhow::bail!("decision record id does not match its body");
@@ -80,7 +84,10 @@ impl DecisionStore {
         let path = self.path_for(&id);
         if !path.exists() {
             let bytes = serde_json::to_vec_pretty(record).context("serializing decision record")?;
-            write_atomic(&path, &bytes).context("writing decision record")?;
+            // The chain-signed `decision_record` event is authoritative and
+            // this content-addressed file can be rebuilt from it. Publish the
+            // cache atomically without extending admission's durability wait.
+            write_atomic_unsynced(&path, &bytes).context("writing decision record")?;
         }
         Ok(id)
     }

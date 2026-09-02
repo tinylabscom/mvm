@@ -42,10 +42,30 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// Lower it freely as deps drop; raising it must be justified in the change
 /// that does.
 ///
-/// 476 (was 475): `sigstore-tuf` enters with the sigstore-verify 0.9→0.11
-/// upgrade; it was absent from 0.9's dependency graph and is reachable only
-/// behind the `manifest-verify` optional feature.
-const FEATURE_CLOSURE_BUDGET: usize = 476;
+/// 469 (was 476): deleting the superseded L3 stack and its unused direct
+/// dependencies removes eight crates, while the first-party `mvm-mcp` crate
+/// adds one. Its
+/// only dependencies are workspace crates already in this closure
+/// (`mvm-client`, `chrono`, `serde`, `serde_json`, `thiserror`, `tokio`), so it
+/// pulls in no third-party graph. That is the distinction this budget exists to
+/// police: it ratchets against *dependency* growth, and a new crate of ours that
+/// vendors nothing is not that.
+///
+/// 470 (was 469): the first-party `mvm-capture` workspace crate. Its third-party
+/// dependencies were already present; the single new closure node is the crate
+/// itself, compiled by the all-features workspace lanes.
+///
+/// 471 (was 470): `async-trait`'s nightly-Clippy compatibility release moves
+/// its compile-time parser to `syn` 3, the same measured +1 as the default tree.
+///
+/// 483 (was 471): the opt-in `tpm2` attestation provider requires the
+/// `tss-esapi` TPM command stack; the default `mvmctl` closure is unchanged.
+///
+/// 484 (was 483): the first-party `mvm-host-services` workspace crate, split
+/// out of `mvm-sdk` so the in-guest cdylib stops being compiled from a crate
+/// carrying the decorator parser. It vendors nothing — its dependencies were
+/// already present — so the single new closure node is the crate itself.
+const FEATURE_CLOSURE_BUDGET: usize = 484;
 
 /// The two gates measure nested sets — everything in the default closure is
 /// reachable with all features on — so a feature budget at or below the default

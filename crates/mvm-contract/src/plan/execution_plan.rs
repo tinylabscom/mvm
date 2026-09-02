@@ -16,12 +16,15 @@ use crate::lifecycle::SnapshotAt;
 use crate::plan::bundle::PlanArtifact;
 use crate::plan::types::{
     AdmissionProfile, ArtifactPolicy, AttestationRequirement, AuditLabels, BuildProvenance,
-    DepsVolumeBinding, EnvironmentRef, FsPolicyRef, HostShareGrant, KeyRotationSpec, L3NetworkSpec,
-    NetworkLimits, NetworkMode, Nonce, PlanId, PolicyRef, PostRunLifecycle, ReleasePin, Resources,
-    RuntimeProfileRef, SecretBinding, SignedImageRef, StreamRetention, TenantId, WorkloadId,
+    CallerCommitment, DepsVolumeBinding, EnvironmentRef, FsPolicyRef, HostShareGrant,
+    IngressMapping, IngressMappingsError, KeyRotationSpec, NetworkLimits, NetworkMode, Nonce,
+    PlanId, PolicyRef, PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding,
+    SignedImageRef, StreamRetention, TenantId, WorkloadId, validate_ingress_mappings,
+    validate_ingress_material,
 };
 use crate::plan::verb::VerbId;
 use crate::protocol::broker::ServiceId;
+use crate::protocol::extension_pack::ExtensionPlanBinding;
 
 /// Wire-format version of the `ExecutionPlan`. New fields are additive with
 /// `#[serde(default)]`; the verifier rejects any plan whose `schema_version`
@@ -111,20 +114,17 @@ pub struct ExecutionPlan {
     #[serde(default)]
     pub network_mode: NetworkMode,
 
-    /// The L3-tunnel contract, when `network_mode` is
-    /// [`NetworkMode::L3Vsock`]. Admission refuses an `l3_vsock` plan with no
-    /// spec and a spec on a plan with another mode, so the two fields cannot
-    /// disagree about what was admitted. `#[serde(default)]` so a plan
-    /// without the field deserializes as the safe absent case.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub l3_network: Option<L3NetworkSpec>,
-
     /// Transport-neutral endpoint resource ceilings. Defaults are omitted so
     /// adding this signed field does not change bytes produced for existing
     /// plans. New networking transports consume this value instead of
     /// transport-specific limits.
     #[serde(default, skip_serializing_if = "NetworkLimits::is_default")]
     pub network_limits: NetworkLimits,
+
+    /// Exact host listeners and guest-loopback targets admitted for ingress.
+    /// Empty means the endpoint owns no public listener for this workload.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ingress: Vec<IngressMapping>,
 
     /// Opt-in warm-snapshot timing. `None` (default) = this workload is not
     /// warm-snapshotted; `Some(at)` = the host may capture a warm snapshot when
@@ -172,6 +172,12 @@ pub struct ExecutionPlan {
     pub tool_policy: PolicyRef,
 
     pub artifact_policy: ArtifactPolicy,
+
+    /// Optional opaque caller commitment fixed before execution. The bytes are
+    /// part of the plan content address and host signature; MVM deliberately
+    /// assigns them no semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_commitment: Option<CallerCommitment>,
 
     /// Free-form audit labels copied verbatim into every audit entry
     /// generated for this plan. Usually carries tenant-meaningful
@@ -256,6 +262,12 @@ pub struct ExecutionPlan {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub services: Vec<ServiceId>,
 
+    /// Optional independently signed extension packs admitted for this exact
+    /// workload. Empty keeps ordinary launches on the existing path: no pack
+    /// discovery, installation, or extension dispatch occurs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extensions: Vec<ExtensionPlanBinding>,
+
     /// Inbound stream edges: other workloads whose output feeds this one's
     /// stdin. Each names a *binding* the host resolves, never a VM — see
     /// [`crate::stream::edge`] for why a guest never addresses another guest.
@@ -279,25 +291,17 @@ pub struct ExecutionPlan {
 }
 
 impl ExecutionPlan {
-    /// Resolve the transport-neutral networking ceilings for this plan.
-    ///
-    /// A pre-migration L3 plan can still carry non-default flow and DNS
-    /// ceilings in its legacy transport block. Those values are projected
-    /// into the neutral type here so callers have one limit interface while
-    /// the old signed representation remains verifiable.
+    /// Validate all ingress mappings as one signed listener set.
+    pub fn validate_ingress(&self) -> Result<(), IngressMappingsError> {
+        validate_ingress_mappings(&self.ingress, self.network_limits.max_ingress_listeners)?;
+        validate_ingress_material(&self.ingress, &self.secrets)
+    }
+
+    /// Validate and return the admitted networking ceilings for this plan.
     pub fn effective_network_limits(
         &self,
     ) -> Result<NetworkLimits, crate::plan::types::NetworkLimitsError> {
-        if !self.network_limits.is_default() {
-            return Ok(self.network_limits);
-        }
-        let Some(legacy) = &self.l3_network else {
-            return Ok(self.network_limits);
-        };
-        NetworkLimits::builder()
-            .max_tcp_flows(legacy.max_flows)
-            .max_dns_bindings(legacy.max_dns_bindings)
-            .build()
+        self.network_limits.validate()
     }
 }
 
@@ -348,7 +352,7 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
         admission_profile: AdmissionProfile::local_default("vm:boot", PlanSeccompTier::Standard),
         network_policy: PolicyRef("local-default".to_string()),
         network_mode: Default::default(),
-        l3_network: None,
+        ingress: Vec::new(),
         network_limits: Default::default(),
         snapshot_at: Default::default(),
         build_provenance: Default::default(),
@@ -362,6 +366,7 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
             capture_paths: Vec::new(),
             retention_days: 0,
         },
+        caller_commitment: None,
         audit_labels: BTreeMap::new(),
         key_rotation: KeyRotationSpec { interval_days: 0 },
         attestation: AttestationRequirement {
@@ -381,6 +386,7 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
         deps_volume: None,
         shares: Vec::new(),
         services: Vec::new(),
+        extensions: Vec::new(),
         stream_edges: Vec::new(),
         stream_retention: StreamRetention::Persist,
     }
@@ -405,18 +411,18 @@ mod tests {
     }
 
     #[test]
-    fn legacy_l3_limits_project_into_the_transport_neutral_type() {
-        let mut plan = minimal_plan();
-        let mut legacy = L3NetworkSpec::v1();
-        legacy.max_flows = 17;
-        legacy.max_dns_bindings = 23;
-        plan.l3_network = Some(legacy);
+    fn absent_caller_commitment_preserves_existing_plan_bytes() {
+        let plan = minimal_plan();
+        let json = serde_json::to_string(&plan).expect("plan serializes");
+        assert!(
+            !json.contains("caller_commitment"),
+            "default leaked: {json}"
+        );
 
-        let effective = plan.effective_network_limits().unwrap();
-        assert_eq!(effective.max_tcp_flows, 17);
-        assert_eq!(effective.max_dns_bindings, 23);
-        assert_eq!(effective.max_udp_associations, 256);
-        assert_eq!(effective.max_ingress_listeners, 16);
+        let mut committed = plan;
+        committed.caller_commitment = Some(CallerCommitment::from_bytes([0x44; 32]));
+        let json = serde_json::to_string(&committed).expect("committed plan serializes");
+        assert!(json.contains(&format!("\"caller_commitment\":\"{}\"", "44".repeat(32))));
     }
 
     #[test]

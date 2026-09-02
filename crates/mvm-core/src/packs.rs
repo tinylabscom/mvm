@@ -19,6 +19,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use mvm_contract::protocol::extension_pack::{ExtensionContractError, ExtensionPackContract};
+
 use crate::arch::GuestArch;
 use crate::plan::bundle::{KeyId, key_id_from_identity, key_id_from_pubkey};
 
@@ -36,6 +38,7 @@ pub enum PackKind {
     Runtime,
     Builder,
     ImageProject,
+    Extension,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -138,6 +141,11 @@ pub struct PackManifest {
     pub backend_compatibility: Vec<PackBackend>,
     pub required_host_capabilities: Vec<HostCapability>,
     pub policy_compatibility: PolicyCompatibility,
+    /// Present only for [`PackKind::Extension`]. The enclosing pack supplies
+    /// the signature, artifact digest, provenance, SBOM, expiry, and
+    /// revocation channel for this generic extension declaration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension: Option<ExtensionPackContract>,
     pub inputs: PackInputs,
     pub outputs: PackOutputs,
     pub provenance: PackProvenance,
@@ -552,6 +560,7 @@ pub fn validate_manifest_structural(
         });
     }
     validate_required_outputs(manifest)?;
+    validate_extension_contract(manifest)?;
     validate_oci_inputs(manifest)?;
     validate_file_paths(manifest)?;
     Ok(())
@@ -664,8 +673,31 @@ fn validate_required_outputs(manifest: &PackManifest) -> Result<(), PackVerifyEr
         PackKind::ImageProject => {
             require_hash(manifest.outputs.rootfs_hash.as_ref(), "rootfs_hash")?;
         }
+        PackKind::Extension => {}
     }
     Ok(())
+}
+
+fn validate_extension_contract(manifest: &PackManifest) -> Result<(), PackVerifyError> {
+    match (&manifest.kind, &manifest.extension) {
+        (PackKind::Extension, Some(extension)) => {
+            extension.validate()?;
+            if !manifest
+                .outputs
+                .files
+                .iter()
+                .any(|file| file.path == extension.artifact)
+            {
+                return Err(PackVerifyError::ExtensionEntrypointNotDeclared(
+                    extension.artifact.clone(),
+                ));
+            }
+            Ok(())
+        }
+        (PackKind::Extension, None) => Err(PackVerifyError::MissingExtensionContract),
+        (_, Some(_)) => Err(PackVerifyError::UnexpectedExtensionContract),
+        (_, None) => Ok(()),
+    }
 }
 
 fn require_hash(hash: Option<&Sha256Hex>, field: &str) -> Result<(), PackVerifyError> {
@@ -859,6 +891,14 @@ pub enum PackVerifyError {
     ExpiredTrustMetadata { expired_at: DateTime<Utc> },
     #[error("pack is missing required output hash {0}")]
     MissingOutputHash(String),
+    #[error("extension pack is missing its extension contract")]
+    MissingExtensionContract,
+    #[error("non-extension pack carries an extension contract")]
+    UnexpectedExtensionContract,
+    #[error("extension entrypoint {0:?} is not a declared pack file")]
+    ExtensionEntrypointNotDeclared(String),
+    #[error("invalid extension contract: {0}")]
+    InvalidExtensionContract(#[from] ExtensionContractError),
     #[error("mutable OCI reference is not eligible for attested fast launch: {reference}")]
     MutableOciReference { reference: String },
     #[error("unsafe pack file path {0:?}")]
@@ -996,6 +1036,7 @@ pub struct PackBuilder<'a> {
     metadata: PackMetadata,
     output_hashes: PackOutputHashes,
     files: Vec<String>,
+    extension: Option<ExtensionPackContract>,
     signer: PackSigner<'a>,
 }
 
@@ -1010,6 +1051,7 @@ impl<'a> PackBuilder<'a> {
             metadata,
             output_hashes: PackOutputHashes::default(),
             files: Vec::new(),
+            extension: None,
             signer: PackSigner::Ed25519(signing_key),
         }
     }
@@ -1028,6 +1070,7 @@ impl<'a> PackBuilder<'a> {
             metadata,
             output_hashes: PackOutputHashes::default(),
             files: Vec::new(),
+            extension: None,
             signer: PackSigner::Keyless {
                 identity: identity.into(),
             },
@@ -1048,6 +1091,13 @@ impl<'a> PackBuilder<'a> {
 
     pub fn output_hashes(mut self, hashes: PackOutputHashes) -> Self {
         self.output_hashes = hashes;
+        self
+    }
+
+    /// Attach the generic extension declaration. Validation refuses it on any
+    /// pack kind other than `extension`.
+    pub fn extension(mut self, extension: ExtensionPackContract) -> Self {
+        self.extension = Some(extension);
         self
     }
 
@@ -1145,6 +1195,7 @@ impl<'a> PackBuilder<'a> {
             backend_compatibility: self.metadata.backend_compatibility,
             required_host_capabilities: self.metadata.required_host_capabilities,
             policy_compatibility: self.metadata.policy_compatibility,
+            extension: self.extension,
             inputs: self.metadata.inputs,
             outputs,
             provenance,
@@ -1190,6 +1241,16 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use ed25519_dalek::{Signer, SigningKey};
     use tempfile::TempDir;
+
+    use mvm_contract::protocol::agent_capability::{
+        AGENT_CAPABILITY_PROTOCOL_VERSION, CapabilityDescriptor, CapabilityId, CapabilityLimits,
+        SchemaRef,
+    };
+    use mvm_contract::protocol::broker::ServiceId;
+    use mvm_contract::protocol::extension_pack::{
+        EXTENSION_PACK_SCHEMA, ExtensionBudgets, ExtensionId, ExtensionPackContract,
+        ExtensionPlacement, ExtensionProtocolRange, ExtensionVersion,
+    };
 
     use super::*;
 
@@ -1287,6 +1348,7 @@ mod tests {
                 local_rebuild_required: false,
                 allowed_channels: vec!["stable".to_string()],
             },
+            extension: None,
             inputs: PackInputs {
                 flake_locks: vec![FlakeLockIdentity {
                     reference: "github:tinylabs/mvm".to_string(),
@@ -1659,6 +1721,145 @@ mod tests {
             })
             .build()
             .expect("produce runtime pack")
+    }
+
+    fn extension_contract(entrypoint: &str) -> ExtensionPackContract {
+        let descriptor = CapabilityDescriptor::builder()
+            .id(CapabilityId::new(
+                ServiceId::parse("host.assurance.v1").expect("service"),
+                "probe",
+            )
+            .expect("capability"))
+            .description("one declared assurance probe")
+            .input_schema(SchemaRef::new("probe.input.v1", [1; 32]).expect("input"))
+            .output_schema(SchemaRef::new("probe.output.v1", [2; 32]).expect("output"))
+            .limits(CapabilityLimits::new(4096, 4096, 1000).expect("limits"))
+            .build()
+            .expect("descriptor");
+        ExtensionPackContract {
+            schema: EXTENSION_PACK_SCHEMA.to_string(),
+            extension_id: ExtensionId::parse("org.example.assurance").expect("id"),
+            version: ExtensionVersion::parse("0.1.0").expect("version"),
+            protocol: ExtensionProtocolRange {
+                min_mvm_version: ExtensionVersion::parse("0.18.0").expect("min"),
+                max_mvm_version: ExtensionVersion::parse("0.18.9").expect("max"),
+                min_protocol: 1,
+                max_protocol: 1,
+            },
+            placement: ExtensionPlacement::GuestWorkload,
+            artifact: "extension.ext4".to_string(),
+            entrypoint: entrypoint.to_string(),
+            capabilities: vec![descriptor],
+            budgets: ExtensionBudgets {
+                cpu_millis: 500,
+                memory_bytes: 128 * 1024 * 1024,
+                duration_ms: 60_000,
+                max_steps: 12,
+                max_concurrency: 1,
+                max_payload_bytes: 4096,
+                max_output_bytes: 4096,
+                max_artifact_bytes: 1024 * 1024,
+            },
+            revocation_identity: "org.example.assurance.release".to_string(),
+            permission_delta: "May invoke one declared assurance probe.".to_string(),
+        }
+    }
+
+    #[test]
+    fn signed_extension_pack_verifies_through_the_generic_pack_path() {
+        let dir = TempDir::new().expect("tempdir");
+        fs::write(
+            dir.path().join("extension.ext4"),
+            b"synthetic-extension-filesystem",
+        )
+        .expect("artifact");
+        let key = signing_key();
+        let manifest = PackBuilder::new(dir.path(), producer_metadata(PackKind::Extension), &key)
+            .file("extension.ext4")
+            .extension(extension_contract("bin/extension"))
+            .build()
+            .expect("produce extension pack");
+        let verified = verify_pack_at(
+            &manifest,
+            dir.path(),
+            &hvf_policy(),
+            &hvf_trust_store(),
+            &StaticRevocation {
+                status: RevocationStatus::Good,
+            },
+        )
+        .expect("extension pack verifies");
+        assert_eq!(verified.pack_hash, manifest.outputs.pack_hash);
+        assert!(manifest.extension.is_some());
+    }
+
+    #[test]
+    fn signed_extension_pack_refuses_an_unsupported_protocol() {
+        let dir = TempDir::new().expect("tempdir");
+        fs::write(dir.path().join("extension.ext4"), b"extension-filesystem").expect("artifact");
+        let key = signing_key();
+        let mut extension = extension_contract("bin/extension");
+        extension.protocol.min_protocol = AGENT_CAPABILITY_PROTOCOL_VERSION.saturating_add(1);
+        extension.protocol.max_protocol = extension.protocol.min_protocol;
+        let manifest = PackBuilder::new(dir.path(), producer_metadata(PackKind::Extension), &key)
+            .file("extension.ext4")
+            .extension(extension)
+            .build()
+            .expect("produce extension pack");
+        let error = verify_pack_at(
+            &manifest,
+            dir.path(),
+            &hvf_policy(),
+            &hvf_trust_store(),
+            &StaticRevocation {
+                status: RevocationStatus::Good,
+            },
+        )
+        .expect_err("unsupported protocol must fail");
+        assert!(matches!(
+            error,
+            PackVerifyError::InvalidExtensionContract(
+                ExtensionContractError::UnsupportedProtocolRange
+            )
+        ));
+    }
+
+    #[test]
+    fn signed_extension_pack_refuses_an_untrusted_signer() {
+        let dir = TempDir::new().expect("tempdir");
+        fs::write(dir.path().join("extension.ext4"), b"extension-filesystem").expect("artifact");
+        let key = signing_key();
+        let manifest = PackBuilder::new(dir.path(), producer_metadata(PackKind::Extension), &key)
+            .file("extension.ext4")
+            .extension(extension_contract("bin/extension"))
+            .build()
+            .expect("produce extension pack");
+        let error = verify_pack_at(
+            &manifest,
+            dir.path(),
+            &hvf_policy(),
+            &MapTrustStore {
+                keys: HashMap::new(),
+            },
+            &StaticRevocation {
+                status: RevocationStatus::Good,
+            },
+        )
+        .expect_err("unknown signer must fail");
+        assert!(matches!(error, PackVerifyError::UnknownSigningKey { .. }));
+    }
+
+    #[test]
+    fn extension_entrypoint_must_be_a_verified_pack_file() {
+        let mut manifest = fixture(PackKind::Runtime).manifest;
+        manifest.kind = PackKind::Extension;
+        let mut extension = extension_contract("bin/extension");
+        extension.artifact = "not-declared.ext4".to_string();
+        manifest.extension = Some(extension);
+        assert!(matches!(
+            validate_extension_contract(&manifest),
+            Err(PackVerifyError::ExtensionEntrypointNotDeclared(_))
+        ));
     }
 
     fn hvf_policy() -> LocalPackPolicy {

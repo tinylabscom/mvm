@@ -18,8 +18,8 @@
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use super::HvfError;
@@ -27,20 +27,25 @@ use super::HvfError;
 use super::guest_ram::HVF_PAGE_SIZE;
 use super::guest_ram::{GuestRam, page_rounded_len};
 use super::hv_impl::{HvfHandle, HvfVcpu};
-use super::snapshot::HVF_SNAPSHOT_BACKEND_KIND;
+use super::smp::{CreationOrder, Release, SecondaryGates, VcpuStart, psci};
+use super::snapshot::{HVF_SNAPSHOT_BACKEND_KIND, HvfVcpuState};
 use super::sys::*;
 use super::vcpu::esr_ec;
-use super::{BootFault, default_bootargs, default_virtiofs_bootargs};
+use super::{BootFault, default_bootargs};
 use crate::vmm::device::Pl011;
-use crate::vmm::device_state::capture_device_states;
+use crate::vmm::device_state::{SnapshotDeviceState, capture_device_states};
 use crate::vmm::hv::{CoreReg, HypervisorVcpu, SysReg, VcpuHandle};
 use crate::vmm::run::{self, RunControl, RunDevice, RunOutcome};
 use crate::vmm::virtio::{DiskImage, VirtioBlk, VirtioFs};
 use crate::vmm::virtio_rng::VirtioRng;
 use crate::vmm::vsock::VirtioVsock;
 use crate::vmm::{fdt, kernel_image};
+use mvm_core::usage_capture::{Mechanism, Metric, UsageCapture};
 use mvm_core::vcpu_quota::VcpuQuotaRecord;
-use mvm_vmm::quota::{QuotaConfig, QuotaPolicy, ThreadCpuHandle, VcpuQuota};
+use mvm_vmm::host::process_usage;
+use mvm_vmm::quota::{
+    QuotaConfig, QuotaPolicy, SummedClock, ThreadCpuClock, ThreadCpuHandle, VcpuQuota,
+};
 
 /// Guest RAM base (2 GiB, per the aarch64 Linux boot convention). The GIC +
 /// PL011 sit below RAM so their accesses fault out as MMIO.
@@ -48,6 +53,37 @@ const RAM_BASE: u64 = 0x8000_0000;
 /// Default guest RAM (512 MiB) when the caller specifies none — enough for a
 /// demo/agent boot. A builder overrides it (a `nix build` OOMs at 512 MiB).
 const DEFAULT_RAM_SIZE: usize = 0x2000_0000;
+
+/// vCPUs this VMM will create, for a requested `vcpus`.
+///
+/// Zero is not a machine, so it means one. Nothing else is clamped: the host's
+/// real ceiling is whatever `hv_vcpu_create` will grant, and asking for more
+/// fails the boot with that error rather than quietly handing back a smaller
+/// machine than the one that was asked for.
+///
+/// The single function the device tree and the vCPU creation both read, so the
+/// tree can never describe CPUs the VMM does not create. That mismatch does not
+/// degrade into a smaller guest; the kernel onlines secondaries that never
+/// respond and the boot hangs with no console output.
+fn effective_vcpus(vcpus: u32) -> u32 {
+    vcpus.max(1)
+}
+
+/// Put one vCPU into its architectural start state.
+///
+/// Shared by the primary and by every CPU a PSCI `CPU_ON` releases — the two
+/// differ only in the [`VcpuStart`] values. x1..x3 are zeroed because the arm64
+/// boot protocol reserves them, and a secondary entering with stale register
+/// contents is a fault the guest attributes to itself.
+fn apply_vcpu_start(vcpu: &HvfVcpu, start: VcpuStart) -> Result<(), HvfError> {
+    vcpu.set_sys(SysReg::MpidrEl1, start.mpidr)
+        .and_then(|()| vcpu.set_core(CoreReg::Pc, start.entry))
+        .and_then(|()| vcpu.set_core(CoreReg::Cpsr, 0x3c5))
+        .and_then(|()| vcpu.set_core(CoreReg::X(0), start.x0))
+        .and_then(|()| vcpu.set_core(CoreReg::X(1), 0))
+        .and_then(|()| vcpu.set_core(CoreReg::X(2), 0))
+        .and_then(|()| vcpu.set_core(CoreReg::X(3), 0))
+}
 
 /// Guest RAM in bytes for `mem_mib` MiB, or the default when `mem_mib` is 0.
 /// A MiB is a multiple of the 16 KiB hypervisor page size, so the result is
@@ -74,24 +110,24 @@ const VIRTIO_MMIO_BASE: u64 = 0x0a00_0000;
 const VIRTIO_IRQ: u32 = 48;
 const VSOCK_MMIO_BASE: u64 = 0x0a00_0200;
 const VSOCK_IRQ: u32 = 49;
-/// virtio-fs windows start above the disk band (MAX_DISKS=5 → up to
-/// base+5*stride) and vsock. The first slot is the optional virtio-fs root;
+/// virtio-fs windows start above the disk band (MAX_DISKS=6 → up to
+/// base+6*stride) and vsock. The first slot is the optional virtio-fs root;
 /// following slots are live user directory shares.
-const FS_MMIO_BASE: u64 = VIRTIO_MMIO_BASE + 6 * MMIO_STRIDE;
-const FS_IRQ: u32 = 54;
+const FS_MMIO_BASE: u64 = VIRTIO_MMIO_BASE + 7 * MMIO_STRIDE;
+const FS_IRQ: u32 = 55;
 /// Maximum number of user virtio-fs shares in one HVF guest. The bound keeps the
 /// MMIO and SPI allocations fixed and leaves the entropy device at a stable slot.
 const MAX_VIRTIOFS_SHARES: usize = 8;
 /// The entropy device follows every optional disk/vsock/virtio-fs window, so its
 /// stable address cannot collide with a device combination selected at runtime.
-const RNG_MMIO_BASE: u64 = VIRTIO_MMIO_BASE + (7 + MAX_VIRTIOFS_SHARES as u64) * MMIO_STRIDE;
+const RNG_MMIO_BASE: u64 = VIRTIO_MMIO_BASE + (8 + MAX_VIRTIOFS_SHARES as u64) * MMIO_STRIDE;
 const RNG_IRQ: u32 = FS_IRQ + MAX_VIRTIOFS_SHARES as u32 + 1;
 /// virtio-mmio window stride; each device occupies one 0x200 slot.
 const MMIO_STRIDE: u64 = 0x200;
 /// Max virtio-blk devices (`/dev/vda`..). The builder-with-runtime-overlay path
-/// needs five: rootfs, nix-store, input, output, and the read-only runtime
-/// overlay.
-const MAX_DISKS: usize = 5;
+/// needs six: rootfs, nix-store, input, output, the read-only runtime overlay,
+/// and the per-boot FlowMux identity drive.
+const MAX_DISKS: usize = 6;
 
 /// MMIO base + SPI for virtio-blk device `i` (`/dev/vda` = 0). Disk 0 keeps the
 /// original single-disk window; disks 1+ sit *above* the vsock slot, so vsock's
@@ -110,7 +146,114 @@ fn disk_mmio(i: usize) -> (u64, u32) {
 const PSCI_VERSION_FN: u64 = 0x8400_0000;
 const PSCI_SYSTEM_OFF: u64 = 0x8400_0008;
 const PSCI_SYSTEM_RESET: u64 = 0x8400_0009;
-const PSCI_NOT_SUPPORTED: u64 = (-1i64) as u64;
+/// `CPU_ON`, both calling conventions. A 64-bit guest uses the SMC64 id; the
+/// SMC32 id is accepted because a kernel may probe with it.
+const PSCI_CPU_ON_SMC64: u64 = 0xC400_0003;
+const PSCI_CPU_ON_SMC32: u64 = 0x8400_0003;
+/// `AFFINITY_INFO`, used by the kernel to poll whether a target CPU came up.
+const PSCI_AFFINITY_INFO_SMC64: u64 = 0xC400_0004;
+const PSCI_AFFINITY_INFO_SMC32: u64 = 0x8400_0004;
+
+/// How many distinct PSCI function ids / exception classes to keep. A
+/// diagnostic sample rather than a log: the content is which kinds occurred,
+/// and a guest in a fault loop would otherwise grow the vector without bound.
+const DIAGNOSTIC_SAMPLE_LIMIT: usize = 16;
+
+/// Diagnostics one vCPU gathered while running.
+///
+/// Per-CPU rather than shared. These are counters on the exception hot path, so
+/// a lock behind every HVC would cost more than the numbers are worth. The
+/// primary merges every CPU's set once the threads have joined, so the boot
+/// result describes the machine rather than whichever CPU happened to report.
+#[derive(Debug, Default)]
+struct CpuDiagnostics {
+    hvc_calls: usize,
+    other_exceptions: usize,
+    psci_fns: Vec<u64>,
+    other_ecs: Vec<u32>,
+}
+
+impl CpuDiagnostics {
+    /// Fold another CPU's diagnostics in. Counts add; the function-id and
+    /// exception-class lists stay sets, because "which kinds happened" is what
+    /// they answer and a secondary issuing the same PSCI call as the primary is
+    /// not new information.
+    fn merge(&mut self, other: Self) {
+        self.hvc_calls += other.hvc_calls;
+        self.other_exceptions += other.other_exceptions;
+        for fn_id in other.psci_fns {
+            if self.psci_fns.len() < DIAGNOSTIC_SAMPLE_LIMIT && !self.psci_fns.contains(&fn_id) {
+                self.psci_fns.push(fn_id);
+            }
+        }
+        for ec in other.other_ecs {
+            if self.other_ecs.len() < DIAGNOSTIC_SAMPLE_LIMIT && !self.other_ecs.contains(&ec) {
+                self.other_ecs.push(ec);
+            }
+        }
+    }
+}
+
+/// Handle one guest exception, on any vCPU.
+///
+/// The same body for the boot CPU and every secondary: an HVC can come from any
+/// CPU, and PSCI in particular is issued by whichever CPU is bringing another
+/// one up. Answers come from `gates`, which is also what releases the parked
+/// threads, so the call and the thread it starts cannot disagree about which
+/// CPUs exist.
+fn handle_exception(
+    vc: &HvfVcpu,
+    esr: u64,
+    shared: &MachineShared<'_>,
+    diag: &mut CpuDiagnostics,
+) -> Result<RunControl, HvfError> {
+    if esr_ec(esr) != EC_HVC_AARCH64 {
+        let ec = esr_ec(esr);
+        diag.other_exceptions += 1;
+        if diag.other_ecs.len() < DIAGNOSTIC_SAMPLE_LIMIT && !diag.other_ecs.contains(&ec) {
+            diag.other_ecs.push(ec);
+        }
+        // Advance past the faulting instruction and keep going.
+        let pc = vc.get_core(CoreReg::Pc)?;
+        vc.set_core(CoreReg::Pc, pc + 4)?;
+        return Ok(RunControl::Continue);
+    }
+
+    diag.hvc_calls += 1;
+    let fn_id = vc.get_core(CoreReg::X(0))?;
+    if diag.psci_fns.len() < DIAGNOSTIC_SAMPLE_LIMIT && !diag.psci_fns.contains(&fn_id) {
+        diag.psci_fns.push(fn_id);
+    }
+    match fn_id {
+        // Whichever CPU asks, shutting the machine down ends the whole run —
+        // PSCI SYSTEM_OFF is a machine-wide verb, not a per-CPU one. Recorded
+        // so the boot result can tell a guest that powered itself off from one
+        // the host stopped.
+        PSCI_SYSTEM_OFF | PSCI_SYSTEM_RESET => {
+            shared.guest_shutdown.store(true, Ordering::Relaxed);
+            return Ok(RunControl::Stop);
+        }
+        PSCI_VERSION_FN => vc.set_core(CoreReg::X(0), 0x1_0000)?, // PSCI v1.0
+        // x1 is the target MPIDR, x2 the entry point, x3 the context id the
+        // kernel wants handed back in x0 on the other side.
+        PSCI_CPU_ON_SMC64 | PSCI_CPU_ON_SMC32 => {
+            let target = vc.get_core(CoreReg::X(1))?;
+            let entry = vc.get_core(CoreReg::X(2))?;
+            let context_id = vc.get_core(CoreReg::X(3))?;
+            vc.set_core(
+                CoreReg::X(0),
+                shared.gates.cpu_on(target, entry, context_id),
+            )?;
+        }
+        PSCI_AFFINITY_INFO_SMC64 | PSCI_AFFINITY_INFO_SMC32 => {
+            let target = vc.get_core(CoreReg::X(1))?;
+            vc.set_core(CoreReg::X(0), shared.gates.affinity_info(target))?;
+        }
+        _ => vc.set_core(CoreReg::X(0), psci::NOT_SUPPORTED)?,
+    }
+    // HVC is completed: HVF already advanced PC. Do NOT advance.
+    Ok(RunControl::Continue)
+}
 
 /// Raises a device SPI on the process-global in-kernel GIC — the [`IrqLine`] the
 /// vsock host-I/O thread uses to interrupt the guest off the vCPU exit path
@@ -162,6 +305,12 @@ pub struct KernelBootResult {
     /// Internal supervisor shutdown spans. Present when the watchdog stopped a
     /// live run; absent for setup failures and ordinary guest exits.
     pub shutdown_timing: Option<KernelShutdownTiming>,
+    /// What the machine consumed, measured from inside the run.
+    ///
+    /// The vCPU CPU time can only be read while the vCPU threads are alive, so
+    /// it is taken here rather than by the caller; the caller persists it
+    /// beside the exit code, where it knows the VM's state directory.
+    pub usage: UsageCapture,
 }
 
 /// Internal spans between the watchdog observing stop and Hypervisor.framework
@@ -222,11 +371,13 @@ pub struct HostChannels {
     /// Guest RAM in MiB. `0` ⇒ the built-in default (512 MiB). A builder sets
     /// several GiB so `nix build` doesn't OOM.
     pub mem_mib: u32,
-    /// When set, serve this host directory (the unpacked+injected OCI tree) to
-    /// the guest as a read-only **virtiofs root** instead of a block rootfs — the
-    /// Plan-223 dev-tier boot. No virtio-blk disk is attached; the default
-    /// cmdline becomes `rootfstype=virtiofs root=mvmroot`.
-    pub virtiofs_root: Option<PathBuf>,
+    /// Guest vCPUs. `0` ⇒ 1.
+    ///
+    /// Read by exactly two things that must agree: the device tree, which tells
+    /// the guest how many CPUs exist, and the vCPU creation below. A tree that
+    /// describes more CPUs than the VMM creates hangs the boot waiting for
+    /// secondaries; fewer, and the extra vCPUs are never onlined.
+    pub vcpus: u32,
     /// Read-only live host-directory shares as `(virtio-fs tag, host path)`.
     pub virtiofs_shares: Vec<(String, PathBuf)>,
     /// Host console log to mirror guest output into as the guest emits it.
@@ -540,6 +691,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
     // Validate it's an arm64 Image; we load at the fixed boot-protocol offset.
     let kernel_meta = kernel.metadata()?;
     let ram_size = ram_size_bytes(channels.mem_mib);
+    let vcpus = effective_vcpus(channels.vcpus);
     let load_off = KERNEL_LOAD_OFFSET as usize;
     let dtb_off = ram_size
         .checked_sub(FDT_MAX_SIZE as usize)
@@ -584,13 +736,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
     let mut bootargs = std::env::var("MVM_HVF_BOOTARGS")
         .ok()
         .or_else(|| channels.cmdline.clone())
-        .unwrap_or_else(|| {
-            if channels.virtiofs_root.is_some() {
-                default_virtiofs_bootargs()
-            } else {
-                default_bootargs(!disks.is_empty())
-            }
-        });
+        .unwrap_or_else(|| default_bootargs(!disks.is_empty()));
     if let Ok(extra) = std::env::var("MVM_HVF_BOOTARGS_EXTRA") {
         let extra = extra.trim();
         if !extra.is_empty() {
@@ -611,12 +757,11 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
     if vsock {
         virtio_nodes.push((VSOCK_MMIO_BASE, VSOCK_IRQ));
     }
-    let has_virtiofs_root = channels.virtiofs_root.is_some();
-    let fs_count = usize::from(has_virtiofs_root) + channels.virtiofs_shares.len();
-    if fs_count > MAX_VIRTIOFS_SHARES + 1 {
+    let fs_count = channels.virtiofs_shares.len();
+    if fs_count > MAX_VIRTIOFS_SHARES {
         return Err(HvfError::BadBoot(BootFault::TooManyFilesystems {
             given: fs_count,
-            max: MAX_VIRTIOFS_SHARES + 1,
+            max: MAX_VIRTIOFS_SHARES,
         }));
     }
     for index in 0..fs_count {
@@ -636,6 +781,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
         initrd_bounds,
         &virtio_nodes,
         Some(&rng_seed),
+        vcpus,
     );
     if dtb.len() > FDT_MAX_SIZE as usize {
         return Err(HvfError::BadBoot(BootFault::DtbTooLarge {
@@ -672,6 +818,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
                 vsock,
                 timeout,
                 ram_size: mapped_ram_size,
+                vcpus,
                 agent_socket: channels.agent_socket,
                 substitution_socket: channels.substitution_socket,
                 egress_relay: channels.egress_relay,
@@ -679,7 +826,6 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
                 broker_socket: channels.broker_socket,
                 console_data_sockets: channels.console_data_sockets,
                 builder_control_sockets: channels.builder_control_sockets,
-                virtiofs_root: channels.virtiofs_root,
                 virtiofs_shares: channels.virtiofs_shares,
                 console_log: channels.console_log,
                 pause_state: channels.pause_state,
@@ -723,6 +869,11 @@ struct RunInputs {
     timeout: Duration,
     /// Mapped guest RAM size in bytes (matches the host allocation).
     ram_size: usize,
+    /// vCPUs this run actually creates — already through `effective_vcpus`, and
+    /// the same number the device tree was built from. PSCI answers `CPU_ON`
+    /// and `AFFINITY_INFO` against it so the guest cannot be told a CPU exists
+    /// that no thread backs.
+    vcpus: u32,
     /// Per-VM agent RPC socket (productionized off `MVM_HVF_AGENT_SOCKET`).
     agent_socket: Option<PathBuf>,
     /// Per-VM substitution-endpoint socket (productionized off
@@ -740,8 +891,6 @@ struct RunInputs {
     /// data port). Empty for a sealed prod config — nothing bound (claim 15).
     console_data_sockets: Vec<(u32, PathBuf)>,
     builder_control_sockets: Vec<(u32, PathBuf)>,
-    /// When set, serve this host dir to the guest as a read-only virtiofs root.
-    virtiofs_root: Option<PathBuf>,
     virtiofs_shares: Vec<(String, PathBuf)>,
     /// Host console log the PL011 mirrors guest output into as it arrives.
     console_log: Option<PathBuf>,
@@ -760,6 +909,609 @@ struct RunInputs {
     quota_record: Option<PathBuf>,
 }
 
+/// Raise or lower a device interrupt line on the process-global in-kernel GIC.
+///
+/// The vCPU-exit-path counterpart to [`GicSpi`], which the vsock host-I/O
+/// thread uses. A free function rather than a closure per vCPU so every CPU of
+/// an SMP machine raises interrupts through the same code.
+fn set_gic_spi(intid: u32, level: bool) -> Result<(), HvfError> {
+    // SAFETY: FFI to the process-global in-kernel GIC, created before any vCPU
+    // and destroyed after all of them. `hv_gic_set_spi` is documented as
+    // callable from any thread.
+    if unsafe { hv_gic_set_spi(intid, level) } == HV_SUCCESS {
+        Ok(())
+    } else {
+        Err(HvfError::GicCreate(0))
+    }
+}
+
+/// Where a pause-time snapshot is written.
+struct SnapshotPaths {
+    request: Option<PathBuf>,
+    ram: Option<PathBuf>,
+    frame: Option<PathBuf>,
+}
+
+/// Holds secondary vCPUs after creation until the primary has restored the
+/// process-global GIC state and is ready for per-vCPU state restoration.
+#[derive(Default)]
+struct MachineStartGate {
+    released: Mutex<bool>,
+    changed: Condvar,
+}
+
+impl MachineStartGate {
+    fn wait(&self) {
+        let mut released = self
+            .released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !*released {
+            released = self
+                .changed
+                .wait(released)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    fn release(&self) {
+        *self
+            .released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        self.changed.notify_all();
+    }
+}
+
+/// The state every vCPU of one machine shares.
+///
+/// Borrowed by each vCPU thread for the length of the run. Every field is
+/// either atomic or internally locked, because on an SMP machine each of them
+/// is read and written by several CPUs at once.
+struct MachineShared<'a> {
+    /// The parking spots PSCI `CPU_ON` releases.
+    gates: &'a SecondaryGates,
+    /// Keeps vCPU creation in CPU-number order, so each CPU gets the GIC
+    /// redistributor frame the device tree assigned it.
+    creation_order: &'a CreationOrder,
+    /// Prevents any secondary from running before whole-machine restore is
+    /// complete.
+    start: &'a MachineStartGate,
+    /// Holds restored CPUs after their local state is installed until every
+    /// CPU has acknowledged the same restore boundary.
+    run: &'a MachineStartGate,
+    /// Every live vCPU's force-exit token.
+    roster: &'a Mutex<Vec<HvfHandle>>,
+    /// The supervisor's stop flag: a timeout, or a graceful stop.
+    stop: &'static AtomicBool,
+    /// The supervisor's pause request.
+    paused: &'static AtomicBool,
+    /// Set by whichever vCPU leaves its run loop first. Every other CPU reads
+    /// it as a stop, which is what turns one CPU taking `PSCI SYSTEM_OFF` into
+    /// the whole machine ending rather than the rest spinning on in a guest
+    /// that has shut itself down.
+    machine_over: &'a AtomicBool,
+    /// Set when any CPU asks to power the machine down.
+    ///
+    /// Separate from `machine_over`, which says only that the run ended. A
+    /// secondary taking `PSCI SYSTEM_OFF` ends the run through the same forced
+    /// exit a watchdog timeout uses, so without this the boot CPU reports a
+    /// clean guest shutdown as a timeout.
+    guest_shutdown: &'a AtomicBool,
+    /// The CPU-quota hold. Shared, because the quota bounds the machine and not
+    /// a thread: when it is set every vCPU parks.
+    throttle: &'a AtomicBool,
+    /// Each secondary's register state, published by that CPU while it is
+    /// parked and read by the boot CPU when it assembles a snapshot.
+    ///
+    /// It has to be published rather than collected because HVF only lets a
+    /// vCPU's registers be read from the thread that created it — the boot CPU
+    /// cannot reach into a secondary and take them. Indexed by CPU number, with
+    /// slot 0 unused; `None` means that CPU has not yet parked and published,
+    /// which is exactly the condition a capture has to wait on.
+    parked_states: &'a Mutex<Vec<Option<HvfVcpuState>>>,
+    /// Each secondary's state to resume from, for a restored machine.
+    ///
+    /// The mirror of `parked_states`, and thread-bound for the same reason: the
+    /// boot CPU parses the frame and leaves each secondary's registers here for
+    /// the thread that owns that vCPU to apply. Empty for a cold boot, where
+    /// secondaries wait for the guest's own PSCI `CPU_ON` instead.
+    restored_states: &'a Mutex<Vec<Option<HvfVcpuState>>>,
+    /// Each vCPU's total consumed CPU time, as that CPU reported it on its way
+    /// out of the machine.
+    ///
+    /// Published rather than collected, for a harder version of the reason
+    /// `parked_states` is: a thread's CPU accounting does not outlive the
+    /// thread. `thread_info` on the port of an exited thread fails, and a
+    /// failed read is charged as zero. Every vCPU observes the same stop flag,
+    /// so any sum the boot CPU takes by reading the other CPUs' clocks races
+    /// their exits — and a CPU that wins the race contributes zero rather than
+    /// what it consumed, silently shrinking a number that goes onto a signed
+    /// receipt. Each CPU instead reads its own clock while it is unambiguously
+    /// alive and leaves the answer here.
+    ///
+    /// Indexed by CPU number, slot 0 being the boot CPU. `None` means that CPU
+    /// never reported, which makes the machine's total unknowable rather than
+    /// smaller.
+    vcpu_time: &'a Mutex<Vec<Option<Duration>>>,
+}
+
+impl MachineShared<'_> {
+    /// True once this run is over, for any reason.
+    fn stopping(&self) -> bool {
+        self.stop.load(Ordering::Relaxed) || self.machine_over.load(Ordering::Relaxed)
+    }
+
+    /// Record what `cpu` consumed, as read on `cpu`'s own thread.
+    ///
+    /// Must be called from the thread being measured and before it returns:
+    /// that is the whole point of publishing rather than collecting.
+    fn publish_vcpu_time(&self, cpu: u32, consumed: Duration) {
+        if let Some(slot) = self
+            .vcpu_time
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(cpu as usize)
+        {
+            *slot = Some(consumed);
+        }
+    }
+
+    /// Record that `cpu` is parked, with the registers it is parked at.
+    fn publish_parked(&self, cpu: u32, state: HvfVcpuState) {
+        if let Some(slot) = self
+            .parked_states
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(cpu as usize)
+        {
+            *slot = Some(state);
+        }
+    }
+
+    /// Forget that `cpu` is parked, because it is about to run again.
+    ///
+    /// Cleared on the way out of the hold rather than on the way in, so a
+    /// capture can never read a state belonging to a CPU that has since
+    /// resumed and moved on.
+    fn clear_parked(&self, cpu: u32) {
+        if let Some(slot) = self
+            .parked_states
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(cpu as usize)
+        {
+            *slot = None;
+        }
+    }
+
+    /// Every secondary's parked state, in CPU order, or `None` if any CPU has
+    /// not parked yet.
+    ///
+    /// The condition a snapshot waits on. Capturing while one CPU is still in
+    /// the guest would write a frame whose RAM and whose registers describe
+    /// different instants — the child would resume a CPU mid-way through a
+    /// critical section the memory image says it never entered.
+    fn secondaries_parked(&self) -> Option<Vec<HvfVcpuState>> {
+        self.parked_states
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .skip(1)
+            .map(Clone::clone)
+            .collect()
+    }
+
+    /// Take the state CPU `cpu` is to resume from, if this is a restored
+    /// machine.
+    fn take_restored(&self, cpu: u32) -> Option<HvfVcpuState> {
+        self.restored_states
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(cpu as usize)
+            .and_then(Option::take)
+    }
+
+    /// End the machine: release every parked secondary and force every running
+    /// one out of the guest.
+    ///
+    /// Called by each vCPU as it leaves its run loop, and on a failed bring-up.
+    /// Idempotent, and it must stay that way — every CPU calls it, and the
+    /// scope joining them afterwards would otherwise wait forever on a CPU the
+    /// guest never onlined.
+    fn end(&self) {
+        self.machine_over.store(true, Ordering::Relaxed);
+        self.gates.shutdown();
+        let handles = self
+            .roster
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        HvfHandle::force_exit(&handles);
+    }
+}
+
+/// What the boot CPU's run needs beyond the shared machine state.
+struct PrimaryRun<'a> {
+    vcpu: &'a HvfVcpu,
+    guest_ram: &'a GuestRam,
+    /// Mirrors the pause request into the on-disk pause marker. Only the boot
+    /// CPU maintains it: it is one file describing one machine, and every CPU
+    /// writing it would have them racing to create and remove the same path.
+    pause_ack: Arc<AtomicBool>,
+    pause_state: Option<PathBuf>,
+    snapshot: SnapshotPaths,
+    /// CPUs this machine has. A snapshot frame holds one vCPU's registers, so a
+    /// request that arrives on a machine with more is refused rather than
+    /// answered with a frame that describes a fraction of it.
+    vcpus: u32,
+}
+
+/// Drive the boot CPU until the machine stops.
+fn run_primary<B: run::DeviceBus>(
+    input: PrimaryRun<'_>,
+    shared: &MachineShared<'_>,
+    bus: &B,
+    diagnostics: &mut CpuDiagnostics,
+) -> Result<RunOutcome, HvfError> {
+    let PrimaryRun {
+        vcpu,
+        guest_ram,
+        pause_ack,
+        pause_state,
+        snapshot,
+        vcpus,
+    } = input;
+    let SnapshotPaths {
+        request: snapshot_request,
+        ram: snapshot_ram,
+        frame: snapshot_frame,
+    } = snapshot;
+
+    run::run_on_bus(
+        vcpu,
+        set_gic_spi,
+        bus,
+        run::RunHooks {
+            on_exception: |vc: &HvfVcpu, esr, _phys| handle_exception(vc, esr, shared, diagnostics),
+            // A forced exit is a real stop only when a stop was requested (timeout,
+            // graceful, or another CPU ending the machine); otherwise it's a heartbeat
+            // wake so the run loop can drain egress sockets into a guest blocked in WFI
+            // (vsock-only egress async proxy).
+            should_stop: || shared.stopping(),
+            // Park the vCPU in the run loop's pause hold while `paused` is set,
+            // freezing guest RAM + device state in place until resume clears it.
+            should_pause: move || {
+                let requested = shared.paused.load(Ordering::Relaxed);
+                if requested {
+                    if !pause_ack.swap(true, Ordering::AcqRel)
+                        && let Some(path) = &pause_state
+                    {
+                        let _ = std::fs::write(path, b"paused\n");
+                    }
+                } else if pause_ack.swap(false, Ordering::AcqRel)
+                    && let Some(path) = &pause_state
+                {
+                    let _ = std::fs::remove_file(path);
+                }
+                requested
+            },
+            on_pause: move |vcpu: &HvfVcpu, devices: &[&dyn SnapshotDeviceState]| {
+                let (Some(request_path), Some(ram_path), Some(frame_path)) = (
+                    snapshot_request.as_deref(),
+                    snapshot_ram.as_deref(),
+                    snapshot_frame.as_deref(),
+                ) else {
+                    return Ok(());
+                };
+                if !request_path.exists() {
+                    return Ok(());
+                }
+                // Wait for every other CPU to reach the pause hold and publish
+                // its registers. They are all being held by the same `paused`
+                // flag, so this resolves on the next turn round the hold; what
+                // it rules out is capturing while one CPU is still in the
+                // guest, which would write a frame whose RAM and whose
+                // registers describe different instants.
+                let Some(secondary_states) = shared.secondaries_parked() else {
+                    return Ok(());
+                };
+                debug_assert_eq!(
+                    secondary_states.len() + 1,
+                    vcpus as usize,
+                    "a parked state per CPU beyond the boot CPU"
+                );
+
+                let ram_bytes = guest_ram.snapshot_bytes();
+                let device_bytes = capture_device_states(devices).map_err(|error| {
+                    eprintln!("HVF snapshot device capture failed: {error}");
+                    HvfError::SnapshotState("snapshot device capture failed")
+                })?;
+                let gic_bytes = super::snapshot::capture_gic_device_state()?;
+                // Boot CPU first, then the rest in CPU order — the order a
+                // restore hands them back out in.
+                let mut vcpu_states = Vec::with_capacity(vcpus as usize);
+                vcpu_states.push(vcpu.capture_state()?);
+                vcpu_states.extend(secondary_states);
+                let frame = super::snapshot::encode_hvf_snapshot_frame(
+                    HVF_SNAPSHOT_BACKEND_KIND,
+                    0,
+                    &ram_bytes,
+                    &device_bytes,
+                    &gic_bytes,
+                    &vcpu_states,
+                    &[],
+                )
+                .map_err(|_| HvfError::SnapshotState("snapshot frame encode failed"))?;
+                std::fs::write(ram_path, &ram_bytes)
+                    .map_err(|_| HvfError::SnapshotState("snapshot RAM write failed"))?;
+                std::fs::write(frame_path, frame)
+                    .map_err(|_| HvfError::SnapshotState("snapshot frame write failed"))?;
+                std::fs::remove_file(request_path)
+                    .map_err(|_| HvfError::SnapshotState("snapshot request cleanup failed"))?;
+                Ok(())
+            },
+            should_throttle: || shared.throttle.load(Ordering::Relaxed),
+            _marker: std::marker::PhantomData,
+        },
+    )
+}
+
+/// Confirm one vCPU's GIC redistributor frame is where the device tree told the
+/// guest it would be.
+///
+/// HVF will not answer before MPIDR_EL1 is set, so this must follow the
+/// affinity write — but affinity is only a precondition for the *query*. The
+/// frame itself is assigned in `hv_vcpu_create` order, which is why creation is
+/// serialised. It is the only way to read back where a vCPU's frame landed, and
+/// worth asking:
+/// a mismatch does not degrade, it hangs. The guest matches CPUs to
+/// redistributors during IRQ init, before the console exists, so the boot stops
+/// with nothing written anywhere. Failing here names the CPU and both
+/// addresses instead.
+fn verify_redistributor_frame(vcpu_id: hv_vcpu_t, cpu: u32) -> Result<(), HvfError> {
+    let mut base: hv_ipa_t = 0;
+    // SAFETY: a live vCPU owned by this thread, with its MPIDR_EL1 already set;
+    // `base` is a valid out-param.
+    let rc = unsafe { hv_gic_get_redistributor_base(vcpu_id, &mut base) };
+    if rc != HV_SUCCESS {
+        return Err(HvfError::GicCreate(rc));
+    }
+    let expected = fdt::GICV3_REDIST_BASE + u64::from(cpu) * fdt::GICV3_REDIST_STRIDE;
+    if base != expected {
+        return Err(HvfError::RedistributorMismatch {
+            cpu,
+            expected,
+            actual: base,
+        });
+    }
+    Ok(())
+}
+
+/// Create one secondary vCPU, give it its identity, and check the GIC agrees
+/// about where its redistributor frame is.
+///
+/// MPIDR_EL1 is set here rather than left to [`apply_vcpu_start`] because it is
+/// this CPU's identity, known from its number alone, and everything else about
+/// the start state comes from a PSCI `CPU_ON` that has not happened yet. HVF
+/// needs the affinity before it will say where the redistributor frame is,
+/// which is what makes the check possible this early — before the guest is
+/// running and while a failure is still a failed boot rather than a hang.
+///
+/// Takes this CPU's turn in `order` for the duration, because the frame HVF
+/// hands back is chosen by `hv_vcpu_create` call order rather than by affinity.
+/// The turn is taken *here*, in the one function that creates a vCPU, so the
+/// ordering cannot be separated from the call it exists to order — it was a
+/// pair of statements at the call site once, and deleting them was a one-line
+/// change that reintroduced the race with nothing in CI to notice.
+fn create_secondary_vcpu(
+    cpu: u32,
+    order: &CreationOrder,
+) -> Result<(HvfVcpu, hv_vcpu_t), HvfError> {
+    // Held until this function returns, by any path.
+    let _turn = order.take_turn(cpu);
+    let mut vcpu_id: hv_vcpu_t = 0;
+    let mut exit: *mut hv_vcpu_exit_t = core::ptr::null_mut();
+    // SAFETY: between `hv_vm_create` and `hv_vm_destroy` — the boot CPU holds
+    // the VM open for as long as this thread is joined within, which the
+    // enclosing `thread::scope` guarantees. Called on this thread because HVF
+    // binds a vCPU to the thread that creates it.
+    let rc = unsafe { hv_vcpu_create(&mut vcpu_id, &mut exit, core::ptr::null_mut()) };
+    if rc != HV_SUCCESS {
+        return Err(HvfError::VcpuCreate(rc));
+    }
+    let vcpu = HvfVcpu::from_raw(vcpu_id, exit);
+
+    let identified = vcpu
+        .set_sys(SysReg::MpidrEl1, fdt::mpidr_for_cpu(cpu))
+        .and_then(|()| verify_redistributor_frame(vcpu_id, cpu));
+    if let Err(e) = identified {
+        // SAFETY: created on this thread and not used again.
+        unsafe { hv_vcpu_destroy(vcpu_id) };
+        return Err(e);
+    }
+    Ok((vcpu, vcpu_id))
+}
+
+/// What the machine consumed, from what each of its vCPUs reported.
+///
+/// `reported` is indexed by CPU number, holding what that CPU read off its own
+/// clock on its way out. The sum across every vCPU is the machine's CPU; a
+/// single CPU's reading would understate an SMP guest by its vCPU count.
+///
+/// A CPU that reported nothing makes the whole machine unavailable rather than
+/// smaller. Summing what did arrive would produce a plausible number that is
+/// short by an entire vCPU's execution, stamped `measured` on a signed receipt
+/// with nothing to mark it as partial — strictly worse than declining to
+/// answer. The same rule covers the empty set: no reports at all is no
+/// measurement, not a measurement of zero.
+fn usage_from_vcpu_time(reported: &[Option<Duration>]) -> UsageCapture {
+    let total = if reported.is_empty() {
+        None
+    } else {
+        // Saturating: a machine cannot consume more than `Duration` holds, and
+        // a receipt is not worth an overflow panic on a teardown path.
+        reported.iter().try_fold(Duration::ZERO, |total, one| {
+            one.map(|one| total.saturating_add(one))
+        })
+    };
+    let cpu_ms = match total {
+        Some(total) => Metric::measured(
+            u64::try_from(total.as_millis()).unwrap_or(u64::MAX),
+            Mechanism::HvfSummedVcpuClock,
+        ),
+        None => Metric::unavailable(),
+    };
+    UsageCapture {
+        cpu_ms,
+        // The VMM runs in this process, so the resident high-water mark covers
+        // the guest RAM mapping together with the device model holding it.
+        peak_rss_mib: process_usage::peak_rss_mib_self(),
+        // The host fills the state-dir size and the wall span when it reports
+        // the exit, and is better placed to; a number written here would be
+        // overwritten at best and contradict the host at worst.
+        ..UsageCapture::default()
+    }
+}
+
+/// Create, park, and then drive one secondary vCPU.
+///
+/// Runs on its own thread for the length of the machine, because HVF requires a
+/// vCPU be created on the thread that runs it. Reports the outcome of its
+/// creation through `created` before parking, so the boot CPU can fail the boot
+/// rather than start a guest that will wait forever on a CPU the host refused.
+fn run_secondary<B: run::DeviceBus>(
+    cpu: u32,
+    shared: &MachineShared<'_>,
+    bus: &B,
+    created: &std::sync::mpsc::Sender<Result<Option<Arc<ThreadCpuHandle>>, HvfError>>,
+    ready: &std::sync::mpsc::Sender<Result<(), HvfError>>,
+) -> Result<CpuDiagnostics, HvfError> {
+    // Ordered internally: HVF allocates GIC redistributor frames in
+    // `hv_vcpu_create` order and the device tree tells the guest CPU n owns the
+    // nth, so the nth vCPU created has to be CPU n whatever order the scheduler
+    // started these threads in.
+    let (vcpu, vcpu_id) = match create_secondary_vcpu(cpu, shared.creation_order) {
+        Ok(created_vcpu) => created_vcpu,
+        Err(e) => {
+            let _ = created.send(Err(e));
+            return Err(e);
+        }
+    };
+    shared
+        .roster
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(vcpu.exit_token());
+    // Captured here because it must be captured on the thread it measures, and
+    // shared rather than handed over: the boot CPU needs it to charge the quota
+    // controller while this CPU runs, and this CPU needs it to report what it
+    // consumed before its thread — and with it, its accounting — is gone.
+    let clock = ThreadCpuHandle::for_current_thread().ok().map(Arc::new);
+    let registered = created.send(Ok(clock.clone())).is_ok();
+
+    let result = (|| {
+        if !registered {
+            // The boot CPU gave up on the bring-up. Do not enter the guest.
+            // Still report, so the primary's tally cannot block: it reads one
+            // message per secondary, and a sibling already parked on the run
+            // gate keeps its own sender alive, so a silent exit here would
+            // leave that read waiting on a message nobody will send.
+            let _ = ready.send(Err(HvfError::SnapshotState(
+                "vCPU never registered with the boot CPU",
+            )));
+            return Ok((RunOutcome::Stopped, CpuDiagnostics::default()));
+        }
+        shared.start.wait();
+        if shared.stopping() {
+            let error = HvfError::SnapshotState("machine stopped before vCPU restore");
+            let _ = ready.send(Err(error));
+            return Err(error);
+        }
+        let restored = match shared.take_restored(cpu) {
+            // A restored machine: this CPU was already running when its parent
+            // was captured, and the guest inside the restored RAM believes it
+            // still is. Resume it directly — waiting for a `CPU_ON` that the
+            // guest has no reason to issue again would hang the child with a
+            // CPU its own scheduler is dispatching onto.
+            Some(state) => {
+                if let Err(error) = vcpu.restore_state(&state) {
+                    let _ = ready.send(Err(error));
+                    return Err(error);
+                }
+                shared.gates.mark_on(cpu);
+                true
+            }
+            // A cold boot: park until the guest's PSCI `CPU_ON` says where to
+            // start — or until the machine ends, for a CPU it never onlined.
+            None => false,
+        };
+        if ready.send(Ok(())).is_err() {
+            return Ok((RunOutcome::Stopped, CpuDiagnostics::default()));
+        }
+        shared.run.wait();
+        if shared.stopping() {
+            return Ok((RunOutcome::Stopped, CpuDiagnostics::default()));
+        }
+        if !restored {
+            let Release::Start(start) = shared.gates.wait_for_release(cpu) else {
+                return Ok((RunOutcome::Stopped, CpuDiagnostics::default()));
+            };
+            apply_vcpu_start(&vcpu, start)?;
+        }
+
+        let mut diagnostics = CpuDiagnostics::default();
+        let outcome = run::run_on_bus(
+            &vcpu,
+            set_gic_spi,
+            bus,
+            run::RunHooks {
+                on_exception: |vc: &HvfVcpu, esr, _phys| {
+                    handle_exception(vc, esr, shared, &mut diagnostics)
+                },
+                should_stop: || shared.stopping(),
+                // A secondary parks for a pause like any other CPU, and writes
+                // no pause marker: that file describes the machine, and the
+                // boot CPU owns it. What it does do is clear its published
+                // state on the way out of the hold, so a capture can never read
+                // registers from a CPU that has already resumed.
+                should_pause: || {
+                    let requested = shared.paused.load(Ordering::Relaxed);
+                    if !requested {
+                        shared.clear_parked(cpu);
+                    }
+                    requested
+                },
+                // Publish this CPU's registers while it is parked. The boot CPU
+                // cannot read them — HVF binds register access to the owning
+                // thread — so a snapshot of an SMP machine is assembled from
+                // what each CPU leaves here.
+                on_pause: |vc: &HvfVcpu, _: &[&dyn SnapshotDeviceState]| {
+                    shared.publish_parked(cpu, vc.capture_state()?);
+                    Ok(())
+                },
+                should_throttle: || shared.throttle.load(Ordering::Relaxed),
+                _marker: std::marker::PhantomData,
+            },
+        )?;
+        Ok((outcome, diagnostics))
+    })();
+
+    // Report what this CPU consumed before anything else, because everything
+    // that follows moves it closer to the exit that destroys its accounting.
+    // Read on this thread, which is the only thread that can read it.
+    if let Some(clock) = &clock {
+        shared.publish_vcpu_time(cpu, clock.consumed());
+    }
+    // This CPU is done, so the machine is: release every other CPU rather than
+    // leaving them in a guest that has nothing left to run.
+    shared.end();
+    // SAFETY: created on this thread, never used after this point, and the VM
+    // outlives the thread.
+    unsafe { hv_vcpu_destroy(vcpu_id) };
+    result.map(|(_, diagnostics)| diagnostics)
+}
+
 unsafe fn run(
     guest_ram: &mut GuestRam,
     ram: *mut u8,
@@ -774,6 +1526,7 @@ unsafe fn run(
         vsock,
         timeout,
         ram_size,
+        vcpus,
         agent_socket,
         substitution_socket,
         egress_relay,
@@ -781,7 +1534,6 @@ unsafe fn run(
         broker_socket,
         console_data_sockets,
         builder_control_sockets,
-        virtiofs_root,
         virtiofs_shares,
         console_log,
         pause_state,
@@ -832,21 +1584,35 @@ unsafe fn run(
         // loop (crate::vmm::run) — the same body the KVM backend uses.
         let vcpu = HvfVcpu::from_raw(vcpu_id, exit);
 
-        // MPIDR_EL1 affinity 0 must match FDT cpu@0 + the GIC redistributor frame
-        // (else gic_populate_rdist walks off the region and faults). arm64 boot
-        // protocol: x0=DTB, x1..x3=0, PC=entry, EL1h with DAIF masked.
-        let setup = vcpu
-            .set_sys(SysReg::MpidrEl1, 0)
-            .and_then(|()| vcpu.set_core(CoreReg::Pc, entry))
-            .and_then(|()| vcpu.set_core(CoreReg::Cpsr, 0x3c5))
-            .and_then(|()| vcpu.set_core(CoreReg::X(0), dtb_addr))
-            .and_then(|()| vcpu.set_core(CoreReg::X(1), 0))
-            .and_then(|()| vcpu.set_core(CoreReg::X(2), 0))
-            .and_then(|()| vcpu.set_core(CoreReg::X(3), 0));
-        if let Err(e) = setup {
+        // MPIDR_EL1 must match this CPU's `cpu@<addr>` node and hence its GIC
+        // redistributor frame (else gic_populate_rdist walks off the region and
+        // faults). arm64 boot protocol: x0 per `VcpuStart`, x1..x3=0, PC=entry,
+        // EL1h with DAIF masked. Routed through `VcpuStart` so a secondary
+        // released by PSCI takes this same path with different data rather than
+        // a second copy of it.
+        // The start state sets MPIDR_EL1, which is what HVF places the GIC
+        // redistributor frame by — so the frame can only be checked afterwards.
+        // Checked for the boot CPU too: a machine whose CPU 0 cannot find its
+        // redistributor hangs in IRQ init with an empty console, and that is
+        // worth naming whether it happens on one CPU or four.
+        let started = apply_vcpu_start(&vcpu, VcpuStart::primary(entry, dtb_addr))
+            .and_then(|()| verify_redistributor_frame(vcpu_id, 0));
+        if let Err(e) = started {
             hv_vcpu_destroy(vcpu_id);
             return Err(e);
         }
+
+        // The parking spots the guest's PSCI `CPU_ON` calls release. Built for
+        // the same count the device tree was, so a call for a CPU the tree
+        // describes always finds a gate.
+        let gates = SecondaryGates::new(vcpus);
+        // Every vCPU's force-exit token, for the threads that have to interrupt
+        // all of them at once: the watchdog, and the quota controller. The boot
+        // CPU registers here; each secondary adds itself as it is created.
+        // Behind a lock rather than built up front because a token only exists
+        // once its vCPU does, and a vCPU only exists on the thread that will run
+        // it.
+        let roster: Arc<Mutex<Vec<HvfHandle>>> = Arc::new(Mutex::new(vec![vcpu.exit_token()]));
 
         // Watchdog + heartbeat: a booting kernel never exits on its own, so force
         // the vCPU out after `timeout` or as soon as `stop` is set (graceful stop).
@@ -878,22 +1644,12 @@ unsafe fn run(
         let agent_bound = agent_socket.is_some();
         let substitution_socket = substitution_socket
             .or_else(|| std::env::var_os("MVM_HVF_SUBSTITUTION_SOCKET").map(PathBuf::from));
-        let handle = vcpu.exit_token();
-
-        // Start the in-process CPU quota controller when the supervisor config
-        // carries a share. Failing to start the controller must not fail the
-        // boot; the VM falls back to the unbounded path and writes no record.
-        let mut quota: Option<VcpuQuota<HvfHandle>> = None;
-        if let Some(millicores) = cpu_millicores
-            && let Ok(config) = QuotaConfig::for_share(millicores)
-            && let Ok(clock) = ThreadCpuHandle::for_current_thread()
-        {
-            quota = Some(VcpuQuota::start(handle, clock, QuotaPolicy::new(config)));
-        }
-        let throttle_flag = quota
-            .as_ref()
-            .map(|q| q.throttle_flag().clone())
-            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        // The boot CPU's own CPU-time handle. Captured here because it must be
+        // captured *on* the thread it measures, and this is that thread; the
+        // controller it feeds is started further down, once every secondary has
+        // contributed its own.
+        let primary_clock = ThreadCpuHandle::for_current_thread().ok().map(Arc::new);
+        let roster_w = Arc::clone(&roster);
 
         let watchdog = std::thread::spawn(move || {
             let step = Duration::from_millis(5);
@@ -924,14 +1680,28 @@ unsafe fn run(
                     || agent_bound
                     || egress_active_w.load(Ordering::Relaxed) > 0
                 {
-                    HvfHandle::force_exit(&[handle]); // wake the run loop
+                    // Every vCPU, not just the boot CPU: the work the wake
+                    // exists for — draining a host reply into the guest, or
+                    // reaching the pause hold — has to happen on whichever CPU
+                    // is in the guest, and on an SMP machine that is rarely
+                    // CPU 0 alone.
+                    let handles = roster_w
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
+                    HvfHandle::force_exit(&handles); // wake the run loops
                 }
             };
             pause_ack_w.store(false, Ordering::Release);
             if let Some(path) = &pause_state_w {
                 let _ = std::fs::remove_file(path);
             }
-            HvfHandle::force_exit(&[handle]); // final wake → loop sees stop, returns
+            // Final wake, every CPU → each loop sees the stop and returns.
+            let handles = roster_w
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            HvfHandle::force_exit(&handles);
             Some(stop_observed_at)
         });
 
@@ -957,26 +1727,13 @@ unsafe fn run(
             .collect();
         let mut vsock_dev =
             vsock.then(|| VirtioVsock::new(VSOCK_MMIO_BASE, VSOCK_IRQ, ram, RAM_BASE, ram_size));
-        // virtiofs-root dev boot: serve the unpacked+injected tree read-only.
-        let has_virtiofs_root = virtiofs_root.is_some();
-        let mut fs_devs =
-            Vec::with_capacity(usize::from(has_virtiofs_root) + virtiofs_shares.len());
-        if let Some(root) = virtiofs_root {
+        let mut fs_devs = Vec::with_capacity(virtiofs_shares.len());
+        for (index, (tag, root)) in virtiofs_shares.into_iter().enumerate() {
             // SAFETY: `ram` is the mapped guest RAM valid for the run (this fn body
             // is within an `unsafe` block), same contract as the other devices.
-            fs_devs.push(VirtioFs::new(
-                FS_MMIO_BASE,
-                FS_IRQ,
-                ram,
-                RAM_BASE,
-                ram_size,
-                root,
-            ));
-        }
-        for (index, (tag, root)) in virtiofs_shares.into_iter().enumerate() {
             fs_devs.push(VirtioFs::with_tag(
-                FS_MMIO_BASE + (index + usize::from(has_virtiofs_root)) as u64 * MMIO_STRIDE,
-                FS_IRQ + (index + usize::from(has_virtiofs_root)) as u32,
+                FS_MMIO_BASE + index as u64 * MMIO_STRIDE,
+                FS_IRQ + index as u32,
                 ram,
                 RAM_BASE,
                 ram_size,
@@ -1061,6 +1818,20 @@ unsafe fn run(
                 if let Err(e) = v.set_host_dial_sockets(ports) {
                     eprintln!("mvm-hvf: host-dial socket bind failed: {e}");
                 }
+                // The builder's control channels are exempt from idle
+                // eviction; the console ports above are not. A dispatch client
+                // holds its connection open across a whole `nix build` and is
+                // silent for exactly as long as the build takes, so reclaiming
+                // it for being quiet severs a healthy request mid-flight and
+                // reports a dispatch failure for a build that is running fine.
+                // A console, by contrast, is the case idle reclaim is for.
+                //
+                // Nothing leaks: a peer that has actually gone is still
+                // reclaimed by the bridge's EOF arm, which is what detects a
+                // dead client. Idle only ever described a live quiet one.
+                v.set_long_lived_host_dial_ports(
+                    builder_control_sockets.iter().map(|(port, _)| *port),
+                );
             }
             if v.set_handoff_control(
                 handoff_socket.as_deref(),
@@ -1081,14 +1852,31 @@ unsafe fn run(
         }
 
         // Diagnostics gathered by the exception hook (HVC/PSCI + other traps).
-        let mut hvc_calls = 0usize;
-        let mut other_exceptions = 0usize;
-        let mut psci_fns: Vec<u64> = Vec::new();
-        let mut other_ecs: Vec<u32> = Vec::new();
+        // The boot CPU's; each secondary keeps its own and they are merged once
+        // the threads have joined.
+        let mut diagnostics = CpuDiagnostics::default();
+
+        // Each secondary's registers to resume from, filled in by the restore
+        // below and drained by that CPU's own thread. Empty for a cold boot,
+        // where secondaries wait for the guest's PSCI `CPU_ON` instead.
+        let mut restored_secondaries: Vec<Option<HvfVcpuState>> =
+            (0..vcpus).map(|_| None).collect();
+        let mut restored_boot = None;
+        let mut restored_gic = None;
 
         if let Some(frame_path) = restore_frame.as_deref() {
             let frame = std::fs::read(frame_path)
                 .map_err(|_| HvfError::SnapshotState("restore frame read failed"))?;
+            // Validate the complete frame and its machine shape before
+            // constructing restore targets. Device restore mutates live state,
+            // so a snapshot from a differently-sized machine must fail first.
+            let restored_vcpus = super::snapshot::hvf_snapshot_vcpu_count(&frame, guest_ram.len())
+                .map_err(|_| HvfError::SnapshotState("restore frame validation failed"))?;
+            if restored_vcpus != vcpus as usize {
+                return Err(HvfError::SnapshotState(
+                    "snapshot vCPU count does not match this machine",
+                ));
+            }
             let mut restore_devices: Vec<&mut dyn RunDevice> = vec![&mut uart];
             for device in &mut virtio_disks {
                 restore_devices.push(device);
@@ -1104,13 +1892,21 @@ unsafe fn run(
                 .iter_mut()
                 .filter_map(|device| device.snapshot_device_mut())
                 .collect::<Vec<_>>();
-            super::snapshot::restore_hvf_snapshot_control(
+            // Restores the boot CPU here and hands back the rest: HVF only
+            // lets a vCPU's registers be written from the thread that created
+            // it, and those threads do not exist yet.
+            let restored = super::snapshot::restore_hvf_snapshot_control(
                 &frame,
                 guest_ram.len(),
-                &vcpu,
                 &mut snapshot_targets,
             )
             .map_err(|_| HvfError::SnapshotState("restore control state failed"))?;
+            let mut states = restored.vcpus.into_iter();
+            restored_boot = states.next();
+            for (slot, state) in restored_secondaries.iter_mut().skip(1).zip(states) {
+                *slot = Some(state);
+            }
+            restored_gic = Some(restored.gic);
             drop(snapshot_targets);
             drop(restore_devices);
 
@@ -1138,7 +1934,11 @@ unsafe fn run(
 
         // Scope the device list so its mutable borrows end before we read the
         // device output below.
-        let outcome = {
+        // Whether the guest asked to power down, as opposed to being stopped
+        // from outside. Declared out here because the boot result is assembled
+        // below, after the vCPU threads it is set by have been joined.
+        let guest_shutdown = AtomicBool::new(false);
+        let (outcome, mut quota, usage) = {
             let mut devices: Vec<&mut dyn RunDevice> = vec![&mut uart];
             for v in virtio_disks.iter_mut() {
                 devices.push(v);
@@ -1150,106 +1950,207 @@ unsafe fn run(
                 devices.push(fs);
             }
             devices.push(&mut rng_dev);
-            let set_irq = |intid: u32, level: bool| -> Result<(), HvfError> {
-                // SAFETY: FFI to the process-global in-kernel GIC (nested in the
-                // enclosing `unsafe` block).
-                if hv_gic_set_spi(intid, level) == HV_SUCCESS {
-                    Ok(())
-                } else {
-                    Err(HvfError::GicCreate(0))
-                }
+
+            // One bus whether this machine has one CPU or eight. A single-CPU
+            // run pays an uncontended lock per MMIO exit, which is nothing next
+            // to the exit itself, and in exchange the common path is the same
+            // code as the rare one rather than a copy of it that can rot.
+            let bus = run::SharedBus::new(&mut devices);
+            let machine_over = AtomicBool::new(false);
+            // Indexed by CPU number, slot 0 unused: the boot CPU reads and
+            // writes its own registers directly.
+            let parked_states: Mutex<Vec<Option<HvfVcpuState>>> =
+                Mutex::new((0..vcpus).map(|_| None).collect());
+            let restored_states: Mutex<Vec<Option<HvfVcpuState>>> =
+                Mutex::new(restored_secondaries);
+            // Indexed by CPU number, slot 0 being the boot CPU. Every CPU fills
+            // its own on its way out; a slot still `None` at the end names a
+            // CPU whose consumption nobody can account for.
+            let vcpu_time: Mutex<Vec<Option<Duration>>> =
+                Mutex::new((0..vcpus).map(|_| None).collect());
+            // Created before any vCPU thread, because every one of them reads
+            // it to know when to park. The quota controller that sets it starts
+            // later, once each CPU has contributed its CPU clock.
+            let throttle = Arc::new(AtomicBool::new(false));
+            let creation_order = CreationOrder::default();
+            let start = MachineStartGate::default();
+            let run_start = MachineStartGate::default();
+            let shared = MachineShared {
+                gates: &gates,
+                creation_order: &creation_order,
+                start: &start,
+                run: &run_start,
+                roster: &roster,
+                stop,
+                paused,
+                machine_over: &machine_over,
+                guest_shutdown: &guest_shutdown,
+                throttle: &throttle,
+                parked_states: &parked_states,
+                restored_states: &restored_states,
+                vcpu_time: &vcpu_time,
             };
-            let snapshot_guest_ram = &*guest_ram;
-            run::run_with_hooks(
-                &vcpu,
-                set_irq,
-                &mut devices,
-                run::RunHooks {
-                    on_exception: |vc: &HvfVcpu, esr, _phys| {
-                        if esr_ec(esr) == EC_HVC_AARCH64 {
-                            hvc_calls += 1;
-                            let fn_id = vc.get_core(CoreReg::X(0))?;
-                            if psci_fns.len() < 16 && !psci_fns.contains(&fn_id) {
-                                psci_fns.push(fn_id);
-                            }
-                            match fn_id {
-                                PSCI_SYSTEM_OFF | PSCI_SYSTEM_RESET => return Ok(RunControl::Stop),
-                                PSCI_VERSION_FN => vc.set_core(CoreReg::X(0), 0x1_0000)?, // PSCI v1.0
-                                _ => vc.set_core(CoreReg::X(0), PSCI_NOT_SUPPORTED)?,
-                            }
-                            // HVC is completed: HVF already advanced PC. Do NOT advance.
-                            Ok(RunControl::Continue)
-                        } else {
-                            let ec = esr_ec(esr);
-                            other_exceptions += 1;
-                            if other_ecs.len() < 16 && !other_ecs.contains(&ec) {
-                                other_ecs.push(ec);
-                            }
-                            // Advance past the faulting instruction and keep going.
-                            let pc = vc.get_core(CoreReg::Pc)?;
-                            vc.set_core(CoreReg::Pc, pc + 4)?;
-                            Ok(RunControl::Continue)
-                        }
-                    },
-                    // A forced exit is a real stop only when `stop` is set (timeout or
-                    // graceful); otherwise it's a heartbeat wake so the run loop can drain
-                    // egress sockets into a guest blocked in WFI (vsock-only egress async proxy).
-                    should_stop: move || stop.load(Ordering::Relaxed),
-                    // Park the vCPU in the run loop's pause hold while `paused` is set,
-                    // freezing guest RAM + device state in place until resume clears it.
-                    should_pause: move || {
-                        let requested = paused.load(Ordering::Relaxed);
-                        if requested {
-                            if !pause_ack.swap(true, Ordering::AcqRel)
-                                && let Some(path) = &pause_state
-                            {
-                                let _ = std::fs::write(path, b"paused\n");
-                            }
-                        } else if pause_ack.swap(false, Ordering::AcqRel)
-                            && let Some(path) = &pause_state
-                        {
-                            let _ = std::fs::remove_file(path);
-                        }
-                        requested
-                    },
-                    on_pause: move |vcpu, devices| {
-                        let (Some(request_path), Some(ram_path), Some(frame_path)) = (
-                            snapshot_request.as_deref(),
-                            snapshot_ram.as_deref(),
-                            snapshot_frame.as_deref(),
-                        ) else {
-                            return Ok(());
-                        };
-                        if !request_path.exists() {
-                            return Ok(());
-                        }
-                        let ram_bytes = snapshot_guest_ram.snapshot_bytes();
-                        let device_bytes = capture_device_states(devices).map_err(|_| {
-                            HvfError::SnapshotState("snapshot device capture failed")
-                        })?;
-                        let vcpu_state = vcpu.capture_state()?;
-                        let frame = super::snapshot::encode_hvf_snapshot_frame(
-                            HVF_SNAPSHOT_BACKEND_KIND,
-                            0,
-                            &ram_bytes,
-                            &device_bytes,
-                            &vcpu_state,
-                            &[],
-                        )
-                        .map_err(|_| HvfError::SnapshotState("snapshot frame encode failed"))?;
-                        std::fs::write(ram_path, &ram_bytes)
-                            .map_err(|_| HvfError::SnapshotState("snapshot RAM write failed"))?;
-                        std::fs::write(frame_path, frame)
-                            .map_err(|_| HvfError::SnapshotState("snapshot frame write failed"))?;
-                        std::fs::remove_file(request_path).map_err(|_| {
-                            HvfError::SnapshotState("snapshot request cleanup failed")
-                        })?;
-                        Ok(())
-                    },
-                    should_throttle: move || throttle_flag.load(Ordering::Relaxed),
-                    _marker: std::marker::PhantomData,
+            let primary = PrimaryRun {
+                vcpu: &vcpu,
+                guest_ram: &*guest_ram,
+                pause_ack,
+                pause_state,
+                snapshot: SnapshotPaths {
+                    request: snapshot_request,
+                    ram: snapshot_ram,
+                    frame: snapshot_frame,
                 },
-            )?
+                vcpus,
+            };
+
+            std::thread::scope(|scope| {
+                // Every secondary reports the result of its own
+                // `hv_vcpu_create` here before parking.
+                let (created_tx, created_rx) = std::sync::mpsc::channel();
+                let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+                let secondaries: Vec<_> = (1..vcpus)
+                    .map(|cpu| {
+                        let created_tx = created_tx.clone();
+                        let ready_tx = ready_tx.clone();
+                        let shared = &shared;
+                        let bus = &bus;
+                        scope.spawn(move || run_secondary(cpu, shared, bus, &created_tx, &ready_tx))
+                    })
+                    .collect();
+                drop(created_tx);
+                drop(ready_tx);
+
+                // Wait for the whole machine to exist before starting the
+                // guest. The device tree already describes these CPUs, so a
+                // vCPU the host refuses to create has to fail the boot here —
+                // once the kernel is running it will online that CPU, wait for
+                // it to reach its release point, and hang with no console
+                // output to say why.
+                // Shared rather than handed over: the quota controller takes
+                // this set onto its own thread, and each CPU keeps its own to
+                // report what it consumed on the way out.
+                let mut clocks: Vec<Arc<ThreadCpuHandle>> = primary_clock.iter().cloned().collect();
+                let mut bring_up: Result<(), HvfError> = Ok(());
+                for _ in 1..vcpus {
+                    match created_rx.recv() {
+                        Ok(Ok(clock)) => clocks.extend(clock),
+                        Ok(Err(e)) => bring_up = bring_up.and(Err(e)),
+                        // The thread died without reporting. Nothing else can
+                        // say which CPU is missing, but the boot must not
+                        // proceed a CPU short of the tree it was given.
+                        Err(_) => {
+                            bring_up = bring_up.and(Err(HvfError::VcpuCreate(0)));
+                        }
+                    }
+                }
+
+                // Hypervisor.framework restores the process-global GIC only
+                // after every vCPU exists and before any vCPU runs. CPU-local
+                // ICC state follows on each vCPU's owning thread. The start
+                // gate makes those ordering requirements explicit.
+                if bring_up.is_ok()
+                    && let Some(gic) = restored_gic.as_deref()
+                {
+                    bring_up = super::snapshot::restore_gic_device_state(gic);
+                }
+                if bring_up.is_ok()
+                    && let Some(state) = restored_boot.as_ref()
+                {
+                    bring_up = vcpu.restore_state(state);
+                }
+                if bring_up.is_err() {
+                    shared.end();
+                }
+                shared.start.release();
+
+                // Do not run the primary until every secondary has either
+                // restored its CPU-local state or reported a failure.
+                if bring_up.is_ok() {
+                    for _ in 1..vcpus {
+                        match ready_rx.recv() {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => bring_up = bring_up.and(Err(error)),
+                            Err(_) => {
+                                bring_up = bring_up.and(Err(HvfError::SnapshotState(
+                                    "secondary vCPU restore report missing",
+                                )));
+                            }
+                        }
+                    }
+                }
+                if bring_up.is_err() {
+                    shared.end();
+                }
+                shared.run.release();
+
+                // Bound the machine only once every vCPU exists and has
+                // contributed its clock: a controller charging one thread of an
+                // SMP guest would see a fraction of what it is consuming and
+                // never throttle. Failing to start the controller must not fail
+                // the boot; the VM falls back to the unbounded path and writes
+                // no record.
+                let quota = bring_up
+                    .is_ok()
+                    .then(|| {
+                        let handles = roster
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone();
+                        cpu_millicores
+                            .and_then(|millicores| QuotaConfig::for_share(millicores).ok())
+                            .filter(|_| !clocks.is_empty())
+                            .map(|config| {
+                                VcpuQuota::start_with_hold(
+                                    handles,
+                                    SummedClock::new(clocks),
+                                    QuotaPolicy::new(config),
+                                    Arc::clone(&throttle),
+                                )
+                            })
+                    })
+                    .flatten();
+
+                let outcome =
+                    bring_up.and_then(|()| run_primary(primary, &shared, &bus, &mut diagnostics));
+
+                // The boot CPU is out of the guest, so the machine is over.
+                // Every secondary has to be released — including one the guest
+                // never onlined, which is parked on its gate and would
+                // otherwise be joined forever at the end of this scope.
+                shared.end();
+                for secondary in secondaries {
+                    match secondary.join() {
+                        Ok(Ok(cpu_diagnostics)) => diagnostics.merge(cpu_diagnostics),
+                        // A secondary that failed has already been accounted for
+                        // through `bring_up`, or failed after the machine was
+                        // running — where the boot CPU's outcome is the one that
+                        // describes the run.
+                        Ok(Err(_)) => {}
+                        // A panicked vCPU thread leaves the device model
+                        // poisoned; the bus reports that on its next lock. There
+                        // is nothing to merge.
+                        Err(_) => {}
+                    }
+                }
+
+                // Every secondary has published and exited; the boot CPU
+                // publishes last, on its own thread, so its own teardown is
+                // counted too. Only now is the set complete, and nothing here
+                // reads another thread's clock — which is the whole point:
+                // every reading was taken by the CPU it belongs to while that
+                // CPU was unambiguously alive.
+                if let Some(clock) = &primary_clock {
+                    shared.publish_vcpu_time(0, clock.consumed());
+                }
+                let usage = usage_from_vcpu_time(
+                    &shared
+                        .vcpu_time
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                );
+
+                outcome.map(|outcome| (outcome, quota, usage))
+            })?
         };
 
         let vcpu_exited_at = Instant::now();
@@ -1295,15 +2196,26 @@ unsafe fn run(
         let mut r = KernelBootResult {
             console: uart.output,
             exit_reason: match outcome {
-                RunOutcome::Canceled => HV_EXIT_REASON_CANCELED,
+                // A run the guest ended by powering itself down reports as an
+                // exception however it reached the loop's exit: on an SMP
+                // machine the CPU that took `PSCI SYSTEM_OFF` may not be the
+                // one whose outcome is reported, and the other CPUs leave
+                // through the same forced exit a timeout uses.
+                RunOutcome::Canceled if !guest_shutdown.load(Ordering::Relaxed) => {
+                    HV_EXIT_REASON_CANCELED
+                }
                 _ => HV_EXIT_REASON_EXCEPTION,
             },
-            hvc_calls,
-            stopped_by_watchdog: outcome == RunOutcome::Canceled,
-            other_exceptions,
-            psci_fns,
-            other_ecs,
+            // Every CPU's, merged: the boot CPU's own plus whatever each
+            // secondary reported as it joined.
+            hvc_calls: diagnostics.hvc_calls,
+            stopped_by_watchdog: outcome == RunOutcome::Canceled
+                && !guest_shutdown.load(Ordering::Relaxed),
+            other_exceptions: diagnostics.other_exceptions,
+            psci_fns: diagnostics.psci_fns,
+            other_ecs: diagnostics.other_ecs,
             final_pc,
+            usage,
             shutdown_timing: stop_observed_at.map(|observed_at| KernelShutdownTiming {
                 watchdog_to_vcpu_exit: vcpu_exited_at.saturating_duration_since(observed_at),
                 watchdog_join,
@@ -1327,6 +2239,246 @@ unsafe fn run(
 
 #[cfg(test)]
 mod tests {
+    /// A machine granted no CPU share is still measured.
+    ///
+    /// Measurement and enforcement are different questions. A workload with no
+    /// quota runs the same vCPU threads, and each still reports what it used;
+    /// only the controller depends on a grant.
+    #[test]
+    fn cpu_is_measured_on_a_machine_that_was_granted_no_share() {
+        let usage = super::usage_from_vcpu_time(&[
+            Some(Duration::from_millis(2000)),
+            Some(Duration::from_millis(2210)),
+        ]);
+        assert_eq!(
+            usage.cpu_ms,
+            Metric::measured(4210, Mechanism::HvfSummedVcpuClock)
+        );
+    }
+
+    /// The machine's CPU is every vCPU's, added up.
+    ///
+    /// A single CPU's reading understates an SMP guest by its vCPU count, which
+    /// would bill a four-CPU workload for a quarter of what it consumed.
+    #[test]
+    fn cpu_is_summed_across_vcpus_rather_than_read_off_one() {
+        let one = super::usage_from_vcpu_time(&[Some(Duration::from_millis(1000))]);
+        let four = super::usage_from_vcpu_time(&[Some(Duration::from_millis(1000)); 4]);
+        assert_eq!(one.cpu_ms.value(), Some(1000));
+        assert_eq!(four.cpu_ms.value(), Some(4000));
+    }
+
+    /// Nothing reported is not a report of nothing.
+    ///
+    /// No CPU reported at all has to read as unavailable: a zero would be
+    /// indistinguishable from a workload that genuinely burned no CPU, and
+    /// would go onto the receipt stamped `measured`.
+    #[test]
+    fn a_machine_with_no_readable_clocks_reports_cpu_unavailable() {
+        assert_eq!(
+            super::usage_from_vcpu_time(&[]).cpu_ms,
+            Metric::unavailable()
+        );
+    }
+
+    /// A machine missing one CPU's report is unmeasured, not smaller.
+    ///
+    /// Summing what did arrive yields a plausible number short by an entire
+    /// vCPU's execution, stamped `measured` with nothing marking it partial.
+    /// Declining to answer is the honest option and the only recoverable one.
+    #[test]
+    fn a_machine_missing_one_vcpus_report_reports_cpu_unavailable() {
+        let usage = super::usage_from_vcpu_time(&[Some(Duration::from_millis(1000)), None]);
+        assert_eq!(usage.cpu_ms, Metric::unavailable());
+    }
+
+    /// A vCPU that genuinely burned nothing is measured as zero.
+    ///
+    /// The other side of the rule above: `None` is the absence of a report, not
+    /// a report of absence, and a CPU the guest onlined but never scheduled has
+    /// a real answer that happens to be small.
+    #[test]
+    fn a_vcpu_that_reported_zero_is_measured_rather_than_unavailable() {
+        let usage =
+            super::usage_from_vcpu_time(&[Some(Duration::from_millis(500)), Some(Duration::ZERO)]);
+        assert_eq!(
+            usage.cpu_ms,
+            Metric::measured(500, Mechanism::HvfSummedVcpuClock)
+        );
+    }
+
+    /// The reason every CPU reports itself instead of being read by the boot
+    /// CPU at the end.
+    ///
+    /// A thread's CPU accounting dies with the thread: `thread_info` on the
+    /// port of an exited thread fails, and the failure is charged as zero. This
+    /// witnesses both halves against the real Mach API — the value the thread
+    /// published survives it, and a read of the same handle after the join does
+    /// not. Deterministic in both directions: the busy loop guarantees a
+    /// non-zero reading, and a joined thread's port is unconditionally invalid.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_vcpus_time_survives_the_thread_that_earned_it() {
+        let published: Arc<Mutex<Option<Duration>>> = Arc::new(Mutex::new(None));
+        let retained: Arc<Mutex<Option<Arc<ThreadCpuHandle>>>> = Arc::new(Mutex::new(None));
+        let published_w = Arc::clone(&published);
+        let retained_w = Arc::clone(&retained);
+
+        std::thread::spawn(move || {
+            let clock = Arc::new(ThreadCpuHandle::for_current_thread().unwrap());
+            *retained_w.lock().unwrap() = Some(Arc::clone(&clock));
+            let started = Instant::now();
+            let mut x = 0u64;
+            while started.elapsed() < Duration::from_millis(50) {
+                x = x.wrapping_add(1);
+                std::hint::black_box(x);
+            }
+            // What every vCPU thread does on its way out.
+            *published_w.lock().unwrap() = Some(clock.consumed());
+        })
+        .join()
+        .expect("worker thread");
+
+        let published = published.lock().unwrap().expect("the thread reported");
+        assert!(
+            published > Duration::ZERO,
+            "a busy thread's own reading must be non-zero, got {published:?}"
+        );
+
+        let handle = retained.lock().unwrap().clone().expect("handle retained");
+        assert_eq!(
+            handle.consumed(),
+            Duration::ZERO,
+            "reading a joined thread's clock fails and is charged as zero — which \
+             is exactly why the reading is published rather than collected"
+        );
+    }
+
+    /// The device tree describes exactly the CPUs the VMM creates.
+    ///
+    /// Pinned against `effective_vcpus`, which is also what the vCPU bring-up
+    /// counts, because these two readings are the fact: a tree describing more
+    /// CPUs than exist has the kernel online secondaries that never respond and
+    /// the boot hangs with no console output — not a smaller machine, a dead
+    /// one. Fewer, and the vCPUs that do exist are never onlined.
+    #[test]
+    fn the_booted_tree_describes_exactly_the_cpus_the_vmm_creates() {
+        for requested in [0u32, 1, 2, 4, 8] {
+            let vcpus = super::effective_vcpus(requested);
+            let dtb = mvm_vmm::vmm::fdt::build_dtb(
+                "console=ttyAMA0",
+                0x8000_0000,
+                0x2000_0000,
+                None,
+                &[],
+                None,
+                vcpus,
+            );
+            let described = dtb.windows(4).filter(|w| *w == b"cpu@").count();
+            assert_eq!(
+                described as u32, vcpus,
+                "requested {requested}: the tree must describe the {vcpus} CPUs \
+                 this VMM creates"
+            );
+        }
+    }
+
+    /// The gates answer for exactly the CPUs the tree describes.
+    ///
+    /// The other half of the same fact. A `CPU_ON` for a CPU the tree named has
+    /// to find a gate — the guest was told that CPU exists — and one beyond the
+    /// tree has to be refused.
+    #[test]
+    fn psci_answers_for_exactly_the_cpus_the_tree_describes() {
+        for requested in [1u32, 2, 4] {
+            let vcpus = super::effective_vcpus(requested);
+            let gates = super::SecondaryGates::new(vcpus);
+            assert_eq!(gates.vcpus(), vcpus);
+            for cpu in 0..u64::from(vcpus) {
+                assert_ne!(
+                    gates.affinity_info(cpu),
+                    super::psci::INVALID_PARAMETERS,
+                    "cpu {cpu} is in the tree, so PSCI must know it"
+                );
+            }
+            assert_eq!(
+                gates.affinity_info(u64::from(vcpus)),
+                super::psci::INVALID_PARAMETERS,
+                "the CPU past the end of the tree does not exist"
+            );
+        }
+    }
+
+    /// A request is honoured, not quietly reduced.
+    ///
+    /// Zero is not a machine, so it means one. Everything else is passed
+    /// through: the host's real ceiling is whatever `hv_vcpu_create` grants,
+    /// and a count it refuses fails the boot rather than handing back a smaller
+    /// machine than the one that was asked for. Silently giving one CPU to a
+    /// workload that asked for four is the defect this whole path exists to
+    /// fix.
+    #[test]
+    fn a_requested_cpu_count_is_honoured_rather_than_reduced() {
+        assert_eq!(super::effective_vcpus(0), 1, "zero is not a machine");
+        for requested in [1u32, 2, 4, 8, 64] {
+            assert_eq!(
+                super::effective_vcpus(requested),
+                requested,
+                "a request for {requested} CPUs must not be reduced"
+            );
+        }
+    }
+
+    /// Per-CPU diagnostics merge into one description of the machine.
+    ///
+    /// Counts add, and the sampled function ids and exception classes stay a
+    /// set: the question they answer is which kinds occurred, and a secondary
+    /// issuing the same PSCI call as the boot CPU is not new information.
+    #[test]
+    fn diagnostics_from_every_cpu_merge_into_one_machine_view() {
+        let mut primary = super::CpuDiagnostics {
+            hvc_calls: 3,
+            other_exceptions: 1,
+            psci_fns: vec![0x8400_0000],
+            other_ecs: vec![0x16],
+        };
+        primary.merge(super::CpuDiagnostics {
+            hvc_calls: 2,
+            other_exceptions: 4,
+            // One already seen, one new.
+            psci_fns: vec![0x8400_0000, 0xC400_0003],
+            other_ecs: vec![0x16, 0x24],
+        });
+
+        assert_eq!(primary.hvc_calls, 5, "counts add across CPUs");
+        assert_eq!(primary.other_exceptions, 5);
+        assert_eq!(
+            primary.psci_fns,
+            vec![0x8400_0000, 0xC400_0003],
+            "function ids are a set, in first-seen order"
+        );
+        assert_eq!(primary.other_ecs, vec![0x16, 0x24]);
+    }
+
+    /// Merging cannot grow the sample lists without bound.
+    ///
+    /// A guest in a fault loop on several CPUs would otherwise hand back a
+    /// vector per exception for the length of the run.
+    #[test]
+    fn merging_diagnostics_respects_the_sample_limit() {
+        let mut primary = super::CpuDiagnostics::default();
+        for cpu in 0..8u64 {
+            primary.merge(super::CpuDiagnostics {
+                hvc_calls: 0,
+                other_exceptions: 0,
+                psci_fns: (0..8).map(|i| cpu * 8 + i).collect(),
+                other_ecs: (0..8).map(|i| (cpu * 8 + i) as u32).collect(),
+            });
+        }
+        assert_eq!(primary.psci_fns.len(), super::DIAGNOSTIC_SAMPLE_LIMIT);
+        assert_eq!(primary.other_ecs.len(), super::DIAGNOSTIC_SAMPLE_LIMIT);
+    }
+
     use super::*;
 
     fn arm64_image(size: usize, image_size: u64) -> Vec<u8> {
@@ -1428,17 +2580,17 @@ mod tests {
     }
 
     #[test]
-    fn fifth_disk_slot_stays_below_virtiofs_window() {
+    fn sixth_disk_slot_stays_below_virtiofs_window() {
         let (last_mmio, _) = disk_mmio(MAX_DISKS - 1);
         assert!(
             last_mmio + MMIO_STRIDE <= FS_MMIO_BASE,
-            "fifth disk must fit below the virtiofs MMIO window"
+            "sixth disk must fit below the virtiofs MMIO window"
         );
 
         let (next_mmio, _) = disk_mmio(MAX_DISKS);
         assert_eq!(
             next_mmio, FS_MMIO_BASE,
-            "a sixth disk would collide with the virtiofs root window"
+            "a seventh disk would collide with the virtiofs root window"
         );
     }
 
@@ -1531,5 +2683,29 @@ mod tests {
                 dtb_offset: 8192,
             })
         );
+    }
+
+    #[test]
+    fn machine_start_gate_holds_a_cpu_until_release() {
+        let gate = Arc::new(MachineStartGate::default());
+        let worker_gate = Arc::clone(&gate);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (released_tx, released_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            entered_tx.send(()).expect("announce wait");
+            worker_gate.wait();
+            released_tx.send(()).expect("announce release");
+        });
+
+        entered_rx.recv().expect("worker reached gate");
+        assert!(
+            released_rx.recv_timeout(Duration::from_millis(20)).is_err(),
+            "worker must remain held before release"
+        );
+        gate.release();
+        released_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("worker released");
+        worker.join().expect("worker joins");
     }
 }

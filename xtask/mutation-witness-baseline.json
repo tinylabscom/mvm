@@ -8,13 +8,6 @@
       ]
     },
     {
-      "path": "crates/mvm-agentd/src/l3/privdrop.rs",
-      "package": "mvm-agentd",
-      "claims": [
-        2
-      ]
-    },
-    {
       "path": "crates/mvm-agentd/src/vsock/verb_grant.rs",
       "package": "mvm-agentd",
       "claims": [
@@ -147,13 +140,6 @@
       ]
     },
     {
-      "path": "crates/mvm-contract/src/protocol/vm_backend.rs",
-      "package": "mvm-contract",
-      "claims": [
-        13
-      ]
-    },
-    {
       "path": "crates/mvm-contract/src/substitution.rs",
       "package": "mvm-contract",
       "claims": [
@@ -165,6 +151,13 @@
       "package": "mvm-core",
       "claims": [
         18
+      ]
+    },
+    {
+      "path": "crates/mvm-core/src/crypto/policy/mount.rs",
+      "package": "mvm-core",
+      "claims": [
+        1
       ]
     },
     {
@@ -200,6 +193,13 @@
       "package": "mvm-hostd",
       "claims": [
         18
+      ]
+    },
+    {
+      "path": "crates/mvm-hostd/src/bin/mvm-network-endpoint.rs",
+      "package": "mvm-hostd",
+      "claims": [
+        10
       ]
     },
     {
@@ -265,7 +265,12 @@
       "package": "mvm-hostd",
       "claims": [
         13
-      ]
+      ],
+      "scope": {
+        "examine_re": "prepare_request|SubstitutionDriver.*substitute",
+        "why": "This file enters claim 13's mutation surface because it implements the generically named `SubstitutionDriver::substitute` witness adapter. The claim-relevant boundary is that adapter plus `prepare_request`, which refuses substitution errors before forwarding. The rest of this 4,700-line module is FlowMux transport, streaming, redaction, AI metering, and vsock plumbing covered by its focused unit, integration, and fuzz suites rather than the no-secret-over-broker-channel claim.",
+        "excluded_tracked_by": "#2033"
+      }
     },
     {
       "path": "crates/mvm-hostd/src/supervisor/wall_clock.rs",
@@ -314,11 +319,11 @@
   "uncovered_claims": [
     {
       "number": 5,
-      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 7,
-      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 16,
@@ -330,11 +335,6 @@
       "file": "crates/mvm-agentd/src/bin/mvm-seccomp-apply.rs",
       "mutant": "replace main with ()",
       "reason": "replaces the binary's entrypoint with a no-op. The only witness would be executing the built binary, which this package's own test suite does not do; the claim-2 witness it calls, set_no_new_privs, is asserted directly."
-    },
-    {
-      "file": "crates/mvm-agentd/src/l3/privdrop.rs",
-      "mutant": "replace drop_privileges -> DropReport with Default::default()",
-      "reason": "mutates only the cfg(not(target_os = \"linux\")) no-op implementation while the security mutation shard runs on Linux, so that body is not compiled. Non-Linux unit coverage asserts the complete no-op report, while the Linux shard executes the real drop in an isolated privileged child and verifies the thread's kernel privilege state."
     },
     {
       "file": "crates/mvm-backends/src/driver/hvf.rs",
@@ -359,11 +359,6 @@
     {
       "file": "crates/mvm-backends/src/driver/hvf.rs",
       "mutant": "delete field host_vsock_proxy from struct VmCapabilities expression in <impl VmmDriver for HvfDriver>::capabilities",
-      "reason": "VmCapabilities field constants are assertions about HVF backend capability; their correctness is covered by admission and backend-selection integration tests."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf.rs",
-      "mutant": "delete field l3_vsock from struct VmCapabilities expression in <impl VmmDriver for HvfDriver>::capabilities",
       "reason": "VmCapabilities field constants are assertions about HVF backend capability; their correctness is covered by admission and backend-selection integration tests."
     },
     {
@@ -513,11 +508,6 @@
     },
     {
       "file": "crates/mvm-backends/src/driver/hvf.rs",
-      "mutant": "replace <impl VmmDriver for HvfDriver>::supports_directory_shares -> bool with false",
-      "reason": "HVF capability constant; the directory-share path is exercised by live HVF runs and BDD scenarios."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf.rs",
       "mutant": "replace <impl VmmDriver for HvfDriver>::supports_resident_handoff -> bool with false",
       "reason": "HVF capability constant; the resident-handoff path is exercised by live HVF warm-claim tests and BDD scenarios."
     },
@@ -565,11 +555,6 @@
       "file": "crates/mvm-backends/src/driver/hvf.rs",
       "mutant": "replace match guard !spec .vsock .iter() .any(|port| port.service == GuestService::NetworkFlow) with true in relay_supervisor_config_with_handoff",
       "reason": "HVF supervisor config relay is macOS-specific and exercises vsock channel setup that is validated by live HVF BDD scenarios, not by Linux unit tests."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf.rs",
-      "mutant": "replace match guard !spec.vsock.iter().any(|port| port.service == GuestService::NetworkFlow) with true in relay_supervisor_config_with_handoff",
-      "reason": "The substitution-service port selection is part of HVF supervisor config relay; the correct shape is asserted by live HVF runs and BDD scenarios."
     },
     {
       "file": "crates/mvm-backends/src/driver/hvf.rs",
@@ -634,11 +619,6 @@
     {
       "file": "crates/mvm-backends/src/driver/libkrun.rs",
       "mutant": "delete field fs_quick_checkpoint from struct VmCapabilities expression in <impl VmmDriver for LibkrunDriver>::capabilities",
-      "reason": "VmCapabilities field constants are assertions about libkrun backend capability; their correctness is covered by admission and backend-selection integration tests."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/libkrun.rs",
-      "mutant": "delete field l3_vsock from struct VmCapabilities expression in <impl VmmDriver for LibkrunDriver>::capabilities",
       "reason": "VmCapabilities field constants are assertions about libkrun backend capability; their correctness is covered by admission and backend-selection integration tests."
     },
     {
@@ -843,36 +823,6 @@
     },
     {
       "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace output.status.success() with false in has_kernel",
-      "reason": "has_kernel probes the builder VM for a vmlinux file. Mutating the probe to always report false only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace output.status.success() with false in has_squashfs",
-      "reason": "has_squashfs probes the builder VM for a squashfs rootfs. Mutating the probe to always report false only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace output.status.success() with false in is_installed",
-      "reason": "is_installed probes the builder VM for a firecracker binary. Mutating the probe to always report false only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace output.status.success() with true in has_kernel",
-      "reason": "has_kernel probes the builder VM for a vmlinux file. Mutating the probe to always report true only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace output.status.success() with true in has_squashfs",
-      "reason": "has_squashfs probes the builder VM for a squashfs rootfs. Mutating the probe to always report true only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace output.status.success() with true in is_installed",
-      "reason": "is_installed probes the builder VM for a firecracker binary. Mutating the probe to always report true only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
       "mutant": "replace prepare_rootfs -> Result<()> with Ok(())",
       "reason": "Firecracker rootfs and state operations require a live Firecracker/jailer environment and are covered by live Firecracker BDD scenarios."
     },
@@ -909,46 +859,6 @@
     {
       "file": "crates/mvm-build/src/runtime_overlay.rs",
       "mutant": "replace && with || in local_source_cache_is_fresh",
-      "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace match guard local_source_cache_is_fresh( &resolver.layout(&arch.to_string()), &expected_fingerprint, )? with false in resolve_or_build_local_runtime_overlay",
-      "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace match guard local_source_cache_is_fresh( &resolver.layout(&arch.to_string()), &expected_fingerprint, )? with true in resolve_or_build_local_runtime_overlay",
-      "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace match guard out.status.success() with true in curl_download",
-      "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace run_nix_build -> Result<(), RuntimeOverlayError> with Ok(())",
-      "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace runtime_overlay_source_checkout_root -> Option<PathBuf> with None",
-      "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace runtime_overlay_source_checkout_root -> Option<PathBuf> with Some(Default::default())",
-      "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace write_local_build_epoch -> Result<(), RuntimeOverlayError> with Ok(())",
-      "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace write_local_source_fingerprint -> Result<(), RuntimeOverlayError> with Ok(())",
       "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
     },
     {
@@ -1007,9 +917,24 @@
       "reason": "the discriminating input is a bare relative name that exists as a file or directory in the process's current directory. A test cannot create one without writing into the repo working tree or mutating process-global CWD shared by parallel tests under the documented cargo test fallback."
     },
     {
+      "file": "crates/mvm-contract/src/policy/network_policy.rs",
+      "mutant": "replace AiPolicy::disabled -> Self with Default::default()",
+      "reason": "provably equivalent: `AiPolicy::disabled` returns `Self::default()` directly. No test can distinguish the two expressions; the adjacent constructor test pins disabled equality and separately proves that `metered` differs by enabling metering."
+    },
+    {
+      "file": "crates/mvm-contract/src/protocol/capability_negotiation.rs",
+      "mutant": "replace ClientOperationCapabilities::builder -> ClientOperationCapabilitiesBuilder with Default::default()",
+      "reason": "provably equivalent: `ClientOperationCapabilities::builder` returns `ClientOperationCapabilitiesBuilder::default()` directly, so the mutant evaluates the identical expression. No test can distinguish the two, while the adjacent builder test asserts that `build` preserves every enabled operation."
+    },
+    {
       "file": "crates/mvm-core/src/plan/synthesis.rs",
       "mutant": "replace SynthesisInput<'a>::builder -> SynthesisInputBuilder<'a> with Default::default()",
       "reason": "provably equivalent: `SynthesisInput::builder` is a one-line alias for `SynthesisInputBuilder::new()`, and this file's `impl Default for SynthesisInputBuilder` returns `Self::new()`, so `Default::default()` evaluates the identical expression. No test can distinguish the two, and the builder's own required-field refusal is asserted directly by the empty-builder test beside it."
+    },
+    {
+      "file": "crates/mvm-hostd/src/bin/mvm-network-endpoint.rs",
+      "mutant": "replace confine_endpoint_without_lsm -> Result<()> with Ok(())",
+      "reason": "This is the macOS/Windows compatibility stub: those hosts have no Landlock or seccomp confinement to witness. The distinct function name keeps this exception from masking mutations of the Linux fail-closed confine_endpoint implementation."
     },
     {
       "file": "crates/mvm-hostd/src/admission_budget.rs",
@@ -1033,18 +958,8 @@
     },
     {
       "file": "crates/mvm-hostd/src/plan_admission.rs",
-      "mutant": "replace * with + in admit_within_host_budget",
-      "reason": "The BUNDLE_JSON_MAX_BYTES cap is fail-closed; shrinking it refuses strictly more input. Catching the mutation needs a fixture between the two sizes, which the existing boundary test deliberately avoids as a tautology."
-    },
-    {
-      "file": "crates/mvm-hostd/src/plan_admission.rs",
       "mutant": "replace AdmitAndStartParams<'a>::builder -> AdmitAndStartParamsBuilder<'a> with Default::default()",
       "reason": "provably equivalent: `AdmitAndStartParams::builder` is a one-line alias for `AdmitAndStartParamsBuilder::new()`, and this file's `impl Default for AdmitAndStartParamsBuilder` returns `Self::new()`, so `Default::default()` evaluates the identical expression. No test can distinguish the two, and the builder's own required-field refusal is asserted directly by the empty-builder test beside it."
-    },
-    {
-      "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
-      "mutant": "replace > with == in highest_sealed_segment",
-      "reason": "observable only through `read_dir` ordering, which is unspecified. Under `==` the scan keeps whatever entry the directory yields first; whether that differs from the maximum depends on the filesystem, so a test asserting the difference would pass or fail on the host rather than on the code. `the_highest_sequence_wins_not_the_lowest` covers the sign flip, which is the mutation that is deterministically wrong."
     },
     {
       "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
@@ -1055,6 +970,31 @@
       "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
       "mutant": "replace RotationPolicy::never -> Self with Default::default()",
       "reason": "RotationPolicy::never is a constant constructor; the policy behavior is exercised by audit-file integration tests that verify rotation decisions."
+    },
+    {
+      "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
+      "mutant": "replace * with +",
+      "reason": "changes the cursor tail's initial read window from 64 KiB to 1088 bytes. The backwards scan still widens until it reaches the final record or the file start, so this only adds reads; long-record and multibyte-boundary tests prove the result is unchanged."
+    },
+    {
+      "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
+      "mutant": "replace * with + in FileAuditSigner::restore_cursor",
+      "reason": "changes geometric tail-window growth into linear growth. Both paths monotonically widen to the file length and return the same final record hash; the mutant is slower but cannot change acceptance or chain contents."
+    },
+    {
+      "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
+      "mutant": "replace == with != in FileAuditSigner::prune_through",
+      "reason": "the segment set is fully verified for continuity immediately before this defensive presence check. For a valid multi-segment prefix both predicates find an entry; for a missing segment verification has already refused the prune. The only distinguishable single-segment case makes the mutant fail closed."
+    },
+    {
+      "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
+      "mutant": "replace > with == in FileAuditSigner::prune_through",
+      "reason": "after verification and range validation, `through` names an existing sealed segment and a later active segment exists. This side-effect-free existence check therefore succeeds with either the named segment or its successor; the active segment survival and past-end refusal are asserted separately."
+    },
+    {
+      "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
+      "mutant": "replace > with >= in FileAuditSigner::prune_through",
+      "reason": "after verification and range validation, `through` names an existing sealed segment and a later active segment exists. Both comparisons therefore find an entry, and the result is used only as an existence proof; no input reaching this point distinguishes them."
     },
     {
       "file": "crates/mvm-hostd/src/supervisor/network/stages.rs",

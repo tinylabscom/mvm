@@ -15,9 +15,9 @@
 //! — no libkrun, no libkrunfw, no custom kernel, no slirp. Proven end-to-end
 //! on x86_64 (the builder kernel compiled + `vmlinux` landed in `/out`).
 //!
-//! Host-side packing/extraction uses `mkfs.ext4 -d` + `debugfs rdump` rather
-//! than loop mounts, so the builder runs as a normal user in the `kvm` group —
-//! no root.
+//! Host-side packing/extraction uses `mkfs.ext4 -d` + allow-listed `debugfs
+//! dump` calls rather than loop mounts, so the builder runs as a normal user in
+//! the `kvm` group — no root and no guest-ownership restoration.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -25,15 +25,21 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::builder_vm::{BuilderArtifacts, BuilderJob, BuilderMounts, BuilderVm, BuilderVmError};
 #[cfg(feature = "builder-vm")]
-use crate::builder_vm_runtime::{CLOSURE_SEED_TAG, acquire_nix_store_image_lock_named};
+use crate::builder_vm_runtime::acquire_nix_store_image_lock_named;
 #[cfg(feature = "builder-vm")]
 use crate::libkrun_builder::{
-    BuilderEndpointTransport, BuilderShellJob, BuilderShellResult, BuilderVmImage,
-    BuilderVsockEgressEndpoint, DEFAULT_NIX_STORE_MIB, builder_runtime_overlay_attachment,
-    builder_vm_cache_dir, prepopulate_stage0_nix_store_image, require_runtime_overlay_ext4,
-    stage0_nix_store_image_name,
+    BuilderEndpointTransport, BuilderRuntimeOverlayAttachment, BuilderShellJob, BuilderShellResult,
+    BuilderVmImage, BuilderVsockEgressEndpoint, DEFAULT_NIX_STORE_MIB,
+    builder_runtime_overlay_attachment, builder_vm_cache_dir, extract_builder_transport_output,
+    prepare_builder_transport_disks, prepopulate_stage0_nix_store_image,
+    require_runtime_overlay_ext4, stage0_nix_store_image_name,
 };
 use mvm_core::config::DEFAULT_MVM_HOME_DIR_NAME;
+use mvm_fs::overlay::CHECKSUM_MANIFEST_FILE;
+use mvm_fs::sdk_sidecar::{SDK_SIDECAR_IMAGE_FILE, SDK_SIDECAR_VERSION_FILE};
+use mvm_vmm::qemu_arch::{
+    machine_for_arch as qemu_machine_for_arch, serial_console_for_arch as qemu_console_for_arch,
+};
 
 /// QEMU-backed builder VM (Linux). Constructed with `::default()`; no I/O at
 /// construction — the first I/O is in `run_stage0`.
@@ -96,7 +102,7 @@ impl BuilderVm for QemuBuilderVm {
 
 /// Max wall-clock for a Stage 0 QEMU run (kernel compile + downloads). Wraps
 /// the qemu child in `timeout` so a hung guest can't block forever.
-const STAGE0_TIMEOUT_SECS: u32 = 7200;
+const STAGE0_TIMEOUT_SECS: u32 = 14_400;
 const QEMU_BUILDER_VSOCK_EGRESS_TOKEN: &str = "mvm.vsock_egress=1";
 const QEMU_BUILDER_VSOCK_EGRESS_PORT_TOKEN_PREFIX: &str = "mvm.vsock_egress_port=";
 const QEMU_BUILDER_VSOCK_EGRESS_PORT_BASE: u32 = 45_253;
@@ -114,6 +120,9 @@ const QEMU_STAGE0_OUT_ARTIFACT_NAMES: &[&str] = &[
     "manifest.json",
     "mvm-kernel.config",
     "nix-stderr.log",
+    SDK_SIDECAR_IMAGE_FILE,
+    SDK_SIDECAR_VERSION_FILE,
+    CHECKSUM_MANIFEST_FILE,
 ];
 
 /// Directories `copy_tree_filtered` drops when staging a `/work` tree for
@@ -267,24 +276,8 @@ fn run_stage0_qemu(
         cmd.arg("-drive")
             .arg(format!("file={},if=virtio,format=raw", disk.display()));
     }
-    // Read-only, matching how the shell-job and build paths attach it.
     #[cfg(feature = "builder-vm")]
-    cmd.arg("-drive").arg(format!(
-        "file={},if=virtio,format=raw,readonly=on",
-        identity_drive.display()
-    ));
-    #[cfg(feature = "builder-vm")]
-    {
-        cmd.arg("-drive").arg(format!(
-            "file={},if=virtio,format=raw,readonly=on",
-            identity_drive.display()
-        ));
-    }
-    #[cfg(feature = "builder-vm")]
-    cmd.arg("-drive").arg(format!(
-        "file={},if=virtio,format=raw",
-        nix_store_lock.path().display()
-    ));
+    attach_stage0_identity_and_store(&mut cmd, &identity_drive, nix_store_lock.path());
     cmd.arg("-device")
         .arg(format!("vhost-vsock-pci,guest-cid={guest_cid}"));
     cmd.args(["-display", "none"]);
@@ -322,8 +315,9 @@ fn run_stage0_qemu(
         )));
     }
 
-    // 4. Pull the artifacts back out of the /out ext4 into `artifact_out`
-    //    (debugfs rdump — no mount). The caller validates + promotes them.
+    // 4. Pull the allow-listed artifacts back out of the /out ext4 into
+    //    `artifact_out` (debugfs dump — no mount or ownership restoration).
+    //    The caller validates + promotes them.
     extract_out_artifacts(&vdc, artifact_out)?;
 
     // Best-effort: drop the (large) disk images now the build is done. Keep
@@ -332,6 +326,18 @@ fn run_stage0_qemu(
         let _ = std::fs::remove_file(img);
     }
     Ok(())
+}
+
+/// Attach the two host-owned Stage 0 data disks exactly once and in a stable
+/// order: the read-only FlowMux identity followed by the writable Nix store.
+#[cfg(any(feature = "builder-vm", test))]
+fn attach_stage0_identity_and_store(cmd: &mut Command, identity_drive: &Path, nix_store: &Path) {
+    cmd.arg("-drive").arg(format!(
+        "file={},if=virtio,format=raw,readonly=on",
+        identity_drive.display()
+    ));
+    cmd.arg("-drive")
+        .arg(format!("file={},if=virtio,format=raw", nix_store.display()));
 }
 
 /// Recursively copy `src` into `dst`, skipping any directory whose name is in
@@ -591,35 +597,36 @@ fn pack_ext4(src_dir: &Path, img: &Path, size: u64) -> Result<(), BuilderVmError
 }
 
 /// Extract the builder artifacts from the `/out` ext4 image into `dest` using
-/// `debugfs rdump` (no mount). Copies the known artifact names if present.
+/// allow-listed `debugfs dump` calls (no mount). Omitting `dump -p` is
+/// deliberate: Stage 0 writes root-owned guest files, while the host extractor
+/// is an unprivileged process and must not attempt to restore guest ownership.
 fn extract_out_artifacts(out_img: &Path, dest: &Path) -> Result<(), BuilderVmError> {
     let tmp = dest.join(".qemu-out-extract");
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).map_err(|e| io_err("creating extract dir", &tmp, e))?;
-    let status = Command::new("debugfs")
-        .arg("-R")
-        .arg(format!("rdump / {}", tmp.display()))
-        .arg(out_img)
-        .status()
-        .map_err(|e| {
-            BuilderVmError::ExtractionFailed(format!("spawning debugfs (install e2fsprogs): {e}"))
-        })?;
-    if !status.success() {
-        return Err(BuilderVmError::ExtractionFailed(format!(
-            "debugfs rdump of {} exited {}",
-            out_img.display(),
-            status.code().unwrap_or(-1)
-        )));
-    }
     for name in QEMU_STAGE0_OUT_ARTIFACT_NAMES {
         let from = tmp.join(name);
-        if from.is_file() {
+        let status = Command::new("debugfs")
+            .arg("-R")
+            .arg(debugfs_dump_request(name, &from))
+            .arg(out_img)
+            .status()
+            .map_err(|e| {
+                BuilderVmError::ExtractionFailed(format!(
+                    "spawning debugfs (install e2fsprogs): {e}"
+                ))
+            })?;
+        if status.success() && from.is_file() {
             std::fs::copy(&from, dest.join(name))
                 .map_err(|e| io_err("copying extracted artifact", &from, e))?;
         }
     }
     let _ = std::fs::remove_dir_all(&tmp);
     Ok(())
+}
+
+fn debugfs_dump_request(name: &str, destination: &Path) -> String {
+    format!("dump /{name} {}", destination.display())
 }
 
 /// `qemu-system-<host-arch>` on `$PATH`. The builder/Stage 0 guest is always
@@ -644,21 +651,6 @@ fn locate_qemu() -> Result<String, BuilderVmError> {
                  (`apt install qemu-system-x86 qemu-utils` / `dnf install qemu-system-x86`)."
             ),
         })
-}
-
-fn qemu_machine_for_arch(arch: &str) -> Option<&'static str> {
-    match arch {
-        "aarch64" => Some("virt"),
-        "x86_64" => None,
-        _ => None,
-    }
-}
-
-fn qemu_console_for_arch(arch: &str) -> &'static str {
-    match arch {
-        "aarch64" => "ttyAMA0",
-        _ => "ttyS0",
-    }
 }
 
 /// The running kernel's `vmlinuz` + `initrd.img` under `/boot`. The stock
@@ -732,9 +724,33 @@ mod tests {
         DEFAULT_MVM_HOME_DIR_NAME, DirStats, QEMU_STAGE0_OUT_ARTIFACT_NAMES,
         QEMU_STAGE0_VSOCK_GUEST_MODULES, WORK_EXT4_DIR_OVERHEAD_BYTES,
         WORK_EXT4_FILE_OVERHEAD_BYTES, WORK_EXT4_FIXED_HEADROOM_BYTES, WORK_TREE_EXCLUDE_DIRS,
-        copy_tree_filtered, dir_stats, locate_qemu_vsock_module,
+        attach_stage0_identity_and_store, copy_tree_filtered, debugfs_dump_request, dir_stats,
+        locate_qemu_vsock_module,
     };
     use std::fs;
+
+    #[test]
+    fn stage0_attaches_one_identity_before_one_nix_store() {
+        let mut command = std::process::Command::new("qemu-system-test");
+        let identity = std::path::Path::new("/tmp/flowmux-identity.ext4");
+        let store = std::path::Path::new("/tmp/nix-store.img");
+
+        attach_stage0_identity_and_store(&mut command, identity, store);
+
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "-drive",
+                "file=/tmp/flowmux-identity.ext4,if=virtio,format=raw,readonly=on",
+                "-drive",
+                "file=/tmp/nix-store.img,if=virtio,format=raw",
+            ]
+        );
+    }
 
     #[test]
     fn qemu_stage0_vsock_guest_module_list_is_ordered_by_dependency() {
@@ -759,6 +775,25 @@ mod tests {
             QEMU_STAGE0_OUT_ARTIFACT_NAMES.contains(&"mvm-kernel.config"),
             "QEMU Stage 0 must retain the config required for verified kernel publication"
         );
+    }
+
+    #[test]
+    fn qemu_stage0_extracts_sdk_sidecar_bundle() {
+        for artifact in ["sdk.ext4", "VERSION", "checksums-sha256.txt"] {
+            assert!(
+                QEMU_STAGE0_OUT_ARTIFACT_NAMES.contains(&artifact),
+                "QEMU Stage 0 must retain SDK-sidecar artifact {artifact}"
+            );
+        }
+    }
+
+    #[test]
+    fn qemu_stage0_dump_does_not_restore_guest_ownership() {
+        let request = debugfs_dump_request("sdk.ext4", std::path::Path::new("/tmp/sdk.ext4"));
+
+        assert_eq!(request, "dump /sdk.ext4 /tmp/sdk.ext4");
+        assert!(!request.contains("rdump"));
+        assert!(!request.contains(" -p"));
     }
 
     #[test]
@@ -872,7 +907,9 @@ fn io_err(ctx: &str, path: &Path, e: std::io::Error) -> BuilderVmError {
 // Devices, matched to what the unchanged guest expects:
 //   - vda  virtio-blk  the builder `rootfs.ext4` (mounted `ro`)
 //   - vdb  virtio-blk  the persistent nix-store image (`/nix` overlay upper)
-//   - virtio-fs tags `work` `out` `job` `mvm-bins` over vhost-user/virtiofsd
+//   - vdc  virtio-blk  the input tar: `job` `work` `mvm-bins` + closure seed
+//   - vdd  virtio-blk  the output tar the guest writes its artifacts onto
+//   - vde  virtio-blk  the runtime overlay
 //   - virtio-net-pci + user-mode (slirp); slirp's DHCP feeds the guest's
 //     `udhcpc -i eth0` (we force `net.ifnames=0` so the NIC comes up `eth0`)
 //
@@ -900,23 +937,20 @@ fn run_build_qemu(
 
 #[cfg(feature = "builder-vm")]
 fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, BuilderVmError> {
+    use crate::builder_disk_transport::InputTree;
     use crate::builder_vm_runtime::{
         acquire_nix_store_image_lock, builder_vm_timeout, read_job_result_with_diagnostics,
-        shell_job_exit_error, stage_closure_seed_dir, stage_shell_job_dir,
+        shell_job_exit_error, stage_filtered_work_input, stage_shell_job_dir,
     };
     use crate::libkrun_builder::{
         BuilderVmImage, DEFAULT_NIX_STORE_MIB, builder_vm_cache_dir, ensure_builder_vm_image,
         host_arch_tag, unique_job_id,
     };
+    use crate::pipeline::build::BUILDER_OUTPUT_DISK_MIB;
 
     validate_shell_job(job)?;
 
     let qemu_bin = locate_qemu()?;
-    let (virtiofsd_bin, virtiofsd_flavor) =
-        crate::virtiofsd::locate_virtiofsd().map_err(|e| BuilderVmError::VmmUnavailable {
-            requested: "virtiofsd".to_string(),
-            reason: format!("{e:#}"),
-        })?;
     let (kernel, rootfs, image_cmdline) = match ensure_builder_vm_image()? {
         BuilderVmImage::Rootfs {
             kernel_path,
@@ -958,43 +992,33 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
         );
     }
 
-    // Attach the resolved builder image's seeded closure NAR, when it
-    // carries one, as a fourth read-only share — the same per-arch cache
-    // dir `ensure_builder_vm_image` just read the kernel/rootfs from.
+    // The resolved builder image's seeded closure NAR, when it carries one,
+    // rides the input disk at `closure-seed/<CLOSURE_FILE>` — the same
+    // per-arch cache dir `ensure_builder_vm_image` just read kernel/rootfs
+    // from. The guest imports that fixed path either way.
     let closure_nar =
         crate::builder_pack::closure_nar_path(&builder_vm_cache_dir().join(host_arch_tag()));
-    let closure_share_dir = closure_nar
-        .as_deref()
-        .map(|nar| stage_closure_seed_dir(nar, &vm_state_dir))
-        .transpose()?;
 
-    let shares = qemu_shares_with_closure_seed(
-        vec![
-            ("work", job.work_dir.as_path()),
-            ("out", job.artifact_out.as_path()),
-            ("job", job_dir.as_path()),
+    // `job.work_dir` can be the repo root on a source checkout. A share
+    // tolerated that; a tar does not — `target/`, `.git/` and `.worktrees/`
+    // would overflow the guest's RAM-capped extraction tmpfs. `work_staging`
+    // must outlive the QEMU run.
+    let work_staging = stage_filtered_work_input(&job.work_dir)?;
+    let (input_disk, output_disk) = prepare_builder_transport_disks(
+        &vm_state_dir,
+        &[
+            InputTree {
+                name: "job",
+                src: &job_dir,
+            },
+            InputTree {
+                name: "work",
+                src: work_staging.path(),
+            },
         ],
-        closure_share_dir.as_deref(),
-    );
-    let mut virtiofsd = crate::virtiofsd::VirtiofsdGuard::default();
-    for (tag, dir) in shares.iter().copied() {
-        let sock = qemu_virtiofs_socket_path(&job_id, tag);
-        virtiofsd
-            .spawn(
-                crate::virtiofsd::SpawnParams::new(
-                    &virtiofsd_bin,
-                    virtiofsd_flavor,
-                    tag,
-                    &sock,
-                    dir,
-                )
-                .read_only(false),
-            )
-            .map_err(|e| BuilderVmError::VmmUnavailable {
-                requested: "virtiofsd".to_string(),
-                reason: format!("{e:#}"),
-            })?;
-    }
+        closure_nar.as_deref(),
+        u64::from(BUILDER_OUTPUT_DISK_MIB) << 20,
+    )?;
 
     // The QEMU builder is always a lean Rootfs builder, so the runtime overlay
     // is required — fail closed rather than booting a builder whose guest agent
@@ -1002,7 +1026,7 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
     let runtime_overlay = require_runtime_overlay_ext4()
         .map_err(|e| BuilderVmError::RuntimeOverlayUnavailable(format!("{e:#}")))?;
     let egress_port = allocate_qemu_builder_egress_port();
-    let overlay_cmdline = builder_runtime_overlay_attachment(
+    let overlay_cmdline = qemu_runtime_overlay_attachment(
         &BuilderVmImage::Rootfs {
             kernel_path: kernel.clone(),
             rootfs_path: rootfs.clone(),
@@ -1036,11 +1060,23 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
         crate::builder_cmdline::checked_builder_cmdline(cmdline.clone())
             .map_err(BuilderVmError::NixBuildFailed)?,
     );
+    // Slot order is the guest's contract, not a preference: the cmdline names
+    // `/dev/vdc` and `/dev/vdd` for the transport pair and `/dev/vde` for the
+    // runtime overlay, so these four must be attached in exactly this order.
+    // vda rootfs, vdb nix-store, vdc input, vdd output, vde overlay.
     cmd.arg("-drive")
         .arg(format!("file={},if=virtio,format=raw", rootfs.display()));
     cmd.arg("-drive").arg(format!(
         "file={},if=virtio,format=raw",
         nix_store_lock.path().display()
+    ));
+    cmd.arg("-drive").arg(format!(
+        "file={},if=virtio,format=raw,readonly=on",
+        input_disk.display()
+    ));
+    cmd.arg("-drive").arg(format!(
+        "file={},if=virtio,format=raw",
+        output_disk.display()
     ));
     cmd.arg("-drive").arg(format!(
         "file={},if=virtio,format=raw,readonly=on",
@@ -1051,20 +1087,6 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
         cmd.arg("-drive").arg(format!(
             "file={},if=virtio,format=raw{read_only}",
             disk.path.display()
-        ));
-    }
-    cmd.args([
-        "-object",
-        &format!("memory-backend-memfd,id=mem,size={mem_arg},share=on"),
-        "-numa",
-        "node,memdev=mem",
-    ]);
-    for (tag, _) in shares.iter().copied() {
-        let sock = qemu_virtiofs_socket_path(&job_id, tag);
-        cmd.arg("-chardev")
-            .arg(format!("socket,id=vfs-{tag},path={}", sock.display()));
-        cmd.arg("-device").arg(format!(
-            "vhost-user-fs-pci,queue-size=1024,chardev=vfs-{tag},tag={tag}"
         ));
     }
     let (identity_material, identity_drive) =
@@ -1089,7 +1111,6 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
         .status()
         .map_err(|e| BuilderVmError::NixBuildFailed(format!("spawning qemu ({qemu_bin}): {e}")))?;
     drop(egress_endpoint);
-    drop(virtiofsd);
 
     if !status.success() && status.code() == Some(124) {
         return Err(BuilderVmError::NixBuildFailed(format!(
@@ -1104,6 +1125,13 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
             console_log.display()
         )));
     }
+
+    // The guest wrote its artifacts onto the output disk rather than into a
+    // shared `/out`, so the host has to extract before anything reads them —
+    // `read_job_result_with_diagnostics` looks for `result` in `job_dir`, which
+    // the extraction populates.
+    extract_builder_transport_output(&output_disk, &job.artifact_out, &job_dir)?;
+    drop(work_staging);
 
     let result = read_job_result_with_diagnostics(&job_dir, &vm_state_dir)?;
     if result.exit_code != 0 {
@@ -1152,14 +1180,16 @@ fn run_build_qemu(
     job: &BuilderJob,
     mounts: &BuilderMounts,
 ) -> Result<BuilderArtifacts, BuilderVmError> {
+    use crate::builder_disk_transport::InputTree;
     use crate::builder_vm_runtime::{
         acquire_nix_store_image_lock, builder_vm_timeout, finalize_flake_job, finalize_install_job,
-        stage_closure_seed_dir, stage_job_dir,
+        stage_filtered_work_input, stage_job_dir,
     };
     use crate::libkrun_builder::{
         BuilderVmImage, DEFAULT_NIX_STORE_MIB, builder_vm_cache_dir, ensure_builder_vm_image,
         host_arch_tag, unique_job_id,
     };
+    use crate::pipeline::build::BUILDER_OUTPUT_DISK_MIB;
 
     // 1. Validate caller inputs early — clearer than a QEMU launch failure.
     validate_build_mounts(mounts)?;
@@ -1167,11 +1197,6 @@ fn run_build_qemu(
 
     // 2. Locate the host tooling up front.
     let qemu_bin = locate_qemu()?;
-    let (virtiofsd_bin, virtiofsd_flavor) =
-        crate::virtiofsd::locate_virtiofsd().map_err(|e| BuilderVmError::VmmUnavailable {
-            requested: "virtiofsd".to_string(),
-            reason: format!("{e:#}"),
-        })?;
 
     // 3. Resolve the cached builder image (kernel + rootfs + cmdline) the
     //    Stage 0 path promoted. `run_build` never takes the RootDir shape.
@@ -1228,48 +1253,38 @@ fn run_build_qemu(
         eprintln!("[mvm] QEMU running unaccelerated (TCG) — no /dev/kvm; this build will be slow.");
     }
 
-    // 8. Bring up one virtiofsd per share BEFORE QEMU (QEMU connects to
-    //    their sockets as a client at launch, so they must be ready). The
-    //    guest mounts each by tag; `work`/`mvm-bins` are inputs it mounts
-    //    read-only (`virtiofs_tag_is_read_only`), `out`/`job` read-write.
-    // Attach the resolved builder image's seeded closure NAR, when it
-    // carries one, as a fifth read-only share — the same per-arch cache
-    // dir `ensure_builder_vm_image` just read the kernel/rootfs from.
+    // 8. Pack the inbound trees onto the input disk and create the output
+    //    disk. The resolved builder image's seeded closure NAR, when it
+    //    carries one, rides the same input disk at
+    //    `closure-seed/<CLOSURE_FILE>` — the per-arch cache dir
+    //    `ensure_builder_vm_image` just read the kernel/rootfs from.
     let closure_nar =
         crate::builder_pack::closure_nar_path(&builder_vm_cache_dir().join(host_arch_tag()));
-    let closure_share_dir = closure_nar
-        .as_deref()
-        .map(|nar| stage_closure_seed_dir(nar, &vm_state_dir))
-        .transpose()?;
 
-    let shares = qemu_shares_with_closure_seed(
-        vec![
-            ("work", mounts.flake_src.as_path()),
-            ("out", mounts.artifact_out.as_path()),
-            ("job", job_dir.as_path()),
-            ("mvm-bins", mounts.host_bin_dir.as_path()),
+    // `mounts.flake_src` is the repo root itself on a source checkout. A share
+    // tolerated that; a tar does not — `target/`, `.git/` and `.worktrees/`
+    // would overflow the guest's RAM-capped extraction tmpfs. `work_staging`
+    // must outlive the QEMU run.
+    let work_staging = stage_filtered_work_input(&mounts.flake_src)?;
+    let (input_disk, output_disk) = prepare_builder_transport_disks(
+        &vm_state_dir,
+        &[
+            InputTree {
+                name: "job",
+                src: &job_dir,
+            },
+            InputTree {
+                name: "work",
+                src: work_staging.path(),
+            },
+            InputTree {
+                name: "mvm-bins",
+                src: &mounts.host_bin_dir,
+            },
         ],
-        closure_share_dir.as_deref(),
-    );
-    let mut virtiofsd = crate::virtiofsd::VirtiofsdGuard::default();
-    for (tag, dir) in shares.iter().copied() {
-        let sock = qemu_virtiofs_socket_path(&job_id, tag);
-        virtiofsd
-            .spawn(
-                crate::virtiofsd::SpawnParams::new(
-                    &virtiofsd_bin,
-                    virtiofsd_flavor,
-                    tag,
-                    &sock,
-                    dir,
-                )
-                .read_only(false),
-            )
-            .map_err(|e| BuilderVmError::VmmUnavailable {
-                requested: "virtiofsd".to_string(),
-                reason: format!("{e:#}"),
-            })?;
-    }
+        closure_nar.as_deref(),
+        u64::from(BUILDER_OUTPUT_DISK_MIB) << 20,
+    )?;
 
     // 9. Build the QEMU cmdline from the image's (swap hvc0 for the native
     //    QEMU serial console, force eth0, mark the backend); `root=/dev/vda ro
@@ -1280,7 +1295,7 @@ fn run_build_qemu(
     let runtime_overlay = require_runtime_overlay_ext4()
         .map_err(|e| BuilderVmError::RuntimeOverlayUnavailable(format!("{e:#}")))?;
     let egress_port = allocate_qemu_builder_egress_port();
-    let overlay_cmdline = builder_runtime_overlay_attachment(
+    let overlay_cmdline = qemu_runtime_overlay_attachment(
         &BuilderVmImage::Rootfs {
             kernel_path: kernel.clone(),
             rootfs_path: rootfs.clone(),
@@ -1316,10 +1331,13 @@ fn run_build_qemu(
         crate::builder_cmdline::checked_builder_cmdline(cmdline.clone())
             .map_err(BuilderVmError::NixBuildFailed)?,
     );
-    // Root disk (vda) + persistent nix store (vdb). The guest mounts vda
-    // `ro`, so the cached `rootfs.ext4` stays pristine across builds even
-    // though the block device is attached writable (mirrors libkrun). vdb
-    // lands at `/dev/vdb`, exactly where mvm-host-vm-init expects it.
+    // Slot order is the guest's contract, not a preference: the cmdline names
+    // `/dev/vdc` and `/dev/vdd` for the transport pair and `/dev/vde` for the
+    // runtime overlay, so these five must be attached in exactly this order.
+    // The guest mounts vda `ro`, so the cached `rootfs.ext4` stays pristine
+    // across builds even though the block device is attached writable
+    // (mirrors libkrun).
+    //   vda rootfs, vdb nix-store, vdc input, vdd output, vde overlay.
     cmd.arg("-drive")
         .arg(format!("file={},if=virtio,format=raw", rootfs.display()));
     cmd.arg("-drive").arg(format!(
@@ -1328,24 +1346,16 @@ fn run_build_qemu(
     ));
     cmd.arg("-drive").arg(format!(
         "file={},if=virtio,format=raw,readonly=on",
+        input_disk.display()
+    ));
+    cmd.arg("-drive").arg(format!(
+        "file={},if=virtio,format=raw",
+        output_disk.display()
+    ));
+    cmd.arg("-drive").arg(format!(
+        "file={},if=virtio,format=raw,readonly=on",
         runtime_overlay.display()
     ));
-    // Shared memory backend required by vhost-user-fs (virtiofs). Its size
-    // MUST equal `-m`.
-    cmd.args([
-        "-object",
-        &format!("memory-backend-memfd,id=mem,size={mem_arg},share=on"),
-        "-numa",
-        "node,memdev=mem",
-    ]);
-    for (tag, _) in shares.iter().copied() {
-        let sock = qemu_virtiofs_socket_path(&job_id, tag);
-        cmd.arg("-chardev")
-            .arg(format!("socket,id=vfs-{tag},path={}", sock.display()));
-        cmd.arg("-device").arg(format!(
-            "vhost-user-fs-pci,queue-size=1024,chardev=vfs-{tag},tag={tag}"
-        ));
-    }
     let (identity_material, identity_drive) =
         crate::libkrun_builder::stage_builder_flowmux_identity(&vm_state_dir)?;
     let egress_endpoint = BuilderVsockEgressEndpoint::spawn_with_transport(
@@ -1369,9 +1379,6 @@ fn run_build_qemu(
         .map_err(|e| BuilderVmError::NixBuildFailed(format!("spawning qemu ({qemu_bin}): {e}")))?;
     drop(egress_endpoint);
 
-    // 11. virtiofsd is no longer needed once QEMU has exited.
-    drop(virtiofsd);
-
     if !status.success() && status.code() == Some(124) {
         return Err(BuilderVmError::NixBuildFailed(format!(
             "QEMU builder VM timed out after {timeout_secs}s; console at {}",
@@ -1379,7 +1386,12 @@ fn run_build_qemu(
         )));
     }
 
-    // 12. Per-variant finalize via the shared job protocol — identical to
+    // 12. The guest wrote its artifacts onto the output disk rather than into
+    //     a shared `/out`, so extract before finalize reads them.
+    extract_builder_transport_output(&output_disk, &mounts.artifact_out, &job_dir)?;
+    drop(work_staging);
+
+    // 13. Per-variant finalize via the shared job protocol — identical to
     //     the libkrun/HVF paths, so the BuilderArtifacts is byte-identical
     //     regardless of VMM. Flake reads /job/result + validates
     //     /out/rootfs.ext4; Install reads /out/result.json.
@@ -1389,30 +1401,6 @@ fn run_build_qemu(
     }?;
     drop(nix_store_lock);
     Ok(artifacts)
-}
-
-#[cfg(feature = "builder-vm")]
-fn qemu_virtiofs_socket_path(job_id: &str, tag: &str) -> PathBuf {
-    // AF_UNIX paths cap at ~108 bytes on Linux. Cache roots can be deeply
-    // nested in worktrees, so keep QEMU virtiofs sockets under /tmp and rely
-    // on VirtiofsdGuard to remove them.
-    PathBuf::from(format!("/tmp/mvm-vfs-{job_id}-{tag}.sock"))
-}
-
-/// Append the closure-seed share to `base` iff `closure_share_dir` is
-/// `Some`, mirroring the libkrun path's `closure_seed_share`. Pulled out as
-/// its own pure step (no qemu/virtiofsd spawn) so the "attach a share iff
-/// the resolved image carries a closure" decision is unit-testable without
-/// booting anything.
-#[cfg(feature = "builder-vm")]
-fn qemu_shares_with_closure_seed<'a>(
-    mut base: Vec<(&'a str, &'a Path)>,
-    closure_share_dir: Option<&'a Path>,
-) -> Vec<(&'a str, &'a Path)> {
-    if let Some(dir) = closure_share_dir {
-        base.push((CLOSURE_SEED_TAG, dir));
-    }
-    base
 }
 
 /// Validate the caller's mount paths before launching QEMU. Mirrors
@@ -1485,6 +1473,18 @@ fn allocate_qemu_builder_egress_port() -> u32 {
         .saturating_add(NEXT_QEMU_BUILDER_EGRESS_PORT.fetch_add(1, Ordering::Relaxed))
 }
 
+#[cfg(feature = "builder-vm")]
+fn qemu_runtime_overlay_attachment<'a>(
+    image: &'a BuilderVmImage,
+    runtime_overlay: Option<&'a Path>,
+) -> Option<BuilderRuntimeOverlayAttachment<'a>> {
+    // The disk-transport flavour, which is what pins the overlay to `/dev/vde`
+    // and emits `mvm.builder_transport=disk` plus the input/output device
+    // tokens. The device is a consequence of the slot order below: the two
+    // transport disks take vdc and vdd, so the overlay follows them.
+    builder_runtime_overlay_attachment(image, runtime_overlay)
+}
+
 /// Adapt the cached builder-image kernel cmdline for a QEMU boot. The
 /// image cmdline is libkrun-flavoured (`console=hvc0 root=/dev/vda ro
 /// rootfstype=ext4 init=/sbin/mvm-host-vm-init`); for QEMU we swap the
@@ -1541,28 +1541,29 @@ mod vsock_module_tests {
     #[cfg(feature = "builder-vm")]
     use crate::libkrun_builder::{BuilderExtraDisk, BuilderShellJob};
 
+    /// The overlay device and the transport tokens are one decision, not two:
+    /// the input/output disks take vdc and vdd, so the overlay must be named
+    /// vde. A cmdline that says vdc while the disks are attached in the new
+    /// order points the guest's runtime overlay at the input tar.
     #[cfg(feature = "builder-vm")]
     #[test]
-    fn qemu_shares_omit_closure_seed_when_absent() {
-        let base = vec![("work", Path::new("/w")), ("out", Path::new("/o"))];
-        let shares = qemu_shares_with_closure_seed(base.clone(), None);
-        assert_eq!(shares, base);
-    }
-
-    #[cfg(feature = "builder-vm")]
-    #[test]
-    fn qemu_shares_append_closure_seed_when_present() {
-        let base = vec![("work", Path::new("/w")), ("out", Path::new("/o"))];
-        let closure_dir = Path::new("/vm-state/closure-seed");
-        let shares = qemu_shares_with_closure_seed(base, Some(closure_dir));
-        assert_eq!(
-            shares,
-            vec![
-                ("work", Path::new("/w")),
-                ("out", Path::new("/o")),
-                (CLOSURE_SEED_TAG, closure_dir),
-            ]
+    fn qemu_runtime_overlay_rides_the_disk_transport_at_vde() {
+        let image = BuilderVmImage::new(
+            PathBuf::from("/img/Image"),
+            PathBuf::from("/img/rootfs.ext4"),
+            "console=hvc0 root=/dev/vda".to_string(),
         );
+        let overlay = Path::new("/cache/runtime-overlay.ext4");
+        let attachment = qemu_runtime_overlay_attachment(&image, Some(overlay))
+            .expect("QEMU rootfs builders attach the runtime overlay");
+
+        assert_eq!(attachment.disk_path, overlay);
+        assert!(attachment.read_only);
+        assert!(attachment.cmdline.contains("mvm.runtime_data=/dev/vde"));
+        assert!(!attachment.cmdline.contains("mvm.runtime_data=/dev/vdc"));
+        assert!(attachment.cmdline.contains("mvm.builder_transport=disk"));
+        assert!(attachment.cmdline.contains("mvm.builder_input=/dev/vdc"));
+        assert!(attachment.cmdline.contains("mvm.builder_output=/dev/vdd"));
     }
 
     #[test]
@@ -1630,7 +1631,7 @@ mod vsock_module_tests {
     fn qemu_builder_defaults_leave_host_headroom() {
         assert_eq!(QEMU_BUILD_MEMORY_MIB, 6144);
         assert_eq!(QEMU_BUILD_VCPUS, 4);
-        assert_eq!(STAGE0_TIMEOUT_SECS, 7200);
+        assert_eq!(STAGE0_TIMEOUT_SECS, 14_400);
     }
 
     #[test]
@@ -1658,12 +1659,8 @@ mod vsock_module_tests {
     fn cmdline_preserves_runtime_overlay_tokens() {
         let out = qemu_build_cmdline(
             "console=hvc0 root=/dev/vda ro init=/sbin/mvm-host-vm-init \
-             mvm.runtime_source_policy=required_overlay mvm.runtime_data=/dev/vdc",
+             mvm.runtime_data=/dev/vdc",
             45253,
-        );
-        assert!(
-            out.contains("mvm.runtime_source_policy=required_overlay"),
-            "got: {out}"
         );
         assert!(out.contains("mvm.runtime_data=/dev/vdc"), "got: {out}");
     }
@@ -1691,14 +1688,40 @@ mod vsock_module_tests {
         );
     }
 
-    #[cfg(feature = "builder-vm")]
+    /// The seeded closure reaches the guest at the same fixed path it always
+    /// did — `closure-seed/<CLOSURE_FILE>` — but on the input disk rather than
+    /// as its own share, so the QEMU builder needs no staging directory for it.
     #[test]
-    fn virtiofs_socket_path_stays_below_linux_unix_socket_limit() {
-        let path = qemu_virtiofs_socket_path("1781841830517-1343691", "work");
-        let rendered = path.to_string_lossy();
+    fn closure_nar_rides_the_input_disk_under_its_fixed_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let job = dir.path().join("job");
+        std::fs::create_dir_all(&job).unwrap();
+        std::fs::write(job.join("cmd.sh"), b"#!/bin/sh\n").unwrap();
+        let nar = dir.path().join("some-other-name.nar");
+        std::fs::write(&nar, b"nar-bytes").unwrap();
 
-        assert!(rendered.starts_with("/tmp/mvm-vfs-"), "{rendered}");
-        assert!(rendered.len() < 108, "{rendered}");
+        let image = dir.path().join("input.img");
+        crate::builder_disk_transport::pack_input_disk(
+            &[crate::builder_disk_transport::InputTree {
+                name: "job",
+                src: &job,
+            }],
+            Some(nar.as_path()),
+            &image,
+            0,
+        )
+        .unwrap();
+
+        let out = dir.path().join("extracted");
+        crate::builder_disk_transport::read_output_disk(&image, &out).unwrap();
+        assert_eq!(
+            std::fs::read(
+                out.join("closure-seed")
+                    .join(crate::builder_pack::CLOSURE_FILE)
+            )
+            .unwrap(),
+            b"nar-bytes"
+        );
     }
 
     #[cfg(feature = "builder-vm")]
@@ -1771,6 +1794,32 @@ fi
         assert!(
             result.vm_state_dir.join("console.log").exists(),
             "live proof must leave a console log for diagnosis"
+        );
+    }
+
+    /// Stage 0 delegates the host-owned disks to the single-purpose helper once.
+    ///
+    /// The FlowMux identity image was attached twice, which consumed a device
+    /// letter and pushed the Nix store one slot further down the enumeration —
+    /// past where the guest looked for it. The guest then fell back to
+    /// enumeration order and selected the 32 KiB identity image as its store,
+    /// failing closed on every Stage 0 kernel build.
+    #[test]
+    fn stage0_calls_host_owned_disk_attachment_once() {
+        let src = include_str!("qemu_builder.rs");
+        let block = src
+            .split_once("for disk in [&vda, &vdb, &vdc, &vdd]")
+            .expect("stage 0 still attaches its disks here")
+            .1
+            .split_once("\"-device\"")
+            .expect("the drive list ends before the vsock device")
+            .0;
+
+        let calls = block.matches("attach_stage0_identity_and_store(").count();
+        assert_eq!(
+            calls, 1,
+            "the host-owned Stage 0 disks are attached through the helper {calls} times; \
+             duplicate attachment re-letters every disk behind them"
         );
     }
 }

@@ -91,15 +91,14 @@ async fn handle_connection(
         "mvm-broker received call (correlation id reassigned)"
     );
 
-    // session_id + profile are still stubbed; enriching them from the
-    // supervisor envelope is a follow-up (neither gates the registered
-    // host.audit.v1). The correlation id is the integrity-relevant field and is
-    // reassigned above.
+    // The registration's workload identity is also this broker connection's
+    // server-derived session lookup key. A guest cannot choose it: each VM has
+    // a separately bound listener carrying its admitted registration context.
     let ctx = ServiceCallCtx {
         workload_id: workload_id.clone(),
         tenant_id: tenant_id.clone(),
         correlation_id: correlation_id.clone(),
-        session_id: "w1a-stub-session".to_string(),
+        session_id: workload_id.clone(),
         profile: AgentProfile::default(),
         composition_depth: 0,
         composition_width: 0,

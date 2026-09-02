@@ -91,6 +91,9 @@ fn main() -> Result<()> {
         let listener = UnixListener::bind(&cfg.uds_path)
             .with_context(|| format!("mvm-broker UDS bind failed on {}", cfg.uds_path.display()))?;
         let mut registry = Registry::new();
+        registry
+            .admit_capabilities(cfg.capability_bindings.clone())
+            .context("load admitted extension capability bindings")?;
         register_handlers(&mut registry, &cfg);
         let registry = Arc::new(registry);
         info!(

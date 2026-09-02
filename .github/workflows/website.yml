@@ -1,10 +1,16 @@
 name: Website
 
-# check:tokens and check:samples were developer conventions with no CI gate:
-# a hardcoded hex value or a drifted code sample could land on main and only
-# ever get caught by someone remembering to run pnpm check locally. This is
-# the gate. It's scoped to public/** so it doesn't run (and can't be required)
-# on PRs that never touch the site.
+# check:tokens, check:samples and check:perf were developer conventions with
+# no CI gate: a hardcoded hex value, a drifted code sample, or a homepage
+# percentile that no longer matches the performance page could land on main
+# and only ever get caught by someone remembering to run pnpm check locally.
+# This is the gate. It's scoped to public/** so it doesn't run (and can't be
+# required) on PRs that never touch the site.
+#
+# Steps are listed individually rather than via `pnpm check` so a failure
+# names the gate that failed. Adding a check:* script therefore needs a step
+# here too, or it runs nowhere. The job `name:` is deliberately left alone
+# when steps are added — it is the check name branch protection matches on.
 on:
   pull_request:
     paths:
@@ -30,7 +36,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           package_json_file: public/package.json
 
@@ -44,7 +50,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.96.0
+          toolchain: 1.97.1
           targets: wasm32-unknown-unknown,wasm32-wasip1
 
       - name: Install wasm-pack
@@ -68,6 +74,14 @@ jobs:
       - name: Check sample provenance
         working-directory: public
         run: pnpm check:samples
+
+      - name: Check perf provenance
+        working-directory: public
+        run: pnpm check:perf
+
+      - name: Check cross-origin isolation headers
+        working-directory: public
+        run: pnpm check:headers
 
       - name: Build
         working-directory: public

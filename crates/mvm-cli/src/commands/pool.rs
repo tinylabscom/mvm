@@ -7,8 +7,8 @@
 //!
 //! A standby is claimable by a launch whose kernel, resources, **rootfs image**
 //! and **guest egress enablement** all match (`StandbyCompat`, exact equality) and whose
-//! shape a shared parent can serve at all (`warm_eligible_launch` — no extra volumes, no
-//! virtio-fs root). Anything else cold-boots. Both halves of
+//! shape a shared parent can serve at all (`warm_eligible_launch` — no extra volumes).
+//! Anything else cold-boots. Both halves of
 //! the pool build that key and that eligibility test through one function each, because
 //! a spawn and a claim that compute them separately are free to disagree, and a
 //! disagreement is invisible: the pool fills and never drains. Multi-kernel keying and
@@ -21,8 +21,8 @@ use clap::{Args as ClapArgs, Subcommand};
 use mvm_core::checkpoint::CheckpointId;
 use mvm_core::user_config::MvmConfig;
 use mvm_core::vm_backend::{
-    StandbyClaim, StandbyCompat, StandbyError, StandbyHandle, StandbySpec, StandbyState, VmBackend,
-    VmId, VmStartConfig, WarmClaimRefusal, WarmLaunchMode,
+    RuntimeSourceRootStrategy, StandbyClaim, StandbyCompat, StandbyError, StandbyHandle,
+    StandbySpec, StandbyState, VmBackend, VmId, VmStartConfig, WarmClaimRefusal, WarmLaunchMode,
 };
 use mvm_fs::snapshot_store::FsSnapshotStore;
 use mvm_runtime::backend::AnyBackend;
@@ -101,15 +101,17 @@ pub struct StandbySpecParams<'a> {
     pub mem_mib: u32,
     pub signer_id: &'a str,
     pub signing_key_path: &'a Path,
-    /// Source rootfs image the parent boots and is captured from — the launch's
-    /// own rootfs, so a claim's compat key names the disk that actually booted.
-    /// `None` only when the caller has no launch to mirror, which the spawn
-    /// then refuses.
+    /// Resolved rootfs image for the parent. A block parent boots it directly;
+    /// a virtiofs parent uses its digest as the image identity while serving the
+    /// launch's read-only unpacked tree. `None` only when the caller has no
+    /// launch to mirror, which the spawn then refuses.
     pub image_path: Option<&'a Path>,
     /// Sha256 hex of that image — the compat key's image half, and the same
     /// digest a claim computes for its own launch. `None` only alongside an
     /// absent `image_path`.
     pub image_sha256: Option<&'a str>,
+    /// Root device model the parent boots and every restored child inherits.
+    pub root_strategy: RuntimeSourceRootStrategy,
     /// Whether the parent boots its guest's vsock egress client — the compat
     /// key's egress half, read off the launch's effective enablement. A restored
     /// child inherits the token from the parent's memory, so this is fixed here.
@@ -140,6 +142,7 @@ pub struct StandbySpecParamsBuilder<'a> {
     signing_key_path: Option<&'a Path>,
     image_path: Option<&'a Path>,
     image_sha256: Option<&'a str>,
+    root_strategy: Option<RuntimeSourceRootStrategy>,
     vsock_egress: Option<bool>,
 }
 
@@ -159,6 +162,7 @@ impl<'a> StandbySpecParamsBuilder<'a> {
             signing_key_path: None,
             image_path: None,
             image_sha256: None,
+            root_strategy: None,
             vsock_egress: None,
         }
     }
@@ -240,6 +244,13 @@ impl<'a> StandbySpecParamsBuilder<'a> {
         self
     }
 
+    /// Set `root_strategy`.
+    #[must_use]
+    pub fn root_strategy(mut self, root_strategy: RuntimeSourceRootStrategy) -> Self {
+        self.root_strategy = Some(root_strategy);
+        self
+    }
+
     /// Set `vsock_egress`.
     #[must_use]
     pub fn vsock_egress(mut self, vsock_egress: bool) -> Self {
@@ -278,6 +289,9 @@ impl<'a> StandbySpecParamsBuilder<'a> {
             ))?,
             image_path: self.image_path,
             image_sha256: self.image_sha256,
+            root_strategy: self
+                .root_strategy
+                .ok_or(BuilderError::missing("StandbySpecParams", "root_strategy"))?,
             vsock_egress: self
                 .vsock_egress
                 .ok_or(BuilderError::missing("StandbySpecParams", "vsock_egress"))?,
@@ -320,6 +334,7 @@ pub fn build_standby_spec(p: &StandbySpecParams<'_>) -> Result<StandbySpec> {
         binding_nonce: nonce,
         image_path: p.image_path.map(|p| p.to_string_lossy().into_owned()),
         image_sha256: p.image_sha256.map(str::to_string),
+        root_strategy: p.root_strategy,
         vsock_egress: p.vsock_egress,
         id,
     })
@@ -413,16 +428,19 @@ fn admit_standby_parent_plan(
         shares: Vec::new(),
         redaction: mvm_core::policy::RedactionPolicy::default(),
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
+        caller_commitment: None,
         audit_labels: Default::default(),
         agent_verbs: None,
         services: Vec::new(),
+        extensions: Vec::new(),
         stream_edges: Vec::new(),
         stream_retention: Default::default(),
+        attestation_mode: mvm_contract::plan::AttestationMode::Noop,
         // The parent reaches nothing, so it gets the closed transport and no
         // L3 spec — the same "no workload authority" posture as the empty
         // secrets, services, and shares above.
         network_mode: mvm_contract::plan::NetworkMode::None,
-        l3_network: None,
+        ingress: Vec::new(),
     };
     let ledger = InMemoryNonceLedger::new();
     admit_for_run(
@@ -523,6 +541,42 @@ fn discard_preloaded_child(backend: &AnyBackend, handle: &StandbyHandle) {
     }
 }
 
+/// Whether a standby pool this backend cannot serve should fail the launch.
+///
+/// The warm target is not always something anyone asked for. On the HVF
+/// default tier the host residency policy resolves to always-warm on its own,
+/// and a run that names a pool-less backend — `--hypervisor libkrun`, wasm —
+/// inherits that default without ever opting into it. Refusing there makes
+/// those backends unusable on this host for a pool nobody configured, which is
+/// what `machine run --hypervisor libkrun` reported: "claiming *configured*
+/// warm standby", naming a configuration that did not exist.
+///
+/// An operator who set `MVM_RESIDENCY` did ask, and a request this backend
+/// cannot serve is worth saying out loud rather than quietly cold-booting.
+///
+/// Pure over the source so both answers are testable without mutating process
+/// env, which no test can do safely while others run beside it.
+fn unsupported_standby_pool_is_fatal(source: mvm_core::residency::ResidencySource) -> bool {
+    matches!(source, mvm_core::residency::ResidencySource::EnvOverride)
+}
+
+/// How this launch came by its warm target.
+fn residency_source() -> mvm_core::residency::ResidencySource {
+    mvm_core::residency::resolve_residency().1
+}
+
+fn warm_launch_mode(
+    source: mvm_core::residency::ResidencySource,
+    require_claim_override: bool,
+) -> WarmLaunchMode {
+    if require_claim_override || matches!(source, mvm_core::residency::ResidencySource::EnvOverride)
+    {
+        WarmLaunchMode::Required
+    } else {
+        WarmLaunchMode::Optional
+    }
+}
+
 pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Result<WarmResult> {
     if p.target == 0 {
         return Ok(WarmResult {
@@ -531,6 +585,12 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
         });
     }
     if !p.backend.capabilities().standby_pool {
+        if !unsupported_standby_pool_is_fatal(residency_source()) {
+            return Ok(WarmResult {
+                spawned: 0,
+                failed: 0,
+            });
+        }
         return Err(anyhow::Error::new(StandbyError::Unsupported {
             backend: p.backend.name().to_string(),
         })
@@ -577,6 +637,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
                 .signing_key_path(p.signing_key_path)
                 .image_path(image)
                 .image_sha256(want.image_sha256.as_deref())
+                .root_strategy(want.root_strategy)
                 .vsock_egress(want.vsock_egress)
                 .build()?,
         )?;
@@ -743,6 +804,9 @@ where
                 },
             ));
         }
+        if !unsupported_standby_pool_is_fatal(residency_source()) {
+            return Ok(LaunchDecision::ColdBoot);
+        }
         return Err(anyhow::Error::new(StandbyError::Unsupported {
             backend: backend.name().to_string(),
         })
@@ -867,6 +931,10 @@ fn compat_for_launch(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Result<Sta
         vcpus: u8::try_from(cfg.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX),
         mem_mib: cfg.memory_mib,
         image_sha256: Some(image_identity(Path::new(cfg.rootfs_path.as_str()))?),
+        // Every launch resolves a block root; the field stays on the recorded
+        // spec so a parent warmed before that was true still declares what it
+        // was warmed under, and the claim's compat check can refuse it.
+        root_strategy: RuntimeSourceRootStrategy::BlockExt4,
         // Whether the guest boots an egress client, read off the launch's policy
         // and its admitted plan through the same derivation the guest cmdline
         // token comes from — never re-expressed here, because a second
@@ -888,7 +956,10 @@ fn compat_for_launch(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Result<Sta
 ///
 /// - **extra volumes** — the attach threads only the rootfs, so a volume disk
 ///   would be missing from the child;
-/// - **a virtio-fs root** — there is no rootfs image to capture.
+///
+/// A virtio-fs root is keyed rather than excluded. The parent boots the same
+/// read-only image tree and a restored child inherits that device model, so the
+/// compatibility key distinguishes it from a block-backed parent.
 ///
 /// An egress-allowing policy is *not* excluded. `mvm.vsock_egress=1` is a
 /// kernel-cmdline token, and a forked child inherits its parent's cmdline out of
@@ -905,7 +976,7 @@ fn compat_for_launch(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Result<Sta
 /// factory-parent path has no late attachment operation for a host path, so a
 /// live read-only share remains cold-path-only until the backend supplies one.
 fn warm_eligible_launch(cfg: &VmStartConfig) -> bool {
-    cfg.volumes.is_empty() && cfg.virtiofs_root.is_none()
+    cfg.volumes.is_empty()
 }
 
 /// Attempt a warm-pool claim for this launch. Returns the claimed `VmId` (the standby-id
@@ -942,6 +1013,9 @@ pub fn try_warm_claim(
         return Ok(None);
     };
     if !backend.capabilities().standby_pool {
+        if !unsupported_standby_pool_is_fatal(residency_source()) {
+            return Ok(None);
+        }
         return Err(anyhow::Error::new(StandbyError::Unsupported {
             backend: backend.name().to_string(),
         })
@@ -955,11 +1029,10 @@ pub fn try_warm_claim(
     let bundle_json = cfg.bundle_json.clone();
     let claim_start_config = cfg.clone();
     let pool = SupervisorStandbyPool::open()?;
-    let claim_mode = if std::env::var("MVM_HVF_WARM_REQUIRE_CLAIM").as_deref() == Ok("1") {
-        WarmLaunchMode::Required
-    } else {
-        WarmLaunchMode::Optional
-    };
+    let claim_mode = warm_launch_mode(
+        residency_source(),
+        std::env::var("MVM_HVF_WARM_REQUIRE_CLAIM").as_deref() == Ok("1"),
+    );
     let make_claim = |handle: &StandbyHandle| {
         // The audit substrate (`gateway-<vm>.sock`) is name-keyed; the claimed VM runs
         // under the standby-id, so compute it for `handle.id`.
@@ -1087,6 +1160,7 @@ mod tests {
             .signing_key_path(key)
             .image_path(image)
             .image_sha256("cafebabe")
+            .root_strategy(RuntimeSourceRootStrategy::VirtiofsRoot)
             .vsock_egress(true)
             .build()
         else {
@@ -1095,6 +1169,7 @@ mod tests {
         assert_eq!(built.template_id, Some("tpl-1"));
         assert_eq!(built.image_path, Some(image));
         assert_eq!(built.image_sha256, Some("cafebabe"));
+        assert_eq!(built.root_strategy, RuntimeSourceRootStrategy::VirtiofsRoot);
         assert!(built.vsock_egress);
     }
 
@@ -1155,6 +1230,7 @@ mod tests {
             parent_checkpoint: Some(ckpt.as_str().to_string()),
             kernel_sha256: "a".repeat(64),
             image_sha256: Some("b".repeat(64)),
+            root_strategy: RuntimeSourceRootStrategy::BlockExt4,
             vsock_egress: false,
             preloaded_child_vm_name: None,
         }
@@ -1271,11 +1347,18 @@ mod tests {
         );
     }
 
+    /// A pool the operator named is still worth refusing over: silently
+    /// cold-booting would hide that the backend they also chose cannot serve
+    /// the residency they asked for.
+    ///
+    /// qemu is the dev/test substrate and is never wired for the standby pool,
+    /// so it stays "unsupported" regardless of which workload backend grows a
+    /// live warm path next.
     #[test]
-    fn try_warm_claim_refuses_unsupported_backend_instead_of_cold_booting() {
-        // qemu is the dev/test substrate and is never wired for the standby
-        // pool, so it stays "unsupported" regardless of which workload backend
-        // grows a live warm path next.
+    fn try_warm_claim_refuses_an_operator_configured_pool_on_an_unsupported_backend() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_RESIDENCY", "warm");
+
         let backend = AnyBackend::from_hypervisor("qemu");
         let err = try_warm_claim(&backend, &eligible_cfg(), false)
             .expect_err("configured warm pool must not silently cold-boot");
@@ -1287,6 +1370,22 @@ mod tests {
         assert!(
             message.contains("requested standby-pool recovery"),
             "{message}"
+        );
+    }
+
+    /// The other half, and the regression: with no `MVM_RESIDENCY` the warm
+    /// target is the host tier's own default, which a run naming a pool-less
+    /// backend never opted into. It cold-boots instead of failing the launch.
+    #[test]
+    fn try_warm_claim_cold_boots_a_host_default_pool_on_an_unsupported_backend() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.remove("MVM_RESIDENCY");
+
+        let backend = AnyBackend::from_hypervisor("qemu");
+        assert_eq!(
+            try_warm_claim(&backend, &eligible_cfg(), false).unwrap(),
+            None,
+            "a default nobody configured must not fail the launch"
         );
     }
 
@@ -1302,6 +1401,8 @@ mod tests {
         let b = AnyBackend::from_hypervisor("libkrun");
         let mut c = eligible_cfg();
         c.volumes = vec![VmVolume {
+            materialized_image: None,
+            volume_label: None,
             host: "/h".into(),
             guest: "/g".into(),
             size: String::new(),
@@ -1313,11 +1414,21 @@ mod tests {
     }
 
     #[test]
-    fn try_warm_claim_cold_with_virtiofs_root() {
-        let b = AnyBackend::from_hypervisor("libkrun");
-        let mut c = eligible_cfg();
-        c.virtiofs_root = Some("/unpacked/root".into());
-        assert_eq!(try_warm_claim(&b, &c, false).unwrap(), None);
+    fn every_launch_keys_as_a_block_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"root").unwrap();
+        let backend = AnyBackend::from_hypervisor("libkrun");
+        let mut cfg = eligible_cfg();
+        cfg.rootfs_path = rootfs.to_string_lossy().into_owned();
+
+        let key = compat_for_launch(backend.as_vm_backend(), &cfg).unwrap();
+
+        // There is one root shape now. A parent warmed under any other one
+        // still declares it on its recorded spec, so the compat check keeps
+        // comparing the field rather than assuming it.
+        assert_eq!(key.root_strategy, RuntimeSourceRootStrategy::BlockExt4);
+        assert!(warm_eligible_launch(&cfg));
     }
 
     #[test]
@@ -1387,6 +1498,53 @@ mod tests {
         );
     }
 
+    /// The regression: on the HVF default tier the residency policy resolves to
+    /// always-warm with nobody configuring anything, and every pool-less
+    /// backend inherited it. `machine run --hypervisor libkrun` then died on
+    /// "claiming configured warm standby / standby pool is not supported by
+    /// this backend" before it could boot, naming a configuration that did not
+    /// exist. A host default is a preference, so it yields to the backend.
+    #[test]
+    fn a_host_default_warm_target_yields_to_a_backend_with_no_pool() {
+        assert!(!unsupported_standby_pool_is_fatal(
+            mvm_core::residency::ResidencySource::AutoDetect
+        ));
+    }
+
+    /// An operator who set `MVM_RESIDENCY` asked for warm by name. Silently
+    /// cold-booting there would hide that the backend they also chose cannot
+    /// do it, so that one still refuses.
+    #[test]
+    fn an_operator_set_residency_still_refuses_a_backend_with_no_pool() {
+        assert!(unsupported_standby_pool_is_fatal(
+            mvm_core::residency::ResidencySource::EnvOverride
+        ));
+    }
+
+    #[test]
+    fn an_operator_requested_warm_launch_refuses_a_failed_claim() {
+        assert_eq!(
+            warm_launch_mode(mvm_core::residency::ResidencySource::EnvOverride, false),
+            WarmLaunchMode::Required
+        );
+    }
+
+    #[test]
+    fn a_host_default_warm_launch_may_fall_back_to_cold() {
+        assert_eq!(
+            warm_launch_mode(mvm_core::residency::ResidencySource::AutoDetect, false),
+            WarmLaunchMode::Optional
+        );
+    }
+
+    #[test]
+    fn a_required_claim_override_remains_fail_closed() {
+        assert_eq!(
+            warm_launch_mode(mvm_core::residency::ResidencySource::AutoDetect, true),
+            WarmLaunchMode::Required
+        );
+    }
+
     #[test]
     fn inline_replenish_skips_zero_unsupported_and_ineligible_shapes() {}
 
@@ -1398,25 +1556,20 @@ mod tests {
     fn claim_and_replenish_agree_on_which_launch_shapes_a_warm_parent_can_serve() {
         use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
 
-        let ineligible = [
-            ("extra volume", {
-                let mut c = eligible_cfg();
-                c.volumes = vec![VmVolume {
-                    host: "/h".into(),
-                    guest: "/g".into(),
-                    size: String::new(),
-                    read_only: false,
-                    kind: VmVolumeKind::Disk,
-                    encrypted: false,
-                }];
-                c
-            }),
-            ("virtiofs root", {
-                let mut c = eligible_cfg();
-                c.virtiofs_root = Some("/unpacked/root".into());
-                c
-            }),
-        ];
+        let ineligible = [("extra volume", {
+            let mut c = eligible_cfg();
+            c.volumes = vec![VmVolume {
+                materialized_image: None,
+                volume_label: None,
+                host: "/h".into(),
+                guest: "/g".into(),
+                size: String::new(),
+                read_only: false,
+                kind: VmVolumeKind::Disk,
+                encrypted: false,
+            }];
+            c
+        })];
 
         assert!(
             warm_eligible_launch(&eligible_cfg()),
@@ -1610,6 +1763,7 @@ mod tests {
             .mem_mib(1024)
             .signer_id("host:test")
             .signing_key_path(&key_path)
+            .root_strategy(RuntimeSourceRootStrategy::BlockExt4)
             .vsock_egress(false)
             .build()
         else {
@@ -1685,6 +1839,7 @@ mod tests {
             spawned_unix_secs: 1,
             state: StandbyState::Idle,
             image_sha256: None,
+            root_strategy: Default::default(),
             parent_checkpoint: None,
             vsock_egress: false,
             preloaded_child_vm_name: None,
@@ -1704,6 +1859,7 @@ mod tests {
             spawned_unix_secs: 1,
             state: StandbyState::Idle,
             image_sha256: Some(image.into()),
+            root_strategy: Default::default(),
             parent_checkpoint: None,
             vsock_egress: false,
             preloaded_child_vm_name: None,
@@ -1867,7 +2023,7 @@ mod tests {
             rootfs_path: rootfs.display().to_string(),
             initrd_path: None,
             label: "fixture".into(),
-            virtiofs_oci_root: None,
+            unpacked_oci_root: None,
         };
         let policy = mvm_core::network_policy::NetworkPolicy::deny_all();
         let shape = |name: Option<&'static str>| crate::exec::LaunchShape {
@@ -1877,10 +2033,12 @@ mod tests {
             memory_mib: 1024,
             mem_initial_mib: None,
             dir_shares: &[],
+            disk_volumes: &[],
             pty: false,
             network_policy: &policy,
             warm_pool_size: 1,
-            sdk_sidecar: None,
+            sdk_host_services: &[],
+            declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
             hypervisor: Some("mock"),
         };
         let resolve = |name| {
@@ -2214,10 +2372,14 @@ fn resolve_warm_launch(req: &WarmRequest) -> Result<crate::exec::ResolvedLaunch>
         memory_mib: req.memory_mib,
         mem_initial_mib: None,
         dir_shares: &[],
+        disk_volumes: &[],
         pty: false,
         network_policy: &network_policy,
         warm_pool_size: req.target,
-        sdk_sidecar: None,
+        // A warm standby boots before any workload claims it, so it binds no
+        // host service and carries no sidecar.
+        sdk_host_services: &[],
+        declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
         hypervisor: None,
     };
     crate::exec::resolve_launch(

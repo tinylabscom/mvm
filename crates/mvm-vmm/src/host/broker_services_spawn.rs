@@ -318,6 +318,7 @@ pub struct BrokerSpawnParams<'a> {
     pub audit_signer_uds_path: &'a Path,
     /// Exact host-service bindings from the admitted execution plan.
     pub services: &'a [mvm_core::protocol::broker::ServiceId],
+    pub capability_bindings: &'a [mvm_contract::protocol::agent_capability::CapabilityBinding],
 }
 
 impl<'a> BrokerSpawnParams<'a> {
@@ -339,6 +340,7 @@ pub struct BrokerSpawnParamsBuilder<'a> {
     state_dir: Option<&'a Path>,
     audit_signer_uds_path: Option<&'a Path>,
     services: Option<&'a [mvm_core::protocol::broker::ServiceId]>,
+    capability_bindings: Option<&'a [mvm_contract::protocol::agent_capability::CapabilityBinding]>,
 }
 
 impl<'a> BrokerSpawnParamsBuilder<'a> {
@@ -352,6 +354,7 @@ impl<'a> BrokerSpawnParamsBuilder<'a> {
             state_dir: None,
             audit_signer_uds_path: None,
             services: None,
+            capability_bindings: None,
         }
     }
 
@@ -397,6 +400,15 @@ impl<'a> BrokerSpawnParamsBuilder<'a> {
         self
     }
 
+    #[must_use]
+    pub fn capability_bindings(
+        mut self,
+        bindings: &'a [mvm_contract::protocol::agent_capability::CapabilityBinding],
+    ) -> Self {
+        self.capability_bindings = Some(bindings);
+        self
+    }
+
     /// Finish, or name the first required field left unset.
     pub fn build(self) -> Result<BrokerSpawnParams<'a>, BuilderError> {
         Ok(BrokerSpawnParams {
@@ -420,6 +432,10 @@ impl<'a> BrokerSpawnParamsBuilder<'a> {
             services: self
                 .services
                 .ok_or(BuilderError::missing("BrokerSpawnParams", "services"))?,
+            capability_bindings: self.capability_bindings.ok_or(BuilderError::missing(
+                "BrokerSpawnParams",
+                "capability_bindings",
+            ))?,
         })
     }
 }
@@ -459,6 +475,7 @@ fn spawn_broker_with_timeout(
         state_dir,
         audit_signer_uds_path,
         services,
+        capability_bindings,
     } = params;
 
     let bin = resolve_subprocess_bin("mvm-broker", "MVM_BROKER_PATH")?;
@@ -480,6 +497,7 @@ fn spawn_broker_with_timeout(
         // the broker only registers that service when this is set.
         "audit_signer_uds_path": audit_signer_uds_path,
         "services_bindings": services,
+        "capability_bindings": capability_bindings,
     });
 
     let child = spawn_detached_with_config(&bin, &cfg, "mvm-broker")?;
@@ -578,6 +596,7 @@ pub struct BrokerServicesSpawnParams<'a> {
     pub broker_listen_socket: &'a Path,
     /// Exact host-service bindings from the admitted execution plan.
     pub services: &'a [mvm_core::protocol::broker::ServiceId],
+    pub capability_bindings: &'a [mvm_contract::protocol::agent_capability::CapabilityBinding],
 }
 
 impl<'a> BrokerServicesSpawnParams<'a> {
@@ -599,6 +618,7 @@ pub struct BrokerServicesSpawnParamsBuilder<'a> {
     state_dir: Option<&'a Path>,
     broker_listen_socket: Option<&'a Path>,
     services: Option<&'a [mvm_core::protocol::broker::ServiceId]>,
+    capability_bindings: Option<&'a [mvm_contract::protocol::agent_capability::CapabilityBinding]>,
 }
 
 impl<'a> BrokerServicesSpawnParamsBuilder<'a> {
@@ -612,6 +632,7 @@ impl<'a> BrokerServicesSpawnParamsBuilder<'a> {
             state_dir: None,
             broker_listen_socket: None,
             services: None,
+            capability_bindings: None,
         }
     }
 
@@ -657,6 +678,15 @@ impl<'a> BrokerServicesSpawnParamsBuilder<'a> {
         self
     }
 
+    #[must_use]
+    pub fn capability_bindings(
+        mut self,
+        bindings: &'a [mvm_contract::protocol::agent_capability::CapabilityBinding],
+    ) -> Self {
+        self.capability_bindings = Some(bindings);
+        self
+    }
+
     /// Finish, or name the first required field left unset.
     pub fn build(self) -> Result<BrokerServicesSpawnParams<'a>, BuilderError> {
         Ok(BrokerServicesSpawnParams {
@@ -680,6 +710,10 @@ impl<'a> BrokerServicesSpawnParamsBuilder<'a> {
             services: self.services.ok_or(BuilderError::missing(
                 "BrokerServicesSpawnParams",
                 "services",
+            ))?,
+            capability_bindings: self.capability_bindings.ok_or(BuilderError::missing(
+                "BrokerServicesSpawnParams",
+                "capability_bindings",
             ))?,
         })
     }
@@ -710,6 +744,7 @@ pub fn spawn_broker_services_if_admitted(
         state_dir,
         broker_listen_socket,
         services,
+        capability_bindings,
     } = params;
     let Some(tenant_id) = tenant_id else {
         return Ok(BrokerServicesGuard::defused());
@@ -731,6 +766,7 @@ pub fn spawn_broker_services_if_admitted(
         state_dir,
         audit_signer_uds_path: &audit.uds_path,
         services,
+        capability_bindings,
     })?;
     Ok(guard)
 }
@@ -948,6 +984,7 @@ mod tests {
             state_dir: &state_dir,
             audit_signer_uds_path: &audit_uds,
             services: &[],
+            capability_bindings: &[],
         });
 
         let handle = res.expect("spawn with stub broker should succeed");
@@ -995,6 +1032,7 @@ mod tests {
             // Unused on the unadmitted path (the gate short-circuits first).
             broker_listen_socket: &dir,
             services: &[],
+            capability_bindings: &[],
         })
         .expect("unadmitted VM yields a defused no-op guard");
         drop(guard); // a defused guard's Drop reaps nothing
@@ -1051,6 +1089,7 @@ mod tests {
             state_dir: &state_dir,
             broker_listen_socket: &broker_uds,
             services: &[],
+            capability_bindings: &[],
         });
 
         let mut guard = res.expect("admitted VM spawns both broker services");

@@ -1,6 +1,6 @@
 //! The one `sha256:<64 lowercase hex>` shape check shared by every
 //! prefixed content-address newtype in this crate (checkpoint digests,
-//! semantic addresses, OCI digests). The wrapper types stay distinct and
+//! workload addresses, OCI digests). The wrapper types stay distinct and
 //! non-convertible — only this validation routine is shared, so a bug fixed
 //! here is fixed for all three and none can silently drift.
 

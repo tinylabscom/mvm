@@ -1,14 +1,18 @@
 //! `mvmctl audit` subcommand handlers.
 
+mod inspect;
+
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
 use std::io::Write;
 
 use crate::ui;
 
+use std::path::PathBuf;
+
 use ed25519_dalek::VerifyingKey;
 use mvm_client::audit::{AuditSourceId, AuditSourceKind, LocalAuditReader};
-use mvm_contract::merkle::{InclusionProof, SignedAuditRoot, verify_inclusion, verify_signed_root};
+use mvm_contract::merkle::{InclusionProof, SignedAuditRoot, verify_membership};
 use mvm_core::user_config::MvmConfig;
 use mvm_hostd::supervisor::SignedEnvelope;
 
@@ -17,6 +21,8 @@ use super::super::vm::host_signer;
 use super::Cli;
 use mvm_contract::provenance::DecisionId;
 use mvm_hostd::audit::decisions::DecisionStore;
+
+use inspect::{audit_show, audit_tail};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -245,6 +251,29 @@ pub(in crate::commands) enum ReceiptsAction {
         #[arg(long)]
         plan_id: Option<String>,
         /// Emit receipts as a JSON array to stdout.
+        #[arg(long, conflicts_with = "archive")]
+        json: bool,
+        /// Write a signed `.mvmev` evidence archive to this path instead of
+        /// printing. The archive carries the receipts, an inclusion proof per
+        /// receipt, the raw chain lines, and a citation for every in-scope
+        /// entry with no receipt mapping.
+        #[arg(long, value_name = "PATH")]
+        archive: Option<PathBuf>,
+        /// Cover the whole tenant chain rather than one plan, so a verifier
+        /// can derive coverage by comparing the leaf count against the signed
+        /// root's tree size. Without it a plan-scoped archive's completeness
+        /// is host-attested and cannot be checked.
+        #[arg(long)]
+        full_chain: bool,
+    },
+    /// Verify a `.mvmev` evidence archive offline.
+    ///
+    /// Reports integrity, inclusion, and scope completeness separately.
+    /// Exit code is a bitmask: 1 integrity, 2 inclusion, 4 completeness.
+    Verify {
+        /// Path to the archive.
+        archive: PathBuf,
+        /// Emit the report as JSON on stdout.
         #[arg(long)]
         json: bool,
     },
@@ -370,7 +399,16 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 tenant,
                 plan_id,
                 json,
-            } => audit_receipts_export(&tenant, plan_id.as_deref(), json),
+                archive,
+                full_chain,
+            } => audit_receipts_export(&ExportArgs {
+                tenant,
+                plan_id,
+                json,
+                archive,
+                full_chain,
+            }),
+            ReceiptsAction::Verify { archive, json } => audit_receipts_verify(&archive, json),
         },
         AuditAction::Transcript { action } => super::transcript::run(action),
         AuditAction::Decisions { action } => match action {
@@ -483,36 +521,185 @@ fn audit_provenance_export(
 /// the host signer's public key, converts each mappable `PlanAuditEntry`
 /// into a receipt payload, signs it with the same host key, and prints
 /// the result. No new audit entries are written.
-fn audit_receipts_export(tenant: &str, plan_id: Option<&str>, json: bool) -> Result<()> {
+/// Arguments for `mvmctl trust audit receipts export`.
+///
+/// A struct rather than five positional parameters — two of the five are
+/// bools, which is exactly the shape that transposes without the compiler
+/// noticing.
+pub(in crate::commands) struct ExportArgs {
+    /// Tenant whose chain to read.
+    pub tenant: String,
+    /// Optional plan filter.
+    pub plan_id: Option<String>,
+    /// Print receipts as a JSON array.
+    pub json: bool,
+    /// Write an archive here instead of printing.
+    pub archive: Option<PathBuf>,
+    /// Cover the whole tenant chain.
+    pub full_chain: bool,
+}
+
+impl ExportArgs {
+    /// Scope the archive covers.
+    ///
+    /// `--full-chain` wins over `--plan-id`: asking for the whole chain and a
+    /// single plan at once is contradictory, and the wider scope is the one a
+    /// verifier can actually check.
+    fn scope(&self) -> mvm_core::receipt_archive::ArchiveScope {
+        match (&self.plan_id, self.full_chain) {
+            (Some(plan_id), false) => mvm_core::receipt_archive::ArchiveScope::Plan {
+                plan_id: plan_id.clone(),
+            },
+            _ => mvm_core::receipt_archive::ArchiveScope::Tenant,
+        }
+    }
+}
+
+fn audit_receipts_export(args: &ExportArgs) -> Result<()> {
     let signer = host_signer::load_or_init().context("loading host signer to export receipts")?;
     let dir = default_audit_dir().context("resolving audit directory")?;
-    let receipts =
-        mvm_hostd::audit::receipt_export::export_receipts(&dir, tenant, plan_id, &signer.signing)
-            .with_context(|| format!("exporting receipts for tenant '{tenant}'"))?;
+
+    if let Some(path) = &args.archive {
+        if args.plan_id.is_some() && args.full_chain {
+            ui::warn(
+                "--full-chain covers the whole tenant chain; the --plan-id filter is ignored.",
+            );
+        }
+        let req = mvm_hostd::audit::receipt_archive::ArchiveRequest::builder()
+            .audit_dir(&dir)
+            .tenant(args.tenant.clone())
+            .scope(args.scope())
+            .build()?;
+        let bytes = mvm_hostd::audit::receipt_archive::write_archive(&req, &signer.signing)
+            .with_context(|| format!("building the evidence archive for '{}'", args.tenant))?;
+        std::fs::write(path, &bytes)
+            .with_context(|| format!("writing archive to {}", path.display()))?;
+        ui::success(&format!(
+            "wrote {n} byte(s) to {p}",
+            n = bytes.len(),
+            p = path.display()
+        ));
+        // Keyed off the resolved scope, not the flag: with no --plan-id the
+        // scope is already the whole tenant, and warning about attestation
+        // there would describe an archive the caller did not ask for.
+        if matches!(
+            args.scope(),
+            mvm_core::receipt_archive::ArchiveScope::Plan { .. }
+        ) {
+            // notice, not info: info is verbosity-gated chatter and this is a
+            // caveat about what the archive does not attest. A limit nobody
+            // sees is not a limit that was stated.
+            ui::notice(
+                "Scope completeness in this archive is host-attested, not checked. \
+                 Re-run with --full-chain for an archive whose coverage a verifier can derive.",
+            );
+        }
+        return Ok(());
+    }
+
+    let evidence = mvm_hostd::audit::receipt_export::export_evidence(
+        &dir,
+        &args.tenant,
+        args.plan_id.as_deref(),
+        &signer.signing,
+    )
+    .with_context(|| format!("exporting receipts for tenant '{}'", args.tenant))?;
+
+    if args.json {
+        crate::json_out::emit_json(&evidence.receipts)?;
+        return Ok(());
+    }
+
+    if evidence.receipts.is_empty() && evidence.cited.is_empty() {
+        ui::info(&format!(
+            "No exportable evidence found for tenant '{}'.",
+            args.tenant
+        ));
+        return Ok(());
+    }
+    ui::success(&format!(
+        "exported {r} receipt(s) and {c} citation(s) for tenant '{t}'",
+        r = evidence.receipts.len(),
+        c = evidence.cited.len(),
+        t = args.tenant,
+    ));
+    for signed in &evidence.receipts {
+        eprintln!(
+            "  {type} {outcome} {id}",
+            type = signed.payload.receipt_type,
+            outcome = serde_json::to_string(&signed.payload.outcome)
+                .unwrap_or_default()
+                .trim_matches('"'),
+            id = signed.payload.receipt_id,
+        );
+    }
+    // Citations are the entries that used to vanish. Showing them is the
+    // difference between "there was no egress" and "egress was not exported".
+    for cited in &evidence.cited {
+        eprintln!(
+            "  cited leaf {i} {e}",
+            i = cited.leaf_index,
+            e = cited.event
+        );
+    }
+    Ok(())
+}
+
+/// Verify a `.mvmev` archive and report the three results separately.
+fn audit_receipts_verify(archive: &std::path::Path, json: bool) -> Result<()> {
+    use mvm_hostd::audit::receipt_archive_verify::{CheckResult, CompletenessResult};
+
+    let bytes =
+        std::fs::read(archive).with_context(|| format!("reading archive {}", archive.display()))?;
+    let report = mvm_hostd::audit::receipt_archive_verify::verify_archive(&bytes)
+        .with_context(|| format!("verifying archive {}", archive.display()))?;
+
+    let word = |r: &CheckResult| match r {
+        CheckResult::Passed => ("ok".to_string(), None),
+        CheckResult::Failed(why) => ("FAILED".to_string(), Some(why.clone())),
+    };
+    let (integrity, integrity_why) = word(&report.integrity);
+    let (inclusion, inclusion_why) = word(&report.inclusion);
+    let (completeness, completeness_why) = match &report.completeness {
+        CompletenessResult::Derived => ("derived".to_string(), None),
+        CompletenessResult::Attested => ("attested".to_string(), None),
+        CompletenessResult::Failed(why) => ("FAILED".to_string(), Some(why.clone())),
+    };
 
     if json {
-        crate::json_out::emit_json(&receipts)?;
+        crate::json_out::emit_json(&serde_json::json!({
+            "integrity": { "result": integrity, "detail": integrity_why },
+            "inclusion": { "result": inclusion, "detail": inclusion_why },
+            "completeness": { "result": completeness, "detail": completeness_why },
+            "exit_code": report.exit_code(),
+        }))?;
     } else {
-        if receipts.is_empty() {
-            ui::info(&format!(
-                "No exportable receipts found for tenant '{tenant}'."
-            ));
-        } else {
-            ui::success(&format!(
-                "exported {n} receipt(s) for tenant '{tenant}'",
-                n = receipts.len()
-            ));
-            for signed in &receipts {
-                eprintln!(
-                    "  {type} {outcome} {id}",
-                    type = signed.payload.receipt_type,
-                    outcome = serde_json::to_string(&signed.payload.outcome)
-                        .unwrap_or_default()
-                        .trim_matches('"'),
-                    id = signed.payload.receipt_id,
-                );
-            }
+        eprintln!("  integrity     {integrity}");
+        if let Some(w) = &integrity_why {
+            eprintln!("                {w}");
         }
+        eprintln!("  inclusion     {inclusion}");
+        if let Some(w) = &inclusion_why {
+            eprintln!("                {w}");
+        }
+        eprintln!("  completeness  {completeness}");
+        if let Some(w) = &completeness_why {
+            eprintln!("                {w}");
+        }
+        if matches!(report.completeness, CompletenessResult::Attested) {
+            // Saying "ok" here would report an assertion as a check, and info
+            // would let the caveat vanish at the default verbosity.
+            ui::notice(
+                "Completeness was asserted by the host, not checked. A plan-scoped archive \
+                 is a subsequence of the log and cannot show its own coverage; export with \
+                 --full-chain for an archive a verifier can derive it from.",
+            );
+        }
+    }
+
+    let code = report.exit_code();
+    if code != 0 {
+        std::process::exit(code);
     }
     Ok(())
 }
@@ -551,7 +738,7 @@ fn verify_cert(
     };
 
     // 1. Slurp the cert. `-` reads from stdin so an auditor can
-    //    `cat certs.json | mvmctl audit verify-cert -`.
+    //    `cat certs.json | mvmctl trust audit verify-cert -`.
     let raw = if cert == "-" {
         let mut buf = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
@@ -648,7 +835,7 @@ fn verify_cert(
     // 6. Render. Human summary to stderr always; receipts JSON to
     //    stdout when --json.
     eprintln!(
-        "mvmctl audit verify-cert: {} certificate(s) verified",
+        "mvmctl trust audit verify-cert: {} certificate(s) verified",
         verified.len()
     );
     for (r, chain_match) in verified.iter().zip(chain_matches.iter()) {
@@ -878,32 +1065,7 @@ fn run_verify_inclusion(
     vk: &VerifyingKey,
     expected_tenant: &str,
 ) -> Result<String> {
-    verify_signed_root(signed_root, vk)
-        .map_err(|e| anyhow::anyhow!("signed-root verification failed: {e}"))?;
-    if signed_root.tenant != expected_tenant {
-        anyhow::bail!(
-            "tenant binding failed: signed root is for tenant '{}', expected '{}'",
-            signed_root.tenant,
-            expected_tenant
-        );
-    }
-    verify_inclusion(proof)
-        .map_err(|e| anyhow::anyhow!("inclusion-proof verification failed: {e}"))?;
-    if proof.root != signed_root.root_hash {
-        anyhow::bail!(
-            "root binding failed: proof root {} does not match the host-signed root {}",
-            proof.root,
-            signed_root.root_hash
-        );
-    }
-    if proof.tree_size != signed_root.tree_size {
-        anyhow::bail!(
-            "tree-size binding failed: proof tree_size {} does not match the host-signed \
-             tree_size {}",
-            proof.tree_size,
-            signed_root.tree_size
-        );
-    }
+    verify_membership(proof, signed_root, vk, expected_tenant)?;
     Ok(format!(
         "verified: entry at index {idx} of {n} is in the host-signed log (root {root})",
         idx = proof.leaf_index,
@@ -1073,6 +1235,67 @@ fn print_chain_line(line: &str) {
     }
 }
 
+/// Report the two append-only properties beyond "each entry is signed".
+///
+/// Both are reported, never merged into the chain's own verdict, because they
+/// attest different things: the chain verifying says every entry is signed and
+/// linked; these say the log was only ever appended to. A host can pass the
+/// first and fail the second.
+///
+/// Neither is fatal here. `verify` already exits nonzero on a chain refusal,
+/// and a missing witness is a configuration state rather than a finding -- but
+/// a *divergence* is a finding, and it is printed as an error so an operator
+/// reading the output cannot miss it.
+fn report_append_only(dir: &std::path::Path, tenant: &str, vk: &ed25519_dalek::VerifyingKey) {
+    match mvm_hostd::audit::merkle::verify_root_history(dir, tenant, vk) {
+        Ok(r) if r.roots == 0 => ui::info(
+            "No published audit roots, so nothing attests the log was only appended to. \
+             Roots are published at admission and exit.",
+        ),
+        Ok(r) => ui::success(&format!(
+            "append-only: {} published root(s), {} transition(s) proven a prefix extension",
+            r.roots, r.transitions_checked
+        )),
+        Err(e) => ui::error(&format!("append-only check failed: {e:#}")),
+    }
+
+    let Some(source) = mvm_hostd::audit::witness::configured_source() else {
+        // Said out loud rather than passed over in silence: without an
+        // off-host witness the roots above were all signed by this host and
+        // stored beside the log they attest, which is no evidence against
+        // this host rewriting both.
+        ui::info(
+            "No readable off-host witness configured (MVM_AUDIT_WITNESS), so a rewrite by \
+             this host is undetectable from here.",
+        );
+        return;
+    };
+    match mvm_hostd::audit::witness::detect_divergence(dir, tenant, source.as_ref(), vk) {
+        Ok(r) if !r.is_clean() => {
+            ui::error(&format!(
+                "WITNESS DIVERGENCE: {} witnessed root(s) disagree with this host",
+                r.diverged.len()
+            ));
+            for d in &r.diverged {
+                ui::error(&format!(
+                    "  tree_size {}: witness has {}, host has {}",
+                    d.tree_size,
+                    d.witnessed_root,
+                    d.host_root.as_deref().unwrap_or("nothing")
+                ));
+            }
+        }
+        Ok(r) if r.agreed == 0 => ui::info(
+            "The configured witness holds no roots for this tenant yet; nothing was compared.",
+        ),
+        Ok(r) => ui::success(&format!(
+            "witness agrees on {} root(s); {} not yet witnessed",
+            r.agreed, r.unwitnessed
+        )),
+        Err(e) => ui::error(&format!("witness comparison failed: {e:#}")),
+    }
+}
+
 fn audit_verify(tenant: &str) -> Result<()> {
     let dir = default_audit_dir()?;
 
@@ -1109,8 +1332,10 @@ fn audit_verify(tenant: &str) -> Result<()> {
         ));
     }
 
+    report_append_only(&dir, tenant, &signer.verifying);
+
     // Print a clear error AND propagate so the process exits nonzero.
-    // `mvmctl audit verify` is meant for scripting.
+    // `mvmctl trust audit verify` is meant for scripting.
     if let Some(refusal) = outcome.refusals.first() {
         anyhow::bail!(
             "{} verify failed ({}): {}",
@@ -1198,125 +1423,6 @@ fn source_path(dir: &std::path::Path, source: &AuditSourceId) -> std::path::Path
             mvm_core::config::WORKLOAD_AUDIT_SUFFIX
         )),
         _ => audit_path_for_tenant(dir, &source.tenant),
-    }
-}
-
-fn audit_show(tenant: &str, plan_id: &str, json: bool) -> Result<()> {
-    let dir = default_audit_dir()?;
-    let path = audit_path_for_tenant(&dir, tenant);
-    if !path.exists() {
-        if json {
-            crate::json_out::emit_json(&Vec::<SignedEnvelope>::new())?;
-        } else {
-            ui::info(&format!(
-                "No audit chain found for tenant '{tenant}' at {}.",
-                path.display()
-            ));
-        }
-        return Ok(());
-    }
-    use std::io::BufRead;
-    let file = std::fs::File::open(&path).with_context(|| format!("opening {}", path.display()))?;
-    let reader = std::io::BufReader::new(file);
-    let mut matched: Vec<SignedEnvelope> = Vec::new();
-    for line in reader.lines() {
-        let line = line?;
-        if let Ok(env) = serde_json::from_str::<SignedEnvelope>(&line)
-            && env.entry.plan_id.0 == plan_id
-        {
-            if json {
-                matched.push(env);
-            } else {
-                print_chain_line(&line);
-            }
-        }
-    }
-    if json {
-        crate::json_out::emit_json(&matched)?;
-    } else if matched.is_empty() {
-        ui::info(&format!(
-            "No audit entries found for plan_id '{plan_id}' in tenant '{tenant}'."
-        ));
-    }
-    Ok(())
-}
-
-fn audit_tail(lines: usize, follow: bool) -> Result<()> {
-    let log_path = mvm_core::audit::default_audit_log();
-    let path = std::path::Path::new(&log_path);
-
-    if !path.exists() {
-        ui::info(&format!(
-            "No audit log found. Events are recorded at {log_path}."
-        ));
-        return Ok(());
-    }
-
-    print_last_n_lines(path, lines)?;
-
-    if !follow {
-        return Ok(());
-    }
-
-    // Tail -f: track file position and poll for new content.
-    let mut pos = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-
-    loop {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        if !path.exists() {
-            continue;
-        }
-        let new_len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-        if new_len > pos {
-            let mut file = std::fs::File::open(path)?;
-            use std::io::{BufRead, Seek, SeekFrom};
-            file.seek(SeekFrom::Start(pos))?;
-            let reader = std::io::BufReader::new(&file);
-            for line in reader.lines() {
-                let line = line?;
-                print_audit_line(&line);
-            }
-            pos = new_len;
-        }
-    }
-}
-
-fn print_last_n_lines(path: &std::path::Path, n: usize) -> Result<()> {
-    use std::io::BufRead;
-    let file =
-        std::fs::File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
-    let reader = std::io::BufReader::new(file);
-    let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
-    let start = lines.len().saturating_sub(n);
-    for line in &lines[start..] {
-        print_audit_line(line);
-    }
-    Ok(())
-}
-
-fn print_audit_line(line: &str) {
-    match serde_json::from_str::<mvm_core::audit::LocalAuditEvent>(line) {
-        Ok(event) => {
-            let kind = serde_json::to_string(&event.kind)
-                .unwrap_or_default()
-                .trim_matches('"')
-                .to_string();
-            let vm = event
-                .vm_name
-                .as_deref()
-                .map(|n| format!("  [{n}]"))
-                .unwrap_or_default();
-            let detail = event
-                .detail
-                .as_deref()
-                .map(|d| format!("  {d}"))
-                .unwrap_or_default();
-            println!("{ts}  {kind}{vm}{detail}", ts = event.timestamp);
-        }
-        Err(_) => {
-            // Non-local-audit line — print as-is (fleet PlanAuditEntry, etc.)
-            println!("{line}");
-        }
     }
 }
 
@@ -1532,6 +1638,7 @@ mod verify_cert_tests {
                 image_name: mvm_hostd::supervisor::UNBOUND_IMAGE_NAME.to_string(),
                 image_sha256: mvm_hostd::supervisor::UNBOUND_IMAGE_SHA256.to_string(),
                 event: "lifecycle.tenant.destroyed".to_string(),
+                caller_commitment: None,
                 labels,
             };
             rt.block_on(signer.sign_and_emit(&entry)).unwrap();
@@ -1660,6 +1767,7 @@ mod verify_cert_tests {
             image_name: mvm_hostd::supervisor::UNBOUND_IMAGE_NAME.to_string(),
             image_sha256: mvm_hostd::supervisor::UNBOUND_IMAGE_SHA256.to_string(),
             event: "lifecycle.tenant.destroyed".to_string(),
+            caller_commitment: None,
             labels,
         };
         rt.block_on(signer.sign_and_emit(&destroy_entry)).unwrap();
@@ -1677,6 +1785,7 @@ mod verify_cert_tests {
             image_name: mvm_hostd::supervisor::UNBOUND_IMAGE_NAME.to_string(),
             image_sha256: mvm_hostd::supervisor::UNBOUND_IMAGE_SHA256.to_string(),
             event: "cmd.up.completed".to_string(),
+            caller_commitment: None,
             labels: other_labels,
         };
         rt.block_on(signer.sign_and_emit(&other_entry)).unwrap();
@@ -1701,7 +1810,9 @@ mod merkle_verb_tests {
     use super::*;
     use base64::Engine;
     use ed25519_dalek::{Signer, SigningKey};
-    use mvm_contract::merkle::{build_inclusion_proof, merkle_root, root_signing_bytes};
+    use mvm_contract::merkle::{
+        build_inclusion_proof, merkle_root, root_signing_bytes, verify_inclusion,
+    };
     use rand::Rng;
 
     fn fresh_key() -> SigningKey {
@@ -1900,6 +2011,7 @@ mod merkle_verb_tests {
                 image_name: "img".to_string(),
                 image_sha256: "abc".to_string(),
                 event: format!("e-{i}"),
+                caller_commitment: None,
                 labels: BTreeMap::new(),
             };
             rt.block_on(signer.sign_and_emit(&entry)).unwrap();

@@ -2,6 +2,8 @@
 
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
+use mvm_core::net::session::SessionError;
+use std::time::Duration;
 
 use crate::ui;
 
@@ -69,7 +71,86 @@ fn fs_diff(name: &str) -> Result<Vec<FsChange>> {
             return mvm_agentd::vsock::query_fs_diff(&mock_dir.to_string_lossy());
         }
     }
-    let mut stream =
-        mvm_runtime::vsock_transport::for_vm(name)?.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
-    mvm_agentd::vsock::query_fs_diff_on(&mut stream)
+    retry_initial_handshake(|| {
+        let mut stream = mvm_runtime::vsock_transport::for_vm(name)?
+            .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
+        mvm_agentd::vsock::query_fs_diff_on(&mut stream)
+    })
+}
+
+/// Retry only an authenticated-session handshake that ended before the peer
+/// sent any proof. The request cannot have reached the guest in that state, so
+/// replaying it on a fresh connection is safe. An EOF after the request was
+/// sent has a different error chain and is returned without retrying.
+fn retry_initial_handshake<T>(mut attempt: impl FnMut() -> Result<T>) -> Result<T> {
+    match attempt() {
+        Err(error) if is_handshake_peer_hangup(&error) => {
+            std::thread::sleep(Duration::from_millis(100));
+            attempt()
+        }
+        outcome => outcome,
+    }
+}
+
+fn is_handshake_peer_hangup(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<SessionError>()
+            .is_some_and(SessionError::is_peer_hangup)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::io::{Error, ErrorKind};
+
+    fn handshake_hangup() -> anyhow::Error {
+        anyhow::Error::new(SessionError::Io(Error::from(ErrorKind::UnexpectedEof)))
+            .context("host session handshake failed")
+    }
+
+    #[test]
+    fn a_peer_hangup_before_authentication_is_retried_once() {
+        let attempts = Cell::new(0);
+        let value = retry_initial_handshake(|| {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() == 1 {
+                Err(handshake_hangup())
+            } else {
+                Ok(7)
+            }
+        })
+        .expect("second connection succeeds");
+
+        assert_eq!(value, 7);
+        assert_eq!(attempts.get(), 2);
+    }
+
+    #[test]
+    fn an_eof_after_authentication_is_not_replayed() {
+        let attempts = Cell::new(0);
+        let error = retry_initial_handshake::<()>(|| {
+            attempts.set(attempts.get() + 1);
+            Err(anyhow::Error::new(Error::from(ErrorKind::UnexpectedEof))
+                .context("control frame read failed"))
+        })
+        .expect_err("post-request EOF must be returned");
+
+        assert_eq!(attempts.get(), 1);
+        assert!(error.to_string().contains("control frame read failed"));
+    }
+
+    #[test]
+    fn a_second_handshake_hangup_is_bounded() {
+        let attempts = Cell::new(0);
+        retry_initial_handshake::<()>(|| {
+            attempts.set(attempts.get() + 1);
+            Err(handshake_hangup())
+        })
+        .expect_err("the retry budget must be bounded");
+
+        assert_eq!(attempts.get(), 2);
+    }
 }

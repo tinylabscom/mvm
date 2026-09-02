@@ -138,14 +138,6 @@ pub const PER_VM_HOST_BINARIES: &[PerVmBinary] = &[
         features: "",
         scope: PerVmScope::Always,
     },
-    // The per-VM L3 gateway. Whether a host may serve the tunnel is decided
-    // at admission, not by whether the binary happens to exist.
-    PerVmBinary {
-        package: "mvm-hostd",
-        name: "mvm-netd",
-        features: "",
-        scope: PerVmScope::Always,
-    },
     // The per-VM broker fork and its audit signer. Reached when
     // `MVM_HOST_AGENT_DAEMON=0` selects the pre-daemon path, which is a
     // documented escape hatch rather than dead code — so both ship.

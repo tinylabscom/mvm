@@ -20,7 +20,7 @@
   #                       boot.
   #   overlay.verity    — dm-verity sidecar (Merkle tree).
   #   overlay.roothash  — 64 lowercase hex chars + newline. What
-  #                       mvm-verity-init reads from the kernel
+  #                       the guest agent reads from the kernel
   #                       cmdline as `mvm.runtime_roothash=<hex>`.
   #   VERSION           — semver of the producing mvmctl. The
   #                       resolver (`mvm_build::runtime_overlay`)
@@ -86,7 +86,10 @@
   outputs =
     { self, nixpkgs, ... }:
     let
-      systems = [ "aarch64-linux" "x86_64-linux" ];
+      systems = [
+        "aarch64-linux"
+        "x86_64-linux"
+      ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
 
       # Workspace staging — same `MVM_WORKSPACE_PATH` env override
@@ -105,7 +108,7 @@
         (import (workspaceRoot + "/nix/lib/workspace-filter.nix") {
           inherit (nixpkgs) lib;
         })
-        { inherit workspaceRoot; };
+          { inherit workspaceRoot; };
 
       # mvmctl semver pinned to match
       # `[workspace.package].version` in the root Cargo.toml. The
@@ -118,15 +121,16 @@
       overlayVersion = "0.18.0";
 
       # mvm-agentd binaries — agent + seccomp shim + verity-init.
-      # `mvm-verity-init` is the initrd PID 1; it lives in the
+      # the universal initramfs agent is PID 1; it lives in the
       # initramfs cpio.gz, *not* in this overlay. We still build
       # it here because the rustPlatform derivation produces all
       # three binaries from one `--package mvm-agentd` build (per
       # `nix/packages/mvm-guest-agent.nix`'s
-      # `--bin mvm-guest-agent --bin mvm-seccomp-apply --bin mvm-verity-init`
+      # `--bin mvm-guest-agent --bin mvm-seccomp-apply`
       # flags); we just don't copy the verity-init binary into the
       # overlay's staging dir.
-      mvmGuestFor = system:
+      mvmGuestFor =
+        system:
         let
           pkgs = import nixpkgs { inherit system; };
         in
@@ -140,7 +144,8 @@
       # Folded into mvm-agentd as a [[bin]], so we select just that
       # binary out of the mvm-agentd package; workspace Cargo.lock
       # drives the closure.
-      mvmRunnerFor = system:
+      mvmRunnerFor =
+        system:
         let
           pkgs = import nixpkgs { inherit system; };
           staticPkgs = pkgs.pkgsStatic;
@@ -149,10 +154,16 @@
           pname = "mvm-runner";
           version = overlayVersion;
           src = workspace;
-          cargoLock = {
+          cargoDeps = import (workspace + "/nix/lib/static-crates-cargo-deps.nix") {
+            inherit pkgs;
             lockFile = workspace + "/Cargo.lock";
           };
-          cargoBuildFlags = [ "--package" "mvm-agentd" "--bin" "mvm-runner" ];
+          cargoBuildFlags = [
+            "--package"
+            "mvm-agentd"
+            "--bin"
+            "mvm-runner"
+          ];
           doCheck = false;
           meta = {
             description = "mvm function-workload entrypoint runner (plan 60 Phase 5 Slice C)";
@@ -160,7 +171,8 @@
           };
         };
 
-      mvmEgressClientFor = system:
+      mvmEgressClientFor =
+        system:
         let
           pkgs = import nixpkgs { inherit system; };
         in
@@ -170,17 +182,8 @@
           mvmSrc = workspace;
         };
 
-      mvmNetAgentFor = system:
-        let
-          pkgs = import nixpkgs { inherit system; };
-        in
-        import (workspace + "/nix/packages/mvm-net-agent.nix") {
-          pkgs = pkgs.pkgsStatic;
-          lib = pkgs.lib;
-          mvmSrc = workspace;
-        };
-
-      mvmAddonDnsFor = system:
+      mvmAddonDnsFor =
+        system:
         let
           pkgs = import nixpkgs { inherit system; };
         in
@@ -190,7 +193,8 @@
           mvmSrc = workspace;
         };
 
-      mvmExitReportFor = system:
+      mvmExitReportFor =
+        system:
         let
           pkgs = import nixpkgs { inherit system; };
         in
@@ -206,12 +210,20 @@
       # filename; built for the glibc workload rootfs (same platform as the
       # agent), not the static-musl builder target — a cdylib needs the
       # dynamic loader the rootfs provides.
-      mvmSdkCdylibFor = system:
+      mvmSdkCdylibFor =
+        system:
+        mvmSdkCdylibForLibc system "glibc";
+
+      # The same derivation, parameterized by the libc the object is built
+      # against. A guest can only dlopen the variant matching its own, and the
+      # host selects from the libc recorded in the image's `mvm-meta.json`.
+      mvmSdkCdylibForLibc =
+        system: libc:
         let
           pkgs = import nixpkgs { inherit system; };
         in
-        import (workspace + "/nix/packages/mvm-sdk-cdylib.nix") {
-          inherit pkgs;
+        import (workspaceRoot + "/nix/packages/mvm-sdk-cdylib.nix") {
+          inherit pkgs libc;
           lib = pkgs.lib;
           mvmSrc = workspace;
         };
@@ -251,7 +263,8 @@
       # `nix/images/builder-vm/flake.nix` together.
       pinnedCryptsetupVersion = "2.8.6";
       pinnedCryptsetupSrcHash = "sha256-gAQmX9mTiF0I97Yz2+BWhR3hohAwdhOk693HQ/zO/lo=";
-      pinnedCryptsetupFor = pkgs:
+      pinnedCryptsetupFor =
+        pkgs:
         pkgs.cryptsetup.overrideAttrs (_old: {
           version = pinnedCryptsetupVersion;
           src = pkgs.fetchurl {
@@ -268,12 +281,28 @@
       # 32 MiB allocation.
       overlaySizeBytes = 16 * 1024 * 1024;
 
-      mkSdkSidecar = system:
+      mkSdkSidecar =
+        system:
+        mkSdkSidecarForLibc system "glibc";
+
+      # The musl sidecar carries only what the guest lacks.
+      #
+      # The glibc tree bundles a loader and a libc because the workload rootfs
+      # has neither — the catalog is Alpine. A musl guest already has both: its
+      # own interpreter is running under `/lib/ld-musl-<arch>.so.1`. So the musl
+      # tree is the cdylib plus musl's libgcc, which the object still records as
+      # NEEDED — rustc emits `-lgcc_s` for unwinding and `-static-libgcc` does
+      # not remove it. The RPATH stays, because that libgcc is what the object
+      # finds through it.
+      mkSdkSidecarForLibc =
+        system: libc:
         let
           pkgs = import nixpkgs { inherit system; };
-          hostsvc = mvmSdkCdylibFor system;
+          isMusl = libc == "musl";
+          hostsvc = mvmSdkCdylibForLibc system libc;
+          muslLibgcc = "${pkgs.pkgsMusl.lib.getLib pkgs.pkgsMusl.stdenv.cc.cc}/lib/libgcc_s.so.1";
         in
-        pkgs.runCommand "mvm-sdk-sidecar-${system}"
+        pkgs.runCommand "mvm-sdk-sidecar-${libc}-${system}"
           {
             nativeBuildInputs = [ pkgs.patchelf ];
             passthru = {
@@ -285,11 +314,20 @@
             set -euo pipefail
 
             mkdir -p "$out/lib"
-            cp ${sdkRuntimeLoaderFor pkgs} "$out/lib/${sdkRuntimeLoaderBaseFor pkgs}"
             cp ${hostsvc}/lib/libmvm_host_services.so \
               "$out/lib/libmvm_host_services.so"
-            cp ${sdkRuntimeLibcFor pkgs} "$out/lib/libc.so.6"
-            cp ${sdkRuntimeLibgccFor pkgs} "$out/lib/libgcc_s.so.1"
+            ${
+              if isMusl then
+                ''
+                  cp ${muslLibgcc} "$out/lib/libgcc_s.so.1"
+                ''
+              else
+                ''
+                  cp ${sdkRuntimeLoaderFor pkgs} "$out/lib/${sdkRuntimeLoaderBaseFor pkgs}"
+                  cp ${sdkRuntimeLibcFor pkgs} "$out/lib/libc.so.6"
+                  cp ${sdkRuntimeLibgccFor pkgs} "$out/lib/libgcc_s.so.1"
+                ''
+            }
             chmod u+w "$out/lib/libmvm_host_services.so"
             patchelf \
               --set-rpath /mvm/sdk/lib \
@@ -297,7 +335,7 @@
             chmod 0555 "$out/lib"/*
             echo "${overlayVersion}" > "$out/VERSION"
             cat > "$out/README" <<'EOF'
-            This read-only sidecar supplies the glibc SDK host-services cdylib.
+            This read-only sidecar supplies the ${libc} SDK host-services cdylib.
             Attach it at /mvm/sdk for workloads that use mvm.audit or mvm.host.
             EOF
             chmod 0444 "$out/VERSION" "$out/README"
@@ -315,12 +353,17 @@
       # `sha256sum`-format manifest the host-side resolver verifies before it
       # offers an attachment — so a truncated or drifted artifact refuses to
       # boot instead of surfacing as an in-guest dlopen failure.
-      mkSdkSidecarImage = system:
+      mkSdkSidecarImage =
+        system:
+        mkSdkSidecarImageForLibc system "glibc";
+
+      mkSdkSidecarImageForLibc =
+        system: libc:
         let
           pkgs = import nixpkgs { inherit system; };
-          tree = mkSdkSidecar system;
+          tree = mkSdkSidecarForLibc system libc;
         in
-        pkgs.runCommand "mvm-sdk-sidecar-image-${system}"
+        pkgs.runCommand "mvm-sdk-sidecar-image-${libc}-${system}"
           {
             nativeBuildInputs = [
               pkgs.e2fsprogs
@@ -366,13 +409,13 @@
             echo "  VERSION: $(cat $out/VERSION)" >&2
           '';
 
-      mkRuntimeOverlay = system:
+      mkRuntimeOverlay =
+        system:
         let
           pkgs = import nixpkgs { inherit system; };
           guest = mvmGuestFor system;
           runner = mvmRunnerFor system;
           egressClient = mvmEgressClientFor system;
-          netAgent = mvmNetAgentFor system;
           addonDns = mvmAddonDnsFor system;
           exitReport = mvmExitReportFor system;
         in
@@ -384,7 +427,13 @@
               pkgs.coreutils
             ];
             passthru = {
-              inherit guest runner egressClient addonDns exitReport;
+              inherit
+                guest
+                runner
+                egressClient
+                addonDns
+                exitReport
+                ;
               sdkSidecar = mkSdkSidecar system;
               sdkSidecarImage = mkSdkSidecarImage system;
               version = overlayVersion;
@@ -399,7 +448,7 @@
             # overlay ext4. The kernel mounts this at /mvm/runtime
             # inside the guest, so the *FS root* contains
             # /agent, /seccomp-apply, /netinit, /runner,
-            # /egress-client, /net-agent, /addon-dns, /exit-report, /sdk-py/,
+            # /egress-client, /addon-dns, /exit-report, /sdk-py/,
             # /sdk-ts/, /VERSION.
             staging="$TMPDIR/staging"
             mkdir -p "$staging"
@@ -409,7 +458,6 @@
             cp ${guest}/bin/mvm-guest-netinit    "$staging/netinit"
             cp ${runner}/bin/mvm-runner "$staging/runner"
             cp ${egressClient}/bin/mvm-egress-client "$staging/egress-client"
-            cp ${netAgent}/bin/mvm-net-agent "$staging/net-agent"
             cp ${addonDns}/bin/mvm-addon-dns "$staging/addon-dns"
             cp ${exitReport}/bin/mvm-exit-report "$staging/exit-report"
 
@@ -447,6 +495,16 @@
 
             mkdir -p $out
 
+            # Host-side OCI materialization needs this compatibility set before
+            # the overlay is attached. Publish the exact static binaries beside
+            # the disk so an installed mvmctl never needs a Rust toolchain.
+            mkdir -p $out/guest-runtime
+            cp ${guest}/bin/mvm-guest-agent    $out/guest-runtime/mvm-guest-agent
+            cp ${guest}/bin/mvm-guest-netinit  $out/guest-runtime/mvm-guest-netinit
+            cp ${egressClient}/bin/mvm-egress-client $out/guest-runtime/mvm-egress-client
+            cp ${guest}/bin/mvm-oci-entrypoint $out/guest-runtime/mvm-oci-entrypoint
+            chmod 0555 $out/guest-runtime/*
+
             # ext4 generation. Mirrors
             # `mvm_build::oci_to_rootfs::ext4::materialize_to_ext4`
             # parameters — same UUID / hash_seed / block size /
@@ -467,7 +525,7 @@
 
             # Verity sidecar. Parameters mirror
             # `mvm_build::oci_to_rootfs::verity::VeritysetupOptions::default` —
-            # data block 1024 (must match `mvm-verity-init.rs`'s
+            # data block 1024 (must match the guest agent's
             # DATA_BLOCK_SIZE constant), hash block 4096, zero
             # salt, sha256.
             touch $out/overlay.verity
@@ -514,6 +572,12 @@
         runtime-overlay = mkRuntimeOverlay system;
         sdk-sidecar = mkSdkSidecar system;
         sdk-sidecar-image = mkSdkSidecarImage system;
+        # Exposed individually so each libc variant can be built and inspected
+        # on its own; the musl one is what an Alpine guest can load.
+        sdk-cdylib-glibc = mvmSdkCdylibForLibc system "glibc";
+        sdk-cdylib-musl = mvmSdkCdylibForLibc system "musl";
+        sdk-sidecar-musl = mkSdkSidecarForLibc system "musl";
+        sdk-sidecar-image-musl = mkSdkSidecarImageForLibc system "musl";
       });
     };
 }

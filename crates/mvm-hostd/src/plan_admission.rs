@@ -43,10 +43,21 @@
 //! `admit_for_run` takes a `Clock` and a `NonceLedger` so tests can
 //! drive the validity window + replay protection deterministically.
 //! Production callers use `SystemClock` + the host's nonce store.
+//!
+//! ## Externally-signed plans
+//!
+//! [`admit_signed_plan_for_run`] admits a plan signed by a fleet issuer the
+//! operator pinned in the host config's `trusted_plan_signers`, verifying the
+//! envelope against that set — never the host's own key — before any policy
+//! gate reads the plan body. From the content-address check onward it runs
+//! the same `finish_admission` tail as the self-signed path: the host's
+//! ceiling, budget, validity window, and replay protection apply unchanged,
+//! so the host stays the final authority over what it boots.
 
 use anyhow::{Context, Result};
 use chrono::Utc;
 use ed25519_dalek::VerifyingKey;
+use mvm_build::guest_libc::GuestLibc;
 use mvm_contract::grants::ceiling::GrantCeiling;
 use mvm_contract::grants::{CpuGrant, Grants};
 use mvm_contract::protocol::capability_negotiation::negotiate_grants;
@@ -55,6 +66,8 @@ use mvm_contract::provenance::{
     ActorRef, AttestationBinding, DecisionActorRole, DecisionCategory, DecisionOutcome,
     DecisionRecord, DecisionRecordBuilder,
 };
+use mvm_core::pack_cache::{PackVerifyCtx, resolve_pack_digest};
+use mvm_core::packs::{PackKind, Sha256Hex};
 use mvm_core::plan::bundle::{BundleResolver, TrustStore};
 use mvm_core::plan::{
     ExecutionPlan, NonceStore, PlanId, PlanValidityError, SignedExecutionPlan, Variant,
@@ -70,6 +83,7 @@ use mvm_contract::builder::BuilderError;
 use mvm_core::plan::{SynthesisInput, synthesize_plan};
 use mvm_core::vm_backend::{VmId, VmStartConfig};
 use mvm_runtime::AnyBackend;
+use sha2::{Digest, Sha256};
 
 pub use mvm_core::time::{Clock, SystemClock};
 
@@ -107,7 +121,8 @@ impl Default for InMemoryNonceLedger {
 /// input gate — decide what a workload may do by reading this plan, so a value
 /// of this type has to be a claim that the plan *was* signed, verified,
 /// window-checked and replay-checked, not merely a struct shaped like one. Both
-/// halves of that are enforced by privacy: [`admit_for_run`] is the only
+/// halves of that are enforced by privacy: `finish_admission` — the shared
+/// tail of [`admit_for_run`] and [`admit_signed_plan_for_run`] — is the only
 /// non-test code that can build one (a struct literal needs every field named,
 /// and there is no `Default` to spread from), and no accessor hands out a `&mut`
 /// or an owned field, so a caller that legitimately holds one cannot afterwards
@@ -118,6 +133,14 @@ pub struct AdmittedPlan {
     plan_id: PlanId,
     signer_id: String,
     signed: SignedExecutionPlan,
+    extensions: Vec<AdmittedExtension>,
+}
+
+/// Re-verified host artifact behind one extension binding in the signed plan.
+#[derive(Debug, Clone)]
+pub struct AdmittedExtension {
+    pub binding: mvm_contract::protocol::extension_pack::ExtensionPlanBinding,
+    pub root: std::path::PathBuf,
 }
 
 impl AdmittedPlan {
@@ -134,7 +157,9 @@ impl AdmittedPlan {
         &self.plan_id
     }
 
-    /// The host signer whose key the plan verified under.
+    /// The signer whose key the plan verified under — this host's own signer
+    /// for a synthesized run, or the pinned external signer for a
+    /// fleet-issued one.
     #[must_use]
     pub fn signer_id(&self) -> &str {
         &self.signer_id
@@ -145,6 +170,12 @@ impl AdmittedPlan {
     #[must_use]
     pub fn signed(&self) -> &SignedExecutionPlan {
         &self.signed
+    }
+
+    /// Exact re-verified extension artifacts available to this launch.
+    #[must_use]
+    pub fn extensions(&self) -> &[AdmittedExtension] {
+        &self.extensions
     }
 
     /// Mint one without admitting it — **tests only**, and unreachable from a
@@ -166,6 +197,7 @@ impl AdmittedPlan {
             signer_id,
             plan,
             signed,
+            extensions: Vec::new(),
         }
     }
 }
@@ -180,6 +212,48 @@ impl AdmittedPlan {
 pub struct BundleAdmissionContext<'a> {
     pub resolver: &'a dyn BundleResolver,
     pub trust: &'a dyn TrustStore,
+}
+
+/// Trust and revocation inputs for exact extension-pack re-verification.
+pub struct ExtensionAdmissionContext<'a> {
+    verify: &'a PackVerifyCtx<'a>,
+    cache_root: Option<&'a std::path::Path>,
+}
+
+impl<'a> ExtensionAdmissionContext<'a> {
+    /// Use the ordinary MVM pack cache.
+    #[must_use]
+    pub fn ambient(verify: &'a PackVerifyCtx<'a>) -> Self {
+        Self {
+            verify,
+            cache_root: None,
+        }
+    }
+
+    /// Use an explicit provider-owned pack cache.
+    #[must_use]
+    pub fn at(cache_root: &'a std::path::Path, verify: &'a PackVerifyCtx<'a>) -> Self {
+        Self {
+            verify,
+            cache_root: Some(cache_root),
+        }
+    }
+
+    fn resolve(
+        &self,
+        digest: &Sha256Hex,
+    ) -> Result<Option<mvm_core::pack_cache::VerifiedPackRecord>> {
+        match self.cache_root {
+            Some(cache_root) => mvm_core::pack_cache::resolve_pack_digest_at(
+                cache_root,
+                PackKind::Extension,
+                digest,
+                self.verify,
+            ),
+            None => resolve_pack_digest(PackKind::Extension, digest, self.verify),
+        }
+        .map_err(Into::into)
+    }
 }
 
 /// Run the full admission pipeline for an `mvmctl up` invocation.
@@ -227,6 +301,50 @@ pub fn admit_plan_for_run(
     bundle_ctx: Option<&BundleAdmissionContext<'_>>,
     posture: RunPosture,
 ) -> Result<AdmittedPlan> {
+    admit_plan_for_run_inner(
+        plan,
+        clock,
+        ledger,
+        host_signer_keys_dir,
+        bundle_ctx,
+        None,
+        posture,
+    )
+}
+
+/// Admit a plan carrying optional extension bindings, re-verifying every
+/// digest-pinned pack under current trust and revocation state before signing.
+pub fn admit_plan_for_run_with_extensions(
+    plan: &ExecutionPlan,
+    clock: &dyn Clock,
+    ledger: &InMemoryNonceLedger,
+    host_signer_keys_dir: Option<&std::path::Path>,
+    bundle_ctx: Option<&BundleAdmissionContext<'_>>,
+    extension_ctx: &ExtensionAdmissionContext<'_>,
+    posture: RunPosture,
+) -> Result<AdmittedPlan> {
+    admit_plan_for_run_inner(
+        plan,
+        clock,
+        ledger,
+        host_signer_keys_dir,
+        bundle_ctx,
+        Some(extension_ctx),
+        posture,
+    )
+}
+
+fn admit_plan_for_run_inner(
+    plan: &ExecutionPlan,
+    clock: &dyn Clock,
+    ledger: &InMemoryNonceLedger,
+    host_signer_keys_dir: Option<&std::path::Path>,
+    bundle_ctx: Option<&BundleAdmissionContext<'_>>,
+    extension_ctx: Option<&ExtensionAdmissionContext<'_>>,
+    posture: RunPosture,
+) -> Result<AdmittedPlan> {
+    validate_extension_bindings(plan)?;
+    let extensions = verify_extension_packs(plan, extension_ctx)?;
     // Grants are checked in the pre-keystore window, and for the same
     // reason as synthesis: a plan we would refuse must never leave here with a
     // signature on it. A signed refused plan is indistinguishable from a
@@ -256,20 +374,141 @@ pub fn admit_plan_for_run(
     let trusted: [(&str, &VerifyingKey); 1] = [(&signer_id, &signer.verifying)];
     let verified = verify_plan(&signed, &trusted).context("verifying just-signed plan")?;
 
+    finish_admission(VerifiedAdmission {
+        verified,
+        signed,
+        signer_id,
+        extensions,
+        clock,
+        ledger,
+        bundle_ctx,
+    })
+}
+
+/// Admit an externally-signed plan — one signed by a fleet issuer the
+/// operator pinned in `trusted_plan_signers`, not by this host's own key.
+///
+/// The order differs from the self-signed path in exactly the way the trust
+/// boundary dictates: the envelope is verified against the pinned signer set
+/// *first*, because every byte of it is attacker-controlled until then, and
+/// only afterwards do the host's own policy gates (extension bindings, grant
+/// ceiling, host budget) read the plan. From [`verify_plan_id`] onward both
+/// paths run the same checks through [`finish_admission`] — the host remains
+/// the final authority over what it boots, whoever signed the plan.
+///
+/// The trusted set comes from operator config and nowhere else, so a caller
+/// cannot hand admission a wider trust than the host configured. An empty set
+/// is the fail-closed default: every externally-signed plan is refused.
+///
+/// A refusal never emits an audit entry: the plan body is the only anchor a
+/// refusal entry could bind to, and until the signature verifies the body is
+/// an attacker's claim, not a fact to record.
+#[tracing::instrument(skip_all)]
+pub fn admit_signed_plan_for_run(
+    signed: &SignedExecutionPlan,
+    clock: &dyn Clock,
+    ledger: &InMemoryNonceLedger,
+    bundle_ctx: Option<&BundleAdmissionContext<'_>>,
+    posture: RunPosture,
+) -> Result<AdmittedPlan> {
+    let trusted = host_trusted_plan_signers()?;
+    if trusted.is_empty() {
+        anyhow::bail!(
+            "refusing the externally-signed plan: this host pins no trusted plan signers; \
+             set `trusted_plan_signers` in the host config.toml to admit fleet-signed plans"
+        );
+    }
+    let trusted_refs: Vec<(&str, &VerifyingKey)> =
+        trusted.iter().map(|(id, key)| (id.as_str(), key)).collect();
+    let verified =
+        verify_plan(signed, &trusted_refs).context("verifying externally-signed plan")?;
+    let signer_id = signed.0.signer_id.clone();
+
+    validate_extension_bindings(&verified)?;
+    // No extension verification context on this path: a plan that binds
+    // optional extensions is refused rather than admitted unchecked.
+    let extensions = verify_extension_packs(&verified, None)?;
+    admit_grants(&verified, &host_grant_ceiling(), posture)?;
+    admit_within_host_budget(&verified)?;
+
+    finish_admission(VerifiedAdmission {
+        verified,
+        // The caller lends the envelope; the admitted plan owns a copy so
+        // downstream consumers can re-verify without trusting this process.
+        signed: signed.clone(),
+        signer_id,
+        extensions,
+        clock,
+        ledger,
+        bundle_ctx,
+    })
+}
+
+/// The external plan signers this host trusts, from operator config.
+///
+/// Read from config rather than taken as a parameter for the same reason as
+/// the grant ceiling: admission's trust root must not be widen-able by the
+/// caller asking for admission. A malformed pin fails the whole read, so the
+/// set in force is exactly the set the operator wrote.
+fn host_trusted_plan_signers() -> Result<Vec<(String, VerifyingKey)>> {
+    mvm_core::user_config::load(None).trusted_plan_signer_keys()
+}
+
+/// Everything the shared post-verification tail of admission needs.
+///
+/// A params struct rather than seven positional arguments: `verified`,
+/// `signed`, and `signer_id` travel together from whichever path verified
+/// them, and a positional call could transpose them with nothing to catch it.
+struct VerifiedAdmission<'a> {
+    /// The plan body, already signature-verified against the trust root of
+    /// the path that produced it (the host signer, or the operator's pinned
+    /// external signer set).
+    verified: ExecutionPlan,
+    /// The envelope `verified` was decoded from, carried verbatim onto the
+    /// launch config for consumers that re-verify.
+    signed: SignedExecutionPlan,
+    /// The signer the envelope verified under — the audit chain records it.
+    signer_id: String,
+    /// Re-verified extension artifacts, empty when the plan binds none.
+    extensions: Vec<AdmittedExtension>,
+    clock: &'a dyn Clock,
+    ledger: &'a InMemoryNonceLedger,
+    bundle_ctx: Option<&'a BundleAdmissionContext<'a>>,
+}
+
+/// The checks every admitted plan passes after its signature has verified,
+/// shared by the host-signed and externally-signed paths: content-address,
+/// ingress shape, validity window, replay protection, bundle re-verify.
+///
+/// The replay insert is deliberately last but one: every check that can
+/// refuse runs before the nonce is spent, so a refused plan can be corrected
+/// and resubmitted, while an admitted one cannot be replayed.
+fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
+    let VerifiedAdmission {
+        verified,
+        signed,
+        signer_id,
+        extensions,
+        clock,
+        ledger,
+        bundle_ctx,
+    } = parts;
+
     // The plan_id is the content-address of the plan body — recompute it and
     // refuse a plan whose stored id doesn't match, so a run is only ever
     // admitted under an id that genuinely addresses its content.
     verify_plan_id(&verified).context("plan_id content-address check")?;
 
-    // The retired raw-packet transport, checked again on the verified plan and
-    // not only in synthesis: admission is what a plan built elsewhere reaches,
-    // and the refusal has to hold for those too.
-    mvm_core::plan::refuse_retired_l3(&verified.network_mode, verified.l3_network.is_some())?;
+    verified
+        .validate_ingress()
+        .context("validating signed ingress mappings")?;
 
     // Validity window — refuses plans whose now() is outside
     // [valid_from, valid_until). For freshly-synthesized plans this
     // can only fire if the host's clock changed during signing or if
-    // someone overrode the validity window in synthesis defaults.
+    // someone overrode the validity window in synthesis defaults; for an
+    // externally-signed plan it is the host's own check that the window the
+    // fleet issuer chose still holds here.
     let now = clock.now();
     check_window(&verified, now).map_err(|e| match e {
         PlanValidityError::NotYetValid { .. } | PlanValidityError::Expired { .. } => {
@@ -278,10 +517,9 @@ pub fn admit_plan_for_run(
         other => anyhow::anyhow!("plan validity error: {other}"),
     })?;
 
-    // Replay protection: insert (signer_id, nonce). A second admit_for_run
-    // call within the validity window with the same nonce gets refused.
-    // Synthesis generates fresh nonces, so this only fires on the
-    // pathological "same plan submitted twice" case.
+    // Replay protection: insert (signer_id, nonce). A second admission with
+    // the same signer + nonce — a re-submitted fleet plan, or a synthesized
+    // plan that somehow recurred — is refused.
     {
         let mut store = ledger.inner.lock().expect("nonce store mutex poisoned");
         store
@@ -289,9 +527,9 @@ pub fn admit_plan_for_run(
             .context("replay protection check")?;
     }
 
-    // Claim 9 — bundle re-verify at admit time. Only fires
+    // Bundle re-verify at admit time. Only fires
     // when the plan pinned a bundle; missing context with a pinned
-    // plan is operator misconfiguration (mvmctl up wasn't wired
+    // plan is operator misconfiguration (the driver wasn't wired
     // with a resolver/trust store), so we refuse rather than skip
     // silently.
     if let Some(pin) = verified.bundle.as_ref() {
@@ -320,7 +558,153 @@ pub fn admit_plan_for_run(
         signer_id,
         plan: verified,
         signed,
+        extensions,
     })
+}
+
+fn validate_extension_bindings(plan: &ExecutionPlan) -> Result<()> {
+    if !plan.extensions.is_empty() {
+        let verbs = plan.agent_verbs.as_deref().unwrap_or_default();
+        for required in ["run-extension", "cancel-extension"] {
+            if !verbs.iter().any(|verb| verb.as_str() == required) {
+                anyhow::bail!(
+                    "signed plans with optional extensions must grant the {required} agent verb"
+                );
+            }
+        }
+    }
+    let mut extension_ids = std::collections::HashSet::new();
+    let mut pack_digests = std::collections::HashSet::new();
+    let mut capabilities = std::collections::HashSet::new();
+    for extension in &plan.extensions {
+        extension
+            .validate()
+            .map_err(|error| anyhow::anyhow!("invalid extension binding: {error}"))?;
+        if extension.placement
+            != mvm_contract::protocol::extension_pack::ExtensionPlacement::GuestWorkload
+        {
+            anyhow::bail!(
+                "extension placement isolated_controller is not executable by this MVM version"
+            );
+        }
+        if !extension_ids.insert(extension.extension_id.clone()) {
+            anyhow::bail!("duplicate extension identity in signed plan");
+        }
+        if !pack_digests.insert(extension.pack_digest) {
+            anyhow::bail!("duplicate extension pack digest in signed plan");
+        }
+        for binding in &extension.capabilities {
+            if !plan.services.contains(&binding.capability.service) {
+                anyhow::bail!(
+                    "extension capability service {} is not bound by the signed plan",
+                    binding.capability.service
+                );
+            }
+            if !capabilities.insert(binding.capability.clone()) {
+                anyhow::bail!("duplicate extension capability in signed plan");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verify_extension_packs(
+    plan: &ExecutionPlan,
+    context: Option<&ExtensionAdmissionContext<'_>>,
+) -> Result<Vec<AdmittedExtension>> {
+    if plan.extensions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let context = context.ok_or_else(|| {
+        anyhow::anyhow!(
+            "plan binds optional extensions but no extension verification context was provided"
+        )
+    })?;
+    plan.extensions
+        .iter()
+        .map(|binding| {
+            let digest = Sha256Hex::new(hex::encode(binding.pack_digest))
+                .context("decoding extension pack digest")?;
+            let digest_text = digest.as_str();
+            let record = context
+                .resolve(&digest)
+                .with_context(|| format!("re-verifying extension pack {digest_text}"))?
+                .ok_or_else(|| anyhow::anyhow!("extension pack {digest_text} is not installed"))?;
+            let contract = record.manifest.extension.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("verified extension pack {digest_text} has no extension contract")
+            })?;
+            let contract_digest: [u8; 32] = Sha256::digest(
+                serde_json::to_vec(contract).context("encoding extension contract")?,
+            )
+            .into();
+            if !extension_binding_matches_contract(binding, contract, contract_digest) {
+                anyhow::bail!("extension binding does not match verified pack {digest_text}");
+            }
+            let maximum: std::collections::HashSet<_> = contract
+                .capabilities
+                .iter()
+                .map(mvm_contract::protocol::agent_capability::CapabilityDescriptor::binding)
+                .collect();
+            if binding
+                .capabilities
+                .iter()
+                .any(|capability| !maximum.contains(capability))
+            {
+                anyhow::bail!("extension binding widens verified pack authority {digest_text}");
+            }
+            if !budgets_are_narrower(binding.budgets, contract.budgets) {
+                anyhow::bail!("extension binding widens verified pack budgets {digest_text}");
+            }
+            let artifact = record.dir.root.join(&binding.artifact);
+            if !artifact.is_file() {
+                anyhow::bail!("verified extension artifact is missing from pack {digest_text}");
+            }
+            let artifact_size = std::fs::metadata(&artifact)
+                .with_context(|| format!("inspecting extension artifact for {digest_text}"))?
+                .len();
+            if extension_artifact_exceeds_budget(artifact_size, binding.budgets.max_artifact_bytes)
+            {
+                anyhow::bail!(
+                    "verified extension artifact exceeds admitted budget for {digest_text}"
+                );
+            }
+            Ok(AdmittedExtension {
+                binding: binding.clone(),
+                root: record.dir.root,
+            })
+        })
+        .collect()
+}
+
+fn extension_binding_matches_contract(
+    binding: &mvm_contract::protocol::extension_pack::ExtensionPlanBinding,
+    contract: &mvm_contract::protocol::extension_pack::ExtensionPackContract,
+    contract_digest: [u8; 32],
+) -> bool {
+    binding.extension_id == contract.extension_id
+        && binding.version == contract.version
+        && binding.contract_digest == contract_digest
+        && binding.placement == contract.placement
+        && binding.artifact == contract.artifact
+        && binding.entrypoint == contract.entrypoint
+}
+
+fn extension_artifact_exceeds_budget(artifact_size: u64, maximum_size: u64) -> bool {
+    artifact_size > maximum_size
+}
+
+fn budgets_are_narrower(
+    admitted: mvm_contract::protocol::extension_pack::ExtensionBudgets,
+    maximum: mvm_contract::protocol::extension_pack::ExtensionBudgets,
+) -> bool {
+    admitted.cpu_millis <= maximum.cpu_millis
+        && admitted.memory_bytes <= maximum.memory_bytes
+        && admitted.duration_ms <= maximum.duration_ms
+        && admitted.max_steps <= maximum.max_steps
+        && admitted.max_concurrency <= maximum.max_concurrency
+        && admitted.max_payload_bytes <= maximum.max_payload_bytes
+        && admitted.max_output_bytes <= maximum.max_output_bytes
+        && admitted.max_artifact_bytes <= maximum.max_artifact_bytes
 }
 
 /// Synthesize a plan and admit it for execution.
@@ -474,7 +858,7 @@ fn admit_grants(plan: &ExecutionPlan, ceiling: &GrantCeiling, posture: RunPostur
 /// right answer to pick between them: enforcing the grant ignores a signed
 /// field, enforcing the field ignores what the ceiling was applied to. Refusing
 /// is the only choice that cannot silently run a workload under a bound nobody
-/// authored — the same posture the `network_mode` / `l3_network` pair takes.
+/// authored.
 ///
 /// The comparison runs against the projection, never against the grant
 /// directly, because the projection is lossy: an absent grant and an explicit
@@ -933,31 +1317,52 @@ pub fn enforce_admitted_shares(
     Ok(())
 }
 
-/// Admission enforcement for the optional glibc SDK sidecar.
+/// Typed reasons the selected backend cannot carry the native SDK sidecar.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum SdkSidecarBackendCompatibilityError {
+    #[error(
+        "refusing to launch SDK host service(s) [{services}] on the wasm backend: the SDK \
+         host-services library is delivered as a native shared object on a read-only disk, but \
+         wasm has neither block devices nor a native dynamic loader. Remove these bindings or \
+         use a microVM backend; WASI host-service imports are not implemented"
+    )]
+    WasmHostServicesUnsupported { services: String },
+}
+
+/// Refuse a host-service delivery mechanism the selected backend cannot carry.
 ///
-/// The sidecar carries the host-services cdylib the language SDKs `dlopen`. It
-/// is not in the base rootfs or the static-musl runtime overlay, so it has to be
-/// attached per-workload — and the attachment is authorized by the plan's
-/// host-service bindings, never by an environment variable or a guess about
-/// application content.
+/// This gate runs before attachment-shape validation and backend start so an
+/// SDK host-service request cannot leak as an error about the synthetic disk
+/// volume used to carry its native library.
+pub fn enforce_sdk_sidecar_backend_compatibility(
+    backend: mvm_core::vm_backend::BackendKind,
+    plan: &ExecutionPlan,
+) -> std::result::Result<(), SdkSidecarBackendCompatibilityError> {
+    use mvm_core::plan::{sdk_host_services_in, sdk_sidecar_required};
+
+    if backend != mvm_core::vm_backend::BackendKind::Wasm || !sdk_sidecar_required(plan) {
+        return Ok(());
+    }
+
+    let services = sdk_host_services_in(&plan.services)
+        .iter()
+        .map(|service| service.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(SdkSidecarBackendCompatibilityError::WasmHostServicesUnsupported { services })
+}
+
+/// Admission enforcement for the optional SDK sidecar attachment.
 ///
-/// Both directions fail closed, and both are checked on the one admission path
-/// every backend reaches — including the mock and dev-tier backends, so a
-/// dev/test launch can't quietly acquire a posture production wouldn't:
-///
-/// - The plan binds an SDK-served host service, but no read-only sidecar
-///   attachment is present → refuse. Booting anyway strands the workload with a
-///   `dlopen` failure it cannot act on.
-/// - The plan binds none, but something attached a volume at the sidecar mount
-///   point anyway → refuse. That would smuggle the glibc closure (and a
-///   host-services transport) into a workload the plan never authorized.
-///
-/// A sidecar attachment must additionally be read-only and a disk image: the
-/// guest never writes to it, and a writable or directory-share attachment is a
-/// different, unadmitted shape.
+/// The sidecar carries the host-services cdylib the language SDKs `dlopen`. Its
+/// attachment is authorized by the plan's host-service bindings, never by an
+/// environment variable or a guess about application content. Both directions
+/// fail closed: a bound SDK service requires exactly one read-only disk at the
+/// SDK mount point, and a plan with no SDK binding may not carry one.
 pub fn enforce_sdk_sidecar_attachment(
     volumes: &[mvm_core::vm_backend::VmVolume],
     plan: &ExecutionPlan,
+    image_libc: GuestLibc,
 ) -> Result<()> {
     use mvm_core::plan::{SDK_SIDECAR_GUEST_PATH, sdk_host_services_in, sdk_sidecar_required};
     use mvm_core::vm_backend::VmVolumeKind;
@@ -990,7 +1395,7 @@ pub fn enforce_sdk_sidecar_attachment(
              need the SDK sidecar mounted read-only at {SDK_SIDECAR_GUEST_PATH}, and no such \
              attachment is present. The launch path resolves the sidecar from the version-keyed \
              cache under the mvm cache dir; build it with \
-             `nix build ./nix/images/runtime-overlay#sdk-sidecar-image` and retry.",
+             `mvmctl build sdk-sidecar build` and retry.",
             bound.join(", "),
         );
     };
@@ -1015,7 +1420,82 @@ pub fn enforce_sdk_sidecar_attachment(
             sidecar.host,
         );
     }
+    // The sidecar's own libc comes from the path it was filed under, so both
+    // sides of the comparison are observed rather than assumed. Reading it here
+    // rather than threading it in keeps this a check on the launch config as
+    // presented — the thing admission is actually authorizing.
+    let sidecar_libc =
+        mvm_build::guest_libc::sidecar_libc_of_image_path(std::path::Path::new(&sidecar.host));
+    enforce_sidecar_libc(image_libc, sidecar_libc, &bound)?;
     Ok(())
+}
+
+/// Refuse a launch whose SDK sidecar the guest could not load.
+///
+/// The launch-shaped entry point onto [`enforce_sdk_sidecar_attachment`], for
+/// callers that hold a rootfs path and a launch config rather than an
+/// `AdmittedPlan`. `mvmctl run` is one: it admits through `admit_for_run`, which
+/// does not run the post-admission gates, so without this the only thing
+/// standing between a libc mismatch and the guest is nothing at all — the boot
+/// succeeds and the workload dies on `dlopen` resolving `_dl_find_object`.
+///
+/// Takes the rootfs path rather than the libc so the caller cannot supply a
+/// libc that disagrees with the image it is about to boot.
+pub fn enforce_sdk_sidecar_for_launch(
+    rootfs_path: &str,
+    volumes: &[mvm_core::vm_backend::VmVolume],
+    plan: &ExecutionPlan,
+) -> Result<()> {
+    enforce_sdk_sidecar_attachment(
+        volumes,
+        plan,
+        mvm_build::guest_libc::recorded_image_libc(std::path::Path::new(rootfs_path)),
+    )
+}
+
+/// Refuse a sidecar the guest could not load.
+///
+/// The cdylib inside it is built for one libc, and a process under the other
+/// cannot `dlopen` it at all. Left unchecked, the boot succeeds and the failure
+/// lands inside the guest as a relocation error naming `_dl_find_object` — a
+/// symbol the operator never heard of, from a library they did not ask for.
+/// Refusing here is the same outcome, said where it can name the cause.
+///
+/// [`GuestLibc::Unknown`] refuses too. It covers an image whose loader was
+/// unrecognisable and a sidecar written before the field existed, and neither
+/// is evidence that loading would work.
+fn enforce_sidecar_libc(
+    image_libc: GuestLibc,
+    sidecar_libc: GuestLibc,
+    bound: &[&str],
+) -> Result<()> {
+    if mvm_build::guest_libc::sidecar_loads_in(image_libc, sidecar_libc) {
+        return Ok(());
+    }
+    let detail = match (image_libc, sidecar_libc) {
+        (GuestLibc::Unknown, _) => {
+            "the image records no libc this host recognises. An image materialized before mvm \
+             began recording it reads this way — re-pull or rebuild it and the sidecar is \
+             rewritten with the libc"
+        }
+        (_, GuestLibc::Unknown) => {
+            "the attached sidecar is not filed under a libc this host recognises, so which \
+             variant it holds cannot be established. Rebuild the cache with \
+             `mvmctl build sdk-sidecar build`, which files each variant under its own libc"
+        }
+        _ => {
+            "a process under one libc cannot dlopen an object built for the other — the guest \
+             would fail resolving symbols such as `_dl_find_object`"
+        }
+    };
+    anyhow::bail!(
+        "refusing to launch: the signed ExecutionPlan binds SDK host service(s) [{}], which are \
+         delivered by a shared object built for {}, but this image is {}. {detail}. Use an image \
+         whose libc matches, or drop the host-service binding.",
+        bound.join(", "),
+        sidecar_libc.as_str(),
+        image_libc.as_str(),
+    )
 }
 
 /// Inputs for [`admit_and_start`]. The `synthesis` describes the plan to admit
@@ -1029,6 +1509,7 @@ pub struct AdmitAndStartParams<'a> {
     pub ledger: &'a InMemoryNonceLedger,
     pub host_signer_keys_dir: Option<&'a std::path::Path>,
     pub bundle_ctx: Option<&'a BundleAdmissionContext<'a>>,
+    pub extension_ctx: Option<&'a ExtensionAdmissionContext<'a>>,
     /// This run's posture. Decides whether a grant the resolved backend has no
     /// mechanism for refuses the boot ([`Variant::Prod`]) or warns and proceeds
     /// ([`Variant::Dev`]).
@@ -1074,6 +1555,7 @@ pub struct AdmitAndStartParamsBuilder<'a> {
     ledger: Option<&'a InMemoryNonceLedger>,
     host_signer_keys_dir: Option<&'a std::path::Path>,
     bundle_ctx: Option<&'a BundleAdmissionContext<'a>>,
+    extension_ctx: Option<&'a ExtensionAdmissionContext<'a>>,
     variant: Option<Variant>,
     policy_bundle: Option<&'a PolicyBundle>,
     emitter: Option<&'a crate::audit::emitter::AuditEmitter>,
@@ -1092,6 +1574,7 @@ impl<'a> AdmitAndStartParamsBuilder<'a> {
             ledger: None,
             host_signer_keys_dir: None,
             bundle_ctx: None,
+            extension_ctx: None,
             variant: None,
             policy_bundle: None,
             emitter: None,
@@ -1145,6 +1628,16 @@ impl<'a> AdmitAndStartParamsBuilder<'a> {
         bundle_ctx: impl Into<Option<&'a BundleAdmissionContext<'a>>>,
     ) -> Self {
         self.bundle_ctx = bundle_ctx.into();
+        self
+    }
+
+    /// Supply current trust and revocation inputs for optional extensions.
+    #[must_use]
+    pub fn extension_ctx(
+        mut self,
+        extension_ctx: impl Into<Option<&'a ExtensionAdmissionContext<'a>>>,
+    ) -> Self {
+        self.extension_ctx = extension_ctx.into();
         self
     }
 
@@ -1208,6 +1701,7 @@ impl<'a> AdmitAndStartParamsBuilder<'a> {
                 .ok_or(BuilderError::missing("AdmitAndStartParams", "ledger"))?,
             host_signer_keys_dir: self.host_signer_keys_dir,
             bundle_ctx: self.bundle_ctx,
+            extension_ctx: self.extension_ctx,
             variant: self
                 .variant
                 .ok_or(BuilderError::missing("AdmitAndStartParams", "variant"))?,
@@ -1241,26 +1735,37 @@ impl<'a> Default for AdmitAndStartParamsBuilder<'a> {
 /// Fail-closed in both directions. A plan that pins a kernel and a launch
 /// config that supplies none is a refusal, not a pass — otherwise dropping the
 /// kernel path would be a way to skip the check.
-fn enforce_admitted_environment(config: &VmStartConfig, plan: &ExecutionPlan) -> Result<()> {
+/// Takes the kernel path rather than the whole [`VmStartConfig`] so the two
+/// admission seams can share one gate. `mvmctl` synthesizes and admits its plan
+/// without ever building a `VmStartConfig`, so a config-shaped signature meant
+/// the CLI — the seam that ships — could not call this at all.
+pub fn enforce_admitted_environment(
+    kernel_path: Option<&std::path::Path>,
+    plan: &ExecutionPlan,
+) -> Result<()> {
     let Some(environment) = plan.environment.as_ref() else {
         // No environment pinned. Plans predating the field, and backends that
         // boot their own bundled kernel, land here.
         return Ok(());
     };
-    let Some(kernel_path) = config.kernel_path.as_deref() else {
+    let Some(kernel_path) = kernel_path else {
         anyhow::bail!(
             "plan pins kernel {} but the launch config supplies no kernel path",
             environment.kernel_sha256
         );
     };
-    let actual = mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(kernel_path))
-        .with_context(|| {
-            format!("hashing kernel at {kernel_path} for admitted-environment check")
+    let actual =
+        mvm_core::crypto::image_verify::sha256_file_cached(kernel_path).with_context(|| {
+            format!(
+                "hashing kernel at {} for admitted-environment check",
+                kernel_path.display()
+            )
         })?;
     if actual != environment.kernel_sha256 {
         anyhow::bail!(
-            "admitted-environment mismatch: plan pins kernel {} but {kernel_path} hashes to {actual}",
-            environment.kernel_sha256
+            "admitted-environment mismatch: plan pins kernel {} but {} hashes to {actual}",
+            environment.kernel_sha256,
+            kernel_path.display()
         );
     }
     Ok(())
@@ -1305,19 +1810,6 @@ fn apply_admitted_grants(
         .context("applying the admitted plan's grants to the started VM")
 }
 
-/// The single admitted-boot entrypoint every driver shares — the CLI's
-/// `mvmctl up`/`run` and the `mvm-client` local backend both reach it, so a
-/// workload can never boot on a path that skipped admission.
-///
-/// Order matters and is fail-closed: synthesize + sign + verify + validity +
-/// replay (+ bundle re-verify) run first; only then is the signed plan threaded
-/// onto the launch config and every volume checked against the admitted shares
-/// (claim 1); only then does the backend start the VM. Any earlier failure
-/// returns with **no VM created** — admission is a gate, not a formality.
-///
-/// The caller resolves the image to a `config.rootfs_path` beforehand; this
-/// function is backend-agnostic (it drives whatever `AnyBackend` it is handed,
-/// including the in-memory mock in tests).
 /// The four post-admission gates between `plan.admitted` and the backend
 /// start, run in order. On refusal the failing stage's wire label is
 /// returned alongside the error so the caller can emit a terminal
@@ -1325,6 +1817,7 @@ fn apply_admitted_grants(
 fn run_post_admission_gates(
     mut config: VmStartConfig,
     admitted: &AdmittedPlan,
+    backend: BackendKind,
     policy_bundle: Option<&PolicyBundle>,
 ) -> std::result::Result<VmStartConfig, (&'static str, anyhow::Error)> {
     if let Err(e) = populate_audit_substrate(&mut config, admitted, policy_bundle) {
@@ -1333,13 +1826,62 @@ fn run_post_admission_gates(
     if let Err(e) = enforce_admitted_shares(&config.volumes, admitted.plan()) {
         return Err(("admitted-shares", e));
     }
-    if let Err(e) = enforce_admitted_environment(&config, admitted.plan()) {
+    if let Err(e) = enforce_admitted_environment(
+        config.kernel_path.as_deref().map(std::path::Path::new),
+        admitted.plan(),
+    ) {
         return Err(("admitted-environment", e));
     }
-    if let Err(e) = enforce_sdk_sidecar_attachment(&config.volumes, admitted.plan()) {
+    if let Err(e) = enforce_sdk_sidecar_backend_compatibility(backend, admitted.plan()) {
+        return Err(("sdk-sidecar", e.into()));
+    }
+    if let Err(e) = enforce_sdk_sidecar_attachment(
+        &config.volumes,
+        admitted.plan(),
+        mvm_build::guest_libc::recorded_image_libc(std::path::Path::new(&config.rootfs_path)),
+    ) {
         return Err(("sdk-sidecar", e));
     }
+    if let Err(e) = attach_admitted_extensions(&mut config, admitted) {
+        return Err(("extension-attachment", e));
+    }
     Ok(config)
+}
+
+fn attach_admitted_extensions(config: &mut VmStartConfig, admitted: &AdmittedPlan) -> Result<()> {
+    if !admitted.extensions().is_empty() {
+        config.extension_plan_id = Some(admitted.plan_id().0.clone());
+    }
+    for extension in admitted.extensions() {
+        if extension.binding.placement
+            != mvm_contract::protocol::extension_pack::ExtensionPlacement::GuestWorkload
+        {
+            anyhow::bail!(
+                "extension placement isolated_controller reached guest attachment after admission"
+            );
+        }
+        let digest = hex::encode(extension.binding.pack_digest);
+        let guest = format!("/run/mvm/extensions/{digest}");
+        if config.volumes.iter().any(|volume| volume.guest == guest) {
+            anyhow::bail!("extension mountpoint collision at {guest}");
+        }
+        config.volumes.push(mvm_core::vm_backend::VmVolume {
+            materialized_image: None,
+            volume_label: None,
+            host: extension
+                .root
+                .join(&extension.binding.artifact)
+                .display()
+                .to_string(),
+            guest,
+            size: String::new(),
+            read_only: true,
+            kind: mvm_core::vm_backend::VmVolumeKind::Disk,
+            encrypted: false,
+        });
+        config.extensions.push(extension.binding.clone());
+    }
+    Ok(())
 }
 
 fn launch_decision_record(plan: &ExecutionPlan, backend_name: &str) -> DecisionRecord {
@@ -1364,6 +1906,21 @@ fn launch_decision_record(plan: &ExecutionPlan, backend_name: &str) -> DecisionR
         })
         .build()
         .expect("launch decision record is well-formed")
+}
+
+fn attach_assurance_proxy(
+    config: &mut VmStartConfig,
+    proxy: mvm_contract::protocol::broker_control::ServiceProxyBinding,
+) -> Result<()> {
+    if config
+        .service_proxies
+        .iter()
+        .any(|binding| binding.service == proxy.service)
+    {
+        anyhow::bail!("assurance controller proxy service is already configured");
+    }
+    config.service_proxies.push(proxy);
+    Ok(())
 }
 
 /// What rolling a launch back needs to know. A struct rather than seven
@@ -1407,54 +1964,63 @@ fn undo_launch(undo: UndoLaunch<'_>) -> anyhow::Error {
     undo.err
 }
 
+/// Everything the post-admission tail needs, in one struct.
+///
+/// A params struct rather than six positional arguments: three of the fields
+/// are optional borrows of unrelated types and a positional call could drop or
+/// transpose one with nothing to catch it.
+pub struct StartAdmittedParams<'a> {
+    pub backend: &'a AnyBackend,
+    /// The plan this boot runs under. Taken by value because it is handed back
+    /// on the [`StartedMachine`], and holding one is the only proof admission
+    /// ran — it cannot be built any other way.
+    pub admitted: AdmittedPlan,
+    pub config: VmStartConfig,
+    pub policy_bundle: Option<&'a PolicyBundle>,
+    /// Optional chain-signed emitter: `plan.launched` fires on a successful
+    /// backend start, `plan.failed` on a start failure or a post-start refusal.
+    /// The caller owns `plan.admitted`, which is already recorded by the time
+    /// this runs.
+    pub emitter: Option<&'a crate::audit::emitter::AuditEmitter>,
+    /// An assurance campaign to open against this boot, when the operator
+    /// declared one. `None` — the default — is every ordinary run.
+    pub assurance: Option<&'a crate::assurance_session::CampaignRequest>,
+}
+
+/// The post-admission tail every admitted boot shares: the gates, the backend
+/// start, the grants, the budget charge and the launch records.
+///
+/// Split out of [`admit_and_start`] so a caller holding an already-admitted
+/// plan — a resumed durable session, for one — can boot it without admitting a
+/// second time. Two admissions would mean two nonces and two signed plans, with
+/// the second silently becoming the real authority. Because this is the only
+/// path from an `AdmittedPlan` to a running VM, a caller cannot boot on a path
+/// that skipped a gate.
+///
+/// Order matters and is fail-closed: the signed plan is threaded onto the
+/// launch config and every volume checked against the admitted shares
+/// (claim 1); only then does the backend start the VM. A refusal in any gate
+/// returns with **no VM created**, and a refusal *after* the start rolls the
+/// launch back rather than leaving a VM up whose only record says it was
+/// bounded.
+///
+/// The caller resolves the image to a `config.rootfs_path` beforehand; this
+/// function is backend-agnostic (it drives whatever `AnyBackend` it is handed,
+/// including the in-memory mock in tests).
 #[tracing::instrument(skip_all)]
-pub fn admit_and_start(
-    backend: &AnyBackend,
-    params: AdmitAndStartParams<'_>,
-) -> Result<StartedMachine> {
-    // The tier comes from the backend that is about to boot this plan — the
-    // object itself, via its typed discriminant. Nothing here reads a backend
-    // name: the grant gate decides which resource controls a run is measured
-    // against, and deciding that from a string is how a plan ends up measured
-    // against a tier it is not running on.
-    let posture = RunPosture::on_backend(params.variant, backend.kind());
-
-    // Synthesize the plan up-front so a refusal can be recorded with the
-    // plan context if admission fails. Synthesis failures have no plan to
-    // anchor to; they propagate without a chain entry.
-    let plan = synthesize_plan(params.synthesis).context("synthesizing plan")?;
-
-    let admitted = match admit_plan_for_run(
-        &plan,
-        params.clock,
-        params.ledger,
-        params.host_signer_keys_dir,
-        params.bundle_ctx,
-        posture,
-    ) {
-        Ok(admitted) => admitted,
-        Err(err) => {
-            if let Some(emitter) = params.emitter
-                && let Err(e) =
-                    emitter.emit_refused(&plan, "admit_plan_for_run", &format!("{err:#}"))
-            {
-                tracing::warn!(error = %e, "audit emit_refused failed (non-fatal)");
-            }
-            return Err(err);
-        }
-    };
-
-    crate::audit::durability::record_admission(
-        params.emitter,
-        admitted.plan(),
-        admitted.signer_id(),
-        params.audit_durability,
-    )?;
+pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine> {
+    let backend = params.backend;
+    let admitted = params.admitted;
 
     // A refusal in any post-admission gate must still terminate the chain:
     // `plan.admitted` already fired, so a gate refusal emits `plan.failed`
     // carrying the refusing stage rather than leaving a dangling admission.
-    let config = match run_post_admission_gates(params.config, &admitted, params.policy_bundle) {
+    let mut config = match run_post_admission_gates(
+        params.config,
+        &admitted,
+        backend.kind(),
+        params.policy_bundle,
+    ) {
         Ok(config) => config,
         Err((stage, err)) => {
             if let Some(emitter) = params.emitter
@@ -1465,6 +2031,11 @@ pub fn admit_and_start(
             return Err(err.context(format!("admission gate refused ({stage})")));
         }
     };
+    if params.assurance.is_some() {
+        let proxy = crate::assurance_session::prepare_controller_proxy(&config.name)
+            .context("preparing admitted assurance controller proxy")?;
+        attach_assurance_proxy(&mut config, proxy)?;
+    }
 
     let backend_name = backend.name().to_string();
     let vm_name = config.name.clone();
@@ -1530,9 +2101,24 @@ pub fn admit_and_start(
             // launch they belong to. A refusal here fails the boot: a campaign
             // the operator declared and that silently did not open would be
             // reported as a trial that observed nothing.
-            if let Some(campaign) = params.assurance {
-                crate::assurance_session::open_for_boot(campaign, &vm_id.0, &admitted)
-                    .context("opening the declared assurance session")?;
+            if let Some(campaign) = params.assurance
+                && let Err(err) =
+                    crate::assurance_session::open_for_boot(campaign, &vm_id.0, &admitted)
+            {
+                // Rolls the launch back rather than returning with the VM up.
+                // The session opens after the backend start, so a bare `?`
+                // here left a running workload behind while reporting the boot
+                // as failed — and an orphan whose only record says it did not
+                // start is worse than either outcome alone.
+                return Err(undo_launch(UndoLaunch {
+                    backend,
+                    vm_id: &vm_id,
+                    admitted: &admitted,
+                    emitter: params.emitter,
+                    stage: "assurance-session",
+                    reason: "the declared assurance campaign could not be opened",
+                    err,
+                }));
             }
             Ok(StartedMachine {
                 vm_id,
@@ -1552,6 +2138,81 @@ pub fn admit_and_start(
     }
 }
 
+/// The single admitted-boot entrypoint every driver shares — the CLI's
+/// `mvmctl up`/`run` and the `mvm-client` local backend both reach it, so a
+/// workload can never boot on a path that skipped admission.
+///
+/// Order matters and is fail-closed: synthesize + sign + verify + validity +
+/// replay (+ bundle re-verify) run first, and any failure among them returns
+/// with **no VM created** — admission is a gate, not a formality. Only once the
+/// admission is recorded does this delegate to [`start_admitted`], which owns
+/// the rest of the order.
+#[tracing::instrument(skip_all)]
+pub fn admit_and_start(
+    backend: &AnyBackend,
+    params: AdmitAndStartParams<'_>,
+) -> Result<StartedMachine> {
+    // The tier comes from the backend that is about to boot this plan — the
+    // object itself, via its typed discriminant. Nothing here reads a backend
+    // name: the grant gate decides which resource controls a run is measured
+    // against, and deciding that from a string is how a plan ends up measured
+    // against a tier it is not running on.
+    let posture = RunPosture::on_backend(params.variant, backend.kind());
+
+    // Synthesize the plan up-front so a refusal can be recorded with the
+    // plan context if admission fails. Synthesis failures have no plan to
+    // anchor to; they propagate without a chain entry.
+    let plan = synthesize_plan(params.synthesis).context("synthesizing plan")?;
+
+    let admitted_result = match params.extension_ctx {
+        Some(extension_ctx) => admit_plan_for_run_with_extensions(
+            &plan,
+            params.clock,
+            params.ledger,
+            params.host_signer_keys_dir,
+            params.bundle_ctx,
+            extension_ctx,
+            posture,
+        ),
+        None => admit_plan_for_run(
+            &plan,
+            params.clock,
+            params.ledger,
+            params.host_signer_keys_dir,
+            params.bundle_ctx,
+            posture,
+        ),
+    };
+    let admitted = match admitted_result {
+        Ok(admitted) => admitted,
+        Err(err) => {
+            if let Some(emitter) = params.emitter
+                && let Err(e) =
+                    emitter.emit_refused(&plan, "admit_plan_for_run", &format!("{err:#}"))
+            {
+                tracing::warn!(error = %e, "audit emit_refused failed (non-fatal)");
+            }
+            return Err(err);
+        }
+    };
+
+    crate::audit::durability::record_admission(
+        params.emitter,
+        admitted.plan(),
+        admitted.signer_id(),
+        params.audit_durability,
+    )?;
+
+    start_admitted(StartAdmittedParams {
+        backend,
+        admitted,
+        config: params.config,
+        policy_bundle: params.policy_bundle,
+        emitter: params.emitter,
+        assurance: params.assurance,
+    })
+}
+
 #[cfg(test)]
 mod admitted_environment_tests {
     use super::*;
@@ -1562,13 +2223,6 @@ mod admitted_environment_tests {
             kernel_sha256: k.to_string(),
         });
         plan
-    }
-
-    fn config_with_kernel(kernel: Option<&std::path::Path>) -> VmStartConfig {
-        VmStartConfig {
-            kernel_path: kernel.map(|k| k.display().to_string()),
-            ..VmStartConfig::default()
-        }
     }
 
     fn write_kernel(dir: &std::path::Path, bytes: &[u8]) -> std::path::PathBuf {
@@ -1583,11 +2237,8 @@ mod admitted_environment_tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let kernel = write_kernel(tmp.path(), b"workload-kernel");
         let sha = mvm_core::crypto::image_verify::sha256_file(&kernel).expect("hash");
-        enforce_admitted_environment(
-            &config_with_kernel(Some(&kernel)),
-            &plan_pinning(Some(&sha)),
-        )
-        .expect("matching kernel must be admitted");
+        enforce_admitted_environment(Some(kernel.as_path()), &plan_pinning(Some(&sha)))
+            .expect("matching kernel must be admitted");
     }
 
     /// A different kernel than the plan pinned is refused: same plan, same
@@ -1600,11 +2251,8 @@ mod admitted_environment_tests {
         let sha = mvm_core::crypto::image_verify::sha256_file(&kernel).expect("hash");
         std::fs::write(&kernel, b"a-general-purpose-kernel").expect("swap kernel");
 
-        let err = enforce_admitted_environment(
-            &config_with_kernel(Some(&kernel)),
-            &plan_pinning(Some(&sha)),
-        )
-        .expect_err("a substituted kernel must be refused");
+        let err = enforce_admitted_environment(Some(kernel.as_path()), &plan_pinning(Some(&sha)))
+            .expect_err("a substituted kernel must be refused");
         let msg = format!("{err:#}");
         assert!(
             msg.contains("admitted-environment mismatch"),
@@ -1615,11 +2263,8 @@ mod admitted_environment_tests {
     /// Dropping the kernel path must not be a way around the pin.
     #[test]
     fn pinned_plan_with_no_kernel_path_is_refused() {
-        let err = enforce_admitted_environment(
-            &config_with_kernel(None),
-            &plan_pinning(Some(&"a".repeat(64))),
-        )
-        .expect_err("a pinned plan with no kernel path must be refused");
+        let err = enforce_admitted_environment(None, &plan_pinning(Some(&"a".repeat(64))))
+            .expect_err("a pinned plan with no kernel path must be refused");
         assert!(format!("{err:#}").contains("supplies no kernel path"));
     }
 
@@ -1629,9 +2274,9 @@ mod admitted_environment_tests {
     fn unpinned_plan_is_unaffected() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let kernel = write_kernel(tmp.path(), b"whatever");
-        enforce_admitted_environment(&config_with_kernel(Some(&kernel)), &plan_pinning(None))
+        enforce_admitted_environment(Some(kernel.as_path()), &plan_pinning(None))
             .expect("an unpinned plan must be unaffected");
-        enforce_admitted_environment(&config_with_kernel(None), &plan_pinning(None))
+        enforce_admitted_environment(None, &plan_pinning(None))
             .expect("an unpinned plan with no kernel must be unaffected");
     }
 }
@@ -1699,7 +2344,7 @@ mod tests {
         //    Privacy also means no `&mut` reaches a field, so a caller holding
         //    a legitimately-admitted plan cannot afterwards push a service
         //    grant into it that admission never saw.
-        for field in ["plan", "plan_id", "signer_id", "signed"] {
+        for field in ["plan", "plan_id", "signer_id", "signed", "extensions"] {
             assert!(
                 body.contains(&format!("\n    {field}: ")),
                 "`AdmittedPlan.{field}` must stay private — a pub field is a forge"
@@ -1732,11 +2377,11 @@ mod tests {
             "the test constructor must stay `#[cfg(test)]` and crate-private"
         );
 
-        // 5. And `admit_for_run` is the only place that writes the literal.
+        // 5. And `finish_admission` is the only place that writes the literal.
         let literals = production_source().matches("Ok(AdmittedPlan {").count();
         assert_eq!(
             literals, 1,
-            "exactly one production construction site, inside admit_for_run"
+            "exactly one production construction site, inside finish_admission"
         );
     }
 
@@ -1746,7 +2391,7 @@ mod tests {
             stream_edges: Vec::new(),
             kernel_sha256: None,
             network_mode: Default::default(),
-            l3_network: None,
+            ingress: Vec::new(),
             vm_name,
             tenant: None,
             backend_name: "firecracker",
@@ -1772,17 +2417,462 @@ mod tests {
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
+            caller_commitment: None,
             audit_labels: Default::default(),
             agent_verbs: None,
             services: Vec::new(),
+            extensions: Vec::new(),
             stream_retention: Default::default(),
+            attestation_mode: mvm_contract::plan::AttestationMode::Noop,
         }
     }
 
+    fn extension_binding(
+        placement: mvm_contract::protocol::extension_pack::ExtensionPlacement,
+    ) -> mvm_contract::protocol::extension_pack::ExtensionPlanBinding {
+        mvm_contract::protocol::extension_pack::ExtensionPlanBinding {
+            extension_id: mvm_contract::protocol::extension_pack::ExtensionId::parse(
+                "org.example.generic-extension",
+            )
+            .expect("valid fixture extension id"),
+            version: mvm_contract::protocol::extension_pack::ExtensionVersion::parse("1.0.0")
+                .expect("valid fixture extension version"),
+            pack_digest: [7; 32],
+            contract_digest: [8; 32],
+            placement,
+            artifact: "extension.ext4".to_string(),
+            entrypoint: "bin/extension".to_string(),
+            capabilities: vec![mvm_contract::assurance::probe_capability_descriptor().binding()],
+            budgets: mvm_contract::protocol::extension_pack::ExtensionBudgets {
+                cpu_millis: 500,
+                memory_bytes: 128 * 1024 * 1024,
+                duration_ms: 30_000,
+                max_steps: 12,
+                max_concurrency: 1,
+                max_payload_bytes: 16 * 1024,
+                max_output_bytes: 16 * 1024,
+                max_artifact_bytes: 1024 * 1024,
+            },
+        }
+    }
+
+    fn extension_contract(
+        binding: &mvm_contract::protocol::extension_pack::ExtensionPlanBinding,
+    ) -> mvm_contract::protocol::extension_pack::ExtensionPackContract {
+        mvm_contract::protocol::extension_pack::ExtensionPackContract {
+            schema: mvm_contract::protocol::extension_pack::EXTENSION_PACK_SCHEMA.to_string(),
+            extension_id: binding.extension_id.clone(),
+            version: binding.version.clone(),
+            protocol: mvm_contract::protocol::extension_pack::ExtensionProtocolRange {
+                min_mvm_version: mvm_contract::protocol::extension_pack::ExtensionVersion::parse(
+                    "0.18.0",
+                )
+                .expect("valid minimum extension version"),
+                max_mvm_version: mvm_contract::protocol::extension_pack::ExtensionVersion::parse(
+                    "0.18.9",
+                )
+                .expect("valid maximum extension version"),
+                min_protocol: 1,
+                max_protocol: 1,
+            },
+            placement: binding.placement,
+            artifact: binding.artifact.clone(),
+            entrypoint: binding.entrypoint.clone(),
+            capabilities: vec![mvm_contract::assurance::probe_capability_descriptor()],
+            budgets: binding.budgets,
+            revocation_identity: "org.example.generic-extension.release".to_string(),
+            permission_delta: "May execute one declared assurance probe.".to_string(),
+        }
+    }
+
+    fn admitted_with_extension(
+        binding: mvm_contract::protocol::extension_pack::ExtensionPlanBinding,
+        root: &std::path::Path,
+    ) -> AdmittedPlan {
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .extensions(vec![binding.clone()])
+            .build();
+        let signer_id = "host:extension-test".to_string();
+        let signed = mvm_core::plan::signing::sign_plan(
+            &plan,
+            &ed25519_dalek::SigningKey::from_bytes(&[31; 32]),
+            &signer_id,
+        );
+        let mut admitted = AdmittedPlan::for_test(plan, signer_id, signed);
+        admitted.extensions.push(AdmittedExtension {
+            binding,
+            root: root.to_path_buf(),
+        });
+        admitted
+    }
+
+    #[test]
+    fn extension_budget_comparison_requires_every_dimension() {
+        let maximum = extension_binding(
+            mvm_contract::protocol::extension_pack::ExtensionPlacement::GuestWorkload,
+        )
+        .budgets;
+        assert!(budgets_are_narrower(maximum, maximum));
+
+        let mut candidates = Vec::new();
+        let mut candidate = maximum;
+        candidate.cpu_millis += 1;
+        candidates.push(candidate);
+        let mut candidate = maximum;
+        candidate.memory_bytes += 1;
+        candidates.push(candidate);
+        let mut candidate = maximum;
+        candidate.duration_ms += 1;
+        candidates.push(candidate);
+        let mut candidate = maximum;
+        candidate.max_steps += 1;
+        candidates.push(candidate);
+        let mut candidate = maximum;
+        candidate.max_concurrency += 1;
+        candidates.push(candidate);
+        let mut candidate = maximum;
+        candidate.max_payload_bytes += 1;
+        candidates.push(candidate);
+        let mut candidate = maximum;
+        candidate.max_output_bytes += 1;
+        candidates.push(candidate);
+        let mut candidate = maximum;
+        candidate.max_artifact_bytes += 1;
+        candidates.push(candidate);
+
+        for candidate in candidates {
+            assert!(
+                !budgets_are_narrower(candidate, maximum),
+                "one widened budget dimension must refuse the whole binding"
+            );
+        }
+    }
+
+    #[test]
+    fn extension_binding_identity_requires_every_verified_field() {
+        let mut binding = extension_binding(
+            mvm_contract::protocol::extension_pack::ExtensionPlacement::GuestWorkload,
+        );
+        let contract = extension_contract(&binding);
+        let contract_digest: [u8; 32] = Sha256::digest(
+            serde_json::to_vec(&contract).expect("encode extension contract fixture"),
+        )
+        .into();
+        binding.contract_digest = contract_digest;
+        assert!(extension_binding_matches_contract(
+            &binding,
+            &contract,
+            contract_digest
+        ));
+
+        let mut mismatches = Vec::new();
+        let mut mismatch = binding.clone();
+        mismatch.extension_id =
+            mvm_contract::protocol::extension_pack::ExtensionId::parse("org.example.other")
+                .expect("valid alternate extension id");
+        mismatches.push(mismatch);
+        let mut mismatch = binding.clone();
+        mismatch.version = mvm_contract::protocol::extension_pack::ExtensionVersion::parse("1.0.1")
+            .expect("valid alternate extension version");
+        mismatches.push(mismatch);
+        let mut mismatch = binding.clone();
+        mismatch.contract_digest[0] ^= 1;
+        mismatches.push(mismatch);
+        let mut mismatch = binding.clone();
+        mismatch.placement =
+            mvm_contract::protocol::extension_pack::ExtensionPlacement::IsolatedController;
+        mismatches.push(mismatch);
+        let mut mismatch = binding.clone();
+        mismatch.artifact.push_str(".other");
+        mismatches.push(mismatch);
+        let mut mismatch = binding.clone();
+        mismatch.entrypoint.push_str("-other");
+        mismatches.push(mismatch);
+
+        for mismatch in mismatches {
+            assert!(
+                !extension_binding_matches_contract(&mismatch, &contract, contract_digest),
+                "one mismatched identity field must refuse the whole binding"
+            );
+        }
+    }
+
+    #[test]
+    fn extension_artifact_budget_is_inclusive_at_the_exact_limit() {
+        assert!(!extension_artifact_exceeds_budget(7, 8));
+        assert!(!extension_artifact_exceeds_budget(8, 8));
+        assert!(extension_artifact_exceeds_budget(9, 8));
+    }
+
+    #[test]
+    fn extension_attachment_sets_plan_identity_and_refuses_controller_placement() {
+        let root = tempfile::tempdir().expect("extension root");
+        let guest_binding = extension_binding(
+            mvm_contract::protocol::extension_pack::ExtensionPlacement::GuestWorkload,
+        );
+        let admitted = admitted_with_extension(guest_binding.clone(), root.path());
+        let mut config = mvm_core::vm_backend::VmStartConfig::default();
+        attach_admitted_extensions(&mut config, &admitted)
+            .expect("an admitted guest extension attaches");
+        assert_eq!(
+            config.extension_plan_id.as_deref(),
+            Some(admitted.plan_id().0.as_str())
+        );
+        assert_eq!(config.extensions, vec![guest_binding]);
+        assert_eq!(config.volumes.len(), 1);
+        let error = attach_admitted_extensions(&mut config, &admitted)
+            .expect_err("the same guest mountpoint must not attach twice");
+        assert!(error.to_string().contains("mountpoint collision"));
+
+        let controller_binding = extension_binding(
+            mvm_contract::protocol::extension_pack::ExtensionPlacement::IsolatedController,
+        );
+        let admitted = admitted_with_extension(controller_binding, root.path());
+        let error = attach_admitted_extensions(
+            &mut mvm_core::vm_backend::VmStartConfig::default(),
+            &admitted,
+        )
+        .expect_err("a controller extension must never reach guest attachment");
+        assert!(error.to_string().contains("isolated_controller"));
+    }
+
+    #[test]
+    fn assurance_proxy_attachment_refuses_a_duplicate_service() {
+        let proxy = mvm_contract::protocol::broker_control::ServiceProxyBinding {
+            service: mvm_contract::protocol::broker::ServiceId::parse(
+                mvm_contract::assurance::HOST_ASSURANCE_SERVICE,
+            )
+            .expect("valid assurance service"),
+            endpoint: "/tmp/mvm-assurance-test.sock".to_string(),
+            capabilities: vec![mvm_contract::assurance::probe_capability_descriptor()],
+        };
+        let mut config = mvm_core::vm_backend::VmStartConfig::default();
+        config.service_proxies.push(proxy.clone());
+        let error = attach_assurance_proxy(&mut config, proxy)
+            .expect_err("the same controller service must not be attached twice");
+        assert!(error.to_string().contains("already configured"));
+    }
+
+    #[test]
+    fn extension_binding_requires_the_signed_dispatch_verb() {
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new()
+            .services(vec![
+                mvm_contract::protocol::broker::ServiceId::parse(
+                    mvm_contract::assurance::HOST_ASSURANCE_SERVICE,
+                )
+                .expect("valid fixture service"),
+            ])
+            .extensions(vec![extension_binding(
+                mvm_contract::protocol::extension_pack::ExtensionPlacement::GuestWorkload,
+            )])
+            .build();
+
+        let error = validate_extension_bindings(&plan)
+            .expect_err("an extension plan without the dispatch verb must be refused");
+        assert!(error.to_string().contains("run-extension"));
+
+        plan.agent_verbs = Some(vec![
+            mvm_contract::plan::VerbId::new("run-extension").expect("valid fixture verb"),
+        ]);
+        let error = validate_extension_bindings(&plan)
+            .expect_err("an extension plan without the cancellation verb must be refused");
+        assert!(error.to_string().contains("cancel-extension"));
+
+        plan.agent_verbs = Some(vec![
+            mvm_contract::plan::VerbId::new("run-extension").expect("valid fixture verb"),
+            mvm_contract::plan::VerbId::new("cancel-extension").expect("valid fixture verb"),
+        ]);
+        validate_extension_bindings(&plan).expect("the exact signed verb admits dispatch");
+    }
+
+    #[test]
+    fn unsupported_extension_placement_fails_closed() {
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new()
+            .services(vec![
+                mvm_contract::protocol::broker::ServiceId::parse(
+                    mvm_contract::assurance::HOST_ASSURANCE_SERVICE,
+                )
+                .expect("valid fixture service"),
+            ])
+            .extensions(vec![extension_binding(
+                mvm_contract::protocol::extension_pack::ExtensionPlacement::IsolatedController,
+            )])
+            .build();
+        plan.agent_verbs = Some(vec![
+            mvm_contract::plan::VerbId::new("run-extension").expect("valid fixture verb"),
+            mvm_contract::plan::VerbId::new("cancel-extension").expect("valid fixture verb"),
+        ]);
+
+        let error = validate_extension_bindings(&plan)
+            .expect_err("an unimplemented placement must never fall through to guest dispatch");
+        assert!(error.to_string().contains("not executable"));
+    }
+
+    /// A musl guest cannot load the glibc cdylib, and the failure would
+    /// otherwise land inside the guest at `dlopen` time as a relocation error
+    /// naming a symbol the operator never heard of. Refuse on the host, where
+    /// the cause can be named.
+    /// Stage a rootfs whose `mvm-meta.json` records `libc`, and hand back the
+    /// rootfs path the launch would boot.
+    fn rootfs_recording_libc(dir: &std::path::Path, libc: GuestLibc) -> String {
+        let sidecar = mvm_build::builder_vm::GuestSidecar::for_oci_run("fixture", false, false)
+            .with_libc(libc);
+        sidecar.write_to_dir(dir).expect("write mvm-meta.json");
+        dir.join("rootfs.ext4").to_string_lossy().into_owned()
+    }
+
+    /// The launch-shaped entry point reads the image's libc off the rootfs
+    /// rather than taking it on trust, so a caller cannot pass a libc that
+    /// disagrees with the image it is about to boot.
+    #[test]
+    fn the_launch_gate_reads_the_libc_off_the_rootfs_it_is_given() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plan = plan_binding(&["host.kv.v1"]);
+
+        let musl_rootfs = rootfs_recording_libc(dir.path(), GuestLibc::Musl);
+        enforce_sdk_sidecar_for_launch(
+            &musl_rootfs,
+            &[sdk_sidecar_volume_for(GuestLibc::Musl)],
+            &plan,
+        )
+        .expect("a musl image may load the musl sidecar");
+
+        let err = enforce_sdk_sidecar_for_launch(
+            &musl_rootfs,
+            &[sdk_sidecar_volume_for(GuestLibc::Glibc)],
+            &plan,
+        )
+        .expect_err("a musl image must not receive the glibc sidecar");
+        let msg = err.to_string();
+        assert!(msg.contains("musl") && msg.contains("glibc"), "{msg}");
+    }
+
+    /// A rootfs with no sidecar beside it records nothing, and an image whose
+    /// libc cannot be established is refused rather than assumed loadable.
+    #[test]
+    fn the_launch_gate_refuses_an_image_recording_no_libc() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plan = plan_binding(&["host.kv.v1"]);
+        let rootfs = dir
+            .path()
+            .join("rootfs.ext4")
+            .to_string_lossy()
+            .into_owned();
+
+        let err = enforce_sdk_sidecar_for_launch(
+            &rootfs,
+            &[sdk_sidecar_volume_for(GuestLibc::Musl)],
+            &plan,
+        )
+        .expect_err("an image of unknown libc must not receive a sidecar");
+
+        assert!(
+            err.to_string().contains("records no libc"),
+            "the refusal must say the image is the unknown side: {err}"
+        );
+    }
+
+    /// A sidecar whose path carries no libc segment cannot be identified, and
+    /// an unidentifiable variant is refused rather than assumed to match. Any
+    /// path this layout did not write reads that way — the check is on what the
+    /// launch config presents, not on where it came from.
+    #[test]
+    fn a_sidecar_filed_under_no_libc_is_refused() {
+        use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
+        let plan = plan_binding(&["host.kv.v1"]);
+        let unkeyed = VmVolume {
+            host: "/cache/sdk-sidecar/1.2.3/aarch64/sdk.ext4".into(),
+            guest: mvm_core::plan::SDK_SIDECAR_GUEST_PATH.into(),
+            read_only: true,
+            kind: VmVolumeKind::Disk,
+            ..Default::default()
+        };
+
+        let err = enforce_sdk_sidecar_attachment(&[unkeyed], &plan, GuestLibc::Musl)
+            .expect_err("a sidecar of unknown variant must not be attached");
+
+        assert!(
+            err.to_string().contains("sdk-sidecar build"),
+            "the refusal must say how to repopulate the cache: {err}"
+        );
+    }
+
+    #[test]
+    fn a_sidecar_the_guest_cannot_load_is_refused_before_boot() {
+        let plan = plan_binding(&["host.kv.v1"]);
+        let err = enforce_sdk_sidecar_attachment(
+            &[sdk_sidecar_volume_for(GuestLibc::Glibc)],
+            &plan,
+            GuestLibc::Musl,
+        )
+        .expect_err("a musl image must not receive the glibc sidecar");
+        let msg = err.to_string();
+        assert!(msg.contains("musl"), "must name the image's libc: {msg}");
+        assert!(msg.contains("glibc"), "must name the sidecar's libc: {msg}");
+        assert!(
+            msg.contains("host.kv.v1"),
+            "must name the binding that asked for it: {msg}"
+        );
+    }
+
+    /// Unknown is the arm a permissive default would wave through. It covers an
+    /// image materialized before mvm recorded the libc, so the message has to
+    /// say how to make it known rather than just refusing.
+    #[test]
+    fn an_unknown_libc_is_refused_and_says_how_to_resolve_it() {
+        let plan = plan_binding(&["host.kv.v1"]);
+        let err = enforce_sdk_sidecar_attachment(
+            &[sdk_sidecar_volume()],
+            &plan,
+            mvm_build::guest_libc::GuestLibc::Unknown,
+        )
+        .expect_err("an unrecorded libc must not be attached on a guess");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("re-pull or rebuild"),
+            "must name the remedy: {msg}"
+        );
+    }
+
+    /// The libc gate must sit behind the binding check: a workload that binds
+    /// no SDK service carries no sidecar, so its libc is irrelevant and must
+    /// not refuse the boot.
+    #[test]
+    fn an_unbound_workload_is_unaffected_by_its_libc() {
+        let plan = plan_binding(&[]);
+        assert!(
+            enforce_sdk_sidecar_attachment(&[], &plan, mvm_build::guest_libc::GuestLibc::Unknown)
+                .is_ok()
+        );
+    }
+
+    /// The libc the shipped cdylib is built for. These tests assert attachment
+    /// *shape* — count, read-only, kind — so they hold the libc loadable and
+    /// let the dedicated libc tests vary it.
+    /// One libc for both sides of the admission fixtures: what the image
+    /// records and what the sidecar was filed under have to agree for the
+    /// attachment to be admissible, and these tests are about the other rules.
+    const LOADABLE_LIBC: GuestLibc = GuestLibc::Musl;
+
+    /// A sidecar volume shaped the way the resolver actually hands one over:
+    /// filed under its libc, because that segment is where the gate reads the
+    /// variant from. A path without it is not a lesser fixture, it is a
+    /// different case — covered by
+    /// `a_sidecar_filed_under_no_libc_is_refused`.
     fn sdk_sidecar_volume() -> mvm_core::vm_backend::VmVolume {
+        sdk_sidecar_volume_for(LOADABLE_LIBC)
+    }
+
+    /// The same volume filed under an arbitrary libc, so a test can state both
+    /// sides of the comparison instead of leaning on which one the shared
+    /// fixture happens to use.
+    fn sdk_sidecar_volume_for(libc: GuestLibc) -> mvm_core::vm_backend::VmVolume {
         use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
         VmVolume {
-            host: "/cache/sdk-sidecar/1.2.3/aarch64/sdk.ext4".into(),
+            host: format!(
+                "/cache/sdk-sidecar/1.2.3/aarch64/{}/sdk.ext4",
+                libc.as_str()
+            ),
             guest: mvm_core::plan::SDK_SIDECAR_GUEST_PATH.into(),
             read_only: true,
             kind: VmVolumeKind::Disk,
@@ -1811,6 +2901,58 @@ mod tests {
 
     /// Claim 1: a volume that the signed plan didn't admit — or that
     /// mismatches the admitted ro/rw — is refused before launch.
+    /// Materializing a granted directory must not change what it has to be
+    /// granted *as*.
+    ///
+    /// `enforce_admitted_shares` is the trust-boundary hook for claim 1: a
+    /// volume reaches a guest only if the signed plan admitted that exact
+    /// host path, guest path and kind. `--mount` now attaches an ext4 image
+    /// rather than the directory, and the volume records which image in
+    /// `materialized_image` — but `host` stays the directory that was
+    /// granted, so the grant still matches.
+    ///
+    /// This is not cosmetic. Had the materialized mount become a `Disk` whose
+    /// `host` was the image under `~/.mvm`, this check would compare that path
+    /// against the granted directory and refuse the boot. The field exists so
+    /// the transport can change without the grant changing.
+    #[test]
+    fn a_materialized_grant_still_satisfies_the_directory_share_it_was_granted_as() {
+        let grant = mvm_core::plan::HostShareGrant {
+            tag: "uvol0".into(),
+            host_path: "/h/src".into(),
+            guest_path: "/data".into(),
+            kind: mvm_core::plan::ShareKind::DirShare,
+            read_only: true,
+            encrypted: false,
+        };
+        let mut input = fixture_input("vm-materialized-share");
+        input.shares = vec![grant];
+        let plan = synthesize_plan(&input).unwrap();
+
+        let materialized = mvm_core::vm_backend::VmVolume {
+            host: "/h/src".into(),
+            guest: "/data".into(),
+            read_only: true,
+            kind: mvm_core::vm_backend::VmVolumeKind::DirShare,
+            materialized_image: Some("/state/mount-0.ext4".into()),
+            volume_label: None,
+            ..Default::default()
+        };
+        enforce_admitted_shares(std::slice::from_ref(&materialized), &plan)
+            .expect("a materialized grant is still the grant that was admitted");
+
+        // And the image path is not what is checked: a volume claiming a host
+        // path nobody granted is refused whatever it materialized into.
+        let ungranted = mvm_core::vm_backend::VmVolume {
+            host: "/state/mount-0.ext4".into(),
+            ..materialized.clone()
+        };
+        assert!(
+            enforce_admitted_shares(std::slice::from_ref(&ungranted), &plan).is_err(),
+            "only the granted host path may reach a guest"
+        );
+    }
+
     #[test]
     fn enforce_admitted_shares_refuses_unadmitted_or_mismatched() {
         use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
@@ -1860,9 +3002,9 @@ mod tests {
     #[test]
     fn no_sdk_binding_means_no_sidecar_attachment() {
         let plan = plan_binding(&[]);
-        assert!(enforce_sdk_sidecar_attachment(&[], &plan).is_ok());
+        assert!(enforce_sdk_sidecar_attachment(&[], &plan, LOADABLE_LIBC).is_ok());
 
-        let err = enforce_sdk_sidecar_attachment(&[sdk_sidecar_volume()], &plan)
+        let err = enforce_sdk_sidecar_attachment(&[sdk_sidecar_volume()], &plan, LOADABLE_LIBC)
             .expect_err("an unauthorized sidecar must be refused");
         let msg = err.to_string();
         assert!(msg.contains("binds no SDK host service"), "{msg}");
@@ -1873,8 +3015,10 @@ mod tests {
     #[test]
     fn unrelated_service_binding_does_not_require_the_sidecar() {
         let plan = plan_binding(&["broker.v1", "host.other.v1"]);
-        assert!(enforce_sdk_sidecar_attachment(&[], &plan).is_ok());
-        assert!(enforce_sdk_sidecar_attachment(&[sdk_sidecar_volume()], &plan).is_err());
+        assert!(enforce_sdk_sidecar_attachment(&[], &plan, LOADABLE_LIBC).is_ok());
+        assert!(
+            enforce_sdk_sidecar_attachment(&[sdk_sidecar_volume()], &plan, LOADABLE_LIBC).is_err()
+        );
     }
 
     /// A bound SDK host service with the sidecar attached read-only is admitted.
@@ -1883,10 +3027,42 @@ mod tests {
         for service in mvm_core::plan::SDK_HOST_SERVICES {
             let plan = plan_binding(&[service]);
             assert!(
-                enforce_sdk_sidecar_attachment(&[sdk_sidecar_volume()], &plan).is_ok(),
+                enforce_sdk_sidecar_attachment(&[sdk_sidecar_volume()], &plan, LOADABLE_LIBC)
+                    .is_ok(),
                 "{service} bound + sidecar attached read-only must be admitted"
             );
         }
+    }
+
+    /// Wasm has neither block devices nor a native dynamic loader, so the
+    /// ext4-hosted SDK cdylib cannot reach that tier. Refuse in terms of the
+    /// requested service before the backend leaks a synthetic disk-volume
+    /// implementation detail.
+    #[test]
+    fn wasm_sdk_binding_is_refused_at_the_delivery_seam() {
+        let plan = plan_binding(&["host.time.v1"]);
+        let err = enforce_sdk_sidecar_backend_compatibility(
+            mvm_core::vm_backend::BackendKind::Wasm,
+            &plan,
+        )
+        .expect_err("wasm cannot receive or load the SDK sidecar");
+        let msg = err.to_string();
+        assert!(msg.contains("wasm"), "{msg}");
+        assert!(msg.contains("host.time.v1"), "{msg}");
+        assert!(msg.contains("SDK host service"), "{msg}");
+        assert!(!msg.contains("DiskVolumeNotSupported"), "{msg}");
+    }
+
+    #[test]
+    fn microvm_backend_keeps_the_sdk_sidecar_delivery_path() {
+        let plan = plan_binding(&["host.time.v1"]);
+        assert!(
+            enforce_sdk_sidecar_backend_compatibility(
+                mvm_core::vm_backend::BackendKind::Firecracker,
+                &plan,
+            )
+            .is_ok()
+        );
     }
 
     /// A bound SDK host service with no sidecar attachment fails closed, and the
@@ -1894,7 +3070,7 @@ mod tests {
     #[test]
     fn sdk_binding_without_the_sidecar_fails_closed() {
         let plan = plan_binding(&["host.secrets.v1"]);
-        let err = enforce_sdk_sidecar_attachment(&[], &plan)
+        let err = enforce_sdk_sidecar_attachment(&[], &plan, LOADABLE_LIBC)
             .expect_err("a required-but-absent sidecar must refuse the launch");
         let msg = err.to_string();
         assert!(msg.contains("host.secrets.v1"), "{msg}");
@@ -1915,14 +3091,16 @@ mod tests {
             read_only: false,
             ..sdk_sidecar_volume()
         };
-        let err = enforce_sdk_sidecar_attachment(&[writable], &plan).expect_err("rw refused");
+        let err = enforce_sdk_sidecar_attachment(&[writable], &plan, LOADABLE_LIBC)
+            .expect_err("rw refused");
         assert!(err.to_string().contains("read-only"), "{err}");
 
         let share = mvm_core::vm_backend::VmVolume {
             kind: VmVolumeKind::DirShare,
             ..sdk_sidecar_volume()
         };
-        let err = enforce_sdk_sidecar_attachment(&[share], &plan).expect_err("share refused");
+        let err = enforce_sdk_sidecar_attachment(&[share], &plan, LOADABLE_LIBC)
+            .expect_err("share refused");
         assert!(err.to_string().contains("disk image"), "{err}");
     }
 
@@ -1932,7 +3110,8 @@ mod tests {
     fn duplicate_sidecar_attachments_fail_closed() {
         let plan = plan_binding(&["host.time.v1"]);
         let dup = [sdk_sidecar_volume(), sdk_sidecar_volume()];
-        let err = enforce_sdk_sidecar_attachment(&dup, &plan).expect_err("duplicates refused");
+        let err = enforce_sdk_sidecar_attachment(&dup, &plan, LOADABLE_LIBC)
+            .expect_err("duplicates refused");
         assert!(err.to_string().contains("exactly one"), "{err}");
     }
 
@@ -1948,15 +3127,25 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            enforce_sdk_sidecar_attachment(std::slice::from_ref(&other), &plan_binding(&[]))
-                .is_ok()
+            enforce_sdk_sidecar_attachment(
+                std::slice::from_ref(&other),
+                &plan_binding(&[]),
+                LOADABLE_LIBC
+            )
+            .is_ok()
         );
         let bound = plan_binding(&["host.cost.v1"]);
         assert!(
-            enforce_sdk_sidecar_attachment(&[other.clone(), sdk_sidecar_volume()], &bound).is_ok()
+            enforce_sdk_sidecar_attachment(
+                &[other.clone(), sdk_sidecar_volume()],
+                &bound,
+                LOADABLE_LIBC
+            )
+            .is_ok()
         );
         assert!(
-            enforce_sdk_sidecar_attachment(std::slice::from_ref(&other), &bound).is_err(),
+            enforce_sdk_sidecar_attachment(std::slice::from_ref(&other), &bound, LOADABLE_LIBC)
+                .is_err(),
             "an unrelated volume must not satisfy the sidecar requirement"
         );
     }
@@ -1970,7 +3159,9 @@ mod tests {
         let back: ExecutionPlan = serde_json::from_str(&json).expect("plan round-trips");
         assert_eq!(back.services, plan.services);
         assert!(mvm_core::plan::sdk_sidecar_required(&back));
-        assert!(enforce_sdk_sidecar_attachment(&[sdk_sidecar_volume()], &back).is_ok());
+        assert!(
+            enforce_sdk_sidecar_attachment(&[sdk_sidecar_volume()], &back, LOADABLE_LIBC).is_ok()
+        );
     }
 
     // ---- grants: the ceiling, and what the tier can actually enforce ----
@@ -3239,6 +4430,11 @@ mod tests {
             admitted.plan().nonce.as_hex(),
             "nonce hex must match plan"
         );
+        assert_eq!(
+            envelope.grant.not_after,
+            admitted.plan().valid_until,
+            "a verb grant must not outlive its admitted plan"
+        );
         let pub_arr: [u8; 32] = hex::decode(&envelope.pubkey_hex)
             .unwrap()
             .try_into()
@@ -3373,6 +4569,7 @@ mod tests {
                 ledger: &ledger,
                 host_signer_keys_dir: Some(dir.path()),
                 bundle_ctx: None,
+                extension_ctx: None,
                 variant: Variant::Dev,
                 policy_bundle: None,
                 emitter: None,
@@ -3391,6 +4588,114 @@ mod tests {
             backend.status(&started.vm_id).unwrap(),
             mvm_core::vm_backend::VmStatus::Running
         ));
+    }
+
+    #[test]
+    fn a_campaign_that_cannot_open_rolls_the_launch_back() {
+        // The session opens *after* the backend start, so a failure there used
+        // to return with the workload still running.
+        //
+        // The campaign declares no destination, which `open` refuses whether or
+        // not a plane happens to be installed. Asserting on the absence of the
+        // process-global plane instead would make this test depend on run
+        // order — a `OnceLock` admits one value and the neighbouring test
+        // installs it, so it would pass under nextest and flake under
+        // `cargo test`.
+        use std::sync::Arc;
+
+        use mvm_contract::assurance::{
+            ApprovalSet, AssuranceId, ObservationScope, RequestedAuthority, Sha256Digest, ToolId,
+        };
+
+        use crate::assurance_session::{
+            CampaignDeclaration, CampaignRequest, default_policy_ceiling,
+        };
+
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let dir = tempfile::tempdir().unwrap();
+        let audit = tempfile::tempdir().unwrap();
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let ledger = InMemoryNonceLedger::new();
+        let emitter = Arc::new(
+            crate::audit::emitter::AuditEmitter::with_dir(
+                ed25519_dalek::SigningKey::from_bytes(&[41u8; 32]),
+                audit.path(),
+            )
+            .expect("emitter"),
+        );
+        let id = |raw: &str| AssuranceId::parse(raw).expect("identifier");
+        let declaration = CampaignDeclaration {
+            request_id: id("mvm-request-rollback"),
+            idempotency_key: id("trial-retry-rollback"),
+            campaign_id: id("mvm-campaign-9"),
+            trial_id: id("trial-9"),
+            source_run_id: id("scout-9"),
+            source_digest: Sha256Digest::parse(format!("sha256:{}", "5".repeat(64)))
+                .expect("digest"),
+            artifact_digest: Sha256Digest::parse(format!("sha256:{}", "6".repeat(64)))
+                .expect("artifact digest"),
+            edges: Vec::new(),
+            approvals: ApprovalSet::none().with(ToolId::CampaignProbeV1),
+            requested: RequestedAuthority {
+                allowed_tools: vec![ToolId::CampaignProbeV1],
+                observation_scopes: vec![ObservationScope::HostAuditRefs],
+                max_steps: 4,
+                max_output_bytes: 4096,
+                deadline_unix_ms: 0,
+            },
+            grant_ttl_ms: 600_000,
+        };
+        let campaign = CampaignRequest {
+            declaration,
+            emitter: Arc::clone(&emitter),
+            policy_ceiling: default_policy_ceiling(),
+            policy: mvm_core::policy::network_policy::NetworkPolicy::deny_all(),
+            backend: "mock".to_string(),
+            now_unix_ms: 1_800_000_000_000,
+        };
+
+        let service =
+            mvm_core::protocol::broker::ServiceId::parse("host.assurance.v1").expect("service id");
+        let mut synthesis = fixture_input("vm-rollback");
+        synthesis.services = vec![service];
+        let config = mvm_core::vm_backend::VmStartConfig {
+            name: "vm-rollback".into(),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            ..Default::default()
+        };
+
+        let err = admit_and_start(
+            &backend,
+            AdmitAndStartParams {
+                synthesis: &synthesis,
+                config,
+                clock: &SystemClock,
+                ledger: &ledger,
+                host_signer_keys_dir: Some(dir.path()),
+                bundle_ctx: None,
+                extension_ctx: None,
+                variant: Variant::Dev,
+                policy_bundle: None,
+                emitter: Some(&emitter),
+                audit_durability: crate::audit::durability::AuditDurability::BestEffort,
+                assurance: Some(&campaign),
+            },
+        )
+        .expect_err("a campaign declaring no destination cannot open");
+        // Deliberately not asserted on the message: which refusal fires
+        // depends on whether a neighbouring test installed the process-global
+        // plane first (`NoPlane`) or not (`NoEdges`). Both roll the launch
+        // back, and the rollback is the property under test.
+        let _ = &err;
+
+        // The whole point: no workload is left running behind the failure.
+        assert!(
+            !matches!(
+                backend.status(&mvm_core::vm_backend::VmId("vm-rollback".into())),
+                Ok(mvm_core::vm_backend::VmStatus::Running)
+            ),
+            "a campaign that could not open must not leave the VM up"
+        );
     }
 
     #[test]
@@ -3431,11 +4736,15 @@ mod tests {
         );
         let id = |raw: &str| AssuranceId::parse(raw).expect("identifier");
         let declaration = CampaignDeclaration {
+            request_id: id("mvm-request-1"),
+            idempotency_key: id("trial-retry-1"),
             campaign_id: id("mvm-campaign-1"),
             trial_id: id("trial-1"),
             source_run_id: id("scout-1"),
             source_digest: Sha256Digest::parse(format!("sha256:{}", "3".repeat(64)))
                 .expect("digest"),
+            artifact_digest: Sha256Digest::parse(format!("sha256:{}", "b".repeat(64)))
+                .expect("artifact digest"),
             edges: vec![DeclaredEdge {
                 label: id("undeclared.synthetic.destination"),
                 host: "attacker.example.com".to_string(),
@@ -3465,6 +4774,165 @@ mod tests {
             mvm_core::protocol::broker::ServiceId::parse("host.assurance.v1").expect("service id");
         let mut synthesis = fixture_input("vm-assurance");
         synthesis.services = vec![service];
+        struct Trust(ed25519_dalek::VerifyingKey);
+        impl mvm_core::packs::PackTrustStore for Trust {
+            fn verifying_key(
+                &self,
+                _key_id: &mvm_core::plan::bundle::KeyId,
+            ) -> Option<ed25519_dalek::VerifyingKey> {
+                Some(self.0)
+            }
+        }
+        struct Revocations;
+        impl mvm_core::packs::PackRevocationChecker for Revocations {
+            fn status(
+                &self,
+                _key_id: &mvm_core::plan::bundle::KeyId,
+                _pack_hash: &mvm_core::packs::Sha256Hex,
+            ) -> mvm_core::packs::RevocationStatus {
+                mvm_core::packs::RevocationStatus::Good
+            }
+        }
+        let staged = tempfile::tempdir().expect("extension staging");
+        std::fs::write(
+            staged.path().join("extension.ext4"),
+            b"fixture extension filesystem",
+        )
+        .expect("write extension artifact");
+        let pack_key = ed25519_dalek::SigningKey::from_bytes(&[45; 32]);
+        let pack_policy_hash = mvm_core::packs::Sha256Hex::from_bytes(b"extension-policy");
+        let pack_metadata = mvm_core::packs::PackMetadata {
+            kind: mvm_core::packs::PackKind::Extension,
+            target_arch: mvm_core::arch::GuestArch::host(),
+            backend_compatibility: vec![mvm_core::packs::PackBackend::Firecracker],
+            required_host_capabilities: vec![mvm_core::packs::HostCapability("vsock".to_string())],
+            policy_compatibility: mvm_core::packs::PolicyCompatibility {
+                policy_hash: pack_policy_hash.clone(),
+                local_rebuild_required: false,
+                allowed_channels: vec!["stable".to_string()],
+            },
+            inputs: mvm_core::packs::PackInputs {
+                flake_locks: Vec::new(),
+                derivations: Vec::new(),
+                nar_hashes: Vec::new(),
+                oci_images: Vec::new(),
+                setup_commands: Vec::new(),
+                source_revisions: Vec::new(),
+                toolchain_versions: Default::default(),
+            },
+            provenance: mvm_core::packs::PackProvenanceMeta {
+                builder_identity: "assurance-release".to_string(),
+                build_environment_identity: "test".to_string(),
+                build_timestamp: Utc::now(),
+                reproducibility: mvm_core::packs::ReproducibilityStatus::NotChecked,
+                sbom: mvm_core::packs::SbomReference {
+                    uri: "urn:sbom:extension".to_string(),
+                    sha256: mvm_core::packs::Sha256Hex::from_bytes(b"sbom"),
+                },
+            },
+            trust: mvm_core::packs::PackTrustMeta {
+                expires_at: Utc.with_ymd_and_hms(2100, 1, 1, 0, 0, 0).unwrap(),
+                revocation_channel: "https://example.invalid/revocations".to_string(),
+                channel_identity: "stable".to_string(),
+                mirror_identity: None,
+                transparency_log: None,
+            },
+            signature: mvm_core::packs::SignatureValidity {
+                signed_at: Utc::now(),
+                expires_at: Utc.with_ymd_and_hms(2100, 1, 1, 0, 0, 0).unwrap(),
+            },
+        };
+        let extension_budgets = mvm_contract::protocol::extension_pack::ExtensionBudgets {
+            cpu_millis: 500,
+            memory_bytes: 128 * 1024 * 1024,
+            duration_ms: 600_000,
+            max_steps: 12,
+            max_concurrency: 1,
+            max_payload_bytes: 16 * 1024,
+            max_output_bytes: 16 * 1024,
+            max_artifact_bytes: 1024 * 1024,
+        };
+        let contract = mvm_contract::protocol::extension_pack::ExtensionPackContract {
+            schema: mvm_contract::protocol::extension_pack::EXTENSION_PACK_SCHEMA.to_string(),
+            extension_id: mvm_contract::protocol::extension_pack::ExtensionId::parse(
+                "org.example.assurance-extension",
+            )
+            .expect("extension id"),
+            version: mvm_contract::protocol::extension_pack::ExtensionVersion::parse("1.0.0")
+                .expect("extension version"),
+            protocol: mvm_contract::protocol::extension_pack::ExtensionProtocolRange {
+                min_mvm_version: mvm_contract::protocol::extension_pack::ExtensionVersion::parse(
+                    "0.18.0",
+                )
+                .expect("minimum version"),
+                max_mvm_version: mvm_contract::protocol::extension_pack::ExtensionVersion::parse(
+                    "0.18.9",
+                )
+                .expect("maximum version"),
+                min_protocol: 1,
+                max_protocol: 1,
+            },
+            placement: mvm_contract::protocol::extension_pack::ExtensionPlacement::GuestWorkload,
+            artifact: "extension.ext4".to_string(),
+            entrypoint: "bin/assurance-extension".to_string(),
+            capabilities: vec![mvm_contract::assurance::probe_capability_descriptor()],
+            budgets: extension_budgets,
+            revocation_identity: "org.example.assurance-extension.release".to_string(),
+            permission_delta: "May execute one declared assurance probe.".to_string(),
+        };
+        let manifest = mvm_core::packs::PackBuilder::new(staged.path(), pack_metadata, &pack_key)
+            .file("extension.ext4")
+            .extension(contract)
+            .build()
+            .expect("build signed extension pack");
+        let pack_policy = mvm_core::packs::LocalPackPolicy {
+            host_arch: mvm_core::arch::GuestArch::host(),
+            backend: mvm_core::packs::PackBackend::Firecracker,
+            host_capabilities: [mvm_core::packs::HostCapability("vsock".to_string())]
+                .into_iter()
+                .collect(),
+            policy_hash: pack_policy_hash,
+            allowed_channels: ["stable".to_string()].into_iter().collect(),
+            now: Utc::now(),
+        };
+        let trust = Trust(pack_key.verifying_key());
+        let revocations = Revocations;
+        let verify =
+            mvm_core::pack_cache::PackVerifyCtx::ed25519(&pack_policy, &trust, &revocations);
+        let promoted = mvm_core::pack_cache::promote(staged.path(), &manifest, &verify)
+            .expect("promote extension pack");
+        let capability = mvm_contract::assurance::probe_capability_descriptor().id;
+        let authority = std::collections::HashSet::from([capability]);
+        let placements = std::collections::BTreeSet::from([
+            mvm_contract::protocol::extension_pack::ExtensionPlacement::GuestWorkload,
+        ]);
+        let extension = mvm_core::extension_admission::admit_extension(
+            &manifest,
+            &promoted.verified,
+            mvm_core::extension_admission::ExtensionAuthority {
+                requested: &authority,
+                policy_ceiling: &authority,
+                session_grant: &authority,
+                explicit_approval: &authority,
+            },
+            mvm_core::extension_admission::ExtensionAdmissionPolicy {
+                placements: &placements,
+                budgets: extension_budgets,
+            },
+        )
+        .expect("admit extension authority");
+        synthesis.extensions = vec![extension];
+        synthesis.agent_verbs = Some(vec![
+            mvm_contract::plan::VerbId::new("run-extension").expect("extension verb"),
+            mvm_contract::plan::VerbId::new("cancel-extension").expect("extension verb"),
+        ]);
+        synthesis
+            .audit_labels
+            .insert("assurance.source_run_id".to_string(), "scout-1".to_string());
+        synthesis.audit_labels.insert(
+            "assurance.source_digest".to_string(),
+            format!("sha256:{}", "3".repeat(64)),
+        );
         let config = mvm_core::vm_backend::VmStartConfig {
             name: "vm-assurance".into(),
             rootfs_path: "/store/rootfs.ext4".into(),
@@ -3480,6 +4948,7 @@ mod tests {
                 ledger: &ledger,
                 host_signer_keys_dir: Some(dir.path()),
                 bundle_ctx: None,
+                extension_ctx: Some(&ExtensionAdmissionContext::ambient(&verify)),
                 variant: Variant::Dev,
                 policy_bundle: None,
                 emitter: Some(&emitter),
@@ -3503,6 +4972,48 @@ mod tests {
         // Its citations came from real emission on the boot path.
         assert!(!binding.audit_refs.is_empty());
         assert!(!binding.receipt_refs.is_empty());
+
+        let mut refused_synthesis = synthesis.clone();
+        refused_synthesis.vm_name = "vm-assurance-refused";
+        refused_synthesis
+            .audit_labels
+            .remove("assurance.source_digest");
+        let refusal = admit_and_start(
+            &backend,
+            AdmitAndStartParams {
+                synthesis: &refused_synthesis,
+                config: mvm_core::vm_backend::VmStartConfig {
+                    name: "vm-assurance-refused".into(),
+                    rootfs_path: "/store/rootfs.ext4".into(),
+                    ..Default::default()
+                },
+                clock: &SystemClock,
+                ledger: &InMemoryNonceLedger::new(),
+                host_signer_keys_dir: Some(dir.path()),
+                bundle_ctx: None,
+                extension_ctx: Some(&ExtensionAdmissionContext::ambient(&verify)),
+                variant: Variant::Dev,
+                policy_bundle: None,
+                emitter: Some(&emitter),
+                audit_durability: crate::audit::durability::AuditDurability::BestEffort,
+                assurance: Some(&campaign),
+            },
+        )
+        .expect_err("an assurance launch without its admitted service must fail");
+        assert!(
+            refusal
+                .to_string()
+                .contains("does not bind the campaign source identity")
+        );
+        assert!(
+            matches!(
+                backend.status(&mvm_core::vm_backend::VmId(
+                    "vm-assurance-refused".to_string()
+                )),
+                Ok(mvm_core::vm_backend::VmStatus::Stopped)
+            ),
+            "a post-start assurance refusal must roll the VM back"
+        );
     }
 
     /// The bound the backend spawns under comes off the signed plan, and only
@@ -3591,6 +5102,7 @@ mod tests {
                 ledger: &ledger,
                 host_signer_keys_dir: Some(dir.path()),
                 bundle_ctx: None,
+                extension_ctx: None,
                 variant: Variant::Dev,
                 policy_bundle: None,
                 emitter: None,
@@ -3638,6 +5150,7 @@ mod tests {
                 ledger: &ledger,
                 host_signer_keys_dir: Some(dir.path()),
                 bundle_ctx: None,
+                extension_ctx: None,
                 variant: Variant::Dev,
                 policy_bundle: None,
                 emitter: Some(&emitter),
@@ -3688,6 +5201,7 @@ mod tests {
                 ledger: &ledger,
                 host_signer_keys_dir: Some(dir.path()),
                 bundle_ctx: None,
+                extension_ctx: None,
                 variant: Variant::Prod,
                 policy_bundle: None,
                 emitter: None,
@@ -3749,6 +5263,7 @@ mod tests {
                 ledger: &ledger,
                 host_signer_keys_dir: Some(dir.path()),
                 bundle_ctx: None,
+                extension_ctx: None,
                 variant: Variant::Dev,
                 policy_bundle: None,
                 emitter: Some(&emitter),
@@ -3803,6 +5318,7 @@ mod tests {
                 ledger: &ledger,
                 host_signer_keys_dir: Some(dir.path()),
                 bundle_ctx: None,
+                extension_ctx: None,
                 variant: Variant::Dev,
                 policy_bundle: None,
                 emitter: Some(&emitter),
@@ -3844,6 +5360,7 @@ mod tests {
                 ledger: &ledger,
                 host_signer_keys_dir: Some(dir.path()),
                 bundle_ctx: None,
+                extension_ctx: None,
                 variant: Variant::Dev,
                 policy_bundle: None,
                 emitter: None,
@@ -3964,5 +5481,243 @@ mod launch_decision_record_tests {
             Some("plan-under-launch"),
             "the attestation binding must name the launched plan"
         );
+    }
+}
+
+#[cfg(test)]
+mod signed_plan_admission_tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+    use ed25519_dalek::SigningKey;
+    use mvm_core::plan::test_support::PlanFixture;
+    use mvm_core::user_config::{MvmConfig, TrustedPlanSigner};
+    use mvm_core::util::test_env::TestEnv;
+
+    /// The fleet issuer key the tests pin — or deliberately don't.
+    fn fleet_key() -> SigningKey {
+        SigningKey::from_bytes(&[42u8; 32])
+    }
+
+    fn pin_for(signer_id: &str, key: &SigningKey) -> TrustedPlanSigner {
+        TrustedPlanSigner {
+            signer_id: signer_id.to_string(),
+            ed25519_pubkey_hex: hex::encode(key.verifying_key().as_bytes()),
+        }
+    }
+
+    /// Isolate `MVM_HOME` and write `cfg` as the host config. Admission reads
+    /// the trusted signer set (and the grant ceiling) from host config rather
+    /// than from a parameter, so a test that wants a trusting host has to
+    /// *be* one. The guard and home must both outlive the admission call.
+    fn host_with(cfg: MvmConfig) -> (TestEnv, tempfile::TempDir) {
+        let home = tempfile::tempdir().expect("scratch mvm home");
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let pins = cfg.trusted_plan_signers.len();
+        mvm_core::user_config::save(&cfg, None).expect("writing the host config");
+        // Precondition, not a redundant assertion: if this fails the isolation
+        // did not hold and every check below would measure some other host.
+        assert_eq!(
+            mvm_core::user_config::load(None).trusted_plan_signers.len(),
+            pins,
+            "the isolated host must read back the pins it was configured with"
+        );
+        (env, home)
+    }
+
+    fn host_pinning(signers: Vec<TrustedPlanSigner>) -> (TestEnv, tempfile::TempDir) {
+        host_with(MvmConfig {
+            trusted_plan_signers: signers,
+            ..MvmConfig::default()
+        })
+    }
+
+    fn signed_by_fleet(plan: &ExecutionPlan) -> SignedExecutionPlan {
+        sign_plan(plan, &fleet_key(), "fleet-prod")
+    }
+
+    fn admit(signed: &SignedExecutionPlan, ledger: &InMemoryNonceLedger) -> Result<AdmittedPlan> {
+        admit_signed_plan_for_run(
+            signed,
+            &SystemClock,
+            ledger,
+            None,
+            RunPosture::without_backend(Variant::Dev),
+        )
+    }
+
+    #[test]
+    fn a_pinned_fleet_signers_plan_is_admitted() {
+        let (_env, _home) = host_pinning(vec![pin_for("fleet-prod", &fleet_key())]);
+        let plan = PlanFixture::new().tenant("fleet-tenant").build();
+        let signed = signed_by_fleet(&plan);
+
+        let admitted = admit(&signed, &InMemoryNonceLedger::new())
+            .expect("a plan signed by a pinned fleet signer admits");
+
+        assert_eq!(admitted.signer_id(), "fleet-prod");
+        assert_eq!(admitted.plan().tenant.0, "fleet-tenant");
+        // The admitted plan is content-addressed and the envelope the caller
+        // handed in is carried verbatim — not re-signed under the host key.
+        assert_eq!(admitted.plan_id(), &admitted.plan().plan_id);
+        assert_eq!(admitted.signed().0.signer_id, "fleet-prod");
+        assert_eq!(admitted.signed().0.signature, signed.0.signature);
+    }
+
+    #[test]
+    fn an_unpinned_host_refuses_every_signed_plan() {
+        // The default: no pins, no externally-signed admissions. This is the
+        // fail-closed posture a host is in before the operator delegates.
+        let (_env, _home) = host_pinning(Vec::new());
+        let signed = signed_by_fleet(&PlanFixture::new().build());
+
+        let err = admit(&signed, &InMemoryNonceLedger::new())
+            .expect_err("a host that pins nobody must refuse");
+        assert!(
+            format!("{err:#}").contains("pins no trusted plan signers"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_signer_is_refused() {
+        // The host pins a *different* fleet issuer; the envelope names one it
+        // never heard of.
+        let other = SigningKey::from_bytes(&[7u8; 32]);
+        let (_env, _home) = host_pinning(vec![pin_for("fleet-staging", &other)]);
+        let signed = signed_by_fleet(&PlanFixture::new().build());
+
+        let err = admit(&signed, &InMemoryNonceLedger::new())
+            .expect_err("an unpinned signer must be refused");
+        assert!(
+            format!("{err:#}").contains("no trusted key matched signer_id fleet-prod"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_tampered_payload_is_refused() {
+        let (_env, _home) = host_pinning(vec![pin_for("fleet-prod", &fleet_key())]);
+        let mut signed = signed_by_fleet(&PlanFixture::new().build());
+        signed.0.payload[0] ^= 0x01;
+
+        let err = admit(&signed, &InMemoryNonceLedger::new())
+            .expect_err("a tampered payload must fail signature verification");
+        assert!(
+            format!("{err:#}").contains("signature verification failed"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn an_expired_plan_is_refused() {
+        let (_env, _home) = host_pinning(vec![pin_for("fleet-prod", &fleet_key())]);
+        let now = Utc::now();
+        let plan = PlanFixture::new()
+            .validity(now - Duration::hours(2), now - Duration::hours(1))
+            .build();
+        let signed = signed_by_fleet(&plan);
+
+        let err = admit(&signed, &InMemoryNonceLedger::new())
+            .expect_err("a validly-signed but expired plan must be refused");
+        assert!(
+            format!("{err:#}").contains("plan validity window violated"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_not_yet_valid_plan_is_refused() {
+        let (_env, _home) = host_pinning(vec![pin_for("fleet-prod", &fleet_key())]);
+        let now = Utc::now();
+        let plan = PlanFixture::new()
+            .validity(now + Duration::hours(1), now + Duration::hours(2))
+            .build();
+        let signed = signed_by_fleet(&plan);
+
+        let err = admit(&signed, &InMemoryNonceLedger::new())
+            .expect_err("a plan whose window has not opened must be refused");
+        assert!(
+            format!("{err:#}").contains("plan validity window violated"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_replayed_nonce_is_refused() {
+        let (_env, _home) = host_pinning(vec![pin_for("fleet-prod", &fleet_key())]);
+        let signed = signed_by_fleet(&PlanFixture::new().build());
+        let ledger = InMemoryNonceLedger::new();
+
+        admit(&signed, &ledger).expect("the first admission succeeds");
+        let err = admit(&signed, &ledger).expect_err("the same plan admitted twice is a replay");
+        assert!(format!("{err:#}").contains("replay"), "got: {err:#}");
+    }
+
+    #[test]
+    fn a_plan_id_that_does_not_address_its_content_is_refused() {
+        use ed25519_dalek::Signer as _;
+
+        let (_env, _home) = host_pinning(vec![pin_for("fleet-prod", &fleet_key())]);
+        // sign_plan re-derives the content address, so a mismatched id cannot
+        // come through it — build the envelope by hand: a valid signature over
+        // a plan whose stored id does not address its body.
+        let plan = PlanFixture::new()
+            .plan_id("not-the-content-address")
+            .build();
+        let payload = serde_json::to_vec(&plan).expect("plan serializes");
+        let signature = fleet_key().sign(&payload);
+        let signed = SignedExecutionPlan(mvm_core::protocol::signing::SignedPayload {
+            payload,
+            signature: signature.to_bytes().to_vec(),
+            signer_id: "fleet-prod".to_string(),
+        });
+
+        let err = admit(&signed, &InMemoryNonceLedger::new())
+            .expect_err("a signed plan whose id does not address its content must be refused");
+        assert!(
+            format!("{err:#}").contains("plan_id content-address check"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_grant_over_the_host_ceiling_is_refused() {
+        // The fleet's signature does not widen host policy: the ceiling the
+        // operator configured still bounds what an externally-signed plan may
+        // ask for.
+        let (_env, _home) = host_with(MvmConfig {
+            max_cpu_millicores: Some(2000),
+            trusted_plan_signers: vec![pin_for("fleet-prod", &fleet_key())],
+            ..MvmConfig::default()
+        });
+        let plan = PlanFixture::new()
+            .grants(Some(mvm_contract::grants::Grants {
+                cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 64_000 }),
+                ..mvm_contract::grants::Grants::default()
+            }))
+            .build();
+        let signed = signed_by_fleet(&plan);
+
+        let err = admit(&signed, &InMemoryNonceLedger::new())
+            .expect_err("a grant above the host's ceiling must not be admitted");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("ceiling"), "{msg}");
+        assert!(msg.contains("64000") && msg.contains("2000"), "{msg}");
+    }
+
+    #[test]
+    fn a_malformed_pin_refuses_admission() {
+        // A pin the operator mistyped fails the whole load — admission never
+        // runs against a silently-truncated trust set.
+        let (_env, _home) = host_pinning(vec![TrustedPlanSigner {
+            signer_id: "fleet-prod".to_string(),
+            ed25519_pubkey_hex: "not-hex".to_string(),
+        }]);
+        let signed = signed_by_fleet(&PlanFixture::new().build());
+
+        let err = admit(&signed, &InMemoryNonceLedger::new())
+            .expect_err("a malformed pin must refuse admission");
+        assert!(format!("{err:#}").contains("fleet-prod"), "got: {err:#}");
     }
 }

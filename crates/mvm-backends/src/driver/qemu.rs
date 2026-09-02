@@ -28,13 +28,13 @@ use mvm_core::vm_backend::{
 };
 use mvm_net::channel::GuestService;
 
-use crate::driver::qemu_legacy::{
+use crate::driver::qemu_process::{
     self, QEMU_LOG_FILE, QEMU_PID_FILE, QemuBridgeGuestDial, QemuBridgeHostDial, QemuBridgeSpec,
 };
 use mvm_vmm::driver::spec::{KernelImage, VmmSpec, VsockDirection, VsockPort};
 use mvm_vmm::driver::traits::{DuplexStream, RunningVm, VmmDriver};
 use mvm_vmm::host::ui;
-use mvm_vmm::host::virtiofsd::{SpawnParams, VirtiofsdGuard, locate_virtiofsd};
+use mvm_vmm::qemu_arch::{machine_for_arch, serial_console_for_arch};
 
 /// The QEMU VMM driver: pure VMM mechanics, no policy and no admission. It
 /// boots what a `VmmSpec` describes and relays the guest's channels through
@@ -54,17 +54,18 @@ impl Default for QemuDriver {
     }
 }
 
-/// The default base kernel cmdline for a QEMU workload boot. QEMU guests use
-/// the `ttyS0` serial console (same serial line Firecracker uses), and carry
+/// The default base kernel cmdline for a QEMU workload boot. The serial device
+/// follows the QEMU machine for the host architecture, and the cmdline carries
 /// no NIC tokens — the converged path attaches no guest NIC. The root/init
 /// selection follows the boot shape; the shared cmdline assembler layers
 /// verity/grants/egress/uvols tokens on top of this.
-fn qemu_base_bootargs(virtiofs_root: bool, has_disk: bool) -> String {
+fn qemu_base_bootargs_for_arch(arch: &str, has_disk: bool) -> String {
     // Serial console + reboot/panic behavior + stable interface naming.
-    let console = "console=ttyS0 reboot=k panic=1 net.ifnames=0";
-    if virtiofs_root {
-        format!("{console} rootfstype=virtiofs root=mvmroot ro init=/init")
-    } else if has_disk {
+    let console = format!(
+        "console={} reboot=k panic=1 net.ifnames=0",
+        serial_console_for_arch(arch)
+    );
+    if has_disk {
         format!("{console} root=/dev/vda ro rootwait init=/init")
     } else {
         // Verity / initramfs boot: the initramfs PID 1 owns root/init selection,
@@ -73,11 +74,8 @@ fn qemu_base_bootargs(virtiofs_root: bool, has_disk: bool) -> String {
     }
 }
 
-/// AF_UNIX socket path QEMU uses to connect to `virtiofsd` for a given
-/// share. Kept under `/tmp` so deeply-nested `MVM_HOME` paths don't bump into
-/// the ~108-byte Linux AF_UNIX path limit.
-fn qemu_virtiofs_socket_path(vm_name: &str, tag: &str) -> PathBuf {
-    PathBuf::from(format!("/tmp/mvm-vfs-{vm_name}-{tag}.sock"))
+fn qemu_base_bootargs(has_disk: bool) -> String {
+    qemu_base_bootargs_for_arch(std::env::consts::ARCH, has_disk)
 }
 
 /// The qemu launch, bounded by whatever CPU share this VM was admitted under.
@@ -107,12 +105,53 @@ fn qemu_boot_argv(
     kvm: bool,
     pid_file: &Path,
 ) -> Vec<String> {
+    qemu_boot_argv_for_arch(spec, kernel, cid, kvm, pid_file, std::env::consts::ARCH)
+}
+
+fn qemu_boot_argv_for_arch(
+    spec: &VmmSpec,
+    kernel: &Path,
+    cid: u32,
+    kvm: bool,
+    pid_file: &Path,
+    arch: &str,
+) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
     args.push("-m".into());
     args.push(spec.memory_mib.to_string());
+    // A floor that keeps an absurd `--cpus` from being fatal, deliberately not
+    // a claim about how many vCPUs QEMU will start. This backend therefore
+    // declares no `max_vcpus` in `capabilities()`, and the reporting clamp
+    // above the backends stays quiet on it.
+    //
+    // Nothing reachable from here knows the real number. QEMU's ceiling is a
+    // property of the machine type, and the machine type on x86_64 is whichever
+    // one the distribution packaged as its default -- omitted from this argv on
+    // purpose, so it moves without mvm moving. One host, one 8.2.2 binary:
+    // `pc-i440fx-noble-v2` (that default) stops at 255, every `pc-q35` from 5.2
+    // on reports 288, and `virt-8.2` on aarch64 stops at 512.
+    //
+    // Asking does not help either, which is the part worth writing down. QMP
+    // `query-machines` reports `cpu-max: 288` for q35, and that machine refuses
+    // `-smp 256` with `apic initialization failed. APIC ID 255 is invalid`.
+    // A probe would spend a subprocess on every launch to obtain a count 33
+    // above the one the machine boots -- the failure a declared ceiling exists
+    // to prevent, bought at a higher price.
+    //
+    // And no host-side number is the one the caller observes: the guest kernel
+    // binds first. `--cpus 100` and `--cpus 300` both pass QEMU's check, boot,
+    // and report 64 (`CPU topo: Allowing 64 present CPUs`) -- `CONFIG_NR_CPUS`,
+    // which `nix/images/kernel/` does not set, so it is nixpkgs' arch-dependent
+    // default. A warning naming any ceiling above 64 would misdescribe the
+    // machine the caller got, which is why silence here is the accurate answer
+    // rather than the unfinished one.
     let vcpus = spec.vcpus.clamp(1, u32::from(u8::MAX));
     args.push("-smp".into());
     args.push(vcpus.to_string());
+    if let Some(machine) = machine_for_arch(arch) {
+        args.push("-machine".into());
+        args.push(machine.into());
+    }
     if kvm {
         args.push("-enable-kvm".into());
         args.push("-cpu".into());
@@ -122,8 +161,14 @@ fn qemu_boot_argv(
         args.push("max".into());
     }
 
-    let has_virtiofs_root = spec.shares.iter().any(|s| s.tag == "mvmroot");
-    let mem_arg = format!("{}M", spec.memory_mib);
+    // QEMU requires an explicit machine type on aarch64; the `virt` board
+    // is the generic reference platform that matches our virtio-blk/vsock
+    // device layout. x86_64 still boots with its built-in default, so we
+    // only override on architectures that need it.
+    if std::env::consts::ARCH == "aarch64" {
+        args.push("-machine".into());
+        args.push("virt".into());
+    }
 
     args.push("-kernel".into());
     args.push(kernel.to_string_lossy().into_owned());
@@ -137,7 +182,7 @@ fn qemu_boot_argv(
     let has_disk = spec.initramfs.is_none() && !spec.blocks.is_empty();
     let trimmed = spec.cmdline.trim();
     let cmdline = if trimmed.is_empty() {
-        qemu_base_bootargs(has_virtiofs_root, has_disk)
+        qemu_base_bootargs_for_arch(arch, has_disk)
     } else {
         trimmed.to_string()
     };
@@ -161,31 +206,10 @@ fn qemu_boot_argv(
         args.push(drive);
     }
 
-    // virtio-fs shares: one virtiofsd per share, one vhost-user-fs-pci device
-    // per share, plus the shared memfd backend that makes vhost-user-fs work.
-    if !spec.shares.is_empty() {
-        args.push("-object".into());
-        args.push(format!(
-            "memory-backend-memfd,id=mem,size={mem_arg},share=on"
-        ));
-        args.push("-numa".into());
-        args.push("node,memdev=mem".into());
-        for share in &spec.shares {
-            let tag = &share.tag;
-            let sock = qemu_virtiofs_socket_path(&spec.name, tag);
-            args.push("-chardev".into());
-            args.push(format!("socket,id=vfs-{tag},path={}", sock.display()));
-            args.push("-device".into());
-            let mut fs_dev =
-                format!("vhost-user-fs-pci,queue-size=1024,chardev=vfs-{tag},tag={tag}");
-            if share.dax {
-                // DAX window size per share. 256 MiB matches the HVF/libkrun
-                // DAX window budget without ballooning the QEMU memory backend.
-                fs_dev.push_str(",cache-size=256M");
-            }
-            args.push(fs_dev);
-        }
-    }
+    // No virtio-fs devices. `boot` refuses a spec carrying shares before it
+    // reaches here, so there is nothing to map — and the `memory-backend-memfd`
+    // + `-numa` pair went with them, since it existed only because
+    // vhost-user-fs requires a shared memory backend whose size equals `-m`.
 
     // virtio-vsock on the per-VM guest CID. The host reaches the guest's
     // listeners through the AF_VSOCK↔UNIX bridge spawned after the boot.
@@ -216,6 +240,19 @@ fn qemu_boot_argv(
     args.push("-pidfile".into());
     args.push(pid_file.to_string_lossy().into_owned());
     args
+}
+
+fn qemu_log_tail(log_path: &Path, max_lines: usize) -> String {
+    let Ok(contents) = std::fs::read_to_string(log_path) else {
+        return "qemu log was unavailable".to_string();
+    };
+    let mut lines: Vec<&str> = contents.lines().rev().take(max_lines).collect();
+    lines.reverse();
+    if lines.is_empty() {
+        "qemu log was empty".to_string()
+    } else {
+        lines.join("\n")
+    }
 }
 
 /// Assemble the bridge wiring plan for a spec boot: every host-dialed
@@ -270,7 +307,7 @@ impl VmmDriver for QemuDriver {
     }
 
     fn is_available(&self) -> Result<bool> {
-        Ok(qemu_legacy::locate_qemu().is_ok())
+        Ok(qemu_process::locate_qemu().is_ok())
     }
 
     fn capabilities(&self) -> VmCapabilities {
@@ -331,8 +368,8 @@ impl VmmDriver for QemuDriver {
         }
     }
 
-    fn workload_base_bootargs(&self, virtiofs_root: bool, has_disk: bool) -> String {
-        qemu_base_bootargs(virtiofs_root, has_disk)
+    fn workload_base_bootargs(&self, has_disk: bool) -> String {
+        qemu_base_bootargs(has_disk)
     }
 
     #[tracing::instrument(
@@ -341,30 +378,44 @@ impl VmmDriver for QemuDriver {
         fields(vm = %spec.name, vcpus = spec.vcpus, memory_mib = spec.memory_mib)
     )]
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
+        // Refuse rather than ignore. Every workload spec has carried no shares
+        // since the granted directory became a materialized block image, so
+        // this arm was already unreachable — but a driver that silently drops a
+        // share it was asked to serve would hand the guest a VM missing a
+        // filesystem it expected. Firecracker has refused on the same grounds
+        // from the start; this makes QEMU match.
+        if !spec.shares.is_empty() {
+            bail!(
+                "the QEMU backend does not support virtio-fs shares ({} requested); \
+                 a granted host directory is materialized into a block image instead",
+                spec.shares.len()
+            );
+        }
         // QEMU has no bundled kernel (libkrun's libkrunfw is the only
         // bundled-kernel backend): a `Bundled` spec takes the same cached
         // builder-kernel fallback the raw path uses for a kernel-less
         // workload rootfs.
         let kernel = match &spec.kernel {
             KernelImage::Path(p) => p.clone(),
-            KernelImage::Bundled => qemu_legacy::resolve_workload_kernel_path(&spec.name, None)?,
+            KernelImage::Bundled => qemu_process::resolve_workload_kernel_path(&spec.name, None)?,
         };
-        let qemu_bin = qemu_legacy::locate_qemu()?;
+        let qemu_bin = qemu_process::locate_qemu()?;
 
         let state_dir = vm_state_dir(&spec.name);
         std::fs::create_dir_all(&state_dir)
             .map_err(|e| anyhow!("create state dir {}: {e}", state_dir.display()))?;
-        // Clear any prior run's captured exit code so `wait` reads only this
-        // launch's, and pre-create the write-only console sink so the
-        // invariant + truncate-on-boot match the other backends.
-        let _ = std::fs::remove_file(mvm_core::exit_capture::exit_file_path(&state_dir));
+        // Clear any prior run's captured exit code and usage record so `wait`
+        // and the exit report read only this launch's, and pre-create the
+        // write-only console sink so the invariant + truncate-on-boot match
+        // the other backends.
+        mvm_core::run_sidecars::clear_prior_run(&state_dir);
         drop(
             mvm_vmm::host::console_capture::open_console_capture(&spec.console.log_path).map_err(
                 |e| anyhow!("open console sink {}: {e}", spec.console.log_path.display()),
             )?,
         );
 
-        let kvm = qemu_legacy::kvm_available();
+        let kvm = qemu_process::kvm_available();
         if !kvm {
             // Loud Tier-3 banner for the unaccelerated TCG fallback — the
             // same runtime-tier signal the raw path emits.
@@ -377,57 +428,35 @@ impl VmmDriver for QemuDriver {
             ));
         }
 
-        let cid = qemu_legacy::allocate_cid(&spec.name)?;
+        let cid = qemu_process::allocate_cid(&spec.name)?;
         let pid_file = state_dir.join(QEMU_PID_FILE);
         let _ = std::fs::remove_file(&pid_file);
 
-        // Bring up one virtiofsd per share before QEMU. QEMU connects to the
-        // sockets as a client at launch, so they must exist first. The guard
-        // is moved into the running-VM handle and dropped on kill so daemons
-        // and sockets are cleaned up when the VM goes away.
-        let mut virtiofsd = None;
-        if !spec.shares.is_empty() {
-            let (virtiofsd_bin, virtiofsd_flavor) = locate_virtiofsd()?;
-            let mut guard = VirtiofsdGuard::default();
-            for share in &spec.shares {
-                let sock = qemu_virtiofs_socket_path(&spec.name, &share.tag);
-                guard.spawn(
-                    SpawnParams::new(
-                        &virtiofsd_bin,
-                        virtiofsd_flavor,
-                        &share.tag,
-                        &sock,
-                        &share.host_path,
-                    )
-                    .read_only(share.read_only)
-                    .dax(share.dax),
-                )?;
-            }
-            virtiofsd = Some(guard);
-        }
-
         let argv = qemu_boot_argv(spec, &kernel, cid, kvm, &pid_file);
+        tracing::debug!(qemu_bin = %qemu_bin, argv = ?argv, "launching qemu-system");
         let status = bounded_qemu_command(&qemu_bin, &argv, spec, &state_dir)
             .status()
             .map_err(|e| anyhow!("spawn qemu ({qemu_bin}): {e}"))?;
         if !status.success() {
+            let log_path = state_dir.join(QEMU_LOG_FILE);
             bail!(
-                "qemu-system exited {} before daemonizing workload '{}'; see {}",
+                "qemu-system exited {} before daemonizing workload '{}'; {} tail:\n{}",
                 status.code().unwrap_or(-1),
                 spec.name,
-                state_dir.join(QEMU_LOG_FILE).display()
+                log_path.display(),
+                qemu_log_tail(&log_path, 40)
             );
         }
 
         // `-daemonize` returns only after the pidfile is written, but poll
         // defensively so a slow fork doesn't race the bridge spawn below.
-        let deadline = Instant::now() + qemu_legacy::PID_FILE_TIMEOUT;
+        let deadline = Instant::now() + qemu_process::PID_FILE_TIMEOUT;
         while !pid_file.exists() {
             if Instant::now() >= deadline {
                 bail!(
                     "qemu did not write pidfile {} within {:?}",
                     pid_file.display(),
-                    qemu_legacy::PID_FILE_TIMEOUT
+                    qemu_process::PID_FILE_TIMEOUT
                 );
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -439,12 +468,12 @@ impl VmmDriver for QemuDriver {
         // the pid/cid sidecars so a retry re-allocates a CID instead of
         // pinning the (possibly conflicting) one this attempt wrote.
         let bridge_spec = bridge_spec_for_vsock(cid, &state_dir, &spec.vsock);
-        if let Err(e) = qemu_legacy::spawn_vsock_bridges(&spec.name, &state_dir, &bridge_spec) {
-            if let Some(pid) = qemu_legacy::read_pid(&pid_file) {
-                qemu_legacy::send_signal(pid, libc::SIGTERM);
+        if let Err(e) = qemu_process::spawn_vsock_bridges(&spec.name, &state_dir, &bridge_spec) {
+            if let Some(pid) = qemu_process::read_pid(&pid_file) {
+                qemu_process::send_signal(pid, libc::SIGTERM);
             }
             let _ = std::fs::remove_file(&pid_file);
-            let _ = std::fs::remove_file(state_dir.join(qemu_legacy::QEMU_CID_FILE));
+            let _ = std::fs::remove_file(state_dir.join(qemu_process::QEMU_CID_FILE));
             return Err(e);
         }
 
@@ -452,7 +481,6 @@ impl VmmDriver for QemuDriver {
             id: VmId(spec.name.clone()),
             state_dir,
             pid_file,
-            virtiofsd: std::sync::Mutex::new(virtiofsd),
         }))
     }
 
@@ -466,7 +494,6 @@ impl VmmDriver for QemuDriver {
             pid_file: state_dir.join(QEMU_PID_FILE),
             state_dir,
             id: id.clone(),
-            virtiofsd: std::sync::Mutex::new(None),
         }))
     }
 
@@ -474,7 +501,7 @@ impl VmmDriver for QemuDriver {
         // The shared agent client connects to the UNIX socket the bridge
         // binds (`vm_vsock_port_socket`); the `cid` here is the guest CID
         // the bridge dials over AF_VSOCK, surfaced for diagnostics.
-        let cid = qemu_legacy::read_cid(&id.0).unwrap_or(3);
+        let cid = qemu_process::read_cid(&id.0).unwrap_or(3);
         Ok(GuestChannelInfo::Vsock {
             cid,
             port: mvm_agentd::vsock::GUEST_AGENT_PORT,
@@ -489,7 +516,6 @@ struct QemuRunningVm {
     id: VmId,
     state_dir: PathBuf,
     pid_file: PathBuf,
-    virtiofsd: std::sync::Mutex<Option<VirtiofsdGuard>>,
 }
 
 impl RunningVm for QemuRunningVm {
@@ -508,31 +534,31 @@ impl RunningVm for QemuRunningVm {
         // Guard on liveness so a stale pidfile (crash without cleanup) whose
         // PID the OS has since recycled isn't signalled by mistake.
         if let Some(bridge_pid) =
-            qemu_legacy::read_pid(&self.state_dir.join(qemu_legacy::BRIDGE_PID_FILE))
-            && qemu_legacy::pid_alive(bridge_pid)
+            qemu_process::read_pid(&self.state_dir.join(qemu_process::BRIDGE_PID_FILE))
+            && qemu_process::pid_alive(bridge_pid)
         {
-            qemu_legacy::send_signal(bridge_pid, libc::SIGTERM);
+            qemu_process::send_signal(bridge_pid, libc::SIGTERM);
         }
-        let _ = std::fs::remove_file(self.state_dir.join(qemu_legacy::BRIDGE_PID_FILE));
-        qemu_legacy::cleanup_vsock_bridge_sockets(&self.state_dir);
+        let _ = std::fs::remove_file(self.state_dir.join(qemu_process::BRIDGE_PID_FILE));
+        qemu_process::cleanup_vsock_bridge_sockets(&self.state_dir);
 
         // Arm before SIGTERM so a short-lived QEMU process cannot exit between
         // signal delivery and observer registration.
-        if let Some(pid) = qemu_legacy::read_pid(&self.pid_file)
-            && qemu_legacy::pid_alive(pid)
+        if let Some(pid) = qemu_process::read_pid(&self.pid_file)
+            && qemu_process::pid_alive(pid)
         {
             let observer = mvm_vmm::host::process_exit::ProcessExitObserver::arm(pid).ok();
             // SIGTERM gives QEMU a chance to close its virtio-blk file
             // descriptors, then SIGKILL if it ignores us within the grace
             // window.
-            qemu_legacy::send_signal(pid, libc::SIGTERM);
+            qemu_process::send_signal(pid, libc::SIGTERM);
             let exited = mvm_vmm::host::process_exit::wait_for_pid_exit(
                 pid,
-                Instant::now() + qemu_legacy::STOP_TIMEOUT,
+                Instant::now() + qemu_process::STOP_TIMEOUT,
                 observer.as_ref(),
             );
             if !exited {
-                qemu_legacy::send_signal(pid, libc::SIGKILL);
+                qemu_process::send_signal(pid, libc::SIGKILL);
                 if !mvm_vmm::host::process_exit::wait_for_pid_exit(
                     pid,
                     Instant::now() + Duration::from_millis(500),
@@ -546,12 +572,6 @@ impl RunningVm for QemuRunningVm {
             }
         }
         let _ = std::fs::remove_file(&self.pid_file);
-
-        // Release the virtiofsd daemons now that QEMU is gone. Dropping the
-        // guard kills the children and removes their sockets.
-        if let Some(guard) = self.virtiofsd.lock().unwrap().take() {
-            drop(guard);
-        }
         Ok(())
     }
 
@@ -564,8 +584,8 @@ impl RunningVm for QemuRunningVm {
     }
 
     fn status(&self) -> Result<VmStatus> {
-        Ok(match qemu_legacy::read_pid(&self.pid_file) {
-            Some(pid) if qemu_legacy::pid_alive(pid) => VmStatus::Running,
+        Ok(match qemu_process::read_pid(&self.pid_file) {
+            Some(pid) if qemu_process::pid_alive(pid) => VmStatus::Running,
             _ => VmStatus::Stopped,
         })
     }
@@ -636,6 +656,8 @@ mod tests {
                 log_path: "/state/w/console.log".into(),
             },
             trusted_builder: false,
+            // Not a persistent builder: nothing here outlives its launcher.
+            builder_egress_endpoint: None,
             plan_binding: None,
         }
     }
@@ -657,22 +679,39 @@ mod tests {
     }
 
     #[test]
-    fn argv_maps_virtio_fs_shares() {
+    fn boot_rejects_virtio_fs_shares() {
+        // Mirrors Firecracker's `boot_rejects_virtio_fs_shares`. Every workload
+        // spec has carried no shares since a granted directory became a
+        // materialized block image, so this arm is unreachable in practice —
+        // the refusal exists so a caller that wires one gets an error rather
+        // than a guest silently missing a filesystem it expected.
         let mut spec = spec_with(KernelImage::Path("/img/Image".into()), vec![], vec![]);
-        spec.shares = vec![
-            VirtioFsShare {
-                tag: "mvmroot".into(),
-                host_path: "/host/root".into(),
-                read_only: true,
-                dax: true,
-            },
-            VirtioFsShare {
-                tag: "uvol0".into(),
-                host_path: "/host/vol0".into(),
-                read_only: false,
-                dax: false,
-            },
-        ];
+        spec.shares.push(VirtioFsShare {
+            tag: "mvmroot".into(),
+            host_path: "/host/root".into(),
+            read_only: true,
+            dax: true,
+        });
+
+        // `Box<dyn RunningVm>` is not Debug, so the error comes out via
+        // `err()` rather than `expect_err`.
+        let msg = match QemuDriver::new().boot(&spec) {
+            Ok(_) => panic!("a spec carrying a virtio-fs share must be refused"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            msg.contains("does not support virtio-fs shares"),
+            "unexpected refusal: {msg}"
+        );
+    }
+
+    #[test]
+    fn argv_carries_no_virtio_fs_or_shared_memory_backend() {
+        // The memfd backend and its `-numa` node existed only to satisfy
+        // vhost-user-fs, whose size had to equal `-m`. Both go with the shares;
+        // a stray `-object` here would mean the shared-memory backend outlived
+        // its only reason to exist.
+        let spec = spec_with(KernelImage::Path("/img/Image".into()), vec![], vec![]);
         let argv = qemu_boot_argv(
             &spec,
             Path::new("/img/Image"),
@@ -681,62 +720,15 @@ mod tests {
             Path::new("/state/w/qemu.pid"),
         );
 
-        // Shared memory backend required by vhost-user-fs, sized to match -m.
-        let object = argvalue(&argv, "-object").expect("-object");
+        assert_eq!(argvalue(&argv, "-object"), None);
+        assert_eq!(argvalue(&argv, "-numa"), None);
         assert!(
-            object.contains("memory-backend-memfd"),
-            "expected memfd backend, got: {object}"
+            !argv.iter().any(|a| a.starts_with("vhost-user-fs-pci")),
+            "no vhost-user-fs device may be emitted: {argv:?}"
         );
         assert!(
-            object.contains("share=on"),
-            "expected share=on, got: {object}"
-        );
-        assert!(object.contains("size=512M"), "expected 512M, got: {object}");
-        assert_eq!(argvalue(&argv, "-numa"), Some("node,memdev=mem"));
-
-        // One chardev + one device per share, socket under /tmp.
-        let chardevs: Vec<&str> = argv
-            .iter()
-            .zip(argv.iter().skip(1))
-            .filter(|(flag, _)| flag.as_str() == "-chardev")
-            .map(|(_, value)| value.as_str())
-            .collect();
-        assert_eq!(chardevs.len(), 2);
-        assert!(
-            chardevs
-                .iter()
-                .any(|c| c.contains("id=vfs-mvmroot") && c.contains("/tmp/mvm-vfs-w-mvmroot.sock"))
-        );
-        assert!(
-            chardevs
-                .iter()
-                .any(|c| c.contains("id=vfs-uvol0") && c.contains("/tmp/mvm-vfs-w-uvol0.sock"))
-        );
-
-        let fs_devs: Vec<&str> = argv
-            .iter()
-            .zip(argv.iter().skip(1))
-            .filter(|(flag, _)| flag.as_str() == "-device")
-            .map(|(_, value)| value.as_str())
-            .filter(|v| v.starts_with("vhost-user-fs-pci"))
-            .collect();
-        assert_eq!(fs_devs.len(), 2);
-        assert!(
-            fs_devs
-                .iter()
-                .any(|d| d.contains("chardev=vfs-mvmroot") && d.contains("tag=mvmroot"))
-        );
-        assert!(
-            fs_devs
-                .iter()
-                .any(|d| d.contains("chardev=vfs-uvol0") && d.contains("tag=uvol0"))
-        );
-
-        // Default cmdline picks virtiofs root because a mvmroot share exists.
-        let append = argvalue(&argv, "-append").expect("-append");
-        assert!(
-            append.contains("rootfstype=virtiofs") && append.contains("root=mvmroot"),
-            "expected virtiofs-root cmdline, got: {append}"
+            !argv.iter().any(|a| a.contains("mvm-vfs-")),
+            "no virtiofsd socket may be referenced: {argv:?}"
         );
     }
 
@@ -790,23 +782,25 @@ mod tests {
     #[test]
     fn base_bootargs_follow_the_boot_shape_with_no_nic_or_roothash_tokens() {
         let d = QemuDriver::new();
-        let disk = d.workload_base_bootargs(false, true);
-        assert!(disk.contains("console=ttyS0"), "got: {disk}");
+        let console = format!(
+            "console={}",
+            serial_console_for_arch(std::env::consts::ARCH)
+        );
+        let disk = d.workload_base_bootargs(true);
+        assert!(disk.contains(&console), "got: {disk}");
         assert!(disk.contains("root=/dev/vda"), "got: {disk}");
         assert!(disk.contains("init=/init"), "got: {disk}");
         assert!(!disk.contains("mvm.roothash="), "got: {disk}");
         assert!(!disk.contains("mvm.ip="), "got: {disk}");
 
         // Verity / initramfs base: serial console only, no root/init token.
-        let verity = d.workload_base_bootargs(false, false);
+        let verity = d.workload_base_bootargs(false);
         assert!(!verity.contains("root="), "got: {verity}");
         assert!(!verity.contains("init=/init"), "got: {verity}");
-        assert!(verity.contains("console=ttyS0"), "got: {verity}");
+        assert!(verity.contains(&console), "got: {verity}");
 
-        let virtiofs = d.workload_base_bootargs(true, false);
-        assert!(virtiofs.contains("console=ttyS0"), "got: {virtiofs}");
-        assert!(virtiofs.contains("rootfstype=virtiofs"), "got: {virtiofs}");
-        assert!(virtiofs.contains("root=mvmroot"), "got: {virtiofs}");
+        // No third shape: the virtiofs-root base is gone.
+        assert!(!disk.contains("virtiofs") && !verity.contains("virtiofs"));
     }
 
     #[test]
@@ -823,7 +817,7 @@ mod tests {
             ],
         );
         let spec = VmmSpec {
-            cmdline: "  console=ttyS0 mvm.runtime_source_policy=required_overlay  ".into(),
+            cmdline: "  console=ttyAMA0 mvm.vsock_egress=1  ".into(),
             ..spec
         };
         let argv = qemu_boot_argv(
@@ -839,7 +833,7 @@ mod tests {
         // Non-empty spec cmdline is threaded verbatim (trimmed).
         assert_eq!(
             argvalue(&argv, "-append"),
-            Some("console=ttyS0 mvm.runtime_source_policy=required_overlay")
+            Some("console=ttyAMA0 mvm.vsock_egress=1")
         );
         assert_eq!(argvalue(&argv, "-m"), Some("512"));
         assert_eq!(argvalue(&argv, "-smp"), Some("2"));
@@ -888,12 +882,13 @@ mod tests {
     fn argv_defaults_the_cmdline_base_by_boot_shape_and_uses_tcg_without_kvm() {
         // Empty cmdline + an initramfs (no disk root) ⇒ console-only base.
         let spec = spec_with(KernelImage::Path("/img/vmlinux".into()), vec![], vec![]);
-        let argv = qemu_boot_argv(
+        let argv = qemu_boot_argv_for_arch(
             &spec,
             Path::new("/img/vmlinux"),
             3,
             false,
             Path::new("/state/w/qemu.pid"),
+            "x86_64",
         );
         let append = argvalue(&argv, "-append").expect("append");
         assert!(append.contains("console=ttyS0"), "got: {append}");
@@ -909,17 +904,100 @@ mod tests {
             vec![block("/img/rootfs.ext4", true, 0)],
         );
         spec.initramfs = None;
-        let argv = qemu_boot_argv(
+        let argv = qemu_boot_argv_for_arch(
             &spec,
             Path::new("/img/vmlinux"),
             3,
             true,
             Path::new("/state/w/qemu.pid"),
+            "x86_64",
         );
         let append = argvalue(&argv, "-append").expect("append");
         assert!(append.contains("root=/dev/vda"), "got: {append}");
         assert!(append.contains("init=/init"), "got: {append}");
         assert!(!argv.contains(&"-initrd".to_string()));
+    }
+
+    #[test]
+    fn aarch64_argv_selects_virt_machine_and_pl011_console() {
+        let spec = spec_with(KernelImage::Path("/img/vmlinux".into()), vec![], vec![]);
+        let argv = qemu_boot_argv_for_arch(
+            &spec,
+            Path::new("/img/vmlinux"),
+            3,
+            false,
+            Path::new("/state/w/qemu.pid"),
+            "aarch64",
+        );
+
+        assert_eq!(argvalue(&argv, "-machine"), Some("virt"));
+        let append = argvalue(&argv, "-append").expect("append");
+        assert!(append.contains("console=ttyAMA0"), "got: {append}");
+        assert!(!append.contains("console=ttyS0"), "got: {append}");
+    }
+
+    /// This backend declares no vCPU ceiling, and that is the answer rather
+    /// than a gap left for someone to fill in.
+    ///
+    /// The other backends declare one because they have one to declare:
+    /// Firecracker's API refuses above 32, libkrun aborts at 65, HVF asks the
+    /// host. QEMU's limit belongs to the machine type -- 255 on the x86_64
+    /// default, 288 reported for q35, 512 on aarch64 `virt` -- and this driver
+    /// names no machine on x86_64, so the number is the distribution's to
+    /// change. Asking QEMU is worse than not asking: `query-machines` reports
+    /// 288 for a q35 that will not start at 256.
+    ///
+    /// The measurement that settles it is on the other side. `--cpus 100` and
+    /// `--cpus 300` both boot and both report 64 vCPUs, because the guest
+    /// kernel's `CONFIG_NR_CPUS` binds well under any of those ceilings. A
+    /// declared ceiling exists to make the clamp warning truthful, and here
+    /// every candidate would make it name a count four times what the caller
+    /// got.
+    ///
+    /// So the contract still holds -- an over-large `--cpus` boots rather than
+    /// failing -- and it is `-smp` that holds it, not a declaration.
+    #[test]
+    fn no_vcpu_ceiling_is_declared_and_an_oversized_request_still_boots() {
+        assert_eq!(
+            QemuDriver::new().capabilities().max_vcpus,
+            None,
+            "a ceiling declared here would be a guess about the host's QEMU \
+             package, and would still sit above the guest kernel's own limit"
+        );
+
+        // The floor in the argv is what keeps the request non-fatal. QEMU
+        // refuses `-smp 9999` outright, so an unclamped value would turn an
+        // over-large request into a failed launch on this backend alone.
+        for (requested, expected) in [(9999, "255"), (300, "255"), (100, "100"), (0, "1")] {
+            let mut spec = spec_with(KernelImage::Path("/img/vmlinux".into()), vec![], vec![]);
+            spec.vcpus = requested;
+            let argv = qemu_boot_argv_for_arch(
+                &spec,
+                Path::new("/img/vmlinux"),
+                3,
+                true,
+                Path::new("/state/w/qemu.pid"),
+                "x86_64",
+            );
+            assert_eq!(
+                argvalue(&argv, "-smp"),
+                Some(expected),
+                "{requested} vCPUs requested"
+            );
+        }
+    }
+
+    #[test]
+    fn qemu_log_tail_keeps_only_the_latest_bounded_diagnostics() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let log = scratch.path().join("qemu.log");
+        std::fs::write(&log, "one\ntwo\nthree\nfour\n").expect("write qemu log");
+
+        assert_eq!(qemu_log_tail(&log, 2), "three\nfour");
+        assert_eq!(
+            qemu_log_tail(&scratch.path().join("missing.log"), 2),
+            "qemu log was unavailable"
+        );
     }
 
     #[test]
@@ -995,7 +1073,7 @@ mod tests {
         env.set("MVM_HOME", dir.path());
 
         // Missing cache entry ⇒ a clear, named failure.
-        let err = qemu_legacy::resolve_workload_kernel_path("w", None).unwrap_err();
+        let err = qemu_process::resolve_workload_kernel_path("w", None).unwrap_err();
         assert!(
             err.to_string().contains("no bootable kernel"),
             "unexpected error: {err}"
@@ -1015,7 +1093,7 @@ mod tests {
         std::fs::create_dir_all(cached.parent().expect("cache parent")).unwrap();
         std::fs::write(&cached, b"kernel").unwrap();
         assert_eq!(
-            qemu_legacy::resolve_workload_kernel_path("w", None).unwrap(),
+            qemu_process::resolve_workload_kernel_path("w", None).unwrap(),
             cached
         );
     }
@@ -1066,7 +1144,6 @@ mod tests {
             id: VmId("agent-vm".into()),
             state_dir: dir.path().to_path_buf(),
             pid_file: dir.path().join(QEMU_PID_FILE),
-            virtiofsd: std::sync::Mutex::new(None),
         };
 
         // The agent port connects + round-trips through the bridge socket —

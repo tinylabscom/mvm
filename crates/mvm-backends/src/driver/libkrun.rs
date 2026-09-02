@@ -29,6 +29,25 @@ use mvm_vmm::driver::traits::{DuplexStream, RunningVm, VmmDriver};
 /// for typical workload roots without overcommitting guest address space.
 const VIRTIO_FS_DAX_SHM_SIZE: u64 = 256 * 1024 * 1024;
 
+/// The most vCPUs libkrun will boot a guest on.
+///
+/// A limit of the VMM, not of the wire format. This was `u8::MAX` on the
+/// reasoning that `krun_set_vm_config` takes the count as a byte, which is true
+/// and does not bound anything: the call accepts every value from 1 to 255, and
+/// the ones it cannot honour abort the process inside `krun_start_enter`,
+/// killing the supervisor before it binds its vsock socket. So a request
+/// clamped to the protocol ceiling did not boot — it died with a message about
+/// a missing socket, naming neither vCPUs nor the count it was given.
+///
+/// Neither the library nor the host reports the real bound. On Linux/KVM
+/// `krun_get_max_vcpus()` answers 4096, which is KVM's own `KVM_CAP_MAX_VCPUS`
+/// forwarded verbatim, and the host agrees; libkrun aborts at 65 regardless.
+/// The number is therefore measured, and measured as a constant rather than a
+/// resource limit: 64 boots and 65 aborts, unchanged when the guest is given
+/// eight times the memory — so it is not a layout artifact that a bigger
+/// machine would move.
+const MAX_VCPUS: u32 = 64;
+
 /// The libkrun VMM driver: pure VMM mechanics, no policy and no admission. It
 /// boots what a `VmmSpec` describes and relays the guest's egress port to the
 /// host-side bridge; the claim-10 gate and substitution live in that bridge,
@@ -51,16 +70,13 @@ impl Default for LibkrunDriver {
 /// use the virtio-console `console=hvc0` (there is no pl011 UART), and the
 /// root/init selection follows the boot shape. The shared cmdline assembler
 /// layers verity/grants/egress/uvols tokens on top of this.
-fn libkrun_base_bootargs(virtiofs_root: bool, has_disk: bool) -> String {
-    if virtiofs_root {
-        // Dev virtiofs-root boot: hvc0 console + the virtiofs guest root.
-        "console=hvc0 rootfstype=virtiofs root=mvmroot ro init=/init".to_string()
-    } else if has_disk {
+fn libkrun_base_bootargs(has_disk: bool) -> String {
+    if has_disk {
         "console=hvc0 root=/dev/vda ro init=/init".to_string()
     } else {
         // Verity / initramfs boot: the initramfs PID 1 owns root/init selection,
         // so only the console base is emitted here.
-        crate::driver::libkrun_legacy::VERITY_CMDLINE.to_string()
+        crate::driver::libkrun_process::VERITY_CMDLINE.to_string()
     }
 }
 
@@ -93,9 +109,14 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
     // kernel to a libkrun-loadable ELF and reports the format; on aarch64 it is a
     // passthrough at Raw. The driver must not diverge from the host kernel-prep.
     let (kernel, kernel_format) =
-        crate::driver::libkrun_legacy::libkrun_kernel_for_host(&kernel_path)?;
+        crate::driver::libkrun_process::libkrun_kernel_for_host(&kernel_path)?;
 
-    let vcpus = u8::try_from(spec.vcpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
+    // Hold the count to what the VMM will boot at the point it is handed over.
+    // The clamp that *reports* itself to the user lives above the backend,
+    // where the request is still the user's; this one is the floor under
+    // callers that never passed through it, and it keeps the declared ceiling
+    // and the value libkrun receives from drifting apart.
+    let vcpus = u8::try_from(spec.vcpus.clamp(1, MAX_VCPUS)).unwrap_or(u8::MAX);
     let state_dir_str = state_dir.to_string_lossy().into_owned();
     let console_log = state_dir.join("console.log");
 
@@ -116,11 +137,10 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
     // (the shared assembler returns None when no extra tokens are needed); a
     // non-empty one already carries the console + root/init base plus every
     // layered token, so it is threaded verbatim.
-    let has_virtiofs_root = spec.shares.iter().any(|s| s.tag == "mvmroot");
     let has_disk = spec.initramfs.is_none() && !spec.blocks.is_empty();
     let trimmed = spec.cmdline.trim();
     let cmdline = if trimmed.is_empty() {
-        libkrun_base_bootargs(has_virtiofs_root, has_disk)
+        libkrun_base_bootargs(has_disk)
     } else {
         trimmed.to_string()
     };
@@ -130,17 +150,11 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
     // rootfs disk (plain-rootfs boot) or the first extra disk (initramfs boot,
     // where the initramfs PID 1 owns root selection), so an initramfs spec puts
     // every block in extra_disks and a plain spec pins slot 0 as the rootfs.
-    // A virtiofs-root boot has no block rootfs either; all blocks are extra disks.
     let mut ordered: Vec<&BlockDev> = spec.blocks.iter().collect();
     ordered.sort_by_key(|b| b.slot);
     match &spec.initramfs {
         Some(initramfs) => {
             krun.initramfs_path = Some(initramfs.to_string_lossy().into_owned());
-            for block in &ordered {
-                krun = attach_block(krun, block);
-            }
-        }
-        None if has_virtiofs_root => {
             for block in &ordered {
                 krun = attach_block(krun, block);
             }
@@ -272,6 +286,11 @@ impl VmmDriver for LibkrunDriver {
     }
 
     fn capabilities(&self) -> VmCapabilities {
+        // 255: libkrun's C API takes the count as a `u8`, and this driver
+        // already clamps to that range before the call. Declaring it here means
+        // the clamp is reported to the caller instead of happening silently one
+        // layer down.
+        //
         // libkrun does not support memory snapshots (same trade as
         // Apple Container). The mvm libkrun launch path is intentionally
         // vsock-only: the supervisor accepts only `NetworkingMode::VsockDirect`,
@@ -283,8 +302,16 @@ impl VmmDriver for LibkrunDriver {
         // admission and endpoint guards, so the runner-facing capability set
         // reports both snapshot and standby pool as unsupported.
         let mut capabilities = VmCapabilities {
+            // What libkrun will actually boot, so a portable oversized request
+            // is clamped to a count that runs rather than to one that aborts
+            // the supervisor. See `MAX_VCPUS`.
+            max_vcpus: Some(MAX_VCPUS),
             pause_resume: false,
             snapshots: false,
+            // Both of the next two are overwritten below — see the
+            // reassignment after this literal. They describe the raw libkrun
+            // substrate, not what the selectable runner advertises. Quoting
+            // either value from here is wrong, and has been more than once.
             snapshot_capability: SnapshotCapability::DiskOnly,
             standby_pool: true,
             vsock: true,
@@ -295,19 +322,10 @@ impl VmmDriver for LibkrunDriver {
             // there is no net device in the guest's device tree to route.
             no_routable_guest_nic: true,
             host_vsock_proxy: true,
-            // libkrun attaches a virtio-net device and drains it, which
-            // satisfies `no_routable_guest_nic` (no upstream route) but
-            // not the L3 tunnel's stricter precondition: that mode
-            // requires the guest to have no network device at all, so
-            // `mvm0` is the only interface its stack can route to.
-            l3_vsock: false,
             // libkrun's C API doesn't expose virtio-balloon control
             // today; the upstream crate carries no `.balloon(...)`
             // builder. Declared `false` until wiring lands.
             balloon: false,
-            // libkrun's krun_add_virtiofs2/3 APIs can export a host directory
-            // as a virtio-fs share, including DAX and host-enforced read-only.
-            virtiofs_root: true,
             // libkrun runs on macOS but the rootfs lives in a regular
             // file, not an APFS clone-eligible volume mount; no
             // clonefile shortcut here.
@@ -322,6 +340,10 @@ impl VmmDriver for LibkrunDriver {
             resource_controls: ResourceControls::for_backend(BackendKind::Libkrun),
             ..VmCapabilities::default()
         };
+        // The runner-facing answer, and the one every caller sees. The
+        // substrate has the primitives; this runner does not route them
+        // through its admission and endpoint guards, so it advertises
+        // neither.
         capabilities.snapshot_capability = SnapshotCapability::Unsupported;
         capabilities.standby_pool = false;
         capabilities
@@ -355,8 +377,8 @@ impl VmmDriver for LibkrunDriver {
         }
     }
 
-    fn workload_base_bootargs(&self, virtiofs_root: bool, has_disk: bool) -> String {
-        libkrun_base_bootargs(virtiofs_root, has_disk)
+    fn workload_base_bootargs(&self, has_disk: bool) -> String {
+        libkrun_base_bootargs(has_disk)
     }
 
     #[tracing::instrument(
@@ -369,10 +391,10 @@ impl VmmDriver for LibkrunDriver {
         std::fs::create_dir_all(&state_dir)
             .map_err(|e| anyhow!("create state dir {}: {e}", state_dir.display()))?;
         let console_log = state_dir.join("console.log");
-        // Clear any prior run's captured exit code so `wait` reads only this
-        // launch's, and the console capture so a stale panic isn't mistaken for
-        // this boot's.
-        let _ = std::fs::remove_file(mvm_core::exit_capture::exit_file_path(&state_dir));
+        // Clear any prior run's captured exit code and usage record so `wait`
+        // and the exit report read only this launch's, and the console capture
+        // so a stale panic isn't mistaken for this boot's.
+        mvm_core::run_sidecars::clear_prior_run(&state_dir);
         let _ = mvm_vmm::host::console_capture::open_console_capture(&console_log);
 
         let cfg = relay_libkrun_supervisor_config(spec, &state_dir)?;
@@ -384,15 +406,11 @@ impl VmmDriver for LibkrunDriver {
         let json = serde_json::to_string(&cfg)
             .map_err(|e| anyhow!("serialize libkrun SupervisorConfig: {e}"))?;
 
-        let supervisor = crate::driver::libkrun_legacy::resolve_supervisor_path()?;
+        let supervisor = crate::driver::libkrun_process::resolve_supervisor_path()?;
         let stdout = mvm_vmm::host::console_capture::open_console_capture(&console_log)
             .map(Stdio::from)
             .unwrap_or_else(|_| Stdio::null());
-        let stderr = mvm_vmm::host::console_capture::open_console_capture(
-            &state_dir.join("supervisor.stderr.log"),
-        )
-        .map(Stdio::from)
-        .unwrap_or_else(|_| Stdio::inherit());
+        let stderr = mvm_vmm::host::console_capture::supervisor_stderr(&state_dir);
         let mut child = bounded_supervisor_command(&supervisor, spec, &state_dir)
             .stdin(Stdio::piped())
             .stdout(stdout)
@@ -408,7 +426,7 @@ impl VmmDriver for LibkrunDriver {
 
         // Poll for the PID file (boot confirmed). If the supervisor exits first,
         // surface that — its console capture carries the actionable detail.
-        let deadline = Instant::now() + crate::driver::libkrun_legacy::PID_FILE_TIMEOUT;
+        let deadline = Instant::now() + crate::driver::libkrun_process::PID_FILE_TIMEOUT;
         loop {
             if pid_file.exists() {
                 break;
@@ -418,16 +436,18 @@ impl VmmDriver for LibkrunDriver {
                 .map_err(|e| anyhow!("poll supervisor: {e}"))?
             {
                 bail!(
-                    "libkrun supervisor exited before writing its PID file (status: {status}); see {}",
-                    console_log.display()
+                    "libkrun supervisor exited before writing its PID file (status: {status}); see {}{}",
+                    console_log.display(),
+                    mvm_vmm::host::console_capture::supervisor_stderr_detail(&state_dir)
                 );
             }
             if Instant::now() >= deadline {
                 let _ = child.kill();
                 bail!(
-                    "libkrun supervisor did not confirm boot within {:?}; see {}",
-                    crate::driver::libkrun_legacy::PID_FILE_TIMEOUT,
-                    console_log.display()
+                    "libkrun supervisor did not confirm boot within {:?}; see {}{}",
+                    crate::driver::libkrun_process::PID_FILE_TIMEOUT,
+                    console_log.display(),
+                    mvm_vmm::host::console_capture::supervisor_stderr_detail(&state_dir)
                 );
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -438,7 +458,7 @@ impl VmmDriver for LibkrunDriver {
         // attach / shell_exec that immediately follows doesn't race a
         // not-yet-bound socket and report the VM "not running".
         let agent_socket = vm_vsock_port_socket_at(&state_dir, GUEST_AGENT_PORT);
-        let sock_deadline = Instant::now() + crate::driver::libkrun_legacy::VSOCK_SOCKET_TIMEOUT;
+        let sock_deadline = Instant::now() + crate::driver::libkrun_process::VSOCK_SOCKET_TIMEOUT;
         while !agent_socket.exists() {
             if let Some(status) = child
                 .try_wait()
@@ -455,7 +475,7 @@ impl VmmDriver for LibkrunDriver {
                 bail!(
                     "libkrun supervisor did not bind vsock socket {} within {:?}; killed; see {}",
                     agent_socket.display(),
-                    crate::driver::libkrun_legacy::VSOCK_SOCKET_TIMEOUT,
+                    crate::driver::libkrun_process::VSOCK_SOCKET_TIMEOUT,
                     console_log.display()
                 );
             }
@@ -511,7 +531,7 @@ impl RunningVm for LibkrunRunningVm {
     }
 
     fn host_process_id(&self) -> Option<u32> {
-        crate::driver::libkrun_legacy::read_pid(&self.pid_file)
+        crate::driver::libkrun_process::read_pid(&self.pid_file)
             .and_then(|pid| u32::try_from(pid).ok())
     }
 
@@ -524,21 +544,21 @@ impl RunningVm for LibkrunRunningVm {
     fn kill(&self) -> Result<()> {
         // Arm before SIGTERM so a short-lived supervisor cannot exit between
         // signal delivery and observer registration.
-        if let Some(pid) = crate::driver::libkrun_legacy::read_pid(&self.pid_file)
-            && crate::driver::libkrun_legacy::pid_alive(pid)
+        if let Some(pid) = crate::driver::libkrun_process::read_pid(&self.pid_file)
+            && crate::driver::libkrun_process::pid_alive(pid)
         {
             let observer = mvm_vmm::host::process_exit::ProcessExitObserver::arm(pid).ok();
             // SIGTERM gives libkrun a chance to close its virtio-blk file
             // descriptors, then SIGKILL if it ignores us within the grace
             // window.
-            crate::driver::libkrun_legacy::send_signal(pid, libc::SIGTERM);
+            crate::driver::libkrun_process::send_signal(pid, libc::SIGTERM);
             let exited = mvm_vmm::host::process_exit::wait_for_pid_exit(
                 pid,
-                Instant::now() + crate::driver::libkrun_legacy::STOP_TIMEOUT,
+                Instant::now() + crate::driver::libkrun_process::STOP_TIMEOUT,
                 observer.as_ref(),
             );
             if !exited {
-                crate::driver::libkrun_legacy::send_signal(pid, libc::SIGKILL);
+                crate::driver::libkrun_process::send_signal(pid, libc::SIGKILL);
                 if !mvm_vmm::host::process_exit::wait_for_pid_exit(
                     pid,
                     Instant::now() + Duration::from_millis(500),
@@ -552,7 +572,7 @@ impl RunningVm for LibkrunRunningVm {
             }
         }
         let _ = std::fs::remove_file(&self.pid_file);
-        crate::driver::libkrun_legacy::cleanup_vsock_sockets(&self.state_dir);
+        crate::driver::libkrun_process::cleanup_vsock_sockets(&self.state_dir);
         Ok(())
     }
 
@@ -570,8 +590,8 @@ impl RunningVm for LibkrunRunningVm {
 
     fn status(&self) -> Result<VmStatus> {
         Ok(
-            match crate::driver::libkrun_legacy::read_pid(&self.pid_file) {
-                Some(pid) if crate::driver::libkrun_legacy::pid_alive(pid) => VmStatus::Running,
+            match crate::driver::libkrun_process::read_pid(&self.pid_file) {
+                Some(pid) if crate::driver::libkrun_process::pid_alive(pid) => VmStatus::Running,
                 _ => VmStatus::Stopped,
             },
         )
@@ -646,6 +666,8 @@ mod tests {
                 log_path: "/tmp/console.log".into(),
             },
             trusted_builder: false,
+            // Not a persistent builder: nothing here outlives its launcher.
+            builder_egress_endpoint: None,
             plan_binding: None,
         }
     }
@@ -683,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn carrying_a_plan_does_not_move_the_supervisor_off_its_legacy_route() {
+    fn carrying_a_plan_does_not_move_the_supervisor_onto_the_admission_route() {
         let mut spec = spec_with(KernelImage::Path("/k/Image".into()), vec![], vec![]);
         spec.plan_binding = Some(binding());
         let cfg = relay(&spec);
@@ -718,10 +740,15 @@ mod tests {
         assert_eq!(d.name(), "libkrun");
         assert_eq!(d.kind(), BackendKind::Libkrun);
         let caps = d.capabilities();
-        assert!(caps.virtiofs_root, "libkrun must advertise virtiofs_root");
         assert!(caps.vsock);
         assert!(caps.no_routable_guest_nic);
         assert!(caps.host_vsock_proxy);
+        assert_eq!(
+            caps.max_vcpus,
+            Some(MAX_VCPUS),
+            "the ceiling admission clamps to must be one libkrun will boot, \
+             not the u8 the config call happens to take"
+        );
         assert_eq!(d.snapshot_capability(), SnapshotCapability::Unsupported);
         assert_eq!(d.security_profile().tier, "Tier 2");
     }
@@ -729,20 +756,18 @@ mod tests {
     #[test]
     fn workload_base_bootargs_uses_the_hvc0_console_not_ttyama0() {
         let d = LibkrunDriver::new();
-        let disk = d.workload_base_bootargs(false, true);
+        let disk = d.workload_base_bootargs(true);
         assert!(disk.contains("console=hvc0"), "got: {disk}");
         assert!(!disk.contains("ttyAMA0"), "got: {disk}");
         assert!(disk.contains("root=/dev/vda"), "got: {disk}");
 
         // Verity / initramfs base: hvc0 console only, no root/init token.
-        let verity = d.workload_base_bootargs(false, false);
+        let verity = d.workload_base_bootargs(false);
         assert_eq!(verity, "console=hvc0");
 
-        // The virtiofs-root variant still uses hvc0, not the pl011 UART.
-        let virtiofs = d.workload_base_bootargs(true, false);
-        assert!(virtiofs.contains("console=hvc0"), "got: {virtiofs}");
-        assert!(!virtiofs.contains("ttyAMA0"), "got: {virtiofs}");
-        assert!(virtiofs.contains("rootfstype=virtiofs"), "got: {virtiofs}");
+        // There is no third shape: the virtiofs-root variant is gone, so no
+        // base this driver produces can name a virtiofs root.
+        assert!(!disk.contains("virtiofs") && !verity.contains("virtiofs"));
     }
 
     #[test]
@@ -797,6 +822,49 @@ mod tests {
         assert_eq!(cfg.krun.kernel_path.as_deref(), Some("/img/Image"));
         assert_eq!(cfg.vm_state_dir, "/state/w");
         assert_eq!(cfg.pid_file_name, None);
+    }
+
+    /// The declared ceiling is the one the supervisor config is held to.
+    ///
+    /// Both halves matter and neither is enough alone. `capabilities()` is what
+    /// the clamp above the backend measures the user's `--cpus` against, and
+    /// this config is what libkrun receives — a ceiling naming a count libkrun
+    /// aborts on is how `--cpus 9999` became a supervisor that died before
+    /// binding its vsock socket, so the two are asserted against one constant.
+    #[test]
+    fn an_oversized_vcpu_request_is_held_to_the_ceiling_the_driver_declares() {
+        let ceiling = LibkrunDriver::new()
+            .capabilities()
+            .max_vcpus
+            .expect("the driver declares a vCPU ceiling");
+        let ceiling_u8 = u8::try_from(ceiling).expect("the ceiling fits the config's byte field");
+
+        for (requested, expected) in [(9999, ceiling_u8), (ceiling + 1, ceiling_u8), (0, 1)] {
+            let mut spec = spec_with(KernelImage::Path("/img/Image".into()), vec![], vec![]);
+            spec.vcpus = requested;
+
+            assert_eq!(
+                relay(&spec).krun.vcpus,
+                expected,
+                "{requested} vCPUs requested; expected {expected} handed to libkrun"
+            );
+        }
+    }
+
+    /// A count at or under the ceiling reaches libkrun untouched — the bound
+    /// bounds the request rather than rewriting it.
+    #[test]
+    fn a_vcpu_request_within_the_ceiling_reaches_libkrun_unchanged() {
+        for requested in [1u32, 2, MAX_VCPUS] {
+            let mut spec = spec_with(KernelImage::Path("/img/Image".into()), vec![], vec![]);
+            spec.vcpus = requested;
+
+            assert_eq!(
+                u32::from(relay(&spec).krun.vcpus),
+                requested,
+                "{requested} vCPUs is within the ceiling and must not be rewritten"
+            );
+        }
     }
 
     #[test]
@@ -886,7 +954,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_config_treats_virtiofs_root_as_a_share_not_a_block() {
+    fn relay_config_maps_a_share_without_letting_it_steer_the_root() {
         let mut spec = spec_with(KernelImage::Path("/img/Image".into()), vec![], vec![]);
         spec.shares.push(VirtioFsShare {
             tag: "mvmroot".into(),
@@ -905,15 +973,18 @@ mod tests {
         assert_eq!(root.host_path, "/host/root");
         assert!(root.read_only);
         assert_eq!(root.shm_size, Some(VIRTIO_FS_DAX_SHM_SIZE));
-        // Empty cmdline ⇒ the driver supplies the virtiofs-root base.
-        assert_eq!(
-            cfg.krun.kernel_cmdline.as_deref(),
-            Some("console=hvc0 rootfstype=virtiofs root=mvmroot ro init=/init")
+        // A share no longer steers the root. It is still mapped — the builder
+        // VM depends on that — but the default cmdline names no virtiofs root,
+        // so a spec carrying only a share boots the console-only base.
+        let cmdline = cfg.krun.kernel_cmdline.as_deref().expect("cmdline");
+        assert!(
+            !cmdline.contains("virtiofs") && !cmdline.contains("root=mvmroot"),
+            "no default cmdline may boot a virtiofs root: {cmdline}"
         );
     }
 
     #[test]
-    fn relay_config_keeps_blocks_as_extras_when_virtiofs_root_is_present() {
+    fn relay_config_boots_the_block_rootfs_even_when_a_share_is_attached() {
         let mut spec = spec_with(
             KernelImage::Path("/img/Image".into()),
             vec![],
@@ -931,10 +1002,11 @@ mod tests {
             dax: true,
         });
         let cfg = relay(&spec);
-        // The share is the root; the block is an extra disk, not /dev/vda rootfs.
-        assert_eq!(cfg.krun.rootfs_path, None);
-        assert_eq!(cfg.krun.extra_disks.len(), 1);
-        assert_eq!(cfg.krun.extra_disks[0].path, "/img/data.img");
+        // A share used to suppress the block rootfs so the guest booted from
+        // virtiofs. It no longer does: the first block is the rootfs whatever
+        // shares are attached, and the share is mounted alongside it.
+        assert_eq!(cfg.krun.rootfs_path.as_deref(), Some("/img/data.img"));
+        assert_eq!(cfg.krun.extra_disks.len(), 0);
         assert_eq!(cfg.krun.virtio_fs_mounts.len(), 1);
     }
 
@@ -1049,7 +1121,7 @@ mod tests {
         let cfg = relay(&spec);
         assert_eq!(
             cfg.krun.kernel_cmdline.as_deref(),
-            Some(crate::driver::libkrun_legacy::VERITY_CMDLINE)
+            Some(crate::driver::libkrun_process::VERITY_CMDLINE)
         );
     }
 

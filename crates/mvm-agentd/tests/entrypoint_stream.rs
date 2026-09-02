@@ -20,7 +20,9 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use mvm_agentd::entrypoint::{CallCaps, EntrypointCall, ValidatedEntrypoint};
+#[cfg(target_os = "linux")]
+use mvm_agentd::entrypoint::ProcessResourceLimits;
+use mvm_agentd::entrypoint::{CallCaps, CancellationToken, EntrypointCall, ValidatedEntrypoint};
 use mvm_agentd::entrypoint_stream::stream_call;
 use mvm_agentd::vsock::{
     EntrypointEvent, GuestResponse, RunEntrypointError, read_frame, write_frame,
@@ -54,7 +56,11 @@ fn loopback_pair() -> (UnixStream, UnixStream) {
 fn shell_entrypoint() -> ValidatedEntrypoint {
     let resolved = PathBuf::from("/bin/sh");
     let file = File::open(&resolved).expect("/bin/sh");
-    ValidatedEntrypoint { resolved, file }
+    ValidatedEntrypoint {
+        resolved,
+        file,
+        use_resolved_path: false,
+    }
 }
 
 fn caps() -> CallCaps {
@@ -82,6 +88,8 @@ fn serve_with_caps(mut guest: UnixStream, script: &str, timeout: Duration, caps:
         stdin: script.as_bytes(),
         timeout,
         caps,
+        resource_limits: None,
+        cancellation: None,
         env: vec![("PATH".to_string(), SCRIPT_PATH.to_string())],
         stream_input: false,
     };
@@ -489,6 +497,8 @@ fn a_blocked_consumer_does_not_defer_the_child_deadline() {
         stdin: b"trap '' TERM; printf early; while :; do sleep 1; done",
         timeout: Duration::from_millis(300),
         caps: caps(),
+        resource_limits: None,
+        cancellation: None,
         env: vec![("PATH".to_string(), SCRIPT_PATH.to_string())],
         stream_input: false,
     };
@@ -515,5 +525,80 @@ fn a_blocked_consumer_does_not_defer_the_child_deadline() {
     assert!(
         elapsed < Duration::from_millis(2800),
         "the kill ladder waited for the consumer; call took {elapsed:?}"
+    );
+}
+
+#[test]
+fn cancellation_kills_the_active_process_group_and_reports_canceled() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let entrypoint = shell_entrypoint();
+    let cancellation = CancellationToken::default();
+    let call = EntrypointCall {
+        entrypoint: &entrypoint,
+        cwd: tmp.path(),
+        stdin: b"trap '' TERM; while :; do sleep 1; done",
+        timeout: Duration::from_secs(30),
+        caps: CallCaps {
+            kill_grace_period: Duration::from_millis(100),
+            poll_interval: Duration::from_millis(10),
+            ..caps()
+        },
+        resource_limits: None,
+        cancellation: Some(cancellation.clone()),
+        env: vec![("PATH".to_string(), SCRIPT_PATH.to_string())],
+        stream_input: false,
+    };
+
+    let started = Instant::now();
+    let terminal = std::thread::scope(|scope| {
+        let running = scope.spawn(move || stream_call(call, &mut |_| {}));
+        std::thread::sleep(Duration::from_millis(100));
+        cancellation.request();
+        running.join().expect("canceled call")
+    });
+
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "cancellation waited for the wall-clock deadline"
+    );
+    assert!(matches!(
+        terminal,
+        EntrypointEvent::Error {
+            kind: RunEntrypointError::Canceled,
+            ..
+        }
+    ));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn child_cpu_budget_is_kernel_enforced() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let entrypoint = shell_entrypoint();
+    let call = EntrypointCall {
+        entrypoint: &entrypoint,
+        cwd: tmp.path(),
+        stdin: b"while :; do :; done",
+        timeout: Duration::from_secs(5),
+        caps: caps(),
+        resource_limits: Some(ProcessResourceLimits {
+            address_space_bytes: 256 * 1024 * 1024,
+            cpu_millis: 10,
+        }),
+        cancellation: None,
+        env: vec![("PATH".to_string(), SCRIPT_PATH.to_string())],
+        stream_input: false,
+    };
+
+    let terminal = stream_call(call, &mut |_| {});
+    assert!(
+        matches!(
+            terminal,
+            EntrypointEvent::Error {
+                kind: RunEntrypointError::WrapperCrashed,
+                ..
+            }
+        ),
+        "CPU exhaustion must terminate the child, got {terminal:?}"
     );
 }

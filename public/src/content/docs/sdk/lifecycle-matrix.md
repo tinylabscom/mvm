@@ -27,11 +27,11 @@ keep a workflow documented as planned.
 | Create named sandbox | Shipped | Partial | Partial | SDK live mode calls `mvmctl machine run`; record mode records `Sandbox.create(...)`. |
 | One-shot run | Shipped | Target | Target | `mvmctl run -- <cmd>` is current; SDK convenience helpers should preserve receipts and policy. |
 | Start command | Shipped | Partial | Partial | SDK exposes `commands.start(...)`; result capture is still a target. |
-| Command result capture | Shipped | Target | Target | CLI one-shot JSON/receipt paths exist; SDK `commands.run(...)` result shape is a target. |
+| Command result capture | Shipped | Shipped | Shipped | `sandbox.exec(...)` / `shell(...)` returns a captured `ExecResult` (live mode only). There is no `commands.run(...)`. |
 | File write | Shipped | Shipped | Shipped | SDK supports `files.write(...)`; live mode shells to `mvmctl machine fs write`. |
-| File read/list/remove | Shipped | Target | Target | CLI filesystem verbs exist; SDK wrappers need shared tests. |
+| File read/list/remove | Shipped | Shipped | Shipped | `files.read/list/stat/mkdir/remove/move(...)`, live mode only. |
 | Logs | Shipped | Target | Target | SDK log helpers should keep payload redaction rules explicit. |
-| Port forwarding | Shipped | Target | Target | SDK helpers should require explicit host and guest port binding. |
+| Port forwarding | Not claimed | Not claimed | Not claimed | Dynamic forwarding is retired. Ingress is declared before boot with `machine run --port HOST:GUEST`, or `network(ports=[...])` in a declaration; `mvmctl machine forward` and `sandbox.forward(...)` only explain the migration. |
 | Snapshot save/restore | Shipped | Target | Target | Backend behavior differs; SDK type model needs to expose that. |
 | Cold mode | Shipped | Target | Target | SDK should make running, cold, restoring, stopped, and destroyed states explicit. |
 | Stop/down | Shipped | Partial | Partial | Python context managers, TypeScript `using`, and explicit `kill()` clean up live sandboxes. |
@@ -47,8 +47,8 @@ keep a workflow documented as planned.
 | Local SDK smoke script | Python or TypeScript `Sandbox.create(...)` in record mode | Produces Workload IR without booting a VM. |
 | Live SDK experiment | `mvmctl run --mode live ./script.py` or `.ts` | Exercises current live transport and cleanup helpers. |
 | Deployable workload declaration | Static declaration workflow | Avoids importing user modules during compile. |
-| Persistent service | `mvmctl build`, `mvmctl machine run`, `mvmctl machine logs`, `mvmctl machine stop` | CLI has the broadest lifecycle coverage today. |
-| Cold recovery test | `mvmctl pause/resume` or `mvmctl checkpoint create/restore` | Backend-specific state handling is visible. |
+| Persistent service | `mvmctl machine build`, `mvmctl machine run`, `mvmctl machine logs`, `mvmctl machine stop` | CLI has the broadest lifecycle coverage today. |
+| Cold recovery test | `mvmctl machine pause/resume` or `mvmctl machine checkpoint create/restore` (hidden verbs — they work but are absent from `--help`) | Backend-specific state handling is visible. |
 
 ## SDK parity rules
 
@@ -70,12 +70,11 @@ name. New SDK helpers should preserve these invariants:
 
 The next SDK work should close the highest-value gaps in this order:
 
-1. `commands.run(...)` with typed result, timeout, bounded output, and receipt
-   correlation.
-2. `files.read/list/remove(...)` with path validation tests.
-3. `logs(...)` with redaction and bounded streaming.
-4. `ports.forward(...)` with explicit policy.
-5. `snapshot(...)`, `cold()`, `resume()`, `destroy()`, and `detach()` with
+1. Receipt/audit correlation on the `ExecResult` returned by
+   `sandbox.exec(...)`, which today carries only exit code, stdout, and stderr.
+2. `logs(...)` with redaction and bounded streaming.
+3. Declarative `network.ports` ingress with explicit policy.
+4. `snapshot(...)`, `cold()`, `resume()`, `destroy()`, and `detach()` with
    backend-aware state types.
 
 Each item needs Python and TypeScript fixture parity before the docs move it

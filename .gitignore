@@ -1,4 +1,6 @@
 /target
+# Local ad-hoc tool downloads (e.g. act binary).
+/.bin/
 # Swift Package Manager build output (mvm-providers/swift, mvm-vz-supervisor).
 **/.build/
 .playwright-mcp/
@@ -50,6 +52,7 @@ nix/images/dev-prebuilt/
 # Worktree-local dev env (use .envrc.example as template)
 /.envrc
 /.codex/
+/.wrangler/
 /.codex-transfer/
 /.mvm-test/
 # Ad-hoc parallel-session isolation dirs (MVM_CACHE_DIR / MVM_DATA_DIR pointed
@@ -83,3 +86,15 @@ __pycache__/
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 graft/
+./weblinux-pack-out/
+
+# Qwen Code session directory
+.qwen/
+
+# Generated document output (`output/pdf`). Regenerable, and large enough that
+# committing it once would be hard to undo.
+output/
+
+# Local generated output and QA scratch data.
+/artifacts/
+/qa/

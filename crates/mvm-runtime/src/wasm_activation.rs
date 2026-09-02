@@ -39,7 +39,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use mvm_core::vm_backend::{RuntimeSourcePolicy, VmStartConfig, VmVolumeKind};
+use mvm_core::vm_backend::{VmStartConfig, VmVolumeKind};
 use serde::{Deserialize, Serialize};
 
 use crate::wasm_backend::WasmBackendError;
@@ -143,15 +143,13 @@ pub fn build_wasm_preopen_plan(
     }
 }
 
-/// Whether this launch declares the runtime overlay: the full artifact
-/// triple is present (the all-three-or-none rule the block layout
-/// applies), or the runtime-source policy requires it. An overlay-free
-/// launch gets no preopen and no error.
+/// Whether this launch declares the runtime overlay: the full artifact triple
+/// is present (the all-three-or-none rule the block layout applies). An
+/// overlay-free launch gets no preopen and no error.
 pub fn overlay_declared(config: &VmStartConfig) -> bool {
-    let triple = config.runtime_overlay_path.is_some()
+    config.runtime_overlay_path.is_some()
         && config.runtime_overlay_verity_path.is_some()
-        && config.runtime_overlay_roothash.is_some();
-    triple || config.runtime_source_policy == RuntimeSourcePolicy::RequiredOverlay
+        && config.runtime_overlay_roothash.is_some()
 }
 
 /// Resolve the runtime-overlay guest binaries as a host directory to
@@ -287,6 +285,8 @@ mod tests {
 
     fn dir_share(host: &str, guest: &str, read_only: bool) -> VmVolume {
         VmVolume {
+            materialized_image: None,
+            volume_label: None,
             host: host.into(),
             guest: guest.into(),
             size: String::new(),
@@ -298,6 +298,8 @@ mod tests {
 
     fn disk_volume(host: &str, guest: &str) -> VmVolume {
         VmVolume {
+            materialized_image: None,
+            volume_label: None,
             host: host.into(),
             guest: guest.into(),
             size: String::new(),
@@ -319,24 +321,18 @@ mod tests {
         c.runtime_overlay_verity_path = Some("/img/runtime.verity".into());
         c.runtime_overlay_roothash = Some("ab".repeat(32));
         assert!(overlay_declared(&c), "the full triple declares the overlay");
-        let mut c = cfg("x");
-        c.runtime_source_policy = RuntimeSourcePolicy::RequiredOverlay;
-        assert!(
-            overlay_declared(&c),
-            "a required policy declares the overlay"
-        );
     }
 
     #[test]
     fn preopen_plan_maps_run_dir_overlay_and_volumes_in_order_with_ro_honored() {
         let mut c = cfg("x");
         c.volumes = vec![
-            dir_share("/host/share", "/mnt/share", true),
-            dir_share("/host/data", "/mnt/data", false),
+            dir_share("/host/share", "/data/share", true),
+            dir_share("/host/data", "/data/incoming", false),
             // A Disk volume in the config is not a preopen (it is refused
             // upstream by reject_unsupported_start_config); the plan must
             // never silently emit one either.
-            disk_volume("/host/disk.img", "/mnt/disk"),
+            disk_volume("/host/disk.img", "/data/disk"),
         ];
         let plan = build_wasm_preopen_plan(
             &c,
@@ -358,12 +354,12 @@ mod tests {
                 },
                 WasmPreopen {
                     host_dir: PathBuf::from("/host/share"),
-                    guest_path: "/mnt/share".into(),
+                    guest_path: "/data/share".into(),
                     read_only: true,
                 },
                 WasmPreopen {
                     host_dir: PathBuf::from("/host/data"),
-                    guest_path: "/mnt/data".into(),
+                    guest_path: "/data/incoming".into(),
                     read_only: false,
                 },
             ]
@@ -389,7 +385,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state_dir = dir.path();
         let mut c = cfg("act-vm");
-        c.volumes = vec![dir_share("/host/share", "/mnt/share", true)];
+        c.volumes = vec![dir_share("/host/share", "/data/share", true)];
         c.network_policy = mvm_core::network_policy::NetworkPolicy::preset(
             mvm_core::network_policy::NetworkPreset::None,
         );
@@ -405,7 +401,7 @@ mod tests {
             WasmActivation {
                 runtime_overlay: Some("/mvm/runtime".to_string()),
                 volumes: vec![WasmVolume {
-                    guest_path: "/mnt/share".into(),
+                    guest_path: "/data/share".into(),
                     read_only: true,
                 }],
                 network_policy_summary: "deny-all".to_string(),
@@ -448,7 +444,7 @@ mod tests {
 
     #[test]
     fn volume_guest_path_validation_rejects_shadowing_and_relative_paths() {
-        assert!(validate_wasm_volume_guest_path("/mnt/share").is_ok());
+        assert!(validate_wasm_volume_guest_path("/data/share").is_ok());
         for bad in [
             "mnt/relative",
             "/",

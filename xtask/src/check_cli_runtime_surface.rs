@@ -61,6 +61,14 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
         "store surface: checkpoint / fork / restore over the CoW rootfs",
     ),
     (
+        "commands/vm/checkpoint/vm_state.rs",
+        &[Rule::AnyBackend],
+        "same store surface as commands/vm/checkpoint.rs — the VM-state and \
+         backend-capability probes moved here when the parent crossed the \
+         production file-size cap. Listed per file for the reason the entry below \
+         gives: a directory prefix would exempt whatever lands beside it next",
+    ),
+    (
         "commands/vm/checkpoint/fork_vm_full.rs",
         &[Rule::AnyBackend],
         "same store surface as commands/vm/checkpoint.rs — the vm_full fork arms live in \
@@ -114,6 +122,27 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
         "exec.rs",
         &[Rule::AnyBackend],
         "shared backend-selection helpers (from_hypervisor / auto_select) the CLI dispatches through",
+    ),
+    (
+        "exec/backend_select.rs",
+        &[Rule::AnyBackend],
+        "the backend-selection helpers themselves, split out of exec.rs to keep it inside the \
+         file-size budget: this is the selection the exemption above names, not a new reach",
+    ),
+    (
+        "exec/session.rs",
+        &[Rule::AnyBackend],
+        "same helpers as exec.rs: the warm-session lifecycle split out of it, not a new reach",
+    ),
+    (
+        "exec/transient.rs",
+        &[Rule::AnyBackend],
+        "same helpers as exec.rs: the transient boot/teardown lifecycle split out of it",
+    ),
+    (
+        "exec/guest_run.rs",
+        &[Rule::AnyBackend],
+        "same helpers as exec.rs: the in-guest dispatch leg split out of it",
     ),
     (
         "bench/probe.rs",

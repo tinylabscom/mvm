@@ -129,6 +129,35 @@ pub const DEFAULT_BUILDER_STORE_GC_GIB: u32 = 24;
 /// a typo must not disable the just-built-closure-preserving GC).
 pub const MVM_BUILDER_STORE_GC_GIB_ENV: &str = "MVM_BUILDER_STORE_GC_GIB";
 
+/// Source-rendered compatibility seal for workload rootfs images.
+///
+/// The host may deliberately boot the last published builder VM while testing
+/// newer host code. Running the offline checker in the generated job script
+/// therefore guarantees that the source-under-test can seal an image even
+/// when the builder image's hook-runner binary predates journal sealing.
+pub(crate) fn seal_rootfs_journal_sh(rootfs_path: &str) -> String {
+    format!(
+        r#"echo "mvm-builder-vm: sealing rootfs journal" >&2
+if ! chmod 0644 {rootfs_path}; then
+    echo "mvm-builder-vm: rootfs permission normalization failed" >&2
+    rm -f {rootfs_path}
+    exit 1
+fi
+set +e
+/sbin/e2fsck -p -f {rootfs_path} >&2
+fsck_rc=$?
+set -e
+case "$fsck_rc" in
+  0|1) ;;
+  *)
+    echo "mvm-builder-vm: rootfs journal check failed (exit $fsck_rc)" >&2
+    rm -f {rootfs_path}
+    exit "$fsck_rc"
+    ;;
+esac"#
+    )
+}
+
 /// Resolve the builder-store GC cap, in KiB, for substitution into the
 /// in-guest build script's `du -k` comparison. Reads
 /// [`MVM_BUILDER_STORE_GC_GIB_ENV`]; an unset, non-integer, or zero
@@ -372,14 +401,22 @@ const WORKSPACE_SNAPSHOT_SKIP: &[&str] = &[
 
 /// Stage an allowlisted, filtered copy of the mvm workspace into `mvm_src`:
 /// only the cargo tree — root `Cargo.{toml,lock}` + `src` + `crates` +
-/// `xtask` (the `[workspace] members`) — with `WORKSPACE_SNAPSHOT_SKIP`
+/// `third_party` local dependencies + `xtask` (the `[workspace] members`) —
+/// with `WORKSPACE_SNAPSHOT_SKIP`
 /// basenames pruned at any depth. This is what `mvm/mvm-workspace`
 /// resolves to, so `mvm-guest-agent` / `mvm-addon-dns` compile from a clean
 /// source tree. Allowlist (not blocklist): a missing member fails the build
 /// loudly rather than silently leaking host files into the rootfs.
 fn stage_filtered_workspace(workspace: &Path, mvm_src: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(mvm_src)?;
-    for item in ["Cargo.toml", "Cargo.lock", "src", "crates", "xtask"] {
+    for item in [
+        "Cargo.toml",
+        "Cargo.lock",
+        "src",
+        "crates",
+        "third_party",
+        "xtask",
+    ] {
         let from = workspace.join(item);
         if !from.exists() {
             continue;
@@ -623,13 +660,18 @@ fi
 BUILD_HOOK_ROOTFS="/tmp/mvm-rootfs-before-build.ext4"
 cp -L "$ROOTFS_SRC" "$BUILD_HOOK_ROOTFS"
 echo "mvm-builder-vm: running before_build hook" >&2
-if ! /sbin/mvm-host-vm-init run-before-build-hook "$BUILD_HOOK_ROOTFS"; then
-    hook_rc=$?
+set +e
+/sbin/mvm-host-vm-init run-before-build-hook "$BUILD_HOOK_ROOTFS"
+hook_rc=$?
+set -e
+if [ "$hook_rc" -ne 0 ]; then
     echo "mvm-builder-vm: before_build hook failed (exit $hook_rc)" >&2
     rm -f "$BUILD_HOOK_ROOTFS"
     exit $hook_rc
 fi
 cp -L "$BUILD_HOOK_ROOTFS" /out/rootfs.ext4
+{seal_rootfs_journal_sh}
+sync
 rm -f "$BUILD_HOOK_ROOTFS"
 
 if [ -n "$KERNEL_SRC" ]; then
@@ -671,12 +713,12 @@ fi
 
 # Pin the builder VM's own materialize toolchain under fixed GC roots so the
 # cap GC below can't reap it. The OCI rootfs materialize job runs
-# /sbin/mkfs.ext4 (and `mount`) inside this VM but registers no root of its
+# /sbin/mkfs.ext4, /sbin/e2fsck (and `mount`) inside this VM but registers no root of its
 # own, and a workload build's $NIX_OUT closure never carries e2fsprogs — so
-# without these roots a cap GC after a workload build leaves /sbin/mkfs.ext4
-# a dangling symlink and every later image run dies with "mkfs.ext4: not
+# without these roots a cap GC after a workload build leaves the filesystem
+# tools as dangling symlinks and every later image run dies with "mkfs.ext4: not
 # found". Best-effort; skips a tool already missing (recovery rebuilds it).
-for tool in /sbin/mkfs.ext4 mount; do
+for tool in /sbin/mkfs.ext4 /sbin/e2fsck mount; do
   tool_path=$(command -v "$tool" 2>/dev/null) || continue
   tool_store=$(readlink -f "$tool_path" 2>/dev/null) || continue
   [ -n "$tool_store" ] || continue
@@ -699,6 +741,7 @@ fi
         override_flag = override_flag,
         attr_path = shell_single_quote_escape(attr_path),
         gc_cap_kib = gc_cap_kib,
+        seal_rootfs_journal_sh = seal_rootfs_journal_sh("\"/out/rootfs.ext4\""),
     )
 }
 
@@ -1102,8 +1145,9 @@ fn tail_forward(
     }
 }
 
-/// Finalize a flake build: read `<job_dir>/result`, validate the
-/// `rootfs.ext4` (and optional `vmlinux`) landed in `artifact_out`,
+/// Finalize a flake build: read the guest result from `<job_dir>/result` or its
+/// host-visible mirror in `artifact_out`, validate the `rootfs.ext4` (and
+/// optional `vmlinux`) landed in `artifact_out`,
 /// return a [`BuilderArtifacts::Image`]. Hypervisor-agnostic — the
 /// inputs are all host paths into virtio-fs shares libkrun and HVF
 /// both attach identically.
@@ -1112,7 +1156,7 @@ pub fn finalize_flake_job(
     artifact_out: &Path,
     job_id: &str,
 ) -> Result<BuilderArtifacts, BuilderVmError> {
-    let result = read_job_result(job_dir)?;
+    let result = read_flake_job_result(job_dir, artifact_out)?;
     if result.exit_code != 0 {
         // The 20-line `stderr_tail` in `result` is from the OUTER
         // cmd.sh (run_job captures cmd.sh's stderr into a 20-line
@@ -1174,6 +1218,25 @@ pub fn finalize_flake_job(
         lock_hash: None,
         accessible: None,
     })
+}
+
+fn read_flake_job_result(job_dir: &Path, artifact_out: &Path) -> Result<JobResult, BuilderVmError> {
+    // Guest init writes the same result to both writable shares. Some VMM/FUSE
+    // combinations can lose one share's final write during power-off, so accept
+    // the mirror only when the primary file is absent. A malformed primary
+    // remains a hard failure and cannot be hidden by the mirror.
+    match read_job_result(job_dir) {
+        Ok(result) => Ok(result),
+        Err(BuilderVmError::NixBuildFailed(primary)) => match read_job_result(artifact_out) {
+            Ok(result) => Ok(result),
+            Err(BuilderVmError::NixBuildFailed(_)) => Err(BuilderVmError::NixBuildFailed(format!(
+                "{primary}; mirrored result was also absent at {}",
+                artifact_out.join("result").display()
+            ))),
+            Err(err) => Err(err),
+        },
+        Err(err) => Err(err),
+    }
 }
 
 /// Read `<job_dir>/store-path` and extract the leading Nix store hash
@@ -1621,6 +1684,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn finalize_flake_job_reads_mirrored_result_from_artifact_out() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let job_dir = scratch.path().join("job");
+        let artifact_out = scratch.path().join("out");
+        std::fs::create_dir_all(&job_dir).unwrap();
+        std::fs::create_dir_all(&artifact_out).unwrap();
+        std::fs::write(
+            artifact_out.join("result"),
+            r#"{"exit_code":0,"stderr_tail":""}"#,
+        )
+        .unwrap();
+        std::fs::write(artifact_out.join("rootfs.ext4"), b"rootfs").unwrap();
+
+        let artifacts = finalize_flake_job(&job_dir, &artifact_out, "fallback-job-id").unwrap();
+        assert!(matches!(artifacts, BuilderArtifacts::Image { .. }));
+    }
+
     /// `read_last_bytes_of` returns the trailing `max_bytes` of a
     /// file. When the file is larger than the cap, we get the *end*,
     /// not the head — the use case is tailing nix-build stderr where
@@ -2002,7 +2083,7 @@ mod tests {
     }
 
     #[test]
-    fn render_flake_cmd_sh_runs_before_build_hook_before_copying_artifact() {
+    fn render_flake_cmd_sh_seals_final_artifact_without_a_new_builder_subcommand() {
         let body = render_flake_cmd_sh(".", "default", false);
         // The hook runner is invoked on a writable temp copy so the Nix
         // store output is never modified in place.
@@ -2014,16 +2095,34 @@ mod tests {
             body.contains("/tmp/mvm-rootfs-before-build.ext4"),
             "missing writable temp rootfs path in:\n{body}"
         );
-        // The hook must run before the final rootfs is copied to /out.
+        // The hook must run before the final rootfs is copied to /out, and the
+        // source-rendered script must seal that exact artifact itself.
         let hook_idx = body
             .find("/sbin/mvm-host-vm-init run-before-build-hook")
             .expect("hook runner present");
+        let journal_idx = body
+            .find(r#"/sbin/e2fsck -p -f "/out/rootfs.ext4""#)
+            .expect("offline rootfs journal check present");
+        let writable_idx = body
+            .find(r#"chmod 0644 "/out/rootfs.ext4""#)
+            .expect("final rootfs permission normalization present");
         let out_copy_idx = body
             .find(r#"cp -L "$BUILD_HOOK_ROOTFS" /out/rootfs.ext4"#)
             .expect("final rootfs copy present");
         assert!(
-            hook_idx < out_copy_idx,
-            "before_build hook must run before /out/rootfs.ext4 is copied"
+            hook_idx < out_copy_idx && out_copy_idx < writable_idx && writable_idx < journal_idx,
+            "the exported rootfs must be checked after the hook and final copy"
+        );
+        let sync_idx = body
+            .find("sync\nrm -f \"$BUILD_HOOK_ROOTFS\"")
+            .expect("artifact sync present");
+        assert!(
+            out_copy_idx < sync_idx,
+            "the exported rootfs must be flushed before the temporary image is removed"
+        );
+        assert!(
+            out_copy_idx < journal_idx && journal_idx < sync_idx,
+            "the final copied rootfs must be sealed before it is published"
         );
         // A failed hook must fail the build, leaving no partial artifact.
         assert!(
@@ -2033,6 +2132,33 @@ mod tests {
         assert!(
             body.contains(r#"rm -f "$BUILD_HOOK_ROOTFS""#),
             "temp rootfs must be cleaned up on hook failure in:\n{body}"
+        );
+        assert!(
+            body.contains(
+                "set +e\n/sbin/mvm-host-vm-init run-before-build-hook \"$BUILD_HOOK_ROOTFS\"\nhook_rc=$?\nset -e"
+            ),
+            "the hook's real exit status must be captured before testing it in:\n{body}"
+        );
+        assert!(
+            !body.contains("if ! /sbin/mvm-host-vm-init run-before-build-hook"),
+            "negating the hook command makes `$?` report the `!` result instead of the hook failure"
+        );
+        assert!(
+            body.contains("0|1) ;;"),
+            "the offline checker must accept clean and repaired exit codes in:\n{body}"
+        );
+        assert!(
+            body.contains("rootfs journal check failed (exit $fsck_rc)"),
+            "the offline checker must fail closed for every other exit code in:\n{body}"
+        );
+        assert!(
+            body.contains("rootfs permission normalization failed")
+                && body.contains("rm -f \"/out/rootfs.ext4\""),
+            "an artifact that cannot be made writable for repair must be removed in:\n{body}"
+        );
+        assert!(
+            !body.contains("/sbin/mvm-host-vm-init seal-rootfs-journal"),
+            "source-rendered jobs must remain compatible with published builder binaries that predate the seal subcommand"
         );
     }
 
@@ -2059,6 +2185,10 @@ mod tests {
         assert!(
             body.contains("/sbin/mkfs.ext4"),
             "toolchain pin must cover mkfs.ext4 in:\n{body}"
+        );
+        assert!(
+            body.contains("/sbin/e2fsck"),
+            "toolchain pin must cover the rootfs journal checker in:\n{body}"
         );
         let gc_idx = body.find("nix-collect-garbage").expect("gc present");
         assert!(

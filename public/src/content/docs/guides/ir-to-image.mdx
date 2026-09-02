@@ -44,11 +44,12 @@ The IR is the contract; everything else is mechanical.
 
 The IR is a JSON document with a fixed schema. It describes one or more applications, each with a source, image, entrypoints, resources, dependencies, network policy, and optional addons. Two equivalent IR documents always serialize to the same bytes and the same hash.
 
-**Source of truth:** `crates/mvm-ir/src/workload.rs`
+**Source of truth:** `crates/mvm-contract/src/ir/workload.rs`
 
 The top-level shape:
 
-```rust
+```rust,ignore
+// illustrative: the canonical shape of `mvm_contract::ir::Workload`, written with elisions
 pub struct Workload {
     pub schema_version: String,                       // currently "0.1"
     pub id: String,                                   // workload identifier
@@ -83,18 +84,18 @@ Entrypoints come in two shapes:
 
 The IR is canonicalized to **RFC 8785** (keys sorted, no whitespace, deterministic escaping) before it is hashed or written to disk:
 
-- `crates/mvm-ir/src/canonicalize.rs` — produces the canonical byte sequence
-- `crates/mvm-ir/src/hash.rs` — `ir_hash()` returns the lowercase-hex SHA-256
+- `crates/mvm-contract/src/ir/canonicalize.rs` — produces the canonical byte sequence
+- `crates/mvm-contract/src/ir/hash.rs` — `ir_hash()` returns the lowercase-hex SHA-256
 
 Two semantically equivalent IRs (different field order, different whitespace) **must** produce the same hash. The hash is what binds an IR to a launch plan and to an audit-chain entry (ADR-001 claim 8). If you change a workload's IR, its hash changes; if you change anything else, it does not.
 
 ### Validation
 
-`crates/mvm-ir/src/validate.rs` runs the host-side checks. It rejects:
+`crates/mvm-contract/src/ir/validate.rs` runs the host-side checks. It rejects:
 
 - IRs with the wrong `schema_version`
 - Missing required fields, unknown fields (every type uses `#[serde(deny_unknown_fields)]`)
-- Languages not in `crates/mvm-ir/data/supported_languages.txt`
+- Languages not in `crates/mvm-contract/data/supported_languages.txt`
 - Unpinned dependencies — exits with `E_UNPINNED_DEPS`
 - Secret-shaped fields that leak into args/return schemas
 
@@ -112,29 +113,32 @@ import mvm
 
 @mvm.app(
     name="hello",
-    image=mvm.image.nix_packages(["python3"]),
-    resources=mvm.resources(vcpus=1, memory_mb=256),
-    dependencies=mvm.deps.none(),
+    source=mvm.local_path("."),
+    image=mvm.nix_packages(["python3"]),
+    resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
+    dependencies=mvm.no_deps(),
+    entrypoint=mvm.entrypoint_function(
+        module="app", function="greet", language="python", format="json"
+    ),
 )
-@mvm.function(language="python", module="app", function="greet", format="json")
 def greet(name: str) -> str:
     return f"hello, {name}"
 ```
 
-`mvmctl emit entry.py` runs the user's module under `MVM_EMITTING=1` and `MVM_IR_OUT=/path/to/workload-ir.json`. The decorators build a `Workload` dataclass tree, `_dsl.emit_json()` calls `json.dumps(..., sort_keys=True, separators=(",", ":"))`, and the canonical bytes land at `MVM_IR_OUT` (or stdout when unset).
+`mvmctl build compile entry.py` runs the user's module under `MVM_EMITTING=1` and `MVM_IR_OUT=/path/to/workload-ir.json`. The decorators build a `Workload` dataclass tree, `_dsl.emit_json()` calls `json.dumps(..., sort_keys=True, separators=(",", ":"))`, and the canonical bytes land at `MVM_IR_OUT` (or stdout when unset).
 
 </TabItem>
 <TabItem label="TypeScript">
 
 ```ts
-import * as mvm from "mvm-sdk";
+import * as mvm from "@runmvm/mvm";
 
 export const greet = mvm.app({
   name: "hello",
-  image: mvm.nixPackages(["nodejs_22"]),
-  resources: mvm.resources({ vcpus: 1, memory_mb: 256 }),
-  dependencies: mvm.deps.none(),
-  entrypoint: mvm.entrypointFunction({
+  image: mvm.nix_packages(["nodejs_22"]),
+  resources: mvm.resources({ cpu_cores: 1, memory_mb: 256, rootfs_size_mb: 512 }),
+  dependencies: mvm.no_deps(),
+  entrypoint: mvm.entrypoint_function({
     language: "typescript",
     module: "app",
     function: "greet",
@@ -143,22 +147,28 @@ export const greet = mvm.app({
 })((name: string): string => `hello, ${name}`);
 ```
 
-`mvmctl emit entry.ts` runs the declaration under the same `MVM_EMITTING=1` and `MVM_IR_OUT=/path/to/workload-ir.json` contract. The TypeScript helpers emit canonical IR through the same schema-owned shape as Python.
+`mvmctl build compile entry.ts` runs the declaration under the same `MVM_EMITTING=1` and `MVM_IR_OUT=/path/to/workload-ir.json` contract. The TypeScript helpers emit canonical IR through the same schema-owned shape as Python.
 
 </TabItem>
 <TabItem label="Rust">
 
 ```rust
-use mvm_sdk::{workload, image, resources};
+use mvm_sdk::{app, entrypoint_function, nix_packages, resources, workload};
 
-fn main() -> Result<(), mvm_sdk::EmitError> {
+// `build()` yields `BuildError` and `emit()` yields `EmitError`; there is no
+// conversion between them, so the caller boxes both.
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let wl = workload("hello")
-        .app(|a| a
-            .image(image::nix_packages(["python3"]))
-            .resources(resources(1, 256))
-            .function("python", "app", "greet", "json"))
+        .app(
+            app("hello")
+                .image(nix_packages(["python3"]))
+                .resources(resources(1, 256, 512))
+                .entrypoint(entrypoint_function("python", "app", "greet"))
+                .build()?,
+        )
         .build()?;
-    mvm_sdk::emit(&wl)
+    mvm_sdk::emit(&wl)?;
+    Ok(())
 }
 ```
 
@@ -230,13 +240,13 @@ The four files baked into every function workload:
 | `/etc/mvm/wrapper.json` | `{ module, function, format, working_dir, mode = "prod" }` — what the wrapper itself reads at startup |
 | `/etc/mvm/runtime.json` | `{ language, module, function, format, source_path, concurrency? }` — what the guest agent reads to decide how to dispatch |
 
-The two JSON files have different consumers on purpose: `runtime.json` is the agent's contract (its schema mirrors `mvm_guest::runtime_config::RuntimeConfig` exactly, with `deny_unknown_fields`), and `wrapper.json` is the wrapper's contract. Splitting them means the agent and the wrapper can evolve independently.
+The two JSON files have different consumers on purpose: `runtime.json` is the agent's contract (its schema mirrors `mvm_agentd::runtime_config::RuntimeConfig` exactly, with `deny_unknown_fields`), and `wrapper.json` is the wrapper's contract. Splitting them means the agent and the wrapper can evolve independently.
 
 The language registry lives at `nix/lib/factories/languages/` — one file per supported language. Adding a new language is **three changes**:
 
 1. Drop `nix/lib/factories/languages/<lang>.nix` with `servicePackages`, `language`, `runnerScript` attrs
 2. Add it to the `default.nix` switchboard in that directory
-3. Add the bare name to `crates/mvm-ir/data/supported_languages.txt`
+3. Add the bare name to `crates/mvm-contract/data/supported_languages.txt`
 
 No factory-side switch, no caller switch. The dispatcher in `mkFunctionService` looks it up.
 
@@ -260,8 +270,8 @@ What it provides:
 - **Firecracker kernel** (`vmlinux`)
 - **Busybox-as-PID-1 init** — under-5-second cold boot, no systemd
 - **Guest agent** — one universal Rust binary built from `mvm-src`, communicating over vsock (ADR-001 W4.1, W6.1.2). Production-safe runs receive a runtime profile and signed `VerbGrant`; DevOnly handlers remain unreachable without that authorization.
-- **Networking** — `eth0` configured via kernel boot args, NAT to host
-- **Privilege model** — PID 1 runs as uid 0 (kernel requirement); the entrypoint and agent run rootless (uid 1000 in prod, uid 0 in dev for the dev shell)
+- **Networking** — none. A workload microVM boots with no guest NIC; egress leaves only over vsock to the per-VM `mvm-network-endpoint`
+- **Privilege model** — PID 1 runs as uid 0 (kernel requirement); the agent runs as uid 990, and the entrypoint runs as uid 1000 in prod / uid 0 in dev for the dev shell
 - **Hardening** — `setpriv --no-new-privs` (W2.3), seccomp `standard` (W2.4), per-service uids (W2.1), read-only `/etc` overlay (W2.2), dm-verity verified boot (W3)
 - **Drive mounting** — `/mnt/config`, `/mnt/secrets`, `/mnt/data`
 
@@ -275,14 +285,14 @@ You now have a Nix derivation. To get a bootable rootfs on disk, `mvmctl` runs `
 
 **Orchestrator:** `crates/mvm-build/src/pipeline/orchestrator.rs::pool_build`
 
-The orchestrator picks a builder mode (`host` | `vsock` | `ssh` | `auto`) and dispatches to one of the backends under `crates/mvm-build/src/backend/`. For each build it:
+The orchestrator picks a builder mode (`host` | `vsock` | `auto`) and dispatches to one of the backends under `crates/mvm-build/src/backend/`. For each build it:
 
 1. **Prepares mounts.** Workspace mounted RO at `/work` inside the builder VM. Host `/nix` mounted RO when present; otherwise an empty store. Artifact dir mounted RW at `/out`.
 2. **Boots the builder VM.** 4 vCPU, 4096 MiB default. The builder image itself is built from this repo's flakes (`nix/images/builder-vm/`) — never downloaded — when running from a source checkout. (See CLAUDE.md: "Source-checkout builds never depend on mvm-published artifacts".)
 3. **Runs `nix build`.** With `--override-input mvm git+file://...?dir=nix` so the builder VM consumes the in-tree `nix/lib` you're editing, not a pinned release.
 4. **Extracts artifacts.** Copies `rootfs.ext4`, `vmlinux`, and `mvm-meta.json` back to the host artifact dir.
 
-The host never runs `nix` itself. Plan 72 is migrating the builder VM from libkrun to libkrun (macOS) / Firecracker (Linux); the contract is unchanged.
+The host never runs `nix` itself. The builder VM runs on libkrun (macOS 13-25), HVF (macOS 26+) or QEMU/libkrun (Linux); the contract is unchanged.
 
 ### Caching and reuse
 
@@ -345,17 +355,17 @@ import mvm
 
 @mvm.app(
     name="hello",
-    source=mvm.source.local("./src"),
-    image=mvm.image.nix_packages(["python3"]),
-    resources=mvm.resources(vcpus=1, memory_mb=256),
-    dependencies=mvm.deps.none(),
-)
-@mvm.function(
-    language="python",
-    module="app",
-    function="greet",
-    format="json",
-    primary=True,
+    source=mvm.local_path("./src"),
+    image=mvm.nix_packages(["python3"]),
+    resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
+    dependencies=mvm.no_deps(),
+    entrypoint=mvm.entrypoint_function(
+        module="app",
+        function="greet",
+        language="python",
+        format="json",
+        primary=True,
+    ),
 )
 def _spec(): pass
 ```
@@ -366,15 +376,15 @@ def _spec(): pass
 `entry.ts`:
 
 ```ts
-import * as mvm from "mvm-sdk";
+import * as mvm from "@runmvm/mvm";
 
 export const spec = mvm.app({
   name: "hello",
-  source: mvm.source.local("./src"),
-  image: mvm.nixPackages(["nodejs_22"]),
-  resources: mvm.resources({ vcpus: 1, memory_mb: 256 }),
-  dependencies: mvm.deps.none(),
-  entrypoint: mvm.entrypointFunction({
+  source: mvm.localPath("./src"),
+  image: mvm.nix_packages(["nodejs_22"]),
+  resources: mvm.resources({ cpu_cores: 1, memory_mb: 256, rootfs_size_mb: 512 }),
+  dependencies: mvm.no_deps(),
+  entrypoint: mvm.entrypoint_function({
     language: "typescript",
     module: "app",
     function: "greet",
@@ -389,7 +399,7 @@ export const spec = mvm.app({
 
 ### The emitted IR
 
-`mvmctl emit entry.py > workload-ir.json` produces canonical JSON. With whitespace re-added for readability:
+`mvmctl build compile entry.py > workload-ir.json` produces canonical JSON. With whitespace re-added for readability:
 
 ```json
 {
@@ -419,7 +429,7 @@ export const spec = mvm.app({
 }
 ```
 
-`mvmctl validate workload-ir.json` accepts it. `ir_hash()` returns a stable lowercase-hex SHA-256; copy that hash anywhere you need to refer to this exact IR (launch plan, audit entry, cache key).
+`mvmctl build address workload-ir.json` accepts it and prints its address. `ir_hash()` returns a stable lowercase-hex SHA-256; copy that hash anywhere you need to refer to this exact IR (launch plan, audit entry, cache key).
 
 ### The flake
 
@@ -480,11 +490,12 @@ Note the IR's `working_dir` field ends up baked into both files. Nothing is deci
 
 ## IR field reference
 
-The Workload IR types live in `crates/mvm-ir/src/workload.rs`. The full schema is enforced at the type level (`#[serde(deny_unknown_fields)]` everywhere); this section names the variants you'll most often choose between.
+The Workload IR types live in `crates/mvm-contract/src/ir/workload.rs`. The full schema is enforced at the type level (`#[serde(deny_unknown_fields)]` everywhere); this section names the variants you'll most often choose between.
 
 ### `Source` — where the code comes from
 
-```rust
+```rust,ignore
+// illustrative: IR variant shape; sibling types are named but not in scope here
 enum Source {
     LocalPath  { path: String, include: Vec<String>, exclude: Vec<String> },
     NixDerivation { expr: String },
@@ -500,7 +511,8 @@ enum Source {
 
 ### `Image` — what the rootfs is built from
 
-```rust
+```rust,ignore
+// illustrative: IR variant shape; sibling types are named but not in scope here
 enum Image {
     NixPackages { packages: Vec<String> },
     OciBase     { reference: String, digest: String },
@@ -511,7 +523,8 @@ enum Image {
 
 ### `Dependencies` — language deps that aren't in stdlib
 
-```rust
+```rust,ignore
+// illustrative: IR variant shape; sibling types are named but not in scope here
 enum Dependencies {
     Python { lockfile: String, tool: PythonTool },   // Uv | PipTools
     Node   { lockfile: String, tool: NodeTool },     // Pnpm | Npm | Yarn
@@ -527,11 +540,12 @@ The validator rejects unpinned dependencies with `E_UNPINNED_DEPS`. Pinning rule
 - `npm` — `package-lock.json` v3 (every dep carries `integrity` + `resolved`)
 - `yarn` — `yarn.lock` (Yarn classic v1, every entry carries `integrity "sha512-..."`)
 
-If your workload only needs the language standard library, set `dependencies = mvm.deps.none()` explicitly. There's no implicit "none"; the validator wants you to declare your posture.
+If your workload only needs the language standard library, set `dependencies = mvm.no_deps()` explicitly (there is no `mvm.deps` namespace). There's no implicit "none"; the validator wants you to declare your posture.
 
 ### `Entrypoint` — how the wrapper inside the microVM is dispatched
 
-```rust
+```rust,ignore
+// illustrative: IR variant shape; sibling types are named but not in scope here
 enum Entrypoint {
     Command  { command: Vec<String>, working_dir: String, env: BTreeMap<…> },
     Function {
@@ -607,12 +621,12 @@ The rootfs itself stays minimal — it carries only the interpreter and the lang
 
 The IR hash isn't decorative — it's load-bearing in the admission path.
 
-**`mvmctl machine run`** (`crates/mvm-cli/src/commands/vm/plan_admission.rs`):
+**`mvmctl machine run`** (`crates/mvm-hostd/src/plan_admission.rs`):
 
 1. Resolves the workload → IR JSON → `ir_hash`.
 2. Calls `synthesize_plan(input)` (`plan_builder.rs`) to build a typed `ExecutionPlan` carrying the IR hash, image ref, resources, policy refs, an intent-bound admission profile, validity window, and a fresh nonce.
 3. Signs the plan with the host's Ed25519 keypair at `~/.mvm/keys/host-signer.ed25519` (mode 0600).
-4. Verifies through `mvm_plan::verify_plan`.
+4. Verifies through `mvm_core::plan::verify_plan`.
 5. Enforces validity window (G4) and nonce replay-store.
 6. Dispatches to the backend.
 
@@ -624,7 +638,7 @@ The admission profile is the security-posture binding. It records the declared i
 - `plan.launched` — backend dispatch succeeded
 - `plan.failed` — admission rejected, with reason
 
-All three reference `(plan_id, plan_version)`, the IR hash, and admission labels such as `intent`, `admission_profile`, and `seccomp_tier`. The log is hash-chained: entry N includes the hash of entry N-1. Tampering breaks `mvm_hostd::supervisor::verify_audit_chain`, which `mvmctl audit verify` surfaces as a nonzero exit.
+All three reference `(plan_id, plan_version)`, the IR hash, and admission labels such as `intent`, `admission_profile`, and `seccomp_tier`. The log is hash-chained: entry N includes the hash of entry N-1. Tampering breaks `mvm_hostd::supervisor::verify_audit_chain`, which `mvmctl trust audit verify` surfaces as a nonzero exit.
 
 The contract: **every workload mvm runs is launched from a signed ExecutionPlan that names a specific IR hash**. No IR hash, no launch.
 
@@ -644,12 +658,13 @@ Typical output:
   "accessible":            false,
   "sealed":                true,
   "entrypointKind":        "command",
-  "init_system":           "busybox",
-  "expected_boot_ms":      4200,
-  "agent_binary":          "/nix/store/...-mvm-guest-agent",
-  "rootless_entrypoint":   true,
-  "vmlinux_present":       true,
-  "initrd_present":        false
+  "entrypointArgv":        ["/usr/lib/mvm/wrappers/runner"],
+  "initSystem":            "busybox",
+  "expectedBootMs":        300,
+  "agentBinary":           "real",
+  "rootlessEntrypoint":    true,
+  "uids":                  { "agent": 990, "entrypoint": 1000 },
+  "overlayAware":          true
 }
 ```
 
@@ -684,12 +699,12 @@ Common errors you'll meet, with where they originate:
 
 | Error | Origin | Meaning |
 |-------|--------|---------|
-| `E_UNPINNED_DEPS` | `crates/mvm-ir/src/validate.rs` | A dependency lockfile entry doesn't carry the expected hash format. Use `uv lock`, `pip-compile --generate-hashes`, or pnpm/npm/yarn lockfiles with integrity entries. |
-| `UnsupportedSchema` (plan verifier) | `crates/mvm-plan/src/plan.rs` | Plan schema_version is newer than this binary understands. Update mvmctl. |
+| `E_UNPINNED_DEPS` | `crates/mvm-contract/src/ir/validate.rs` | A dependency lockfile entry doesn't carry the expected hash format. Use `uv lock`, `pip-compile --generate-hashes`, or pnpm/npm/yarn lockfiles with integrity entries. |
+| `UnsupportedSchema` (plan verifier) | `crates/mvm-core/src/plan/` | Plan schema_version is newer than this binary understands. Update mvmctl. |
 | `mkFunctionWorkload: IR must have exactly one app` | `nix/lib/mkFunctionWorkload.nix:75` | Helper only supports single-app workloads. Drop to mkFunctionService + mkGuest by hand. |
 | `mkFunctionWorkload: app.image.kind must be "nix_packages"` | `nix/lib/mkFunctionWorkload.nix:83` | Helper doesn't support `oci_base`. Long-form route until OCI is wired through. |
 | `mkFunctionWorkload: expected exactly one primary function entrypoint` | `nix/lib/mkFunctionWorkload.nix:99` | Multi-function dispatch is ADR-0014 Phase 2; today, mark exactly one entrypoint `primary: true` and let the helper bake just that one, or use the long form. |
-| `mkFunctionService: language "<x>" has no entry in the language registry` | `nix/lib/factories/mkFunctionService.nix:59` | Add `nix/lib/factories/languages/<lang>.nix`, register in `default.nix`, append to `crates/mvm-ir/data/supported_languages.txt`. |
+| `mkFunctionService: language "<x>" has no entry in the language registry` | `nix/lib/factories/mkFunctionService.nix:59` | Add `nix/lib/factories/languages/<lang>.nix`, register in `default.nix`, append to `crates/mvm-contract/data/supported_languages.txt`. |
 
 ## Why this design
 
@@ -699,7 +714,7 @@ A few choices look unusual until you've seen them play out.
 
 **Why is the flake helper not a code generator?** Because the flake the user writes is already minimal (`mkFunctionWorkload { irFile = ...; appPkg = ./.; }`). A code generator would have to be re-run every time the IR changed, and its output would need to be committed or `.gitignore`d. Reading the IR at Nix evaluation time means the flake stays static; the IR can change without touching `flake.nix`.
 
-**Why do `wrapper.json` and `runtime.json` carry overlapping fields?** Two consumers, two contracts. The agent owns `runtime.json` (and ships its schema via `mvm_guest::runtime_config::RuntimeConfig` with `deny_unknown_fields`). The wrapper owns `wrapper.json` (its schema is in `nix/wrappers/README.md`). Splitting lets the agent and the wrapper evolve independently. The overlap is intentional duplication: both consumers need the same module/function/format triple to do their jobs.
+**Why do `wrapper.json` and `runtime.json` carry overlapping fields?** Two consumers, two contracts. The agent owns `runtime.json` (and ships its schema via `mvm_agentd::runtime_config::RuntimeConfig` with `deny_unknown_fields`). The wrapper owns `wrapper.json` (its schema is in `nix/wrappers/README.md`). Splitting lets the agent and the wrapper evolve independently. The overlap is intentional duplication: both consumers need the same module/function/format triple to do their jobs.
 
 **Why busybox-as-PID-1?** Cold boot under 5 seconds. systemd would dominate the boot budget. ADR-0013 spells out the math and the trade-offs.
 
@@ -724,7 +739,7 @@ A few choices look unusual until you've seen them play out.
 ## Where to read next
 
 - **[Writing Nix Flakes](/guides/nix-flakes/)** — full mkGuest reference for command-style workloads and richer compositions
-- **`crates/mvm-ir/src/workload.rs`** — the Workload IR type definitions (canonical reference)
+- **`crates/mvm-contract/src/ir/workload.rs`** — the Workload IR type definitions (canonical reference)
 - **`nix/lib/mkFunctionWorkload.nix`** — the IR → derivation helper (read it; it's 150 lines)
 - **`nix/lib/factories/mkFunctionService.nix`** — per-language factory
 - **`nix/lib/mk-guest.nix`** — the rootfs builder

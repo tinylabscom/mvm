@@ -28,7 +28,7 @@ use std::time::Instant;
 use mvm_agentd::vsock::connect_to;
 use mvm_core::checkpoint::CheckpointId;
 use mvm_core::crypto::vmgenid::fresh_generation_token;
-use mvm_core::vm_backend::{StandbySpec, StandbyState, StartMode};
+use mvm_core::vm_backend::{RuntimeSourceRootStrategy, StandbySpec, StandbyState, StartMode};
 use mvm_runtime::checkpoint::{CaptureVmFullParams, CheckpointStore, capture_vm_full};
 use mvm_runtime::driver::fc::FcDriver;
 use mvm_runtime::driver::{
@@ -78,6 +78,7 @@ fn host_signer_pub_cmdline_token() -> String {
 /// out of the saved memory.
 fn parent_boot_spec(name: &str, images: &LiveImages, state_dir: &Path) -> VmmSpec {
     VmmSpec {
+        builder_egress_endpoint: None,
         name: name.to_string(),
         kernel: KernelImage::Path(images.kernel.clone()),
         initramfs: None,
@@ -127,6 +128,7 @@ fn standby_spec(id: &str, images: &LiveImages, home: &Path) -> StandbySpec {
             .into_owned(),
         image_path: Some(images.rootfs.to_string_lossy().into_owned()),
         image_sha256: Some(sha256(&images.rootfs)),
+        root_strategy: RuntimeSourceRootStrategy::BlockExt4,
         // The live launch this parent mirrors is deny-all, so the guest boots no
         // egress client.
         vsock_egress: false,
@@ -223,7 +225,6 @@ fn fc_warm_pool_spawn_and_claim() {
             id: parent_checkpoint.clone(),
             vm_name: parent_id.clone(),
             supervisor_config_digest: String::new(),
-            runtime_source_policy: None,
             runtime_overlay_version: None,
             // Firecracker keeps no supervisor-config blob.
             supervisor_config_src: None,

@@ -6,9 +6,9 @@ Feature: HVF admitted egress is observable and does not hang
   timeout kills it. Endpoint diagnostics must also be capturable on disk instead
   of being discarded to /dev/null.
 
-  @live
+  @live @tls_tunnel_client
   Scenario: Admitted HTTPS egress completes instead of hanging
-    When I run mvmctl with "machine run --image alpine --allow-host httpbin.org -- wget -q -O - https://httpbin.org/get" with a 120 second timeout
+    When I run mvmctl with "machine run --image curlimages/curl:8.21.0 --allow-host httpbin.org -- curl -fsSL https://httpbin.org/get" with a 120 second timeout
     Then the command exits with code 0
     And the output contains "httpbin.org"
 
@@ -18,9 +18,9 @@ Feature: HVF admitted egress is observable and does not hang
     Then the command exits with code 0
     And the output contains "Successfully installed"
 
-  @live
+  @live @tls_tunnel_client
   Scenario: Substitution endpoint diagnostics are written to /tmp
-    When I run mvmctl with "machine run --name bdd-subst-log --image alpine --allow-host httpbin.org -- wget -q -O - https://httpbin.org/get" with a 120 second timeout
+    When I run mvmctl with "machine run --name bdd-subst-log --image curlimages/curl:8.21.0 --allow-host httpbin.org -- curl -fsSL https://httpbin.org/get" with a 120 second timeout
     Then the command exits with code 0
     And the file "/tmp/mvm-substitution-endpoint-bdd-subst-log.log" exists
     And the file "/tmp/mvm-substitution-endpoint-bdd-subst-log.log" contains "substitution endpoint bound"

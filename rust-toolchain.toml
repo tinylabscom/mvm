@@ -1,3 +1,4 @@
 [toolchain]
-channel = "1.96.0"
-components = ["clippy", "rustfmt"]
+channel = "nightly-2026-08-25"
+components = ["clippy", "rustfmt", "rust-src", "rustc-codegen-cranelift"]
+targets = ["aarch64-unknown-linux-musl", "wasm32-wasip1", "x86_64-unknown-linux-musl"]

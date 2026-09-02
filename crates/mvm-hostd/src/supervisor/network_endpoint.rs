@@ -52,7 +52,11 @@ pub fn build_egress_gate(
 ) -> mvm_runtime::vmm::egress_gate::EgressGate {
     let pins = mvm_core::policy::dns_pin::resolve_network_policy_pins(policy);
     let now = chrono::Utc::now().to_rfc3339();
+    // Peer routes ride the policy, so they arrive here already admitted and
+    // need no separate thread. Attaching them at the same place the egress
+    // rules are projected keeps one construction site for the whole gate.
     mvm_runtime::vmm::egress_gate::EgressGate::from_network_policy(policy, &pins, &now)
+        .with_peers(policy.peers().to_vec())
 }
 
 /// Default remote-resolver round-trip timeout (connect + one request/response
@@ -171,6 +175,10 @@ pub struct FlowMuxIdentity {
 pub struct EndpointConfig {
     /// Tenant the workload belongs to — the store lookup key.
     pub tenant_id: String,
+    /// VM instance identifier. Used to attribute AI egress metrics and audit
+    /// records to this workload.
+    #[serde(default)]
+    pub instance_id: String,
     /// The admitted plan's `secrets` (name → source). Only
     /// [`mvm_core::plan::SecretSource::Keystore`] entries participate; the
     /// endpoint reconstructs each one's binding from the host binding store.
@@ -232,6 +240,15 @@ pub struct EndpointConfig {
     /// closed when set: an unadmitted destination is refused before any forward.
     #[serde(default)]
     pub network_policy: Option<mvm_core::policy::network_policy::NetworkPolicy>,
+    /// Transport-neutral resource ceilings from the admitted execution plan.
+    /// Every FlowMux session for this VM draws from one shared owner of these
+    /// limits; the default preserves endpoint configs written before the field
+    /// existed.
+    #[serde(default)]
+    pub network_limits: mvm_core::plan::NetworkLimits,
+    /// Exact signed ingress mappings this endpoint owns.
+    #[serde(default)]
+    pub ingress: Vec<mvm_core::plan::IngressMapping>,
     /// Which egress protocol the relayed guest stream carries. `Wire` (default,
     /// secret-bearing) keeps the existing WireRequest substitution serve loop; `Raw`
     /// selects the raw-TCP splice serve loop. Fixed at admission — never sniffed.
@@ -246,6 +263,19 @@ pub struct EndpointConfig {
     /// between an endpoint that is serving and one that merely started.
     #[serde(default)]
     pub session_marker: Option<std::path::PathBuf>,
+    /// Host-local event socket for the first authenticated session.
+    ///
+    /// The endpoint binds this before its process-ready handshake and wakes
+    /// connected launchers after writing `session_marker`. It carries no
+    /// identity or secret data; the marker remains the durable evidence.
+    #[serde(default)]
+    pub session_ready_socket: Option<std::path::PathBuf>,
+    /// Host-local typed connector ingress. This listener is owned by the same
+    /// endpoint process and uses the same signed policy projection, secret
+    /// registry, redaction engine, audit sink, and hardened forwarder as guest
+    /// `OpenHttp` flows. Absent on legacy endpoint configs.
+    #[serde(default)]
+    pub connector_uds_path: Option<std::path::PathBuf>,
     /// How to resolve a bound secret's raw value: this host's local encrypted
     /// store (default), or a remote fleet-secrets daemon over a UDS. See
     /// [`ResolverBackend`].
@@ -287,8 +317,64 @@ pub fn resolve_store_dirs(cfg: &EndpointConfig) -> anyhow::Result<(PathBuf, Path
 /// The stores are the same ones `mvmctl secret put` (values) and `mvmctl
 /// secret set` (bindings) populate; the endpoint runs as the same host user
 /// and opens them by path.
+/// Endpoint-wide objects projected once from the admitted network fields.
+///
+/// FlowMux sessions, typed connectors, typed HTTP, ingress transforms, DNS,
+/// TCP, and UDP all clone these `Arc`s. Equal reconstructed values are not
+/// sufficient here: one object identity is what prevents policy or audit
+/// configuration from drifting between surfaces.
+#[derive(Clone)]
+pub struct EndpointNetworkProjection {
+    gate: Option<Arc<mvm_runtime::vmm::egress_gate::EgressGate>>,
+    recorder: Option<Arc<crate::supervisor::audit_recorder::Recorder>>,
+}
+
+impl EndpointNetworkProjection {
+    /// Project the endpoint's admitted policy and audit sink exactly once.
+    #[must_use]
+    pub fn from_config(cfg: &EndpointConfig) -> Self {
+        let gate = cfg
+            .network_policy
+            .as_ref()
+            .map(build_egress_gate)
+            .map(Arc::new)
+            .or_else(|| {
+                (cfg.egress_mode == EgressMode::FlowMux)
+                    .then(|| Arc::new(mvm_runtime::vmm::egress_gate::EgressGate::default_deny()))
+            });
+        Self {
+            gate,
+            recorder: build_audit_recorder(&cfg.tenant_id).map(Arc::new),
+        }
+    }
+
+    /// The one claim-10 policy object used by all FlowMux surfaces.
+    pub fn flowmux_gate(&self) -> anyhow::Result<Arc<mvm_runtime::vmm::egress_gate::EgressGate>> {
+        self.gate
+            .as_ref()
+            .map(Arc::clone)
+            .context("FlowMux endpoint projection has no egress gate")
+    }
+
+    /// The endpoint's one optional chain-signed audit sink.
+    #[must_use]
+    pub fn recorder(&self) -> Option<Arc<crate::supervisor::audit_recorder::Recorder>> {
+        self.recorder.as_ref().map(Arc::clone)
+    }
+}
+
 pub fn assemble(
     cfg: &EndpointConfig,
+) -> anyhow::Result<(Arc<SubstitutionService>, HandedPlaceholders)> {
+    let projection = EndpointNetworkProjection::from_config(cfg);
+    assemble_with_projection(cfg, &projection)
+}
+
+/// Assemble the substitution/connector service over the endpoint's already
+/// projected policy and audit objects.
+pub fn assemble_with_projection(
+    cfg: &EndpointConfig,
+    projection: &EndpointNetworkProjection,
 ) -> anyhow::Result<(Arc<SubstitutionService>, HandedPlaceholders)> {
     let bindings = match &cfg.binding_store_dir {
         Some(dir) => FileBindingStore::with_dir(dir),
@@ -331,13 +417,6 @@ pub fn assemble(
         None => None,
     };
 
-    // Chain-signed substitution audit. Best-effort: if the host signer key
-    // exists at the standard location, attach a Recorder so a live substituting
-    // invoke leaves `secret.substituted` / `secret.redacted` entries (metadata
-    // only) in the per-tenant audit log; absent ⇒ the endpoint serves without
-    // audit rather than refusing (the same optional posture `with_recorder` had).
-    let recorder = build_audit_recorder(&cfg.tenant_id);
-
     // Build the service over the resolver assembled above. `from_plan` builds
     // the registry (from the local binding store), the forwarder, and threads
     // the redaction / reversible-replacement / TLS / recorder wiring; passing
@@ -350,10 +429,17 @@ pub fn assemble(
         tracing::info!(proxy = %p.summary(), "forward leg routed through an upstream proxy");
     }
 
+    let ai_policy = cfg
+        .network_policy
+        .as_ref()
+        .and_then(|policy| policy.ai())
+        .cloned();
+
     let (service, handed) = SubstitutionService::from_plan(
         crate::supervisor::network_endpoint_proxy::FromPlanInputs {
             plan_secrets: &cfg.secrets,
             tenant: &cfg.tenant_id,
+            instance_id: &cfg.instance_id,
             bindings: &bindings,
             resolver,
             forward_timeout_secs: cfg.forward_timeout_secs,
@@ -361,28 +447,24 @@ pub fn assemble(
             redaction: cfg.redaction.clone(),
             reversible_replacement: cfg.reversible_replacement.clone(),
             tls_intermediate,
-            recorder,
+            recorder: None,
+            ai_policy,
         },
     )?;
 
-    // Claim-10: when the backend threaded the VM's resolved network policy, this
-    // endpoint becomes the egress gate. Resolve host-allowlist pins once (fails
-    // closed on an unresolvable host), build the gate over the same claim-10
-    // projection every backend shares, and attach it. Absent ⇒ no gate here.
-    let service = match &cfg.network_policy {
-        Some(policy) => {
-            let gate = build_egress_gate(policy);
-            // from_plan just minted this Arc with no other holders, so the unwrap
-            // is infallible; attach the gate, then re-wrap.
-            let svc = Arc::try_unwrap(service)
-                .map_err(|_| anyhow::anyhow!("substitution service Arc unexpectedly shared"))?
-                .with_egress_gate(gate);
-            Arc::new(svc)
-        }
-        None => service,
-    };
+    // `from_plan` just minted this Arc with no other holders. Attach both
+    // endpoint-wide objects before exposing the service to connector, typed
+    // HTTP, terminator, or ingress tasks.
+    let mut service = Arc::try_unwrap(service)
+        .map_err(|_| anyhow::anyhow!("substitution service Arc unexpectedly shared"))?;
+    if let Some(gate) = projection.gate.as_ref() {
+        service = service.with_shared_egress_gate(Arc::clone(gate));
+    }
+    if let Some(recorder) = projection.recorder.as_ref() {
+        service = service.with_shared_recorder(Arc::clone(recorder));
+    }
 
-    Ok((service, handed))
+    Ok((Arc::new(service), handed))
 }
 
 /// Fingerprint every secret this endpoint can resolve, for the host→guest
@@ -518,9 +600,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn connector_service_uses_the_exact_endpoint_policy_and_audit_objects() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("secrets")).unwrap();
+        std::fs::create_dir_all(dir.path().join("bindings")).unwrap();
+        let mut cfg = vsock_cfg(vec![], dir.path());
+        cfg.egress_mode = EgressMode::FlowMux;
+        cfg.network_policy = Some(mvm_core::policy::network_policy::NetworkPolicy::deny_all());
+
+        let gate = Arc::new(mvm_runtime::vmm::egress_gate::EgressGate::default_deny());
+        let recorder = Arc::new(crate::supervisor::audit_recorder::Recorder::new(
+            Arc::new(crate::supervisor::audit::NoopAuditSigner),
+            mvm_core::plan::TenantId("local".into()),
+        ));
+        let projection = EndpointNetworkProjection {
+            gate: Some(Arc::clone(&gate)),
+            recorder: Some(Arc::clone(&recorder)),
+        };
+
+        let (service, _) = assemble_with_projection(&cfg, &projection).unwrap();
+        assert_eq!(
+            service.shared_projection_ids(),
+            (
+                Some(Arc::as_ptr(&gate).cast::<()>() as usize),
+                Some(Arc::as_ptr(&recorder).cast::<()>() as usize),
+            )
+        );
+    }
+
     fn vsock_cfg(secrets: Vec<SecretBinding>, dir: &std::path::Path) -> EndpointConfig {
         EndpointConfig {
             tenant_id: "local".into(),
+            instance_id: "test".into(),
             secrets,
             transport: EndpointTransport::Vsock { port: 5253 },
             redaction: mvm_core::policy::RedactionPolicy::default(),
@@ -534,10 +646,14 @@ mod tests {
             terminator_listen: None,
             tls_intermediate: None,
             network_policy: None,
+            network_limits: mvm_core::plan::NetworkLimits::default(),
+            ingress: Vec::new(),
             egress_mode: EgressMode::Wire,
             resolver: ResolverBackend::default(),
             flowmux_identity: None,
             session_marker: None,
+            session_ready_socket: None,
+            connector_uds_path: None,
         }
     }
 
@@ -586,6 +702,18 @@ mod tests {
             .insert("smuggled".into(), serde_json::json!("x"));
         let err = parse(&serde_json::to_vec(&bad).unwrap()).unwrap_err();
         assert!(err.to_string().contains("unknown field"), "got {err}");
+    }
+
+    #[test]
+    fn legacy_config_defaults_network_limits() {
+        let parsed = parse(
+            br#"{"tenant_id":"t","secrets":[],"transport":{"kind":"uds","path":"/tmp/x.sock"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.network_limits,
+            mvm_core::plan::NetworkLimits::default()
+        );
     }
 
     #[test]
@@ -917,9 +1045,9 @@ mod tests {
 
     #[test]
     fn resolver_backend_defaults_to_local_when_field_omitted() {
-        // Back-compat: a config the backend wrote before `resolver` existed
-        // (or one that simply omits it) must still parse and land on the
-        // local-store behaviour existing `mvmctl secret set` flows rely on.
+        // A config that omits `resolver` parses and lands on the local-store
+        // behaviour `mvmctl secret set` relies on — the `#[serde(default)]`
+        // rule for a new optional field, not a shim for an older format.
         let json = serde_json::json!({
             "tenant_id": "local",
             "secrets": [],
@@ -1148,5 +1276,84 @@ mod proxy_config_tests {
     fn a_malformed_proxy_is_an_error_not_a_silent_direct_dial() {
         let cfg = cfg_with(Some("ftp://nope"), None, None);
         assert!(cfg.resolve_proxy().is_err());
+    }
+}
+
+#[cfg(test)]
+mod peer_thread_tests {
+    use mvm_contract::peer::{PeerBinding, PeerName};
+    use mvm_core::policy::network_policy::NetworkPolicy;
+    use mvm_runtime::vmm::egress_gate::EgressVerdict;
+
+    fn binding() -> PeerBinding {
+        PeerBinding {
+            name: PeerName::parse("db.mvm.peer").expect("valid"),
+            port: 5432,
+            host_addr: "127.0.0.1".to_string(),
+            host_port: 34567,
+        }
+    }
+
+    /// **The assertion whose absence let a documented `--peer` flag be written
+    /// against a path that could not carry one.** A binding on the admitted
+    /// policy has to arrive at the gate that decides the dial. Everything
+    /// between is plumbing; this is the property.
+    #[test]
+    fn a_peer_binding_on_the_admitted_policy_reaches_the_gate() {
+        let policy = NetworkPolicy::deny_all().with_peers(vec![binding()]);
+        let gate = super::build_egress_gate(&policy);
+        assert_eq!(
+            gate.decide_peer("db.mvm.peer", 5432),
+            EgressVerdict::Allow {
+                ips: vec!["127.0.0.1".parse().expect("ip")],
+                port: 34567,
+            }
+        );
+    }
+
+    /// Peers are orthogonal to egress: a workload that admits no outbound
+    /// destination at all may still reach its own database. If these were
+    /// coupled, the common shape would be impossible to express.
+    #[test]
+    fn a_deny_all_policy_still_carries_its_peers() {
+        let policy = NetworkPolicy::deny_all().with_peers(vec![binding()]);
+        let gate = super::build_egress_gate(&policy);
+        assert!(matches!(
+            gate.decide_peer("db.mvm.peer", 5432),
+            EgressVerdict::Allow { .. }
+        ));
+        assert!(matches!(
+            gate.decide_target("api.example.com", 443).verdict,
+            EgressVerdict::Deny(_)
+        ));
+    }
+
+    /// A policy with no peers builds a gate that admits none, so every
+    /// existing launch keeps its exact posture.
+    #[test]
+    fn a_policy_without_peers_admits_none() {
+        let gate = super::build_egress_gate(&NetworkPolicy::deny_all());
+        assert!(matches!(
+            gate.decide_peer("db.mvm.peer", 5432),
+            EgressVerdict::Deny(_)
+        ));
+    }
+
+    /// The policy crosses a process boundary as JSON on the endpoint's stdin.
+    /// A binding that did not survive that round trip would be admitted by the
+    /// CLI and absent at the gate -- the plan promising a route the runtime
+    /// denies.
+    #[test]
+    fn peers_survive_the_policy_serialization_the_endpoint_reads() {
+        let policy = NetworkPolicy::deny_all().with_peers(vec![binding()]);
+        let json = serde_json::to_string(&policy).expect("serialize");
+        let back: NetworkPolicy = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.peers(), policy.peers());
+
+        let gate = super::build_egress_gate(&back);
+        assert!(matches!(
+            gate.decide_peer("db.mvm.peer", 5432),
+            EgressVerdict::Allow { .. }
+        ));
     }
 }

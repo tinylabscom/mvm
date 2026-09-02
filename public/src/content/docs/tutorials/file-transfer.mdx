@@ -10,17 +10,20 @@ File transfer should be explicit. A narrow copy operation is easier to audit and
 ## Copy into the guest
 
 ```sh
-cargo run -- cp ./input.json filebox:/work/input.json
-cargo run -- exec filebox -- python /work/process.py /work/input.json
+cargo run -- machine cp ./input.json filebox:/work/input.json
+cargo run -- machine exec filebox -- python /work/process.py /work/input.json
 ```
+
+`machine cp` is an advanced verb: it works, but it is hidden from
+`machine --help`.
 
 ## Copy out of the guest
 
 ```sh
-cargo run -- cp filebox:/work/output.json ./output.json
+cargo run -- machine cp filebox:/work/output.json ./output.json
 ```
 
-Use host mounts only when the workflow is intentionally a development workflow and the mounted path is narrow.
+Use host mounts only when the workflow is intentionally a development workflow and the mounted path is narrow. A guest mount path has to sit under `/data` or `/work`; `/mnt` is refused because the runtime's own config and secret drives live there.
 
 ## Planned runtime SDK shape
 

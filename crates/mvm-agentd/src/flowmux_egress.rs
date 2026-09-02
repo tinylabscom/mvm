@@ -37,6 +37,18 @@ fn flowmux_to_io(error: FlowMuxError) -> io::Error {
     io::Error::new(io::ErrorKind::ConnectionAborted, error.to_string())
 }
 
+fn http_failure_status(error: &FlowMuxError) -> &'static str {
+    match error {
+        FlowMuxError::Refused(_) => "403 Forbidden",
+        FlowMuxError::Handshake(_)
+        | FlowMuxError::Frame(_)
+        | FlowMuxError::SessionClosed(_)
+        | FlowMuxError::Transport(_)
+        | FlowMuxError::UpstreamConnect(_)
+        | FlowMuxError::ChannelClosed => "502 Bad Gateway",
+    }
+}
+
 /// Bind the loopback proxy at `listen` and serve egress over one FlowMux
 /// session indefinitely.
 pub async fn run(listen: SocketAddr, flowmux: FlowMuxReconnectClient) -> io::Result<()> {
@@ -135,7 +147,7 @@ async fn serve_http_connect(
         }
         Err(error) => {
             let mut client = client;
-            write_connect_reply(&mut client, ProxyReplyStyle::HttpConnect, ConnectAck::Fail)
+            write_http_response(&mut client, http_failure_status(&error))
                 .await
                 .ok();
             Err(flowmux_to_io(error))
@@ -143,12 +155,49 @@ async fn serve_http_connect(
     }
 }
 
+/// What a client asking this proxy to fetch an `https://` URL is told.
+///
+/// The reason travels in the status line because that is the only part of the
+/// refusal most clients surface: BusyBox `wget` prints the whole line, so an
+/// operator sees what to do instead of a bare code.
+const TLS_ABSOLUTE_URI_STATUS: &str =
+    "501 Not Implemented (https absolute-URI needs CONNECT or SOCKS)";
+
+/// Refuse an absolute-form `https://` request rather than forwarding it.
+///
+/// A forward proxy asked for `GET https://host/…` is being asked to speak TLS
+/// on the client's behalf. This proxy never originates TLS — it relays bytes
+/// so the host can authorize and log every connection — so forwarding the head
+/// would write a cleartext request to a port that expects TLS: the origin
+/// answers with an error or hangs up, and the request line, `Host` and every
+/// header have already crossed the network in the clear. Refusing keeps that
+/// from happening and names the two transports that do work.
+async fn refuse_tls_absolute_uri(mut client: TcpStream, target: &str) -> io::Result<()> {
+    warn!(
+        %target,
+        "refusing an https absolute-URI proxy request: this proxy tunnels TLS \
+         (CONNECT or SOCKS5) and never originates it, so forwarding the head \
+         would send it in cleartext"
+    );
+    write_http_response(&mut client, TLS_ABSOLUTE_URI_STATUS)
+        .await
+        .ok();
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "https absolute-URI proxy request",
+    ))
+}
+
 async fn serve_http_forward(
     client: TcpStream,
     head: &[u8],
     flowmux: FlowMuxReconnectClient,
 ) -> io::Result<()> {
-    let target = http_forward_target(head)?;
+    let forward = http_forward_target(head)?;
+    if forward.tls {
+        return refuse_tls_absolute_uri(client, &forward.target).await;
+    }
+    let target = forward.target;
     match flowmux.open_tcp(&target).await {
         Ok(mut upstream) => {
             upstream.write_all(head).await?;
@@ -157,7 +206,7 @@ async fn serve_http_forward(
         }
         Err(error) => {
             let mut client = client;
-            write_http_response(&mut client, "502 Bad Gateway")
+            write_http_response(&mut client, http_failure_status(&error))
                 .await
                 .ok();
             Err(flowmux_to_io(error))
@@ -547,5 +596,218 @@ pub mod dns_stub {
             task.abort();
             host.await.unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod http_forward_tests {
+    use super::*;
+    use ed25519_dalek::{SigningKey, VerifyingKey};
+    use mvm_contract::protocol::network_flow::hello::Handshake;
+    use mvm_contract::protocol::network_flow::{Opcode, encode_into};
+    use tokio::io::{AsyncRead, AsyncWrite};
+
+    fn keypair() -> (SigningKey, VerifyingKey) {
+        let bytes: [u8; 32] = rand::random();
+        let signing = SigningKey::from_bytes(&bytes);
+        let verifying = signing.verifying_key();
+        (signing, verifying)
+    }
+
+    #[test]
+    fn policy_refusal_and_upstream_failure_have_distinct_http_statuses() {
+        assert_eq!(
+            http_failure_status(&FlowMuxError::Refused("not admitted".into())),
+            "403 Forbidden"
+        );
+        assert_eq!(
+            http_failure_status(&FlowMuxError::UpstreamConnect("connection failed".into())),
+            "502 Bad Gateway"
+        );
+    }
+
+    async fn send_frame<S>(
+        stream: &mut S,
+        session: &mut mvm_core::net::session::Session,
+        opcode: Opcode,
+        stream_id: u32,
+        payload: &[u8],
+    ) where
+        S: AsyncWrite + Unpin,
+    {
+        let mut wire = Vec::new();
+        encode_into(&mut wire, opcode, stream_id, payload).unwrap();
+        let sealed = session.seal(&wire).unwrap();
+        let mut sealed_bytes = Vec::new();
+        sealed.encode(&mut sealed_bytes).unwrap();
+        let len = u32::try_from(sealed_bytes.len()).unwrap();
+        stream.write_all(&len.to_be_bytes()).await.unwrap();
+        stream.write_all(&sealed_bytes).await.unwrap();
+        stream.flush().await.unwrap();
+    }
+
+    async fn read_frame<S>(
+        stream: &mut S,
+        session: &mut mvm_core::net::session::Session,
+    ) -> Option<(Opcode, u32, u32, Vec<u8>)>
+    where
+        S: AsyncRead + Unpin,
+    {
+        crate::flowmux::read_sealed_frame_from(stream, session)
+            .await
+            .unwrap()
+    }
+
+    /// The regression this exists for: BusyBox `wget` asks a plain HTTP proxy
+    /// for `GET https://host/ HTTP/1.1`. The proxy used to resolve that to
+    /// `host:443`, open a TCP flow and write the head — a cleartext request to
+    /// a port that expects TLS. The origin answered with an error or hung up,
+    /// which read as "mvm egress is broken", and the request line and every
+    /// header had already crossed the network in the clear.
+    ///
+    /// Nothing may reach the host, and the client must be told which
+    /// transports do work.
+    #[tokio::test]
+    async fn an_https_absolute_uri_is_refused_without_opening_a_flow() {
+        let (guest_stream, host_stream) = tokio::io::duplex(4096);
+        let (guest_key, _guest_anchor) = keypair();
+        let (host_key, host_anchor) = keypair();
+
+        let host = tokio::spawn(async move {
+            let handle = tokio::runtime::Handle::try_current().unwrap();
+            let (mut host_stream, mut host_session) = tokio::task::spawn_blocking(move || {
+                let mut adapter = crate::flowmux::AsyncStreamSyncAdapter::new(host_stream, handle);
+                let result =
+                    mvm_core::net::session::Session::host(&mut adapter, "test-session", host_key);
+                let stream = adapter.into_inner();
+                result.map(|(session, _peer)| (stream, session))
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+            let _hello = read_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::HelloAck,
+                0,
+                &Handshake::local("test-host").encode(),
+            )
+            .await;
+
+            // Whatever the proxy decides, it decides without us: anything that
+            // arrives after the handshake is a flow it should never have opened.
+            tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                read_frame(&mut host_stream, &mut host_session),
+            )
+            .await
+            .ok()
+            .flatten()
+            .map(|(opcode, _, _, _)| opcode)
+        });
+
+        let client = crate::flowmux::FlowMuxClient::connect(guest_stream, guest_key, host_anchor)
+            .await
+            .unwrap();
+        let (tx, rx) = watch::channel(Some(Arc::new(client)));
+        let _tx = tx;
+        let flowmux = crate::flowmux::FlowMuxReconnectClient::from_receiver(rx);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut caller = TcpStream::connect(addr).await.unwrap();
+        let (served, _) = listener.accept().await.unwrap();
+
+        let head = b"GET https://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let err = serve_http_forward(served, head, flowmux)
+            .await
+            .expect_err("an https absolute-URI must be refused");
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+
+        let mut reply = String::new();
+        caller.read_to_string(&mut reply).await.unwrap();
+        assert!(
+            reply.starts_with("HTTP/1.1 501 Not Implemented"),
+            "unexpected reply: {reply}"
+        );
+        assert!(
+            reply.contains("CONNECT"),
+            "the refusal must name the way through: {reply}"
+        );
+
+        assert_eq!(
+            host.await.unwrap(),
+            None,
+            "no frame may reach the host for a request that is never forwarded"
+        );
+    }
+
+    /// The path that still works, and must keep working: a `http://` absolute
+    /// URI is forwarded, so the guest opens a flow for it.
+    #[tokio::test]
+    async fn a_plain_http_absolute_uri_still_opens_a_flow() {
+        let (guest_stream, host_stream) = tokio::io::duplex(4096);
+        let (guest_key, _guest_anchor) = keypair();
+        let (host_key, host_anchor) = keypair();
+
+        let host = tokio::spawn(async move {
+            let handle = tokio::runtime::Handle::try_current().unwrap();
+            let (mut host_stream, mut host_session) = tokio::task::spawn_blocking(move || {
+                let mut adapter = crate::flowmux::AsyncStreamSyncAdapter::new(host_stream, handle);
+                let result =
+                    mvm_core::net::session::Session::host(&mut adapter, "test-session", host_key);
+                let stream = adapter.into_inner();
+                result.map(|(session, _peer)| (stream, session))
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+            let _hello = read_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::HelloAck,
+                0,
+                &Handshake::local("test-host").encode(),
+            )
+            .await;
+
+            let (opcode, _sid, _len, payload) = read_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
+            (opcode, String::from_utf8_lossy(&payload).to_string())
+        });
+
+        let client = crate::flowmux::FlowMuxClient::connect(guest_stream, guest_key, host_anchor)
+            .await
+            .unwrap();
+        let (tx, rx) = watch::channel(Some(Arc::new(client)));
+        let _tx = tx;
+        let flowmux = crate::flowmux::FlowMuxReconnectClient::from_receiver(rx);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _caller = TcpStream::connect(addr).await.unwrap();
+        let (served, _) = listener.accept().await.unwrap();
+
+        let head = b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let forward = tokio::spawn(async move {
+            let _ = serve_http_forward(served, head, flowmux).await;
+        });
+
+        let (opcode, target) = host.await.unwrap();
+        assert_eq!(opcode, Opcode::OpenTcp);
+        assert!(
+            target.contains("example.com:80"),
+            "unexpected open target: {target}"
+        );
+        forward.abort();
     }
 }

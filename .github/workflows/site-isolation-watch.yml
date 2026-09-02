@@ -1,0 +1,103 @@
+name: Site isolation watch
+
+# Checks that the live site sends the cross-origin isolation headers the
+# WebLinux demo needs, on a schedule that nothing in the repo has to trigger.
+#
+# Every other gate here reasons about the tree. This one exists because the
+# tree was right and the site was still broken: `public/public/_headers` is a
+# Cloudflare Pages file, GitHub Pages ignores it silently, and the deploy was
+# moved to Cloudflare Pages behind one-time setup (a Pages project, two
+# secrets, a DNS change) that a merged PR cannot perform. The demo has been
+# failing with "SharedArrayBuffer is not defined" ever since, with a correct
+# config in the tree and a green Website lane.
+#
+# The deploy job checks the deployment URL it just published, which cannot see
+# this: DNS pointing somewhere else is invisible from inside a successful
+# deploy. So this asks the question users ask — fetch the production domain,
+# read the headers off the wire — and it runs on a cron because the deploy is
+# release-triggered and may not run for weeks.
+#
+# Failure opens or updates one tracking issue; a clean run closes it. That is
+# the enforcement surface, not a merge block: no PR can regress this and no PR
+# can fix it.
+
+on:
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write # opens/updates/closes the tracking issue
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check live cross-origin isolation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      # No URL argument: the script reads the domain out of the site config, so
+      # a domain move cannot leave this watching the old one and passing.
+      - name: Check the production domain
+        id: check
+        run: |
+          set -uo pipefail
+          ./scripts/check-site-isolation-headers.sh 2>&1 | tee report.txt
+          echo "status=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Open, update, or close the tracking issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STATUS: ${{ steps.check.outputs.status }}
+          TITLE: "Live site is not cross-origin isolated"
+        run: |
+          set -euo pipefail
+
+          EXISTING=$(gh issue list --repo "$REPO" --state open \
+            --search "\"$TITLE\" in:title" --json number --jq '.[0].number // empty')
+
+          if [ "$STATUS" = "0" ]; then
+            if [ -n "$EXISTING" ]; then
+              printf 'The live site is cross-origin isolated again ([run](%s)) — closing.\n' \
+                "$RUN_URL" > body.md
+              gh issue comment "$EXISTING" --repo "$REPO" --body-file body.md
+              gh issue close "$EXISTING" --repo "$REPO"
+            fi
+            exit 0
+          fi
+
+          # Backticks below are markdown, not command substitution.
+          # shellcheck disable=SC2016
+          {
+            printf 'The WebLinux demo on the live site fails with '
+            printf '`SharedArrayBuffer is not defined`.\n\n'
+            printf 'Run: %s\n\n' "$RUN_URL"
+            printf '```\n'
+            cat report.txt
+            printf '```\n\n'
+            printf 'SharedArrayBuffer is exposed only to a cross-origin-isolated document, '
+            printf 'and isolation does not propagate upward from a frame — so the landing '
+            printf 'page, which embeds the demo in an iframe, has to send the headers too, '
+            printf 'not just the demo document.\n\n'
+            printf 'The headers are declared in `public/public/_headers`, which only '
+            printf 'Cloudflare Pages reads. If the report above says GitHub Pages served '
+            printf 'the response, the config is fine and the deployment is not: finish the '
+            printf 'cutover in `.github/workflows/pages.yml` (Pages project, '
+            printf '`CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`, DNS).\n'
+          } > body.md
+
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "$REPO" --body-file body.md
+          else
+            gh issue create --repo "$REPO" --title "$TITLE" --body-file body.md
+          fi
+
+          exit 1

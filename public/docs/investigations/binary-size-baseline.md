@@ -31,15 +31,19 @@ release-path measurement may drive the release budget.
 
 ### Release-gated target
 
-Measured 2026-07-08 for `aarch64-apple-darwin` in
-[`.github/workflows/release.yml`](../../.github/workflows/release.yml):
+Measured 2026-08-20 for `aarch64-apple-darwin` with the new
+`[profile.release-min]` in [`.github/workflows/release.yml`](../../.github/workflows/release.yml):
 
-| Target | Measured size | Budget |
-|---|---:|---:|
-| `aarch64-apple-darwin` | **30,007,616 bytes** | **33,554,432 bytes** (32 MiB) |
+| Target                 |        Measured size |                        Budget |
+| ---------------------- | -------------------: | ----------------------------: |
+| `aarch64-apple-darwin` | **19,206,160 bytes** | **25,165,824 bytes** (24 MiB) |
 
-This is the current real binary-size ratchet: the release workflow runs
-`xtask check-binary-size` against that budget for the measured target only.
+The `release-min` profile inherits the existing `release` settings
+(`lto = true`, `codegen-units = 1`, `strip = true`, `overflow-checks = true`)
+and adds `opt-level = "z"` and `panic = "abort"` to minimize the shipped
+artifact. This is the current real binary-size ratchet: the release workflow
+runs `xtask check-binary-size` against that budget for the measured target
+only.
 
 ### Release-bundled secondary binaries
 

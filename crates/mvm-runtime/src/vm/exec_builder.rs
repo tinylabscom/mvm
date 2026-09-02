@@ -386,10 +386,17 @@ mod tests {
     use crate::mock_guest_agent::MockGuestAgent;
     #[cfg(feature = "test-support")]
     use mvm_agentd::vsock::connect_to_port;
+    #[cfg(feature = "test-support")]
+    use mvm_core::util::test_env::TestEnv;
 
     /// Start a mock agent and return a connected, handshaken stream to it.
     #[cfg(feature = "test-support")]
-    fn agent_stream() -> Option<(tempfile::TempDir, MockGuestAgent, UnixStream)> {
+    fn agent_stream() -> Option<(TestEnv, tempfile::TempDir, MockGuestAgent, UnixStream)> {
+        // MockGuestAgent resolves the process-wide MVM_HOME more than once
+        // while creating and loading its signer. Hold the shared guard for the
+        // full agent/session lifetime so another parallel test cannot move the
+        // key root between those operations.
+        let env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         let agent = match MockGuestAgent::start(dir.path()) {
             Ok(agent) => agent,
@@ -416,7 +423,7 @@ mod tests {
             }
             Err(err) => panic!("connect to mock guest agent: {err:#}"),
         };
-        Some((dir, agent, stream))
+        Some((env, dir, agent, stream))
     }
 
     #[test]
@@ -448,7 +455,7 @@ mod tests {
     #[test]
     #[cfg(feature = "test-support")]
     fn stage_files_then_exec_on_one_stream_returns_outcome() {
-        let Some((_d, _a, mut stream)) = agent_stream() else {
+        let Some((_env, _d, _a, mut stream)) = agent_stream() else {
             return;
         };
         let mut session = ControlSession::open(&mut stream).unwrap();
@@ -474,7 +481,7 @@ mod tests {
     #[test]
     #[cfg(feature = "test-support")]
     fn run_entrypoint_returns_outcome_on_one_stream() {
-        let Some((_d, _a, mut stream)) = agent_stream() else {
+        let Some((_env, _d, _a, mut stream)) = agent_stream() else {
             return;
         };
         let mut session = ControlSession::open(&mut stream).unwrap();
@@ -495,7 +502,7 @@ mod tests {
     #[test]
     #[cfg(feature = "test-support")]
     fn batch_stages_and_runs_commands_in_one_round_trip() {
-        let Some((_d, _a, mut stream)) = agent_stream() else {
+        let Some((_env, _d, _a, mut stream)) = agent_stream() else {
             return;
         };
         let stages = [StagedFile {
@@ -516,7 +523,7 @@ mod tests {
     #[test]
     #[cfg(feature = "test-support")]
     fn exec_after_staging_multiple_files_still_succeeds() {
-        let Some((_d, _a, mut stream)) = agent_stream() else {
+        let Some((_env, _d, _a, mut stream)) = agent_stream() else {
             return;
         };
         let mut session = ControlSession::open(&mut stream).unwrap();

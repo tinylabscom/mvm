@@ -47,113 +47,36 @@ use crate::supervisor::{
     AuditSigner, FileAuditSigner, PlanAuditEntry, audit_mirror, for_plan, transcript_sealed,
 };
 use anyhow::{Context, Result};
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::Utc;
-use ed25519_dalek::{Signer, SigningKey};
-use mvm_contract::merkle::{SignedAuditRoot, root_signing_bytes};
+use ed25519_dalek::SigningKey;
+use mvm_contract::merkle::SignedAuditRoot;
 use mvm_contract::provenance::{
     ActorRef, AttestationBinding, DecisionActorRole, DecisionCategory, DecisionId, DecisionOutcome,
     DecisionRecord, DecisionRecordBuilder,
 };
 use mvm_contract::verify::hash_line;
 use mvm_core::plan::ExecutionPlan;
+use mvm_core::usage_capture::UsageCapture;
 use std::collections::HashMap;
-use std::sync::Mutex;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
-/// Wire-stable event name and label keys for the wall-clock enforcement entry.
-/// Shared so the supervisor that emits it and any reader asserting on it cannot
-/// drift on a string.
-pub mod wall_clock_audit {
-    /// Emitted when a supervisor timer killed a workload at its deadline.
-    pub const EXPIRED_EVENT: &str = "plan.wall_clock_expired";
-    /// Label: the bound that was enforced, in seconds.
-    pub const LABEL_BOUND_SECS: &str = "wall_clock_secs";
-    /// Label: wall-clock seconds actually elapsed when the timer fired.
-    pub const LABEL_ELAPSED_SECS: &str = "elapsed_secs";
-    /// Label: which mechanism killed it, so the entry names a fact rather than
-    /// leaving the reader to infer one.
-    pub const LABEL_ENFORCED_BY: &str = "enforced_by";
-}
+mod atomic_sync;
+use atomic_sync::AtomicSyncBatch;
+pub(crate) use atomic_sync::AtomicSyncState;
+#[cfg(test)]
+use atomic_sync::atomic_sync_is_batched;
 
-/// Wire-stable event names and label keys for the checkpoint audit entries.
-/// Shared so the emitter (writer) and the lineage chain-anchor (reader) can't
-/// drift on a string — a drift there would silently defeat chain-anchored
-/// lineage verification.
-pub mod checkpoint_audit {
-    /// Emitted when a VM's state is frozen into a checkpoint.
-    pub const CREATED_EVENT: &str = "checkpoint.created";
-    /// Emitted when a VM is resumed from a vm_full checkpoint (same identity).
-    pub const RESTORED_EVENT: &str = "checkpoint.restored";
-    /// Emitted when a new sandbox is branched from a checkpoint.
-    pub const FORKED_EVENT: &str = "checkpoint.forked";
+mod atomic_write;
+#[cfg(test)]
+pub(crate) use atomic_write::write_atomic_batched;
+pub(crate) use atomic_write::{write_atomic, write_atomic_unsynced};
 
-    /// Label: the checkpoint's own id (created/restored).
-    pub const LABEL_CHECKPOINT_ID: &str = "checkpoint_id";
-    /// Label: the checkpoint's content-address (created/restored).
-    pub const LABEL_META_DIGEST: &str = "meta_digest";
-    /// Label: the checkpoint class (created).
-    pub const LABEL_CLASS: &str = "class";
-    /// Label: the owning VM name (created/restored).
-    pub const LABEL_VM_NAME: &str = "vm_name";
-    /// Label: how a restore was initiated (`revert` / `rewind` / `advance`),
-    /// so a time-travel restore is distinguishable in the chain from a
-    /// same-identity resume. Carried on `checkpoint.restored`.
-    pub const LABEL_VIA: &str = "via";
-    /// Label: the parent checkpoint id (forked).
-    pub const LABEL_PARENT_ID: &str = "parent_id";
-    /// Label: the child (new) checkpoint id (forked).
-    pub const LABEL_CHILD_ID: &str = "child_id";
-    /// Label: the child VM name (forked).
-    pub const LABEL_CHILD_VM_NAME: &str = "child_vm_name";
-    /// Label: the parent's content-address, i.e. the child's hash-link (forked).
-    pub const LABEL_PARENT_DIGEST: &str = "parent_digest";
-    /// Label: the child's content-address (forked).
-    pub const LABEL_CHILD_DIGEST: &str = "child_digest";
-}
+mod session_events;
 
-/// Wire-stable event name and label keys for the image version-lineage audit
-/// entry. Shared so the emitter (writer) and the lineage chain-anchor (reader)
-/// cannot drift on a string — a drift there would silently defeat chain-anchored
-/// image-lineage verification.
-pub mod image_audit {
-    /// Emitted when a compiled image's version-lineage node is created.
-    pub const CREATED_EVENT: &str = "image.created";
-    /// Emitted when a fresh VM is launched from a prior image-lineage node (a
-    /// time-travel restore), so a revert is distinguishable in the chain from an
-    /// ordinary image run. Not a creation event — the chain-anchor never indexes
-    /// it, since a restore mints no new lineage node.
-    pub const REVERTED_EVENT: &str = "image.reverted";
-    /// Label: how a restore was initiated (`revert` / `rewind` / `advance`).
-    /// Carried on [`REVERTED_EVENT`].
-    pub const LABEL_VIA: &str = "via";
-    /// Label: the reconstructed `machine run` reference a restore re-runs.
-    /// Carried on [`REVERTED_EVENT`].
-    pub const LABEL_REVERTED_REFERENCE: &str = "image_reverted_reference";
-    /// Label: the node's own content-address. The chain-anchor keys on this.
-    pub const LABEL_NODE_DIGEST: &str = "image_node_digest";
-    /// Label: the predecessor node's content-address (the parent hash-link), or
-    /// [`GENESIS_PARENT`] when the node has none.
-    pub const LABEL_PARENT_DIGEST: &str = "image_parent_digest";
-    /// Label: the build-identity discriminant (`"flake"` / `"oci"`).
-    pub const LABEL_BUILD_IDENTITY_KIND: &str = "image_build_identity_kind";
-    /// Label: the build-identity value (flake slot hash, or
-    /// `"<registry>/<repository>"`).
-    pub const LABEL_BUILD_IDENTITY: &str = "image_build_identity";
-    /// Label: the provenance discriminant (`"build"` / `"oci"`).
-    pub const LABEL_PROVENANCE_KIND: &str = "image_provenance_kind";
-    /// Label: the build-provenance input reference.
-    pub const LABEL_PROVENANCE_INPUT_REF: &str = "image_provenance_input_ref";
-    /// Label: the build-provenance lock digest, when recorded.
-    pub const LABEL_PROVENANCE_LOCK_DIGEST: &str = "image_provenance_lock_digest";
-    /// Label: the OCI-provenance resolved manifest digest.
-    pub const LABEL_PROVENANCE_RESOLVED_DIGEST: &str = "image_provenance_resolved_digest";
-    /// Label: the OCI-provenance layer digest set (comma-joined).
-    pub const LABEL_PROVENANCE_LAYER_DIGESTS: &str = "image_provenance_layer_digests";
-    /// [`LABEL_PARENT_DIGEST`] sentinel for a genesis (parentless) node.
-    pub const GENESIS_PARENT: &str = "genesis";
-}
+pub mod checkpoint_audit;
+pub mod wall_clock_audit;
+pub use checkpoint_audit::CheckpointForkedAudit;
+pub mod image_audit;
 
 /// Wire-stable event name and label keys for the workload output-stream audit
 /// entries. Shared so the emitter (writer) and any reader cannot drift on a
@@ -334,6 +257,20 @@ pub fn audit_root_path_for_tenant(audit_dir: &Path, tenant: &str) -> PathBuf {
     audit_dir.join(format!("{tenant}.root.json"))
 }
 
+/// The append-only history of every root ever published for `tenant`.
+///
+/// The latest-root sidecar is overwritten on each publish, which is what a
+/// reader wanting "where is the log now" needs and exactly the wrong shape
+/// for attesting that it only ever grew: a consistency proof relates *two*
+/// roots, and overwriting destroys the earlier one. So each publish also
+/// appends here, and the file is never rewritten.
+pub fn audit_root_history_path_for_tenant(audit_dir: &Path, tenant: &str) -> PathBuf {
+    audit_dir.join(format!(
+        "{tenant}{}",
+        mvm_core::config::AUDIT_ROOT_HISTORY_SUFFIX
+    ))
+}
+
 /// Host-side emitter wrapping `FileAuditSigner`. Owns its own signing
 /// key half (cloned from the host signer at construction); calls
 /// `tokio::runtime::Builder::new_current_thread()` per emit.
@@ -342,7 +279,7 @@ pub fn audit_root_path_for_tenant(audit_dir: &Path, tenant: &str) -> PathBuf {
 /// and sign a published Merkle root over the tenant chain
 /// ([`Self::publish_root`]).
 pub struct AuditEmitter {
-    signers: Vec<FileAuditSigner>,
+    signers: Vec<Arc<FileAuditSigner>>,
     signing_key: SigningKey,
     audit_dir: PathBuf,
     receipts_enabled: bool,
@@ -350,6 +287,7 @@ pub struct AuditEmitter {
     decisions_enabled: bool,
     decisions_dir: Option<PathBuf>,
     decision_stores: Mutex<HashMap<String, DecisionStore>>,
+    atomic_sync_state: Arc<AtomicSyncState>,
     /// Built once on first emit and reused.
     ///
     /// The signer interface is async and the callers are not, so each emit has
@@ -411,8 +349,44 @@ impl AuditEmitter {
                 })?;
             }
         }
-        let signer = FileAuditSigner::open(signing_key.clone(), audit_dir)
-            .with_context(|| format!("opening FileAuditSigner at {}", audit_dir.display()))?;
+        let signer = Arc::new(
+            FileAuditSigner::open(signing_key.clone(), audit_dir)
+                .with_context(|| format!("opening FileAuditSigner at {}", audit_dir.display()))?,
+        );
+        Self::from_primary_signer(signing_key, audit_dir, signer)
+    }
+
+    /// Construct around an existing signer for the same key and audit
+    /// directory.
+    ///
+    /// Sharing the command-envelope signer keeps deferred launch records alive
+    /// until the terminal command record performs the file-wide durability
+    /// barrier. The signer still flushes on its final `Arc` drop, so unwind and
+    /// early-return paths retain the ordinary fallback.
+    pub fn with_primary_signer(
+        signing_key: SigningKey,
+        audit_dir: &Path,
+        signer: Arc<FileAuditSigner>,
+    ) -> Result<Self> {
+        if signer.verifying_key() != signing_key.verifying_key() {
+            anyhow::bail!("shared audit signer does not match the emitter signing key");
+        }
+        let probe_tenant = "__mvm_audit_path_probe";
+        if signer.tenant_path(probe_tenant) != audit_dir.join(format!("{probe_tenant}.jsonl")) {
+            anyhow::bail!("shared audit signer does not target the emitter audit directory");
+        }
+        Self::from_primary_signer(signing_key, audit_dir, signer)
+    }
+
+    fn from_primary_signer(
+        signing_key: SigningKey,
+        audit_dir: &Path,
+        signer: Arc<FileAuditSigner>,
+    ) -> Result<Self> {
+        if !audit_dir.exists() {
+            std::fs::create_dir_all(audit_dir)
+                .with_context(|| format!("creating audit dir at {}", audit_dir.display()))?;
+        }
         Ok(Self {
             signers: vec![signer],
             signing_key,
@@ -422,6 +396,7 @@ impl AuditEmitter {
             decisions_enabled: false,
             decisions_dir: None,
             decision_stores: Mutex::new(HashMap::new()),
+            atomic_sync_state: Arc::new(AtomicSyncState::default()),
             runtime: OnceLock::new(),
         })
     }
@@ -443,6 +418,34 @@ impl AuditEmitter {
         }
 
         let mut emitter = Self::with_dir(signing_key.clone(), audit_dir)?;
+        emitter.add_policy_destinations(signing_key, policy)?;
+        Ok(emitter)
+    }
+
+    /// Policy-aware constructor that reuses the primary local-chain signer.
+    /// Additional `file://` policy destinations retain independent signers.
+    pub fn with_policy_and_primary_signer(
+        signing_key: SigningKey,
+        audit_dir: &Path,
+        policy: &mvm_core::policy::AuditPolicy,
+        primary_signer: Arc<FileAuditSigner>,
+    ) -> Result<Self> {
+        if !policy.chain_signing {
+            anyhow::bail!(
+                "policy audit.chain_signing=false is not supported for policy-bound admission"
+            );
+        }
+        let mut emitter =
+            Self::with_primary_signer(signing_key.clone(), audit_dir, primary_signer)?;
+        emitter.add_policy_destinations(signing_key, policy)?;
+        Ok(emitter)
+    }
+
+    fn add_policy_destinations(
+        &mut self,
+        signing_key: SigningKey,
+        policy: &mvm_core::policy::AuditPolicy,
+    ) -> Result<()> {
         for destination in &policy.stream_destinations {
             let Some(raw_path) = destination.strip_prefix("file://") else {
                 anyhow::bail!(
@@ -459,9 +462,9 @@ impl AuditEmitter {
             }
             let signer = FileAuditSigner::open_file(signing_key.clone(), &path)
                 .with_context(|| format!("opening audit stream {}", path.display()))?;
-            emitter.signers.push(signer);
+            self.signers.push(Arc::new(signer));
         }
-        Ok(emitter)
+        Ok(())
     }
 
     /// Enable runtime emission of signed [`ExecutionReceipt`]s alongside
@@ -729,35 +732,18 @@ impl AuditEmitter {
         )
     }
 
-    /// Emit `plan.boot_posture` — records which rootfs strategy the run-path
-    /// tier gate actually selected for this boot, so an audit reader can tell a
-    /// dev virtiofs-root boot (the weaker dev-tier virtiofs contract — no
-    /// dm-verity, does not witness claim 3) from a block+ext4 boot (the path the
-    /// numbered claim-3 witness rides on). `root_strategy` is
-    /// `"virtiofs-root"` or `"block-ext4"`. `runtime_source_policy` records
-    /// whether this boot declared the guest runtime source as
-    /// `"required-overlay"`, `"prefer-overlay"`, or `"rootfs-only"`.
+    /// Emit `plan.boot_posture` — records which rootfs strategy the run path
+    /// selected for this boot. Every boot is `"block-ext4"`, the path the
+    /// numbered claim-3 witness rides on; the label is still written, and still
+    /// per-plan, so an audit reader can confirm it rather than assume it.
     /// Informational — the hard admission decision is still `plan.admitted`;
-    /// this event lets an operator answer "did this run boot off a virtiofs
-    /// root or a materialized block image, and was the runtime contract
-    /// overlay-required or not?" via the tamper-evident chain rather than an
-    /// unsigned side channel.
-    pub fn emit_boot_posture(
-        &self,
-        plan: &ExecutionPlan,
-        root_strategy: &str,
-        runtime_source_policy: &str,
-    ) -> Result<()> {
+    /// this event lets an operator answer "what did this run boot off?" via the
+    /// tamper-evident chain rather than an unsigned side channel.
+    pub fn emit_boot_posture(&self, plan: &ExecutionPlan, root_strategy: &str) -> Result<()> {
         self.emit(
             plan,
             "plan.boot_posture",
-            [
-                ("root_strategy".to_string(), root_strategy.to_string()),
-                (
-                    "runtime_source_policy".to_string(),
-                    runtime_source_policy.to_string(),
-                ),
-            ],
+            [("root_strategy".to_string(), root_strategy.to_string())],
         )
     }
 
@@ -778,6 +764,28 @@ impl AuditEmitter {
             "plan.policy_resolved",
             [("slots_mode".to_string(), slots_mode.to_string())],
         )
+    }
+
+    /// Emit `plan.egress_destinations` — records the (host, port) allowlist
+    /// admitted for this workload so a receipt can name the network boundary
+    /// without resolving policy refs again. No-op when the list is empty.
+    pub fn emit_egress_destinations(
+        &self,
+        plan: &ExecutionPlan,
+        destinations: &[(String, u16)],
+    ) -> Result<()> {
+        if destinations.is_empty() {
+            return Ok(());
+        }
+        let mut labels: Vec<(String, String)> = vec![(
+            "destination_count".to_string(),
+            destinations.len().to_string(),
+        )];
+        for (i, (host, port)) in destinations.iter().enumerate() {
+            labels.push((format!("destination_{i}_host"), host.clone()));
+            labels.push((format!("destination_{i}_port"), port.to_string()));
+        }
+        self.emit(plan, "plan.egress_destinations", labels)
     }
 
     /// Emit `plan.shares_admitted` — records the user host-fs grants
@@ -946,28 +954,31 @@ impl AuditEmitter {
     pub fn emit_checkpoint_forked(
         &self,
         plan: &ExecutionPlan,
-        parent_id: &str,
-        child_id: &str,
-        child_vm_name: &str,
-        parent_digest: &str,
-        child_digest: &str,
+        audit: CheckpointForkedAudit<'_>,
     ) -> Result<()> {
         use checkpoint_audit as k;
         self.emit(
             plan,
             k::FORKED_EVENT,
             [
-                (k::LABEL_PARENT_ID.to_string(), parent_id.to_string()),
-                (k::LABEL_CHILD_ID.to_string(), child_id.to_string()),
+                (k::LABEL_PARENT_ID.to_string(), audit.parent_id.to_string()),
+                (k::LABEL_CHILD_ID.to_string(), audit.child_id.to_string()),
                 (
                     k::LABEL_CHILD_VM_NAME.to_string(),
-                    child_vm_name.to_string(),
+                    audit.child_vm_name.to_string(),
                 ),
                 (
                     k::LABEL_PARENT_DIGEST.to_string(),
-                    parent_digest.to_string(),
+                    audit.parent_digest.to_string(),
                 ),
-                (k::LABEL_CHILD_DIGEST.to_string(), child_digest.to_string()),
+                (
+                    k::LABEL_CHILD_DIGEST.to_string(),
+                    audit.child_digest.to_string(),
+                ),
+                (
+                    k::LABEL_SECRET_BINDINGS.to_string(),
+                    audit.secret_bindings_json.to_string(),
+                ),
             ],
         )
     }
@@ -1023,6 +1034,7 @@ impl AuditEmitter {
         vm_name: &str,
         sealed_root_hex: &str,
         chunk_count: usize,
+        adopted: bool,
     ) -> Result<()> {
         let entry = transcript_sealed(
             plan,
@@ -1031,36 +1043,67 @@ impl AuditEmitter {
             vm_name,
             sealed_root_hex,
             chunk_count,
+            adopted,
         );
         self.emit_entry(&entry)
     }
+}
 
+/// What a finished run reports about itself.
+///
+/// A struct rather than a positional list because this grows with each
+/// dimension the host learns to observe, and a four-then-five-argument emit
+/// is the shape the workspace's argument-count rule exists to prevent.
+#[derive(Debug, Clone, Copy)]
+pub struct ExitRecord<'a> {
+    /// `None` when the guest never reported one.
+    pub exit_code: Option<i32>,
+    pub backend: &'a str,
+    pub usage: UsageCapture,
+}
+
+impl AuditEmitter {
     /// Emit `plan.exited` — fires after a waited-for workload powers off,
     /// carrying its captured exit code.
     pub fn emit_exited(&self, plan: &ExecutionPlan, exit_code: i32, backend: &str) -> Result<()> {
-        self.emit_exited_with_capture(plan, Some(exit_code), backend)
+        self.emit_exited_with_capture(
+            plan,
+            ExitRecord {
+                exit_code: Some(exit_code),
+                backend,
+                usage: UsageCapture::default(),
+            },
+        )
     }
 
     /// Emit `plan.exited` with capture fidelity: a missing exit capture is
     /// recorded as `exit_code=none` + `captured=false` rather than being
-    /// attested as a successful exit 0 the guest never reported.
+    /// attested as a successful exit 0 the guest never reported. The usage
+    /// record follows the same rule — a dimension nobody observed is written
+    /// as unavailable rather than left out, so a reader can tell an
+    /// unmeasured run from an unmeasurable one.
     pub fn emit_exited_with_capture(
         &self,
         plan: &ExecutionPlan,
-        exit_code: Option<i32>,
-        backend: &str,
+        record: ExitRecord<'_>,
     ) -> Result<()> {
-        let (code, captured) = match exit_code {
+        let (code, captured) = match record.exit_code {
             Some(code) => (code.to_string(), "true"),
             None => ("none".to_string(), "false"),
         };
+        // One label rather than a field per metric: the record is a typed
+        // document with its own validation, and flattening it here would put
+        // that validation on the far side of a string round trip.
+        let usage = serde_json::to_string(&record.usage)
+            .context("encoding the usage record for the audit chain")?;
         self.emit(
             plan,
             "plan.exited",
             [
                 ("exit_code".to_string(), code),
                 ("captured".to_string(), captured.to_string()),
-                ("backend".to_string(), backend.to_string()),
+                ("backend".to_string(), record.backend.to_string()),
+                ("usage".to_string(), usage),
             ],
         )
     }
@@ -1122,22 +1165,18 @@ impl AuditEmitter {
     /// sidecar is written temp-then-fsync-then-rename to
     /// `<audit_dir>/<tenant>.root.json` so a reader never observes a partial
     /// file.
+    /// The directory this emitter's chains, roots, and witness marks live in.
+    pub fn audit_dir(&self) -> &Path {
+        &self.audit_dir
+    }
+
     pub fn publish_root(&self, tenant: &str) -> Result<SignedAuditRoot> {
-        let vk = self.signing_key.verifying_key();
-        let (root, tree_size) = crate::audit::merkle::build_root_in(&self.audit_dir, tenant, &vk)?;
-        let root_hash = hex::encode(root);
-        let timestamp = chrono::Utc::now().to_rfc3339();
-        let payload = root_signing_bytes(tenant, tree_size, &root_hash, &timestamp)
-            .map_err(|e| anyhow::anyhow!("serializing Merkle root signing payload: {e}"))?;
-        let signature = self.signing_key.sign(&payload);
-        let signed = SignedAuditRoot {
-            tenant: tenant.to_string(),
-            tree_size,
-            root_hash,
-            timestamp,
-            signature: BASE64_STANDARD.encode(signature.to_bytes()),
-            signer_pubkey: hex::encode(vk.to_bytes()),
-        };
+        let signed =
+            crate::audit::merkle::sign_root_in(&self.audit_dir, tenant, &self.signing_key)?;
+        // History first. A crash between the two leaves a history entry with
+        // no matching sidecar, which a reader can reconcile; the reverse
+        // leaves a published root that no consistency check will ever see.
+        append_root_history(&self.audit_dir, tenant, &signed)?;
         let path = audit_root_path_for_tenant(&self.audit_dir, tenant);
         write_atomic(&path, serde_json::to_vec_pretty(&signed)?.as_slice())
             .with_context(|| format!("publishing signed root to {}", path.display()))?;
@@ -1184,21 +1223,25 @@ impl AuditEmitter {
     /// records that never reached the disk. The scope must therefore close
     /// before the action the entries authorize — not at process exit.
     pub fn batched<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        let atomic_batch = AtomicSyncBatch::begin(Arc::clone(&self.atomic_sync_state))?;
         for signer in &self.signers {
             signer.begin_batch();
         }
         let out = f();
         // End every batch even if `f` failed, so a later emit is not left
         // silently deferring its barriers.
-        let mut flush = Ok(());
+        let mut paths = Vec::new();
         for signer in &self.signers {
-            if let Err(e) = signer.end_batch() {
-                flush = Err(e);
-            }
+            paths.extend(signer.take_batched_paths());
         }
-        let out = out?;
-        flush.context("syncing batched audit entries before the action they authorize")?;
-        Ok(out)
+        let flush = atomic_batch
+            .finish(paths)
+            .context("syncing batched audit entries before the action they authorize");
+        match (out, flush) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(value), Ok(())) => Ok(value),
+        }
     }
 
     /// The shared blocking runtime, built on first use.
@@ -1308,7 +1351,7 @@ impl AuditEmitter {
         let host_did =
             mvm_core::did_key::DidKey::from_verifying_key(self.signing_key.verifying_key())
                 .to_did_key();
-        let mut receipt = audit_entry_to_receipt(entry, &host_did).ok_or_else(|| {
+        let mut receipt = audit_entry_to_receipt(entry, &host_did, None).ok_or_else(|| {
             anyhow::anyhow!(
                 "audit event {} has no receipt mapping; evidence cannot cite it",
                 entry.event
@@ -1345,7 +1388,7 @@ impl AuditEmitter {
         let host_did =
             mvm_core::did_key::DidKey::from_verifying_key(self.signing_key.verifying_key())
                 .to_did_key();
-        let mut receipt = match audit_entry_to_receipt(entry, &host_did) {
+        let mut receipt = match audit_entry_to_receipt(entry, &host_did, None) {
             Some(r) => r,
             None => return,
         };
@@ -1414,56 +1457,38 @@ impl AuditEmitter {
     }
 }
 
-/// Write `bytes` to `path` atomically: a same-directory temp file is
-/// written, fsync'd, then `rename`d over `path`. A concurrent reader sees
-/// either the old file or the complete new one, never a torn write. The
-/// temp name carries the pid so two publishers don't collide on it.
+/// Write `bytes` to `path` atomically: a same-directory temp file is written,
+/// made durable, then `rename`d over `path`. Inside [`AuditEmitter::batched`]
+/// the complete file is renamed first and its stable-storage wait joins the
+/// batch; every wait still completes before the batch returns. A concurrent
+/// reader sees either the old file or the complete new one, never a torn
+/// write. The temp name carries the pid so two publishers don't collide on
+/// it.
 /// [`write_atomic`], without the fsync.
 ///
 /// Still atomic — the rename gives a reader either the whole old file or the
 /// whole new one. What is dropped is survival of power loss, which is the
 /// right trade only for something reconstructible from data already durable.
-pub(crate) fn write_atomic_unsynced(path: &Path, bytes: &[u8]) -> Result<()> {
-    write_atomic_inner(path, bytes, false)
-}
+/// Append one published root to `tenant`'s root history, durably.
+///
+/// One JSON object per line, fsynced before returning: a root that is not on
+/// disk when the next one is published is a hole in the very sequence the
+/// consistency check walks.
+fn append_root_history(audit_dir: &Path, tenant: &str, signed: &SignedAuditRoot) -> Result<()> {
+    use std::io::Write as _;
 
-pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    write_atomic_inner(path, bytes, true)
-}
-
-fn write_atomic_inner(path: &Path, bytes: &[u8], sync: bool) -> Result<()> {
-    use std::io::Write;
-    let dir = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("path {} has no parent directory", path.display()))?;
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| anyhow::anyhow!("path {} has no file name", path.display()))?;
-    let tmp = dir.join(format!(".{file_name}.tmp.{}", std::process::id()));
-    // Best-effort: if any step before the rename fails, don't leave the
-    // partial temp file behind.
-    let write = (|| -> Result<()> {
-        let mut f = std::fs::File::create(&tmp)
-            .with_context(|| format!("creating temp file {}", tmp.display()))?;
-        f.write_all(bytes)
-            .with_context(|| format!("writing temp file {}", tmp.display()))?;
-        if sync {
-            f.sync_all()
-                .with_context(|| format!("fsync temp file {}", tmp.display()))?;
-        }
-        Ok(())
-    })();
-    if let Err(e) = write {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(anyhow::Error::from(e))
-            .with_context(|| format!("renaming {} to {}", tmp.display(), path.display()));
-    }
+    let path = audit_root_history_path_for_tenant(audit_dir, tenant);
+    let mut line = serde_json::to_vec(signed)?;
+    line.push(b'\n');
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("opening root history at {}", path.display()))?;
+    file.write_all(&line)
+        .with_context(|| format!("appending to root history at {}", path.display()))?;
+    file.sync_data()
+        .with_context(|| format!("syncing root history at {}", path.display()))?;
     Ok(())
 }
 
@@ -1471,13 +1496,114 @@ fn write_atomic_inner(path: &Path, bytes: &[u8], sync: bool) -> Result<()> {
 mod tests {
     use super::*;
     use crate::supervisor::verify_audit_chain;
+    use mvm_core::usage_capture::{Mechanism, Metric};
     use rand::Rng;
+
+    #[test]
+    fn root_history_path_is_outside_lifecycle_chain_scope() {
+        let path = audit_root_history_path_for_tenant(Path::new("/audit"), "local");
+        assert_eq!(path, Path::new("/audit/local.roots.jsonl"));
+        assert!(!mvm_core::config::is_host_lifecycle_chain(&path));
+    }
 
     fn fixture_plan(tenant: &str, plan_id: &str) -> ExecutionPlan {
         mvm_core::plan::test_support::PlanFixture::new()
             .tenant(tenant)
             .plan_id(plan_id)
             .build()
+    }
+
+    #[test]
+    fn a_durability_batch_flushes_atomic_files_even_when_the_body_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[31; 32]);
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let first = dir.path().join("first.json");
+        let second = dir.path().join("second.json");
+
+        let error = emitter
+            .batched::<()>(|| {
+                write_atomic_batched(&first, br#"{"value":1}"#, &emitter.atomic_sync_state)?;
+                write_atomic_batched(&second, br#"{"value":2}"#, &emitter.atomic_sync_state)?;
+                anyhow::bail!("admission body failed")
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("admission body failed"));
+        assert_eq!(std::fs::read(&first).unwrap(), br#"{"value":1}"#);
+        assert_eq!(std::fs::read(&second).unwrap(), br#"{"value":2}"#);
+        assert!(
+            !atomic_sync_is_batched(&emitter.atomic_sync_state),
+            "an error must close the thread-local durability scope"
+        );
+
+        let after = dir.path().join("after.json");
+        write_atomic(&after, b"after").unwrap();
+        assert_eq!(std::fs::read(after).unwrap(), b"after");
+    }
+
+    #[test]
+    fn derived_caches_do_not_extend_the_admission_durability_barrier() {
+        use mvm_contract::provenance::{
+            ActorRef, AttestationBinding, DecisionCategory, DecisionOutcome, DecisionRecordBuilder,
+        };
+
+        let audit_dir = tempfile::tempdir().unwrap();
+        let decisions_dir = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[34; 32]);
+        let signer_pubkey = hex::encode(key.verifying_key().to_bytes());
+        let emitter = AuditEmitter::with_dir(key, audit_dir.path())
+            .unwrap()
+            .with_receipts()
+            .with_decisions_dir(decisions_dir.path());
+        let plan = fixture_plan("local", "plan-cache-durability");
+        let record = DecisionRecordBuilder::new()
+            .version(1)
+            .category(DecisionCategory::Admission)
+            .actor(ActorRef {
+                principal: "host:builder".to_string(),
+                key_id: "host-signer-1".to_string(),
+                key_role: None,
+            })
+            .reasoning("grant ceiling satisfied")
+            .outcome(DecisionOutcome::Approved)
+            .timestamp("2026-08-26T00:00:00Z".to_string())
+            .attestation(AttestationBinding {
+                plan_id: Some(plan.plan_id.0.clone()),
+                signer_pubkey,
+                ..AttestationBinding::default()
+            })
+            .build()
+            .expect("valid record");
+
+        emitter
+            .batched(|| {
+                emitter.emit_admitted(&plan, "host:test")?;
+                emitter.emit_decision_record(&plan, record)?;
+                assert_eq!(
+                    atomic_sync::deferred_path_count(&emitter.atomic_sync_state),
+                    0,
+                    "receipt and decision caches are reconstructible from the audit chain and must not add stable-storage waits to admission"
+                );
+                Ok(())
+            })
+            .expect("the audit-chain barrier remains durable");
+    }
+
+    #[test]
+    fn a_shared_primary_signer_must_match_the_key_and_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[32; 32]);
+        let signer = Arc::new(FileAuditSigner::open(key.clone(), dir.path()).unwrap());
+
+        let emitter =
+            AuditEmitter::with_primary_signer(key.clone(), dir.path(), signer.clone()).unwrap();
+        assert!(Arc::ptr_eq(&emitter.signers[0], &signer));
+
+        let wrong_key = SigningKey::from_bytes(&[33; 32]);
+        assert!(AuditEmitter::with_primary_signer(wrong_key, dir.path(), signer.clone()).is_err());
+        assert!(AuditEmitter::with_primary_signer(key, other.path(), signer).is_err());
     }
 
     /// Construct, use and drop an emitter from inside an async context.
@@ -1826,11 +1952,91 @@ mod tests {
     }
 
     #[test]
-    fn boot_posture_event_is_chain_signed_and_distinguishes_root_strategy() {
-        // The dev virtiofs-root boot and the block boot must be distinguishable
-        // in the tamper-evident chain (dev-tier virtiofs vs the claim-3 block
-        // witness). Emit one of each and assert both verify + carry the right
-        // root_strategy + runtime_source_policy labels.
+    fn session_parked_event_is_chain_signed_and_keeps_the_plan_labels() {
+        // The park entry's extras must add to the plan's session labels, not
+        // replace them: `for_plan` merges extras over the plan's own labels,
+        // so a key collision would overwrite what was signed.
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let mut plan = fixture_plan("local", "plan-SESSION");
+        plan.audit_labels
+            .insert("session_id".to_string(), "sess-alpha".to_string());
+        plan.audit_labels
+            .insert("session_generation".to_string(), "3".to_string());
+
+        emitter
+            .emit_session_parked(
+                &plan,
+                vec![
+                    ("parked_session".to_string(), "sess-alpha".to_string()),
+                    ("parked_at_generation".to_string(), "3".to_string()),
+                    ("park_reason".to_string(), "approval-wait".to_string()),
+                    ("park_storage_tier".to_string(), "parked".to_string()),
+                ],
+            )
+            .unwrap();
+
+        let path = dir.path().join("local.jsonl");
+        let content = std::fs::read_to_string(&path).expect("audit file exists");
+        assert!(content.contains("session.parked"));
+        assert!(content.contains("park_reason"));
+        assert!(content.contains("approval-wait"));
+        assert!(
+            content.contains("session_generation"),
+            "the plan's own session labels must survive the merge: {content}"
+        );
+        assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
+    }
+
+    #[test]
+    fn session_resumed_event_is_chain_signed_and_keeps_the_plan_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let mut plan = fixture_plan("local", "plan-RESUME");
+        plan.audit_labels
+            .insert("session_id".to_string(), "sess-alpha".to_string());
+        plan.audit_labels
+            .insert("session_generation".to_string(), "4".to_string());
+
+        emitter
+            .emit_session_resumed(
+                &plan,
+                vec![
+                    ("resumed_session".to_string(), "sess-alpha".to_string()),
+                    ("resumed_at_generation".to_string(), "4".to_string()),
+                    ("resumed_plan_id".to_string(), "plan-RESUME".to_string()),
+                ],
+            )
+            .unwrap();
+
+        let path = dir.path().join("local.jsonl");
+        let content = std::fs::read_to_string(&path).expect("audit file exists");
+        assert!(content.contains("session.resumed"));
+        assert!(content.contains("resumed_at_generation"));
+        assert!(
+            content.contains("session_generation"),
+            "the plan's own session labels must survive the merge: {content}"
+        );
+        assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
+    }
+
+    #[test]
+    fn boot_posture_event_is_chain_signed_and_binds_the_label_to_its_own_plan() {
+        // The posture label is per-plan, not per-file: two boots in one chain
+        // each carry their own plan id alongside the strategy they booted, so a
+        // reader can attribute a posture rather than infer it from position.
         let dir = tempfile::tempdir().unwrap();
         let key = {
             let mut __ed_seed = [0u8; 32];
@@ -1840,28 +2046,21 @@ mod tests {
         let vk = key.verifying_key();
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
 
-        let vfs = fixture_plan("local", "plan-vfs");
-        let blk = fixture_plan("local", "plan-blk");
-        emitter
-            .emit_boot_posture(&vfs, "virtiofs-root", "rootfs-only")
-            .unwrap();
-        emitter
-            .emit_boot_posture(&blk, "block-ext4", "prefer-overlay")
-            .unwrap();
+        let first = fixture_plan("local", "plan-one");
+        let second = fixture_plan("local", "plan-two");
+        emitter.emit_boot_posture(&first, "block-ext4").unwrap();
+        emitter.emit_boot_posture(&second, "block-ext4").unwrap();
 
         let path = dir.path().join("local.jsonl");
         let content = std::fs::read_to_string(&path).expect("audit file exists");
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("plan.boot_posture"));
-        assert!(lines[0].contains("virtiofs-root"));
-        assert!(lines[0].contains("rootfs-only"));
-        assert!(lines[0].contains("\"plan-vfs\""));
+        assert!(lines[0].contains("block-ext4"));
+        assert!(lines[0].contains("\"plan-one\""));
+        assert!(!lines[0].contains("\"plan-two\""));
         assert!(lines[1].contains("block-ext4"));
-        assert!(lines[1].contains("prefer-overlay"));
-        assert!(lines[1].contains("\"plan-blk\""));
-        // A block boot never mislabels as virtiofs and vice-versa.
-        assert!(!lines[1].contains("virtiofs-root"));
+        assert!(lines[1].contains("\"plan-two\""));
         assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 2);
     }
 
@@ -1916,7 +2115,7 @@ mod tests {
         let root = "cd".repeat(32);
 
         emitter
-            .emit_transcript_sealed(&plan, "capture-1", "vm-1", &root, 3)
+            .emit_transcript_sealed(&plan, "capture-1", "vm-1", &root, 3, false)
             .unwrap();
 
         let path = dir.path().join("local.jsonl");
@@ -2015,11 +2214,25 @@ mod tests {
 
         // A captured exit records the code and captured=true.
         emitter
-            .emit_exited_with_capture(&plan, Some(0), "mock")
+            .emit_exited_with_capture(
+                &plan,
+                ExitRecord {
+                    exit_code: Some(0),
+                    backend: "mock",
+                    usage: UsageCapture::default(),
+                },
+            )
             .unwrap();
         // A missing capture must never be attested as exit 0.
         emitter
-            .emit_exited_with_capture(&plan, None, "mock")
+            .emit_exited_with_capture(
+                &plan,
+                ExitRecord {
+                    exit_code: None,
+                    backend: "mock",
+                    usage: UsageCapture::default(),
+                },
+            )
             .unwrap();
 
         let path = dir.path().join("local.jsonl");
@@ -2035,6 +2248,92 @@ mod tests {
             "uncaptured must not read as exit 0"
         );
         assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 2);
+    }
+
+    #[test]
+    fn an_exit_entry_carries_the_usage_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-USAGE");
+        let usage = UsageCapture {
+            cpu_ms: Metric::measured(4210, Mechanism::HostProcessCpu),
+            ..UsageCapture::default()
+        };
+
+        emitter
+            .emit_exited_with_capture(
+                &plan,
+                ExitRecord {
+                    exit_code: Some(0),
+                    backend: "libkrun",
+                    usage,
+                },
+            )
+            .unwrap();
+
+        // Parse the label back rather than substring-matching the line: the
+        // entry has to carry the number, the source, and the mechanism that
+        // produced it, and an `||` over two loose substrings would pass on any
+        // one of the three.
+        let content =
+            std::fs::read_to_string(dir.path().join("local.jsonl")).expect("audit file exists");
+        let entry: serde_json::Value = content
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("entry is json"))
+            .find(|line| line["entry"]["event"] == "plan.exited")
+            .expect("a plan.exited entry");
+        let recorded: UsageCapture = serde_json::from_str(
+            entry["entry"]["labels"]["usage"]
+                .as_str()
+                .expect("the usage label is a json string"),
+        )
+        .expect("the usage label parses back into a capture");
+        assert_eq!(recorded, usage);
+        assert_eq!(
+            recorded.cpu_ms,
+            Metric::measured(4210, Mechanism::HostProcessCpu)
+        );
+        // The dimensions this run did not observe stay unobserved rather than
+        // being filled in by the emitter.
+        assert_eq!(recorded.peak_rss_mib, Metric::unavailable());
+    }
+
+    #[test]
+    fn an_exit_that_measured_nothing_still_says_so_in_the_chain() {
+        // Absence of the label would be indistinguishable from an older
+        // entry; an explicit all-unavailable record is the attestable form.
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-USAGE-NONE");
+
+        emitter
+            .emit_exited_with_capture(
+                &plan,
+                ExitRecord {
+                    exit_code: None,
+                    backend: "firecracker",
+                    usage: UsageCapture::default(),
+                },
+            )
+            .unwrap();
+
+        let content =
+            std::fs::read_to_string(dir.path().join("local.jsonl")).expect("audit file exists");
+        assert!(content.contains("unavailable"), "got: {content}");
+        assert!(
+            content.contains("captured"),
+            "capture fidelity is unchanged"
+        );
     }
 
     #[test]
@@ -2056,6 +2355,54 @@ mod tests {
         assert!(content.contains("\"3\""));
         assert!(content.contains("\"libkrun\""));
         assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
+    }
+
+    #[test]
+    fn emit_egress_destinations_records_host_port_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-EG");
+        let destinations = vec![
+            ("example.com".to_string(), 443),
+            ("api.example.com".to_string(), 8443),
+        ];
+        emitter
+            .emit_egress_destinations(&plan, &destinations)
+            .unwrap();
+
+        let path = dir.path().join("local.jsonl");
+        let content = std::fs::read_to_string(&path).expect("audit file exists");
+        assert!(content.contains("plan.egress_destinations"));
+        assert!(content.contains("\"example.com\""));
+        assert!(content.contains("\"api.example.com\""));
+        assert!(content.contains("\"443\""));
+        assert!(content.contains("\"8443\""));
+        assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
+    }
+
+    #[test]
+    fn emit_egress_destinations_is_noop_for_empty_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-EG-EMPTY");
+        emitter.emit_egress_destinations(&plan, &[]).unwrap();
+
+        let path = dir.path().join("local.jsonl");
+        assert!(
+            !path.exists(),
+            "empty allowlist must not write an audit entry"
+        );
     }
 
     #[test]
@@ -2253,11 +2600,14 @@ mod tests {
         emitter
             .emit_checkpoint_forked(
                 &plan,
-                "ckpt-parent",
-                "ckpt-child",
-                "childvm",
-                &parent_digest,
-                &child_digest,
+                CheckpointForkedAudit {
+                    parent_id: "ckpt-parent",
+                    child_id: "ckpt-child",
+                    child_vm_name: "childvm",
+                    parent_digest: &parent_digest,
+                    child_digest: &child_digest,
+                    secret_bindings_json: r#"[{"name":"API_KEY","allowed_hosts":["api.example.com"]}]"#,
+                },
             )
             .unwrap();
         let path = dir.path().join("local.jsonl");
@@ -2270,6 +2620,8 @@ mod tests {
         assert!(content.contains("child_digest"));
         assert!(content.contains(&parent_digest));
         assert!(content.contains(&child_digest));
+        assert!(content.contains("API_KEY"));
+        assert!(content.contains("api.example.com"));
         assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
     }
 

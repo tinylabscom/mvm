@@ -102,6 +102,19 @@ pub fn capability_call<T: serde::Serialize>(
     call(stream, &request)
 }
 
+/// Open a guest→host broker stream and exchange one typed capability call.
+pub fn broker_capability_call<T: serde::Serialize>(
+    service: ServiceId,
+    verb: impl Into<String>,
+    binding: CapabilityBinding,
+    invocation_id: AgentRequestId,
+    payload: T,
+    timeout_secs: u64,
+) -> Result<serde_json::Value, BrokerError> {
+    let mut stream = connect_host_vsock(BROKER_PORT, timeout_secs)?;
+    capability_call(&mut stream, service, verb, binding, invocation_id, payload)
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write;

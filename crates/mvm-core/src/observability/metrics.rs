@@ -54,9 +54,10 @@ pub struct Metrics {
 
     // ── Dev/builder image verification ──────────────────────────────
     // One counter per outcome of the cosign-signed manifest +
-    // SHA-256 verification pipeline at builder_vm.rs::download_dev_image.
-    // The duration gauge is the last observed wall-clock from
-    // try_fetch_signed_manifest entry through verify_artifact_hash exit.
+    // SHA-256 verification pipeline in
+    // mvm-cli/src/commands/env/artifact_verify.rs. The duration gauge is
+    // the last observed wall-clock from fetch_expected_hashes entry
+    // through verify_artifact_hash exit.
     // mvmd reads these via the prometheus exposition to alert
     // on attack-shaped failure spikes (sig_invalid / digest_mismatch).
     pub dev_image_verify_ok: AtomicU64,
@@ -87,7 +88,6 @@ pub struct Metrics {
     pub audit_audit_total: AtomicU64,
     pub audit_dns_total: AtomicU64,
     pub audit_icmp_total: AtomicU64,
-    pub audit_l3_total: AtomicU64,
     pub audit_workload_audit_total: AtomicU64,
 }
 
@@ -150,7 +150,6 @@ impl Metrics {
             audit_audit_total: AtomicU64::new(0),
             audit_dns_total: AtomicU64::new(0),
             audit_icmp_total: AtomicU64::new(0),
-            audit_l3_total: AtomicU64::new(0),
             audit_workload_audit_total: AtomicU64::new(0),
         }
     }
@@ -208,7 +207,6 @@ impl Metrics {
             audit_audit_total: self.audit_audit_total.load(Ordering::Relaxed),
             audit_dns_total: self.audit_dns_total.load(Ordering::Relaxed),
             audit_icmp_total: self.audit_icmp_total.load(Ordering::Relaxed),
-            audit_l3_total: self.audit_l3_total.load(Ordering::Relaxed),
             audit_workload_audit_total: self.audit_workload_audit_total.load(Ordering::Relaxed),
         }
     }
@@ -487,12 +485,6 @@ impl Metrics {
         );
         write_metric(
             &mut out,
-            "mvm_audit_l3_total",
-            s.audit_l3_total,
-            "Audit events in the `l3` category (L3 tunnel gateway decisions)",
-        );
-        write_metric(
-            &mut out,
             "mvm_audit_workload_audit_total",
             s.audit_workload_audit_total,
             "Audit events in the `workload_audit` category (workload-emitted via `host.audit.v1`)",
@@ -590,8 +582,6 @@ pub struct MetricsSnapshot {
     #[serde(default)]
     pub audit_dns_total: u64,
     pub audit_icmp_total: u64,
-    #[serde(default)]
-    pub audit_l3_total: u64,
     #[serde(default)]
     pub audit_workload_audit_total: u64,
 }

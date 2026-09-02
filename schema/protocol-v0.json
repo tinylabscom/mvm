@@ -23,6 +23,14 @@
         "rootfs"
       ],
       "properties": {
+        "extensions": {
+          "description": "Exact optional extension identities admitted by the signed plan.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ExtensionConfig"
+          }
+        },
         "rootfs": {
           "description": "Rootfs configuration.  The data device (or virtio-fs tag) becomes the guest's `/` after activation.",
           "allOf": [
@@ -91,6 +99,10 @@
           ]
         }
       ]
+    },
+    "AssuranceId": {
+      "description": "A bounded, audit-safe identifier.\n\nUnlike the agent-session identifiers this contract sits beside, uppercase is legal: the finding and rule identifiers minted upstream look like `SCOUT-RCE-001`, and lowercasing them here would silently break the join back to the source finding.",
+      "type": "string"
     },
     "BackpressureReason": {
       "description": "Why a streaming or queued operation is currently throttled.\n\nClosed enum: every reason is named, and drift between host and guest fails the serde `deny_unknown_fields`-equivalent path (variants must match). Detail strings carried alongside this enum are bounded and redacted — never argv / env / stdin / stdout / stderr / filesystem paths.",
@@ -223,6 +235,59 @@
           ],
           "format": "uint64",
           "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "CapabilityBinding": {
+      "description": "Exact descriptor identity admitted for one workload.",
+      "type": "object",
+      "required": [
+        "capability",
+        "descriptor_digest"
+      ],
+      "properties": {
+        "capability": {
+          "description": "Capability identity approved by admission.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/CapabilityId"
+            }
+          ]
+        },
+        "descriptor_digest": {
+          "description": "Digest of the complete descriptor approved by admission.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0.0
+          },
+          "maxItems": 32,
+          "minItems": 32
+        }
+      },
+      "additionalProperties": false
+    },
+    "CapabilityId": {
+      "description": "A versioned service verb that can be admitted independently.",
+      "type": "object",
+      "required": [
+        "service",
+        "verb"
+      ],
+      "properties": {
+        "service": {
+          "description": "Versioned host service identity.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ServiceId"
+            }
+          ]
+        },
+        "verb": {
+          "description": "Verb within the versioned service.",
+          "type": "string"
         }
       },
       "additionalProperties": false
@@ -576,6 +641,304 @@
             "format": "uint8",
             "minimum": 0.0
           }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ExtensionBudgets": {
+      "description": "Maximum resources the extension publisher permits one admitted instance to receive. Host policy and the short-lived grant may only narrow these.",
+      "type": "object",
+      "required": [
+        "cpu_millis",
+        "duration_ms",
+        "max_artifact_bytes",
+        "max_concurrency",
+        "max_output_bytes",
+        "max_payload_bytes",
+        "max_steps",
+        "memory_bytes"
+      ],
+      "properties": {
+        "cpu_millis": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "duration_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "max_artifact_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "max_concurrency": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "max_output_bytes": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "max_payload_bytes": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "max_steps": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "memory_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ExtensionCancellation": {
+      "description": "Identity-only cancellation for one active optional-extension invocation. It deliberately carries no process selector, signal, path, or cleanup scope; the guest resolves the already-admitted process from this identity.",
+      "type": "object",
+      "required": [
+        "campaign_id",
+        "contract_digest",
+        "extension_id",
+        "grant_digest",
+        "idempotency_key",
+        "nonce",
+        "pack_digest",
+        "plan_id",
+        "request_id",
+        "session_id",
+        "trial_id"
+      ],
+      "properties": {
+        "campaign_id": {
+          "$ref": "#/definitions/AssuranceId"
+        },
+        "contract_digest": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0.0
+          },
+          "maxItems": 32,
+          "minItems": 32
+        },
+        "extension_id": {
+          "type": "string"
+        },
+        "grant_digest": {
+          "$ref": "#/definitions/Sha256Digest"
+        },
+        "idempotency_key": {
+          "$ref": "#/definitions/AssuranceId"
+        },
+        "nonce": {
+          "$ref": "#/definitions/AssuranceId"
+        },
+        "pack_digest": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0.0
+          },
+          "maxItems": 32,
+          "minItems": 32
+        },
+        "plan_id": {
+          "$ref": "#/definitions/AssuranceId"
+        },
+        "request_id": {
+          "$ref": "#/definitions/AssuranceId"
+        },
+        "session_id": {
+          "$ref": "#/definitions/AssuranceId"
+        },
+        "trial_id": {
+          "$ref": "#/definitions/AssuranceId"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ExtensionConfig": {
+      "description": "One read-only extension artifact mounted for identity-only dispatch.",
+      "type": "object",
+      "required": [
+        "binding",
+        "device",
+        "mountpoint",
+        "plan_id"
+      ],
+      "properties": {
+        "binding": {
+          "$ref": "#/definitions/ExtensionPlanBinding"
+        },
+        "device": {
+          "type": "string"
+        },
+        "mountpoint": {
+          "type": "string"
+        },
+        "plan_id": {
+          "$ref": "#/definitions/AssuranceId"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ExtensionDispatch": {
+      "description": "Identity-bound input for one optional extension invocation. There is no program, argv, environment, mount, destination, or host path on this wire.",
+      "type": "object",
+      "required": [
+        "campaign_id",
+        "contract_digest",
+        "extension_id",
+        "grant_digest",
+        "idempotency_key",
+        "input",
+        "nonce",
+        "pack_digest",
+        "plan_id",
+        "request_id",
+        "session_id",
+        "trial_id"
+      ],
+      "properties": {
+        "campaign_id": {
+          "$ref": "#/definitions/AssuranceId"
+        },
+        "contract_digest": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0.0
+          },
+          "maxItems": 32,
+          "minItems": 32
+        },
+        "extension_id": {
+          "type": "string"
+        },
+        "grant_digest": {
+          "$ref": "#/definitions/Sha256Digest"
+        },
+        "idempotency_key": {
+          "$ref": "#/definitions/AssuranceId"
+        },
+        "input": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0.0
+          }
+        },
+        "nonce": {
+          "$ref": "#/definitions/AssuranceId"
+        },
+        "pack_digest": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0.0
+          },
+          "maxItems": 32,
+          "minItems": 32
+        },
+        "plan_id": {
+          "$ref": "#/definitions/AssuranceId"
+        },
+        "request_id": {
+          "$ref": "#/definitions/AssuranceId"
+        },
+        "session_id": {
+          "$ref": "#/definitions/AssuranceId"
+        },
+        "trial_id": {
+          "$ref": "#/definitions/AssuranceId"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ExtensionPlacement": {
+      "description": "Where MVM places and launches the verified executable.",
+      "type": "string",
+      "enum": [
+        "guest_workload",
+        "isolated_controller"
+      ]
+    },
+    "ExtensionPlanBinding": {
+      "description": "Exact extension identity and authority embedded in the signed execution plan after pack verification and policy/grant intersection.",
+      "type": "object",
+      "required": [
+        "artifact",
+        "budgets",
+        "capabilities",
+        "contract_digest",
+        "entrypoint",
+        "extension_id",
+        "pack_digest",
+        "placement",
+        "version"
+      ],
+      "properties": {
+        "artifact": {
+          "type": "string"
+        },
+        "budgets": {
+          "$ref": "#/definitions/ExtensionBudgets"
+        },
+        "capabilities": {
+          "description": "Already-intersected exact typed capabilities. The broker receives these from the host-signed admission; the extension cannot widen them.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/CapabilityBinding"
+          }
+        },
+        "contract_digest": {
+          "description": "SHA-256 of [`ExtensionPackContract`].",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0.0
+          },
+          "maxItems": 32,
+          "minItems": 32
+        },
+        "entrypoint": {
+          "type": "string"
+        },
+        "extension_id": {
+          "type": "string"
+        },
+        "pack_digest": {
+          "description": "SHA-256 of the enclosing verified pack's canonical manifest.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0.0
+          },
+          "maxItems": 32,
+          "minItems": 32
+        },
+        "placement": {
+          "$ref": "#/definitions/ExtensionPlacement"
+        },
+        "version": {
+          "type": "string"
         }
       },
       "additionalProperties": false
@@ -951,6 +1314,7 @@
             "integration_status",
             "entrypoint_status",
             "run_entrypoint",
+            "run_extension",
             "filesystem_rpc",
             "process_rpc",
             "console",
@@ -1267,6 +1631,50 @@
           "additionalProperties": false
         },
         {
+          "description": "Run one exact optional extension admitted and mounted at activation. The request carries identities and bounded stdin only; the executable, mount, environment, and resource ceilings are fixed by admission.",
+          "type": "object",
+          "required": [
+            "RunExtension"
+          ],
+          "properties": {
+            "RunExtension": {
+              "type": "object",
+              "required": [
+                "dispatch"
+              ],
+              "properties": {
+                "dispatch": {
+                  "$ref": "#/definitions/ExtensionDispatch"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Cancel one exact active optional-extension invocation. There is no PID, signal, command, or cleanup selector on this surface.",
+          "type": "object",
+          "required": [
+            "CancelExtension"
+          ],
+          "properties": {
+            "CancelExtension": {
+              "type": "object",
+              "required": [
+                "cancellation"
+              ],
+              "properties": {
+                "cancellation": {
+                  "$ref": "#/definitions/ExtensionCancellation"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
           "description": "Run an arbitrary argv as a detached workload (dev-only).\n\nMirrors how the image's `/init` runs its baked entrypoint, but driven from the agent and non-blocking: the agent spawns the program in its own session (`setsid`), with stdin from `/dev/null` and stdout/stderr on the guest console (which the host backend captures to `console.log`), returns an immediate `DetachedStarted { pid }` ack, and a reaper reports the workload's exit code to the host's workload-exit port when it finishes — so the VM powers off once the workload exits (docker `-d` semantics). Unlike `Exec`, the workload's lifetime is not bound to this request's connection.",
           "type": "object",
           "required": [
@@ -1341,6 +1749,13 @@
                   "format": "uint64",
                   "minimum": 0.0
                 },
+                "hostname": {
+                  "description": "Workload identity to install as the kernel hostname after a warm parent is restored into a named child. Legacy resume callers omit it and leave the current hostname unchanged.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "token": {
                   "default": [
                     0,
@@ -1381,30 +1796,6 @@
           "enum": [
             "FsDiff"
           ]
-        },
-        {
-          "description": "Start a vsock→TCP port forwarder for the given guest port. The agent binds vsock port `PORT_FORWARD_BASE + guest_port` and forwards each connection to `localhost:guest_port`.",
-          "type": "object",
-          "required": [
-            "StartPortForward"
-          ],
-          "properties": {
-            "StartPortForward": {
-              "type": "object",
-              "required": [
-                "guest_port"
-              ],
-              "properties": {
-                "guest_port": {
-                  "type": "integer",
-                  "format": "uint16",
-                  "minimum": 0.0
-                }
-              },
-              "additionalProperties": false
-            }
-          },
-          "additionalProperties": false
         },
         {
           "description": "Bind a guest Unix socket and forward each accepted connection to a host vsock port. The guest path must live under `/run/mvm/` (see `validate_unix_forward_guest_path`).",
@@ -2587,6 +2978,13 @@
           "additionalProperties": false
         },
         {
+          "description": "The exact active extension invocation accepted cancellation.",
+          "type": "string",
+          "enum": [
+            "ExtensionCancellationAck"
+          ]
+        },
+        {
           "description": "One event in the streaming response of a DevOnly `Exec` call. Terminated by `ExecEvent::Exit`.",
           "type": "object",
           "required": [
@@ -2702,36 +3100,6 @@
                   "items": {
                     "$ref": "#/definitions/FsChange"
                   }
-                }
-              },
-              "additionalProperties": false
-            }
-          },
-          "additionalProperties": false
-        },
-        {
-          "description": "Port forward started successfully.",
-          "type": "object",
-          "required": [
-            "PortForwardStarted"
-          ],
-          "properties": {
-            "PortForwardStarted": {
-              "type": "object",
-              "required": [
-                "guest_port",
-                "vsock_port"
-              ],
-              "properties": {
-                "guest_port": {
-                  "type": "integer",
-                  "format": "uint16",
-                  "minimum": 0.0
-                },
-                "vsock_port": {
-                  "type": "integer",
-                  "format": "uint32",
-                  "minimum": 0.0
                 }
               },
               "additionalProperties": false
@@ -3738,6 +4106,13 @@
           ]
         },
         {
+          "description": "The admitted controller canceled the call and the agent killed its process group.",
+          "type": "string",
+          "enum": [
+            "Canceled"
+          ]
+        },
+        {
           "description": "Another `RunEntrypoint` is in flight on this VM. M12: agents serialize per-VM; concurrency comes from pool growth.",
           "type": "string",
           "enum": [
@@ -3804,6 +4179,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "ServiceId": {
+      "description": "Reverse-DNS-like service identifier with a mandatory version segment.\n\nExamples: `host.secrets.v1`, `host.time.v1`, `host.cost.v1`, `broker.v1`.\n\nStrings are validated at construction so the gate code can rely on the shape (in particular, the version segment is the rate-limiting parser for the binding gate).",
+      "type": "string"
+    },
+    "Sha256Digest": {
+      "description": "A `sha256:<64 hex>` digest.\n\nStored in its wire form rather than as `[u8; 32]` so that a digest which round-trips through this contract is byte-identical to the one the counterparty computed, including its hex case. Equality is over those exact bytes, which is what the identity checks downstream depend on.",
+      "type": "string"
     },
     "StageFile": {
       "description": "A file to stage into the guest before an [`GuestRequest::ExecBatch`] runs.",
@@ -4022,6 +4405,13 @@
             {
               "$ref": "#/definitions/VolumeConfigKind"
             }
+          ]
+        },
+        "label": {
+          "description": "ext4 volume label on the attached image, when the host wrote one.\n\nPreferred over [`Self::device`] for a block volume: a device node names whichever image landed in that slot, so a slot-order change mounts the wrong one and succeeds. Matching the label proves the guest mounted the image the host meant. `None` falls back to the node.",
+          "type": [
+            "string",
+            "null"
           ]
         },
         "mountpoint": {

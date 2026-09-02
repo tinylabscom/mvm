@@ -48,6 +48,10 @@ pub enum RuntimeOverlayError {
     #[error(transparent)]
     Resolve(#[from] OverlayError),
 
+    /// The published compatibility binaries could not be validated or cached.
+    #[error(transparent)]
+    GuestRuntime(#[from] crate::guest_agent_build::GuestAgentBuildError),
+
     /// `nix build` exited non-zero or couldn't be spawned by the
     /// orchestrator that drives `nix build` against the runtime-overlay
     /// flake. Includes the upstream stderr so failures are debuggable
@@ -207,6 +211,7 @@ pub fn build_runtime_overlay_from_guest_binaries(
         (&bins.egress_client, root.join("egress-client")),
         (&bins.addon_dns, root.join("addon-dns")),
         (&bins.exit_report, root.join("exit-report")),
+        (&bins.forward_proxy, root.join("forward-proxy")),
     ];
     par_map(binaries.to_vec(), |(src, dst)| {
         stage_runtime_overlay_binary(src, &dst)
@@ -596,6 +601,21 @@ fn validate_built_artifact(
 }
 
 fn runtime_overlay_source_checkout_root() -> Option<PathBuf> {
+    if !crate::artifact_acquisition::compiled_channel().permits_automatic_builds() {
+        return None;
+    }
+    if let Ok(override_root) = std::env::var("MVM_RUNTIME_OVERLAY_SOURCE_ROOT") {
+        let path = PathBuf::from(override_root);
+        if path
+            .join("nix")
+            .join("images")
+            .join("runtime-overlay")
+            .join("flake.nix")
+            .is_file()
+        {
+            return Some(path);
+        }
+    }
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir.parent()?.parent()?;
     workspace_root
@@ -875,9 +895,8 @@ const DEFAULT_RELEASE_BASE: &str = "https://github.com/tinylabscom/mvm/releases/
 
 /// Documented escape hatch — bypass the SHA-256
 /// integrity check when an emergency rotation requires it. Never set
-/// in CI. Matches the env var name used by `download_dev_image` and
-/// `download_builder_vm_image` so the operator runbook covers all
-/// three.
+/// in CI. Matches the env var name honoured by `verify_artifact_hash` on the
+/// CLI's download path, so the operator runbook covers both.
 pub(crate) const SKIP_HASH_VERIFY_ENV: &str = "MVM_SKIP_HASH_VERIFY";
 
 /// Construct the per-version release base URL the four artifacts
@@ -897,8 +916,8 @@ pub fn release_base_url(version: &str) -> String {
 /// `checksums-sha256.txt`, and install into `cache_root` under the canonical layout
 /// `<cache_root>/runtime-overlay/<version>/<arch>/`.
 ///
-/// Mirrors the integrity pattern of `download_dev_image` /
-/// `download_builder_vm_image`: fetch the archive checksum first; reject
+/// Mirrors the integrity pattern of `download_builder_vm_image`: fetch the
+/// archive checksum first; reject
 /// downloads whose hash isn't pre-committed there; honor
 /// `MVM_SKIP_HASH_VERIFY=1` only as a documented emergency
 /// rotation escape (never set in CI).
@@ -935,10 +954,27 @@ pub fn download_runtime_overlay(
             asset: &names.archive,
             archive_path: &archive_local,
             version,
+            // Unchanged: this path still resolves its base URL from the CLI
+            // version, so its signature train must stay the CLI one. Splitting
+            // its download tag from its cache key is a separate change.
+            train: crate::release_signature::ReleaseTrain::Cli,
         },
     )?;
     extract_release_archive(&archive_local, stage, &OVERLAY_ARCHIVE_MEMBERS)?;
     verify_overlay_dir_integrity(stage)?;
+    verify_release_guest_runtime(stage)?;
+
+    crate::guest_agent_build::install_into_cache(
+        crate::guest_agent_build::GuestRuntimeBinaryPaths {
+            agent: &stage.join("mvm-guest-agent"),
+            netinit: &stage.join("mvm-guest-netinit"),
+            egress_client: &stage.join("mvm-egress-client"),
+            entrypoint_runner: &stage.join("mvm-oci-entrypoint"),
+        },
+        &cache_root.join("oci"),
+        version,
+        arch,
+    )?;
 
     // Step 3: read the roothash text so the returned
     // `RuntimeOverlayArtifact` carries the value the backend
@@ -971,13 +1007,37 @@ pub fn download_runtime_overlay(
 /// Exactly the members the overlay's release tarball may carry. Doubles as the
 /// extraction allow-list and the completeness check — an archive carrying
 /// anything else, or missing any of these, is refused.
-const OVERLAY_ARCHIVE_MEMBERS: [&str; 5] = [
+const RELEASE_GUEST_RUNTIME_FILES: [&str; 4] =
+    crate::guest_agent_build::OCI_GUEST_RUNTIME_BINARY_NAMES;
+
+const OVERLAY_ARCHIVE_MEMBERS: [&str; 9] = [
     "overlay.ext4",
     "overlay.verity",
     "overlay.roothash",
     "VERSION",
+    "mvm-guest-agent",
+    "mvm-guest-netinit",
+    "mvm-egress-client",
+    "mvm-oci-entrypoint",
     CHECKSUM_MANIFEST_FILE,
 ];
+
+fn verify_release_guest_runtime(stage: &Path) -> Result<(), RuntimeOverlayError> {
+    let manifest_path = stage.join(CHECKSUM_MANIFEST_FILE);
+    let body = std::fs::read_to_string(&manifest_path)?;
+    let expected = mvm_fs::overlay::parse_checksums_manifest(&body);
+    for name in RELEASE_GUEST_RUNTIME_FILES {
+        let expected_hash =
+            expected
+                .get(name)
+                .ok_or_else(|| RuntimeOverlayError::ChecksumMissing {
+                    name: name.to_string(),
+                    checksums_url: manifest_path.display().to_string(),
+                })?;
+        verify_file_sha256(&stage.join(name), name, Some(expected_hash))?;
+    }
+    Ok(())
+}
 
 /// Safely extract a published release tarball into `stage`, flattening it to the
 /// canonical filenames in `expected`.
@@ -1180,6 +1240,25 @@ mod tests {
 
     const FAKE_ROOTHASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+    #[cfg(feature = "release-channel")]
+    #[test]
+    fn official_build_does_not_detect_the_compiled_in_runtime_overlay_flake() {
+        assert_eq!(runtime_overlay_source_checkout_root(), None);
+    }
+
+    #[cfg(not(feature = "release-channel"))]
+    #[test]
+    fn contributor_build_detects_the_compiled_in_runtime_overlay_flake() {
+        let workspace_root = runtime_overlay_source_checkout_root()
+            .expect("a contributor build must detect its source checkout");
+        assert!(
+            workspace_root
+                .join("nix/images/runtime-overlay/flake.nix")
+                .is_file(),
+            "detected workspace root must contain the runtime-overlay flake"
+        );
+    }
+
     fn valid_overlay_ext4_bytes() -> Vec<u8> {
         let paths: &[&str] = &[
             "/agent",
@@ -1188,6 +1267,7 @@ mod tests {
             "/seccomp-apply",
             "/runner",
             "/egress-client",
+            "/forward-proxy",
             "/addon-dns",
             "/exit-report",
         ];
@@ -1850,6 +1930,15 @@ mod tests {
         assert!(cache_dir.join("overlay.verity").is_file());
         assert!(cache_dir.join("overlay.roothash").is_file());
         assert!(cache_dir.join("VERSION").is_file());
+        assert!(
+            crate::guest_agent_build::cached_guest_binaries(
+                &cache.path().join("oci"),
+                "9.9.9",
+                GuestArch::Aarch64,
+            )
+            .is_some(),
+            "the published overlay must seed OCI materialization shims"
+        );
         assert_eq!(
             std::fs::read(cache_dir.join("overlay.ext4")).unwrap(),
             ext4_bytes
@@ -1992,25 +2081,62 @@ mod tests {
         }
     }
 
+    #[test]
+    fn published_guest_runtime_requires_an_inner_checksum_for_every_binary() {
+        let stage = TempDir::new().unwrap();
+        for name in RELEASE_GUEST_RUNTIME_FILES {
+            std::fs::write(
+                stage.path().join(name),
+                crate::guest_agent_build::fake_static_elf(GuestArch::Aarch64, name.as_bytes()),
+            )
+            .unwrap();
+        }
+        std::fs::write(stage.path().join(CHECKSUM_MANIFEST_FILE), "").unwrap();
+
+        let err = verify_release_guest_runtime(stage.path())
+            .expect_err("unsigned inner guest binaries must be refused");
+        match err {
+            RuntimeOverlayError::ChecksumMissing { name, .. } => {
+                assert_eq!(name, "mvm-guest-agent");
+            }
+            other => panic!("expected ChecksumMissing, got {other:?}"),
+        }
+    }
+
     fn runtime_overlay_archive_bytes(
         ext4_bytes: &[u8],
         verity_bytes: &[u8],
         roothash_bytes: &[u8],
         version_bytes: &[u8],
     ) -> Vec<u8> {
-        let checksums = format!(
+        let guest_files: Vec<(&str, Vec<u8>)> = RELEASE_GUEST_RUNTIME_FILES
+            .iter()
+            .map(|name| {
+                (
+                    *name,
+                    crate::guest_agent_build::fake_static_elf(GuestArch::Aarch64, name.as_bytes()),
+                )
+            })
+            .collect();
+        let mut checksums = format!(
             "{}  overlay.ext4\n{}  overlay.verity\n{}  overlay.roothash\n{}  VERSION\n",
             sha256_hex(ext4_bytes),
             sha256_hex(verity_bytes),
             sha256_hex(roothash_bytes),
             sha256_hex(version_bytes),
         );
+        for (name, bytes) in &guest_files {
+            checksums.push_str(&format!("{}  {name}\n", sha256_hex(bytes)));
+        }
         let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         let mut tar = tar::Builder::new(encoder);
         append_archive_file(&mut tar, "overlay.ext4", ext4_bytes);
         append_archive_file(&mut tar, "overlay.verity", verity_bytes);
         append_archive_file(&mut tar, "overlay.roothash", roothash_bytes);
         append_archive_file(&mut tar, "VERSION", version_bytes);
+        for (name, bytes) in &guest_files {
+            append_archive_file(&mut tar, name, bytes);
+        }
         append_archive_file(&mut tar, CHECKSUM_MANIFEST_FILE, checksums.as_bytes());
         let encoder = tar.into_inner().unwrap();
         encoder.finish().unwrap()
@@ -2059,7 +2185,7 @@ mod tests {
             egress_client: make_bin("egress-client"),
             addon_dns: make_bin("addon-dns"),
             exit_report: make_bin("exit-report"),
-            verity_init: make_bin("verity-init"),
+            forward_proxy: make_bin("forward-proxy"),
         };
 
         let artifact = build_runtime_overlay_from_guest_binaries(

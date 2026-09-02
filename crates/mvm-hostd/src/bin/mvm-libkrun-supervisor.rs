@@ -174,13 +174,26 @@ fn apply_egress_relay_override(cfg: &mut SupervisorConfig) {
 /// booting it while another VM holds the lock is the filesystem corruption the
 /// lock exists to prevent.
 fn hold_exclusive_image_lock(cfg: &SupervisorConfig) -> Result<Option<std::fs::File>, ExitCode> {
+    hold_exclusive_image_lock_with(cfg, mvm_build::builder_vm_runtime::LockWait::from_env())
+}
+
+/// [`hold_exclusive_image_lock`] with the wait budget supplied rather than
+/// resolved from the environment.
+///
+/// A caller that asserts what happens under contention has to say how long it
+/// is willing to queue, because nothing else here can say it for them.
+/// `LockWait::from_env` falls back to fail-fast under `cfg!(test)`, but
+/// `cfg!` is evaluated in the crate being compiled — mvm-build — so a test
+/// living in this crate is not a test as far as that check is concerned, and
+/// inherits the production hour instead.
+fn hold_exclusive_image_lock_with(
+    cfg: &SupervisorConfig,
+    wait: mvm_build::builder_vm_runtime::LockWait,
+) -> Result<Option<std::fs::File>, ExitCode> {
     let Some(lock_path) = cfg.exclusive_image_lock.as_ref() else {
         return Ok(None);
     };
-    match mvm_build::builder_vm_runtime::hold_image_lock(
-        lock_path,
-        mvm_build::builder_vm_runtime::LockWait::from_env(),
-    ) {
+    match mvm_build::builder_vm_runtime::hold_image_lock(lock_path, wait) {
         Ok(file) => {
             append_supervisor_breadcrumb(
                 std::path::Path::new(&cfg.vm_state_dir),
@@ -286,6 +299,12 @@ fn dispatch_config(mut cfg: SupervisorConfig) -> ExitCode {
             return ExitCode::from(7);
         }
     };
+
+    // Registered here rather than at the top of `main`: everything above this
+    // line refuses to boot, and a refusal has no consumption worth recording.
+    // From here on the guest runs, so every way out of this process should
+    // leave a reading.
+    record_usage_at_exit(std::path::Path::new(&cfg.vm_state_dir));
 
     let outcome = run_legacy(&cfg);
 
@@ -425,6 +444,46 @@ fn run_legacy(cfg: &SupervisorConfig) -> Result<std::convert::Infallible> {
     })
 }
 
+/// Where the exit-time usage reading is written. Set once, immediately before
+/// this process enters its VMM run loop, so the paths that refuse to boot leave
+/// no record at all — an absent sidecar already reads as "nothing observed",
+/// which is the honest answer for a machine that never started.
+static USAGE_STATE_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// The `atexit` trampoline. Takes the reading against the directory the run loop
+/// was entered for; does nothing if no run loop was ever entered.
+///
+/// The measurement itself lives in `mvm_hostd::supervisor::self_usage`, which is
+/// feature-independent: this binary compiles only under `libkrun-sys`, and a
+/// measurement tested only here would be tested in no lane at all.
+extern "C" fn record_self_usage_at_exit() {
+    if let Some(dir) = USAGE_STATE_DIR.get() {
+        mvm_hostd::supervisor::self_usage::record_self_usage(dir);
+    }
+}
+
+/// Arrange for a usage reading however this process ends.
+///
+/// There is no "after the run loop returns" here to hang this off: libkrun calls
+/// `exit()` on this process from inside `krun_start_enter` when the guest powers
+/// off, so no Rust statement following [`run_legacy`] executes on the ordinary
+/// path. `atexit` is the hook that still fires there, and one registration also
+/// covers the wall-clock kill — which exits `124` from the timer thread, and is
+/// precisely the run whose consumption someone will want to read — and the
+/// VMM-error return through `main`.
+///
+/// The SIGTERM handler libkrun installs is the one exit this does not reach: it
+/// calls `_exit`, which skips `atexit` by design because nothing in this
+/// function is safe to run from a signal handler.
+fn record_usage_at_exit(vm_state_dir: &std::path::Path) {
+    if USAGE_STATE_DIR.set(vm_state_dir.to_path_buf()).is_ok() {
+        // SAFETY: `record_self_usage_at_exit` is an `extern "C"` function taking
+        // no arguments and returning nothing, which is the signature `atexit`
+        // requires.
+        unsafe { libc::atexit(record_self_usage_at_exit) };
+    }
+}
+
 fn append_supervisor_breadcrumb(vm_state_dir: &std::path::Path, stage: &str, detail: String) {
     let path = vm_state_dir.join("supervisor.lifecycle.log");
     if let Some(parent) = path.parent() {
@@ -445,6 +504,7 @@ fn append_supervisor_breadcrumb(vm_state_dir: &std::path::Path, stage: &str, det
 mod tests {
     use super::{
         append_supervisor_breadcrumb, apply_egress_relay_override, hold_exclusive_image_lock,
+        hold_exclusive_image_lock_with,
     };
     use libkrun_sys::{BridgeRestartPolicy, KrunContext, NetworkingMode, SupervisorConfig};
 
@@ -517,10 +577,13 @@ mod tests {
 
         let mut cfg = sample_cfg(NetworkingMode::VsockDirect, None);
         cfg.exclusive_image_lock = Some(lock_path);
-        // Under cfg(test) the wait budget is fail-fast, so this returns rather
-        // than queueing for the hour a real supervisor would wait.
+        // The budget is stated here rather than inherited. `cfg!(test)` is
+        // evaluated in whichever crate compiles it, so mvm-build's
+        // test-build default does not reach a test that lives here — this
+        // test queued for the production hour instead of refusing.
         assert!(
-            hold_exclusive_image_lock(&cfg).is_err(),
+            hold_exclusive_image_lock_with(&cfg, mvm_build::builder_vm_runtime::LockWait::none())
+                .is_err(),
             "a supervisor that cannot take the lock must refuse to boot"
         );
         drop(held);

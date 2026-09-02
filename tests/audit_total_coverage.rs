@@ -103,6 +103,7 @@ const ENV_SUB: &[(&str, AuditPosture)] = &[
 const OPS_SUB: &[(&str, AuditPosture)] = &[
     ("metrics", AuditPosture::ReadOnly),
     ("config", AuditPosture::Emits("ConfigChange")),
+    ("mcp", AuditPosture::InteractiveOrControl),
 ];
 
 // `kernel build` compiles/downloads a microVM kernel into the local
@@ -122,6 +123,10 @@ const KERNEL_SUB: &[(&str, AuditPosture)] = &[("build", AuditPosture::ReadOnly)]
 // it does not emit a local audit-chain entry of its own.
 const RUNTIME_OVERLAY_SUB: &[(&str, AuditPosture)] = &[("build", AuditPosture::ReadOnly)];
 
+// The explicit sidecar build primes a content-verified cache and delegates
+// supply-chain audit events to the shared Stage 0 runner.
+const SDK_SIDECAR_SUB: &[(&str, AuditPosture)] = &[("build", AuditPosture::ReadOnly)];
+
 // Plan 178 (D1) — build-time verbs grouped under `build <sub>`.
 const BUILD_SUB: &[(&str, AuditPosture)] = &[
     // Reads an IR document and prints its content identity; no state change.
@@ -133,6 +138,7 @@ const BUILD_SUB: &[(&str, AuditPosture)] = &[
         "runtime-overlay",
         AuditPosture::DelegatesToSub(RUNTIME_OVERLAY_SUB),
     ),
+    ("sdk-sidecar", AuditPosture::DelegatesToSub(SDK_SIDECAR_SUB)),
 ];
 
 const NETWORK_SUB: &[(&str, AuditPosture)] = &[
@@ -328,6 +334,16 @@ const SESSION_SUB: &[(&str, AuditPosture)] = &[
     ("reap", AuditPosture::Emits("Kill")),
 ];
 
+const AGENT_SESSION_SUB: &[(&str, AuditPosture)] = &[
+    // Creating the durable record is covered by the top-level command
+    // envelope; parking and resuming also append their lifecycle entries.
+    ("open", AuditPosture::Emits("cmd.agent-session")),
+    ("ls", AuditPosture::ReadOnly),
+    ("show", AuditPosture::ReadOnly),
+    ("park", AuditPosture::Emits("session.parked")),
+    ("resume", AuditPosture::Emits("session.resumed")),
+];
+
 const PROC_SUB: &[(&str, AuditPosture)] = &[
     ("start", AuditPosture::Emits("VmProcStart")),
     ("ls", AuditPosture::ReadOnly),
@@ -418,7 +434,15 @@ const TRANSCRIPT_SUB: &[(&str, AuditPosture)] = &[
 // their own: `publish-root` writes a signed-root sidecar derived from the chain
 // (not a new chain event), and `prove` / `verify-inclusion` are pure reads —
 // the same audit posture as `verify-cert`.
-const RECEIPTS_SUB: &[(&str, AuditPosture)] = &[("export", AuditPosture::ReadOnly)];
+// `trust audit receipts <sub>` — both verbs are pure reads of the chain-signed
+// log. `export` derives receipts and an evidence archive from entries that are
+// already there; `verify` only reads an archive file and never touches the
+// chain at all. Neither appends, which is the point: an exporter that emitted
+// its own entry would change the log it is trying to attest.
+const RECEIPTS_SUB: &[(&str, AuditPosture)] = &[
+    ("export", AuditPosture::ReadOnly),
+    ("verify", AuditPosture::ReadOnly),
+];
 
 // `trust audit provenance <sub>` — read-only PROV-O/Turtle export of the
 // chain-signed audit log. Does not emit new audit events.
@@ -477,6 +501,12 @@ const DEPS_SUB: &[(&str, AuditPosture)] = &[
     ("capture", AuditPosture::Emits("DepsAudit")),
     ("install", AuditPosture::Emits("DepsAudit")),
     ("capture-live", AuditPosture::Emits("DepsAudit")),
+];
+
+const CAPTURE_SUB: &[(&str, AuditPosture)] = &[
+    ("project", AuditPosture::InteractiveOrControl),
+    ("resolve", AuditPosture::ReadOnly),
+    ("verify", AuditPosture::InteractiveOrControl),
 ];
 
 /// Every top-level `mvmctl` subcommand keyed by its clap name.
@@ -565,8 +595,13 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // Sprint 52 W2 — bundles + trust store.
     ("bundle", AuditPosture::DelegatesToSub(BUNDLE_SUB)),
     ("trust", AuditPosture::DelegatesToSub(TRUST_SUB)),
+    (
+        "agent-session",
+        AuditPosture::DelegatesToSub(AGENT_SESSION_SUB),
+    ),
     // Plan 73 Followup C — sealed deps-volume cache verbs.
     ("deps", AuditPosture::DelegatesToSub(DEPS_SUB)),
+    ("capture", AuditPosture::DelegatesToSub(CAPTURE_SUB)),
     // Plan 76 Phase 6 — portable signed `.mvm` artifacts.
     ("artifact", AuditPosture::DelegatesToSub(ARTIFACT_SUB)),
     // Host-side developer tool: ptrace a command and report syscalls. No host
@@ -776,10 +811,13 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         // Plan-64 audit-chain events.
         "plan.admitted",
         "plan.launched",
+        "session.parked",
+        "session.resumed",
         // Plan-326 chain-structure event: `trust audit prune` records the
         // removal in the chain before deleting the segments it names.
         "chain.pruned",
         // Top-level command audit envelopes.
+        "cmd.agent-session",
         "cmd.deploy",
         // Image time-travel restore marker.
         "image.reverted",

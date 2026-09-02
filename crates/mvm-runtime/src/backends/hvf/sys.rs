@@ -29,6 +29,10 @@ pub type hv_vcpu_t = u64;
 /// Opaque config object pointers (`hv_vm_config_t` / `hv_vcpu_config_t`); NULL
 /// selects the defaults.
 pub type hv_config_t = *mut c_void;
+/// Opaque GIC state object returned by Hypervisor.framework.
+pub type hv_gic_state_t = *mut c_void;
+/// GIC ICC system-register selector.
+pub type hv_gic_icc_reg_t = u16;
 
 /// `hv_memory_flags_t` bits.
 pub type hv_memory_flags_t = u64;
@@ -46,7 +50,23 @@ pub const HV_REG_X3: hv_reg_t = 3;
 /// GP register index `n` maps directly to `HV_REG_X0 + n`.
 pub const HV_REG_X30: hv_reg_t = 30;
 pub const HV_REG_PC: hv_reg_t = 31;
+pub const HV_REG_FPCR: hv_reg_t = 32;
+pub const HV_REG_FPSR: hv_reg_t = 33;
 pub const HV_REG_CPSR: hv_reg_t = 34;
+
+/// ARM SIMD/FP register selector.
+pub type hv_simd_fp_reg_t = u32;
+
+// The framework's setter takes its 128-bit vector by value in q0. Stable Rust
+// cannot express that SIMD C ABI, so this leaf shim accepts a byte pointer,
+// loads q0, and tail-calls the framework entry point.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+core::arch::global_asm!(
+    ".globl _mvm_hv_vcpu_set_simd_fp_reg",
+    "_mvm_hv_vcpu_set_simd_fp_reg:",
+    "ldr q0, [x2]",
+    "b _hv_vcpu_set_simd_fp_reg",
+);
 
 /// `hv_sys_reg_t` — encoded AArch64 system register id (op0/op1/crn/crm/op2).
 pub type hv_sys_reg_t = u32;
@@ -66,6 +86,23 @@ pub const HV_SYS_REG_CNTKCTL_EL1: hv_sys_reg_t = 0xc708;
 pub const HV_SYS_REG_CNTV_CTL_EL0: hv_sys_reg_t = 0xdf19;
 pub const HV_SYS_REG_CNTV_CVAL_EL0: hv_sys_reg_t = 0xdf1a;
 pub const HV_SYS_REG_SP_EL1: hv_sys_reg_t = 0xe208;
+pub const HV_SYS_REG_ACTLR_EL1: hv_sys_reg_t = 0xc081;
+pub const HV_SYS_REG_CPACR_EL1: hv_sys_reg_t = 0xc082;
+pub const HV_SYS_REG_APIAKEYLO_EL1: hv_sys_reg_t = 0xc108;
+pub const HV_SYS_REG_APIAKEYHI_EL1: hv_sys_reg_t = 0xc109;
+pub const HV_SYS_REG_APIBKEYLO_EL1: hv_sys_reg_t = 0xc10a;
+pub const HV_SYS_REG_APIBKEYHI_EL1: hv_sys_reg_t = 0xc10b;
+pub const HV_SYS_REG_APDAKEYLO_EL1: hv_sys_reg_t = 0xc110;
+pub const HV_SYS_REG_APDAKEYHI_EL1: hv_sys_reg_t = 0xc111;
+pub const HV_SYS_REG_APDBKEYLO_EL1: hv_sys_reg_t = 0xc112;
+pub const HV_SYS_REG_APDBKEYHI_EL1: hv_sys_reg_t = 0xc113;
+pub const HV_SYS_REG_APGAKEYLO_EL1: hv_sys_reg_t = 0xc118;
+pub const HV_SYS_REG_APGAKEYHI_EL1: hv_sys_reg_t = 0xc119;
+pub const HV_SYS_REG_SP_EL0: hv_sys_reg_t = 0xc208;
+pub const HV_SYS_REG_CONTEXTIDR_EL1: hv_sys_reg_t = 0xc681;
+pub const HV_SYS_REG_TPIDR_EL1: hv_sys_reg_t = 0xc684;
+pub const HV_SYS_REG_TPIDR_EL0: hv_sys_reg_t = 0xde82;
+pub const HV_SYS_REG_TPIDRRO_EL0: hv_sys_reg_t = 0xde83;
 
 /// Exception class (ESR `EC`, bits 31:26) values the run loop dispatches on.
 pub const EC_HVC_AARCH64: u32 = 0x16;
@@ -151,6 +188,16 @@ unsafe extern "C" {
     pub fn hv_vcpu_run(vcpu: hv_vcpu_t) -> hv_return_t;
     pub fn hv_vcpu_set_reg(vcpu: hv_vcpu_t, reg: hv_reg_t, value: u64) -> hv_return_t;
     pub fn hv_vcpu_get_reg(vcpu: hv_vcpu_t, reg: hv_reg_t, value: *mut u64) -> hv_return_t;
+    pub fn hv_vcpu_get_simd_fp_reg(
+        vcpu: hv_vcpu_t,
+        reg: hv_simd_fp_reg_t,
+        value: *mut [u8; 16],
+    ) -> hv_return_t;
+    pub fn mvm_hv_vcpu_set_simd_fp_reg(
+        vcpu: hv_vcpu_t,
+        reg: hv_simd_fp_reg_t,
+        value: *const [u8; 16],
+    ) -> hv_return_t;
     pub fn hv_vcpu_set_sys_reg(vcpu: hv_vcpu_t, reg: hv_sys_reg_t, value: u64) -> hv_return_t;
     pub fn hv_vcpu_get_sys_reg(vcpu: hv_vcpu_t, reg: hv_sys_reg_t, value: *mut u64) -> hv_return_t;
     /// Force the listed vCPUs out of `hv_vcpu_run` (they exit with
@@ -176,11 +223,30 @@ unsafe extern "C" {
     pub fn hv_gic_get_distributor_size(size: *mut usize) -> hv_return_t;
     pub fn hv_gic_get_distributor_base_alignment(alignment: *mut usize) -> hv_return_t;
     pub fn hv_gic_get_redistributor_size(size: *mut usize) -> hv_return_t;
+    /// The guest-physical base of one vCPU's redistributor frame. HVF assigns
+    /// these itself as vCPUs are created; this is the only way to learn where a
+    /// given vCPU's landed, and hence whether it matches the device tree the
+    /// guest is reading.
+    pub fn hv_gic_get_redistributor_base(
+        vcpu: hv_vcpu_t,
+        redistributor_base: *mut hv_ipa_t,
+    ) -> hv_return_t;
     pub fn hv_gic_get_redistributor_base_alignment(alignment: *mut usize) -> hv_return_t;
     pub fn hv_gic_get_spi_interrupt_range(
         spi_intid_base: *mut u32,
         spi_intid_count: *mut u32,
     ) -> hv_return_t;
+    pub fn hv_gic_state_create() -> hv_gic_state_t;
+    pub fn hv_gic_state_get_size(state: hv_gic_state_t, size: *mut usize) -> hv_return_t;
+    pub fn hv_gic_state_get_data(state: hv_gic_state_t, data: *mut c_void) -> hv_return_t;
+    pub fn hv_gic_set_state(data: *const c_void, size: usize) -> hv_return_t;
+    pub fn hv_gic_get_icc_reg(
+        vcpu: hv_vcpu_t,
+        reg: hv_gic_icc_reg_t,
+        value: *mut u64,
+    ) -> hv_return_t;
+    pub fn hv_gic_set_icc_reg(vcpu: hv_vcpu_t, reg: hv_gic_icc_reg_t, value: u64) -> hv_return_t;
+    pub fn os_release(object: *mut c_void);
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -232,6 +298,24 @@ pub unsafe fn hv_vcpu_set_reg(_vcpu: hv_vcpu_t, _reg: hv_reg_t, _value: u64) -> 
 #[cfg(not(target_os = "macos"))]
 #[allow(clippy::missing_safety_doc)]
 pub unsafe fn hv_vcpu_get_reg(_vcpu: hv_vcpu_t, _reg: hv_reg_t, _value: *mut u64) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn hv_vcpu_get_simd_fp_reg(
+    _vcpu: hv_vcpu_t,
+    _reg: hv_simd_fp_reg_t,
+    _value: *mut [u8; 16],
+) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn mvm_hv_vcpu_set_simd_fp_reg(
+    _vcpu: hv_vcpu_t,
+    _reg: hv_simd_fp_reg_t,
+    _value: *const [u8; 16],
+) -> hv_return_t {
     HV_ERROR_UNSUPPORTED
 }
 #[cfg(not(target_os = "macos"))]
@@ -303,6 +387,14 @@ pub unsafe fn hv_gic_get_redistributor_size(_size: *mut usize) -> hv_return_t {
 }
 #[cfg(not(target_os = "macos"))]
 #[allow(clippy::missing_safety_doc)]
+pub unsafe fn hv_gic_get_redistributor_base(
+    _vcpu: hv_vcpu_t,
+    _redistributor_base: *mut hv_ipa_t,
+) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe fn hv_gic_get_redistributor_base_alignment(_alignment: *mut usize) -> hv_return_t {
     HV_ERROR_UNSUPPORTED
 }
@@ -314,6 +406,45 @@ pub unsafe fn hv_gic_get_spi_interrupt_range(
 ) -> hv_return_t {
     HV_ERROR_UNSUPPORTED
 }
+#[cfg(not(target_os = "macos"))]
+pub unsafe fn hv_gic_state_create() -> hv_gic_state_t {
+    std::ptr::null_mut()
+}
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn hv_gic_state_get_size(_state: hv_gic_state_t, _size: *mut usize) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn hv_gic_state_get_data(_state: hv_gic_state_t, _data: *mut c_void) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn hv_gic_set_state(_data: *const c_void, _size: usize) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn hv_gic_get_icc_reg(
+    _vcpu: hv_vcpu_t,
+    _reg: hv_gic_icc_reg_t,
+    _value: *mut u64,
+) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn hv_gic_set_icc_reg(
+    _vcpu: hv_vcpu_t,
+    _reg: hv_gic_icc_reg_t,
+    _value: u64,
+) -> hv_return_t {
+    HV_ERROR_UNSUPPORTED
+}
+#[cfg(not(target_os = "macos"))]
+pub unsafe fn os_release(_object: *mut c_void) {}
 
 /// Opaque `hv_gic_config_t`.
 pub type hv_gic_config_t = *mut c_void;

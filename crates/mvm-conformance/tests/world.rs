@@ -97,6 +97,31 @@ impl Drop for ScenarioEnvGuard {
     }
 }
 
+/// One end-to-end launch's observable result: what the CLI said, and how long
+/// the guest took to become dispatchable.
+///
+/// Lives here rather than beside its steps because `tests/world.rs` is also
+/// auto-discovered as its own integration-test target, where `crate::steps`
+/// does not exist.
+#[derive(Debug, Default)]
+pub struct LaunchRecord {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+    /// `dispatch_window` from `MVM_PHASE_TIMING=1`, in milliseconds.
+    pub dispatch_window_ms: Option<f64>,
+    /// Wall-clock for the whole `mvmctl` invocation.
+    pub wall: std::time::Duration,
+}
+
+impl LaunchRecord {
+    /// stdout and stderr together — the guest's own output and the CLI's
+    /// diagnostics arrive on different streams depending on the shape.
+    pub fn combined(&self) -> String {
+        format!("{}\n{}", self.stdout, self.stderr)
+    }
+}
+
 /// Constructed fresh for every scenario. Holds the result of the most
 /// recent CLI invocation so later `Then` steps can assert on it, plus the
 /// workload identities parsed from successful `build address` runs, keyed by
@@ -104,6 +129,32 @@ impl Drop for ScenarioEnvGuard {
 #[derive(cucumber::World, Default)]
 pub struct CliWorld {
     pub last_run: Option<Output>,
+    /// Artifact-warm `MVM_HOME` the end-to-end launch scenarios share.
+    pub e2e_home: Option<PathBuf>,
+    /// Result of the most recent end-to-end launch, including its measured
+    /// dispatch window.
+    pub last_launch: Option<LaunchRecord>,
+    /// Name of the shared guest the documented machine-verb journey drives.
+    pub journey_machine: Option<String>,
+    /// Gate under test in the peer-addressing scenarios.
+    pub peer_gate: Option<mvm_vmm::vsock_egress_bridge::egress_gate::EgressGate>,
+    /// The most recent peer/egress decision.
+    pub peer_decision: Option<mvm_vmm::vsock_egress_bridge::egress_gate::TargetDecision>,
+    /// Broker registry under test in the key-value scenarios.
+    pub broker_registry: Option<mvm_hostd::broker::registry::Registry>,
+    /// Tempdir backing the key-value store, held so it outlives the scenario.
+    pub kv_root: Option<tempfile::TempDir>,
+    /// Read-only ext4 carrying the live service-plane fixture tree, held so it
+    /// remains present while the microVM boots and mounts it.
+    pub service_plane_fixture_disk: Option<tempfile::TempDir>,
+    /// Outcome of the most recent broker dispatch.
+    pub kv_result: Option<mvm_core::protocol::handler::ServiceDispatchResult>,
+    /// Catalog under test in the declared-binding scenarios.
+    pub runtime_catalog: Option<mvm_core::runtime_catalog::RuntimeCatalog>,
+    /// Outcome of resolving a runtime by name, error rendered for assertion.
+    pub runtime_resolution: Option<Result<mvm_core::runtime_catalog::Detection, String>>,
+    /// Whether detection matched, or why it refused.
+    pub runtime_detection: Option<Result<bool, String>>,
     /// Id of the conformance claim currently being exercised by a claim scenario.
     pub current_claim_id: Option<String>,
     /// Local file:// registry created by template-registry scenarios.
@@ -129,35 +180,16 @@ pub struct CliWorld {
     /// Result of exercising the signed-plan share gate with an attachment the
     /// plan did not authorize.
     pub volume_admission_result: Option<Result<(), String>>,
-    // --- L3 TUN-over-vsock witnesses ---
-    /// The machine a launch-guard scenario built.
-    pub l3_machine: Option<mvm_runtime::machine::Machine>,
-    /// Verdict from the no-guest-NIC launch guard.
-    pub l3_guard_result: Option<Result<(), mvm_runtime::machine::nic_guard::NicGuardError>>,
-    /// Capability shortfall from a backend check, if any.
-    pub l3_backend_check: Option<Result<(), Vec<&'static str>>>,
-    /// The per-session admission state a packet scenario drives.
-    pub l3_admitter: Option<mvm_net::l3::L3Admitter>,
-    /// Outbound verdict, reduced to its stable reason label.
-    pub l3_verdict: Option<Result<(), &'static str>>,
-    /// Inbound verdict, same shape.
-    pub l3_inbound_verdict: Option<Result<(), &'static str>>,
-    /// The packet most recently admitted or refused.
-    pub l3_last_packet: Option<Vec<u8>>,
-    pub l3_previous_session: Option<mvm_net::l3::SessionId>,
-    pub l3_current_session: Option<mvm_net::l3::SessionId>,
-    pub l3_lease: Option<mvm_net::lease::NetworkLease>,
-    pub l3_lease_instance: Option<mvm_net::channel::VmInstanceIdentity>,
-    pub l3_lease_result: Option<Result<(), String>>,
-    pub l3_backend_capabilities: Option<mvm_hostd::netd::ForwardingCapabilities>,
-    pub l3_capability_shortfall: Option<Vec<String>>,
-    /// `semantic_address` per fixture name, populated on a zero-exit
+    /// `workload_address` per fixture name, populated on a zero-exit
     /// `build address` run.
     pub addresses: HashMap<String, String>,
     /// `ir_hash` per fixture name, from the same run as `addresses`.
     pub ir_hashes: HashMap<String, String>,
     /// Full sealed-workload cmdline assembled through a real VMM driver.
     pub workload_cmdline: Option<String>,
+    /// Whether the sealed launch's production block mapping attached both
+    /// read-only runtime-overlay devices under a complete verified triple.
+    pub sealed_runtime_overlay_attached: Option<bool>,
     /// Kernel format mapped by the libkrun supervisor-config seam.
     pub libkrun_kernel_format: Option<KernelFormat>,
     /// An isolated `MVM_HOME` created by a `Given` step and reused by later
@@ -206,6 +238,13 @@ pub struct CliWorld {
     pub initramfs_boot_initrd: Option<Result<Option<String>, String>>,
     /// Whether live CLI steps should keep one warm standby for the next run.
     pub warm_residency: bool,
+    /// Home selected by the most recent live CLI step. This is the shared
+    /// artifact-warm home when the live runner provides one.
+    pub last_live_home: Option<PathBuf>,
+    /// Transient request directories present before a live warm-claim journey.
+    /// The final assertion compares against this baseline so unrelated stale
+    /// state in a shared runner home cannot hide or falsely fail the cleanup.
+    pub live_request_dirs_before: Option<HashSet<PathBuf>>,
     /// Content address of the bundle a `bundle install` step registered, so the
     /// boot step can name it as `machine run --manifest <sha>`.
     pub bundle_sha: Option<String>,
@@ -455,10 +494,21 @@ impl fmt::Debug for CliWorld {
             .field("addresses", &self.addresses)
             .field("ir_hashes", &self.ir_hashes)
             .field("workload_cmdline", &self.workload_cmdline)
+            .field(
+                "sealed_runtime_overlay_attached",
+                &self.sealed_runtime_overlay_attached,
+            )
             .field("libkrun_kernel_format", &self.libkrun_kernel_format)
             .field(
                 "isolated_home",
                 &self.isolated_home.as_ref().map(|t| t.path().to_path_buf()),
+            )
+            .field(
+                "service_plane_fixture_disk",
+                &self
+                    .service_plane_fixture_disk
+                    .as_ref()
+                    .map(|t| t.path().to_path_buf()),
             )
             .field(
                 "kernel_reacquisition_must_fail",
@@ -481,7 +531,7 @@ impl CliWorld {
             .expect("no CLI invocation recorded yet — a prior `When` step must run one")
     }
 
-    /// The stored semantic address for `fixture`, or a failed assertion
+    /// The stored workload address for `fixture`, or a failed assertion
     /// naming the fixture whose `When` step didn't run (or didn't succeed).
     pub fn address_of(&self, fixture: &str) -> &str {
         self.addresses.get(fixture).unwrap_or_else(|| {

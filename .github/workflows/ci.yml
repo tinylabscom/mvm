@@ -173,15 +173,13 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
 
       - uses: ./.github/actions/apt-deps
         with:
           packages: lld
-
-      - uses: ./.github/actions/install-zigbuild
 
       - uses: ./.github/actions/rust-cache
 
@@ -197,14 +195,25 @@ jobs:
                      nix/packaging/release/assert-init-shebang.sh \
                      nix/packaging/release/assert-kernel-format.sh \
                      scripts/check-no-orchestration-server.sh \
-                     scripts/check-no-orchestration-server.test.sh
+                     scripts/check-no-orchestration-server.test.sh \
+                     scripts/security-lane-verdict.sh \
+                     scripts/security-lane-verdict.test.sh \
+                     .githooks/pre-commit \
+                     .githooks/pre-commit.test.sh
 
       - name: Release-asset verifier gate tests
         run: bash nix/packaging/release/verify-release-assets.test.sh
 
+      # The hook narrows clippy to the packages owning the staged files. When
+      # it picked a package cargo cannot address with `-p`, it reported that as
+      # "clippy failed" while clippy was fine. These tests pin the scoping
+      # decision; they do not run clippy.
+      - name: Pre-commit hook scoping tests
+        run: bash .githooks/pre-commit.test.sh
+
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: ./scripts/cargo-stable.sh clippy --all-targets -- -D warnings
 
       # The cucumber runner is `harness = false`, so it sits behind the `bdd`
       # feature to keep it out of `cargo nextest run --workspace` — nextest
@@ -214,7 +223,7 @@ jobs:
       # struct or signature change anywhere in the workspace can break the BDD
       # suite unnoticed and only surface in a release run. Compile it here.
       - name: Clippy (BDD conformance target)
-        run: cargo clippy -p mvm-conformance --tests --features bdd -- -D warnings
+        run: ./scripts/cargo-stable.sh clippy -p mvm-conformance --tests --features bdd -- -D warnings
 
   lint-policy:
     # This real policy lane publishes the existing required `Invariant`
@@ -255,7 +264,7 @@ jobs:
         run: |
           set -euo pipefail
           tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-          curl -fL --retry 3 -o "$tarball" \
+          curl -fL --retry 3 --retry-all-errors --retry-delay 2 -o "$tarball" \
             "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
           echo "${ACTIONLINT_SHA256}  ${tarball}" | sha256sum -c -
           tar -xzf "$tarball" actionlint
@@ -267,12 +276,12 @@ jobs:
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v8.2.0
+        with:
+          version: "0.12.5"
       - name: Set up Node
         uses: actions/setup-node@v6
         with:
           node-version: "22"
-
-      - uses: ./.github/actions/install-zigbuild
 
       - uses: ./.github/actions/rust-cache
 
@@ -283,37 +292,41 @@ jobs:
       - name: Orchestration-server gate tests
         run: bash scripts/check-no-orchestration-server.test.sh
 
+      # The nightly security lanes do not run on a PR, so this is the only
+      # place their failure reporting is exercised before it has to work.
+      - name: Security lane verdict tests
+        run: bash scripts/security-lane-verdict.test.sh
+
       - name: Architecture scan not required for this diff
         if: needs.scope.outputs.architecture == 'false'
         run: echo "No architecture-relevant paths changed."
 
-      - name: ADR coverage (informational)
-        continue-on-error: true
-        run: cargo run -p xtask -- check-adr-coverage
+      # One driver, not sixty steps. It runs every gate and reports all
+      # of them: the old shape stopped at the first failure, so a branch
+      # breaking four gates cost four pushes and four full lanes to find
+      # that out. `cargo run -p xtask -- <gate>` still runs any one of
+      # them on its own.
+      - name: Policy gates (check-abi-layout) (single-network-path)
+        run: cargo run -p xtask -- check-all
 
-      - name: No Debug/Display on secret-named types
-        run: cargo run -p xtask -- check-no-display-on-secret-types
+      # `check-fast-cargo` pins the whole nightly-fast / stable-lint split —
+      # the toolchain versions, the cranelift and threads settings, and the
+      # exact invocations in the Justfile and the pre-commit hook. It is a
+      # shell script rather than an xtask gate, so `check-all` above does not
+      # reach it, and until now nothing in CI did either: it had gone red on
+      # main unnoticed when rust-toolchain.toml was bumped to
+      # nightly-2026-08-25 and bdd.yml was left on nightly-2026-08-08.
+      - name: Fast/stable toolchain split is pinned
+        run: ./scripts/check-fast-cargo.sh
 
-      - name: No positional audit::emit / event-chain calls
-        run: cargo run -p xtask -- check-audit-positional
 
-      - name: Broad-egress constructor stays builder-only
-        run: cargo run -p xtask -- check-build-egress-callers
 
-      - name: Workload-kernel reads go through the verified seam
-        run: cargo run -p xtask -- check-verified-kernel-reads
 
-      - name: No host-nix invocation (builds route through the builder VM)
-        run: cargo run -p xtask -- check-no-host-nix
 
-      - name: No Virtualization.framework / Containerization Swift (Apple Container rides the in-house HVF VMM)
-        run: cargo run -p xtask -- check-no-vz
 
-      - name: No forbidden dependency families
-        run: cargo run -p xtask -- check-forbidden-deps
 
-      - name: Gated doc claims
-        run: cargo run -p xtask -- check-doc-claims
+
+
 
       # Runs its own self-test first: a gate nobody has watched fail is a gate
       # nobody knows works, and this one is the relief valve for the exclusion
@@ -323,151 +336,71 @@ jobs:
           cargo run -p xtask -- check-declared-backing --self-test
           cargo run -p xtask -- check-declared-backing
 
-      - name: Machine docs guards
-        run: cargo run -p xtask -- check-machine-doc-guards
 
-      - name: No overclaiming
-        run: cargo run -p xtask -- check-no-overclaim
 
-      - name: Two product surfaces only (host + user)
-        run: cargo run -p xtask -- check-two-surfaces
 
-      - name: No spec refs in source comments
-        run: cargo run -p xtask -- check-no-spec-refs-in-comments
 
-      - name: No stringly backend-name dispatch
-        run: cargo run -p xtask -- check-no-string-backend-dispatch
 
-      - name: Single MVM_HOME root (no resolver bypass)
-        run: cargo run -p xtask -- check-single-home
 
-      - name: Tests that move MVM_HOME also isolate HOME
-        run: cargo run -p xtask -- check-test-home-isolation
 
-      - name: No baked network literals (IPs/ports/tmp-sockets)
-        run: cargo run -p xtask -- check-no-network-literals
 
-      - name: mvm-cli drives machines through the mvm-client facade
-        run: cargo run -p xtask -- check-cli-runtime-surface
 
-      - name: "`mvmctl --help` and the CLI reference describe one surface"
-        run: cargo run -p xtask -- check-cli-help-matches-docs
 
-      - name: repr(C) types carry a layout contract (check-abi-layout)
-        run: cargo run -p xtask -- check-abi-layout
 
-      - name: Conformance claim catalog
-        run: cargo run -p xtask -- check-claim-catalog
 
-      - name: Sprint delivery log stays one-file-per-entry
-        run: cargo run -p xtask -- check-sprint-append
 
-      - name: New plans are slug-named, not numbered
-        run: cargo run -p xtask -- check-plan-names
 
-      - name: Claim mutation surface is pinned
-        run: cargo run -p xtask -- check-mutation-witnesses
 
-      - name: Prose cites witnesses that exist
-        run: cargo run -p xtask -- check-witness-citations
 
-      - name: Security controls declare their reachability
-        run: cargo run -p xtask -- check-dormant-controls
 
-      - name: Conformance model is the single source (R1)
-        run: cargo run -p xtask -- check-conformance
 
-      - name: No deferred markers (R4)
-        run: cargo run -p xtask -- check-deferrals
 
-      - name: Honesty levels respected in docs (R2)
-        run: cargo run -p xtask -- check-honesty
 
-      - name: Trust-gradient ledger
-        run: cargo run -p xtask -- check-trust-gradient
 
-      - name: vsock-only egress (no guest NIC on the vmm/HVF path, ADR-100)
-        run: cargo run -p xtask -- check-vsock-only-egress
+      # The in-guest toolbox is deliberately ungoverned — the microVM boundary
+      # bounds it. What the boundary cannot bound is the guest originating a
+      # connection outward, so that is what this checks.
 
       # The other half of the same rule. The gate above says a guest has only
       # the vsock channel; this one says it speaks exactly one protocol over
       # it. A guest made FlowMux-only while the host still served the old
       # protocol is what killed egress on main with every test green.
-      - name: one guest→host protocol
-        run: cargo run -p xtask -- check-one-guest-protocol
 
-      # Tree-wide companion to the check above. The userspace network gateways
-      # went with the guest-NIC path; a reference coming back is how a second
-      # egress model grows back alongside the real one.
-      - name: no reference to a removed userspace network gateway
-        run: cargo run -p xtask -- check-no-gateway-names
-
-      # Temporary, shrink-only ratchet: the raw-packet workload networking path
-      # is frozen while the single flow-aware vsock path is built. Deleted with
-      # its last allowlist entry.
-      - name: l3 expansion freeze (no new raw-packet networking references)
-        run: cargo run -p xtask -- check-l3-expansion-freeze
-
-      - name: uniform vsock egress (Firecracker + libkrun + HVF use the WorkloadRunner seam)
-        run: cargo run -p xtask -- check-uniform-vsock-egress
+      # An image's declared environment is resolved once. The console used to
+      # assemble its own, which is why `machine run --image rust:latest -it`
+      # opened a shell with the image's own toolchain missing from PATH.
+      - name: one workload-env resolver (console and entrypoint agree on the image)
+        run: cargo run -p xtask -- check-single-workload-env
 
       # A wall-clock bound is declared once, as a grant. `exec_secs` is that
       # grant's projection into the plan's older encoding; a second writer is a
       # second declaration of one decision, and the two can disagree.
-      - name: one writer of exec_secs (the wall-clock grant's projection)
-        run: cargo run -p xtask -- check-single-exec-secs-writer
 
       # Whether a destination is bound by a secret's `allowed_hosts` is decided
       # by `host_is_bound` and nowhere else. A second copy is a second decision,
       # and the disagreement surfaces as a credential reaching a destination it
       # should not.
-      - name: one host-binding predicate (allowed_hosts is quantified in one place)
-        run: cargo run -p xtask -- check-single-host-predicate
 
-      - name: one stream redaction seam (every StreamBroker is built over the curated ruleset)
-        run: cargo run -p xtask -- check-stream-redaction-seam
 
-      - name: guest init parity (both inits share one post-mount bootstrap)
-        run: cargo run -p xtask -- check-guest-init-parity
 
-      - name: require-grant token confined to allowlist (guards mvmd no-brick invariant)
-        run: cargo run -p xtask -- check-require-grant-token-allowlist
 
-      - name: host-binaries manifest parity
-        run: cargo run -p xtask -- check-mvm-host-binaries-sync
 
       # release.yml runs on tags, so a per-VM binary added to the registry but
       # not to the release job is invisible until a user's downloaded mvmctl
       # fails to spawn it. Resolve it here, on the PR that adds it.
-      - name: release ships every spawnable per-VM binary
-        run: cargo run -p xtask -- check-per-vm-host-binaries-sync
 
-      - name: mvm-core default build is runtime-free
-        run: cargo run -p xtask -- check-core-runtime-free
 
-      - name: content-address digests stay deterministic
-        run: cargo run -p xtask -- check-content-address-determinism
 
-      - name: mvmctl default closure within budget
-        run: cargo run -p xtask -- check-closure-budget
 
       # Manifest-level sibling to the closure budgets, which resolve trees and
       # therefore cannot see a member pinning a version behind the workspace
       # table's back, or a table entry nobody inherits.
-      - name: workspace dependency table is the single version source
-        run: cargo run -p xtask -- check-workspace-dep-inheritance
 
       # Sibling to the default-closure budget: bounds what any *feature* can
       # pull in, which is where an off-by-default tree (wasm-backend's
       # wasmtime/cranelift family) would otherwise grow unobserved.
-      - name: no unbounded growth behind optional features
-        run: cargo run -p xtask -- check-feature-closure-budget
 
-      - name: no new duplicate-major dependencies
-        run: cargo run -p xtask -- check-duplicate-majors
 
-      - name: workflow paths and fuzz targets still exist
-        run: cargo run -p xtask -- check-workflow-paths
 
       - name: Detect fuzz-crate changes
         id: fuzz_changed
@@ -479,7 +412,7 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
           git fetch --no-tags --depth=1 origin "$BASE_SHA" >/dev/null 2>&1 || true
-          if git diff --name-only "$BASE_SHA"...HEAD 2>/dev/null | grep -qE '(^|/)fuzz[^/]*/'; then
+          if git diff --name-only "$BASE_SHA" HEAD 2>/dev/null | grep -qE '(^|/)fuzz[^/]*/'; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
@@ -493,40 +426,20 @@ jobs:
           for manifest in crates/*/fuzz*/Cargo.toml crates/deps/*/fuzz*/Cargo.toml; do
             [ -f "$manifest" ] || continue
             echo "::group::$manifest"
-            cargo check --manifest-path "$manifest" --all-targets || fail=1
+            cargo check --locked --manifest-path "$manifest" --all-targets || fail=1
             echo "::endgroup::"
           done
           exit "$fail"
 
-      - name: mvm-guest agent closure is runtime-free
-        run: cargo run -p xtask -- check-guest-agent-runtime-free
 
-      - name: guest agent forked in every bootable image
-        run: cargo run -p xtask -- check-guest-agent-in-all-images
 
-      - name: workload guest images bake no host/builder tools
-        run: cargo run -p xtask -- check-guest-images-no-builder-tools
 
-      - name: OCI guest-binary name lists agree
-        run: cargo run -p xtask -- check-guest-binary-lists
 
-      - name: no new builder shell-job dispatch sites
-        run: cargo run -p xtask -- check-builder-shell-job-sites
 
-      - name: every VMM boot path seeds the guest CSPRNG
-        run: cargo run -p xtask -- check-guest-entropy-seed
 
-      - name: runtime-overlay version pinned to workspace
-        run: cargo run -p xtask -- check-runtime-overlay-version
 
-      - name: no oversized production file bodies (≤1500 non-test lines)
-        run: cargo run -p xtask -- check-file-size
 
-      - name: SDK stubs match the Rust schemas (no drift)
-        run: cargo run -p xtask -- check-stubs
 
-      - name: Python and TypeScript IR fixtures match the Rust semantic address
-        run: cargo run -p xtask -- check-ir-parity
 
   lint-features:
     name: Lint feature coverage
@@ -538,7 +451,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy
 
@@ -546,12 +459,17 @@ jobs:
         with:
           packages: lld
 
+      # The only lane in this workflow that needs the pinned zig. Eight other
+      # jobs installed it because `mvm-cli`'s build script used to cross-compile
+      # the embedded Linux binaries on every build; that is now behind
+      # `embed-host-bins`, which only the step below turns on. If a second lane
+      # ever enables that feature, it needs this too.
       - uses: ./.github/actions/install-zigbuild
 
       - uses: ./.github/actions/rust-cache
 
       - name: Clippy (mvm-client tracing-bridge)
-        run: cargo clippy -p mvm-client --all-targets --features tracing-bridge -- -D warnings
+        run: ./scripts/cargo-stable.sh clippy -p mvm-client --all-targets --features tracing-bridge -- -D warnings
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
@@ -585,6 +503,35 @@ jobs:
           cargo nextest run -p mvm-agentd --features addons
           cargo check -p mvm-agentd --features addons --bins
 
+      # `embed-host-bins` is off by default, so the entire cross-compile leg of
+      # `mvm-cli/build.rs` — and every test that inspects the embedded payload —
+      # is absent from every other lane in this workflow. Only the tag-push
+      # release build turns it on, and a break there is invisible until a
+      # release is already being cut. This lane is the one place a pull request
+      # proves the leg still compiles and still produces the manifest's set.
+      #
+      # `--bins` matters: the payload is `include_bytes!`d into the binary, so a
+      # lib-only check would not link it and would not catch a bad path.
+      - name: embed-host-bins feature (cross-compiled payload)
+        run: |
+          cargo nextest run -p mvm-cli --features embed-host-bins \
+            --test embedded_binaries --test host_binaries_extract \
+            --test host_binaries_manifest --test dispatch_host_bin_dir
+          cargo check -p mvmctl --features embed-host-bins --bins
+
+      # End-user release builds enable an acquisition policy that contributor
+      # builds deliberately omit: checkout proximity must never select a local
+      # compiler. Compile the CLI and execute the policy boundary tests on every
+      # code-changing pull request so the release workflow is not the first
+      # process to exercise that channel.
+      - name: release artifact acquisition contract
+        run: |
+          cargo check -p mvm-cli --features release-artifact-bootstrap --lib
+          cargo test -p mvm-build --features release-channel --lib \
+            artifact_acquisition
+          cargo test -p mvm-build --features release-channel --lib \
+            official_build_does_not_detect
+
       - name: Assert auto-detect still picks libkrun off Linux/HVF
         run: |
           cargo test -p mvm-build --features builder-vm --lib \
@@ -599,11 +546,12 @@ jobs:
         # different fingerprints and rebuilt most of the same graph seven
         # times over — 28 of this job's 35 minutes, and the critical path for
         # every pull request. These packages form one feature subtree
-        # (mvm-cli -> mvm-runtime -> mvm-backends, mvm-vmm -> mvm-core), so a
-        # single resolution covers all of them and compiles once.
+        # (mvm-cli -> mvm-runtime -> mvm-backends, mvm-vmm -> mvm-core,
+        # mvm-fs), so a single resolution covers all of them and compiles once.
         run: |
           cargo nextest run --features test-support --lib \
-            -p mvm-backends -p mvm-runtime -p mvm-client -p mvm-cli -p mvm-vmm
+            -p mvm-backends -p mvm-runtime -p mvm-client -p mvm-cli -p mvm-vmm \
+            -p mvm-fs
           cargo nextest run -p mvmctl --features test-support --test audit_emissions_live
           cargo check -p mvm-cli --features test-support --example verification_loop
 
@@ -651,7 +599,7 @@ jobs:
   test:
     name: Test
     if: ${{ always() }}
-    needs: [scope, test-workspace, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, kernel]
+    needs: [scope, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, kernel]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -660,6 +608,7 @@ jobs:
           SCOPE_RESULT: ${{ needs.scope.result }}
           SCOPE_CODE: ${{ needs.scope.outputs.code }}
           WORKSPACE_RESULT: ${{ needs.test-workspace.result }}
+          WORKSPACE_AARCH64_RESULT: ${{ needs.test-workspace-aarch64.result }}
           LINUX_RESULT: ${{ needs.test-linux.result }}
           RELEASE_WITNESS_RESULT: ${{ needs.test-release-witness.result }}
           EBPF_RESULT: ${{ needs.test-ebpf-telemetry.result }}
@@ -678,7 +627,7 @@ jobs:
             false) required=skipped ;;
             *) echo "Invalid code scope: $SCOPE_CODE"; exit 1 ;;
           esac
-          for result in "$WORKSPACE_RESULT" "$LINUX_RESULT" "$RELEASE_WITNESS_RESULT" "$EBPF_RESULT"; do
+          for result in "$WORKSPACE_RESULT" "$WORKSPACE_AARCH64_RESULT" "$LINUX_RESULT" "$RELEASE_WITNESS_RESULT" "$EBPF_RESULT"; do
             if [ "$result" != "$required" ]; then
               echo "A test lane did not match scope $SCOPE_CODE: $result"
               exit 1
@@ -728,8 +677,6 @@ jobs:
         with:
           packages: attr cryptsetup-bin lld
 
-      - uses: ./.github/actions/install-zigbuild
-
       - uses: ./.github/actions/rust-cache
 
       - name: Install cargo-nextest
@@ -769,6 +716,63 @@ jobs:
         # nextest does not run doctests; gate them separately.
         run: cargo test --workspace --doc
 
+  test-workspace-aarch64:
+    name: Test workspace (aarch64)
+    needs: [scope]
+    if: needs.scope.outputs.code == 'true'
+    # The only lane that executes mvm's aarch64 code paths. Everything else in
+    # this workflow runs on x86_64, so arch-gated code compiles here for the
+    # first time and its tests run for the first time. The sharpest example is
+    # `jailer::seccomp::CONFINED_ROLE_SYSCALLS`, which is a *separate table* per
+    # architecture: a wrong or missing entry in the aarch64 half SIGSYS-kills a
+    # confined role at the moment it starts working, and no x86_64 runner can
+    # see it. `GuestArch::host()`, the bundle arch gate, and the aarch64
+    # `mvm-seccomp-apply` arm are in the same position.
+    #
+    # SCOPE, honestly: this proves the suite passes natively on aarch64. It does
+    # NOT prove a guest boots — GitHub's arm64 runners expose no nested KVM, so
+    # `backend.start()` is unreachable here exactly as it is in every other lane.
+    # A green run here is not a Tier-1 boot witness; that still needs real
+    # hardware.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/free-disk
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: attr cryptsetup-bin libcap-ng-dev lld
+
+      - uses: ./.github/actions/rust-cache
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      # `mvm-fs` is excluded, and only on this lane. Its dev-dependency
+      # `am-fs-ext4` (the independent ext4 read oracle `tests/oracle.rs` and
+      # `tests/xattr.rs` check our writer against) does not compile for
+      # aarch64-linux: it assumes `c_char == i8`, which holds on x86_64-linux
+      # and on aarch64-*darwin* but not on aarch64-linux, where `c_char` is
+      # `u8`. That is upstream's bug, in a dev-only oracle, and it is load
+      # bearing on x86_64 — so the oracle stays an x86_64 oracle rather than
+      # being dropped. `mvm-fs`'s own library still builds here as a dependency
+      # of everything else; it is only its test targets that are skipped.
+      - name: Build
+        run: cargo build --workspace --exclude mvm-fs --all-targets
+
+      - name: Run tests
+        # The workspace suite only. The arch-independent extras Test workspace
+        # also runs (man pages, the addons feature, doctests) are covered on
+        # x86_64 and would only duplicate cost here.
+        run: cargo nextest run --workspace --exclude mvm-fs --all-targets
+
   test-release-witness:
     name: Test release profile (overflow + no debug assertions)
     needs: [scope]
@@ -786,8 +790,6 @@ jobs:
       - uses: ./.github/actions/apt-deps
         with:
           packages: attr cryptsetup-bin lld
-
-      - uses: ./.github/actions/install-zigbuild
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
@@ -826,6 +828,8 @@ jobs:
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v8.2.0
+        with:
+          version: "0.12.5"
 
       - name: Set up Node
         uses: actions/setup-node@v6
@@ -843,13 +847,11 @@ jobs:
         with:
           packages: attr cryptsetup-bin lld
 
-      - uses: ./.github/actions/install-zigbuild
-
       - uses: ./.github/actions/rust-cache
 
       - name: Install pinned no_std toolchain and targets
         run: |
-          rustup toolchain install 1.96.0 --profile minimal \
+          rustup toolchain install 1.97.1 --profile minimal \
             --target wasm32-unknown-unknown,wasm32-wasip1,riscv32imac-unknown-none-elf
 
       - name: Install just
@@ -926,8 +928,23 @@ jobs:
   # to catch drift will flake here and get switched off.
   boot-latency:
     name: Boot latency ceiling
+    # Merge queue and manual dispatch, not every PR push. This lane needs a KVM
+    # runner and takes ~11 minutes, and at the 20-concurrent-job cap six of them
+    # were queued at once across open PRs — it was a material share of the wait
+    # before any PR's own jobs could start.
+    #
+    # Safe to move because of what this lane is: it pins a *published* image on
+    # purpose, as a control variable, so a regression it catches is in host-side
+    # code and is caught in the queue before anything reaches main. The budget is
+    # a ceiling with roughly 3x headroom over the observed median, not a
+    # tolerance — it exists to catch multiple-x regressions, and one merge-queue
+    # run catches those exactly as well as one run per push.
+    #
+    # `nix-flake-check` below makes the same trade for the same reason.
     needs: [scope]
-    if: needs.scope.outputs.code == 'true'
+    if: >-
+      needs.scope.outputs.code == 'true'
+      && (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -939,7 +956,7 @@ jobs:
       # nobody had published. Boot images get their own tags precisely so
       # this pin stops moving with the CLI's version — keep it in step with
       # `DEFAULT_BOOT_IMAGE_TAG` in mvm-core's config.
-      IMAGE_TAG: boot-image/v0.1.0
+      IMAGE_TAG: boot-image/v0.1.3
       # Must track `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT`. The
       # launch path passes `--enable-pci`, which older Firecracker rejects
       # outright: it exits before creating its API socket, and the only symptom
@@ -963,11 +980,6 @@ jobs:
       # same reasoning that made these manifests signed in the first place.
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
-
-      # Building the root package runs `crates/mvm-cli/build.rs`, which
-      # cross-compiles the embedded host binaries and needs the pinned zig.
-      # Without it the lane fails before it ever boots anything.
-      - uses: ./.github/actions/install-zigbuild
 
       - uses: ./.github/actions/rust-cache
         with:
@@ -1142,7 +1154,7 @@ jobs:
 
       - name: Install Nix
         if: needs.scope.outputs.kernel == 'true'
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Build builder and workload kernels
         if: needs.scope.outputs.kernel == 'true'
@@ -1181,6 +1193,156 @@ jobs:
             staging/kernel-metrics-${{ matrix.arch }}.json
             staging/workload-config-${{ matrix.arch }}
 
+  guest-image-boot:
+    name: Guest image boots (tree-built)
+    # The gap #2635 names: nothing builds the guest image generator's output and
+    # starts it before the change is on main. The only lane that boots a
+    # tree-built image runs on a `boot-image/v*` tag, which is after the merge.
+    # That is how a rootfs whose /init the kernel could not exec shipped for five
+    # weeks with every checksum verifying clean, and how five successive release
+    # runs each surfaced exactly one more layer — an unattached overlay, a guest
+    # never told where the overlay was, a sidecar field the serializer dropped —
+    # none of which any static check can see, because each one needs a guest that
+    # actually runs.
+    #
+    # Merge queue, not per-PR, and the cost argument is wall-clock rather than
+    # runner-minutes: this job takes ~33 minutes, and the merge-group CI it joins
+    # already takes 32-36, so running in parallel it adds close to nothing to how
+    # long a merge takes. Per-PR it would be pure addition on every push.
+    # `nix-flake-check` above sets the same precedent for the same reason.
+    needs: [scope]
+    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/free-disk
+        if: needs.scope.outputs.nix == 'true'
+
+      - name: Install Nix
+        if: needs.scope.outputs.nix == 'true'
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - name: Install Rust toolchain
+        if: needs.scope.outputs.nix == 'true'
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - uses: ./.github/actions/apt-deps
+        if: needs.scope.outputs.nix == 'true'
+        with:
+          packages: lld
+
+      - name: Build the guest image from this tree
+        if: needs.scope.outputs.nix == 'true'
+        run: |
+          set -euo pipefail
+          nix build "./nix/images/default-tenant#packages.x86_64-linux.default" \
+            --impure --no-link --print-out-paths > /tmp/store-path.txt
+          STORE_PATH=$(head -1 /tmp/store-path.txt)
+          mkdir -p staging
+          # cp -L so each artifact resolves through its nix-store symlink.
+          cp -L "$STORE_PATH/vmlinux"       staging/vmlinux
+          cp -L "$STORE_PATH/rootfs.ext4"   staging/rootfs.ext4
+          cp -L "$STORE_PATH/mvm-meta.json" staging/mvm-meta.json
+
+      - name: Assert the tree-built rootfs has an exec'able /init
+        if: needs.scope.outputs.nix == 'true'
+        run: |
+          set -euo pipefail
+          # The cheap half, and the one that catches the defect that actually
+          # shipped. Runs before the boot so a rootfs the kernel cannot exec
+          # fails here, where the message says so, rather than as a panic.
+          command -v debugfs >/dev/null 2>&1 \
+            || { sudo apt-get update && sudo apt-get install -y e2fsprogs; }
+          bash nix/packaging/release/assert-init-shebang.sh \
+            staging/rootfs.ext4 "tree-built x86_64"
+          bash nix/packaging/release/assert-kernel-format.sh \
+            staging/vmlinux x86_64 "tree-built x86_64 kernel"
+
+      # The prod rootfs bakes no agent — /init resolves it from /mvm/runtime,
+      # the runtime overlay attached as a second virtio-blk drive. The nix store
+      # is warm from the image build, so this is usually a store lookup rather
+      # than a build.
+      - name: Build the runtime overlay
+        if: needs.scope.outputs.nix == 'true'
+        run: |
+          set -euo pipefail
+          OVERLAY_PATH=$(nix build "./nix/images/runtime-overlay#packages.x86_64-linux.default" \
+            --no-link --print-out-paths | head -1)
+          mkdir -p overlay-staging
+          cp -L "$OVERLAY_PATH/overlay.ext4"     overlay-staging/overlay.ext4
+          cp -L "$OVERLAY_PATH/overlay.verity"   overlay-staging/overlay.verity
+          cp -L "$OVERLAY_PATH/overlay.roothash" overlay-staging/overlay.roothash
+          echo "MVM_RUNTIME_BOOT_OVERLAY_ROOTHASH=$(tr -d '[:space:]' < overlay-staging/overlay.roothash)" \
+            >> "$GITHUB_ENV"
+
+      - name: Install firecracker
+        if: needs.scope.outputs.nix == 'true'
+        env:
+          # Tracks `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT`.
+          FC_VERSION: v1.14.1
+        run: |
+          set -euo pipefail
+          curl -fL -o firecracker.tgz \
+            "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-x86_64.tgz"
+          tar -xzf firecracker.tgz
+          sudo install -m 0755 "release-${FC_VERSION}-x86_64/firecracker-${FC_VERSION}-x86_64" /usr/bin/firecracker
+          /usr/bin/firecracker --version
+
+      - name: Grant /dev/kvm access for the job
+        if: needs.scope.outputs.nix == 'true'
+        run: |
+          set -euo pipefail
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm missing on this runner — the boot gate cannot run." >&2
+            exit 1
+          fi
+          sudo chmod 666 /dev/kvm
+
+      - name: Boot the tree-built image
+        if: needs.scope.outputs.nix == 'true'
+        # Not a latency assertion. The budget is an order of magnitude above the
+        # observed median and RUNS/CONCURRENT are 1, because the only question
+        # here is whether this tree's image reaches userspace and binds its
+        # agent. Latency belongs to `boot-latency`, which pins a *published*
+        # image deliberately so a regression is unambiguous between host code
+        # and image — the two lanes answer different questions and neither
+        # substitutes for the other.
+        env:
+          MVM_RUNTIME_BOOT_BENCH: "1"
+          MVM_RUNTIME_BOOT_BACKEND: firecracker
+          MVM_RUNTIME_BOOT_KERNEL: staging/vmlinux
+          MVM_RUNTIME_BOOT_ROOTFS: staging/rootfs.ext4
+          MVM_RUNTIME_BOOT_OVERLAY: overlay-staging/overlay.ext4
+          MVM_RUNTIME_BOOT_OVERLAY_VERITY: overlay-staging/overlay.verity
+          MVM_RUNTIME_BOOT_READY: guest-agent
+          MVM_RUNTIME_BOOT_RUNS: "1"
+          MVM_RUNTIME_BOOT_CONCURRENT: "1"
+          MVM_RUNTIME_BOOT_BUDGET_MS: "60000"
+        run: |
+          set -euo pipefail
+          # No copy needed: the runtime-overlay admission gate reads
+          # `mvm-meta.json` from the rootfs's own directory, and the build step
+          # already staged it beside `rootfs.ext4`.
+          test -f staging/mvm-meta.json
+          cargo test --test runtime_boot_bench \
+            prebuilt_runtime_image_boots_within_budget -- --exact --nocapture
+
+      - name: Guest console on failure
+        if: ${{ failure() && needs.scope.outputs.nix == 'true' }}
+        run: |
+          for d in "$HOME"/.mvm/vms/*/; do
+            echo "===== $d ====="
+            ls -la "$d" || true
+            # `if`, not `A && B || C`: with the latter the `|| true` also runs
+            # when `cat` itself fails, which would hide a console.log that
+            # exists but cannot be read — the one case worth seeing here.
+            if [ -f "$d/console.log" ]; then
+              cat "$d/console.log"
+            fi
+          done
+
   nix-flake-check:
     name: Nix flake check (Linux eval)
     # Nix eval/build is heavy; run it in the merge queue and on manual dispatch,
@@ -1193,7 +1355,7 @@ jobs:
 
       - name: Install Nix
         if: needs.scope.outputs.nix == 'true'
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Restore Nix binary cache
         if: needs.scope.outputs.nix == 'true'

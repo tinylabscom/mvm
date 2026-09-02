@@ -57,6 +57,17 @@ pub struct VsockHostBindings {
     pub console_sockets: Vec<(u32, PathBuf)>,
 }
 
+#[derive(Clone, Default)]
+struct VsockHostRuntimeConfig {
+    bindings: VsockHostBindings,
+    agent_activity: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    substitution_activity: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    broker_activity: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    host_dial_activity: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    workload_exit_stop: Option<&'static AtomicBool>,
+    trusted_builder_egress: bool,
+}
+
 impl VsockHostBindings {
     fn paths(&self) -> Vec<&Path> {
         self.agent_socket
@@ -234,6 +245,17 @@ impl VsockShared {
         self.handlers.set_host_dial_sockets(ports)
     }
 
+    /// Exempt these guest ports from idle eviction in **both** layers that can
+    /// reclaim a quiet stream: the host-dial bridge, which closes the host
+    /// socket, and the transport's credit table, which sends the guest an
+    /// `OP_RST`. Fixing only one leaves the other to sever the connection.
+    pub fn set_long_lived_host_dial_ports(&mut self, ports: impl IntoIterator<Item = u32>) {
+        let ports: Vec<u32> = ports.into_iter().collect();
+        self.handlers
+            .set_long_lived_host_dial_ports(ports.iter().copied());
+        self.transport.set_long_lived_ports(ports);
+    }
+
     pub fn set_host_dial_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
         self.handlers.set_host_dial_activity(counter);
     }
@@ -325,6 +347,7 @@ pub struct VirtioVsock {
     shared: Arc<Mutex<VsockShared>>,
     io: Option<super::vsock_io::IoHandle>,
     irq_line: Option<Arc<dyn IrqLine>>,
+    host_runtime: VsockHostRuntimeConfig,
     handoff_listener: Option<UnixListener>,
     handoff_root: Option<PathBuf>,
     handoff_verify_key: Option<VerifyingKey>,
@@ -345,6 +368,7 @@ impl VirtioVsock {
             shared: Arc::new(Mutex::new(shared)),
             io: None,
             irq_line: None,
+            host_runtime: VsockHostRuntimeConfig::default(),
             handoff_listener: None,
             handoff_root: None,
             handoff_verify_key: None,
@@ -365,42 +389,57 @@ impl VirtioVsock {
 
     pub fn set_agent_socket(&mut self, path: &std::path::Path) -> std::io::Result<()> {
         let result = self.lock().set_agent_socket(path);
+        if result.is_ok() {
+            self.host_runtime.bindings.agent_socket = Some(path.to_path_buf());
+        }
         self.notify_io();
         result
     }
 
     pub fn set_agent_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
-        self.lock().set_agent_activity(counter);
+        self.lock().set_agent_activity(Arc::clone(&counter));
+        self.host_runtime.agent_activity = Some(counter);
         self.notify_io();
     }
 
     pub fn set_network_endpoint(&mut self, path: &std::path::Path) {
         self.lock().set_network_endpoint(path);
+        self.host_runtime.bindings.network_endpoint = Some(path.to_path_buf());
         self.notify_io();
     }
 
     pub fn set_trusted_builder_egress(&mut self) {
         self.lock().set_trusted_builder_egress();
+        self.host_runtime.trusted_builder_egress = true;
         self.notify_io();
     }
 
     pub fn set_substitution_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
-        self.lock().set_substitution_activity(counter);
+        self.lock().set_substitution_activity(Arc::clone(&counter));
+        self.host_runtime.substitution_activity = Some(counter);
         self.notify_io();
     }
 
     pub fn set_broker_endpoint(&mut self, path: &std::path::Path) {
         self.lock().set_broker_endpoint(path);
+        self.host_runtime.bindings.broker_endpoint = Some(path.to_path_buf());
         self.notify_io();
     }
 
     pub fn set_broker_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
-        self.lock().set_broker_activity(counter);
+        self.lock().set_broker_activity(Arc::clone(&counter));
+        self.host_runtime.broker_activity = Some(counter);
         self.notify_io();
     }
 
     pub fn capture_workload_exit(&mut self, stop: &'static std::sync::atomic::AtomicBool) {
         self.lock().capture_workload_exit(stop);
+        self.host_runtime.workload_exit_stop = Some(stop);
+        self.notify_io();
+    }
+
+    pub fn set_long_lived_host_dial_ports(&mut self, ports: impl IntoIterator<Item = u32>) {
+        self.lock().set_long_lived_host_dial_ports(ports);
         self.notify_io();
     }
 
@@ -408,14 +447,50 @@ impl VirtioVsock {
         &mut self,
         ports: impl IntoIterator<Item = (u32, &'a std::path::Path)>,
     ) -> std::io::Result<()> {
-        let result = self.lock().set_host_dial_sockets(ports);
+        let ports = ports
+            .into_iter()
+            .map(|(port, path)| (port, path.to_path_buf()))
+            .collect::<Vec<_>>();
+        let result = self
+            .lock()
+            .set_host_dial_sockets(ports.iter().map(|(port, path)| (*port, path.as_path())));
+        if result.is_ok() {
+            self.host_runtime.bindings.console_sockets = ports;
+        }
         self.notify_io();
         result
     }
 
     pub fn set_host_dial_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
-        self.lock().set_host_dial_activity(counter);
+        self.lock().set_host_dial_activity(Arc::clone(&counter));
+        self.host_runtime.host_dial_activity = Some(counter);
         self.notify_io();
+    }
+
+    fn restore_host_runtime(&mut self, irq_line: Arc<dyn IrqLine>) -> std::io::Result<()> {
+        let config = self.host_runtime.clone();
+        self.lock().handlers.clear_host_bindings();
+        self.host_runtime = VsockHostRuntimeConfig::default();
+        self.rebind_host_channels(&config.bindings, Arc::clone(&irq_line))?;
+        if config.trusted_builder_egress {
+            self.set_trusted_builder_egress();
+        }
+        if let Some(counter) = config.agent_activity {
+            self.set_agent_activity(counter);
+        }
+        if let Some(counter) = config.substitution_activity {
+            self.set_substitution_activity(counter);
+        }
+        if let Some(counter) = config.broker_activity {
+            self.set_broker_activity(counter);
+        }
+        if let Some(counter) = config.host_dial_activity {
+            self.set_host_dial_activity(counter);
+        }
+        if let Some(stop) = config.workload_exit_stop {
+            self.capture_workload_exit(stop);
+        }
+        Ok(())
     }
 
     /// Rebind host channels after a child restores guest state.
@@ -430,6 +505,7 @@ impl VirtioVsock {
     ) -> std::io::Result<()> {
         handoff_debug("rebind begin");
         self.shutdown();
+        self.lock().handlers.clear_host_bindings();
         let result = (|| {
             if let Some(path) = &bindings.agent_socket {
                 self.set_agent_socket(path)?;
@@ -555,9 +631,12 @@ impl VirtioVsock {
         self.lock().cancel();
     }
 
-    /// Stop host I/O and discard all host-owned bindings before serializing a
-    /// paused parent. Guest transport registers remain in place; a restored
-    /// child binds fresh authorized channels before it resumes.
+    /// Stop host I/O before serializing a paused parent.
+    ///
+    /// The manual device codec never serializes listeners or handler objects,
+    /// so the parent keeps its binding configuration in memory for
+    /// [`Self::resume_after_snapshot`]. A restored child starts with a newly
+    /// constructed handler registry and binds fresh authorized channels.
     pub fn prepare_snapshot(&mut self) {
         let queue = self.lock().transport.queues[0];
         handoff_debug(&format!(
@@ -575,6 +654,15 @@ impl VirtioVsock {
             queue.num,
             self.lock().transport.pending_rx.len()
         ));
+    }
+
+    /// Restart the live parent's host-I/O owner after a snapshot pause.
+    pub fn resume_after_snapshot(&mut self) {
+        if let Some(irq_line) = self.irq_line.clone()
+            && let Err(error) = self.restore_host_runtime(irq_line)
+        {
+            handoff_debug(&format!("resume after snapshot failed: {error}"));
+        }
     }
 
     pub fn received(&self) -> Vec<u8> {
@@ -984,6 +1072,12 @@ mod tests {
         unsafe { VirtioVsock::new(0x0a00_0000, 49, ram.as_mut_ptr(), 0x4000_0000, ram.len()) }
     }
 
+    struct TestIrqLine;
+
+    impl IrqLine for TestIrqLine {
+        fn signal(&self, _spi: u32) {}
+    }
+
     #[test]
     fn idle_control_state_roundtrips_without_host_state() {
         let source = virtio_dev();
@@ -1077,6 +1171,35 @@ mod tests {
                 field: "host_endpoints_bound"
             })
         ));
+    }
+
+    #[test]
+    fn snapshot_pause_rebinds_the_live_parents_host_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let endpoint = dir.path().join("egress.sock");
+        let mut source = virtio_dev();
+        source.set_network_endpoint(&endpoint);
+        source.irq_line = Some(Arc::new(TestIrqLine));
+
+        source.prepare_snapshot();
+        source
+            .snapshot_state()
+            .expect("paused device contains no host-owned handles");
+        assert_eq!(
+            source.host_runtime.bindings.network_endpoint.as_deref(),
+            Some(endpoint.as_path())
+        );
+
+        source.resume_after_snapshot();
+        assert!(source.io.is_some(), "live parent host I/O must restart");
+        assert!(matches!(
+            source.snapshot_state(),
+            Err(DeviceStateError::InvalidValue {
+                kind: DeviceKind::VirtioVsock,
+                field: "host_io_active"
+            })
+        ));
+        source.shutdown();
     }
 
     #[test]
@@ -1266,6 +1389,99 @@ mod tests {
         d.handle_packet(rw, b"93.184.216.34:80");
         assert!(d.lifecycle.received.is_empty());
         assert!(d.transport.pending_rx.iter().any(|(h, _)| h.op == OP_RST));
+    }
+
+    /// The regression a FlowMux launch died on: the session handshake opens
+    /// with the *host's* `SessionHello`, so the guest connects and reads. A
+    /// bridge that dials the endpoint only on the first guest payload leaves
+    /// the endpoint with no socket to greet on, and both halves wait — which
+    /// surfaced as "no guest authenticated" with a guest that had connected.
+    #[test]
+    fn egress_port_delivers_a_host_first_greeting_after_only_a_connect() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("subst.sock");
+
+        let Some(listener) = bind_unix_listener(&sock) else {
+            return;
+        };
+        let server = std::thread::spawn(move || {
+            let (mut c, _) = listener.accept().unwrap();
+            c.write_all(b"HELLO").unwrap();
+            // The real endpoint holds the session open waiting for the guest's
+            // reply; dropping here would close the socket before the drain.
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        });
+
+        let mut d = dev();
+        d.set_network_endpoint(&sock);
+
+        let request = VsockHdr {
+            src_cid: GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: 1600,
+            dst_port: mvm_agentd::vsock::EGRESS_PORT,
+            len: 0,
+            op: OP_REQUEST,
+            typ: TYPE_STREAM,
+            buf_alloc: HOST_BUF_ALLOC,
+            ..Default::default()
+        };
+        d.handle_packet(request, &[]);
+        assert!(
+            d.transport
+                .pending_rx
+                .iter()
+                .any(|(h, _)| h.op == OP_RESPONSE),
+            "the connect itself must still be accepted"
+        );
+
+        let mut greeting = None;
+        for _ in 0..200 {
+            let _ = d.service_host_io();
+            if let Some((h, payload)) = d
+                .transport
+                .pending_rx
+                .iter()
+                .find(|(h, _)| h.op == OP_RW && h.dst_port == 1600)
+            {
+                greeting = Some((*h, payload.clone()));
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let (h, payload) =
+            greeting.expect("the endpoint's greeting reaches a guest that has only connected");
+        assert_eq!(h.src_port, mvm_agentd::vsock::EGRESS_PORT);
+        assert_eq!(payload, b"HELLO");
+        server.join().unwrap();
+    }
+
+    /// With nothing bound the refusal now lands on the connect rather than on
+    /// the first payload, so a guest waiting to be greeted learns immediately
+    /// instead of blocking until its own timeout.
+    #[test]
+    fn egress_port_resets_a_connect_without_endpoint() {
+        let mut d = dev();
+        let request = VsockHdr {
+            src_cid: GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: 2100,
+            dst_port: mvm_agentd::vsock::EGRESS_PORT,
+            len: 0,
+            op: OP_REQUEST,
+            typ: TYPE_STREAM,
+            ..Default::default()
+        };
+        d.handle_packet(request, &[]);
+        assert!(d.transport.pending_rx.iter().any(|(h, _)| h.op == OP_RST));
+        assert!(
+            !d.transport
+                .pending_rx
+                .iter()
+                .any(|(h, _)| h.op == OP_RESPONSE),
+            "a connect with no endpoint must not read as accepted"
+        );
     }
 
     #[test]

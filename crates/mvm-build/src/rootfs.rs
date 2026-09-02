@@ -550,6 +550,10 @@ fn materialize_ext4_in_builder_vm(
             BuilderBackendChoice::Qemu => QemuBuilderVm::new()
                 .run_shell_script(&shell_job)
                 .map(|_| ()),
+            BuilderBackendChoice::WebLinux => Err(crate::builder_vm::BuilderVmError::VmmUnavailable {
+                requested: "web-linux".into(),
+                reason: "the web-linux builder is browser-only; select libkrun, qemu, or hvf on a native host".into(),
+            }),
         }
     })?;
     Ok(())
@@ -629,14 +633,26 @@ trap - EXIT
 /// walker/materializer implementation), then layers the dm-verity sidecar
 /// emission this crate's run path expects on top.
 ///
-/// This is the no-shell path the local run uses. It reads
-/// the whole tree into memory (each file's bytes + the assembled image), which
-/// is fine for small/medium rootfs; large images want the streaming +
-/// multi-block-group follow-ups. The output is a valid ext4 real readers mount;
-/// integrity is provided by dm-verity, added on top (not by in-filesystem
-/// checksums).
+/// This is the no-shell path the local run uses. Unsealed callers stream the
+/// assembled image to disk while retaining the walked file contents; verity
+/// callers additionally retain the dense image bytes needed to build the hash
+/// tree. The output is a valid ext4 real readers mount; integrity is provided
+/// by dm-verity, added on top (not by in-filesystem checksums).
 pub fn materialize_ext4_pure(
     input: &MaterializeExt4Input,
+) -> Result<MaterializedExt4, RootfsError> {
+    materialize_ext4_pure_with_walk_options(input, mvm_fs::rootfs::WalkOptions::default())
+}
+
+/// Materialize with caller-selected source-walk behavior.
+///
+/// Immutable OCI roots use [`mvm_fs::rootfs::WalkOptions::default`]. Live
+/// directory snapshots may instead omit entries that vanish during capture
+/// while preserving the same ext4 construction path.
+#[cfg(feature = "pure-mkfs")]
+pub fn materialize_ext4_pure_with_walk_options(
+    input: &MaterializeExt4Input,
+    walk: mvm_fs::rootfs::WalkOptions,
 ) -> Result<MaterializedExt4, RootfsError> {
     if !input.unpacked_root.is_dir() {
         return Err(RootfsError::UnpackedRootNotDirectory(
@@ -645,13 +661,26 @@ pub fn materialize_ext4_pure(
     }
     // Stage-0 /work is mounted by label; every other caller leaves
     // volume_label None and gets the unchanged default-options image.
-    let mut options = mvm_fs::rootfs::MaterializeOptions::default()
-        .with_extra_nodes(input.deferred_nodes.clone());
+    let mut options = mvm_fs::rootfs::MaterializeOptions::builder()
+        .walk(walk)
+        .extra_nodes(input.deferred_nodes.clone())
+        .build();
     if let Some(label) = &input.volume_label {
         options = options.with_volume_label(label.as_bytes());
     }
-    // Build the whole image in memory so we can compute dm-verity before any
-    // disk write, avoiding a full read-back of the just-written rootfs.
+    if !input.emit_verity {
+        let materialized =
+            mvm_fs::rootfs::materialize_ext4_pure(&input.unpacked_root, &input.output, &options)?;
+        return Ok(MaterializedExt4 {
+            path: materialized.path,
+            size_bytes: materialized.size_bytes,
+            verity_root_hash: None,
+        });
+    }
+
+    // Verity needs the dense image bytes to construct its hash tree. Keep that
+    // path in memory, while unsealed callers above stream sparse ranges to the
+    // output file and avoid retaining a second image-sized allocation.
     let (image, size_bytes) = mvm_fs::rootfs::build_ext4_pure(&input.unpacked_root, &options)?;
 
     if let Some(parent) = input.output.parent() {
@@ -665,11 +694,7 @@ pub fn materialize_ext4_pure(
         source,
     })?;
 
-    let verity_root_hash = if input.emit_verity {
-        Some(emit_verity_sidecars_for_image(&input.output, &image)?)
-    } else {
-        None
-    };
+    let verity_root_hash = Some(emit_verity_sidecars_for_image(&input.output, &image)?);
 
     Ok(MaterializedExt4 {
         path: input.output.clone(),

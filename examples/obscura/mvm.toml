@@ -1,0 +1,7 @@
+# Obscura has no guest NIC. Browser traffic must use mvm's admitted proxy.
+flake = "."
+profile = "default"
+cpus = 1
+mem = "512M"
+data_disk = "0"
+net = false

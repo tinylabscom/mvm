@@ -18,15 +18,6 @@
 #                 window. The dependency chain (ZONE_DEVICE, MEMORY_HOTPLUG,
 #                 etc.) is no longer builder-only dead weight: sealed workloads
 #                 can boot from a virtiofs root and map DAX-backed uvols.
-#   TUN         — /dev/net/tun, for the opt-in L3-over-vsock network mode. The
-#                 guest agent creates `mvm0` with IFF_TUN | IFF_NO_PI and
-#                 frames raw IP packets over vsock; without the built-in
-#                 driver the device node never appears and the mode fails
-#                 closed at startup with "guest kernel needs CONFIG_TUN".
-#                 Workload-only: the builder VM has no tunnel. This is the TUN
-#                 half of the driver only — the guest still has no NIC, and
-#                 `mvm0` terminates in the agent, not in a host device.
-#
 # The flake passes `base` in so both the builder and workload kernels share
 # one `base.nix` source. base.nix is imported relatively by the builder-vm
 # flake rather than through `workspace`, for the same reason as builder.nix:
@@ -53,7 +44,6 @@ base.mkKernel {
     "ZONE_DEVICE"
     "FS_DAX"
     "FUSE_DAX"
-    "TUN"
     "IPV6"
   ]
   ++ pkgs.lib.optionals optimizeForSize [ "CC_OPTIMIZE_FOR_SIZE" ];

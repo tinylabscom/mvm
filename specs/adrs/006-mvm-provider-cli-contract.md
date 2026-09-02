@@ -52,6 +52,14 @@ CLI-specific path to the same operations. `mvm-sdk` and any studio/gateway
 consumer program against this one trait rather than reimplementing
 lifecycle calls.
 
+**`mvm` may contain one open-source `mvmd` deployment client, but no provider
+registry, tenant scheduler, or fleet control plane.** `mvmctl deploy` is allowed
+as a client operation that submits a signed deployment intent, artifact
+references, and policy to an authenticated `mvmd` origin. The client does not
+choose a production host or hypervisor; `mvmd` owns placement, backend
+selection, and launch authority (ADR-037). This is a narrow exception to the
+"no tenant/fleet orchestration" boundary, not a general provider abstraction.
+
 **`mvm` does not model accelerators, GPUs, or remote inference targets as
 providers.** No such capability, identity, or health surface exists in
 the current tree. If host-side accelerator access is ever exposed, it is

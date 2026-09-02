@@ -39,8 +39,7 @@ Drive machines from Rust with the `MvmClient` facade. `MachineSpec::builder`
 gives a fluent, forward-compatible way to describe what to run:
 
 ```rust
-use mvm_client::{MvmClient, MachineSpec};
-use mvm_client_local::LocalBackend;
+use mvm_client::{LocalBackend, MachineSpec, MvmClient};
 
 // inside an async context:
 let client = LocalBackend::new();

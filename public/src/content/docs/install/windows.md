@@ -1,16 +1,22 @@
 ---
 title: "Install mvm on Windows"
-description: "Native Windows is not a supported local microVM host. WSL2 with nested KVM is the supported libkrun-backed workload path."
+description: "Neither native Windows nor WSL2 is a supported local microVM host. Use native Linux with /dev/kvm or an Apple Silicon Mac."
 ---
 
-mvm does **not** currently support native Windows as a local microVM host. The supported local hosts are:
+mvm does **not** currently support native Windows as a local microVM host, and
+**WSL2 is not a supported workload path either**. The supported local hosts are:
 
 - macOS Apple Silicon.
 - Native Linux with `/dev/kvm`.
 
-The supported Windows-adjacent runtime path is **WSL2 with nested KVM** running
-the libkrun workload backend inside the distro. Native Windows remains future
-work, tracked in [mvm#428](https://github.com/tinylabscom/mvm/issues/428).
+mvm detects WSL2 as its own platform and refuses the libkrun workload backend
+there unconditionally — `Platform::Wsl2` never resolves to libkrun regardless of
+whether the distro exposes nested `/dev/kvm`. `mvmctl doctor` reports it plainly:
+*"WSL2 — a workload runtime needs nested /dev/kvm; without it only `qemu`
+(dev/test only, no claim-10) runs."* The `qemu` backend is dev/test only and does
+**not** enforce claim-10 egress, so it is not a workload runtime. Native Windows
+support remains future work, tracked in
+[mvm#428](https://github.com/tinylabscom/mvm/issues/428).
 
 For the full host/backend matrix, see [Platform support](/reference/platform-support/).
 
@@ -18,32 +24,22 @@ For the full host/backend matrix, see [Platform support](/reference/platform-sup
 
 Use one of these paths today:
 
-- Run mvm inside a WSL2 distro that exposes `/dev/kvm`, has libkrun installed,
-  and keeps the repo/runtime state on the WSL ext4 filesystem.
 - Run mvm on a Linux host with `/dev/kvm`.
 - Run mvm on an Apple Silicon Mac.
 
-## WSL2 With Nested KVM
+## What about WSL2?
 
-Before treating the WSL2 path as supported, verify inside the distro:
+WSL2 is not a supported workload path, even with nested KVM exposed. You can
+install `mvmctl` inside a WSL2 distro and run non-workload commands, but the
+platform probe refuses libkrun there and auto-select never reaches a workload
+backend, so a `machine run` has nothing to boot on. `mvmctl doctor` will tell you
+so:
 
 ```bash
-test -c /dev/kvm && test -w /dev/kvm
 mvmctl doctor
 ```
 
-If either check fails, use a supported host. See the [WSL2 notes](/guides/windows-wsl2) for details and caveats.
-
-### Optional: host-side Nix (in WSL2) for power users
-
-Skip this unless you're contributing to mvm itself or want a shared `/nix/store` between your editor and mvm. Inside the WSL2 distro:
-
-```bash
-sh <(curl -L https://nixos.org/nix/install) --daemon
-. /etc/profile.d/nix.sh
-```
-
-Installing host-side Nix is optional. The normal `mvmctl build` path still treats the CLI as the host control plane and the builder VM as the image build boundary. See [Builder VM](/guides/builder-vm/).
+See the [WSL2 notes](/guides/windows-wsl2) for details and caveats.
 
 ## What about native Windows microVMs?
 
@@ -55,7 +51,7 @@ Tracking issue: [Future work: Windows host support via Windows Hypervisor Platfo
 
 ## Troubleshooting
 
-- **`/dev/kvm` missing inside WSL2** — this host shape is unsupported for mvm's WSL2 workload path.
+- **`/dev/kvm` missing inside WSL2** — expected; WSL2 is unsupported for workloads either way.
 - **`mvmctl doctor` reports "no KVM available"** — use a supported Linux KVM host or Apple Silicon Mac.
 
 See [Windows troubleshooting](/guides/windows-troubleshooting) for the full Windows-specific FAQ.

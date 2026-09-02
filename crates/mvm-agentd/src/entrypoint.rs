@@ -35,6 +35,11 @@ pub struct EntrypointPolicy {
     pub required_uid: u32,
     /// Required `st_gid` of the resolved wrapper.
     pub required_gid: u32,
+    /// When true, a `#!/bin/sh` style shebang on the resolved wrapper is
+    /// allowed. Sealed rootfs images currently bake the entrypoint as a
+    /// shell script under `/etc/mvm/entrypoint` rather than a wrapper
+    /// path, so the fallback policy needs to accept it.
+    pub allow_shell_shebang: bool,
 }
 
 impl EntrypointPolicy {
@@ -51,6 +56,30 @@ impl EntrypointPolicy {
             required_mode: 0o555,
             required_uid: 0,
             required_gid: 0,
+            allow_shell_shebang: false,
+        }
+    }
+
+    /// Fallback policy for sealed images that bake the entrypoint as a
+    /// script directly inside `/etc/mvm/entrypoint`. mkGuest currently emits
+    /// this shape for `entrypoint.command` images, so the agent treats the
+    /// marker file itself as the executable. The same ownership, mode, and
+    /// same-filesystem checks apply; only the path prefix and the shebang
+    /// restriction are relaxed.
+    pub fn sealed_script_marker() -> Self {
+        Self {
+            marker_path: PathBuf::from("/etc/mvm/entrypoint"),
+            allowed_prefix: PathBuf::from("/etc/mvm/"),
+            same_fs_as: Some(PathBuf::from("/etc/mvm")),
+            // mkGuest currently emits the script marker as 0755, so the
+            // fallback policy accepts either 0555 or 0755. Immutable baked
+            // files are still read-only in practice because the rootfs is
+            // mounted ro; tightening this to 0555 can follow the wrapper
+            // layout migration in mkGuest.
+            required_mode: 0o755,
+            required_uid: 0,
+            required_gid: 0,
+            allow_shell_shebang: true,
         }
     }
 
@@ -62,9 +91,65 @@ impl EntrypointPolicy {
         let raw = std::fs::read_to_string(&self.marker_path).map_err(|e| {
             ValidationError::ReadMarker {
                 path: self.marker_path.clone(),
+                // The kind is kept alongside the rendered message: an absent
+                // marker means the image offers no entrypoint, while one that
+                // exists and cannot be read is a real misconfiguration. Only
+                // `to_string()` was retained before, so the two were
+                // indistinguishable downstream and both counted as failures.
+                kind: e.kind(),
                 source: e.to_string(),
             }
         })?;
+
+        // Sealed-script shortcut: mkGuest currently bakes the entrypoint as a
+        // shebang script directly inside the marker file. Treat the marker
+        // itself as the executable, applying the same ownership, mode, and
+        // same-filesystem checks as a wrapper path.
+        if self.allow_shell_shebang && raw.starts_with("#!") {
+            let resolved = self.marker_path.clone();
+            if !resolved.starts_with(&self.allowed_prefix) {
+                return Err(ValidationError::OutsideAllowedPrefix {
+                    resolved,
+                    allowed_prefix: self.allowed_prefix.clone(),
+                });
+            }
+            let metadata = std::fs::metadata(&resolved).map_err(|e| ValidationError::Stat {
+                path: resolved.clone(),
+                source: e.to_string(),
+            })?;
+            check_metadata(
+                &metadata,
+                &resolved,
+                self.required_uid,
+                self.required_gid,
+                self.required_mode,
+            )?;
+            if let Some(reference) = &self.same_fs_as {
+                let reference_meta =
+                    std::fs::metadata(reference).map_err(|e| ValidationError::Stat {
+                        path: reference.clone(),
+                        source: e.to_string(),
+                    })?;
+                if metadata.dev() != reference_meta.dev() {
+                    return Err(ValidationError::DifferentFilesystem {
+                        resolved: resolved.clone(),
+                        reference: reference.clone(),
+                        resolved_dev: metadata.dev(),
+                        reference_dev: reference_meta.dev(),
+                    });
+                }
+            }
+            let file = File::open(&resolved).map_err(|e| ValidationError::Open {
+                path: resolved.clone(),
+                source: e.to_string(),
+            })?;
+            return Ok(ValidatedEntrypoint {
+                resolved,
+                file,
+                use_resolved_path: true,
+            });
+        }
+
         let stated = PathBuf::from(raw.trim());
         if !stated.is_absolute() {
             return Err(ValidationError::NotAbsolute { path: stated });
@@ -116,9 +201,15 @@ impl EntrypointPolicy {
             path: resolved.clone(),
             source: e.to_string(),
         })?;
-        check_no_shell_shebang(&mut file, &resolved)?;
+        if !self.allow_shell_shebang {
+            check_no_shell_shebang(&mut file, &resolved)?;
+        }
 
-        Ok(ValidatedEntrypoint { resolved, file })
+        Ok(ValidatedEntrypoint {
+            resolved,
+            file,
+            use_resolved_path: false,
+        })
     }
 }
 
@@ -188,6 +279,10 @@ fn check_no_shell_shebang(file: &mut File, path: &Path) -> Result<(), Validation
 pub struct ValidatedEntrypoint {
     pub resolved: PathBuf,
     pub file: File,
+    /// When true, spawn the entrypoint via its resolved filesystem path
+    /// instead of `/proc/self/fd/<n>`. Needed for sealed-script markers
+    /// whose interpreter chain relies on file capabilities on the rootfs.
+    pub use_resolved_path: bool,
 }
 
 impl ValidatedEntrypoint {
@@ -200,6 +295,7 @@ impl ValidatedEntrypoint {
         Ok(Self {
             resolved: self.resolved.clone(),
             file: self.file.try_clone()?,
+            use_resolved_path: self.use_resolved_path,
         })
     }
 }
@@ -210,6 +306,10 @@ impl ValidatedEntrypoint {
 pub enum ValidationError {
     ReadMarker {
         path: PathBuf,
+        /// Kind of the underlying I/O error. `NotFound` means the image
+        /// declares no entrypoint at all; anything else is a marker that
+        /// exists and could not be read.
+        kind: std::io::ErrorKind,
         source: String,
     },
     NotAbsolute {
@@ -272,19 +372,36 @@ impl ValidationError {
     /// wrapper — see the wrapper-model plan). This is a clean "RunEntrypoint
     /// not offered" state, NOT a failure.
     ///
-    /// Deliberately narrow: only a non-absolute marker (a script body or a
-    /// relative path, never a wrapper path) counts. A marker that *is* an
-    /// absolute path but fails the ownership / mode / prefix / same-fs checks
-    /// is a real misconfiguration or tamper and stays a hard failure.
+    /// Two shapes count, and only two. A non-absolute marker (a script body or
+    /// a relative path, never a wrapper path), and a marker that is not there
+    /// at all — an image declaring no entrypoint has no file to read, which is
+    /// the plainest form of "not offered" there is.
+    ///
+    /// Everything else stays a hard failure: a marker that exists and cannot be
+    /// read is a real misconfiguration, and one that *is* an absolute path but
+    /// fails the ownership / mode / prefix / same-fs checks is a
+    /// misconfiguration or a tamper.
+    ///
+    /// The absent case was missing, so `machine wait` exited 65 with
+    /// `entrypoint failed: read entrypoint marker /etc/mvm/entrypoint: No such
+    /// file or directory` against any guest that declares no entrypoint —
+    /// reporting a component that does not apply as one that failed.
     pub fn is_entrypoint_not_offered(&self) -> bool {
-        matches!(self, ValidationError::NotAbsolute { .. })
+        matches!(
+            self,
+            ValidationError::NotAbsolute { .. }
+                | ValidationError::ReadMarker {
+                    kind: std::io::ErrorKind::NotFound,
+                    ..
+                }
+        )
     }
 }
 
 impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ValidationError::ReadMarker { path, source } => {
+            ValidationError::ReadMarker { path, source, .. } => {
                 write!(f, "read entrypoint marker {}: {source}", path.display())
             }
             ValidationError::NotAbsolute { path } => {
@@ -367,6 +484,8 @@ impl std::error::Error for ValidationError {}
 
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::stream_pump::{CapturedOutput, Pump, PumpOutcome, RetainingSink};
@@ -422,6 +541,36 @@ impl Default for CallCaps {
     }
 }
 
+/// Kernel-enforced resource ceilings applied to a child before `execve`.
+///
+/// Wall time and byte-stream limits remain in [`CallCaps`]; these ceilings
+/// bound resources the stream pump cannot control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessResourceLimits {
+    /// Maximum process address space in bytes.
+    pub address_space_bytes: u64,
+    /// Maximum CPU time in milliseconds. The kernel limit is rounded up to a
+    /// whole second so every positive admitted budget remains executable.
+    pub cpu_millis: u32,
+}
+
+/// Cloneable, process-local cancellation signal for one admitted call.
+#[derive(Debug, Clone, Default)]
+pub struct CancellationToken(Arc<AtomicBool>);
+
+impl CancellationToken {
+    /// Request cancellation. Repeated requests are idempotent.
+    pub fn request(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    /// Whether cancellation has been requested.
+    #[must_use]
+    pub fn is_requested(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
 /// One control-channel record parsed from the wrapper's fd-3 stream.
 /// Wire format (length-prefixed JSON header + length-prefixed payload)
 /// is documented at `mvm_agentd::vsock::EntrypointEvent::Control`.
@@ -456,6 +605,11 @@ pub struct EntrypointCall<'a> {
     /// Wall-clock budget before the kill ladder starts.
     pub timeout: Duration,
     pub caps: CallCaps,
+    /// Optional kernel resource ceilings. Ordinary entrypoint calls retain
+    /// their existing behavior; admitted extensions always set this value.
+    pub resource_limits: Option<ProcessResourceLimits>,
+    /// Optional controller-owned cancellation signal.
+    pub cancellation: Option<CancellationToken>,
     /// Environment injected after `env_clear()`.
     pub env: Vec<(String, String)>,
     /// Keep the child's stdin open after `stdin` is written, handing it to
@@ -479,6 +633,8 @@ pub enum RunOutcome {
     Exited { code: i32 },
     /// Wrapper exceeded the wall-clock timeout. Killed.
     Timeout,
+    /// The owning controller canceled the call. Killed.
+    Canceled,
     /// The request payload exceeded `stdin_max`; the wrapper was never
     /// spawned.
     StdinCap,
@@ -494,6 +650,7 @@ impl From<PumpOutcome> for RunOutcome {
             PumpOutcome::Exited(code) => RunOutcome::Exited { code },
             PumpOutcome::Crashed { signal } => RunOutcome::WrapperCrashed { signal },
             PumpOutcome::Timeout => RunOutcome::Timeout,
+            PumpOutcome::Canceled => RunOutcome::Canceled,
         }
     }
 }
@@ -510,6 +667,8 @@ pub enum CallOutcome {
     Exited { code: i32, output: CapturedOutput },
     /// Wrapper exceeded the wall-clock timeout. Killed.
     Timeout { output: CapturedOutput },
+    /// The owning controller canceled the call.
+    Canceled { output: CapturedOutput },
     /// The request payload exceeded `stdin_max`; the wrapper was never
     /// spawned, so there is nothing captured to report.
     StdinCap,
@@ -540,6 +699,8 @@ pub fn execute(
         stdin: stdin_data,
         timeout,
         caps,
+        resource_limits: None,
+        cancellation: None,
         env,
         stream_input: false,
     };
@@ -549,6 +710,7 @@ pub fn execute(
     match outcome {
         RunOutcome::Exited { code } => CallOutcome::Exited { code, output },
         RunOutcome::Timeout => CallOutcome::Timeout { output },
+        RunOutcome::Canceled => CallOutcome::Canceled { output },
         RunOutcome::WrapperCrashed { signal } => CallOutcome::WrapperCrashed { signal, output },
         RunOutcome::StdinCap => CallOutcome::StdinCap,
         RunOutcome::SpawnFailed { message } => CallOutcome::SpawnFailed { message },
@@ -581,11 +743,19 @@ pub fn execute_streaming(
         stdin: stdin_data,
         timeout,
         caps,
+        resource_limits: _resource_limits,
+        cancellation,
         env,
         stream_input,
     } = call;
     if stdin_data.len() > caps.stdin_max {
         return RunOutcome::StdinCap;
+    }
+    if cancellation
+        .as_ref()
+        .is_some_and(CancellationToken::is_requested)
+    {
+        return RunOutcome::Canceled;
     }
 
     // On Linux `spawn_path` references the validation fd by number via
@@ -676,8 +846,14 @@ pub fn execute_streaming(
     // signal-safe libc calls are used (dup2, fcntl, close, prctl). No Rust
     // allocator calls.
     unsafe {
+        #[cfg(target_os = "linux")]
+        let resource_limits = *_resource_limits;
         cmd.pre_exec(move || {
             install_fd3_in_child(write_raw)?;
+            #[cfg(target_os = "linux")]
+            if let Some(limits) = resource_limits {
+                apply_process_resource_limits(limits)?;
+            }
             crate::guest_mount::drop_workload_capability_bounding_set()
         });
     }
@@ -720,10 +896,13 @@ pub fn execute_streaming(
 
     // Nothing here waits for the child to die before output moves: the pump
     // hands each read straight to `sink`.
-    let outcome = Pump::new(caps)
+    let mut pump = Pump::new(caps)
         .control_channel(fd3_read)
-        .deadline(Instant::now() + *timeout)
-        .run(&mut child, sink);
+        .deadline(Instant::now() + *timeout);
+    if let Some(token) = cancellation {
+        pump = pump.cancellation(token.clone());
+    }
+    let outcome = pump.run(&mut child, sink);
 
     if *stream_input {
         // The child is reaped. A desk left open would answer the next host
@@ -731,6 +910,35 @@ pub fn execute_streaming(
         crate::stream_input::InputDesk::abandon();
     }
     outcome.into()
+}
+
+#[cfg(target_os = "linux")]
+fn apply_process_resource_limits(limits: ProcessResourceLimits) -> std::io::Result<()> {
+    let address_space = libc::rlim_t::try_from(limits.address_space_bytes)
+        .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+    let cpu_seconds = u64::from(limits.cpu_millis).div_ceil(1000).max(1);
+    let cpu = libc::rlim_t::try_from(cpu_seconds)
+        .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+    let address_limit = libc::rlimit {
+        rlim_cur: address_space,
+        rlim_max: address_space,
+    };
+    let cpu_limit = libc::rlimit {
+        rlim_cur: cpu,
+        rlim_max: cpu,
+    };
+    // SAFETY: setrlimit reads each fully initialized stack value during the
+    // syscall. This function is called only by the post-fork pre-exec hook and
+    // performs no allocation after constructing the values above.
+    unsafe {
+        if libc::setrlimit(libc::RLIMIT_AS, &address_limit) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if libc::setrlimit(libc::RLIMIT_CPU, &cpu_limit) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 /// Create an `O_CLOEXEC` pipe and return `(read_end, write_end)` as
@@ -880,6 +1088,9 @@ fn dup_above_fd3(original: &std::fs::File) -> std::io::Result<std::os::fd::Owned
 /// with a validation fd at fd 3. `worker_pool::spawn_worker` does not
 /// install a fd-3 channel and so uses this function unchanged.
 pub(crate) fn spawn_path(entrypoint: &ValidatedEntrypoint) -> PathBuf {
+    if entrypoint.use_resolved_path {
+        return entrypoint.resolved.clone();
+    }
     #[cfg(target_os = "linux")]
     {
         use std::os::fd::AsRawFd;
@@ -1004,6 +1215,7 @@ mod tests {
             required_mode: mode,
             required_uid: uid,
             required_gid: gid,
+            allow_shell_shebang: false,
         }
     }
 
@@ -1061,6 +1273,32 @@ mod tests {
             Err(ValidationError::ReadMarker { .. }) => {}
             other => panic!("expected ReadMarker, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_absent_marker_is_not_offered_rather_than_failed() {
+        // An image that declares no entrypoint has no marker file. That is the
+        // plainest "not offered" there is, and treating it as a failure made
+        // `machine wait` exit 65 on every such guest.
+        let err = ValidationError::ReadMarker {
+            path: PathBuf::from("/etc/mvm/entrypoint"),
+            kind: std::io::ErrorKind::NotFound,
+            source: "No such file or directory (os error 2)".to_string(),
+        };
+        assert!(err.is_entrypoint_not_offered());
+    }
+
+    #[test]
+    fn an_unreadable_marker_stays_a_failure() {
+        // The marker exists and cannot be read: a real misconfiguration, and
+        // the case that must not be swept into "not offered" along with the
+        // absent one.
+        let err = ValidationError::ReadMarker {
+            path: PathBuf::from("/etc/mvm/entrypoint"),
+            kind: std::io::ErrorKind::PermissionDenied,
+            source: "Permission denied (os error 13)".to_string(),
+        };
+        assert!(!err.is_entrypoint_not_offered());
     }
 
     #[test]

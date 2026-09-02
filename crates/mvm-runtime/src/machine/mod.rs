@@ -29,16 +29,7 @@ pub enum NetworkMode {
     /// No guest NIC; egress and ingress are mediated by host brokers over
     /// vsock. Endpoint access is still gated by policy.
     HostVsockProxy,
-    /// No guest NIC; the guest gets a point-to-point `mvm0` TUN interface and
-    /// raw IP packets ride dedicated vsock connections to the host gateway.
-    /// A compatibility mode for workloads that need a real IP stack; never
-    /// selected implicitly, and never fallen back to or from.
-    L3Vsock,
 }
-
-/// The guest-NIC invariant, checked on the launch specification so every
-/// launcher inherits it rather than each remembering.
-pub mod nic_guard;
 
 const DEFAULT_CPUS: u32 = 1;
 const DEFAULT_MEMORY_MIB: u64 = 512;
@@ -185,15 +176,6 @@ impl Machine {
                 req.host_vsock_proxy = true;
                 req.no_routable_guest_nic = true;
             }
-            NetworkMode::L3Vsock => {
-                // `l3_vsock` is the stricter requirement: the guest must
-                // have no network device at all, so `mvm0` is the only
-                // interface its stack can route to. Requiring
-                // `no_routable_guest_nic` alongside it keeps a backend that
-                // only drains a NIC out of selection.
-                req.l3_vsock = true;
-                req.no_routable_guest_nic = true;
-            }
         }
         req
     }
@@ -232,14 +214,6 @@ impl Machine {
             memory_mib: u32::try_from(self.spec.memory_mib).unwrap_or(u32::MAX),
             network_policy,
             warm_pool_size: 0,
-            runtime_source_policy: mvm_core::vm_backend::select_runtime_source_policy(
-                mvm_core::vm_backend::RuntimeSourcePolicySelection {
-                    backend_name: inputs.backend_name.as_deref(),
-                    sealed: inputs.sealed,
-                    root_strategy: inputs.root_strategy,
-                    launch_kind: mvm_core::vm_backend::RuntimeSourceLaunchKind::WorkloadImage,
-                },
-            ),
             ..Default::default()
         }
     }
@@ -294,74 +268,6 @@ mod tests {
         let req = machine.required_capabilities();
         assert!(req.host_vsock_proxy);
         assert!(req.no_routable_guest_nic);
-    }
-
-    #[test]
-    fn l3_vsock_requires_the_tunnel_capability_and_a_nic_less_backend() {
-        let machine = Machine::builder()
-            .image("alpine")
-            .network(NetworkMode::L3Vsock)
-            .build()
-            .unwrap();
-        let req = machine.required_capabilities();
-        assert!(req.l3_vsock);
-        assert!(req.no_routable_guest_nic);
-        assert!(
-            !req.host_vsock_proxy,
-            "l3-vsock is a distinct mode, not a superset of the brokered one"
-        );
-    }
-
-    #[test]
-    fn l3_vsock_is_refused_on_a_backend_that_only_drains_a_nic() {
-        // libkrun's posture: no routable NIC, brokered proxy, but a
-        // virtio-net device is still attached — which the L3 tunnel's
-        // no-device precondition forbids.
-        let machine = Machine::builder()
-            .image("alpine")
-            .network(NetworkMode::L3Vsock)
-            .build()
-            .unwrap();
-        let caps = VmCapabilities {
-            vsock: true,
-            no_routable_guest_nic: true,
-            host_vsock_proxy: true,
-            l3_vsock: false,
-            ..VmCapabilities::default()
-        };
-        let err = machine.check_backend(&caps).unwrap_err();
-        assert_eq!(err.missing, vec!["l3_vsock"]);
-    }
-
-    #[test]
-    fn l3_vsock_selection_picks_a_backend_that_advertises_the_tunnel() {
-        let machine = Machine::builder()
-            .image("alpine")
-            .network(NetworkMode::L3Vsock)
-            .build()
-            .unwrap();
-        let backend = machine.select_backend().expect("select backend");
-        let caps = backend.capabilities();
-        assert!(caps.l3_vsock);
-        assert!(caps.no_routable_guest_nic);
-    }
-
-    #[test]
-    fn selecting_l3_vsock_never_falls_back_to_the_brokered_mode() {
-        // A backend that can serve only the brokered mode must fail the
-        // L3 machine outright rather than degrading it.
-        let machine = Machine::builder()
-            .image("alpine")
-            .network(NetworkMode::L3Vsock)
-            .build()
-            .unwrap();
-        let brokered_only = VmCapabilities {
-            vsock: true,
-            no_routable_guest_nic: true,
-            host_vsock_proxy: true,
-            ..VmCapabilities::default()
-        };
-        assert!(machine.check_backend(&brokered_only).is_err());
     }
 
     #[test]
@@ -476,39 +382,5 @@ mod tests {
         let backend = MockBackend::new();
         let id = backend.start(&cfg).unwrap();
         backend.stop(&id).unwrap();
-    }
-
-    #[test]
-    fn to_start_config_requires_overlay_for_sealed_libkrun_block_workloads() {
-        let machine = Machine::builder().image("alpine").build().unwrap();
-        let cfg = machine.to_start_config(LaunchInputs {
-            name: "m2".into(),
-            rootfs_path: "/store/rootfs.ext4".into(),
-            kernel_path: Some("/store/vmlinux".into()),
-            backend_name: Some("libkrun".into()),
-            sealed: true,
-            root_strategy: Some(mvm_core::vm_backend::RuntimeSourceRootStrategy::BlockExt4),
-        });
-        assert_eq!(
-            cfg.runtime_source_policy,
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
-        );
-    }
-
-    #[test]
-    fn to_start_config_keeps_virtiofs_roots_on_rootfs_only() {
-        let machine = Machine::builder().image("alpine").build().unwrap();
-        let cfg = machine.to_start_config(LaunchInputs {
-            name: "m3".into(),
-            rootfs_path: "/store/rootfs.ext4".into(),
-            kernel_path: Some("/store/vmlinux".into()),
-            backend_name: Some("hvf".into()),
-            sealed: false,
-            root_strategy: Some(mvm_core::vm_backend::RuntimeSourceRootStrategy::VirtiofsRoot),
-        });
-        assert_eq!(
-            cfg.runtime_source_policy,
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay
-        );
     }
 }

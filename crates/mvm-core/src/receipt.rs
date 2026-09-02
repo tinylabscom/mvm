@@ -56,6 +56,56 @@ pub mod receipt_type {
     pub const ASSURANCE_SESSION_OPENED: &str = "assurance.session_opened";
     /// Emitted when an assurance trial completes and its outcome is derived.
     pub const ASSURANCE_TRIAL_COMPLETED: &str = "assurance.trial_completed";
+    /// Emitted when the host observer commits its trial observation.
+    pub const ASSURANCE_OBSERVER_COMPLETED: &str = "assurance.observer_completed";
+    /// Emitted after the admitted disposable VM is confirmed stopped.
+    pub const ASSURANCE_CLEANUP_COMPLETED: &str = "assurance.cleanup_completed";
+    /// Emitted after a trusted runtime verifier joins a native quote to the
+    /// admitted assurance session.
+    pub const ASSURANCE_ATTESTATION_VERIFIED: &str = "assurance.attestation_verified";
+}
+
+/// Namespaced keys for the extensions an exporter attaches.
+///
+/// These are inside the signed payload, so a receipt lifted out of an archive
+/// and forwarded on its own still names the log position it came from. All are
+/// `mvm.`-prefixed: `extensions` is an open map, and an unprefixed key would
+/// collide with whatever a future writer chooses.
+pub mod extension_key {
+    /// Lowercase hex SHA-256 of the exact signed audit-entry bytes.
+    pub const AUDIT_DIGEST: &str = "mvm.audit_digest";
+    /// Merkle root hash the receipt was exported against.
+    pub const AUDIT_ROOT: &str = "mvm.audit_root";
+    /// Tree size that root was published at.
+    pub const TREE_SIZE: &str = "mvm.tree_size";
+    /// Ciphertext-manifest root of the workload's sealed output transcript.
+    ///
+    /// Present only once the transcript has sealed, so a receipt exported
+    /// mid-run does not carry one. Its value is the same root a reader
+    /// verifies before decrypting anything -- never a plaintext digest.
+    pub const TRANSCRIPT_ROOT: &str = "mvm.transcript_root";
+    /// Lowest leaf index in the tenant's audit tree carrying an entry for
+    /// this plan, and [`PLAN_LEAF_LAST`] the highest.
+    ///
+    /// **A bound, not an enumeration.** The tree is per-tenant, so another
+    /// plan's entries can sit between these two indices. What the pair buys is
+    /// that nothing for this plan sits outside them, so a verifier can restrict
+    /// its scan to that window instead of walking the whole tree. Reading it as
+    /// "every leaf in this range belongs to this plan" is wrong.
+    pub const PLAN_LEAF_FIRST: &str = "mvm.plan_leaf_first";
+    /// Highest leaf index for this plan. See [`PLAN_LEAF_FIRST`] for the
+    /// bound-not-enumeration caveat.
+    pub const PLAN_LEAF_LAST: &str = "mvm.plan_leaf_last";
+    /// Whether that transcript was rebuilt from its journal rather than
+    /// sealed by the process that captured it. `true` marks a floor: records
+    /// the departed writer shed after its last durable append are in no file
+    /// anywhere, so the transcript is an incomplete account of the run.
+    pub const TRANSCRIPT_ADOPTED: &str = "mvm.transcript_adopted";
+    /// Measured resource consumption for the run this receipt closes.
+    /// Present on every `plan.exited` receipt, including runs where nothing
+    /// could be observed — a dimension with no reading is recorded as
+    /// unavailable rather than omitted.
+    pub const USAGE: &str = "mvm.usage";
 }
 
 /// Outcome of the action described by a receipt.
@@ -122,6 +172,24 @@ pub struct ExecutionReceipt {
     /// Optional hash link to the previous receipt in this chain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prev_receipt_id: Option<String>,
+    /// RFC 3339 UTC timestamp when the action started, if known.
+    /// For `plan.exited`, this is the timestamp of the matching `plan.launched`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    /// RFC 3339 UTC timestamp when the action ended.
+    /// For `plan.exited`, this is the timestamp of the exit entry itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<String>,
+    /// Captured process exit code, when the receipt records a workload exit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Capability grants admitted for this workload, e.g. agent verbs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub granted_capabilities: Vec<String>,
+    /// Network destinations admitted for this workload, as (host, port) pairs.
+    /// `port = 0` means "any port for this host".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub network_destinations: Vec<(String, u16)>,
     /// RFC 3339 UTC timestamp of when the action occurred.
     pub issued_at: String,
     /// Namespace-prefixed extensions. Unknown keys are preserved by verifiers.
@@ -164,6 +232,10 @@ pub enum ReceiptError {
     /// The `receipt_id` did not match the recomputed content address.
     #[error("receipt_id does not match recomputed content address")]
     ReceiptIdMismatch,
+
+    /// The archive's content address does not match its contents.
+    #[error("archive_id does not match recomputed content address")]
+    ArchiveIdMismatch,
     /// The `did:key` could not be parsed.
     #[error("did:key parse error: {0}")]
     DidKey(#[from] crate::did_key::DidKeyError),
@@ -341,6 +413,11 @@ mod tests {
             outcome: ReceiptOutcome::Authorized,
             granted_by: None,
             prev_receipt_id: None,
+            started_at: None,
+            ended_at: None,
+            exit_code: None,
+            granted_capabilities: Vec::new(),
+            network_destinations: Vec::new(),
             issued_at: "2026-08-06T00:00:00+00:00".into(),
             extensions: BTreeMap::new(),
         }

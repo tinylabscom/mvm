@@ -31,16 +31,72 @@ There is no third package and no gateway binary. Every libkrun lane — builder
 VM, Stage 0, and workload — boots with an explicit virtio-vsock device and no
 guest NIC, so there is nothing for a userspace network gateway to sit between.
 The `MVM_NETWORKING` and `MVM_GATEWAY_BIN` knobs that used to select one are
-gone, and `xtask check-no-gateway-names` fails the build if a reference comes
-back.
+gone, and `xtask check-single-network-path` fails the build if a gateway,
+guest NIC, or second endpoint path comes back.
 
 `mvmctl doctor` reports the libkrun install state and emits hints when it is missing.
 
 For source-checkout contributors only: a **pinned** zig + cargo-zigbuild are
-needed at `cargo build`-of-mvmctl time so `crates/mvm-cli/build.rs` can
-cross-compile the embedded host-vm binaries (`mvm-host-vm-init`,
-`mvm-egress-proxy`) as static `aarch64-unknown-linux-musl` (the
-builder VM rootfs has no dynamic loader). See Plan 115 / ADR-004.
+needed so `crates/mvm-cli/build.rs` can cross-compile the embedded host-vm
+binaries (`mvm-host-vm-init`, `mvm-egress-proxy`) as static
+`aarch64-unknown-linux-musl` (the builder VM rootfs has no dynamic loader).
+See Plan 115 / ADR-004.
+
+That cross-compile is **opt-in**, behind the `embed-host-bins` feature, and is
+the only work `build.rs` still does. Run it when you are about to boot a VM:
+
+```sh
+just embed                    # build and invoke ./target/debug/mvmctl
+just embed --release          # build and invoke ./target/release/mvmctl
+```
+
+A plain `cargo build` never cross-compiles, but it does **restore** the payload
+from the content store at `~/.cache/mvm/embed` when the store holds bytes keyed
+to this tree — the same key (dependency closure + `Cargo.lock` + pinned
+toolchain) the embedding arm trusts when it skips a rebuild. That matters
+because both variants write the same `target/<profile>/mvmctl`: the last cargo
+invocation owns the file, and a cached zero-compile build is enough to swap it.
+Restoring means one `just embed` sticks. On a miss (fresh clone, an edit to the
+payload's own sources, `MVM_EMBED_NO_CACHE=1`) the arm writes the empty table as
+before — it compiles nothing, so a payload it cannot prove is one it does not
+ship.
+
+Bare `just embed` builds the **debug** profile; use `just embed --release` for a
+release binary, or the release one is left untouched. Without a payload `mvmctl`
+runs every host-side verb but cannot bootstrap a builder VM —
+`host_binaries::extract` refuses with the profile-correct rebuild rather than
+extracting an empty directory. The tag-push release workflow always turns the
+feature on, so a downloaded binary is self-sufficient; `just release-build`
+carries it too.
+
+On macOS the recipe also replaces any globally configured compiler-cache
+wrapper with `scripts/rustc-macos-loader.sh` for this explicit build. Cargo
+constructs a new dynamic-library search path before invoking rustc, so the
+wrapper restores the pinned Rust sysroot's `lib/` directory through
+`DYLD_FALLBACK_LIBRARY_PATH` at the compiler boundary; ordinary builds keep
+their configured wrapper. Some nightly distributions give `rust-objcopy` an
+incorrect RPATH; without the repair cargo-zigbuild repeatedly warns that
+`libLLVM.dylib` is missing and embeds larger, unstripped binaries even though
+the library exists. Cargo may replay warning text cached by compilation units
+built before this repair; a new warning has a new `dyld[PID]` and indicates the
+current strip step still failed.
+
+Without embedding, `mvmctl` runs every host-side verb but cannot bootstrap a
+builder VM. Rebuild and invoke the same profile: a bare `mvmctl` that resolves
+to `target/release/mvmctl` is not repaired by a debug-only `just embed`. The
+tag-push release workflow always turns the feature on, so a downloaded binary
+is self-sufficient.
+
+After changing the guest-facing C ABI in `crates/mvm-host-services`, refresh
+the source sidecar explicitly:
+
+```sh
+./target/release/mvmctl build sdk-sidecar build
+```
+
+The command is complete only after both glibc and musl variants report that
+they were cached successfully. A builder-egress endpoint exiting on SIGTERM is
+normal one-shot teardown, not a failed sidecar build.
 
 Provision it with one command — it installs the exact pinned zig (from the
 `ziglang` PyPI package, read out of `[workspace.metadata.mvm.toolchain]`) plus
@@ -109,7 +165,7 @@ Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, disting
 
 - `mvm-hostd` -- host-side daemon roles, one crate with separate `[[bin]]`s (the process moat): the `supervisor` + `jailer` libs, the `broker`/`host_signer`/`audit_signer` subprocess bins, and the per-VM supervisor bins `mvm-libkrun-supervisor`/`mvm-hvf-supervisor`. Absorbs `mvm-supervisor`/`mvm-broker`/`mvm-host-signer`/`mvm-audit-signer`/`mvm-jailer-lite`/`mvm-vm-host`.
 - `mvm-agentd` -- the in-guest daemon: vsock protocol (`vsock/`), console, integrations, entrypoint runtime, the `mvm-guest-agent` `[[bin]]`, and the addon/egress helper bins (`mvm-addon-dns`/`mvm-addon-vsock-bridge`, gated behind the off-by-default `addons` feature so the sealed agent stays tokio-free). Absorbs `mvm-guest` + `mvm-guest-helpers`.
-- `mvm-sdk` -- SDK: decorator parser → canonical `Workload` IR → Nix template, runtime record mode, and the in-guest host-services C-ABI cdylib (`libmvm_host_services.so`) loaded by every language SDK. Language SDK surfaces live under `crates/mvm-sdk/sdks/`.
+- `mvm-sdk` -- SDK: decorator parser → canonical `Workload` IR → Nix template, and runtime record mode. Language SDK surfaces live under `crates/mvm-sdk/sdks/`. The in-guest host-services C-ABI cdylib is **not** here: `libmvm_host_services.so` is emitted by `mvm-host-services`, a separate crate whose package name is what makes cargo produce that filename directly rather than `libmvm_sdk.so` plus a rename. This matters beyond bookkeeping — the SDK sidecar's staleness fingerprint hashes `mvm-host-services` and its dependencies, so an edit under `crates/mvm-sdk` does not invalidate a cached sidecar.
 - `crates/deps/libkrun-sys` -- the libkrun C FFI (bindgen + `-lkrun`, gated by the `libkrun-sys` feature) **plus the safe wrapper** (`KrunContext`/`SupervisorConfig`). Was `mvm-libkrun`; lives low so `mvm-build`/`mvm-runtime` consume the wrapper.
 
 `xtask` -- tooling + claim-gate lints. `mvm-conformance` -- dev-only cucumber-rs BDD harness running the security-claim scenarios against `mvmctl` (not a dependency of any shipped crate).
@@ -158,8 +214,8 @@ The `RuntimeBuildEnv` in mvm implements only `ShellEnvironment`. The full `Build
 
 ### Key Design Decisions
 
-- **Firecracker-only on Linux; libkrun (macOS 13-25) / HVF (macOS 26+) on macOS**: no Docker/containers on any auto-detected runtime path. The only container-tier backend is `--hypervisor apple-container` (Apple's prebuilt container kernel on the in-house HVF VMM), and `auto_select` returns it only when explicitly selected; it is not a fallback. Builds run Nix inside the builder VM (libkrun on macOS 13-25 / HVF on macOS 26+ / libkrun on Linux, with an auto-fallback to the QEMU builder where libkrun can't create its VM — ADR-007; note the _builder_ VMM is not Firecracker even on Linux). The QEMU/microvm_nix backend (Plan 166) is a **`mvm`-only dev/test backend, never used by `mvmd`** — it carries no untrusted multi-tenant workload, so claim-10 egress enforcement is deliberately not wired into its start path (it's Tier 2 dev/test, not a workload-bearing tier — see ADR-001 §"Per-backend tier matrix" claim-10 egress-enforcement note). Egress default-deny is enforced at one seam for every backend on the admitted workload funnel — Firecracker, libkrun, HVF, and `apple-container`, which holds an `HvfRunner` and substitutes only the kernel image, so it inherits that seam verbatim: the per-VM substitution endpoint, whose shared `EgressGate` is the sole claim-10 decision point. `xtask check-uniform-vsock-egress` pins Firecracker, libkrun, and HVF to that one spawn site so a backend cannot grow a second gate. The tiers `AnyBackend::as_workload_backend` returns `None` for — QEMU and Wasm — are barred from that funnel instead of gated on it.
-- **Workload microVMs have no NIC**: every workload *microVM* backend boots the guest with a virtio-vsock device and **no net device at all** — Firecracker's config sequence omits `/network-interfaces`, libkrun pins `NetworkingMode::VsockDirect` (which never calls a net attach), HVF's device model has no net device (and `apple-container` is that same device model with a different kernel image), and the QEMU workload driver emits no `-netdev`. The non-microVM tiers reach the same end differently: the Wasm tier mediates no networking at all. Egress leaves the guest only over vsock, to the host-side substitution endpoint. This is what makes claim 10 (default-deny), claim 13 (no raw secret to the guest), and the audit chain mechanically enforceable: the host _originates_ every outbound connection, so it can authorize, substitute, and log it. `xtask check-vsock-only-egress` fails closed if `virtio_net`, a tap, or a userspace gateway token appears on a workload path. The builder VM is the opposite tier and **does** have a NIC — see **Host dependencies**.
+- **Firecracker-only on Linux; libkrun (macOS 13-25) / HVF (macOS 26+) on macOS**: no Docker/containers on any auto-detected runtime path. The only container-tier backend is `--hypervisor apple-container` (Apple's prebuilt container kernel on the in-house HVF VMM), and `auto_select` returns it only when explicitly selected; it is not a fallback. Builds run Nix inside the builder VM (libkrun on macOS 13-25 / HVF on macOS 26+ / libkrun on Linux, with an auto-fallback to the QEMU builder where libkrun can't create its VM — ADR-007; note the _builder_ VMM is not Firecracker even on Linux). The QEMU/microvm_nix backend (Plan 166) is a **`mvm`-only dev/test backend, never used by `mvmd`** — it carries no untrusted multi-tenant workload. Egress default-deny is enforced at one seam for every workload runner — Firecracker, libkrun, HVF, QEMU, and `apple-container`, which holds an `HvfRunner` and substitutes only the kernel image, so it inherits that seam verbatim: the per-VM `mvm-network-endpoint`, whose shared `EgressGate` is the sole claim-10 decision point. `xtask check-single-network-path` pins every runner to that one spawn site and endpoint binary so a backend cannot grow a second gate. Wasm has no guest network and remains outside the microVM funnel.
+- **Workload microVMs have no NIC**: every workload *microVM* backend boots the guest with a virtio-vsock device and **no net device at all** — Firecracker's config sequence omits `/network-interfaces`, libkrun pins `NetworkingMode::VsockDirect` (which never calls a net attach), HVF's device model has no net device (and `apple-container` is that same device model with a different kernel image), and the QEMU workload driver emits no `-netdev`. The non-microVM tiers reach the same end differently: the Wasm tier mediates no networking at all. Egress leaves the guest only over the `NetworkFlow` channel to the host-side endpoint. This is what makes claim 10 (default-deny), claim 13 (no raw secret to the guest), and the audit chain mechanically enforceable: the host endpoint _originates_ every outbound connection, so it can authorize, substitute, and log it. `xtask check-single-network-path` fails closed if a guest NIC, raw-packet stack, alternate spawn implementation, or second workload socket owner appears. The builder VM is the opposite tier and **does** have a NIC — see **Host dependencies**.
 - **No SSH in microVMs, ever**: microVMs are headless workloads. No sshd, no SSH keys, no SSH users in any rootfs. Guest communication uses Firecracker vsock only. The builder VM (where Nix builds run) is headless too — no interactive shell or console, just a build engine you debug through its logs. See **Security model** below for the full posture.
 - **Builder VM is headless**: there is no interactive shell into it. The builder VM exists solely to run `nix build` on behalf of `mvmctl build` / `mvmctl machine run`; `mvmctl bootstrap` optionally pre-fetches/builds its image ahead of time, but builds auto-bootstrap it on first use if you skip that step. On macOS 26+ Apple Silicon: a long-lived HVF builder VM with Nix + build tools. On other macOS: libkrun builder VM. On Linux with KVM: Firecracker directly. None of these start or SSH into a workload microVM — the builder VM and workload microVMs are always separate.
 - **Headless microVMs**: `mvmctl run` and `mvmctl machine start` boot Firecracker as a daemon. Interactive access via `mvmctl machine console` (PTY-over-vsock, dev-mode only).
@@ -171,7 +227,7 @@ The `RuntimeBuildEnv` in mvm implements only `ShellEnvironment`. The full `Build
 - **No `clippy::too_many_arguments`**: `#[allow(clippy::too_many_arguments)]` is banned outright — no exceptions in hand-written code (the only legitimate use is bindgen-generated FFI like `crates/deps/libkrun-sys/src/sys.rs`). When a function trips the lint, introduce a dedicated struct with a builder (Rust best practice) carrying those arguments and pass the built value. See AGENTS.md §"Clippy: Zero Warnings, Always".
 - **Reuse first — never reimplement what exists**: before writing anything, search the workspace (`rg`, the facade re-exports, the owning module) for a helper, type, trait impl, or crate that already does the job, and call it. Duplicated logic drifts and is this repo's most common bug source. If an existing helper is _almost_ right, extend it — don't fork a second copy. Concrete standing rules: all `~/.mvm` paths go through `mvm-core::config` helpers (`mvm_home`, `vm_state_dir`, `mvm_keys_dir`, `mvm_cache_dir`, …) — never build them inline with `std::env::var("HOME")` + `.join(...)` (that ignores `MVM_HOME` and breaks worktree isolation); shell/VM ops go through the `ShellEnvironment`/`BuildEnvironment` traits.
 - **Best-practice construction**: prefer many small single-purpose functions (each trivially unit-testable) over large branchy ones; use the **builder pattern** for types with more than a couple of (especially optional) fields instead of long positional constructors; express behavior that varies by backend/env/mode as a **trait with impls** (`VmBackend`, `ShellEnvironment`), not a `match` scattered across call sites; group related values into named config/params **structs** rather than threading bare arguments through layers; make illegal states unrepresentable with newtypes/enums over stringly-typed flags; and don't over-abstract (YAGNI) — reach for a trait/builder only when there's a real second case. If you can't write a focused test for a function, it's too big — split it. (See AGENTS.md §"Reuse First; Compose Small, Testable Units".)
-- **Source-checkout builds never depend on mvm-published artifacts**: when `mvmctl` is run from a source checkout of this repo (anywhere `find_dev_image_flake()` / `find_builder_vm_flake()` returns `Some`), every VM image is built locally from the in-repo flakes — both the builder VM image (`nix/images/builder-vm/`) and the user-facing image (user `--flake`, OCI images, `nix/images/runtime-overlay/`, etc.). The mvm-published prebuilts on GitHub releases are end-user infrastructure only; they are never a prerequisite for any source-checkout workflow. A contributor modifying `nix/images/builder-vm/flake.nix` must see their change the next time the builder VM boots — via `mvmctl bootstrap` or auto-bootstrap on the next build — with no release-pipeline round-trip. See ADR-007 §"Two artifact layers, two acquisition paths" for the resolution rule and ADR-007 §"Why the contributor path doesn't download" for the rationale. **One opt-out exists**: `MVM_BOOT_IMAGE=fetch` makes a source checkout fetch the published boot image instead of building it, for when the image is not what is being worked on and an unconditional image build is pure cost. It is off by default, so a contributor who sets nothing sees exactly the behaviour above; the fetched image records `source: fetched` in its sidecar, so a stale prebuilt cannot later be mistaken for a build of the working tree; and `mvmctl doctor`'s `boot image` line reports which arm ran and why. The invariant is the default, not an absolute — say so rather than letting the paragraph above read as one.
+- **Contributor builds never depend on mvm-published artifacts when matching source is available**: the compiled distribution channel is authoritative. A contributor-built `mvmctl` may detect its source checkout and build source-matched artifacts from the in-repo flakes; an official release binary always downloads verified, version-matched artifacts even when invoked from inside a clone. Filesystem proximity must never turn an official binary into a compiler frontend. A contributor modifying `nix/images/builder-vm/flake.nix` must see their change the next time the builder VM boots — via `mvmctl bootstrap` or auto-bootstrap on the next build — with no release-pipeline round-trip. See ADR-007 §"Two artifact layers, two acquisition paths" for the resolution rule and ADR-007 §"Why the contributor path doesn't download" for the rationale. **One contributor opt-out exists**: `MVM_BOOT_IMAGE=fetch` fetches the published boot image when the image is not what is being worked on and an unconditional image build is pure cost. The fetched image records `source: fetched` in its sidecar, so a stale prebuilt cannot later be mistaken for a build of the working tree; and `mvmctl doctor`'s `boot image` line reports which arm ran and why. Explicit acquisition overrides remain explicit; the channel governs automatic defaults.
 - **Host Nix is never used by mvmctl**, even when present: `mvmctl` does not shell out to a host `nix` binary, does not consult `nix-darwin`'s `linux-builder`, and does not honor `nix-daemon` URLs in any code path. Every Nix evaluation goes through a VM we launched; builds run inside that builder VM via libkrun (macOS) or Firecracker (Linux). The reason is determinism and consistency: the same `mvmctl` produces the same artifacts on every host regardless of what the host happens to have installed. A contributor with host Nix installed must not see different behavior from a contributor without it. This invariant supersedes ADR-004's "host Nix remains an opt-in power-user path" clause for everything inside `mvmctl`.
 
 ## Security model
@@ -201,7 +257,26 @@ prose below is the narrative and the table is the ledger — and when the
 two disagree, **the table is right**: it is gated and the prose is not.
 Do not name a test here without checking it exists (`rg 'fn <name>'`);
 several of the names below were fabricated and survived for months
-precisely because nothing checks this file.
+precisely because nothing checks this file. `check-witness-citations`
+checks it now — a backticked symbol in this file must appear in code,
+and a comment or a string literal mentioning it does not count.
+
+The opposite direction is checked too. Prose recording that a name was
+**never written** goes inside an absence region:
+
+```markdown
+<!-- absent:begin -->
+
+`a_name_that_does_not_exist`
+
+<!-- absent:end -->
+```
+
+`check-asserted-absence` fails if anything in there starts resolving, so
+a correction cannot rot into a stale denial, and it fails on a region
+that names nothing — a region asserting nothing would pass forever.
+Inside a region the citation gate stands down, so the two can never
+demand opposite things of the same name.
 
 Claim lineage:
 
@@ -250,16 +325,9 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
    exercises the universal agent's runtime profile and signed grant boundary
    (W4.3). The unit and conformance tests enumerate the complete DevOnly
    request set.
-5. **Vsock framing + supervisor-config JSON + the datapath ingress are
-   fuzzed.** `cargo-fuzz` targets at `crates/mvm-agentd/fuzz/` cover
-   `GuestRequest` and `AuthenticatedFrame` (W4.2).
-   `crates/mvm-hostd/fuzz/fuzz_targets/fuzz_datapath_ingress.rs` covers the
-   userspace socket datapath's guest-facing ingress: IP admission (IPv4 and
-   IPv6, including the bounded extension-header walk), the datapath's own
-   re-read of an admitted packet, and the per-flow smoltcp stack guest bytes
-   reach through `deliver_from_guest`. It does not cover the privileged Linux
-   TUN datapath, which forwards whole packets rather than parsing them.
-   Plan 88 W6 adds
+5. **Vsock framing + supervisor-config JSON are fuzzed.** `cargo-fuzz`
+   targets at `crates/mvm-agentd/fuzz/` cover `GuestRequest` and
+   `AuthenticatedFrame` (W4.2). Plan 88 W6 adds
    `crates/deps/libkrun-sys/fuzz/fuzz_targets/fuzz_supervisor_config.rs` against the
    host-side `SupervisorConfig` parser the `mvm-libkrun-supervisor`
    binary reads on stdin. `#[serde(deny_unknown_fields)]` on every
@@ -270,8 +338,17 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
    path, so there is no in-tree caller and no frame for them to parse.
    `specs/adrs/003-hypervisor-egress-policy.md` is written around the
    vsock-only chokepoint.
-6. **Pre-built dev image is hash-verified.** No function named
-   `download_dev_image` exists; the real pipeline is
+6. **Pre-built dev image is hash-verified.** No such function exists —
+
+   <!-- absent:begin -->
+
+   `download_dev_image`
+
+   <!-- absent:end -->
+
+   defines nothing and never did; the five doc comments that named it were
+   corrected on 2026-09-01, along with a second fabricated name they carried.
+   The real pipeline is
    `fetch_expected_hashes` + `verify_artifact_hash`
    (`crates/mvm-cli/src/commands/env/artifact_verify.rs`), which fetch
    the per-arch `*-checksums-sha256.txt` manifest, stream the
@@ -334,9 +411,17 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     `MVM_ACK_UNRESTRICTED_NETWORK=1`. **None of that exists.** `up` is not a
     dispatched verb — `up::Args` is not a `Commands` variant, so its
     `--network-preset` and `--network-allow` fields are unreachable CLI
-    surface. `MVM_ACK_UNRESTRICTED_NETWORK` is read nowhere in the workspace;
+    surface. The acknowledgement env var is read nowhere in the workspace;
     its only occurrence is a doc comment in `mvm-contract::stream::edge`
-    saying another mechanism is "shaped after" it. There is no unrestricted
+    saying another mechanism is "shaped after" it:
+
+    <!-- absent:begin -->
+
+    `MVM_ACK_UNRESTRICTED_NETWORK`.
+
+    <!-- absent:end -->
+
+    There is no unrestricted
     acknowledgement, so nothing is being bypassed — but nothing warns either,
     and `specs/plans/296` cites the non-existent hatch as prior art for its
     E7 redaction opt-out. Building the acknowledgement is Plan 306 WS5.
@@ -357,10 +442,16 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     (`mvm_build::app_deps_gate::apply_install_gate`); `mvmctl deps
    inspect` / `mvmctl deps audit` surface the sealed sidecars without
     a VM spawn. The `app-deps-audit` job lives in
-    `.github/workflows/ci-full.yml` (Followup D), not `ci.yml` — that
-    workflow is `workflow_dispatch`-only, so this lane does **not**
-    gate every PR; it runs on manual dispatch. It exercises `mvmctl
-   build compile` on
+    `.github/workflows/security.yml` (Followup D), not `ci.yml` — it runs
+    on the nightly cron and on release tags, so this lane does **not**
+    gate every PR. It lived in `ci-full.yml` until 2026-08-21, which was
+    `workflow_dispatch`-only and had been triggered zero times since it
+    was written: ADR-001's ledger cited `ci:app-deps-audit` for claim 11
+    the whole time, against a lane that had never once run. (`ci-full.yml`
+    still exists, as `Extended CI`, and now runs nightly — it kept the
+    lanes that are neither security-bearing nor duplicated by `ci.yml`,
+    including the repository's only macOS coverage.) It exercises
+    `mvmctl build compile` on
     `examples/python/hello-app-with-deps/`, seals a clean + a high-CVE
     fixture via `mvm-build`'s `mvm-app-deps-fixture-tool` example,
     asserts `mvmctl deps inspect --json` reports a well-formed report,
@@ -378,15 +469,24 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     `unbound_service_returns_not_bound` and
     `service_call_rejects_unknown_envelope_fields`.
 
-    Earlier revisions of this bullet named — in quotes rather than
-    backticks, because backticks assert a real identifier and these are
-    names nobody ever wrote —
-    "service_call_denied_when_unbound",
-    "service_call_denied_outside_profile",
-    "audit_chain_contains_service_call_entries",
-    `audit_chain_carries_no_payload_bytes`, a `fuzz_service_call.rs`
-    target, and three `xtask check-handler-*` gates. **None of them
-    exist**, and none ever did on this branch. The ADR-001 row was
+    Earlier revisions of this bullet named four tests, a fuzz target, and
+    three `xtask check-handler-*` gates that **do not exist** and never did
+    on this branch:
+
+    <!-- absent:begin -->
+
+    `service_call_denied_when_unbound`,
+    `service_call_denied_outside_profile`,
+    `audit_chain_contains_service_call_entries`,
+    `audit_chain_carries_no_payload_bytes`, and a
+    `fuzz_service_call.rs` target.
+
+    <!-- absent:end -->
+
+    That list used to be held in quotes rather than backticks, by hand,
+    because backticks assert a real identifier. It is now a gate:
+    `check-asserted-absence` fails if any of those names appears in the
+    tree, so the correction cannot decay into a stale denial. The ADR-001 row was
     always correct, so `check-claim-catalog` never went red — only this
     file was wrong, which is why the ledger and not the narrative is
     authoritative. Payload-freedom for the stream plane's own audit
@@ -396,17 +496,29 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
 13. **No raw secret value crosses the broker channel.**
     `host.secrets.v1` returns destination-bound, time-bound signed
     credentials only; raw secret bytes never leave the supervisor's
-    address space. Plan 104 W5 / ADR-023 / ADR-020. Witnesses, per the
-    ADR-001 row:
-    `encode_secret_env_cmdline_round_trips_pairs_as_single_token` and
-    `substitute`. The six test names this bullet used to list
-    ("host_secrets_v1_denied_outside_allowed_destinations",
-    "zeroize_drop_zeros_secret_bytes",
-    "handler_inter_call_memory_hygiene",
-    "host_secrets_v1_signed_payload_jcs_roundtrip",
-    "secrets_subprocess_cannot_reach_supervisor_memory",
-    "placeholder_in_outbound_request_dropped_and_audited") do not exist
-    in the tree — same failure as claim 12's.
+    address space. Plan 104 W5 / ADR-023 / ADR-020. Witness, per the
+    ADR-001 row: `substitute` — and only that one. The row also named
+    `encode_secret_env_cmdline_round_trips_pairs_as_single_token` until it
+    turned out to round-trip an encoder nothing calls: `mvm.secret_env` is
+    built by no backend and parsed by no guest, so the test witnessed an
+    encoding rather than a containment. The shipped mechanism injects
+    placeholders on the invoke path from the endpoint-minted env file. The
+    cmdline token remains in tree as designed-but-unwired. Note the shape
+    of that failure, because `check-claim-catalog` cannot catch it: the
+    gate proves a named witness *exists*, never that anything calls the
+    code it tests. The six test names this bullet used to list do not
+    exist in the tree — same failure as claim 12's:
+
+    <!-- absent:begin -->
+
+    `host_secrets_v1_denied_outside_allowed_destinations`,
+    `zeroize_drop_zeros_secret_bytes`,
+    `handler_inter_call_memory_hygiene`,
+    `host_secrets_v1_signed_payload_jcs_roundtrip`,
+    `secrets_subprocess_cannot_reach_supervisor_memory`,
+    `placeholder_in_outbound_request_dropped_and_audited`.
+
+    <!-- absent:end -->
 14. **Every `mvmctl run --image <oci-ref>` admission records the OCI
     image provenance in the chain-signed audit log.** Row 14 of the
     ADR-001 table. Plan 85 Phase E + F wire the user-facing OCI image
@@ -437,13 +549,16 @@ prod_pull_requires_digest_pin_before_network` and
     resolved digest before cache admission or boot. The OCI
     `unpack_layer` fuzz harness lives in
     `.github/workflows/security.yml`'s `fuzz` job (release-tag pushes
-    - nightly cron + manual dispatch); the
-      `oci-layer-unpack-adversarial`, `oci-digest-mismatch-reject`,
-      `oci-malformed-manifest`, `oci-mutable-tag-prod-reject`,
-      `oci-reproducibility`, and `oci-image-runner-smoke` lanes live in
-      `.github/workflows/ci-full.yml`, not `ci.yml` — that workflow is
-      `workflow_dispatch`-only, so none of the six gate a PR; they run
-      on manual dispatch.
+    - nightly cron + manual dispatch); the six OCI hardening lanes
+      (`layer-unpack-adversarial`, `digest-mismatch-reject`,
+      `malformed-manifest`, `mutable-tag-prod-reject`, `reproducibility`,
+      `image-runner-smoke`) are the `oci-hardening` matrix in
+      `.github/workflows/security.yml`, not `ci.yml` — so none of the six
+      gate a PR; they run nightly and on release tags. They were six
+      separate dispatch-only jobs in `ci-full.yml` until 2026-08-21 and
+      had never been run. Note that ADR-001's ledger does not cite them:
+      claim 14's row names no `ci:` witness, so this paragraph is prose
+      about lanes the gate does not check, and the table is what binds.
 15. **A sealed production microVM has no shell, no DevOnly guest-agent
     verbs, and no PTY.** The sole
     interactive path into a guest is the agent-served PTY-over-vsock
@@ -489,6 +604,9 @@ length-and-hash match, not an identity, and encoding, derivation and a
 window-straddling split defeat the scan permanently. ADR-001's ledger
 carries the full limits note, marked closed or open individually; do not
 paraphrase this row as enforced without it.
+The fleet stream-edge workflow in mvmd is now the input plane's second
+production caller; that closes no remaining limit and does not promote the
+claim.
 
 `Preview` claim 18 — **a workload's resource consumption is bounded at
 admission, and bound at spawn where the host has a mechanism**. Admission
@@ -504,9 +622,10 @@ counts each machine's configured maximum rather than the balloon's
 current commitment. CPU is the partial half: a granted share wraps the VMM spawn in a
 systemd transient scope on Linux and the achieved tier is read back off
 `cpu.max`. On the in-house HVF VMM on macOS there is no host-level quota
-primitive, so the run loop enforces the share in-process using the vCPU
-thread's Mach CPU time; the achieved tier is read back from the scheduler's
-measured record and audited. libkrun has no in-process vCPU control, so a CPU
+primitive, so the run loop enforces the share in-process using the summed Mach
+CPU time of every vCPU thread — the sum, so the bound stays a bound on the
+machine rather than on one CPU of an SMP guest; the achieved tier is read back
+from the scheduler's measured record and audited. libkrun has no in-process vCPU control, so a CPU
 grant there stays `declared` and `--prod` refuses it. Wall clock is enforced
 by the per-VM supervisor on libkrun and HVF: the process that owns the guest
 for its whole life arms a timer from the admitted plan, and a workload that
@@ -593,6 +712,37 @@ Every new module, type, or function needs test coverage:
 ## Scratch & temporary files
 
 Never write scratch, temporary, or intermediate files anywhere inside the repo working tree — not the root, not a subdirectory, not a hidden dotfile, not a gitignored path. This covers **every** kind of agent-created scratch (analysis lists, command output, intermediate JSON/TSV, logs, ad-hoc scripts, `git merge-file` inputs), not just screenshots/binaries. Write them under `/tmp/` instead. See AGENTS.md §"Screenshots & Temporary Files" for the full rule.
+
+`.agent-memory/notes/` is the one exception, and it is not an exception to the
+rule so much as a different thing: those are committed findings, reviewed in a
+PR like any other file. Scratch is what you produce while working; a note is
+what you learned.
+
+## Committed findings (`.agent-memory/`)
+
+One finding per file under `.agent-memory/notes/<slug>.md`, with `title`,
+`date` and `tags` frontmatter. `just recall <terms>` searches them, `just
+notes` lists them, `just remember <slug>` scaffolds one. `xtask
+check-agent-notes` holds the shape and refuses a `[[link]]` to a note that does
+not exist.
+
+**Recall before you investigate.** A measurement already in there is one you do
+not have to pay for twice.
+
+Write one when you learn something the diff will not say — and especially when
+you learn something is *false*. The falsifications are the notes that earn
+their keep: `teardown-scales-with-guest-ram` records the obvious fix, the A/B
+that refuted it, and why it could not have worked, which is the difference
+between a day spent and a paragraph read. Say what not to retry, and say why.
+Commit the note with the change it explains.
+
+Machine-specific context — host names, fleet layout, ssh targets, local paths —
+does not go here. It belongs in your own agent memory; in the repository it
+just confuses contributors.
+
+These notes are observations, not authority. `specs/adrs/` owns decisions and
+the claims ledger owns what is enforced; where a note disagrees with one of
+those, the owner wins and the note is stale.
 
 ## Build and Run
 

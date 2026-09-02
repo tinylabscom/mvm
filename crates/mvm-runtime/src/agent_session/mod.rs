@@ -162,6 +162,13 @@ impl AgentSessionRecord {
     /// the same suspended one cheaper to hold. The resume point and journal
     /// cursor are preserved, because a demoted session is still resumable; only
     /// the cost of holding it changed.
+    ///
+    /// This overwrites `park_reason` with `RetentionDemotion`, discarding
+    /// whatever reason the session was originally parked under, so after a
+    /// demotion `storage_tier` and `park_reason` can disagree with each other
+    /// under `select_tier`'s mapping. The stored `storage_tier` is what is
+    /// authoritative from that point on; `park_reason` is a breadcrumb of how
+    /// the session got there, not an input to recompute the tier from.
     pub fn demote(&self, now_unix: u64) -> Result<Self, SessionTransitionError> {
         match self.state {
             SandboxResidency::Closed => return Err(SessionTransitionError::Closed),
@@ -261,6 +268,17 @@ impl AgentSessionStore {
         // `AgentSessionId::parse` already refuses `/`, `..`, and leading or
         // trailing dots, so the id cannot escape the root.
         self.root.join(id.as_str()).join(RECORD_FILE)
+    }
+
+    /// Whether a record file is present for `id`.
+    ///
+    /// Deliberately not `load(id).is_ok()`: a record that is on disk but
+    /// unparseable must still read as present. A caller that probes before
+    /// creating a session would otherwise treat a corrupt record as an absent
+    /// one and overwrite it, and the record is the only thing a parked
+    /// session's resume point can be recovered from.
+    pub fn exists(&self, id: &AgentSessionId) -> bool {
+        self.record_path(id).is_file()
     }
 
     /// Write a record, replacing any prior one for the same session.
@@ -417,19 +435,30 @@ fn fence(current: &AgentSessionRecord, expected: u64) -> Result<()> {
     Ok(())
 }
 
+/// Whether `record`'s resume point must survive garbage collection.
+///
+/// This is the one place that decides the rule: a live or hibernated session
+/// can still resume from its `parent_checkpoint`, so that checkpoint must be
+/// held. A `Closed` session is sealed and not resumable, so nothing it names
+/// needs holding. Both `pinned_checkpoints` (the automated sweep's set) and
+/// `pinning_session` (the manual-deletion door's session lookup) project from
+/// this predicate rather than re-deriving it.
+pub fn pins_resume_point(record: &AgentSessionRecord) -> bool {
+    !matches!(record.state, SandboxResidency::Closed)
+}
+
 /// Every checkpoint a live or hibernated session names as its resume point.
 ///
 /// A garbage collector consults this before reaping. Without it, a session
 /// parked for longer than the sweep's age cut loses the checkpoint it resumes
 /// from and becomes permanently unresumable — the record survives and points at
-/// nothing. `Closed` sessions are excluded deliberately: a sealed session is not
-/// resumable, so nothing it names needs holding.
+/// nothing.
 pub fn pinned_checkpoints(
     store: &AgentSessionStore,
 ) -> Result<std::collections::BTreeSet<mvm_core::checkpoint::CheckpointDigest>> {
     let mut pinned = std::collections::BTreeSet::new();
     for record in store.list()? {
-        if matches!(record.state, SandboxResidency::Closed) {
+        if !pins_resume_point(&record) {
             continue;
         }
         if let Some(digest) = record.parent_checkpoint {
@@ -437,6 +466,27 @@ pub fn pinned_checkpoints(
         }
     }
     Ok(pinned)
+}
+
+/// The live or hibernated session whose resume point is `digest`, if any.
+///
+/// Applies the same `pins_resume_point` rule `pinned_checkpoints` sweeps
+/// with, but returns the session identity rather than folding it into a set:
+/// a manual deletion refusal needs to name the session holding the pin,
+/// which the set-only helper can't.
+pub fn pinning_session(
+    store: &AgentSessionStore,
+    digest: &mvm_core::checkpoint::CheckpointDigest,
+) -> Result<Option<AgentSessionId>> {
+    for record in store.list()? {
+        if !pins_resume_point(&record) {
+            continue;
+        }
+        if record.parent_checkpoint.as_ref() == Some(digest) {
+            return Ok(Some(record.session_id));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -467,6 +517,33 @@ mod tests {
             journal_cursor: 0,
             approval_head: None,
         }
+    }
+
+    #[test]
+    fn exists_reports_a_present_record_even_when_it_will_not_parse() {
+        // The distinction the method exists for: a caller creating a session
+        // probes `exists` and must be told "present" for a corrupt record, or
+        // it would overwrite the only copy of a parked session's resume point.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let rec = record("sess-alpha");
+        assert!(!store.exists(&rec.session_id));
+        store.write(&rec).unwrap();
+        assert!(store.exists(&rec.session_id));
+
+        std::fs::write(
+            tmp.path().join("sess-alpha").join(RECORD_FILE),
+            b"{ not json",
+        )
+        .unwrap();
+        assert!(
+            store.load(&rec.session_id).is_err(),
+            "the record no longer parses"
+        );
+        assert!(
+            store.exists(&rec.session_id),
+            "an unparseable record is still a record"
+        );
     }
 
     #[test]
@@ -1005,6 +1082,21 @@ mod tests {
     }
 
     #[test]
+    fn pins_resume_point_holds_for_active_and_hibernated_but_not_closed() {
+        let mut active = record("sess-active");
+        active.state = SandboxResidency::Active;
+        assert!(pins_resume_point(&active));
+
+        let mut hibernated = record("sess-hibernated");
+        hibernated.state = SandboxResidency::Hibernated;
+        assert!(pins_resume_point(&hibernated));
+
+        let mut closed = record("sess-closed");
+        closed.state = SandboxResidency::Closed;
+        assert!(!pins_resume_point(&closed));
+    }
+
+    #[test]
     fn pinned_checkpoints_covers_active_and_hibernated_but_not_closed() {
         let tmp = tempfile::tempdir().unwrap();
         let store = AgentSessionStore::at(tmp.path());
@@ -1085,14 +1177,20 @@ mod tests {
         // stays resumable, just more cheaply stored. Two demotes (Resident ->
         // Parked -> Cold) reach the bottom of the ladder cleanly, so there is
         // no need for a fallback branch to get there.
+        //
+        // approval_head is asserted here too: it is the resume fence's input,
+        // and the fence only applies when it is `Some`. A refactor that
+        // dropped the field through `demote` would not fail loudly — it would
+        // silently stop fencing — so this must not leave it `None`.
         let mut rec = record("sess-alpha");
         rec.parent_checkpoint = Some(digest_of("11"));
+        let head = head_of("ab");
         let parked = rec
             .park(
                 &ParkInput {
                     reason: ParkReason::Idle,
                     journal_cursor: 42,
-                    approval_head: None,
+                    approval_head: Some(head.clone()),
                 },
                 100,
             )
@@ -1100,5 +1198,6 @@ mod tests {
         let cold = parked.demote(200).unwrap().demote(300).unwrap();
         assert_eq!(cold.journal_cursor, 42);
         assert_eq!(cold.parent_checkpoint, Some(digest_of("11")));
+        assert_eq!(cold.approval_head, Some(head));
     }
 }

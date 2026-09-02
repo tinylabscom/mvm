@@ -89,7 +89,7 @@ mod tests {
     }
 
     fn sample_register() -> ControlRequest {
-        ControlRequest::Register(RegisterVm {
+        ControlRequest::Register(Box::new(RegisterVm {
             vm_id: "vm-1".into(),
             workload_id: Some("wl-1".into()),
             tenant_id: "local".into(),
@@ -101,7 +101,9 @@ mod tests {
                 mvm_contract::protocol::broker::ServiceId::parse("host.time.v1").unwrap(),
             ],
             capability_bindings: vec![],
-        })
+            assurance: None,
+            service_proxies: vec![],
+        }))
     }
 
     /// Pins `ControlRequest`'s JCS canonical bytes. `ControlRequest` is
@@ -215,6 +217,43 @@ mod tests {
         signed.sig = base64::engine::general_purpose::STANDARD.encode(raw);
         assert!(matches!(
             verify(&signed, &k.verifying_key()),
+            Err(ControlError::SignatureInvalid)
+        ));
+    }
+
+    #[test]
+    fn controller_proxy_binding_is_covered_by_the_host_signature() {
+        use mvm_contract::protocol::agent_capability::{
+            CapabilityDescriptor, CapabilityId, CapabilityLimits, SchemaRef,
+        };
+        use mvm_contract::protocol::broker::ServiceId;
+        use mvm_contract::protocol::broker_control::ServiceProxyBinding;
+
+        let service = ServiceId::parse("host.test.controller.v1").unwrap();
+        let descriptor = CapabilityDescriptor::builder()
+            .id(CapabilityId::new(service.clone(), "probe").unwrap())
+            .description("bounded test controller")
+            .input_schema(SchemaRef::new("test.input.v1", [1; 32]).unwrap())
+            .output_schema(SchemaRef::new("test.output.v1", [2; 32]).unwrap())
+            .limits(CapabilityLimits::new(128, 128, 100).unwrap())
+            .build()
+            .unwrap();
+        let mut request = sample_register();
+        let ControlRequest::Register(registration) = &mut request else {
+            panic!("sample is a registration");
+        };
+        registration.service_proxies.push(ServiceProxyBinding {
+            service,
+            endpoint: "/run/mvm/controller.sock".to_string(),
+            capabilities: vec![descriptor],
+        });
+        let mut signed = sign(request, &key()).unwrap();
+        let ControlRequest::Register(registration) = &mut signed.request else {
+            panic!("signed sample is a registration");
+        };
+        registration.service_proxies[0].endpoint = "/run/mvm/other.sock".to_string();
+        assert!(matches!(
+            verify(&signed, &key().verifying_key()),
             Err(ControlError::SignatureInvalid)
         ));
     }

@@ -87,7 +87,7 @@ impl Verdict {
         }
     }
 
-    /// A docs-only run: every lane correctly skipped. The kernel job has no
+    /// A docs-only run: every lane it should skips. The kernel job has no
     /// job-level `if:`, so it still runs and still reports `success`.
     fn out_of_scope() -> Self {
         Self {
@@ -108,6 +108,10 @@ impl Verdict {
             .env("SCOPE_RESULT", self.scope_result)
             .env("SCOPE_CODE", self.code)
             .env("WORKSPACE_RESULT", self.lanes)
+            // The aarch64 workspace lane carries the same `code` scope as the
+            // other four in the loop, so it moves with them rather than getting
+            // its own field.
+            .env("WORKSPACE_AARCH64_RESULT", self.lanes)
             .env("LINUX_RESULT", self.lanes)
             .env("RELEASE_WITNESS_RESULT", self.lanes)
             .env("EBPF_RESULT", self.lanes)
@@ -200,6 +204,25 @@ fn a_genuine_failure_is_still_refused_in_either_scope() {
     for (what, verdict) in cases {
         assert!(!verdict.accepts(), "the aggregate must refuse {what}");
     }
+}
+
+#[test]
+fn aggregate_does_not_depend_on_the_aarch64_no_kvm_smoke() {
+    let workflow = std::fs::read_to_string(".github/workflows/ci.yml")
+        .expect("failed to read .github/workflows/ci.yml");
+    let test_job = workflow
+        .split_once("\n  test:\n")
+        .map(|(_, rest)| rest)
+        .and_then(|rest| rest.split_once("\n  test-workspace:\n").map(|(job, _)| job))
+        .expect("Test aggregate job must remain delimited by test-workspace");
+    assert!(
+        !test_job.contains("aarch64-no-kvm-smoke"),
+        "the Test aggregate must not depend on the no-KVM smoke; it lives in ci-full.yml"
+    );
+    assert!(
+        !test_job.contains("NO_KVM_RESULT"),
+        "the Test aggregate must not reference the no-KVM smoke result"
+    );
 }
 
 /// A malformed scope output must fail closed rather than be read as one of the

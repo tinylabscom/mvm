@@ -124,11 +124,6 @@ pub trait VmmDriver: Send + Sync {
     }
     /// Which of the CI-enforced security claims this VMM's boot path holds.
     fn security_profile(&self) -> BackendSecurityProfile;
-    /// Whether this VMM can attach live read-only host-directory shares.
-    /// Unsupported drivers must fail closed before boot.
-    fn supports_directory_shares(&self) -> bool {
-        false
-    }
     /// Whether a standby claim can hand a resident VMM directly to the child
     /// identity without starting a separate saved-state restore.
     fn supports_resident_handoff(&self) -> bool {
@@ -242,10 +237,7 @@ pub trait VmmDriver: Send + Sync {
     ) -> Result<PostRestoreOutcome> {
         signal_post_restore(
             child_vm_name,
-            &VsockPostRestoreSignal {
-                token,
-                grant_envelope,
-            },
+            &VsockPostRestoreSignal::for_resumed_child(token, grant_envelope),
             crate::post_restore::POST_RESTORE_READY_TIMEOUT,
         )
     }
@@ -271,10 +263,12 @@ pub trait VmmDriver: Send + Sync {
     }
 
     /// The VMM-specific base kernel bootargs (console, earlycon, root/init
-    /// selection) for a workload boot with the given root/disk shape. The
-    /// shared cmdline assembler (`workload_runner::cmdline`) layers every
-    /// other token — verity, grants, egress, uvols — on top of this.
-    fn workload_base_bootargs(&self, virtiofs_root: bool, has_disk: bool) -> String;
+    /// selection) for a workload boot. `has_disk` distinguishes a block root
+    /// from a verity/initramfs boot, where the initramfs PID 1 owns root/init
+    /// selection and the base carries only the console. The shared cmdline
+    /// assembler (`workload_runner::cmdline`) layers every other token —
+    /// verity, grants, egress, uvols — on top of this.
+    fn workload_base_bootargs(&self, has_disk: bool) -> String;
 
     /// Reconstruct a live handle for an already-running VM by id — the stateless
     /// lifecycle entry (stop/status/wait from a process that didn't boot it).

@@ -3,6 +3,16 @@
 use super::*;
 use std::time::Instant;
 
+/// Whether the host may repair the rootfs immediately before launch.
+///
+/// A dm-verity sidecar authenticates the rootfs bytes as they existed when the
+/// sidecar was generated. Running e2fsck after that point changes authenticated
+/// filesystem metadata and makes every subsequent verity read fail closed.
+#[cfg(any(target_os = "linux", test))]
+fn should_repair_rootfs_before_start(config: &VmStartConfig) -> bool {
+    config.verity_path.is_none()
+}
+
 impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegistrar + 'static>
     WorkloadRunner<D, S, B>
 {
@@ -22,7 +32,6 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
         let endpoint_started = Instant::now();
         let state_dir = vm_state_dir(&id.0);
         reap_network_endpoint(&state_dir, &id.0);
-        mvm_vmm::host::netd_spawn::reap_netd(&state_dir);
         mvm_vmm::host::broker_services_spawn::reap_broker_services(&state_dir);
         mvm_vmm::host::host_agent_spawn::reap_host_agent_services_from_state(&state_dir, &id.0);
         let endpoint_reaping = endpoint_started.elapsed();
@@ -114,16 +123,21 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
 
         // A cold boot's rootfs *is* its image, so the gate reads the dir it
         // already boots from.
-        ClaimGuards::new(&self.spawner).admit_overlay_contract(
-            std::path::Path::new(&config.rootfs_path),
-            config.runtime_source_policy,
-        )?;
+        ClaimGuards::new(&self.spawner)
+            .admit_overlay_contract(std::path::Path::new(&config.rootfs_path))?;
+        #[cfg(target_os = "linux")]
+        if should_repair_rootfs_before_start(config)
+            && let Err(e) = mvm_build::builderd::repair_ext4_filesystem(std::path::Path::new(
+                &config.rootfs_path,
+            ))
+        {
+            tracing::warn!(error = %e, rootfs = %config.rootfs_path, "failed to repair workload rootfs; continuing, but the read-only guest mount may fail if the journal is dirty");
+        }
         crate::base::runtime_meta::record_from_start_config(
             &config.name,
             StartMode::Detached,
             config,
         )?;
-        mvm_vmm::host::netd_spawn::spawn_netd_if_needed(config, &state_dir, self.driver.kind())?;
 
         let default_redaction = RedactionPolicy::default();
         let decoded = decode_plan_secrets_from_state(&state_dir)?;
@@ -137,8 +151,8 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
                 ),
             };
 
-        let cmdline = cmdline::runner_cmdline(config, &state_dir, |virtiofs_root, has_disk| {
-            self.driver.workload_base_bootargs(virtiofs_root, has_disk)
+        let cmdline = cmdline::runner_cmdline(config, &state_dir, |has_disk| {
+            self.driver.workload_base_bootargs(has_disk)
         });
         if let Some(problem) = cmdline::cmdline_overflow(&cmdline) {
             anyhow::bail!("refusing to start VM {}: {problem}", config.name);
@@ -155,10 +169,7 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
         };
         match self.start_workload(&inputs) {
             Ok(_vm) => Ok(VmId(config.name.clone())),
-            Err(e) => {
-                mvm_vmm::host::netd_spawn::reap_netd(&state_dir);
-                Err(e)
-            }
+            Err(e) => Err(e),
         }
     }
 
@@ -255,5 +266,33 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
 {
     fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
         EgressSubstitutionTransport::VsockUdsChannel
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_repair_rootfs_before_start;
+    use mvm_core::vm_backend::VmStartConfig;
+
+    #[test]
+    fn unsealed_rootfs_is_repaired_before_start() {
+        let config = VmStartConfig {
+            rootfs_path: "/images/rootfs.ext4".into(),
+            ..Default::default()
+        };
+
+        assert!(should_repair_rootfs_before_start(&config));
+    }
+
+    #[test]
+    fn verity_sealed_rootfs_remains_byte_for_byte_immutable() {
+        let config = VmStartConfig {
+            rootfs_path: "/images/rootfs.ext4".into(),
+            verity_path: Some("/images/rootfs.verity".into()),
+            roothash: Some("a".repeat(64)),
+            ..Default::default()
+        };
+
+        assert!(!should_repair_rootfs_before_start(&config));
     }
 }

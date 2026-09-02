@@ -64,6 +64,14 @@ per-call AF_UNIX-vs-AF_INET argument predicate to narrow. The
 confinement narrowing for `Remote` is entirely a Landlock (path)
 concern; see `SECCOMP.md` for the syscall table.
 
+## Authenticated-session marker
+
+Endpoints configured to publish authenticated-session launch readiness also
+receive bounded read-write access to the marker's already-existing per-VM
+parent directory. The opt-in grant lets the endpoint create and verify the
+durable marker after authentication; endpoints without a marker retain the
+narrower default ruleset.
+
 ABI v2 (Linux 5.19+) required for the file-execute permission split —
 v1 collapses read + exec into a single bit, which would force us to
 choose between letting the confined role exec into other binaries or

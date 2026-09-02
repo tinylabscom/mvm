@@ -1,6 +1,6 @@
 //! `mvmctl build <sub>` — build-time commands.
 //!
-//! `address`/`compile`/`validate`/`kernel`/`runtime-overlay` are the
+//! `address`/`compile`/`validate`/`kernel`/`runtime-overlay`/`sdk-sidecar` are the
 //! build-time verbs. Image builds moved to `machine build`.
 
 use anyhow::Result;
@@ -9,7 +9,7 @@ use clap::{Args as ClapArgs, Subcommand};
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
-use super::{address, compile, kernel, runtime_overlay, validate};
+use super::{address, compile, kernel, runtime_overlay, sdk_sidecar, validate};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -28,7 +28,10 @@ pub(in crate::commands) enum BuildCmd {
     /// Prebuild or refresh the read-only runtime overlay cache
     #[command(name = "runtime-overlay")]
     RuntimeOverlay(runtime_overlay::Args),
-    /// Print a Workload IR's semantic address and ir-hash
+    /// Build the source checkout's SDK host-services sidecar via Stage 0
+    #[command(name = "sdk-sidecar")]
+    SdkSidecar(sdk_sidecar::Args),
+    /// Print a Workload IR's workload address and ir-hash
     Address(address::Args),
 }
 
@@ -40,6 +43,7 @@ impl BuildCmd {
             BuildCmd::Validate(_) => "validate",
             BuildCmd::Kernel(_) => "kernel",
             BuildCmd::RuntimeOverlay(_) => "runtime-overlay",
+            BuildCmd::SdkSidecar(_) => "sdk-sidecar",
             BuildCmd::Address(_) => "address",
         }
     }
@@ -51,6 +55,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         BuildCmd::Validate(a) => validate::run(cli, a, cfg),
         BuildCmd::Kernel(a) => kernel::run(cli, a, cfg),
         BuildCmd::RuntimeOverlay(a) => runtime_overlay::run(cli, a, cfg),
+        BuildCmd::SdkSidecar(a) => sdk_sidecar::run(cli, a, cfg),
         BuildCmd::Address(a) => address::run(cli, a, cfg),
     }
 }

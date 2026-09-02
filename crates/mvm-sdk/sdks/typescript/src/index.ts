@@ -37,6 +37,8 @@ import type {
   Dependencies,
   Entrypoint,
   EnvValue,
+  AiBudget,
+  AiPolicy,
   HookCmd,
   Hooks,
   Image,
@@ -94,6 +96,7 @@ export {
   MVM_CLI_BIN_ENV,
   MVM_SDK_MODE_ENV,
   MVM_SDK_OUT_PATH_ENV,
+  MVM_SDK_RUN_PROFILE_ENV,
   RecordingNotActiveError,
   Sandbox,
   SandboxDevOnly,
@@ -112,6 +115,7 @@ export type {
   SandboxCreateWire,
   SandboxExecOptions,
   SandboxInfo,
+  SandboxSource,
   FsEntry,
   FsStat,
   ProcessResult,
@@ -141,7 +145,13 @@ export type {
 } from "./_machine.js";
 
 // Typed Sandbox presets (Phase C).
-export { BrowserSandbox, CodeError, CodeSandbox } from "./_helpers.js";
+export {
+  BrowserReadyError,
+  BrowserSandbox,
+  CodeError,
+  CodeSandbox,
+  OBSCURA_IMAGE,
+} from "./_helpers.js";
 export type { BrowserSandboxOptions } from "./_helpers.js";
 
 // In-guest host-services runtime surface (`mvm.audit.emit`, `mvm.host.time()`).
@@ -263,24 +273,47 @@ export function resources(opts: {
   };
 }
 
+/** Build an AI token budget for `network({ ai: ... })`. */
+export function aiBudget(opts: {
+  maxInputTokens?: number;
+  maxOutputTokens?: number;
+  maxTotalTokens?: number;
+}): AiBudget {
+  return {
+    max_input_tokens: opts.maxInputTokens,
+    max_output_tokens: opts.maxOutputTokens,
+    max_total_tokens: opts.maxTotalTokens,
+  };
+}
+
+/** Build an AI egress metering/budget policy for `network({ ai: ... })`. */
+export function aiPolicy(opts: {
+  metering?: boolean;
+  budget?: AiBudget;
+}): AiPolicy {
+  return {
+    metering: opts.metering ?? true,
+    budget: opts.budget,
+  };
+}
+
 /** Declare a network policy. v1 surface: mode + ports. Egress, peers,
  *  DNS land alongside the imperative Sandbox surface (Phase 7). */
 export function network(opts: {
   mode?: "none" | "bridge" | "host";
   ports?: PortForward[];
   /**
-   * The workload needs a real in-guest IP stack — raw sockets, ICMP,
-   * non-TCP/UDP protocols, or its own resolver. Selects the transport, so
-   * it is a declaration about the workload rather than a choice about the
-   * host. Omitting it keeps the socket-aware default.
+   * Optional AI egress metering and budget policy. When set, the host
+   * records token usage for known AI providers and refuses further AI
+   * requests once the budget is exceeded.
    */
-  rawIpStack?: boolean;
+  ai?: AiPolicy;
 }): Network {
   return {
     mode: opts.mode ?? "none",
     ports: opts.ports ?? [],
     peers: [],
-    ...(opts.rawIpStack ? { raw_ip_stack: true } : {}),
+    ...(opts.ai ? { ai: opts.ai } : {}),
   };
 }
 

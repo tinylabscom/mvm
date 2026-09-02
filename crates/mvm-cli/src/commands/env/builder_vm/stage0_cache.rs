@@ -879,9 +879,9 @@ pub(super) fn promote_builder_vm_stage0_cache(
 /// `builder-vm-image` release-workflow job into the local cache dir,
 /// SHA-256-verified.
 ///
-/// Mirrors `download_dev_image_inner` for the interactive image: the checksum
-/// manifest is signature-verified before it is parsed, and every artifact is
-/// then held to the digest it pins. The required artifacts are `vmlinux`,
+/// Uses the shared verification pipeline: `fetch_expected_hashes` reads the
+/// checksum manifest, and `verify_artifact_hash` then holds every artifact to
+/// the digest that manifest pins. The required artifacts are `vmlinux`,
 /// `rootfs.ext4`, `cmdline.txt`, and `manifest.json`; the runtime
 /// builder-image loader rejects caches that do not carry the full
 /// contract.
@@ -893,9 +893,10 @@ pub(super) fn promote_builder_vm_stage0_cache(
 /// at compile time via `--features release-artifact-bootstrap`.
 #[cfg(feature = "release-artifact-bootstrap")]
 pub(super) fn download_builder_vm_image(arch: &str, cache_dir: &str) -> Result<()> {
-    let version = env!("CARGO_PKG_VERSION");
     let names = builder_vm_artifact_names(arch);
-    let base_url = format!("https://github.com/tinylabscom/mvm/releases/download/v{version}");
+    // Builder-VM images ship on the boot image counter, not the CLI's.
+    let (tag, image_version) = crate::update::boot_image_release()?;
+    let base_url = format!("https://github.com/tinylabscom/mvm/releases/download/{tag}");
     let kernel_url = format!("{base_url}/{}", names.kernel);
     let rootfs_url = format!("{base_url}/{}", names.rootfs);
     let cmdline_url = format!("{base_url}/{}", names.cmdline);
@@ -908,7 +909,8 @@ pub(super) fn download_builder_vm_image(arch: &str, cache_dir: &str) -> Result<(
         &ChecksumManifest {
             base_url: &base_url,
             asset: &names.checksums,
-            version,
+            version: &image_version,
+            train: mvm_build::release_signature::ReleaseTrain::BootImage,
         },
         &[
             &names.kernel,

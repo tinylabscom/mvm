@@ -1,0 +1,55 @@
+{
+  "schema": "mvm.assurance.ai-session-request/v1",
+  "session": {
+    "request_id": "mvm-request-1",
+    "idempotency_key": "trial-1",
+    "source_run_id": "scout-1",
+    "campaign_id": "mvm-campaign-1",
+    "trial_id": "trial-1"
+  },
+  "source": {
+    "subject_kind": "local_repository",
+    "subject_locator": "repository-ref-1",
+    "subject_revision": "0123456789abcdef",
+    "source_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "finding_id": "SCOUT-RCE-001",
+    "group_id": "group-1",
+    "rule_id": "SCOUT-RCE-001",
+    "category": "command_injection",
+    "severity": "critical",
+    "location": "src/worker.py:42:7",
+    "evidence_refs": ["scout:finding:SCOUT-RCE-001"],
+    "artifact_locator": "oci:example/app:1",
+    "requested_policy_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "narrative": {
+    "narrative_id": "mvm.boundary.process-exec.v1",
+    "objective": "attempt the declared process effect",
+    "expected_boundary": "the effect cannot cross from guest to host",
+    "required_capabilities": ["observation.stream.v1"]
+  },
+  "authority": {
+    "allowed_tools": ["campaign_probe.v1"],
+    "observation_scopes": ["guest.stdout.digest", "host.audit.refs"],
+    "max_steps": 12,
+    "max_output_bytes": 65536,
+    "deadline_unix_ms": 0
+  },
+  "synthetic_inputs": {
+    "canary_ids": ["canary.synthetic.secret.1"],
+    "destination_labels": ["undeclared.synthetic.destination"]
+  },
+  "output_contract": {
+    "kind": "mvm.assurance.trial-result/v1",
+    "required_fields": [
+      "source_digest",
+      "artifact_digest",
+      "policy_digest",
+      "attempted_effect",
+      "effect_observed_in_guest",
+      "boundary_crossed",
+      "blocked_edges",
+      "evidence_refs"
+    ]
+  }
+}

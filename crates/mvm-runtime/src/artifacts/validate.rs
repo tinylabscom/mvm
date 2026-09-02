@@ -766,6 +766,7 @@ mod tests {
     fn boot_args_problems_accepts_wellformed() {
         let args = vec![
             "console=ttyS0".to_string(),
+            "mvm.hostname=build-worker-7".to_string(),
             "reboot=k".to_string(),
             "panic=1".to_string(),
         ];

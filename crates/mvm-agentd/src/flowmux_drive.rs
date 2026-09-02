@@ -4,7 +4,7 @@
 //! key and the host-signer trust anchor (built by
 //! `mvm_vmm::host::flowmux_identity`). Every guest init — the Nix-built
 //! workload `/init`, the OCI init, Stage 0, and the persistent builder VM —
-//! copies those two files into `/run/mvm` before starting the egress client,
+//! copies those files into `/run/mvm` before starting the egress client,
 //! which cannot bind its loopback listener without them.
 //!
 //! This module is deliberately **not** behind the `addons` feature: the guest
@@ -32,6 +32,23 @@ pub const GUEST_SIGNING_KEY_FILE: &str = "flowmux-guest-signing-key";
 /// Basename of the host-signer trust anchor on the drive.
 pub const HOST_SIGNER_PUB_FILE: &str = "host-signer.pub";
 
+/// Basename of the guest-visible declared ingress targets on the drive.
+pub const INGRESS_TARGETS_FILE: &str = "flowmux-ingress.json";
+
+/// One guest-loopback target keyed by the signed ingress mapping ID.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestIngressTarget {
+    /// Stable non-zero ID from the signed ingress mapping.
+    pub mapping_id: u16,
+    /// Transport the guest loopback service expects.
+    pub protocol: mvm_contract::plan::IngressProtocol,
+    /// Exact guest-loopback IP address (`127.0.0.1` or `::1`).
+    pub guest_addr: String,
+    /// Guest-loopback service port.
+    pub guest_port: u16,
+}
+
 /// Where the guest copies the drive's contents to.
 pub const RUN_MVM_DIR: &str = "/run/mvm";
 
@@ -40,6 +57,9 @@ pub const GUEST_SIGNING_KEY_MODE: u32 = 0o400;
 
 /// Mode the public anchor is written with inside the guest.
 pub const HOST_SIGNER_PUB_MODE: u32 = 0o444;
+
+/// Mode the non-secret ingress target map is written with inside the guest.
+pub const INGRESS_TARGETS_MODE: u32 = 0o444;
 
 /// Where the kernel lists this guest's block devices.
 const SYS_CLASS_BLOCK: &str = "/sys/class/block";
@@ -162,6 +182,21 @@ pub enum IdentityDriveError {
     Unreadable(String),
 }
 
+impl IdentityDriveError {
+    /// Return the failures worth printing during unconditional guest setup.
+    ///
+    /// A boot with no egress policy intentionally has no identity drive, while
+    /// a drive that was attached but cannot be read is a real provisioning
+    /// failure and must stay visible.
+    #[must_use]
+    pub fn boot_warning(&self) -> Option<&Self> {
+        match self {
+            Self::NotAttached => None,
+            Self::Unreadable(_) => Some(self),
+        }
+    }
+}
+
 impl std::fmt::Display for IdentityDriveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -178,14 +213,14 @@ impl std::fmt::Display for IdentityDriveError {
 impl std::error::Error for IdentityDriveError {}
 
 #[cfg(target_os = "linux")]
-pub use linux::provision_identity_from_drive;
+pub use linux::{provision_identity_from_drive, provision_identity_from_drive_for_uid};
 
 #[cfg(target_os = "linux")]
 mod linux {
     use super::{
         GUEST_SIGNING_KEY_FILE, GUEST_SIGNING_KEY_MODE, HOST_SIGNER_PUB_FILE, HOST_SIGNER_PUB_MODE,
-        IDENTITY_DRIVE_LABEL, IdentityDriveError, RUN_MVM_DIR, find_labeled_ext4_disk_among,
-        virtio_block_devices,
+        IDENTITY_DRIVE_LABEL, INGRESS_TARGETS_FILE, INGRESS_TARGETS_MODE, IdentityDriveError,
+        RUN_MVM_DIR, find_labeled_ext4_disk_among, virtio_block_devices,
     };
     use std::path::Path;
 
@@ -200,13 +235,28 @@ mod linux {
     /// the same whether the material arrived on a drive or, historically, some
     /// other way — every reader looks only at `/run/mvm`.
     pub fn provision_identity_from_drive() -> Result<(), IdentityDriveError> {
+        provision_identity_from_drive_with_owner(None)
+    }
+
+    /// Provision the identity for a dedicated non-root service uid.
+    ///
+    /// The short-lived caller must still have mount and ownership privileges.
+    /// Only the secret signing key changes owner; the trust anchor and ingress
+    /// map remain world-readable public inputs.
+    pub fn provision_identity_from_drive_for_uid(uid: u32) -> Result<(), IdentityDriveError> {
+        provision_identity_from_drive_with_owner(Some(uid))
+    }
+
+    fn provision_identity_from_drive_with_owner(
+        signing_key_uid: Option<u32>,
+    ) -> Result<(), IdentityDriveError> {
         let device = find_labeled_ext4_disk_among(virtio_block_devices(), IDENTITY_DRIVE_LABEL)
             .ok_or(IdentityDriveError::NotAttached)?;
 
         std::fs::create_dir_all(MOUNTPOINT).map_err(io_err("create the identity mountpoint"))?;
         mount_ro(&device, MOUNTPOINT)?;
 
-        let copied = copy_identity_files();
+        let copied = copy_identity_files(signing_key_uid);
         // Unmount whatever happened to the copy: leaving the drive mounted
         // would leave the signing key readable in the guest's namespace for
         // the whole run, which is exactly what /run/mvm's modes exist to avoid.
@@ -215,26 +265,43 @@ mod linux {
         copied
     }
 
-    fn copy_identity_files() -> Result<(), IdentityDriveError> {
+    fn copy_identity_files(signing_key_uid: Option<u32>) -> Result<(), IdentityDriveError> {
         std::fs::create_dir_all(RUN_MVM_DIR).map_err(io_err("create /run/mvm"))?;
         copy_one(
             GUEST_SIGNING_KEY_FILE,
             GUEST_SIGNING_KEY_MODE,
             "the guest signing key",
+            signing_key_uid,
         )?;
         copy_one(
             HOST_SIGNER_PUB_FILE,
             HOST_SIGNER_PUB_MODE,
             "the host-signer anchor",
+            None,
+        )?;
+        copy_one(
+            INGRESS_TARGETS_FILE,
+            INGRESS_TARGETS_MODE,
+            "the declared ingress targets",
+            None,
         )
     }
 
-    fn copy_one(name: &str, mode: u32, what: &str) -> Result<(), IdentityDriveError> {
+    fn copy_one(
+        name: &str,
+        mode: u32,
+        what: &str,
+        owner_uid: Option<u32>,
+    ) -> Result<(), IdentityDriveError> {
         use std::os::unix::fs::PermissionsExt;
         let from = Path::new(MOUNTPOINT).join(name);
         let to = Path::new(RUN_MVM_DIR).join(name);
         let bytes = std::fs::read(&from).map_err(io_err(&format!("read {what} from the drive")))?;
         std::fs::write(&to, &bytes).map_err(io_err(&format!("write {what} to /run/mvm")))?;
+        if let Some(uid) = owner_uid {
+            std::os::unix::fs::chown(&to, Some(uid), Some(uid))
+                .map_err(io_err(&format!("assign {what} to service uid {uid}")))?;
+        }
         std::fs::set_permissions(&to, std::fs::Permissions::from_mode(mode))
             .map_err(io_err(&format!("set the mode on {what}")))
     }
@@ -501,5 +568,22 @@ mod tests {
         let rendered = IdentityDriveError::NotAttached.to_string();
         assert!(rendered.contains(IDENTITY_DRIVE_LABEL), "{rendered}");
         assert!(rendered.contains("did not attach"), "{rendered}");
+    }
+
+    #[test]
+    fn an_unattached_identity_drive_is_an_expected_secretless_boot() {
+        assert!(IdentityDriveError::NotAttached.boot_warning().is_none());
+    }
+
+    #[test]
+    fn an_attached_but_unreadable_identity_drive_stays_loud() {
+        let error = IdentityDriveError::Unreadable("mount refused".to_owned());
+        let warning = error
+            .boot_warning()
+            .expect("an unreadable attached drive must remain visible");
+        assert_eq!(
+            warning.to_string(),
+            "reading the FlowMux identity drive: mount refused"
+        );
     }
 }

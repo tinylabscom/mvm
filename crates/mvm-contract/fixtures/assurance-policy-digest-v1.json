@@ -1,0 +1,10 @@
+{
+  "algorithm": "sha256:nul-separated-policy-refs-v1",
+  "references": {
+    "network": "operator-network-v1",
+    "egress": "operator-egress-v1",
+    "filesystem": "operator-fs-v1",
+    "tool": "operator-tools-v1"
+  },
+  "digest": "sha256:5dd0de53b6d211f764728599e291e93a9491dc34f87596e906365fb74c95e0ff"
+}

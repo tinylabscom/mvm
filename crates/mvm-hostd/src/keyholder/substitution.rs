@@ -63,6 +63,12 @@ impl SubstitutionRegistry {
         self.map.resolve(token)
     }
 
+    /// Resolve host-owned material by its signed plan name without minting or
+    /// exposing a new placeholder.
+    pub fn resolve_name(&self, name: &str) -> Option<&SecretRef> {
+        self.map.resolve_name(name)
+    }
+
     /// Whether any secret in this session is bound to `host`. The transparent
     /// `https` terminator uses this for its terminate-vs-splice decision: it
     /// MITM-terminates only hosts a workload secret may reach, and splices

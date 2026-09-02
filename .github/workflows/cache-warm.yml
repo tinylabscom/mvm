@@ -72,7 +72,7 @@ jobs:
       - uses: ./.github/actions/free-disk
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Restore and publish the trusted Nix binary cache
         uses: DeterminateSystems/magic-nix-cache-action@v14
@@ -94,11 +94,10 @@ jobs:
           nix build --print-build-logs --impure --no-link \
             ./nix/images/default-tenant#packages.x86_64-linux.default
 
-      # Nightly is what the heavy lanes (lint-core, lint-features,
-      # test-workspace) use, so it is the toolchain worth warming. Stable lanes
-      # still benefit from the cargo registry half of the cache.
+      # Stable is what the lint lanes use, so warm the exact compiler and
+      # Clippy artifacts those required checks restore.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy
 
@@ -122,4 +121,4 @@ jobs:
       # already passed CI, and its only job is to leave a cache behind. A
       # genuine breakage is caught by the lanes that gate.
       - name: Build the workspace to populate the cache
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: ./scripts/cargo-stable.sh clippy --workspace --all-targets -- -D warnings

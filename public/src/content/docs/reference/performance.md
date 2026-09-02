@@ -7,11 +7,10 @@ mvm's launch contract is a set of budgets on the **dispatch window** — the spa
 from an admitted execution plan to the guest command being dispatched. That is
 the window the contract is set against, so it is the one published here.
 
-This page states the contract. It does not state results: the budgets below are
-ceilings that CI enforces, not percentiles anyone observed. A ceiling printed in
-the same column as an observation gets read as an observation, so measured
-matrix numbers are published separately, per host, once a lane report has been
-seeded.
+The budget table states the contract. It does not state results: those budgets
+are ceilings that CI enforces, not percentiles anyone observed. A ceiling
+printed in the same column as an observation gets read as an observation, so
+seeded matrix results are published in a separate table below, per host.
 
 ## Lanes
 
@@ -25,15 +24,15 @@ network would make the gate measure the wrong thing.
 
 <!-- generated:launch-budgets:begin -->
 
-A lane result is publishable only when it carries at least 20 measured samples taken after exactly 2 discarded warm-ups, under report schema version 5. A report that misses any of those is refused rather than published with a caveat.
+A lane result is publishable only when it carries at least 20 measured samples taken after exactly 2 discarded warm-ups, under report schema version 7. A report that misses any of those is refused rather than published with a caveat. Prepared-cold lanes additionally require every measured dispatch to be strictly under 200 ms, even below the publication sample floor.
 
-| Lane | What it measures | p50 | p95 | p99 |
-| --- | --- | --- | --- | --- |
-| `prepared_cold` | Cached artifacts, no mount image, new VMM and new guest identity. | 200 ms | 250 ms | 300 ms |
-| `prepared_cold_mount_hit` | The same launch with an unchanged cached read-only mount image. | 200 ms | 250 ms | 300 ms |
-| `mount_miss` | Directory fingerprint plus first mount-image materialization. | — | — | — |
-| `artifact_miss` | Image acquisition, unpack, verification, and preparation. | — | — | — |
-| `warm_claim` | A claimed warm standby — a comparison point, never folded into a cold number. | 30 ms | — | 50 ms |
+| Lane | What it measures | p50 | p95 | p99 | Every boot |
+| --- | --- | --- | --- | --- | --- |
+| `prepared_cold` | Cached artifacts, no mount image, new VMM and new guest identity. | 200 ms | 250 ms | 300 ms | < 200 ms |
+| `prepared_cold_mount_hit` | The same launch with an unchanged cached read-only mount image. | 200 ms | 250 ms | 300 ms | < 200 ms |
+| `mount_miss` | Directory fingerprint plus first mount-image materialization. | — | — | — | — |
+| `artifact_miss` | Image acquisition, unpack, verification, and preparation. | — | — | — | — |
+| `warm_claim` | A claimed warm standby — a comparison point, never folded into a cold number. | 30 ms | — | 50 ms | — |
 
 <!-- generated:launch-budgets:end -->
 
@@ -79,27 +78,51 @@ fixed fraction of a measured launch is `fsync` cost that disappears on NVMe.
 A number measured on spinning media is not a runtime number, and is not
 comparable to one that was not.
 
+## Seeded measurements
+
+These are observations, not new budgets. The report gate revalidated every raw
+sample before the row was added.
+
+| Date | Lane | Host fingerprint | Backend | Storage | Samples | p50 | p95 | p99 |
+| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
+| 2026-08-19 | `prepared_cold` | Linux 6.8.0-137 x86_64, Intel i7-7700 | Firecracker v1.14.1 | rotational md-RAID (`ROTA=1`) | 20 (+2 warm-ups) | 171.5 ms | 176.0 ms | 178.0 ms |
+
+The source revision was `b107dfb22c`. The full schema-v5 raw report is kept at
+`specs/evidence/performance/2574-prepared-cold-firecracker-2026-08-19.json`;
+its SHA-256 digest is
+`523ffd3f2904696141edd806861093abb1011de00d6c345b7acc3be27f4ee6c4`.
+All 20 measured samples were release builds, used `block_ext4`, carried no
+degradation, and recorded every prepared-cold work flag as false.
+
 ## Reproducing a measurement
 
-The launch benchmark is a library surface driven by a live, `#[ignore]`d test,
-not a shipped CLI verb — the suite can never produce a launch number by
-accident. Run it against a release binary on a host with a prepared artifact
+`mvmctl bench` is the shipped, visible verb for this. The lane is a **flag**, not
+a subcommand. Run it from a release build on a host with a prepared artifact
 cache:
 
 ```sh
-export MVM_COLD_LAUNCH_MVMCTL=target/release/mvmctl
-export MVM_COLD_LAUNCH_ARGS="machine run --image alpine -- /bin/true"
-export MVM_COLD_LAUNCH_LANE=prepared_cold
-export MVM_COLD_LAUNCH_RUNS=20
-export MVM_COLD_LAUNCH_WARMUP=2
-
-cargo test --release --test cold_launch_bench -- --ignored --nocapture
+mvmctl prepare
+mvmctl bench --lane prepared-cold --runs 20 --warmup 2
 ```
 
-Every knob except the counts is required. A benchmark that guesses what to
-launch measures the wrong thing, so an unset variable fails and names itself
-rather than defaulting.
+`--lane` defaults to `prepared-cold` and accepts `prepared-cold`,
+`prepared-cold-mount-hit`, `mount-miss`, `artifact-miss`, and `warm-claim`.
+`--runs` defaults to 20 and `--warmup` to 2 — below 20 measured samples the
+report is not publication-grade. `--json` prints the report instead of a human
+summary, `--out <PATH>` redirects where it is written, and a debug build refuses
+to measure at all unless you pass `--allow-debug-build`, whose numbers mean
+nothing.
 
-The run writes a JSON report under `$MVM_HOME/bench/`, alongside a
+Name the launch after `--` to measure something other than the built-in
+reproducible baseline:
+
+```sh
+mvmctl bench --lane prepared-cold -- machine run --image alpine -- /bin/true
+```
+
+The same measurement substrate is also driven by a live, `#[ignore]`d test for
+CI use, so a routine `cargo test` never produces a launch number by accident.
+
+The run writes a JSON report under `$MVM_HOME/state/bench/`, alongside a
 `-latest.json` copy. The report carries the host fingerprint, the per-lane
 percentiles, and the full raw sample vector.

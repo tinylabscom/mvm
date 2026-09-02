@@ -80,8 +80,26 @@ Feature: One transport between a guest and its host endpoint
     Then a launch is refused because no guest authenticated
     But a launch is admitted once a session is recorded
 
+  # Guest-agent readiness and FlowMux authentication are independent events.
+  # A healthy launch must wait for the latter instead of sampling its marker
+  # once and falsely diagnosing a missing identity drive.
+  Scenario: Allow-host does not race FlowMux authentication
+    Given an allow-host endpoint that authenticates after agent readiness
+    Then the launch is admitted without the FlowMux identity-drive error
+
   # A boot with nothing to mediate has no endpoint at all, and must not be
   # caught by the check above.
   Scenario: A launch with no endpoint at all is not refused
     Given a per-VM state dir with no endpoint
     Then the launch is admitted
+
+  Scenario: Declared ingress is an authenticated FlowMux operation
+    Given a signed exact TCP ingress mapping
+    Then the mapping targets only guest loopback
+    And an admitted host-initiated stream names only that mapping
+    But an undeclared host-initiated stream is refused
+
+  Scenario: TLS ingress keeps private material behind the endpoint
+    Given a signed TLS ingress mapping with a same-plan keystore reference
+    Then the TLS ingress material binding is admitted
+    And the serialized mapping contains only the secret reference

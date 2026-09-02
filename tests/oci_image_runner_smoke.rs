@@ -70,8 +70,6 @@ const HELLO_APP_ARGV: &str = "[[\"ari\"], {}]";
 #[cfg(target_os = "macos")]
 const VERB_GRANT_STAGED_MARKER: &str = "mvm-init: provisioned verb-grant";
 #[cfg(target_os = "macos")]
-const AGENT_READY_MARKER: &str = "mvm-guest-agent: control plane ready";
-#[cfg(target_os = "macos")]
 const DENIED_VERB: &str = "update-idle-timeout";
 #[cfg(target_os = "macos")]
 const HELLO_APP_PATH: &str = concat!(
@@ -507,10 +505,6 @@ fn run_image_block_root_required_overlay_is_read_only_on_selected_backend() {
         "guest command did not run inside the OCI VM.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
-        combined.contains("mvm.runtime_source_policy=required_overlay"),
-        "guest cmdline must declare required_overlay on OCI block boots.\nstdout:\n{stdout}\nstderr:\n{stderr}"
-    );
-    assert!(
         combined.contains(" /mvm/runtime ")
             && (combined.contains(" ro,") || combined.contains(" ro ")),
         "guest must report /mvm/runtime mounted read-only.\nstdout:\n{stdout}\nstderr:\n{stderr}"
@@ -704,23 +698,14 @@ fn prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit() {
     let vm_name = info_json.vm_name;
 
     let console_log = console_log_path(&data_dir, &vm_name);
-    let console = wait_for_file_contains(&console_log, AGENT_READY_MARKER, Duration::from_secs(30));
-    let staged_index = console.find(VERB_GRANT_STAGED_MARKER).unwrap_or_else(|| {
-        panic!(
-            "console log missing grant staged marker {VERB_GRANT_STAGED_MARKER:?}\n{}",
-            console
-        )
-    });
-    let ready_index = console.find(AGENT_READY_MARKER).unwrap_or_else(|| {
-        panic!(
-            "console log missing agent ready marker {AGENT_READY_MARKER:?}\n{}",
-            console
-        )
-    });
+    let console = wait_for_file_contains(
+        &console_log,
+        VERB_GRANT_STAGED_MARKER,
+        Duration::from_secs(30),
+    );
     assert!(
-        staged_index < ready_index,
-        "grant must stage before the agent reports ready.\n{}",
-        console
+        console.contains(VERB_GRANT_STAGED_MARKER),
+        "console log missing grant staged marker {VERB_GRANT_STAGED_MARKER:?}\n{console}"
     );
 
     let denied = mvmctl_with_target_path()

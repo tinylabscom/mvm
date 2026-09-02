@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "valid": [
+    {
+      "name": "key ordering",
+      "input": { "z": 0, "a": 1 },
+      "canonical": "{\"a\":1,\"z\":0}"
+    },
+    {
+      "name": "JSON escaping",
+      "input": {
+        "slash": "/",
+        "quote": "\"",
+        "controls": "\b\f\n\r\t",
+        "backslash": "\\"
+      },
+      "canonical": "{\"backslash\":\"\\\\\",\"controls\":\"\\b\\f\\n\\r\\t\",\"quote\":\"\\\"\",\"slash\":\"/\"}"
+    },
+    {
+      "name": "integer bounds",
+      "input": {
+        "unsigned_max": 18446744073709551615,
+        "signed_min": -9223372036854775808
+      },
+      "canonical": "{\"signed_min\":-9223372036854775808,\"unsigned_max\":18446744073709551615}"
+    },
+    {
+      "name": "empty containers",
+      "input": { "object": {}, "array": [] },
+      "canonical": "{\"array\":[],\"object\":{}}"
+    },
+    {
+      "name": "nested objects",
+      "input": { "outer": { "two": 2, "one": 1 }, "enabled": true },
+      "canonical": "{\"enabled\":true,\"outer\":{\"one\":1,\"two\":2}}"
+    }
+  ],
+  "invalid": [
+    { "name": "floating-point number", "input": { "value": 1.5 } },
+    { "name": "non-ASCII string", "input": { "value": "café" } },
+    { "name": "non-ASCII object key", "input": { "café": "value" } }
+  ],
+  "signed_manifest": {
+    "test_only_secret_key_hex": "0707070707070707070707070707070707070707070707070707070707070707",
+    "canonical_manifest": "{\"archive_id\":\"sha256:346acd969ce71bd744e81ba9df75239d1452f8ca518e86c7ce5ccadf8b84b7ca\",\"audit_root\":{\"root_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"signature\":\"BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBw==\",\"signer_pubkey\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"tenant\":\"local\",\"timestamp\":\"2026-08-22T00:00:00Z\",\"tree_size\":41230},\"completeness\":\"attested\",\"counts_by_event\":{\"flow.egress.denied\":1},\"host_did\":\"did:key:z6MkTest\",\"leaves\":[{\"digest\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"event\":\"flow.egress.denied\",\"index\":903,\"member\":\"cited/903.json\"}],\"members\":{\"cited/903.json\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},\"schema_version\":1,\"scope\":{\"kind\":\"plan\",\"plan_id\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"tenant\":\"local\"}",
+    "envelope": {
+      "manifest": {
+        "schema_version": 1,
+        "archive_id": "sha256:346acd969ce71bd744e81ba9df75239d1452f8ca518e86c7ce5ccadf8b84b7ca",
+        "tenant": "local",
+        "scope": {
+          "kind": "plan",
+          "plan_id": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "host_did": "did:key:z6MkTest",
+        "audit_root": {
+          "tenant": "local",
+          "tree_size": 41230,
+          "root_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "timestamp": "2026-08-22T00:00:00Z",
+          "signature": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBw==",
+          "signer_pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "leaves": [
+          {
+            "index": 903,
+            "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "event": "flow.egress.denied",
+            "member": "cited/903.json"
+          }
+        ],
+        "counts_by_event": { "flow.egress.denied": 1 },
+        "members": {
+          "cited/903.json": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "completeness": "attested"
+      },
+      "signed_by": "did:key:z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z",
+      "signed_at": "2026-08-22T00:00:00Z",
+      "signature": "qZXfqIq9KM4SyBEH3tWvn3H9vYvGAiYiHYY2tMKzXWU8Eycwue3Q0KI1Zr8rKws+kDtpcHYbNh65fKEtK1pfCw=="
+    }
+  }
+}

@@ -9,7 +9,7 @@ pub fn with_hints(result: Result<()>) -> Result<()> {
         let msg = format!("{:#}", e);
         if msg.contains("firecracker: command not found") || msg.contains("firecracker: not found")
         {
-            ui::warn("Hint: Run 'mvmctl setup' to install Firecracker.");
+            ui::warn("Hint: Run 'mvmctl bootstrap' to install Firecracker.");
         } else if msg.contains("/dev/kvm") {
             ui::warn(
                 "Hint: Enable KVM/virtualization in your BIOS or VM settings.\n      \
@@ -20,7 +20,7 @@ pub fn with_hints(result: Result<()>) -> Result<()> {
         } else if msg.contains("nix: command not found") || msg.contains("nix: not found") {
             ui::warn("Hint: Nix runs inside the builder VM; builds invoke it automatically.");
         } else if msg.contains("dev VM is not running") || msg.contains("VM is not started") {
-            ui::warn("Hint: Run 'mvmctl bootstrap' or 'mvmctl setup' to initialise it first.");
+            ui::warn("Hint: Run 'mvmctl bootstrap' to initialise it first.");
         } else if msg.contains("already exists") && msg.contains("template") {
             ui::warn("Hint: Use '--force' to overwrite the existing template.");
         } else if msg.contains("error: builder for") && msg.contains("failed with exit code") {
@@ -50,7 +50,7 @@ pub fn with_hints(result: Result<()>) -> Result<()> {
         } else if msg.contains("hash mismatch") && msg.contains("got:") {
             ui::warn(
                 "Hint: Fixed-output derivation hash changed. Run \
-                 'mvmctl template build <name> --update-hash' to recompute.",
+                 'mvmctl machine build <name> --update-hash' to recompute.",
             );
         } else if msg.contains("does it exist?") && msg.contains("template") {
             ui::warn("Hint: List available templates with 'mvmctl template list'.");

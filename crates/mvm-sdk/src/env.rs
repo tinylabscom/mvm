@@ -98,6 +98,10 @@ sdk_env_vars! {
     /// Selects the SDK's execution mode (for example `live` or `record`).
     MVM_SDK_MODE_ENV = "MVM_SDK_MODE", [Rust, Python, TypeScript];
 
+    /// Carries an explicitly selected security profile from `mvmctl run`
+    /// into the live SDK's nested `mvmctl machine run` invocation.
+    MVM_SDK_RUN_PROFILE_ENV = "MVM_SDK_RUN_PROFILE", [Rust, Python, TypeScript];
+
     /// When set, the SDK writes its wire-shape recording JSON to this
     /// path on exit, so a caller need not parse stdout.
     MVM_SDK_OUT_PATH_ENV = "MVM_SDK_OUT_PATH", [Rust, Python, TypeScript];
@@ -135,6 +139,10 @@ mod tests {
         };
         assert_eq!(by_ident("MVM_CLI_BIN_ENV").name, MVM_CLI_BIN_ENV);
         assert_eq!(by_ident("MVM_SDK_MODE_ENV").name, MVM_SDK_MODE_ENV);
+        assert_eq!(
+            by_ident("MVM_SDK_RUN_PROFILE_ENV").name,
+            MVM_SDK_RUN_PROFILE_ENV
+        );
         assert_eq!(by_ident("MVM_SDK_OUT_PATH_ENV").name, MVM_SDK_OUT_PATH_ENV);
         assert_eq!(
             by_ident("MVM_MACHINE_TIMEOUT_ENV").name,
@@ -190,11 +198,12 @@ mod tests {
             [
                 "MVM_CLI_BIN_ENV",
                 "MVM_SDK_MODE_ENV",
+                "MVM_SDK_RUN_PROFILE_ENV",
                 "MVM_SDK_OUT_PATH_ENV",
                 "MVM_MACHINE_TIMEOUT_ENV",
                 "MVM_MACHINE_MAX_OUTPUT_ENV"
             ]
         );
-        assert_eq!(exported_to(Surface::Python).count(), 5);
+        assert_eq!(exported_to(Surface::Python).count(), 6);
     }
 }

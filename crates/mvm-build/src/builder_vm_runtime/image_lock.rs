@@ -70,8 +70,10 @@ pub(crate) fn sidecar_lock_path(image: &Path) -> PathBuf {
 }
 
 /// Sparse-allocate `path` to `size_bytes` minus the libkrun tail reserve if
-/// it's missing or empty,
-/// then close the fd. The filesystem records the size without
+/// it's missing or empty, then close the fd. Existing non-empty images are
+/// left at their current size.
+///
+/// The filesystem records the size without
 /// allocating blocks until something writes them (APFS + ext4), so a
 /// multi-GiB cap costs ~nothing until used. An existing non-empty file
 /// is left untouched so a warm store / volume survives across runs.
@@ -80,6 +82,31 @@ pub(crate) fn sidecar_lock_path(image: &Path) -> PathBuf {
 /// hold no open handle on the image so the hypervisor (HVF) can
 /// open it exclusively; serialisation lives on the sidecar lock.
 pub(crate) fn sparse_create_image(path: &Path, size_bytes: u64) -> Result<(), BuilderVmError> {
+    sparse_ensure_image(path, size_bytes, ExistingImageSize::Preserve)
+}
+
+/// Create an empty sparse image or restore an undersized existing image to its
+/// configured capacity. Growing a sparse file preserves every existing block.
+///
+/// Writable raw block backends may turn a trailing discard into a shorter host
+/// file. The filesystem still records the device capacity it was formatted
+/// against, so the persistent builder store must regain that capacity before
+/// its next attachment. Oversized images are never truncated.
+fn sparse_create_or_grow_image(path: &Path, size_bytes: u64) -> Result<(), BuilderVmError> {
+    sparse_ensure_image(path, size_bytes, ExistingImageSize::GrowUndersized)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExistingImageSize {
+    Preserve,
+    GrowUndersized,
+}
+
+fn sparse_ensure_image(
+    path: &Path,
+    size_bytes: u64,
+    existing_size: ExistingImageSize,
+) -> Result<(), BuilderVmError> {
     let existed_before_open = path.exists();
 
     let file = std::fs::OpenOptions::new()
@@ -90,18 +117,20 @@ pub(crate) fn sparse_create_image(path: &Path, size_bytes: u64) -> Result<(), Bu
         .open(path)
         .map_err(|e| BuilderVmError::ExtractionFailed(format!("open {}: {e}", path.display())))?;
 
+    let image_bytes = size_bytes
+        .checked_sub(LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES)
+        .ok_or_else(|| {
+            BuilderVmError::ExtractionFailed(format!(
+                "image size {size_bytes} is too small for the libkrun block-device reserve"
+            ))
+        })?;
     let len = file
         .metadata()
         .map_err(|e| BuilderVmError::ExtractionFailed(format!("metadata {}: {e}", path.display())))?
         .len();
-    if len == 0 {
-        let image_bytes = size_bytes
-            .checked_sub(LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES)
-            .ok_or_else(|| {
-                BuilderVmError::ExtractionFailed(format!(
-                    "image size {size_bytes} is too small for the libkrun block-device reserve"
-                ))
-            })?;
+    let should_resize =
+        len == 0 || (existing_size == ExistingImageSize::GrowUndersized && len < image_bytes);
+    if should_resize {
         file.set_len(image_bytes).map_err(|e| {
             if !existed_before_open {
                 let _ = std::fs::remove_file(path);
@@ -179,6 +208,15 @@ impl LockWait {
     /// tempdir, so a waiting default lets one crate's test suite queue
     /// behind another process's builder for the full hour. A test that
     /// wants to exercise waiting passes [`Self::of`] explicitly.
+    ///
+    /// That flip covers **this crate's own test build and nothing else**.
+    /// `cfg!` is evaluated where it is compiled, so when this crate is built
+    /// as an ordinary dependency of another crate's test binary it is not
+    /// under `cfg(test)`, and that binary's tests inherit
+    /// [`DEFAULT_LOCK_WAIT`] — an hour, spent queueing rather than failing.
+    /// A test outside this crate therefore has to state its own budget; it
+    /// cannot borrow this one. `mvm-libkrun-supervisor` learned that the
+    /// expensive way and now takes its wait as an argument.
     pub fn from_env() -> Self {
         if cfg!(test) {
             return Self::none();
@@ -573,7 +611,7 @@ pub(crate) fn acquire_nix_store_image_lock_named_within(
     // the image fd — HVF needs to open the image exclusively at
     // start (see [`NixStoreImageLock`] docs).
     let lock = acquire_sidecar_lock_within(&sidecar_lock_path(&path), wait)?;
-    sparse_create_image(&path, size_bytes)?;
+    sparse_create_or_grow_image(&path, size_bytes)?;
 
     Ok(NixStoreImageLock { path, _file: lock })
 }
@@ -607,7 +645,7 @@ pub fn ensure_nix_store_image_unlocked(
             "nix-store size_mib overflowed multiplying to bytes: {size_mib}"
         ))
     })?;
-    sparse_create_image(&path, size_bytes)?;
+    sparse_create_or_grow_image(&path, size_bytes)?;
     let lock_path = sidecar_lock_path(&path);
     Ok(UnlockedStoreImage { path, lock_path })
 }
@@ -656,6 +694,49 @@ mod tests {
     // test passes a fresh TempDir path directly and runs without
     // process-wide env mutation.
     // -----------------------------------------------------------------
+
+    #[test]
+    fn sparse_store_regrows_after_a_trailing_discard_without_losing_data() {
+        use std::io::{Read as _, Seek as _, Write as _};
+
+        let scratch = tempfile::TempDir::new().unwrap();
+        let image = scratch.path().join("nix-store.img");
+        let nominal_size = 4 * 1024 * 1024;
+        let target_size = nominal_size - LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES;
+        let shortened_size = target_size - LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES;
+        let payload_offset = 4096;
+        let payload = b"persistent-cache-data";
+
+        let mut file = std::fs::File::create(&image).unwrap();
+        file.set_len(shortened_size).unwrap();
+        file.seek(std::io::SeekFrom::Start(payload_offset)).unwrap();
+        file.write_all(payload).unwrap();
+        drop(file);
+
+        sparse_create_or_grow_image(&image, nominal_size).unwrap();
+
+        assert_eq!(std::fs::metadata(&image).unwrap().len(), target_size);
+        let mut file = std::fs::File::open(&image).unwrap();
+        file.seek(std::io::SeekFrom::Start(payload_offset)).unwrap();
+        let mut actual = vec![0; payload.len()];
+        file.read_exact(&mut actual).unwrap();
+        assert_eq!(actual, payload);
+    }
+
+    #[test]
+    fn sparse_store_never_truncates_an_oversized_existing_image() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let image = scratch.path().join("nix-store.img");
+        let existing_size = 8 * 1024 * 1024;
+
+        std::fs::File::create(&image)
+            .unwrap()
+            .set_len(existing_size)
+            .unwrap();
+        sparse_create_or_grow_image(&image, 4 * 1024 * 1024).unwrap();
+
+        assert_eq!(std::fs::metadata(&image).unwrap().len(), existing_size);
+    }
 
     #[test]
     fn acquire_nix_store_image_lock_creates_sparse_file_once() {
@@ -911,13 +992,35 @@ mod tests {
     }
 
     #[test]
-    fn the_test_build_never_queues_for_a_lock() {
+    fn this_crates_own_test_build_never_queues_for_a_lock() {
         // Unit tests reach production entry points that lock the
         // host-wide store image. Waiting there makes one suite queue
         // behind another process's builder — a 35-minute "passing"
-        // test. The default must stay fail-fast under cfg(test) no
-        // matter what the environment says.
+        // test. The default stays fail-fast under cfg(test) no matter
+        // what the environment says.
+        //
+        // Read what this does and does not prove. `cfg!(test)` is true
+        // here because *this crate* is being compiled as a test, so this
+        // asserts a property of this crate's test build alone. It says
+        // nothing about a test in a crate that merely depends on this
+        // one: there this crate is an ordinary library, the flip does not
+        // happen, and the caller gets the production hour. Reading this
+        // test as a workspace-wide guarantee is what let
+        // `mvm-libkrun-supervisor` ship a test that queued for an hour.
         assert_eq!(LockWait::from_env(), LockWait::none());
+    }
+
+    /// The other half of the same fact, asserted directly rather than left
+    /// to be inferred: the production default really is the long wait, so a
+    /// caller that does not state a budget and is not inside this crate's
+    /// test build gets an hour.
+    #[test]
+    fn the_production_default_is_the_long_wait() {
+        assert_eq!(
+            LockWait::of(DEFAULT_LOCK_WAIT),
+            LockWait::of(Duration::from_secs(60 * 60))
+        );
+        assert_ne!(LockWait::of(DEFAULT_LOCK_WAIT), LockWait::none());
     }
 
     #[test]

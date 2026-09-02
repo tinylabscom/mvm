@@ -1,5 +1,8 @@
 pub mod app_deps;
 pub mod app_deps_gate;
+/// Compiled distribution channel and the default build-vs-download contract
+/// shared by every launch-critical artifact resolver.
+pub mod artifact_acquisition;
 pub mod artifacts;
 pub mod backend;
 /// Disk-only job/artifact transport for the hvf-VMM builder (tar-over-raw-
@@ -42,9 +45,15 @@ pub mod cache_install;
 /// cross-platform.
 pub mod egress_proxy;
 pub mod egress_readiness;
+/// The pinned zig + Rust cross-compile toolchain behind `embed-host-bins`.
+/// Shared with `crates/mvm-cli/build.rs`, which `#[path]`-includes it.
+pub mod embed_toolchain;
 /// Extract an FC-loadable ELF `vmlinux` from a published x86_64 bzImage.
 pub mod firecracker;
 pub mod guest_elf;
+/// Which libc a materialized guest rootfs carries, observed while the tree is
+/// still a directory the host can read.
+pub mod guest_libc;
 /// Config contract for the `mvm-hvf-supervisor` per-VM host process (raw HVF
 /// macOS backend, raw HVF backend). Shared by `mvm_runtime::backends::hvf` (writer) + the bin.
 /// Universal initramfs build + cache resolution.
@@ -60,6 +69,7 @@ pub mod packed_artifact;
 /// libkrun creates; spawning the libkrun VM itself lives in
 /// `LibkrunPersistentHostVm`.
 pub mod persistent_builder;
+pub mod persistent_builder_transport;
 /// Build-provenance recorder: content-addresses produced artifacts into the
 /// signed plan's `BuildProvenance`.
 pub mod provenance;
@@ -77,10 +87,13 @@ pub mod stage0;
 /// Whether a builder guest may fall back to a tmpfs Nix store, or must stop.
 pub mod store_readiness;
 pub mod template_reuse;
-pub mod verity_initrd;
 /// Persistent ext4 image materialization for user-attached block volumes.
 pub mod volume_image;
 
+/// Acquiring and running the builder-VM bootstrap helper (gated by
+/// `builder-vm`). See module-level docs.
+#[cfg(feature = "builder-vm")]
+pub mod builder_vm_bootstrap;
 /// libkrun-backed builder VM (gated by `builder-vm`). See module-level
 /// docs.
 #[cfg(feature = "builder-vm")]
@@ -99,8 +112,6 @@ pub mod libkrun_network_provider;
 /// `cfg(linux)`) plus pure address-parsing/encoding utilities tested
 /// on every host. Consumed by both `stage0-init` and `mvm-host-vm-init`.
 pub mod guest_net;
-
-pub use mvm_vmm::host::virtiofsd;
 
 pub mod qemu_builder;
 

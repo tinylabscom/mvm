@@ -6,7 +6,7 @@ Validation: none — this is a proposed design; no code implements it and no tes
 **Status:** Proposed  
 **Date:** 2026-08-15  
 **Owner:** `mvm` maintainers  
-**Implemented by:** Plan 338  
+**Implemented by:** `specs/plans/2026-08-18-secure-message-fabric.md`  
 **Distributed counterpart:** a separately numbered `mvmd` ADR and plan consume the contracts and deterministic state machine defined here.  
 **Supersedes:** ADR-035 for guest↔host transport, inter-workload routing,
 `StreamEdge`, stdin as a workflow protocol, stdout/stderr as return protocols,
@@ -15,8 +15,10 @@ redaction, bounded telemetry retention, explicit gaps, hash chaining, sealed
 roots, fan-out, and operator debugging.  
 **Complements:** ADR-001, ADR-014, ADR-019, ADR-020, ADR-031, ADR-037,
 ADR-040, ADR-041, and ADR-042.  
-**Consumed by:** the capability-secure workflow ADR/plan after those documents
-are reconciled to depend on this fabric.
+**Consumed by:** ADR-045 and its plan, which depend on this fabric and define
+no message types of their own.  
+**Reconciled by:** ADR-051, which names the shared workload actor model and
+records that this ADR's vocabulary is the one that wins.
 
 ## Context
 

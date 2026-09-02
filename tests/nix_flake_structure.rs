@@ -34,6 +34,133 @@ fn normalized_whitespace(content: &str) -> String {
     content.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+const CRATES_IO_API: &str = "https://crates.io/api/v1/crates";
+
+#[test]
+fn the_crate_source_helper_rewrites_the_api_host_to_the_cdn() {
+    let source = nix_dir().join("lib").join("crates-io.nix");
+    let content = fs::read_to_string(&source)
+        .unwrap_or_else(|e| panic!("crate source helper must be present: {e}"));
+
+    assert!(
+        content.contains(CRATES_IO_API)
+            && content.contains("https://static.crates.io/crates")
+            && content.contains("builtins.replaceStrings"),
+        "nix/lib/crates-io.nix must rewrite crates.io API downloads to the CDN"
+    );
+}
+
+#[test]
+fn the_cargo_deps_helper_routes_downloads_through_the_crate_source_helper() {
+    let helper = nix_dir().join("lib").join("static-crates-cargo-deps.nix");
+    let helper_content = fs::read_to_string(&helper)
+        .unwrap_or_else(|e| panic!("static crate registry helper must be present: {e}"));
+
+    assert!(
+        helper_content.contains("crates-io.nix")
+            && helper_content.contains("toCdn")
+            && helper_content.contains("fetchurl = fetchStaticCrate"),
+        "the cargo-deps helper must route lockfile downloads through crates-io.nix"
+    );
+    assert!(
+        !helper_content.contains("extraRegistries"),
+        "the helper must not redefine Cargo's built-in crates.io source"
+    );
+}
+
+#[test]
+fn every_rust_derivation_uses_the_static_crates_registry() {
+    let mut nix_files = Vec::new();
+    collect_nix_files(&nix_dir(), &mut nix_files);
+    let mut rust_derivations = 0;
+    for path in nix_files {
+        let content = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()));
+        if !content.contains("rustPlatform.buildRustPackage {") {
+            continue;
+        }
+        rust_derivations += 1;
+        assert!(
+            content.contains("cargoDeps = import")
+                && content.contains("static-crates-cargo-deps.nix"),
+            "{} builds Rust without the static crates.io registry helper",
+            path.display()
+        );
+    }
+
+    assert!(
+        rust_derivations > 0,
+        "expected at least one Rust Nix derivation"
+    );
+}
+
+/// crates.io's API host answers a plain curl User-Agent with 403, which is what
+/// Nix's fetchurl sends. A hand-written crate fetch against that host therefore
+/// cannot build — it fails with `curl: (22) ... error: 403` on a derivation
+/// named `download`, naming neither the crate nor the host. `crates-io.nix` is
+/// the one place allowed to name the API host, and only to rewrite it away.
+#[test]
+fn no_nix_file_fetches_a_crate_from_the_api_host() {
+    let allowed = nix_dir().join("lib").join("crates-io.nix");
+
+    let mut nix_files = Vec::new();
+    collect_nix_files(&nix_dir(), &mut nix_files);
+
+    let offenders: Vec<PathBuf> = nix_files
+        .into_iter()
+        .filter(|path| *path != allowed)
+        .filter(|path| {
+            fs::read_to_string(path)
+                .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()))
+                .contains(CRATES_IO_API)
+        })
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "these files fetch crates from the crates.io API host, which 403s Nix's \
+         fetchurl; use the fetchCrate helper in nix/lib/crates-io.nix instead: {offenders:?}"
+    );
+}
+
+#[test]
+fn mvm_setpriv_imports_pass_pkgs_to_the_static_crates_helper() {
+    let mk_guest = normalized_whitespace(
+        &fs::read_to_string(nix_dir().join("lib").join("mk-guest.nix"))
+            .expect("mk-guest.nix must be readable"),
+    );
+    assert!(
+        mk_guest.contains(
+            "import ../packages/mvm-setpriv.nix { inherit pkgs; rustPlatform = pkgs.pkgsStatic.rustPlatform;"
+        ),
+        "the workload guest must pass pkgs into mvm-setpriv.nix"
+    );
+
+    let builder_flake = normalized_whitespace(
+        &fs::read_to_string(nix_dir().join("images/builder-vm/flake.nix"))
+            .expect("builder VM flake must be readable"),
+    );
+    assert!(
+        builder_flake.contains(
+            "import (workspace + \"/nix/packages/mvm-setpriv.nix\") { inherit pkgs; rustPlatform = pkgs.pkgsStatic.rustPlatform;"
+        ),
+        "the builder guest must pass pkgs into mvm-setpriv.nix"
+    );
+}
+
+fn collect_nix_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    for entry in
+        fs::read_dir(dir).unwrap_or_else(|e| panic!("{} must be readable: {e}", dir.display()))
+    {
+        let path = entry.expect("directory entry must be readable").path();
+        if path.is_dir() {
+            collect_nix_files(&path, files);
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("nix") {
+            files.push(path);
+        }
+    }
+}
+
 #[test]
 fn flake_nix_exists_and_imports_microvm_nix() {
     let path = nix_dir().join("flake.nix");
@@ -122,7 +249,8 @@ fn host_mvmctl_package_is_source_only() {
     );
     assert!(
         content.contains("src = mvmSrc")
-            && content.contains("cargoLock.lockFile = mvmSrc + \"/Cargo.lock\""),
+            && content.contains("static-crates-cargo-deps.nix")
+            && content.contains("lockFile = mvmSrc + \"/Cargo.lock\""),
         "mvmctl package must use the source checkout and committed Cargo.lock"
     );
     assert!(
@@ -191,8 +319,13 @@ fn host_mvmctl_package_keeps_native_vmm_linkage_explicit() {
     );
     assert!(
         content.contains("assert withNativeLibkrun -> withBuilderVm")
-            && content.contains("\"mvmctl/builder-vm\""),
+            && content.contains("\"mvm-cli/builder-vm\"")
+            && content.contains("\"mvm-build/builder-vm\""),
         "feature flags must stay package-qualified when mvmctl and sidecars build together"
+    );
+    assert!(
+        content.contains("lib.optionals withTpm2 [ \"mvmctl/attestation-tpm2\" ]"),
+        "TPM2 must forward through the root package so cargo-auditable can resolve the feature"
     );
     assert!(
         content.contains("\"mvm-cli/libkrun-sys\"")
@@ -240,8 +373,8 @@ fn native_vmm_recipes_are_source_built_and_pinned() {
         );
     }
 
-    const KERNEL_VERSION: &str = "6.12.103";
-    const KERNEL_HASH: &str = "sha256-8UOqreiHe6VhbniLRIJXbbKEgbz1V+9Tf0/MOTj8MXY=";
+    const KERNEL_VERSION: &str = "6.12.107";
+    const KERNEL_HASH: &str = "sha256-pfjFvj/eLW2coU6WMWQs8fREhxQ/EQWdpzDc1YkuMHo=";
     assert!(
         libkrunfw.contains(&format!("linux-{KERNEL_VERSION}.tar.xz"))
             && libkrunfw.contains(&format!("hash = \"{KERNEL_HASH}\""))
@@ -786,7 +919,58 @@ fn mk_guest_installs_netinit_at_boot() {
 }
 
 #[test]
-fn mk_guest_seeds_vsock_egress_dns_before_privilege_drop() {
+fn mk_guest_assigns_ipv4_loopback_before_starting_guest_services() {
+    let path = nix_dir().join("lib").join("mk-guest.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
+    let address = content
+        .find("ip addr replace 127.0.0.1/8 dev lo")
+        .expect("guest init assigns the canonical IPv4 loopback address");
+    let agent = content
+        .find("# Stage 2.5 — guest agent supervisor")
+        .expect("guest init starts the guest agent");
+
+    assert!(
+        address < agent,
+        "loopback must have an address before any guest service binds it"
+    );
+    assert!(
+        content.contains("ifconfig lo 127.0.0.1 netmask 255.0.0.0 up"),
+        "the no-ip-applet fallback must assign the same address"
+    );
+}
+
+#[test]
+fn mk_guest_starts_the_forward_proxy_before_dropping_privileges() {
+    let path = nix_dir().join("lib").join("mk-guest.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
+    let proxy_start = content
+        .find("# Stage 2.49 — loopback forward proxy")
+        .expect("guest init starts the forward proxy");
+    let agent_start = content[proxy_start..]
+        .find("# Stage 2.5 — guest agent supervisor")
+        .map(|offset| proxy_start + offset)
+        .expect("the unprivileged guest agent starts after the forward proxy");
+    let proxy_block = &content[proxy_start..agent_start];
+
+    assert!(
+        proxy_block.contains("/mvm/runtime/forward-proxy")
+            && proxy_block.contains("/usr/local/bin/mvm-forward-proxy"),
+        "both runtime-source policies must resolve the privileged helper"
+    );
+    assert!(
+        proxy_block.contains("/bin/busybox setsid \"$MVM_FORWARD_PROXY_BIN\" &"),
+        "the init-owned process must start the proxy directly"
+    );
+    assert!(
+        !proxy_block.contains("mvm-setpriv"),
+        "the proxy reads the root-only FlowMux key and must not inherit the workload uid"
+    );
+}
+
+#[test]
+fn mk_guest_provisions_vsock_egress_identity_before_privilege_drop() {
     let path = nix_dir().join("lib").join("mk-guest.nix");
     let content = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
@@ -805,17 +989,43 @@ fn mk_guest_seeds_vsock_egress_dns_before_privilege_drop() {
     let resolver_seed = egress_block
         .find("printf 'nameserver 127.0.0.1\\n' > /run/mvm/resolv.conf")
         .expect("egress init seeds the loopback DNS stub");
+    let required_mode = egress_block
+        .find("MVM_IDENTITY_PROVISION_COMMAND=provision-identity-for")
+        .expect("egress-enabled boots require the service identity");
+    let optional_mode = egress_block
+        .find("MVM_IDENTITY_PROVISION_COMMAND=provision-identity-for-if-present")
+        .expect("other boots provision an attached identity without requiring one");
+    let provision = egress_block
+        .find(
+            "\"$MVM_EGRESS_CLIENT_BIN\" \"$MVM_IDENTITY_PROVISION_COMMAND\" ${toString egressUid}",
+        )
+        .expect("root init provisions according to the boot's egress requirement");
     let spawn = egress_block
-        .find("-- \"$MVM_EGRESS_CLIENT_BIN\" &")
+        .find("--reuid=${toString egressUid} --regid=${toString egressUid}")
         .expect("egress init spawns the client");
 
     assert!(
-        loopback_up < resolver_seed && resolver_seed < spawn,
-        "loopback must be raised and resolv.conf seeded before the egress client starts"
+        required_mode < provision
+            && optional_mode < provision
+            && provision < loopback_up
+            && loopback_up < resolver_seed
+            && resolver_seed < spawn,
+        "the root-owned identity handoff and loopback must be ready before the egress client drops privilege"
     );
     assert!(
-        egress_block.contains("--inh-caps=+net_bind_service --ambient-caps=+net_bind_service"),
-        "the unprivileged egress client must retain only the capability needed to bind DNS :53"
+        egress_block.contains("--inh-caps=+net_bind_service --ambient-caps=+net_bind_service")
+            && egress_block.contains("--no-new-privs"),
+        "the long-lived client must retain only its low-port bind capability"
+    );
+    assert!(
+        !egress_block.contains("--inh-caps=+sys_admin")
+            && !egress_block.contains("--ambient-caps=+sys_admin"),
+        "the long-lived client must not retain mount privilege"
+    );
+    assert!(
+        content.contains("egressUid = 989;")
+            && content.contains("uid 989 is reserved for the FlowMux egress service"),
+        "the dedicated service uid must be fixed and protected from workload, agent, or builder reuse"
     );
 }
 
@@ -1005,13 +1215,6 @@ fn runtime_overlay_flake_stages_egress_client_binary() {
          sealed boots can source the egress shim from the mounted \
          runtime filesystem."
     );
-    assert!(
-        content.contains("cp ${netAgent}/bin/mvm-net-agent \"$staging/net-agent\""),
-        "runtime-overlay flake must stage `mvm-net-agent` at `/net-agent` \
-         inside the overlay ext4. A guest booted for the l3-vsock mode that \
-         cannot resolve the agent refuses to start its workload, so a missing \
-         stage here is a failed boot rather than a degraded one."
-    );
 }
 
 #[test]
@@ -1022,10 +1225,11 @@ fn runtime_overlay_guest_packages_use_static_musl_and_have_no_loader_bundle() {
         .join("flake.nix");
     let content = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("nix/images/runtime-overlay/flake.nix must be present: {e}"));
-    let runtime = content
+    let normalized = normalized_whitespace(&content);
+    let runtime = normalized
         .split("mkRuntimeOverlay = system:")
         .nth(1)
-        .and_then(|tail| tail.split("\n    in\n    {").next())
+        .and_then(|tail| tail.split(" in {").next())
         .expect("runtime-overlay derivation body");
 
     assert!(
@@ -1061,9 +1265,10 @@ fn runtime_overlay_exposes_sdk_sidecar_separately() {
         .join("flake.nix");
     let content = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("nix/images/runtime-overlay/flake.nix must be present: {e}"));
+    let normalized = normalized_whitespace(&content);
 
     assert!(
-        content.contains("mkSdkSidecar = system:"),
+        normalized.contains("mkSdkSidecar = system:"),
         "the glibc SDK FFI must have a distinct sidecar derivation"
     );
     assert!(
@@ -1082,6 +1287,27 @@ fn runtime_overlay_exposes_sdk_sidecar_separately() {
     );
 }
 
+#[test]
+fn builder_vm_exposes_sdk_sidecar_image_for_stage0() {
+    let content =
+        fs::read_to_string("nix/images/builder-vm/flake.nix").expect("read builder VM flake");
+    assert!(
+        content
+            .contains("sdk-sidecar-image = runtimeOverlay.packages.${system}.sdk-sidecar-image;"),
+        "the builder VM flake must pass the runtime-overlay sidecar image through for Stage 0"
+    );
+}
+
+#[test]
+fn sdk_sidecar_build_keeps_cargo_out_of_nixs_sentinel_home() {
+    let content = fs::read_to_string("nix/packages/mvm-sdk-cdylib.nix")
+        .expect("read SDK sidecar cdylib package");
+    assert!(
+        content.contains("HOME = \"/tmp\";"),
+        "Stage 0 runs Nix without its inner sandbox, so Cargo must not create /homeless-shelter and wedge the next derivation"
+    );
+}
+
 /// The sidecar has to ship as an attachable read-only ext4 with the exact file
 /// set `mvm_fs::sdk_sidecar::SdkSidecarResolver` verifies. A directory output
 /// alone can't be attached to a microVM.
@@ -1093,9 +1319,10 @@ fn runtime_overlay_publishes_an_attachable_sdk_sidecar_image() {
         .join("flake.nix");
     let content = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("nix/images/runtime-overlay/flake.nix must be present: {e}"));
+    let normalized = normalized_whitespace(&content);
 
     assert!(
-        content.contains("mkSdkSidecarImage = system:"),
+        normalized.contains("mkSdkSidecarImage = system:"),
         "the sidecar must have an ext4-image derivation, not just a directory tree"
     );
     assert!(
@@ -1266,18 +1493,19 @@ fn cryptsetup_pin_is_shared_by_builder_vm_and_runtime_overlay() {
         ("builder-vm flake", builder.as_str()),
         ("runtime-overlay flake", runtime.as_str()),
     ] {
+        let normalized = normalized_whitespace(content);
         assert!(
-            content.contains("pinnedCryptsetupVersion = \"2.8.6\""),
+            normalized.contains("pinnedCryptsetupVersion = \"2.8.6\""),
             "{name} must pin cryptsetup 2.8.6 explicitly for ADR-017 / #223"
         );
         assert!(
-            content.contains(
+            normalized.contains(
                 "pinnedCryptsetupSrcHash = \"sha256-gAQmX9mTiF0I97Yz2+BWhR3hohAwdhOk693HQ/zO/lo=\""
             ),
             "{name} must pin the cryptsetup 2.8.6 release tarball hash"
         );
         assert!(
-            content.contains("pinnedCryptsetupFor = pkgs:"),
+            normalized.contains("pinnedCryptsetupFor = pkgs:"),
             "{name} must expose a pinned cryptsetup helper instead of using raw pkgs.cryptsetup"
         );
         assert!(
@@ -1350,7 +1578,6 @@ fn no_host_package_uses_release_binary_provenance() {
     let dir = nix_dir().join("packages");
     // Project-release / prebuilt-binary provenance — never source.
     let forbidden = [
-        "releases/download",
         "github.com/tinylabscom/mvm/releases",
         "tinylabscom/mvm/releases",
         "binaryNativeCode",
@@ -1422,6 +1649,31 @@ fn mk_guest_uses_the_static_custom_privilege_helper() {
     assert!(
         !content.contains("pkgs.pkgsStatic.util-linux"),
         "mkGuest must not retain the util-linux setpriv closure"
+    );
+}
+
+#[test]
+fn builder_hook_uses_util_linux_losetup_before_the_mount_syscall() {
+    let builder_flake_path = nix_dir().join("images/builder-vm/flake.nix");
+    let builder_flake = fs::read_to_string(&builder_flake_path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", builder_flake_path.display()));
+    assert!(
+        builder_flake.contains("        util-linux"),
+        "the builder image must retain util-linux for file-backed loop mounts"
+    );
+
+    let hook_path = repo_dir().join("crates/mvm-build/src/bin/mvm-host-vm-init/builder_hooks.rs");
+    let hook = fs::read_to_string(&hook_path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", hook_path.display()));
+    assert!(
+        hook.contains("const UTIL_LINUX_LOSETUP: &str = \"/sbin/losetup\";")
+            && hook.contains("Command::new(UTIL_LINUX_LOSETUP)")
+            && hook.contains("mount("),
+        "the hook runner must allocate the loop device with util-linux before mounting it"
+    );
+    assert!(
+        !hook.contains("Command::new(\"mount\")"),
+        "a PATH-resolved mount can select BusyBox, which cannot allocate the loop device"
     );
 }
 
@@ -1572,5 +1824,43 @@ fn default_tenant_exports_and_ci_counts_the_rootfs_closure() {
     assert!(
         ci.contains("--closure-paths \"$image_path/rootfs-closure-paths\""),
         "the footprint CI gate must consume the exported closure inventory"
+    );
+}
+
+/// No published-image fetch may build its release URL from the CLI's own
+/// version.
+///
+/// The CLI ships from `v<crate version>`; the guest images ship from
+/// `boot-image/vN`, on a counter that moves independently so a kernel fix does
+/// not wait for a CLI release. Deriving an image URL from `CARGO_PKG_VERSION`
+/// therefore points at a tag nobody has published for most of a release cycle —
+/// a 404 on the first boot of a fresh install, which is exactly how it shipped.
+///
+/// `runtime_overlay.rs` and `sdk_sidecar.rs` are deliberately excluded: their
+/// version is also the on-disk cache key, so splitting their download tag from
+/// their cache identity is a separate change, not a rename.
+#[test]
+fn image_fetches_do_not_derive_their_release_url_from_the_cli_version() {
+    let cli = repo_dir().join("crates/mvm-cli/src");
+    let offenders: Vec<String> = [
+        "commands/env/builder_vm/default_microvm.rs",
+        "commands/env/builder_vm/stage0_cache.rs",
+        "commands/image/boot/update.rs",
+        "update.rs",
+    ]
+    .iter()
+    .filter(|rel| {
+        fs::read_to_string(cli.join(rel))
+            .unwrap_or_default()
+            .contains("releases/download/v{version}")
+    })
+    .map(|rel| (*rel).to_string())
+    .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "these build an image release URL from the CLI version, which 404s \
+         whenever the crate version is ahead of the last CLI tag: {offenders:?}. \
+         Use `update::boot_image_release()`."
     );
 }

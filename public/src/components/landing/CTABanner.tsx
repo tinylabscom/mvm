@@ -25,8 +25,9 @@ export function CTABanner() {
                 rescues Tailwind's mx-auto here — that rule only matches divs,
                 so on an h2 the box stayed left of centre while its text
                 appeared centred. */}
-            <h2 className="text-balance lowercase font-display text-2xl font-bold leading-tight text-title sm:text-3xl">
-              run something you don&rsquo;t trust.
+            <h2 className="text-balance lowercase font-display tracking-tight text-2xl font-semibold leading-tight text-title sm:text-3xl">
+              ai may never be fully predictable.{" "}
+              <span className="text-accent-2">its boundaries should be.</span>
             </h2>
             {/* No max-width cap: the sentence should sit on one line at
                 desktop sizes; it still wraps naturally on narrow screens.
@@ -36,8 +37,8 @@ export function CTABanner() {
               className="text-base leading-relaxed text-body"
               style={{ marginTop: "1.5rem" }}
             >
-              One install command. No daemon, no SSH, and no network until
-              policy admits it.
+              That&rsquo;s mvm. One install command. No daemon, no SSH, and no
+              network until policy admits it.
             </p>
             <div
               className="flex flex-wrap items-center justify-center gap-4"

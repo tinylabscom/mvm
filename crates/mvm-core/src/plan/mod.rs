@@ -26,7 +26,6 @@
 
 pub mod bundle;
 pub mod content_id;
-pub mod l3_retirement;
 pub mod signing;
 pub mod synthesis;
 #[cfg(any(test, feature = "test-support"))]
@@ -49,7 +48,6 @@ pub use bundle::{
 };
 pub use content_id::{PlanIdMismatch, compute_plan_id, verify_plan_id};
 pub use execution_plan::{ExecutionPlan, SCHEMA_VERSION};
-pub use l3_retirement::{L3RetiredError, refuse_raw_ip_stack, refuse_retired_l3};
 pub use sdk_sidecar::{
     SDK_HOST_SERVICES, SDK_SIDECAR_GUEST_PATH, SDK_SIDECAR_LIB_PATH, is_sdk_host_service,
     sdk_host_services_in, sdk_sidecar_required, sdk_sidecar_required_for,
@@ -64,12 +62,15 @@ pub use synthesis::{
 };
 pub use types::{
     AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, AuditLabels,
-    AuditTaxonomy, DepsVolumeBinding, DepsVolumeBindingError, EnvironmentRef, FsPolicyRef,
-    HostShareGrant, KeyRotationSpec, L3IcmpPolicy, L3IngressMapping, L3NetworkSpec, NetworkLimits,
-    NetworkLimitsBuilder, NetworkLimitsError, NetworkMode, Nonce, NonceParseError, PlanId,
-    PlanSeccompTier, PlanSeccompTierParseError, PolicyRef, PostRunLifecycle, ReleasePin, Resources,
+    AuditTaxonomy, CallerCommitment, CallerCommitmentParseError, DepsVolumeBinding,
+    DepsVolumeBindingError, EnvironmentRef, FsPolicyRef, HostShareGrant, IngressMapping,
+    IngressMappingBuildError, IngressMappingBuilder, IngressMappingError, IngressMappingsError,
+    IngressProtocol, IngressTransform, KeyRotationSpec, NetworkLimits, NetworkLimitsBuilder,
+    NetworkLimitsError, NetworkMode, Nonce, NonceParseError, PlanId, PlanSeccompTier,
+    PlanSeccompTierParseError, PolicyRef, PostRunLifecycle, ReleasePin, Resources,
     RuntimeProfileRef, SecretBinding, SecretReleasePolicy, SecretSource, ShareKind, SignedImageRef,
     StreamRetention, TenantId, TimeoutSpec, Variant, WorkloadId, WorkloadIntent,
+    validate_ingress_mappings, validate_ingress_material,
 };
 pub use validity::{
     CheckedFreshness, Freshness, FreshnessClaims, NonceStore, PlanValidityError, check_window,

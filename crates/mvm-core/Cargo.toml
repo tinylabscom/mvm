@@ -86,6 +86,10 @@ mvm-http = { workspace = true, optional = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 # The shared seccomp syscall table needs libc constants on Linux.
 libc.workspace = true
+# TPM2 TSS bindings for the `attestation-tpm2` provider. Only resolved on
+# Linux; the provider code is also `cfg(target_os = "linux")` gated so
+# macOS builds never link against the TPM libraries.
+tss-esapi = { version = "7", optional = true }
 
 [features]
 default = []
@@ -125,9 +129,10 @@ manifest-verify = [
 ]
 # Hardware attestation provider stubs — each enables
 # the corresponding `crypto::attestation::provider` impl.
-attestation-tpm2 = []
+attestation-tpm2 = ["dep:tss-esapi"]
 attestation-sev-snp = []
 attestation-tdx = []
+attestation-apple-device = []
 # Derive `schemars::JsonSchema` on the protocol types the
 # host↔guest RPC surface embeds (`AgentProfile`, `BackpressureReason`), so
 # `mvm-agentd`'s `emit_protocol_schema` bin can emit the protocol schema.

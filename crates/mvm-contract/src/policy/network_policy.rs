@@ -44,6 +44,7 @@ pub enum NetworkPolicyParseError {
 
 /// A host:port pair for network allowlist rules.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct HostPort {
     pub host: String,
     pub port: u16,
@@ -95,6 +96,7 @@ pub fn is_banned_ssh_port(port: u16) -> bool {
 /// Built-in network presets for common workloads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum NetworkPreset {
     /// Full internet access (no filtering). Default for backward compatibility.
     Unrestricted,
@@ -178,6 +180,7 @@ impl fmt::Display for NetworkPreset {
 /// the policy resolves to a non-empty allowlist.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum EgressMode {
     /// No filtering — guest gets full outbound. Implied by an
     /// unrestricted policy.
@@ -225,6 +228,59 @@ impl fmt::Display for EgressMode {
     }
 }
 
+/// AI-specific egress policy attached to a network grant.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct AiPolicy {
+    /// Whether to record AI token usage for this workload.
+    #[serde(default)]
+    pub metering: bool,
+    /// Optional token budget. `None` means no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<AiBudget>,
+}
+
+impl AiPolicy {
+    /// A policy with metering off and no budget.
+    pub fn disabled() -> Self {
+        Self::default()
+    }
+
+    /// A policy with metering on and no budget.
+    pub fn metered() -> Self {
+        Self {
+            metering: true,
+            budget: None,
+        }
+    }
+
+    /// A policy with metering on and a total-token budget.
+    pub fn metered_with_total_budget(max_total_tokens: u64) -> Self {
+        Self {
+            metering: true,
+            budget: Some(AiBudget {
+                max_input_tokens: None,
+                max_output_tokens: None,
+                max_total_tokens: Some(max_total_tokens),
+            }),
+        }
+    }
+}
+
+/// Token budget for AI egress. A `None` field means no limit for that category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct AiBudget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_total_tokens: Option<u64>,
+}
+
 /// Network policy for a microVM, controlling outbound traffic.
 ///
 /// The optional `egress_mode` enrichment is a per-policy override. When
@@ -236,26 +292,72 @@ impl fmt::Display for EgressMode {
 /// consumer to re-thread a separate parameter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum NetworkPolicy {
     /// Use a built-in preset.
     Preset {
         preset: NetworkPreset,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         egress_mode: Option<EgressMode>,
+        /// Optional AI egress metering and budget policy.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ai: Option<AiPolicy>,
+        /// Peer routes this workload may dial.
+        ///
+        /// Carried on the policy rather than beside it because a peer route is
+        /// network policy — where this workload may connect — and because the
+        /// policy is already threaded from the CLI through the signed plan to
+        /// the endpoint that builds the gate. A parallel channel would have to
+        /// be re-threaded through every one of those layers, and a layer that
+        /// forgot it would leave a plan promising a route the runtime denies.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        peers: Vec<crate::peer::PeerBinding>,
     },
     /// Explicit allowlist of host:port pairs.
     AllowList {
         rules: Vec<HostPort>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         egress_mode: Option<EgressMode>,
+        /// Optional AI egress metering and budget policy.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ai: Option<AiPolicy>,
+        /// Peer routes this workload may dial.
+        ///
+        /// Carried on the policy rather than beside it because a peer route is
+        /// network policy — where this workload may connect — and because the
+        /// policy is already threaded from the CLI through the signed plan to
+        /// the endpoint that builds the gate. A parallel channel would have to
+        /// be re-threaded through every one of those layers, and a layer that
+        /// forgot it would leave a plan promising a route the runtime denies.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        peers: Vec<crate::peer::PeerBinding>,
     },
 }
 
 impl NetworkPolicy {
+    /// Peer routes this policy admits. Empty is the default and admits none,
+    /// so east-west inherits claim-10's posture rather than having its own.
+    pub fn peers(&self) -> &[crate::peer::PeerBinding] {
+        match self {
+            Self::Preset { peers, .. } | Self::AllowList { peers, .. } => peers,
+        }
+    }
+
+    /// Attach peer routes, replacing any already present.
+    #[must_use]
+    pub fn with_peers(mut self, new_peers: Vec<crate::peer::PeerBinding>) -> Self {
+        match &mut self {
+            Self::Preset { peers, .. } | Self::AllowList { peers, .. } => *peers = new_peers,
+        }
+        self
+    }
+
     pub fn unrestricted() -> Self {
         Self::Preset {
             preset: NetworkPreset::Unrestricted,
             egress_mode: None,
+            ai: None,
+            peers: Vec::new(),
         }
     }
 
@@ -275,6 +377,8 @@ impl NetworkPolicy {
         Self::Preset {
             preset: NetworkPreset::None,
             egress_mode: None,
+            ai: None,
+            peers: Vec::new(),
         }
     }
 
@@ -282,6 +386,8 @@ impl NetworkPolicy {
         Self::Preset {
             preset,
             egress_mode: None,
+            ai: None,
+            peers: Vec::new(),
         }
     }
 
@@ -292,6 +398,8 @@ impl NetworkPolicy {
         Self::Preset {
             preset,
             egress_mode: Some(mode),
+            ai: None,
+            peers: Vec::new(),
         }
     }
 
@@ -299,6 +407,8 @@ impl NetworkPolicy {
         Self::AllowList {
             rules,
             egress_mode: None,
+            ai: None,
+            peers: Vec::new(),
         }
     }
 
@@ -307,6 +417,52 @@ impl NetworkPolicy {
         Self::AllowList {
             rules,
             egress_mode: Some(mode),
+            ai: None,
+            peers: Vec::new(),
+        }
+    }
+
+    /// Construct a preset policy with an AI metering/budget attachment.
+    pub fn preset_with_ai(preset: NetworkPreset, ai: Option<AiPolicy>) -> Self {
+        Self::Preset {
+            preset,
+            egress_mode: None,
+            ai,
+            peers: Vec::new(),
+        }
+    }
+
+    /// Construct an allow-list policy with an AI metering/budget attachment.
+    pub fn allow_list_with_ai(rules: Vec<HostPort>, ai: Option<AiPolicy>) -> Self {
+        Self::AllowList {
+            rules,
+            egress_mode: None,
+            ai,
+            peers: Vec::new(),
+        }
+    }
+
+    /// Return this policy with the AI attachment replaced.
+    pub fn with_ai(self, ai: Option<AiPolicy>) -> Self {
+        match self {
+            Self::Preset {
+                preset,
+                egress_mode,
+                ..
+            } => Self::Preset {
+                preset,
+                egress_mode,
+                ai,
+                peers: Vec::new(),
+            },
+            Self::AllowList {
+                rules, egress_mode, ..
+            } => Self::AllowList {
+                rules,
+                egress_mode,
+                ai,
+                peers: Vec::new(),
+            },
         }
     }
 
@@ -317,6 +473,14 @@ impl NetworkPolicy {
     pub fn egress_mode(&self) -> Option<EgressMode> {
         match self {
             Self::Preset { egress_mode, .. } | Self::AllowList { egress_mode, .. } => *egress_mode,
+        }
+    }
+
+    /// The AI egress metering/budget policy, if any. `None` means no AI
+    /// metering and no budget.
+    pub fn ai(&self) -> Option<&AiPolicy> {
+        match self {
+            Self::Preset { ai, .. } | Self::AllowList { ai, .. } => ai.as_ref(),
         }
     }
 
@@ -552,6 +716,7 @@ mod tests {
     use alloc::vec;
 
     use super::*;
+    use crate::peer::{PeerBinding, PeerName};
 
     #[test]
     fn host_port_parse() {
@@ -842,6 +1007,25 @@ mod tests {
     }
 
     #[test]
+    fn policy_peers_returns_attached_bindings_for_every_shape() {
+        let peer = PeerBinding {
+            name: PeerName::parse("database.mvm.peer").expect("valid peer name"),
+            port: 5432,
+            host_addr: "127.0.0.1".into(),
+            host_port: 34567,
+        };
+
+        for policy in [
+            NetworkPolicy::deny_all().with_peers(vec![peer.clone()]),
+            NetworkPolicy::allow_list(vec![HostPort::new("example.com", 443)])
+                .with_peers(vec![peer.clone()]),
+        ] {
+            assert_eq!(policy.peers(), core::slice::from_ref(&peer));
+        }
+        assert!(NetworkPolicy::deny_all().peers().is_empty());
+    }
+
+    #[test]
     fn policy_serde_roundtrip_preset() {
         let policy = NetworkPolicy::preset(NetworkPreset::Dev);
         let json = serde_json::to_string(&policy).unwrap();
@@ -1129,5 +1313,55 @@ mod tests {
              consequential single address and a maintainer scanning the \
              list should see it before anything else"
         );
+    }
+
+    #[test]
+    fn ai_policy_roundtrips_through_json() {
+        let policy = AiPolicy {
+            metering: true,
+            budget: Some(AiBudget {
+                max_input_tokens: Some(100),
+                max_output_tokens: Some(200),
+                max_total_tokens: Some(300),
+            }),
+        };
+        let json = serde_json::to_string(&policy).unwrap();
+        let back: AiPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(policy, back);
+    }
+
+    #[test]
+    fn ai_policy_constructors_preserve_metering_intent() {
+        assert_eq!(AiPolicy::disabled(), AiPolicy::default());
+
+        let policy = AiPolicy::metered();
+        assert!(policy.metering);
+        assert_eq!(policy.budget, None);
+        assert_ne!(policy, AiPolicy::default());
+    }
+
+    #[test]
+    fn network_policy_with_ai_roundtrips() {
+        let policy = NetworkPolicy::AllowList {
+            rules: vec![HostPort::new("api.openai.com", 443)],
+            egress_mode: None,
+            ai: Some(AiPolicy::metered_with_total_budget(1_000_000)),
+            peers: Vec::new(),
+        };
+        let json = serde_json::to_string(&policy).unwrap();
+        let back: NetworkPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(policy, back);
+        assert!(back.ai().is_some());
+        assert!(back.ai().unwrap().metering);
+        assert_eq!(
+            back.ai().unwrap().budget.unwrap().max_total_tokens,
+            Some(1_000_000)
+        );
+    }
+
+    #[test]
+    fn network_policy_default_has_no_ai() {
+        let policy = NetworkPolicy::deny_all();
+        assert!(policy.ai().is_none());
     }
 }

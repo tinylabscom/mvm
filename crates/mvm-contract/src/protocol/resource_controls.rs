@@ -90,10 +90,12 @@ impl ResourceControls {
                 },
                 wall_clock: WallClockControl::SupervisorTimer,
             },
-            // A cgroup can bound any Linux process, so on Linux these tiers
-            // carry a real CPU quota. Their wall clock is a different story:
-            // the VMM is a bare child of a `mvmctl` that exits at launch, so
-            // there is no process of ours left to hold a deadline. Answering
+            // A cgroup can bound any Linux process — including one we never
+            // forked — so on Linux these tiers carry a real CPU quota. Their
+            // wall clock is a different story: neither VMM is a child of ours
+            // at all. Firecracker detaches its session and is orphaned to init
+            // before the launch returns, and qemu daemonizes itself, so there
+            // is no process of ours left to hold a deadline. Answering
             // `SupervisorTimer` here would be the same overstatement the macOS
             // CPU arm below exists to avoid — a bound accepted at admission and
             // enforced by nothing.
@@ -129,6 +131,14 @@ impl ResourceControls {
                 cpu: CpuControl::None,
                 wall_clock: WallClockControl::None,
             },
+            // Browser-hosted software emulation. CPU and wall-clock bounds are
+            // declared in the plan but cannot be enforced by the host OS; the
+            // browser runtime refuses rather than claiming an unenforceable
+            // control.
+            BackendKind::WebLinux => Self {
+                cpu: CpuControl::None,
+                wall_clock: WallClockControl::None,
+            },
         }
     }
 }
@@ -141,6 +151,214 @@ impl Default for ResourceControls {
             wall_clock: WallClockControl::None,
         }
     }
+}
+
+/// How a backend observes CPU consumption, if it can.
+///
+/// These do not measure the same quantity, which is why the choice is named
+/// rather than reduced to a boolean: guest vCPU time excludes the host-side
+/// device emulation that a process total includes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CpuObservation {
+    /// Nothing about CPU can be measured on this tier.
+    None,
+    /// Summed Mach clocks of every vCPU thread: guest execution only.
+    HvfSummedVcpuClock,
+    /// The in-process VMM's own process CPU time: guest plus VMM overhead.
+    HostProcessCpu,
+}
+
+impl CpuObservation {
+    /// The mechanism a capture site uses on a backend carrying this
+    /// observation, or `None` where there is nothing to measure.
+    #[must_use]
+    pub const fn mechanism(self) -> Option<Mechanism> {
+        match self {
+            Self::None => None,
+            Self::HvfSummedVcpuClock => Some(Mechanism::HvfSummedVcpuClock),
+            Self::HostProcessCpu => Some(Mechanism::HostProcessCpu),
+        }
+    }
+}
+
+/// How a backend observes resident memory, if it can.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryObservation {
+    /// Nothing about resident memory can be measured on this tier.
+    None,
+    /// The kernel-kept resident high-water mark of the VMM process.
+    HostProcessRss,
+}
+
+impl MemoryObservation {
+    /// The mechanism a capture site uses on a backend carrying this
+    /// observation, or `None` where there is nothing to measure.
+    #[must_use]
+    pub const fn mechanism(self) -> Option<Mechanism> {
+        match self {
+            Self::None => None,
+            Self::HostProcessRss => Some(Mechanism::HostProcessRss),
+        }
+    }
+}
+
+/// How a backend observes host-side state growth.
+///
+/// There is no `None`, for the same reason [`WallObservation`] has none: every
+/// run the host launches, it launches out of a state directory on its own
+/// disk, and reading that directory's size needs no cooperation from the VMM.
+/// A variant meaning "unobservable" would be declared by no backend, and would
+/// let the matrix disagree with a capture site that measures unconditionally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostStateObservation {
+    /// Byte total of the VM state directory tree.
+    StateDirTreeBytes,
+}
+
+impl HostStateObservation {
+    /// The mechanism a capture site uses. Unconditional, because the host can
+    /// measure its own state directory on every tier.
+    #[must_use]
+    pub const fn mechanism(self) -> Mechanism {
+        match self {
+            Self::StateDirTreeBytes => Mechanism::StateDirTreeBytes,
+        }
+    }
+}
+
+/// How a backend observes wall-clock span.
+///
+/// There is no `None`: the span is the host's own observation of the run and
+/// needs no cooperation from the backend. Distinct from the supervisor's
+/// wall-clock *timer*, which bounds a run and is a control, not an
+/// observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WallObservation {
+    /// The host's own observation of the span from launch to teardown.
+    HostLaunchSpan,
+}
+
+impl WallObservation {
+    /// The mechanism a capture site uses. Unconditional, because every tier
+    /// can be timed by the host that launched it.
+    #[must_use]
+    pub const fn mechanism(self) -> Mechanism {
+        match self {
+            Self::HostLaunchSpan => Mechanism::HostLaunchSpan,
+        }
+    }
+}
+
+/// What one backend can honestly report about a finished run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceObservation {
+    pub cpu: CpuObservation,
+    pub memory: MemoryObservation,
+    pub host_state: HostStateObservation,
+    pub wall: WallObservation,
+}
+
+impl ResourceObservation {
+    /// What each backend can observe. Exhaustive on purpose, for the same
+    /// reason [`ResourceControls::for_backend`] is: a new `BackendKind` must
+    /// answer this rather than inherit an answer nobody chose for it.
+    ///
+    /// Observation is a different question from control. A tier that can bound
+    /// nothing may still have a resident process to measure, and a tier that
+    /// bounds CPU only under a grant can measure it without one.
+    #[must_use]
+    pub const fn for_backend(kind: BackendKind) -> Self {
+        match kind {
+            // The vCPU threads are ours and their Mach clocks are readable
+            // without a quota controller, so CPU here is measurable whether or
+            // not a share was granted. AppleContainer is this same tier with a
+            // substituted kernel image.
+            BackendKind::Hvf | BackendKind::AppleContainer => Self {
+                cpu: if cfg!(target_os = "macos") {
+                    CpuObservation::HvfSummedVcpuClock
+                } else {
+                    CpuObservation::None
+                },
+                memory: MemoryObservation::HostProcessRss,
+                host_state: HostStateObservation::StateDirTreeBytes,
+                wall: WallObservation::HostLaunchSpan,
+            },
+            // The VMM runs inside our own supervisor process, so its CPU is
+            // this process's CPU — measurable with no cgroup, no session bus,
+            // and no grant.
+            BackendKind::Libkrun => Self {
+                cpu: CpuObservation::HostProcessCpu,
+                memory: MemoryObservation::HostProcessRss,
+                host_state: HostStateObservation::StateDirTreeBytes,
+                wall: WallObservation::HostLaunchSpan,
+            },
+            // Neither VMM is a child of ours. Firecracker is launched
+            // session-detached and orphaned to init before the launch call
+            // returns, and usually runs as root while `mvmctl` does not; qemu
+            // daemonizes itself, so the process the launch reaps is not the one
+            // that ends up running the guest. Both are followed by pid through
+            // a process-exit observer rather than by a wait, which is exactly
+            // why the teardown path is written around an observer. There is no
+            // rusage to collect from a process we never reap, and no process of
+            // ours whose resident size says anything about the guest.
+            BackendKind::Firecracker | BackendKind::Qemu => Self {
+                cpu: CpuObservation::None,
+                memory: MemoryObservation::None,
+                host_state: HostStateObservation::StateDirTreeBytes,
+                wall: WallObservation::HostLaunchSpan,
+            },
+            // Wasm's fuel counter is declared and unwired, so a fuel-derived
+            // CPU number would assert a measurement that does not happen, and
+            // the module runs in-process with no separate VMM to hold a
+            // resident size. It does keep a host-side state directory,
+            // though: `start_with_mode` unconditionally writes
+            // `wasm-activation/activation.json` under `vm_state_dir`, and
+            // that directory outlives the synchronous run (only the
+            // egress-endpoint subdirectory, when spawned, is reaped inline),
+            // so a tree-size reading at exit observes something real.
+            BackendKind::Wasm => Self {
+                cpu: CpuObservation::None,
+                memory: MemoryObservation::None,
+                host_state: HostStateObservation::StateDirTreeBytes,
+                wall: WallObservation::HostLaunchSpan,
+            },
+            // WebLinux runs in a browser and Mock boots nothing, so neither
+            // has a host VMM process whose CPU or resident size says anything
+            // about a guest. The two dimensions the host takes for itself do
+            // still hold: every run is launched out of a state directory on
+            // our disk, whose tree size reads without any cooperation from the
+            // tier, and every run is timed on our clock.
+            BackendKind::WebLinux | BackendKind::Mock => Self {
+                cpu: CpuObservation::None,
+                memory: MemoryObservation::None,
+                host_state: HostStateObservation::StateDirTreeBytes,
+                wall: WallObservation::HostLaunchSpan,
+            },
+        }
+    }
+}
+
+/// How a measured value was observed. Named on every measurement because the
+/// mechanisms do not measure the same quantity: guest vCPU time excludes the
+/// host-side device emulation that a process total includes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mechanism {
+    /// Summed Mach clocks of every vCPU thread: guest execution only.
+    HvfSummedVcpuClock,
+    /// CPU time of the in-process VMM's own process: guest plus VMM overhead.
+    HostProcessCpu,
+    /// Kernel-kept resident high-water mark of the VMM process.
+    HostProcessRss,
+    /// Byte total of the VM state directory tree.
+    StateDirTreeBytes,
+    /// The host's own observation of the span from launch to teardown.
+    HostLaunchSpan,
 }
 
 /// What actually bounded one dimension. Constructed from a read-back of the
@@ -218,6 +436,7 @@ mod tests {
             BackendKind::Mock,
             BackendKind::Hvf,
             BackendKind::Wasm,
+            BackendKind::WebLinux,
             BackendKind::AppleContainer,
         ] {
             let _ = ResourceControls::for_backend(kind);
@@ -253,9 +472,9 @@ mod tests {
     /// Only a tier with a per-VM supervisor process of ours may claim a
     /// supervisor timer. A timer needs two things: a process that outlives the
     /// CLI, and the admitted plan to read a bound from. On the remaining VMM
-    /// tiers the VMM is a bare child of an `mvmctl` that has already exited —
-    /// so the answer there is `None`, not a bound that would be admitted and
-    /// never fire.
+    /// tiers the VMM is not a process of ours at all — it detaches or
+    /// daemonizes itself away from the launching `mvmctl` — so the answer there
+    /// is `None`, not a bound that would be admitted and never fire.
     #[test]
     fn only_a_tier_with_a_live_supervisor_claims_a_supervisor_timer() {
         for kind in [
@@ -347,5 +566,290 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn hvf_observes_guest_vcpu_time_rather_than_a_process_total() {
+        let observation = ResourceObservation::for_backend(BackendKind::Hvf);
+        if cfg!(target_os = "macos") {
+            assert_eq!(observation.cpu, CpuObservation::HvfSummedVcpuClock);
+        } else {
+            assert_eq!(observation.cpu, CpuObservation::None);
+        }
+    }
+
+    #[test]
+    fn apple_container_observes_exactly_what_hvf_does() {
+        // It is the HVF tier with a substituted kernel image, so a divergence
+        // here would be a claim about a difference that does not exist.
+        assert_eq!(
+            ResourceObservation::for_backend(BackendKind::AppleContainer),
+            ResourceObservation::for_backend(BackendKind::Hvf)
+        );
+    }
+
+    #[test]
+    fn a_cpu_bound_a_backend_can_apply_does_not_mean_it_can_observe_one() {
+        // The distinction the whole matrix exists for: a control is not an
+        // observation, and neither direction implies the other.
+        //
+        // A cgroup bounds any process on Linux, including one we never forked,
+        // so Firecracker carries a real CPU quota there — and still observes no
+        // CPU, because a usage reading needs a process we reaped and that VMM
+        // detaches before the launch returns.
+        let firecracker_controls = ResourceControls::for_backend(BackendKind::Firecracker);
+        let firecracker = ResourceObservation::for_backend(BackendKind::Firecracker);
+        if cfg!(target_os = "linux") {
+            assert_eq!(firecracker_controls.cpu, CpuControl::CgroupShare);
+        }
+        assert_eq!(firecracker.cpu, CpuObservation::None);
+
+        // The other direction, on libkrun: off Linux there is no cgroup to
+        // bound it with, and its CPU is still measurable — the VMM runs inside
+        // our own supervisor process, whose usage reads without any quota
+        // controller.
+        let libkrun_controls = ResourceControls::for_backend(BackendKind::Libkrun);
+        let libkrun = ResourceObservation::for_backend(BackendKind::Libkrun);
+        if !cfg!(target_os = "linux") {
+            assert_eq!(libkrun_controls.cpu, CpuControl::None);
+        }
+        assert_eq!(libkrun.cpu, CpuObservation::HostProcessCpu);
+    }
+
+    #[test]
+    fn a_backend_whose_vmm_is_not_our_child_observes_neither_cpu_nor_memory() {
+        // Firecracker launches session-detached and orphaned to init; qemu
+        // daemonizes itself. Neither is ever reaped, so there is no rusage, and
+        // the resident size of this process describes this process rather than
+        // the guest. Pinned because the alternative is a declaration nobody can
+        // honour: the capture site would have to fabricate a measurement or
+        // silently write nothing while the matrix promised a number.
+        for kind in [BackendKind::Firecracker, BackendKind::Qemu] {
+            let observation = ResourceObservation::for_backend(kind);
+            assert_eq!(observation.cpu, CpuObservation::None, "{kind:?}");
+            assert_eq!(observation.memory, MemoryObservation::None, "{kind:?}");
+            // The two the host takes for itself still hold: the state directory
+            // is on our disk and the launch span is on our clock.
+            assert_eq!(
+                observation.host_state,
+                HostStateObservation::StateDirTreeBytes,
+                "{kind:?}"
+            );
+            assert_eq!(
+                observation.wall,
+                WallObservation::HostLaunchSpan,
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_non_vm_tiers_observe_no_guest_process_only_what_the_host_owns() {
+        // The point being pinned is that these two tiers have no host VMM
+        // process: WebLinux runs in a browser and Mock boots nothing, so a CPU
+        // or resident-size reading would describe `mvmctl` rather than a
+        // guest. It is not a claim that nothing at all is observable — the
+        // state directory is the host's own and the span is on the host's own
+        // clock, and `report_exit` measures both on every tier without asking
+        // the backend for anything.
+        for kind in [BackendKind::WebLinux, BackendKind::Mock] {
+            let observation = ResourceObservation::for_backend(kind);
+            assert_eq!(observation.cpu, CpuObservation::None, "{kind:?}");
+            assert_eq!(observation.memory, MemoryObservation::None, "{kind:?}");
+            assert_eq!(
+                observation.host_state,
+                HostStateObservation::StateDirTreeBytes,
+                "{kind:?}"
+            );
+            assert_eq!(
+                observation.wall,
+                WallObservation::HostLaunchSpan,
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_backend_observes_its_host_state_directory() {
+        // The host measures its own disk without cooperation from the tier, so
+        // — like the wall span — there is no backend for which this dimension
+        // is unobservable. Pinned as a matrix-wide property because
+        // `report_exit` assigns it unconditionally, and a `None` cell here
+        // would be a matrix that disagrees with the capture site.
+        for kind in [
+            BackendKind::Firecracker,
+            BackendKind::Libkrun,
+            BackendKind::Qemu,
+            BackendKind::Mock,
+            BackendKind::Hvf,
+            BackendKind::Wasm,
+            BackendKind::WebLinux,
+            BackendKind::AppleContainer,
+        ] {
+            assert_eq!(
+                ResourceObservation::for_backend(kind).host_state,
+                HostStateObservation::StateDirTreeBytes,
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_wasm_tier_observes_its_activation_state_directory() {
+        // `WasmBackend::start_with_mode` unconditionally writes
+        // `wasm-activation/activation.json` under `vm_state_dir` before
+        // running the module, and that directory is not cleaned up when the
+        // synchronous run finishes — only a spawned egress endpoint's own
+        // subdirectory is reaped inline. So unlike CPU and memory, which have
+        // no in-process VMM to observe, the state directory is real and
+        // measurable.
+        let observation = ResourceObservation::for_backend(BackendKind::Wasm);
+        assert_eq!(observation.cpu, CpuObservation::None);
+        assert_eq!(observation.memory, MemoryObservation::None);
+        assert_eq!(
+            observation.host_state,
+            HostStateObservation::StateDirTreeBytes
+        );
+        assert_eq!(observation.wall, WallObservation::HostLaunchSpan);
+    }
+
+    #[test]
+    fn every_backend_observes_the_wall_span_because_it_needs_no_cooperation() {
+        for kind in [
+            BackendKind::Firecracker,
+            BackendKind::Libkrun,
+            BackendKind::Qemu,
+            BackendKind::Mock,
+            BackendKind::Hvf,
+            BackendKind::Wasm,
+            BackendKind::WebLinux,
+            BackendKind::AppleContainer,
+        ] {
+            assert_eq!(
+                ResourceObservation::for_backend(kind).wall,
+                WallObservation::HostLaunchSpan
+            );
+        }
+    }
+
+    #[test]
+    fn every_observation_maps_to_a_distinct_mechanism() {
+        // The observation enums deliberately mirror `Mechanism`'s vocabulary.
+        // Mapping every measurable variant into that one vocabulary, and
+        // requiring the mapping to be injective, is what catches a variant
+        // added to one enum and not the other: without it the two would drift
+        // into carrying duplicate wire strings for different quantities.
+        let mapped = [
+            CpuObservation::HvfSummedVcpuClock.mechanism(),
+            CpuObservation::HostProcessCpu.mechanism(),
+            MemoryObservation::HostProcessRss.mechanism(),
+            Some(HostStateObservation::StateDirTreeBytes.mechanism()),
+            Some(WallObservation::HostLaunchSpan.mechanism()),
+        ];
+        for (i, a) in mapped.iter().enumerate() {
+            assert!(
+                a.is_some(),
+                "a measurable observation must name a mechanism"
+            );
+            for (j, b) in mapped.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b, "two observations claim the same mechanism");
+                }
+            }
+        }
+        assert_eq!(CpuObservation::None.mechanism(), None);
+        assert_eq!(MemoryObservation::None.mechanism(), None);
+    }
+
+    #[test]
+    fn an_observation_round_trips_through_its_wire_form() {
+        // These names end up inside a signed receipt, so a rename that
+        // survives compilation still breaks every verifier that already
+        // parsed the old spelling.
+        let observation = ResourceObservation::for_backend(BackendKind::Libkrun);
+        let json = serde_json::to_string(&observation).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"cpu":"host_process_cpu","memory":"host_process_rss","host_state":"state_dir_tree_bytes","wall":"host_launch_span"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<ResourceObservation>(&json).expect("deserialize"),
+            observation
+        );
+    }
+
+    #[test]
+    fn an_observation_carrying_an_unknown_field_is_refused() {
+        // `deny_unknown_fields` is what stops a future dimension from being
+        // silently dropped by an older reader that then attests the rest as
+        // complete.
+        let err = serde_json::from_str::<ResourceObservation>(
+            r#"{"cpu":"none","memory":"none","host_state":"state_dir_tree_bytes","wall":"host_launch_span","gpu":"none"}"#,
+        );
+        assert!(err.is_err(), "an unknown observation field must not parse");
+    }
+
+    #[test]
+    fn every_observation_variant_round_trips_through_its_wire_string() {
+        for cpu in [
+            CpuObservation::None,
+            CpuObservation::HvfSummedVcpuClock,
+            CpuObservation::HostProcessCpu,
+        ] {
+            let json = serde_json::to_string(&cpu).expect("serialize");
+            assert_eq!(
+                serde_json::from_str::<CpuObservation>(&json).expect("deserialize"),
+                cpu
+            );
+        }
+        for memory in [MemoryObservation::None, MemoryObservation::HostProcessRss] {
+            let json = serde_json::to_string(&memory).expect("serialize");
+            assert_eq!(
+                serde_json::from_str::<MemoryObservation>(&json).expect("deserialize"),
+                memory
+            );
+        }
+        let host_state =
+            serde_json::to_string(&HostStateObservation::StateDirTreeBytes).expect("serialize");
+        assert_eq!(host_state, r#""state_dir_tree_bytes""#);
+        assert_eq!(
+            serde_json::from_str::<HostStateObservation>(&host_state).expect("deserialize"),
+            HostStateObservation::StateDirTreeBytes
+        );
+        let wall = serde_json::to_string(&WallObservation::HostLaunchSpan).expect("serialize");
+        assert_eq!(wall, r#""host_launch_span""#);
+        assert_eq!(
+            serde_json::from_str::<WallObservation>(&wall).expect("deserialize"),
+            WallObservation::HostLaunchSpan
+        );
+    }
+
+    #[test]
+    fn every_mechanism_round_trips_through_its_wire_string() {
+        for (mechanism, wire) in [
+            (Mechanism::HvfSummedVcpuClock, r#""hvf_summed_vcpu_clock""#),
+            (Mechanism::HostProcessCpu, r#""host_process_cpu""#),
+            (Mechanism::HostProcessRss, r#""host_process_rss""#),
+            (Mechanism::StateDirTreeBytes, r#""state_dir_tree_bytes""#),
+            (Mechanism::HostLaunchSpan, r#""host_launch_span""#),
+        ] {
+            assert_eq!(serde_json::to_string(&mechanism).expect("serialize"), wire);
+            assert_eq!(
+                serde_json::from_str::<Mechanism>(wire).expect("deserialize"),
+                mechanism
+            );
+        }
+    }
+
+    #[test]
+    fn the_default_controls_enforce_nothing_and_round_trip() {
+        let default = ResourceControls::default();
+        assert_eq!(default.cpu, CpuControl::None);
+        assert_eq!(default.wall_clock, WallClockControl::None);
+        let json = serde_json::to_string(&default).expect("serialize");
+        assert_eq!(
+            serde_json::from_str::<ResourceControls>(&json).expect("deserialize"),
+            default
+        );
     }
 }

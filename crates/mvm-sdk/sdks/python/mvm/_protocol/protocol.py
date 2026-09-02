@@ -23,6 +23,9 @@ class AgentProfile3(Enum):
 AgentProfile = Union[AgentProfile1, AgentProfile2, AgentProfile3]
 
 
+AssuranceId = str
+
+
 class BackpressureReason1(Enum):
     guest_agent_unavailable = 'guest_agent_unavailable'
 
@@ -72,6 +75,9 @@ class BootTimingReport:
     probes_ready_ms: Optional[int] = None
     vsock_bound_ms: Optional[int] = None
     warm_pool_ready_ms: Optional[int] = None
+
+
+DescriptorDigestItem = int
 
 
 @dataclass
@@ -177,6 +183,29 @@ class ExecOutcomeWire:
     stderr: List[int]
     stdout: List[int]
     peak_rss_kib: Optional[int] = None
+
+
+@dataclass
+class ExtensionBudgets:
+    cpu_millis: int
+    duration_ms: int
+    max_artifact_bytes: int
+    max_concurrency: int
+    max_output_bytes: int
+    max_payload_bytes: int
+    max_steps: int
+    memory_bytes: int
+
+
+ContractDigestItem = int
+
+
+PackDigestItem = int
+
+
+class ExtensionPlacement(Enum):
+    guest_workload = 'guest_workload'
+    isolated_controller = 'isolated_controller'
 
 
 class FsChangeKind(Enum):
@@ -311,6 +340,7 @@ class GuestCapability1(Enum):
     integration_status = 'integration_status'
     entrypoint_status = 'entrypoint_status'
     run_entrypoint = 'run_entrypoint'
+    run_extension = 'run_extension'
     filesystem_rpc = 'filesystem_rpc'
     process_rpc = 'process_rpc'
     console = 'console'
@@ -422,25 +452,15 @@ class RunDetached:
 
 
 @dataclass
-class GuestRequest15:
+class GuestRequest17:
     RunDetached: RunDetached
 
 
 TokenItem = int
 
 
-class GuestRequest17(Enum):
+class GuestRequest19(Enum):
     FsDiff = 'FsDiff'
-
-
-@dataclass
-class StartPortForward:
-    guest_port: int
-
-
-@dataclass
-class GuestRequest18:
-    StartPortForward: StartPortForward
 
 
 @dataclass
@@ -451,7 +471,7 @@ class StartUnixSocketForward:
 
 
 @dataclass
-class GuestRequest19:
+class GuestRequest20:
     StartUnixSocketForward: StartUnixSocketForward
 
 
@@ -464,7 +484,7 @@ class ConsoleOpen:
 
 
 @dataclass
-class GuestRequest20:
+class GuestRequest21:
     ConsoleOpen: ConsoleOpen
 
 
@@ -474,7 +494,7 @@ class ConsoleClose:
 
 
 @dataclass
-class GuestRequest21:
+class GuestRequest22:
     ConsoleClose: ConsoleClose
 
 
@@ -486,15 +506,15 @@ class ConsoleResize:
 
 
 @dataclass
-class GuestRequest22:
+class GuestRequest23:
     ConsoleResize: ConsoleResize
 
 
-class GuestRequest23(Enum):
+class GuestRequest24(Enum):
     EntrypointStatus = 'EntrypointStatus'
 
 
-class GuestRequest24(Enum):
+class GuestRequest25(Enum):
     ReadinessStatus = 'ReadinessStatus'
 
 
@@ -507,7 +527,7 @@ class FsRead:
 
 
 @dataclass
-class GuestRequest25:
+class GuestRequest26:
     FsRead: FsRead
 
 
@@ -523,7 +543,7 @@ class FsWrite:
 
 
 @dataclass
-class GuestRequest26:
+class GuestRequest27:
     FsWrite: FsWrite
 
 
@@ -534,7 +554,7 @@ class FsList:
 
 
 @dataclass
-class GuestRequest27:
+class GuestRequest28:
     FsList: FsList
 
 
@@ -545,7 +565,7 @@ class FsStat1:
 
 
 @dataclass
-class GuestRequest28:
+class GuestRequest29:
     FsStat: FsStat1
 
 
@@ -557,7 +577,7 @@ class FsMkdir:
 
 
 @dataclass
-class GuestRequest29:
+class GuestRequest30:
     FsMkdir: FsMkdir
 
 
@@ -569,7 +589,7 @@ class FsRemove:
 
 
 @dataclass
-class GuestRequest30:
+class GuestRequest31:
     FsRemove: FsRemove
 
 
@@ -581,7 +601,7 @@ class FsMove:
 
 
 @dataclass
-class GuestRequest31:
+class GuestRequest32:
     FsMove: FsMove
 
 
@@ -595,11 +615,11 @@ class ProcStart:
 
 
 @dataclass
-class GuestRequest32:
+class GuestRequest33:
     ProcStart: ProcStart
 
 
-class GuestRequest33(Enum):
+class GuestRequest34(Enum):
     ProcList = 'ProcList'
 
 
@@ -610,7 +630,7 @@ class ProcSignal:
 
 
 @dataclass
-class GuestRequest34:
+class GuestRequest35:
     ProcSignal: ProcSignal
 
 
@@ -621,7 +641,7 @@ class ProcSendInput:
 
 
 @dataclass
-class GuestRequest35:
+class GuestRequest36:
     ProcSendInput: ProcSendInput
 
 
@@ -632,7 +652,7 @@ class ProcWait:
 
 
 @dataclass
-class GuestRequest36:
+class GuestRequest37:
     ProcWait: ProcWait
 
 
@@ -642,7 +662,7 @@ class ProcKill:
 
 
 @dataclass
-class GuestRequest37:
+class GuestRequest38:
     ProcKill: ProcKill
 
 
@@ -654,7 +674,7 @@ class MountVolume:
 
 
 @dataclass
-class GuestRequest38:
+class GuestRequest39:
     MountVolume: MountVolume
 
 
@@ -665,7 +685,7 @@ class UnmountVolume:
 
 
 @dataclass
-class GuestRequest39:
+class GuestRequest40:
     UnmountVolume: UnmountVolume
 
 
@@ -675,7 +695,7 @@ class UpdateIdleTimeout:
 
 
 @dataclass
-class GuestRequest40:
+class GuestRequest41:
     UpdateIdleTimeout: UpdateIdleTimeout
 
 
@@ -686,12 +706,12 @@ class RunCode:
 
 
 @dataclass
-class GuestRequest41:
+class GuestRequest42:
     RunCode: RunCode
 
 
 @dataclass
-class GuestRequest43:
+class GuestRequest44:
     CloseStreamInput: CloseInput
 
 
@@ -836,8 +856,12 @@ class GuestResponse18:
     PrimedStatusReport: PrimedStatusReport
 
 
+class GuestResponse20(Enum):
+    ExtensionCancellationAck = 'ExtensionCancellationAck'
+
+
 @dataclass
-class GuestResponse20:
+class GuestResponse21:
     ExecEvent: ExecEvent
 
 
@@ -847,7 +871,7 @@ class ExecBatchResult:
 
 
 @dataclass
-class GuestResponse21:
+class GuestResponse22:
     ExecBatchResult: ExecBatchResult
 
 
@@ -857,7 +881,7 @@ class DetachedStarted:
 
 
 @dataclass
-class GuestResponse22:
+class GuestResponse23:
     DetachedStarted: DetachedStarted
 
 
@@ -870,19 +894,8 @@ class PostRestoreAck:
 
 
 @dataclass
-class GuestResponse23:
+class GuestResponse24:
     PostRestoreAck: PostRestoreAck
-
-
-@dataclass
-class PortForwardStarted:
-    guest_port: int
-    vsock_port: int
-
-
-@dataclass
-class GuestResponse25:
-    PortForwardStarted: PortForwardStarted
 
 
 @dataclass
@@ -1207,26 +1220,30 @@ class RunEntrypointError2(Enum):
 
 
 class RunEntrypointError3(Enum):
-    Busy = 'Busy'
+    Canceled = 'Canceled'
 
 
 class RunEntrypointError4(Enum):
-    WrapperCrashed = 'WrapperCrashed'
+    Busy = 'Busy'
 
 
 class RunEntrypointError5(Enum):
-    NotReady = 'NotReady'
+    WrapperCrashed = 'WrapperCrashed'
 
 
 class RunEntrypointError6(Enum):
-    EntrypointInvalid = 'EntrypointInvalid'
+    NotReady = 'NotReady'
 
 
 class RunEntrypointError7(Enum):
-    SessionKilled = 'SessionKilled'
+    EntrypointInvalid = 'EntrypointInvalid'
 
 
 class RunEntrypointError8(Enum):
+    SessionKilled = 'SessionKilled'
+
+
+class RunEntrypointError9(Enum):
     InternalError = 'InternalError'
 
 
@@ -1239,6 +1256,7 @@ RunEntrypointError = Union[
     RunEntrypointError6,
     RunEntrypointError7,
     RunEntrypointError8,
+    RunEntrypointError9,
 ]
 
 
@@ -1247,6 +1265,12 @@ class RuntimeOverlayConfig:
     data_dev: str
     hash_dev: str
     roothash: str
+
+
+ServiceId = str
+
+
+Sha256Digest = str
 
 
 @dataclass
@@ -1387,6 +1411,12 @@ VolumeMountResult = Union[VolumeMountResult1, VolumeMountResult2, VolumeMountRes
 
 
 @dataclass
+class CapabilityId:
+    service: ServiceId
+    verb: str
+
+
+@dataclass
 class Error:
     kind: RunEntrypointError
     message: str
@@ -1404,6 +1434,37 @@ EntrypointEvent = Union[
     EntrypointEvent4,
     EntrypointEvent5,
 ]
+
+
+@dataclass
+class ExtensionCancellation:
+    campaign_id: AssuranceId
+    contract_digest: List[ContractDigestItem]
+    extension_id: str
+    grant_digest: Sha256Digest
+    idempotency_key: AssuranceId
+    nonce: AssuranceId
+    pack_digest: List[PackDigestItem]
+    plan_id: AssuranceId
+    request_id: AssuranceId
+    session_id: AssuranceId
+    trial_id: AssuranceId
+
+
+@dataclass
+class ExtensionDispatch:
+    campaign_id: AssuranceId
+    contract_digest: List[ContractDigestItem]
+    extension_id: str
+    grant_digest: Sha256Digest
+    idempotency_key: AssuranceId
+    input: List[int]
+    nonce: AssuranceId
+    pack_digest: List[PackDigestItem]
+    plan_id: AssuranceId
+    request_id: AssuranceId
+    session_id: AssuranceId
+    trial_id: AssuranceId
 
 
 @dataclass
@@ -1461,7 +1522,27 @@ class GuestRequest13:
 
 
 @dataclass
-class GuestRequest42:
+class RunExtension:
+    dispatch: ExtensionDispatch
+
+
+@dataclass
+class GuestRequest15:
+    RunExtension: RunExtension
+
+
+@dataclass
+class CancelExtension:
+    cancellation: ExtensionCancellation
+
+
+@dataclass
+class GuestRequest16:
+    CancelExtension: CancelExtension
+
+
+@dataclass
+class GuestRequest43:
     StreamInput: InputFrame
 
 
@@ -1499,7 +1580,7 @@ class FsDiffResult:
 
 
 @dataclass
-class GuestResponse24:
+class GuestResponse25:
     FsDiffResult: FsDiffResult
 
 
@@ -1584,81 +1665,42 @@ class VolumeConfig:
     tag: str
     device: Optional[str] = None
     kind: Optional[VolumeConfigKind] = 'virtio_fs'
+    label: Optional[str] = None
     read_only: Optional[bool] = False
 
 
 @dataclass
-class ActivateEnvironment:
-    rootfs: RootfsConfig
-    runtime: Optional[RuntimeOverlayConfig] = None
-    verb_grant_envelope: Optional[VerbGrantEnvelope] = None
-    volumes: Optional[List[VolumeConfig]] = field(default_factory=lambda: [])
+class CapabilityBinding:
+    capability: CapabilityId
+    descriptor_digest: List[DescriptorDigestItem]
 
 
 @dataclass
-class GuestRequest1:
-    ActivateEnvironment: ActivateEnvironment
+class ExtensionPlanBinding:
+    artifact: str
+    budgets: ExtensionBudgets
+    capabilities: List[CapabilityBinding]
+    contract_digest: List[ContractDigestItem]
+    entrypoint: str
+    extension_id: str
+    pack_digest: List[PackDigestItem]
+    placement: ExtensionPlacement
+    version: str
 
 
 @dataclass
 class PostRestore:
     grant_envelope: Optional[VerbGrantEnvelope] = None
     host_epoch_secs: Optional[int] = None
+    hostname: Optional[str] = None
     token: Optional[List[TokenItem]] = field(
         default_factory=lambda: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     )
 
 
 @dataclass
-class GuestRequest16:
+class GuestRequest18:
     PostRestore: PostRestore
-
-
-GuestRequest = Union[
-    GuestRequest1,
-    GuestRequest2,
-    GuestRequest3,
-    GuestRequest4,
-    GuestRequest5,
-    GuestRequest6,
-    GuestRequest7,
-    GuestRequest8,
-    GuestRequest9,
-    GuestRequest10,
-    GuestRequest11,
-    GuestRequest12,
-    GuestRequest13,
-    GuestRequest14,
-    GuestRequest15,
-    GuestRequest16,
-    GuestRequest17,
-    GuestRequest18,
-    GuestRequest19,
-    GuestRequest20,
-    GuestRequest21,
-    GuestRequest22,
-    GuestRequest23,
-    GuestRequest24,
-    GuestRequest25,
-    GuestRequest26,
-    GuestRequest27,
-    GuestRequest28,
-    GuestRequest29,
-    GuestRequest30,
-    GuestRequest31,
-    GuestRequest32,
-    GuestRequest33,
-    GuestRequest34,
-    GuestRequest35,
-    GuestRequest36,
-    GuestRequest37,
-    GuestRequest38,
-    GuestRequest39,
-    GuestRequest40,
-    GuestRequest41,
-    GuestRequest42,
-    GuestRequest43,
-]
 
 
 @dataclass
@@ -1714,6 +1756,76 @@ GuestResponse = Union[
     GuestResponse35,
     GuestResponse36,
     GuestResponse37,
+]
+
+
+@dataclass
+class ExtensionConfig:
+    binding: ExtensionPlanBinding
+    device: str
+    mountpoint: str
+    plan_id: AssuranceId
+
+
+@dataclass
+class ActivateEnvironment:
+    rootfs: RootfsConfig
+    extensions: Optional[List[ExtensionConfig]] = field(default_factory=lambda: [])
+    runtime: Optional[RuntimeOverlayConfig] = None
+    verb_grant_envelope: Optional[VerbGrantEnvelope] = None
+    volumes: Optional[List[VolumeConfig]] = field(default_factory=lambda: [])
+
+
+@dataclass
+class GuestRequest1:
+    ActivateEnvironment: ActivateEnvironment
+
+
+GuestRequest = Union[
+    GuestRequest1,
+    GuestRequest2,
+    GuestRequest3,
+    GuestRequest4,
+    GuestRequest5,
+    GuestRequest6,
+    GuestRequest7,
+    GuestRequest8,
+    GuestRequest9,
+    GuestRequest10,
+    GuestRequest11,
+    GuestRequest12,
+    GuestRequest13,
+    GuestRequest14,
+    GuestRequest15,
+    GuestRequest16,
+    GuestRequest17,
+    GuestRequest18,
+    GuestRequest19,
+    GuestRequest20,
+    GuestRequest21,
+    GuestRequest22,
+    GuestRequest23,
+    GuestRequest24,
+    GuestRequest25,
+    GuestRequest26,
+    GuestRequest27,
+    GuestRequest28,
+    GuestRequest29,
+    GuestRequest30,
+    GuestRequest31,
+    GuestRequest32,
+    GuestRequest33,
+    GuestRequest34,
+    GuestRequest35,
+    GuestRequest36,
+    GuestRequest37,
+    GuestRequest38,
+    GuestRequest39,
+    GuestRequest40,
+    GuestRequest41,
+    GuestRequest42,
+    GuestRequest43,
+    GuestRequest44,
 ]
 
 

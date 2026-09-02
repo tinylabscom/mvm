@@ -460,7 +460,9 @@ fn fresh_boot_without_image_is_rejected_at_dispatch() {
     // by name), so a fresh transient boot with no image parses and is
     // refused at mode resolution with a clear message.
     let args = parse_run(&["run", "--", "echo", "hi"]).expect("parse");
-    let err = args.resolve_mode().expect_err("fresh boot needs an image");
+    let err = args
+        .resolve_mode(false)
+        .expect_err("fresh boot needs an image");
     assert!(err.to_string().contains("image"), "unexpected error: {err}");
 }
 
@@ -471,7 +473,7 @@ fn transient_run_without_argv_is_rejected_at_dispatch() {
     // mode resolution with a clear message — not a hang, not a silent exit.
     let args = parse_run(&["run", "--image", "alpine"]).expect("parse");
     let err = args
-        .resolve_mode()
+        .resolve_mode(false)
         .expect_err("transient run needs a command");
     assert!(
         err.to_string().contains("command"),
@@ -480,9 +482,38 @@ fn transient_run_without_argv_is_rejected_at_dispatch() {
 }
 
 #[test]
+fn a_flake_run_without_argv_is_accepted() {
+    // A flake bakes `entrypoint.command` into the image via mkGuest, so an
+    // empty argv is not a missing argument — it is the image supplying one.
+    // `examples/exit_code` exists to run its own entrypoint and hand back that
+    // code, and the README teaches `machine run --flake examples/<name>` with
+    // nothing after it.
+    let args = parse_run(&["run", "--flake", "examples/exit_code"]).expect("parse");
+    args.resolve_mode(false)
+        .expect("a flake carries its own entrypoint");
+}
+
+#[test]
+fn a_flake_already_built_into_a_slot_still_supplies_its_entrypoint() {
+    // The runtime path takes `run.flake` and leaves a manifest slot behind
+    // before resolving the mode, so by then `run.flake` is None even though the
+    // image does carry an entrypoint. Reading the field alone refused exactly
+    // the launches that should have been allowed.
+    let mut args = parse_run(&["run", "--flake", "examples/exit_code"]).expect("parse");
+    args.run.flake = None;
+    args.run.manifest = Some("deadbeef".to_string());
+    args.resolve_mode(true)
+        .expect("a slot built from a flake carries its own entrypoint");
+
+    // And the same shape without that fact is still refused.
+    args.resolve_mode(false)
+        .expect_err("a bare manifest run still needs a command");
+}
+
+#[test]
 fn run_defaults_match_the_lower_level_runner() {
     let args = parse_run(&["run", "--image", "alpine", "--", "true"]).expect("parse");
-    assert_eq!(args.run.cpus, 2);
+    assert_eq!(args.run.cpus, crate::commands::shared::default_vcpus());
     assert_eq!(args.run.memory, "512M");
     assert_eq!(
         args.run.profile,
@@ -573,14 +604,14 @@ fn run_port_is_repeatable_and_implies_persistence() {
     assert_eq!(args.port, vec!["8080:3000", "9090"]);
     assert!(args.persistent(), "a forward needs a live machine owner");
     assert_eq!(
-        args.resolve_mode().expect("port forward resolves"),
+        args.resolve_mode(false).expect("port forward resolves"),
         MachineRunMode::Persistent
     );
-    assert_eq!(post_start_action(&args), PostStart::Forward);
+    assert_eq!(post_start_action(&args), PostStart::Attach);
 }
 
 #[test]
-fn run_port_rejects_invalid_mappings_and_detached_ownership() {
+fn run_port_rejects_invalid_mappings_and_supports_detached_ownership() {
     let invalid = parse_run(&["run", "--image", "alpine", "--port", "abc:3000"])
         .expect_err("invalid ports must fail during CLI parsing");
     assert_eq!(invalid.kind(), clap::error::ErrorKind::ValueValidation);
@@ -593,8 +624,16 @@ fn run_port_rejects_invalid_mappings_and_detached_ownership() {
         "8080:3000",
         "--detach",
     ])
-    .expect_err("a detached CLI cannot own the forwarding process");
-    assert_eq!(detached.kind(), clap::error::ErrorKind::ArgumentConflict);
+    .expect("declared ingress belongs to the persistent machine, not the foreground CLI");
+    assert_eq!(detached.port, vec!["8080:3000"]);
+    assert!(detached.detach);
+    assert_eq!(
+        detached
+            .resolve_mode(false)
+            .expect("detached ingress resolves"),
+        MachineRunMode::Persistent
+    );
+    assert_eq!(post_start_action(&detached), PostStart::PrintId);
 
     let with_command = parse_run(&[
         "run",
@@ -608,12 +647,11 @@ fn run_port_rejects_invalid_mappings_and_detached_ownership() {
         "http.server",
     ])
     .expect("the trailing command is syntactically valid");
-    let error = with_command
-        .resolve_mode()
-        .expect_err("one attached CLI cannot own both console and forwarding");
-    assert!(
-        error.to_string().contains("machine forward"),
-        "the refusal should name the two-command alternative: {error:#}"
+    assert_eq!(
+        with_command
+            .resolve_mode(false)
+            .expect("declared FlowMux ingress and a foreground service share one owner"),
+        MachineRunMode::Persistent
     );
 }
 
@@ -689,7 +727,7 @@ fn resolve_mode_covers_the_behavior_matrix() {
     ];
     for (argv, expected) in cases {
         let args = parse_run(argv).expect("parse");
-        let mode = args.resolve_mode().expect("resolve");
+        let mode = args.resolve_mode(false).expect("resolve");
         assert_eq!(mode, *expected, "argv {argv:?}");
     }
 }
@@ -707,7 +745,7 @@ fn resolve_mode_wasm_allows_empty_argv() {
     ])
     .expect("parse");
     assert_eq!(
-        args.resolve_mode().expect("resolve"),
+        args.resolve_mode(false).expect("resolve"),
         MachineRunMode::Transient
     );
 }
@@ -719,7 +757,9 @@ fn resolve_mode_accepts_materialized_flake_slot_after_build() {
     assert_eq!(flake, ".");
     args.run.manifest = Some("materialized-slot".to_string());
 
-    let mode = args.resolve_mode().expect("materialized flake is a source");
+    let mode = args
+        .resolve_mode(false)
+        .expect("materialized flake is a source");
 
     assert_eq!(mode, MachineRunMode::Transient);
 }
@@ -727,7 +767,9 @@ fn resolve_mode_accepts_materialized_flake_slot_after_build() {
 #[test]
 fn interactive_run_requires_foreground_argv() {
     let args = parse_run(&["run", "-t", "--image", "X"]).expect("parse");
-    let err = args.resolve_mode().expect_err("interactive run needs argv");
+    let err = args
+        .resolve_mode(false)
+        .expect_err("interactive run needs argv");
     assert!(err.to_string().contains("command after `--`"));
 }
 
@@ -784,6 +826,8 @@ fn spec_fixture(name: &str) -> MachineSpec {
         runtime_pack: false,
         net: false,
         allow_host: vec![],
+        peer: Vec::new(),
+        ai: None,
         ports: vec![],
         cpus: 2,
         memory: "512M".to_string(),
@@ -792,6 +836,7 @@ fn spec_fixture(name: &str) -> MachineSpec {
         volumes: vec![],
         init: vec![],
         agent_verb: vec![],
+        caller_commitment: None,
         created_at: None,
         last_started_at: None,
         health_check: None,
@@ -816,6 +861,8 @@ fn run_spec_maps_run_args_into_a_machine_spec() {
         "--net",
         "--allow-host",
         "api.example.com:443",
+        "--caller-commitment",
+        "abababababababababababababababababababababababababababababababab",
     ])
     .expect("parse");
     let spec = machine_run_spec(&args, "web".to_string(), None).expect("spec");
@@ -831,6 +878,10 @@ fn run_spec_maps_run_args_into_a_machine_spec() {
     assert!(spec.init.is_empty());
     // No --agent-verb: spec stores an empty list (computed default applies at start).
     assert!(spec.agent_verb.is_empty());
+    assert_eq!(
+        spec.caller_commitment.as_ref().map(ToString::to_string),
+        Some("ab".repeat(32))
+    );
 }
 
 #[test]
@@ -1066,7 +1117,6 @@ fn interactive_refuses_a_sealed_machine_via_the_claim15_gate() {
             mode: mvm_runtime::vm::runtime_meta::StartModeKind::Detached,
             accessible: false,
             rootfs_path: None,
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
             runtime_overlay_version: None,
             observability_target: None,
         },
@@ -1103,7 +1153,6 @@ fn resolve_machine_build_mode_is_fail_closed_and_reads_accessible() {
                 mode: mvm_runtime::vm::runtime_meta::StartModeKind::Detached,
                 accessible,
                 rootfs_path: None,
-                runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
                 runtime_overlay_version: None,
                 observability_target: None,
             },
@@ -1708,6 +1757,8 @@ fn mark_machine_started_sets_digest_and_timestamp() {
         runtime_pack: false,
         net: false,
         allow_host: Vec::new(),
+        peer: Vec::new(),
+        ai: None,
         ports: vec![],
         cpus: 2,
         memory: "512M".to_string(),
@@ -1716,6 +1767,7 @@ fn mark_machine_started_sets_digest_and_timestamp() {
         volumes: Vec::new(),
         init: Vec::new(),
         agent_verb: Vec::new(),
+        caller_commitment: None,
         created_at: Some("2026-06-18T00:00:00Z".to_string()),
         last_started_at: None,
         health_check: None,
@@ -1735,6 +1787,7 @@ fn create_persists_machine_spec_under_data_dir() {
         image: Some("alpine:latest".to_string()),
         net: true,
         allow_host: vec!["api.example.com".to_string()],
+        peer: Vec::new(),
         cpus: Some(4),
         cpu_limit: None,
         timeout: None,
@@ -1766,6 +1819,7 @@ fn create_auto_generates_a_name_when_omitted() {
         image: Some("alpine:latest".to_string()),
         net: false,
         allow_host: Vec::new(),
+        peer: Vec::new(),
         cpus: None,
         cpu_limit: None,
         timeout: None,
@@ -1814,6 +1868,7 @@ volumes = ["./src:/work:rw"]
         image: None,
         net: false,
         allow_host: Vec::new(),
+        peer: Vec::new(),
         cpus: None,
         cpu_limit: None,
         timeout: None,
@@ -1851,6 +1906,7 @@ fn create_rejects_flake_backed_manifest_for_machine_specs() {
         image: None,
         net: false,
         allow_host: Vec::new(),
+        peer: Vec::new(),
         cpus: None,
         cpu_limit: None,
         timeout: None,
@@ -1883,6 +1939,7 @@ fn create_defaults_to_dev_profile_when_manifest_declares_dev_init() {
         image: None,
         net: false,
         allow_host: Vec::new(),
+        peer: Vec::new(),
         cpus: None,
         cpu_limit: None,
         timeout: None,
@@ -1903,6 +1960,7 @@ fn create_defaults_to_dev_profile_when_manifest_declares_dev_init() {
         image: None,
         net: false,
         allow_host: Vec::new(),
+        peer: Vec::new(),
         cpus: None,
         cpu_limit: None,
         timeout: None,
@@ -1933,6 +1991,8 @@ fn machine_start_receipt_input_redacts_host_paths_and_surfaces_policy() {
         runtime_pack: false,
         net: false,
         allow_host: vec!["api.example.com".to_string()],
+        peer: Vec::new(),
+        ai: None,
         ports: vec![],
         cpus: 4,
         memory: "2G".to_string(),
@@ -1941,6 +2001,7 @@ fn machine_start_receipt_input_redacts_host_paths_and_surfaces_policy() {
         volumes: vec!["/Users/example/src:/work:rw".to_string()],
         init: vec!["pip install -r requirements.txt".to_string()],
         agent_verb: Vec::new(),
+        caller_commitment: None,
         created_at: Some("2026-06-18T00:00:00Z".to_string()),
         last_started_at: None,
         health_check: None,
@@ -2022,6 +2083,8 @@ fn machine_start_preflight_reports_uniform_l4_enforcement_for_oci_allow_host() {
         runtime_pack: false,
         net: false,
         allow_host: vec!["api.example.com".to_string()],
+        peer: Vec::new(),
+        ai: None,
         ports: vec![],
         cpus: 2,
         memory: "512M".to_string(),
@@ -2030,6 +2093,7 @@ fn machine_start_preflight_reports_uniform_l4_enforcement_for_oci_allow_host() {
         volumes: Vec::new(),
         init: Vec::new(),
         agent_verb: Vec::new(),
+        caller_commitment: None,
         created_at: Some("2026-06-18T00:00:00Z".to_string()),
         last_started_at: None,
         health_check: None,
@@ -2056,6 +2120,7 @@ fn create_rejects_unsafe_machine_name() {
         image: Some("alpine:latest".to_string()),
         net: false,
         allow_host: Vec::new(),
+        peer: Vec::new(),
         cpus: Some(2),
         cpu_limit: None,
         timeout: None,
@@ -2083,6 +2148,8 @@ fn create_refuses_overwrite_without_force() {
         runtime_pack: false,
         net: false,
         allow_host: Vec::new(),
+        peer: Vec::new(),
+        ai: None,
         ports: vec![],
         cpus: 2,
         memory: "512M".to_string(),
@@ -2091,6 +2158,7 @@ fn create_refuses_overwrite_without_force() {
         volumes: Vec::new(),
         init: Vec::new(),
         agent_verb: Vec::new(),
+        caller_commitment: None,
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
         health_check: None,
@@ -2115,6 +2183,8 @@ fn remove_machine_spec_requires_confirmation_and_deletes_dir() {
         runtime_pack: false,
         net: false,
         allow_host: Vec::new(),
+        peer: Vec::new(),
+        ai: None,
         ports: vec![],
         cpus: 2,
         memory: "512M".to_string(),
@@ -2123,6 +2193,7 @@ fn remove_machine_spec_requires_confirmation_and_deletes_dir() {
         volumes: Vec::new(),
         init: Vec::new(),
         agent_verb: Vec::new(),
+        caller_commitment: None,
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
         health_check: None,
@@ -2149,6 +2220,8 @@ fn seed_machine_spec(name: &str) {
         runtime_pack: false,
         net: false,
         allow_host: Vec::new(),
+        peer: Vec::new(),
+        ai: None,
         ports: vec![],
         cpus: 2,
         memory: "512M".to_string(),
@@ -2157,6 +2230,7 @@ fn seed_machine_spec(name: &str) {
         volumes: Vec::new(),
         init: Vec::new(),
         agent_verb: Vec::new(),
+        caller_commitment: None,
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
         health_check: None,
@@ -2316,8 +2390,11 @@ fn resolve_remove_targets_dedupes_named_and_enumerates_all() {
     assert_eq!(all, vec!["alpha", "zeta"]);
 }
 
+/// Named for what it drives: `load_machine_spec` itself. The `shell`/`exec`
+/// wrappers no longer go through it — they gate on `require_console_target`,
+/// which admits a transient with no spec.
 #[test]
-fn running_vm_wrappers_require_a_persisted_machine_spec() {
+fn loading_a_missing_machine_spec_names_the_recovery_verbs() {
     let _state = IsolatedMachineState::new();
     let err = load_machine_spec("web").expect_err("missing spec rejected");
     let msg = format!("{err:#}");
@@ -2325,6 +2402,55 @@ fn running_vm_wrappers_require_a_persisted_machine_spec() {
     assert!(msg.contains("machine \"web\" does not exist"), "msg: {msg}");
     assert!(msg.contains("machine ls"), "msg: {msg}");
     assert!(msg.contains("machine create"), "msg: {msg}");
+}
+
+/// `machine shell`/`exec` used to gate on a persisted spec, which a
+/// transient VM from `machine run` never has — so the console was refused for
+/// a machine `machine ls` was listing as running. The gate is existence now,
+/// and a transient's existence is its runtime state dir.
+#[test]
+fn console_target_accepts_a_transient_vm_with_no_spec() {
+    let _state = IsolatedMachineState::new();
+    std::fs::create_dir_all(config::vm_state_dir("adhoc")).expect("seed runtime state");
+    lifecycle::require_console_target("adhoc").expect("a live transient is a console target");
+}
+
+#[test]
+fn console_target_accepts_a_created_machine_that_has_never_booted() {
+    let _state = IsolatedMachineState::new();
+    seed_machine_spec("web");
+    lifecycle::require_console_target("web").expect("a created machine is a console target");
+}
+
+#[test]
+fn console_target_rejects_a_name_with_neither_spec_nor_state() {
+    let _state = IsolatedMachineState::new();
+    let msg = format!(
+        "{:#}",
+        lifecycle::require_console_target("ghost").expect_err("unknown name rejected")
+    );
+    assert!(
+        msg.contains("machine \"ghost\" does not exist"),
+        "msg: {msg}"
+    );
+    assert!(msg.contains("machine ls"), "msg: {msg}");
+}
+
+/// Relaxing the gate to "has a runtime state dir" must not open the builder
+/// VM, which stages its state in the same directory and is headless: it
+/// serves no agent and no PTY, so admitting it would swap a wrong error for a
+/// hang.
+#[test]
+fn console_target_rejects_an_internal_builder_vm_by_name() {
+    let _state = IsolatedMachineState::new();
+    let job = mvm_core::naming::builder_shell_vm_name("92326-1787337475138993000");
+    std::fs::create_dir_all(config::vm_state_dir(&job)).expect("seed builder state");
+    let msg = format!(
+        "{:#}",
+        lifecycle::require_console_target(&job).expect_err("builder VM is not a console target")
+    );
+    assert!(msg.contains("internal builder VM"), "msg: {msg}");
+    assert!(msg.contains("headless"), "msg: {msg}");
 }
 
 #[test]
@@ -2649,6 +2775,8 @@ fn reconfigure_spec_fixture() -> MachineSpec {
         runtime_pack: false,
         net: false,
         allow_host: vec![],
+        peer: Vec::new(),
+        ai: None,
         ports: vec![],
         cpus: 2,
         memory: "512M".into(),
@@ -2657,6 +2785,7 @@ fn reconfigure_spec_fixture() -> MachineSpec {
         volumes: vec!["/data:/data:ro".into()],
         init: vec![],
         agent_verb: vec![],
+        caller_commitment: None,
         created_at: None,
         last_started_at: None,
         health_check: None,
@@ -2728,6 +2857,8 @@ fn patch_allow_host_replace_and_clear() {
 
     let base = MachineSpec {
         allow_host: vec!["old:443".into()],
+        peer: Vec::new(),
+        ai: None,
         ports: vec![],
         ..reconfigure_spec_fixture()
     };
@@ -2804,9 +2935,9 @@ fn rewind_parses_as_its_own_verb() {
     assert_eq!(machine_subcommand(&action), "rewind");
 }
 
-/// The lineage forward-step is `advance`, deliberately NOT `forward` — `machine
-/// forward` is the port-forwarding op folded from `vm forward`. Both must parse
-/// to distinct, non-colliding actions.
+/// The lineage forward-step is `advance`, deliberately NOT `forward` — the
+/// latter remains a parsing-compatible migration boundary. Both must parse to
+/// distinct, non-colliding actions.
 #[test]
 fn advance_does_not_collide_with_the_port_forward_verb() {
     let advance = parse(&["advance", "ckpt-x", "--to", "sha256:child"]).expect("parse advance");
@@ -2817,7 +2948,7 @@ fn advance_does_not_collide_with_the_port_forward_verb() {
         }
         other => panic!("expected advance, got {other:?}"),
     }
-    // `forward` still routes to the folded port-forwarding op, untouched.
+    // `forward` still routes to the folded migration boundary.
     let forward = parse(&["forward", "myvm", "8080:80"]).expect("parse forward");
     assert!(matches!(forward, MachineAction::Vm(VmCmd::Forward(_))));
 }
@@ -2886,77 +3017,12 @@ fn machine_run_exposes_no_network_mode_selector() {
     assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
 }
 
-/// The default is the socket-aware transport — the stronger posture, and
-/// what almost every workload wants. The tunnel is a compatibility mode, not
-/// a default.
 #[test]
-fn an_ordinary_workload_derives_the_socket_aware_transport() {
-    use mvm_contract::plan::NetworkMode;
+fn every_networked_workload_uses_the_flowmux_endpoint() {
     assert_eq!(
-        super::derive_network_mode(false),
-        NetworkMode::HostVsockProxy
+        super::preflight_network(),
+        mvm_contract::plan::NetworkMode::HostVsockProxy
     );
-}
-
-/// A workload that declares it needs a real in-guest IP stack gets the
-/// tunnel. The need is a property of the workload, so it is declared once
-/// and resolves identically everywhere.
-#[test]
-fn a_workload_declaring_a_raw_ip_stack_derives_the_tunnel() {
-    use mvm_contract::plan::NetworkMode;
-    assert_eq!(super::derive_network_mode(true), NetworkMode::L3Vsock);
-}
-
-/// The derivation is host-independent: the same workload produces the same
-/// plan everywhere. A host that silently rewrote the transport would make
-/// one plan mean different things in different places.
-#[test]
-fn the_derivation_does_not_depend_on_the_host() {
-    // No host input exists to vary — the signature admits only the
-    // workload's declared need. This test pins that shape: if host
-    // capability is ever threaded back in, it fails to compile.
-    let f: fn(bool) -> mvm_contract::plan::NetworkMode = super::derive_network_mode;
-    assert_eq!(f(false), mvm_contract::plan::NetworkMode::HostVsockProxy);
-    assert_eq!(f(true), mvm_contract::plan::NetworkMode::L3Vsock);
-}
-
-/// A host that cannot serve the tunnel refuses the workloads that need it,
-/// and only those. Everything else runs normally.
-#[test]
-fn the_host_check_refuses_only_what_it_cannot_serve() {
-    use mvm_contract::plan::NetworkMode;
-    assert!(
-        super::check_host_can_serve(NetworkMode::HostVsockProxy).is_ok(),
-        "the socket-aware transport must be serviceable on every host"
-    );
-    assert!(super::check_host_can_serve(NetworkMode::None).is_ok());
-
-    match super::check_host_can_serve(NetworkMode::L3Vsock) {
-        Ok(()) => {}
-        Err(err) => {
-            let msg = err.to_string();
-            assert!(msg.contains("raw_ip_stack"), "{msg}");
-        }
-    }
-}
-
-/// The derivation never produces a combination the compatibility gate would
-/// reject — which is the point of deriving rather than asking.
-#[test]
-fn the_derivation_never_produces_an_incompatible_plan() {
-    for needs_raw_ip in [false, true] {
-        let mode = super::derive_network_mode(needs_raw_ip);
-        // A workload needing substitution never declares raw_ip_stack, so
-        // the pairing that the gate rejects cannot be constructed here.
-        let requirements = mvm_net::l3::SubstitutionRequirements {
-            binds_secrets: !needs_raw_ip,
-            ..Default::default()
-        };
-        assert!(
-            mvm_net::l3::check_mode_compatibility(mode, &requirements, mode.is_l3_vsock()).is_ok(),
-            "the derivation produced an inadmissible plan (needs_raw_ip={needs_raw_ip})"
-        );
-    }
 }
 
 /// An egress rule says *where* traffic may go, not *how* it travels, and
@@ -2973,7 +3039,7 @@ fn an_allow_host_rule_does_not_influence_the_transport() {
     .unwrap();
     assert_eq!(args.run.allow_host, vec!["api.example.com:443"]);
     assert_eq!(
-        super::derive_network_mode(false),
+        super::preflight_network(),
         mvm_contract::plan::NetworkMode::HostVsockProxy
     );
 }
@@ -3010,7 +3076,8 @@ fn cpus_and_cpu_limit_are_independent_controls() {
         parse_run(&["run", "--image", "alpine", "--cpu-limit", "500"]).expect("parses");
     assert_eq!(only_limit.run.cpu_limit, Some(500));
     assert_eq!(
-        only_limit.run.cpus, 2,
+        only_limit.run.cpus,
+        crate::commands::shared::default_vcpus(),
         "--cpu-limit must not move the vCPU count off its default"
     );
 }
@@ -3037,6 +3104,26 @@ fn the_cpu_flags_help_text_tells_them_apart() {
         help.contains("vCPUs the guest sees"),
         "the vCPU flag must say what it sets: {help}"
     );
+}
+
+#[test]
+fn mount_help_discloses_snapshot_and_unfiltered_tree_semantics() {
+    let help = {
+        let mut cmd = Cli::command();
+        cmd.find_subcommand_mut("machine")
+            .expect("machine noun")
+            .find_subcommand_mut("run")
+            .expect("run verb")
+            .render_long_help()
+            .to_string()
+    };
+
+    assert!(
+        help.contains("host directory snapshot or a sized disk"),
+        "{help}"
+    );
+    assert!(help.contains("without honoring `.gitignore`"), "{help}");
+    assert!(help.contains("large build outputs"), "{help}");
 }
 
 #[test]
@@ -3198,10 +3285,12 @@ fn the_argv_the_sdk_facade_emits_parses_back_into_the_grant_it_encoded() {
             cpu_limit_millicores: args.run.cpu_limit,
             timeout_secs: args.run.timeout,
             allow_host: &args.run.allow_host,
+            peer: &[],
             net: args.run.net,
             grants_file: args.run.grants_file.as_deref(),
             manifest: None,
             config: &config,
+            ai: None,
         })
         .expect("resolves");
 

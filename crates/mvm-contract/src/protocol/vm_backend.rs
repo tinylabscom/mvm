@@ -15,55 +15,6 @@ use core::fmt;
 
 use serde::{Deserialize, Serialize};
 
-/// Which guest-runtime source policy this boot declares.
-///
-/// This is intentionally a **contract field**, not a backend behavior switch by
-/// itself. The first rollout slice uses it to make the intended runtime source
-/// machine-readable in launch configs and audit events without changing any
-/// backend behavior yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeSourcePolicy {
-    /// This boot expects the mvm guest runtime to come from the sealed runtime
-    /// overlay, and should fail closed if that overlay is unavailable.
-    RequiredOverlay,
-    /// This boot prefers the runtime overlay when available, but currently keeps
-    /// a baked rootfs fallback for compatibility with backends/tier
-    /// combinations that have not flipped to required-overlay yet.
-    PreferOverlay,
-    /// This boot does not rely on the runtime overlay path at all; the guest
-    /// runtime is expected to come from the rootfs.
-    #[default]
-    RootfsOnly,
-}
-
-impl RuntimeSourcePolicy {
-    pub const fn audit_label(self) -> &'static str {
-        match self {
-            Self::RequiredOverlay => "required-overlay",
-            Self::PreferOverlay => "prefer-overlay",
-            Self::RootfsOnly => "rootfs-only",
-        }
-    }
-
-    pub const fn cmdline_value(self) -> &'static str {
-        match self {
-            Self::RequiredOverlay => "required_overlay",
-            Self::PreferOverlay => "prefer_overlay",
-            Self::RootfsOnly => "rootfs_only",
-        }
-    }
-
-    pub fn from_cmdline_value(value: &str) -> Option<Self> {
-        match value {
-            "required_overlay" => Some(Self::RequiredOverlay),
-            "prefer_overlay" => Some(Self::PreferOverlay),
-            "rootfs_only" => Some(Self::RootfsOnly),
-            _ => None,
-        }
-    }
-}
-
 /// Which kind of guest launch is selecting a runtime-source policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeSourceLaunchKind {
@@ -80,9 +31,11 @@ pub enum RuntimeSourceLaunchKind {
 }
 
 /// The selected rootfs strategy for a workload boot, when the caller knows it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RuntimeSourceRootStrategy {
     VirtiofsRoot,
+    #[default]
     BlockExt4,
 }
 
@@ -128,6 +81,50 @@ pub struct VmVolume {
     /// Fails closed at launch until that lands; never silently
     /// plaintext. Always false for a `DirShare`.
     pub encrypted: bool,
+    /// For a `DirShare`, the ext4 image the granted directory was
+    /// materialized into, which is what the backend actually attaches.
+    ///
+    /// `host` stays the directory that was *granted*, because that is the fact
+    /// an admission record has to carry: a chain entry naming an image under
+    /// `~/.mvm` would not tell a reviewer which host directory a workload was
+    /// given. The grant and its transport are different things, and only the
+    /// first belongs in the audit.
+    ///
+    /// `None` on a `Disk`, whose `host` is already the image.
+    pub materialized_image: Option<String>,
+    /// ext4 volume label written into the attached image, when the host set
+    /// one, so the guest can mount by identity rather than by enumeration
+    /// order.
+    ///
+    /// A device node is positional: it names whichever disk landed in that
+    /// slot, so a slot-order change mounts the wrong image and succeeds. A
+    /// label travels with the bytes. `None` for an image the host did not
+    /// label, which still mounts by node.
+    pub volume_label: Option<String>,
+}
+
+impl VmVolume {
+    /// Whether this volume reaches the guest as a virtio-blk device.
+    ///
+    /// Every volume does, now that a granted directory is delivered as an
+    /// image — but the two arrive at it differently, and three separate places
+    /// (the block list, the slot arithmetic, and the guest device mapping) have
+    /// to agree on which volumes are in that list and in what order. They agree
+    /// by calling this rather than by each matching on `kind`.
+    #[must_use]
+    pub fn attaches_as_block(&self) -> bool {
+        match self.kind {
+            VmVolumeKind::Disk => true,
+            VmVolumeKind::DirShare => self.materialized_image.is_some(),
+        }
+    }
+
+    /// The host file to attach: the materialized image when there is one, the
+    /// `host` path otherwise.
+    #[must_use]
+    pub fn block_source(&self) -> &str {
+        self.materialized_image.as_deref().unwrap_or(&self.host)
+    }
 }
 
 /// Encode user volumes as a kernel-cmdline parameter the guest init
@@ -195,11 +192,21 @@ pub fn encode_egress_ca_cmdline(cert_pem: &str) -> Option<String> {
     Some(format!("mvm.egress_ca=pem:{body}"))
 }
 
-/// `mvm.runtime_source_policy=<snake_case>` kernel-cmdline token. This lets the
-/// guest-side launcher distinguish required-overlay vs preferred-overlay boots
-/// without inventing a second policy channel.
-pub fn encode_runtime_source_policy_cmdline(policy: RuntimeSourcePolicy) -> String {
-    format!("mvm.runtime_source_policy={}", policy.cmdline_value())
+/// Decode the single positive Unix epoch carried by an
+/// `mvm.hostepoch=<seconds>` kernel-cmdline token.
+///
+/// Missing, malformed, zero, and duplicated tokens are rejected. Rejecting a
+/// duplicate keeps the host-to-guest clock contract unambiguous rather than
+/// allowing token order to decide which wall clock the guest trusts.
+pub fn decode_host_epoch_cmdline(cmdline: &str) -> Option<u64> {
+    let mut values = cmdline
+        .split_whitespace()
+        .filter_map(|token| token.strip_prefix("mvm.hostepoch="));
+    let value = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    value.parse::<u64>().ok().filter(|seconds| *seconds > 0)
 }
 
 /// Encode the per-run secret **placeholder** env as a single
@@ -212,6 +219,16 @@ pub fn encode_runtime_source_policy_cmdline(policy: RuntimeSourcePolicy) -> Stri
 /// `None` for no secrets. The cmdline is the only per-VM channel a *fresh* FC
 /// boot has to a sealed guest (no secrets drive attached), and the placeholder
 /// must be minted **before** boot so it can ride here.
+///
+/// **Unwired.** Nothing calls this and no guest parses `mvm.secret_env`; the
+/// `/init` decode the paragraph above describes was never built. What ships
+/// instead injects placeholders on the invoke path, from the env file the
+/// per-VM substitution endpoint mints — which does not reach the fresh sealed
+/// boot this was meant for, so the gap the design names is real and open.
+///
+/// Kept rather than deleted for that reason. It is not evidence of anything
+/// today — the security ledger cited its round-trip test as a witness until
+/// that was found to prove only that an encoder is self-consistent.
 pub fn encode_secret_env_cmdline(pairs: &[(String, String)]) -> Option<String> {
     if pairs.is_empty() {
         return None;
@@ -413,11 +430,46 @@ impl VmExitStatus {
 ///
 /// Used by consumers to check what operations are available before attempting
 /// them. Recovery capabilities are deliberately part of this same value so a
+/// What a launch actually gets when it asks for `requested` vCPUs.
+///
+/// `Some(granted)` when the backend cannot honour the request in full — the
+/// caller is expected to say so and carry on with `granted`. `None` when the
+/// request is satisfiable as asked.
+///
+/// Clamping rather than refusing is the point. `--cpus 4` on a single-vCPU
+/// backend is a portable command meeting a host limit, not a malformed
+/// request; refusing it would mean a script that runs on Linux fails on macOS
+/// for a reason the user cannot act on. Silence is the other failure — a guest
+/// running on one CPU while its plan says four, with nothing to explain the
+/// performance.
+#[must_use]
+pub fn clamp_vcpus(requested: u32, max_vcpus: Option<u32>) -> Option<u32> {
+    let ceiling = max_vcpus?;
+    // A backend declaring zero has no usable answer; treat it as one rather
+    // than hand back a machine with no CPUs.
+    let ceiling = ceiling.max(1);
+    (requested > ceiling).then_some(ceiling)
+}
+
 /// caller cannot accidentally combine a snapshot tier from one backend with a
 /// standby answer from another.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VmCapabilities {
+    /// Most guest vCPUs this backend can actually create, or `None` when it
+    /// imposes no ceiling of its own.
+    ///
+    /// A request above this is **clamped and reported**, never refused: asking
+    /// for more parallelism than the host tier offers is a preference, not an
+    /// error, and failing the launch would make a portable command
+    /// backend-specific. What must not happen is the silent version — HVF
+    /// booted every guest on one CPU while its admitted plan said two, and
+    /// nothing said so.
+    ///
+    /// `None` rather than `u32::MAX` so "no ceiling" is distinguishable from a
+    /// backend that forgot to declare one.
+    #[serde(default)]
+    pub max_vcpus: Option<u32>,
     /// Can pause/resume vCPUs (Firecracker: yes, WASM: no).
     pub pause_resume: bool,
     /// Legacy coarse snapshot flag. New recovery callers should use
@@ -467,29 +519,22 @@ pub struct VmCapabilities {
     /// Backend supports host/vsock-mediated networking (egress/ingress brokers
     /// over vsock) instead of a guest NIC.
     pub host_vsock_proxy: bool,
-    /// Backend can carry the L3 TUN-over-vsock tunnel: dedicated vsock
-    /// ports for the guest agent's control and packet connections, with no
-    /// guest NIC of any kind. Strictly stronger than
-    /// [`host_vsock_proxy`](Self::host_vsock_proxy) — that mode brokers
-    /// sockets, this one carries raw IP packets — so a backend must
-    /// advertise it separately rather than inheriting it.
-    pub l3_vsock: bool,
     /// Backend can carry an interactive PTY exec/console session.
     pub pty_exec: bool,
     /// Backend permits an in-guest SSH server (production SSH). Always `false`
     /// for every production backend; a plan requiring it is rejected.
     pub production_ssh: bool,
-    /// Backend can attach the unpacked OCI tree as a read-only **virtiofs root**
-    /// device, so a dev-tier boot skips ext4 materialization. `false` for
-    /// Firecracker (no virtiofs root device) and the default. The run-path tier
-    /// gate selects virtiofs-root only when this is `true` *and* the workload is
-    /// non-prod, non-sealed; the virtiofs-root dev path carries a weaker
-    /// integrity contract and does **not** witness the verified-boot claim.
-    pub virtiofs_root: bool,
     /// Which resource dimensions this backend can actually bound. Declared
     /// separately from what a caller requests so a refusal can name the gap.
     #[serde(default)]
     pub resource_controls: crate::protocol::resource_controls::ResourceControls,
+    /// Portable, typed dimensions that describe the backend's guest
+    /// environment, CPU execution mode, isolation boundary, and lifecycle
+    /// scope. Added so browser and native builds share the same capability
+    /// identity without pulling backend-specific constructors into the
+    /// contract crate.
+    #[serde(default)]
+    pub capability_dimensions: BackendCapabilityDimensions,
 }
 
 /// The capabilities a run/plan requires from its backend.
@@ -507,7 +552,6 @@ pub struct RequiredCapabilities {
     pub vsock: bool,
     pub no_routable_guest_nic: bool,
     pub host_vsock_proxy: bool,
-    pub l3_vsock: bool,
     pub pty_exec: bool,
 }
 
@@ -515,7 +559,7 @@ impl VmCapabilities {
     /// Names of the capabilities `required` asks for that this backend does
     /// not advertise. Empty means the backend can serve the request.
     pub fn shortfall(&self, required: &RequiredCapabilities) -> Vec<&'static str> {
-        let checks: [(bool, bool, &'static str); 10] = [
+        let checks: [(bool, bool, &'static str); 9] = [
             (
                 required.eager_cow_restore,
                 self.eager_cow_restore,
@@ -552,7 +596,6 @@ impl VmCapabilities {
                 self.host_vsock_proxy,
                 "host_vsock_proxy",
             ),
-            (required.l3_vsock, self.l3_vsock, "l3_vsock"),
             (required.pty_exec, self.pty_exec, "pty_exec"),
         ];
         checks
@@ -925,11 +968,15 @@ pub struct StandbySpec {
     pub control_socket: String,
     /// Per-VM state dir the standby writes its pid into.
     pub vm_state_dir: String,
-    /// Source rootfs image path for image-bound standbys. `None` for libkrun
-    /// (no rootfs is baked in at spawn; any workload rootfs attaches at claim time).
+    /// Resolved rootfs image path for image-bound standbys. Block parents boot
+    /// it directly; virtiofs parents use its digest as the image identity while
+    /// booting the resolved read-only tree carried by the launch config.
     pub image_path: Option<String>,
     /// Sha256 hex of `image_path` for the compat key. `None` for libkrun.
     pub image_sha256: Option<String>,
+    /// Root device model the parent boots. A restored child inherits this
+    /// device shape, so block and virtiofs roots are never interchangeable.
+    pub root_strategy: RuntimeSourceRootStrategy,
     /// Whether the parent boots the guest's vsock egress client on
     /// (see [`StandbyCompat::vsock_egress`]).
     ///
@@ -942,14 +989,11 @@ pub struct StandbySpec {
 /// The base-compat key — everything a standby fixes at spawn and must therefore match the
 /// workload exactly, else the launch cold-boots.
 ///
-/// `image_sha256` is `Some(sha)` for a standby captured from a rootfs — a saved-state
-/// standby is a frozen {rootfs, memory, machine-id} triple taken from one particular
-/// image, and every child is cloned from that captured content, so the image is part of
-/// the standby's identity rather than something attached to it later. It is `None` only
-/// for a standby carrying no rootfs at all (a bare pre-spawned supervisor any image could
-/// attach to). Compatibility is exact in both directions — `None == None` and
-/// `Some(a) == Some(b)` iff `a == b` — so a claim that computes this field differently
-/// from the spawn that recorded it matches nothing, silently and forever.
+/// `image_sha256` is `Some(sha)` for a standby resolved from an image. The root
+/// strategy says whether the parent booted that image as a block device or its
+/// read-only unpacked tree through virtiofs; a child inherits both the image and
+/// device model. Compatibility is exact in both directions, so a claim that
+/// computes either field differently from the spawn matches nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StandbyCompat {
     /// Registered template identity. Compatibility is exact, including the
@@ -961,6 +1005,9 @@ pub struct StandbyCompat {
     /// `Some(sha256-hex)` for a standby captured from a rootfs; `None` only for
     /// one that carries no rootfs.
     pub image_sha256: Option<String>,
+    /// Root device model fixed when the parent boots.
+    #[serde(default)]
+    pub root_strategy: RuntimeSourceRootStrategy,
     /// Whether the guest boots with its in-guest vsock egress client started.
     ///
     /// A restored child inherits its kernel cmdline from the parent's saved
@@ -1003,6 +1050,10 @@ pub struct StandbyHandle {
     /// standbys.
     #[serde(default)]
     pub image_sha256: Option<String>,
+    /// Root device model the parent booted. Older records predate virtiofs
+    /// parents and therefore deserialize as block-backed.
+    #[serde(default)]
+    pub root_strategy: RuntimeSourceRootStrategy,
     /// The content-addressed checkpoint this parent was captured as, set once
     /// a spawn has captured it. `None` means the parent was never captured, so
     /// it cannot be claimed: a claim verifies content and lineage against this
@@ -1039,6 +1090,7 @@ impl StandbyHandle {
             vcpus: self.vcpus,
             mem_mib: self.mem_mib,
             image_sha256: self.image_sha256.clone(),
+            root_strategy: self.root_strategy,
             vsock_egress: self.vsock_egress,
         }
     }
@@ -1224,6 +1276,13 @@ impl BackendSecurityProfile {
             .collect()
     }
 }
+// ---------------------------------------------------------------------------
+pub mod portable;
+
+pub use portable::{
+    ArtifactRef, ArtifactSetRef, AttestationTier, BackendCapabilityDimensions, BackendRequest,
+    BackendResponse, CpuExecution, GuestEnvironment, IsolationBoundary, LifecycleScope,
+};
 
 /// Summary info for a managed VM, returned by `VmBackend::list`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1280,6 +1339,10 @@ pub enum BackendKind {
     /// portability/demo backend: opt-in only, never returned by auto-detect,
     /// no hardware isolation boundary.
     Wasm,
+    /// Browser-hosted Linux tier running a real Nix-built Linux kernel under
+    /// QEMU-Wasm. Claim-free portability/development backend: opt-in only,
+    /// never returned by native auto-detect, no hardware isolation boundary.
+    WebLinux,
     /// Apple Container tier: workloads boot Apple's prebuilt container
     /// kernel (a fetched binary artifact) with the same universal initramfs
     /// and `ActivateEnvironment` flow as every other runner backend, on the
@@ -1303,6 +1366,7 @@ impl BackendKind {
             Self::Mock => "mock",
             Self::Hvf => "hvf",
             Self::Wasm => "wasm",
+            Self::WebLinux => "web-linux",
             Self::AppleContainer => "apple-container",
         }
     }
@@ -1328,6 +1392,7 @@ impl BackendKind {
             "mock" => Self::Mock,
             "hvf" => Self::Hvf,
             "wasm" => Self::Wasm,
+            "web-linux" => Self::WebLinux,
             "apple-container" => Self::AppleContainer,
             _ => return None,
         };
@@ -1337,6 +1402,41 @@ impl BackendKind {
 
 #[cfg(test)]
 mod tests {
+
+    /// A satisfiable request is left alone.
+    #[test]
+    fn a_request_within_the_ceiling_is_not_clamped() {
+        assert_eq!(super::clamp_vcpus(1, Some(1)), None);
+        assert_eq!(super::clamp_vcpus(2, Some(4)), None);
+        assert_eq!(super::clamp_vcpus(4, Some(4)), None, "equal is satisfiable");
+        assert_eq!(super::clamp_vcpus(64, None), None, "no ceiling declared");
+    }
+
+    /// Over the ceiling reports the granted count rather than refusing.
+    ///
+    /// The caller needs a value to boot with *and* something to tell the user.
+    /// Returning the granted count gives both; returning an error would make a
+    /// portable `--cpus 4` fail on one host and succeed on another for a reason
+    /// the user cannot act on.
+    #[test]
+    fn a_request_over_the_ceiling_is_granted_the_ceiling() {
+        assert_eq!(super::clamp_vcpus(4, Some(1)), Some(1));
+        assert_eq!(super::clamp_vcpus(8, Some(2)), Some(2));
+    }
+
+    /// A backend declaring zero still yields a bootable machine.
+    ///
+    /// Zero CPUs is not a smaller guest, it is not a guest. Treat a nonsense
+    /// ceiling as one rather than propagate it into the device tree.
+    #[test]
+    fn a_zero_ceiling_still_grants_one_cpu() {
+        assert_eq!(super::clamp_vcpus(4, Some(0)), Some(1));
+        assert_eq!(
+            super::clamp_vcpus(1, Some(0)),
+            None,
+            "one is already within"
+        );
+    }
     use super::*;
 
     #[test]
@@ -1365,6 +1465,7 @@ mod tests {
             BackendKind::Mock,
             BackendKind::Hvf,
             BackendKind::Wasm,
+            BackendKind::WebLinux,
             BackendKind::AppleContainer,
         ] {
             assert_eq!(
@@ -1393,12 +1494,14 @@ mod tests {
             BackendKind::Mock,
             BackendKind::Hvf,
             BackendKind::Wasm,
+            BackendKind::WebLinux,
             BackendKind::AppleContainer,
         ];
         // Pin the labels a report is read against.
         assert_eq!(BackendKind::Hvf.as_str(), "hvf");
         assert_eq!(BackendKind::Firecracker.as_str(), "firecracker");
         assert_eq!(BackendKind::AppleContainer.as_str(), "apple-container");
+        assert_eq!(BackendKind::WebLinux.as_str(), "web-linux");
         // Two backends sharing a label would silently merge their samples.
         for (i, a) in kinds.iter().enumerate() {
             for b in &kinds[i + 1..] {
@@ -1453,6 +1556,7 @@ mod tests {
             vcpus: 2,
             mem_mib: 128,
             image_sha256: Some("bb".repeat(32)),
+            root_strategy: RuntimeSourceRootStrategy::BlockExt4,
             vsock_egress: false,
         };
         let request = WarmServiceRequest::Claim {
@@ -1501,6 +1605,7 @@ mod tests {
                 vcpus: 2,
                 mem_mib: 128,
                 image_sha256: Some("dd".repeat(32)),
+                root_strategy: RuntimeSourceRootStrategy::BlockExt4,
                 vsock_egress: false,
             },
             target: 1,
@@ -1555,6 +1660,7 @@ mod tests {
             spawned_unix_secs: 1_700_000_000,
             state: StandbyState::Idle,
             image_sha256: None,
+            root_strategy: RuntimeSourceRootStrategy::BlockExt4,
             parent_checkpoint: None,
             vsock_egress: false,
             preloaded_child_vm_name: None,
@@ -1570,6 +1676,7 @@ mod tests {
             vcpus: 2,
             mem_mib: 1024,
             image_sha256: None,
+            root_strategy: RuntimeSourceRootStrategy::BlockExt4,
             vsock_egress: false,
         };
         assert!(back.is_compatible(&want));
@@ -1599,6 +1706,11 @@ mod tests {
         assert!(!hvf_handle.is_compatible(&want)); // None ≠ Some
         assert!(!hvf_handle.is_compatible(&StandbyCompat {
             image_sha256: Some("d".repeat(64)),
+            ..want.clone()
+        }));
+        assert!(!hvf_handle.is_compatible(&StandbyCompat {
+            image_sha256: Some("c".repeat(64)),
+            root_strategy: RuntimeSourceRootStrategy::VirtiofsRoot,
             ..want.clone()
         }));
         // Guest egress enablement partitions the pool in both directions: a
@@ -1661,6 +1773,11 @@ mod tests {
         }"#;
         let h: StandbyHandle = serde_json::from_str(old_json).unwrap();
         assert_eq!(h.image_sha256, None, "absent field must default to None");
+        assert_eq!(
+            h.root_strategy,
+            RuntimeSourceRootStrategy::BlockExt4,
+            "records predating virtiofs parents must default to block-backed"
+        );
         assert!(
             !h.vsock_egress,
             "a record from before the field existed booted no egress client"
@@ -1677,6 +1794,7 @@ mod tests {
             vcpus: 2,
             mem_mib: 1024,
             image_sha256: None,
+            root_strategy: RuntimeSourceRootStrategy::BlockExt4,
             vsock_egress: false,
         };
         assert!(h.is_compatible(&want));
@@ -1705,6 +1823,7 @@ mod tests {
             spawned_unix_secs: 1,
             state: StandbyState::Idle,
             image_sha256: Some("dd".repeat(32)),
+            root_strategy: RuntimeSourceRootStrategy::BlockExt4,
             parent_checkpoint: None,
             vsock_egress: false,
             preloaded_child_vm_name: None,
@@ -1826,6 +1945,27 @@ mod tests {
     }
 
     #[test]
+    fn host_epoch_cmdline_decoder_accepts_one_positive_epoch() {
+        assert_eq!(
+            decode_host_epoch_cmdline("console=ttyAMA0 mvm.hostepoch=1786425335 root=/dev/vda"),
+            Some(1_786_425_335)
+        );
+    }
+
+    #[test]
+    fn host_epoch_cmdline_decoder_rejects_unsafe_encodings() {
+        for cmdline in [
+            "root=/dev/vda",
+            "mvm.hostepoch=0",
+            "mvm.hostepoch=-5",
+            "mvm.hostepoch=notanumber",
+            "mvm.hostepoch=1786425335 mvm.hostepoch=1786425336",
+        ] {
+            assert_eq!(decode_host_epoch_cmdline(cmdline), None, "{cmdline}");
+        }
+    }
+
+    #[test]
     fn encode_secret_env_cmdline_empty_is_none() {
         assert!(encode_secret_env_cmdline(&[]).is_none());
     }
@@ -1859,20 +1999,6 @@ mod tests {
         assert_eq!(got, "mvm.egress_ca=pem:ABCD");
         // Single cmdline token — no spaces/newlines survive the compaction.
         assert!(!got.contains(' ') && !got.contains('\n'));
-    }
-
-    #[test]
-    fn encode_runtime_source_policy_cmdline_round_trips_as_single_token() {
-        let token = encode_runtime_source_policy_cmdline(RuntimeSourcePolicy::RequiredOverlay);
-        assert_eq!(token, "mvm.runtime_source_policy=required_overlay");
-        assert!(!token.contains(' '));
-        let value = token
-            .strip_prefix("mvm.runtime_source_policy=")
-            .expect("token prefix");
-        assert_eq!(
-            RuntimeSourcePolicy::from_cmdline_value(value),
-            Some(RuntimeSourcePolicy::RequiredOverlay)
-        );
     }
 
     #[test]
@@ -2201,58 +2327,9 @@ mod tests {
     /// The audit label is what the chain-signed log records for the boot's
     /// runtime source. A blank or wrong label is a corrupt audit record,
     /// and every variant must be distinguishable from every other.
-    #[test]
-    fn runtime_source_audit_labels_are_exact_and_distinct() {
-        assert_eq!(
-            RuntimeSourcePolicy::RequiredOverlay.audit_label(),
-            "required-overlay"
-        );
-        assert_eq!(
-            RuntimeSourcePolicy::PreferOverlay.audit_label(),
-            "prefer-overlay"
-        );
-        assert_eq!(RuntimeSourcePolicy::RootfsOnly.audit_label(), "rootfs-only");
-
-        let labels = [
-            RuntimeSourcePolicy::RequiredOverlay.audit_label(),
-            RuntimeSourcePolicy::PreferOverlay.audit_label(),
-            RuntimeSourcePolicy::RootfsOnly.audit_label(),
-        ];
-        for label in labels {
-            assert!(!label.is_empty());
-        }
-        assert_ne!(labels[0], labels[1]);
-        assert_ne!(labels[1], labels[2]);
-        assert_ne!(labels[0], labels[2]);
-    }
-
     /// Every cmdline spelling round-trips to its own variant. Dropping an
     /// arm makes that value unparseable, so the boot silently falls back to
     /// a runtime source the cmdline did not ask for.
-    #[test]
-    fn every_runtime_source_cmdline_value_round_trips() {
-        for policy in [
-            RuntimeSourcePolicy::RequiredOverlay,
-            RuntimeSourcePolicy::PreferOverlay,
-            RuntimeSourcePolicy::RootfsOnly,
-        ] {
-            assert_eq!(
-                RuntimeSourcePolicy::from_cmdline_value(policy.cmdline_value()),
-                Some(policy),
-                "{} must parse back to itself",
-                policy.cmdline_value()
-            );
-        }
-        assert_eq!(RuntimeSourcePolicy::from_cmdline_value("nonsense"), None);
-        assert_eq!(RuntimeSourcePolicy::from_cmdline_value(""), None);
-        // The audit spelling is not the cmdline spelling; neither is accepted
-        // in the other's place.
-        assert_eq!(
-            RuntimeSourcePolicy::from_cmdline_value("prefer-overlay"),
-            None
-        );
-    }
-
     /// `is_microvm` gates the Tier 3 shared-kernel banner, so it must be a
     /// conjunction: any missing isolation layer means not a microVM. With
     /// a disjunction, a container that only clears the host-hypervisor

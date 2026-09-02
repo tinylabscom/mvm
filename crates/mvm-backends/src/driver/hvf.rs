@@ -26,7 +26,7 @@ use mvm_vmm::host::hvf_supervisor::{
 };
 use mvm_vmm::hvf_handoff::HvfHandoffRequest;
 
-use crate::driver::hvf_legacy::{
+use crate::driver::hvf_process::{
     self as hvf_backend, PID_FILE_NAME, PID_FILE_TIMEOUT, resolve_supervisor_path,
 };
 use mvm_contract::grants::CpuGrant;
@@ -187,14 +187,12 @@ fn relay_supervisor_config_with_handoff(
         (!c.is_empty()).then(|| c.to_string())
     };
 
-    // Collect explicitly host-dialable channels: dev consoles are range-gated,
-    // while TCP ingress appears only when the admitted launch spec declared it.
+    // Collect explicitly host-dialable dev console channels.
     let console_data_sockets = spec
         .vsock
         .iter()
         .filter(|p| {
             matches!(p.service, GuestService::ConsoleData { port } if dev_console_data_ports().any(|cp| cp == port))
-                || matches!(p.service, GuestService::IngressTcp { .. })
         })
         .map(|p| HostDialSocket {
             guest_port: p.port(),
@@ -227,17 +225,12 @@ fn relay_supervisor_config_with_handoff(
         kernel,
         cmdline,
         memory_mib: spec.memory_mib,
+        vcpus: spec.vcpus,
         initramfs: spec.initramfs.clone(),
         disks,
-        virtiofs_root: spec
-            .shares
-            .iter()
-            .find(|share| share.tag == "mvmroot")
-            .map(|share| share.host_path.clone()),
         virtiofs_shares: spec
             .shares
             .iter()
-            .filter(|share| share.tag != "mvmroot")
             .map(|share| HvfVirtioFsShare {
                 path: share.host_path.clone(),
                 tag: share.tag.clone(),
@@ -245,6 +238,9 @@ fn relay_supervisor_config_with_handoff(
             .collect(),
         vsock: true,
         trusted_builder_egress: spec.trusted_builder,
+        // Only a VM that outlives its launcher sets this; everyone else spawns
+        // their own endpoint and stays alive to parent it.
+        builder_egress_endpoint: spec.builder_egress_endpoint.clone(),
         console_log: paths.console_log.clone(),
         pid_file: paths.pid_file.clone(),
         workload_exit: paths.workload_exit.clone(),
@@ -329,7 +325,9 @@ fn boot_with_handoff(
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
     let paths = SupervisorPaths::resolve(state_dir, timeout_secs);
-    let _ = std::fs::remove_file(&paths.workload_exit);
+    // Clear any prior run's captured exit code and usage record so `wait` and
+    // the exit report read only this launch's.
+    mvm_core::run_sidecars::clear_prior_run(&paths.state_dir);
     let cfg = relay_supervisor_config_with_handoff(spec, &paths, handoff, exclusive_image_lock)?;
     let config_path = paths.state_dir.join("supervisor.json");
     std::fs::write(
@@ -343,7 +341,9 @@ fn boot_with_handoff(
     let mut child = bounded_supervisor_command(&supervisor, spec, &paths.state_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
+        .stderr(mvm_vmm::host::console_capture::supervisor_stderr(
+            &paths.state_dir,
+        ))
         .spawn()
         .map_err(|e| anyhow!("spawn {}: {e}", supervisor.display()))?;
     child
@@ -363,15 +363,17 @@ fn boot_with_handoff(
             .map_err(|e| anyhow!("poll supervisor: {e}"))?
         {
             bail!(
-                "hvf supervisor exited before writing its PID file (status: {status}); see {}",
-                paths.console_log.display()
+                "hvf supervisor exited before writing its PID file (status: {status}); see {}{}",
+                paths.console_log.display(),
+                mvm_vmm::host::console_capture::supervisor_stderr_detail(&paths.state_dir)
             );
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
             bail!(
-                "hvf supervisor did not confirm boot within {PID_FILE_TIMEOUT:?}; see {}",
-                paths.console_log.display()
+                "hvf supervisor did not confirm boot within {PID_FILE_TIMEOUT:?}; see {}{}",
+                paths.console_log.display(),
+                mvm_vmm::host::console_capture::supervisor_stderr_detail(&paths.state_dir)
             );
         }
         std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
@@ -403,10 +405,25 @@ impl VmmDriver for HvfDriver {
     }
 
     fn capabilities(&self) -> VmCapabilities {
-        let proxy_path_ready = hvf_backend::hvf_workload_support_available();
         // vsock is live-proven through the unified run loop; the rest land as
         // pause/snapshot/networking are wired onto the primitive.
         VmCapabilities {
+            // Asked of the host, not assumed. This was a hardcoded `Some(4)`
+            // for a while: 5, 6 and 8 vCPU guests really did fail to reach the
+            // agent, and the number recorded that. The cause turned out to be a
+            // race in this backend's own vCPU creation rather than any limit —
+            // HVF hands out GIC redistributor frames in `hv_vcpu_create` order,
+            // and the creation threads were unordered, so two CPUs swapped
+            // frames and the guest could not match either to its
+            // redistributor. The suspicion written beside that constant — that
+            // a plausible-looking derivation would hide a threading bug — was
+            // right, and it was the constant that was hiding it.
+            //
+            // With creation ordered, 1, 2, 4, 5, 6, 8, 16 and 32 all boot and
+            // report their full count. So the ceiling comes from
+            // `hv_vm_get_max_vcpu_count` now, which answers 64 here and answers
+            // for itself on a different host.
+            max_vcpus: hvf_backend::hvf_max_vcpus(),
             pause_resume: true,
             // The supervisor serializes guest RAM plus vCPU and deterministic
             // device state under an acknowledged pause, and reloads both into a
@@ -426,13 +443,6 @@ impl VmmDriver for HvfDriver {
             // and always routes egress through the per-VM endpoint over vsock.
             no_routable_guest_nic: true,
             host_vsock_proxy: true,
-            // HVF presents no network device to the guest whatsoever.
-            l3_vsock: true,
-            // The hvf VMM can serve the unpacked OCI tree as a read-only
-            // virtiofs root (dev tier); the run-path tier gate selects it only for
-            // non-prod, non-sealed workloads. This stays gated on the launchable
-            // supervisor path — it is a dev-tier boot capability, not egress.
-            virtiofs_root: proxy_path_ready,
             // Named explicitly rather than left to `..Default::default()`:
             // the honest HVF answer (no cgroup, but a supervisor wall-clock
             // timer) differs from the all-`None` default.
@@ -467,10 +477,6 @@ impl VmmDriver for HvfDriver {
                 "Pause/resume + snapshot land as they are wired onto the primitive.",
             ],
         }
-    }
-
-    fn supports_directory_shares(&self) -> bool {
-        true
     }
 
     fn supports_resident_handoff(&self) -> bool {
@@ -528,6 +534,7 @@ impl VmmDriver for HvfDriver {
             spawned_unix_secs: mvm_core::time::now_unix_secs(),
             state: StandbyState::Idle,
             image_sha256: req.spec.image_sha256.clone(),
+            root_strategy: req.spec.root_strategy,
             parent_checkpoint: None,
             preloaded_child_vm_name: None,
             vsock_egress: req.spec.vsock_egress,
@@ -663,8 +670,8 @@ impl VmmDriver for HvfDriver {
         bail!("hvf does not provide guest channel info")
     }
 
-    fn workload_base_bootargs(&self, virtiofs_root: bool, has_disk: bool) -> String {
-        crate::driver::hvf_bootargs::workload_bootargs(virtiofs_root, has_disk)
+    fn workload_base_bootargs(&self, has_disk: bool) -> String {
+        crate::driver::hvf_bootargs::workload_bootargs(has_disk)
     }
 }
 
@@ -697,6 +704,16 @@ fn read_handoff_response(stream: &mut std::os::unix::net::UnixStream) -> std::io
     Ok(response)
 }
 
+/// Point a restored child's state files at the parent supervisor's, which is
+/// the process actually running the child's guest.
+///
+/// The captured usage record is deliberately not in this list. It is written
+/// once, at the owning process's teardown, describing the whole life of that
+/// process — so a symlink would hand the child the parent's CPU and resident
+/// numbers and let its exit report sign them as its own measurement. A child
+/// with no usage sidecar reads as unobserved, which is the honest answer:
+/// attributing a warm-forked child's consumption is an open question this
+/// version does not answer.
 fn link_child_state(child_dir: &Path, parent_dir: &Path) -> std::io::Result<()> {
     for name in [PID_FILE_NAME, "console.log", "workload.exit", "pause.state"] {
         let child_path = child_dir.join(name);
@@ -1067,6 +1084,7 @@ mod tests {
 
     fn spec_with(kernel: KernelImage, vsock: Vec<VsockPort>, blocks: Vec<BlockDev>) -> VmmSpec {
         VmmSpec {
+            builder_egress_endpoint: None,
             name: "w".into(),
             kernel,
             initramfs: Some("/img/initrd.cpio".into()),
@@ -1149,12 +1167,12 @@ mod tests {
     fn workload_base_bootargs_delegates_to_hvf_bootargs() {
         let d = HvfDriver::new();
         assert_eq!(
-            d.workload_base_bootargs(false, true),
-            crate::driver::hvf_bootargs::workload_bootargs(false, true)
+            d.workload_base_bootargs(true),
+            crate::driver::hvf_bootargs::workload_bootargs(true)
         );
         assert_eq!(
-            d.workload_base_bootargs(true, false),
-            crate::driver::hvf_bootargs::workload_bootargs(true, false)
+            d.workload_base_bootargs(false),
+            crate::driver::hvf_bootargs::workload_bootargs(false)
         );
     }
 
@@ -1440,6 +1458,34 @@ mod tests {
             vec![],
         );
         assert!(relay_supervisor_config(&spec, &sample_paths()).is_err());
+    }
+
+    /// A multi-vCPU request reaches the supervisor rather than being refused.
+    ///
+    /// This backend used to bail here, because the VMM below described one CPU
+    /// in the device tree whatever was asked for and answering a `CPU_ON` it
+    /// could not honour would hang the boot. It creates the CPUs now, so the
+    /// only correct thing to do with the count is pass it on — and passing it
+    /// on is the whole fix, since the supervisor is the process that calls
+    /// `hv_vcpu_create`.
+    #[test]
+    fn relay_config_carries_a_multi_vcpu_request_to_the_supervisor() {
+        for requested in [1u32, 2, 4] {
+            let mut spec = spec_with(
+                KernelImage::Path("/img/Image".into()),
+                vec![egress_port("/run/egress.sock")],
+                vec![],
+            );
+            spec.vcpus = requested;
+
+            let config = relay_supervisor_config(&spec, &sample_paths())
+                .expect("a vCPU count this backend now honours must not be refused");
+
+            assert_eq!(
+                config.vcpus, requested,
+                "the supervisor must be told the {requested} CPUs that were asked for"
+            );
+        }
     }
 
     #[test]

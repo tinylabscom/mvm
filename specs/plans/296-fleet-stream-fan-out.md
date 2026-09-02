@@ -2,10 +2,26 @@
 
 **Status:** Complete. WS1–WS6 landed.
 
+**Fleet integration landed (2026-08-29):** mvmd PR
+[#238](https://github.com/tinylabscom/mvmd/pull/238) now validates the complete
+DAG and each signed consumer plan before boot, resolves only fleet-granted
+bindings, then drives `EdgeConnector` through accepted records and an explicit
+close. The workflow has bounded nodes, edges, audit events and step count; it
+fails the graph without reconnecting on any edge error. The three fleet-only
+controls have therefore left `xtask/dormant-controls.toml` as the ratchet
+requires.
+
+**Integration repair (2026-08-28):** `EdgeConnector` now owns the admitted
+`InputRoute`, not a bare `InputSession`, so `step()` carries cleared bytes over
+the guest transport and `close()` delivers the scanner tail before EOF.
+`StreamPlane::subscribe` exposes the redacted reader by host-resolved VM name,
+and `LaunchOutcome::admitted` hands the fleet caller the exact authority object
+used for the boot rather than inviting a second admission.
+
 `mvm` ships the mechanism; `mvmd` declares the edges and resolves the bindings.
-That split is why the landed half has **no production caller in this
-repository** — see "Declared dormancy" below. It is a declaration, not an
-oversight.
+That split is why the production caller lives in mvmd rather than this
+repository. The boundary remains deliberate: mvm exposes single-host authority
+objects and never learns what a fleet is.
 
 Connect one workload's output stream to another's input stream, so a fleet can
 run a workflow. `mvmd` declares the edges; `mvm` exposes the primitives and
@@ -91,9 +107,9 @@ Two consequences worth stating plainly, because they will surprise someone:
   a connector that had picked those answers here would have picked them blind.
   What it does own is local: acceptance order (one pass, never reordered,
   `seq` strictly increasing across the edge's life), lease upkeep on every
-  step including idle ones, and `close()` routing through
-  `InputSession::close` so the scanner's withheld tail is delivered rather
-  than dropped.
+  step including idle ones, and `close()` routing through `InputRoute::close`
+  so the scanner's withheld tail is carried to the guest before EOF rather
+  than merely returned to the caller or dropped.
 
   **E2 cannot be served from this reader, and that is a finding.** Redaction
   runs before hashing, so a record reaching a `ReaderHandle` has already
@@ -120,14 +136,14 @@ Two consequences worth stating plainly, because they will surprise someone:
   edge guarantees by construction (no guest addresses another, no new path out
   of a guest, the four pre-boot refusals, raw refused rather than downgraded,
   safe defaults that cannot be lost by omission, producer never stalled) and
-  what it does not — chiefly that **none of those refusals has fired in
-  production**, because none has a caller here. They are dormant by
-  declaration, and the gate now enforces that in both directions.
+  what it does not. At landing, none of those refusals had fired in production
+  because the fleet caller did not yet exist. The mvmd workflow now exercises
+  them before boot.
 
-  Claim 17 stays `Preview`. An edge would be the input plane's second
-  production caller and the promotion question is deferred until one exists;
-  promoting on a caller nobody has written would make the claim true of code
-  and false of the system. Why it existed: An edge is a different authorization shape than a
+  Claim 17 stays `Preview`. An edge is the input plane's second
+  production caller. That caller now exists in mvmd; the reassessment keeps
+  claim 17 at `Preview` because its remaining limits are the fingerprint scan
+  and shell-entrypoint heuristic, not reachability. Why it existed: An edge is a different authorization shape than a
   per-plan grant, so this is not claim 17 with more rows. State what an edge
   guarantees, what it does not, and witness it. Reassess whether the input plane
   can leave `Preview` once it has a second production caller.
@@ -143,22 +159,22 @@ Two consequences worth stating plainly, because they will surprise someone:
   flight, why fan-in is a merge node, and what happens when a consumer falls
   behind under each mode.
 
-## Declared dormancy
+## External production caller
 
-`validate_topology` and `check_plan_edges` have **no caller inside `mvm`**, and
-will not get one: a single-VM `mvmctl` run has no graph to validate, and this
-repository has no fleet. `mvmd` is the caller.
+`validate_topology`, `check_plan_edges`, and `EdgeConnector` have **no caller
+inside `mvm`**, and will not get one: a single-VM `mvmctl` run has no graph to
+validate, and this repository has no fleet. The production caller landed in
+mvmd PR [#238](https://github.com/tinylabscom/mvmd/pull/238).
 
-That is the shape plan 293's WS4 exists to catch, so it is written down here
-rather than discovered later. The distinction WS4 draws is between a control
-that is dormant *by declaration* and one that is dormant *by accident* — this
-is the former, and when WS4 lands these two belong in its allowlist with this
-paragraph as the justification.
+The dormant-control manifest is a ratchet, not a permanent registry of
+cross-repository boundaries. These entries were correct while the caller was
+absent and were removed when the external production path landed. This section
+preserves why an in-repository reference still should not be invented merely to
+make a text scan see across repositories.
 
-What keeps it honest meanwhile: both are pure functions with no side effects,
-both are covered by their own tests, and neither claims a guarantee that
-anything in `mvm` relies on. The refusals they implement are real only once
-`mvmd` calls them, and no claim in ADR-001 asserts otherwise.
+What keeps the boundary honest is end-to-end evidence on both sides: mvm tests
+the mechanism and mvmd tests the fleet workflow, including wrong bindings,
+cycles, fan-in, resource exhaustion, edge failure and explicit close.
 
 ## Open questions
 

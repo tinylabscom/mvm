@@ -24,7 +24,7 @@ Two shapes are deliberately not covered:
 - `--attach` dispatches into a machine some earlier invocation admitted, so this
   process holds no admitted plan to write under. `--stdin -` there is refused
   with that explanation rather than a refusal from three layers down.
-- `mvmctl session attach --stdin` is a one-shot payload for the same reason.
+- `mvmctl machine session attach --stdin` is a one-shot payload for the same reason.
 
 Output goes the other way and *does* work today — see
 [Workload output streaming](/guides/workload-output-streaming/).

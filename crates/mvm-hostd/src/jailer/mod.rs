@@ -153,6 +153,18 @@ impl ConfinementSpec {
             allowed_syscalls,
         }
     }
+
+    /// Permit the endpoint to create its authenticated-session marker inside
+    /// one already-existing per-VM directory. Keeping this as an explicit
+    /// opt-in preserves the narrower default for endpoints that do not expose
+    /// launch-readiness evidence.
+    #[must_use]
+    pub fn with_session_marker_parent(mut self, parent: Option<&Path>) -> Self {
+        if let Some(parent) = parent {
+            self.read_write_paths.push(parent.to_path_buf());
+        }
+        self
+    }
 }
 
 /// Drop paths that don't exist on this host. Landlock installs a rule by
@@ -366,6 +378,18 @@ mod tests {
             vec![dir],
             "Local must add nothing beyond the audit dir"
         );
+    }
+
+    #[test]
+    fn network_endpoint_spec_grants_only_the_configured_session_marker_parent() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let marker_parent = dir.join("tests");
+        let spec =
+            ConfinementSpec::network_endpoint(dir.clone(), dir.clone(), dir.clone(), dir, None)
+                .with_session_marker_parent(Some(&marker_parent));
+
+        assert!(spec.read_write_paths.contains(&marker_parent));
+        assert_eq!(spec.read_write_paths.len(), 2);
     }
 
     /// M3: `Remote { uds_path, .. }` (`Some(uds)`) additionally permits

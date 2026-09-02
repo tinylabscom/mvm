@@ -199,7 +199,11 @@ pub fn ensure_host_agent_daemon(tenant: &str) -> Result<PathBuf> {
 /// Register a VM with the daemon: it binds the VM's `BROKER_PORT` socket and
 /// serves host-services on it. Host-signed.
 pub fn register_vm(control_socket: &Path, key_bytes: &[u8; 32], reg: RegisterVm) -> Result<()> {
-    send_control(control_socket, key_bytes, ControlRequest::Register(reg))
+    send_control(
+        control_socket,
+        key_bytes,
+        ControlRequest::Register(Box::new(reg)),
+    )
 }
 
 /// Deregister a VM at teardown: the daemon unbinds + drops it. Host-signed,
@@ -236,6 +240,9 @@ pub struct HostAgentServicesParams<'a> {
     pub broker_listen_socket: &'a Path,
     /// Exact host-service bindings from the admitted execution plan.
     pub services: &'a [mvm_core::protocol::broker::ServiceId],
+    pub capability_bindings: &'a [mvm_contract::protocol::agent_capability::CapabilityBinding],
+    /// Host-only controller-backed typed services prepared by admission.
+    pub service_proxies: &'a [mvm_contract::protocol::broker_control::ServiceProxyBinding],
 }
 
 impl<'a> HostAgentServicesParams<'a> {
@@ -257,6 +264,8 @@ pub struct HostAgentServicesParamsBuilder<'a> {
     state_dir: Option<&'a Path>,
     broker_listen_socket: Option<&'a Path>,
     services: Option<&'a [mvm_core::protocol::broker::ServiceId]>,
+    capability_bindings: Option<&'a [mvm_contract::protocol::agent_capability::CapabilityBinding]>,
+    service_proxies: Option<&'a [mvm_contract::protocol::broker_control::ServiceProxyBinding]>,
 }
 
 impl<'a> HostAgentServicesParamsBuilder<'a> {
@@ -270,6 +279,8 @@ impl<'a> HostAgentServicesParamsBuilder<'a> {
             state_dir: None,
             broker_listen_socket: None,
             services: None,
+            capability_bindings: None,
+            service_proxies: Some(&[]),
         }
     }
 
@@ -315,6 +326,25 @@ impl<'a> HostAgentServicesParamsBuilder<'a> {
         self
     }
 
+    #[must_use]
+    pub fn capability_bindings(
+        mut self,
+        bindings: &'a [mvm_contract::protocol::agent_capability::CapabilityBinding],
+    ) -> Self {
+        self.capability_bindings = Some(bindings);
+        self
+    }
+
+    /// Set controller-backed typed service bindings.
+    #[must_use]
+    pub fn service_proxies(
+        mut self,
+        bindings: &'a [mvm_contract::protocol::broker_control::ServiceProxyBinding],
+    ) -> Self {
+        self.service_proxies = Some(bindings);
+        self
+    }
+
     /// Finish, or name the first required field left unset.
     pub fn build(self) -> Result<HostAgentServicesParams<'a>, BuilderError> {
         Ok(HostAgentServicesParams {
@@ -337,6 +367,14 @@ impl<'a> HostAgentServicesParamsBuilder<'a> {
             services: self
                 .services
                 .ok_or(BuilderError::missing("HostAgentServicesParams", "services"))?,
+            capability_bindings: self.capability_bindings.ok_or(BuilderError::missing(
+                "HostAgentServicesParams",
+                "capability_bindings",
+            ))?,
+            service_proxies: self.service_proxies.ok_or(BuilderError::missing(
+                "HostAgentServicesParams",
+                "service_proxies",
+            ))?,
         })
     }
 }
@@ -364,6 +402,8 @@ pub fn register_host_agent_services_if_admitted(
         state_dir,
         broker_listen_socket,
         services,
+        capability_bindings,
+        service_proxies,
     } = params;
     let Some(tenant) = tenant_id else {
         return Ok(HostAgentServicesGuard::defused());
@@ -398,7 +438,9 @@ pub fn register_host_agent_services_if_admitted(
             ),
             audit_signer_uds_path: None,
             services_bindings: services.to_vec(),
-            capability_bindings: vec![],
+            capability_bindings: capability_bindings.to_vec(),
+            service_proxies: service_proxies.to_vec(),
+            assurance: None,
         },
     )?;
     warm_claim_debug("register_vm_done");
@@ -697,6 +739,8 @@ mod tests {
             ),
             services_bindings: vec![],
             capability_bindings: vec![],
+            assurance: None,
+            service_proxies: vec![],
         }
     }
 
@@ -860,6 +904,8 @@ mod tests {
             state_dir: dir.path(),
             broker_listen_socket: &dir.path().join("vsock-5300.sock"),
             services: &[],
+            capability_bindings: &[],
+            service_proxies: &[],
         })
         .expect("unadmitted VM registers nothing");
         drop(guard); // defused Drop reaps nothing

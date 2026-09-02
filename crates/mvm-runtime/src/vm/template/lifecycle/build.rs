@@ -178,7 +178,6 @@ pub fn template_build_from_manifest(
         // compatibility with old revision.json files; manifest-built
         // slots emit an empty string. cache_key no longer keys off
         // role; this field is informational only.
-        role: String::new(),
         vcpus: persisted.vcpus,
         mem_mib: persisted.mem_mib,
         data_disk_mib: persisted.data_disk_mib,

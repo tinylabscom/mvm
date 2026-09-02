@@ -75,3 +75,8 @@ schema = ["protocol", "dep:schemars"]
 
 [lints]
 workspace = true
+
+[[bin]]
+name = "emit_assurance_schema"
+path = "src/bin/emit_assurance_schema.rs"
+required-features = ["schema"]

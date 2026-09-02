@@ -54,7 +54,7 @@ free-form shell or unreviewed Nix that bypasses the security model.
 
 ## Security checklist
 
-- Review generated files before running `mvmctl build`.
+- Review generated files before running `mvmctl machine build`.
 - Keep `flake.lock` pinned and committed.
 - Do not put credentials in `mvm.toml`, `flake.nix`, or source examples.
 - Prefer secret references and explicit runtime grants.

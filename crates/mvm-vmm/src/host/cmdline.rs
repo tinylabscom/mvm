@@ -19,10 +19,9 @@ use std::path::{Path, PathBuf};
 
 use mvm_core::vm_backend::VmStartConfig;
 
-use crate::host::boot_config::{
-    booted_with_universal_initramfs, build_runtime_overlay_cmdline_args, build_verity_cmdline_args,
-    non_verity_overlay_ext4,
-};
+#[cfg(test)]
+use crate::host::boot_config::booted_with_universal_initramfs;
+use crate::host::boot_config::non_verity_overlay_ext4;
 use crate::host::egress_bridge::{
     host_signer_pub_cmdline_token, require_grant_cmdline_token, verb_grant_cmdline_token,
 };
@@ -51,37 +50,28 @@ pub fn cmdline_overflow(cmdline: &str) -> Option<String> {
     })
 }
 
-/// Kernel cmdline token that turns on the in-guest vsock egress client.
-/// Emitted only when the run actually allows outbound egress and the workload
-/// carries no bound secrets, so the raw SOCKS path never contends with the
-/// substitution endpoint for the shared egress port.
-pub fn vsock_egress_cmdline_token(config: &VmStartConfig, state_dir: &Path) -> Option<String> {
-    (config.network_policy.allows_egress()
-        && !crate::host::egress_shared::state_has_bound_secrets(state_dir).unwrap_or(false))
-    .then(|| "mvm.vsock_egress=1".to_string())
+/// Kernel cmdline token that turns on the authenticated in-guest vsock client.
+pub fn vsock_egress_cmdline_token(config: &VmStartConfig, _state_dir: &Path) -> Option<String> {
+    crate::host::egress_shared::effective_vsock_egress(config)
+        .then(|| "mvm.vsock_egress=1".to_string())
 }
 
-fn verity_initrd_path(config: &VmStartConfig) -> Option<PathBuf> {
-    config
-        .verity_path
-        .as_deref()
-        .zip(config.roothash.as_deref())
-        .and_then(|_| {
-            Path::new(&config.rootfs_path)
-                .parent()
-                .map(|p| p.join("rootfs.initrd"))
-        })
-        .filter(|p| p.exists())
+/// Kernel cmdline token that gives the guest the workload's machine name.
+///
+/// The name crosses a whitespace-delimited boundary, so validate it again at
+/// the encoding seam even though normal machine creation already validates it.
+/// A malformed internal launch config must not be able to inject another
+/// kernel argument.
+pub fn hostname_cmdline_token(machine_name: &str) -> Option<String> {
+    mvm_core::naming::validate_vm_name(machine_name)
+        .is_ok()
+        .then(|| format!("mvm.hostname={machine_name}"))
 }
 
-/// The initramfs this boot uses: an explicit `--initrd` override, or (for a
-/// verity-sealed boot) the sibling `rootfs.initrd` next to the rootfs image.
+/// The initramfs this boot uses: the explicit `--initrd` override, or the
+/// universal initramfs path attached by the runtime source resolver.
 pub fn effective_initrd(config: &VmStartConfig) -> Option<PathBuf> {
-    config
-        .initrd_path
-        .as_ref()
-        .map(PathBuf::from)
-        .or_else(|| verity_initrd_path(config))
+    config.initrd_path.as_ref().map(PathBuf::from)
 }
 
 /// Whether this boot has everything dm-verity needs: a verity sidecar, a
@@ -100,6 +90,28 @@ pub fn runtime_overlay(config: &VmStartConfig) -> Option<(&str, &str, &str)> {
     ))
 }
 
+/// The `mvm.runtime_data=` token for a non-verity boot, naming the device the
+/// runtime overlay was *actually* attached to.
+///
+/// Derived from [`workload_blocks`] rather than assumed, because the two
+/// disagreed: the layout appends the rootfs dm-verity sidecar whenever
+/// `verity_path` is set, but this branch runs whenever verity is *disabled* —
+/// and verity is disabled by a missing initramfs, not by a missing sidecar. An
+/// OCI image built with verified boot but launched without an initramfs
+/// therefore had its Merkle tree at `/dev/vdb` while the hardcoded token still
+/// said the overlay was there. Reading the slot off the layout cannot drift.
+///
+/// [`workload_blocks`]: crate::host::spec_map::workload_blocks
+fn build_runtime_overlay_cmdline_args_for_layout(config: &VmStartConfig) -> Option<String> {
+    let overlay = non_verity_overlay_ext4(config)?;
+    let overlay_path = Path::new(overlay);
+    let device = crate::host::spec_map::workload_blocks(config)
+        .iter()
+        .find(|block| block.source == overlay_path)
+        .map(crate::driver::spec::BlockDev::device_node)?;
+    Some(format!("mvm.runtime_data={device}"))
+}
+
 /// Assemble the workload kernel cmdline for `config`, or `None` when no extra
 /// tokens are needed (the driver then falls back to its own default base
 /// cmdline).
@@ -112,9 +124,19 @@ pub fn runtime_overlay(config: &VmStartConfig) -> Option<(&str, &str, &str)> {
 pub fn workload_cmdline(
     config: &VmStartConfig,
     state_dir: &Path,
-    base_bootargs: impl Fn(bool, bool) -> String,
+    base_bootargs: impl Fn(bool) -> String,
+) -> Option<String> {
+    workload_cmdline_for_hostname(config, state_dir, base_bootargs, Some(&config.name))
+}
+
+fn workload_cmdline_for_hostname(
+    config: &VmStartConfig,
+    state_dir: &Path,
+    base_bootargs: impl Fn(bool) -> String,
+    guest_hostname: Option<&str>,
 ) -> Option<String> {
     let egress = vsock_egress_cmdline_token(config, state_dir);
+    let hostname = guest_hostname.and_then(hostname_cmdline_token);
     let grants: Vec<String> = [
         verb_grant_cmdline_token(&config.name),
         require_grant_cmdline_token(&config.name),
@@ -123,16 +145,13 @@ pub fn workload_cmdline(
     .into_iter()
     .flatten()
     .collect();
-    let virtiofs_root = config.virtiofs_root.is_some();
-    let has_disk = !virtiofs_root && !config.rootfs_path.is_empty();
+    let has_disk = !config.rootfs_path.is_empty();
     let verity_is_enabled = verity_enabled(config);
-    if egress.is_none()
-        && grants.is_empty()
-        && !verity_is_enabled
-        && config.runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly
-    {
-        // No security tokens, no runtime policy, and no initramfs boot: let the
-        // driver fall back to its own default base cmdline.
+    if egress.is_none() && hostname.is_none() && grants.is_empty() && !verity_is_enabled {
+        // Nothing mvm-specific to say and no initramfs boot: let the driver
+        // fall back to its own default base cmdline. (This used to also require
+        // a rootfs-only runtime-source policy; with the overlay as the single
+        // source that conjunct was always true and said nothing.)
         return None;
     }
     let mut cmdline = if verity_is_enabled {
@@ -140,44 +159,24 @@ pub fn workload_cmdline(
         // so the base carries only the VMM-specific console (has_disk=false).
         // Route through the driver seam — libkrun needs `console=hvc0`, HVF the
         // pl011 UART — instead of hardcoding one VMM's console onto every guest.
-        base_bootargs(virtiofs_root, false)
+        base_bootargs(false)
     } else {
-        base_bootargs(virtiofs_root, has_disk)
+        base_bootargs(has_disk)
     };
     // The universal initramfs receives the rootfs and runtime-overlay
     // roothashes/device paths over vsock via `ActivateEnvironment` after boot, so
-    // its cmdline carries none of them. A legacy per-rootfs verity initramfs
-    // (`mvm-verity-init` as PID 1) is never sent that verb — the cmdline is its
-    // only channel, and without these tokens it aborts before userspace and the
-    // kernel panics on a dead PID 1. Hosts that cannot yet resolve the universal
-    // artifact still boot the legacy initramfs, so both shapes stay live.
-    if verity_is_enabled
-        && !booted_with_universal_initramfs(config)
-        && let Some(verity_args) = build_verity_cmdline_args(
-            config.roothash.as_deref(),
-            runtime_overlay(config).map(|(_, _, roothash)| roothash),
-        )
-    {
-        cmdline.push(' ');
-        cmdline.push_str(&verity_args);
-    }
-    // Non-verity boots carry the runtime overlay as a plain read-only
-    // `/dev/vdb` (attached by the backend's disk layout); emit the token its
-    // `/init` mounts from. Verity boots already emitted the dm-verity variant
-    // above.
+    // its cmdline carries none of them. The legacy per-rootfs verity initramfs
+    // is no longer supported.
+    // Non-verity boots carry the runtime overlay as a plain read-only block
+    // device; emit the token naming the device it actually landed on.
     if !verity_is_enabled
         && has_disk
-        && let Some(overlay_args) =
-            build_runtime_overlay_cmdline_args(None, non_verity_overlay_ext4(config).is_some())
+        && let Some(overlay_args) = build_runtime_overlay_cmdline_args_for_layout(config)
     {
         cmdline.push(' ');
         cmdline.push_str(&overlay_args);
     }
-    cmdline.push(' ');
-    cmdline.push_str(&mvm_core::vm_backend::encode_runtime_source_policy_cmdline(
-        config.runtime_source_policy,
-    ));
-    for token in egress.into_iter().chain(grants) {
+    for token in hostname.into_iter().chain(egress).chain(grants) {
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
@@ -199,11 +198,31 @@ pub fn workload_cmdline(
 pub fn runner_cmdline(
     config: &VmStartConfig,
     state_dir: &Path,
-    base_bootargs: impl Fn(bool, bool) -> String,
+    base_bootargs: impl Fn(bool) -> String,
 ) -> String {
-    let base = workload_cmdline(config, state_dir, &base_bootargs);
+    runner_cmdline_for_hostname(config, state_dir, base_bootargs, Some(&config.name))
+}
+
+/// Assemble a factory parent's cmdline without binding it to the parent's
+/// temporary internal name. A restored child receives its own hostname over
+/// the post-restore identity handshake.
+pub fn runner_cmdline_without_hostname(
+    config: &VmStartConfig,
+    state_dir: &Path,
+    base_bootargs: impl Fn(bool) -> String,
+) -> String {
+    runner_cmdline_for_hostname(config, state_dir, base_bootargs, None)
+}
+
+fn runner_cmdline_for_hostname(
+    config: &VmStartConfig,
+    state_dir: &Path,
+    base_bootargs: impl Fn(bool) -> String,
+    guest_hostname: Option<&str>,
+) -> String {
+    let base = workload_cmdline_for_hostname(config, state_dir, &base_bootargs, guest_hostname);
     let mut tokens: Vec<String> = Vec::new();
-    if !config.rootfs_path.is_empty() || config.virtiofs_root.is_some() {
+    if !config.rootfs_path.is_empty() {
         // HVF/libkrun workload guests have no RTC. Seed their wall clock before
         // image processes perform TLS validation (for example, pip contacting
         // PyPI), using the same host epoch captured at boot time as the builder.
@@ -232,9 +251,8 @@ pub fn runner_cmdline(
     match base {
         Some(base) => format!("{base} {extra}"),
         None => {
-            let virtiofs_root = config.virtiofs_root.is_some();
-            let has_disk = !virtiofs_root && !config.rootfs_path.is_empty();
-            format!("{} {extra}", base_bootargs(virtiofs_root, has_disk))
+            let has_disk = !config.rootfs_path.is_empty();
+            format!("{} {extra}", base_bootargs(has_disk))
         }
     }
 }
@@ -263,16 +281,113 @@ mod tests {
 
     /// HVF-like base bootargs for tests (pl011 UART console). Keeps the
     /// cmdline tests independent of the HVF backend module.
-    fn hvf_like_workload_bootargs(virtiofs_root: bool, has_disk: bool) -> String {
+    fn hvf_like_workload_bootargs(has_disk: bool) -> String {
         const UART_BASE: u64 = 0x9000000; // matches fdt::SERIAL_MMIO_BASE historically
         let mut args =
             format!("earlycon=pl011,0x{UART_BASE:x} console=ttyAMA0 panic=-1 nokaslr loglevel=8");
-        if virtiofs_root {
-            args.push_str(" rootfstype=virtiofs root=mvmroot rw init=/init");
-        } else if has_disk {
+        if has_disk {
             args.push_str(" root=/dev/vda rw init=/init");
         }
         args
+    }
+
+    /// A non-verity launch whose image *was* built with verified boot: the
+    /// rootfs carries a dm-verity sidecar, but no initramfs resolved, so verity
+    /// is disabled and the guest `/init` mounts the overlay from the
+    /// `mvm.runtime_data=` token.
+    fn sidecar_bearing_non_verity_config() -> VmStartConfig {
+        VmStartConfig {
+            name: "w".to_string(),
+            kernel_path: Some("/cache/vmlinux".to_string()),
+            rootfs_path: "/cache/oci/rootfs.ext4".to_string(),
+            verity_path: Some("/cache/oci/rootfs.verity".to_string()),
+            roothash: Some("a".repeat(64)),
+            // No initrd: this is what makes verity *disabled* despite the
+            // sidecar being present, and it is the exact shape a cold
+            // initramfs cache produced.
+            initrd_path: None,
+            runtime_overlay_path: Some("/cache/runtime-overlay/overlay.ext4".to_string()),
+            runtime_overlay_verity_path: Some("/cache/runtime-overlay/overlay.verity".to_string()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn runtime_data_token_names_the_device_the_overlay_actually_landed_on() {
+        // The regression: the token was hardcoded to /dev/vdb on every
+        // non-verity boot, but `workload_blocks` appends the rootfs dm-verity
+        // sidecar whenever `verity_path` is set — which is independent of
+        // whether verity is *enabled*. So on an image built with verified boot
+        // but launched without an initramfs, /dev/vdb was the rootfs Merkle
+        // tree and the overlay was one slot further along at /dev/vdc.
+        let config = sidecar_bearing_non_verity_config();
+        assert!(
+            !verity_enabled(&config),
+            "no initrd means verity is disabled, which is what selects this branch"
+        );
+
+        let token = build_runtime_overlay_cmdline_args_for_layout(&config)
+            .expect("a resolved overlay triple yields a token");
+
+        let blocks = crate::host::spec_map::workload_blocks(&config);
+        let overlay_device = blocks
+            .iter()
+            .find(|b| b.source == Path::new("/cache/runtime-overlay/overlay.ext4"))
+            .map(crate::driver::spec::BlockDev::device_node)
+            .expect("the overlay is in the attached layout");
+
+        assert_eq!(token, format!("mvm.runtime_data={overlay_device}"));
+        assert_eq!(
+            token, "mvm.runtime_data=/dev/vdc",
+            "rootfs=vda, rootfs verity sidecar=vdb, overlay=vdc"
+        );
+        assert_ne!(
+            token, "mvm.runtime_data=/dev/vdb",
+            "vdb is the rootfs Merkle tree on this shape, not the overlay"
+        );
+    }
+
+    #[test]
+    fn runtime_data_token_is_vdb_when_no_verity_sidecar_is_attached() {
+        // The plain OCI shape: no sidecar, so the overlay really is the second
+        // disk. The layout-derived token must agree with the old hardcoded
+        // answer here, or the fix would have moved a working case.
+        let mut config = sidecar_bearing_non_verity_config();
+        config.verity_path = None;
+        config.roothash = None;
+
+        assert_eq!(
+            build_runtime_overlay_cmdline_args_for_layout(&config).as_deref(),
+            Some("mvm.runtime_data=/dev/vdb"),
+        );
+    }
+
+    #[test]
+    fn assembled_cmdline_carries_the_layout_derived_runtime_device() {
+        // End of the seam: the token the guest actually receives.
+        let config = sidecar_bearing_non_verity_config();
+        let state = std::path::PathBuf::from("/tmp/nonexistent-state");
+        let cmdline = workload_cmdline(&config, &state, hvf_like_workload_bootargs)
+            .expect("a required-overlay boot always emits tokens");
+
+        assert!(
+            cmdline.contains("mvm.runtime_data=/dev/vdc"),
+            "assembled cmdline must point at the overlay's real slot: {cmdline}"
+        );
+        assert!(
+            !cmdline.contains("mvm.runtime_data=/dev/vdb"),
+            "must not point at the rootfs Merkle tree: {cmdline}"
+        );
+    }
+
+    #[test]
+    fn no_runtime_data_token_without_a_resolved_overlay() {
+        let mut config = sidecar_bearing_non_verity_config();
+        config.runtime_overlay_path = None;
+        config.runtime_overlay_verity_path = None;
+        config.runtime_overlay_roothash = None;
+        assert_eq!(build_runtime_overlay_cmdline_args_for_layout(&config), None);
     }
 
     #[test]
@@ -298,10 +413,32 @@ mod tests {
     }
 
     #[test]
-    pub fn vsock_egress_cmdline_token_only_when_policy_allows_egress() {
+    pub fn vsock_egress_cmdline_token_for_ingress_under_deny_all() {
         let dir = tempfile::tempdir().unwrap();
         let deny_all = VmStartConfig::default();
         assert_eq!(vsock_egress_cmdline_token(&deny_all, dir.path()), None);
+
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.ingress.push(
+            mvm_core::plan::IngressMapping::builder()
+                .mapping_id(1)
+                .protocol(mvm_core::plan::IngressProtocol::Tcp)
+                .host_addr("127.0.0.1")
+                .host_port(8080)
+                .guest_addr("127.0.0.1")
+                .guest_port(8080)
+                .transform(mvm_core::plan::IngressTransform::Opaque)
+                .build()
+                .expect("valid ingress fixture"),
+        );
+        let ingress = VmStartConfig {
+            plan_json: Some(serde_json::to_string(&plan).expect("serialize ingress fixture")),
+            ..Default::default()
+        };
+        assert_eq!(
+            vsock_egress_cmdline_token(&ingress, dir.path()).as_deref(),
+            Some("mvm.vsock_egress=1")
+        );
 
         let allow_egress = VmStartConfig {
             network_policy: mvm_core::network_policy::NetworkPolicy::preset(
@@ -316,11 +453,35 @@ mod tests {
     }
 
     #[test]
-    fn workload_cmdline_appends_vsock_egress_token_for_virtiofs_root() {
+    fn workload_cmdline_carries_the_machine_name_as_the_guest_hostname() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = VmStartConfig {
+            name: "build-worker-7".to_string(),
+            ..Default::default()
+        };
+
+        let cmdline =
+            workload_cmdline(&config, dir.path(), hvf_like_workload_bootargs).expect("cmdline");
+
+        assert!(
+            cmdline.contains("mvm.hostname=build-worker-7"),
+            "all workload backends consume this shared cmdline: {cmdline}"
+        );
+    }
+
+    #[test]
+    fn an_invalid_machine_name_cannot_inject_a_kernel_cmdline_token() {
+        assert_eq!(hostname_cmdline_token("worker mvm.vsock_egress=1"), None);
+        assert_eq!(hostname_cmdline_token("UPPERCASE"), None);
+        assert_eq!(hostname_cmdline_token("-leading"), None);
+    }
+
+    #[test]
+    fn workload_cmdline_appends_the_vsock_egress_token_for_a_block_root() {
         let dir = tempfile::tempdir().unwrap();
 
         let config = VmStartConfig {
-            virtiofs_root: Some("/tmp/root".to_string()),
+            rootfs_path: "/img/rootfs.ext4".to_string(),
             network_policy: mvm_core::network_policy::NetworkPolicy::allow_list(vec![
                 mvm_core::network_policy::HostPort::new("example.com", 443),
             ]),
@@ -328,17 +489,21 @@ mod tests {
         };
         let cmdline =
             workload_cmdline(&config, dir.path(), hvf_like_workload_bootargs).expect("cmdline");
-        assert!(cmdline.contains("rootfstype=virtiofs root=mvmroot"));
         assert!(cmdline.contains("init=/init"));
-        assert!(cmdline.contains("mvm.runtime_source_policy=rootfs_only"));
         assert!(cmdline.contains("mvm.vsock_egress=1"));
+        // The root strategy this was written around is gone; the egress token
+        // it also asserted is not, which is why the test survives it.
+        assert!(
+            !cmdline.contains("virtiofs"),
+            "no cmdline may name virtiofs: {cmdline}"
+        );
     }
 
     /// A verity boot whose initramfs is the *universal* one (resolved out of the
     /// shared initramfs cache) gets its roothashes and device paths over vsock
     /// via `ActivateEnvironment`, so the kernel cmdline must not carry them.
     #[test]
-    fn workload_cmdline_for_universal_initramfs_verity_boot_emits_console_and_policy_only() {
+    fn workload_cmdline_for_universal_initramfs_verity_boot_emits_console_only() {
         let _guard = crate::host::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -358,7 +523,6 @@ mod tests {
             runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
             runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
             runtime_overlay_roothash: Some("b".repeat(64)),
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
             ..Default::default()
         };
         let cmdline =
@@ -375,16 +539,14 @@ mod tests {
         assert!(!cmdline.contains("mvm.runtime_roothash="));
         assert!(!cmdline.contains("mvm.runtime_data=/dev/vdc"));
         assert!(!cmdline.contains("mvm.runtime_hash=/dev/vdd"));
-        assert!(cmdline.contains("mvm.runtime_source_policy=required_overlay"));
     }
 
-    /// The counterpart: a legacy per-rootfs verity initramfs (`mvm-verity-init`
-    /// as PID 1) is never sent `ActivateEnvironment`, so the kernel cmdline is
-    /// its only channel for the roothashes and device paths. Dropping those
-    /// tokens makes `mvm-verity-init` fatal ("no mvm.roothash= on kernel
-    /// cmdline") and panics the guest before userspace.
     #[test]
-    fn workload_cmdline_for_legacy_verity_initramfs_boot_carries_the_roothash_tokens() {
+    fn verity_cmdline_takes_the_console_from_the_driver_seam_not_a_hardcoded_uart() {
+        // Isolate MVM_HOME: this seeds an initramfs cache, and it also keeps
+        // the host signer out — an un-isolated home leaks a real
+        // `mvm.host_signer_pub=` token in and makes the assertions below pass
+        // for a reason that has nothing to do with the console.
         let _guard = crate::host::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -392,65 +554,22 @@ mod tests {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.set("MVM_HOME", dir.path());
         let rootfs = dir.path().join("rootfs.ext4");
-        let verity = dir.path().join("rootfs.verity");
-        let initrd = dir.path().join("rootfs.initrd");
-        std::fs::write(&rootfs, b"rootfs").unwrap();
-        std::fs::write(&verity, b"verity").unwrap();
-        std::fs::write(&initrd, b"initrd").unwrap();
-
-        let rootfs_hash = "a".repeat(64);
-        let overlay_hash = "b".repeat(64);
-        let config = VmStartConfig {
-            rootfs_path: rootfs.display().to_string(),
-            verity_path: Some(verity.display().to_string()),
-            roothash: Some(rootfs_hash.clone()),
-            runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
-            runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
-            runtime_overlay_roothash: Some(overlay_hash.clone()),
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-            ..Default::default()
-        };
-        assert!(
-            !booted_with_universal_initramfs(&config),
-            "fixture must resolve as a legacy-initramfs boot"
-        );
-        let cmdline =
-            workload_cmdline(&config, dir.path(), hvf_like_workload_bootargs).expect("cmdline");
-        for token in [
-            format!("mvm.roothash={rootfs_hash}"),
-            "mvm.data=/dev/vda".to_string(),
-            "mvm.hash=/dev/vdb".to_string(),
-            format!("mvm.runtime_roothash={overlay_hash}"),
-            "mvm.runtime_data=/dev/vdc".to_string(),
-            "mvm.runtime_hash=/dev/vdd".to_string(),
-        ] {
-            assert!(
-                cmdline.contains(&token),
-                "legacy verity cmdline missing {token}: {cmdline}"
-            );
-        }
-        assert!(cmdline.contains("mvm.runtime_source_policy=required_overlay"));
-    }
-
-    /// A verity boot must take its console base from the driver seam, not a
-    /// hardcoded HVF UART. A libkrun-style base yields `console=hvc0`; the
-    /// cmdline must never carry the pl011 `ttyAMA0`/`earlycon` that a libkrun
-    /// guest has no device for (the regression that emitted a 0-byte console).
-    #[test]
-    fn verity_cmdline_takes_the_console_from_the_driver_seam_not_a_hardcoded_uart() {
-        let dir = tempfile::tempdir().unwrap();
-        let rootfs = dir.path().join("rootfs.ext4");
         std::fs::write(&rootfs, b"rootfs").unwrap();
         let config = VmStartConfig {
             rootfs_path: rootfs.display().to_string(),
-            verity_path: Some("/tmp/rootfs.verity".into()),
+            verity_path: Some(dir.path().join("rootfs.verity").display().to_string()),
             roothash: Some("a".repeat(64)),
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+            // `verity_enabled` needs an initramfs as well as the sidecar pair:
+            // the initramfs is PID 1 on a sealed boot and is what sets the
+            // dm-verity target up. Without it this is not a verity boot, the
+            // cmdline carries no mvm tokens at all, and the driver's own base
+            // is used instead — which is a different function's contract.
+            initrd_path: Some(seed_universal_initramfs(dir.path())),
             ..Default::default()
         };
         // libkrun's base: a verity boot (has_disk=false) carries only the
         // console; a disk boot adds root/init.
-        let libkrun_base = |_virtiofs: bool, has_disk: bool| {
+        let libkrun_base = |has_disk: bool| {
             if has_disk {
                 "console=hvc0 root=/dev/vda rw init=/init".to_string()
             } else {
@@ -470,6 +589,8 @@ mod tests {
 
     fn disk_volume(host: &str, guest: &str) -> mvm_core::vm_backend::VmVolume {
         mvm_core::vm_backend::VmVolume {
+            materialized_image: None,
+            volume_label: None,
             host: host.into(),
             guest: guest.into(),
             size: String::new(),

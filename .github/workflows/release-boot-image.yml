@@ -84,10 +84,10 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.96.0
+        uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
@@ -247,7 +247,7 @@ jobs:
 
   # Plan 74 W1.4b / ADR-018: the verity-sealed mvm runtime overlay
   # disk. Attached as `/dev/vdc` at every microVM boot;
-  # `mvm-verity-init` mounts it at `/mvm/runtime` so the guest agent,
+  # the universal initramfs agent mounts it at `/mvm/runtime` so the agent,
   # seccomp shim, and per-language SDK runtime libraries live in a
   # single mvm-controlled blob instead of being baked into every
   # per-image rootfs. Built per-arch from `nix/images/runtime-overlay/`.
@@ -255,10 +255,9 @@ jobs:
   # The host-side `RuntimeOverlayResolver`
   # (`crates/mvm-build/src/runtime_overlay.rs`) downloads one
   # arch-qualified tarball plus a tarball sha256 sidecar, then
-  # installs the extracted canonical names (`overlay.ext4`,
-  # `overlay.verity`, `overlay.roothash`, `VERSION`,
-  # `checksums-sha256.txt`) into
-  # `~/.mvm/cache/runtime-overlay/<mvmctl-version>/<arch>/`.
+  # installs the overlay's canonical files into
+  # `~/.mvm/cache/runtime-overlay/<mvmctl-version>/<arch>/` and the six
+  # verified OCI materialization shims into the versioned OCI guest cache.
   runtime-overlay-image:
     # Skipped on a dry-run dispatch (see builder-vm-image).
     if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
@@ -281,7 +280,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Build runtime overlay image
         env:
@@ -299,14 +298,25 @@ jobs:
           cp -L "$STORE_PATH/overlay.verity"   "staging/runtime-overlay-${ARCH}/overlay.verity"
           cp -L "$STORE_PATH/overlay.roothash" "staging/runtime-overlay-${ARCH}/overlay.roothash"
           cp -L "$STORE_PATH/VERSION"          "staging/runtime-overlay-${ARCH}/VERSION"
+          for bin in \
+            mvm-guest-agent mvm-guest-netinit \
+            mvm-egress-client mvm-oci-entrypoint; do
+            cp -L "$STORE_PATH/guest-runtime/$bin" "staging/runtime-overlay-${ARCH}/$bin"
+          done
           (
             cd "staging/runtime-overlay-${ARCH}"
-            sha256sum overlay.ext4 overlay.verity overlay.roothash VERSION \
+            sha256sum \
+              overlay.ext4 overlay.verity overlay.roothash VERSION \
+              mvm-guest-agent mvm-guest-netinit \
+              mvm-egress-client mvm-oci-entrypoint \
               > checksums-sha256.txt
           )
           tar -C "staging/runtime-overlay-${ARCH}" \
             -czf "staging/runtime-overlay-${ARCH}.tar.gz" \
-            overlay.ext4 overlay.verity overlay.roothash VERSION checksums-sha256.txt
+            overlay.ext4 overlay.verity overlay.roothash VERSION \
+            mvm-guest-agent mvm-guest-netinit \
+            mvm-egress-client mvm-oci-entrypoint \
+            checksums-sha256.txt
           (
             cd staging
             sha256sum "runtime-overlay-${ARCH}.tar.gz" \
@@ -321,16 +331,16 @@ jobs:
             staging/runtime-overlay-${{ matrix.arch }}.tar.gz
             staging/runtime-overlay-${{ matrix.arch }}.tar.gz.sha256
 
-  # ADR-018: the optional glibc SDK-sidecar disk. Mounted read-only at
+  # ADR-018: the optional SDK-sidecar disk. Mounted read-only at
   # /mvm/sdk, and only for workloads whose signed plan binds an SDK-served
-  # host service — so a workload that never calls one never pays for the glibc
-  # closure. Built per-arch from the same `nix/images/runtime-overlay/` flake
-  # as the overlay.
+  # host service — so a workload that never calls one never pays for the
+  # closure. Built per-architecture and per-libc from the same
+  # `nix/images/runtime-overlay/` flake as the overlay.
   #
   # The host-side downloader (`mvm_build::sdk_sidecar::download_sdk_sidecar`)
-  # fetches one arch-qualified tarball plus its sha256 sidecar, and installs the
+  # fetches one arch-and-libc-qualified tarball plus its sha256 sidecar, and installs the
   # extracted canonical names (`sdk.ext4`, `VERSION`, `checksums-sha256.txt`)
-  # into `~/.mvm/cache/sdk-sidecar/<mvmctl-version>/<arch>/`. The asset names
+  # into `~/.mvm/cache/sdk-sidecar/<mvmctl-version>/<arch>/<libc>/`. The asset names
   # here are pinned against that Rust constructor by `tests/release_assets.rs`.
   #
   # Unlike the overlay job this does NOT regenerate the manifest: the
@@ -352,45 +362,68 @@ jobs:
         include:
           - arch: aarch64
             runner: ubuntu-24.04-arm
+            libc: glibc
+            package: sdk-sidecar-image
+            archive: sdk-sidecar-aarch64-glibc.tar.gz
+            checksum: sdk-sidecar-aarch64-glibc.tar.gz.sha256
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            libc: musl
+            package: sdk-sidecar-image-musl
+            archive: sdk-sidecar-aarch64-musl.tar.gz
+            checksum: sdk-sidecar-aarch64-musl.tar.gz.sha256
           - arch: x86_64
             runner: ubuntu-latest
+            libc: glibc
+            package: sdk-sidecar-image
+            archive: sdk-sidecar-x86_64-glibc.tar.gz
+            checksum: sdk-sidecar-x86_64-glibc.tar.gz.sha256
+          - arch: x86_64
+            runner: ubuntu-latest
+            libc: musl
+            package: sdk-sidecar-image-musl
+            archive: sdk-sidecar-x86_64-musl.tar.gz
+            checksum: sdk-sidecar-x86_64-musl.tar.gz.sha256
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Build SDK sidecar image
         env:
           ARCH: ${{ matrix.arch }}
+          LIBC: ${{ matrix.libc }}
+          PACKAGE: ${{ matrix.package }}
+          ARCHIVE: ${{ matrix.archive }}
+          CHECKSUM: ${{ matrix.checksum }}
         run: |
           SYSTEM="${ARCH}-linux"
-          nix build "./nix/images/runtime-overlay#packages.${SYSTEM}.sdk-sidecar-image" \
+          nix build "./nix/images/runtime-overlay#packages.${SYSTEM}.${PACKAGE}" \
             --no-link --print-out-paths > /tmp/store-path.txt
           STORE_PATH=$(head -1 /tmp/store-path.txt)
-          mkdir -p "staging/sdk-sidecar-${ARCH}"
+          mkdir -p "staging/sdk-sidecar-${ARCH}-${LIBC}"
           # cp -L so the payload resolves through nix-store symlinks into the
           # actual blobs; the artifact uploader doesn't follow symlinks.
-          cp -L "$STORE_PATH/sdk.ext4"             "staging/sdk-sidecar-${ARCH}/sdk.ext4"
-          cp -L "$STORE_PATH/VERSION"              "staging/sdk-sidecar-${ARCH}/VERSION"
-          cp -L "$STORE_PATH/checksums-sha256.txt" "staging/sdk-sidecar-${ARCH}/checksums-sha256.txt"
-          tar -C "staging/sdk-sidecar-${ARCH}" \
-            -czf "staging/sdk-sidecar-${ARCH}.tar.gz" \
+          cp -L "$STORE_PATH/sdk.ext4"             "staging/sdk-sidecar-${ARCH}-${LIBC}/sdk.ext4"
+          cp -L "$STORE_PATH/VERSION"              "staging/sdk-sidecar-${ARCH}-${LIBC}/VERSION"
+          cp -L "$STORE_PATH/checksums-sha256.txt" "staging/sdk-sidecar-${ARCH}-${LIBC}/checksums-sha256.txt"
+          tar -C "staging/sdk-sidecar-${ARCH}-${LIBC}" \
+            -czf "staging/${ARCHIVE}" \
             sdk.ext4 VERSION checksums-sha256.txt
           (
             cd staging
-            sha256sum "sdk-sidecar-${ARCH}.tar.gz" \
-              > "sdk-sidecar-${ARCH}.tar.gz.sha256"
+            sha256sum "${ARCHIVE}" > "${CHECKSUM}"
           )
 
       - name: Upload SDK sidecar image artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: sdk-sidecar-image-${{ matrix.arch }}
+          name: sdk-sidecar-image-${{ matrix.arch }}-${{ matrix.libc }}
           path: |
-            staging/sdk-sidecar-${{ matrix.arch }}.tar.gz
-            staging/sdk-sidecar-${{ matrix.arch }}.tar.gz.sha256
+            staging/${{ matrix.archive }}
+            staging/${{ matrix.checksum }}
 
   # Plan 158: the bundled default microVM image `mvmctl up`/`exec` boots when
   # no --flake/--template/--image is given. Ships the PROD variant only
@@ -424,10 +457,10 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.96.0
+        uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
@@ -467,6 +500,11 @@ jobs:
             "staging/default-microvm-rootfs-${ARCH}.ext4" "staged ${ARCH}"
           bash nix/packaging/release/assert-kernel-format.sh \
             "staging/default-microvm-vmlinux-${ARCH}" "${ARCH}" "staged ${ARCH} kernel"
+          # Runs on BOTH legs, unlike the boot gate below. Reading JSON needs no
+          # KVM, so the one defect class that has actually shipped through the
+          # aarch64 leg's blind spot — an incoherent sidecar — is caught on both.
+          bash nix/packaging/release/assert-sidecar-coherent.sh \
+            "staging/default-microvm-meta-${ARCH}.json" "staged ${ARCH} sidecar"
 
       # Nothing in this job ever started the image. Every gate below the build
       # is a checksum, a signature or a byte-level read, and none of those can
@@ -476,9 +514,12 @@ jobs:
       #
       # x86_64 only: the aarch64 leg runs on ubuntu-24.04-arm, which has no
       # nested KVM and cannot boot a guest at all. That leg's coverage is the
-      # static /init read above, which catches the defect class that actually
-      # shipped and is a stated compromise rather than a claim of equivalence —
-      # an aarch64-only regression that is not a shebang defect still gets past.
+      # static reads above — the /init shebang, the kernel format, and the
+      # sidecar coherence check, each catching a class that has actually shipped
+      # — and remains a stated compromise rather than a claim of equivalence: an
+      # aarch64-only regression outside those classes still gets past. Closing
+      # it needs an arm64 runner with KVM, which is infrastructure rather than
+      # anything this file can express.
       # The boot gate runs `cargo test`, which builds mvmctl, whose build.rs
       # cross-compiles the embedded host binaries as static musl and needs the
       # pinned zig. Without it the gate fails before it ever starts a guest —
@@ -547,6 +588,26 @@ jobs:
           echo "MVM_RUNTIME_BOOT_OVERLAY_ROOTHASH=$(tr -d '[:space:]' < overlay-staging/overlay.roothash)" \
             >> "$GITHUB_ENV"
 
+      # Build the raw initramfs from the same source revision as the staged
+      # image. Publication belongs to release.yml's version train; this local
+      # copy exists only so the pre-publish gate can exercise the sealed path.
+      - name: Build the universal initramfs for the boot gate
+        if: matrix.arch == 'x86_64'
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          SYSTEM="${ARCH}-linux"
+          INITRAMFS_PATH=$(nix build "./nix/images/initramfs#packages.${SYSTEM}.default" \
+            --no-link --print-out-paths | head -1)
+          # The runtime identifies the universal initramfs by its location in
+          # the mvm cache. Keep the staged witness on that production path so
+          # WorkloadRunner sends ActivateEnvironment instead of treating this
+          # as a legacy per-rootfs initramfs.
+          mkdir -p "$HOME/.mvm/cache/initramfs"
+          cp -L "$INITRAMFS_PATH/initramfs.cpio.gz" \
+            "$HOME/.mvm/cache/initramfs/initramfs.cpio.gz"
+
       - name: Boot the staged image before it becomes a release asset
         if: matrix.arch == 'x86_64'
         # Boots the artifact in `staging/`, never a published one — the whole
@@ -577,6 +638,11 @@ jobs:
           cp "staging/default-microvm-meta-${ARCH}.json" staging/mvm-meta.json
           cargo test --test runtime_boot_bench \
             prebuilt_runtime_image_boots_within_budget -- --exact --nocapture
+          MVM_RUNTIME_BOOT_INITRD="$HOME/.mvm/cache/initramfs/initramfs.cpio.gz" \
+          MVM_RUNTIME_BOOT_ROOTFS_VERITY="staging/default-microvm-rootfs-${ARCH}.verity" \
+          MVM_RUNTIME_BOOT_ROOTFS_ROOTHASH="$(tr -d '[:space:]' < "staging/default-microvm-rootfs-${ARCH}.roothash")" \
+            cargo test --test runtime_boot_bench \
+              prebuilt_runtime_image_boots_within_budget -- --exact --nocapture
 
       - name: Dump VMM diagnostics on failure
         if: ${{ failure() && matrix.arch == 'x86_64' }}
@@ -692,9 +758,41 @@ jobs:
             staging/default-microvm-${{ matrix.arch }}.sbom.txt
             staging/default-microvm-${{ matrix.arch }}-checksums-sha256.txt
 
+  # Browser QEMU is an immutable runtime pack, not a website build input. Build
+  # it on the boot-image release cadence so a docs-only publish only downloads
+  # and verifies these bytes instead of compiling QEMU through Emscripten again.
+  qemu-wasm-site-pack:
+    if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - name: Build QEMU-WASM browser pack
+        run: |
+          set -euo pipefail
+          nix build ./nix#qemu-wasm-smoke-pack
+          mkdir -p staging
+          tar -C result -czf staging/qemu-wasm-smoke-pack.tar.gz .
+          (
+            cd staging
+            sha256sum qemu-wasm-smoke-pack.tar.gz \
+              > qemu-wasm-smoke-pack.tar.gz.sha256
+          )
+
+      - name: Upload QEMU-WASM browser pack
+        uses: actions/upload-artifact@v7
+        with:
+          name: qemu-wasm-site-pack
+          path: |
+            staging/qemu-wasm-smoke-pack.tar.gz
+            staging/qemu-wasm-smoke-pack.tar.gz.sha256
+
   publish-boot-image:
-    needs: [builder-vm-image, runtime-overlay-image, sdk-sidecar-image, default-microvm]
-    # `!cancelled()` rather than plain success: the four image jobs are
+    needs: [builder-vm-image, runtime-overlay-image, sdk-sidecar-image, default-microvm, qemu-wasm-site-pack]
+    # `!cancelled()` rather than plain success: the five image jobs are
     # independent artifacts and one arch's Nix build failing must not strand
     # the others, exactly as it does not strand the binary release next door.
     # It reaches this job so the completeness check below can name every
@@ -745,6 +843,7 @@ jobs:
           for blob in \
             artifacts/runtime-overlay-*.tar.gz \
             artifacts/sdk-sidecar-*.tar.gz \
+            artifacts/qemu-wasm-smoke-pack.tar.gz.sha256 \
             artifacts/builder-vm-*-checksums-sha256.txt \
             artifacts/default-microvm-*-checksums-sha256.txt; do
             cosign sign-blob \
@@ -776,10 +875,21 @@ jobs:
               "builder-vm-vmlinux-${arch}" \
               "builder-vm-rootfs-${arch}.ext4" \
               "builder-vm-${arch}-checksums-sha256.txt" \
-              "runtime-overlay-${arch}.tar.gz" \
-              "sdk-sidecar-${arch}.tar.gz"; do
+              "runtime-overlay-${arch}.tar.gz"; do
               [ -s "artifacts/${f}" ] || missing+=("${f}")
             done
+            for libc in glibc musl; do
+              for f in \
+                "sdk-sidecar-${arch}-${libc}.tar.gz" \
+                "sdk-sidecar-${arch}-${libc}.tar.gz.sha256"; do
+                [ -s "artifacts/${f}" ] || missing+=("${f}")
+              done
+            done
+          done
+          for f in \
+            qemu-wasm-smoke-pack.tar.gz \
+            qemu-wasm-smoke-pack.tar.gz.sha256; do
+            [ -s "artifacts/${f}" ] || missing+=("${f}")
           done
           if [ ${#missing[@]} -gt 0 ]; then
             echo "::error::boot image release is incomplete — refusing to publish. Missing: ${missing[*]}" >&2
@@ -811,9 +921,15 @@ jobs:
             artifacts/runtime-overlay-*.tar.gz
             artifacts/runtime-overlay-*.tar.gz.sha256
             artifacts/runtime-overlay-*.tar.gz.bundle
-            artifacts/sdk-sidecar-*.tar.gz
-            artifacts/sdk-sidecar-*.tar.gz.sha256
-            artifacts/sdk-sidecar-*.tar.gz.bundle
+            artifacts/sdk-sidecar-*-glibc.tar.gz
+            artifacts/sdk-sidecar-*-glibc.tar.gz.sha256
+            artifacts/sdk-sidecar-*-glibc.tar.gz.bundle
+            artifacts/sdk-sidecar-*-musl.tar.gz
+            artifacts/sdk-sidecar-*-musl.tar.gz.sha256
+            artifacts/sdk-sidecar-*-musl.tar.gz.bundle
+            artifacts/qemu-wasm-smoke-pack.tar.gz
+            artifacts/qemu-wasm-smoke-pack.tar.gz.sha256
+            artifacts/qemu-wasm-smoke-pack.tar.gz.sha256.bundle
             artifacts/default-microvm-vmlinux-*
             artifacts/default-microvm-rootfs-*
             artifacts/default-microvm-meta-*

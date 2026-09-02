@@ -93,6 +93,7 @@ struct CapabilityRegistration {
 /// (the static catalog is the contract).
 pub struct Registry {
     handlers: HashMap<ServiceId, Arc<dyn ServiceHandler>>,
+    capability_only_services: HashSet<ServiceId>,
     capabilities: HashMap<CapabilityId, CapabilityRegistration>,
     admitted: HashMap<CapabilityId, [u8; 32]>,
     consumed_invocations: std::sync::Mutex<HashSet<(CapabilityId, AgentRequestId)>>,
@@ -104,6 +105,7 @@ impl Registry {
     pub fn new() -> Self {
         Self {
             handlers: HashMap::new(),
+            capability_only_services: HashSet::new(),
             capabilities: HashMap::new(),
             admitted: HashMap::new(),
             consumed_invocations: std::sync::Mutex::new(HashSet::new()),
@@ -144,6 +146,13 @@ impl Registry {
     /// bindings at the plan-verification layer, not here).
     pub fn register(&mut self, handler: Arc<dyn ServiceHandler>) {
         self.handlers.insert(handler.id(), handler);
+    }
+
+    /// Require every call to `service` to carry admitted typed-capability
+    /// metadata. Controller proxies use this so a direct legacy service call
+    /// cannot bypass descriptor, replay, and payload gates.
+    pub fn require_capability(&mut self, service: ServiceId) {
+        self.capability_only_services.insert(service);
     }
 
     /// Register one explicitly described per-verb capability.
@@ -269,6 +278,12 @@ impl Registry {
         verb: &str,
         payload: serde_json::Value,
     ) -> ServiceDispatchResult {
+        if self.capability_only_services.contains(service) {
+            return Err(ServiceError::new(
+                ServiceErrorCode::CapabilityDenied,
+                "this service requires an admitted typed capability invocation",
+            ));
+        }
         let Some(handler) = self.handlers.get(service) else {
             return Err(self.teaching_refusal(
                 ServiceErrorCode::NotBound,
@@ -1389,6 +1404,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn unbound_name_teaching_uses_the_exact_attempt_ceiling() {
+        let registry = Registry::new();
+
+        for attempt in 1..=MAX_UNBOUND_ATTEMPTS_PER_NAME {
+            assert!(
+                registry.should_still_teach("host.time.v1"),
+                "attempt {attempt} must still teach the admitted surface"
+            );
+        }
+        assert!(
+            !registry.should_still_teach("host.time.v1"),
+            "the first attempt past the ceiling must be terse"
+        );
+    }
+
     #[tokio::test]
     async fn refusal_tracking_cannot_be_grown_without_bound() {
         let registry = Registry::new();
@@ -1453,5 +1484,24 @@ mod tests {
             "the typed path is the real one; its refusal must teach too: {}",
             err.message
         );
+    }
+
+    #[tokio::test]
+    async fn a_capability_only_service_refuses_the_legacy_direct_call_path() {
+        let mut registry = Registry::new();
+        let handler: Arc<dyn ServiceHandler> = Arc::new(EchoHandler);
+        registry.register(Arc::clone(&handler));
+        registry.require_capability(handler.id());
+
+        let error = registry
+            .dispatch(
+                &ctx(),
+                &handler.id(),
+                "echo",
+                serde_json::json!({"value": "synthetic"}),
+            )
+            .await
+            .expect_err("direct calls must not bypass typed capability gates");
+        assert_eq!(error.code, ServiceErrorCode::CapabilityDenied);
     }
 }

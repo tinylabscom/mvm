@@ -36,7 +36,7 @@ fn live_env() -> Option<(String, RootfsSource)> {
 
 /// Make the lane self-contained: seed the supplied workload kernel into the
 /// exact cache location the launch path resolves
-/// (`<cache>/builder-vm/<arch>/kernels/workload/vmlinux`) when the cache is
+/// (`<cache>/kernels/<arch>/workload/vmlinux`) when the cache is
 /// cold. An already-populated cache is left untouched — the operator's own
 /// verified kernel wins.
 ///

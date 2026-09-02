@@ -1,0 +1,35 @@
+[package]
+name = "mvm-host-services"
+description = "In-guest host-services C ABI (libmvm_host_services.so) — one JSON-in/JSON-out entry point over the vsock broker, loaded by every language SDK."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+# The package name is what makes cargo emit `libmvm_host_services.so`
+# directly. When this lived in `mvm-sdk` the output was `libmvm_sdk.so` and the
+# nix package renamed it, which meant the stable filename every language SDK
+# dlopens was established by an `install` line rather than by the build.
+#
+# `lib` as well as `cdylib` so `mvm-sdk`'s error taxonomy can reference the
+# `MVM_HSVC_*` status codes as constants instead of restating them.
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+# The broker clients and vsock primitives. This crate is only the C-ABI veneer.
+mvm-agentd.workspace = true
+# Request/response DTOs for the host.audit and host.kv protocols.
+mvm-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Deliberately nothing else. This closure is what gets compiled into every
+# guest, and it must stay free of C and of an async runtime: `ring` and the
+# tree-sitter parsers cannot cross-compile to `aarch64-unknown-linux-musl`
+# without a musl C toolchain, and cannot go to `wasm32-unknown-unknown` at all.
+# `check-sdk-transport-free` holds that line.
+
+[lints]
+workspace = true

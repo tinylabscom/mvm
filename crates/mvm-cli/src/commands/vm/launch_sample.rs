@@ -221,8 +221,6 @@ pub struct ArtifactPaths {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LaunchRootStrategy {
-    /// Boot the unpacked OCI tree through a read-only virtio-fs root.
-    VirtiofsRoot,
     /// Boot a materialized ext4 block image, optionally protected by dm-verity.
     BlockExt4,
 }
@@ -230,7 +228,6 @@ pub enum LaunchRootStrategy {
 impl From<mvm_build::run_image::RootStrategy> for LaunchRootStrategy {
     fn from(strategy: mvm_build::run_image::RootStrategy) -> Self {
         match strategy {
-            mvm_build::run_image::RootStrategy::VirtiofsRoot => Self::VirtiofsRoot,
             mvm_build::run_image::RootStrategy::BlockExt4 => Self::BlockExt4,
         }
     }
@@ -263,6 +260,15 @@ pub struct LaunchSubTimings {
     pub mount_materialize_ms: Option<f64>,
     /// Verity sidecar probe and roothash read for the resolved rootfs.
     pub artifact_verify_ms: Option<f64>,
+    /// Synthesizing, signing and recording the admitted plan.
+    ///
+    /// The `admit` bucket was a window with no named parts, so a launch that
+    /// spent it somewhere unexpected could only say how long, never where.
+    pub admit_plan_ms: Option<f64>,
+    /// Attaching the cached runtime overlay.
+    pub attach_overlay_ms: Option<f64>,
+    /// Attaching the cached universal initramfs.
+    pub attach_initramfs_ms: Option<f64>,
     /// The backend's own VM creation call, start to return.
     ///
     /// How much of guest boot this contains is backend-defined: HVF's `start`
@@ -331,6 +337,9 @@ impl LaunchSubTimings {
             ("mount_cache_lookup", self.mount_cache_lookup_ms),
             ("mount_materialize", self.mount_materialize_ms),
             ("artifact_verify", self.artifact_verify_ms),
+            ("admit_plan", self.admit_plan_ms),
+            ("attach_overlay", self.attach_overlay_ms),
+            ("attach_initramfs", self.attach_initramfs_ms),
             ("vmm_create", self.vmm_create_ms),
             ("guest_kernel_entry", self.guest_kernel_entry_ms),
             ("agent_auth", self.agent_auth_ms),
@@ -444,7 +453,7 @@ mod tests {
             os: "macos".to_string(),
             arch: "aarch64".to_string(),
             launch_mode: LaunchMode::Cold,
-            root_strategy: Some(LaunchRootStrategy::VirtiofsRoot),
+            root_strategy: Some(LaunchRootStrategy::BlockExt4),
             sizing: GuestSizing {
                 cpus: 2,
                 memory_mib: 512,
@@ -570,10 +579,6 @@ mod tests {
 
     #[test]
     fn root_strategy_mapping_preserves_the_security_tier() {
-        assert_eq!(
-            LaunchRootStrategy::from(mvm_build::run_image::RootStrategy::VirtiofsRoot),
-            LaunchRootStrategy::VirtiofsRoot
-        );
         assert_eq!(
             LaunchRootStrategy::from(mvm_build::run_image::RootStrategy::BlockExt4),
             LaunchRootStrategy::BlockExt4

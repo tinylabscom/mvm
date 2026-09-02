@@ -101,17 +101,16 @@ Build a microVM image and run it in one command:
 mvmctl machine run --flake . --cpus 2 --memory 1024
 ```
 
-Run in background with port forwarding:
+Run persistently with signed ingress:
 
 ```bash
-mvmctl machine run --flake . --name my-vm -d
-mvmctl machine forward my-vm -p 8080:8080
+mvmctl machine run --flake . --name my-vm --port 8080:8080
 ```
 
 Or build separately:
 
 ```bash
-mvmctl build --flake . --profile minimal
+mvmctl machine build --flake . --profile minimal
 mvmctl machine run --flake .
 ```
 
@@ -124,7 +123,7 @@ and records the flake target plus runtime sizing:
 mvmctl init base-worker --preset worker
 cd base-worker
 $EDITOR mvm.toml
-mvmctl build
+mvmctl machine build
 mvmctl machine run --manifest .
 ```
 
@@ -150,7 +149,7 @@ Browse the bundled catalog and scaffold from a curated entry:
 ```bash
 mvmctl catalog list                       # Browse available entries
 mvmctl init my-app --catalog minimal      # Scaffold from a catalog entry
-mvmctl build my-app                       # Build the manifest
+mvmctl machine build my-app                       # Build the manifest
 mvmctl machine run --manifest my-app                          # Boot the VM
 ```
 
@@ -173,7 +172,7 @@ or `--manifest`.
 ```bash
 mvmctl machine run --image alpine -- uname -a                    # OCI image, one-shot
 mvmctl machine run --flake . --mount .:/work -- ls /work         # share host dir, read-only
-mvmctl machine run --image alpine -e DEBUG=1 -- env | grep DEBUG # inject env vars
+mvmctl machine run --image alpine -e DEBUG=1 -- sh -c 'env | grep DEBUG' # inject env vars
 mvmctl machine run --manifest my-tpl -- /bin/true                # registered template
 ```
 

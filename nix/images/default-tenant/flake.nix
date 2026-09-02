@@ -57,7 +57,7 @@
       # Verity determinism — copied verbatim from runtime-overlay
       # (nix/images/runtime-overlay/flake.nix:180-203). MUST stay in lockstep
       # with `mvm_build::oci_to_rootfs::verity::VeritysetupOptions::default` and
-      # `mvm-verity-init`'s DATA_BLOCK_SIZE.
+      # the guest agent's DATA_BLOCK_SIZE.
       verityDataBlockSize = 1024;
       verityHashBlockSize = 4096;
       veritySalt = "0000000000000000000000000000000000000000000000000000000000000000";

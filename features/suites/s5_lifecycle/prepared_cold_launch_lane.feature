@@ -41,3 +41,13 @@ Feature: Prepared cold-launch measurement lanes
     Given a debug launch sample whose launch performed no hidden work
     When the sample is offered to the prepared-cold lane
     Then the prepared-cold lane refuses the sample as not release-built
+
+  Scenario: A prepared boot just below 200 ms meets the hard requirement
+    Given a prepared-cold launch with a dispatch window of 199.9 ms
+    When the dispatch timing is checked against the hard boot requirement
+    Then the hard boot requirement passes
+
+  Scenario: A prepared boot at 200 ms fails the hard requirement
+    Given a prepared-cold launch with a dispatch window of 200.0 ms
+    When the dispatch timing is checked against the hard boot requirement
+    Then the hard boot requirement fails and says every boot must be under 200 ms

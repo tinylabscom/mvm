@@ -28,11 +28,11 @@ use mvm_fs::oci::{
 };
 use mvm_runtime::AnyBackend;
 
-use mvm_core::client::BackendCapabilityReport;
 use mvm_core::client::dto::{
     ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus,
     PauseOpts, PauseOutcome, PortMapping, ResumeOpts, ResumeOutcome,
 };
+use mvm_core::client::{BackendCapabilityReport, ClientOperationCapabilities};
 use mvm_core::client::{MvmClient, MvmError, Result};
 use mvm_core::config::vm_state_dir;
 use mvm_core::vm_backend::{SnapshotCapability, VmStartConfig, WarmStartError};
@@ -55,6 +55,19 @@ pub struct LocalBackend {
     pub(crate) secret_service: Option<std::sync::Arc<crate::secret::SecretService>>,
 }
 
+/// vCPUs to give a guest when the caller does not say.
+///
+/// A plain constant again. It was briefly resolved per backend, because HVF
+/// accepted exactly one vCPU and refused anything else while being the macOS
+/// default — so the default configuration and the default backend were
+/// mutually exclusive there. HVF has real SMP now, which removes the ceiling
+/// and with it the reason to vary the default by backend. Varying it anyway
+/// would quietly hand a macOS caller half the CPUs everyone else gets.
+#[must_use]
+pub fn default_vcpus() -> u32 {
+    2
+}
+
 impl LocalBackend {
     pub fn new() -> Self {
         Self {
@@ -66,6 +79,21 @@ impl LocalBackend {
     pub fn with_hypervisor(name: &str) -> Self {
         Self {
             backend: AnyBackend::from_hypervisor(name),
+            secret_service: None,
+        }
+    }
+
+    /// Client bound to the backend that actually started `vm`, falling back to
+    /// the host default when the VM has left no marker.
+    ///
+    /// A verb operating an *existing* machine must reach the VMM that owns it.
+    /// Choosing from a flag default instead sent `pause` at Firecracker for a
+    /// guest running on HVF, which failed on a socket that was never going to
+    /// exist.
+    #[must_use]
+    pub fn for_started_vm(vm: &str) -> Self {
+        Self {
+            backend: AnyBackend::for_started_vm(vm).unwrap_or_else(AnyBackend::auto_select),
             secret_service: None,
         }
     }
@@ -104,24 +132,36 @@ impl LocalBackend {
         infos.into_iter().map(|i| to_state(i, None)).collect()
     }
 
-    /// Whether this client drives the hermetic in-memory mock backend. The mock
-    /// has no live Firecracker socket and no guest agent, so the snapshot path
-    /// swaps in canned bytes and skips the guest-facing signals.
-    fn is_mock(&self) -> bool {
-        self.backend.kind() == BackendKind::Mock
+    /// Resolve an existing machine's owning backend from its live marker. A
+    /// marker-less machine falls back to the backend explicitly carried by this
+    /// client, preserving the hermetic mock path and explicit CLI overrides.
+    fn lifecycle_backend_for(&self, vm_name: &str) -> AnyBackend {
+        AnyBackend::for_started_vm(vm_name)
+            .unwrap_or_else(|| AnyBackend::from_hypervisor(self.backend.name()))
     }
 
-    /// Pick the `SnapshotIO` matching this client's backend. The mock writes
+    /// Firecracker and the hermetic mock use the sealed snapshot lifecycle.
+    /// Other backends own their pause/resume mechanics directly.
+    fn uses_sealed_snapshot(backend: &AnyBackend) -> bool {
+        matches!(backend.kind(), BackendKind::Firecracker | BackendKind::Mock)
+    }
+
+    fn is_mock_backend(backend: &AnyBackend) -> bool {
+        backend.kind() == BackendKind::Mock
+    }
+
+    /// Pick the `SnapshotIO` matching the resolved machine owner. The mock writes
     /// deterministic `CannedIO` stub bytes so the seal/verify round-trip runs
     /// without a real Firecracker socket; every other backend drives
-    /// `FirecrackerIO` against the running VM's UDS control socket. The mock
+    /// `FirecrackerIO` against the running Firecracker VM's UDS control socket.
+    /// Backend-native lifecycle paths never call this helper. The mock
     /// arm is gated behind `test-support` along with `is_mock()`'s only
     /// possible `true` outcome — outside that feature `AnyBackend::Mock`
     /// doesn't exist, so `is_mock()` is always `false` and this falls
     /// straight through to the real Firecracker path.
-    fn snapshot_io_for(&self, vm_name: &str) -> Result<Box<dyn SnapshotIO>> {
+    fn snapshot_io_for(&self, backend: &AnyBackend, vm_name: &str) -> Result<Box<dyn SnapshotIO>> {
         #[cfg(feature = "test-support")]
-        if self.is_mock() {
+        if Self::is_mock_backend(backend) {
             let dir = mvm_runtime::MockBackend::vm_dir(vm_name);
             if !dir.exists() {
                 return Err(backend_err(format!(
@@ -134,6 +174,11 @@ impl LocalBackend {
                 b"mock-mem".to_vec(),
             )));
         }
+        debug_assert_eq!(
+            backend.kind(),
+            BackendKind::Firecracker,
+            "only Firecracker reaches the production sealed-snapshot transport"
+        );
         let vm_dir = mvm_runtime::microvm::resolve_running_vm_dir(vm_name)
             .map_err(|e| backend_err(format!("VM {vm_name:?} is not running: {e:#}")))?;
         Ok(Box::new(FirecrackerIO::new(firecracker_socket(&vm_dir))))
@@ -143,15 +188,12 @@ impl LocalBackend {
     /// fresh VMGenID, load + resume live memory, reseed. Fails closed with the
     /// typed `WarmStartError::Unsupported` recovery hint on a disk-only backend
     /// rather than silently cold-booting.
-    fn warm_resume(&self, name: &str) -> Result<ResumeOutcome> {
+    fn warm_resume(&self, backend: &AnyBackend, name: &str) -> Result<ResumeOutcome> {
         let config = VmStartConfig {
             name: name.to_string(),
             ..Default::default()
         };
-        match self
-            .backend
-            .warm_start(&config, SnapshotCapability::LiveMemory)
-        {
+        match backend.warm_start(&config, SnapshotCapability::LiveMemory) {
             Ok(outcome) => {
                 // FC keeps its pid across pause/resume, so the marker must be
                 // cleared explicitly on a successful warm resume.
@@ -175,8 +217,16 @@ impl LocalBackend {
     /// older-epoch snapshot** — load it back and resume vCPUs, then finish
     /// bringing the guest back with a fresh-VMGenID PostRestore (skipped for the
     /// mock, which has no guest agent).
-    fn plain_resume(&self, name: &str) -> Result<ResumeOutcome> {
-        let io = self.snapshot_io_for(name)?;
+    fn plain_resume(&self, backend: &AnyBackend, name: &str) -> Result<ResumeOutcome> {
+        if !Self::uses_sealed_snapshot(backend) {
+            backend
+                .resume(&VmId(name.to_string()))
+                .map_err(|e| backend_err(format!("resuming VM {name:?}: {e:#}")))?;
+            set_registry_resumed(name);
+            return Ok(ResumeOutcome::default());
+        }
+
+        let io = self.snapshot_io_for(backend, name)?;
         // The replay-refusal gate: `verify_and_resume` rejects a snapshot whose
         // epoch is below the persisted high-water mark before restoring anything.
         // Called unchanged — this is the security property of resume.
@@ -192,7 +242,7 @@ impl LocalBackend {
         // simply re-run resume.
         set_registry_resumed(name);
 
-        if !self.is_mock() {
+        if !Self::is_mock_backend(backend) {
             signal_guest_post_restore(name)?;
         }
         // Report the verified snapshot's epoch + artifact lengths so the caller's
@@ -225,6 +275,7 @@ fn signal_guest_post_restore(name: &str) -> Result<()> {
         name,
         &VsockPostRestoreSignal {
             token,
+            hostname: Some(name.to_string()),
             grant_envelope: None,
         },
         POST_RESTORE_READY_TIMEOUT,
@@ -511,7 +562,6 @@ fn materialize_from_dir(
     // a source checkout or a complete compatibility cache.
     mvm_build::run_image::inject_and_materialize(
         mvm_build::run_image::InjectAndMaterializeRequest::builder(&cache_root, dir, &output, name)
-            .profile(mvm_build::oci_runtime_inject::RuntimeInjectionProfile::RuntimeLean)
             .sealed(false)
             .deferred_nodes(deferred_nodes)
             .build(),
@@ -603,10 +653,26 @@ impl MvmClient for LocalBackend {
     async fn backend_capabilities(&self) -> Result<BackendCapabilityReport> {
         // Straight from the backend that will actually run the workload, so
         // the report cannot drift from the thing it describes.
-        Ok(BackendCapabilityReport::new(
-            self.backend.kind(),
-            self.backend.capabilities(),
-        ))
+        let capabilities = self.backend.capabilities();
+        Ok(
+            BackendCapabilityReport::new(self.backend.kind(), capabilities.clone())
+                .with_operations(
+                    ClientOperationCapabilities::builder()
+                        .list(true)
+                        .inspect(true)
+                        .create(true)
+                        .run(true)
+                        .start(true)
+                        .stop(true)
+                        .pause(capabilities.pause_resume)
+                        .resume(capabilities.pause_resume)
+                        .remove(true)
+                        .logs(true)
+                        .reconfigure(true)
+                        .set_ttl(true)
+                        .build(),
+                ),
+        )
     }
 
     async fn list_machines(&self, filter: MachineFilter) -> Result<Vec<MachineState>> {
@@ -761,11 +827,12 @@ impl MvmClient for LocalBackend {
 
     async fn pause_machine(&self, id: &MachineId, opts: PauseOpts) -> Result<PauseOutcome> {
         let name = &id.0;
+        let backend = self.lifecycle_backend_for(name);
 
         // Opt-in warm-base barrier: wait for the workload to signal "primed"
         // before sealing. Fails closed — a timeout propagates so no half-warmed
         // snapshot is sealed. Skipped for the mock (no guest agent to answer).
-        if let Some(timeout) = primed_barrier_timeout(&opts, self.is_mock()) {
+        if let Some(timeout) = primed_barrier_timeout(&opts, Self::is_mock_backend(&backend)) {
             let source = VsockPrimedSignalSource {
                 vm_name: name.clone(),
                 poll_interval: std::time::Duration::from_millis(500),
@@ -774,7 +841,15 @@ impl MvmClient for LocalBackend {
                 .map_err(|e| backend_err(format!("primed barrier for VM {name:?}: {e:#}")))?;
         }
 
-        let io = self.snapshot_io_for(name)?;
+        if !Self::uses_sealed_snapshot(&backend) {
+            backend
+                .pause(&VmId(name.clone()))
+                .map_err(|e| backend_err(format!("pausing VM {name:?}: {e:#}")))?;
+            set_registry_paused(name, true);
+            return Ok(PauseOutcome::default());
+        }
+
+        let io = self.snapshot_io_for(&backend, name)?;
         let sidecar = pause_and_seal(name, &*io)
             .map_err(|e| backend_err(format!("pausing VM {name:?}: {e:#}")))?;
 
@@ -789,13 +864,14 @@ impl MvmClient for LocalBackend {
     }
 
     async fn resume_machine(&self, id: &MachineId, opts: ResumeOpts) -> Result<ResumeOutcome> {
+        let backend = self.lifecycle_backend_for(&id.0);
         // `warm` routes through the backend's live-memory warm-start path (fails
         // closed on a disk-only backend); the default plain path verifies +
         // restores the sealed snapshot and signals the guest.
         if opts.warm {
-            self.warm_resume(&id.0)
+            self.warm_resume(&backend, &id.0)
         } else {
-            self.plain_resume(&id.0)
+            self.plain_resume(&backend, &id.0)
         }
     }
 
@@ -979,6 +1055,21 @@ mod tests {
             }),
             MachineStatus::Failed
         );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "test-support")]
+    async fn local_operation_report_omits_the_unwired_exec_seam() {
+        let operations = LocalBackend::with_hypervisor("mock")
+            .backend_capabilities()
+            .await
+            .expect("local capabilities")
+            .operations;
+        assert!(operations.list && operations.inspect && operations.run);
+        assert!(operations.create && operations.start && operations.stop);
+        assert!(operations.remove && operations.logs && operations.reconfigure);
+        assert!(operations.set_ttl);
+        assert!(!operations.exec);
     }
 
     #[test]
@@ -1407,6 +1498,33 @@ mod tests {
         );
     }
 
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn lifecycle_backend_prefers_the_started_vm_marker() {
+        let _data = IsolatedDataDir::new();
+        let state_dir = mvm_core::config::vm_state_dir("hvf-owned");
+        std::fs::create_dir_all(&state_dir).expect("create VM state directory");
+        std::fs::write(state_dir.join("hvf.pid"), "123").expect("write HVF owner marker");
+
+        let firecracker_client = LocalBackend::with_hypervisor("firecracker");
+        let owner = firecracker_client.lifecycle_backend_for("hvf-owned");
+
+        assert_eq!(owner.kind(), BackendKind::Hvf);
+        assert!(!LocalBackend::uses_sealed_snapshot(&owner));
+    }
+
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn lifecycle_backend_falls_back_to_the_explicit_test_backend_without_a_marker() {
+        let _data = IsolatedDataDir::new();
+        let mock_client = LocalBackend::with_hypervisor("mock");
+
+        let owner = mock_client.lifecycle_backend_for("marker-less");
+
+        assert_eq!(owner.kind(), BackendKind::Mock);
+        assert!(LocalBackend::uses_sealed_snapshot(&owner));
+    }
+
     #[tokio::test]
     #[cfg(feature = "test-support")]
     async fn pause_seals_and_resume_verifies_over_mock_canned_io() {
@@ -1463,6 +1581,7 @@ mod tests {
             MACHINE_SPEC_SCHEMA_VERSION, MachineSpec as PersistSpec, save_machine_spec,
         };
         let spec = PersistSpec {
+            caller_commitment: None,
             schema_version: MACHINE_SPEC_SCHEMA_VERSION,
             name: name.to_string(),
             image: Some("alpine:latest".to_string()),
@@ -1471,6 +1590,7 @@ mod tests {
             resolved_digest: None,
             net: false,
             allow_host: vec![],
+            peer: vec![],
             cpus: 2,
             memory: "512M".to_string(),
             mem_initial: None,
@@ -1484,6 +1604,7 @@ mod tests {
             deployment: None,
             grants: None,
             ports: vec![],
+            ai: None,
         };
         save_machine_spec(&spec, false).expect("persist_test_spec: save failed");
     }

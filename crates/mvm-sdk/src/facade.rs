@@ -611,6 +611,7 @@ mod tests {
             memory_mib: 512,
             env: vec![("MODE".into(), "test".into())],
             grants: None,
+            assurance_campaign: None,
         };
         assert_eq!(
             run_args(&spec).unwrap().args,
@@ -642,6 +643,7 @@ mod tests {
             memory_mib: 512,
             env: vec![],
             grants: None,
+            assurance_campaign: None,
         };
         assert_eq!(
             create_args(&spec).unwrap().args,
@@ -677,6 +679,7 @@ mod tests {
             memory_mib: 64,
             env: vec![],
             grants: None,
+            assurance_campaign: None,
         };
         assert!(create_args(&bad).is_err());
     }
@@ -690,6 +693,7 @@ mod tests {
             memory_mib: 64,
             env: vec![],
             grants: None,
+            assurance_campaign: None,
         };
         assert!(matches!(
             run_args(&MachineSpec {
@@ -964,6 +968,7 @@ mod tests {
                 memory_mib: 128,
                 env: vec![],
                 grants: None,
+                assurance_campaign: None,
             })
             .await
             .expect("run boots");

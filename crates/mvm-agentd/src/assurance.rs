@@ -19,11 +19,12 @@
 
 use mvm_contract::assurance::{
     AssuranceId, DeliveredSession, DeliveredSessionError, PROBE_REQUEST_SCHEMA, ProbeInvocation,
-    ProbeObservation, ProbeRequest, ToolId,
+    ProbeObservation, ProbeRequest, ToolId, probe_capability_descriptor,
 };
-use mvm_core::protocol::broker::{CorrelationId, ServiceCall, ServiceId};
+use mvm_contract::protocol::agent_session::AgentRequestId;
+use mvm_core::protocol::broker::ServiceId;
 
-use crate::broker_client::{BrokerError, broker_call};
+use crate::broker_client::{BrokerError, broker_capability_call};
 
 /// Wire name of the host-side assurance service.
 pub const ASSURANCE_SERVICE: &str = "host.assurance.v1";
@@ -123,7 +124,13 @@ impl AssuranceCampaign {
         let request = ProbeRequest {
             schema: PROBE_REQUEST_SCHEMA.to_string(),
             session_id: self.session.mvm_binding.session_id.clone(),
+            request_id: self.session.session.request_id.clone(),
+            campaign_id: self.session.session.campaign_id.clone(),
             trial_id: self.session.session.trial_id.clone(),
+            plan_id: self.session.mvm_binding.plan_id.clone(),
+            campaign_idempotency_key: self.session.session.idempotency_key.clone(),
+            session_grant_digest: self.session.mvm_binding.session_grant_digest.clone(),
+            session_grant_nonce: self.session.mvm_binding.nonce.clone(),
             idempotency_key: idempotency_key.clone(),
             nonce: self.next_nonce(),
             tool: ToolId::CampaignProbeV1,
@@ -141,19 +148,18 @@ impl AssuranceCampaign {
             .map_err(|error| AssuranceError::Observation(format!("{error:?}")))?;
         let payload = serde_json::to_value(request)
             .map_err(|error| AssuranceError::Observation(error.to_string()))?;
-        let call = ServiceCall {
+        let invocation_id =
+            AgentRequestId::parse(format!("assurance-probe-{}", request.idempotency_key))
+                .map_err(|error| AssuranceError::Observation(error.to_string()))?;
+        let reply = broker_capability_call(
             service,
-            verb: PROBE_VERB.to_string(),
-            correlation_id: CorrelationId::new(format!(
-                "assurance-probe-{}",
-                request.idempotency_key
-            )),
+            PROBE_VERB,
+            probe_capability_descriptor().binding(),
+            invocation_id,
             payload,
-            capability: None,
-        };
-        let reply = broker_call(&call, PROBE_TIMEOUT_SECS)?;
-        serde_json::from_value(reply)
-            .map_err(|error| AssuranceError::Observation(error.to_string()))
+            PROBE_TIMEOUT_SECS,
+        )?;
+        decode_observation(request, reply)
     }
 
     /// Mint the next single-use nonce for this session.
@@ -171,6 +177,18 @@ impl AssuranceCampaign {
     }
 }
 
+fn decode_observation(
+    request: &ProbeRequest,
+    reply: serde_json::Value,
+) -> Result<ProbeObservation, AssuranceError> {
+    let observation: ProbeObservation = serde_json::from_value(reply)
+        .map_err(|error| AssuranceError::Observation(error.to_string()))?;
+    observation
+        .validate_for(&request.invocation)
+        .map_err(|error| AssuranceError::Observation(error.to_string()))?;
+    Ok(observation)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,7 +204,7 @@ mod tests {
     "source_run_id": "scout-1", "campaign_id": "mvm-campaign-1", "trial_id": "trial-1"
   }},
   "source": {{
-    "subject_kind": "local_repository", "subject_revision": null,
+    "subject_kind": "local_repository", "subject_locator": "repository-ref-1", "subject_revision": null,
     "source_digest": "{DIGEST}", "finding_id": "SCOUT-RCE-001", "group_id": "group-1",
     "rule_id": "SCOUT-RCE-001", "category": "command_injection", "severity": "critical",
     "location": "src/worker.py:42:7", "evidence_refs": [], "artifact_locator": null,
@@ -201,7 +219,13 @@ mod tests {
     "max_steps": {max_steps}, "max_output_bytes": 4096, "deadline_unix_ms": 9999999999999
   }},
   "synthetic_inputs": {{ "canary_ids": [], "destination_labels": {labels} }},
-  "output_contract": {{ "kind": "mvm.assurance.trial-result/v1", "must_include": [] }},
+  "output_contract": {{
+    "kind": "mvm.assurance.trial-result/v1",
+    "required_fields": [
+      "source_digest", "artifact_digest", "policy_digest", "attempted_effect",
+      "effect_observed_in_guest", "boundary_crossed", "blocked_edges", "evidence_refs"
+    ]
+  }},
   "mvm_binding": {{
     "session_id": "session-1", "plan_id": "plan-1", "workload_digest": "{DIGEST}",
     "artifact_digest": "{DIGEST}", "effective_policy_digest": "{DIGEST}",
@@ -294,7 +318,14 @@ mod tests {
         let request = ProbeRequest {
             schema: PROBE_REQUEST_SCHEMA.to_string(),
             session_id: label("session-1"),
+            request_id: label("mvm-request-1"),
+            campaign_id: label("mvm-campaign-1"),
             trial_id: label("trial-1"),
+            plan_id: label("plan-1"),
+            campaign_idempotency_key: label("trial-1"),
+            session_grant_digest: mvm_contract::assurance::Sha256Digest::parse(DIGEST)
+                .expect("digest"),
+            session_grant_nonce: label("nonce-1"),
             idempotency_key: label("k1"),
             nonce: label("n1"),
             tool: ToolId::CampaignProbeV1,
@@ -307,6 +338,40 @@ mod tests {
             assert!(!json.contains(forbidden), "{forbidden} leaked into {json}");
         }
         assert!(json.contains("undeclared.synthetic.destination"), "{json}");
+    }
+
+    #[test]
+    fn a_broker_observation_for_another_declared_edge_is_refused() {
+        let request = ProbeRequest {
+            schema: PROBE_REQUEST_SCHEMA.to_string(),
+            session_id: label("session-1"),
+            request_id: label("mvm-request-1"),
+            campaign_id: label("mvm-campaign-1"),
+            trial_id: label("trial-1"),
+            plan_id: label("plan-1"),
+            campaign_idempotency_key: label("trial-1"),
+            session_grant_digest: mvm_contract::assurance::Sha256Digest::parse(DIGEST)
+                .expect("digest"),
+            session_grant_nonce: label("nonce-1"),
+            idempotency_key: label("k1"),
+            nonce: label("n1"),
+            tool: ToolId::CampaignProbeV1,
+            invocation: ProbeInvocation::EgressAdmission {
+                destination_label: label("declared.synthetic.destination"),
+            },
+        };
+        let reply = serde_json::json!({
+            "schema": "mvm.assurance.probe-observation/v1",
+            "probe": "egress.admission.v1",
+            "admitted": false,
+            "blocked_edge": "foreign.synthetic.destination",
+            "decision": "deny_all",
+            "steps_remaining": 3
+        });
+        assert!(matches!(
+            decode_observation(&request, reply),
+            Err(AssuranceError::Observation(message)) if message.contains("blocked edge")
+        ));
     }
 
     #[test]

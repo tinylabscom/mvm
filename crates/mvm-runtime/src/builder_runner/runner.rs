@@ -30,7 +30,7 @@ const INPUT_DISK_MIN: u64 = 16 << 20;
 /// Host-side backstop while waiting for the builder VM to power off. The VM's own
 /// run budget (`MVM_HVF_TIMEOUT`) is the real bound — this only guards against a
 /// supervisor that never drops its PID file. A `nix build` can take many minutes.
-const BUILD_WAIT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const BUILD_WAIT_TIMEOUT: Duration = Duration::from_secs(120 * 60);
 
 /// Resolved inputs for one builder run. The caller (the builder-selection layer)
 /// resolves the builder VM image + the persistent nix-store disk and stages the
@@ -165,6 +165,8 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
             egress_proxy: None,
             tls_intermediate: None,
             network_policy: Some(&builder_policy),
+            network_limits: mvm_core::plan::NetworkLimits::default(),
+            ingress: &[],
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: Some(builder_identity.spawn_config().clone()),

@@ -1,10 +1,8 @@
 //! Manifest-keyed slot primitives.
 //!
-//! These coexist with the legacy name-keyed primitives in [`super::crud`].
 //! They operate on
 //! `~/.mvm/templates/<sha256(canonical_manifest_path)>/manifest.json` —
-//! `PersistedManifest` is the slot-resident JSON record. Callers migrate
-//! incrementally; nothing in the legacy path changes here.
+//! `PersistedManifest` is the slot-resident JSON record.
 
 use anyhow::{Context, Result};
 use mvm_core::manifest::{
@@ -64,26 +62,23 @@ pub fn template_delete_slot(slot_hash: &str, force: bool) -> Result<()> {
     }
 }
 
-/// Pure helper: split a list of directory entries from
-/// `~/.mvm/templates/` into modern hash-keyed and legacy name-keyed
-/// buckets. Independent of the filesystem so it is straightforwardly
-/// unit-testable.
-fn classify_template_dir_entries<I>(entries: I) -> (Vec<String>, Vec<String>)
+/// Pure helper: keep only the slot-hash directory entries from
+/// `~/.mvm/templates/`. Independent of the filesystem so it is
+/// straightforwardly unit-testable.
+///
+/// Anything else in that directory is not a slot. It used to be sorted into a
+/// second "name-keyed" bucket that a lister exposed; there are no name-keyed
+/// slots any more, so a non-hash entry is simply skipped.
+fn slot_hash_dirnames<I>(entries: I) -> Vec<String>
 where
     I: IntoIterator<Item = String>,
 {
-    let mut hashes = Vec::new();
-    let mut legacy = Vec::new();
-    for name in entries {
-        if is_slot_hash_dirname(&name) {
-            hashes.push(name);
-        } else {
-            legacy.push(name);
-        }
-    }
+    let mut hashes: Vec<String> = entries
+        .into_iter()
+        .filter(|n| is_slot_hash_dirname(n))
+        .collect();
     hashes.sort();
-    legacy.sort();
-    (hashes, legacy)
+    hashes
 }
 
 /// Read the immediate child directory names under
@@ -111,18 +106,8 @@ fn read_templates_base_subdir_names() -> Result<Vec<String>> {
 #[instrument(skip_all)]
 pub fn template_list_slot_hashes() -> Result<Vec<String>> {
     let names = read_templates_base_subdir_names()?;
-    let (hashes, _) = classify_template_dir_entries(names);
+    let hashes = slot_hash_dirnames(names);
     Ok(hashes)
-}
-
-/// List legacy name-keyed template directory names — anything in
-/// `~/.mvm/templates/` whose dirname isn't a 64-char lowercase-hex
-/// slot hash. Powers the migration banner / `template list --legacy`.
-#[instrument(skip_all)]
-pub fn template_list_legacy_names() -> Result<Vec<String>> {
-    let names = read_templates_base_subdir_names()?;
-    let (_, legacy) = classify_template_dir_entries(names);
-    Ok(legacy)
 }
 
 /// Cleanup pass — remove slots whose source manifest file is missing
@@ -200,7 +185,7 @@ mod tests {
     use super::*;
 
     // -----------------------------------------------------------------
-    // classify_template_dir_entries (pure helper).
+    // slot_hash_dirnames (pure helper).
     //
     // Filesystem-independent unit tests. The slot-keyed
     // persist/load/delete/list_* wrappers are thin delegations to
@@ -215,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_separates_hashes_from_legacy_names() {
+    fn only_slot_hash_dirnames_survive() {
         let h = hex_dirname();
         let entries = vec![
             "openclaw".to_string(),
@@ -223,20 +208,13 @@ mod tests {
             "agent-foo".to_string(),
             "claude-code-vm".to_string(),
         ];
-        let (hashes, legacy) = classify_template_dir_entries(entries);
-        assert_eq!(hashes, vec![h]);
-        assert_eq!(
-            legacy,
-            vec![
-                "agent-foo".to_string(),
-                "claude-code-vm".to_string(),
-                "openclaw".to_string(),
-            ]
-        );
+        // Only the slot hash survives; the three non-hash entries are not
+        // slots and are skipped rather than bucketed.
+        assert_eq!(slot_hash_dirnames(entries), vec![h]);
     }
 
     #[test]
-    fn classify_returns_sorted_within_each_bucket() {
+    fn slot_hashes_come_back_sorted() {
         let h1 = "f".repeat(64);
         let h2 = "0".repeat(64);
         let entries = vec![
@@ -245,46 +223,34 @@ mod tests {
             h2.clone(),
             "a-tpl".to_string(),
         ];
-        let (hashes, legacy) = classify_template_dir_entries(entries);
-        assert_eq!(hashes, vec![h2, h1]);
-        assert_eq!(legacy, vec!["a-tpl".to_string(), "z-tpl".to_string()]);
+        assert_eq!(slot_hash_dirnames(entries), vec![h2, h1]);
     }
 
     #[test]
     fn classify_handles_empty_input() {
-        let (hashes, legacy) = classify_template_dir_entries(Vec::<String>::new());
-        assert!(hashes.is_empty());
-        assert!(legacy.is_empty());
+        assert!(slot_hash_dirnames(Vec::<String>::new()).is_empty());
     }
 
     #[test]
-    fn classify_treats_64_char_non_hex_as_legacy() {
+    fn a_64_char_non_hex_dirname_is_not_a_slot() {
         // 64 chars but contains non-hex characters → not a slot hash.
         let almost = "G".repeat(64);
-        let (hashes, legacy) = classify_template_dir_entries(vec![almost.clone()]);
-        assert!(hashes.is_empty());
-        assert_eq!(legacy, vec![almost]);
+        assert!(slot_hash_dirnames(vec![almost]).is_empty());
     }
 
     #[test]
-    fn classify_treats_uppercase_hex_as_legacy() {
+    fn an_uppercase_hex_dirname_is_not_a_slot() {
         // is_slot_hash_dirname requires LOWERCASE hex; uppercase rejects.
         let upper = "ABCDEF0123456789".repeat(4);
         assert_eq!(upper.len(), 64);
-        let (hashes, legacy) = classify_template_dir_entries(vec![upper.clone()]);
-        assert!(hashes.is_empty());
-        assert_eq!(legacy, vec![upper]);
+        assert!(slot_hash_dirnames(vec![upper]).is_empty());
     }
 
     #[test]
     fn classify_rejects_short_or_long_dirnames() {
         let short = "a".repeat(63);
         let long = "a".repeat(65);
-        let (hashes, legacy) = classify_template_dir_entries(vec![short.clone(), long.clone()]);
-        assert!(hashes.is_empty());
-        let mut expected = vec![short, long];
-        expected.sort();
-        assert_eq!(legacy, expected);
+        assert!(slot_hash_dirnames(vec![short, long]).is_empty());
     }
 
     #[test]

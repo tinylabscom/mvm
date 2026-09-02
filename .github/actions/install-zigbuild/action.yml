@@ -39,7 +39,7 @@ runs:
         # crates.io occasionally returns partial downloads on hosted runners.
         # Retry the pinned install instead of failing CI before fmt/clippy run.
         for attempt in 1 2 3; do
-          if CARGO_NET_RETRY=10 cargo install cargo-zigbuild --version 0.20.0 --locked; then
+          if CARGO_NET_RETRY=10 cargo install cargo-zigbuild --version 0.23.0 --locked; then
             exit 0
           fi
 
@@ -50,10 +50,14 @@ runs:
           sleep "$((attempt * 10))"
         done
 
-    - name: Add musl targets (both arches)
+    - name: Install embedded Rust toolchain and musl targets
       shell: bash
       # Plan 164 — mvm-cli/build.rs picks the embed target by
       # CARGO_CFG_TARGET_ARCH. On an x86_64 runner it builds the bins
       # natively for x86_64-musl (no zig); a cross path zigbuilds. Add both
       # musl targets so either path resolves regardless of runner arch.
-      run: rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl
+      run: |
+        RUST_VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['metadata']['mvm']['toolchain']['rust'])")
+        rustup toolchain install "${RUST_VERSION}" --profile minimal
+        rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl \
+          --toolchain "${RUST_VERSION}"

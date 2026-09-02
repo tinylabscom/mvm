@@ -33,9 +33,11 @@ pub struct PlanFixture {
     valid_from: Option<DateTime<Utc>>,
     valid_until: Option<DateTime<Utc>>,
     services: Vec<ServiceId>,
+    extensions: Vec<mvm_contract::protocol::extension_pack::ExtensionPlanBinding>,
     stream_edges: Vec<mvm_contract::stream::StreamEdge>,
     stream_retention: StreamRetention,
     audit_labels: BTreeMap<String, String>,
+    caller_commitment: Option<crate::plan::CallerCommitment>,
     grants: Option<mvm_contract::grants::Grants>,
 }
 
@@ -51,9 +53,11 @@ impl Default for PlanFixture {
             valid_from: None,
             valid_until: None,
             services: Vec::new(),
+            extensions: Vec::new(),
             stream_edges: Vec::new(),
             stream_retention: StreamRetention::default(),
             audit_labels: BTreeMap::new(),
+            caller_commitment: None,
             grants: None,
         }
     }
@@ -101,6 +105,14 @@ impl PlanFixture {
         self
     }
 
+    pub fn extensions(
+        mut self,
+        extensions: Vec<mvm_contract::protocol::extension_pack::ExtensionPlanBinding>,
+    ) -> Self {
+        self.extensions = extensions;
+        self
+    }
+
     /// Whether this plan's captured output is kept after the run. The default
     /// is [`StreamRetention::Persist`]; a test pins `Ephemeral` to exercise the
     /// signed opt-out.
@@ -115,6 +127,12 @@ impl PlanFixture {
     /// the assertion covers the merge rather than the fixture's silence.
     pub fn audit_labels(mut self, labels: BTreeMap<String, String>) -> Self {
         self.audit_labels = labels;
+        self
+    }
+
+    /// Opaque caller commitment copied into the signed plan and audit chain.
+    pub fn caller_commitment(mut self, commitment: crate::plan::CallerCommitment) -> Self {
+        self.caller_commitment = Some(commitment);
         self
     }
 
@@ -141,7 +159,7 @@ impl PlanFixture {
             build_provenance: Default::default(),
             snapshot_at: Default::default(),
             network_mode: Default::default(),
-            l3_network: None,
+            ingress: Vec::new(),
             network_limits: Default::default(),
             schema_version: SCHEMA_VERSION,
             plan_id: PlanId(self.plan_id),
@@ -179,6 +197,7 @@ impl PlanFixture {
                 capture_paths: Vec::new(),
                 retention_days: 0,
             },
+            caller_commitment: self.caller_commitment,
             audit_labels: self.audit_labels,
             key_rotation: KeyRotationSpec { interval_days: 0 },
             attestation: AttestationRequirement {
@@ -198,6 +217,7 @@ impl PlanFixture {
             deps_volume: None,
             shares: Vec::new(),
             services: self.services,
+            extensions: self.extensions,
             stream_edges: self.stream_edges.clone(),
             stream_retention: self.stream_retention,
         }

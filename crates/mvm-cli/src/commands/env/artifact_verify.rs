@@ -65,6 +65,9 @@ pub(crate) struct ChecksumManifest<'a> {
     pub asset: &'a str,
     /// Release version whose signing identity is accepted for this manifest.
     pub version: &'a str,
+    /// Which release train published the manifest, and therefore which
+    /// workflow identity may have signed it.
+    pub train: mvm_build::release_signature::ReleaseTrain,
 }
 
 impl ChecksumManifest<'_> {
@@ -150,6 +153,7 @@ pub(super) fn verify_manifest_signature(
             asset: manifest.asset,
             archive_path: staged,
             version: manifest.version,
+            train: manifest.train,
         },
     )
     .map_err(|error| {
@@ -391,6 +395,7 @@ mod tests {
             base_url,
             asset: MANIFEST_ASSET,
             version: MANIFEST_VERSION,
+            train: mvm_build::release_signature::ReleaseTrain::Cli,
         }
     }
 

@@ -25,16 +25,16 @@ substrate_server_category = "host daemon roles substrate (supervisor + broker + 
 
 # Each key subprocess is its own process — the moat. The supervisor and
 # jailer are library modules; the jailer is applied in-process by each role.
-# Per-VM L3 tunnel gateway. Its own process for the same reason the broker
-# and the substitution endpoint are: it parses bytes a hostile guest
-# controls, so it gets its own address space and its own failure domain.
-[[bin]]
-name = "mvm-netd"
-path = "src/bin/mvm-netd.rs"
-
 [[bin]]
 name = "mvm-broker"
 path = "src/bin/mvm-broker.rs"
+
+# Optional admitted extension-provider process. It owns the bounded MVEX
+# transport and loads one strict operator boot configuration from its explicit
+# private state root; ordinary launch never invokes it.
+[[bin]]
+name = "mvm-extension-provider"
+path = "src/bin/mvm-extension-provider.rs"
 
 [[bin]]
 name = "mvm-host-agent"
@@ -57,6 +57,11 @@ path = "src/bin/mvm-signer-helper.rs"
 [[bin]]
 name = "mvm-network-endpoint"
 path = "src/bin/mvm-network-endpoint.rs"
+
+[[example]]
+name = "network_perf_probe"
+path = "examples/network_perf_probe.rs"
+required-features = ["network-perf"]
 
 # Per-VM supervisor host processes — one process per guest VM. libkrun VMM +
 # merged in-process bridge; libkrun-sys-gated so a host without libkrun.h
@@ -118,22 +123,12 @@ base64.workspace = true
 chrono.workspace = true
 # rand_core feature for the signers' Ed25519 keygen.
 ed25519-dalek = { workspace = true, features = ["rand_core"] }
-# Packet parse + payload rebuild for the gateway observer pipeline
-# (see workspace dep comment).
+# Packet parse + payload rebuild for the endpoint transformation pipeline.
 etherparse = { workspace = true }
 sysinfo = { version = "0.30", default-features = false }
 ipnet.workspace = true
-# Readiness polling for the per-VM L3 gateway's drive loop: the guest data
-# channel and the datapath are independent sources of work.
+# Evented readiness for FlowMux UDP relays.
 mio = { workspace = true }
-# Non-blocking host `connect()` for the userspace datapath's deferred handshake.
-# `all` for the TCP keepalive tuning knobs (`with_interval`, `with_retries`)
-# the userspace datapath sets on every flow's host socket. Declared here
-# rather than relied on: without it the crate builds only while some
-# unrelated transitive dependency happens to enable the feature, and the
-# failure when that changes names a missing method with no hint where the
-# feature went.
-socket2 = { workspace = true, features = ["all"] }
 # custom-dns pulls hickory 0.26 (needs Rust 1.88); the default build
 # carries no hickory and stays on the workspace 1.85 floor.
 hickory-resolver = { workspace = true, features = ["tokio"], optional = true }
@@ -146,45 +141,20 @@ serde_json.workspace = true
 # RFC 8785 JSON Canonicalization Scheme — audit-signer stable bytes-to-sign.
 serde_jcs = "0.1"
 sha2.workspace = true
+tar.workspace = true
 # keyholder HMAC-SHA256 signer (webhook HMAC + AWS SigV4 key derivation).
 hmac.workspace = true
 # hex digests for flow-byte-log record refs.
 hex.workspace = true
 thiserror.workspace = true
-toml.workspace = true
 url = "2"
 # Server-side TLS termination for bound-host https egress.
 rustls = { workspace = true }
+httparse = "1"
 zeroize.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
-# `proto-ipv6` is enabled so the userspace datapath can emit an IPv6 reset,
-# not to give the guest an IPv6 path.
-#
-# What keeps that surface dark is exactly one thing: `mvm_net::l3::admit`'s
-# `admit_outbound` denies `meta.version != 4` outright, so no IPv6 packet a
-# guest writes ever becomes an `AdmittedPacket`, and `send_to_network` takes
-# nothing else. Relax that check and this surface goes live the same day.
-#
-# It is specifically NOT kept dark by the interface having no IPv6 address.
-# In smoltcp 0.13.1 `process_ipv6` runs `process_hopbyhop` before any
-# address check, so an option chain is parsed — and can answer with an
-# ICMPv6 ParamProblem — with no IPv6 address configured; and the
-# "no assigned address" drop is not total, since `::1` passes via
-# `is_loopback()` and `ff02::1` passes `has_multicast_group` even with the
-# `multicast` feature off, both reaching `process_nxt_hdr` and socket
-# dispatch. Do not weaken the admission guard on the strength of the
-# interface configuration.
-#
-# `alloc` is on because every established flow owns its socket set and its
-# TCP ring buffers. Without it smoltcp can only borrow that storage for the
-# socket set's own lifetime, which for per-flow owned state leaves a
-# self-referential struct or a leaked allocation per connection. It adds no
-# crate to the tree: it turns on the owned-slice arm of `managed`, which is
-# already there as smoltcp's own dependency.
-smoltcp = { version = "0.13.1", default-features = false, features = ["alloc", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp"] }
-
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 rustix = { version = "1.1", features = ["fs"] }
@@ -196,7 +166,6 @@ rustix = { version = "1.1", features = ["fs"] }
 # Optional: enabling `ebpf-telemetry` pulls Aya into the default closure; it
 # is intentionally off-by-default to keep mvmctl's dependency budget tight.
 aya = { version = "0.13", optional = true }
-aya-log = { version = "0.2", optional = true }
 seccompiler = { workspace = true }
 landlock = { workspace = true }
 # DNS wire codec for the raw-egress resolver. Every consumer in
@@ -210,9 +179,12 @@ hickory-proto = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+xtask = { path = "../../xtask" }
+# The release-only networking probe drives the same guest FlowMux client used
+# by the loopback adapters without linking their Linux AF_VSOCK binaries.
+mvm-agentd = { workspace = true, features = ["flowmux-async"] }
 # plan_admission bundle re-verify tests build/read `.mvmpkg` archives; verb-grant
 # test decodes the signer pubkey hex.
-tar.workspace = true
 hex.workspace = true
 # `TestEnv` env-var guard for env-mutating tests (reaper / network_endpoint).
 mvm-core = { workspace = true, features = ["test-support"] }
@@ -222,15 +194,21 @@ mvm-core = { workspace = true, features = ["test-support"] }
 # production binary; force it on for this crate's own test build the same
 # way the `mvm-core` entry above does.
 mvm-runtime = { workspace = true, features = ["test-support"] }
+# Session-resume fixtures install a resolver-valid runtime overlay through the
+# shared ext4 and overlay helpers instead of bypassing the production contract.
+mvm-fs.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "time", "sync", "test-util"] }
 # jailer property tests re-spawn under SECCOMP_PROBE=1 before main.
 ctor = "0.2"
 
 [features]
 default = []
+# Build the hermetic legacy-L3/FlowMux comparison producer. Never enabled by
+# a production binary; it exposes only a high-level loopback fixture.
+network-perf = []
 # Enable the host-side eBPF/procfs egress telemetry probe in the supervisor.
 # Off by default so the Aya dependency tree does not inflate mvmctl's closure.
-ebpf-telemetry = ["dep:aya", "dep:aya-log"]
+ebpf-telemetry = ["dep:aya"]
 custom-dns = ["dep:hickory-resolver"]
 # Enable the wasm-container backend in the depended-on runtime crate, so the
 # data-governance witness (tests/wasm_egress_witness.rs) can drive a real

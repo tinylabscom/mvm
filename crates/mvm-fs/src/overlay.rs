@@ -40,12 +40,28 @@
 //! canonical `Display` form.
 
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// File name of the per-artifact sha256sum-format checksum manifest.
 pub const CHECKSUM_MANIFEST_FILE: &str = "checksums-sha256.txt";
+
+/// Best-effort cache of a completed full integrity + payload validation.
+///
+/// The stamp is never accepted on its own: every canonical file and the
+/// checksum manifest must retain the exact filesystem identity captured after
+/// validation. A mismatch or unreadable stamp falls back to full validation.
+const VALIDATION_STAMP_FILE: &str = ".validated-v1.json";
+const VALIDATION_STAMP_SCHEMA_VERSION: u32 = 1;
+const CANONICAL_OVERLAY_FILES: [&str; 4] = [
+    "overlay.ext4",
+    "overlay.verity",
+    "overlay.roothash",
+    "VERSION",
+];
 
 /// File name of the source-checkout fingerprint marker a local build drops
 /// next to the artifact (freshness key for source-built overlays).
@@ -58,12 +74,20 @@ pub const LOCAL_BUILD_EPOCH_FILE: &str = "BUILD_EPOCH";
 /// Guest-absolute paths every overlay ext4 payload must carry. The overlay is
 /// the single source of guest runtime binaries, so a missing entry means a
 /// boot that silently strands the agent — fail at resolve time instead.
-const REQUIRED_OVERLAY_GUEST_PATHS: &[&str] = &[
+///
+/// Public because every fixture that builds "a valid overlay" has to agree with
+/// it, and each hand-written copy is one an added entry silently invalidates —
+/// four of them existed, and adding `/forward-proxy` broke three.
+pub const REQUIRED_OVERLAY_GUEST_PATHS: &[&str] = &[
     "/agent",
     "/netinit",
     "/seccomp-apply",
     "/runner",
     "/egress-client",
+    // The whole of a secret-bearing workload's egress: that launch starts no
+    // vsock egress client, so an overlay without this strands it as completely
+    // as one without the agent.
+    "/forward-proxy",
     "/addon-dns",
     "/exit-report",
     "/VERSION",
@@ -342,9 +366,15 @@ impl RuntimeOverlayResolver {
             });
         }
 
-        verify_overlay_dir_integrity(&layout.artifact_dir)?;
+        let validation_cached = validation_stamp_matches(&layout.artifact_dir);
+        if !validation_cached {
+            verify_overlay_dir_integrity(&layout.artifact_dir)?;
+        }
         let roothash = read_roothash_file(&layout.roothash_file)?;
-        validate_overlay_payload(&layout.overlay_ext4)?;
+        if !validation_cached {
+            validate_overlay_payload(&layout.overlay_ext4)?;
+            write_validation_stamp(&layout.artifact_dir);
+        }
 
         Ok(RuntimeOverlayArtifact {
             overlay_ext4: layout.overlay_ext4,
@@ -401,12 +431,7 @@ pub fn verify_overlay_dir_integrity(dir: &Path) -> Result<(), OverlayError> {
     let manifest_path = dir.join(CHECKSUM_MANIFEST_FILE);
     let body = std::fs::read_to_string(&manifest_path)?;
     let expected = parse_checksums_manifest(&body);
-    for name in [
-        "overlay.ext4",
-        "overlay.verity",
-        "overlay.roothash",
-        "VERSION",
-    ] {
+    for name in CANONICAL_OVERLAY_FILES {
         let Some(expected_hash) = expected.get(name) else {
             return Err(OverlayError::ChecksumManifestMissing {
                 manifest_path: manifest_path.clone(),
@@ -423,6 +448,145 @@ pub fn verify_overlay_dir_integrity(dir: &Path) -> Result<(), OverlayError> {
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ValidationStamp {
+    schema_version: u32,
+    checksum_manifest_sha256: String,
+    files: Vec<FileFingerprint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileFingerprint {
+    name: String,
+    len: u64,
+    modified_secs: u64,
+    modified_nanos: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unix_dev: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unix_inode: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unix_ctime_secs: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unix_ctime_nanos: Option<i64>,
+}
+
+fn validation_stamp_path(dir: &Path) -> PathBuf {
+    dir.join(VALIDATION_STAMP_FILE)
+}
+
+/// Accept a prior validation only while every input retains the filesystem
+/// identity it had after the full checksum and payload scan.
+///
+/// On Unix, device/inode/change-time make a same-size rewrite or atomic file
+/// replacement invalidate the stamp even if an actor restores the mtime. The
+/// manifest digest additionally makes editing its expected hashes visible.
+/// This is a performance cache, not a new trust root: acquisition signature
+/// verification and dm-verity remain the authenticity and guest-read
+/// enforcement boundaries.
+fn validation_stamp_matches(dir: &Path) -> bool {
+    let body = match std::fs::read(validation_stamp_path(dir)) {
+        Ok(body) => body,
+        Err(_) => return false,
+    };
+    let stamp: ValidationStamp = match serde_json::from_slice(&body) {
+        Ok(stamp) => stamp,
+        Err(_) => return false,
+    };
+    if stamp.schema_version != VALIDATION_STAMP_SCHEMA_VERSION {
+        return false;
+    }
+    let manifest_path = dir.join(CHECKSUM_MANIFEST_FILE);
+    if compute_file_sha256(&manifest_path).ok().as_deref()
+        != Some(stamp.checksum_manifest_sha256.as_str())
+    {
+        return false;
+    }
+    validation_fingerprints(dir).is_some_and(|fingerprints| fingerprints == stamp.files)
+}
+
+fn validation_fingerprints(dir: &Path) -> Option<Vec<FileFingerprint>> {
+    CANONICAL_OVERLAY_FILES
+        .into_iter()
+        .chain(std::iter::once(CHECKSUM_MANIFEST_FILE))
+        .map(|name| file_fingerprint(dir, name))
+        .collect()
+}
+
+fn file_fingerprint(dir: &Path, name: &str) -> Option<FileFingerprint> {
+    let metadata = std::fs::metadata(dir.join(name)).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let modified = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    #[cfg(unix)]
+    let (unix_dev, unix_inode, unix_ctime_secs, unix_ctime_nanos) = {
+        use std::os::unix::fs::MetadataExt as _;
+        (
+            Some(metadata.dev()),
+            Some(metadata.ino()),
+            Some(metadata.ctime()),
+            Some(metadata.ctime_nsec()),
+        )
+    };
+    #[cfg(not(unix))]
+    let (unix_dev, unix_inode, unix_ctime_secs, unix_ctime_nanos) = (None, None, None, None);
+    Some(FileFingerprint {
+        name: name.to_string(),
+        len: metadata.len(),
+        modified_secs: modified.as_secs(),
+        modified_nanos: modified.subsec_nanos(),
+        unix_dev,
+        unix_inode,
+        unix_ctime_secs,
+        unix_ctime_nanos,
+    })
+}
+
+/// Publish a reconstructible validation stamp without adding a durability
+/// barrier to cache resolution. A crash can lose the stamp, in which case the
+/// next resolve simply performs the full validation again.
+fn write_validation_stamp(dir: &Path) {
+    let Some(files) = validation_fingerprints(dir) else {
+        return;
+    };
+    let Ok(checksum_manifest_sha256) = compute_file_sha256(&dir.join(CHECKSUM_MANIFEST_FILE))
+    else {
+        return;
+    };
+    let stamp = ValidationStamp {
+        schema_version: VALIDATION_STAMP_SCHEMA_VERSION,
+        checksum_manifest_sha256,
+        files,
+    };
+    let Ok(body) = serde_json::to_vec_pretty(&stamp) else {
+        return;
+    };
+    let path = validation_stamp_path(dir);
+    let staged = dir.join(format!(
+        ".{VALIDATION_STAMP_FILE}.{}.{}.tmp",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos())
+    ));
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)
+        .and_then(|mut file| file.write_all(&body));
+    if written.is_ok() {
+        let _ = std::fs::rename(&staged, &path);
+    }
+    let _ = std::fs::remove_file(staged);
 }
 
 /// Read an `overlay.roothash` text file and validate it parses to 64
@@ -594,7 +758,7 @@ mod tests {
             version,
             arch,
             &[
-                ("overlay.ext4", &valid_overlay_ext4_bytes(true, true, true)),
+                ("overlay.ext4", &valid_overlay_ext4_bytes()),
                 ("overlay.verity", b"verity-sidecar"),
                 ("overlay.roothash", format!("{FAKE_ROOTHASH}\n").as_bytes()),
                 ("VERSION", format!("{version}\n").as_bytes()),
@@ -602,67 +766,33 @@ mod tests {
         )
     }
 
-    fn valid_overlay_ext4_bytes(
-        include_egress_client: bool,
-        include_addon_dns: bool,
-        include_exit_report: bool,
-    ) -> Vec<u8> {
-        let mut nodes = vec![
-            Node::File {
-                path: "/agent".into(),
-                mode: 0o555,
-                data: b"agent".to_vec(),
+    /// A payload carrying every path the validator requires.
+    ///
+    /// Derived from `REQUIRED_OVERLAY_GUEST_PATHS` rather than listed again, so
+    /// adding a required entry cannot leave the fixture describing a payload
+    /// the validator would reject — which would fail every unrelated test at
+    /// once and name none of them the cause.
+    fn valid_overlay_ext4_bytes() -> Vec<u8> {
+        overlay_ext4_bytes_without(&[])
+    }
+
+    /// The same payload with `omitted` left out, for the rejection tests.
+    fn overlay_ext4_bytes_without(omitted: &[&str]) -> Vec<u8> {
+        let nodes: Vec<Node> = REQUIRED_OVERLAY_GUEST_PATHS
+            .iter()
+            .filter(|path| !omitted.contains(*path))
+            .map(|path| Node::File {
+                path: (*path).into(),
+                // `VERSION` is data the resolver reads back, not a binary.
+                mode: if *path == "/VERSION" { 0o444 } else { 0o555 },
+                data: if *path == "/VERSION" {
+                    b"0.14.0\n".to_vec()
+                } else {
+                    path.trim_start_matches('/').as_bytes().to_vec()
+                },
                 xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/netinit".into(),
-                mode: 0o555,
-                data: b"netinit".to_vec(),
-                xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/seccomp-apply".into(),
-                mode: 0o555,
-                data: b"seccomp".to_vec(),
-                xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/runner".into(),
-                mode: 0o555,
-                data: b"runner".to_vec(),
-                xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/VERSION".into(),
-                mode: 0o444,
-                data: b"0.14.0\n".to_vec(),
-                xattrs: Vec::new(),
-            },
-        ];
-        if include_egress_client {
-            nodes.push(Node::File {
-                path: "/egress-client".into(),
-                mode: 0o555,
-                data: b"egress".to_vec(),
-                xattrs: Vec::new(),
-            });
-        }
-        if include_addon_dns {
-            nodes.push(Node::File {
-                path: "/addon-dns".into(),
-                mode: 0o555,
-                data: b"addon-dns".to_vec(),
-                xattrs: Vec::new(),
-            });
-        }
-        if include_exit_report {
-            nodes.push(Node::File {
-                path: "/exit-report".into(),
-                mode: 0o555,
-                data: b"exit-report".to_vec(),
-                xattrs: Vec::new(),
-            });
-        }
+            })
+            .collect();
         crate::ext4::build_image(nodes).expect("build valid overlay ext4 fixture")
     }
 
@@ -720,6 +850,72 @@ mod tests {
     }
 
     #[test]
+    fn successful_full_validation_publishes_a_reconstructible_stamp() {
+        let cache = complete_cache("0.14.0", "aarch64");
+        let artifact_dir = cache.path().join("runtime-overlay/0.14.0/aarch64");
+        let resolver = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.14.0".into());
+
+        resolver
+            .resolve("aarch64")
+            .expect("first resolve validates");
+
+        let stamp_path = validation_stamp_path(&artifact_dir);
+        let stamp: ValidationStamp = serde_json::from_slice(
+            &std::fs::read(&stamp_path).expect("validation stamp was published"),
+        )
+        .expect("validation stamp parses");
+        assert_eq!(stamp.schema_version, VALIDATION_STAMP_SCHEMA_VERSION);
+        assert_eq!(stamp.files.len(), CANONICAL_OVERLAY_FILES.len() + 1);
+        assert!(validation_stamp_matches(&artifact_dir));
+    }
+
+    #[test]
+    fn same_size_overlay_rewrite_invalidates_stamp_and_fails_closed() {
+        let cache = complete_cache("0.14.0", "aarch64");
+        let artifact_dir = cache.path().join("runtime-overlay/0.14.0/aarch64");
+        let overlay = artifact_dir.join("overlay.ext4");
+        let resolver = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.14.0".into());
+        resolver
+            .resolve("aarch64")
+            .expect("first resolve validates");
+        let mut bytes = std::fs::read(&overlay).expect("read overlay fixture");
+        let last = bytes.last_mut().expect("overlay fixture is non-empty");
+        *last ^= 0xff;
+        std::fs::write(&overlay, bytes).expect("rewrite overlay at the same length");
+
+        assert!(!validation_stamp_matches(&artifact_dir));
+        let err = resolver
+            .resolve("aarch64")
+            .expect_err("changed bytes must force full validation and fail");
+        assert!(
+            matches!(
+                err,
+                OverlayError::ChecksumManifestMismatch { ref name, .. }
+                    if name == "overlay.ext4"
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn corrupt_validation_stamp_falls_back_to_full_validation_and_repairs_it() {
+        let cache = complete_cache("0.14.0", "aarch64");
+        let artifact_dir = cache.path().join("runtime-overlay/0.14.0/aarch64");
+        let resolver = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.14.0".into());
+        resolver
+            .resolve("aarch64")
+            .expect("first resolve validates");
+        std::fs::write(validation_stamp_path(&artifact_dir), b"not-json")
+            .expect("corrupt validation stamp");
+
+        resolver
+            .resolve("aarch64")
+            .expect("corrupt cache metadata cannot reject a valid artifact");
+
+        assert!(validation_stamp_matches(&artifact_dir));
+    }
+
+    #[test]
     fn resolve_fails_when_overlay_ext4_missing() {
         let cache = make_cache(
             "0.14.0",
@@ -746,7 +942,7 @@ mod tests {
             "0.14.0",
             "aarch64",
             &[
-                ("overlay.ext4", &valid_overlay_ext4_bytes(true, true, true)),
+                ("overlay.ext4", &valid_overlay_ext4_bytes()),
                 ("overlay.verity", b"sidecar"),
                 ("overlay.roothash", format!("{FAKE_ROOTHASH}\n").as_bytes()),
                 ("VERSION", b"0.14.0\n"),
@@ -925,7 +1121,7 @@ mod tests {
             "0.14.0",
             "aarch64",
             &[
-                ("overlay.ext4", &valid_overlay_ext4_bytes(true, true, true)),
+                ("overlay.ext4", &valid_overlay_ext4_bytes()),
                 ("overlay.verity", b"sidecar"),
                 ("overlay.roothash", FAKE_ROOTHASH.as_bytes()),
                 ("VERSION", b"0.14.0"),
@@ -942,7 +1138,10 @@ mod tests {
             "0.14.0",
             "aarch64",
             &[
-                ("overlay.ext4", &valid_overlay_ext4_bytes(false, true, true)),
+                (
+                    "overlay.ext4",
+                    &overlay_ext4_bytes_without(&["/egress-client"]),
+                ),
                 ("overlay.verity", b"sidecar"),
                 ("overlay.roothash", format!("{FAKE_ROOTHASH}\n").as_bytes()),
                 ("VERSION", b"0.14.0\n"),
@@ -964,7 +1163,7 @@ mod tests {
             "0.14.0",
             "aarch64",
             &[
-                ("overlay.ext4", &valid_overlay_ext4_bytes(true, false, true)),
+                ("overlay.ext4", &overlay_ext4_bytes_without(&["/addon-dns"])),
                 ("overlay.verity", b"sidecar"),
                 ("overlay.roothash", format!("{FAKE_ROOTHASH}\n").as_bytes()),
                 ("VERSION", b"0.14.0\n"),
@@ -986,7 +1185,10 @@ mod tests {
             "0.14.0",
             "aarch64",
             &[
-                ("overlay.ext4", &valid_overlay_ext4_bytes(true, true, false)),
+                (
+                    "overlay.ext4",
+                    &overlay_ext4_bytes_without(&["/exit-report"]),
+                ),
                 ("overlay.verity", b"sidecar"),
                 ("overlay.roothash", format!("{FAKE_ROOTHASH}\n").as_bytes()),
                 ("VERSION", b"0.14.0\n"),
@@ -997,6 +1199,34 @@ mod tests {
         match err {
             OverlayError::PayloadIncomplete { missing_path, .. } => {
                 assert_eq!(missing_path, "/exit-report");
+            }
+            other => panic!("expected PayloadIncomplete, got {other:?}"),
+        }
+    }
+
+    /// A secret-bearing workload starts no vsock egress client, so this is the
+    /// whole of its egress: an overlay without it strands that workload as
+    /// completely as one without the agent, and must be refused at resolve
+    /// time rather than at its first request.
+    #[test]
+    fn resolve_rejects_overlay_payload_missing_forward_proxy() {
+        let cache = make_cache(
+            "0.14.0",
+            "aarch64",
+            &[
+                (
+                    "overlay.ext4",
+                    &overlay_ext4_bytes_without(&["/forward-proxy"]),
+                ),
+                ("overlay.verity", b"sidecar"),
+                ("overlay.roothash", format!("{FAKE_ROOTHASH}\n").as_bytes()),
+                ("VERSION", b"0.14.0\n"),
+            ],
+        );
+        let resolver = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.14.0".into());
+        match resolver.resolve("aarch64").unwrap_err() {
+            OverlayError::PayloadIncomplete { missing_path, .. } => {
+                assert_eq!(missing_path, "/forward-proxy");
             }
             other => panic!("expected PayloadIncomplete, got {other:?}"),
         }
@@ -1173,11 +1403,7 @@ short  bar.ext4
     #[test]
     fn read_overlay_artifact_from_dir_reads_canonical_four_files() {
         let tmp = TempDir::new().unwrap();
-        std::fs::write(
-            tmp.path().join("overlay.ext4"),
-            valid_overlay_ext4_bytes(true, true, true),
-        )
-        .unwrap();
+        std::fs::write(tmp.path().join("overlay.ext4"), valid_overlay_ext4_bytes()).unwrap();
         std::fs::write(tmp.path().join("overlay.verity"), b"verity").unwrap();
         std::fs::write(
             tmp.path().join("overlay.roothash"),

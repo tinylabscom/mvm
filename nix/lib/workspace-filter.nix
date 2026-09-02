@@ -25,10 +25,12 @@
 #   build.rs                 root package build script
 #   src/                     root package (`mvmctl`) sources
 #   crates/                  every workspace member
+#   third_party/             workspace-local patched/path dependencies
 #   xtask/                   workspace member
 #   tests/                   root package integration targets; the source-built
 #                            mvmctl derivation leaves doCheck at its default, so
 #                            `cargo test --package mvmctl` compiles these
+#   third_party/             vendored path dependencies referenced by Cargo.toml
 #   schema/                  wire schemas; kept because they never churn, so
 #                            excluding them would buy nothing
 #   nix/                     the flakes themselves, nix/lib, nix/packages, and
@@ -69,10 +71,13 @@ let
     "build.rs"
     "src"
     "crates"
+    "third_party"
     "xtask"
     "tests"
+    "third_party"
     "schema"
     "nix"
+    ".github"
   ];
 
   # Pruned *within* the admitted roots.

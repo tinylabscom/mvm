@@ -12,9 +12,29 @@ Feature: Transient sandbox boot
     And the output contains "mvm-bdd-oci-hello"
 
   @live
+  Scenario: a named machine observes that name as its guest hostname
+    When I run mvmctl in an isolated live home with "machine run --name bdd-guest-hostname --image alpine --timeout 120 -- /bin/hostname"
+    Then the command exits with code 0
+    And the output contains "bdd-guest-hostname"
+
+  # The verified OCI root stays read-only. Scratch space is a dedicated tmpfs
+  # carried from the universal initramfs across the root pivot.
+  @live
+  Scenario: a sealed OCI workload has writable scratch space
+    When I run mvmctl in an isolated live home with "machine run --name bdd-oci-scratch --image alpine --timeout 120 -- mktemp /tmp/mvm-bdd.XXXXXX"
+    Then the command exits with code 0
+    And the output contains "/tmp/mvm-bdd."
+
+  @live
   Scenario: machine run boots a transient sandbox from a Nix flake
-    When I run mvmctl in an isolated live home with "machine run --name bdd-nix-boot --flake examples/exit_code --timeout 120"
+    When I run mvmctl in an isolated live home with "machine run --name bdd-nix-boot --flake examples/exit_code"
     Then the command exits with code 7
+
+  @live
+  Scenario: a sealed flake refuses a timeout the backend cannot enforce
+    When I run mvmctl in an isolated live home with "machine run --name bdd-nix-timeout --flake examples/exit_code --timeout 120"
+    Then the command exits with code 1
+    And the error output contains "cannot enforce every declared grant"
 
   # The universal initramfs made the agent PID 1 and, for a while, carried over
   # only the mounting half of the older init. A workload booted with `lo` down
@@ -22,9 +42,9 @@ Feature: Transient sandbox boot
   # failed as `Network unreachable` — while the proxy environment variables were
   # still exported, which made it read as a broken network rather than as a
   # policy denial. This is that regression, as a scenario.
-  @live
+  @live @tls_tunnel_client
   Scenario: a workload reaches an admitted host over the mediated egress path
-    When I run mvmctl in an isolated live home with "machine run --name bdd-egress-https --image alpine --allow-host example.com --timeout 180 -- wget -q -O- https://example.com"
+    When I run mvmctl in an isolated live home with "machine run --name bdd-egress-https --image curlimages/curl:8.21.0 --allow-host example.com --timeout 180 -- curl -fsSL https://example.com"
     Then the command exits with code 0
     And the output contains "Example Domain"
 
@@ -58,11 +78,11 @@ Feature: Transient sandbox boot
 
   @live
   Scenario: machine run cleans the request state after claiming a warm standby
-    Given an isolated mvm home
+    Given the live mvm home request state is recorded
     And warm residency is enabled
-    When I run mvmctl in an isolated live home with "machine run --image alpine --timeout 120 -- /bin/echo mvm-bdd-warm-seed"
+    When I run mvmctl in an isolated live home with "pool warm 1 --image alpine"
     Then the command exits with code 0
     When I run mvmctl in an isolated live home with "machine run --image alpine --timeout 120 -- /bin/echo mvm-bdd-warm-claim"
     Then the command exits with code 0
     And the output contains "Claimed a warm standby ("
-    And the isolated mvm home has no transient request state directories
+    And the live mvm home has no new transient request state directories

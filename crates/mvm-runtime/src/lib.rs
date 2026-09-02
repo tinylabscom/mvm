@@ -92,9 +92,6 @@ pub mod mock;
 /// Gated the same way — test-only, never in a production build.
 #[cfg(feature = "test-support")]
 pub mod mock_guest_agent;
-/// Starting and reaping the per-VM `mvm-netd` gateway. The gateway must be
-/// listening before the VM starts, so the spawn waits for it to report both
-/// guest channels bound.
 pub mod netinit_audit;
 /// QEMU workload runtime backend (dev/test).
 /// Process-local reservation and rollback for resident warm parents.
@@ -131,6 +128,7 @@ pub mod wasm_activation;
 /// user-supplied WASI module. Always constructible; the real engine only
 /// compiles in behind the opt-in `wasm-backend` feature.
 pub mod wasm_backend;
+pub mod web_linux_backend;
 /// `WorkloadBackend` marker trait — the type-level permission to carry an
 /// untrusted workload. The admitted launch path accepts `&dyn WorkloadBackend`
 /// only, so a non-workload backend (QEMU dev/test, mock) cannot reach it.

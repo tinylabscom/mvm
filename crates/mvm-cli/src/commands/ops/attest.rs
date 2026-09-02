@@ -181,6 +181,7 @@ fn status_at(identity_dir: &std::path::Path) -> Result<()> {
         mvm_core::crypto::attestation::HwProviderKind::Tpm2,
         mvm_core::crypto::attestation::HwProviderKind::SevSnp,
         mvm_core::crypto::attestation::HwProviderKind::Tdx,
+        mvm_core::crypto::attestation::HwProviderKind::AppleDeviceAttestation,
     ] {
         let state = if kind.compiled_in() {
             "compiled (stub returns NotYetImplemented)"

@@ -6,13 +6,34 @@ Feature: Signed bundle boot on a runtime-only host
   admit, boot — with no flake, no builder VM and no network fetch of an image.
 
   Sealing a bundle is a full image build, far too slow to do inline, so the
-  archive is supplied by the operator with `MVM_BDD_BUNDLE=<path to .mvmpkg>`.
-  These scenarios boot a real Firecracker microVM, so on top of that they need
-  `MVM_BDD_LIVE`, a usable `/dev/kvm` and a `firecracker` binary; the harness
-  skips them cleanly wherever any of that is missing.
+  operator supplies the archive with `MVM_BDD_BUNDLE=<path to .mvmpkg>` and the
+  publisher key it was sealed under with `MVM_BDD_BUNDLE_PUBKEY=<path to .pub>`.
+  `scripts/make-bundle-fixture.sh` produces both.
+
+  The key is not optional bookkeeping. A scenario installs into an isolated
+  `MVM_HOME` whose trust store starts empty, and verification refuses an unknown
+  `key_id` — claim 9, working as designed. Before this suite supplied a trust
+  anchor these scenarios could not have passed even with an archive present;
+  nothing noticed, because nothing set `MVM_BDD_BUNDLE` either.
+
+  Verifying and installing an archive needs no hypervisor, so those scenarios
+  are gated on the fixture alone and run wherever one exists. Only the boot
+  additionally needs `MVM_BDD_LIVE`, a usable `/dev/kvm` and `firecracker`.
+
+  @bundle
+  Scenario: a published bundle installs by content address
+    When I install the bundle fixture
+    Then the command exits with code 0
+    And the install reports a bundle content address
+
+  @bundle
+  Scenario: a bundle from an unenrolled publisher is refused
+    When I install the bundle fixture without trusting its publisher
+    Then the command exits with code 1
+    And the failure names the untrusted publisher key
 
   @live @firecracker @bundle
-  Scenario: a published bundle installs by content address and boots
+  Scenario: an installed bundle boots by content address
     When I install the bundle fixture
     Then the command exits with code 0
     And the install reports a bundle content address

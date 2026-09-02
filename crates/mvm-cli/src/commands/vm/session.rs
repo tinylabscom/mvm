@@ -11,7 +11,7 @@
 //! v1 ships the table + the verbs. Sessions are populated by
 //! `crate::exec::boot_session_vm` (which now registers an entry per
 //! booted VM) and removed by `tear_down_session_vm` (which marks
-//! `state = Killed` for human-initiated `mvmctl session kill` calls or
+//! `state = Killed` for human-initiated `mvmctl machine session kill` calls or
 //! removes the file on graceful exit). Because `mvmctl invoke` today
 //! still boots-and-tears-down per call, sessions are short-lived; the
 //! warm-process pool path is what keeps a session materialised across
@@ -193,7 +193,7 @@ pub(in crate::commands) struct StartArgs {
     #[arg(long = "agent-verb", value_name = "VERB")]
     pub agent_verb: Vec<String>,
     /// vCPU count for the booted VM. Default 2.
-    #[arg(long, default_value = "2")]
+    #[arg(long, default_value_t = crate::commands::shared::default_vcpus())]
     pub cpus: u32,
     /// Memory for the booted VM (MiB). Default 512.
     #[arg(long, default_value = "512")]
@@ -430,7 +430,7 @@ fn emit_stale_warnings(sessions: &[mvm_core::session::SessionRecord]) {
     if !long_lived_dev.is_empty() {
         eprintln!(
             "[mvm] WARN: {} long-lived dev session(s) older than 1 hour — \
-             check `mvmctl session info <id>` and consider `mvmctl session kill`:",
+             check `mvmctl machine session info <id>` and consider `mvmctl machine session kill`:",
             long_lived_dev.len()
         );
         for r in long_lived_dev {
@@ -500,7 +500,7 @@ fn cmd_set_timeout(args: SetTimeoutArgs) -> Result<()> {
         bail!(
             "--seconds {} exceeds the {}s hard ceiling (24h). \
              Long-running sessions are a foot-gun: extend periodically with \
-             repeated `mvmctl session set-timeout` calls, or split work \
+             repeated `mvmctl machine session set-timeout` calls, or split work \
              across shorter-lived sessions.",
             args.seconds,
             MAX_IDLE_TIMEOUT_SECS
@@ -728,7 +728,7 @@ fn cmd_attach(args: AttachArgs) -> Result<()> {
     })?;
 
     // Bump the session's invoke counter / last-used timestamp so
-    // observers (`mvmctl session info`) see the activity.
+    // observers (`mvmctl machine session info`) see the activity.
     if let Err(e) = session::update_session(&id, |r| {
         r.invoke_count = r.invoke_count.saturating_add(1);
         r.last_invoke_at = Some(rfc3339_now());
@@ -978,7 +978,7 @@ fn cmd_start(args: StartArgs) -> Result<()> {
     if args.idle_timeout > MAX_IDLE_TIMEOUT_SECS {
         bail!(
             "--idle-timeout {} exceeds the {}s hard ceiling (24h). \
-             Use `mvmctl session set-timeout` to extend periodically \
+             Use `mvmctl machine session set-timeout` to extend periodically \
              instead of opting in to an unbounded keepalive.",
             args.idle_timeout,
             MAX_IDLE_TIMEOUT_SECS
@@ -987,7 +987,6 @@ fn cmd_start(args: StartArgs) -> Result<()> {
 
     // Resolve the manifest argument the same way `mvmctl invoke` does.
     let template_id = match super::shared::resolve_manifest_arg(&args.manifest)? {
-        super::shared::ManifestArgRef::Name(n) => n,
         super::shared::ManifestArgRef::Slot { slot_hash } => slot_hash,
         super::shared::ManifestArgRef::WasmModule { .. } => {
             anyhow::bail!("wasm module manifests are not supported for this command")
@@ -1009,14 +1008,22 @@ fn cmd_start(args: StartArgs) -> Result<()> {
     let is_dev = args.dev;
     let admit_ctx: Rc<RefCell<Option<super::up::AdmissionContext>>> = Rc::new(RefCell::new(None));
     let ctx_sink = Rc::clone(&admit_ctx);
-    let admit = move |rootfs: &std::path::Path,
-                      vm_name: &str|
+    let admit = move |inputs: crate::exec::AdmitInputs<'_>|
           -> Result<Option<crate::exec::SessionAuditSubstrate>> {
+        // This path binds no SDK host service, so the launch resolution has no
+        // sidecar to hand over and the plan admits no share for one.
+        let crate::exec::AdmitInputs {
+            rootfs,
+            kernel,
+            vm_name,
+            sdk_sidecar: _,
+        } = inputs;
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
         let ctx = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
-            network_mode: crate::commands::machine::derive_network_mode(false),
+            network_mode: crate::commands::machine::preflight_network(),
             tenant: "local",
             vm_name,
+            kernel_path: kernel,
             backend_name: &admit_backend,
             rootfs_path: rootfs,
             precomputed_image_sha256: None,
@@ -1026,6 +1033,7 @@ fn cmd_start(args: StartArgs) -> Result<()> {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::default(),
             secrets: vec![],
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: None,
@@ -1087,6 +1095,7 @@ fn cmd_start(args: StartArgs) -> Result<()> {
         args.memory_mib,
         &mvm_core::network_policy::NetworkPolicy::deny_all(),
         Some(&admit),
+        Some(&backend_name),
     ) {
         Ok(vm) => {
             let ctx = admit_ctx.borrow_mut().take();

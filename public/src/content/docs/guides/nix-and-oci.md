@@ -21,7 +21,7 @@ than widening to guest-networking.
 
 ## Builder VM as the secure build boundary
 
-Developers run `mvmctl build` from the host. The Linux work happens inside the builder VM:
+Developers run `mvmctl machine build` from the host. The Linux work happens inside the builder VM:
 
 ```text
 host mvmctl

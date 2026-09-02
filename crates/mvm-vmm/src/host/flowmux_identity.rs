@@ -39,7 +39,8 @@ use super::network_endpoint_spawn::FlowMuxIdentitySpawnConfig;
 // `mvm_agentd::flowmux_keys`, and used here. One declaration, so a rename
 // cannot leave the writer and the reader describing different drives.
 pub use mvm_agentd::flowmux_drive::{
-    GUEST_SIGNING_KEY_FILE, HOST_SIGNER_PUB_FILE, IDENTITY_DRIVE_LABEL,
+    GUEST_SIGNING_KEY_FILE, GuestIngressTarget, HOST_SIGNER_PUB_FILE, IDENTITY_DRIVE_LABEL,
+    INGRESS_TARGETS_FILE,
 };
 
 /// Mode the guest signing key is stored with. The drive is mounted read-only,
@@ -135,12 +136,33 @@ impl FlowMuxIdentityMaterial {
     /// under `~/.mvm`, which is already 0700, and a mode on the image is one
     /// less thing depending on that.
     pub fn write_drive(&self, path: &Path) -> Result<()> {
+        self.write_drive_with_ingress(path, &[])
+    }
+
+    /// Build the identity drive with the signed plan's guest-loopback ingress
+    /// projection. Host bind addresses and transformation material are omitted.
+    pub fn write_drive_with_ingress(
+        &self,
+        path: &Path,
+        ingress: &[mvm_core::plan::IngressMapping],
+    ) -> Result<()> {
         use mvm_fs::ext4::{BuildOptions, Node, build_image_with_options};
 
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
+        let targets = ingress
+            .iter()
+            .map(|mapping| GuestIngressTarget {
+                mapping_id: mapping.mapping_id,
+                protocol: mapping.protocol,
+                guest_addr: mapping.guest_addr.clone(),
+                guest_port: mapping.guest_port,
+            })
+            .collect::<Vec<_>>();
+        let targets_json =
+            serde_json::to_vec(&targets).context("serializing guest ingress targets")?;
         let nodes = vec![
             Node::File {
                 path: format!("/{GUEST_SIGNING_KEY_FILE}"),
@@ -152,6 +174,12 @@ impl FlowMuxIdentityMaterial {
                 path: format!("/{HOST_SIGNER_PUB_FILE}"),
                 mode: HOST_SIGNER_PUB_MODE,
                 data: self.host_signer_pub.to_vec(),
+                xattrs: Vec::new(),
+            },
+            Node::File {
+                path: format!("/{INGRESS_TARGETS_FILE}"),
+                mode: HOST_SIGNER_PUB_MODE,
+                data: targets_json,
                 xattrs: Vec::new(),
             },
         ];

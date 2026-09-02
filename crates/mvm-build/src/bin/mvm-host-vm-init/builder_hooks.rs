@@ -9,11 +9,13 @@
 //! Linux-only: the runner uses `mount`, `chroot`, and `wait` syscalls.
 
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use nix::mount::{MsFlags, mount, umount};
+use nix::mount::{MntFlags, MsFlags, mount, umount, umount2};
+
+use crate::parse_loop_device;
 
 /// Canonical path to the before_build hook inside a workload rootfs.
 const HOOK_PATH: &str = "/etc/mvm/hooks/before_build.sh";
@@ -22,6 +24,13 @@ const HOOK_PATH: &str = "/etc/mvm/hooks/before_build.sh";
 /// builder VM's tmpfs (`/tmp`) so the mount point itself is writable and
 /// does not depend on any host share.
 const MOUNT_POINT: &str = "/tmp/mvm-before-build-rootfs";
+
+/// Absolute path populated by the builder image from util-linux.
+const UTIL_LINUX_LOSETUP: &str = "/sbin/losetup";
+
+/// Offline filesystem checker used to replay and seal the ext4 journal after
+/// the writable hook mount has been torn down.
+const E2FSCK: &str = "/sbin/e2fsck";
 
 /// Grace period for the before_build hook. Build-time setup (DB
 /// migrations, cache warming) should complete promptly; if it hangs we
@@ -87,6 +96,22 @@ pub enum BuilderHookError {
         #[source]
         source: std::io::Error,
     },
+
+    /// The offline rootfs journal check could not be started.
+    #[error("check rootfs journal for {rootfs}: {source}")]
+    CheckRootfs {
+        rootfs: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The offline checker could not leave the rootfs in a clean state.
+    #[error("rootfs journal check for {rootfs} exited with code {code}: {stderr}")]
+    RootfsNotClean {
+        rootfs: PathBuf,
+        code: i32,
+        stderr: String,
+    },
 }
 
 /// Mount `rootfs_path` read-write at [`MOUNT_POINT`], bind-mount
@@ -106,7 +131,7 @@ pub fn run_before_build_hook(rootfs_path: &Path) -> Result<(), BuilderHookError>
         source: e,
     })?;
 
-    mount_rootfs(rootfs_path)?;
+    let mut mounted_rootfs = MountedRootfs::mount(rootfs_path)?;
 
     // Ensure the chroot has the target directories for bind mounts.
     // mkGuest rootfses already include them, but creating them is
@@ -115,15 +140,15 @@ pub fn run_before_build_hook(rootfs_path: &Path) -> Result<(), BuilderHookError>
         let _ = std::fs::create_dir_all(format!("{MOUNT_POINT}/{subdir}"));
     }
 
-    let mut bind_mounts = Vec::new();
     for (src, dst) in [("/proc", "proc"), ("/sys", "sys"), ("/dev", "dev")] {
         let dst_path = format!("{MOUNT_POINT}/{dst}");
-        bind_mount(src, &dst_path).map_err(|e| BuilderHookError::BindMount {
-            src: src.to_string(),
-            dst: dst_path.clone(),
-            source: e,
-        })?;
-        bind_mounts.push(dst_path);
+        mounted_rootfs
+            .bind_mount(src, &dst_path)
+            .map_err(|e| BuilderHookError::BindMount {
+                src: src.to_string(),
+                dst: dst_path.clone(),
+                source: e,
+            })?;
     }
 
     let hook_in_chroot = format!("{MOUNT_POINT}{HOOK_PATH}");
@@ -131,60 +156,212 @@ pub fn run_before_build_hook(rootfs_path: &Path) -> Result<(), BuilderHookError>
         .map(|m| m.is_file())
         .unwrap_or(false);
 
-    if !hook_present {
+    let hook_result = if !hook_present {
         eprintln!("mvm-host-vm-init: no before_build hook at {HOOK_PATH}; treating as no-op");
-        cleanup_mounts(&bind_mounts);
-        return Ok(());
+        Ok(())
+    } else {
+        eprintln!(
+            "mvm-host-vm-init: running before_build hook in {rootfs_path}",
+            rootfs_path = rootfs_path.display()
+        );
+        run_hook_in_chroot()
+    };
+
+    // Drop every bind mount, the rootfs mount, and its loop device before
+    // touching the image offline. If best-effort Drop cleanup ever leaves the
+    // image mounted, e2fsck refuses it and the artifact is not published.
+    drop(mounted_rootfs);
+    let journal_result = seal_rootfs_journal(rootfs_path);
+    match (hook_result, journal_result) {
+        (Err(hook_error), _) => Err(hook_error),
+        (Ok(()), result) => result,
     }
-
-    eprintln!(
-        "mvm-host-vm-init: running before_build hook in {rootfs_path}",
-        rootfs_path = rootfs_path.display()
-    );
-    let result = run_hook_in_chroot();
-
-    cleanup_mounts(&bind_mounts);
-    result
 }
 
-fn mount_rootfs(rootfs_path: &Path) -> Result<(), BuilderHookError> {
-    // `loop` asks the kernel to auto-allocate a loop device for the
-    // file-backed ext4 image. The builder VM kernel keeps BLK_DEV_LOOP
-    // enabled for image assembly.
-    mount(
-        Some(rootfs_path.as_os_str()),
-        MOUNT_POINT,
-        Some("ext4"),
-        MsFlags::empty(),
-        Some("loop"),
-    )
-    .map_err(|e| BuilderHookError::MountRootfs {
+pub fn seal_rootfs_journal(rootfs_path: &Path) -> Result<(), BuilderHookError> {
+    let output = Command::new(E2FSCK)
+        .args(["-p", "-f"])
+        .arg(rootfs_path)
+        .output()
+        .map_err(|source| BuilderHookError::CheckRootfs {
+            rootfs: rootfs_path.to_path_buf(),
+            source,
+        })?;
+    let code = output.status.code().unwrap_or(-1);
+    if e2fsck_exit_code_is_clean(code) {
+        return Ok(());
+    }
+    Err(BuilderHookError::RootfsNotClean {
         rootfs: rootfs_path.to_path_buf(),
-        mount_point: MOUNT_POINT,
-        source: std::io::Error::other(format!("{e}")),
+        code,
+        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
     })
 }
 
-fn bind_mount(source: &str, target: &str) -> Result<(), std::io::Error> {
-    std::fs::create_dir_all(target)?;
-    mount(
-        Some(source),
-        target,
-        None::<&str>,
-        MsFlags::MS_BIND | MsFlags::MS_REC,
-        None::<&str>,
-    )
-    .map_err(|e| std::io::Error::other(format!("{e}")))
+fn e2fsck_exit_code_is_clean(code: i32) -> bool {
+    matches!(code, 0 | 1)
 }
 
-fn cleanup_mounts(bind_mounts: &[String]) {
-    for m in bind_mounts.iter().rev() {
-        if let Err(e) = umount(m.as_str()) {
-            eprintln!("mvm-host-vm-init: warning: umount {m} failed: {e}");
+struct LoopDevice {
+    path: PathBuf,
+}
+
+impl LoopDevice {
+    fn attach(rootfs_path: &Path) -> Result<Self, BuilderHookError> {
+        let output = Command::new(UTIL_LINUX_LOSETUP)
+            .args(["--find", "--show"])
+            .arg(rootfs_path)
+            .output()
+            .map_err(|e| BuilderHookError::MountRootfs {
+                rootfs: rootfs_path.to_path_buf(),
+                mount_point: MOUNT_POINT,
+                source: e,
+            })?;
+        if !output.status.success() {
+            return Err(BuilderHookError::MountRootfs {
+                rootfs: rootfs_path.to_path_buf(),
+                mount_point: MOUNT_POINT,
+                source: std::io::Error::other(format!(
+                    "losetup exited with status {}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )),
+            });
+        }
+        let path =
+            parse_loop_device(&output.stdout).map_err(|source| BuilderHookError::MountRootfs {
+                rootfs: rootfs_path.to_path_buf(),
+                mount_point: MOUNT_POINT,
+                source,
+            })?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for LoopDevice {
+    fn drop(&mut self) {
+        match Command::new(UTIL_LINUX_LOSETUP)
+            .arg("--detach")
+            .arg(&self.path)
+            .status()
+        {
+            Ok(status) if status.success() => {}
+            Ok(status) => eprintln!(
+                "mvm-host-vm-init: warning: detach {} exited {status}",
+                self.path.display()
+            ),
+            Err(error) => eprintln!(
+                "mvm-host-vm-init: warning: detach {} failed: {error}",
+                self.path.display()
+            ),
         }
     }
-    if let Err(e) = umount(MOUNT_POINT) {
-        eprintln!("mvm-host-vm-init: warning: umount {MOUNT_POINT} failed: {e}");
+}
+
+struct MountedRootfs {
+    _loop_device: LoopDevice,
+    bind_mounts: Vec<String>,
+}
+
+impl MountedRootfs {
+    fn mount(rootfs_path: &Path) -> Result<Self, BuilderHookError> {
+        let loop_device = LoopDevice::attach(rootfs_path)?;
+        mount(
+            Some(loop_device.path.as_path()),
+            MOUNT_POINT,
+            Some("ext4"),
+            MsFlags::empty(),
+            None::<&str>,
+        )
+        .map_err(|error| BuilderHookError::MountRootfs {
+            rootfs: rootfs_path.to_path_buf(),
+            mount_point: MOUNT_POINT,
+            source: std::io::Error::other(format!("{error}")),
+        })?;
+        Ok(Self {
+            _loop_device: loop_device,
+            bind_mounts: Vec::new(),
+        })
+    }
+
+    fn bind_mount(&mut self, source: &str, target: &str) -> Result<(), std::io::Error> {
+        std::fs::create_dir_all(target)?;
+        mount(
+            Some(source),
+            target,
+            None::<&str>,
+            MsFlags::MS_BIND | MsFlags::MS_REC,
+            None::<&str>,
+        )
+        .map_err(|error| std::io::Error::other(format!("{error}")))?;
+        self.bind_mounts.push(target.to_string());
+        Ok(())
+    }
+}
+
+/// Mount points currently under `root`, deepest first.
+///
+/// A recursive bind (`MS_REC`) of `/dev` brings `devpts`, `shm` and friends
+/// along, and each is a mount of its own. Unmounting only the paths we bound
+/// leaves those children mounted, the parent returns `EBUSY`, and the rootfs
+/// stays mounted — which is what made the later `e2fsck` exit 8 rather than
+/// seal the journal.
+fn mounts_under(root: &str) -> Vec<String> {
+    let Ok(mounts) = std::fs::read_to_string("/proc/self/mounts") else {
+        return Vec::new();
+    };
+    mounts_under_in(&mounts, root)
+}
+
+/// The parsing and ordering half of [`mounts_under`], split out so it can be
+/// tested without a `/proc` to read.
+fn mounts_under_in(mounts: &str, root: &str) -> Vec<String> {
+    let prefix = format!("{root}/");
+    let mut found: Vec<String> = mounts
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(1))
+        // `/proc/self/mounts` escapes spaces and tabs octally.
+        .map(|point| point.replace("\\040", " ").replace("\\011", "\t"))
+        .filter(|point| point == root || point.starts_with(&prefix))
+        .collect();
+    // Deepest first, so a child never keeps its parent busy.
+    found.sort_by_key(|point| std::cmp::Reverse(point.matches('/').count()));
+    found
+}
+
+/// Unmount everything under `root`, deepest first, and report whether the
+/// subtree is genuinely gone.
+///
+/// `MNT_DETACH` is the fallback rather than the default: a lazy unmount
+/// returns success while the filesystem is still in use, which would let the
+/// caller seal a journal that is still being written.
+fn unmount_tree(root: &str) -> bool {
+    for point in mounts_under(root) {
+        if umount(point.as_str()).is_ok() {
+            continue;
+        }
+        if let Err(error) = umount2(point.as_str(), MntFlags::MNT_DETACH) {
+            eprintln!("mvm-host-vm-init: warning: umount {point} failed: {error}");
+        }
+    }
+    let remaining = mounts_under(root);
+    if !remaining.is_empty() {
+        eprintln!(
+            "mvm-host-vm-init: warning: {} mount(s) still present under {root}: {}",
+            remaining.len(),
+            remaining.join(", ")
+        );
+        return false;
+    }
+    true
+}
+
+impl Drop for MountedRootfs {
+    fn drop(&mut self) {
+        // Unmount the whole subtree rather than just the paths we bound: a
+        // recursive bind creates children we never recorded, and any one of
+        // them left mounted keeps the rootfs busy.
+        unmount_tree(MOUNT_POINT);
     }
 }
 
@@ -256,9 +433,62 @@ mod tests {
         // the Nix factory. If they change, the wiring sites must update.
         assert_eq!(HOOK_PATH, "/etc/mvm/hooks/before_build.sh");
         assert_eq!(MOUNT_POINT, "/tmp/mvm-before-build-rootfs");
+    }
+
+    /// The bug this replaced: only the recorded bind targets were unmounted,
+    /// so `MS_REC` children kept the rootfs busy, the parent umount returned
+    /// EBUSY, and `e2fsck` then exited 8 against a still-mounted filesystem.
+    #[test]
+    fn mounts_under_returns_children_before_their_parent() {
+        let mounts = concat!(
+            "/dev/root / ext4 rw 0 0\n",
+            "/dev/loop0 /tmp/mvm-before-build-rootfs ext4 rw 0 0\n",
+            "devtmpfs /tmp/mvm-before-build-rootfs/dev devtmpfs rw 0 0\n",
+            "devpts /tmp/mvm-before-build-rootfs/dev/pts devpts rw 0 0\n",
+        );
+        let found = mounts_under_in(mounts, MOUNT_POINT);
+        assert_eq!(
+            found,
+            vec![
+                "/tmp/mvm-before-build-rootfs/dev/pts",
+                "/tmp/mvm-before-build-rootfs/dev",
+                "/tmp/mvm-before-build-rootfs",
+            ],
+            "children must unmount before the parent"
+        );
+    }
+
+    #[test]
+    fn mounts_under_ignores_unrelated_and_prefix_lookalike_paths() {
+        let mounts = concat!(
+            "tmpfs /tmp tmpfs rw 0 0\n",
+            // Shares a prefix but is a different directory.
+            "tmpfs /tmp/mvm-before-build-rootfs-old ext4 rw 0 0\n",
+            "/dev/loop0 /tmp/mvm-before-build-rootfs ext4 rw 0 0\n",
+        );
+        let found = mounts_under_in(mounts, MOUNT_POINT);
+        assert_eq!(found, vec!["/tmp/mvm-before-build-rootfs"]);
+    }
+
+    #[test]
+    fn mounts_under_decodes_octal_escapes() {
+        let mounts = "tmpfs /tmp/mvm-before-build-rootfs/a\\040b tmpfs rw 0 0\n";
+        let found = mounts_under_in(mounts, MOUNT_POINT);
+        assert_eq!(found, vec!["/tmp/mvm-before-build-rootfs/a b"]);
+        assert_eq!(UTIL_LINUX_LOSETUP, "/sbin/losetup");
+        assert_eq!(E2FSCK, "/sbin/e2fsck");
         assert_eq!(
             CHROOT_PATH,
             "/usr/local/sbin:/usr/local/bin:/sbin:/usr/sbin:/bin:/usr/bin"
         );
+    }
+
+    #[test]
+    fn e2fsck_clean_and_repaired_codes_are_accepted() {
+        assert!(e2fsck_exit_code_is_clean(0));
+        assert!(e2fsck_exit_code_is_clean(1));
+        for code in [2, 4, 8, 16, 32, 128, -1] {
+            assert!(!e2fsck_exit_code_is_clean(code), "code {code}");
+        }
     }
 }

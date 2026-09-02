@@ -11,14 +11,16 @@ Services need more lifecycle structure than one-shot commands.
 - Declare the service command as the entrypoint.
 - Declare ports explicitly.
 - Add readiness checks where supported.
-- Use `mvmctl machine logs`, `mvmctl wait`, and `mvmctl boot-report` for diagnostics.
+- Use `mvmctl machine logs`, `mvmctl machine wait`, and `mvmctl machine boot-report` for diagnostics.
 
 ```sh
-mvmctl machine run --manifest ./mvm.toml --name api-dev -d
-mvmctl machine forward api-dev -p 8080:8080
-mvmctl wait api-dev --for all
+mvmctl machine run --manifest ./mvm.toml --name api-dev --port 8080:8080
+mvmctl machine wait api-dev --for all
 mvmctl machine logs api-dev -f
 ```
+
+`machine wait` and `machine boot-report` are advanced verbs: they work, but
+they are hidden from `machine --help`.
 
 ## Security notes
 

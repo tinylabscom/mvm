@@ -13,6 +13,10 @@ edition = "2024"
 # table is the documented fix.
 [workspace]
 
+# This standalone graph cannot inherit the root workspace's source patch.
+[patch.crates-io]
+arrayref = { path = "../../../third_party/arrayref" }
+
 # cargo-fuzz looks for this metadata key; without it the harness refuses
 # to drive the binaries.
 [package.metadata]
@@ -31,6 +35,10 @@ path = ".."
 
 [dependencies.mvm-core]
 path = "../../mvm-core"
+# `paired_sessions_for_test` builds a session from a handed-over shared secret
+# so the post-auth target can drive `Session::open` without a handshake per
+# iteration. Gated so it cannot reach a production build.
+features = ["test-support"]
 
 [dependencies.mvm-contract]
 path = "../../mvm-contract"
@@ -53,8 +61,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "fuzz_authenticated_frame"
-path = "fuzz_targets/fuzz_authenticated_frame.rs"
+name = "fuzz_sealed_frame"
+path = "fuzz_targets/fuzz_sealed_frame.rs"
 test = false
 doc = false
 bench = false

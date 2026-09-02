@@ -16,6 +16,74 @@ use serde::{Deserialize, Serialize};
 
 use super::launch_sample::LaunchSubTimings;
 
+/// Timing collected for one completed transient launch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunPhaseTimingReport {
+    pub phases: RunPhaseTimings,
+    pub sub_phases: LaunchSubTimings,
+    pub backend_phases: Vec<mvm_core::launch_trace::TracePhase>,
+    pub degraded: Vec<String>,
+}
+
+impl RunPhaseTimingReport {
+    #[must_use]
+    pub fn new(
+        phases: RunPhaseTimings,
+        sub_phases: LaunchSubTimings,
+        backend_phases: Vec<mvm_core::launch_trace::TracePhase>,
+        degraded: Vec<String>,
+    ) -> Self {
+        Self {
+            phases,
+            sub_phases,
+            backend_phases,
+            degraded,
+        }
+    }
+
+    /// Render the report as a compact human-readable table.
+    #[must_use]
+    pub fn render_table(&self) -> String {
+        let mut rows = vec![
+            ("resolve", self.phases.resolve_ms),
+            ("drives", self.phases.drives_ms),
+            ("admit", self.phases.admit_ms),
+        ];
+        if self.phases.launch_mode == LaunchMode::Warm {
+            rows.extend([
+                ("pool wait", self.phases.pool_wait_ms),
+                ("claim", self.phases.claim_ms),
+            ]);
+        }
+        rows.extend([
+            ("backend start", self.phases.backend_start_ms),
+            ("guest ready", self.phases.vsock_wait_ms),
+            ("command", self.phases.command_ms),
+            ("teardown", self.phases.teardown_ms),
+            ("total", self.phases.total_ms),
+        ]);
+        let width = rows.iter().map(|(name, _)| name.len()).max().unwrap_or(0);
+        let mut out = format!(
+            "[mvm] phase timing ({})\n{:<width$}  {:>9}\n",
+            self.phases.launch_mode.as_str(),
+            "phase",
+            "duration",
+            width = width
+        );
+        out.push_str(&format!("{}  {}\n", "-".repeat(width), "-".repeat(9)));
+        for (name, ms) in rows {
+            out.push_str(&format!("{name:<width$}  {ms:>8.1}ms\n"));
+        }
+        out.push_str(&format!(
+            "dispatch window: {:.1}ms\nwarm SLO: {}",
+            self.phases.dispatch_window_ms(),
+            self.phases.warm_slo_status()
+        ));
+        out
+    }
+}
+
 /// Whether the backend satisfied the launch from a warm standby or performed
 /// a normal boot/restore path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,6 +180,12 @@ pub enum SubPhase {
     MountCacheLookup,
     MountMaterialize,
     ArtifactVerify,
+    /// Synthesizing, signing and recording the admitted plan, inside admit.
+    AdmitPlan,
+    /// Attaching the cached runtime overlay, inside admit.
+    AttachOverlay,
+    /// Attaching the cached universal initramfs, inside admit.
+    AttachInitramfs,
     VmmCreate,
     GuestKernelEntry,
     AgentAuth,
@@ -153,6 +227,9 @@ pub struct LaunchSubMarks {
     mount_cache_lookup: SpanMark,
     mount_materialize: SpanMark,
     artifact_verify: SpanMark,
+    admit_plan: SpanMark,
+    attach_overlay: SpanMark,
+    attach_initramfs: SpanMark,
     vmm_create: SpanMark,
     guest_kernel_entry: SpanMark,
     agent_auth: SpanMark,
@@ -179,6 +256,9 @@ impl LaunchSubMarks {
             SubPhase::MountCacheLookup => &mut self.mount_cache_lookup,
             SubPhase::MountMaterialize => &mut self.mount_materialize,
             SubPhase::ArtifactVerify => &mut self.artifact_verify,
+            SubPhase::AdmitPlan => &mut self.admit_plan,
+            SubPhase::AttachOverlay => &mut self.attach_overlay,
+            SubPhase::AttachInitramfs => &mut self.attach_initramfs,
             SubPhase::VmmCreate => &mut self.vmm_create,
             SubPhase::GuestKernelEntry => &mut self.guest_kernel_entry,
             SubPhase::AgentAuth => &mut self.agent_auth,
@@ -238,6 +318,9 @@ impl LaunchSubMarks {
             mount_cache_lookup_ms: self.mount_cache_lookup.elapsed_ms(),
             mount_materialize_ms: self.mount_materialize.elapsed_ms(),
             artifact_verify_ms: self.artifact_verify.elapsed_ms(),
+            admit_plan_ms: self.admit_plan.elapsed_ms(),
+            attach_overlay_ms: self.attach_overlay.elapsed_ms(),
+            attach_initramfs_ms: self.attach_initramfs.elapsed_ms(),
             vmm_create_ms: self.vmm_create.elapsed_ms(),
             guest_kernel_entry_ms: self.guest_kernel_entry.elapsed_ms(),
             agent_auth_ms: self.agent_auth.elapsed_ms(),
@@ -320,6 +403,15 @@ impl RunPhaseMarks {
 /// as warm-launch latency.
 pub const WARM_START_MAX_MS: f64 = 300.0;
 
+/// Whether one warm-claim dispatch window satisfies the strict hard ceiling.
+///
+/// This is the shared contract for the CLI timing report and live conformance
+/// witnesses. Keeping the comparison beside the constant prevents a scenario
+/// from substituting the prepared-cold 200ms target for the warm-claim limit.
+pub fn within_warm_start_slo_ms(dispatch_window_ms: f64) -> bool {
+    dispatch_window_ms < WARM_START_MAX_MS
+}
+
 /// Which span contains which, as `(span, parent)`.
 ///
 /// Parents named here are either another sub-span or one of the coarse bucket
@@ -336,8 +428,15 @@ pub const WARM_START_MAX_MS: f64 = 300.0;
 const SPAN_PARENTS: &[(&str, &str)] = &[
     ("mount_fingerprint", "drives"),
     ("mount_cache_lookup", "drives"),
-    ("mount_materialize", "drives"),
+    // Materialization happens while the start config is assembled, which is
+    // inside the admit window and not `drives`. Parenting it where it was
+    // *expected* to run rather than where it does would make the tree's
+    // arithmetic wrong in the one place it is checked.
+    ("mount_materialize", "admit"),
     ("artifact_verify", "drives"),
+    ("admit_plan", "admit"),
+    ("attach_overlay", "admit"),
+    ("attach_initramfs", "admit"),
     ("vmm_create", "backend start"),
     ("guest_kernel_entry", "guest ready"),
     ("agent_auth", "guest ready"),
@@ -437,7 +536,7 @@ impl RunPhaseTimings {
     /// [`WARM_START_MAX_MS`] ceiling. A result at exactly 300ms misses the
     /// sub-300ms requirement.
     pub fn within_warm_start_slo(&self) -> bool {
-        self.dispatch_window_ms() < WARM_START_MAX_MS
+        within_warm_start_slo_ms(self.dispatch_window_ms())
     }
 
     /// Render the warm SLO only for a warm claim. Cold launches are diagnostic
@@ -596,7 +695,7 @@ pub fn warm_vs_cold(warm: &RunPhaseTimings, cold: &RunPhaseTimings) -> WarmVsCol
     WarmVsColdReport {
         warm_hot_ms,
         cold_hot_ms,
-        clears_slo: warm.dispatch_window_ms() < WARM_START_MAX_MS,
+        clears_slo: within_warm_start_slo_ms(warm.dispatch_window_ms()),
         clears_p50_target: warm_hot_ms <= WARM_START_P50_BUDGET_MS,
         speedup,
     }
@@ -670,6 +769,12 @@ mod tests {
     }
 
     #[test]
+    fn standalone_warm_ceiling_check_is_strict() {
+        assert!(within_warm_start_slo_ms(WARM_START_MAX_MS - 0.1));
+        assert!(!within_warm_start_slo_ms(WARM_START_MAX_MS));
+    }
+
+    #[test]
     fn dispatch_window_is_backend_start_plus_vsock_wait() {
         // The dispatch window is "backend start to command dispatch":
         // admitted -> backend booted -> guest agent reachable.
@@ -718,6 +823,36 @@ mod tests {
             t.render(),
             "[mvm] phase-timing: resolve=5.0ms drives=7.0ms admit=8.0ms pool_wait_ms=5.0 claim_ms=95.0 backend_start=100.0ms vsock_wait=30.0ms warm_window_ms=130.0 command=10.0ms teardown=15.0ms total=175.0ms launch_mode=warm dispatch_window=130.0ms warm_slo=ok"
         );
+    }
+
+    #[test]
+    fn report_renders_as_a_table_and_roundtrips_as_json() {
+        let phases = RunPhaseTimings {
+            launch_mode: LaunchMode::Warm,
+            resolve_ms: 5.0,
+            drives_ms: 7.0,
+            admit_ms: 8.0,
+            pool_wait_ms: 5.0,
+            claim_ms: 95.0,
+            backend_start_ms: 100.0,
+            vsock_wait_ms: 30.0,
+            warm_window_ms: 130.0,
+            command_ms: 10.0,
+            teardown_ms: 15.0,
+            total_ms: 175.0,
+        };
+        let report =
+            RunPhaseTimingReport::new(phases, LaunchSubTimings::default(), Vec::new(), Vec::new());
+        let table = report.render_table();
+        assert!(table.contains("phase timing (warm)"));
+        assert!(table.contains("backend start"));
+        assert!(table.contains("total"));
+        assert!(!table.contains("phase-timing:"));
+
+        let json = serde_json::to_string(&report).expect("serialize timing report");
+        let decoded: RunPhaseTimingReport =
+            serde_json::from_str(&json).expect("deserialize timing report");
+        assert_eq!(decoded, report);
     }
 
     /// Build timings with a chosen dispatch window (`backend_start +
@@ -782,11 +917,14 @@ mod tests {
 
     /// Every sub-phase, so a mis-wired `slot()` arm shows up as one phase
     /// overwriting another rather than as a silently wrong benchmark column.
-    const ALL_SUB_PHASES: [SubPhase; 12] = [
+    const ALL_SUB_PHASES: [SubPhase; 15] = [
         SubPhase::MountFingerprint,
         SubPhase::MountCacheLookup,
         SubPhase::MountMaterialize,
         SubPhase::ArtifactVerify,
+        SubPhase::AdmitPlan,
+        SubPhase::AttachOverlay,
+        SubPhase::AttachInitramfs,
         SubPhase::VmmCreate,
         SubPhase::GuestKernelEntry,
         SubPhase::AgentAuth,
@@ -952,6 +1090,11 @@ mod tests {
         };
         let sub = LaunchSubTimings {
             artifact_verify_ms: Some(0.2),
+            // The admit window's parts must sum inside `admit_ms` above, so
+            // the tree-arithmetic assertions have a real partition to check.
+            admit_plan_ms: Some(45.9),
+            attach_overlay_ms: Some(0.9),
+            attach_initramfs_ms: Some(0.6),
             vmm_create_ms: Some(12.0),
             guest_kernel_entry_ms: Some(57.1),
             agent_auth_ms: Some(1.1),
@@ -1060,6 +1203,9 @@ mod tests {
             "  drives                             13.4ms    5%",
             "    artifact verify                   0.2ms",
             "  admit                              47.4ms   17%",
+            "    admit plan                       45.9ms",
+            "    attach overlay                    0.9ms",
+            "    attach initramfs                  0.6ms",
             "  backend start                      16.1ms    6%",
             "    vmm create                       12.0ms",
             "  guest ready                        58.2ms   20%",
@@ -1124,11 +1270,22 @@ mod tests {
         let (phases, sub) = observed_launch();
         let out = phases.render_tree(&sub);
         assert!(out.contains("p50 budget 200ms across 20 samples"));
-        for verdict in ["ok", "over", "pass", "fail", "PASS", "FAIL", "✓", "✗"] {
+        // Whole words, not substrings. A span is free to be named "attach
+        // overlay" or "mount cache lookup" without that being a verdict, and a
+        // substring search reads both as one — which it did, silently, for as
+        // long as neither span happened to be populated in this fixture.
+        let words: Vec<&str> = out
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .collect();
+        for verdict in ["ok", "over", "pass", "fail", "PASS", "FAIL"] {
             assert!(
-                !out.contains(verdict),
+                !words.contains(&verdict),
                 "tree renders a verdict token {verdict}"
             );
+        }
+        for mark in ["✓", "✗"] {
+            assert!(!out.contains(mark), "tree renders a verdict mark {mark}");
         }
     }
 

@@ -66,9 +66,12 @@ Point `mvm.toml` at the dev output:
 ```toml
 flake     = "."
 profile   = "dev"
-vcpus     = 2
-memory_mib = 1024
+cpus      = 2          # `vcpus` is an accepted alias
+mem       = "1024M"
 ```
+
+`mvm.toml` rejects unknown keys. Memory is `mem` (a size string) — `memory_mib`
+is a `mkGuest` argument, not a manifest key.
 
 Then:
 
@@ -84,7 +87,13 @@ You **never edit anything inside the mvm repository** to customize your dev imag
 
 ### Adding services to your dev image
 
-The shell is your interactive surface, but you can run additional services in parallel via the `services` field:
+:::caution[Not wired yet]
+The `services` field is accepted and recorded, but nothing supervises it — the
+multi-service supervisor is not built. `mkGuest` warns at evaluation time. The
+shape below is the declared surface, not running behaviour.
+:::
+
+The declared shape:
 
 ```nix
 dev = mvm.lib.${system}.mkGuest {
@@ -103,7 +112,8 @@ dev = mvm.lib.${system}.mkGuest {
 };
 ```
 
-Each service runs as its own supervised process. The shell stays your foreground; services are background.
+The intent is that each service runs as its own supervised process with the
+shell as your foreground. None of that supervision exists yet.
 
 ### Forcing the dev path on a sealed entrypoint
 
@@ -137,10 +147,10 @@ The build path is the same as any mvm image:
 
 ```sh
 # From your project directory:
-mvmctl build --flake . --profile dev
+mvmctl machine build --flake . --profile dev
 ```
 
-If you intentionally manage your own Nix environment, you can run `nix build .#dev` directly. The normal mvm path is `mvmctl build`, which runs Nix inside the builder VM. Output is a derivation with `passthru.mvm.{accessible, sealed, expectedBootMs}`. Check it from a Nix-enabled debug environment:
+If you intentionally manage your own Nix environment, you can run `nix build .#dev` directly. The normal mvm path is `mvmctl machine build`, which runs Nix inside the builder VM. Output is a derivation with `passthru.mvm.{accessible, sealed, expectedBootMs}`. Check it from a Nix-enabled debug environment:
 
 ```sh
 nix eval .#dev.passthru.mvm
@@ -154,7 +164,7 @@ nix eval .#dev.passthru.mvm
 mvm runs Nix builds inside the project builder VM and copies the finished artifacts back to the host cache. You don't need Nix on your host, and you don't need to enter a dev shell before building. See [Builder VM](/guides/builder-vm/).
 
 - **Linux** (with `/dev/kvm`): the builder VM owns image construction; Firecracker is the default runtime backend.
-- **macOS Apple Silicon**: the host `mvmctl build` command orchestrates the builder VM. The resulting dev image can then boot on the selected macOS runtime backend.
+- **macOS Apple Silicon**: the host `mvmctl machine build` command orchestrates the builder VM. The resulting dev image can then boot on the selected macOS runtime backend.
 - **Windows / WSL2**: WSL2 with nested `/dev/kvm` is supported for the libkrun-backed workload runtime path. Native Windows and a Hyper-V managed Linux builder are not supported local paths today.
 
 ## Why this is structured this way

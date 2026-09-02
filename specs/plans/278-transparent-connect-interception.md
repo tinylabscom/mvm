@@ -1,11 +1,15 @@
 # Plan 278 — Transparent connect interception for non-cooperative workloads
 
-**Status: Proposed — W0 measured, blocked on one maintainer decision**
+**Status: REJECTED — 2026-08-20, no implementation**
 
-W0's investigation is done and it refuted the plan's own framing: the two
-candidate resolutions are a conjunction, not a choice, and one of them means a
-more deliberate weakening than originally written. Nothing is implemented and
-W1–W3 stay frozen until the decision in W0 lands.
+W0's investigation refuted the plan's own framing: the two candidate
+resolutions are a conjunction, not a choice, and one of them means a more
+deliberate weakening than originally written. The compatibility benefit does
+not justify making workload memory readable to a same-uid supervisor. The
+supported FlowMux adapters remain the compatibility boundary; a workload that
+ignores them has no network route and fails closed. Nothing in W1–W3 was
+implemented, `DUMPABLE=0` and the empty capability bounding set remain intact,
+and no seccomp user-notification listener is installed.
 
 Workload microVMs have no NIC. Egress leaves the guest over vsock, to the
 host-side substitution endpoint, and that is what makes claim 10 (default-deny),
@@ -183,7 +187,7 @@ gate in `__ptrace_may_access` is long-stable, but the numbers above are from
 
 ## Workstreams
 
-### W0 — settle address reading *(blocking)*
+### W0 — settle address reading *(decision complete)*
 
 - [x] Confirm `ptrace_may_access` behaviour for both candidates, measured rather
       than reasoned from the docs. Four-case matrix on Linux 6.8.0 with
@@ -194,50 +198,41 @@ gate in `__ptrace_may_access` is long-stable, but the numbers above are from
 - [x] Establish that a privilege drop leaves `dumpable = 2`, so candidate 2 means
       affirmatively raising it post-drop in the launch path, not deleting a
       `prctl` in `hardening.rs`.
-- [ ] **Maintainer decision: accept or reject the surviving design.** Accepting
+- [x] **Maintainer decision: reject the surviving design.** Accepting
       means the workload's `/proc/<pid>/mem` is readable at the workload's own
       uid, for an app-compat feature that is explicitly not a security control.
-      Rejecting closes the plan and keeps the cooperative path as a documented
-      non-goal. This is the remaining blocker; W1–W3 stay frozen until it lands.
-- [ ] Re-run the matrix once on a real guest at the pinned 6.12.x kernel to
-      confirm the 6.8.0 numbers transfer.
+      That trade is rejected; the cooperative path remains the documented
+      boundary and W1–W3 are permanently descoped.
+- [x] ~~Re-run the matrix once on a real guest at the pinned 6.12.x kernel.~~
+      Descoped because no implementation depends on transferring the 6.8.0
+      measurements.
 
-### W1 — notify listener install
+### W1 — notify listener install *(rejected; no implementation)*
 
-- [ ] Confirm per tier whether `connect` is permitted (F3); skip listener
-      installation for tiers that deny it.
-- [ ] Hand-written BPF: `USER_NOTIF` for `connect`, `ALLOW` otherwise, installed
-      via raw `seccomp(2)` with `SECCOMP_FILTER_FLAG_NEW_LISTENER`, arch-gated
-      for aarch64 and x86_64 the way the tier tables already are.
-- [ ] Pass the listener fd from `mvm-seccomp-apply` to the supervisor over
-      `SCM_RIGHTS` before `execve`.
-- [ ] Unit test: stacked filters yield `USER_NOTIF` for `connect` and the tier's
-      verdict for everything else.
+- [x] Descoped the per-tier `connect` investigation with the rejected design.
+- [x] Descoped the hand-written seccomp `USER_NOTIF` filter; no listener is
+      installed on either architecture.
+- [x] Descoped listener-fd transfer; `mvm-seccomp-apply` sends no new
+      `SCM_RIGHTS` message.
+- [x] Descoped stacked-filter tests because the second filter does not exist.
 
-### W2 — supervisor loop
+### W2 — supervisor loop *(rejected; no implementation)*
 
-- [ ] Read the notification, recover the destination, dial the loopback SOCKS
-      proxy, complete the handshake.
-- [ ] Install the connected socket with `SECCOMP_IOCTL_NOTIF_ADDFD` +
-      `SECCOMP_ADDFD_FLAG_SETFD` over the target fd; return success.
-- [ ] Handle every failure by returning the errno the workload would have seen
-      with no interception, so a supervisor bug degrades to today's behaviour
-      rather than to a hang.
-- [ ] `SECCOMP_IOCTL_NOTIF_ID_VALID` before acting on any notification, so a
-      dead target cannot cause an fd to be installed into a recycled pid.
+- [x] Descoped notification reads and destination recovery.
+- [x] Descoped `SECCOMP_IOCTL_NOTIF_ADDFD`; no workload socket is replaced.
+- [x] Descoped interception-specific errno handling.
+- [x] Descoped notification-ID validation because no notification loop exists.
 
-### W3 — validation
+### W3 — validation *(reframed around the rejected boundary)*
 
-- [ ] A non-cooperative fixture — a static binary that dials a real address with
-      no proxy env — reaches an admitted destination through the endpoint.
-- [ ] The same fixture against a denied destination is refused by the shared
-      `EgressGate`, with the refusal in the audit chain. Interception must not
-      become a second gate.
-- [ ] A workload that defeats interception (raw syscall, filter evasion) still
-      reaches nothing. This is the test that proves the security property does
-      not rest on this mechanism.
-- [ ] Latency delta on the cooperative path is zero: proxy-env-honouring apps do
-      not enter the notify path at all.
+- [x] Rejected direct-socket compatibility; non-cooperative direct sockets
+      intentionally have no route.
+- [x] Descoped interception-specific `EgressGate` coverage because no second
+      interception path exists.
+- [x] A workload using a direct socket still reaches nothing. This is covered
+      at the supported public boundary and proves the security property does
+      not rest on interception.
+- [x] Descoped interception latency measurement because no notify path exists.
 
 ## Out of scope
 

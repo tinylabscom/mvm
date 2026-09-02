@@ -78,12 +78,11 @@ pub(crate) fn resolve_kernel_source() -> Option<KernelSource> {
 /// into the per-arch kernel cache, returning its path.
 #[cfg(feature = "builder-vm")]
 pub(super) fn download_builder_kernel(arch: &str) -> Result<std::path::PathBuf> {
-    let dest = std::path::Path::new(&mvm_core::config::mvm_cache_dir())
-        .join("builder-vm")
-        .join(arch)
-        .join("kernels")
-        .join("builder")
-        .join("vmlinux");
+    let dest = mvm_build::kernel_fetch::cached_kernel_path(
+        std::path::Path::new(&mvm_core::config::mvm_cache_dir()),
+        arch,
+        "builder",
+    );
     crate::update::download_kernel(arch, "builder", &dest)?;
     Ok(dest)
 }
@@ -180,12 +179,13 @@ pub(crate) fn build_kernel_via_stage0(
     })?;
 
     let arch = builder_vm_host_arch();
-    let out_dir = format!(
-        "{}/builder-vm/{arch}/kernels/{}",
-        mvm_core::config::mvm_cache_dir(),
-        variant.label()
+    let out_dir_buf = mvm_build::kernel_fetch::kernel_cache_dir(
+        std::path::Path::new(&mvm_core::config::mvm_cache_dir()),
+        arch,
+        variant.label(),
     );
-    let out_dir_path = std::path::Path::new(&out_dir);
+    let out_dir_path = out_dir_buf.as_path();
+    let out_dir = out_dir_path.display().to_string();
     std::fs::create_dir_all(out_dir_path)
         .with_context(|| format!("creating kernel cache dir {out_dir}"))?;
 
@@ -198,25 +198,6 @@ pub(crate) fn build_kernel_via_stage0(
         ));
     }
 
-    let stage0_assets = mvm_build::stage0::assets_for_host_arch();
-    let vendor_reports = mvm_build::stage0::prepare_assets(stage0_assets)
-        .context("preparing Stage 0 bootstrap assets (nix-tarball seed)")?;
-    for report in &vendor_reports {
-        mvm_core::policy::audit::emit(
-            mvm_core::policy::audit::LocalAuditKind::VendorBlobFetched,
-            None,
-            Some(&report.audit_detail()),
-        );
-    }
-
-    let root_dir = mvm_build::stage0::stage0_cache_dir().join("root");
-    let host_bins_cache = format!("{}/host-bins", mvm_core::config::mvm_cache_dir());
-    let boot_binaries = crate::host_binaries::extract::ensure_boot_host_binaries(
-        std::path::Path::new(&host_bins_cache),
-    )?;
-    mvm_build::stage0::materialize_root_dir(&root_dir, &boot_binaries.stage0_init)
-        .with_context(|| format!("materializing Stage 0 root at {}", root_dir.display()))?;
-
     let workspace_root = std::path::Path::new(&builder_flake_dir)
         .parent()
         .and_then(|p| p.parent())
@@ -228,18 +209,17 @@ pub(crate) fn build_kernel_via_stage0(
     std::fs::create_dir_all(&staging_dir)
         .with_context(|| format!("creating Stage 0 staging dir {}", staging_dir.display()))?;
 
-    let conf = format!(
-        "MVM_STAGE0_BUILD_ATTR={}\nMVM_STAGE0_OUTPUT_MODE=kernel\nMVM_STAGE0_CONFIG_ATTR={}\n",
-        variant.attr(),
-        variant.config_attr(),
-    );
-    std::fs::write(staging_dir.join("stage0-build.conf"), conf)
-        .with_context(|| format!("writing stage0-build.conf in {}", staging_dir.display()))?;
+    let request =
+        super::stage0_artifact::Stage0ArtifactBuild::builder(&workspace_root, &staging_dir)
+            .build_attr(variant.attr())
+            .output_mode("kernel")
+            .config_attr(variant.config_attr())
+            .verbose(verbose)
+            .build()?;
 
     ui::info(&format_compile_start(variant.label(), arch));
 
     {
-        use mvm_build::builder_backend_select as bbs;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -261,24 +241,14 @@ pub(crate) fn build_kernel_via_stage0(
             }))
         };
 
-        let selected = bbs::resolve_choice();
-        let explicit = bbs::resolve_env_override().is_some();
-        let result = bbs::run_with_builder_fallback(selected, explicit, |choice| {
-            bbs::resolve_stage0_backend_for_choice(choice, verbose).run_stage0(
-                &root_dir,
-                "/init",
-                &workspace_root,
-                &staging_dir,
-                &boot_binaries.dir,
-            )
-        });
+        let result = request.run();
 
         stop.store(true, Ordering::Relaxed);
         if let Some(handle) = heartbeat {
             let _ = handle.join();
         }
 
-        result.map_err(|e| anyhow::anyhow!("Stage 0 kernel build: {e}"))?;
+        result.context("Stage 0 kernel build")?;
     }
 
     let published = publish_kernel_artifacts(&staging_dir, out_dir_path, variant);

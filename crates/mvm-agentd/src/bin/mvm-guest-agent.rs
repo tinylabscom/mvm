@@ -115,15 +115,15 @@ use crate::state::{ActivationState, AgentBootState, AgentState, IntegrationState
 use crate::transport::{AgentListener, accept_control, bind_listener};
 
 use handlers::{
-    handle_checkpoint_integrations, handle_close_stream_input, handle_entrypoint_status,
-    handle_fs_diff, handle_fs_list, handle_fs_mkdir, handle_fs_move, handle_fs_read,
-    handle_fs_remove, handle_fs_stat, handle_fs_write, handle_integration_status,
+    handle_cancel_extension, handle_checkpoint_integrations, handle_close_stream_input,
+    handle_entrypoint_status, handle_fs_diff, handle_fs_list, handle_fs_mkdir, handle_fs_move,
+    handle_fs_read, handle_fs_remove, handle_fs_stat, handle_fs_write, handle_integration_status,
     handle_mount_volume, handle_ping, handle_post_restore, handle_primed_status,
     handle_probe_status, handle_proc_kill, handle_proc_list, handle_proc_send_input,
     handle_proc_signal, handle_proc_start, handle_proc_wait, handle_readiness_status,
-    handle_resource_usage, handle_run_entrypoint_request, handle_sleep_prep,
-    handle_start_port_forward, handle_start_unix_socket_forward, handle_stream_input,
-    handle_unmount_volume, handle_update_idle_timeout, handle_wake, handle_worker_status,
+    handle_resource_usage, handle_run_entrypoint_request, handle_run_extension, handle_sleep_prep,
+    handle_start_unix_socket_forward, handle_stream_input, handle_unmount_volume,
+    handle_update_idle_timeout, handle_wake, handle_worker_status,
 };
 use interactive::{
     handle_console_close, handle_console_open, handle_console_resize, handle_exec,
@@ -347,7 +347,20 @@ fn handle_client(
 
             GuestRequest::ActivateEnvironment(env) => {
                 match init::apply_activation(&env, boot_state) {
-                    Ok(()) => GuestResponse::ActivateEnvironmentAck,
+                    Ok(()) => {
+                        // Universal initramfs: the workload root was just
+                        // pivoted into place. Start entrypoint validation and
+                        // the warm pool in the background so activation stays
+                        // fast, while keeping the chained dependency order.
+                        if init::is_pid1() {
+                            let bs = Arc::clone(boot_state);
+                            std::thread::spawn(move || {
+                                init_entrypoint_validation(&bs);
+                                init_warm_pool(&bs);
+                            });
+                        }
+                        GuestResponse::ActivateEnvironmentAck
+                    }
                     Err(e) => {
                         let message = e.to_string();
                         boot_state.set_activation(ActivationState::Failed {
@@ -371,9 +384,16 @@ fn handle_client(
             GuestRequest::PrimedStatus => handle_primed_status(),
             GuestRequest::PostRestore {
                 token,
+                hostname,
                 host_epoch_secs,
                 grant_envelope,
-            } => handle_post_restore(&mut ctx, token, host_epoch_secs, grant_envelope),
+            } => handle_post_restore(
+                &mut ctx,
+                token,
+                hostname.as_deref(),
+                host_epoch_secs,
+                grant_envelope,
+            ),
 
             GuestRequest::Exec {
                 command,
@@ -398,6 +418,9 @@ fn handle_client(
                 stream_input,
             } => handle_run_entrypoint_request(&mut ctx, stdin, timeout_secs, env, stream_input),
 
+            GuestRequest::RunExtension { dispatch } => handle_run_extension(ctx.file, dispatch),
+            GuestRequest::CancelExtension { cancellation } => handle_cancel_extension(cancellation),
+
             // The host→guest half of the stream plane. Admission happened on
             // the host, at the gate that holds the signed plan; what reaches
             // here is bytes it already cleared, in the order it cleared them.
@@ -407,8 +430,6 @@ fn handle_client(
             GuestRequest::RunDetached { argv, env } => handle_run_detached(argv, env),
 
             GuestRequest::FsDiff => handle_fs_diff(),
-
-            GuestRequest::StartPortForward { guest_port } => handle_start_port_forward(guest_port),
 
             GuestRequest::StartUnixSocketForward {
                 guest_path,
@@ -536,6 +557,74 @@ fn handle_client(
     send_authenticated_response(&mut file, &mut session, &resp);
 }
 
+#[derive(Clone)]
+struct GuestServer {
+    state: Arc<Mutex<AgentState>>,
+    integration_state: Arc<Mutex<IntegrationState>>,
+    probe_state: Arc<Mutex<ProbeState>>,
+    boot_state: Arc<AgentBootState>,
+    guest_signing_key: Arc<SigningKey>,
+}
+
+impl GuestServer {
+    fn handle_inline(&self, fd: RawFd, connection_guard: CounterGuard) {
+        let _connection_guard = connection_guard;
+        handle_client(
+            fd,
+            &self.state,
+            &self.integration_state,
+            &self.probe_state,
+            &self.boot_state,
+            &self.guest_signing_key,
+        );
+    }
+
+    fn spawn_handler(&self, fd: RawFd, connection_guard: CounterGuard) {
+        let server = self.clone();
+        std::thread::spawn(move || server.handle_inline(fd, connection_guard));
+    }
+}
+
+fn acquire_connection_slot(fd: RawFd) -> Option<CounterGuard> {
+    let limits = ConnectionLimits::default();
+    let Some(connection_guard) = try_acquire(&ACTIVE_CONNECTIONS, limits.total) else {
+        eprintln!("mvm-guest-agent: rejecting connection at concurrency limit");
+        // SAFETY: fd was returned by accept and ownership has not been passed
+        // to a File or another thread.
+        unsafe {
+            close(fd);
+        }
+        return None;
+    };
+    Some(connection_guard)
+}
+
+/// Serve PID-1 activation synchronously so the mount, identity, capability,
+/// bounding-set, and `no_new_privs` transition occurs before any thread is
+/// created. Linux credentials are per-thread; doing this in a worker would
+/// harden only that worker and leave later handlers with different credentials.
+fn serve_until_activated(listener: &AgentListener, server: &GuestServer) -> bool {
+    loop {
+        if SHUTDOWN_REQUESTED.load(Ordering::Acquire) {
+            return false;
+        }
+        let Some(cfd) = accept_control(listener) else {
+            continue;
+        };
+        server.boot_state.mark_first_accept();
+        let Some(connection_guard) = acquire_connection_slot(cfd) else {
+            continue;
+        };
+        server.handle_inline(cfd, connection_guard);
+        if matches!(
+            server.boot_state.activation_state(),
+            ActivationState::Activated
+        ) {
+            return true;
+        }
+    }
+}
+
 fn main() {
     let cfg = parse_config();
 
@@ -551,21 +640,6 @@ fn main() {
         .flatten()
         .map(|p| p.profile)
         .unwrap_or_else(|| mvm_core::security::SecurityPolicy::dev_defaults().profile);
-    eprintln!("mvm-guest-agent: profile={:?}", active_profile);
-
-    if crate::transport::unix_transport_selected() {
-        eprintln!(
-            "mvm-guest-agent: starting on unix socket {} (threshold={}, interval={}s)",
-            crate::transport::unix_socket_path().display(),
-            cfg.busy_threshold,
-            cfg.sample_interval_secs
-        );
-    } else {
-        eprintln!(
-            "mvm-guest-agent: starting on vsock port {} (threshold={}, interval={}s)",
-            cfg.port, cfg.busy_threshold, cfg.sample_interval_secs
-        );
-    }
 
     // PID-1 initramfs setup: mount early filesystems and install the
     // SIGCHLD reaper before the control plane comes up.  On non-PID-1
@@ -652,23 +726,14 @@ fn main() {
         .expect("SysRng entropy for guest signing key");
     let guest_signing_key = Arc::new(SigningKey::from_bytes(&guest_seed));
     boot_state.mark_vsock_bound();
-    eprintln!(
-        "mvm-guest-agent: control plane ready ({}ms)",
-        boot_state
-            .snapshot()
-            .boot_millis
-            .vsock_bound_ms
-            .unwrap_or(0)
-    );
 
-    // Defer entrypoint validation + warm-pool startup to a
-    // background thread chained in dependency order
-    // (warm pool reads `VALIDATED_ENTRYPOINT.get()`, so the sequence
-    // must stay serial inside this one thread). The accept loop
-    // below begins serving `Ping` / `ReadinessStatus` /
-    // `EntrypointStatus` immediately; `RunEntrypoint` returns
-    // `NotReady` until the entrypoint flips to `Ready`.
-    {
+    // On legacy per-rootfs boots the agent is not PID 1 and the workload
+    // root is already in place, so validate the entrypoint and start the warm
+    // pool now. On the universal initramfs path validation is deferred until
+    // after `ActivateEnvironment` pivots into the workload rootfs; running it
+    // here would validate the initramfs root, which has no
+    // `/etc/mvm/entrypoint`.
+    if !init::is_pid1() {
         let bs = Arc::clone(&boot_state);
         std::thread::spawn(move || {
             init_entrypoint_validation(&bs);
@@ -676,64 +741,53 @@ fn main() {
         });
     }
 
-    // Start background monitoring thread.
     let state = Arc::new(Mutex::new(AgentState::new()));
-    let monitor_state = Arc::clone(&state);
     // Seed the hot-reloadable atomics from the boot-time config so
     // monitoring_loop picks up the same values it would have with
     // the prior captured-by-value shape.
     HOT_BUSY_THRESHOLD_BITS.store(cfg.busy_threshold.to_bits(), Ordering::Release);
     HOT_SAMPLE_INTERVAL_SECS.store(cfg.sample_interval_secs, Ordering::Release);
-    std::thread::spawn(move || monitoring_loop(monitor_state));
 
-    // Defer integration drop-in scanning + health loop startup to a
-    // dedicated background thread. The scan
-    // itself is fast (single directory read), but moving it off the
-    // bind-to-accept critical path also means a malformed drop-in
-    // can't bubble a panic into the boot sequence.
     let integration_state = Arc::new(Mutex::new(IntegrationState {
         integrations: Vec::new(),
     }));
-    {
-        let bs = Arc::clone(&boot_state);
-        let s = Arc::clone(&integration_state);
-        std::thread::spawn(move || init_integrations(&bs, &s));
-    }
-
-    // Same shape for the probe drop-in scan + loop.
     let probe_state = Arc::new(Mutex::new(ProbeState { probes: Vec::new() }));
-    {
-        let bs = Arc::clone(&boot_state);
-        let s = Arc::clone(&probe_state);
-        std::thread::spawn(move || init_probes(&bs, &s));
+
+    let server = GuestServer {
+        state: Arc::clone(&state),
+        integration_state: Arc::clone(&integration_state),
+        probe_state: Arc::clone(&probe_state),
+        boot_state: Arc::clone(&boot_state),
+        guest_signing_key: Arc::clone(&guest_signing_key),
+    };
+
+    // PID 1 must activate synchronously. `apply_activation` changes Linux
+    // credentials and capability sets, which are per-thread at the kernel
+    // boundary; no background or request thread may exist before it returns.
+    if init::is_pid1() && serve_until_activated(&listener, &server) {
+        init::start_orphan_reaper();
     }
 
-    // Start the egress forward proxy (loopback FORWARD_PROXY_PORT).
-    // The workload's HTTP_PROXY (set by the host invoke path only when the VM
-    // has a substitution endpoint) routes secret-bearing requests here; this
-    // relays them over vsock to the host endpoint, which substitutes the real
-    // credential. Always started (cheap, loopback-only): with no HTTP_PROXY in
-    // the workload env it simply sees no connections. Not interactive-gated —
-    // egress substitution is a production feature.
-    std::thread::spawn(|| {
-        if let Err(e) = mvm_agentd::forward_proxy::start_forward_proxy(30) {
-            eprintln!("mvm-guest-agent: forward proxy failed to start: {e}");
+    if !SHUTDOWN_REQUESTED.load(Ordering::Acquire) {
+        let monitor_state = Arc::clone(&state);
+        std::thread::spawn(move || monitoring_loop(monitor_state));
+
+        // Defer integration and probe scans to background threads, but only
+        // after PID-1 activation has completed its privilege transition.
+        {
+            let bs = Arc::clone(&boot_state);
+            let s = Arc::clone(&integration_state);
+            std::thread::spawn(move || init_integrations(&bs, &s));
         }
-    });
+        {
+            let bs = Arc::clone(&boot_state);
+            let s = Arc::clone(&probe_state);
+            std::thread::spawn(move || init_probes(&bs, &s));
+        }
+    }
 
     // Port forwarders are started on-demand via StartPortForward requests
     // from the host (works with all backends, no config drive needed).
-
-    match &listener {
-        AgentListener::Vsock(_) => eprintln!(
-            "mvm-guest-agent: listening on vsock port {} (entrypoint, warm pool, integrations, probes initializing in background)",
-            cfg.port
-        ),
-        AgentListener::Unix(_) => eprintln!(
-            "mvm-guest-agent: listening on unix socket {} (entrypoint, warm pool, integrations, probes initializing in background)",
-            crate::transport::unix_socket_path().display()
-        ),
-    }
 
     // Every accepted connection gets its own bounded worker so a long-running
     // data stream cannot prevent Ping, readiness, sleep, or shutdown requests
@@ -774,30 +828,10 @@ fn main() {
         // Stamp first-accept timing once. Idempotent inside
         // `AgentBootState` — subsequent calls are no-ops.
         boot_state.mark_first_accept();
-        let limits = ConnectionLimits::default();
-        let Some(connection_guard) = try_acquire(&ACTIVE_CONNECTIONS, limits.total) else {
-            eprintln!("mvm-guest-agent: rejecting connection at concurrency limit");
-            unsafe {
-                close(cfd);
-            }
+        let Some(connection_guard) = acquire_connection_slot(cfd) else {
             continue;
         };
-        let state = Arc::clone(&state);
-        let integration_state = Arc::clone(&integration_state);
-        let probe_state = Arc::clone(&probe_state);
-        let bs = Arc::clone(&boot_state);
-        let guest_signing_key = Arc::clone(&guest_signing_key);
-        std::thread::spawn(move || {
-            let _connection_guard = connection_guard;
-            handle_client(
-                cfd,
-                &state,
-                &integration_state,
-                &probe_state,
-                &bs,
-                &guest_signing_key,
-            );
-        });
+        server.spawn_handler(cfd, connection_guard);
     }
 
     // Close the listening socket so any in-flight accept on a

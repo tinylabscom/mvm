@@ -59,6 +59,9 @@ mod tests {
             kernel_path: Some("/img/vmlinux".into()),
             cpus: 2,
             memory_mib: 512,
+            runtime_overlay_path: Some("/img/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/img/runtime.verity".into()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
             ..Default::default()
         };
         let spec = StandbySpec {
@@ -75,6 +78,7 @@ mod tests {
             vm_state_dir: tmp.path().join("standby-parent-1").display().to_string(),
             image_path: Some(image.display().to_string()),
             image_sha256: Some("c".repeat(64)),
+            root_strategy: Default::default(),
             vsock_egress: mvm_vmm::host::egress_shared::effective_vsock_egress(&launch),
         };
 
@@ -120,6 +124,9 @@ mod tests {
             kernel_path: Some("/img/vmlinux".into()),
             cpus: 2,
             memory_mib: 512,
+            runtime_overlay_path: Some("/img/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/img/runtime.verity".into()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
             ..Default::default()
         };
         let egress_launch = VmStartConfig {
@@ -144,18 +151,16 @@ mod tests {
                 .to_string(),
             image_path: Some(image.display().to_string()),
             image_sha256: Some("c".repeat(64)),
+            root_strategy: Default::default(),
             vsock_egress: mvm_vmm::host::egress_shared::effective_vsock_egress(launch),
         };
         let parent_boot = |launch: &VmStartConfig| {
             let spec = spec_for(launch);
             let cfg = factory_parent_config(launch, &spec).unwrap();
-            let boot = factory_parent_spec(
-                &cfg,
-                std::path::Path::new(&spec.vm_state_dir),
-                |virtiofs_root, has_disk| {
-                    FcDriver::new().workload_base_bootargs(virtiofs_root, has_disk)
-                },
-            );
+            let boot =
+                factory_parent_spec(&cfg, std::path::Path::new(&spec.vm_state_dir), |has_disk| {
+                    FcDriver::new().workload_base_bootargs(has_disk)
+                });
             (spec.vsock_egress, boot)
         };
 

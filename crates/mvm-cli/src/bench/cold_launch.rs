@@ -29,9 +29,11 @@ use super::stats::percentile;
 /// byte measurements and optional resolved kernel-config evidence; version 3
 /// adds the selected root filesystem strategy; version 4 adds whole-VMM warm
 /// resident-memory and first-command fault evidence; version 5 changes Linux
-/// memory accounting from PSS to RSS. Older reports remain readable through
-/// serde defaults but are not comparable without the new substrate.
-pub const COLD_LAUNCH_SCHEMA_VERSION: u32 = 5;
+/// memory accounting from PSS to RSS; version 6 adds maxima and the explicit
+/// hard boot requirement; version 7 adds the outer, shell-visible command
+/// lifecycle wall clock. Older reports remain readable through serde defaults
+/// but are not comparable without the new substrate.
+pub const COLD_LAUNCH_SCHEMA_VERSION: u32 = 7;
 
 /// Minimum measured samples in a publishable live matrix lane.
 pub const MIN_MATRIX_SAMPLES: u32 = 20;
@@ -47,6 +49,12 @@ pub const PREPARED_COLD_P95_BUDGET_MS: f64 = 250.0;
 
 /// Prepared-cold dispatch-window p99 budget, in milliseconds.
 pub const PREPARED_COLD_P99_BUDGET_MS: f64 = 300.0;
+
+/// Every prepared cold dispatch must finish strictly below this ceiling.
+///
+/// Unlike the percentile budgets, this is a per-sample invariant: one launch
+/// at exactly 200 ms is a failure even when every published percentile passes.
+pub const PREPARED_COLD_HARD_MAX_MS: f64 = 200.0;
 
 /// Warm-claim dispatch-window p50 budget, in milliseconds.
 pub const WARM_CLAIM_P50_BUDGET_MS: f64 = 30.0;
@@ -65,6 +73,8 @@ pub struct LaneBudgets {
     pub p50_ms: Option<f64>,
     pub p95_ms: Option<f64>,
     pub p99_ms: Option<f64>,
+    /// Strict per-sample ceiling. A value equal to this limit fails.
+    pub hard_max_ms: Option<f64>,
 }
 
 impl LaneBudgets {
@@ -154,16 +164,19 @@ impl LaunchLane {
                 p50_ms: Some(PREPARED_COLD_P50_BUDGET_MS),
                 p95_ms: Some(PREPARED_COLD_P95_BUDGET_MS),
                 p99_ms: Some(PREPARED_COLD_P99_BUDGET_MS),
+                hard_max_ms: Some(PREPARED_COLD_HARD_MAX_MS),
             },
             Self::WarmClaim => LaneBudgets {
                 p50_ms: Some(WARM_CLAIM_P50_BUDGET_MS),
                 p95_ms: None,
                 p99_ms: Some(WARM_CLAIM_P99_BUDGET_MS),
+                hard_max_ms: None,
             },
             Self::MountMiss | Self::ArtifactMiss => LaneBudgets {
                 p50_ms: None,
                 p95_ms: None,
                 p99_ms: None,
+                hard_max_ms: None,
             },
         }
     }
@@ -226,6 +239,12 @@ pub enum LaneViolation {
         percentile: &'static str,
         found_ms: f64,
         budget_ms: f64,
+    },
+    /// A prepared boot reached or crossed the strict per-sample ceiling.
+    HardMaximumExceeded {
+        lane: LaunchLane,
+        found_ms: f64,
+        limit_ms: f64,
     },
     /// The stored summary does not match the report's raw samples.
     NonCanonicalSummary,
@@ -295,6 +314,15 @@ impl std::fmt::Display for LaneViolation {
                 "lane {} {percentile} dispatch percentile {found_ms:.1}ms exceeds {budget_ms:.1}ms",
                 lane.as_str()
             ),
+            Self::HardMaximumExceeded {
+                lane,
+                found_ms,
+                limit_ms,
+            } => write!(
+                f,
+                "lane {} slowest boot dispatch was {found_ms:.1}ms; every boot must be under {limit_ms:.1}ms",
+                lane.as_str()
+            ),
             Self::NonCanonicalSummary => {
                 f.write_str("cold-launch report summary does not match its raw samples")
             }
@@ -331,9 +359,10 @@ pub fn validate_matrix_report(report: &ColdLaunchReport) -> Result<(), LaneViola
         validate_lane(report.lane, &sample_to_launch_sample(sample))?;
     }
     let canonical = build_cold_launch_report(report.lane, report.warmup, report.raw.clone());
-    if report.stats != canonical.stats {
+    if report.stats != canonical.stats || report.hard_requirement != canonical.hard_requirement {
         return Err(LaneViolation::NonCanonicalSummary);
     }
+    validate_hard_boot_requirement(report)?;
     let measured = report.stats.dispatch_window_ms.by_percentile();
     for ((percentile, budget_ms), (_, found)) in report
         .lane
@@ -345,6 +374,55 @@ pub fn validate_matrix_report(report: &ColdLaunchReport) -> Result<(), LaneViola
         if let Some(budget_ms) = budget_ms {
             require_budget(report.lane, percentile, found, budget_ms)?;
         }
+    }
+    Ok(())
+}
+
+/// Enforce the strict prepared-boot ceiling independently of publication-size
+/// percentile validation.
+///
+/// This deliberately runs for indicative one-off reports too. "Always under"
+/// cannot become conditional on collecting twenty observations first.
+pub fn validate_hard_boot_requirement(report: &ColdLaunchReport) -> Result<(), LaneViolation> {
+    let observed_max_ms = report
+        .raw
+        .iter()
+        .map(|sample| sample.phases.dispatch_window_ms())
+        .reduce(f64::max);
+    if report.stats.dispatch_window_ms.max != observed_max_ms {
+        return Err(LaneViolation::NonCanonicalSummary);
+    }
+    let expected = matches!(
+        report.lane,
+        LaunchLane::PreparedCold | LaunchLane::PreparedColdMountHit
+    )
+    .then(|| HardBootRequirement::prepared(observed_max_ms));
+    if report.hard_requirement != expected {
+        return Err(LaneViolation::NonCanonicalSummary);
+    }
+    let Some(requirement) = report.hard_requirement.as_ref() else {
+        return Ok(());
+    };
+    if let Some(found_ms) = requirement.observed_max_ms {
+        validate_hard_boot_timing(report.lane, found_ms)?;
+    }
+    Ok(())
+}
+
+/// Validate one observed dispatch duration against the lane's per-boot rule.
+/// Acquisition and warm-claim lanes have different contracts and are left to
+/// their own gates.
+pub fn validate_hard_boot_timing(lane: LaunchLane, found_ms: f64) -> Result<(), LaneViolation> {
+    if matches!(
+        lane,
+        LaunchLane::PreparedCold | LaunchLane::PreparedColdMountHit
+    ) && found_ms >= PREPARED_COLD_HARD_MAX_MS
+    {
+        return Err(LaneViolation::HardMaximumExceeded {
+            lane,
+            found_ms,
+            limit_ms: PREPARED_COLD_HARD_MAX_MS,
+        });
     }
     Ok(())
 }
@@ -629,6 +707,10 @@ pub struct ColdLaunchSample {
     pub cache: CacheState,
     pub work: LaunchWork,
     pub launch_mode: LaunchMode,
+    /// Parent-observed process wall clock, from immediately before spawning
+    /// `mvmctl` until it exits after command-level audit completion.
+    #[serde(default)]
+    pub command_lifecycle_ms: f64,
     pub phases: RunPhaseTimings,
     pub sub_phases: LaunchSubTimings,
     /// Whole-VMM warm-ready and first-command memory evidence.
@@ -655,6 +737,10 @@ pub struct SpanStats {
     pub p50: Option<f64>,
     pub p95: Option<f64>,
     pub p99: Option<f64>,
+    /// Slowest recorded sample. This is required to evaluate an "every boot"
+    /// contract; no percentile, including p99, proves a hard maximum.
+    #[serde(default)]
+    pub max: Option<f64>,
 }
 
 impl SpanStats {
@@ -676,17 +762,60 @@ impl SpanStats {
             p50: Some(percentile(samples, 50.0)),
             p95: Some(percentile(samples, 95.0)),
             p99: Some(percentile(samples, 99.0)),
+            max: samples.iter().copied().reduce(f64::max),
+        }
+    }
+}
+
+/// Machine-readable statement and verdict for the prepared-boot invariant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimingMetric {
+    DispatchWindowMs,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequirementComparison {
+    LessThan,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HardBootRequirement {
+    pub metric: TimingMetric,
+    pub comparison: RequirementComparison,
+    pub limit_ms: f64,
+    pub observed_max_ms: Option<f64>,
+    pub met: bool,
+    pub remark: String,
+}
+
+impl HardBootRequirement {
+    fn prepared(observed_max_ms: Option<f64>) -> Self {
+        Self {
+            metric: TimingMetric::DispatchWindowMs,
+            comparison: RequirementComparison::LessThan,
+            limit_ms: PREPARED_COLD_HARD_MAX_MS,
+            observed_max_ms,
+            met: observed_max_ms.is_some_and(|value| value < PREPARED_COLD_HARD_MAX_MS),
+            remark: format!(
+                "Every prepared boot must reach authenticated command dispatch in under {PREPARED_COLD_HARD_MAX_MS:.0} ms."
+            ),
         }
     }
 }
 
 /// Percentiles for every span of one lane.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaneStats {
     /// Admitted plan to command dispatch — the window the launch contract is
     /// set against.
     pub dispatch_window_ms: SpanStats,
+    /// The shell-visible lifetime of the complete `mvmctl` child process.
+    #[serde(default)]
+    pub command_lifecycle_ms: SpanStats,
     pub total_ms: SpanStats,
     pub resolve_ms: SpanStats,
     pub drives_ms: SpanStats,
@@ -731,6 +860,9 @@ pub struct ColdLaunchReport {
     pub lane: LaunchLane,
     pub warmup: u32,
     pub stats: LaneStats,
+    /// Present on lanes governed by the strict prepared-boot ceiling.
+    #[serde(default)]
+    pub hard_requirement: Option<HardBootRequirement>,
     pub raw: Vec<ColdLaunchSample>,
 }
 
@@ -774,12 +906,19 @@ pub fn build_cold_launch_report(
             .collect();
         SpanStats::from_samples(&values)
     };
+    let dispatch_window_ms = col(|s| s.phases.dispatch_window_ms());
+    let hard_requirement = matches!(
+        lane,
+        LaunchLane::PreparedCold | LaunchLane::PreparedColdMountHit
+    )
+    .then(|| HardBootRequirement::prepared(dispatch_window_ms.max));
     ColdLaunchReport {
         schema_version: COLD_LAUNCH_SCHEMA_VERSION,
         lane,
         warmup,
         stats: LaneStats {
-            dispatch_window_ms: col(|s| s.phases.dispatch_window_ms()),
+            dispatch_window_ms,
+            command_lifecycle_ms: col(|s| s.command_lifecycle_ms),
             total_ms: col(|s| s.phases.total_ms),
             resolve_ms: col(|s| s.phases.resolve_ms),
             drives_ms: col(|s| s.phases.drives_ms),
@@ -809,6 +948,7 @@ pub fn build_cold_launch_report(
                 memory.delta.major_faults
             }),
         },
+        hard_requirement,
         raw,
     }
 }
@@ -966,6 +1106,7 @@ mod tests {
             },
             work: LaunchWork::default(),
             launch_mode: LaunchMode::Cold,
+            command_lifecycle_ms: total_ms + 25.0,
             phases: phases(total_ms),
             sub_phases: LaunchSubTimings {
                 vmm_create_ms: Some(total_ms / 2.0),
@@ -1350,6 +1491,7 @@ mod tests {
         assert_eq!(report.stats.total_ms.p50, Some(250.0));
         assert_eq!(report.stats.total_ms.p95, Some(385.0));
         assert_eq!(report.stats.total_ms.p99, Some(397.0));
+        assert_eq!(report.stats.command_lifecycle_ms.p50, Some(275.0));
         // Dispatch window is constant across the fixture, so every
         // percentile lands on it.
         assert_eq!(report.stats.dispatch_window_ms.p50, Some(130.0));
@@ -1436,7 +1578,7 @@ mod tests {
     }
 
     #[test]
-    fn matrix_gate_applies_prepared_cold_percentile_budgets() {
+    fn matrix_gate_applies_the_hard_maximum_before_percentile_diagnostics() {
         let report = build_cold_launch_report(
             LaunchLane::PreparedCold,
             MATRIX_WARMUP_SAMPLES,
@@ -1450,13 +1592,82 @@ mod tests {
         );
         assert_eq!(
             validate_matrix_report(&report),
+            Err(LaneViolation::HardMaximumExceeded {
+                lane: LaunchLane::PreparedCold,
+                found_ms: 301.0,
+                limit_ms: PREPARED_COLD_HARD_MAX_MS,
+            })
+        );
+    }
+
+    #[test]
+    fn percentile_budget_check_is_inclusive_at_its_boundary() {
+        assert_eq!(
+            require_budget(
+                LaunchLane::PreparedCold,
+                "p50",
+                Some(PREPARED_COLD_P50_BUDGET_MS),
+                PREPARED_COLD_P50_BUDGET_MS,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            require_budget(
+                LaunchLane::PreparedCold,
+                "p50",
+                Some(PREPARED_COLD_P50_BUDGET_MS + 0.1),
+                PREPARED_COLD_P50_BUDGET_MS,
+            ),
             Err(LaneViolation::BudgetExceeded {
                 lane: LaunchLane::PreparedCold,
                 percentile: "p50",
-                found_ms: 301.0,
+                found_ms: PREPARED_COLD_P50_BUDGET_MS + 0.1,
                 budget_ms: PREPARED_COLD_P50_BUDGET_MS,
             })
         );
+    }
+
+    #[test]
+    fn hard_boot_requirement_rejects_one_slow_sample_below_publication_floor() {
+        let mut fast = cold_sample(1, 150.0);
+        fast.phases.backend_start_ms = 169.9;
+        fast.phases.vsock_wait_ms = 30.0;
+        let fast_report = build_cold_launch_report(LaunchLane::PreparedCold, 0, vec![fast]);
+        assert_eq!(validate_hard_boot_requirement(&fast_report), Ok(()));
+        assert_eq!(fast_report.stats.dispatch_window_ms.max, Some(199.9));
+        assert!(
+            fast_report
+                .hard_requirement
+                .as_ref()
+                .is_some_and(|requirement| requirement.met)
+        );
+
+        let mut boundary = cold_sample(1, 150.0);
+        boundary.phases.backend_start_ms = 170.0;
+        boundary.phases.vsock_wait_ms = 30.0;
+        let boundary_report = build_cold_launch_report(LaunchLane::PreparedCold, 0, vec![boundary]);
+        assert_eq!(
+            validate_hard_boot_requirement(&boundary_report),
+            Err(LaneViolation::HardMaximumExceeded {
+                lane: LaunchLane::PreparedCold,
+                found_ms: 200.0,
+                limit_ms: PREPARED_COLD_HARD_MAX_MS,
+            })
+        );
+        assert!(
+            !boundary_report
+                .hard_requirement
+                .as_ref()
+                .is_some_and(|requirement| requirement.met)
+        );
+    }
+
+    #[test]
+    fn acquisition_lanes_do_not_claim_the_prepared_boot_requirement() {
+        let report =
+            build_cold_launch_report(LaunchLane::ArtifactMiss, 0, vec![cold_sample(1, 500.0)]);
+        assert_eq!(report.hard_requirement, None);
+        assert_eq!(validate_hard_boot_requirement(&report), Ok(()));
     }
 
     #[test]
@@ -1466,6 +1677,9 @@ mod tests {
         let json = serde_json::to_string(&report).unwrap();
         let back: ColdLaunchReport = serde_json::from_str(&json).unwrap();
         assert_eq!(back, report);
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["hard_requirement"]["comparison"], "less_than");
+        assert_eq!(value["stats"]["dispatch_window_ms"]["max"], 130.0);
     }
 
     #[test]

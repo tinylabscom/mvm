@@ -37,6 +37,16 @@ pub(in crate::commands::vm) struct AdmitPlanForBootParams<'a> {
     pub vm_name: &'a str,
     pub backend_name: &'a str,
     pub rootfs_path: &'a std::path::Path,
+    /// The kernel this launch will boot, pinned into the plan's
+    /// `EnvironmentRef` and re-checked by the admitted-environment gate.
+    ///
+    /// `None` only for backends that carry their own kernel (libkrun's
+    /// bundled image, the mock). For everything else this must be the same
+    /// path handed to the backend: the image digest says what the workload
+    /// *is* and says nothing about what confines it, so a plan that names the
+    /// image but not the kernel admits a workload onto whatever kernel the
+    /// host happened to have cached.
+    pub kernel_path: Option<&'a std::path::Path>,
     /// Skip re-hashing `rootfs_path` and admit with this sha256 instead.
     /// Only sound when a fail-closed integrity check re-hashes the same
     /// bytes before boot (the checkpoint fork path: `verify_content`
@@ -60,6 +70,8 @@ pub(in crate::commands::vm) struct AdmitPlanForBootParams<'a> {
     pub seccomp_tier: mvm_core::plan::PlanSeccompTier,
     pub secret_release: mvm_core::plan::SecretReleasePolicy,
     pub secrets: Vec<mvm_core::plan::SecretBinding>,
+    /// Opaque caller commitment copied into the plan and its audit entries.
+    pub caller_commitment: Option<mvm_core::plan::CallerCommitment>,
     pub no_supervisor: bool,
     pub ledger: &'a InMemoryNonceLedger,
     /// Override for the host-signer keys directory. Production callers
@@ -259,6 +271,13 @@ impl std::fmt::Debug for AdmissionContext {
 pub(in crate::commands::vm) fn admit_plan_for_boot(
     p: AdmitPlanForBootParams<'_>,
 ) -> Result<Option<AdmissionContext>> {
+    admit_plan_for_boot_with_ingress(p, Vec::new())
+}
+
+pub(in crate::commands::vm) fn admit_plan_for_boot_with_ingress(
+    p: AdmitPlanForBootParams<'_>,
+    ingress: Vec<mvm_core::plan::IngressMapping>,
+) -> Result<Option<AdmissionContext>> {
     if p.no_supervisor {
         return Ok(None);
     }
@@ -350,6 +369,18 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         None => (None, None, None),
     };
 
+    // Pin the kernel alongside the image. Through the shared digest cache, the
+    // same way `image_sha256` above is derived — a pin that re-read the whole
+    // kernel would put a multi-MB read back on every launch to reproduce a
+    // value the kernel's own cache check just computed from the same bytes.
+    let kernel_sha256 = p
+        .kernel_path
+        .map(|kernel| {
+            mvm_core::crypto::image_verify::sha256_file_cached(kernel)
+                .with_context(|| format!("hashing kernel at {} for the plan pin", kernel.display()))
+        })
+        .transpose()?;
+
     let generated_network_policy_bundle =
         generated_policy_bundle_for_network_policy(p.tenant, p.vm_name, &p.network_policy)?;
     let generated_policy_ref = generated_network_policy_bundle
@@ -362,9 +393,9 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         // signature covers it.
         grants: p.grants.clone(),
         stream_edges: Vec::new(),
-        kernel_sha256: None,
+        kernel_sha256: kernel_sha256.as_deref(),
         network_mode: p.network_mode,
-        l3_network: None,
+        ingress,
         vm_name: p.vm_name,
         tenant: Some(p.tenant),
         backend_name: p.backend_name,
@@ -390,6 +421,7 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         shares: p.shares.clone(),
         redaction: p.redaction.clone(),
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
+        caller_commitment: p.caller_commitment.clone(),
         audit_labels: Default::default(),
         agent_verbs: crate::commands::vm::agent_verbs::parse_agent_verb_override(
             &p.agent_verb_override,
@@ -402,12 +434,14 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
             )
         }),
         services: p.services.clone(),
+        extensions: Vec::new(),
         // Recorded, always, and not reachable from a flag. A caller who could
         // turn the transcript off from the command line would leave an absent
         // recording indistinguishable from a suppressed one; opting out is a
         // decision for whoever authors and signs the plan, and it lands in the
         // chain as `plan.admitted`'s retention label either way.
         stream_retention: StreamRetention::Persist,
+        attestation_mode: mvm_contract::plan::AttestationMode::Noop,
     };
     let admission_ctx = match (&bundle_resolver, &bundle_trust) {
         (Some(r), Some(t)) => Some(BundleAdmissionContext {
@@ -600,6 +634,16 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         }
         .context("loading the tenant policy bundle for the bridge")?,
     };
+
+    // Record the admitted L7 egress boundary in the chain-signed log so a
+    // receipt can name the destinations without re-resolving policy refs.
+    let egress_destinations = policy_bundle
+        .as_ref()
+        .map(|b| b.egress.allow_list.clone())
+        .unwrap_or_default();
+    if let Err(e) = emitter.emit_egress_destinations(admitted.plan(), &egress_destinations) {
+        tracing::warn!(error = %e, "audit emit_egress_destinations failed (non-fatal)");
+    }
 
     Ok(Some(AdmissionContext {
         admitted,
@@ -870,18 +914,12 @@ pub(in crate::commands::vm) fn emit_launched_if(
 pub(in crate::commands::vm) fn emit_boot_posture_if(
     ctx: &Option<AdmissionContext>,
     strategy: mvm_build::run_image::RootStrategy,
-    runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
 ) {
     let Some(ctx) = ctx else { return };
     let label = match strategy {
-        mvm_build::run_image::RootStrategy::VirtiofsRoot => "virtiofs-root",
         mvm_build::run_image::RootStrategy::BlockExt4 => "block-ext4",
     };
-    if let Err(e) = ctx.emitter.emit_boot_posture(
-        ctx.admitted.plan(),
-        label,
-        runtime_source_policy.audit_label(),
-    ) {
+    if let Err(e) = ctx.emitter.emit_boot_posture(ctx.admitted.plan(), label) {
         tracing::warn!(error = %e, "audit emit_boot_posture failed (non-fatal)");
     }
 }
@@ -898,6 +936,25 @@ pub(super) fn enforce_shares_if(
     if let Some(ctx) = ctx {
         mvm_hostd::plan_admission::enforce_admitted_shares(volumes, ctx.admitted.plan())
             .context("admission share check")?;
+    }
+    Ok(())
+}
+
+/// Refuse to boot if the kernel about to be loaded is not the one the verified
+/// `ExecutionPlan` pinned. No-op when admission was skipped.
+///
+/// The sibling of [`enforce_shares_if`], called at the same point for the same
+/// reason: `mvmctl` admits its plan and then starts the backend itself rather
+/// than going through `start_admitted`, so every gate that path runs has to be
+/// run here too or it does not run at all. The admitted-environment gate was
+/// the one nobody called.
+pub(super) fn enforce_kernel_if(
+    ctx: &Option<AdmissionContext>,
+    kernel_path: Option<&std::path::Path>,
+) -> Result<()> {
+    if let Some(ctx) = ctx {
+        mvm_hostd::plan_admission::enforce_admitted_environment(kernel_path, ctx.admitted.plan())
+            .context("admission kernel check")?;
     }
     Ok(())
 }
@@ -1130,6 +1187,143 @@ mod admit_plan_tests {
         assert!(sibling_deploy_boot_artifact(&unrelated).unwrap().is_none());
     }
 
+    /// A minimal admission that really runs — signs, verifies, burns a nonce.
+    /// Callers override only the fields their assertion is about.
+    fn pinning_params<'a>(
+        rootfs: &'a std::path::Path,
+        ledger: &'a InMemoryNonceLedger,
+    ) -> AdmitPlanForBootParams<'a> {
+        AdmitPlanForBootParams {
+            network_mode: mvm_contract::plan::NetworkMode::default(),
+            tenant: "local",
+            vm_name: "vm-pinned",
+            backend_name: "firecracker",
+            rootfs_path: rootfs,
+            kernel_path: None,
+            precomputed_image_sha256: None,
+            boot_artifact_identity: None,
+            cpus: 2,
+            mem_mib: 512,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
+            secrets: Vec::new(),
+            caller_commitment: None,
+            no_supervisor: false,
+            ledger,
+            keys_dir: None,
+            audit_dir: None,
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            restrict_agent_verbs: true,
+            services: Vec::new(),
+            grants: None,
+            backend_kind: None,
+            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
+        }
+    }
+
+    #[test]
+    fn admission_binds_the_caller_commitment_into_the_plan() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rootfs = write_rootfs(dir.path(), b"committed rootfs");
+        let keys_dir = dir.path().join("keys");
+        let audit_dir = dir.path().join("audit");
+        let ledger = InMemoryNonceLedger::new();
+        let commitment = mvm_core::plan::CallerCommitment::from_bytes([0x33; 32]);
+        let mut params = pinning_params(&rootfs, &ledger);
+        params.keys_dir = Some(&keys_dir);
+        params.audit_dir = Some(&audit_dir);
+        params.caller_commitment = Some(commitment.clone());
+
+        let admitted = admit_plan_for_boot(params)
+            .expect("admission succeeds")
+            .expect("supervisor admission is enabled");
+        assert_eq!(admitted.admitted.plan().caller_commitment, Some(commitment));
+    }
+
+    /// The image digest says what the workload *is* and nothing about what
+    /// confines it, so a plan that names the image but not the kernel admits a
+    /// workload onto whatever kernel the host happened to have cached. This is
+    /// the assertion that would have caught `kernel_sha256: None` sitting on
+    /// the CLI's only admission seam.
+    #[test]
+    fn the_booting_kernel_is_pinned_into_the_signed_plan() {
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"hello rootfs");
+        let kernel = rootfs_dir.path().join("vmlinux");
+        std::fs::write(&kernel, b"workload-kernel-bytes").unwrap();
+        let expected = mvm_core::crypto::image_verify::sha256_file(&kernel).unwrap();
+        let ledger = InMemoryNonceLedger::new();
+
+        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            kernel_path: Some(kernel.as_path()),
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            ..pinning_params(&rootfs, &ledger)
+        })
+        .expect("admission")
+        .expect("Some when admission ran");
+
+        let environment = ctx
+            .admitted
+            .plan()
+            .environment
+            .as_ref()
+            .expect("a launch that boots a kernel must pin it");
+        assert_eq!(environment.kernel_sha256, expected);
+
+        // And the pin is what the enforcement gate compares against, so the
+        // kernel that was admitted is admitted onto itself rather than the pin
+        // being a value nothing ever reads.
+        mvm_hostd::plan_admission::enforce_admitted_environment(
+            Some(kernel.as_path()),
+            ctx.admitted.plan(),
+        )
+        .expect("the pinned kernel must pass its own gate");
+    }
+
+    /// A kernel swapped between admission and boot is refused. Same plan, same
+    /// image, a different confinement — the substitution the pin exists to make
+    /// visible.
+    #[test]
+    fn a_kernel_swapped_after_admission_is_refused() {
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"hello rootfs");
+        let kernel = rootfs_dir.path().join("vmlinux");
+        std::fs::write(&kernel, b"workload-kernel-bytes").unwrap();
+        let ledger = InMemoryNonceLedger::new();
+
+        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            kernel_path: Some(kernel.as_path()),
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            ..pinning_params(&rootfs, &ledger)
+        })
+        .expect("admission")
+        .expect("Some when admission ran");
+
+        std::fs::write(&kernel, b"a-general-purpose-kernel-with-user-ns").unwrap();
+
+        let err = mvm_hostd::plan_admission::enforce_admitted_environment(
+            Some(kernel.as_path()),
+            ctx.admitted.plan(),
+        )
+        .expect_err("a kernel swapped after admission must be refused");
+        assert!(
+            format!("{err:#}").contains("admitted-environment mismatch"),
+            "error must name the mismatch, got: {err:#}"
+        );
+    }
+
     #[test]
     fn no_supervisor_short_circuits_to_none() {
         // The escape hatch must skip admission entirely — no host
@@ -1143,6 +1337,7 @@ mod admit_plan_tests {
             vm_name: "vm-skip",
             backend_name: "firecracker",
             rootfs_path: &rootfs,
+            kernel_path: None,
             precomputed_image_sha256: None,
             boot_artifact_identity: None,
             cpus: 2,
@@ -1150,6 +1345,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: true,
             ledger: &ledger,
             keys_dir: None, // not read — short-circuit returns first
@@ -1185,6 +1381,7 @@ mod admit_plan_tests {
             vm_name: "vm-happy",
             backend_name: "firecracker",
             rootfs_path: &rootfs,
+            kernel_path: None,
             precomputed_image_sha256: None,
             boot_artifact_identity: Some(&boot_artifact),
             cpus: 2,
@@ -1192,6 +1389,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Network,
             secret_release: mvm_core::plan::SecretReleasePolicy::PlanBound,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -1248,6 +1446,7 @@ mod admit_plan_tests {
             vm_name: "vm-missing",
             backend_name: "firecracker",
             rootfs_path: std::path::Path::new("/nonexistent/rootfs.ext4"),
+            kernel_path: None,
             precomputed_image_sha256: None,
             boot_artifact_identity: None,
             cpus: 1,
@@ -1255,6 +1454,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -1286,51 +1486,6 @@ mod admit_plan_tests {
     /// the ordinary ones that derive `HostVsockProxy` and get a broker stood up
     /// for them. The value is inside the signature, so the record was
     /// confidently wrong rather than merely absent.
-    /// Admit a plan carrying `mode`, with everything else held constant.
-    ///
-    /// Shared by the record-the-transport test and the retired-transport
-    /// refusal so the two differ only in the mode they pass.
-    fn admit_with_mode(
-        mode: mvm_contract::plan::NetworkMode,
-        keys_dir: &std::path::Path,
-        audit_dir: &std::path::Path,
-        rootfs: &std::path::Path,
-        ledger: &InMemoryNonceLedger,
-    ) -> Result<Option<AdmissionContext>> {
-        admit_plan_for_boot(AdmitPlanForBootParams {
-            network_mode: mode,
-            grants: None,
-            backend_kind: None,
-            tenant: "local",
-            vm_name: "vm-transport",
-            backend_name: "firecracker",
-            rootfs_path: rootfs,
-            precomputed_image_sha256: None,
-            boot_artifact_identity: None,
-            cpus: 1,
-            mem_mib: 128,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::None,
-            secrets: Vec::new(),
-            no_supervisor: false,
-            ledger,
-            keys_dir: Some(keys_dir),
-            audit_dir: Some(audit_dir),
-            policy_dir: None,
-            bundle_pin: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            agent_verb_override: vec![],
-            restrict_agent_verbs: false,
-            services: Vec::new(),
-            entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
-                "test",
-            ),
-        })
-    }
-
     /// The retired in-guest IP stack does not boot, and says why.
     ///
     /// The refusal is the thing that keeps the migration to a single
@@ -1339,24 +1494,17 @@ mod admit_plan_tests {
     /// both replacements — not merely on `is_err()`.
     #[test]
     fn a_launch_asking_for_the_retired_ip_stack_is_refused() {
-        let keys_dir = tempfile::tempdir().unwrap();
-        let audit_dir = tempfile::tempdir().unwrap();
-        let rootfs_dir = tempfile::tempdir().unwrap();
-        let rootfs = write_rootfs(rootfs_dir.path(), b"transport");
-        let ledger = InMemoryNonceLedger::new();
-
-        let err = admit_with_mode(
-            mvm_contract::plan::NetworkMode::L3Vsock,
-            keys_dir.path(),
-            audit_dir.path(),
-            &rootfs,
-            &ledger,
-        )
-        .expect_err("the retired transport must not admit");
-        let msg = format!("{err:#}");
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.network_mode = mvm_contract::plan::NetworkMode::HostVsockProxy;
+        let json = serde_json::to_string(&plan)
+            .expect("plan serializes")
+            .replace("host_vsock_proxy", "l3_vsock");
+        let err = serde_json::from_str::<mvm_contract::plan::ExecutionPlan>(&json)
+            .expect_err("the retired transport must not enter the admitted type");
+        let msg = err.to_string();
         assert!(msg.contains("has been retired"), "{msg}");
-        assert!(msg.contains("loopback adapters"), "{msg}");
-        assert!(msg.contains("typed SDK connector"), "{msg}");
+        assert!(msg.contains("FlowMux loopback adapters"), "{msg}");
+        assert!(msg.contains("typed connector"), "{msg}");
     }
 
     #[test]
@@ -1379,6 +1527,7 @@ mod admit_plan_tests {
                 vm_name: "vm-transport",
                 backend_name: "firecracker",
                 rootfs_path: &rootfs,
+                kernel_path: None,
                 precomputed_image_sha256: None,
                 boot_artifact_identity: None,
                 cpus: 1,
@@ -1386,6 +1535,7 @@ mod admit_plan_tests {
                 seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
                 secret_release: mvm_core::plan::SecretReleasePolicy::None,
                 secrets: Vec::new(),
+                caller_commitment: None,
                 no_supervisor: false,
                 ledger: &ledger,
                 keys_dir: Some(keys_dir.path()),
@@ -1431,6 +1581,7 @@ mod admit_plan_tests {
             vm_name: "vm-1",
             backend_name: "firecracker",
             rootfs_path: &rootfs,
+            kernel_path: None,
             precomputed_image_sha256: None,
             boot_artifact_identity: None,
             cpus: 1,
@@ -1438,6 +1589,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -1463,6 +1615,7 @@ mod admit_plan_tests {
             vm_name: "vm-2",
             backend_name: "firecracker",
             rootfs_path: &rootfs,
+            kernel_path: None,
             precomputed_image_sha256: None,
             boot_artifact_identity: None,
             cpus: 1,
@@ -1470,6 +1623,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -1508,7 +1662,7 @@ mod admit_plan_tests {
     }
 
     #[test]
-    fn emit_boot_posture_audits_runtime_source_policy_label() {
+    fn emit_boot_posture_audits_the_root_strategy_label() {
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -1520,6 +1674,7 @@ mod admit_plan_tests {
             vm_name: "vm-boot-posture",
             backend_name: "firecracker",
             rootfs_path: &rootfs,
+            kernel_path: None,
             precomputed_image_sha256: None,
             boot_artifact_identity: None,
             cpus: 1,
@@ -1527,6 +1682,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -1547,11 +1703,7 @@ mod admit_plan_tests {
         .expect("admission")
         .expect("Some when admission ran");
 
-        emit_boot_posture_if(
-            &Some(ctx),
-            mvm_build::run_image::RootStrategy::BlockExt4,
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-        );
+        emit_boot_posture_if(&Some(ctx), mvm_build::run_image::RootStrategy::BlockExt4);
 
         let audit_path = audit_dir.path().join("local.jsonl");
         let content = std::fs::read_to_string(&audit_path).expect("audit file exists");
@@ -1564,8 +1716,8 @@ mod admit_plan_tests {
             "audit chain must carry selected root strategy: {content}"
         );
         assert!(
-            content.contains("\"runtime_source_policy\":\"required-overlay\""),
-            "audit chain must carry runtime_source_policy label from the enum: {content}"
+            content.contains("\"root_strategy\":\"block-ext4\""),
+            "audit chain must carry the root_strategy label: {content}"
         );
     }
 
@@ -1599,6 +1751,7 @@ mod admit_plan_tests {
             vm_name: "vm-local-default",
             backend_name: "firecracker",
             rootfs_path: &rootfs,
+            kernel_path: None,
             precomputed_image_sha256: None,
             boot_artifact_identity: None,
             cpus: 1,
@@ -1606,6 +1759,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -1656,6 +1810,7 @@ mod admit_plan_tests {
             vm_name: "vm-allow-list",
             backend_name: "libkrun",
             rootfs_path: &rootfs,
+            kernel_path: None,
             precomputed_image_sha256: None,
             boot_artifact_identity: None,
             cpus: 1,
@@ -1663,6 +1818,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -1720,6 +1876,7 @@ mod admit_plan_tests {
             vm_name: "vm-unrestricted",
             backend_name: "hvf",
             rootfs_path: &rootfs,
+            kernel_path: None,
             precomputed_image_sha256: None,
             boot_artifact_identity: None,
             cpus: 1,
@@ -1727,6 +1884,7 @@ mod admit_plan_tests {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -1811,12 +1969,14 @@ mod admit_plan_tests {
             vm_name: "vm-non-shell-granted",
             backend_name: "firecracker",
             rootfs_path: &rootfs,
+            kernel_path: None,
             precomputed_image_sha256: None,
             cpus: 1,
             mem_mib: 128,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -1872,12 +2032,14 @@ mod admit_plan_tests {
             vm_name: "vm-shell-ungranted",
             backend_name: "firecracker",
             rootfs_path: &rootfs,
+            kernel_path: None,
             precomputed_image_sha256: None,
             cpus: 1,
             mem_mib: 128,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -1923,12 +2085,14 @@ mod admit_plan_tests {
             vm_name: "vm-shell-granted",
             backend_name: "firecracker",
             rootfs_path: &rootfs,
+            kernel_path: None,
             precomputed_image_sha256: None,
             cpus: 1,
             mem_mib: 128,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -1982,12 +2146,14 @@ mod admit_plan_tests {
             vm_name: "vm-entrypoint-unknown",
             backend_name: "firecracker",
             rootfs_path: &rootfs,
+            kernel_path: None,
             precomputed_image_sha256: None,
             cpus: 1,
             mem_mib: 128,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -2037,12 +2203,14 @@ mod admit_plan_tests {
             vm_name: "vm-entrypoint-unknown-ungranted",
             backend_name: "firecracker",
             rootfs_path: &rootfs,
+            kernel_path: None,
             precomputed_image_sha256: None,
             cpus: 1,
             mem_mib: 128,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -2085,12 +2253,14 @@ mod admit_plan_tests {
             vm_name: "vm-dev-shell",
             backend_name: "firecracker",
             rootfs_path: &rootfs,
+            kernel_path: None,
             precomputed_image_sha256: None,
             cpus: 1,
             mem_mib: 128,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -2265,10 +2435,12 @@ allow_hosts = ["localhost:8443"]
             cpu_limit_millicores: None,
             timeout_secs: None,
             allow_host: &[],
+            peer: &[],
             net: false,
             grants_file: None,
             manifest: Some(&declared),
             config: &config,
+            ai: None,
         })
         .expect("the manifest's grants resolve");
 
@@ -2283,6 +2455,7 @@ allow_hosts = ["localhost:8443"]
             vm_name: "vm-granted",
             backend_name: "firecracker",
             rootfs_path: &rootfs,
+            kernel_path: None,
             precomputed_image_sha256: None,
             boot_artifact_identity: None,
             cpus: 4,
@@ -2290,6 +2463,7 @@ allow_hosts = ["localhost:8443"]
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -2351,12 +2525,14 @@ allow_hosts = ["localhost:8443"]
             cpu_limit_millicores: None,
             timeout_secs: None,
             allow_host: &[],
+            peer: &[],
             // `--net` would select the broad dev preset; the granted allow-list
             // is what wins.
             net: true,
             grants_file: None,
             manifest: Some(&declared),
             config: &config,
+            ai: None,
         })
         .expect("resolves");
 
@@ -2406,10 +2582,12 @@ allow_hosts = ["localhost:8443"]
             cpu_limit_millicores: None,
             timeout_secs: None,
             allow_host: &[],
+            peer: &[],
             net: false,
             grants_file: None,
             manifest: Some(&declared),
             config: &config,
+            ai: None,
         })
         .expect_err("the resolver refuses a grant over this host's ceiling");
         let early = format!("{early:#}");
@@ -2426,10 +2604,12 @@ allow_hosts = ["localhost:8443"]
             cpu_limit_millicores: None,
             timeout_secs: None,
             allow_host: &[],
+            peer: &[],
             net: false,
             grants_file: None,
             manifest: Some(&declared),
             config: &MvmConfig::default(),
+            ai: None,
         })
         .expect("an unbounded config resolves the same grant");
 
@@ -2444,6 +2624,7 @@ allow_hosts = ["localhost:8443"]
             vm_name: "vm-over-ceiling",
             backend_name: "firecracker",
             rootfs_path: &rootfs,
+            kernel_path: None,
             precomputed_image_sha256: None,
             boot_artifact_identity: None,
             cpus: 4,
@@ -2451,6 +2632,7 @@ allow_hosts = ["localhost:8443"]
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
@@ -2485,10 +2667,12 @@ allow_hosts = ["localhost:8443"]
             cpu_limit_millicores: None,
             timeout_secs: None,
             allow_host: &[],
+            peer: &[],
             net: false,
             grants_file: None,
             manifest: None,
             config: &config,
+            ai: None,
         })
         .expect("resolves");
         assert_eq!(resolved.plan_grants, None);
@@ -2504,6 +2688,7 @@ allow_hosts = ["localhost:8443"]
             vm_name: "vm-ungranted",
             backend_name: "firecracker",
             rootfs_path: &rootfs,
+            kernel_path: None,
             precomputed_image_sha256: None,
             boot_artifact_identity: None,
             cpus: 2,
@@ -2511,6 +2696,7 @@ allow_hosts = ["localhost:8443"]
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),

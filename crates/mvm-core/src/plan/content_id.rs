@@ -100,7 +100,7 @@ mod tests {
     #[test]
     fn id_has_sha256_prefixed_shape() {
         // Reuse the one shared shape validator so this id can never drift from
-        // the checkpoint/OCI/semantic-address content-address wire shape.
+        // the checkpoint/OCI/workload-address content-address wire shape.
         let id = compute_plan_id(&plan());
         assert!(matches!(
             validate_sha256_prefixed(&id.0),
@@ -170,6 +170,15 @@ mod tests {
         let mut p = base_plan;
         p.plan_version += 1;
         assert_ne!(base, compute_plan_id(&p), "plan_version");
+    }
+
+    #[test]
+    fn caller_commitment_is_load_bearing() {
+        let base_plan = plan();
+        let base = compute_plan_id(&base_plan);
+        let mut committed = base_plan;
+        committed.caller_commitment = Some(crate::plan::CallerCommitment::from_bytes([7; 32]));
+        assert_ne!(base, compute_plan_id(&committed));
     }
 
     #[test]

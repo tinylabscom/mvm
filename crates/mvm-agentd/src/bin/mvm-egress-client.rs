@@ -25,6 +25,55 @@ const DEFAULT_HOST_VSOCK_PORT: u32 = mvm_agentd::vsock::EGRESS_PORT;
 /// read it.
 const HOST_VSOCK_PORT_ENV: &str = "MVM_EGRESS_VSOCK_PORT";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdentityRequirement {
+    Required,
+    IfPresent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupMode {
+    Serve,
+    ProvisionIdentityFor {
+        uid: u32,
+        requirement: IdentityRequirement,
+    },
+}
+
+fn startup_mode_from_args(args: impl IntoIterator<Item = String>) -> Result<StartupMode, String> {
+    let mut args = args.into_iter();
+    let Some(command) = args.next() else {
+        return Ok(StartupMode::Serve);
+    };
+    let requirement = match command.as_str() {
+        "provision-identity-for" => IdentityRequirement::Required,
+        "provision-identity-for-if-present" => IdentityRequirement::IfPresent,
+        _ => return Err(format!("unknown command {command:?}")),
+    };
+    let raw_uid = args
+        .next()
+        .ok_or_else(|| format!("{command} requires a non-root uid"))?;
+    if args.next().is_some() {
+        return Err(format!("{command} accepts exactly one uid"));
+    }
+    match raw_uid.parse::<u32>() {
+        Ok(uid) if uid > 0 => Ok(StartupMode::ProvisionIdentityFor { uid, requirement }),
+        _ => Err(format!("invalid non-root egress service uid {raw_uid:?}")),
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn provisioning_failure_is_fatal(
+    requirement: IdentityRequirement,
+    error: &mvm_agentd::flowmux_drive::IdentityDriveError,
+) -> bool {
+    requirement == IdentityRequirement::Required
+        || !matches!(
+            error,
+            mvm_agentd::flowmux_drive::IdentityDriveError::NotAttached
+        )
+}
+
 /// Resolve the host port to dial, falling back to the compiled-in default.
 ///
 /// Pure over the raw value so the fallback and the refusal are testable without
@@ -42,7 +91,23 @@ fn host_vsock_port_from_env(raw: Option<&str>) -> Result<u32, String> {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn flowmux_identity_is_complete(paths: [&std::path::Path; 3]) -> bool {
+    paths.into_iter().all(std::path::Path::is_file)
+}
+
 fn main() -> ExitCode {
+    let mode = match startup_mode_from_args(std::env::args().skip(1)) {
+        Ok(mode) => mode,
+        Err(error) => {
+            eprintln!("mvm-egress-client: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    if let StartupMode::ProvisionIdentityFor { uid, requirement } = mode {
+        return provision_identity_for(uid, requirement);
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -71,6 +136,24 @@ fn main() -> ExitCode {
 }
 
 #[cfg(target_os = "linux")]
+fn provision_identity_for(uid: u32, requirement: IdentityRequirement) -> ExitCode {
+    match mvm_agentd::flowmux_drive::provision_identity_from_drive_for_uid(uid) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) if !provisioning_failure_is_fatal(requirement, &error) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("mvm-egress-client: could not provision the FlowMux identity: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn provision_identity_for(_uid: u32, _requirement: IdentityRequirement) -> ExitCode {
+    eprintln!("mvm-egress-client: FlowMux identity drives are only available on Linux guests");
+    ExitCode::from(1)
+}
+
+#[cfg(target_os = "linux")]
 fn run(addr: std::net::SocketAddr, host_port: u32) -> ExitCode {
     use mvm_agentd::flowmux::{FlowMuxError, FlowMuxReconnectClient};
     use mvm_agentd::flowmux_keys;
@@ -84,23 +167,30 @@ fn run(addr: std::net::SocketAddr, host_port: u32) -> ExitCode {
         }
     };
 
-    // Provision this boot's identity from the host-attached drive before
-    // loading it. Doing it here rather than in each guest init means one
-    // implementation covers every tier -- including the Nix-built `/init`,
-    // which is shell and would otherwise need a second copy of the
-    // superblock-label probe. Idempotent, so an init that already provisioned
-    // (Stage 0 and the builder VM do, to get a named refusal earlier) is
-    // unaffected.
-    if !std::path::Path::new(flowmux_keys::DEFAULT_GUEST_SIGNING_KEY_PATH).exists()
-        && let Err(e) = mvm_agentd::flowmux_drive::provision_identity_from_drive()
-    {
-        eprintln!("mvm-egress-client: FlowMux identity not provisioned: {e}");
+    // Identity-drive mounting is a short privileged init action. The
+    // long-lived parser reaches this point only after its init has handed the
+    // root-only signing key to the dedicated service uid.
+    if !flowmux_identity_is_complete([
+        std::path::Path::new(flowmux_keys::DEFAULT_GUEST_SIGNING_KEY_PATH),
+        std::path::Path::new(flowmux_keys::DEFAULT_HOST_SIGNER_PUBKEY_PATH),
+        std::path::Path::new(flowmux_keys::DEFAULT_INGRESS_TARGETS_PATH),
+    ]) {
+        eprintln!("mvm-egress-client: FlowMux identity was not provisioned by guest init");
+        return ExitCode::from(1);
     }
 
     let guest_signing_key = match rt.block_on(flowmux_keys::load_guest_signing_key()) {
         Ok(key) => key,
         Err(e) => {
             eprintln!("mvm-egress-client: failed to load guest signing key: {e:#}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let ingress_targets = match rt.block_on(flowmux_keys::load_ingress_targets()) {
+        Ok(targets) => targets,
+        Err(e) => {
+            eprintln!("mvm-egress-client: failed to load ingress targets: {e:#}");
             return ExitCode::from(1);
         }
     };
@@ -127,7 +217,7 @@ fn run(addr: std::net::SocketAddr, host_port: u32) -> ExitCode {
     let deadline = std::time::Instant::now() + mvm_agentd::flowmux::CONNECT_RETRY_BUDGET;
     let mut attempt = 0u32;
     let client = loop {
-        let outcome = rt.block_on(FlowMuxReconnectClient::connect(
+        let outcome = rt.block_on(FlowMuxReconnectClient::connect_with_ingress(
             move || async move {
                 connect_host_vsock(host_port)
                     .await
@@ -135,6 +225,7 @@ fn run(addr: std::net::SocketAddr, host_port: u32) -> ExitCode {
             },
             guest_signing_key.clone(),
             host_anchor,
+            ingress_targets.clone(),
         ));
         match outcome {
             Ok(client) => break client,
@@ -148,6 +239,25 @@ fn run(addr: std::net::SocketAddr, host_port: u32) -> ExitCode {
             }
         }
     };
+
+    // The ICMP mediator serves `ping` for the unprivileged workload, which
+    // cannot read the signing key this process just loaded. Its own blocking
+    // thread rather than a task on this runtime: it opens a blocking FlowMux
+    // session per client, and `block_on` inside the runtime would panic. Bound
+    // here rather than on the thread, because the guest init waits only for the
+    // proxy port and a workload can already be running by the time a lazily
+    // bound listener is scheduled. A bind failure is not fatal — every other
+    // kind of egress still works without `ping`.
+    match mvm_agentd::icmp_mediator::bind_icmp_mediator() {
+        Ok(listener) => {
+            std::thread::spawn(move || {
+                if let Err(e) = mvm_agentd::icmp_mediator::serve_icmp_mediator(&listener) {
+                    eprintln!("mvm-egress-client: ICMP mediator stopped: {e:#}");
+                }
+            });
+        }
+        Err(e) => eprintln!("mvm-egress-client: ICMP mediator not serving: {e:#}"),
+    }
 
     match rt.block_on(mvm_agentd::flowmux_egress::run(addr, client)) {
         Ok(()) => ExitCode::SUCCESS,
@@ -165,8 +275,65 @@ fn run(_addr: std::net::SocketAddr, _host_port: u32) -> ExitCode {
 }
 
 #[cfg(test)]
-mod host_port_tests {
+mod tests {
     use super::*;
+
+    #[test]
+    fn startup_mode_separates_privileged_provisioning_from_serving() {
+        assert_eq!(
+            startup_mode_from_args(Vec::<String>::new()),
+            Ok(StartupMode::Serve)
+        );
+        assert_eq!(
+            startup_mode_from_args(["provision-identity-for".into(), "989".into()]),
+            Ok(StartupMode::ProvisionIdentityFor {
+                uid: 989,
+                requirement: IdentityRequirement::Required,
+            })
+        );
+        assert_eq!(
+            startup_mode_from_args(["provision-identity-for-if-present".into(), "989".into(),]),
+            Ok(StartupMode::ProvisionIdentityFor {
+                uid: 989,
+                requirement: IdentityRequirement::IfPresent,
+            })
+        );
+    }
+
+    #[test]
+    fn optional_provisioning_ignores_only_an_absent_drive() {
+        use mvm_agentd::flowmux_drive::IdentityDriveError;
+
+        assert!(!provisioning_failure_is_fatal(
+            IdentityRequirement::IfPresent,
+            &IdentityDriveError::NotAttached,
+        ));
+        assert!(provisioning_failure_is_fatal(
+            IdentityRequirement::Required,
+            &IdentityDriveError::NotAttached,
+        ));
+        assert!(provisioning_failure_is_fatal(
+            IdentityRequirement::IfPresent,
+            &IdentityDriveError::Unreadable("corrupt drive".into()),
+        ));
+    }
+
+    #[test]
+    fn startup_mode_rejects_root_invalid_and_ambiguous_service_uids() {
+        for args in [
+            vec!["provision-identity-for".into(), "0".into()],
+            vec!["provision-identity-for".into(), "not-a-uid".into()],
+            vec!["provision-identity-for".into()],
+            vec!["serve".into()],
+            vec![
+                "provision-identity-for".into(),
+                "989".into(),
+                "extra".into(),
+            ],
+        ] {
+            assert!(startup_mode_from_args(args).is_err());
+        }
+    }
 
     /// A guest with no init-supplied port keeps the compiled-in default, which
     /// is what the fixed-port tiers rely on.
@@ -200,5 +367,28 @@ mod host_port_tests {
                 "{bad:?} must refuse rather than fall back"
             );
         }
+    }
+
+    #[test]
+    fn a_partial_identity_is_not_ready_for_the_deprivileged_service() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let signing_key = dir.path().join("flowmux-guest-signing-key");
+        let host_anchor = dir.path().join("host-signer.pub");
+        let ingress_targets = dir.path().join("flowmux-ingress.json");
+
+        std::fs::write(&signing_key, [0_u8; 32]).expect("write signing key");
+        std::fs::write(&host_anchor, [1_u8; 32]).expect("write host anchor");
+        assert!(!flowmux_identity_is_complete([
+            &signing_key,
+            &host_anchor,
+            &ingress_targets,
+        ]));
+
+        std::fs::write(&ingress_targets, b"[]").expect("write ingress targets");
+        assert!(flowmux_identity_is_complete([
+            &signing_key,
+            &host_anchor,
+            &ingress_targets,
+        ]));
     }
 }

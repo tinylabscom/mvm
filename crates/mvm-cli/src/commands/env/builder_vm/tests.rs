@@ -64,7 +64,9 @@ mod builder_backend_attempt_order_tests {
 
 #[cfg(test)]
 mod default_microvm_tests {
-    use super::default_microvm::default_workload_kernel_source;
+    use super::default_microvm::{
+        default_workload_kernel_source, default_workload_kernel_source_for,
+    };
     use super::{KernelSource, default_microvm_assets, missing_workload_kernel_message};
 
     #[test]
@@ -132,9 +134,19 @@ mod default_microvm_tests {
     }
 
     #[test]
+    fn official_release_defaults_to_download_even_inside_a_checkout() {
+        assert_eq!(
+            default_workload_kernel_source_for(
+                mvm_build::artifact_acquisition::DistributionChannel::Release,
+                true,
+            ),
+            KernelSource::Download
+        );
+    }
+
+    #[test]
     fn missing_workload_kernel_message_explains_automatic_and_manual_paths() {
-        let msg =
-            missing_workload_kernel_message("/cache/builder-vm/aarch64/kernels/workload/vmlinux");
+        let msg = missing_workload_kernel_message("/cache/kernels/aarch64/workload/vmlinux");
         assert!(msg.contains("mvmctl kernel build --which workload"));
         assert!(msg.contains("just kernel-workload"));
         assert!(msg.contains("dm-verity-capable workload kernel"));
@@ -243,6 +255,62 @@ mod reap_orphans_tests {
         assert_eq!(out.removed_dirs, 0, "workload dir must never be removed");
         assert!(vm.exists(), "workload VM state dir must survive the sweep");
         assert!(vm.join("config").exists(), "persistent state untouched");
+    }
+
+    /// The HVF builder stages each shell job under the *workload* root, so a
+    /// finished build leaves a dir there. Blanket workload treatment kept it
+    /// forever; now that the inventory no longer surfaces builder VMs, nothing
+    /// else would have shown the accumulation either.
+    #[test]
+    fn a_finished_builder_job_under_the_workload_root_is_pruned() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vms_root = dir.path().join("vms");
+        let vm = vms_root.join(mvm_core::naming::builder_shell_vm_name("4242-9999"));
+        std::fs::create_dir_all(&vm).expect("mkdir");
+        std::fs::write(vm.join("hvf.pid"), "2147483646\n").expect("write pid");
+        std::fs::write(vm.join("payload"), vec![0u8; 2048]).expect("write payload");
+
+        let out = reap_orphaned_vm_helpers_at(&vms_root, WORKLOAD_SIDECARS, true, true, false)
+            .expect("reap workload root");
+        assert_eq!(out.removed_dirs, 1, "a dead per-job builder dir is garbage");
+        assert!(!vm.exists(), "the job dir should be gone");
+        assert!(out.freed_bytes >= 2048);
+    }
+
+    /// The persistent builder's dir is its warm Nix store. Reaping it would
+    /// throw away the cache the builder exists to hold, so it stays managed
+    /// even though it is equally "builder-owned".
+    #[test]
+    fn the_persistent_builder_dir_is_never_pruned() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vms_root = dir.path().join("vms");
+        let vm = vms_root.join(mvm_core::naming::persistent_builder_vm_name(
+            mvm_core::naming::BuilderVmSlot::Hvf,
+            "session",
+        ));
+        std::fs::create_dir_all(&vm).expect("mkdir");
+        std::fs::write(vm.join("hvf.pid"), "2147483646\n").expect("write pid");
+
+        let out = reap_orphaned_vm_helpers_at(&vms_root, WORKLOAD_SIDECARS, true, true, false)
+            .expect("reap workload root");
+        assert_eq!(out.removed_dirs, 0);
+        assert!(vm.exists(), "the warm store must survive a prune");
+    }
+
+    /// The prune authority granted above must not spill onto real machines:
+    /// a stopped machine's state dir is restartable state, not garbage.
+    #[test]
+    fn granting_builder_prune_does_not_reach_a_stopped_machine() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vms_root = dir.path().join("vms");
+        let vm = vms_root.join("web");
+        std::fs::create_dir_all(&vm).expect("mkdir");
+        std::fs::write(vm.join("libkrun.pid"), "2147483646\n").expect("write pid");
+
+        let out = reap_orphaned_vm_helpers_at(&vms_root, WORKLOAD_SIDECARS, true, true, false)
+            .expect("reap workload root");
+        assert_eq!(out.removed_dirs, 0);
+        assert!(vm.exists(), "a stopped machine keeps its state dir");
     }
 
     #[test]

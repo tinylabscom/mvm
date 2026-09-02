@@ -14,15 +14,13 @@ pub const FC_VERSION_DEFAULT: &str = match option_env!("MVM_FC_VERSION") {
 /// rather than a bare version, because it is spliced straight into a release
 /// download URL: `https://github.com/<repo>/releases/download/<tag>/<asset>`.
 ///
-/// **Nothing reads this yet.** `download_default_microvm_image` and the
-/// workload kernel fetch still build their URLs from the CLI's own version and
-/// must keep doing so until a `boot-image/v0.1.0` release actually exists —
-/// repointing them at a tag nobody has published turns every fresh install's
-/// first boot into a 404. Publishing that tag is the condition that unblocks
-/// the switch.
+/// Downloaders and the merge-queue boot witnesses must stay on this same
+/// published tag. Advancing the constant before the release exists turns every
+/// fresh install's first boot into a 404; advancing only one consumer makes CI
+/// validate a different image from the one users receive.
 pub const DEFAULT_BOOT_IMAGE_TAG: &str = match option_env!("MVM_BOOT_IMAGE_TAG") {
     Some(t) => t,
-    None => "boot-image/v0.1.0",
+    None => "boot-image/v0.1.3",
 };
 
 /// Host CPU architecture for arch-tagged downloads (the Firecracker release
@@ -192,7 +190,18 @@ fn home_dir() -> String {
 /// Cache directory for build artifacts, images, VM runtime state:
 /// `<mvm_home>/cache`.
 pub fn mvm_cache_dir() -> String {
-    format!("{}/cache", mvm_home())
+    mvm_cache_dir_at(mvm_home()).to_string_lossy().into_owned()
+}
+
+/// Cache directory beneath an explicit mvm home: `<mvm_home>/cache`.
+///
+/// The pure variant of [`mvm_cache_dir`], for a caller holding an already
+/// resolved or isolated root rather than the one this process's `MVM_HOME`
+/// names. A harness that probes the home its subject will run against needs
+/// this: resolving its own home instead would report on a directory the
+/// subject never reads.
+pub fn mvm_cache_dir_at(mvm_home: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    mvm_home.as_ref().join("cache")
 }
 
 /// The cache directory of the *default* root (`$HOME/.mvm/cache`),
@@ -273,6 +282,17 @@ pub fn mvm_share_dir() -> String {
 /// dir; `mvmctl build` writes to it.
 pub fn mvm_deps_volumes_dir() -> String {
     format!("{}/volumes/deps", mvm_home())
+}
+
+/// Root of the per-workload key-value store served by `host.kv.v1`:
+/// `<mvm_home>/kv`.
+///
+/// Each immediate child is one workload's namespace, named by a digest of the
+/// workload id rather than the id itself. A workload id reaches this path from
+/// the supervisor's call context, so deriving a directory name from it directly
+/// would put a caller-influenced string in a filesystem path.
+pub fn mvm_kv_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home()).join("kv")
 }
 
 /// Snapshot store for copy-on-write warm-parent materialization:
@@ -521,7 +541,13 @@ fn short_vm_socket_dir_at(state_dir: &std::path::Path) -> std::path::PathBuf {
 /// a hashed short namespace under `/tmp/mvm-sock/` so interactive HVF runs from
 /// deep worktrees still bind on macOS.
 pub fn vm_socket_dir_at(state_dir: &std::path::Path) -> std::path::PathBuf {
-    let max_root_socket = state_dir.join("substitution-endpoint.sock");
+    // Sized on the *longest* socket name that lands in this directory, not on
+    // any one of them. `substitution-session-ready.sock` is four bytes longer
+    // than `substitution-endpoint.sock`, so measuring the shorter one let a
+    // path through that fit the endpoint and then overflowed binding the
+    // readiness socket — the endpoint came up, announced itself, and died
+    // before its ready handshake.
+    let max_root_socket = state_dir.join("substitution-session-ready.sock");
     let max_vsock_socket = state_dir
         .join("vsock")
         .join(vsock_socket_filename(u16::MAX.into()));
@@ -666,7 +692,7 @@ pub fn vm_stream_socket_at(state_dir: &std::path::Path) -> std::path::PathBuf {
 /// workload's output capture is always-on, exactly one per VM, and lives and
 /// dies with the VM, so it is addressed the way the rest of that VM's state is.
 ///
-/// Survives the VM exiting: this is what `mvmctl logs` reads once the broker is
+/// Survives the VM exiting: this is what `mvmctl machine logs` reads once the broker is
 /// gone, which is half of "capturable while it runs *and* when it exits".
 pub fn vm_stream_transcript_dir_at(state_dir: &std::path::Path) -> std::path::PathBuf {
     state_dir.join("stream")
@@ -812,11 +838,36 @@ pub fn audit_root_path(tenant: &str) -> std::path::PathBuf {
     mvm_audit_dir().join(format!("{tenant}.root.json"))
 }
 
-/// Forensic transcript captures: `<mvm_home>/audit/transcripts/`. Each
-/// capture is `<tenant>/<vm>/<capture-id>/` holding `manifest.json` + encrypted
-/// chunk files. Kept under `audit/` since it is opt-in forensic evidence.
+/// Forensic transcript captures: `<mvm_home>/audit/transcripts/`. Kept under
+/// `audit/` since it is opt-in forensic evidence rather than VM state.
+///
+/// One capture is [`transcript_capture_dir`] — `<tenant>/<capture-id>/`. The
+/// VM is *not* a path component: a capture names its VM inside its manifest
+/// binding, and a reader discovers captures by scanning tenants rather than by
+/// knowing a VM name. This is the whole reason the tree is separate from
+/// [`vm_stream_transcript_dir`], which is per-VM state addressed the opposite
+/// way.
 pub fn mvm_transcripts_dir() -> std::path::PathBuf {
     mvm_audit_dir().join("transcripts")
+}
+
+/// One forensic capture: `<mvm_home>/audit/transcripts/<tenant>/<capture-id>/`,
+/// holding `manifest.json` plus encrypted segment files.
+pub fn transcript_capture_dir(tenant: &str, capture_id: &str) -> std::path::PathBuf {
+    transcript_capture_dir_at(&mvm_transcripts_dir(), tenant, capture_id)
+}
+
+/// Same as [`transcript_capture_dir`] when the caller already holds the
+/// transcripts root (tests point it at a temp dir).
+///
+/// One convention, two entry points — they must not drift, which is why the
+/// layout is written once here rather than joined inline at each reader.
+pub fn transcript_capture_dir_at(
+    transcripts_dir: &std::path::Path,
+    tenant: &str,
+    capture_id: &str,
+) -> std::path::PathBuf {
+    transcripts_dir.join(tenant).join(capture_id)
 }
 
 /// Filename suffix for a per-VM workload audit chain.
@@ -833,6 +884,11 @@ pub const WORKLOAD_AUDIT_SUFFIX: &str = ".workload.jsonl";
 /// verification" when nothing is wrong — it is reading a file that never
 /// claimed to be a chain.
 pub const SECRETS_OPERATOR_LOG: &str = "secrets.jsonl";
+
+/// Suffix for the append-only history of signed Merkle roots published beside
+/// lifecycle chains. Root-history records use their own schema and must never
+/// be passed to a lifecycle-chain verifier.
+pub const AUDIT_ROOT_HISTORY_SUFFIX: &str = ".roots.jsonl";
 
 /// Per-VM workload audit-chain file:
 /// `<mvm_home>/audit/<tenant>.<vm>.workload.jsonl`.
@@ -851,8 +907,9 @@ pub fn workload_audit_path(tenant: &str, vm_name: &str) -> std::path::PathBuf {
 
 /// Whether a path in the audit dir is a per-tenant *lifecycle* chain
 /// (`<tenant>.jsonl`) — as opposed to a per-VM workload chain
-/// (`<tenant>.<vm>{WORKLOAD_AUDIT_SUFFIX}`) or the unsigned
-/// [`SECRETS_OPERATOR_LOG`], neither of which a lifecycle verifier can parse.
+/// (`<tenant>.<vm>{WORKLOAD_AUDIT_SUFFIX}`), signed Merkle-root history
+/// (`<tenant>{AUDIT_ROOT_HISTORY_SUFFIX}`), or the unsigned
+/// [`SECRETS_OPERATOR_LOG`], none of which a lifecycle verifier can parse.
 ///
 /// Lives here, beside the names it keys on, because more than one sweep needs
 /// it: the lineage anchor indexes lifecycle chains, doctor reports their
@@ -861,7 +918,7 @@ pub fn workload_audit_path(tenant: &str, vm_name: &str) -> std::path::PathBuf {
 /// existed in one of those three and not the others, which is the whole reason
 /// it is one function now.
 ///
-/// Both exclusions are load-bearing rather than tidy: a file that is not a
+/// These exclusions are load-bearing rather than tidy: a file that is not a
 /// chain cannot pass a chain verifier, so admitting one here manufactures a
 /// permanent "this chain fails verification" from a file that never claimed to
 /// be one.
@@ -871,6 +928,7 @@ pub fn is_host_lifecycle_chain(path: &std::path::Path) -> bool {
         .is_some_and(|name| {
             name.ends_with(".jsonl")
                 && !name.ends_with(WORKLOAD_AUDIT_SUFFIX)
+                && !name.ends_with(AUDIT_ROOT_HISTORY_SUFFIX)
                 && name != SECRETS_OPERATOR_LOG
         })
 }
@@ -966,7 +1024,10 @@ pub fn audit_segment_seq(file_name: &str, tenant: &str) -> Option<u64> {
 ///
 /// Returns `None` for anything that is not a lifecycle chain.
 pub fn lifecycle_chain_base(file_name: &str) -> Option<&str> {
-    if file_name == SECRETS_OPERATOR_LOG || file_name.ends_with(WORKLOAD_AUDIT_SUFFIX) {
+    if file_name == SECRETS_OPERATOR_LOG
+        || file_name.ends_with(WORKLOAD_AUDIT_SUFFIX)
+        || file_name.ends_with(AUDIT_ROOT_HISTORY_SUFFIX)
+    {
         return None;
     }
     let stem = file_name.strip_suffix(".jsonl")?;
@@ -1038,6 +1099,36 @@ pub fn is_dev_mode() -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// A state dir that fits the shorter socket name but not the longer one
+    /// must still be moved to the short namespace. Measuring only
+    /// `substitution-endpoint.sock` let such a path through, and the endpoint
+    /// then bound fine and died on the readiness socket.
+    #[test]
+    fn socket_dir_accounts_for_the_longest_socket_name() {
+        // Long enough that the 30-char readiness name overflows while the
+        // 26-char endpoint name still fits.
+        let base = std::path::PathBuf::from("/tmp").join("x".repeat(69));
+        let endpoint = base.join("substitution-endpoint.sock");
+        let ready = base.join("substitution-session-ready.sock");
+        assert!(
+            fits_unix_socket_path(&endpoint),
+            "fixture must fit the shorter name to exercise the gap ({} bytes)",
+            unix_socket_path_len(&endpoint)
+        );
+        assert!(
+            !fits_unix_socket_path(&ready),
+            "fixture must overflow the longer name ({} bytes)",
+            unix_socket_path_len(&ready)
+        );
+
+        let chosen = vm_socket_dir_at(&base);
+        assert_ne!(chosen, base, "must fall back to the short namespace");
+        assert!(
+            fits_unix_socket_path(&chosen.join("substitution-session-ready.sock")),
+            "the chosen dir must fit every socket it will hold"
+        );
+    }
+
     use super::*;
     use crate::util::test_env::TestEnv;
 
@@ -1082,6 +1173,8 @@ mod tests {
         assert!(!is_host_lifecycle_chain(p(
             "/a/audit/local.vm-1.workload.jsonl"
         )));
+        // Signed Merkle-root history has a different envelope format.
+        assert!(!is_host_lifecycle_chain(p("/a/audit/local.roots.jsonl")));
         // Non-chain files in the same directory.
         assert!(!is_host_lifecycle_chain(p("/a/audit/local.jsonl.bak")));
         assert!(!is_host_lifecycle_chain(p("/a/audit/notes.txt")));
@@ -1156,6 +1249,7 @@ mod tests {
         );
         // Not lifecycle chains at all.
         assert_eq!(lifecycle_chain_base("local.vm-1.workload.jsonl"), None);
+        assert_eq!(lifecycle_chain_base("local.roots.jsonl"), None);
         assert_eq!(lifecycle_chain_base(SECRETS_OPERATOR_LOG), None);
         assert_eq!(lifecycle_chain_base("notes.txt"), None);
         assert_eq!(lifecycle_chain_base(".jsonl"), None);
@@ -1619,6 +1713,17 @@ mod tests {
     }
 
     #[test]
+    fn mvm_cache_dir_at_uses_an_explicit_isolated_home() {
+        // The ambient `mvm_cache_dir()` reads this process's `MVM_HOME`. A
+        // caller probing a home it was handed — a harness checking the home
+        // its subject runs against — must not get this process's instead.
+        assert_eq!(
+            mvm_cache_dir_at("/isolated/mvm"),
+            std::path::PathBuf::from("/isolated/mvm/cache")
+        );
+    }
+
+    #[test]
     fn vm_state_dir_at_uses_an_explicit_isolated_home() {
         assert_eq!(
             vms_dir_at("/isolated/mvm"),
@@ -1649,5 +1754,35 @@ mod tests {
         );
 
         env.remove("MVM_HOME");
+    }
+
+    /// The forensic capture layout is `<tenant>/<capture-id>` -- two levels,
+    /// no VM component. Pinned because two doc comments in this file once
+    /// disagreed about it and the only consumer silently followed one of them.
+    #[test]
+    fn a_forensic_capture_is_tenant_then_capture_id_with_no_vm_component() {
+        let root = std::path::Path::new("/tmp/transcripts");
+        let dir = transcript_capture_dir_at(root, "acme", "capture-1");
+        assert_eq!(dir, root.join("acme").join("capture-1"));
+
+        let rel = dir.strip_prefix(root).expect("under the root");
+        assert_eq!(
+            rel.components().count(),
+            2,
+            "a VM component would make the capture unresolvable to a reader \
+             that only scanned tenants, which is how captures are discovered"
+        );
+    }
+
+    /// The by-name and by-root entry points must agree, or a writer and a
+    /// reader can each be correct and still miss each other.
+    #[test]
+    fn both_capture_dir_entry_points_agree() {
+        let tmp = std::env::temp_dir().join("mvm-transcript-layout-test");
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(&tmp);
+        let by_name = transcript_capture_dir("acme", "capture-1");
+        let by_root = transcript_capture_dir_at(&mvm_transcripts_dir(), "acme", "capture-1");
+        assert_eq!(by_name, by_root);
     }
 }

@@ -29,7 +29,7 @@
  * transport; the SDK itself never enters "plan" mode directly.
  */
 
-import type { EnvValue, Network, Resources } from "./ir/workload.js";
+import type { EnvValue, Network, PortForward, Resources } from "./ir/workload.js";
 import type {
   RuntimeFsEntry,
   RuntimeFsStat,
@@ -50,7 +50,8 @@ export { MVM_CLI_BIN_ENV } from "./_cli.js";
 // ────────────────────────────────────────────────────────────────────
 
 export interface SandboxCreateWire {
-  template: string;
+  template?: string;
+  image?: string;
   env: Record<string, EnvValue>;
   include: string[];
   tags: Record<string, string>;
@@ -189,8 +190,8 @@ export const DEFAULT_TTL_SECONDS = 1800;
 
 // Owned by the Rust registry (crates/mvm-sdk/src/env.rs) and generated
 // into `_env/vars.ts`.
-export { MVM_SDK_MODE_ENV, MVM_SDK_OUT_PATH_ENV } from "./_env/vars.js";
-import { MVM_SDK_MODE_ENV, MVM_SDK_OUT_PATH_ENV } from "./_env/vars.js";
+export { MVM_SDK_MODE_ENV, MVM_SDK_OUT_PATH_ENV, MVM_SDK_RUN_PROFILE_ENV } from "./_env/vars.js";
+import { MVM_SDK_MODE_ENV, MVM_SDK_OUT_PATH_ENV, MVM_SDK_RUN_PROFILE_ENV } from "./_env/vars.js";
 
 
 let recording: RuntimeRecordingWire | null = null;
@@ -370,6 +371,95 @@ export interface SandboxCreateOptions {
   ttl?: string | number | null;
   resources?: Resources;
   network?: Network;
+  /** Entrypoint used for this boot. */
+  command?: string[];
+}
+
+/** Typed boot source. A bare string remains a manifest for compatibility. */
+export type SandboxSource = string | { manifest: string } | { image: string };
+
+type BootSource = { kind: "manifest" | "image"; value: string };
+
+function bootSource(source: SandboxSource): BootSource {
+  if (typeof source === "string") {
+    if (source.length === 0) throw new TypeError("source must be non-empty");
+    return { kind: "manifest", value: source };
+  }
+  const keys = Object.keys(source);
+  if (keys.length !== 1 || (keys[0] !== "manifest" && keys[0] !== "image")) {
+    throw new TypeError("source must contain exactly one of manifest or image");
+  }
+  const kind = keys[0] as "manifest" | "image";
+  const value = kind === "manifest" && "manifest" in source
+    ? source.manifest
+    : kind === "image" && "image" in source
+      ? source.image
+      : undefined;
+  if (typeof value !== "string" || value.length === 0) {
+    throw new TypeError(`${kind} source must be a non-empty string`);
+  }
+  return { kind, value };
+}
+
+function rejectLiveOption(name: string, reason: string): never {
+  throw new SandboxModeError(`Sandbox live mode cannot represent \`${name}\` safely: ${reason}`);
+}
+
+function formatAllowHost(host: unknown, port: unknown): string {
+  const wildcards = new Set(["*", "0.0.0.0", "::", "0.0.0.0/0", "::/0"]);
+  if (typeof host !== "string" || host.length === 0 || wildcards.has(host)) {
+    return rejectLiveOption("network.egress", "allowlist hosts must be specific");
+  }
+  if (!Number.isInteger(port) || (port as number) < 1 || (port as number) > 65535) {
+    return rejectLiveOption("network.egress", "allowlist ports must be 1..65535");
+  }
+  const renderedHost = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+  return `${renderedHost}:${String(port)}`;
+}
+
+function lowerLiveOptions(options: SandboxCreateOptions): string[] {
+  const argv: string[] = [];
+  const env = encodeEnvMap(options.env);
+  for (const key of Object.keys(env).sort()) {
+    const value = env[key];
+    if (value?.kind !== "literal" || Object.keys(value).some((field) => field !== "kind" && field !== "value")) {
+      rejectLiveOption("env", "only literal values can be placed on CLI argv");
+    }
+    if (typeof value.value !== "string") {
+      rejectLiveOption("env", "literal values must be strings");
+    }
+    argv.push("--env", `${key}=${value.value}`);
+  }
+  if (options.include && options.include.length > 0) {
+    rejectLiveOption("include", "the live CLI has no source-bundle equivalent");
+  }
+  if (options.tags && Object.keys(options.tags).length > 0) {
+    rejectLiveOption("tags", "the live CLI has no tag equivalent");
+  }
+  if (options.resources !== undefined) {
+    rejectLiveOption("resources", "rootfs_size_mb has no live CLI equivalent, so partial lowering is refused");
+  }
+  const network = options.network;
+  if (network === undefined) return argv;
+  const known = new Set(["mode", "egress", "ports", "peers", "dns"]);
+  const unknown = Object.keys(network).filter((key) => !known.has(key));
+  if (unknown.length > 0) rejectLiveOption("network", `unknown fields: ${unknown.join(", ")}`);
+  if ((network.mode ?? "none") !== "none") {
+    rejectLiveOption("network.mode", "only the NIC-less `none` mode is supported");
+  }
+  if (network.peers && network.peers.length > 0) rejectLiveOption("network.peers", "the live CLI has no peer equivalent");
+  if (network.dns !== undefined && network.dns !== null) rejectLiveOption("network.dns", "the live CLI has no DNS equivalent");
+  if (network.egress === undefined || network.egress === null) return argv;
+  if (Object.keys(network.egress).some((key) => key !== "allowlist") || !Array.isArray(network.egress.allowlist)) {
+    rejectLiveOption("network.egress", "expected only an allowlist");
+  }
+  for (const entry of network.egress.allowlist) {
+    if (Object.keys(entry).some((key) => key !== "host" && key !== "port")) {
+      rejectLiveOption("network.egress", "entries must contain only host and port");
+    }
+    argv.push("--allow-host", formatAllowHost(entry.host, entry.port));
+  }
+  return argv;
 }
 
 export interface SandboxCommandsStartOptions {
@@ -430,20 +520,19 @@ export class LiveTransport {
   readonly vmId: string;
   readonly buildMode: "dev" | "prod";
   private killed = false;
-  // Long-running `mvmctl machine forward` proxies spawned by `forward()`. Torn
-  // down in `kill()` so a port forwarder never outlives the VM.
-  private forwards: import("node:child_process").ChildProcess[] = [];
-
   constructor(opts: { mvmCliBin: string; vmId: string; buildMode: "dev" | "prod" }) {
     this.mvmCliBin = opts.mvmCliBin;
     this.vmId = opts.vmId;
     this.buildMode = opts.buildMode;
   }
 
-  static forTemplate(opts: {
-    template: string;
+  static forSource(opts: {
+    source: BootSource;
     workloadId: string;
     ttlSeconds: number;
+    createArgs: string[];
+    bootCommand: string[] | null;
+    ports: PortForward[];
   }): LiveTransport {
     let mvmCliBin: string;
     try {
@@ -461,18 +550,47 @@ export class LiveTransport {
       .replace(/[^a-z0-9-]/g, "-");
     const vmId = `sdk-${slug}-${suffix}`;
 
-    const argv = [
-      "machine",
-      "run",
-      "-d",
+    const argv = ["machine", "run"];
+    if (opts.ports.length === 0) argv.push("-d");
+    const rawProfile = process.env[MVM_SDK_RUN_PROFILE_ENV];
+    const profile = rawProfile?.trim().toLowerCase();
+    if (
+      profile !== undefined &&
+      profile !== "restrictive" &&
+      profile !== "standard" &&
+      profile !== "dev" &&
+      profile !== "permissive"
+    ) {
+      throw new SandboxModeError(
+        `${MVM_SDK_RUN_PROFILE_ENV}=${JSON.stringify(profile)} is invalid — expected one of: ` +
+          "restrictive, standard, dev, permissive",
+      );
+    }
+    argv.push(
       "--up-json",
       "--name",
       vmId,
-      "--manifest",
-      opts.template,
+      ...(profile === undefined ? [] : ["--profile", profile]),
+      opts.source.kind === "manifest" ? "--manifest" : "--image",
+      opts.source.value,
+      ...opts.createArgs,
       "--ttl",
       `${opts.ttlSeconds}s`,
-    ];
+    );
+    for (const port of opts.ports) {
+      if (
+        port.proto !== "tcp" ||
+        port.transform !== "opaque" ||
+        port.host_addr !== "127.0.0.1" ||
+        port.guest_addr !== "127.0.0.1"
+      ) {
+        throw new SandboxModeError(
+          "Sandbox live mode currently accepts only opaque TCP ingress bound to host and guest 127.0.0.1",
+        );
+      }
+      argv.push("--port", `${port.host}:${port.guest}`);
+    }
+    if (opts.bootCommand !== null) argv.push("--", ...opts.bootCommand);
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     let result;
     try {
@@ -918,37 +1036,9 @@ export class LiveTransport {
     }
   }
 
-  forward(hostPort: number, guestPort: number): void {
-    const spec = `${hostPort}:${guestPort}`;
-    this.requireDev("forward", ["machine", "forward", this.vmId, "--port", spec]);
-    const shell = [this.mvmCliBin, "machine", "forward", this.vmId, "--port", spec];
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    // `mvmctl machine forward` blocks (runs the proxy until signalled), so spawn
-    // it detached + tracked; `kill()` terminates it.
-    let proc;
-    try {
-      proc = child.spawn(shell[0], shell.slice(1), { stdio: "ignore" });
-    } catch (err) {
-      throw new SandboxLiveError(
-        `\`${this.mvmCliBin}\` not found on disk; ${cliResolutionHint()}: ${String(err)}`,
-        { argv: shell },
-      );
-    }
-    this.forwards.push(proc);
-  }
-
   kill(): void {
     if (this.killed) return;
     this.killed = true;
-    // Tear down any port forwarders before the VM goes away.
-    for (const proc of this.forwards) {
-      try {
-        proc.kill();
-      } catch {
-        // best-effort cleanup
-      }
-    }
-    this.forwards = [];
     // `--yes` skips the interactive confirmation prompt; the sandbox tears down
     // non-interactively.
     const shell = [this.mvmCliBin, "machine", "stop", this.vmId, "--yes"];
@@ -1154,7 +1244,7 @@ export class Sandbox {
     };
   }
 
-  static create(template: string, options: SandboxCreateOptions = {}): Sandbox {
+  static create(sourceInput: SandboxSource, options: SandboxCreateOptions = {}): Sandbox {
     const mode = resolveMode();
     if (recording !== null || isLiveActive()) {
       throw new Error(
@@ -1162,20 +1252,25 @@ export class Sandbox {
           "Per the SDK plan's 'v1 scope: one app per workload' decision, a script may construct at most one Sandbox.",
       );
     }
-    if (typeof template !== "string" || template.length === 0) {
-      throw new TypeError("template must be a non-empty string");
+    const source = bootSource(sourceInput);
+    const command = options.command;
+    if (command !== undefined && (command.length === 0 || !command.every((arg) => typeof arg === "string" && arg.length > 0))) {
+      throw new TypeError("command must be a non-empty string array");
     }
     let ttlSeconds = parseTtl(options.ttl);
     if (ttlSeconds === null) {
       ttlSeconds = DEFAULT_TTL_SECONDS;
     }
-    const wid = options.workloadId ?? template;
+    const wid = options.workloadId ?? source.value;
 
     if (mode === "live") {
-      const live = LiveTransport.forTemplate({
-        template,
+      const live = LiveTransport.forSource({
+        source,
         workloadId: wid,
         ttlSeconds,
+        createArgs: lowerLiveOptions(options),
+        bootCommand: command ? [...command] : null,
+        ports: options.network?.ports ?? [],
       });
       const sb = new Sandbox(wid, live);
       liveSandbox = sb;
@@ -1184,7 +1279,9 @@ export class Sandbox {
 
     // record mode (existing path).
     const create: SandboxCreateWire = {
-      template,
+      ...(source.kind === "manifest"
+        ? { template: source.value }
+        : { image: source.value }),
       env: encodeEnvMap(options.env),
       include: options.include ? [...options.include] : [],
       tags: options.tags ? { ...options.tags } : {},
@@ -1196,7 +1293,7 @@ export class Sandbox {
     recording = {
       workload_id: wid,
       create,
-      ops: [],
+      ops: command ? [{ kind: "command_start", argv: [...command], env: {} }] : [],
     };
     return new Sandbox(wid, null);
   }
@@ -1312,15 +1409,10 @@ export class Sandbox {
     this._live.cp(`${this._live.vmId}:${guestPath}`, hostPath);
   }
 
-  /** Forward `hostPort` on the host to `guestPort` in the sandbox.
+  /** Refuse dynamic ingress changes after admission.
    *
-   *  Spawns `mvmctl machine forward <vm> --port <host>:<guest>` as a background
-   *  proxy that runs until the sandbox is torn down (`kill` /
-   *  `[Symbol.dispose]` terminate it).
-   *
-   *  Live mode only: exposing a port is a runtime action, so in record
-   *  mode this throws `SandboxModeError`. To declare a port mapping for a
-   *  recorded workload, use `mvm.network({ ports: [...] })`. */
+   *  Declare the mapping in `network.ports` before {@link Sandbox.create}; the
+   *  host binds only listeners present in the signed admission plan. */
   forward(hostPort: number, guestPort: number): void {
     for (const [label, p] of [
       ["hostPort", hostPort],
@@ -1330,13 +1422,10 @@ export class Sandbox {
         throw new RangeError(`${label} must be an integer in 1..65535`);
       }
     }
-    if (this._live === null) {
-      throw new SandboxModeError(
-        "`Sandbox.forward` is a live-mode operation; under MVM_SDK_MODE=record " +
-          "declare ports with `mvm.network({ ports: [...] })`.",
-      );
-    }
-    this._live.forward(hostPort, guestPort);
+    throw new SandboxModeError(
+      "dynamic `Sandbox.forward` is retired; declare ingress with " +
+        "`Sandbox.create(..., { network: mvm.network({ ports: [...] }) })` before boot",
+    );
   }
 
   kill(): void {

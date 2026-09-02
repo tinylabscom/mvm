@@ -1,12 +1,15 @@
 //! `--host-service` validation: raw CLI strings into plan-bound service ids.
 //!
+//! Validation only. The SDK sidecar these bindings imply is resolved much
+//! later, in `exec::resolve_launch`, because which of the two artifacts a
+//! workload needs depends on the guest's libc and the guest does not exist
+//! until the image has been materialized.
+//!
 //! Kept beside the transient-run surface that reads the flag, and separate from
 //! it, so the parser is unit-testable on its own and the run module stays within
 //! the workspace file-size budget.
 
 use anyhow::Result;
-
-use crate::commands::vm::up::SdkSidecarAttachment;
 
 /// Validate `--host-service` values into plan-bound service ids.
 ///
@@ -25,24 +28,6 @@ pub(crate) fn parse_host_service_bindings(
         }
     }
     Ok(out)
-}
-
-/// Validate the flag and resolve the SDK sidecar it implies, in one step.
-///
-/// Callers need both halves — the bindings go into the signed plan, the
-/// attachment into the launch config — and they must come from one resolution or
-/// the plan grant and the attached volume could disagree about which bytes are
-/// mounted. Returns `(bindings, attachment)`; the attachment is `None` when no
-/// bound service is SDK-served.
-pub(crate) fn resolve_bindings_and_sidecar(
-    raw: &[String],
-) -> Result<(
-    Vec<mvm_contract::protocol::broker::ServiceId>,
-    Option<SdkSidecarAttachment>,
-)> {
-    let bindings = parse_host_service_bindings(raw)?;
-    let attachment = crate::commands::vm::up::resolve_sdk_sidecar_attachment_for_host(&bindings)?;
-    Ok((bindings, attachment))
 }
 
 #[cfg(test)]

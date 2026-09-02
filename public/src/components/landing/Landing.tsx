@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { Backends } from "./Backends";
 import { ExecutionContract } from "./ExecutionContract";
 import { Hero } from "./Hero";
+import { LaunchPerf } from "./LaunchPerf";
 import { Quickstart } from "./Quickstart";
 import { DemoTeaser } from "./DemoTeaser";
 import { DeploymentTiers } from "./DeploymentTiers";
@@ -9,6 +10,7 @@ import { DeploymentTiers } from "./DeploymentTiers";
 // commented-out <Positioning /> below.
 // import { Positioning } from "./Positioning";
 import { RequestAccess } from "./RequestAccess";
+import { RiskControl } from "./RiskControl";
 import { WhyNow } from "./WhyNow";
 import { WhyMicrovm } from "./WhyMicrovm";
 import { FAQ } from "./FAQ";
@@ -31,6 +33,11 @@ import { Footer } from "./Footer";
 //                         the differentiator. Directly after the why-now
 //                         story so the claim lands while the problem is
 //                         fresh, before any how-to content.
+//   2d. Risk control     — the one-pager's operator section: start/stop,
+//                         kill on violation, and the audit trail that
+//                         compliance asks for. After the contract, because
+//                         the levers only make sense once the contract
+//                         they enforce has been introduced.
 //   3. Quickstart       — the shortest path from install to a running microVM.
 //   5. Positioning      — "one project, three ways to drive it": CLI,
 //                         Declare, Runtime, each given its own row.
@@ -40,11 +47,20 @@ import { Footer } from "./Footer";
 //                         just seen how you *use* mvm, so this is where
 //                         "here's what you're actually getting" lands
 //                         hardest.
-//   6a. Deployment tiers — "one contract, four places to run it": the
+//   6a. Launch performance — the objection Why-a-microVM provokes, answered
+//                         where it forms: a reader who has just been told
+//                         every workload boots its own kernel under a real
+//                         hypervisor is at that moment thinking "that must
+//                         be slow". Budget-vs-measurement is drawn, not
+//                         narrated — the arc is the ceiling CI enforces and
+//                         the fill is what one fingerprinted host did.
+//                         Numbers live in perf.ts and are gated against the
+//                         performance page by check-perf-provenance.mjs.
+//   6b. Deployment tiers — "one contract, four places to run it": the
 //                         product-site tier grid (local / hosted / edge /
 //                         confidential), after the case for the boundary
 //                         is made.
-//   6b. Backends          — "the backend is an implementation detail": the
+//   6c. Backends          — "the backend is an implementation detail": the
 //                         product-site backend/attestation grid, standing in
 //                         where the Boundary panel used to make the
 //                         backend-agnostic point.
@@ -69,12 +85,14 @@ export function Landing() {
       <DemoTeaser />
       <WhyNow />
       <ExecutionContract />
+      <RiskControl />
       <Quickstart />
       {/* Positioning ("one project. three ways to drive it.") is hidden for
           now, not deleted — restore by uncommenting here and re-adding its
           entry to the section-order comment above. */}
       {/* <Positioning /> */}
       <WhyMicrovm />
+      <LaunchPerf />
       <DeploymentTiers />
       <Backends />
       <FAQ />

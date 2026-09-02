@@ -17,6 +17,12 @@
 //! facade grew a way to say it: an egress *grant* is carried, and the launch
 //! config's policy is derived from it, so the plan the boot was signed under
 //! and the policy the gate reads come from one authored value.
+//!
+//! One request shape skips synthesis: a `LocalRunRequest` carrying a
+//! `signed_plan` admits that externally-signed envelope instead — verified
+//! against the operator-pinned `trusted_plan_signers`, never re-signed under
+//! the host key — with the plan body (not the request's sizing fields) as the
+//! authority for what boots.
 
 use std::path::{Path, PathBuf};
 
@@ -75,6 +81,16 @@ pub struct LocalRunRequest {
     /// `None` keeps the pre-grant baseline: no CPU cap, no wall-clock bound,
     /// deny-all egress.
     pub grants: Option<mvm_contract::grants::Grants>,
+    /// An externally-signed plan to admit instead of synthesizing and
+    /// self-signing one — a fleet-issued plan whose signer the operator pinned
+    /// in the host config's `trusted_plan_signers`.
+    ///
+    /// When present, the plan is the authority: sizing, grants, and teardown
+    /// intent come from it (the `cpus` / `mem_mib` / `grants` /
+    /// `destroy_on_exit` fields above are not consulted), and the resolved
+    /// rootfs must hash to the plan's pinned image digest. `None` is every
+    /// ordinary local run, which synthesizes its plan as before.
+    pub signed_plan: Option<mvm_core::plan::SignedExecutionPlan>,
 }
 
 /// Admission substrate for a local run: the clock and replay ledger that drive
@@ -127,7 +143,10 @@ pub fn shares_from_vm_volumes(volumes: &[VmVolume]) -> Vec<mvm_core::plan::HostS
 /// boot exactly as it does on the CLI path. Non-fatal on a cold cache under
 /// `PreferOverlay` (the guest falls back to a baked agent when it has one);
 /// fails closed when the policy is `RequiredOverlay`.
-fn attach_runtime_overlay_from_cache(config: &mut VmStartConfig, backend_name: &str) -> Result<()> {
+pub(crate) fn attach_runtime_overlay_from_cache(
+    config: &mut VmStartConfig,
+    backend_name: &str,
+) -> Result<()> {
     use mvm_build::runtime_overlay::{RuntimeOverlayResolver, resolve_or_seed_from_default_cache};
     if !matches!(backend_name, "firecracker" | "hvf" | "qemu" | "libkrun") {
         return Ok(());
@@ -142,27 +161,19 @@ fn attach_runtime_overlay_from_cache(config: &mut VmStartConfig, backend_name: &
             config.runtime_overlay_version = Some(artifact.version);
             Ok(())
         }
-        Err(e)
-            if config.runtime_source_policy
-                == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay =>
-        {
-            Err(anyhow::anyhow!(
-                "runtime overlay required for {backend_name} boot but unavailable: {e}"
-            ))
-        }
-        Err(e) => {
-            // Cold cache / dev rootfs / version drift — boot legacy, don't fail.
-            tracing::debug!(backend = backend_name, error = %e, "runtime overlay not attached");
-            Ok(())
-        }
+        Err(e) => Err(anyhow::anyhow!(
+            "runtime overlay required for {backend_name} boot but unavailable: {e}"
+        )),
     }
 }
 
 /// Admit `req` through the signed-plan gate and boot it on `backend`.
 ///
-/// On success the plan was signed under the host key, verified, inside its
-/// validity window, and non-replayed before the backend saw a single byte of
-/// launch config. Any failure returns with no VM created.
+/// On success the plan was either synthesized here and signed under the host
+/// key, or — when `req.signed_plan` carries a fleet-issued envelope — verified
+/// against the operator-pinned `trusted_plan_signers`; in both cases it was
+/// verified, inside its validity window, and non-replayed before the backend
+/// saw a single byte of launch config. Any failure returns with no VM created.
 pub fn admit_and_boot_local(
     backend: &AnyBackend,
     req: &LocalRunRequest,
@@ -170,6 +181,13 @@ pub fn admit_and_boot_local(
 ) -> Result<StartedMachine> {
     let sha = mvm_core::crypto::image_verify::sha256_file_cached(&req.rootfs_path)
         .with_context(|| format!("hashing rootfs at {}", req.rootfs_path.display()))?;
+
+    // An externally-signed plan takes the other admission door: verified
+    // against the operator-pinned signer set, never synthesized or re-signed
+    // under the host key.
+    if let Some(signed) = req.signed_plan.as_ref() {
+        return admit_signed_and_boot_local(backend, req, signed, &sha, ctx);
+    }
 
     // Pin the kernel into the signed plan. Deliberately the uncached digest: a
     // path+mtime-keyed cache can hand back a stale hash, which for an integrity
@@ -188,7 +206,7 @@ pub fn admit_and_boot_local(
         stream_edges: Vec::new(),
         kernel_sha256: kernel_sha.as_deref(),
         network_mode: Default::default(),
-        l3_network: None,
+        ingress: Vec::new(),
         vm_name: &req.name,
         tenant: Some(LOCAL_TENANT),
         backend_name: &req.backend_name,
@@ -216,10 +234,13 @@ pub fn admit_and_boot_local(
         shares: shares_from_vm_volumes(&req.volumes),
         redaction: Default::default(),
         reversible_replacement: Default::default(),
+        caller_commitment: None,
         audit_labels: Default::default(),
         agent_verbs: None,
         services: Vec::new(),
+        extensions: Vec::new(),
         stream_retention: Default::default(),
+        attestation_mode: mvm_contract::plan::AttestationMode::Noop,
     };
 
     let path_string = |p: &Path| p.to_string_lossy().into_owned();
@@ -233,14 +254,6 @@ pub fn admit_and_boot_local(
         memory_mib: req.mem_mib,
         volumes: req.volumes.clone(),
         tenant_id: Some(LOCAL_TENANT.to_string()),
-        runtime_source_policy: mvm_core::vm_backend::select_runtime_source_policy(
-            mvm_core::vm_backend::RuntimeSourcePolicySelection {
-                backend_name: None,
-                sealed: false,
-                root_strategy: None,
-                launch_kind: mvm_core::vm_backend::RuntimeSourceLaunchKind::WorkloadImage,
-            },
-        ),
         // With no egress grant the deny-all default from `VmStartConfig` stands;
         // a granted allow-list is projected onto it, so the policy the gate
         // enforces is derived from the same grants the plan was signed for.
@@ -263,6 +276,7 @@ pub fn admit_and_boot_local(
             ledger: ctx.ledger,
             host_signer_keys_dir: ctx.host_signer_keys_dir,
             bundle_ctx: None,
+            extension_ctx: None,
             variant: mvm_core::plan::Variant::Dev,
             policy_bundle: None,
             emitter: ctx.emitter,
@@ -275,6 +289,86 @@ pub fn admit_and_boot_local(
             assurance: ctx.assurance,
         },
     )
+}
+
+/// Admit an externally-signed plan through
+/// [`crate::plan_admission::admit_signed_plan_for_run`] and boot it on
+/// `backend` — the local-run tail for the fleet-issued seam.
+///
+/// The admitted plan, not the request, decides what runs: sizing, grants, and
+/// teardown intent are read from the verified plan body, and the resolved
+/// rootfs must hash to the image digest the plan pins — otherwise the host
+/// would be booting bytes the signer never authorized. The caller's
+/// `cpus`/`mem_mib`/`grants`/`destroy_on_exit` are not consulted here;
+/// `admit_and_boot_local` only routes here when `req.signed_plan` is set.
+fn admit_signed_and_boot_local(
+    backend: &AnyBackend,
+    req: &LocalRunRequest,
+    signed: &mvm_core::plan::SignedExecutionPlan,
+    rootfs_sha: &str,
+    ctx: LocalRunContext<'_>,
+) -> Result<StartedMachine> {
+    use crate::plan_admission::{RunPosture, StartAdmittedParams, start_admitted};
+
+    let posture = RunPosture::on_backend(mvm_core::plan::Variant::Dev, backend.kind());
+    let admitted = crate::plan_admission::admit_signed_plan_for_run(
+        signed, ctx.clock, ctx.ledger, None, posture,
+    )?;
+    let plan = admitted.plan();
+
+    // The plan pins the workload image by digest; the resolved rootfs must BE
+    // that image. Synthesized plans get this by construction (synthesis stamps
+    // the hash it just measured); an externally-signed plan gets it by
+    // comparison.
+    if rootfs_sha != plan.image.sha256 {
+        anyhow::bail!(
+            "the signed plan pins image sha256 {} but the resolved rootfs at {} hashes to \
+             {rootfs_sha}; refusing to boot an image the plan does not authorize",
+            plan.image.sha256,
+            req.rootfs_path.display(),
+        );
+    }
+
+    let path_string = |p: &Path| p.to_string_lossy().into_owned();
+    let mut config = VmStartConfig {
+        name: req.name.clone(),
+        rootfs_path: path_string(&req.rootfs_path),
+        kernel_path: req.kernel_path.as_deref().map(path_string),
+        verity_path: req.verity_path.as_deref().map(path_string),
+        roothash: req.roothash.clone(),
+        cpus: plan.resources.cpus,
+        memory_mib: u32::try_from(plan.resources.mem_mib)
+            .context("plan memory does not fit the launch config")?,
+        volumes: req.volumes.clone(),
+        tenant_id: Some(plan.tenant.0.clone()),
+        // The plan's egress grant projects onto the launch config's policy,
+        // exactly as a synthesized plan's does: what the gate enforces is what
+        // the plan was signed for. No grant means deny-all.
+        network_policy: match plan.grants.as_ref() {
+            Some(grants) if grants.egress.is_some() => {
+                mvm_contract::grants::projection::network_policy_from_grants(grants)
+            }
+            _ => mvm_core::network_policy::NetworkPolicy::deny_all(),
+        },
+        ..Default::default()
+    };
+    attach_runtime_overlay_from_cache(&mut config, &req.backend_name)?;
+
+    crate::audit::durability::record_admission(
+        ctx.emitter,
+        plan,
+        admitted.signer_id(),
+        crate::audit::durability::AuditDurability::BestEffort,
+    )?;
+
+    start_admitted(StartAdmittedParams {
+        backend,
+        admitted,
+        config,
+        policy_bundle: None,
+        emitter: ctx.emitter,
+        assurance: ctx.assurance,
+    })
 }
 
 #[cfg(test)]
@@ -310,6 +404,7 @@ mod tests {
             volumes: Vec::new(),
             destroy_on_exit: false,
             grants: None,
+            signed_plan: None,
         };
 
         let started = admit_and_boot_local(
@@ -343,6 +438,8 @@ mod tests {
         use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
         let volumes = vec![
             VmVolume {
+                materialized_image: None,
+                volume_label: None,
                 host: "/h/work.ext4".into(),
                 guest: "/data/work".into(),
                 size: "16M".into(),
@@ -351,6 +448,8 @@ mod tests {
                 encrypted: false,
             },
             VmVolume {
+                materialized_image: None,
+                volume_label: None,
                 host: "/h/src".into(),
                 guest: "/data/src".into(),
                 size: String::new(),
@@ -404,6 +503,8 @@ mod tests {
             mem_mib: 128,
             backend_name: "mock".into(),
             volumes: vec![VmVolume {
+                materialized_image: None,
+                volume_label: None,
                 host: volume.to_string_lossy().into_owned(),
                 guest: "/data/work".into(),
                 size: String::new(),
@@ -413,6 +514,7 @@ mod tests {
             }],
             destroy_on_exit: true,
             grants: None,
+            signed_plan: None,
         };
         let started = admit_and_boot_local(
             &backend,
@@ -470,6 +572,8 @@ mod tests {
             mem_mib: 128,
             backend_name: "mock".into(),
             volumes: vec![VmVolume {
+                materialized_image: None,
+                volume_label: None,
                 host: sidecar.to_string_lossy().into_owned(),
                 guest: mvm_core::plan::SDK_SIDECAR_GUEST_PATH.into(),
                 size: String::new(),
@@ -479,6 +583,7 @@ mod tests {
             }],
             destroy_on_exit: true,
             grants: None,
+            signed_plan: None,
         };
         let err = admit_and_boot_local(
             &backend,
@@ -512,7 +617,7 @@ mod tests {
     /// legacy boot under `PreferOverlay`, fails closed under
     /// `RequiredOverlay`); non-VMM backends (the mock) skip entirely.
     #[test]
-    fn runtime_overlay_attachment_matches_the_cli_matrix() {
+    fn runtime_overlay_attachment_fails_closed_on_a_cold_cache() {
         let data = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
         env.isolate_mvm_home(data.path());
@@ -522,23 +627,15 @@ mod tests {
         attach_runtime_overlay_from_cache(&mut config, "mock").expect("mock skips");
         assert!(config.runtime_overlay_path.is_none());
 
-        // Firecracker + cold cache + PreferOverlay: legacy boot, no fields.
+        // A real backend with a cold cache fails closed. There is no second
+        // arm any more: the overlay is the only source of the guest binaries,
+        // so "boot anyway with nothing attached" is not a posture a backend
+        // can select.
         let mut config = VmStartConfig {
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-            ..Default::default()
-        };
-        attach_runtime_overlay_from_cache(&mut config, "firecracker")
-            .expect("cold cache under PreferOverlay boots legacy");
-        assert!(config.runtime_overlay_path.is_none());
-        assert!(config.runtime_overlay_roothash.is_none());
-
-        // Firecracker + cold cache + RequiredOverlay: fail closed.
-        let mut config = VmStartConfig {
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
             ..Default::default()
         };
         let err = attach_runtime_overlay_from_cache(&mut config, "firecracker")
-            .expect_err("required overlay + cold cache must refuse");
+            .expect_err("a cold cache must refuse");
         assert!(
             err.to_string().contains("runtime overlay required"),
             "got: {err:#}"
@@ -564,6 +661,7 @@ mod tests {
             volumes: Vec::new(),
             destroy_on_exit: false,
             grants: None,
+            signed_plan: None,
         };
         let err = admit_and_boot_local(
             &backend,
@@ -578,5 +676,137 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("hashing rootfs"));
+    }
+}
+
+#[cfg(test)]
+mod signed_boot_tests {
+    //! The fleet-issued door of the local-run seam, end to end over the
+    //! hermetic mock backend: admit an externally-signed plan and boot it —
+    //! or refuse and boot nothing.
+    use super::*;
+    use crate::plan_admission::SystemClock;
+    use ed25519_dalek::SigningKey;
+    use mvm_core::plan::test_support::PlanFixture;
+    use mvm_core::user_config::{MvmConfig, TrustedPlanSigner};
+    use mvm_core::util::test_env::TestEnv;
+
+    fn fleet_key() -> SigningKey {
+        SigningKey::from_bytes(&[42u8; 32])
+    }
+
+    /// Isolate `MVM_HOME` and write the host config; the trusted-signer set
+    /// lives in operator config, so a test that wants a trusting host has to
+    /// be one.
+    fn host_with(cfg: MvmConfig) -> (TestEnv, tempfile::TempDir) {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        mvm_core::user_config::save(&cfg, None).unwrap();
+        (env, home)
+    }
+
+    fn pinned_host() -> (TestEnv, tempfile::TempDir) {
+        host_with(MvmConfig {
+            trusted_plan_signers: vec![TrustedPlanSigner {
+                signer_id: "fleet-prod".to_string(),
+                ed25519_pubkey_hex: hex::encode(fleet_key().verifying_key().as_bytes()),
+            }],
+            ..MvmConfig::default()
+        })
+    }
+
+    /// A request whose signed plan pins the exact bytes of `rootfs`.
+    fn signed_request(
+        name: &str,
+        rootfs: &Path,
+        plan: mvm_core::plan::ExecutionPlan,
+    ) -> LocalRunRequest {
+        LocalRunRequest {
+            name: name.to_string(),
+            rootfs_path: rootfs.to_path_buf(),
+            kernel_path: None,
+            verity_path: None,
+            roothash: None,
+            cpus: 1,
+            mem_mib: 128,
+            backend_name: "mock".into(),
+            volumes: Vec::new(),
+            destroy_on_exit: true,
+            grants: None,
+            signed_plan: Some(mvm_core::plan::sign_plan(&plan, &fleet_key(), "fleet-prod")),
+        }
+    }
+
+    fn boot(req: &LocalRunRequest) -> Result<StartedMachine> {
+        let backend = AnyBackend::from_hypervisor("mock");
+        let ledger = InMemoryNonceLedger::new();
+        admit_and_boot_local(
+            &backend,
+            req,
+            LocalRunContext {
+                clock: &SystemClock,
+                ledger: &ledger,
+                host_signer_keys_dir: None,
+                emitter: None,
+                assurance: None,
+            },
+        )
+    }
+
+    #[test]
+    fn a_fleet_signed_plan_boots_through_the_local_seam() {
+        let (_env, home) = pinned_host();
+        let rootfs = home.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"fleet workload bytes\n").unwrap();
+        let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
+
+        let mut plan = PlanFixture::new()
+            .runtime_profile("mock")
+            .tenant("fleet-tenant")
+            .build();
+        plan.image.sha256 = sha;
+        let req = signed_request("fleet-vm", &rootfs, plan);
+
+        let started = boot(&req).expect("a pinned fleet-signed plan admits and boots");
+        assert_eq!(started.vm_id.0, "fleet-vm");
+        assert_eq!(started.admitted.signer_id(), "fleet-prod");
+        assert_eq!(started.admitted.plan().tenant.0, "fleet-tenant");
+    }
+
+    #[test]
+    fn a_fleet_signed_plan_is_refused_when_the_host_pins_nobody() {
+        let (_env, home) = host_with(MvmConfig::default());
+        let rootfs = home.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"fleet workload bytes\n").unwrap();
+        let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
+
+        let mut plan = PlanFixture::new().runtime_profile("mock").build();
+        plan.image.sha256 = sha;
+        let req = signed_request("fleet-vm-refused", &rootfs, plan);
+
+        let err = boot(&req).expect_err("an unpinned host must refuse");
+        assert!(
+            format!("{err:#}").contains("pins no trusted plan signers"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_rootfs_that_is_not_the_pinned_image_is_refused() {
+        let (_env, home) = pinned_host();
+        let rootfs = home.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"bytes the plan did not authorize\n").unwrap();
+
+        // The plan pins the fixture's digest, not this rootfs's — a validly
+        // signed plan booting different bytes must not pass.
+        let plan = PlanFixture::new().runtime_profile("mock").build();
+        let req = signed_request("fleet-vm-wrong-image", &rootfs, plan);
+
+        let err = boot(&req).expect_err("an image mismatch must refuse the boot");
+        assert!(
+            format!("{err:#}").contains("refusing to boot an image the plan does not authorize"),
+            "got: {err:#}"
+        );
     }
 }

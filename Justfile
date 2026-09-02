@@ -30,22 +30,31 @@ install-hooks:
 toolchain-embed:
     #!/usr/bin/env bash
     set -euo pipefail
+    RUST=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['metadata']['mvm']['toolchain']['rust'])")
     ZIG=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['metadata']['mvm']['toolchain']['zig'])")
-    echo "installing pinned zig ${ZIG} (ziglang) + musl rust targets"
+    echo "installing pinned Rust ${RUST} + zig ${ZIG} (ziglang) + musl targets"
     python3 -m pip install --quiet "ziglang==${ZIG}"
-    rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl
-    echo "embed toolchain ready: zig ${ZIG} + aarch64/x86_64 musl targets"
+    rustup toolchain install "${RUST}" --profile minimal
+    rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl --toolchain "${RUST}"
+    echo "embed toolchain ready: Rust ${RUST} + zig ${ZIG} + aarch64/x86_64 musl targets"
 
-# Build all crates (debug)
-build:
-    cargo build --workspace
+# Build all crates (debug), including the per-VM host helpers `mvmctl` spawns.
+#
+# The helpers need their own step because `mvm-libkrun-supervisor` sits behind
+# `required-features`, which `--workspace` does not enable. Without it a
+# contributor on a libkrun host gets a `mvmctl` that cannot start a VM, which is
+
+# not what "build all crates" should mean.
+build: build-supervisors
+    ./scripts/cargo-fast.sh build --workspace
 
 # `--all-targets` is narrower than it sounds: it skips any target behind
 # `required-features`, and on macOS it cannot compile `cfg(target_os = "linux")`
 # files at all. `check-gated` covers both.
+
 # Type-check without codegen
 check:
-    cargo check --workspace --all-targets
+    ./scripts/cargo-fast.sh check --workspace --all-targets
 
 # Cross-compile every crate's lib for Linux (glibc) via zig — no Docker — so
 # cfg(target_os="linux") code a macOS host never compiles is caught locally.
@@ -55,9 +64,10 @@ check:
 # `rustup target add x86_64-unknown-linux-gnu`. musl is intentionally not the
 # default — libc's ioctl request arg is c_int there vs c_ulong on glibc, so the
 # COW FICLONE path (mvm-runtime) only type-checks against glibc.
+
 # Cross-compile every crate's lib for Linux via zig
 check-linux TARGET="x86_64-unknown-linux-gnu":
-    cargo zigbuild --target {{ TARGET }} --workspace --lib --all-features
+    ./scripts/cargo-stable.sh zigbuild --target {{ TARGET }} --workspace --lib --all-features
 
 # Type-check the targets `just check` cannot see. Two blind spots, both of which
 # have shipped a red CI run that named neither:
@@ -80,10 +90,11 @@ check-linux TARGET="x86_64-unknown-linux-gnu":
 # (the same reason `check-linux` is opt-in), and a cold run costs ~8 min because
 # it type-checks the whole workspace for a second target. Run it before pushing
 # anything that changes a shared type's shape; a warm run is far cheaper.
+
 # Type-check the linux-gated and feature-gated targets `just check` cannot see
 check-gated TARGET="x86_64-unknown-linux-gnu":
-    cargo-zigbuild check --target {{ TARGET }} --workspace --all-targets
-    cargo check -p mvm-conformance --all-targets --features bdd
+    ./scripts/cargo-stable.sh --direct cargo-zigbuild check --target {{ TARGET }} --workspace --all-targets
+    ./scripts/cargo-stable.sh check -p mvm-conformance --all-targets --features bdd
 
 # Bare-metal no_std proof for the embeddable foundation crate (mvm-contract).
 # A `-none-elf` target exposes only core + alloc with no std to leak into, so
@@ -99,7 +110,7 @@ check-embedded TARGET="riscv32imac-unknown-none-elf":
 
 # Run mvmctl with arguments
 run *ARGS:
-    cargo run -- {{ ARGS }}
+    ./scripts/cargo-fast.sh run -- {{ ARGS }}
 
 # Run mvmctl with the dev env set (worktree-local MVM_HOME).
 dev *ARGS:
@@ -109,7 +120,7 @@ dev *ARGS:
 
 # CARGO_TARGET_DIR / CARGO_HOME).
 dev-cargo *ARGS:
-    bash -c 'source scripts/dev-env.sh && cargo {{ ARGS }}'
+    bash -c 'source scripts/dev-env.sh && ./scripts/cargo-fast.sh {{ ARGS }}'
 
 # Run cargo test --workspace with the dev env.
 dev-test:
@@ -117,7 +128,7 @@ dev-test:
 
 # Run clippy with the dev env.
 dev-clippy:
-    just dev-cargo clippy --workspace -- -D warnings
+    bash -c 'source scripts/dev-env.sh && ./scripts/cargo-stable.sh clippy --workspace -- -D warnings'
 
 # Build the host-side eBPF object for vsock egress telemetry.
 
@@ -131,6 +142,12 @@ build-ebpf:
 # Run cargo check with the dev env.
 dev-check:
     just dev-cargo check --workspace
+
+# Verify that the nightly fast path stays pinned and does not leak into the
+
+# stable-compatible Cargo configuration used by release and MSRV lanes.
+check-fast-cargo:
+    ./scripts/check-fast-cargo.sh
 
 # Prebuild or refresh the version-matched read-only runtime overlay once so
 # later required-overlay boots can reuse it without rebuilding guest binaries
@@ -166,10 +183,12 @@ sdk-build-typescript:
 # Run the language SDKs' own unit suites. Neither is a cargo target, so
 # `cargo nextest run --workspace` does not touch them and a Rust-only gate
 # leaves the hand-written half of each SDK — the subprocess wrappers, the
+
 # argv builders, the refusal paths — unproven.
 sdk-test: sdk-test-python sdk-test-typescript
 
 # `--extra schema` installs pydantic; without it the eight
+
 # `derive_schema` tests fail on an ImportError rather than being skipped.
 sdk-test-python:
     uv run --directory crates/mvm-sdk/sdks/python --group dev --extra schema pytest -q
@@ -195,14 +214,15 @@ sdk-test-typescript: sdk-install-typescript
 test:
     #!/usr/bin/env bash
     set -euo pipefail
+    ./scripts/require-nextest.sh
     mkdir -p target/nextest
-    cargo nextest run --workspace 2>&1 | tee target/nextest/last-run.log
+    ./scripts/cargo-fast.sh nextest run --workspace 2>&1 | tee target/nextest/last-run.log
 
 # Doctests. nextest does NOT run doctests, so `just test` skips them;
 
 # this is the companion that keeps doc-fence coverage gated.
 test-doc:
-    cargo test --workspace --doc
+    ./scripts/cargo-fast.sh test --workspace --doc
 
 # Run tests with sccache also caching the workspace crates.
 #
@@ -235,6 +255,7 @@ test-doc:
 # nothing for the second checkout — which is why the machine-wide Rust hit rate
 # sits near 2.5% across ~35k compiles rather than the 84% a same-path
 # experiment suggests. Cargo already caches deps within a target dir, so the
+
 # remaining value here is narrow.
 test-cached:
     @command -v sccache >/dev/null || { echo "sccache not found — install with: cargo install sccache"; exit 1; }
@@ -243,22 +264,25 @@ test-cached:
 
 # Test a single crate
 test-crate CRATE:
-    cargo nextest run -p {{ CRATE }}
+    ./scripts/require-nextest.sh
+    ./scripts/cargo-fast.sh nextest run -p {{ CRATE }}
 
 # Run tests matching a filter expression
 test-filter FILTER:
-    cargo nextest run --workspace -E 'test({{ FILTER }})'
+    ./scripts/require-nextest.sh
+    ./scripts/cargo-fast.sh nextest run --workspace -E 'test({{ FILTER }})'
 
 # Run tests under the `ci` profile: no retries, slow-test warnings, and a
 # JUnit report at target/nextest/ci/junit.xml carrying pass/fail structure
 
 # only (no captured test output — see .config/nextest.toml).
 test-ci:
-    cargo nextest run --workspace --profile ci
+    ./scripts/require-nextest.sh
+    ./scripts/cargo-fast.sh nextest run --workspace --profile ci
 
 # Run tests with cargo test (fallback if nextest not installed)
 test-cargo:
-    cargo test --workspace
+    ./scripts/cargo-fast.sh test --workspace
 
 # BDD conformance suite (cucumber-rs): builds mvmctl and the TypeScript SDK,
 # checks generated SDK artifacts, then runs every Gherkin scenario under
@@ -266,27 +290,183 @@ test-cargo:
 
 # not-yet-implemented coverage and are filtered out by the runner.
 bdd:
-    cargo build --bin mvmctl
-    cargo build -p xtask
+    ./scripts/cargo-fast.sh build --bin mvmctl
+    ./scripts/cargo-fast.sh build -p xtask
     just sdk-install-typescript
     just sdk-build-typescript
-    cargo test -p mvm-conformance --test conformance --features bdd
+    CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" ./scripts/cargo-fast.sh test -p mvm-conformance --test conformance --features bdd
 
-# Build the per-VM host helper bins explicitly. mvmctl's build script already
-# compiles them during `cargo build`/`cargo run`; this is the manual route for
+# End-to-end launch gate: boot a real guest through every README-documented
+# entry point (CLI verbs, runtime SDK, decorator SDK, Rust library facade) on
+# whatever backend this host has. Unlike `bdd-live-ci` this is deliberately NOT
+# narrowed to the merge-queue subset and NOT `@firecracker`-gated — that
+# narrowing is what left the macOS default backend with no lane that boots a
+# guest at all.
+#
+# Sibling of `e2e-docs`: this one proves the ways in, that one proves the whole
+# documented command surface. They overlap in the suite they drive; the split is
+# that this lane also exercises the in-process Rust library seam.
+#
 
-# a targeted rebuild or CI.
-build-supervisors:
-    cargo build -p mvm-hostd --bin mvm-network-endpoint --bin mvm-hvf-supervisor
-    cargo build -p mvm-hostd --bin mvm-libkrun-supervisor --features libkrun-sys
+# Boot a real guest through every documented entry point
+e2e-launch:
+    ./scripts/e2e-launch-modes.sh
+
+# Runs both live lanes in order, against one shared artifact home:
+#
+#   e2e-launch  the ways in — CLI verbs, both SDKs, and the in-process Rust
+#               library seam
+#   e2e-docs    the whole documented command surface, plus the machine journey
+#
+# They overlap in the suite they drive, so this is the belt-and-braces run
+# rather than the quick one; reach for a single lane when iterating. Both sweep
+# their own machines, and the second refuses to start if the first is still
+# holding the home.
+#
+# Read the "did NOT run" tally at the end, not just the pass count: a skipped
+# scenario names a capability this host lacks, and a green suite is not full
+# coverage while any of them are nonzero.
+#
+# Every live end-to-end lane, back to back
+e2e:
+    ./scripts/e2e-launch-modes.sh
+    ./scripts/e2e-documented-surface.sh
+
+# The hermetic `bdd` lane proves a documented command parses; this one boots
+# real microVMs and runs them. Needs an artifact-warm home: it defaults to the
+# real `~/.mvm`, override with MVM_E2E_HOME. Expect minutes on a cold home.
+#
+# Follows each guest's console as it boots; MVM_E2E_FOLLOW=0 silences that.
+# Sweeps its own machines on entry and exit — see `e2e-docs-clean`.
+#
+
+# Every documented example, executed against a real host
+e2e-docs:
+    ./scripts/e2e-documented-surface.sh
+
+# Reap machines a killed e2e run left behind. Scoped to the `bdd-` prefix the
+# suite creates, so it never touches a machine you made.
+#
+
+# Clean up after an interrupted e2e run
+e2e-docs-clean:
+    ./scripts/e2e-documented-surface.sh --clean-only
+
+# KVM-backed merge-queue witness for the cheap documented machine lifecycle.
+# The tag selector keeps registry/build-heavy live scenarios in their dedicated
+
+# witness lanes while proving that the public commands operate a real guest.
+bdd-live-ci:
+    # `embed-host-bins` because these scenarios boot real microVMs: `MVM_BDD_LIVE=1`
+    # admits the `@live` set, which reaches the builder VM. Without the payload
+    # mvmctl refuses at bootstrap. The hermetic `just bdd` lane skips those
+    # scenarios and so deliberately does not pay the cross-compile.
+    cargo build --bin mvmctl --features user,embed-host-bins
+    CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" MVM_BDD_LIVE=1 MVM_BDD_CI_LIVE_ONLY=1 cargo test -p mvm-conformance --test conformance --features bdd
+
+# Build the per-VM host helper bins into `target/<profile>/`, where
+# `aux_bin::resolve` looks for them. Reach for this after `cargo run -p mvm-cli`,
+# which builds no sibling `[[bin]]`s; `just build` runs it for you.
+#
+# `mvm-libkrun-supervisor` needs its own invocation because it carries
+# `required-features = ["libkrun-sys"]`, which a plain `--bins` does not enable,
+# and that feature makes `libkrun-sys`'s build script demand a real `libkrun.h`.
+# So it is probed for, on the same three paths that build script checks.
+#
+# Bare, this writes the debug helpers. Pass `--release` if the mvmctl you invoke
+# is the release one: `aux_bin::resolve` searches `target/release` before
+# `target/debug` and takes the first hit, so a release mvmctl with no release
+# helper beside it silently falls through to whichever debug helper was built
+# last. That one is stale as soon as the config contract moves, and a stale
+# helper refuses the config the current mvmctl sends.
+#
+
+# Build the per-VM supervisor bins (--release to match a release mvmctl)
+build-supervisors *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ./scripts/cargo-fast.sh build -p mvm-hostd --bins {{ARGS}}
+    header="${MVM_LIBKRUN_HEADER:-}"
+    if [[ -z "$header" ]]; then
+      for candidate in /opt/homebrew/include/libkrun.h /usr/local/include/libkrun.h /usr/include/libkrun.h; do
+        [[ -f "$candidate" ]] && header="$candidate" && break
+      done
+    fi
+    if [[ -f "$header" ]]; then
+      ./scripts/cargo-fast.sh build -p mvm-hostd --bin mvm-libkrun-supervisor --features libkrun-sys {{ARGS}}
+    else
+      echo "build-supervisors: no libkrun.h — skipping mvm-libkrun-supervisor."
+      echo "  Install it (brew install slp/krun/libkrun) if you need the libkrun backend."
+    fi
+
+# Build an mvmctl that carries the Linux host binaries the builder VM needs,
+# plus the native per-VM helpers it spawns beside the resulting executable.
+#
+# The cross-compile is off by default, so a plain `cargo build` produces an
+# mvmctl that can run every host-side verb but cannot bootstrap a builder VM —
+# `host_binaries::extract` refuses and names this recipe. Run it when you are
+# about to boot a VM. Note that it and a plain `cargo build` write the same
+# `target/<profile>/mvmctl` under different feature sets, so alternating the two
+
+# relinks mvmctl; that is why this is a deliberate step and not part of `build`.
+# Bare, this writes `target/debug/mvmctl` — pass `--release` if the mvmctl you
+# invoke is the release one, or the release binary is left untouched.
+embed *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Some pinned macOS nightlies ship rust-objcopy with an RPATH relative to
+    # its rustlib bin directory even though libLLVM lives at the sysroot's lib
+    # directory. cargo-zigbuild only warns when stripping then continues with
+    # larger unstripped payloads, so make the library visible explicitly.
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+      # Build scripts are sibling processes launched by Cargo, while compiler
+      # helpers inherit from rustc. Seed the parent for the first case and use
+      # the wrapper for the second; either half alone leaves some rust-objcopy
+      # invocations unable to load libLLVM.
+      rust_channel="$(sed -n 's/^channel = "\([^"]*\)"$/\1/p' rust-toolchain.toml)"
+      rust_sysroot="$(rustup run "$rust_channel" rustc --print sysroot)"
+      if [[ -n "${DYLD_FALLBACK_LIBRARY_PATH:-}" ]]; then
+        export DYLD_FALLBACK_LIBRARY_PATH="$rust_sysroot/lib:$DYLD_FALLBACK_LIBRARY_PATH"
+      else
+        export DYLD_FALLBACK_LIBRARY_PATH="$rust_sysroot/lib"
+      fi
+      export RUSTC_WRAPPER="{{justfile_directory()}}/scripts/rustc-macos-loader.sh"
+    fi
+    # `mvmctl` and these `[[bin]]` targets live in different packages, so
+    # building one does not cause Cargo to build the others. Forward the same
+    # profile arguments (`--release`, `--profile ...`) so runtime's adjacent-
+    # executable lookup always finds the helper matching the selected mvmctl.
+    ./scripts/cargo-fast.sh build -p mvm-hostd --bins {{ARGS}}
+    ./scripts/cargo-fast.sh build --features embed-host-bins {{ARGS}}
 
 # Drop the cached cross-compiled host binaries so the next build rebuilds them.
-# Dev builds reuse these instead of re-running cargo-zigbuild, which is ~93% of
-# mvm-cli's build-script wall time. Run this after editing anything they link
+# Dev builds reuse these instead of re-running cargo-zigbuild, which is the bulk
+# of mvm-cli's build-script wall time. Run this after editing anything they link
 # (mvm-build, mvm-core, ...) when you are about to boot a real VM; ordinary
+
 # check/test/clippy runs never need it. Release builds always rebuild.
 embed-refresh:
-    rm -rf target/*/build/mvm-cli-nested-target/host-vm-target
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Located with `find`, not a glob. The previous pattern
+    # (`target/*/build/mvm-cli-nested-target/host-vm-target`) matched nothing:
+    # it hardcoded `target/` so it missed any CARGO_TARGET_DIR, and it lacked
+    # the `mvm-cli/` path segment the current layout uses. The recipe was a
+    # silent no-op, which is why the launch path kept refusing helpers that
+    # "were reused from an earlier build".
+    #
+    # Only the musl cross-compile is cached this way. The per-VM host helpers
+    # are ordinary workspace binaries now, so cargo rebuilds them on its own
+    # and there is nothing here to clear for them.
+    root="${CARGO_TARGET_DIR:-target}"
+    [[ -d "$root" ]] || exit 0
+    found=0
+    while IFS= read -r dir; do
+      echo "  removing $dir"
+      rm -rf "$dir"
+      found=$((found + 1))
+    done < <(find "$root" -type d -name host-vm-target 2>/dev/null)
+    echo "embed-refresh: cleared $found nested target dir(s)"
 
 # Build the dm-verity-capable workload kernel into the local mvm cache.
 # Set MVM_KERNEL_SOURCE=download to use the hash-verified release artifact, or
@@ -303,6 +483,7 @@ hvf-oci-allow-host-smoke:
     bash scripts/check-hvf-oci-allow-host-smoke.sh
 
 # Live Apple-Silicon HVF warm-restore matrix. Requires the HVF warm capability
+
 # to have passed its live continuity gate; it never enables that capability.
 hvf-warm-restore:
     bash scripts/check-hvf-warm-restore.sh
@@ -328,6 +509,45 @@ honesty:
 deferrals:
     cargo run -p xtask -- check-deferrals
 
+# ── Agent memory (.agent-memory/notes) ───────────────────────────────────
+
+# Recall committed findings. Lexical, because at a few hundred terse,
+# keyword-dense notes a substring match beats anything with a model in it.
+# Terms are OR-ed: `just recall teardown ram` finds notes mentioning either.
+recall +TERMS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pattern=$(printf '%s' "{{ TERMS }}" | tr ' ' '|')
+    rg -il --sort path -e "$pattern" .agent-memory/notes | while read -r path; do
+        printf '%s\n    %s\n' \
+            "$(basename "$path" .md)" \
+            "$(sed -n 's/^title: //p' "$path")"
+    done
+
+# List every note, newest first.
+notes:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for path in .agent-memory/notes/*.md; do
+        printf '%s  %s — %s\n' \
+            "$(sed -n 's/^date: //p' "$path")" \
+            "$(basename "$path" .md)" \
+            "$(sed -n 's/^title: //p' "$path")"
+    done | sort -r
+
+# Scaffold a note. Fill in the body, then commit it with the change it explains.
+remember SLUG:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    path=".agent-memory/notes/{{ SLUG }}.md"
+    if [ -e "$path" ]; then echo "note {{ SLUG }} already exists" >&2; exit 1; fi
+    printf -- '---\ntitle: \ndate: %s\ntags: []\n---\n\n' "$(date +%F)" > "$path"
+    echo "created $path"
+
+# Committed findings parse, are dated, and link to notes that exist.
+agent-notes:
+    cargo run -p xtask -- check-agent-notes
+
 # ── Lint & Format ────────────────────────────────────────────────────────
 
 # Format all code
@@ -340,7 +560,7 @@ fmt-check:
 
 # Run clippy with warnings as errors
 clippy:
-    cargo clippy --workspace --all-targets -- -D warnings
+    ./scripts/cargo-stable.sh clippy --workspace --all-targets -- -D warnings
 
 # Compile the cucumber conformance target. It sits behind the `bdd` feature to
 # stay out of `cargo nextest run --workspace` (nextest lists tests via `--list`,
@@ -349,10 +569,10 @@ clippy:
 
 # elsewhere in the workspace can break it unnoticed.
 clippy-bdd:
-    cargo clippy -p mvm-conformance --tests --features bdd -- -D warnings
+    ./scripts/cargo-stable.sh clippy -p mvm-conformance --tests --features bdd -- -D warnings
 
 # Format check + clippy + model gates (workspace + the feature-gated BDD target)
-lint: fmt-check clippy clippy-bdd model
+lint: fmt-check clippy clippy-bdd model check-fast-cargo
 
 # ── Claim mutation testing ───────────────────────────────────────────────
 # Verify the committed mutation surface still matches the claims ledger.
@@ -402,8 +622,8 @@ release-auto:
     echo "==> Preparing automatic release (PR-based)"
     # Quality gates — auto-fix fmt and clippy, then test.
     cargo fmt --all
-    cargo clippy --fix --allow-dirty --workspace --all-targets -- -D warnings
-    cargo clippy --workspace --all-targets -- -D warnings
+    ./scripts/cargo-stable.sh clippy --fix --allow-dirty --workspace --all-targets -- -D warnings
+    ./scripts/cargo-stable.sh clippy --workspace --all-targets -- -D warnings
     cargo nextest run --workspace
     NEXT_VERSION=$(git cliff --bumped-version | sed 's/^v//')
     echo "==> Auto-detected next version: $NEXT_VERSION"
@@ -415,8 +635,8 @@ release VERSION:
     set -euo pipefail
     echo "==> Preparing release v{{ VERSION }}"
     cargo fmt --all
-    cargo clippy --fix --allow-dirty --workspace --all-targets -- -D warnings
-    cargo clippy --workspace --all-targets -- -D warnings
+    ./scripts/cargo-stable.sh clippy --fix --allow-dirty --workspace --all-targets -- -D warnings
+    ./scripts/cargo-stable.sh clippy --workspace --all-targets -- -D warnings
     cargo nextest run --workspace
     just _release-prep "{{ VERSION }}"
 
@@ -476,13 +696,17 @@ release-tag VERSION:
     git push origin "v$V"
     echo "==> Pushed tag v$V — the release pipeline will build + publish."
 
-# Build optimized release binary
+# Build optimized release binary. `embed-host-bins` matches the release
+# workflow's `MVMCTL_RELEASE_FEATURES`; without it this produces the one build
+# that looks finished and cannot bootstrap a builder VM. `release-channel` is
+# deliberately absent — it would resolve artifacts from the published channel
+# rather than this checkout.
 release-build:
-    cargo build --release --features host,user,template-registry-s3,release-artifact-bootstrap
+    cargo build --release --features host,user,template-registry-s3,release-artifact-bootstrap,embed-host-bins
 
 # Cross-compile release binary for a target
 release-build-target TARGET:
-    cargo build --release --target {{ TARGET }} --features host,user,template-registry-s3,release-artifact-bootstrap
+    cargo build --release --target {{ TARGET }} --features host,user,template-registry-s3,release-artifact-bootstrap,embed-host-bins
 
 # Dry-run crates.io publish (all crates in dependency order)
 publish-dry-run:
@@ -515,26 +739,89 @@ docs-dev: demo-assets
 docs-build: demo-assets
     cd public && pnpm build
 
-# Publish the docs site to GitHub Pages (dispatches pages.yml on main)
+# Publish the docs site to Cloudflare Pages (dispatches pages.yml on main)
 docs-publish:
-    # `pages.yml` is workflow_dispatch-only on purpose — the old
-    # `push: branches:[main] paths:[public/**]` trigger was dropped in the CI
-    # cost reduction — so a docs change reaches the site only when someone asks
-    # for it. That is why this recipe exists: otherwise publishing is an
-    # undocumented `gh workflow run` you have to already know about.
+    # `pages.yml` runs automatically when a release is published or a `v*`
+    # tag is pushed; this recipe exists for operator-triggered docs publishes.
+    # The old `push: branches:[main] paths:[public/**]` trigger was dropped in
+    # the CI cost reduction — so a docs-only change reaches the site only when
+    # someone asks for it or a release/tag fires.
     #
     # `--ref main`, never the current branch: Pages serves what is on main, and
     # dispatching from a branch would publish something nobody has merged.
     gh workflow run pages.yml --ref main
     @echo "Dispatched pages.yml on main. Watch it with: gh run watch \$(gh run list --workflow=pages.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
 
+# Alias for `docs-publish` using the Cloudflare Pages deployment name.
+pages-deploy: docs-publish
+
+# Check the live site sends the cross-origin isolation headers the demo needs
+docs-check-live-headers url="":
+    # No argument checks the domain in public/astro.config.mjs; pass a URL to
+    # check a preview deployment instead. `pnpm check:headers` gates the
+    # `_headers` config — this one gates what the host actually sends, which is
+    # a different question and the one that has been answered wrong.
+    ./scripts/check-site-isolation-headers.sh {{ url }}
+
 # Build the browser-tier microVM demo assets (wasm core + guest + fixtures)
 demo-build:
     ./web/mvm-demo/build.sh
 
-# Stage the /demo assets only if they're missing; `just demo-build` forces a rebuild
+# Build the weblinux demo assets (requires Linux builder)
+weblinux-demo-build:
+    ./web/weblinux-demo/build.sh
+
+# Stage the browser WASM demo unless every generated asset class is present.
+# WebLinux is staged separately from its verified release pack by pages.yml.
 demo-assets:
-    [ -d public/public/demo ] || just demo-build
+    test -s public/public/demo/demo.js \
+      && test -s public/public/demo/worker.js \
+      && test -s public/public/demo/pkg/mvm_demo_web.js \
+      && test -s public/public/demo/pkg/mvm_demo_web_bg.wasm \
+      && test -s public/public/demo/guest/mvm-demo-guest.wasm \
+      && test -s public/public/demo/fixtures/allowed.opt.wasm \
+      && test -s public/public/demo/fixtures/denied.opt.wasm \
+      && test -s public/public/demo/fixtures/unbound.opt.wasm \
+      || just demo-build
+
+# Download the qemu-wasm-smoke-pack from GitHub releases.
+# This is faster than building from scratch (seconds vs 10-30 minutes).
+# Usage: just qemu-wasm-pack-download [output-dir] [tag]
+#   output-dir: Where to place the unpacked pack (default: ./qemu-wasm-smoke-pack)
+
+# tag:        The boot-image tag to download from (default: latest)
+qemu-wasm-pack-download *ARGS:
+    ./scripts/download-qemu-wasm-smoke-pack.sh {{ ARGS }}
+
+# Build the qemu-wasm-smoke-pack in the Linux builder VM and copy it back.
+# This is an alternative to downloading from GitHub releases.
+# Usage: just qemu-wasm-pack [output-dir]
+
+# output-dir: Where to place the built pack (default: ./qemu-wasm-smoke-pack)
+qemu-wasm-pack *ARGS:
+    ./scripts/build-qemu-wasm-smoke-pack.sh {{ ARGS }}
+
+# Build all demo assets (wasm + weblinux); requires Linux for weblinux
+# Usage: just demo-build-all [qemu-wasm-pack-path]
+#   qemu-wasm-pack-path: Path to the built pack (default: ./qemu-wasm-smoke-pack)
+
+# If not provided, downloads it first via just qemu-wasm-pack-download
+demo-build-all *PACK_DIR:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just demo-build
+    # Determine pack directory
+    if [ -n "{{ PACK_DIR }}" ]; then
+      PACK_DIR="{{ PACK_DIR }}"
+    else
+      PACK_DIR="$PWD/qemu-wasm-smoke-pack"
+    fi
+    if [ ! -d "$PACK_DIR" ]; then
+      echo "qemu-wasm-smoke-pack not found at $PACK_DIR"
+      echo "Download it first with: just qemu-wasm-pack-download"
+      exit 1
+    fi
+    ./web/weblinux-demo/build.sh "$PACK_DIR"
 
 # ── VMM setup ────────────────────────────────────────────────────────────
 

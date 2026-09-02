@@ -61,7 +61,6 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::{fs, io};
 
 use libkrun_sys::{KernelFormat, KrunContext, SupervisorConfig};
 use mvm_vmm::host::network_endpoint_spawn::{
@@ -71,12 +70,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::builder_disk_transport::{
-    InputTree, create_output_disk, pack_input_disk, read_output_disk,
+    INPUT_DISK_MIN_BYTES, InputTree, OUTPUT_DISK_BYTES, create_output_disk, pack_input_disk,
+    read_output_disk,
 };
 use crate::builder_vm::{
     BuilderArtifacts, BuilderJob, BuilderMounts, BuilderVm, BuilderVmDisk, BuilderVmError,
     BuilderVmExitInfo, BuilderVmMount, BuilderVmRunConfig, VmBackendForBuilder,
 };
+
+mod egress_process;
+
+use egress_process::{builder_egress_endpoint_was_terminated, builder_egress_supervisor_command};
 // These items previously lived in this file; they migrated to
 // `builder_vm_runtime` so the future VzBuilderVm path can reuse the
 // same logic without duplicating it. `INSTALL_SPEC_FILENAME` and
@@ -89,7 +93,6 @@ use crate::builder_vm_runtime::{
     stage_filtered_work_input, stage_job_dir, stage_persistent_job_dir, stage_shell_job_dir,
     supervisor_exit_error, verbose_from_env,
 };
-use crate::pipeline::build::BUILDER_OUTPUT_DISK_MIB;
 
 /// Default vCPU count for the builder VM. Nix builds are
 /// embarrassingly parallel at the derivation level; 4 cores is the
@@ -143,15 +146,11 @@ pub const GUEST_JOB_DIR: &str = "/job";
 const BUILDER_INPUT_DEVICE: &str = "/dev/vdc";
 const BUILDER_OUTPUT_DEVICE: &str = "/dev/vdd";
 const BUILDER_RUNTIME_DEVICE: &str = "/dev/vde";
-const PERSISTENT_BUILDER_RUNTIME_DEVICE: &str = "/dev/vdc";
-const BUILDER_INPUT_DISK_MIN: u64 = 16 << 20;
+const BUILDER_VIRTIOFS_RUNTIME_DEVICE: &str = "/dev/vdc";
 const BUILDER_VSOCK_EGRESS_TOKEN: &str = "mvm.vsock_egress=1";
 const BUILDER_SUBST_PID_FILE: &str = "substitution.pid";
 const BUILDER_SUBST_STDERR_LOG_FILE: &str = "substitution.stderr.log";
-const BUILDER_VM_BOOTSTRAP_BIN_ENV: &str = "MVM_BUILDER_VM_BOOTSTRAP_BIN";
-const BUILDER_VM_AUTO_BOOTSTRAP_SKIP_ENV: &str = "MVM_SKIP_BUILDER_VM_AUTO_BOOTSTRAP";
-const BUILDER_VM_CACHE_CONTRACT_VERSION: u32 = 3;
-
+const BUILDER_VM_CACHE_CONTRACT_VERSION: u32 = 4;
 /// Resolve (or locally build) the runtime overlay ext4 the builder VM sources
 /// its guest binaries from, failing closed when it cannot be produced.
 ///
@@ -249,14 +248,12 @@ fn builder_disk_transport_cmdline(base_cmdline: &str) -> String {
 
 fn builder_runtime_overlay_cmdline(base_cmdline: &str, runtime_device: &str) -> String {
     let cmdline = builder_disk_transport_cmdline(base_cmdline);
-    let cmdline = append_cmdline_token(&cmdline, "mvm.runtime_source_policy=required_overlay");
     append_cmdline_token(&cmdline, &format!("mvm.runtime_data={runtime_device}"))
 }
 
-fn persistent_builder_runtime_overlay_cmdline(base_cmdline: &str, runtime_device: &str) -> String {
+fn builder_virtiofs_runtime_overlay_cmdline(base_cmdline: &str, runtime_device: &str) -> String {
     let cmdline = builder_boot_contract_cmdline(base_cmdline);
     let cmdline = builder_vsock_egress_cmdline(&cmdline);
-    let cmdline = append_cmdline_token(&cmdline, "mvm.runtime_source_policy=required_overlay");
     append_cmdline_token(&cmdline, &format!("mvm.runtime_data={runtime_device}"))
 }
 
@@ -380,10 +377,8 @@ impl BuilderVsockEgressEndpoint {
                     stderr_log_path.display()
                 ))
             })?;
-        let mut child = Command::new(mvmctl_path)
-            .arg("__builder-egress-supervisor")
-            .arg("--endpoint")
-            .arg(&endpoint_path)
+        let mut endpoint_command = builder_egress_supervisor_command(&mvmctl_path, &endpoint_path);
+        let mut child = endpoint_command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(stderr_log))
@@ -437,8 +432,15 @@ impl BuilderVsockEgressEndpoint {
 
         let child_pid = child.id();
         std::thread::spawn(move || match child.wait() {
+            Ok(status) if builder_egress_endpoint_was_terminated(&status) => {
+                tracing::debug!(
+                    pid = child_pid,
+                    %status,
+                    "builder egress endpoint stopped during teardown"
+                );
+            }
             Ok(status) => eprintln!(
-                "builder egress endpoint pid={} exited with status {}",
+                "builder egress endpoint pid={} exited unexpectedly with status {}",
                 child_pid, status
             ),
             Err(e) => eprintln!("builder egress endpoint pid={} wait failed: {e}", child_pid),
@@ -568,17 +570,18 @@ fn resolve_network_endpoint_path() -> Result<PathBuf, BuilderVmError> {
     for root in &target_roots {
         let built = root.join("debug").join("mvm-network-endpoint");
         if built.is_file() {
-            if endpoint_predates_running_exe(&built) {
-                return Err(BuilderVmError::ExtractionFailed(format!(
-                    "mvm-network-endpoint at {} is older than the running {} even after \
-                     rebuilding it; running them together would pair a guest and a host \
-                     from different builds",
-                    built.display(),
-                    std::env::current_exe()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|_| "mvmctl".to_string()),
-                )));
-            }
+            // Deliberately no mtime re-check here. The comparison above is a
+            // cheap trigger for "might be stale, try a rebuild"; it is not a
+            // verdict, because it compares two artifacts' mtimes rather than
+            // the sources they came from.
+            //
+            // `cargo build` has just confirmed this binary is current with its
+            // sources in this workspace. When it was already current, cargo
+            // does not relink and the mtime does not move — so re-testing it
+            // against the running `mvmctl` failed forever with "even after
+            // rebuilding it". `cargo build --workspace --bins` links `mvmctl`
+            // last, so a normal build leaves the endpoint older every time and
+            // no amount of rebuilding could satisfy the check.
             return Ok(built);
         }
     }
@@ -617,14 +620,24 @@ fn kill_pid(pid: libc::pid_t, sig: libc::c_int) {
     }
 }
 
-fn prepare_builder_transport_disks(
+/// Pack the inbound trees onto an input disk and create the output disk the
+/// guest writes its artifact tar onto — the host half of the disk transport,
+/// shared by every one-shot builder VMM.
+///
+/// `closure_nar` is the resolved builder image's optional seeded Nix store
+/// closure: a single file that rides the same input disk at
+/// `closure-seed/<CLOSURE_FILE>`. The guest imports that fixed path and does
+/// not care which transport populated it, so a caller still attaching the
+/// closure as a virtio-fs share passes `None` here instead.
+pub(crate) fn prepare_builder_transport_disks(
     vm_state_dir: &Path,
     input_trees: &[InputTree<'_>],
+    closure_nar: Option<&Path>,
     output_size: u64,
 ) -> Result<(PathBuf, PathBuf), BuilderVmError> {
     let input_disk = vm_state_dir.join("input.img");
     let output_disk = vm_state_dir.join("output.img");
-    pack_input_disk(input_trees, None, &input_disk, BUILDER_INPUT_DISK_MIN).map_err(|e| {
+    pack_input_disk(input_trees, closure_nar, &input_disk, INPUT_DISK_MIN_BYTES).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
             "pack builder input disk {}: {e}",
             input_disk.display()
@@ -639,7 +652,7 @@ fn prepare_builder_transport_disks(
     Ok((input_disk, output_disk))
 }
 
-fn extract_builder_transport_output(
+pub(crate) fn extract_builder_transport_output(
     output_disk: &Path,
     artifact_out: &Path,
     job_dir: &Path,
@@ -688,16 +701,16 @@ pub(crate) fn builder_runtime_overlay_attachment<'a>(
     }
 }
 
-fn persistent_builder_runtime_overlay_attachment<'a>(
+pub(crate) fn builder_virtiofs_runtime_overlay_attachment<'a>(
     image: &'a BuilderVmImage,
     runtime_overlay: Option<&'a Path>,
 ) -> Option<BuilderRuntimeOverlayAttachment<'a>> {
     match (image, runtime_overlay) {
         (BuilderVmImage::Rootfs { cmdline, .. }, Some(runtime_overlay)) => {
             Some(BuilderRuntimeOverlayAttachment {
-                cmdline: persistent_builder_runtime_overlay_cmdline(
+                cmdline: builder_virtiofs_runtime_overlay_cmdline(
                     cmdline,
-                    PERSISTENT_BUILDER_RUNTIME_DEVICE,
+                    BUILDER_VIRTIOFS_RUNTIME_DEVICE,
                 ),
                 disk_path: runtime_overlay,
                 read_only: true,
@@ -1029,9 +1042,13 @@ impl LibkrunBuilderVm {
                 {
                     0
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    invalidate_stage0_store_after_ext4_error(&console_log, nix_store_lock.path())?;
+                    return Err(error);
+                }
             };
         if exit_code != 0 {
+            invalidate_stage0_store_after_ext4_error(&console_log, nix_store_lock.path())?;
             return Err(BuilderVmError::NixBuildFailed(format!(
                 "Stage 0 supervisor exited with status {exit_code}; \
                  console log at {}",
@@ -1043,6 +1060,7 @@ impl LibkrunBuilderVm {
         // from the console so a nix failure surfaces here with its own log
         // instead of as a downstream "rootfs.ext4 missing" error.
         let console = std::fs::read_to_string(&console_log).unwrap_or_default();
+        invalidate_stage0_store_after_ext4_error(&console_log, nix_store_lock.path())?;
         let console_log_path = console_log.to_string_lossy();
         stage0_run_result(&console, &console_log_path)
     }
@@ -1120,7 +1138,8 @@ impl LibkrunBuilderVm {
                     src: work_staging.path(),
                 },
             ],
-            u64::from(BUILDER_OUTPUT_DISK_MIB) << 20,
+            self.closure_nar.as_deref(),
+            OUTPUT_DISK_BYTES,
         )?;
 
         let mut krun = krun_context_for_image(&vm_name, &image)?
@@ -1147,12 +1166,8 @@ impl LibkrunBuilderVm {
                 attachment.read_only,
             );
         }
-        if let Some(share_dir) = self.closure_seed_share(&vm_state_dir)? {
-            krun = krun.add_virtio_fs(
-                CLOSURE_SEED_TAG,
-                path_to_str(&share_dir, "closure_seed_dir")?,
-            );
-        }
+        // No closure-seed share: the NAR rides the input disk above, landing at
+        // the same `/closure-seed/<CLOSURE_FILE>` the guest imports either way.
 
         for disk in &job.extra_disks {
             krun = krun.add_disk(
@@ -1646,7 +1661,8 @@ impl BuilderVm for LibkrunBuilderVm {
                     src: &mounts.host_bin_dir,
                 },
             ],
-            u64::from(BUILDER_OUTPUT_DISK_MIB) << 20,
+            self.closure_nar.as_deref(),
+            OUTPUT_DISK_BYTES,
         )?;
         let mut krun = krun_context_for_image(&vm_name, &image)?
             .with_resources(self.vcpus, self.memory_mib)
@@ -1672,12 +1688,9 @@ impl BuilderVm for LibkrunBuilderVm {
                 attachment.read_only,
             );
         }
-        if let Some(share_dir) = self.closure_seed_share(&vm_state_dir)? {
-            krun = krun.add_virtio_fs(
-                CLOSURE_SEED_TAG,
-                path_to_str(&share_dir, "closure_seed_dir")?,
-            );
-        }
+        // No closure-seed share: the NAR rides the input disk above, landing at
+        // the same `/closure-seed/<CLOSURE_FILE>` the guest imports either way.
+
         // Builder VMs are NIC-less: egress goes over the vsock relay below, so
         // the libkrun networking mode must be the disconnected sink — the
         // supervisor rejects anything else. Matches the Stage 0 path.
@@ -2320,7 +2333,7 @@ fn read_builder_vm_cache_manifest(
     })
 }
 
-fn builder_vm_source_checkout_root() -> Option<PathBuf> {
+pub(crate) fn builder_vm_source_checkout_root() -> Option<PathBuf> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir.parent()?.parent()?.to_path_buf();
     workspace_root
@@ -2422,235 +2435,6 @@ fn copy_builder_vm_image_files(
     Ok(())
 }
 
-fn auto_bootstrap_builder_vm_image(arch_dir: &Path) -> Result<bool, BuilderVmError> {
-    if std::env::var_os(BUILDER_VM_AUTO_BOOTSTRAP_SKIP_ENV).is_some() {
-        return Ok(false);
-    }
-
-    #[cfg(test)]
-    if std::env::var_os(BUILDER_VM_BOOTSTRAP_BIN_ENV).is_none() {
-        return Ok(false);
-    }
-
-    let Some(workspace_root) = builder_vm_source_checkout_root() else {
-        return Ok(false);
-    };
-
-    let bootstrap_bin = resolve_builder_vm_bootstrap_bin(&workspace_root)?;
-    let mut cmd = Command::new(&bootstrap_bin);
-    cmd.current_dir(&workspace_root)
-        .arg("__builder-vm-bootstrap");
-    #[cfg(target_os = "linux")]
-    if std::env::var_os(crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV).is_none() {
-        // Source-checkout auto-bootstrap on Linux should follow the Linux
-        // builder path, not the libkrun-default host path. The runtime-overlay
-        // source-build flow already uses QEMU shell jobs on Linux; keep Stage 0
-        // aligned so a cold builder-image cache does not fall into a libkrun
-        // networking prerequisite that the Linux builder path itself does not
-        // require.
-        cmd.env(
-            crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV,
-            "qemu",
-        );
-    }
-    let status = cmd.status().map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "spawn builder VM bootstrap helper {}: {e}",
-            bootstrap_bin.display()
-        ))
-    })?;
-    if !status.success() {
-        return Err(BuilderVmError::ExtractionFailed(format!(
-            "builder VM bootstrap helper {} exited with {} while refreshing {}",
-            bootstrap_bin.display(),
-            status.code().unwrap_or(-1),
-            arch_dir.display(),
-        )));
-    }
-    Ok(true)
-}
-
-pub fn maybe_reexec_builder_vm_bootstrap_helper() -> Result<bool, BuilderVmError> {
-    let Some(workspace_root) = builder_vm_source_checkout_root() else {
-        return Ok(false);
-    };
-
-    let bootstrap_bin = resolve_builder_vm_bootstrap_bin(&workspace_root)?;
-    if current_exe_matches(&bootstrap_bin) {
-        return Ok(false);
-    }
-
-    let mut cmd = Command::new(&bootstrap_bin);
-    cmd.current_dir(&workspace_root)
-        .arg("__builder-vm-bootstrap");
-    #[cfg(target_os = "linux")]
-    if std::env::var_os(crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV).is_none() {
-        cmd.env(
-            crate::builder_backend_select::MVM_BUILDER_BACKEND_ENV,
-            "qemu",
-        );
-    }
-    let status = cmd.status().map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "spawn explicit builder VM bootstrap helper {}: {e}",
-            bootstrap_bin.display()
-        ))
-    })?;
-    if !status.success() {
-        return Err(BuilderVmError::ExtractionFailed(format!(
-            "explicit builder VM bootstrap helper {} exited with {}",
-            bootstrap_bin.display(),
-            status.code().unwrap_or(-1),
-        )));
-    }
-    Ok(true)
-}
-
-fn current_exe_matches(path: &Path) -> bool {
-    let Ok(current_exe) = std::env::current_exe() else {
-        return false;
-    };
-    let current = current_exe.canonicalize().unwrap_or(current_exe);
-    let expected = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    current == expected
-}
-
-fn resolve_builder_vm_bootstrap_bin(workspace_root: &Path) -> Result<PathBuf, BuilderVmError> {
-    if let Some(path) = std::env::var_os(BUILDER_VM_BOOTSTRAP_BIN_ENV).map(PathBuf::from) {
-        if path.is_file() {
-            return Ok(path);
-        }
-        return Err(BuilderVmError::ExtractionFailed(format!(
-            "{} points at {} which is not a file",
-            BUILDER_VM_BOOTSTRAP_BIN_ENV,
-            path.display(),
-        )));
-    }
-
-    let helper_target_dir = builder_vm_bootstrap_helper_target_dir(workspace_root);
-    let helper_bin = helper_target_dir.join("debug").join("mvmctl");
-    if helper_bin.is_file() && !bootstrap_helper_needs_rebuild(&helper_bin, workspace_root) {
-        return Ok(helper_bin);
-    }
-    std::fs::create_dir_all(&helper_target_dir).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "create builder VM bootstrap helper target dir {}: {e}",
-            helper_target_dir.display()
-        ))
-    })?;
-
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let mut cmd =
-        builder_vm_bootstrap_helper_build_command(&cargo, workspace_root, &helper_target_dir);
-    let status = cmd.status().map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "spawn cargo to build mvmctl bootstrap helper: {e}"
-        ))
-    })?;
-    if !status.success() {
-        return Err(BuilderVmError::ExtractionFailed(format!(
-            "cargo build --bin mvmctl exited with {} while preparing the builder VM bootstrap helper",
-            status.code().unwrap_or(-1),
-        )));
-    }
-
-    if helper_bin.is_file() {
-        return Ok(helper_bin);
-    }
-
-    Err(BuilderVmError::ExtractionFailed(format!(
-        "mvmctl bootstrap helper not found after build at {}",
-        helper_bin.display()
-    )))
-}
-
-fn builder_vm_bootstrap_helper_build_command(
-    cargo: &std::ffi::OsStr,
-    workspace_root: &Path,
-    helper_target_dir: &Path,
-) -> Command {
-    let mut cmd = Command::new(cargo);
-    cmd.current_dir(workspace_root)
-        .env("CARGO_TARGET_DIR", helper_target_dir)
-        .args(["build", "-q", "--bin", "mvmctl"]);
-    cmd
-}
-
-fn bootstrap_helper_needs_rebuild(helper_bin: &Path, workspace_root: &Path) -> bool {
-    let Ok(helper_metadata) = fs::metadata(helper_bin) else {
-        return true;
-    };
-    let Ok(helper_modified) = helper_metadata.modified() else {
-        return true;
-    };
-
-    bootstrap_helper_inputs(workspace_root)
-        .into_iter()
-        .any(|path| {
-            newest_path_mtime(&path)
-                .map(|mtime| mtime > helper_modified)
-                .unwrap_or(true)
-        })
-}
-
-fn bootstrap_helper_inputs(workspace_root: &Path) -> Vec<PathBuf> {
-    [
-        workspace_root.join("Cargo.toml"),
-        workspace_root.join("Cargo.lock"),
-        workspace_root.join("crates/mvm-build/Cargo.toml"),
-        workspace_root.join("crates/mvm-cli/Cargo.toml"),
-        workspace_root.join("crates/mvm-build/src"),
-        workspace_root.join("crates/mvm-cli/src"),
-    ]
-    .into_iter()
-    .collect()
-}
-
-fn newest_path_mtime(path: &Path) -> io::Result<std::time::SystemTime> {
-    let metadata = fs::metadata(path)?;
-    if metadata.is_file() {
-        return metadata.modified();
-    }
-    if !metadata.is_dir() {
-        return Err(io::Error::other(format!(
-            "{} is neither a file nor a directory",
-            path.display()
-        )));
-    }
-
-    let mut newest = None;
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let child_mtime = newest_path_mtime(&entry.path())?;
-        match newest {
-            Some(current) if child_mtime <= current => {}
-            _ => newest = Some(child_mtime),
-        }
-    }
-    newest.or_else(|| metadata.modified().ok()).ok_or_else(|| {
-        io::Error::other(format!(
-            "failed to read modified time for {}",
-            path.display()
-        ))
-    })
-}
-
-fn builder_vm_bootstrap_helper_target_dir(workspace_root: &Path) -> PathBuf {
-    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR").filter(|dir| !dir.is_empty()) {
-        let target_dir = PathBuf::from(target_dir);
-        let base = if target_dir.is_absolute() {
-            target_dir
-        } else {
-            workspace_root.join(target_dir)
-        };
-        return base.join("mvm-builder-vm-bootstrap");
-    }
-
-    workspace_root
-        .join("target")
-        .join("mvm-builder-vm-bootstrap")
-}
-
 fn validate_builder_vm_image_cache(arch_dir: &Path) -> Result<String, BuilderVmError> {
     let kernel_path = arch_dir.join("vmlinux");
     let rootfs_path = arch_dir.join("rootfs.ext4");
@@ -2726,6 +2510,15 @@ pub(crate) fn prepopulate_stage0_nix_store_image(
     image: &BuilderVmImage,
     store_image: &Path,
 ) -> Result<(), BuilderVmError> {
+    let host_mkfs = find_host_mkfs_ext4();
+    prepopulate_stage0_nix_store_image_with_mkfs(image, store_image, host_mkfs.as_deref())
+}
+
+fn prepopulate_stage0_nix_store_image_with_mkfs(
+    image: &BuilderVmImage,
+    store_image: &Path,
+    host_mkfs: Option<&Path>,
+) -> Result<(), BuilderVmError> {
     let BuilderVmImage::RootDir { root_dir, .. } = image else {
         return Ok(());
     };
@@ -2738,7 +2531,7 @@ pub(crate) fn prepopulate_stage0_nix_store_image(
     let marker = stage0_nix_store_host_marker(&seed_store)?;
     let marker_path = stage0_nix_store_host_marker_path(store_image);
     if std::fs::read_to_string(&marker_path).is_ok_and(|existing| existing == marker)
-        && stage0_store_superblock_is_clean(store_image)?
+        && stage0_store_superblock_is_recoverable(store_image)?
     {
         return Ok(());
     }
@@ -2753,16 +2546,12 @@ pub(crate) fn prepopulate_stage0_nix_store_image(
         })?;
     }
 
-    let Some(mkfs) = find_host_mkfs_ext4() else {
-        // No host mkfs.ext4 (macOS ships none): format the store image in-process
-        // with the memory-safe pure-Rust writer so Stage 0 gets a real,
-        // persistent Nix store instead of falling back to a throwaway tmpfs on
-        // every boot — the fallback recompiles the whole builder closure cold
-        // each time. The image is formatted empty; the guest seeds it from the
-        // verified root store on first boot. Record the same host marker the
-        // seeded path writes so a later run skips reformatting and preserves the
-        // guest-seeded, grown store instead of wiping it.
-        format_stage0_store_empty_in_process(store_image)?;
+    let Some(mkfs) = host_mkfs else {
+        // macOS has no host mkfs.ext4, and the minimal verified Stage 0 seed
+        // intentionally does not carry e2fsprogs. Format a valid labeled ext4
+        // image in-process when that capability is compiled in; otherwise
+        // leave a blank device and let a richer Linux seed format it.
+        format_stage0_store_without_host_mkfs(store_image)?;
         std::fs::write(&marker_path, marker).map_err(|e| {
             BuilderVmError::ExtractionFailed(format!("write {}: {e}", marker_path.display()))
         })?;
@@ -2776,7 +2565,7 @@ pub(crate) fn prepopulate_stage0_nix_store_image(
         blocks_4k,
         "prepopulating Stage 0 Nix store image with host mkfs.ext4"
     );
-    let status = Command::new(&mkfs)
+    let status = Command::new(mkfs)
         // `-L` so the guest can find this disk by label instead of by device
         // letter, which shifts whenever a backend attaches another drive.
         .args(["-F", "-q", "-b", "4096", "-L"])
@@ -2802,13 +2591,41 @@ pub(crate) fn prepopulate_stage0_nix_store_image(
     Ok(())
 }
 
-/// Format the Stage 0 Nix store image as an empty, growable ext4 in-process,
-/// used when the host has no `mkfs.ext4` (macOS). Sized to the device minus the
-/// same 64 KiB margin the host-`mkfs` path leaves for libkrun virtio-blk
-/// geometry rounding. Leaves no seed marker: the guest treats the empty
-/// filesystem as uninitialized and seeds it from the verified root store.
+/// Reset a failed or seed-mismatched Stage 0 store to a blank sparse device.
+/// The Linux Stage 0 guest formats it with e2fsprogs before copying the verified
+/// seed closure. Truncating before restoring the device size discards every
+/// block from a previously damaged filesystem without materializing 64 GiB of
+/// zeros on the host.
+#[cfg(not(feature = "pure-mkfs"))]
+fn reset_stage0_store_for_guest_format(store_image: &Path) -> Result<(), BuilderVmError> {
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(store_image)
+        .map_err(|e| {
+            BuilderVmError::ExtractionFailed(format!("open {}: {e}", store_image.display()))
+        })?;
+    let device_size = file
+        .metadata()
+        .map_err(|e| {
+            BuilderVmError::ExtractionFailed(format!("stat {}: {e}", store_image.display()))
+        })?
+        .len();
+    file.set_len(0).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!("truncate {}: {e}", store_image.display()))
+    })?;
+    file.set_len(device_size).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!("resize {}: {e}", store_image.display()))
+    })?;
+    tracing::info!(
+        image = %store_image.display(),
+        device_size,
+        "reset Stage 0 Nix store for in-guest e2fsprogs format"
+    );
+    Ok(())
+}
+
 #[cfg(feature = "pure-mkfs")]
-fn format_stage0_store_empty_in_process(store_image: &Path) -> Result<(), BuilderVmError> {
+fn format_stage0_store_without_host_mkfs(store_image: &Path) -> Result<(), BuilderVmError> {
     let blocks_4k = host_file_4k_blocks_for_ext4(store_image)?;
     let size_bytes = blocks_4k * mvm_fs::ext4::BLOCK_SIZE as u64;
     let mut file = std::fs::OpenOptions::new()
@@ -2824,10 +2641,6 @@ fn format_stage0_store_empty_in_process(store_image: &Path) -> Result<(), Builde
             BuilderVmError::ExtractionFailed(format!("stat {}: {e}", store_image.display()))
         })?
         .len();
-    // `format_empty_ext4` writes only filesystem metadata so a large sparse
-    // backing file stays sparse. Reset the file first: every inode table the
-    // formatter advertises as zeroed must actually be zero even when this is a
-    // recovery reformat of an image containing an older Nix store.
     file.set_len(0).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!("truncate {}: {e}", store_image.display()))
     })?;
@@ -2849,20 +2662,14 @@ fn format_stage0_store_empty_in_process(store_image: &Path) -> Result<(), Builde
         image = %store_image.display(),
         free_blocks = summary.free_blocks,
         groups = summary.groups,
-        "formatted Stage 0 Nix store image in-process (no host mkfs.ext4)"
+        "formatted Stage 0 Nix store image in-process"
     );
     Ok(())
 }
 
-/// Without the pure-Rust writer there is nothing to format on a host lacking
-/// `mkfs.ext4`; Stage 0 falls back to its in-guest tmpfs seed copy.
 #[cfg(not(feature = "pure-mkfs"))]
-fn format_stage0_store_empty_in_process(store_image: &Path) -> Result<(), BuilderVmError> {
-    tracing::warn!(
-        image = %store_image.display(),
-        "mkfs.ext4 is not available on the host and pure-mkfs is disabled; Stage 0 will fall back to in-guest seed-store setup"
-    );
-    Ok(())
+fn format_stage0_store_without_host_mkfs(store_image: &Path) -> Result<(), BuilderVmError> {
+    reset_stage0_store_for_guest_format(store_image)
 }
 
 fn find_host_mkfs_ext4() -> Option<PathBuf> {
@@ -2900,13 +2707,45 @@ fn stage0_nix_store_host_marker_path(store_image: &Path) -> PathBuf {
     store_image.with_extension("stage0-seed")
 }
 
+fn invalidate_stage0_store_after_ext4_error(
+    console_log: &Path,
+    store_image: &Path,
+) -> Result<(), BuilderVmError> {
+    const EXT4_ERROR_REPORT: &str = "persistent Stage 0 ext4 store reported";
+    let console = std::fs::read_to_string(console_log).unwrap_or_default();
+    if !console.contains(EXT4_ERROR_REPORT) {
+        return Ok(());
+    }
+
+    let marker_path = stage0_nix_store_host_marker_path(store_image);
+    match std::fs::remove_file(&marker_path) {
+        Ok(()) => {
+            tracing::warn!(
+                image = %store_image.display(),
+                console = %console_log.display(),
+                "invalidated Stage 0 Nix store after guest ext4 error report"
+            );
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(BuilderVmError::ExtractionFailed(format!(
+            "remove invalid Stage 0 store marker {}: {error}",
+            marker_path.display()
+        ))),
+    }
+}
+
 const EXT4_SUPERBLOCK_MAGIC_OFFSET: u64 = 1024 + 0x38;
 const EXT4_SUPERBLOCK_MAGIC: u16 = 0xEF53;
+#[cfg(test)]
 const EXT4_VALID_FS: u16 = 0x0001;
+const EXT4_ERROR_FS: u16 = 0x0002;
 
-/// The external seed marker is only reusable when ext4 itself reports a clean
-/// unmount. A zero/dirty/error state forces a fresh sparse format before boot.
-fn stage0_store_superblock_is_clean(store_image: &Path) -> Result<bool, BuilderVmError> {
+/// The external seed marker remains reusable after an interrupted mount when
+/// ext4 has a valid superblock and has not recorded filesystem errors. A dirty
+/// journal is recoverable: the next guest mount replays it before Nix reads the
+/// store. Only an invalid superblock or the explicit error bit forces a reset.
+fn stage0_store_superblock_is_recoverable(store_image: &Path) -> Result<bool, BuilderVmError> {
     use std::io::{Read, Seek, SeekFrom};
 
     let mut file = std::fs::File::open(store_image).map_err(|e| {
@@ -2925,12 +2764,12 @@ fn stage0_store_superblock_is_clean(store_image: &Path) -> Result<bool, BuilderV
     })?;
     let magic = u16::from_le_bytes([fields[0], fields[1]]);
     let state = u16::from_le_bytes([fields[2], fields[3]]);
-    Ok(magic == EXT4_SUPERBLOCK_MAGIC && state == EXT4_VALID_FS)
+    Ok(magic == EXT4_SUPERBLOCK_MAGIC && state & EXT4_ERROR_FS == 0)
 }
 
 fn stage0_nix_store_host_marker(seed_store: &Path) -> Result<String, BuilderVmError> {
     Ok(format!(
-        "schema_version=1\nseed_store_entries_sha256={}\n",
+        "schema_version=2\nseed_store_entries_sha256={}\n",
         seed_store_entries_hash(seed_store)?
     ))
 }
@@ -2974,7 +2813,7 @@ pub fn ensure_builder_vm_image() -> Result<BuilderVmImage, BuilderVmError> {
             if seed_builder_vm_image_from_default_cache(&arch_dir)? {
                 return load_builder_vm_image_from_cache(&arch_dir);
             }
-            if !auto_bootstrap_builder_vm_image(&arch_dir)? {
+            if !crate::builder_vm_bootstrap::auto_bootstrap_builder_vm_image(&arch_dir)? {
                 return Err(initial_error);
             }
             load_builder_vm_image_from_cache(&arch_dir)
@@ -4502,7 +4341,10 @@ impl LibkrunPersistentHostVm {
         let job_dir = builder_vm_cache_dir().join("jobs").join(&session_id);
         stage_persistent_job_dir(&job_dir)?;
 
-        let vm_name = format!("mvm-persistent-builder-vm-{session_id}");
+        let vm_name = mvm_core::naming::persistent_builder_vm_name(
+            mvm_core::naming::BuilderVmSlot::Libkrun,
+            &session_id,
+        );
         let vm_state_dir = builder_vm_cache_dir().join("vms").join(&vm_name);
         std::fs::create_dir_all(&vm_state_dir).map_err(|e| {
             BuilderVmError::ExtractionFailed(format!(
@@ -4561,7 +4403,7 @@ impl LibkrunPersistentHostVm {
             krun = krun.add_vsock_port(mvm_agentd::vsock::GUEST_AGENT_PORT);
         }
         if let Some(attachment) =
-            persistent_builder_runtime_overlay_attachment(&image, runtime_overlay.as_deref())
+            builder_virtiofs_runtime_overlay_attachment(&image, runtime_overlay.as_deref())
         {
             krun = krun.with_cmdline(attachment.cmdline).add_disk(
                 "runtime-overlay",
@@ -4741,6 +4583,41 @@ impl PersistentVmHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::builder_vm_bootstrap::{
+        BUILDER_VM_BOOTSTRAP_BIN_ENV, resolve_builder_vm_bootstrap_bin,
+    };
+
+    #[test]
+    fn builder_egress_supervisor_keeps_protocol_stdout_free_of_tracing() {
+        let command = builder_egress_supervisor_command(
+            Path::new("/opt/mvmctl"),
+            Path::new("/opt/mvm-network-endpoint"),
+        );
+        assert_eq!(command.get_program(), "/opt/mvmctl");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [
+                "__builder-egress-supervisor",
+                "--endpoint",
+                "/opt/mvm-network-endpoint"
+            ]
+        );
+        let env = command.get_envs().collect::<Vec<_>>();
+        assert!(env.iter().any(|(key, value)| {
+            *key == "RUST_LOG" && value.is_some_and(|value| value == "off")
+        }));
+        for key in [
+            mvm_core::observability::span_timing::ENV_ENABLE,
+            mvm_core::observability::span_timing::ENV_OUT,
+            mvm_core::observability::span_timing::ENV_FILTER,
+        ] {
+            assert!(
+                env.iter()
+                    .any(|(candidate, value)| *candidate == key && value.is_none()),
+                "{key} must be removed from the protocol child"
+            );
+        }
+    }
     use crate::builder_vm_runtime::{INSTALL_SPEC_FILENAME, shell_single_quote_escape};
     use mvm_core::util::test_env::TestEnv;
     use tempfile::TempDir;
@@ -5302,12 +5179,23 @@ mod tests {
         let workspace = scratch.path().join("mvm-ws");
         std::fs::create_dir_all(workspace.join("crates/mvm-agentd/src")).unwrap();
         std::fs::create_dir_all(workspace.join("crates/mvm-agentd/target/debug")).unwrap();
+        std::fs::create_dir_all(workspace.join("third_party/local-path-crate/src")).unwrap();
         std::fs::create_dir_all(workspace.join("public")).unwrap();
         std::fs::write(workspace.join("Cargo.toml"), "[workspace]").unwrap();
         std::fs::write(workspace.join("Cargo.lock"), "").unwrap();
         std::fs::write(workspace.join("crates/mvm-agentd/Cargo.toml"), "x").unwrap();
         std::fs::write(workspace.join("crates/mvm-agentd/src/lib.rs"), "x").unwrap();
         std::fs::write(workspace.join("crates/mvm-agentd/target/debug/junk"), "x").unwrap();
+        std::fs::write(
+            workspace.join("third_party/local-path-crate/Cargo.toml"),
+            "[package]\nname = \"local-path-crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join("third_party/local-path-crate/src/lib.rs"),
+            "pub fn linked() {}",
+        )
+        .unwrap();
         std::fs::write(workspace.join("public/index.html"), "x").unwrap();
 
         let job = BuilderJob::Flake {
@@ -5333,6 +5221,12 @@ mod tests {
             job_dir
                 .join("mvm-src/crates/mvm-agentd/src/lib.rs")
                 .exists()
+        );
+        assert!(
+            job_dir
+                .join("mvm-src/third_party/local-path-crate/src/lib.rs")
+                .exists(),
+            "workspace-local path dependencies must be staged"
         );
         assert!(
             !job_dir.join("mvm-src/crates/mvm-agentd/target").exists(),
@@ -5428,6 +5322,49 @@ mod tests {
         );
     }
 
+    /// The seeded closure reaches the guest at `/closure-seed/<CLOSURE_FILE>`
+    /// whether it arrived as a virtio-fs share or on the input disk — the guest
+    /// imports a fixed path and does not care which transport populated it.
+    /// This pins the disk arm, which is what the one-shot builders now use.
+    ///
+    /// The source file is deliberately named something else: `pack_input_disk`
+    /// renames to `CLOSURE_FILE` on the way in, and a differently-named source
+    /// silently landing under its own name would make the guest import a no-op.
+    #[test]
+    fn prepare_transport_disks_lands_the_closure_under_its_fixed_name() {
+        let vm_state_dir = tempfile::TempDir::new().unwrap();
+        let scratch = tempfile::TempDir::new().unwrap();
+        let job = scratch.path().join("job");
+        std::fs::create_dir_all(&job).unwrap();
+        std::fs::write(job.join("cmd.sh"), b"#!/bin/sh\n").unwrap();
+        let nar = scratch.path().join("some-other-name.nar");
+        std::fs::write(&nar, b"closure-bytes").unwrap();
+
+        let (input_disk, _output_disk) = prepare_builder_transport_disks(
+            vm_state_dir.path(),
+            &[InputTree {
+                name: "job",
+                src: &job,
+            }],
+            Some(nar.as_path()),
+            1 << 20,
+        )
+        .unwrap();
+
+        let dest = scratch.path().join("unpacked");
+        read_output_disk(&input_disk, &dest).unwrap();
+        assert_eq!(
+            std::fs::read(
+                dest.join(CLOSURE_SEED_TAG)
+                    .join(crate::builder_pack::CLOSURE_FILE)
+            )
+            .unwrap(),
+            b"closure-bytes"
+        );
+        // And nothing was staged as a share directory for it.
+        assert!(!vm_state_dir.path().join(CLOSURE_SEED_TAG).exists());
+    }
+
     #[test]
     fn host_arch_tag_is_one_of_two_known_values() {
         // The builder-vm flake outputs aarch64-linux and
@@ -5461,7 +5398,7 @@ mod tests {
         std::fs::create_dir_all(store.join("aaa-seed-a")).unwrap();
 
         let marker = stage0_nix_store_host_marker(&store).unwrap();
-        assert!(marker.starts_with("schema_version=1\n"));
+        assert!(marker.starts_with("schema_version=2\n"));
         assert!(marker.contains("seed_store_entries_sha256="));
 
         std::fs::remove_dir_all(&store).unwrap();
@@ -5482,12 +5419,40 @@ mod tests {
         assert_eq!(host_file_4k_blocks_for_ext4(&image).unwrap(), 16);
     }
 
-    /// The no-host-mkfs path formats the store image into a valid ext4 in-process
-    /// and, crucially, writes no host seed marker — so the guest treats the fresh
-    /// filesystem as uninitialized and seeds it from the verified root store.
+    /// The no-host-mkfs path leaves a blank sparse device so the Linux guest's
+    /// established e2fsprogs formatter owns the long-lived filesystem.
+    #[cfg(not(feature = "pure-mkfs"))]
+    #[test]
+    fn stage0_store_reset_leaves_blank_sparse_device_for_guest_format() {
+        let scratch = TempDir::new().unwrap();
+        let image = scratch.path().join("nix-store-stage0-test.img");
+        std::fs::File::create(&image)
+            .unwrap()
+            .set_len(64 * 1024 * 1024)
+            .unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&image)
+            .unwrap()
+            .write_all(b"stale-filesystem")
+            .unwrap();
+
+        reset_stage0_store_for_guest_format(&image).unwrap();
+
+        assert_eq!(std::fs::metadata(&image).unwrap().len(), 64 * 1024 * 1024);
+        let mut prefix = [0u8; 16];
+        std::fs::File::open(&image)
+            .unwrap()
+            .read_exact(&mut prefix)
+            .unwrap();
+        assert_eq!(prefix, [0; 16]);
+    }
+
     #[cfg(feature = "pure-mkfs")]
     #[test]
-    fn stage0_store_empty_format_writes_valid_ext4_without_marker() {
+    fn stage0_store_without_host_mkfs_writes_labeled_ext4() {
+        use std::io::{Read, Seek, SeekFrom};
+
         let scratch = TempDir::new().unwrap();
         let image = scratch.path().join("nix-store-stage0-test.img");
         std::fs::File::create(&image)
@@ -5495,26 +5460,24 @@ mod tests {
             .set_len(64 * 1024 * 1024)
             .unwrap();
 
-        format_stage0_store_empty_in_process(&image).unwrap();
+        format_stage0_store_without_host_mkfs(&image).unwrap();
 
-        // ext4 superblock magic (0xEF53) at byte offset 1024 + 0x38.
-        let bytes = std::fs::read(&image).unwrap();
-        assert_eq!(
-            u16::from_le_bytes([bytes[1024 + 0x38], bytes[1024 + 0x39]]),
-            0xEF53,
-            "store image must be a valid ext4"
-        );
-        assert!(
-            !stage0_nix_store_host_marker_path(&image).exists(),
-            "no host seed marker: the guest must seed the empty store itself"
-        );
+        let mut file = std::fs::File::open(&image).unwrap();
+        file.seek(SeekFrom::Start(1024 + 0x38)).unwrap();
+        let mut magic = [0u8; 2];
+        file.read_exact(&mut magic).unwrap();
+        assert_eq!(u16::from_le_bytes(magic), EXT4_SUPERBLOCK_MAGIC);
+
+        file.seek(SeekFrom::Start(1024 + 0x78)).unwrap();
+        let mut label = [0u8; 16];
+        file.read_exact(&mut label).unwrap();
+        assert!(label.starts_with(crate::rootfs::STAGE0_NIX_STORE_EXT4_LABEL.as_bytes()));
     }
 
     /// A matching external marker must not hide filesystem corruption. The
     /// second prepopulation pass reformats an image whose ext4 error-state bit
     /// is set, restoring a usable sparse store instead of handing it back to
     /// Stage 0.
-    #[cfg(feature = "pure-mkfs")]
     #[test]
     fn stage0_store_prepopulate_repairs_corrupt_marked_store() {
         use std::io::{Read, Seek, SeekFrom, Write};
@@ -5534,8 +5497,8 @@ mod tests {
             .set_len(64 * 1024 * 1024)
             .unwrap();
 
-        // Pass 1: formats and records the host marker (macOS/no-mkfs path).
-        prepopulate_stage0_nix_store_image(&image, &store_image).unwrap();
+        // Pass 1: create the best available clean store and record the seed marker.
+        prepopulate_stage0_nix_store_image_with_mkfs(&image, &store_image, None).unwrap();
         assert!(
             stage0_nix_store_host_marker_path(&store_image).exists(),
             "first prepopulate records the host marker"
@@ -5555,11 +5518,26 @@ mod tests {
             f.read_exact(&mut b).unwrap();
             u16::from_le_bytes(b)
         };
+        #[cfg(feature = "pure-mkfs")]
+        assert_eq!(read_magic(&store_image), EXT4_SUPERBLOCK_MAGIC);
+        #[cfg(not(feature = "pure-mkfs"))]
         assert_eq!(
             read_magic(&store_image),
-            0xEF53,
-            "pass 1 wrote a valid ext4"
+            0,
+            "guest must receive a blank disk"
         );
+
+        // Model the guest's e2fsprogs format and clean unmount by writing the
+        // superblock fields the host-side health check consumes.
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&store_image)
+                .unwrap();
+            f.seek(SeekFrom::Start(magic_off)).unwrap();
+            f.write_all(&EXT4_SUPERBLOCK_MAGIC.to_le_bytes()).unwrap();
+            f.write_all(&EXT4_VALID_FS.to_le_bytes()).unwrap();
+        }
 
         // Set EXT4_ERROR_FS in the superblock state; only a reformat restores
         // the valid-filesystem state.
@@ -5569,21 +5547,20 @@ mod tests {
                 .open(&store_image)
                 .unwrap();
             f.seek(SeekFrom::Start(magic_off + 2)).unwrap();
-            f.write_all(&0x0002_u16.to_le_bytes()).unwrap();
+            f.write_all(&EXT4_ERROR_FS.to_le_bytes()).unwrap();
         }
 
-        // Pass 2: marker matches, but filesystem health does not → reformat.
-        prepopulate_stage0_nix_store_image(&image, &store_image).unwrap();
-        assert_eq!(
-            read_state(&store_image),
-            EXT4_VALID_FS,
-            "a corrupt marked store must be reformatted"
-        );
+        // Pass 2: marker matches, but filesystem health does not, so the
+        // damaged state must be replaced rather than mounted again.
+        prepopulate_stage0_nix_store_image_with_mkfs(&image, &store_image, None).unwrap();
+        #[cfg(feature = "pure-mkfs")]
+        assert_eq!(read_state(&store_image), EXT4_VALID_FS);
+        #[cfg(not(feature = "pure-mkfs"))]
+        assert_eq!(read_state(&store_image), 0);
     }
 
-    #[cfg(feature = "pure-mkfs")]
     #[test]
-    fn stage0_store_prepopulate_preserves_clean_marked_store() {
+    fn stage0_store_prepopulate_preserves_recoverable_dirty_marked_store() {
         use std::io::{Read, Seek, SeekFrom, Write};
 
         let scratch = TempDir::new().unwrap();
@@ -5601,7 +5578,21 @@ mod tests {
             .set_len(64 * 1024 * 1024)
             .unwrap();
 
-        prepopulate_stage0_nix_store_image(&image, &store_image).unwrap();
+        prepopulate_stage0_nix_store_image_with_mkfs(&image, &store_image, None).unwrap();
+        // Model a successful guest format followed by a forced host-side
+        // timeout while the filesystem is mounted. The valid bit is clear,
+        // but ext4 has not recorded an error and can replay its journal.
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&store_image)
+                .unwrap();
+            file.seek(SeekFrom::Start(EXT4_SUPERBLOCK_MAGIC_OFFSET))
+                .unwrap();
+            file.write_all(&EXT4_SUPERBLOCK_MAGIC.to_le_bytes())
+                .unwrap();
+            file.write_all(&0_u16.to_le_bytes()).unwrap();
+        }
         let sentinel_offset = 8 * 1024 * 1024;
         let mut file = std::fs::OpenOptions::new()
             .read(true)
@@ -5612,12 +5603,39 @@ mod tests {
         file.write_all(b"warm-cache").unwrap();
         drop(file);
 
-        prepopulate_stage0_nix_store_image(&image, &store_image).unwrap();
+        prepopulate_stage0_nix_store_image_with_mkfs(&image, &store_image, None).unwrap();
         let mut file = std::fs::File::open(&store_image).unwrap();
         file.seek(SeekFrom::Start(sentinel_offset)).unwrap();
         let mut sentinel = [0u8; 10];
         file.read_exact(&mut sentinel).unwrap();
         assert_eq!(&sentinel, b"warm-cache");
+    }
+
+    #[test]
+    fn stage0_ext4_error_report_invalidates_only_the_external_store_marker() {
+        let scratch = TempDir::new().unwrap();
+        let store_image = scratch.path().join("nix-store-stage0-test.img");
+        let marker = stage0_nix_store_host_marker_path(&store_image);
+        let console = scratch.path().join("console.log");
+        std::fs::write(&marker, b"seed").unwrap();
+        std::fs::write(&console, b"stage0-init: build failed: nix build exit 1\n").unwrap();
+
+        invalidate_stage0_store_after_ext4_error(&console, &store_image).unwrap();
+        assert!(
+            marker.exists(),
+            "ordinary build failures preserve the warm store"
+        );
+
+        std::fs::write(
+            &console,
+            b"stage0-init: build failed: persistent Stage 0 ext4 store reported 7 filesystem error(s)\n",
+        )
+        .unwrap();
+        invalidate_stage0_store_after_ext4_error(&console, &store_image).unwrap();
+        assert!(
+            !marker.exists(),
+            "filesystem errors force a fresh guest format"
+        );
     }
 
     // `read_job_result_*`, `extract_nix_store_hash_*`,
@@ -5686,13 +5704,13 @@ mod tests {
         .unwrap();
         std::fs::write(
             arch_dir.join("manifest.json"),
-            r#"{"cache_contract_version":3,"runtime_overlay_ready":false,"vsock_egress_ready":true}"#,
+            r#"{"cache_contract_version":4,"runtime_overlay_ready":false,"vsock_egress_ready":true}"#,
         )
         .unwrap();
 
         let err = ensure_builder_vm_image().unwrap_err();
         assert!(
-            format!("{err}").contains("cache_contract_version=3"),
+            format!("{err}").contains("cache_contract_version=4"),
             "got {err}"
         );
     }
@@ -5733,7 +5751,7 @@ mod tests {
 
         let err = ensure_builder_vm_image().unwrap_err();
         assert!(
-            format!("{err}").contains("cache_contract_version=3"),
+            format!("{err}").contains("cache_contract_version=4"),
             "got {err}"
         );
     }
@@ -5770,7 +5788,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             arch_dir.join("manifest.json"),
-            r#"{"cache_contract_version":3,"runtime_overlay_ready":true,"vsock_egress_ready":true}"#,
+            r#"{"cache_contract_version":4,"runtime_overlay_ready":true,"vsock_egress_ready":true}"#,
         )
         .unwrap();
 
@@ -5814,7 +5832,7 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nset -eu\narch_dir=\"$MVM_HOME/cache/builder-vm/{arch}\"\nmkdir -p \"$arch_dir\"\nprintf 'kernel' > \"$arch_dir/vmlinux\"\nprintf 'rootfs' > \"$arch_dir/rootfs.ext4\"\nprintf '%s\\n' 'console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init' > \"$arch_dir/cmdline.txt\"\nmanifest_tmp=\"$arch_dir/manifest.$$.json.tmp\"\ncat > \"$manifest_tmp\" <<'EOF'\n{{\"cache_contract_version\":3,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}}\nEOF\nmv \"$manifest_tmp\" \"$arch_dir/manifest.json\"\n"
+                "#!/bin/sh\nset -eu\narch_dir=\"$MVM_HOME/cache/builder-vm/{arch}\"\nmkdir -p \"$arch_dir\"\nprintf 'kernel' > \"$arch_dir/vmlinux\"\nprintf 'rootfs' > \"$arch_dir/rootfs.ext4\"\nprintf '%s\\n' 'console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init' > \"$arch_dir/cmdline.txt\"\nmanifest_tmp=\"$arch_dir/manifest.$$.json.tmp\"\ncat > \"$manifest_tmp\" <<'EOF'\n{{\"cache_contract_version\":4,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}}\nEOF\nmv \"$manifest_tmp\" \"$arch_dir/manifest.json\"\n"
             ),
         )
         .unwrap();
@@ -5869,7 +5887,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             source_arch_dir.join("manifest.json"),
-            r#"{"cache_contract_version":3,"runtime_overlay_ready":true,"vsock_egress_ready":true}"#,
+            r#"{"cache_contract_version":4,"runtime_overlay_ready":true,"vsock_egress_ready":true}"#,
         )
         .unwrap();
 
@@ -5913,7 +5931,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             source_arch_dir.join("manifest.json"),
-            r#"{"cache_contract_version":3,"runtime_overlay_ready":true,"vsock_egress_ready":true}"#,
+            r#"{"cache_contract_version":4,"runtime_overlay_ready":true,"vsock_egress_ready":true}"#,
         )
         .unwrap();
         let sums = crate::cache_install::digest_manifest(
@@ -6037,7 +6055,7 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nset -eu\narch_dir=\"$MVM_HOME/cache/builder-vm/{arch}\"\nmkdir -p \"$arch_dir\"\nprintf 'kernel-new' > \"$arch_dir/vmlinux\"\nprintf 'rootfs-new' > \"$arch_dir/rootfs.ext4\"\nprintf '%s\\n' 'console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init' > \"$arch_dir/cmdline.txt\"\nmanifest_tmp=\"$arch_dir/manifest.$$.json.tmp\"\ncat > \"$manifest_tmp\" <<'EOF'\n{{\"cache_contract_version\":3,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}}\nEOF\nmv \"$manifest_tmp\" \"$arch_dir/manifest.json\"\n"
+                "#!/bin/sh\nset -eu\narch_dir=\"$MVM_HOME/cache/builder-vm/{arch}\"\nmkdir -p \"$arch_dir\"\nprintf 'kernel-new' > \"$arch_dir/vmlinux\"\nprintf 'rootfs-new' > \"$arch_dir/rootfs.ext4\"\nprintf '%s\\n' 'console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init' > \"$arch_dir/cmdline.txt\"\nmanifest_tmp=\"$arch_dir/manifest.$$.json.tmp\"\ncat > \"$manifest_tmp\" <<'EOF'\n{{\"cache_contract_version\":4,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}}\nEOF\nmv \"$manifest_tmp\" \"$arch_dir/manifest.json\"\n"
             ),
         )
         .unwrap();
@@ -6062,7 +6080,7 @@ mod tests {
             std::fs::read_to_string(target_arch_dir.join("manifest.json"))
                 .unwrap()
                 .trim(),
-            "{\"cache_contract_version\":3,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}"
+            "{\"cache_contract_version\":4,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}"
         );
         match image {
             BuilderVmImage::Rootfs {
@@ -6082,193 +6100,11 @@ mod tests {
     }
 
     #[test]
-    fn builder_vm_bootstrap_helper_target_dir_is_dedicated() {
-        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut env = TestEnv::new();
-        env.remove("CARGO_TARGET_DIR");
-
-        let dir = builder_vm_bootstrap_helper_target_dir(Path::new("/workspace"));
-        assert_eq!(
-            dir,
-            PathBuf::from("/workspace/target/mvm-builder-vm-bootstrap")
-        );
-    }
-
-    #[test]
-    fn builder_vm_bootstrap_helper_target_dir_honors_cargo_target_dir() {
-        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut env = TestEnv::new();
-        env.set("CARGO_TARGET_DIR", "shared-target");
-
-        let dir = builder_vm_bootstrap_helper_target_dir(Path::new("/workspace"));
-        assert_eq!(
-            dir,
-            PathBuf::from("/workspace/shared-target/mvm-builder-vm-bootstrap")
-        );
-    }
-
-    #[test]
-    fn bootstrap_helper_build_command_uses_isolated_target_dir() {
-        let cmd = builder_vm_bootstrap_helper_build_command(
-            std::ffi::OsStr::new("cargo"),
-            Path::new("/workspace"),
-            Path::new("/tmp/helper-target"),
-        );
-
-        let args = cmd
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        assert_eq!(args, vec!["build", "-q", "--bin", "mvmctl"]);
-
-        let envs = cmd
-            .get_envs()
-            .map(|(key, value)| {
-                (
-                    key.to_string_lossy().into_owned(),
-                    value.map(|v| v.to_string_lossy().into_owned()),
-                )
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
-        assert_eq!(
-            envs.get("CARGO_TARGET_DIR"),
-            Some(&Some("/tmp/helper-target".to_string()))
-        );
-    }
-
-    #[test]
     fn builder_vm_source_checkout_root_detects_workspace() {
         let root = builder_vm_source_checkout_root().expect("source checkout root");
         assert!(
             root.join("nix/images/builder-vm/flake.nix").is_file(),
             "workspace root must contain the builder-vm flake"
-        );
-    }
-
-    #[test]
-    fn resolve_builder_vm_bootstrap_bin_prefers_env_override() {
-        let dir = TempDir::new().unwrap();
-        let helper = dir.path().join("mvmctl-helper");
-        std::fs::write(&helper, b"#!/bin/sh\n").unwrap();
-
-        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut env = TestEnv::new();
-        env.set(
-            BUILDER_VM_BOOTSTRAP_BIN_ENV,
-            helper.display().to_string().as_str(),
-        );
-
-        let got = resolve_builder_vm_bootstrap_bin(dir.path()).expect("helper path");
-        assert_eq!(got, helper);
-    }
-
-    #[test]
-    fn resolve_builder_vm_bootstrap_bin_rejects_missing_env_override() {
-        let dir = TempDir::new().unwrap();
-        let missing = dir.path().join("missing-helper");
-
-        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut env = TestEnv::new();
-        env.set(
-            BUILDER_VM_BOOTSTRAP_BIN_ENV,
-            missing.display().to_string().as_str(),
-        );
-
-        let err =
-            resolve_builder_vm_bootstrap_bin(dir.path()).expect_err("missing helper must fail");
-        assert!(err.to_string().contains("not a file"), "{err}");
-        assert!(
-            err.to_string().contains(BUILDER_VM_BOOTSTRAP_BIN_ENV),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn bootstrap_helper_needs_rebuild_when_tracked_source_is_newer() {
-        let workspace = TempDir::new().unwrap();
-        let helper = workspace
-            .path()
-            .join("target/mvm-builder-vm-bootstrap/debug/mvmctl");
-        let helper_parent = helper.parent().expect("helper parent");
-        std::fs::create_dir_all(helper_parent).unwrap();
-        std::fs::write(&helper, b"helper").unwrap();
-
-        let cargo_toml = workspace.path().join("Cargo.toml");
-        std::fs::write(&cargo_toml, "[workspace]\n").unwrap();
-        let cargo_lock = workspace.path().join("Cargo.lock");
-        std::fs::write(&cargo_lock, "# lock\n").unwrap();
-        let build_toml = workspace.path().join("crates/mvm-build/Cargo.toml");
-        std::fs::create_dir_all(build_toml.parent().expect("mvm-build manifest parent")).unwrap();
-        std::fs::write(&build_toml, "[package]\nname = \"mvm-build\"\n").unwrap();
-        let cli_toml = workspace.path().join("crates/mvm-cli/Cargo.toml");
-        std::fs::create_dir_all(cli_toml.parent().expect("mvm-cli manifest parent")).unwrap();
-        std::fs::write(&cli_toml, "[package]\nname = \"mvm-cli\"\n").unwrap();
-        let build_src = workspace.path().join("crates/mvm-build/src/lib.rs");
-        std::fs::create_dir_all(build_src.parent().expect("mvm-build src parent")).unwrap();
-        std::fs::write(&build_src, "pub fn build() {}\n").unwrap();
-        let cli_src = workspace.path().join("crates/mvm-cli/src/main.rs");
-        std::fs::create_dir_all(cli_src.parent().expect("mvm-cli src parent")).unwrap();
-        std::fs::write(&cli_src, "fn main() {}\n").unwrap();
-
-        let older = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(10);
-        let newer = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(20);
-        set_mtime(&helper, older);
-        set_mtime(&cargo_toml, older);
-        set_mtime(&cargo_lock, older);
-        set_mtime(&build_toml, older);
-        set_mtime(&cli_toml, older);
-        set_mtime(&build_src, older);
-        set_mtime(&cli_src, newer);
-
-        assert!(bootstrap_helper_needs_rebuild(&helper, workspace.path()));
-    }
-
-    #[test]
-    fn bootstrap_helper_needs_rebuild_skips_fresh_helper() {
-        let workspace = TempDir::new().unwrap();
-        let helper = workspace
-            .path()
-            .join("target/mvm-builder-vm-bootstrap/debug/mvmctl");
-        let helper_parent = helper.parent().expect("helper parent");
-        std::fs::create_dir_all(helper_parent).unwrap();
-        std::fs::write(&helper, b"helper").unwrap();
-
-        let cargo_toml = workspace.path().join("Cargo.toml");
-        std::fs::write(&cargo_toml, "[workspace]\n").unwrap();
-        let cargo_lock = workspace.path().join("Cargo.lock");
-        std::fs::write(&cargo_lock, "# lock\n").unwrap();
-        let build_toml = workspace.path().join("crates/mvm-build/Cargo.toml");
-        std::fs::create_dir_all(build_toml.parent().expect("mvm-build manifest parent")).unwrap();
-        std::fs::write(&build_toml, "[package]\nname = \"mvm-build\"\n").unwrap();
-        let cli_toml = workspace.path().join("crates/mvm-cli/Cargo.toml");
-        std::fs::create_dir_all(cli_toml.parent().expect("mvm-cli manifest parent")).unwrap();
-        std::fs::write(&cli_toml, "[package]\nname = \"mvm-cli\"\n").unwrap();
-        let build_src = workspace.path().join("crates/mvm-build/src/lib.rs");
-        std::fs::create_dir_all(build_src.parent().expect("mvm-build src parent")).unwrap();
-        std::fs::write(&build_src, "pub fn build() {}\n").unwrap();
-        let cli_src = workspace.path().join("crates/mvm-cli/src/main.rs");
-        std::fs::create_dir_all(cli_src.parent().expect("mvm-cli src parent")).unwrap();
-        std::fs::write(&cli_src, "fn main() {}\n").unwrap();
-
-        let older = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(10);
-        let newer = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(20);
-        set_mtime(&cargo_toml, older);
-        set_mtime(&cargo_lock, older);
-        set_mtime(&build_toml, older);
-        set_mtime(&cli_toml, older);
-        set_mtime(&build_src, older);
-        set_mtime(&cli_src, older);
-        set_mtime(&helper, newer);
-
-        assert!(!bootstrap_helper_needs_rebuild(&helper, workspace.path()));
-    }
-
-    #[test]
-    fn current_exe_matches_current_binary() {
-        let current = std::env::current_exe().expect("current exe");
-        assert!(
-            current_exe_matches(&current),
-            "current executable should match itself"
         );
     }
 
@@ -7016,7 +6852,6 @@ mod tests {
         assert!(cmdline.contains("mvm.builder_transport=disk"));
         assert!(cmdline.contains("mvm.builder_input=/dev/vdc"));
         assert!(cmdline.contains("mvm.builder_output=/dev/vdd"));
-        assert!(cmdline.contains("mvm.runtime_source_policy=required_overlay"));
         assert!(cmdline.contains("mvm.runtime_data=/dev/vde"));
         assert!(cmdline.contains(BUILDER_VSOCK_EGRESS_TOKEN));
         assert!(cmdline.starts_with("console=hvc0 root=/dev/vda"));
@@ -7034,11 +6869,6 @@ mod tests {
             .expect("rootfs builder images attach the runtime overlay");
         assert_eq!(attachment.disk_path, overlay);
         assert!(attachment.read_only);
-        assert!(
-            attachment
-                .cmdline
-                .contains("mvm.runtime_source_policy=required_overlay")
-        );
         assert!(attachment.cmdline.contains("rootwait"));
         assert!(attachment.cmdline.contains("panic=-1"));
         assert!(attachment.cmdline.contains("loglevel=8"));
@@ -7061,24 +6891,19 @@ mod tests {
     }
 
     #[test]
-    fn persistent_builder_runtime_overlay_uses_virtiofs_disk_layout() {
+    fn builder_virtiofs_runtime_overlay_uses_virtiofs_disk_layout() {
         let image = BuilderVmImage::new(
             PathBuf::from("/img/Image"),
             PathBuf::from("/img/rootfs.ext4"),
             "console=hvc0 root=/dev/vda".to_string(),
         );
         let overlay = Path::new("/cache/runtime-overlay.ext4");
-        let attachment = persistent_builder_runtime_overlay_attachment(&image, Some(overlay))
-            .expect("persistent rootfs builders attach the runtime overlay");
+        let attachment = builder_virtiofs_runtime_overlay_attachment(&image, Some(overlay))
+            .expect("virtio-fs rootfs builders attach the runtime overlay");
 
         assert_eq!(attachment.disk_path, overlay);
         assert!(attachment.read_only);
         assert!(attachment.cmdline.contains("mvm.runtime_data=/dev/vdc"));
-        assert!(
-            attachment
-                .cmdline
-                .contains("mvm.runtime_source_policy=required_overlay")
-        );
         assert!(!attachment.cmdline.contains("mvm.builder_transport=disk"));
         assert!(!attachment.cmdline.contains("mvm.builder_input="));
         assert!(!attachment.cmdline.contains("mvm.builder_output="));

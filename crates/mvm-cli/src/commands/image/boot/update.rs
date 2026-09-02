@@ -95,17 +95,15 @@ fn fetch_into(dir: &Path, tag: &str) -> Result<()> {
     let checksums = format!("default-microvm-{arch}-checksums-sha256.txt");
     let names: Vec<&str> = assets.iter().map(|(name, _)| name.as_str()).collect();
 
-    // The manifest's signing identity is tag-bound. The boot-image release
-    // train has not published its first tag yet, so the identity this resolves
-    // to is the binary train's; when the image train ships, its own identity
-    // belongs here. Until then this rung fails closed rather than admitting
-    // unverified bytes, which is the safe direction to be wrong in.
+    // The manifest's signing identity is tag-bound, and the image train has now
+    // published, so its own identity is what belongs here.
     let version = tag.strip_prefix("boot-image/v").unwrap_or(tag);
     let expected = fetch_expected_hashes(
         &ChecksumManifest {
             base_url: &base_url,
             asset: &checksums,
             version,
+            train: mvm_build::release_signature::ReleaseTrain::BootImage,
         },
         &names,
     )?;

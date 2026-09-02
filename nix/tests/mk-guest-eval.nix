@@ -255,4 +255,96 @@ in
         extraFiles."/etc/banner".content = "install openssh here";
       })
     ).sshTemplateBan);
+
+  # ── declared-but-unenforced surface ───────────────────────────
+  # `mvmctl generate template` emits `healthChecks` into its scaffolds and the
+  # mkGuest guide teaches all three. Rejecting them made every scaffolded
+  # project fail to evaluate with "unexpected argument". They are accepted and
+  # recorded; nothing acts on them until the supervisor lands.
+
+  # `healthChecks` is consumed now, not merely recorded: each check becomes a
+  # `/etc/mvm/probes.d/<name>.json` drop-in, which the guest agent already
+  # scans at boot and runs on its own interval. Before this, the directory was
+  # always empty and a declared check did nothing.
+  health_checks_render_a_probe_dropin =
+    let
+      entry = (meta (mkGuest {
+        name = "hc";
+        entrypoint.command = [ "/bin/x" ];
+        healthChecks.app = { healthCmd = "/bin/true"; healthIntervalSecs = 5; };
+      })).probes."/etc/mvm/probes.d/app.json";
+    in
+    entry.name == "app"
+      && entry.cmd == "/bin/true"
+      && entry.interval_secs == 5
+      && entry.timeout_secs == 10          # documented default
+      && entry.output_format == "exit_code";
+
+  # A guest declaring no checks carries no drop-ins, so the agent's boot scan
+  # finds an empty directory rather than a stray file.
+  no_health_checks_renders_no_dropins =
+    (meta (mkGuest {
+      name = "plain-probe";
+      entrypoint.command = [ "/bin/x" ];
+    })).probes == { };
+
+  # A check with no command is a typo, not a default.
+  health_check_without_a_command_is_rejected =
+    rejects (mkGuest {
+      name = "hc-nocmd";
+      entrypoint.command = [ "/bin/x" ];
+      healthChecks.app = { healthIntervalSecs = 5; };
+    });
+
+  # `healthChecks` no longer appears in the unenforced list; the other two
+  # still do, because nothing consumes them yet.
+  health_checks_are_no_longer_unenforced =
+    (meta (mkGuest {
+      name = "hc2";
+      entrypoint.command = [ "/bin/x" ];
+      healthChecks.app = { healthCmd = "true"; };
+    })).unenforced.names == [ ];
+
+  volume_mounts_are_accepted =
+    (meta (mkGuest {
+      name = "vm";
+      entrypoint.command = [ "/bin/x" ];
+      volumeMounts."/mnt/work" = { volume = "workspace"; readOnly = false; };
+    })).unenforced.names == [ "volumeMounts" ];
+
+  service_group_is_accepted =
+    (meta (mkGuest {
+      name = "sg";
+      entrypoint.command = [ "/bin/x" ];
+      serviceGroup = "web";
+    })).unenforced.names == [ "serviceGroup" ];
+
+  # A guest declaring none of them reports nothing, so the warning stays quiet
+  # for the overwhelmingly common case.
+  unenforced_is_empty_by_default =
+    (meta (mkGuest {
+      name = "plain";
+      entrypoint.command = [ "/bin/x" ];
+    })).unenforced.names == [ ];
+
+  # The values themselves are carried through, not just their names — a host
+  # or an audit can see exactly what the flake asked for and did not get.
+  unenforced_records_the_declared_value =
+    (meta (mkGuest {
+      name = "hc-value";
+      entrypoint.command = [ "/bin/x" ];
+      healthChecks.app = { healthCmd = "/bin/true"; };
+    })).unenforced.healthChecks.app.healthCmd == "/bin/true";
+
+  # A typo is still an error — the argument set is deliberately non-variadic —
+  # but `builtins.tryEval` cannot catch an arity error the way it catches a
+  # `throw`, so that case is not expressible here. `wrong_shape_is_rejected`
+  # below covers the shape guard, which is a real throw.
+
+  wrong_shape_is_rejected =
+    rejects (mkGuest {
+      name = "bad-shape";
+      entrypoint.command = [ "/bin/x" ];
+      serviceGroup = 42;
+    });
 }

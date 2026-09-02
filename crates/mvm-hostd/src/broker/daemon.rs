@@ -20,7 +20,7 @@
 //! `mvm-backend` `ensure_daemon`/`register_vm` seam that replaces the per-VM
 //! `spawn_broker` fork is the next slice.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -44,6 +44,7 @@ use super::handlers::host_audit_v1::HostAuditV1Handler;
 use super::handlers::register_bound_handlers;
 use super::registry::Registry;
 use super::server::{read_frame, serve_on_listener, write_frame};
+use super::service_proxy::ControllerServiceProxy;
 
 /// Audit category for daemon-emitted health entries. Health probing is
 /// mvm-hostd lifecycle activity, so it files under the host-asserted `host`
@@ -194,6 +195,80 @@ impl RegistrationJournal {
     }
 }
 
+/// Open the assurance session the supervisor admitted for this VM.
+///
+/// This daemon is the process a probe reaches, so it is the only place a
+/// session can usefully exist. The registration is host-signed, so what
+/// arrives here has already been decided: the binding names a plan the
+/// supervisor verified, the authority is post-intersection, and the declared
+/// destinations are resolved. Nothing is judged again.
+///
+/// Both refusals below open nothing rather than opening something partial. A
+/// session whose service is not bound and a session with no audit route are
+/// each a registration that does not describe a run this daemon should serve,
+/// and the probe verb answers `NotBound` or `AuditUnavailable` either way.
+fn open_admitted_assurance_session(bound: &super::handlers::BoundHandlers, r: &RegisterVm) {
+    let Some(session) = &r.assurance else { return };
+    let Some(session_ref) = &session.session else {
+        tracing::warn!(vm_id = %r.vm_id, "legacy assurance registration has no provider session identity; refusing to open");
+        return;
+    };
+    let Some(source_digest) = &session.source_digest else {
+        tracing::warn!(vm_id = %r.vm_id, "assurance registration has no source digest; refusing to open");
+        return;
+    };
+    let Some(handler) = &bound.assurance else {
+        tracing::warn!(
+            vm_id = %r.vm_id,
+            "an assurance session was registered but host.assurance.v1 is not bound; \
+             opening nothing"
+        );
+        return;
+    };
+    let Some(path) = &r.audit_signer_uds_path else {
+        tracing::warn!(
+            vm_id = %r.vm_id,
+            "an assurance session was registered with no audit route; its probes could \
+             not be recorded, so the session is not opened"
+        );
+        return;
+    };
+
+    let sink = crate::audit::assurance::SignerSink::new(
+        super::audit_client::AuditClient::new(path.clone()),
+        r.workload_id.clone().unwrap_or_else(|| r.vm_id.clone()),
+        r.tenant_id.clone(),
+        session.workload_session_id.clone(),
+    );
+    handler.open_session(super::handlers::host_assurance_v1::AssuranceSessionSpec {
+        workload_session_id: session.workload_session_id.clone(),
+        binding: session.binding.clone(),
+        session: session_ref.clone(),
+        source_digest: source_digest.clone(),
+        authority: session.authority.clone(),
+        trial_id: session.trial_id.clone(),
+        policy: session.policy.clone(),
+        destinations: session
+            .destinations
+            .iter()
+            .map(
+                |edge| super::handlers::host_assurance_v1::DeclaredDestination {
+                    label: edge.label.clone(),
+                    host: edge.host.clone(),
+                    port: edge.port,
+                },
+            )
+            .collect(),
+        identity: session.identity.clone(),
+        sink: Some(std::sync::Arc::new(sink)),
+    });
+    tracing::info!(
+        vm_id = %r.vm_id,
+        workload_session_id = %session.workload_session_id,
+        "assurance session opened for the admitted campaign"
+    );
+}
+
 impl HostAgentDaemon {
     /// New daemon for `tenant_id`, verifying control messages against
     /// `verifying_key` (the host signer's public key). `max_frame_bytes` caps
@@ -339,6 +414,26 @@ impl HostAgentDaemon {
         // is host-signed, validate it as a defense-in-depth path-injection
         // guard before it reaches any filesystem path.
         validate_vm_id(&r.vm_id)?;
+        if r.service_proxies.len() > mvm_contract::protocol::broker_control::MAX_SERVICE_PROXIES {
+            bail!("registration has too many controller-backed services");
+        }
+        let mut proxy_services = HashSet::new();
+        for proxy in &r.service_proxies {
+            proxy
+                .validate()
+                .map_err(|message| anyhow::anyhow!(message))?;
+            if !r.services_bindings.contains(&proxy.service) {
+                bail!("controller-backed service is absent from signed service admission");
+            }
+            if !proxy_services.insert(proxy.service.clone()) {
+                bail!("registration repeats a controller-backed service");
+            }
+            for descriptor in &proxy.capabilities {
+                if !r.capability_bindings.contains(&descriptor.binding()) {
+                    bail!("controller-backed capability is absent from signed admission");
+                }
+            }
+        }
 
         // Re-register replaces: drop the prior handle first so its socket is
         // unbound before we rebind (idempotent rebind, fail-closed).
@@ -371,10 +466,29 @@ impl HostAgentDaemon {
         registry
             .admit_capabilities(r.capability_bindings.clone())
             .context("load host-signed capability bindings")?;
-        let _bound = register_bound_handlers(&mut registry, &r.services_bindings);
+        let local_services: Vec<_> = r
+            .services_bindings
+            .iter()
+            .filter(|service| !proxy_services.contains(*service))
+            .cloned()
+            .collect();
+        let _bound = register_bound_handlers(&mut registry, &local_services);
+        open_admitted_assurance_session(&_bound, r);
+        for binding in &r.service_proxies {
+            let proxy = Arc::new(ControllerServiceProxy::new(binding.clone())?);
+            let handler: Arc<dyn mvm_core::protocol::handler::ServiceHandler> = proxy.clone();
+            registry.register(Arc::clone(&handler));
+            registry.require_capability(binding.service.clone());
+            for descriptor in proxy.descriptors() {
+                registry
+                    .register_capability(Arc::clone(&handler), descriptor.clone())
+                    .context("register controller-backed typed capability")?;
+            }
+        }
         let host_audit = mvm_core::protocol::broker::ServiceId::parse("host.audit.v1")
             .expect("host.audit.v1 is a valid ServiceId");
         if r.services_bindings.contains(&host_audit)
+            && !proxy_services.contains(&host_audit)
             && let Some(helper) = &self.signer_helper_uds_path
         {
             let handler = Arc::new(HostAuditV1Handler::new(AuditClient::new_signer_helper(
@@ -388,6 +502,7 @@ impl HostAgentDaemon {
                     .context("register host.audit typed capability")?;
             }
         } else if r.services_bindings.contains(&host_audit)
+            && !proxy_services.contains(&host_audit)
             && let Some(signer) = &r.audit_signer_uds_path
         {
             let handler = Arc::new(HostAuditV1Handler::new(AuditClient::new(signer.clone())));
@@ -719,7 +834,13 @@ mod tests {
             audit_signer_uds_path: signer.map(|p| p.to_string_lossy().into_owned()),
             services_bindings: vec![],
             capability_bindings: vec![],
+            assurance: None,
+            service_proxies: vec![],
         }
+    }
+
+    fn register_control(registration: RegisterVm) -> ControlRequest {
+        ControlRequest::Register(Box::new(registration))
     }
 
     async fn start_helper(
@@ -801,7 +922,7 @@ mod tests {
         let reg = register(dir.path(), "vm-1", "local", None);
         let sock = PathBuf::from(&reg.broker_listen_socket);
 
-        d.apply(&ControlRequest::Register(reg)).unwrap();
+        d.apply(&register_control(reg)).unwrap();
         assert!(d.is_registered("vm-1"));
         assert!(sock.exists(), "broker socket bound");
 
@@ -829,7 +950,7 @@ mod tests {
         .unwrap();
         let sock = PathBuf::from(&reg.broker_listen_socket);
 
-        d.apply(&ControlRequest::Register(reg)).unwrap();
+        d.apply(&register_control(reg)).unwrap();
 
         assert_eq!(d.reap_dead_registrations().unwrap(), 1);
         assert_eq!(d.registration_count(), 0);
@@ -857,7 +978,7 @@ mod tests {
         )
         .unwrap();
 
-        d.apply(&ControlRequest::Register(reg)).unwrap();
+        d.apply(&register_control(reg)).unwrap();
 
         assert_eq!(d.reap_dead_registrations().unwrap(), 0);
         assert!(d.is_registered("live-vm"));
@@ -869,7 +990,7 @@ mod tests {
         let mut d = daemon("local");
         let reg = register(dir.path(), "legacy-vm", "local", None);
 
-        d.apply(&ControlRequest::Register(reg)).unwrap();
+        d.apply(&register_control(reg)).unwrap();
 
         assert_eq!(d.reap_dead_registrations().unwrap(), 0);
         assert!(d.is_registered("legacy-vm"));
@@ -913,7 +1034,7 @@ mod tests {
         let journal_path = dir.path().join("registrations.json");
         let mut d = daemon("local").with_registration_journal(&journal_path);
 
-        d.apply(&ControlRequest::Register(register(
+        d.apply(&register_control(register(
             dir.path(),
             "vm-1",
             "local",
@@ -949,7 +1070,7 @@ mod tests {
 
         {
             let mut first = daemon("local").with_registration_journal(&journal_path);
-            first.apply(&ControlRequest::Register(reg)).unwrap();
+            first.apply(&register_control(reg)).unwrap();
             assert!(first.is_registered("vm-1"));
             assert!(sock.exists(), "first daemon bound broker socket");
         }
@@ -967,13 +1088,8 @@ mod tests {
         let mut d = daemon("local");
 
         for vm in ["vm-1", "vm-2", "vm-3"] {
-            d.apply(&ControlRequest::Register(register(
-                dir.path(),
-                vm,
-                "local",
-                None,
-            )))
-            .unwrap();
+            d.apply(&register_control(register(dir.path(), vm, "local", None)))
+                .unwrap();
             assert!(d.is_registered(vm), "{vm} registered");
         }
 
@@ -997,7 +1113,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut d = daemon("local");
         assert!(
-            d.apply(&ControlRequest::Register(register(
+            d.apply(&register_control(register(
                 dir.path(),
                 "vm-1",
                 "acme",
@@ -1009,10 +1125,43 @@ mod tests {
         let mut bad = register(dir.path(), "ok", "local", None);
         bad.vm_id = "../escape".into();
         assert!(
-            d.apply(&ControlRequest::Register(bad)).is_err(),
+            d.apply(&register_control(bad)).is_err(),
             "unsafe vm_id refused"
         );
         assert_eq!(d.registration_count(), 0);
+    }
+
+    #[test]
+    fn register_refuses_controller_capability_absent_from_signed_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = daemon("local");
+        let mut registration = register(dir.path(), "vm-1", "local", None);
+        let descriptor = mvm_contract::assurance::probe_capability_descriptor();
+        registration
+            .services_bindings
+            .push(descriptor.id.service.clone());
+        registration.service_proxies.push(
+            mvm_contract::protocol::broker_control::ServiceProxyBinding {
+                service: descriptor.id.service.clone(),
+                endpoint: dir
+                    .path()
+                    .join("controller.sock")
+                    .to_string_lossy()
+                    .into_owned(),
+                capabilities: vec![descriptor],
+            },
+        );
+
+        let error = daemon
+            .apply(&register_control(registration))
+            .expect_err("an unsigned controller capability must be refused");
+
+        assert!(
+            error
+                .to_string()
+                .contains("controller-backed capability is absent from signed admission")
+        );
+        assert_eq!(daemon.registration_count(), 0);
     }
 
     #[tokio::test]
@@ -1026,7 +1175,7 @@ mod tests {
         let mut d = daemon("local");
         let reg = register(dir.path(), "vm-1", "local", None);
         let sock = PathBuf::from(&reg.broker_listen_socket);
-        d.apply(&ControlRequest::Register(reg)).unwrap();
+        d.apply(&register_control(reg)).unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // A guest dials the VM's broker socket. Its `correlation_id` is its own
@@ -1061,7 +1210,7 @@ mod tests {
         let mut reg = register(dir.path(), "vm-time", "local", None);
         reg.services_bindings = vec![ServiceId::parse("host.time.v1").unwrap()];
         let sock = PathBuf::from(&reg.broker_listen_socket);
-        d.apply(&ControlRequest::Register(reg)).unwrap();
+        d.apply(&register_control(reg)).unwrap();
 
         let mut time_client = UnixStream::connect(&sock).await.unwrap();
         let time_call = ServiceCall {
@@ -1103,8 +1252,8 @@ mod tests {
         reg_b.services_bindings = vec![ServiceId::parse("host.audit.v1").unwrap()];
         let chain_b = PathBuf::from(&reg_b.workload_chain_path);
 
-        d.apply(&ControlRequest::Register(reg_a)).unwrap();
-        d.apply(&ControlRequest::Register(reg_b)).unwrap();
+        d.apply(&register_control(reg_a)).unwrap();
+        d.apply(&register_control(reg_b)).unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let mut client = UnixStream::connect(&sock_a).await.unwrap();
@@ -1146,7 +1295,7 @@ mod tests {
         reg.services_bindings = vec![ServiceId::parse("host.audit.v1").unwrap()];
         let sock = PathBuf::from(&reg.broker_listen_socket);
         let chain = PathBuf::from(&reg.workload_chain_path);
-        d.apply(&ControlRequest::Register(reg)).unwrap();
+        d.apply(&register_control(reg)).unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let before = emit_audit(&sock, "before-restart").await;
@@ -1222,7 +1371,7 @@ mod tests {
         let mut d = HostAgentDaemon::new_with_signer_helper("local", vk, &helper_sock, 64 * 1024);
         let reg = register(dir.path(), "vm-a", "local", None);
         let chain = PathBuf::from(&reg.workload_chain_path);
-        d.apply(&ControlRequest::Register(reg)).unwrap();
+        d.apply(&register_control(reg)).unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // The append does blocking helper I/O, so run it off the reactor.

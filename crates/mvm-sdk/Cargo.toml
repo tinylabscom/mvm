@@ -1,18 +1,11 @@
 [package]
 name = "mvm-sdk"
-description = "Rust SDK for mvm — build-time workload authoring, runtime record mode, and the in-guest host-services C-ABI cdylib loaded by language SDKs."
+description = "Rust SDK for mvm — build-time workload authoring and runtime record mode. The cdylib language SDKs load is mvm-host-services; this crate references it for the error taxonomy."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-
-[lib]
-# The normal Rust library (`lib`) is consumed by mvmctl and the build pipeline.
-# The `cdylib` output is the in-guest host-services FFI shared object the
-# Python/TypeScript SDKs dlopen; the nix package renames it to the stable
-# `libmvm_host_services.so` filename.
-crate-type = ["lib", "cdylib"]
 
 [dependencies]
 mvm-core = { workspace = true }
@@ -20,6 +13,10 @@ mvm-core = { workspace = true }
 # `host.cost.v1` over the vsock broker. The broker client and vsock primitives
 # live in the guest-agent crate; mvm-sdk only holds the C-ABI veneer.
 mvm-agentd.workspace = true
+# Status codes for the error taxonomy. The C ABI itself moved to its own crate
+# so the object loaded inside every guest does not carry this crate's
+# host-side decorator toolchain.
+mvm-host-services.workspace = true
 # The Workload IR itself (`mvm_sdk::ir` re-exports `mvm_contract::ir`
 # unchanged — see `src/lib.rs`). The IR's own `JsonSchema` derives come from
 # `mvm-contract/schema`, which this crate's `schema` feature forwards to —
@@ -35,7 +32,12 @@ mvm-contract.workspace = true
 async-trait = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-mvm-http.workspace = true
+# Only the remote deploy transport (`MvmdClient::ship`) speaks HTTPS, and it is
+# a host-side path. Optional so the default lib build — which is what the
+# in-guest `libmvm_host_services.so` cdylib is built from — carries no rustls,
+# no ring and no tokio. `ring` is C plus platform assembly, which neither the
+# musl cdylib target nor wasm can build.
+mvm-http = { workspace = true, optional = true }
 thiserror.workspace = true
 
 # Runtime record mode encodes `Sandbox.files.write` bytes
@@ -65,6 +67,10 @@ tree-sitter-typescript = { workspace = true }
 
 [features]
 default = []
+# The remote half of `deploy`: `MvmdClient` and the HTTPS upload. Off by
+# default; `mvm-cli` turns it on. Everything else in `deploy` — the record
+# types and boot-artifact digests the CLI verifies with — stays unconditional.
+deploy-remote = ["dep:mvm-http"]
 client-facade = ["dep:async-trait", "mvm-core/client"]
 # Derive `schemars::JsonSchema` on the addon-manifest and runtime-record types
 # and forward to the IR's own derives, for the three schema-emitter bins below.

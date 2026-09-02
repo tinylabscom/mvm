@@ -2,30 +2,13 @@
 
 use anyhow::{Context, Result};
 
-use mvm_runtime::microvm;
-
-/// Resolve a VM name to its absolute directory path and verify the VM
-/// is running.
-pub fn resolve_running_vm(name: &str) -> Result<String> {
-    let abs_dir = microvm::resolve_running_vm_dir(name)?;
-    let hypervisor = super::resolve_effective_hypervisor("firecracker");
-    if !mvm_client::backend_is_running(&hypervisor, name) {
-        anyhow::bail!(
-            "VM '{}' is not running. Use 'mvmctl status' to list running VMs.",
-            name
-        );
-    }
-
-    Ok(abs_dir)
-}
-
-/// One of two ways to refer to a built manifest: a legacy name (looked
-/// up in the name-keyed registry) or a manifest path that resolves to
-/// a slot hash.
+/// One of the two built workload sources accepted by `--manifest`: a
+/// manifest path that resolves to a slot hash, or a manifest selecting a
+/// pre-built wasm module.
 ///
 /// `mvmctl up` / `mvmctl exec` accept either form via their
-/// `--manifest` flag. The `Slot` variant is the current path;
-/// `Name` is kept only to resolve any pre-existing name-keyed slots.
+/// `--manifest` flag. A manifest is addressed by its path; the slot hash is
+/// derived from that path.
 ///
 /// Callers that need the persisted manifest re-read it via
 /// `mvm_runtime::vm::template::lifecycle::template_load_slot(slot_hash)`
@@ -33,9 +16,6 @@ pub fn resolve_running_vm(name: &str) -> Result<String> {
 /// warning (`PersistedManifest` is ~350 bytes).
 #[derive(Debug, Clone)]
 pub enum ManifestArgRef {
-    /// Legacy name-keyed slot (resolves through `template_load`,
-    /// `template_artifacts`, etc.).
-    Name(String),
     /// Manifest-keyed slot.
     Slot { slot_hash: String },
     /// Manifest selects a pre-built wasm module; no Nix/OCI build or slot.
@@ -45,17 +25,14 @@ pub enum ManifestArgRef {
     },
 }
 
-/// Decide whether a `--manifest` argument refers to a manifest path
-/// (file or directory containing one) or a legacy slot name.
+/// Resolve a `--manifest` argument to the manifest it names.
 ///
-/// Detection rule: if the argument resolves to an existing file or
-/// directory on disk, treat it as a manifest path; otherwise it's a
-/// name. Both `mvmctl up --manifest ./my-app` and
-/// `mvmctl up --manifest openclaw` work as long as the referenced
-/// thing actually exists.
-///
-/// Returns `Err` only on validation/IO failures; missing-name is
-/// handled by the caller's downstream `template_load` lookup.
+/// User-supplied arguments are paths — a manifest file or the directory
+/// containing one. The machine-run flake path also threads the strict
+/// 64-character address returned by `build_flake_to_slot` through this helper;
+/// that internal shape resolves directly against the slot registry. Every
+/// other non-existent bare argument remains a missing-path error: name-keyed
+/// template slots are gone.
 pub fn resolve_manifest_arg(arg: &str) -> Result<ManifestArgRef> {
     use mvm_core::manifest::{canonical_key_for_path, resolve_manifest_config_path};
 
@@ -75,10 +52,16 @@ pub fn resolve_manifest_arg(arg: &str) -> Result<ManifestArgRef> {
                     revision_hash,
                     "manifest alias resolved",
                 );
-                // Boot path still loads `current`; pinning to
-                // `revision_hash` is a follow-up. Treat as Name
-                // so the existing flow proceeds.
-                return Ok(ManifestArgRef::Name(template_id.to_string()));
+                // The alias resolves, but pinning the boot to
+                // `revision_hash` needs lifecycle plumbing that does not
+                // exist. With no name-keyed slot to fall back to there is
+                // nothing to boot, so say so rather than silently booting
+                // `current` under an alias the caller asked to pin.
+                anyhow::bail!(
+                    "manifest alias {alias:?} for template {template_id:?} resolves to \
+                     revision {revision_hash}, but booting a pinned revision is not \
+                     implemented; pass the manifest path instead"
+                );
             }
             None => {
                 anyhow::bail!(
@@ -90,16 +73,24 @@ pub fn resolve_manifest_arg(arg: &str) -> Result<ManifestArgRef> {
     }
 
     let path = std::path::Path::new(arg);
-    let looks_like_path = arg.contains('/')
-        || arg.starts_with('.')
-        || arg.ends_with(".toml")
-        || path.is_file()
-        || path.is_dir();
-    if !looks_like_path {
-        return Ok(ManifestArgRef::Name(arg.to_string()));
-    }
-
     if !path.exists() {
+        if mvm_core::manifest::is_slot_hash_dirname(arg) {
+            let spec = mvm_runtime::vm::template::lifecycle::template_load_dispatched(arg)
+                .with_context(|| {
+                    format!(
+                        "Built slot or installed bundle {arg} is not present in the local registry"
+                    )
+                })?;
+            if spec.template_id != arg {
+                anyhow::bail!(
+                    "Built slot or installed bundle {arg} records mismatched identity {}",
+                    spec.template_id
+                );
+            }
+            return Ok(ManifestArgRef::Slot {
+                slot_hash: arg.to_string(),
+            });
+        }
         anyhow::bail!(
             "Manifest path '{}' does not exist (expected a manifest file or its directory)",
             arg
@@ -181,19 +172,77 @@ pub fn resolve_run_network_policy(
     net: bool,
     allow_host: &[String],
 ) -> Result<mvm_core::network_policy::NetworkPolicy> {
+    resolve_run_network_policy_with_peers(net, allow_host, &[])
+}
+
+/// As [`resolve_run_network_policy`], plus the `--peer` routes.
+///
+/// Peers are orthogonal to the egress arms above: a workload may dial a peer
+/// while admitting no outbound egress at all, which is the common shape for a
+/// service that only talks to its own database. So the peer set is attached to
+/// whichever policy the egress precedence selected rather than being an arm of
+/// it.
+pub fn resolve_run_network_policy_with_peers(
+    net: bool,
+    allow_host: &[String],
+    peer: &[String],
+) -> Result<mvm_core::network_policy::NetworkPolicy> {
     use mvm_core::network_policy::{NetworkPolicy, NetworkPreset};
 
-    if !allow_host.is_empty() {
+    let base = if !allow_host.is_empty() {
         let rules = allow_host
             .iter()
             .map(|s| parse_allow_host(s))
             .collect::<Result<Vec<_>>>()?;
-        Ok(NetworkPolicy::allow_list(rules))
+        NetworkPolicy::allow_list(rules)
     } else if net {
-        Ok(NetworkPolicy::preset(NetworkPreset::Dev))
+        NetworkPolicy::preset(NetworkPreset::Dev)
     } else {
-        Ok(NetworkPolicy::deny_all())
+        NetworkPolicy::deny_all()
+    };
+
+    if peer.is_empty() {
+        return Ok(base);
     }
+    let peers = peer
+        .iter()
+        .map(|s| parse_peer_binding(s))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(base.with_peers(peers))
+}
+
+/// Parse `--peer NAME:PORT=ADDR:PORT` into a validated binding.
+///
+/// Both halves are required and neither is inferred. The left is what the
+/// guest dials; the right is the peer's admitted ingress address. Refusing
+/// here rather than at the gate keeps a malformed route out of the signed
+/// plan, where it would read as an admitted destination that never resolves.
+pub fn parse_peer_binding(raw: &str) -> Result<mvm_contract::peer::PeerBinding> {
+    let (dialed, target) = raw
+        .split_once('=')
+        .ok_or_else(|| anyhow::anyhow!("invalid --peer '{raw}': expected NAME:PORT=ADDR:PORT"))?;
+    let (name, port) = dialed
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow::anyhow!("invalid --peer '{raw}': the dialed side needs a :PORT"))?;
+    let (host_addr, host_port) = target
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow::anyhow!("invalid --peer '{raw}': the target side needs a :PORT"))?;
+
+    let binding = mvm_contract::peer::PeerBinding {
+        name: mvm_contract::peer::PeerName::parse(name)
+            .map_err(|e| anyhow::anyhow!("invalid --peer '{raw}': {e}"))?,
+        port: port
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid --peer '{raw}': '{port}' is not a port"))?,
+        host_addr: host_addr.to_string(),
+        host_port: host_port
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid --peer '{raw}': '{host_port}' is not a port"))?,
+    };
+    binding
+        .validate()
+        .map_err(|e| anyhow::anyhow!("invalid --peer '{raw}': {e}"))?;
+    Ok(binding)
 }
 
 /// How faithfully the resolved `backend` enforces `policy` on the transient
@@ -299,25 +348,146 @@ pub fn resolve_effective_hypervisor(requested: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::manifest::{MANIFEST_SCHEMA_VERSION, PersistedManifest, Provenance};
     use mvm_core::network_policy::{HostPort, NetworkPolicy, NetworkPreset};
     use mvm_core::util::test_env::TestEnv;
 
-    /// A VM that is not running must be refused.
-    ///
-    /// The check is `if !backend_is_running(..)`. Deleting the `!` inverts it:
-    /// a stopped VM resolves successfully and the caller proceeds to operate on
-    /// a machine that is not there. Nothing asserted the refusal, so the
-    /// inversion survived.
+    fn persist_flake_slot(slot_hash: &str) {
+        let now = mvm_core::time::utc_now();
+        let persisted = PersistedManifest {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            manifest_path: "<flake-slot>/fixture".to_string(),
+            manifest_hash: slot_hash.to_string(),
+            flake_ref: "/tmp/fixture-flake".to_string(),
+            profile: "default".to_string(),
+            vcpus: 2,
+            mem_mib: 512,
+            mem_initial_mib: None,
+            data_disk_mib: 0,
+            name: None,
+            backend: "mock".to_string(),
+            provenance: Provenance::current(),
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        mvm_runtime::vm::template::lifecycle::template_persist_slot(&persisted)
+            .expect("persist flake slot");
+    }
+
+    fn persist_installed_bundle(bundle_sha: &str) {
+        let bundle_dir = std::path::PathBuf::from(mvm_core::config::mvm_home())
+            .join("bundles")
+            .join(bundle_sha);
+        std::fs::create_dir_all(bundle_dir.join("artifacts")).expect("create bundle artifacts");
+        std::fs::write(bundle_dir.join("artifacts/vmlinux"), b"kernel")
+            .expect("write bundle kernel");
+        std::fs::write(bundle_dir.join("artifacts/rootfs.ext4"), b"rootfs")
+            .expect("write bundle rootfs");
+        let manifest = serde_json::json!({
+            "schema_version": mvm_core::plan::bundle::BUNDLE_SCHEMA_VERSION,
+            "publisher": "resolver-test",
+            "key_id": "0123456789abcdef0123456789abcdef",
+            "arch": mvm_core::arch::GuestArch::host().to_string(),
+            "created_at": "2026-08-28T00:00:00Z",
+            "artifacts": [
+                {
+                    "name": "kernel",
+                    "role": "kernel",
+                    "path": "artifacts/vmlinux",
+                    "sha256": "0".repeat(64),
+                    "size_bytes": 6
+                },
+                {
+                    "name": "rootfs",
+                    "role": "rootfs",
+                    "path": "artifacts/rootfs.ext4",
+                    "sha256": "1".repeat(64),
+                    "size_bytes": 6
+                }
+            ]
+        });
+        std::fs::write(
+            bundle_dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).expect("encode bundle manifest"),
+        )
+        .expect("write bundle manifest");
+    }
+
     #[test]
-    fn a_vm_that_is_not_running_is_refused() {
-        let home = tempfile::tempdir().expect("tempdir");
+    fn a_materialized_flake_slot_hash_resolves_through_the_registry() {
+        let tmp = tempfile::tempdir().expect("tempdir");
         let mut env = TestEnv::new();
-        env.isolate_mvm_home(home.path());
-        let err = resolve_running_vm("definitely-not-running")
-            .expect_err("a VM that is not running must not resolve");
+        env.isolate_mvm_home(tmp.path());
+        let slot_hash = "a".repeat(64);
+        persist_flake_slot(&slot_hash);
+
+        let resolved = resolve_manifest_arg(&slot_hash).expect("built slot must resolve");
+
+        assert!(matches!(resolved, ManifestArgRef::Slot { slot_hash: got } if got == slot_hash));
+    }
+
+    #[test]
+    fn an_installed_bundle_hash_resolves_through_the_bundle_registry() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(tmp.path());
+        let bundle_sha = "e".repeat(64);
+        persist_installed_bundle(&bundle_sha);
+
+        let resolved = resolve_manifest_arg(&bundle_sha).expect("installed bundle must resolve");
+
+        assert!(matches!(resolved, ManifestArgRef::Slot { slot_hash } if slot_hash == bundle_sha));
+    }
+
+    #[test]
+    fn an_unknown_slot_hash_fails_closed_as_a_registry_lookup() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(tmp.path());
+        let slot_hash = "b".repeat(64);
+
+        let err = resolve_manifest_arg(&slot_hash).expect_err("unknown slot must fail");
+
         assert!(
-            err.to_string().contains("is not running"),
-            "refusal must name the reason; got: {err}"
+            format!("{err:#}").contains("not present in the local registry"),
+            "the refusal must identify a missing registry slot: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_slot_record_with_a_mismatched_identity_fails_closed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(tmp.path());
+        let requested = "c".repeat(64);
+        let recorded = "d".repeat(64);
+        let now = mvm_core::time::utc_now();
+        let persisted = PersistedManifest {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            manifest_path: "<flake-slot>/fixture".to_string(),
+            manifest_hash: recorded.clone(),
+            flake_ref: "/tmp/fixture-flake".to_string(),
+            profile: "default".to_string(),
+            vcpus: 2,
+            mem_mib: 512,
+            mem_initial_mib: None,
+            data_disk_mib: 0,
+            name: None,
+            backend: "mock".to_string(),
+            provenance: Provenance::current(),
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        let slot_dir = mvm_core::manifest::slot_dir(&requested);
+        persisted
+            .write_to_slot(std::path::Path::new(&slot_dir))
+            .expect("persist mismatched slot record");
+
+        let err = resolve_manifest_arg(&requested).expect_err("mismatch must fail");
+
+        assert!(
+            format!("{err:#}").contains(&format!("mismatched identity {recorded}")),
+            "the refusal must identify the recorded identity: {err:#}"
         );
     }
 
@@ -344,10 +514,12 @@ mod tests {
         std::env::set_current_dir(previous).expect("restore cwd");
 
         // It resolves as a path — which fails, because the directory holds no
-        // manifest. The point is that it was not silently taken for a name.
-        if let Ok(ManifestArgRef::Name(n)) = resolved {
-            panic!("a directory was misclassified as the registry name {n:?}");
-        }
+        // manifest. Every argument is a path now, so the only outcome a bare
+        // directory can have is a manifest-not-found error.
+        assert!(
+            resolved.is_err(),
+            "a directory with no manifest must fail rather than resolve"
+        );
     }
 
     /// A relative wasm module resolves against the manifest's own directory.
@@ -598,11 +770,12 @@ mod tests {
     fn a_manifest_argument_is_a_path_on_any_one_signal_alone() {
         let tmp = tempfile::tempdir().expect("tempdir");
 
-        // A bare name matching none of the five signals is a slot name.
-        match resolve_manifest_arg("openclaw").expect("a bare name resolves") {
-            ManifestArgRef::Name(n) => assert_eq!(n, "openclaw"),
-            other => panic!("a bare name must resolve to Name, got {other:?}"),
-        }
+        // A bare name is no longer a slot lookup: name-keyed slots are gone,
+        // so it is just a path that does not exist.
+        assert!(
+            resolve_manifest_arg("openclaw").is_err(),
+            "a bare name must fail as a missing path, not resolve to a slot"
+        );
 
         // Each signal alone is enough to be treated as a path. None of
         // these exist, so the attempt must fail as a *missing path*
@@ -632,5 +805,64 @@ mod tests {
                 "an existing path must not be rejected as a missing one: {got:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod peer_flag_tests {
+    use super::*;
+
+    #[test]
+    fn a_well_formed_peer_parses_into_a_binding() {
+        let b = parse_peer_binding("db.mvm.peer:5432=127.0.0.1:34567").expect("parses");
+        assert_eq!(b.name.as_str(), "db.mvm.peer");
+        assert_eq!(b.port, 5432);
+        assert_eq!(b.host_addr, "127.0.0.1");
+        assert_eq!(b.host_port, 34567);
+    }
+
+    /// Refused at the CLI rather than at the gate, so a malformed route never
+    /// reaches the signed plan, where it would read as an admitted
+    /// destination that happens never to resolve.
+    #[test]
+    fn a_malformed_peer_is_refused_at_the_boundary() {
+        for bad in [
+            "db.mvm.peer:5432",                 // no target
+            "db.mvm.peer=127.0.0.1:34567",      // no dialed port
+            "db.mvm.peer:5432=127.0.0.1",       // no target port
+            "api.example.com:443=127.0.0.1:80", // not a peer name
+            "db.mvm.peer:0=127.0.0.1:34567",    // zero port
+            "db.mvm.peer:5432=db.internal:80",  // target is not a literal ip
+            "db.mvm.peer:x=127.0.0.1:34567",    // port is not a number
+        ] {
+            assert!(
+                parse_peer_binding(bad).is_err(),
+                "expected `{bad}` to be refused"
+            );
+        }
+    }
+
+    /// Peers are orthogonal to the egress arms: the common shape is a service
+    /// that talks only to its own database and admits no outbound egress.
+    #[test]
+    fn peers_attach_to_whichever_egress_arm_was_selected() {
+        let peer = vec!["db.mvm.peer:5432=127.0.0.1:34567".to_string()];
+
+        let denied = resolve_run_network_policy_with_peers(false, &[], &peer).expect("resolves");
+        assert_eq!(denied.peers().len(), 1, "deny-all still carries its peers");
+
+        let dev = resolve_run_network_policy_with_peers(true, &[], &peer).expect("resolves");
+        assert_eq!(dev.peers().len(), 1);
+
+        let allow = resolve_run_network_policy_with_peers(false, &["a.com".to_string()], &peer)
+            .expect("resolves");
+        assert_eq!(allow.peers().len(), 1);
+    }
+
+    #[test]
+    fn no_peer_flag_leaves_the_policy_unchanged() {
+        let p = resolve_run_network_policy_with_peers(false, &[], &[]).expect("resolves");
+        assert!(p.peers().is_empty());
+        assert_eq!(p, resolve_run_network_policy(false, &[]).expect("resolves"));
     }
 }

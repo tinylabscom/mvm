@@ -8,13 +8,14 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 
 use super::cold_launch::{
     ArtifactDigests, ArtifactMeasurements, CacheState, ColdLaunchReport, ColdLaunchSample,
-    KernelConfigMeasurement, LaunchContext, LaunchLane, build_cold_launch_report, validate_lane,
-    validate_matrix_report,
+    KernelConfigMeasurement, LaunchContext, LaunchLane, build_cold_launch_report,
+    validate_hard_boot_requirement, validate_lane, validate_matrix_report,
 };
 use crate::commands::vm::launch_sample::{
     ArtifactPaths, LAUNCH_SAMPLE_ENV, LaunchRootStrategy, LaunchSample, read_sample,
@@ -72,8 +73,20 @@ impl ColdLaunchBench {
         self.lane
     }
 
-    /// Run the warm-up iterations, then the measured ones, and summarise.
+    /// Run, validate, and return one benchmark report.
     pub fn run(&self) -> Result<ColdLaunchReport> {
+        let report = self.measure()?;
+        self.validate_report(&report)?;
+        Ok(report)
+    }
+
+    /// Run the warm-up iterations and measured launches without applying the
+    /// report-level latency gate.
+    ///
+    /// The CLI uses this seam so it can print and persist a failing report
+    /// before returning a non-zero status. Per-sample integrity and lane
+    /// validation still happen here and can never be bypassed.
+    pub fn measure(&self) -> Result<ColdLaunchReport> {
         let staging = tempfile::tempdir().context("creating launch sample staging dir")?;
         let mut strategy = None;
         for index in 0..self.warmup {
@@ -82,9 +95,9 @@ impl ColdLaunchBench {
                 .with_context(|| format!("warm-up launch {index}"))?;
             // A warm-up that does not belong in the lane means the lane was
             // set up wrong; discarding its timing must not discard that.
-            validate_lane(self.lane, &sample)
+            validate_lane(self.lane, &sample.launch)
                 .with_context(|| format!("warm-up launch {index} does not belong in this lane"))?;
-            record_root_strategy(&mut strategy, &sample, "warm-up", index)?;
+            record_root_strategy(&mut strategy, &sample.launch, "warm-up", index)?;
         }
 
         let mut raw = Vec::with_capacity(self.runs as usize);
@@ -93,27 +106,35 @@ impl ColdLaunchBench {
             let sample = self
                 .launch_once(staging.path(), "measured", index)
                 .with_context(|| format!("measured launch {number}"))?;
-            validate_lane(self.lane, &sample).with_context(|| {
+            validate_lane(self.lane, &sample.launch).with_context(|| {
                 format!("measured launch {number} does not belong in this lane")
             })?;
-            record_root_strategy(&mut strategy, &sample, "measured", number)?;
+            record_root_strategy(&mut strategy, &sample.launch, "measured", number)?;
             raw.push(cold_launch_sample(
                 self.lane,
                 number,
-                &sample,
+                &sample.launch,
+                sample.command_lifecycle_ms,
                 self.kernel_config.as_deref(),
             )?);
         }
-        let report = build_cold_launch_report(self.lane, self.warmup, raw);
+        Ok(build_cold_launch_report(self.lane, self.warmup, raw))
+    }
+
+    /// Apply the strict hard ceiling for every report and the publication
+    /// matrix gate when the configured run count reaches its sample floor.
+    pub fn validate_report(&self, report: &ColdLaunchReport) -> Result<()> {
+        validate_hard_boot_requirement(report)
+            .context("live launch report violated the hard boot requirement")?;
         if self.runs >= super::cold_launch::MIN_MATRIX_SAMPLES {
-            validate_matrix_report(&report)
+            validate_matrix_report(report)
                 .context("live launch report did not pass the matrix publication gate")?;
         }
-        Ok(report)
+        Ok(())
     }
 
     /// Spawn the binary once and read back the sample it wrote.
-    fn launch_once(&self, staging: &Path, kind: &str, index: u32) -> Result<LaunchSample> {
+    fn launch_once(&self, staging: &Path, kind: &str, index: u32) -> Result<MeasuredLaunch> {
         let sample_path = staging.join(format!("{kind}-{index}.json"));
         // A stale file from a prior iteration would be read as this
         // iteration's sample if the launch died before writing.
@@ -125,17 +146,32 @@ impl ColdLaunchBench {
         for (key, value) in &self.env {
             command.env(key, value);
         }
+        let started = Instant::now();
         let status = command
             .status()
             .with_context(|| format!("spawning {}", self.mvmctl.display()))?;
+        let command_lifecycle_ms = started.elapsed().as_secs_f64() * 1000.0;
         if !status.success() {
             bail!(
                 "{} exited with {status}; a failed launch is not a measurement",
                 self.mvmctl.display()
             );
         }
-        read_sample(&sample_path)
+        Ok(MeasuredLaunch {
+            launch: read_sample(&sample_path)?,
+            command_lifecycle_ms,
+        })
     }
+}
+
+/// One child process observed from immediately before spawn through exit.
+///
+/// The launch's own sample deliberately ends at transient teardown. The outer
+/// wall clock also includes process creation, command-level audit completion,
+/// and process shutdown, which is the latency a shell caller actually sees.
+struct MeasuredLaunch {
+    launch: LaunchSample,
+    command_lifecycle_ms: f64,
 }
 
 fn record_root_strategy(
@@ -259,6 +295,7 @@ fn cold_launch_sample(
     lane: LaunchLane,
     number: u32,
     sample: &LaunchSample,
+    command_lifecycle_ms: f64,
     kernel_config: Option<&Path>,
 ) -> Result<ColdLaunchSample> {
     Ok(ColdLaunchSample {
@@ -280,6 +317,7 @@ fn cold_launch_sample(
         cache: CacheState::from_sample(sample),
         work: sample.work,
         launch_mode: sample.launch_mode,
+        command_lifecycle_ms,
         phases: sample.phases,
         sub_phases: sample.sub_phases,
         warm_first_command_memory: sample.warm_first_command_memory,
@@ -583,7 +621,8 @@ tmpfs /tmp tmpfs rw 0 0
     #[test]
     fn a_sample_becomes_a_lane_sample_with_derived_context() {
         let sample = sample_for(148.0);
-        let lane_sample = cold_launch_sample(LaunchLane::PreparedCold, 3, &sample, None).unwrap();
+        let lane_sample =
+            cold_launch_sample(LaunchLane::PreparedCold, 3, &sample, 175.0, None).unwrap();
         assert_eq!(lane_sample.number, 3);
         assert_eq!(lane_sample.context.backend, "hvf");
         assert_eq!(
@@ -596,6 +635,7 @@ tmpfs /tmp tmpfs rw 0 0
             Some(LaunchRootStrategy::BlockExt4)
         );
         assert!(lane_sample.cache.artifacts_cached);
+        assert_eq!(lane_sample.command_lifecycle_ms, 175.0);
         assert_eq!(lane_sample.phases.total_ms, 148.0);
         assert_eq!(lane_sample.sub_phases.vmm_create_ms, Some(90.0));
     }
@@ -621,7 +661,8 @@ tmpfs /tmp tmpfs rw 0 0
         };
         sample.warm_first_command_memory = Some(measurement);
 
-        let lane_sample = cold_launch_sample(LaunchLane::WarmClaim, 1, &sample, None).unwrap();
+        let lane_sample =
+            cold_launch_sample(LaunchLane::WarmClaim, 1, &sample, 175.0, None).unwrap();
         assert_eq!(lane_sample.warm_first_command_memory, Some(measurement));
     }
 
@@ -686,6 +727,15 @@ tmpfs /tmp tmpfs rw 0 0
             vec![1, 2, 3, 4]
         );
         assert_eq!(report.stats.total_ms.p50, Some(250.0));
+        assert_eq!(report.stats.command_lifecycle_ms.samples, 4);
+        assert!(
+            report
+                .stats
+                .command_lifecycle_ms
+                .p50
+                .is_some_and(|ms| ms > 0.0),
+            "the shell-visible process lifetime must be measured"
+        );
         let vmm_create = report
             .stats
             .sub_phases
@@ -694,6 +744,30 @@ tmpfs /tmp tmpfs rw 0 0
             .map(|(_, stats)| *stats)
             .expect("vmm_create is always reported");
         assert_eq!(vmm_create.samples, 4);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn measurement_is_available_before_the_hard_gate_returns_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut sample = sample_for(220.0);
+        sample.phases.backend_start_ms = 170.0;
+        sample.phases.vsock_wait_ms = 30.0;
+        let mvmctl = fake_mvmctl(tmp.path(), &[sample]);
+        let bench = ColdLaunchBench::builder(&mvmctl, LaunchLane::PreparedCold)
+            .runs(1)
+            .warmup(0)
+            .build()
+            .unwrap();
+
+        let report = bench.measure().expect("measurement remains reportable");
+        assert_eq!(report.stats.dispatch_window_ms.max, Some(200.0));
+        let err = bench
+            .validate_report(&report)
+            .expect_err("the exact boundary must fail");
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("hard boot requirement"), "{rendered}");
+        assert!(rendered.contains("under 200.0ms"), "{rendered}");
     }
 
     #[cfg(unix)]
@@ -721,7 +795,7 @@ tmpfs /tmp tmpfs rw 0 0
     fn the_runner_refuses_mixed_root_filesystem_strategies() {
         let tmp = tempfile::tempdir().unwrap();
         let mut different = sample_for(100.0);
-        different.root_strategy = Some(LaunchRootStrategy::VirtiofsRoot);
+        different.root_strategy = None;
         let mvmctl = fake_mvmctl(tmp.path(), &[sample_for(100.0), different]);
 
         let err = ColdLaunchBench::builder(&mvmctl, LaunchLane::PreparedCold)

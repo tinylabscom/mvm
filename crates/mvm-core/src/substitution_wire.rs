@@ -81,7 +81,10 @@ pub enum HttpFlowResponseHead {
     Ok {
         status: u16,
         headers: Vec<(String, String)>,
-        body_len: u64,
+        /// Exact decoded body length when the upstream declared one. `None`
+        /// means the body is streamed until `HttpComplete`; receivers still
+        /// enforce their independent hard byte ceiling.
+        body_len: Option<u64>,
     },
     Refused {
         message: String,
@@ -185,6 +188,20 @@ mod tests {
         })
         .unwrap();
         assert!(json.contains(r#""result":"refused""#), "got: {json}");
+    }
+
+    #[test]
+    fn streaming_http_response_head_roundtrips_without_a_length() {
+        let head = HttpFlowResponseHead::Ok {
+            status: 200,
+            headers: vec![("transfer-encoding".into(), "chunked".into())],
+            body_len: None,
+        };
+        let json = serde_json::to_string(&head).unwrap();
+        assert_eq!(
+            serde_json::from_str::<HttpFlowResponseHead>(&json).unwrap(),
+            head
+        );
     }
 
     #[test]

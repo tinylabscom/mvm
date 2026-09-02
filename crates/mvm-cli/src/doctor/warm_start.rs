@@ -263,6 +263,7 @@ mod tests {
             ("libkrun".to_string(), "unsupported"),
             ("qemu".to_string(), "unsupported"),
             ("wasm".to_string(), "unsupported"),
+            ("web-linux".to_string(), "unsupported"),
         ];
         let mut expected_standby_pool = vec![
             ("apple-container".to_string(), false),
@@ -271,6 +272,7 @@ mod tests {
             ("libkrun".to_string(), false),
             ("qemu".to_string(), false),
             ("wasm".to_string(), false),
+            ("web-linux".to_string(), false),
         ];
         if cfg!(feature = "test-support") {
             expected_backends.insert(4, ("mock".to_string(), "live-memory"));
@@ -303,6 +305,7 @@ mod tests {
             "libkrun",
             "qemu",
             "wasm",
+            "web-linux",
         ];
         if cfg!(feature = "test-support") {
             expected.push("mock");

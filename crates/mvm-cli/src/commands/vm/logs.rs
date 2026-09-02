@@ -29,7 +29,7 @@ use mvm_core::config;
 use mvm_core::naming::validate_vm_name;
 use mvm_core::stream_client::{
     EmptyHistory, KindFilter, OutputRecord, OutputRequest, SpliceGap, StreamAvailability,
-    StreamOpts, Truncation, VmOutputStream, open_vm_output,
+    StreamError, StreamOpts, Truncation, VmOutputStream, open_vm_output,
 };
 use mvm_core::transcript::GapMarker;
 use mvm_core::user_config::MvmConfig;
@@ -130,8 +130,47 @@ fn execute(args: Args) -> Result<()> {
     if args.hypervisor {
         return show_hypervisor_log(&args);
     }
-    let stream = open_vm_output(&args.name, args.request())
-        .with_context(|| format!("Reading output for microVM {:?}", args.name))?;
+    let stream = match open_vm_output(&args.name, args.request()) {
+        Ok(stream) => stream,
+        Err(StreamError::NoCapture {
+            vm,
+            socket,
+            transcript,
+            console,
+        }) => {
+            // Check if the VM has a state directory at all
+            let state_dir = config::vm_state_dir(&vm);
+            if !state_dir.exists() {
+                anyhow::bail!(
+                    "microVM {:?} has no state directory at {}; it may have been removed \
+                     or never booted. Run `machine ls` to verify that it still exists",
+                    vm,
+                    state_dir.display()
+                );
+            }
+            // State survived, so distinguish a missing capture from a machine
+            // that was removed or never booted.
+            anyhow::bail!(
+                "microVM {:?} has a state directory at {} but no output capture:\n\
+                 - no live broker at {}\n\
+                 - no transcript at {}\n\
+                 - no console capture at {}\n\
+                 \n\
+                 The retained state can indicate an interrupted boot or manual capture cleanup.\n\
+                 Run `machine inspect {}` to inspect the persisted machine, or `machine ls` to verify it still exists.",
+                vm,
+                state_dir.display(),
+                socket.display(),
+                transcript.display(),
+                console.display(),
+                vm
+            );
+        }
+        Err(err) => {
+            return Err(anyhow::Error::new(err))
+                .with_context(|| format!("Reading output for microVM {:?}", args.name));
+        }
+    };
     show(&args, stream)
 }
 
@@ -819,7 +858,48 @@ mod tests {
             .expect_err("a VM with no capture must not read as empty output");
         let rendered = format!("{err:#}");
         assert!(rendered.contains("ghost-vm"), "{rendered}");
-        assert!(rendered.contains("no output capture"), "{rendered}");
+        assert!(rendered.contains("no state directory"), "{rendered}");
+    }
+
+    #[test]
+    fn a_stopped_vm_with_no_state_directory_shows_helpful_error() {
+        // Regression guard for the scenario in the bug report:
+        // `machine logs <vm>` on a stopped VM that was removed or never booted
+        // should give a helpful error message rather than the raw StreamError.
+        let _home = isolated_home();
+        let err = execute(parse(&["calm-koala-f97a"]).expect("parse"))
+            .expect_err("a VM with no state directory must not read as empty");
+        let rendered = format!("{err:#}");
+        // Verify the error mentions the VM name
+        assert!(rendered.contains("calm-koala-f97a"), "{rendered}");
+        // Verify the error mentions the lack of state directory
+        assert!(rendered.contains("no state directory"), "{rendered}");
+        // Verify it suggests the VM may have been removed
+        assert!(rendered.contains("removed"), "{rendered}");
+        // Give the operator a concrete next command instead of only naming
+        // possible causes.
+        assert!(rendered.contains("machine ls"), "{rendered}");
+    }
+
+    #[test]
+    fn retained_state_without_a_capture_is_diagnosed_separately() {
+        let (_env, _home) = isolated_home();
+        let state_dir = config::vm_state_dir("quiet-vm");
+        std::fs::create_dir_all(&state_dir).expect("state directory");
+
+        let err = execute(parse(&["quiet-vm"]).expect("parse"))
+            .expect_err("retained state without a capture must not read as empty output");
+        let rendered = format!("{err:#}");
+
+        assert!(
+            rendered.contains(&state_dir.display().to_string()),
+            "{rendered}"
+        );
+        assert!(rendered.contains("no live broker"), "{rendered}");
+        assert!(rendered.contains("no transcript"), "{rendered}");
+        assert!(rendered.contains("no console capture"), "{rendered}");
+        assert!(rendered.contains("interrupted boot"), "{rendered}");
+        assert!(rendered.contains("machine inspect quiet-vm"), "{rendered}");
     }
 
     #[test]

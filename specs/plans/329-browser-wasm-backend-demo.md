@@ -1,4 +1,4 @@
-# Plan 329: Browser-tier `BrowserWasmBackend` demo
+# Plan 329: Browser-tier `BrowserWasiBackend` demo
 
 ## Status
 
@@ -65,7 +65,7 @@ for the browser tier.
 │  ┌──────────────────────▼────────────────────────────────────┐  │
 │  │  Web Worker                                                │  │
 │  │  ┌────────────────────┐  ┌──────────────────────────────┐ │  │
-│  │  │ mvm-demo core      │  │ BrowserWasmBackend state     │ │  │
+│  │  │ mvm-demo core      │  │ BrowserWasiBackend state     │ │  │
 │  │  │ (wasm-bindgen)     │  │ • VmId → instance map        │ │  │
 │  │  │ • mvm-contract     │  │ • virtual rootfs (MemFS)     │ │  │
 │  │  │ • policy decision  │  │ • console ring buffer        │ │  │
@@ -158,7 +158,7 @@ outside the guest root are rejected.
 - [x] **1.6** Add a build helper script `web/mvm-demo-guest/build.sh` that
       compiles to `wasm32-wasip1` and runs `wasm-opt -Oz`.
 
-### Slice 2 — Extend `web/mvm-demo` with `BrowserWasmBackend`
+### Slice 2 — Extend `web/mvm-demo` with `BrowserWasiBackend`
 
 - [x] **2.1** Add a new module `src/browser_backend.rs` (compiled into the same
       wasm-bindgen crate) exposing:

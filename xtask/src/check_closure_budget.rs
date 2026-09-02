@@ -57,7 +57,20 @@ const BUDGETS: &[ClosureBudget] = &[
 /// 233 (was 232): `mvm-observability`, the same +1 the Linux budget took —
 /// a workspace crate holding subscriber assembly that `mvm-core` used to
 /// own, carrying no new third-party code on either target.
-const MACOS_CLOSURE_BUDGET: usize = 233;
+///
+/// 227 (was 233): deleting the superseded L3 stack removes seven crates from
+/// this graph; the first-party `mvm-mcp` adapter adds one and no third-party
+/// crates.
+///
+/// 228 (was 227): `mvm-capture`, the project-environment capture frontend. It
+/// adds one first-party crate and no new third-party crate to mvmctl's closure.
+///
+/// 229 (was 228): the same compile-time `syn` 3 transition recorded for the
+/// Linux closure below.
+///
+/// 230 (was 229): aes-gcm 0.11.1 adds `ctutils` on both shipped targets; same
+/// reason as the Linux budget bump above.
+const MACOS_CLOSURE_BUDGET: usize = 230;
 
 /// Max distinct crates allowed in `mvmctl`'s default no-dev closure on
 /// `x86_64-unknown-linux-gnu`. Baseline measured 2026-06-17 against the audited default
@@ -118,21 +131,10 @@ const MACOS_CLOSURE_BUDGET: usize = 233;
 /// feature-gated `mvm-contract` package removes one package from the default
 /// closure while preserving the protocol-only default feature set.
 ///
-/// 278 (was 274): the userspace socket datapath, which is the macOS forwarding
-/// backend and the fallback wherever the Linux TUN probe fails, brings
-/// `smoltcp` (default features off — `medium-ip`, the two IP protocols and the
-/// two socket types only), `mio`, and `socket2`. It cannot be gated off by
-/// default: on macOS it is the only backend, so a build without it would refuse
-/// every `l3-vsock` plan on that platform. Four crates for a whole forwarding
-/// backend, and `smoltcp` is `#![deny(unsafe_code)]` and 0BSD.
 /// 279 (was 274): adopting `rayon` for parallel file walks, copies, ext4
 /// directory/symlink block emission, and dm-verity hash-tree computation;
 /// measured delta +5 crates (rayon, rayon-core, crossbeam-deque,
 /// crossbeam-epoch, crossbeam-utils).
-///
-/// 283 (was 279): making the userspace socket datapath's host-side polling,
-/// socket, and smoltcp protocol dependencies explicit in the shipping binary;
-/// measured delta +4 crates for the complete fallback forwarding backend.
 ///
 /// 284 (was 283): the `did:key` codec for receipt/conformance identity uses
 /// the audited `bs58` crate; it is zero-dependency and the only new crate in
@@ -156,7 +158,7 @@ const MACOS_CLOSURE_BUDGET: usize = 233;
 /// scoped-thread `par_map` in `mvm-fs`, which is all five call sites needed.
 ///
 /// 262 (was 263): `fs2` existed only for `FileExt`'s advisory file locking,
-/// which std stabilized in 1.89 — well under the pinned 1.96 toolchain. std
+/// which std stabilized in 1.89 — well under the pinned 1.97 toolchain. std
 /// also splits contention out of the error type (`TryLockError::WouldBlock`
 /// vs `::Error`), so "another process holds it" stops riding on an errno
 /// comparison.
@@ -185,6 +187,18 @@ const MACOS_CLOSURE_BUDGET: usize = 233;
 /// the sealed guest agent `mvm-agentd` 111 -> 102 (its `tracing-subscriber`
 /// is now gated behind `addons`, since only the helper bins install one).
 /// Measured +1 here, -9 on the guest agent and the embedded musl bins.
+///
+/// 236 (was 239): deleting the superseded L3 stack removes its retired graph;
+/// `mvm-mcp` contributes one first-party crate and no new third-party crate.
+///
+/// 237 (was 236): `mvm-capture`, the project-environment capture frontend. It
+/// adds one first-party crate and no new third-party crate to mvmctl's closure.
+///
+/// 238 (was 237): `async-trait` 0.1.92 removes a generated attribute rejected
+/// by current nightly Clippy and moves its compile-time parser to `syn` 3.
+///
+/// 239 (was 238): aes-gcm 0.11.1 adds `ctutils`, a small helper it did not
+/// carry in 0.11.0; this is the first stable (non-RC) aes-gcm 0.11 release.
 pub(crate) const CLOSURE_BUDGET: usize = 239;
 
 pub fn run(workspace: &Path) -> Result<()> {

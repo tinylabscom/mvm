@@ -363,7 +363,7 @@ impl FileAuditSigner {
     /// Best-effort by signature: a failure here cannot be reported to whoever
     /// emitted the entry, because they were told it succeeded when it was
     /// written. It is logged instead of swallowed.
-    /// Hold barrier fsyncs until [`end_batch`](Self::end_batch).
+    /// Hold barrier fsyncs until the caller takes and syncs the batch paths.
     pub(crate) fn begin_batch(&self) {
         self.batching.store(true, Ordering::SeqCst);
     }
@@ -374,12 +374,9 @@ impl FileAuditSigner {
     /// and it has to: the entries it is syncing include barriers whose emitters
     /// have not yet been told they succeeded. A caller that ignored this would
     /// be strictly worse off than syncing each entry separately.
+    #[cfg(test)]
     pub(crate) fn end_batch(&self) -> Result<(), AuditError> {
-        self.batching.store(false, Ordering::SeqCst);
-        let pending: Vec<PathBuf> = {
-            let mut guard = self.pending_sync.lock().expect("pending_sync poisoned");
-            guard.drain().collect()
-        };
+        let pending = self.take_batched_paths();
         for path in pending {
             OpenOptions::new()
                 .append(true)
@@ -388,6 +385,18 @@ impl FileAuditSigner {
                 .map_err(|e| AuditError::Io(format!("{}: {e}", path.display())))?;
         }
         Ok(())
+    }
+
+    /// Stop holding barriers and hand the files that need syncing to a
+    /// coordinator.
+    ///
+    /// The caller owns the durability wait. This lets one admission wait for
+    /// several independent files in parallel while still completing every
+    /// wait before the admitted action begins.
+    pub(crate) fn take_batched_paths(&self) -> Vec<PathBuf> {
+        self.batching.store(false, Ordering::SeqCst);
+        let mut guard = self.pending_sync.lock().expect("pending_sync poisoned");
+        guard.drain().collect()
     }
 
     pub fn flush_deferred(&self) {
@@ -563,6 +572,7 @@ impl FileAuditSigner {
             image_name: crate::supervisor::audit_recorder::UNBOUND_IMAGE_NAME.to_string(),
             image_sha256: crate::supervisor::audit_recorder::UNBOUND_IMAGE_SHA256.to_string(),
             event: event.to_string(),
+            caller_commitment: None,
             labels,
         }
     }
@@ -961,6 +971,43 @@ pub fn verify_chain_bytes(
     })
 }
 
+/// Verify an already-read segment from `resume_line`, seeding the running
+/// chain hash with `chain_hash` instead of the genesis anchor.
+///
+/// The suffix counterpart of [`verify_chain_bytes`], for a caller that already
+/// holds an authenticated statement about the prefix and needs only what was
+/// appended after it. Cost is `O(lines - resume_line)`.
+///
+/// Sound in the same narrow sense [`verify_audit_chain_incremental`] is: the
+/// resumed line's signature covers its `prev_hash`, so a valid signature there
+/// authenticates the state the prefix ended in. What it does not do is anchor
+/// that prefix, so **every caller owes an account of what authenticates the
+/// seed** — and a caller whose account is a bare stored integer is choosing
+/// the trade this module confines to `doctor`.
+///
+/// A truncated final line is still reported as [`VerifyError::TruncatedTail`]:
+/// the check reads `content`'s terminating byte, which a resumed walk has in
+/// hand exactly as a genesis walk does.
+pub fn verify_chain_bytes_resuming(
+    content: &str,
+    verifying_key: &VerifyingKey,
+    resume_line: usize,
+    chain_hash: [u8; 32],
+) -> Result<SegmentWalk, VerifyError> {
+    let walk = walk_chain(
+        content,
+        verifying_key,
+        ChainStart::Resume {
+            line: resume_line,
+            chain_hash,
+        },
+    )?;
+    Ok(SegmentWalk {
+        entries: walk.entries,
+        tip: walk.chain_hash,
+    })
+}
+
 /// Where a chain walk begins.
 enum ChainStart {
     /// Line 0, with the all-zero chain hash. The zero prefix is the anchor
@@ -1217,6 +1264,13 @@ fn usable_resume(checkpoint: Option<&ChainCheckpoint>, total_lines: usize) -> Op
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_zero_line_checkpoint_cannot_replace_the_genesis_anchor() {
+        let checkpoint = ChainCheckpoint::new(0, [0_u8; 32]);
+
+        assert!(usable_resume(Some(&checkpoint), 3).is_none());
+    }
+
     mod highest_sealed_segment_tests {
         use super::super::highest_sealed_segment;
         use mvm_core::config::audit_segment_file_name;
@@ -1342,6 +1396,7 @@ mod tests {
             image_name: "img".to_string(),
             image_sha256: "abc123".to_string(),
             event: event.to_string(),
+            caller_commitment: None,
             labels: BTreeMap::new(),
         }
     }
@@ -1628,6 +1683,7 @@ mod tests {
                 image_name: "img".to_string(),
                 image_sha256: "d".repeat(64),
                 event: event.to_string(),
+                caller_commitment: None,
                 labels: BTreeMap::new(),
             }
         }

@@ -21,8 +21,9 @@ cmdline (WS2), and every spawn site threads it (WS3). From that point
 WS4–WS7 are the consolidation the plan is named for, and they are now in:
 substitution folded onto `OpenHttp` (WS4), ICMP onto `IcmpEcho` (WS5),
 `EgressMode`/`serve_raw` and the raw dispatcher deleted behind
-`xtask check-one-guest-protocol` (WS6), and readiness failing closed on a launch
-whose endpoint carried no session (WS7). A guest now speaks exactly one
+`xtask check-one-guest-protocol` (WS6), and readiness waiting for the endpoint's
+first authenticated-session event before failing closed if none arrives (WS7).
+A guest now speaks exactly one
 protocol to its host, and the build fails if a second one appears.
 
 Re-confirmed live after WS4–WS7, on macOS/libkrun: exit 0, `4`, and no reset,
@@ -375,8 +376,9 @@ change.
 
 ### WS7 — Readiness fails closed
 
-- [x] `EndpointHandshake` (or a second line) reports the first authenticated session
-      (`crates/mvm-hostd/src/bin/mvm-network-endpoint.rs:88-121`)
+- [x] The endpoint binds a host-local readiness socket before its startup handshake,
+      then signals it only after the first authenticated session's durable marker is
+      written. The launcher waits for that event and verifies the marker after wakeup
 - [x] The spawner treats endpoint-exit-before-session as a launch failure rather than
       detaching and forgetting (`network_endpoint_spawn.rs:707-709`)
 - [x] A session that fails to authenticate fails the launch — Plan 316 invariant 4, and
@@ -393,6 +395,11 @@ Hermetic (gate every PR; these are what would have caught #2480):
 - [ ] There is exactly one guest→host protocol (drives the WS6 gate)
 - [ ] A launch without a FlowMux identity is refused, not booted
 - [ ] A secret-bearing workload boots only when substitution is live (the WS4 hard gate)
+- [x] The loopback substitution proxy runs in an init-owned process that holds
+      the root-only FlowMux identity; baked and overlay boots resolve the same
+      helper, and an incomplete overlay is refused before boot
+- [x] A launch whose guest authentication follows agent readiness waits for the
+      authenticated-session event instead of racing a one-shot marker read
 - [ ] `machine run --image alpine --dry-run` reports the transport, as a
       `hvf | libkrun | firecracker` Scenario Outline
 

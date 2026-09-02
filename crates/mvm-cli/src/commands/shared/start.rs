@@ -312,14 +312,6 @@ impl VmStartParams<'_> {
             mem_initial_mib: self.mem_initial_mib,
             network_policy: self.network_policy,
             warm_pool_size: self.warm_pool_size,
-            runtime_source_policy: mvm_core::vm_backend::select_runtime_source_policy(
-                mvm_core::vm_backend::RuntimeSourcePolicySelection {
-                    backend_name: None,
-                    sealed: false,
-                    root_strategy: None,
-                    launch_kind: mvm_core::vm_backend::RuntimeSourceLaunchKind::WorkloadImage,
-                },
-            ),
             ports: self
                 .port_mappings
                 .iter()
@@ -332,6 +324,8 @@ impl VmStartParams<'_> {
                 .volumes
                 .iter()
                 .map(|v| mvm_core::vm_backend::VmVolume {
+                    materialized_image: None,
+                    volume_label: None,
                     host: v.host.clone(),
                     guest: v.guest.clone(),
                     size: v.size.clone(),
@@ -457,14 +451,5 @@ mod tests {
         let sc = params(deny.clone()).into_start_config();
         assert_eq!(sc.network_policy, deny);
         assert!(!sc.network_policy.is_unrestricted());
-    }
-
-    #[test]
-    fn into_start_config_declares_prefer_overlay_runtime_policy() {
-        let sc = params(NetworkPolicy::deny_all()).into_start_config();
-        assert_eq!(
-            sc.runtime_source_policy,
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay
-        );
     }
 }

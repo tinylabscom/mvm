@@ -80,8 +80,6 @@ default = []
 libkrun-sys = []
 
 [dev-dependencies]
-# Supervisor tests stage scratch dirs.
-tempfile.workspace = true
 # `TestEnv` env-var guard for PATH-sensitive supervisor tests.
 mvm-core = { workspace = true, features = ["test-support"] }
 # The smoke example shares `GUEST_AGENT_PORT` with the production vsock

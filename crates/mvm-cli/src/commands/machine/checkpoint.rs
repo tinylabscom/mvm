@@ -9,8 +9,7 @@
 //! `machine warm-restore`.
 
 use anyhow::{Context, Result, bail};
-use mvm_core::checkpoint::{CheckpointClass, CheckpointId};
-use mvm_core::config::vm_state_dir;
+use mvm_core::checkpoint::CheckpointClass;
 use mvm_core::naming;
 use mvm_runtime::checkpoint::CheckpointStore;
 
@@ -22,6 +21,10 @@ pub(in crate::commands) struct ForkMachineInput {
     pub child_name: Option<String>,
     /// Branch slug for auto-naming (`--branch`).
     pub branch: Option<String>,
+    /// Secret bindings explicitly declared for the child.
+    pub declared_secrets: Vec<mvm_core::plan::SecretBinding>,
+    /// Whether omitting a parent binding is intentional.
+    pub allow_secret_drop: bool,
     /// Emit machine-readable JSON instead of human text.
     pub json: bool,
 }
@@ -34,6 +37,10 @@ pub(in crate::commands) struct RestoreMachineInput {
     pub child_name: Option<String>,
     /// Branch slug for auto-naming (`--branch`).
     pub branch: Option<String>,
+    /// Secret bindings explicitly declared for the child.
+    pub declared_secrets: Vec<mvm_core::plan::SecretBinding>,
+    /// Whether omitting a parent binding is intentional.
+    pub allow_secret_drop: bool,
     /// Emit machine-readable JSON instead of human text.
     pub json: bool,
 }
@@ -61,6 +68,8 @@ pub(in crate::commands) fn fork_machine(input: ForkMachineInput) -> Result<()> {
     fork_vm_full_machine(ForkVmFullMachineInput {
         checkpoint_id: checkpoint_id.as_str().to_string(),
         child_vm_name: Some(child_name),
+        declared_secrets: input.declared_secrets,
+        allow_secret_drop: input.allow_secret_drop,
         json: input.json,
     })
     .with_context(|| format!("forking child from checkpoint {}", checkpoint_id.as_str()))?;
@@ -99,6 +108,8 @@ pub(in crate::commands) fn restore_machine(input: RestoreMachineInput) -> Result
     fork_vm_full_machine(ForkVmFullMachineInput {
         checkpoint_id: input.checkpoint_id,
         child_vm_name: Some(child_name),
+        declared_secrets: input.declared_secrets,
+        allow_secret_drop: input.allow_secret_drop,
         json: input.json,
     })?;
     Ok(())
@@ -110,6 +121,10 @@ pub(in crate::commands) struct ForkVmFullMachineInput {
     pub checkpoint_id: String,
     /// Desired child VM name; auto-generated if omitted.
     pub child_vm_name: Option<String>,
+    /// Secret bindings explicitly declared for the child.
+    pub declared_secrets: Vec<mvm_core::plan::SecretBinding>,
+    /// Whether omitting a parent binding is intentional.
+    pub allow_secret_drop: bool,
     /// Emit machine-readable JSON instead of human text.
     pub json: bool,
 }
@@ -137,29 +152,29 @@ pub(in crate::commands) fn fork_vm_full_machine(input: ForkVmFullMachineInput) -
         );
     }
 
-    let now = crate::commands::vm::checkpoint::now_unix();
-    let child_vm_name = input
-        .child_vm_name
-        .unwrap_or_else(|| format!("{}-warm-{now}", checkpoint.as_str()));
+    let child_vm_name = input.child_vm_name.unwrap_or_else(|| {
+        format!(
+            "{}-warm-{}",
+            checkpoint.as_str(),
+            crate::commands::vm::checkpoint::now_unix()
+        )
+    });
     naming::validate_vm_name(&child_vm_name)
         .with_context(|| format!("invalid child VM name {child_vm_name:?}"))?;
-    let dest_dir = vm_state_dir(&child_vm_name);
-    let child_id = CheckpointId::new(format!("fork-{child_vm_name}-{now}"));
 
-    crate::commands::vm::checkpoint::fork_vm_full_arm_fc(
-        crate::commands::vm::checkpoint::ForkVmFullArmFcParams {
+    crate::commands::vm::checkpoint::fork_vm_full_arm(
+        crate::commands::vm::checkpoint::ForkVmFullArmParams {
             store: &store,
             checkpoint: &checkpoint,
-            parent_meta,
-            child_vm_name,
-            dest_dir,
-            child_id,
-            now,
+            new_id: Some(child_vm_name),
+            cpus_override: None,
+            memory_override: None,
             json: input.json,
             bypass_experimental_guard: true,
+            declared_secrets: &input.declared_secrets,
+            allow_secret_drop: input.allow_secret_drop,
         },
-    )?;
-    Ok(())
+    )
 }
 
 /// Resolve the child VM name from explicit `--as`, `--branch`, or a default.
@@ -194,6 +209,23 @@ fn resolve_child_name(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::checkpoint::{
+        CheckpointId, CheckpointMeta, ContentBlob, HVF_FRAME_BLOB, SUPERVISOR_CONFIG_BLOB,
+    };
+
+    fn write_vm_full_checkpoint(store: &CheckpointStore, id: &str, state_blob: &str) {
+        let meta = CheckpointMeta::builder(
+            CheckpointId::new(id),
+            CheckpointClass::VmFull,
+            "parent-machine",
+        )
+        .content(vec![ContentBlob {
+            name: state_blob.to_string(),
+            sha256: "00".repeat(32),
+        }])
+        .build();
+        store.write_meta(&meta).unwrap();
+    }
 
     #[test]
     fn resolve_explicit_child_name() {
@@ -228,5 +260,50 @@ mod tests {
     #[test]
     fn resolve_rejects_invalid_branch() {
         assert!(resolve_child_name("parent", None, Some("bad/name"), false).is_err());
+    }
+
+    #[test]
+    fn machine_restore_dispatches_hvf_checkpoint_away_from_firecracker() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let store = CheckpointStore::open();
+        write_vm_full_checkpoint(&store, "hvf-parent", HVF_FRAME_BLOB);
+
+        let error = fork_vm_full_machine(ForkVmFullMachineInput {
+            checkpoint_id: "hvf-parent".to_string(),
+            child_vm_name: Some("hvf-child".to_string()),
+            declared_secrets: Vec::new(),
+            allow_secret_drop: false,
+            json: false,
+        })
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            !message.contains("Firecracker machine state"),
+            "an HVF checkpoint must never enter the Firecracker arm: {message}"
+        );
+    }
+
+    #[test]
+    fn machine_restore_refuses_retired_backend_through_shared_dispatch() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let store = CheckpointStore::open();
+        write_vm_full_checkpoint(&store, "retired-parent", SUPERVISOR_CONFIG_BLOB);
+
+        let error = fork_vm_full_machine(ForkVmFullMachineInput {
+            checkpoint_id: "retired-parent".to_string(),
+            child_vm_name: Some("retired-child".to_string()),
+            declared_secrets: Vec::new(),
+            allow_secret_drop: false,
+            json: false,
+        })
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("backend that has been removed"),
+            "the shared dispatcher must preserve the retired-backend refusal: {error:#}"
+        );
     }
 }

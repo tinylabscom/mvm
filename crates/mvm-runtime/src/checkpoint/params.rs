@@ -17,7 +17,6 @@ pub struct CaptureFsQuickParams {
     /// Absolute path to the VM's live rootfs image to clone.
     pub rootfs: PathBuf,
     pub supervisor_config_digest: String,
-    pub runtime_source_policy: Option<mvm_core::vm_backend::RuntimeSourcePolicy>,
     pub runtime_overlay_version: Option<String>,
     pub tag: Option<String>,
     pub created_unix: u64,
@@ -50,7 +49,6 @@ pub struct CaptureFsQuickParamsBuilder {
     vm_name: Option<String>,
     rootfs: Option<PathBuf>,
     supervisor_config_digest: Option<String>,
-    runtime_source_policy: Option<mvm_core::vm_backend::RuntimeSourcePolicy>,
     runtime_overlay_version: Option<String>,
     tag: Option<String>,
     created_unix: Option<u64>,
@@ -67,7 +65,6 @@ impl CaptureFsQuickParamsBuilder {
             vm_name: None,
             rootfs: None,
             supervisor_config_digest: None,
-            runtime_source_policy: None,
             runtime_overlay_version: None,
             tag: None,
             created_unix: None,
@@ -101,16 +98,6 @@ impl CaptureFsQuickParamsBuilder {
     #[must_use]
     pub fn supervisor_config_digest(mut self, supervisor_config_digest: String) -> Self {
         self.supervisor_config_digest = Some(supervisor_config_digest);
-        self
-    }
-
-    /// Set `runtime_source_policy`. Takes a value or an `Option`; unset means `None`.
-    #[must_use]
-    pub fn runtime_source_policy(
-        mut self,
-        runtime_source_policy: impl Into<Option<mvm_core::vm_backend::RuntimeSourcePolicy>>,
-    ) -> Self {
-        self.runtime_source_policy = runtime_source_policy.into();
         self
     }
 
@@ -167,7 +154,6 @@ impl CaptureFsQuickParamsBuilder {
             supervisor_config_digest: self.supervisor_config_digest.ok_or(
                 BuilderError::missing("CaptureFsQuickParams", "supervisor_config_digest"),
             )?,
-            runtime_source_policy: self.runtime_source_policy,
             runtime_overlay_version: self.runtime_overlay_version,
             tag: self.tag,
             created_unix: self.created_unix.ok_or(BuilderError::missing(
@@ -188,6 +174,16 @@ impl Default for CaptureFsQuickParamsBuilder {
     }
 }
 
+/// Whether a checkpoint fork may coexist with its captured parent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForkParentLiveness {
+    /// The parent must be stopped before any child bytes are materialized.
+    MustBeStopped,
+    /// The backend has proved that the restored child cannot collide with the
+    /// still-running parent.
+    MayBeRunning,
+}
+
 /// Inputs for forking a child instance from a checkpoint.
 pub struct ForkParams {
     pub checkpoint: CheckpointId,
@@ -197,6 +193,8 @@ pub struct ForkParams {
     /// Where to materialize the child's rootfs (the new VM's state dir).
     pub dest_dir: PathBuf,
     pub created_unix: u64,
+    /// Backend-specific parent coexistence policy for this restore.
+    pub parent_liveness: ForkParentLiveness,
     /// Serialized `SignedExecutionPlan` JSON for the child's own claim-8
     /// admission. When `Some`, the spawner injects it into the child's
     /// `SupervisorConfig.plan` so the supervisor re-verifies it at start.
@@ -226,6 +224,7 @@ pub struct ForkParamsBuilder {
     child_vm_name: Option<String>,
     dest_dir: Option<PathBuf>,
     created_unix: Option<u64>,
+    parent_liveness: ForkParentLiveness,
     child_plan_json: Option<String>,
     child_tenant_id: Option<String>,
 }
@@ -240,6 +239,7 @@ impl ForkParamsBuilder {
             child_vm_name: None,
             dest_dir: None,
             created_unix: None,
+            parent_liveness: ForkParentLiveness::MustBeStopped,
             child_plan_json: None,
             child_tenant_id: None,
         }
@@ -280,6 +280,13 @@ impl ForkParamsBuilder {
         self
     }
 
+    /// Set the backend's live-parent coexistence policy.
+    #[must_use]
+    pub fn parent_liveness(mut self, parent_liveness: ForkParentLiveness) -> Self {
+        self.parent_liveness = parent_liveness;
+        self
+    }
+
     /// Set `child_plan_json`. Takes a value or an `Option`; unset means `None`.
     #[must_use]
     pub fn child_plan_json(mut self, child_plan_json: impl Into<Option<String>>) -> Self {
@@ -312,6 +319,7 @@ impl ForkParamsBuilder {
             created_unix: self
                 .created_unix
                 .ok_or(BuilderError::missing("ForkParams", "created_unix"))?,
+            parent_liveness: self.parent_liveness,
             child_plan_json: self.child_plan_json,
             child_tenant_id: self.child_tenant_id,
         })
@@ -328,7 +336,6 @@ pub struct CaptureVmFullParams {
     pub id: CheckpointId,
     pub vm_name: String,
     pub supervisor_config_digest: String,
-    pub runtime_source_policy: Option<mvm_core::vm_backend::RuntimeSourcePolicy>,
     pub runtime_overlay_version: Option<String>,
     /// The live VM's persisted supervisor config, copied into the checkpoint so
     /// restore can rebuild the state dir (every stop reaps the live one).
@@ -366,7 +373,6 @@ pub struct CaptureVmFullParamsBuilder {
     id: Option<CheckpointId>,
     vm_name: Option<String>,
     supervisor_config_digest: Option<String>,
-    runtime_source_policy: Option<mvm_core::vm_backend::RuntimeSourcePolicy>,
     runtime_overlay_version: Option<String>,
     supervisor_config_src: Option<PathBuf>,
     tag: Option<String>,
@@ -383,7 +389,6 @@ impl CaptureVmFullParamsBuilder {
             id: None,
             vm_name: None,
             supervisor_config_digest: None,
-            runtime_source_policy: None,
             runtime_overlay_version: None,
             supervisor_config_src: None,
             tag: None,
@@ -411,16 +416,6 @@ impl CaptureVmFullParamsBuilder {
     #[must_use]
     pub fn supervisor_config_digest(mut self, supervisor_config_digest: String) -> Self {
         self.supervisor_config_digest = Some(supervisor_config_digest);
-        self
-    }
-
-    /// Set `runtime_source_policy`. Takes a value or an `Option`; unset means `None`.
-    #[must_use]
-    pub fn runtime_source_policy(
-        mut self,
-        runtime_source_policy: impl Into<Option<mvm_core::vm_backend::RuntimeSourcePolicy>>,
-    ) -> Self {
-        self.runtime_source_policy = runtime_source_policy.into();
         self
     }
 
@@ -484,7 +479,6 @@ impl CaptureVmFullParamsBuilder {
             supervisor_config_digest: self.supervisor_config_digest.ok_or(
                 BuilderError::missing("CaptureVmFullParams", "supervisor_config_digest"),
             )?,
-            runtime_source_policy: self.runtime_source_policy,
             runtime_overlay_version: self.runtime_overlay_version,
             supervisor_config_src: self.supervisor_config_src,
             tag: self.tag,

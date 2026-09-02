@@ -3,6 +3,14 @@ title: Persistent workspaces
 description: Use encrypted volumes, copy workflows, snapshots, and cleanup policies for stateful sandboxes.
 ---
 
+:::note[Hidden verbs]
+`machine volume`, `machine cp` and `machine fs` are all marked hidden in the
+CLI: they work, but they do not appear in `mvmctl machine --help`.
+
+Guest mount paths must be under `/data` or `/work` — those are the only two
+allow-roots. `/cache`, `/workspace` and anything under `/mnt` are refused.
+:::
+
 Persistent state is useful for agents, browser sessions, caches, databases, and
 long-running services. It is also where sensitive data accumulates. Choose the
 smallest state mechanism that fits the workflow, and make the retention policy
@@ -12,9 +20,9 @@ explicit before the sandbox starts.
 
 | Need | Use | Security posture |
 | --- | --- | --- |
-| One input file or result file | `mvmctl cp` or `mvmctl machine fs` | Narrowest boundary; preferred for generated-code tasks. |
+| One input file or result file | `mvmctl machine cp` or `mvmctl machine fs` | Narrowest boundary; preferred for generated-code tasks. |
 | Read-only fixtures | `mvmctl run --mount ...:ro` | Host data is exposed but not writable by the guest. |
-| Local dev edits | `mvmctl cp` or managed volume | Explicit copy or encrypted persistent state; no writable transient host share. |
+| Local dev edits | `mvmctl machine cp` or managed volume | Explicit copy or encrypted persistent state; no writable transient host share. |
 | Stateful app data | managed encrypted volume | Encrypted at rest when locked; plaintext exists while unlocked. |
 | Fast retry or recovery | snapshot or cold mode | Can contain memory, files, processes, prompts, and credentials. |
 
@@ -26,35 +34,35 @@ host share when a managed volume is enough.
 Create a managed local volume:
 
 ```sh
-mvmctl volume create agent-cache
+mvmctl machine volume create agent-cache
 ```
 
 Managed volumes are locked by default. Unlock before mounting:
 
 ```sh
-mvmctl volume unlock agent-cache
+mvmctl machine volume unlock agent-cache
 ```
 
 Mount the unlocked volume into a running sandbox:
 
 ```sh
-mvmctl volume mount agent-sandbox \
+mvmctl machine volume mount agent-sandbox \
   --volume agent-cache \
-  --guest /cache \
+  --guest /data/cache \
   --rw
 ```
 
 List mounts:
 
 ```sh
-mvmctl volume ls agent-sandbox
+mvmctl machine volume ls agent-sandbox
 ```
 
 Unmount and lock when the workflow is done:
 
 ```sh
-mvmctl volume unmount agent-sandbox /cache
-mvmctl volume lock agent-cache
+mvmctl machine volume unmount agent-sandbox /data/cache
+mvmctl machine volume lock agent-cache
 ```
 
 Security rules:
@@ -86,19 +94,19 @@ credentials never enter `mvmctl`; mvmd resolves them from the registered
 Create and list durable volumes:
 
 ```sh
-mvmctl volume create database --size 20G --remote --bucket bucket-primary
-mvmctl volume catalog --remote --json
+mvmctl machine volume create database --size 20G --remote --bucket bucket-primary
+mvmctl machine volume catalog --remote --json
 ```
 
 The API allocates whole GiB, so smaller human-readable sizes round up to one
 GiB. Use the returned volume ID for attachment and checkpoint operations:
 
 ```sh
-mvmctl volume mount worker-1 --volume vol-123 --guest /data --rw --remote
-mvmctl volume checkpoint vol-123 before-upgrade --remote
-mvmctl volume restore vol-123 snap-456 --target database-recovered --remote
-mvmctl volume unmount worker-1 /data --remote
-mvmctl volume delete vol-123 --remote
+mvmctl machine volume mount worker-1 --volume vol-123 --guest /data --rw --remote
+mvmctl machine volume checkpoint vol-123 before-upgrade --remote
+mvmctl machine volume restore vol-123 snap-456 --target database-recovered --remote
+mvmctl machine volume unmount worker-1 /data --remote
+mvmctl machine volume delete vol-123 --remote
 ```
 
 Remote restore always creates a new volume from a pinned, ready checkpoint; it
@@ -113,7 +121,7 @@ Ad-hoc host-backed mounts are useful when an existing encrypted host directory
 is the source of truth:
 
 ```sh
-mvmctl volume mount agent-sandbox \
+mvmctl machine volume mount agent-sandbox \
   --volume project-data \
   --host /absolute/path/to/data \
   --guest /data
@@ -122,7 +130,7 @@ mvmctl volume mount agent-sandbox \
 Use `--rw` only for trusted workflows:
 
 ```sh
-mvmctl volume mount agent-sandbox \
+mvmctl machine volume mount agent-sandbox \
   --volume project-data \
   --host /absolute/path/to/data \
   --guest /data \
@@ -138,9 +146,9 @@ For model-generated code, third-party scripts, and code interpreter workloads,
 prefer copy-in/copy-out:
 
 ```sh
-mvmctl cp ./input.json agent-sandbox:/work/input.json
+mvmctl machine cp ./input.json agent-sandbox:/work/input.json
 mvmctl machine exec agent-sandbox -- python /work/task.py
-mvmctl cp --max-bytes 16777216 agent-sandbox:/work/output.json ./output.json
+mvmctl machine cp --max-bytes 16777216 agent-sandbox:/work/output.json ./output.json
 ```
 
 Copy workflows reduce host exposure. Treat copied guest output as untrusted
@@ -168,7 +176,7 @@ For a coding agent:
 
 1. Create a named sandbox with a short TTL.
 2. Copy the task input into `/work`.
-3. Mount a managed volume at `/workspace` only if the agent needs durable state.
+3. Mount a managed volume at `/data/workspace` only if the agent needs durable state.
 4. Keep network closed until the task has an approved egress need.
 5. Copy out bounded results.
 6. Stop, cold-pause, or destroy based on the retention decision.
@@ -177,16 +185,16 @@ For a coding agent:
 Example:
 
 ```sh
-mvmctl volume create coding-agent-work
-mvmctl volume unlock coding-agent-work
+mvmctl machine volume create coding-agent-work
+mvmctl machine volume unlock coding-agent-work
 mvmctl machine run --flake ./agent-image --name coding-agent -d
-mvmctl volume mount coding-agent --volume coding-agent-work --guest /workspace --rw
-mvmctl cp ./task.json coding-agent:/work/task.json
-mvmctl machine exec coding-agent --timeout 120 -- python /work/run_task.py
-mvmctl cp --max-bytes 16777216 coding-agent:/work/result.json ./result.json
-mvmctl volume unmount coding-agent /workspace
+mvmctl machine volume mount coding-agent --volume coding-agent-work --guest /data/workspace --rw
+mvmctl machine cp ./task.json coding-agent:/work/task.json
+mvmctl machine exec coding-agent -- python /work/run_task.py
+mvmctl machine cp --max-bytes 16777216 coding-agent:/work/result.json ./result.json
+mvmctl machine volume unmount coding-agent /data/workspace
 mvmctl machine stop coding-agent
-mvmctl volume lock coding-agent-work
+mvmctl machine volume lock coding-agent-work
 ```
 
 ## Cleanup checklist

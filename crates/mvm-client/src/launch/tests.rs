@@ -247,6 +247,33 @@ async fn transient_exit_reports_code_and_cleanup_is_idempotent() {
 }
 
 #[tokio::test]
+async fn an_exit_records_the_host_state_size_even_when_the_backend_measured_nothing() {
+    // The host observes its own state directory and its own launch span
+    // without any cooperation from the VMM, so these are measured on every
+    // tier — including one that wrote no usage sidecar at all.
+    let home = Isolated::new();
+    let client = mock_client();
+
+    let request = transient_request(&home.rootfs())
+        .name("t-usage")
+        .build()
+        .expect("request");
+    let outcome = client.launch(request).await.expect("launch");
+    client
+        .stop_machine(&outcome.machine.id)
+        .await
+        .expect("stop");
+
+    client.report_exit(&outcome).expect("report exit");
+
+    let audit = home.audit_text();
+    assert!(audit.contains("state_dir_tree_bytes"), "got: {audit}");
+    assert!(audit.contains("host_launch_span"), "got: {audit}");
+    // Nothing wrote a sidecar, so CPU stays honestly unobserved.
+    assert!(audit.contains("unavailable"), "got: {audit}");
+}
+
+#[tokio::test]
 async fn transient_failed_launch_rolls_back_session_state() {
     let home = Isolated::new();
     let service = fixture_secret_service(&home);
@@ -532,6 +559,7 @@ async fn start_refuses_spec_shapes_the_in_process_backend_cannot_honor() {
     let _home = Isolated::new();
     let client = mock_client();
     let mut spec = mvm_runtime::machine::persist::MachineSpec {
+        caller_commitment: None,
         schema_version: mvm_runtime::machine::persist::MACHINE_SPEC_SCHEMA_VERSION,
         name: "p-net".into(),
         image: Some("alpine:latest".into()),
@@ -541,6 +569,7 @@ async fn start_refuses_spec_shapes_the_in_process_backend_cannot_honor() {
         runtime_pack: false,
         net: true,
         allow_host: vec![],
+        peer: Vec::new(),
         cpus: 1,
         memory: "128M".into(),
         mem_initial: None,
@@ -553,6 +582,7 @@ async fn start_refuses_spec_shapes_the_in_process_backend_cannot_honor() {
         health_check: None,
         grants: None,
         ports: vec![],
+        ai: None,
     };
     mvm_runtime::machine::persist::save_machine_spec(&spec, false).unwrap();
     let err = client
@@ -739,7 +769,7 @@ fn firecracker_admitted_boot_receives_a_concrete_kernel_path() {
     );
 
     // Seed the exact cache location the CLI's machine-run boot path reads:
-    // `<cache>/builder-vm/<arch>/kernels/workload/vmlinux`.
+    // `<cache>/kernels/<arch>/workload/vmlinux`.
     let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let arch = mvm_core::arch::GuestArch::host().to_string();
     let cached = mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, "workload");
@@ -969,6 +999,7 @@ fn a_restart_re_admits_under_the_persisted_grants_not_deny_all() {
     // the "my allowlist stopped applying" failure in its purest form: closed
     // for egress, so nothing breaks loudly, and silent for CPU and wall clock.
     let mut spec = mp::MachineSpec {
+        caller_commitment: None,
         schema_version: mp::MACHINE_SPEC_SCHEMA_VERSION,
         name: "p-restart".to_string(),
         image: Some("alpine:latest".to_string()),
@@ -978,6 +1009,7 @@ fn a_restart_re_admits_under_the_persisted_grants_not_deny_all() {
         runtime_pack: false,
         net: false,
         allow_host: vec![],
+        peer: Vec::new(),
         cpus: 2,
         memory: "256M".to_string(),
         mem_initial: None,
@@ -990,6 +1022,7 @@ fn a_restart_re_admits_under_the_persisted_grants_not_deny_all() {
         health_check: None,
         grants: Some(egress_grants("api.example.com", 443)),
         ports: vec![],
+        ai: None,
     };
 
     let request =

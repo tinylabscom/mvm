@@ -9,11 +9,14 @@ Use this page when you want a practical SDK operation and need to know whether
 to call the SDK today, use the CLI directly, or treat the helper as target API.
 
 The shipped SDK runtime surface is intentionally smaller than the product
-target. Current examples use `Sandbox.create(...)`, `commands.start(...)`,
-`files.write(...)`, TTLs, resources, network declarations, record mode, live
-mode, and cleanup. Higher-level helpers such as `commands.run(...)`,
-`files.read(...)`, logs, ports, and snapshots are parity targets until the
-language SDK tests prove them.
+target. Current examples use `Sandbox.create(...)`, `commands.start(...)`, the
+one-shot `sandbox.exec(...)`, the full `files.*` API, TTLs, resources, network
+declarations, record mode, live mode, and cleanup. Logs, snapshots, and the
+lifecycle helpers are parity targets until the language SDK tests prove them.
+
+Several of the CLI fallbacks below (`machine proc`, `machine fs`, `machine
+pause`, `machine resume`, `machine checkpoint`) are hidden advanced verbs: they
+work, but they do not appear in `mvmctl machine --help`.
 
 ## Operation status
 
@@ -21,14 +24,14 @@ language SDK tests prove them.
 | --- | --- | --- | --- |
 | Create sandbox recording | `mvm.Sandbox.create(...)` | `Sandbox.create(...)` | `mvmctl build compile` or `mvmctl run --mode plan` |
 | Create live sandbox | `mvmctl run --mode live ./script.py` | `mvmctl run --mode live ./script.ts` | `mvmctl machine run` |
-| Start command | `sandbox.commands.start([...])` | `sandbox.commands.start([...])` | `mvmctl proc start` or `mvmctl machine exec` |
-| Capture command result | Target `commands.run(...)` | Target `commands.run(...)` | CLI command result and receipt paths |
+| Start command | `sandbox.commands.start([...])` | `sandbox.commands.start([...])` | `mvmctl machine proc start` or `mvmctl machine exec` |
+| Capture command result | `sandbox.exec(*argv)` | `sandbox.exec(argv)` | CLI command result and receipt paths |
 | Write file | `sandbox.files.write(path, data)` | `sandbox.files.write(path, data)` | `mvmctl machine fs write` |
-| Read/list/remove file | Target helpers | Target helpers | `mvmctl machine fs read`, `mvmctl machine fs ls`, `mvmctl machine fs rm` |
+| Read/list/remove file | `sandbox.files.read/list/remove(...)` | `sandbox.files.read/list/remove(...)` | `mvmctl machine fs read`, `mvmctl machine fs ls`, `mvmctl machine fs rm` |
 | Logs | Target helper | Target helper | `mvmctl machine logs` |
-| Ports | Target helper | Target helper | port-forwarding CLI commands |
-| Pause/resume | Target helper | Target helper | `mvmctl pause`, `mvmctl resume` |
-| Checkpoint create/restore | Target helper | Target helper | `mvmctl checkpoint create --class vm-full`, `mvmctl checkpoint restore` |
+| Ports | Not claimed | Not claimed | Declare ingress before boot: `mvmctl machine run --port HOST:GUEST` |
+| Pause/resume | Target helper | Target helper | `mvmctl machine pause`, `mvmctl machine resume` |
+| Checkpoint create/restore | Target helper | Target helper | `mvmctl machine checkpoint create --class vm-full`, `mvmctl machine checkpoint restore` |
 | Stop cleanup | context manager or `kill()` | `using`/`Symbol.dispose` or `kill()` | `mvmctl machine stop` |
 
 ## Current paths
@@ -45,7 +48,7 @@ with mvm.Sandbox.create(
     ttl="30m",
     include=["src"],
     resources=mvm.resources(cpu_cores=1, memory_mb=512, rootfs_size_mb=1024),
-    network=mvm.network(mode="deny"),
+    network=mvm.network(mode="none"),
 ) as sandbox:
     sandbox.files.write("/app/main.py", "print('hello from mvm')")
     sandbox.commands.start(
@@ -58,7 +61,7 @@ Security notes:
 
 - the Python script itself runs on the host in record, plan, and live modes;
 - secret references are recorded as references, not copied as raw values;
-- `commands.start(...)` starts work, but result capture is still a parity target;
+- `commands.start(...)` starts work and returns a handle; use `sandbox.exec(...)` when you want the exit code and captured output back;
 - the context manager records or performs cleanup through `kill()`.
 
 Run modes:
@@ -73,19 +76,22 @@ mvmctl run --mode live ./sandbox.py
 <TabItem label="TypeScript">
 
 ```ts
-import { Sandbox, network, resources, secret } from "mvm-sdk";
+import { Sandbox, network, resources, secret } from "@runmvm/mvm";
 
 using sandbox = Sandbox.create("node-22", {
   workloadId: "agent-tool",
   ttl: "30m",
   include: ["src"],
   resources: resources({ cpu_cores: 1, memory_mb: 512, rootfs_size_mb: 1024 }),
-  network: network({ mode: "deny" }),
+  network: network({ mode: "none" }),
 });
 
 sandbox.files.write("/app/main.js", "console.log('hello from mvm')");
 sandbox.commands.start(["node", "/app/main.js"], {
-  env: { MODE: "dev", API_KEY: secret("api-key") },
+  env: {
+    MODE: "dev",
+    API_KEY: secret("api-key", { type: "bearer", hosts: ["api.example.com"] }),
+  },
 });
 ```
 
@@ -108,41 +114,41 @@ mvmctl run --mode live ./sandbox.ts
 </TabItem>
 </Tabs>
 
-## Target result capture
+## Result capture
 
-The product target is a typed result helper:
+The shipped one-shot is `sandbox.exec(...)`, live mode only. It returns an
+`ExecResult` carrying the exit code and the captured stdout/stderr:
 
 <Tabs syncKey="runtime-language">
 <TabItem label="Python">
 
 ```python
-result = sandbox.commands.run(["python", "/app/main.py"], timeout_seconds=30)
+result = sandbox.exec("python", "/app/main.py", timeout=30)
 print(result.exit_code)
 print(result.stdout)
-print(result.audit_id)
+print(result.stderr)
 ```
 
 </TabItem>
 <TabItem label="TypeScript">
 
 ```ts
-const result = await sandbox.commands.run(["node", "/app/main.js"], {
-  timeoutSeconds: 30,
-});
+const result = sandbox.exec(["node", "/app/main.js"], { timeout: 30 });
 console.log(result.exitCode);
 console.log(result.stdout);
-console.log(result.auditId);
+console.log(result.stderr);
 ```
 
 </TabItem>
 </Tabs>
 
-Until this helper is shipped in a language SDK, use the CLI path for result
-capture, receipts, and automation that needs exit status or bounded output.
+`ExecResult` carries no run or audit identifier yet. Use the CLI receipt path
+(`mvmctl run --receipt ...`) when automation needs audit correlation.
 
-## Target file reads
+## File reads
 
-The product target is a symmetric file API:
+The file API is symmetric and shipped in both SDKs. Everything but `write` is
+live mode only; in record mode these raise a mode error rather than guessing:
 
 <Tabs syncKey="runtime-language">
 <TabItem label="Python">
@@ -158,16 +164,15 @@ sandbox.files.remove("/work/output.json")
 <TabItem label="TypeScript">
 
 ```ts
-await sandbox.files.write("/work/input.json", new TextEncoder().encode("{}"));
-const data = await sandbox.files.read("/work/output.json");
-const entries = await sandbox.files.list("/work");
-await sandbox.files.remove("/work/output.json");
+sandbox.files.write("/work/input.json", "{}");
+const data = sandbox.files.read("/work/output.json");
+const entries = sandbox.files.list("/work");
+sandbox.files.remove("/work/output.json");
 ```
 
 </TabItem>
 </Tabs>
 
-Until read/list/remove helpers are shipped, use the CLI filesystem commands.
 Treat bytes returned from the guest as untrusted and possibly sensitive.
 
 ## Target logs and ports
@@ -181,7 +186,8 @@ Logs and ports should keep policy visible:
 for event in sandbox.logs(follow=True, redact=True):
     print(event.message)
 
-forward = sandbox.ports.forward(host="127.0.0.1", host_port=8080, guest_port=8000)
+# Ingress is declared in Sandbox.create(..., network={"ports": [...]})
+# before the signed plan is admitted.
 ```
 
 </TabItem>
@@ -192,19 +198,16 @@ for await (const event of sandbox.logs({ follow: true, redact: true })) {
   console.log(event.message);
 }
 
-const forward = await sandbox.ports.forward({
-  host: "127.0.0.1",
-  hostPort: 8080,
-  guestPort: 8000,
-});
+// Ingress is declared in Sandbox.create(..., { network: { ports: [...] } })
+// before the signed plan is admitted.
 ```
 
 </TabItem>
 </Tabs>
 
-Until language helpers are shipped, use the CLI logging and port-forwarding
-commands. Bind host ports explicitly and avoid wildcard listeners unless the
-workflow requires them.
+Until language helpers are shipped, declare ingress through `machine run
+--port` or the manifest. Bind host ports explicitly and avoid wildcard
+listeners unless the workflow requires them.
 
 ## Target lifecycle and snapshots
 
@@ -238,10 +241,10 @@ await sandbox.destroy();
 Until those helpers are shipped, use:
 
 ```sh
-mvmctl pause agent-sandbox
-mvmctl resume agent-sandbox
-mvmctl checkpoint create agent-sandbox --class vm-full
-mvmctl checkpoint restore agent-sandbox --name after-index
+mvmctl machine pause agent-sandbox
+mvmctl machine resume agent-sandbox
+mvmctl machine checkpoint create agent-sandbox --class vm-full
+mvmctl machine checkpoint restore CHECKPOINT_ID
 mvmctl machine stop agent-sandbox
 ```
 

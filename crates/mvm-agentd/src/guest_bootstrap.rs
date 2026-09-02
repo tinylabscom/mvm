@@ -1,9 +1,8 @@
 //! Guest environment setup shared by the two guest inits.
 //!
-//! Both entry points reach the same workload environment: `mvm-oci-init` as PID 1
-//! on the legacy per-rootfs initrd, and the guest agent's activation path when the
-//! universal initramfs boots it as PID 1. Keeping the steps here means neither can
-//! quietly acquire — or lose — one of them.
+//! The guest agent's activation path reaches this when the universal initramfs
+//! boots it as PID 1. Keeping the steps here rather than inline in that path
+//! means an init cannot quietly acquire — or lose — one of them.
 
 use std::ffi::CString;
 use std::fs;
@@ -32,12 +31,19 @@ pub struct EgressClientMissing;
 /// classifying per-error would need every path to preserve an errno, and one
 /// that stopped doing so would silently go back to shouting.
 fn rootfs_is_read_only() -> bool {
-    let Ok(mounts) = std::fs::read_to_string("/proc/mounts") else {
-        // Unreadable /proc: assume writable, which keeps every failure loud.
-        // The wrong guess here costs noise, and the other one costs silence.
-        return false;
-    };
-    root_is_read_only_in(&mounts)
+    // Actually once, not once per step. Every optional step consults this, so
+    // the un-cached version read the file six times on exactly the sealed boot
+    // this exists to quieten, and the doc above claimed otherwise. The mount
+    // cannot change under a running init, so caching costs nothing.
+    static READ_ONLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *READ_ONLY.get_or_init(|| {
+        let Ok(mounts) = std::fs::read_to_string("/proc/mounts") else {
+            // Unreadable /proc: assume writable, which keeps every failure loud.
+            // The wrong guess here costs noise, and the other one costs silence.
+            return false;
+        };
+        root_is_read_only_in(&mounts)
+    })
 }
 
 /// The `/proc/mounts` half of [`rootfs_is_read_only`], split out so it can be
@@ -93,13 +99,16 @@ fn report_read_only_skips() {
 }
 
 pub fn provision_guest_environment() -> Result<(), EgressClientMissing> {
+    provision_hostname();
     ensure_runtime_dirs();
+    provision_pty_devices();
     provision_workload_identity();
     mount_mediated_tools();
     provision_egress_ca();
     provision_verb_grant();
     provision_flowmux_identity();
-    run_one(resolve_exec([NETINIT_OVERLAY, NETINIT_FALLBACK]), "netinit");
+    start_forward_proxy();
+    run_one(resolve_exec([NETINIT_OVERLAY]), "netinit");
     if cmdline_has_flag("mvm.vsock_egress=1") {
         start_vsock_egress()?;
     }
@@ -107,15 +116,64 @@ pub fn provision_guest_environment() -> Result<(), EgressClientMissing> {
     Ok(())
 }
 
+/// Make `/dev` complete enough for a shell.
+///
+/// Two gaps, both from the same cause: devtmpfs creates device nodes and
+/// nothing else, and this guest runs no udev, no mdev and no
+/// systemd-tmpfiles to fill in the rest.
+///
+/// Without the `devpts` mount `openpty(3)` has no slave filesystem to
+/// allocate from, so `machine run -it` and `machine console` fail with
+/// "openpty() failed" — a message that names the call and not the missing
+/// mount. Without the `/dev/fd` family bash process substitution fails with
+/// "/dev/fd/63: No such file or directory".
+///
+/// Both are loud on failure and neither is fatal: a non-interactive workload
+/// needs neither, and refusing to boot over a PTY it will never open would
+/// turn a degraded shell into a dead machine. Reported directly rather than
+/// through [`note_optional_step`] because both land on devtmpfs — a read-only
+/// image root is not an explanation here, so the failure is real either way.
+fn provision_pty_devices() {
+    if let Err(e) = crate::guest_mount::mount_pty_filesystem() {
+        eprintln!(
+            "mvm-guest-init: devpts not mounted at /dev/pts ({e}); \
+             interactive console sessions will fail at openpty()"
+        );
+    }
+    for failure in crate::guest_mount::link_dev_fd_family() {
+        eprintln!("mvm-guest-init: /dev symlink not created: {failure}");
+    }
+}
+
 /// Give the workload a home it owns and a name for its uid.
 ///
 /// Both are cosmetic-until-they-aren't: without the home the shell starts in a
 /// directory it cannot write, and without the `/etc/passwd` entry `whoami`
 /// exits nonzero and `getpwuid()` returns `NULL` to any library that asks.
-/// Neither failure is worth refusing to boot over — a read-only rootfs that
-/// takes neither write still runs the workload — so both are reported and
-/// stepped past.
+/// Neither failure is worth refusing to boot over.
+///
+/// The home comes from a tmpfs laid over a mount point the image carries,
+/// which needs no write to the root and so works on the read-only roots every
+/// workload actually boots with. The account entries are baked in at image
+/// materialization for the same reason; the writable-root branch below is the
+/// fallback for a root mvm did not materialize, and calls the same
+/// `provision_in` the materializer does.
 fn provision_workload_identity() {
+    if let Err(error) = crate::guest_mount::mount_workload_home() {
+        // Deliberately not routed through `note_optional_step`: that bucket
+        // means "the read-only root explains this", and mounting over a
+        // directory needs no write to the root. A failure here is its own
+        // fact and stays at full volume.
+        eprintln!(
+            "mvm-guest-init: could not mount a writable home at {} \
+             (continuing with {} as $HOME): {error}",
+            crate::guest_mount::WORKLOAD_HOME,
+            crate::guest_mount::WORKLOAD_HOME_FALLBACK
+        );
+    }
+    if !crate::guest_mount::optional_image_writes_allowed(rootfs_is_read_only()) {
+        return;
+    }
     if let Err(error) = crate::guest_mount::ensure_workload_home() {
         note_optional_step(
             &format!(
@@ -135,6 +193,36 @@ fn provision_workload_identity() {
             &error,
         );
     }
+}
+
+/// Start the loopback forward proxy the substitution path relays through.
+///
+/// Here, as a privileged child, rather than inside the guest agent: relaying
+/// opens an authenticated FlowMux session, which reads the guest signing key,
+/// and the key is root-only precisely so the workload — whose uid the agent
+/// shares — cannot authenticate as its own guest. Served from the agent, every
+/// relay failed on that read and the workload got a `502`.
+///
+/// Unconditional, and not gated on `mvm.vsock_egress=1` in particular: that
+/// token is *off* for exactly the launches that need this. A secret-bearing
+/// workload's egress goes through the host substitution endpoint, so its guest
+/// deliberately starts no vsock egress client, and this listener is the whole
+/// of its egress. A workload with no placeholders has no `HTTP_PROXY` pointed
+/// here and the listener simply sees no connections.
+///
+/// Non-fatal if it cannot be resolved. Unlike the egress client, whose absence
+/// means an admitted network is silently unreachable, this one is used only by
+/// a launch that minted placeholders — and that launch fails loudly on its
+/// first request rather than quietly reaching the network unsubstituted.
+fn start_forward_proxy() {
+    let Some(proxy) = resolve_forward_proxy() else {
+        note_optional_step(
+            "loopback forward proxy (secret-bearing egress will have nothing to relay through)",
+            &"no executable at /mvm/runtime/forward-proxy or /usr/local/bin/mvm-forward-proxy",
+        );
+        return;
+    };
+    spawn_one(&proxy, "forward-proxy");
 }
 
 fn start_vsock_egress() -> Result<(), EgressClientMissing> {
@@ -160,13 +248,11 @@ fn start_vsock_egress() -> Result<(), EgressClientMissing> {
     Ok(())
 }
 
-pub const NETINIT_FALLBACK: &str = "/usr/local/bin/mvm-guest-netinit";
-
 pub const NETINIT_OVERLAY: &str = "/mvm/runtime/netinit";
 
-pub const EGRESS_CLIENT: &str = "/usr/local/bin/mvm-egress-client";
-
 pub const EGRESS_CLIENT_OVERLAY: &str = "/mvm/runtime/egress-client";
+
+pub const FORWARD_PROXY_OVERLAY: &str = "/mvm/runtime/forward-proxy";
 
 /// Tools the image ships that cannot work in this guest, and the overlay
 /// binary that stands in for each.
@@ -458,8 +544,10 @@ pub fn provision_egress_ca() {
 /// never wanted networking.
 pub fn provision_flowmux_identity() {
     #[cfg(target_os = "linux")]
-    if let Err(e) = crate::flowmux_drive::provision_identity_from_drive() {
-        eprintln!("mvm-init: FlowMux identity not provisioned: {e}");
+    if let Err(error) = crate::flowmux_drive::provision_identity_from_drive()
+        && let Some(warning) = error.boot_warning()
+    {
+        eprintln!("mvm-init: FlowMux identity not provisioned: {warning}");
     }
 }
 
@@ -486,33 +574,34 @@ pub fn resolve_exec<const N: usize>(candidates: [&str; N]) -> Option<PathBuf> {
         .find(|p| is_executable(p))
 }
 
-pub fn runtime_source_policy() -> mvm_core::vm_backend::RuntimeSourcePolicy {
-    cmdline_value("mvm.runtime_source_policy")
-        .as_deref()
-        .and_then(mvm_core::vm_backend::RuntimeSourcePolicy::from_cmdline_value)
-        .unwrap_or(mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay)
+/// The overlay copy of one helper, or nothing.
+///
+/// One rule for every helper, and only one candidate: the runtime overlay is
+/// the single source of the guest binaries. A helper that fell back to a baked
+/// copy would be the one binary in the guest whose provenance the boot could
+/// not account for.
+fn resolve_runtime_binary_for(
+    overlay: &'static str,
+    is_exec: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    let path = Path::new(overlay);
+    is_exec(path).then(|| path.to_path_buf())
 }
 
 pub fn resolve_egress_client() -> Option<PathBuf> {
-    resolve_egress_client_for(runtime_source_policy(), is_executable)
+    resolve_egress_client_for(is_executable)
 }
 
-pub fn resolve_egress_client_for(
-    runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
-    is_exec: impl Fn(&Path) -> bool,
-) -> Option<PathBuf> {
-    let candidates: &[&str] = match runtime_source_policy {
-        mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay => &[EGRESS_CLIENT_OVERLAY],
-        mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay => {
-            &[EGRESS_CLIENT_OVERLAY, EGRESS_CLIENT]
-        }
-        mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly => &[EGRESS_CLIENT],
-    };
-    candidates
-        .iter()
-        .map(Path::new)
-        .find(|path| is_exec(path))
-        .map(Path::to_path_buf)
+pub fn resolve_egress_client_for(is_exec: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    resolve_runtime_binary_for(EGRESS_CLIENT_OVERLAY, is_exec)
+}
+
+pub fn resolve_forward_proxy() -> Option<PathBuf> {
+    resolve_forward_proxy_for(is_executable)
+}
+
+pub fn resolve_forward_proxy_for(is_exec: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    resolve_runtime_binary_for(FORWARD_PROXY_OVERLAY, is_exec)
 }
 
 pub fn is_executable(path: &Path) -> bool {
@@ -604,10 +693,20 @@ pub fn cmdline() -> String {
 }
 
 pub fn cmdline_value(key: &str) -> Option<String> {
-    let prefix = format!("{key}=");
-    cmdline()
-        .split_whitespace()
-        .find_map(|part| part.strip_prefix(&prefix).map(ToOwned::to_owned))
+    crate::guest_hostname::cmdline_value_from(&cmdline(), key).map(ToOwned::to_owned)
+}
+
+fn provision_hostname() {
+    match crate::guest_hostname::provision_from(
+        &cmdline(),
+        crate::guest_hostname::set_kernel_hostname,
+    ) {
+        Ok(true) => {}
+        Ok(false) => {
+            eprintln!("mvm-guest-init: no mvm.hostname token; keeping the kernel hostname")
+        }
+        Err(error) => eprintln!("mvm-guest-init: could not set guest hostname: {error}"),
+    }
 }
 
 pub fn cmdline_has_flag(flag: &str) -> bool {
@@ -683,8 +782,8 @@ fn base64_val(b: u8) -> Option<u8> {
 }
 
 pub fn bring_loopback_up() {
-    if let Err(e) = crate::guest_net::bring_iface_up("lo") {
-        eprintln!("mvm-guest-init: bring loopback up: {e}");
+    if let Err(e) = crate::guest_net::configure_loopback() {
+        eprintln!("mvm-guest-init: configure loopback: {e}");
     }
     if loopback_is_up() {
         return;
@@ -784,71 +883,61 @@ mod tests {
     }
 
     #[test]
-    fn resolve_egress_client_for_required_overlay_resolves_overlay() {
-        let got = resolve_egress_client_for(
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-            |path| path == Path::new(EGRESS_CLIENT_OVERLAY),
-        );
+    fn resolve_egress_client_resolves_the_overlay_copy() {
+        let got = resolve_egress_client_for(|path| path == Path::new(EGRESS_CLIENT_OVERLAY));
         assert_eq!(got, Some(PathBuf::from(EGRESS_CLIENT_OVERLAY)));
     }
 
     #[test]
-    fn resolve_egress_client_for_required_overlay_returns_none_when_nothing_executable() {
-        // No executable candidate -> None, which main() treats as fatal
-        // (fail closed) rather than booting a workload with no egress path.
-        let got = resolve_egress_client_for(
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-            |_path| false,
-        );
+    fn resolve_egress_client_returns_none_when_nothing_is_executable() {
+        // None is fatal to the boot (fail closed) rather than launching a
+        // workload that silently cannot reach its admitted egress.
+        assert_eq!(resolve_egress_client_for(|_| false), None);
+    }
+
+    /// The overlay is the single runtime source, so a stray executable at the
+    /// old baked path must not satisfy the lookup. This is the exact shape that
+    /// let a boot come up with an unaccounted-for binary.
+    #[test]
+    fn resolve_egress_client_ignores_a_stray_binary_at_the_old_baked_path() {
+        let got =
+            resolve_egress_client_for(|path| path == Path::new("/usr/local/bin/mvm-egress-client"));
         assert_eq!(got, None);
     }
 
     #[test]
-    fn resolve_egress_client_for_required_overlay_does_not_fall_back_to_baked() {
-        // Only the baked path is executable; required-overlay must not accept it.
-        let got = resolve_egress_client_for(
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-            |path| path == Path::new(EGRESS_CLIENT),
+    fn resolve_forward_proxy_resolves_the_overlay_copy_and_ignores_the_baked_path() {
+        assert_eq!(
+            resolve_forward_proxy_for(|path| path == Path::new(FORWARD_PROXY_OVERLAY)),
+            Some(PathBuf::from(FORWARD_PROXY_OVERLAY))
         );
-        assert_eq!(got, None);
+        assert_eq!(
+            resolve_forward_proxy_for(|path| {
+                path == Path::new("/usr/local/bin/mvm-forward-proxy")
+            }),
+            None
+        );
     }
 
+    /// The two helpers must not drift apart: they are the same decision about
+    /// where the runtime came from, and the shared rule is what keeps them one.
     #[test]
-    fn resolve_egress_client_for_prefer_overlay_prefers_overlay_when_both_present() {
-        let got = resolve_egress_client_for(
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-            |_path| true,
-        );
-        assert_eq!(got, Some(PathBuf::from(EGRESS_CLIENT_OVERLAY)));
-    }
-
-    #[test]
-    fn resolve_egress_client_for_prefer_overlay_falls_back_to_baked() {
-        let got = resolve_egress_client_for(
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-            |path| path == Path::new(EGRESS_CLIENT),
-        );
-        assert_eq!(got, Some(PathBuf::from(EGRESS_CLIENT)));
-    }
-
-    #[test]
-    fn resolve_egress_client_for_rootfs_only_ignores_overlay_and_uses_baked() {
-        // Overlay executable but policy is rootfs-only -> only the baked
-        // candidate is considered, so it wins.
-        let got = resolve_egress_client_for(
-            mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
-            |path| path == Path::new(EGRESS_CLIENT_OVERLAY) || path == Path::new(EGRESS_CLIENT),
-        );
-        assert_eq!(got, Some(PathBuf::from(EGRESS_CLIENT)));
-    }
-
-    #[test]
-    fn resolve_egress_client_for_rootfs_only_returns_none_when_baked_missing() {
-        let got = resolve_egress_client_for(
-            mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
-            |_path| false,
-        );
-        assert_eq!(got, None);
+    fn the_egress_client_and_the_forward_proxy_resolve_by_the_same_rule() {
+        for (overlay, baked) in [
+            (EGRESS_CLIENT_OVERLAY, "/usr/local/bin/mvm-egress-client"),
+            (FORWARD_PROXY_OVERLAY, "/usr/local/bin/mvm-forward-proxy"),
+        ] {
+            assert_eq!(
+                resolve_runtime_binary_for(overlay, |p| p == Path::new(overlay)),
+                Some(PathBuf::from(overlay)),
+                "{overlay} did not resolve from the overlay"
+            );
+            assert_eq!(
+                resolve_runtime_binary_for(overlay, |p| p == Path::new(baked)),
+                None,
+                "{overlay} accepted a binary at the old baked path {baked}"
+            );
+        }
     }
 
     #[test]

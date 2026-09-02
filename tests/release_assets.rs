@@ -37,6 +37,12 @@ fn boot_image_workflow() -> String {
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
 }
 
+fn ci_workflow() -> String {
+    let path = Path::new(".github/workflows/ci.yml");
+    fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+}
+
 fn pages_workflow() -> String {
     let path = Path::new(".github/workflows/pages.yml");
     fs::read_to_string(path)
@@ -53,10 +59,15 @@ fn assert_publishes(workflow: &str, asset: &str) {
 #[test]
 fn release_publishes_every_sdk_sidecar_asset_the_downloader_requests() {
     let workflow = boot_image_workflow();
-    for token in [SHELL_ARCH_TOKEN, MATRIX_ARCH_TOKEN] {
-        let names = mvmctl::build::sdk_sidecar::SdkSidecarArtifactNames::for_arch(token);
-        assert_publishes(&workflow, &names.archive);
-        assert_publishes(&workflow, &names.archive_checksum);
+    for arch in ["aarch64", "x86_64"] {
+        for libc in [
+            mvmctl::build::guest_libc::GuestLibc::Glibc,
+            mvmctl::build::guest_libc::GuestLibc::Musl,
+        ] {
+            let names = mvmctl::build::sdk_sidecar::SdkSidecarArtifactNames::for_target(arch, libc);
+            assert_publishes(&workflow, &names.archive);
+            assert_publishes(&workflow, &names.archive_checksum);
+        }
     }
 }
 
@@ -70,6 +81,32 @@ fn release_publishes_every_runtime_overlay_asset_the_downloader_requests() {
     }
 }
 
+#[test]
+fn runtime_overlay_release_carries_every_oci_guest_runtime_binary() {
+    let workflow = boot_image_workflow();
+    let runtime_flake = fs::read_to_string("nix/images/runtime-overlay/flake.nix")
+        .expect("runtime-overlay flake must be readable");
+    let guest_package = fs::read_to_string("nix/packages/mvm-guest-agent.nix")
+        .expect("guest-agent package must be readable");
+
+    for name in mvmctl::build::guest_agent_build::OCI_GUEST_RUNTIME_BINARY_NAMES {
+        assert!(
+            workflow.contains(name),
+            "release-boot-image.yml must put {name} in the published runtime archive"
+        );
+        assert!(
+            runtime_flake.contains(name),
+            "runtime-overlay flake must stage {name} for release packaging"
+        );
+        if name != "mvm-egress-client" {
+            assert!(
+                guest_package.contains(name),
+                "mvm-guest-agent.nix must build {name} before the overlay flake stages it"
+            );
+        }
+    }
+}
+
 /// Publishing the asset is not enough — the release job has to attach it. A job
 /// whose artifacts upload but are never listed in `gh release create` leaves
 /// the downloader with a 404 exactly as a rename would.
@@ -80,8 +117,12 @@ fn the_release_job_attaches_the_sdk_sidecar_assets() {
         boot_image.contains("  sdk-sidecar-image:"),
         "release-boot-image.yml must define the sdk-sidecar-image job"
     );
+    let publish_needs = job_block(&boot_image, "publish-boot-image")
+        .lines()
+        .find(|line| line.trim_start().starts_with("needs:"))
+        .expect("the boot image publish job must declare its dependencies");
     assert!(
-        boot_image.contains("sdk-sidecar-image, default-microvm]"),
+        publish_needs.contains("sdk-sidecar-image"),
         "the boot image publish job must declare the sdk-sidecar-image job in its needs"
     );
     // Both releases attach it for now: the download side still composes its URL
@@ -89,8 +130,10 @@ fn the_release_job_attaches_the_sdk_sidecar_assets() {
     // fresh install before the boot image tag is ever consulted.
     for workflow in [&boot_image, &release_workflow()] {
         for pattern in [
-            "artifacts/sdk-sidecar-*.tar.gz",
-            "artifacts/sdk-sidecar-*.tar.gz.sha256",
+            "artifacts/sdk-sidecar-*-glibc.tar.gz",
+            "artifacts/sdk-sidecar-*-glibc.tar.gz.sha256",
+            "artifacts/sdk-sidecar-*-musl.tar.gz",
+            "artifacts/sdk-sidecar-*-musl.tar.gz.sha256",
         ] {
             assert!(
                 workflow.contains(pattern),
@@ -105,9 +148,17 @@ fn the_release_job_attaches_the_sdk_sidecar_assets() {
 #[test]
 fn release_attaches_the_signature_bundle_the_verifier_fetches() {
     let workflow = release_workflow();
-    let sidecar = mvmctl::build::sdk_sidecar::SdkSidecarArtifactNames::for_arch("*");
     let overlay = mvmctl::build::runtime_overlay::RuntimeOverlayArtifactNames::for_arch("*");
-    for asset in [sidecar.archive, overlay.archive] {
+    let mut assets = vec![overlay.archive];
+    for libc in [
+        mvmctl::build::guest_libc::GuestLibc::Glibc,
+        mvmctl::build::guest_libc::GuestLibc::Musl,
+    ] {
+        assets.push(
+            mvmctl::build::sdk_sidecar::SdkSidecarArtifactNames::for_target("*", libc).archive,
+        );
+    }
+    for asset in assets {
         let bundle = mvmctl::build::release_signature::bundle_asset_name(&asset);
         assert!(
             workflow.contains(&format!("artifacts/{bundle}")),
@@ -182,7 +233,7 @@ fn the_release_consumes_its_own_artifacts_before_publishing_them() {
 /// Both published architectures must be built, or a whole platform's users get
 /// the fail-closed refusal this artifact exists to prevent.
 #[test]
-fn the_sdk_sidecar_job_builds_both_published_arches() {
+fn the_sdk_sidecar_job_builds_every_published_arch_and_libc() {
     let workflow = boot_image_workflow();
     let job = workflow
         .split("  sdk-sidecar-image:")
@@ -196,6 +247,18 @@ fn the_sdk_sidecar_job_builds_both_published_arches() {
         assert!(
             job.contains(&format!("arch: {arch}")),
             "the sdk-sidecar-image matrix must build {arch}"
+        );
+    }
+    for libc in ["glibc", "musl"] {
+        assert!(
+            job.contains(&format!("libc: {libc}")),
+            "the sdk-sidecar-image matrix must build {libc}"
+        );
+    }
+    for package in ["sdk-sidecar-image", "sdk-sidecar-image-musl"] {
+        assert!(
+            job.contains(&format!("package: {package}")),
+            "the sdk-sidecar-image matrix must build {package}"
         );
     }
 }
@@ -314,6 +377,47 @@ fn the_staged_microvm_image_is_booted_before_it_is_uploaded() {
     assert!(
         !step.contains("releases/download"),
         "the boot gate must not fetch a published artifact"
+    );
+}
+
+/// A plain boot proves the release image reaches userspace, but it does not
+/// exercise the initramfs or dm-verity sidecars. The pre-publish gate must run
+/// the exact same staged image a second time with the complete sealed triple.
+#[test]
+fn the_staged_microvm_boot_gate_covers_plain_and_sealed_boots() {
+    let workflow = boot_image_workflow();
+    let job = workflow
+        .split("  default-microvm:")
+        .nth(1)
+        .expect("release-boot-image.yml must define the default-microvm job");
+    let boot = job
+        .find("- name: Boot the staged image before it becomes a release asset")
+        .expect("the default-microvm job must define its boot gate");
+    let rest = &job[boot..];
+    let step_end = rest[1..]
+        .find("\n      - name:")
+        .map_or(rest.len(), |offset| offset + 1);
+    let step = &rest[..step_end];
+
+    assert_eq!(
+        step.matches("prebuilt_runtime_image_boots_within_budget")
+            .count(),
+        2,
+        "the gate must boot once plainly and once through the sealed path"
+    );
+    for variable in [
+        "MVM_RUNTIME_BOOT_INITRD=",
+        "MVM_RUNTIME_BOOT_ROOTFS_VERITY=",
+        "MVM_RUNTIME_BOOT_ROOTFS_ROOTHASH=",
+    ] {
+        assert!(
+            step.contains(variable),
+            "the sealed boot invocation must set {variable}"
+        );
+    }
+    assert!(
+        step.contains("MVM_RUNTIME_BOOT_INITRD=\"$HOME/.mvm/cache/initramfs/initramfs.cpio.gz\""),
+        "the staged universal initramfs must use the production cache path so activation runs"
     );
 }
 
@@ -498,6 +602,177 @@ fn pages_workflow_installs_every_wasm_target_used_by_the_demo() {
     );
 }
 
+#[test]
+fn release_lookups_pass_the_filter_directly_to_gh_jq() {
+    for (name, workflow) in [
+        ("pages.yml", pages_workflow()),
+        ("release.yml", release_workflow()),
+    ] {
+        assert!(
+            workflow.contains("--json tagName --jq '"),
+            "{name} must pass its semantic-version filter directly to gh --jq"
+        );
+        assert!(
+            !workflow.contains("--json tagName --jq -r"),
+            "{name} must pass the filter directly to gh --jq; -r is a standalone jq flag"
+        );
+    }
+}
+
+#[test]
+fn pages_deployment_uses_the_checked_in_wrangler_config() {
+    let workflow = pages_workflow();
+    let account_job = job_block(&workflow, "cloudflare-account");
+    let package = fs::read_to_string("public/package.json").expect("read site package manifest");
+    let config = fs::read_to_string("public/wrangler.toml").expect("read Wrangler config");
+
+    assert!(
+        workflow.contains("cloudflare-account:")
+            && account_job.contains("runs-on: ubuntu-latest")
+            && workflow.contains("needs: cloudflare-account")
+            && workflow.contains("command: pages deployment list --project-name=mvm")
+            && !workflow.contains("pages project create"),
+        "the Pages workflow must verify the configured account and project before building"
+    );
+    assert!(
+        workflow.contains("uses: pnpm/action-setup@v6"),
+        "the Pages workflow must use the Node 24-compatible pnpm setup action"
+    );
+    assert!(
+        workflow.contains("workingDirectory: public")
+            && workflow.contains("command: pages deploy --branch=main"),
+        "the Pages action must deploy from public/ so Wrangler reads the checked-in config"
+    );
+    assert!(
+        config.contains("name = \"mvm\"") && config.contains("pages_build_output_dir = \"./dist\""),
+        "Wrangler must target the existing mvm project and Astro output"
+    );
+    // Wrangler refuses a Pages config carrying `account_id` outright --
+    // "Configuration file for Pages projects does not support account_id" --
+    // so the deploy fails after a successful build, at the last step. The
+    // account is supplied by the workflow from `secrets.CLOUDFLARE_ACCOUNT_ID`,
+    // which is where it belongs: it is deployment identity, not site config,
+    // and checking it in pins one account into a file every fork inherits.
+    assert!(
+        !config.contains("account_id"),
+        "a Pages wrangler config must not carry account_id; the workflow passes \
+         accountId from secrets"
+    );
+    assert!(
+        package.contains("\"wrangler\": \"^4.127.0\"")
+            && package.contains("\"check:deploy-assets\":")
+            && package.contains(
+                "\"deploy\": \"pnpm build && pnpm check:deploy-assets && wrangler pages deploy --branch=main\""
+            ),
+        "the site must pin Wrangler and validate assets in its production deploy command"
+    );
+}
+
+#[test]
+fn pages_deployment_refuses_an_incomplete_weblinux_bundle() {
+    let workflow = pages_workflow();
+    let validator = fs::read_to_string("public/scripts/check-weblinux-deploy-assets.mjs")
+        .expect("read WebLinux deployment validator");
+
+    assert!(
+        workflow.contains("node public/scripts/check-weblinux-deploy-assets.mjs public/dist"),
+        "Pages must run the shared WebLinux bundle validator before publishing"
+    );
+
+    for asset in [
+        "demo/weblinux/demo.js",
+        "demo/weblinux/worker.js",
+        "demo/weblinux/qemu-system-x86_64.js",
+        "demo/weblinux/qemu-system-x86_64.wasm.gz",
+        "demo/weblinux/pack/kernel.img",
+        "demo/weblinux/pack/rootfs.bin",
+    ] {
+        assert!(
+            validator.contains(asset),
+            "the shared deployment validator must require {asset}"
+        );
+    }
+}
+
+#[test]
+fn qemu_wasm_site_pack_is_built_once_on_the_boot_image_train() {
+    let boot_image = boot_image_workflow();
+    let pages = pages_workflow();
+    let publish_needs = job_block(&boot_image, "publish-boot-image")
+        .lines()
+        .find(|line| line.trim_start().starts_with("needs:"))
+        .expect("the boot image publish job must declare its dependencies");
+
+    assert!(
+        boot_image.contains("\n  qemu-wasm-site-pack:\n"),
+        "release-boot-image.yml must build the browser QEMU pack on the boot-image tag"
+    );
+    assert!(
+        boot_image.contains("nix build ./nix#qemu-wasm-smoke-pack"),
+        "the boot-image workflow must build the QEMU-WASM pack from the tagged tree"
+    );
+    assert!(
+        publish_needs.contains("qemu-wasm-site-pack"),
+        "the boot-image release must wait for the QEMU-WASM pack before publishing"
+    );
+    for asset in [
+        "qemu-wasm-smoke-pack.tar.gz",
+        "qemu-wasm-smoke-pack.tar.gz.sha256",
+        "qemu-wasm-smoke-pack.tar.gz.sha256.bundle",
+    ] {
+        assert!(
+            boot_image.contains(asset),
+            "the boot-image release must publish {asset} for site deployments"
+        );
+        assert!(
+            pages.contains(asset),
+            "pages.yml must download and verify {asset} instead of rebuilding QEMU"
+        );
+    }
+    assert!(
+        !pages.contains("nix build ./nix#qemu-wasm-smoke-pack"),
+        "site deployment must not rebuild the tagged QEMU-WASM pack"
+    );
+    assert!(
+        !pages.contains("nix-installer-action"),
+        "site deployment no longer needs Nix once the QEMU-WASM pack is released"
+    );
+    assert!(
+        pages.contains("cosign verify-blob")
+            && pages.contains("release-boot-image.yml@refs/tags/boot-image/v.*")
+            && pages.contains("sha256sum -c qemu-wasm-smoke-pack.tar.gz.sha256"),
+        "site deployment must verify the tag-built pack's release identity"
+    );
+    assert!(
+        pages.contains("gh release view \"${CANDIDATE}\"")
+            && pages.contains("HAS_SITE_PACK")
+            && pages.contains("| sort_by(.v) | reverse | .[].tag"),
+        "site deployment must select the newest semantic release that actually carries the pack"
+    );
+    assert!(
+        pages.contains("./web/weblinux-demo/build.sh qemu-wasm-smoke-pack"),
+        "site deployment must stage the verified pack with the current demo shell"
+    );
+}
+
+#[test]
+fn weblinux_qemu_module_is_staged_below_the_pages_file_limit() {
+    let build =
+        fs::read_to_string("web/weblinux-demo/build.sh").expect("read WebLinux build script");
+    let worker = fs::read_to_string("web/weblinux-demo/worker.js").expect("read WebLinux worker");
+
+    assert!(
+        build.contains("gzip -9 -n \"$DEST_DIR/qemu-system-x86_64.wasm\""),
+        "the oversized QEMU-WASM module must be compressed while staging"
+    );
+    assert!(
+        worker.contains("qemu-system-x86_64.wasm.gz")
+            && worker.contains("new DecompressionStream(\"gzip\")")
+            && worker.contains("self.Module.wasmBinary = await loadCompressedWasm()"),
+        "the worker must explicitly decompress the staged module before Emscripten starts"
+    );
+}
+
 /// The compiled-in boot image tag must name the release the workflow creates.
 ///
 /// The tag is spliced straight into a download URL, so a drift between the two
@@ -537,6 +812,48 @@ fn the_boot_image_tag_composes_the_url_the_workflow_uploads_to() {
         assert!(
             workflow.contains(&staged),
             "the workflow must stage {staged:?}, or {url} 404s"
+        );
+    }
+}
+
+#[test]
+fn the_ci_boot_witness_pins_the_compiled_boot_image_tag() {
+    let tag = mvmctl::core::config::DEFAULT_BOOT_IMAGE_TAG;
+    assert!(
+        ci_workflow().contains(&format!("IMAGE_TAG: {tag}")),
+        "the merge-queue boot witness must validate the compiled default boot image tag {tag}"
+    );
+}
+
+#[test]
+fn the_cross_compile_installers_share_a_cortex_flag_compatible_zigbuild() {
+    let workspace = fs::read_to_string("Cargo.toml").expect("read workspace manifest");
+    let version = workspace
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("cargo-zigbuild = \"")
+                .and_then(|value| value.strip_suffix('"'))
+        })
+        .expect("workspace cargo-zigbuild pin");
+    let parts = version
+        .split('.')
+        .map(|part| part.parse::<u32>().expect("numeric cargo-zigbuild version"))
+        .collect::<Vec<_>>();
+    assert!(
+        parts.as_slice() >= &[0, 23, 0],
+        "cargo-zigbuild {version} forwards Rust's AArch64 cortex workaround to Zig, which rejects it"
+    );
+
+    for path in [
+        ".github/actions/install-zigbuild/action.yml",
+        "scripts/local-aarch64-no-kvm-smoke.sh",
+    ] {
+        let installer = fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("failed to read {path}: {error}"));
+        assert!(
+            installer.contains(&format!("cargo-zigbuild --version {version}")),
+            "{path} must install the workspace cargo-zigbuild pin {version}"
         );
     }
 }
@@ -661,4 +978,82 @@ fn the_two_release_trains_do_not_share_a_signing_environment() {
         "the boot image train must not sign under the CLI train's environment; \
          its tags are boot-image/v*, which a v*-scoped policy refuses outright"
     );
+}
+
+/// The initramfs is what `mvm-verity-init` runs as PID 1 to set up dm-verity
+/// and mount the runtime overlay before `switch_root`. Without it a published
+/// prod image cannot be sealed-booted from its own release assets — and nothing
+/// published it, so `download_initramfs` had never once succeeded.
+///
+/// Pinned against the Rust constructor rather than against a literal, because
+/// the failure this prevents is a rename on one side only, which produces a 404
+/// at install time and nothing at build time.
+#[test]
+fn release_publishes_every_initramfs_asset_the_downloader_requests() {
+    let workflow = release_workflow();
+    for token in [SHELL_ARCH_TOKEN, MATRIX_ARCH_TOKEN] {
+        let names = mvmctl::build::initramfs::InitramfsArtifactNames::for_arch(token);
+        assert_publishes(&workflow, &names.archive);
+        assert_publishes(&workflow, &names.archive_checksum);
+    }
+}
+
+/// Publishing is not attaching. A job whose artifacts upload but never appear
+/// in `gh release create` leaves the downloader with the same 404 a rename
+/// would, and the release still reports success.
+#[test]
+fn the_release_job_builds_and_attaches_the_initramfs() {
+    let workflow = release_workflow();
+    assert!(
+        workflow.contains("  initramfs-image:"),
+        "release.yml must define the initramfs-image job"
+    );
+    assert!(
+        workflow.contains("needs: [bdd, e2e-docs, build, initramfs-image]"),
+        "the release job must wait for initramfs-image, or it publishes without it"
+    );
+    let release = job_block(&workflow, "release");
+    assert!(
+        release.contains("needs.initramfs-image.result == 'success'"),
+        "the release job must fail closed when the initramfs build fails"
+    );
+    for pattern in [
+        "artifacts/initramfs-*.tar.gz",
+        "artifacts/initramfs-*.tar.gz.sha256",
+    ] {
+        assert!(
+            workflow.contains(pattern),
+            "the release job's asset list must include {pattern:?}"
+        );
+    }
+    // Both arches, or an install on the other one 404s exactly as before.
+    let block = job_block(&workflow, "initramfs-image");
+    for arch in ["aarch64", "x86_64"] {
+        assert!(
+            block.contains(&format!("arch: {arch}")),
+            "the initramfs-image matrix must build {arch}"
+        );
+    }
+}
+
+/// Every member `extract_initramfs_archive` requires must actually be put in
+/// the tarball. Four come from the derivation and the fifth is generated at
+/// packaging; leaving any out fails at install time with
+/// `missing required archive member`, on a host that cannot debug it.
+#[test]
+fn the_initramfs_tarball_carries_every_member_the_extractor_requires() {
+    let workflow = release_workflow();
+    let block = job_block(&workflow, "initramfs-image");
+    for member in [
+        mvm_fs::initramfs::INITRAMFS_IMAGE_FILE,
+        mvm_fs::initramfs::INITRAMFS_HASH_FILE,
+        mvm_fs::initramfs::INITRAMFS_SIZE_FILE,
+        mvm_fs::initramfs::VERSION_FILE,
+        mvm_fs::initramfs::CHECKSUM_MANIFEST_FILE,
+    ] {
+        assert!(
+            block.contains(member),
+            "the initramfs tarball must carry {member:?}, which the extractor requires"
+        );
+    }
 }

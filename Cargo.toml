@@ -15,9 +15,15 @@ members = [
     "crates/mvm-backends",
     "crates/mvm-build",
     "crates/mvm-agentd",
+    # The in-guest host-services C ABI. Its own crate so the object compiled
+    # into every guest carries no host-side toolchain: `mvm-sdk` holds the
+    # decorator parser (tree-sitter) and the deploy record (blake3), both C,
+    # and building the cdylib from that crate dragged them along.
+    "crates/mvm-host-services",
     "crates/mvm-cli",
     "crates/mvm-hostd",
     "crates/mvm-client",
+    "crates/mvm-mcp",
     # plan 74 W1 — OCI image distribution client (registry resolution,
     # manifest fetch, digest verification; layer fetch + ext4 unpack +
     # verity generation land in subsequent W1 PRs). Anonymous-only at
@@ -45,6 +51,10 @@ members = [
     # placeholder — re-add it when the
     # `#[mvm::function]`/`#[mvm::image]`/… bodies actually land.
     "crates/mvm-sdk",
+    # mvm-capture — project-environment capture frontend. Linux-specific
+    # collectors are gated at runtime; the crate compiles on macOS/Windows
+    # as a stub so workspace builds stay green for non-Linux contributors.
+    "crates/mvm-capture",
     # Plan 104 W1a — host services broker subprocess (one of three
     # per-VM subprocesses: mvm-broker, mvm-host-signer,
     # mvm-audit-signer; ADR-020 dropped mvm-secrets-dispatcher). W1a
@@ -120,10 +130,6 @@ exclude = [
     # harness. Parallel role to mvm-libkrun/fuzz; same libfuzzer-sys linker
     # constraints apply.
     "crates/mvm-build/fuzz",
-    # Plan 141 / ADR-003 — gateway packet parse + payload-rebuild fuzz
-    # harness (`fuzz_packet_parse`). Same libfuzzer-sys linker constraints;
-    # CI gate at `.github/workflows/security.yml::fuzz`.
-    "crates/mvm-hostd/fuzz",
     # Response-head + chunked-framing parser for the in-house HTTP client —
     # the whole untrusted surface a hostile server reaches. Same libfuzzer-sys
     # linker constraints as the other fuzz crates.
@@ -267,7 +273,6 @@ mio = { version = "1", features = ["os-poll", "os-ext"] }
 # `std::net::TcpStream`. std has no non-blocking connect, and the alternative is
 # hand-marshalling `sockaddr_in`/`sockaddr_in6` through `unsafe`. Already in the
 # lockfile via tokio and mio, so this adds a name, not a build.
-socket2 = "0.6"
 
 # Seccomp BPF compilation (W2.4 — per-service syscall filtering inside
 # guests, applied via the `mvm-seccomp-apply` shim before execve into
@@ -298,7 +303,7 @@ ipnet = { version = "2", features = ["serde"] }
 # deps, fuzzed upstream. Lands on the untrusted-guest-bytes path (claim 5),
 # so a mature parser beats a hand-rolled one.
 etherparse = "0.20"
-async-trait = "0.1"
+async-trait = "=0.1.89"
 
 # Pure-Rust DNS resolver, used only by the opt-in custom-dns feature.
 hickory-resolver = "0.26"
@@ -354,7 +359,9 @@ tree-sitter-typescript = "0.23.2"
 mvm-contract = { path = "crates/mvm-contract", version = "0.18.0", default-features = false, features = ["protocol"] }
 mvm-core = { path = "crates/mvm-core", version = "0.18.0" }
 mvm-client = { path = "crates/mvm-client", version = "0.18.0" }
+mvm-mcp = { path = "crates/mvm-mcp", version = "0.18.0" }
 mvm-agentd = { path = "crates/mvm-agentd", version = "0.18.0" }
+mvm-host-services = { path = "crates/mvm-host-services", version = "0.18.0" }
 mvm-build = { path = "crates/mvm-build", version = "0.18.0", default-features = false }
 mvm-runtime = { path = "crates/mvm-runtime", version = "0.18.0", default-features = false }
 mvm-vmm = { path = "crates/mvm-vmm", version = "0.18.0" }
@@ -368,6 +375,7 @@ mvm-hostd = { path = "crates/mvm-hostd", version = "0.18.0", default-features = 
 
 # plan 60 Phase 5 — build-time SDK port from ../mvmforge.
 mvm-sdk = { path = "crates/mvm-sdk", version = "0.18.0" }
+mvm-capture = { path = "crates/mvm-capture", version = "0.18.0" }
 # Plan 57 W1 — libkrun FFI bindings split out of mvm-providers so the
 # bindgen + libclang build cost is isolated from the rest of the
 # workspace. Default feature set is empty; consumers wanting real FFI
@@ -414,10 +422,14 @@ anyhow.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3", features = ["NSRunLoop", "NSDate", "NSAutoreleasePool"] }
-# Plan 87 W5 — enable mvm-cli's `libkrun-sys` feature on macOS so the
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+# Enable mvm-cli's `libkrun-sys` feature on Apple Silicon so the
 # `mvmctl` binary's `extract_bundled_kernel()` path is wired by
 # default (libkrun is the macOS hypervisor backend; libkrunfw ships
-# alongside via the same Homebrew tap). Linux CI / runtimes use
+# alongside via the same Homebrew tap). Intel macOS uses the native
+# HVF backend instead: the libkrunfw Homebrew formula is arm64-only,
+# and that path neither loads nor links libkrun. Linux CI / runtimes use
 # Firecracker, which doesn't need libkrun headers — the target-gated
 # dep keeps `cargo build` on Ubuntu working without `apt install
 # libkrun-dev` (which doesn't ship a libkrun-dev package today).
@@ -432,13 +444,19 @@ objc2-foundation = { version = "0.3", features = ["NSRunLoop", "NSDate", "NSAuto
 # kernel-oops; see comment at apple_container.rs:~2870).
 mvm-cli = { workspace = true, default-features = false, features = ["builder-vm", "libkrun-sys"] }
 
+[target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
+# Intel uses HVF directly. Retain builder orchestration while leaving the
+# arm64-only libkrun firmware and FFI feature out of the dependency graph.
+mvm-cli = { workspace = true, default-features = false, features = ["builder-vm"] }
+
 [dev-dependencies]
+mvm-contract.workspace = true
+hex.workspace = true
 assert_cmd.workspace = true
 chrono.workspace = true
 flate2.workspace = true
 sha2.workspace = true
 tar.workspace = true
-libkrun-sys.workspace = true
 mvm-fs.workspace = true
 mvm-vmm.workspace = true
 # Plan 60 Phase 4 — `tests/audit_total_coverage.rs` walks the
@@ -529,6 +547,10 @@ dev = [
 libkrun-sys = ["mvm-cli/libkrun-sys"]
 libkrun-live = ["mvm-cli/libkrun-live"]
 
+# Platform: link the TPM2 TSS provider. Kept root-owned so source-built host
+# packages remain cargo-auditable while selecting the Linux TPM dependency.
+attestation-tpm2 = ["mvm-core/attestation-tpm2"]
+
 # Internal library knob (NOT a product surface): compile mvm-core's gated hostd
 # IPC transport. `host` already includes it; exposed standalone so a downstream
 # host-side daemon can flip just the transport through the facade and stay lean
@@ -539,6 +561,18 @@ hostd-transport = ["mvm-core/hostd-transport"]
 # VM images on a cache miss. Off for source checkouts (they build locally); the
 # release workflow turns it on.
 release-artifact-bootstrap = ["mvm-cli/release-artifact-bootstrap"]
+# Mark an official distribution separately so runtime artifact resolution uses
+# the published channel even when the binary runs from a source checkout.
+release-channel = ["mvm-cli/release-channel"]
+
+# Build-only: cross-compile the Linux host binaries and embed them in `mvmctl`.
+# Acquisition mechanics, not product behaviour — a build with this on and one
+# with it off expose exactly the same verbs; the difference is whether the
+# payload the builder VM needs travels inside the binary. Off by default so the
+# only remaining work in `mvm-cli`'s build script stays off the inner loop.
+
+# `just embed` and the tag-push release workflow turn it on.
+embed-host-bins = ["mvm-cli/embed-host-bins"]
 
 # Optional S3 storage backend for the template registry — a heavy cloud dep kept
 # opt-in (not part of the local host runtime; fleet/deployment use only).
@@ -564,6 +598,18 @@ hvf-live-validation = [
 # validation lane. The normal binary remains fail-closed without it.
 trusted-apfs = ["mvm-cli/trusted-apfs", "mvm-runtime/trusted-apfs"]
 
+[patch.crates-io]
+# The locked test oracle initializes a C `char` array as `i8`, which does not
+# compile on targets where `c_char` is unsigned (including aarch64 Linux).
+# Keep the oracle enabled in native gates while the one-line upstream fix is
+# pending; the vendored source is otherwise the published 0.4.0 package.
+am-fs-ext4 = { path = "third_party/am-fs-ext4" }
+# The registry owner account yanked every established arrayref release and
+# published 0.3.10 with an unresolvable `proc-macro1` dependency. Keep BLAKE3
+# on the reviewed 0.3.9 source at an immutable upstream revision until the
+# registry package is restored.
+arrayref = { path = "third_party/arrayref" }
+
 [profile.release]
 opt-level = 3
 strip = true
@@ -586,6 +632,15 @@ inherits = "release"
 lto = false
 codegen-units = 16
 strip = false
+
+# Minimum-size shipping profile for end-user `mvmctl` binaries. Aggressively
+# optimizes for binary size over runtime speed, while keeping the security
+# invariant that integer overflow traps rather than wrapping. Build with:
+#   cargo build --profile release-min --features user
+[profile.release-min]
+inherits = "release"
+opt-level = "z"
+panic = "abort"
 
 # Speed up `cargo test --workspace` by giving the test profile more
 # parallel codegen units and dropping debug info to line tables only.
@@ -660,8 +715,22 @@ opt-level = 3
 # interpreter dependency, so it boots in any rootfs — the same reason
 # mkGuest static-links its own /init. Both binaries are libc-only (no
 # TLS/ring/openssl), so the musl build is unencumbered.
+rust = "1.91.1"
 zig = "0.13.0"
-cargo-zigbuild = "0.20.0"
+cargo-zigbuild = "0.23.0"
+
+# Developer tooling that is NOT vendored or pinned by rust-toolchain.toml, so a
+# contributor's machine can silently drift below what the workspace needs.
+#
+# nextest: the pinned nightly cargo emits test binaries under
+# `target/debug/build/<pkg>/<hash>/out/` rather than `target/debug/deps/`.
+# A nextest older than this does not export `CARGO_BIN_EXE_<name>` for that
+# layout, and `assert_cmd`'s fallback — pop one dir, expect `deps` — then looks
+# for `mvmctl` in the wrong place. Every one of the 111 root-package CLI
+# integration tests fails with "CARGO_BIN_EXE_mvmctl is unset", which reads as
+# broken code rather than a stale tool. `scripts/require-nextest.sh` turns that
+# into one actionable line. This is a known-good floor, not a bisected minimum.
+nextest-min = "0.9.143"
 
 # Per-arch musl target. build.rs picks the entry for CARGO_CFG_TARGET_ARCH
 # (the arch mvmctl is built for == the arch of the guest it boots, since the

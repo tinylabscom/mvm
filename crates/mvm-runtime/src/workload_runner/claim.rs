@@ -161,6 +161,10 @@ pub struct EndpointSpawnInputs<'a> {
     pub secrets: &'a [SecretBinding],
     pub redaction: &'a RedactionPolicy,
     pub network_policy: &'a NetworkPolicy,
+    /// Transport-neutral resource ceilings from the admitted plan.
+    pub network_limits: mvm_core::plan::NetworkLimits,
+    /// Exact signed ingress mappings owned by this endpoint.
+    pub ingress: &'a [mvm_core::plan::IngressMapping],
     /// Where this boot's FlowMux identity comes from. A cold boot mints one; a
     /// warm claim inherits its parent's, because the restored child already
     /// holds the parent's signing key in memory.
@@ -229,16 +233,9 @@ impl<'a> ClaimGuards<'a> {
     /// claim for a missing sidecar while the identical cold boot of the same
     /// image was admitted — the resident-handoff path already passed the image
     /// dir here for exactly this reason, and the two must not disagree.
-    pub fn admit_overlay_contract(
-        &self,
-        image_rootfs: &Path,
-        runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
-    ) -> Result<()> {
+    pub fn admit_overlay_contract(&self, image_rootfs: &Path) -> Result<()> {
         let rootfs_dir = image_rootfs.parent().unwrap_or_else(|| Path::new("."));
-        mvm_vmm::host::runtime_meta::admit_runtime_overlay_contract(
-            rootfs_dir,
-            runtime_source_policy,
-        )
+        mvm_vmm::host::runtime_meta::admit_runtime_overlay_contract(rootfs_dir)
     }
 
     /// Spawn the per-child substitution endpoint keyed on `vm`'s own id — 0700,
@@ -250,7 +247,10 @@ impl<'a> ClaimGuards<'a> {
         vm: &VmId,
         inputs: &EndpointSpawnInputs<'_>,
     ) -> Result<EndpointHandle> {
-        if inputs.secrets.is_empty() && !inputs.network_policy.allows_egress() {
+        if inputs.secrets.is_empty()
+            && !inputs.network_policy.allows_egress()
+            && inputs.ingress.is_empty()
+        {
             return Ok(EndpointHandle {
                 egress_uds: None,
                 identity_drive: None,
@@ -269,6 +269,8 @@ impl<'a> ClaimGuards<'a> {
             secrets: inputs.secrets,
             redaction: inputs.redaction,
             network_policy: inputs.network_policy,
+            network_limits: inputs.network_limits,
+            ingress: inputs.ingress,
             identity: inputs.identity,
         })?;
         Ok(EndpointHandle {
@@ -283,7 +285,6 @@ impl<'a> ClaimGuards<'a> {
 mod tests {
     use super::*;
     use mvm_core::checkpoint::{CheckpointClass, CheckpointId, ContentBlob};
-    use mvm_core::vm_backend::RuntimeSourcePolicy;
 
     fn fake_meta_with_rootfs(hex: String) -> CheckpointMeta {
         CheckpointMeta::builder(
@@ -362,7 +363,9 @@ mod tests {
         fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> anyhow::Result<SpawnedEndpoint> {
             *self.seen_vm.lock().unwrap() = Some(req.vm_name.to_string());
             Ok(SpawnedEndpoint {
-                egress_uds: mvm_core::config::vm_network_endpoint_socket(req.vm_name),
+                egress_uds: PathBuf::from("fake-endpoints")
+                    .join(req.vm_name)
+                    .join("substitution-endpoint.sock"),
                 identity_drive: None,
             })
         }
@@ -380,17 +383,13 @@ mod tests {
             secrets: &[],
             redaction,
             network_policy: policy,
+            network_limits: mvm_core::plan::NetworkLimits::default(),
+            ingress: &[],
         }
     }
 
     #[test]
     fn claim_guards_spawn_endpoint_keys_the_socket_on_the_given_vm() {
-        // The endpoint socket is `MVM_HOME`-rooted; serialize against tests that
-        // mutate `MVM_HOME` (the warm-claim runner tests) so the spawn and the
-        // expected-path recompute both read one stable home.
-        let _home = crate::base::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let spawner = FakeSpawner::default();
         let guards = ClaimGuards::new(&spawner);
         let redaction = RedactionPolicy::default();
@@ -400,8 +399,12 @@ mod tests {
                 443,
             )]);
         let state = tempfile::tempdir().unwrap();
-        let expected_child = mvm_core::config::vm_network_endpoint_socket("child-a");
-        let expected_sibling = mvm_core::config::vm_network_endpoint_socket("child-b");
+        let expected_child = PathBuf::from("fake-endpoints")
+            .join("child-a")
+            .join("substitution-endpoint.sock");
+        let expected_sibling = PathBuf::from("fake-endpoints")
+            .join("child-b")
+            .join("substitution-endpoint.sock");
 
         let mut child = guards
             .spawn_endpoint(
@@ -453,11 +456,7 @@ mod tests {
         mvm_build::builder_vm::GuestSidecar::for_oci_run("cg-valid", false, true)
             .write_to_dir(ok_dir.path())
             .unwrap();
-        assert!(
-            guards
-                .admit_overlay_contract(&ok_rootfs, RuntimeSourcePolicy::default())
-                .is_ok()
-        );
+        assert!(guards.admit_overlay_contract(&ok_rootfs).is_ok());
 
         // A rootfs whose dir carries no sidecar is refused — same message the
         // cold-boot gate emits.
@@ -465,7 +464,7 @@ mod tests {
         let bare_rootfs = bare_dir.path().join("rootfs.ext4");
         std::fs::write(&bare_rootfs, b"rootfs").unwrap();
         let err = guards
-            .admit_overlay_contract(&bare_rootfs, RuntimeSourcePolicy::default())
+            .admit_overlay_contract(&bare_rootfs)
             .expect_err("a rootfs with no overlay-aware sidecar must be refused");
         assert!(
             err.to_string().contains("mvm-meta.json"),
@@ -498,15 +497,11 @@ mod tests {
         std::fs::write(clone_dir.path().join("memory.bin"), b"mem").unwrap();
 
         assert!(
-            guards
-                .admit_overlay_contract(&image_rootfs, RuntimeSourcePolicy::default())
-                .is_ok(),
+            guards.admit_overlay_contract(&image_rootfs).is_ok(),
             "the admitted image carries the sidecar and must be admitted"
         );
         assert!(
-            guards
-                .admit_overlay_contract(&clone_rootfs, RuntimeSourcePolicy::default())
-                .is_err(),
+            guards.admit_overlay_contract(&clone_rootfs).is_err(),
             "the clone has no sidecar — proving the gate must not be pointed at it"
         );
     }

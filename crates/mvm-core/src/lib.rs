@@ -9,6 +9,8 @@
 /// cached action's output artifacts, and a verify-on-read helper that
 /// recomputes each artifact's digest before a cache entry is trusted.
 pub mod action;
+/// SCITT-compatible action state capsules with hash chaining and evidence binding.
+pub mod action_state;
 pub mod arch;
 pub mod at_rest;
 pub mod build_env;
@@ -45,6 +47,7 @@ pub mod egress_handler;
 /// Secrets are substituted into outbound requests host-side and never enter the
 /// guest.
 pub mod exit_capture;
+pub mod extension_admission;
 /// Per-dimension resolution of a workload's grants across the CLI, a JSON
 /// grants file, the project manifest, and the operator's host config.
 pub mod grants_resolve;
@@ -57,10 +60,6 @@ pub mod icmp_wire;
 /// Content-addressed image version-lineage nodes (the image analog of
 /// [`checkpoint`]). Provenance metadata, never authorization.
 pub mod image_lineage;
-/// Host ingress-broker decision logic (host listener only by explicit policy).
-pub mod ingress_broker;
-/// Ingress-broker handler: compose decision + trace into an audit record.
-pub mod ingress_handler;
 /// Ingress secret redaction (mask known secret values before they reach the guest).
 pub mod ingress_redaction;
 /// `mvm-init` supervisor core logic: metadata → exec spec, marker progression.
@@ -74,6 +73,11 @@ pub mod launch_metadata;
 pub mod launch_trace;
 /// Shared backoff for polls that wait on a condition.
 pub mod poll_backoff;
+/// Clearing one run's leftover sidecars before the next boot.
+pub mod run_sidecars;
+/// Measured resource consumption for one workload run, and the sidecar
+/// convention that carries it off the process that owned the VM.
+pub mod usage_capture;
 pub mod vcpu_quota;
 // Guest lifecycle markers + snapshot timing (the `mvm-init` ↔ host
 // contract) are a pure-DTO leaf that now lives in `mvm-contract`;
@@ -101,9 +105,12 @@ pub mod pii;
 /// templates a stock binary trusts for its own release packs, with
 /// version interpolation.
 pub mod release_trust;
-/// Semantic content identity for the Workload IR (`sha256(JCS(ir))`,
-/// distinct from every exact-byte/trust/replay identity type).
-pub mod semantic_address;
+/// UOR-ADDR-compatible canonical content identity for the Workload IR,
+/// distinct from every exact-byte, trust, and replay identity type.
+pub mod workload_address;
+pub use workload_address::{
+    WorkloadAddress, WorkloadAddressError, WorkloadAddressParseError, workload_address,
+};
 pub mod user_config;
 
 /// Test-only drift-lock proving `mvm_contract::ir::canonicalize` and
@@ -132,6 +139,9 @@ pub mod protocol;
 pub mod provenance;
 pub mod rate_limit;
 pub mod receipt;
+/// The signed index of an evidence archive: manifest, citations, and the
+/// checked-versus-asserted completeness distinction.
+pub mod receipt_archive;
 pub mod residency;
 /// What a caller declared a machine should boot from — the one type both the
 /// declaration boundary and the build side name.

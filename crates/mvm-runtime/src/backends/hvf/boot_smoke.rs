@@ -113,6 +113,33 @@ pub enum HvfError {
     BadBoot(BootFault),
     /// In-kernel GICv3 creation failed (needs macOS 15+).
     GicCreate(hv_return_t),
+    /// Capturing the in-kernel GICv3 device state failed.
+    GicDeviceCapture(hv_return_t),
+    /// Restoring the in-kernel GICv3 device state failed.
+    GicDeviceRestore(hv_return_t),
+    /// Capturing one vCPU's GIC CPU-interface state failed.
+    GicCpuCapture {
+        reg: hv_gic_icc_reg_t,
+        status: hv_return_t,
+    },
+    /// Restoring one vCPU's GIC CPU-interface state failed.
+    GicCpuRestore {
+        reg: hv_gic_icc_reg_t,
+        status: hv_return_t,
+    },
+    /// A vCPU's GIC redistributor frame is not where the device tree told the
+    /// guest it would be.
+    ///
+    /// Its own variant because the alternative is not a worse machine, it is a
+    /// hang: the guest matches CPUs to redistributors during IRQ init, before
+    /// the console exists, so the boot stops with nothing written anywhere.
+    /// Naming the CPU and both addresses is the difference between a five-minute
+    /// fix and a day of bisecting a silent failure.
+    RedistributorMismatch {
+        cpu: u32,
+        expected: u64,
+        actual: u64,
+    },
     /// Serialized HVF state failed structural validation.
     SnapshotState(&'static str),
 }

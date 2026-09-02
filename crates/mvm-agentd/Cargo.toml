@@ -38,16 +38,6 @@ path = "src/bin/mvm-seccomp-apply.rs"
 name = "mvm-runner"
 path = "src/bin/mvm-runner.rs"
 
-# Early-userspace init (PID 1) that runs from the verity initramfs
-# baked by `mkGuest` when `verifiedBoot = true`. Reads the roothash
-# from /proc/cmdline, constructs the dm-verity device-mapper target
-# via raw ioctls, mounts it, and switch_roots to the real /init.
-# Bypasses Firecracker's auto-appended `root=/dev/vda` by owning the
-# boot pivot in userspace.
-[[bin]]
-name = "mvm-verity-init"
-path = "src/bin/mvm-verity-init.rs"
-
 # Guest-side network defense. Installs kernel blackhole
 # routes for `MANDATORY_DENY_RANGES` (cloud metadata, link-local,
 # CGNAT, host loopback) inside every microVM. Run as root from
@@ -58,14 +48,6 @@ path = "src/bin/mvm-verity-init.rs"
 [[bin]]
 name = "mvm-guest-netinit"
 path = "src/bin/mvm-guest-netinit.rs"
-
-# Static PID 1 injected into arbitrary OCI rootfs trees by `run --image`.
-# It performs the mvm boot/runtime setup with syscalls and direct process
-# spawns, so scratch/distroless images do not need `/bin/sh`, busybox, coreutils,
-# or an image-native init system.
-[[bin]]
-name = "mvm-oci-init"
-path = "src/bin/mvm-oci-init.rs"
 
 [[bin]]
 name = "mvm-oci-entrypoint"
@@ -99,13 +81,13 @@ required-features = ["addons"]
 name = "mvm-ping"
 path = "src/bin/mvm-ping.rs"
 
-# In-guest L3 TUN-over-vsock tunnel agent. Creates `mvm0`, framing raw IP
-# packets onto dedicated vsock connections to the host gateway. Linux-only
-# at runtime; compiles as an inert binary elsewhere so workspace builds stay
-# green for macOS contributors.
+# The guest's loopback forward proxy for secret-bearing egress. Its own
+# privileged process because relaying opens an authenticated FlowMux session,
+# which reads the root-only guest signing key. No `addons` feature: the proxy is
+# entirely `std` and blocking.
 [[bin]]
-name = "mvm-net-agent"
-path = "src/bin/mvm-net-agent.rs"
+name = "mvm-forward-proxy"
+path = "src/bin/mvm-forward-proxy.rs"
 
 # In-guest one-shot workload-exit-code reporter over AF_VSOCK.
 [[bin]]
@@ -178,11 +160,16 @@ schema = ["dep:schemars", "mvm-core/schema"]
 # `/init`, never linked into `mvm-guest-agent`, so gating them here costs
 # the sealed agent nothing.
 addons = [
-    "dep:tokio",
+    "flowmux-async",
     "dep:hickory-proto",
     "dep:tokio-vsock",
     "dep:tracing-subscriber",
 ]
+# The reusable async FlowMux client itself needs Tokio but not the Linux-only
+# AF_VSOCK adapter or DNS helper binaries bundled by `addons`. Benchmark and
+# protocol fixtures enable this narrower surface so they do not pull a second
+# `nix` major through `tokio-vsock`.
+flowmux-async = ["dep:tokio"]
 
 [dependencies]
 mvm-core.workspace = true
@@ -193,7 +180,6 @@ mvm-contract.workspace = true
 # Only under `schema` (protocol-schema codegen) — see the feature above.
 schemars = { version = "0.8", optional = true }
 anyhow.workspace = true
-aes-gcm.workspace = true
 base64.workspace = true
 chrono.workspace = true
 ed25519-dalek.workspace = true
@@ -201,7 +187,6 @@ libc.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 x25519-dalek.workspace = true
 zeroize.workspace = true
 # The readiness/shutdown hook runner uses thiserror for

@@ -7,7 +7,13 @@
 The measurement substrate has been in `crates/mvm-cli/src/bench/` for a while:
 five launch lanes, percentile statistics, a versioned JSON report, baseline
 regression gating, and the budgets the docs publish (200/250/300 ms
-prepared-cold p50/p95/p99; 30/50 ms warm-claim p50/p99).
+prepared-cold p50/p95/p99 diagnostics; 30/50 ms warm-claim p50/p99).
+
+The prepared-cold release requirement is stricter: every dispatch must be
+under 200 ms. The default output now presents that hard maximum separately
+from percentiles, uses explicit PASS/FAIL words, and explains each phase in a
+Remarks column. `--json` remains supported and schema v6 carries the hard
+comparison, limit, observed maximum, verdict, and remark.
 
 What it did not have was a caller outside the project. Only the CI gate, the
 conformance suite and two `#[ignore]`d tests drove it — so "is my host meeting

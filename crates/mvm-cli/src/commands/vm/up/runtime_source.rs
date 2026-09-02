@@ -19,57 +19,18 @@ use crate::commands::runtime_overlay::{
 };
 use crate::ui;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RuntimeSourceStatus {
-    OverlayRequired,
-    OverlayPreferred,
-    OverlayPreferredFallbackUsed,
-    RootfsOnlyByPolicy,
-}
-
-impl RuntimeSourceStatus {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::OverlayRequired => "overlay-required",
-            Self::OverlayPreferred => "overlay-preferred",
-            Self::OverlayPreferredFallbackUsed => "overlay-preferred-fallback-used",
-            Self::RootfsOnlyByPolicy => "rootfs-only-by-policy",
-        }
-    }
-}
-
-pub(crate) fn resolve_runtime_source_status(
-    start_config: &mvm_core::vm_backend::VmStartConfig,
-) -> RuntimeSourceStatus {
-    match start_config.runtime_source_policy {
-        mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay => {
-            RuntimeSourceStatus::OverlayRequired
-        }
-        mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay => {
-            if start_config.runtime_overlay_path.is_some()
-                && start_config.runtime_overlay_verity_path.is_some()
-                && start_config.runtime_overlay_roothash.is_some()
-            {
-                RuntimeSourceStatus::OverlayPreferred
-            } else {
-                RuntimeSourceStatus::OverlayPreferredFallbackUsed
-            }
-        }
-        mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly => {
-            RuntimeSourceStatus::RootfsOnlyByPolicy
-        }
-    }
-}
-
+/// Report where this launch's guest binaries come from.
+///
+/// There is one answer now — the runtime overlay — so this reports whether the
+/// overlay was actually attached rather than which of several postures applied.
 pub(crate) fn emit_runtime_source_status(start_config: &mvm_core::vm_backend::VmStartConfig) {
-    let status = resolve_runtime_source_status(start_config);
-    tracing::info!(
-        runtime_source_status = status.label(),
-        runtime_source_policy = start_config.runtime_source_policy.audit_label(),
-        overlay_attached = start_config.runtime_overlay_path.is_some(),
-        "resolved guest runtime source"
-    );
-    ui::info(&format!("Runtime source: {}", status.label()));
+    let attached = start_config.runtime_overlay_path.is_some();
+    tracing::info!(overlay_attached = attached, "resolved guest runtime source");
+    ui::info(if attached {
+        "Runtime source: overlay attached"
+    } else {
+        "Runtime source: overlay not attached"
+    });
 }
 
 fn apply_runtime_overlay_artifact(
@@ -87,10 +48,12 @@ fn apply_runtime_overlay_artifact(
 /// probe. Backends that can consume the sealed overlay attach it as extra
 /// read-only block devices and thread the matching roothash through the
 /// guest cmdline; unsupported backends ignore the fields.
-/// **Non-fatal**: a cold cache or a non-verity dev rootfs leaves the
-/// fields `None` and the VM boots legacy. The seeded resolve is a pure
-/// cache read — no build, no download, no `nix` — so this is safe on
-/// every host.
+/// **Fatal on a real backend**: the overlay is the only source of the guest
+/// binaries, so a cold cache returns `Err` rather than leaving the fields
+/// `None` and booting a guest that cannot reach an agent. The caller's
+/// acquisition ladder catches that and builds or downloads. The seeded
+/// resolve is a pure cache read — no build, no download, no `nix` — so this
+/// is safe on every host.
 #[tracing::instrument(skip_all, fields(hypervisor, arch = ?arch))]
 pub(crate) fn attach_runtime_overlay(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
@@ -107,16 +70,7 @@ pub(crate) fn attach_runtime_overlay(
             Ok(())
         }
         Err(e) => {
-            if start_config.runtime_source_policy
-                == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
-            {
-                anyhow::bail!(
-                    "runtime overlay required for {hypervisor} boot but unavailable: {e}"
-                );
-            }
-            // Cold cache / dev rootfs / version drift — boot legacy, don't fail.
-            tracing::debug!(backend = hypervisor, error = %e, "runtime overlay not attached");
-            Ok(())
+            anyhow::bail!("runtime overlay required for {hypervisor} boot but unavailable: {e}")
         }
     }
 }
@@ -149,8 +103,6 @@ pub(crate) fn attach_runtime_overlay_if_cached_version(
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let arch = mvm_core::arch::GuestArch::host();
     if expected_version.is_none()
-        && start_config.runtime_source_policy
-            == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
         && matches!(hypervisor, "firecracker" | "hvf" | "qemu" | "libkrun")
         && runtime_overlay_acquire_mode() == RuntimeOverlayAcquireMode::BuildFromSourceCheckout
         && runtime_overlay_source_checkout_root().is_some()
@@ -167,10 +119,7 @@ pub(crate) fn attach_runtime_overlay_if_cached_version(
         mvm_fs::overlay::RuntimeOverlayResolver::new(cache_root.clone(), version.to_string());
     match attach_runtime_overlay(start_config, hypervisor, &resolver, arch) {
         Ok(()) => Ok(()),
-        Err(_err)
-            if start_config.runtime_source_policy
-                == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay =>
-        {
+        Err(_err) => {
             if expected_version.is_some() {
                 return Err(anyhow::anyhow!(
                     "runtime overlay version {version} is required for this boot and was not found in the local cache"
@@ -209,7 +158,6 @@ pub(crate) fn attach_runtime_overlay_if_cached_version(
             );
             Ok(())
         }
-        Err(err) => Err(err),
     }
 }
 
@@ -327,6 +275,7 @@ fn evict_stale_universal_initramfs(
 /// without building or downloading anything? Applies the same
 /// source-fingerprint eviction as the attach path first, so a stale artifact
 /// never counts as available.
+#[cfg(test)]
 pub(crate) fn universal_initramfs_available() -> bool {
     let version = env!("CARGO_PKG_VERSION");
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
@@ -394,10 +343,38 @@ fn attach_universal_initramfs_with_resolver(
             );
         }
         Err(e) => {
+            // Fail closed. Nothing else mounts the runtime overlay: the guest
+            // `/init` baked into a workload rootfs has no code for it, and the
+            // `ActivateEnvironment` that does mount it is only sent on the
+            // universal-initramfs path. So a rootfs boot without an initramfs
+            // reaches PID 1 with an empty `/mvm/runtime` — no agent, no egress
+            // client — and dies as a kernel panic the host only sees as a
+            // 30-second agent-readiness timeout naming nothing.
+            //
+            // Swallowing this at debug level is what turned a missing artifact
+            // into that timeout. Refuse here, while the resolver's real error
+            // is still in hand.
+            if initramfs_is_required(start_config) {
+                return Err(anyhow::Error::new(e).context(format!(
+                    "the universal initramfs {version} for {arch} could not be resolved, and \
+                     this workload cannot boot without it: it is what mounts the guest runtime \
+                     overlay at /mvm/runtime, which carries the guest agent and the egress \
+                     client. Run `mvmctl doctor` to see the artifact state"
+                )));
+            }
             tracing::debug!(error = %e, "universal initramfs not attached");
         }
     }
     Ok(())
+}
+
+/// Whether this launch cannot boot without the universal initramfs.
+///
+/// True for every boot that has a guest root to mount and expects its runtime
+/// binaries from the overlay. A kernel-less shape (wasm) has no initramfs leg
+/// at all, and is the only launch that can come up without one.
+fn initramfs_is_required(config: &mvm_core::vm_backend::VmStartConfig) -> bool {
+    config.kernel_path.is_some() && !config.rootfs_path.is_empty()
 }
 
 // ── SDK sidecar ──────────────────────────────────────────────────────────────
@@ -419,6 +396,7 @@ fn attach_universal_initramfs_with_resolver(
 ///    silently downloads a sidecar.
 pub(crate) fn resolve_sdk_sidecar_attachment_for_host(
     services: &[mvm_contract::protocol::broker::ServiceId],
+    libc: mvm_contract::guest_libc::GuestLibc,
 ) -> Result<Option<SdkSidecarAttachment>> {
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let version = env!("CARGO_PKG_VERSION");
@@ -426,28 +404,114 @@ pub(crate) fn resolve_sdk_sidecar_attachment_for_host(
     let resolver =
         mvm_fs::sdk_sidecar::SdkSidecarResolver::new(cache_root.clone(), version.to_string());
 
-    let cache_miss =
-        match mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(services, &resolver, arch) {
-            Ok(resolved) => return Ok(resolved),
-            Err(e) => e,
-        };
+    let cache_miss = match mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(
+        services, &resolver, arch, libc,
+    ) {
+        Ok(Some(resolved)) => {
+            warn_if_sidecar_predates_the_working_tree(&cache_root, version, arch, libc);
+            return Ok(Some(resolved));
+        }
+        // No SDK-served binding means no sidecar was selected. In particular,
+        // an image whose libc has not been detected yet must not probe the
+        // synthetic `unknown/` cache path and mislabel its absence as a
+        // published artifact.
+        Ok(None) => return Ok(None),
+        Err(e) => e,
+    };
 
-    if mvm_build::sdk_sidecar::resolve_or_seed_from_default_cache(&resolver, arch).is_ok() {
-        return mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(services, &resolver, arch);
+    if mvm_build::sdk_sidecar::resolve_or_seed_from_default_cache(&resolver, arch, libc).is_ok() {
+        return mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(
+            services, &resolver, arch, libc,
+        );
     }
 
     match runtime_overlay_acquire_mode() {
         // Building the sidecar needs the builder VM, which must not be spawned
         // implicitly inside a launch. Keep the fail-closed refusal, which
-        // already names the binding and the `nix build` that satisfies it.
+        // names the binding and the explicit source-build command.
         RuntimeOverlayAcquireMode::BuildFromSourceCheckout => Err(cache_miss),
         RuntimeOverlayAcquireMode::DownloadPublishedArtifact => {
             ui::info("SDK sidecar missing from cache; downloading the published artifact now...");
-            mvm_build::sdk_sidecar::download_sdk_sidecar(version, arch, &cache_root)
+            mvm_build::sdk_sidecar::download_sdk_sidecar(version, arch, libc, &cache_root)
                 .with_context(|| sdk_sidecar_download_failure_context(services, version, arch))?;
-            mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(services, &resolver, arch)
+            mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(
+                services, &resolver, arch, libc,
+            )
         }
     }
+}
+
+/// Say so when the cached sidecar cannot carry this checkout's cdylib changes.
+///
+/// The sidecar cache key is version + architecture, so an older downloaded or
+/// source-built image can remain structurally valid after `crates/mvm-sdk`
+/// changes. A contributor who adds a host-service verb would otherwise learn
+/// about the drift only from inside the guest, as `unknown method
+/// \`host.kv.get\`` — an error that points at the broker rather than at the
+/// stale image.
+///
+/// A warning, not an implicit rebuild: source construction boots Stage 0 and
+/// therefore remains an explicit operator action outside a workload launch.
+///
+/// Silent for a release binary, which has no checkout and for which the
+/// published artifact is exactly right.
+/// Said once per process. A launch resolves the sidecar from more than one call
+/// site, and the condition is process-global — same cache, same checkout — so
+/// repeating it is noise that trains people to skip the line.
+fn warn_if_sidecar_predates_the_working_tree(
+    cache_root: &std::path::Path,
+    version: &str,
+    arch: mvm_core::arch::GuestArch,
+    libc: mvm_contract::guest_libc::GuestLibc,
+) {
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    let Some(workspace_root) =
+        crate::commands::runtime_overlay::runtime_overlay_source_checkout_root()
+    else {
+        return;
+    };
+    match mvm_build::sdk_sidecar::cached_sidecar_provenance(
+        cache_root,
+        version,
+        arch,
+        libc,
+        &workspace_root,
+    ) {
+        Ok(mvm_build::sdk_sidecar::SidecarProvenance::MatchesSource) => {}
+        Ok(_) if SAID.swap(true, std::sync::atomic::Ordering::Relaxed) => {}
+        Ok(provenance) => {
+            let origin = match provenance {
+                mvm_build::sdk_sidecar::SidecarProvenance::Published => "is the published artifact",
+                _ => "was built from a different revision of this tree",
+            };
+            let marker = mvm_fs::sdk_sidecar::SdkSidecarLayout::under(
+                cache_root,
+                version,
+                &arch.to_string(),
+                libc,
+            )
+            .artifact_dir
+            .join(mvm_build::sdk_sidecar::LOCAL_SOURCE_FINGERPRINT_FILE);
+            ui::warn(&sidecar_provenance_warning(origin, &marker));
+        }
+        // Provenance is a diagnostic. Failing to compute it must not fail a
+        // launch that would otherwise proceed.
+        Err(error) => {
+            tracing::debug!(%error, "could not determine SDK sidecar provenance");
+        }
+    }
+}
+
+fn sidecar_provenance_warning(origin: &str, marker: &std::path::Path) -> String {
+    format!(
+        "SDK sidecar {origin}, so `libmvm_host_services.so` does not carry changes to \
+         crates/mvm-host-services in this checkout. Host-service calls from the guest use \
+         the verbs it shipped with; one added here answers `unknown method`. Run \
+         `mvmctl build sdk-sidecar build` and wait for both libc variants to report cached \
+         successfully. Provenance marker: {}.",
+        marker.display()
+    )
 }
 
 /// A failed download must read like the cache-miss refusal it replaces: name
@@ -488,7 +552,22 @@ mod sdk_sidecar_host_resolution_tests {
         hex::encode(Sha256::digest(bytes))
     }
 
-    fn sidecar_ext4_bytes() -> Vec<u8> {
+    #[test]
+    fn stale_sidecar_guidance_names_the_current_owner_and_completion_signal() {
+        let marker = std::path::Path::new("/cache/glibc/SOURCE_FINGERPRINT");
+        let warning = sidecar_provenance_warning("is the published artifact", marker);
+
+        assert!(warning.contains("crates/mvm-host-services"), "{warning}");
+        assert!(!warning.contains("changes to crates/mvm-sdk"), "{warning}");
+        assert!(warning.contains("both libc variants"), "{warning}");
+        assert!(warning.contains(&marker.display().to_string()), "{warning}");
+    }
+
+    /// `libc` is explicit at every call site: the resolver proves an
+    /// artifact's libc from its own `DT_NEEDED` and refuses one that disagrees
+    /// with the slot it was filed under, so a defaulted fixture could disagree
+    /// with its own slot silently.
+    fn sidecar_ext4_bytes(libc: mvm_contract::guest_libc::GuestLibc) -> Vec<u8> {
         use mvm_fs::ext4::Node;
         let nodes = vec![
             Node::Dir {
@@ -499,7 +578,10 @@ mod sdk_sidecar_host_resolution_tests {
             Node::File {
                 path: "/lib/libmvm_host_services.so".into(),
                 mode: 0o555,
-                data: b"\x7fELF-stub".to_vec(),
+                data: mvm_fs::elf::test_fixture::shared_object(&[
+                    "libgcc_s.so.1",
+                    libc.libc_soname().expect("a fixture names a real libc"),
+                ]),
                 xattrs: Vec::new(),
             },
         ];
@@ -507,9 +589,23 @@ mod sdk_sidecar_host_resolution_tests {
     }
 
     fn seed_sidecar_cache(cache: &std::path::Path, version: &str, arch: GuestArch) {
-        let layout = SdkSidecarLayout::under(cache, version, &arch.to_string());
+        seed_sidecar_variant(
+            cache,
+            version,
+            arch,
+            mvm_contract::guest_libc::GuestLibc::Musl,
+        );
+    }
+
+    fn seed_sidecar_variant(
+        cache: &std::path::Path,
+        version: &str,
+        arch: GuestArch,
+        libc: mvm_contract::guest_libc::GuestLibc,
+    ) {
+        let layout = SdkSidecarLayout::under(cache, version, &arch.to_string(), libc);
         std::fs::create_dir_all(&layout.artifact_dir).unwrap();
-        let image = sidecar_ext4_bytes();
+        let image = sidecar_ext4_bytes(libc);
         let version_text = format!("{version}\n");
         std::fs::write(&layout.image, &image).unwrap();
         std::fs::write(&layout.version_file, &version_text).unwrap();
@@ -537,6 +633,7 @@ mod sdk_sidecar_host_resolution_tests {
             &[svc("host.audit.v1")],
             &resolver,
             arch,
+            mvm_contract::guest_libc::GuestLibc::Musl,
         )
         .unwrap()
         .unwrap();
@@ -547,6 +644,7 @@ mod sdk_sidecar_host_resolution_tests {
         mvm_hostd::plan_admission::enforce_sdk_sidecar_attachment(
             std::slice::from_ref(&attached.volume),
             &plan,
+            mvm_contract::guest_libc::GuestLibc::Musl,
         )
         .expect("the resolved attachment must satisfy the admission gate");
 
@@ -556,6 +654,7 @@ mod sdk_sidecar_host_resolution_tests {
             mvm_hostd::plan_admission::enforce_sdk_sidecar_attachment(
                 std::slice::from_ref(&attached.volume),
                 &unbound,
+                mvm_contract::guest_libc::GuestLibc::Musl,
             )
             .is_err()
         );
@@ -569,9 +668,26 @@ mod sdk_sidecar_host_resolution_tests {
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(dir.path());
-        assert_eq!(resolve_sdk_sidecar_attachment_for_host(&[]).unwrap(), None);
         assert_eq!(
-            resolve_sdk_sidecar_attachment_for_host(&[svc("broker.v1")]).unwrap(),
+            resolve_sdk_sidecar_attachment_for_host(
+                &[],
+                mvm_contract::guest_libc::GuestLibc::Unknown
+            )
+            .unwrap(),
+            None,
+            "no binding must short-circuit before probing an unknown-libc cache path"
+        );
+        assert_eq!(
+            resolve_sdk_sidecar_attachment_for_host(&[], mvm_contract::guest_libc::GuestLibc::Musl)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve_sdk_sidecar_attachment_for_host(
+                &[svc("broker.v1")],
+                mvm_contract::guest_libc::GuestLibc::Musl
+            )
+            .unwrap(),
             None
         );
     }
@@ -586,7 +702,11 @@ mod sdk_sidecar_host_resolution_tests {
             "build",
         );
         assert!(
-            resolve_sdk_sidecar_attachment_for_host(&[svc("host.audit.v1")]).is_err(),
+            resolve_sdk_sidecar_attachment_for_host(
+                &[svc("host.audit.v1")],
+                mvm_contract::guest_libc::GuestLibc::Musl
+            )
+            .is_err(),
             "a bound SDK service with no cached sidecar must refuse the launch"
         );
     }
@@ -595,8 +715,8 @@ mod sdk_sidecar_host_resolution_tests {
     /// not touched" points here: if the acquire path ran, the call fails.
     const UNREACHABLE_BASE_URL: &str = "file:///nonexistent/mvm-sdk-sidecar-release-fixture";
 
-    fn sidecar_archive_bytes(version: &str) -> Vec<u8> {
-        let image = sidecar_ext4_bytes();
+    fn sidecar_archive_bytes(version: &str, libc: mvm_contract::guest_libc::GuestLibc) -> Vec<u8> {
+        let image = sidecar_ext4_bytes(libc);
         let version_text = format!("{version}\n").into_bytes();
         let manifest = format!(
             "{}  {SDK_SIDECAR_IMAGE_FILE}\n{}  {SDK_SIDECAR_VERSION_FILE}\n",
@@ -624,10 +744,15 @@ mod sdk_sidecar_host_resolution_tests {
     /// Stage the two assets `release.yml` publishes for this arch, so the
     /// download path runs end to end against local bytes instead of the network.
     fn seed_sidecar_release_fixture(base: &std::path::Path, version: &str, arch: GuestArch) {
-        let names = mvm_build::sdk_sidecar::SdkSidecarArtifactNames::for_arch(&arch.to_string());
+        let names = mvm_build::sdk_sidecar::SdkSidecarArtifactNames::for_target(
+            &arch.to_string(),
+            mvm_contract::guest_libc::GuestLibc::Glibc,
+        );
         let release_dir = base.join(format!("v{version}"));
         std::fs::create_dir_all(&release_dir).unwrap();
-        let archive = sidecar_archive_bytes(version);
+        // The release fixture carries the glibc variant, matching the asset
+        // names staged beside it.
+        let archive = sidecar_archive_bytes(version, mvm_contract::guest_libc::GuestLibc::Glibc);
         std::fs::write(release_dir.join(&names.archive), &archive).unwrap();
         std::fs::write(
             release_dir.join(&names.archive_checksum),
@@ -658,11 +783,22 @@ mod sdk_sidecar_host_resolution_tests {
         // `mvm_build::release_signature`, not here.
         env.set(mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
 
-        let attached = resolve_sdk_sidecar_attachment_for_host(&[svc("host.audit.v1")])
-            .expect("a published sidecar must satisfy the binding")
-            .expect("a bound SDK service must attach the sidecar");
+        // The published variant, unlike the seeded-cache tests above: this is the
+        // one path that fetches a real release asset, and the release carries only
+        // the glibc archive. Asking for the other is refused before any transport.
+        let attached = resolve_sdk_sidecar_attachment_for_host(
+            &[svc("host.audit.v1")],
+            mvm_contract::guest_libc::GuestLibc::Glibc,
+        )
+        .expect("a published sidecar must satisfy the binding")
+        .expect("a bound SDK service must attach the sidecar");
 
-        let layout = SdkSidecarLayout::under(&dir.path().join("cache"), version, &arch.to_string());
+        let layout = SdkSidecarLayout::under(
+            &dir.path().join("cache"),
+            version,
+            &arch.to_string(),
+            mvm_contract::guest_libc::GuestLibc::Glibc,
+        );
         assert_eq!(attached.volume.host, layout.image.display().to_string());
         assert!(attached.volume.read_only);
         assert_eq!(attached.version, version);
@@ -687,8 +823,11 @@ mod sdk_sidecar_host_resolution_tests {
         );
         env.set("MVM_OVERLAY_BASE_URL", UNREACHABLE_BASE_URL);
 
-        let err = resolve_sdk_sidecar_attachment_for_host(&[svc("host.secrets.v1")])
-            .expect_err("a source-checkout host must refuse rather than download");
+        let err = resolve_sdk_sidecar_attachment_for_host(
+            &[svc("host.secrets.v1")],
+            mvm_contract::guest_libc::GuestLibc::Musl,
+        )
+        .expect_err("a source-checkout host must refuse rather than download");
         let msg = format!("{err:#}");
 
         assert!(msg.contains("host.secrets.v1"), "{msg}");
@@ -697,7 +836,7 @@ mod sdk_sidecar_host_resolution_tests {
             "{msg}"
         );
         assert!(
-            msg.contains("nix build ./nix/images/runtime-overlay#sdk-sidecar-image"),
+            msg.contains("mvmctl build sdk-sidecar build"),
             "the refusal must still name the build that satisfies it: {msg}"
         );
     }
@@ -716,8 +855,11 @@ mod sdk_sidecar_host_resolution_tests {
         );
         env.set("MVM_OVERLAY_BASE_URL", UNREACHABLE_BASE_URL);
 
-        let err = resolve_sdk_sidecar_attachment_for_host(&[svc("host.time.v1")])
-            .expect_err("an unreachable release must refuse the launch");
+        let err = resolve_sdk_sidecar_attachment_for_host(
+            &[svc("host.time.v1")],
+            mvm_contract::guest_libc::GuestLibc::Musl,
+        )
+        .expect_err("an unreachable release must refuse the launch");
         let msg = format!("{err:#}");
 
         assert!(msg.contains("host.time.v1"), "{msg}");
@@ -745,9 +887,12 @@ mod sdk_sidecar_host_resolution_tests {
         );
         env.set("MVM_OVERLAY_BASE_URL", UNREACHABLE_BASE_URL);
 
-        let attached = resolve_sdk_sidecar_attachment_for_host(&[svc("host.audit.v1")])
-            .expect("a warm cache resolves without any transport")
-            .expect("a bound SDK service must attach the sidecar");
+        let attached = resolve_sdk_sidecar_attachment_for_host(
+            &[svc("host.audit.v1")],
+            mvm_contract::guest_libc::GuestLibc::Musl,
+        )
+        .expect("a warm cache resolves without any transport")
+        .expect("a bound SDK service must attach the sidecar");
         assert_eq!(attached.version, version);
     }
 }
@@ -758,66 +903,36 @@ mod runtime_overlay_attach_tests {
     use crate::commands::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV;
     use mvm_core::arch::GuestArch;
     use mvm_core::util::test_env::TestEnv;
-    use mvm_core::vm_backend::{RuntimeSourcePolicy, VmStartConfig};
+    use mvm_core::vm_backend::VmStartConfig;
     use mvm_fs::ext4::Node;
     use mvm_fs::overlay::RuntimeOverlayResolver;
     use sha2::{Digest, Sha256};
 
     static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// A payload carrying every path the resolver requires, optionally minus
+    /// the egress client — the one omission these tests actually exercise.
+    ///
+    /// Derived from `REQUIRED_OVERLAY_GUEST_PATHS` rather than restated: a
+    /// hand-written copy is one an added required path silently invalidates,
+    /// and it then fails as an unrelated integrity error rather than as a stale
+    /// fixture.
     fn valid_overlay_ext4_bytes(version: &str, include_egress_client: bool) -> Vec<u8> {
-        let mut nodes = vec![
-            Node::File {
-                path: "/agent".into(),
-                mode: 0o555,
-                data: b"agent".to_vec(),
+        let nodes: Vec<Node> = mvm_fs::overlay::REQUIRED_OVERLAY_GUEST_PATHS
+            .iter()
+            .filter(|path| include_egress_client || **path != "/egress-client")
+            .map(|path| Node::File {
+                path: (*path).into(),
+                // `VERSION` is data the resolver reads back, not a binary.
+                mode: if *path == "/VERSION" { 0o444 } else { 0o555 },
+                data: if *path == "/VERSION" {
+                    format!("{version}\n").into_bytes()
+                } else {
+                    path.trim_start_matches('/').as_bytes().to_vec()
+                },
                 xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/netinit".into(),
-                mode: 0o555,
-                data: b"netinit".to_vec(),
-                xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/seccomp-apply".into(),
-                mode: 0o555,
-                data: b"seccomp".to_vec(),
-                xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/runner".into(),
-                mode: 0o555,
-                data: b"runner".to_vec(),
-                xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/addon-dns".into(),
-                mode: 0o555,
-                data: b"addon-dns".to_vec(),
-                xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/exit-report".into(),
-                mode: 0o555,
-                data: b"exit-report".to_vec(),
-                xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/VERSION".into(),
-                mode: 0o444,
-                data: format!("{version}\n").into_bytes(),
-                xattrs: Vec::new(),
-            },
-        ];
-        if include_egress_client {
-            nodes.push(Node::File {
-                path: "/egress-client".into(),
-                mode: 0o555,
-                data: b"egress".to_vec(),
-                xattrs: Vec::new(),
-            });
-        }
+            })
+            .collect();
         mvm_fs::ext4::build_image(nodes).expect("build valid overlay ext4 fixture")
     }
 
@@ -876,23 +991,50 @@ mod runtime_overlay_attach_tests {
         verity_bytes: &[u8],
         roothash_bytes: &[u8],
         version_bytes: &[u8],
+        arch: GuestArch,
     ) -> Vec<u8> {
-        let checksums = format!(
+        let guest_files: Vec<(&str, Vec<u8>)> =
+            mvm_build::guest_agent_build::OCI_GUEST_RUNTIME_BINARY_NAMES
+                .iter()
+                .map(|name| (*name, fake_static_elf(arch, name.as_bytes())))
+                .collect();
+        let mut checksums = format!(
             "{}  overlay.ext4\n{}  overlay.verity\n{}  overlay.roothash\n{}  VERSION\n",
             sha256_hex(ext4_bytes),
             sha256_hex(verity_bytes),
             sha256_hex(roothash_bytes),
             sha256_hex(version_bytes),
         );
+        for (name, bytes) in &guest_files {
+            checksums.push_str(&format!("{}  {name}\n", sha256_hex(bytes)));
+        }
         let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         let mut tar = tar::Builder::new(encoder);
         append_archive_file(&mut tar, "overlay.ext4", ext4_bytes);
         append_archive_file(&mut tar, "overlay.verity", verity_bytes);
         append_archive_file(&mut tar, "overlay.roothash", roothash_bytes);
         append_archive_file(&mut tar, "VERSION", version_bytes);
+        for (name, bytes) in &guest_files {
+            append_archive_file(&mut tar, name, bytes);
+        }
         append_archive_file(&mut tar, "checksums-sha256.txt", checksums.as_bytes());
         let encoder = tar.into_inner().unwrap();
         encoder.finish().unwrap()
+    }
+
+    fn fake_static_elf(arch: GuestArch, tag: &[u8]) -> Vec<u8> {
+        let machine: u16 = match arch {
+            GuestArch::X86_64 => 0x3E,
+            GuestArch::Aarch64 => 0xB7,
+        };
+        let mut bytes = vec![0u8; 64];
+        bytes[..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
+        bytes[4] = 2;
+        bytes[5] = 1;
+        bytes[18..20].copy_from_slice(&machine.to_le_bytes());
+        bytes[54..56].copy_from_slice(&56u16.to_le_bytes());
+        bytes.extend_from_slice(tag);
+        bytes
     }
 
     fn append_archive_file<W: std::io::Write>(tar: &mut tar::Builder<W>, path: &str, bytes: &[u8]) {
@@ -917,6 +1059,7 @@ mod runtime_overlay_attach_tests {
             verity_bytes,
             roothash_text,
             version_text.as_bytes(),
+            arch,
         );
         write_fixture(&release_dir, &names.archive, &archive_bytes);
         write_fixture(
@@ -939,7 +1082,6 @@ mod runtime_overlay_attach_tests {
         seed_cache(dir.path(), ver, arch);
         let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::PreferOverlay,
             ..VmStartConfig::default()
         };
         attach_runtime_overlay(&mut sc, "firecracker", &resolver, arch).unwrap();
@@ -965,7 +1107,6 @@ mod runtime_overlay_attach_tests {
         seed_cache(dir.path(), ver, arch);
         let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             ..VmStartConfig::default()
         };
         attach_runtime_overlay(&mut sc, "hvf", &resolver, arch).unwrap();
@@ -988,7 +1129,6 @@ mod runtime_overlay_attach_tests {
         seed_cache(dir.path(), ver, arch);
         let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             ..VmStartConfig::default()
         };
         attach_runtime_overlay(&mut sc, "libkrun", &resolver, arch).unwrap();
@@ -1011,7 +1151,6 @@ mod runtime_overlay_attach_tests {
         seed_cache(dir.path(), ver, arch);
         let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             ..VmStartConfig::default()
         };
         attach_runtime_overlay(&mut sc, "mock", &resolver, arch).unwrap();
@@ -1020,7 +1159,7 @@ mod runtime_overlay_attach_tests {
     }
 
     #[test]
-    fn firecracker_cold_cache_leaves_fields_unset_non_fatal() {
+    fn firecracker_cold_cache_refuses_rather_than_booting_without_the_overlay() {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap(); // empty cache
@@ -1030,14 +1169,19 @@ mod runtime_overlay_attach_tests {
         let arch = GuestArch::host();
         let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::PreferOverlay,
             ..VmStartConfig::default()
         };
-        attach_runtime_overlay(&mut sc, "firecracker", &resolver, arch).unwrap();
+        // The overlay is the single source of the guest binaries, so a cold
+        // cache is fatal here rather than something the boot can shrug off.
+        // The caller's acquisition ladder catches this Err and builds or
+        // downloads; what must never happen is a silent overlay-free boot.
+        let err = attach_runtime_overlay(&mut sc, "firecracker", &resolver, arch)
+            .expect_err("a cold cache must refuse, not attach nothing");
         assert!(
-            sc.runtime_overlay_path.is_none(),
-            "cold cache must not attach (legacy boot)"
+            err.to_string().contains("runtime overlay required"),
+            "unexpected refusal: {err}"
         );
+        assert!(sc.runtime_overlay_path.is_none());
     }
 
     #[test]
@@ -1051,7 +1195,6 @@ mod runtime_overlay_attach_tests {
         let arch = GuestArch::host();
         let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             ..VmStartConfig::default()
         };
         let err = attach_runtime_overlay(&mut sc, "firecracker", &resolver, arch).unwrap_err();
@@ -1069,7 +1212,6 @@ mod runtime_overlay_attach_tests {
         let arch = GuestArch::host();
         let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             ..VmStartConfig::default()
         };
         let err = attach_runtime_overlay(&mut sc, "hvf", &resolver, arch).unwrap_err();
@@ -1088,7 +1230,6 @@ mod runtime_overlay_attach_tests {
         let arch = GuestArch::host();
         let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             ..VmStartConfig::default()
         };
         let err = attach_runtime_overlay(&mut sc, "libkrun", &resolver, arch).unwrap_err();
@@ -1109,7 +1250,6 @@ mod runtime_overlay_attach_tests {
         seed_cache(dir.path(), ver, arch);
         let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             ..VmStartConfig::default()
         };
         attach_runtime_overlay(&mut sc, "qemu", &resolver, arch).unwrap();
@@ -1129,7 +1269,6 @@ mod runtime_overlay_attach_tests {
         let arch = GuestArch::host();
         let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             ..VmStartConfig::default()
         };
         let err = attach_runtime_overlay(&mut sc, "qemu", &resolver, arch).unwrap_err();
@@ -1161,7 +1300,6 @@ mod runtime_overlay_attach_tests {
         );
 
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             ..VmStartConfig::default()
         };
         attach_runtime_overlay_if_cached_version(&mut sc, "firecracker", None).unwrap();
@@ -1209,6 +1347,18 @@ mod runtime_overlay_attach_tests {
         );
     }
 
+    #[cfg(feature = "release-channel")]
+    #[test]
+    fn release_channel_defaults_to_published_runtime_overlay() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        env.remove(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV);
+        assert_eq!(
+            runtime_overlay_acquire_mode(),
+            RuntimeOverlayAcquireMode::DownloadPublishedArtifact
+        );
+    }
+
     #[test]
     fn attach_runtime_overlay_if_cached_version_uses_requested_cached_version() {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1227,7 +1377,6 @@ mod runtime_overlay_attach_tests {
         seed_cache(&dir.path().join("cache"), pinned, arch);
 
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             ..VmStartConfig::default()
         };
         attach_runtime_overlay_if_cached_version(&mut sc, "firecracker", Some(pinned)).unwrap();
@@ -1271,7 +1420,6 @@ mod runtime_overlay_attach_tests {
         seed_cache(&dir.path().join("cache"), current, arch);
 
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             ..VmStartConfig::default()
         };
         let err = attach_runtime_overlay_if_cached_version(&mut sc, "firecracker", Some(missing))
@@ -1309,7 +1457,6 @@ mod runtime_overlay_attach_tests {
         seed_cache(&dir.path().join("cache"), older, arch);
 
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             ..VmStartConfig::default()
         };
         attach_runtime_overlay_if_cached(&mut sc, "firecracker").unwrap();
@@ -1348,7 +1495,6 @@ mod runtime_overlay_attach_tests {
         seed_cache(&dir.path().join("cache"), stale, arch);
 
         let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             runtime_overlay_version: Some(stale.to_string()),
             ..VmStartConfig::default()
         };
@@ -1366,45 +1512,6 @@ mod runtime_overlay_attach_tests {
                     .to_str()
                     .expect("utf-8 overlay path")
             )
-        );
-    }
-
-    #[test]
-    fn prefer_overlay_reports_fallback_when_overlay_not_attached() {
-        let sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::PreferOverlay,
-            ..VmStartConfig::default()
-        };
-        assert_eq!(
-            resolve_runtime_source_status(&sc),
-            RuntimeSourceStatus::OverlayPreferredFallbackUsed
-        );
-    }
-
-    #[test]
-    fn prefer_overlay_reports_overlay_when_all_artifacts_attached() {
-        let sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::PreferOverlay,
-            runtime_overlay_path: Some("/overlay.ext4".into()),
-            runtime_overlay_verity_path: Some("/overlay.verity".into()),
-            runtime_overlay_roothash: Some("a".repeat(64)),
-            ..VmStartConfig::default()
-        };
-        assert_eq!(
-            resolve_runtime_source_status(&sc),
-            RuntimeSourceStatus::OverlayPreferred
-        );
-    }
-
-    #[test]
-    fn rootfs_only_reports_rootfs_only_by_policy() {
-        let sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RootfsOnly,
-            ..VmStartConfig::default()
-        };
-        assert_eq!(
-            resolve_runtime_source_status(&sc),
-            RuntimeSourceStatus::RootfsOnlyByPolicy
         );
     }
 }
@@ -1465,14 +1572,24 @@ mod universal_initramfs_attach_tests {
         }
     }
 
+    /// The resolver failure a cold cache produces, as the real ladder now
+    /// reports it (both acquisition arms having failed).
+    fn cold_cache_failure() -> mvm_build::initramfs::InitramfsBuildError {
+        mvm_build::initramfs::InitramfsBuildError::CargoBuildFailed {
+            reason: "automatic warming is disabled in this test".to_string(),
+        }
+    }
+
     #[test]
-    fn attach_universal_initramfs_if_cached_cold_cache_is_non_fatal() {
+    fn attach_universal_initramfs_if_cached_cold_cache_is_non_fatal_without_a_rootfs() {
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         // HOME moves with MVM_HOME or the cache under test is not cold: the
         // initramfs resolver seeds a miss from `$HOME/.mvm/cache`.
         env.isolate_mvm_home(dir.path());
 
+        // No rootfs and no virtiofs root: an initramfs-only guest boots
+        // entirely from RAM, so there is no runtime overlay to strand.
         let mut sc = VmStartConfig {
             kernel_path: Some("/dummy/vmlinux".to_string()),
             ..Default::default()
@@ -1480,10 +1597,7 @@ mod universal_initramfs_attach_tests {
         let resolver_called = std::cell::Cell::new(false);
         attach_universal_initramfs_with_resolver(&mut sc, |_, _, _, _| {
             resolver_called.set(true);
-            Err(mvm_build::initramfs::InitramfsBuildError::HostUnsupported {
-                operation: "test cache miss",
-                reason: "automatic warming is disabled in this test",
-            })
+            Err(cold_cache_failure())
         })
         .unwrap();
 
@@ -1493,8 +1607,84 @@ mod universal_initramfs_attach_tests {
         );
         assert!(
             sc.initrd_path.is_none(),
-            "a cold-cache resolution failure must preserve legacy boot"
+            "a cold-cache resolution failure leaves no initramfs attached"
         );
+    }
+
+    #[test]
+    fn attach_universal_initramfs_refuses_a_rootfs_boot_that_cannot_resolve_one() {
+        // The regression this exists for: the resolver failure used to be
+        // swallowed at debug level, so the launch continued with no initramfs.
+        // Nothing else mounts the runtime overlay, so PID 1 came up to an empty
+        // /mvm/runtime, found neither the agent nor the egress client, exited,
+        // and panicked the kernel. The host saw only "guest agent did not
+        // become reachable within 30s" — a message naming nothing that was
+        // actually wrong.
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(dir.path());
+
+        let mut sc = VmStartConfig {
+            kernel_path: Some("/dummy/vmlinux".to_string()),
+            rootfs_path: "/cache/oci/rootfs.ext4".to_string(),
+            ..Default::default()
+        };
+        let error = attach_universal_initramfs_with_resolver(&mut sc, |_, _, _, _| {
+            Err(cold_cache_failure())
+        })
+        .expect_err("a rootfs boot with no resolvable initramfs must refuse");
+
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("universal initramfs"),
+            "the refusal must name the missing artifact: {rendered}"
+        );
+        assert!(
+            rendered.contains("/mvm/runtime"),
+            "the refusal must say what the artifact would have mounted: {rendered}"
+        );
+        assert!(
+            sc.initrd_path.is_none(),
+            "a refused launch attaches nothing"
+        );
+    }
+
+    #[test]
+    fn attach_universal_initramfs_still_refuses_a_prefer_overlay_rootfs_boot() {
+        // PreferOverlay is the default policy, and it is the one every
+        // `machine run --image` launch actually carries into this function on a
+        // non-sealed image. It needs the initramfs for exactly the same reason
+        // RequiredOverlay does — only RootfsOnly declares a baked-in agent.
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(dir.path());
+
+        let mut sc = VmStartConfig {
+            kernel_path: Some("/dummy/vmlinux".to_string()),
+            rootfs_path: "/cache/oci/rootfs.ext4".to_string(),
+            ..Default::default()
+        };
+        attach_universal_initramfs_with_resolver(&mut sc, |_, _, _, _| Err(cold_cache_failure()))
+            .expect_err("PreferOverlay with a rootfs must refuse too");
+    }
+
+    #[test]
+    fn attach_universal_initramfs_lets_a_kernel_less_launch_through() {
+        // A wasm launch has no kernel and therefore no initramfs leg at all.
+        // It is the only shape left that can come up without one — every
+        // guest that boots a kernel sources its binaries from the overlay,
+        // and the initramfs is what mounts it.
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(dir.path());
+
+        let mut sc = VmStartConfig {
+            kernel_path: None,
+            ..Default::default()
+        };
+        attach_universal_initramfs_with_resolver(&mut sc, |_, _, _, _| Err(cold_cache_failure()))
+            .expect("a kernel-less launch needs no initramfs");
+        assert!(sc.initrd_path.is_none());
     }
 
     #[test]

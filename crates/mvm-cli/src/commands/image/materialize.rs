@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use mvm_build::oci_runtime_inject::OciEntrypointConfig;
+use mvm_build::oci_runtime_inject::ImageRuntimeConfig;
 use mvm_build::rootfs::MaterializeExt4Input;
 
 use super::cache::safe_cache_path;
@@ -31,11 +31,7 @@ const RUNTIME_TAG_PREFIX_LEN: usize = 16;
 /// reads a sidecar rather than the artifacts, and never triggers a build.
 pub(super) fn oci_runtime_tag(cache_root: &Path) -> String {
     match mvm_build::run_image::resolve_guest_runtime_identity(cache_root) {
-        Ok(identity) => format!(
-            "{}-guest-{}",
-            env!("CARGO_PKG_VERSION"),
-            runtime_tag_prefix(&identity)
-        ),
+        Ok(identity) => oci_runtime_tag_from_identity(&identity),
         Err(err) => {
             // Degrade to a version-only tag rather than fail the run, but leave
             // a breadcrumb: a silent drop here can reuse a stale injected
@@ -46,9 +42,18 @@ pub(super) fn oci_runtime_tag(cache_root: &Path) -> String {
                 "could not identify the injected guest runtime; \
                  a cached rootfs may reuse a stale injected runtime"
             );
-            format!("{}-guest-unidentified", env!("CARGO_PKG_VERSION"))
+            oci_runtime_tag_from_identity("unidentified")
         }
     }
+}
+
+fn oci_runtime_tag_from_identity(identity: &str) -> String {
+    format!(
+        "{}-inject-{}-guest-{}",
+        env!("CARGO_PKG_VERSION"),
+        mvm_build::oci_runtime_inject::INJECT_SEMANTICS_VERSION,
+        runtime_tag_prefix(identity)
+    )
 }
 
 /// The identity prefix used in a cache tag.
@@ -81,28 +86,28 @@ pub(super) fn prepared_virtiofs_root(
         .join("rootfs-only")
 }
 
-pub(super) fn oci_entrypoint_from_config_bytes(
-    bytes: &[u8],
-) -> Result<Option<OciEntrypointConfig>> {
+/// The image's declared runtime config, or `None` when it declares nothing.
+///
+/// An empty argv does not make the result empty: an image is free to declare
+/// `Env` and no command, and discarding the environment along with the absent
+/// command is what left `rust:latest` without `/usr/local/cargo/bin` on
+/// `PATH`.
+pub(super) fn oci_entrypoint_from_config_bytes(bytes: &[u8]) -> Result<Option<ImageRuntimeConfig>> {
     let config: OciImageConfig = serde_json::from_slice(bytes).context("parse OCI image config")?;
     let mut argv = config.config.entrypoint.unwrap_or_default();
     argv.extend(config.config.cmd.unwrap_or_default());
-    if argv.is_empty() {
-        return Ok(None);
-    }
-    let env = config.config.env;
-    let working_dir = config.config.working_dir.filter(|dir| !dir.is_empty());
-    Ok(Some(OciEntrypointConfig {
+    let resolved = ImageRuntimeConfig {
         argv,
-        env,
-        working_dir,
-    }))
+        env: config.config.env,
+        working_dir: config.config.working_dir,
+    };
+    Ok((!resolved.is_empty()).then_some(resolved))
 }
 
 pub(super) fn oci_entrypoint_from_cache_path(
     cache_root: &Path,
     config_path: Option<&str>,
-) -> Result<Option<OciEntrypointConfig>> {
+) -> Result<Option<ImageRuntimeConfig>> {
     let Some(config_path) = config_path else {
         return Ok(None);
     };
@@ -156,7 +161,7 @@ pub(super) type RuntimeMaterializer = fn(
     &Path,
     &Path,
     &str,
-    Option<&OciEntrypointConfig>,
+    Option<&ImageRuntimeConfig>,
     bool,
     Vec<mvm_fs::ext4::Node>,
 ) -> Result<()>;
@@ -229,13 +234,13 @@ pub(super) fn materialize_run_rootfs(input: &MaterializeExt4Input) -> Result<()>
 /// with no vsock control plane and times out at `wait_for_agent`. The
 /// injected `/init` + baked agent + `/mvm/runtime` mount point make the
 /// rootfs genuinely overlay-aware, so the `for_oci_run` sidecar admits
-/// honestly through `admit_overlay_aware` without weakening the gate.
+/// honestly through `admit_runtime_overlay_contract` without weakening the gate.
 pub(super) fn inject_runtime_and_materialize(
     cache_root: &Path,
     unpacked_root: &Path,
     rootfs_abs: &Path,
     image_label: &str,
-    entrypoint: Option<&OciEntrypointConfig>,
+    entrypoint: Option<&ImageRuntimeConfig>,
     sealed: bool,
     deferred_nodes: Vec<mvm_fs::ext4::Node>,
 ) -> Result<()> {
@@ -246,7 +251,6 @@ pub(super) fn inject_runtime_and_materialize(
             rootfs_abs,
             image_label,
         )
-        .profile(mvm_build::oci_runtime_inject::RuntimeInjectionProfile::RuntimeLean)
         .entrypoint(entrypoint)
         .sealed(sealed)
         .deferred_nodes(deferred_nodes)
@@ -275,19 +279,13 @@ pub(super) fn prepare_rootfs_only_tree(
     })?;
     let bins = mvm_build::run_image::resolve_guest_binaries(cache_root)
         .context("resolve guest binaries for rootfs-only OCI tree")?;
-    mvm_build::oci_runtime_inject::inject_mvm_runtime(
-        &prepared_root,
-        &bins,
-        None,
-        false,
-        mvm_build::oci_runtime_inject::RuntimeInjectionProfile::RootfsOnly,
-    )
-    .with_context(|| {
-        format!(
-            "inject rootfs-only runtime into {}",
-            prepared_root.display()
-        )
-    })?;
+    mvm_build::oci_runtime_inject::inject_mvm_runtime(&prepared_root, &bins, None, false)
+        .with_context(|| {
+            format!(
+                "inject rootfs-only runtime into {}",
+                prepared_root.display()
+            )
+        })?;
     Ok(prepared_root)
 }
 
@@ -356,16 +354,6 @@ pub(super) fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Whether booting an `--image` OCI run will cross-compile the mvm guest
-/// runtime from source first. Announcing this before the pull keeps the slow,
-/// output-silent artifact build from looking like a hang.
-pub(in crate::commands) fn oci_guest_runtime_compile_pending(cache_root: &Path) -> bool {
-    mvm_build::guest_agent_build::source_build_pending(
-        cache_root,
-        mvm_core::arch::GuestArch::host(),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::oci_types::{CachedOciImage, CachedOciLayer};
@@ -408,6 +396,24 @@ mod tests {
         let got = runtime_tag_prefix(identity);
         assert_eq!(got.chars().count(), RUNTIME_TAG_PREFIX_LEN);
         assert!(identity.starts_with(got));
+    }
+
+    #[test]
+    fn runtime_tag_carries_host_injection_semantics_outside_the_binary_sidecar() {
+        let tag = oci_runtime_tag_from_identity("0123456789abcdef-rest");
+        assert_eq!(
+            tag,
+            format!(
+                "{}-inject-{}-guest-0123456789abcdef",
+                env!("CARGO_PKG_VERSION"),
+                mvm_build::oci_runtime_inject::INJECT_SEMANTICS_VERSION
+            )
+        );
+        assert_ne!(
+            tag,
+            format!("{}-guest-0123456789abcdef", env!("CARGO_PKG_VERSION")),
+            "the pre-semantics cache tag must become stale"
+        );
     }
 
     fn sample_image(reference: &str, digest: &str, layer_path: &str) -> CachedOciImage {
@@ -488,7 +494,11 @@ mod tests {
         seed_guest_artifacts(tmp.path(), b"v1");
         let tag = oci_runtime_tag(tmp.path());
         assert!(
-            tag.starts_with(concat!(env!("CARGO_PKG_VERSION"), "-guest-")),
+            tag.starts_with(&format!(
+                "{}-inject-{}-guest-",
+                env!("CARGO_PKG_VERSION"),
+                mvm_build::oci_runtime_inject::INJECT_SEMANTICS_VERSION
+            )),
             "unexpected runtime tag: {tag}"
         );
         assert_eq!(
@@ -602,7 +612,7 @@ mod tests {
             drop(f);
             swapped += 1;
         }
-        assert_eq!(swapped, 6, "expected the full artifact set");
+        assert_eq!(swapped, 4, "expected the full artifact set");
 
         assert_eq!(
             oci_runtime_tag(tmp.path()),

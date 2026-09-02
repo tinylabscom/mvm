@@ -64,6 +64,82 @@ fn canonical_bdd_workflow_runs_the_full_suite() {
 }
 
 #[test]
+fn canonical_bdd_workflow_runs_a_kvm_live_witness_in_the_merge_queue() {
+    let contents = workflow("bdd.yml");
+    let live = job_block(&contents, "bdd-live");
+
+    for expected in [
+        "github.event_name == 'merge_group'",
+        "github.event_name == 'workflow_dispatch'",
+        "runs-on: ubuntu-latest",
+        "FC_VERSION: v1.14.1",
+        "MVM_KERNEL_SOURCE: download",
+        "packages: libcap-ng-dev lld qemu-system-x86 qemu-utils",
+        "sudo chmod 666 /dev/kvm",
+        "run: just bdd-live-ci",
+    ] {
+        assert!(
+            live.contains(expected),
+            "the merge-queue live BDD job must contain {expected:?}"
+        );
+    }
+}
+
+#[test]
+fn live_bdd_recipe_opts_in_and_selects_only_the_fast_ci_witness() {
+    let justfile = fs::read_to_string("Justfile").expect("read Justfile");
+    let recipe = justfile
+        .split("\nbdd-live-ci:\n")
+        .nth(1)
+        .expect("Justfile must define bdd-live-ci")
+        .split("\n\n")
+        .next()
+        .expect("bdd-live-ci recipe has a body");
+
+    assert!(recipe.contains("MVM_BDD_LIVE=1"));
+    assert!(recipe.contains("MVM_BDD_CI_LIVE_ONLY=1"));
+    assert!(recipe.contains("cargo build --bin mvmctl --features user"));
+    assert!(recipe.contains("CARGO_BIN_EXE_mvmctl=\"${CARGO_TARGET_DIR:-target}/debug/mvmctl\""));
+    assert!(!recipe.contains("--tags"));
+}
+
+#[test]
+fn fast_live_witness_executes_the_readme_persistent_machine_path() {
+    let feature =
+        fs::read_to_string("features/suites/s8_readme_contract/persistent_machine_live.feature")
+            .expect("read the fast README live feature");
+
+    assert!(feature.contains("@live @firecracker @ci_live"));
+    for command in [
+        "machine create bdd-readme-web --image nginx --cpus 2 --memory 512M",
+        "machine start bdd-readme-web",
+        "machine exec bdd-readme-web -- nginx -v",
+        "machine logs bdd-readme-web",
+        "machine inspect bdd-readme-web",
+        "machine stop bdd-readme-web --yes",
+        "machine rm bdd-readme-web --yes",
+    ] {
+        assert!(
+            feature.contains(command),
+            "the live README witness must execute {command:?}"
+        );
+    }
+}
+
+#[test]
+fn canonical_bdd_workflow_uses_bounded_apt_action() {
+    let contents = workflow("bdd.yml");
+    assert!(
+        contents.contains("uses: ./.github/actions/apt-deps"),
+        "BDD setup must inherit the shared mirror replacement, timeouts, and retries"
+    );
+    assert!(
+        !contents.contains("sudo apt-get"),
+        "BDD setup must not bypass the bounded apt action"
+    );
+}
+
+#[test]
 fn runtime_release_publication_needs_bdd() {
     assert_reuses_bdd_gate("release.yml");
     assert_job_needs_bdd("release.yml", "release");

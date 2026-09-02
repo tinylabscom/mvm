@@ -26,11 +26,13 @@ const SURFACES: [&str; 2] = ["host", "user"];
 /// forwards are inlined in the root Cargo.toml); what remains here is `default`
 /// plus platform/storage opt-ins that genuinely cannot always be on. Keep this
 /// list tiny — a new entry is a conscious "this cannot live in a surface".
-const INTERNAL: [&str; 8] = [
+const INTERNAL: [&str; 9] = [
     "default",
     // Platform: link the libkrun C VMM (absent on a macOS-26 HVF host).
     "libkrun-sys",
     "libkrun-live",
+    // Platform: link the Linux TPM2 TSS provider when a host exposes a TPM.
+    "attestation-tpm2",
     // Optional heavy S3 storage backend for the template registry (fleet-only).
     "template-registry-s3",
     // Lean library knob: mvm-core's gated hostd IPC transport, flipped through
@@ -49,7 +51,15 @@ const INTERNAL: [&str; 8] = [
 /// either product surface (they gate acquisition mechanics, not behaviour).
 /// `dev` is the local-development meta-feature (the `host` + `user` union that
 /// runs every documented example) — a convenience, not a third product surface.
-const BUILD_ONLY: [&str; 2] = ["release-artifact-bootstrap", "dev"];
+const BUILD_ONLY: [&str; 4] = [
+    "release-artifact-bootstrap",
+    "release-channel",
+    "dev",
+    // Whether the Linux host binaries are cross-compiled into the artifact.
+    // Both settings expose the same verbs, so this gates acquisition, not
+    // behaviour — it belongs here rather than in `host` or `user`.
+    "embed-host-bins",
+];
 
 /// `dev` must aggregate both surfaces so a contributor can run every README /
 /// docs example from one build. Asserted structurally below.
@@ -298,9 +308,11 @@ dev = ["host", "user", "dev-watch"]
             "default",
             "dev",
             "libkrun-sys",
+            "attestation-tpm2",
             "template-registry-s3",
             "hostd-transport",
             "release-artifact-bootstrap",
+            "release-channel",
             "test-support",
         ] {
             assert!(allowed.contains(f), "{f} must be classified");

@@ -67,6 +67,7 @@ impl Platform {
         has_nested_kvm_at(
             "/sys/module/kvm_intel/parameters/nested",
             "/sys/module/kvm_amd/parameters/nested",
+            "/sys/module/kvm/parameters/nested",
         )
     }
 
@@ -188,7 +189,7 @@ impl Platform {
 /// glyph on either path so the helper isn't picky about which
 /// module's encoding lives where (the kernel has changed this in
 /// the past).
-fn has_nested_kvm_at(intel_path: &str, amd_path: &str) -> bool {
+fn has_nested_kvm_at(intel_path: &str, amd_path: &str, arm_path: &str) -> bool {
     fn read_enabled(path: &str) -> bool {
         match std::fs::read_to_string(path) {
             Ok(s) => {
@@ -198,7 +199,7 @@ fn has_nested_kvm_at(intel_path: &str, amd_path: &str) -> bool {
             Err(_) => false,
         }
     }
-    read_enabled(intel_path) || read_enabled(amd_path)
+    read_enabled(intel_path) || read_enabled(amd_path) || read_enabled(arm_path)
 }
 
 /// Check whether the current macOS version is 13.0 (Ventura) or later.
@@ -333,6 +334,7 @@ mod tests {
         assert!(has_nested_kvm_at(
             intel.to_str().unwrap(),
             amd_missing.to_str().unwrap(),
+            scratch.path().join("arm-nested-missing").to_str().unwrap(),
         ));
     }
 
@@ -344,6 +346,7 @@ mod tests {
         assert!(has_nested_kvm_at(
             intel_missing.to_str().unwrap(),
             amd.to_str().unwrap(),
+            scratch.path().join("arm-nested-missing").to_str().unwrap(),
         ));
     }
 
@@ -355,6 +358,7 @@ mod tests {
         assert!(!has_nested_kvm_at(
             intel.to_str().unwrap(),
             amd_missing.to_str().unwrap(),
+            scratch.path().join("arm-nested-missing").to_str().unwrap(),
         ));
     }
 
@@ -366,6 +370,7 @@ mod tests {
         assert!(!has_nested_kvm_at(
             intel_missing.to_str().unwrap(),
             amd.to_str().unwrap(),
+            scratch.path().join("arm-nested-missing").to_str().unwrap(),
         ));
     }
 
@@ -377,6 +382,7 @@ mod tests {
         assert!(!has_nested_kvm_at(
             intel.to_str().unwrap(),
             amd.to_str().unwrap(),
+            scratch.path().join("arm-nested-missing").to_str().unwrap(),
         ));
     }
 
@@ -389,6 +395,33 @@ mod tests {
         assert!(has_nested_kvm_at(
             intel.to_str().unwrap(),
             amd_missing.to_str().unwrap(),
+            scratch.path().join("arm-nested-missing").to_str().unwrap(),
+        ));
+    }
+
+    /// arm64 has neither `kvm_intel` nor `kvm_amd`; the kernel exposes the
+    /// arch-neutral `kvm` module node instead. Reading only the two vendor
+    /// paths reported "no nested KVM" on every ARM host regardless of the
+    /// truth.
+    #[test]
+    fn nested_kvm_arm_neutral_node_enabled() {
+        let scratch = tempfile::tempdir().unwrap();
+        let arm = write_sysfs(scratch.path(), "arm-nested", "Y\n");
+        assert!(has_nested_kvm_at(
+            scratch.path().join("intel-missing").to_str().unwrap(),
+            scratch.path().join("amd-missing").to_str().unwrap(),
+            arm.to_str().unwrap(),
+        ));
+    }
+
+    #[test]
+    fn nested_kvm_arm_neutral_node_disabled() {
+        let scratch = tempfile::tempdir().unwrap();
+        let arm = write_sysfs(scratch.path(), "arm-nested", "N\n");
+        assert!(!has_nested_kvm_at(
+            scratch.path().join("intel-missing").to_str().unwrap(),
+            scratch.path().join("amd-missing").to_str().unwrap(),
+            arm.to_str().unwrap(),
         ));
     }
 

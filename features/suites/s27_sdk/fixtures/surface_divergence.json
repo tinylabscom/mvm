@@ -5,7 +5,8 @@
     "so a name can only appear or disappear here deliberately.",
     "Regenerate intentionally; do not paste over a failure.",
     "",
-    "Both directional backlogs are now empty. What remains is the two",
+    "The only directional backlog is `kv`, whose first in-guest SDK witness",
+    "is intentionally Python-only. What otherwise remains is the two",
     "categories that describe differences rather than debt.",
     "",
     "`python_only_permanent_by_design` cannot close. `derive_schema` needs",
@@ -36,6 +37,8 @@
     "SecretInArgWarning",
     "derive_schema"
   ],
-  "python_only_absent_from_typescript": [],
+  "python_only_absent_from_typescript": [
+    "kv"
+  ],
   "typescript_only_absent_from_python": []
 }

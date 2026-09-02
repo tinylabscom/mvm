@@ -20,7 +20,7 @@
 //!     own stdout / stderr as they arrive, byte for byte, while handing the
 //!     same frames to the VM's output capture — which redacts, chains, and
 //!     persists a copy of its own. The caller gets the workload's bytes;
-//!     `mvmctl logs` gets the masked ones; any divergence between the two is
+//!     `mvmctl machine logs` gets the masked ones; any divergence between the two is
 //!     named on stderr rather than left for the caller to discover,
 //!   - tears the VM down (unless `keep_alive`),
 //!   - exits with the wrapper's exit code (or non-zero on error).
@@ -60,6 +60,8 @@ pub(in crate::commands) struct EntrypointCall {
     /// Explicit ProdSafe agent-verb override to mint into the admitted grant
     /// for the transient entrypoint boot. Empty => use the computed default.
     pub agent_verb_override: Vec<String>,
+    /// Opaque commitment to bind into the transient entrypoint plan.
+    pub caller_commitment: Option<mvm_core::plan::CallerCommitment>,
     /// Restore the session VM from its post-boot snapshot before the call.
     /// Wired but no-op in this build (session-pool plan).
     pub reset: bool,
@@ -86,6 +88,9 @@ pub(in crate::commands) struct EntrypointCall {
     /// endpoint so a baked entrypoint enforces egress identically to the
     /// transient argv path. Defaults to `deny_all`.
     pub network_policy: mvm_core::network_policy::NetworkPolicy,
+    /// Explicit hypervisor/backend selector passed through from `--hypervisor`.
+    /// When `None` the platform-default auto-selection is used.
+    pub hypervisor: Option<String>,
 }
 
 /// How a call's stdin is supplied.
@@ -140,12 +145,15 @@ struct EntrypointAdmission {
 
 struct EntrypointAdmissionParams<'a> {
     rootfs: &'a std::path::Path,
+    /// The kernel this boot loads, pinned into the plan alongside the image.
+    kernel_path: Option<&'a std::path::Path>,
     vm_name: &'a str,
     backend_name: &'a str,
     cpus: u32,
     mem_mib: u64,
     lowered_secrets: &'a super::managed_secrets::LoweredPlanSecrets,
     agent_verb_override: &'a [String],
+    caller_commitment: Option<mvm_core::plan::CallerCommitment>,
     keep_alive_dev: bool,
     network_policy: mvm_core::network_policy::NetworkPolicy,
     /// Whether this call asked for a host→guest stdin stream. The only thing
@@ -156,17 +164,20 @@ struct EntrypointAdmissionParams<'a> {
 impl<'a> EntrypointAdmissionParams<'a> {
     fn builder(
         rootfs: &'a std::path::Path,
+        kernel_path: Option<&'a std::path::Path>,
         vm_name: &'a str,
         backend_name: &'a str,
     ) -> EntrypointAdmissionParamsBuilder<'a> {
         EntrypointAdmissionParamsBuilder {
             rootfs,
+            kernel_path,
             vm_name,
             backend_name,
             cpus: 1,
             mem_mib: 256,
             lowered_secrets: None,
             agent_verb_override: &[],
+            caller_commitment: None,
             keep_alive_dev: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             stream_stdin: false,
@@ -176,12 +187,14 @@ impl<'a> EntrypointAdmissionParams<'a> {
 
 struct EntrypointAdmissionParamsBuilder<'a> {
     rootfs: &'a std::path::Path,
+    kernel_path: Option<&'a std::path::Path>,
     vm_name: &'a str,
     backend_name: &'a str,
     cpus: u32,
     mem_mib: u64,
     lowered_secrets: Option<&'a super::managed_secrets::LoweredPlanSecrets>,
     agent_verb_override: &'a [String],
+    caller_commitment: Option<mvm_core::plan::CallerCommitment>,
     keep_alive_dev: bool,
     network_policy: mvm_core::network_policy::NetworkPolicy,
     stream_stdin: bool,
@@ -211,6 +224,14 @@ impl<'a> EntrypointAdmissionParamsBuilder<'a> {
         self
     }
 
+    fn caller_commitment(
+        mut self,
+        caller_commitment: Option<mvm_core::plan::CallerCommitment>,
+    ) -> Self {
+        self.caller_commitment = caller_commitment;
+        self
+    }
+
     fn keep_alive_dev(mut self, keep_alive_dev: bool) -> Self {
         self.keep_alive_dev = keep_alive_dev;
         self
@@ -229,6 +250,7 @@ impl<'a> EntrypointAdmissionParamsBuilder<'a> {
     fn build(self) -> EntrypointAdmissionParams<'a> {
         EntrypointAdmissionParams {
             rootfs: self.rootfs,
+            kernel_path: self.kernel_path,
             vm_name: self.vm_name,
             backend_name: self.backend_name,
             cpus: self.cpus,
@@ -237,6 +259,7 @@ impl<'a> EntrypointAdmissionParamsBuilder<'a> {
                 .lowered_secrets
                 .expect("entrypoint admission params require lowered secrets"),
             agent_verb_override: self.agent_verb_override,
+            caller_commitment: self.caller_commitment,
             keep_alive_dev: self.keep_alive_dev,
             network_policy: self.network_policy,
             stream_stdin: self.stream_stdin,
@@ -259,11 +282,12 @@ fn admit_entrypoint_boot(
 ) -> Result<Option<EntrypointAdmission>> {
     let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
     let ctx = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
-        network_mode: crate::commands::machine::derive_network_mode(false),
+        network_mode: crate::commands::machine::preflight_network(),
         tenant: "local",
         vm_name: params.vm_name,
         backend_name: params.backend_name,
         rootfs_path: params.rootfs,
+        kernel_path: params.kernel_path,
         precomputed_image_sha256: None,
         boot_artifact_identity: None,
         cpus: params.cpus,
@@ -271,6 +295,7 @@ fn admit_entrypoint_boot(
         seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
         secret_release: params.lowered_secrets.secret_release,
         secrets: params.lowered_secrets.secrets.clone(),
+        caller_commitment: params.caller_commitment,
         no_supervisor: false,
         ledger: &ledger,
         keys_dir: None,
@@ -398,12 +423,10 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
         ));
     }
 
-    // The entrypoint action targets a *template* / manifest slot. Resolve
-    // through the same shared helper as `machine exec --manifest`. Slot-hash
-    // and registered-name both resolve to a string the lifecycle helpers
-    // consume.
+    // The entrypoint action targets a manifest slot. Resolve through the same
+    // shared helper as `machine exec --manifest`; the slot hash is the string
+    // the lifecycle helpers consume.
     let template_id = match super::shared::resolve_manifest_arg(&call.source)? {
-        super::shared::ManifestArgRef::Name(n) => n,
         super::shared::ManifestArgRef::Slot { slot_hash } => slot_hash,
         super::shared::ManifestArgRef::WasmModule { .. } => {
             anyhow::bail!("wasm module manifests are not supported for this command")
@@ -425,28 +448,42 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
         .map(|w| super::managed_secrets::lower_workload_secrets(&w))
         .filter(|lowered| !lowered.secrets.is_empty())
         .unwrap_or_default();
-    let backend_name = mvm_runtime::backend::AnyBackend::auto_select()
-        .name()
-        .to_string();
+    let backend_name = if let Some(name) = call.hypervisor.as_deref() {
+        mvm_runtime::backend::AnyBackend::require_hypervisor_selectable(name)?;
+        mvm_runtime::backend::AnyBackend::from_hypervisor(name)
+    } else {
+        mvm_runtime::backend::AnyBackend::auto_select()
+    }
+    .name()
+    .to_string();
     let admit_backend = backend_name.clone();
     let cpus = call.cpus;
     let mem = call.memory_mib as u64;
     let agent_verb_override = call.agent_verb_override.clone();
+    let caller_commitment = call.caller_commitment.clone();
     let keep_alive_dev = call.keep_alive_dev;
     let network_policy = call.network_policy.clone();
     let admit_network_policy = network_policy.clone();
     let admit_ctx: std::rc::Rc<std::cell::RefCell<Option<super::up::AdmissionContext>>> =
         std::rc::Rc::new(std::cell::RefCell::new(None));
     let ctx_sink = std::rc::Rc::clone(&admit_ctx);
-    let admit = move |rootfs: &std::path::Path,
-                      vm_name: &str|
+    let admit = move |inputs: crate::exec::AdmitInputs<'_>|
           -> Result<Option<crate::exec::SessionAuditSubstrate>> {
+        // This path binds no SDK host service, so the launch resolution has no
+        // sidecar to hand over and the plan admits no share for one.
+        let crate::exec::AdmitInputs {
+            rootfs,
+            kernel,
+            vm_name,
+            sdk_sidecar: _,
+        } = inputs;
         let admitted = admit_entrypoint_boot(
-            EntrypointAdmissionParams::builder(rootfs, vm_name, &admit_backend)
+            EntrypointAdmissionParams::builder(rootfs, kernel, vm_name, &admit_backend)
                 .cpus(cpus)
                 .mem_mib(mem)
                 .lowered_secrets(&lowered_secrets)
                 .agent_verb_override(&agent_verb_override)
+                .caller_commitment(caller_commitment.clone())
                 .keep_alive_dev(keep_alive_dev)
                 .network_policy(admit_network_policy.clone())
                 .stream_stdin(stream_stdin)
@@ -466,6 +503,7 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
         call.memory_mib,
         &network_policy,
         Some(&admit),
+        Some(&backend_name),
     ) {
         Ok(vm) => {
             let ctx = admit_ctx.borrow_mut().take();
@@ -687,14 +725,79 @@ impl std::fmt::Display for AutoStdinError {
 }
 impl std::error::Error for AutoStdinError {}
 
-/// Read one buffered stdin payload, capped. A TTY on stdin is interactive input
-/// for the terminal, not a workload payload, so it yields empty and never blocks.
+/// What the caller's stdin is, for the purpose of the implicit payload read.
+///
+/// Three states rather than a `bool`, because "not a terminal" was doing two
+/// jobs and only one of them is "a payload is waiting".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::commands) enum AutoStdin {
+    /// A terminal. Interactive input for the person at the keyboard, never a
+    /// workload payload.
+    Terminal,
+    /// Not a terminal, and nothing readable right now — stdin was inherited
+    /// rather than redirected at us.
+    Idle,
+    /// Not a terminal and readable now: the caller handed us something.
+    Ready,
+}
+
+/// Classify the real stdin fd without consuming a byte of it.
+///
+/// A terminal is decided first: a TTY with type-ahead buffered is *readable*,
+/// and reading it would steal the person's keystrokes.
+///
+/// Otherwise `poll` with a zero timeout answers "is there something here", which
+/// is the question the implicit read actually needs. A regular file and
+/// `/dev/null` always poll readable, so redirection still works; a pipe that was
+/// merely inherited does not, so it is left alone. `POLLHUP` counts as readable
+/// because a closed pipe yields EOF immediately rather than blocking.
+fn classify_stdin() -> AutoStdin {
+    use std::io::IsTerminal as _;
+    if std::io::stdin().is_terminal() {
+        return AutoStdin::Terminal;
+    }
+    if fd_is_readable_now(libc::STDIN_FILENO) {
+        AutoStdin::Ready
+    } else {
+        AutoStdin::Idle
+    }
+}
+
+/// Whether `fd` would yield something — bytes, EOF, or an error — without
+/// waiting. Split from [`classify_stdin`] so it can be exercised against a real
+/// pipe rather than whatever the test harness happens to have on fd 0.
+fn fd_is_readable_now(fd: std::os::fd::RawFd) -> bool {
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: `pfd` is a single initialized `pollfd` living for the whole call,
+    // and the count matches. A zero timeout cannot block. `poll` writes only
+    // `revents`.
+    let ready = unsafe { libc::poll(&mut pfd, 1, 0) };
+    ready > 0 && pfd.revents != 0
+}
+
+/// Read one buffered stdin payload, capped.
+///
+/// Only [`AutoStdin::Ready`] is read. The other two yield empty without
+/// touching the fd, which is what keeps this from blocking: an inherited pipe
+/// that nobody ever writes to or closes used to park the whole launch here in
+/// `read_to_end` — before any VM was created, with no output and no timeout.
+///
+/// One residual: a producer that writes, then holds the pipe open without
+/// closing it, polls readable and then blocks in `read_to_end` waiting for the
+/// end it was promised. That is the contract this mode has — one whole buffered
+/// payload — and truncating at whatever happened to arrive first would be worse
+/// than waiting. Callers who want a stream rather than a payload have
+/// `--stdin -`, which is a different contract with the guest.
 fn read_auto_stdin_from<R: std::io::Read>(
     mut reader: R,
-    is_tty: bool,
+    stdin: AutoStdin,
     cap: usize,
 ) -> Result<Vec<u8>, AutoStdinError> {
-    if is_tty {
+    if stdin != AutoStdin::Ready {
         return Ok(Vec::new());
     }
     // Read cap+1 so an exactly-cap payload passes and the first over-cap byte trips.
@@ -711,8 +814,8 @@ fn read_auto_stdin_from<R: std::io::Read>(
 }
 
 /// Public entry: acquire the caller's stdin payload from the real stdin fd.
-pub(in crate::commands) fn read_auto_stdin(is_tty: bool) -> anyhow::Result<Vec<u8>> {
-    read_auto_stdin_from(std::io::stdin().lock(), is_tty, MAX_STDIN_BYTES)
+pub(in crate::commands) fn read_auto_stdin() -> anyhow::Result<Vec<u8>> {
+    read_auto_stdin_from(std::io::stdin().lock(), classify_stdin(), MAX_STDIN_BYTES)
         .map_err(|e| anyhow::anyhow!(e))
 }
 
@@ -803,7 +906,7 @@ fn dispatch_inner(call: EntrypointDispatch<'_>) -> Result<i32> {
     let mut capture = mvm_hostd::stream::EntrypointSink::for_vm(vm_name);
     let recorded = capture.is_recorded();
     let mut out = CallOutput::inherited();
-    let terminal = mvm_agentd::vsock::send_run_entrypoint(
+    let terminal = mvm_agentd::vsock::send_run_entrypoint_while(
         &mut stream,
         mvm_agentd::vsock::RunEntrypointCall {
             stdin: match stdin {
@@ -822,6 +925,10 @@ fn dispatch_inner(call: EntrypointDispatch<'_>) -> Result<i32> {
             stream_input: streaming,
         },
         |event| write_entrypoint_event(event, &mut capture, &mut out),
+        // Consulted only when the stream has gone quiet. A guest that dies
+        // mid-stream leaves the host socket open, so without this the read
+        // blocks forever and the run never returns.
+        || mvm_runtime::checkpoint::vm_is_running(vm_name),
     );
     drop(capture);
     // Before the `?`, not after: a call that failed truncated the caller's
@@ -954,7 +1061,7 @@ impl CallOutput<'_> {
                 &mut self.sinks,
                 &format!(
                     "this call's output was not recorded: no output capture for microVM \
-                     {vm_name:?} in this process, so `mvmctl logs {vm_name}` will not show it"
+                     {vm_name:?} in this process, so `mvmctl machine logs {vm_name}` will not show it"
                 ),
             );
             return;
@@ -1048,7 +1155,7 @@ impl RecordedDivergence {
         }
         Some(format!(
             "recorded output differs from what this call printed — {}; \
-             the bytes above are the workload's own, `mvmctl logs {vm_name}` shows the \
+             the bytes above are the workload's own, `mvmctl machine logs {vm_name}` shows the \
              redacted copy",
             parts.join("; ")
         ))
@@ -1254,6 +1361,11 @@ fn exit_code_for(event: &mvm_agentd::vsock::EntrypointEvent) -> i32 {
                 RunEntrypointError::PayloadCap => (1, "payload cap exceeded"),
                 RunEntrypointError::WrapperCrashed => (137, "wrapper crashed"),
                 RunEntrypointError::EntrypointInvalid => (1, "entrypoint invalid"),
+                // 130 = 128 + SIGINT (2), the conventional shell status for
+                // an explicitly canceled foreground operation. This reports
+                // the semantic cancellation, not whichever signal the bounded
+                // guest kill ladder ultimately needed.
+                RunEntrypointError::Canceled => (130, "canceled"),
                 // 142 = 128 + SIGALRM (14). The signal-style mapping
                 // matches `WrapperCrashed`'s 137 = 128 + SIGKILL (9)
                 // pattern; SIGALRM is repurposed here as a stable
@@ -1466,7 +1578,7 @@ mod streaming_tests {
     #[test]
     fn an_uncaptured_call_says_so_rather_than_leaving_the_operator_to_find_out() {
         // The residual from a `--attach` into a machine some other process
-        // booted: the call runs, but `mvmctl logs` will not show it.
+        // booted: the call runs, but `mvmctl machine logs` will not show it.
         let (mut out, mut err) = (Vec::new(), Vec::new());
         {
             let mut sinks = buffers(&mut out, &mut err);
@@ -1561,7 +1673,7 @@ mod stdin_grant_tests {
         ) -> anyhow::Result<Option<super::EntrypointAdmission>> {
             let lowered = super::super::managed_secrets::LoweredPlanSecrets::default();
             admit_entrypoint_boot(
-                EntrypointAdmissionParams::builder(&self.rootfs, vm, "firecracker")
+                EntrypointAdmissionParams::builder(&self.rootfs, None, vm, "firecracker")
                     .lowered_secrets(&lowered)
                     .stream_stdin(stream_stdin)
                     .build(),
@@ -1647,7 +1759,7 @@ mod stdin_grant_tests {
 
 #[cfg(test)]
 mod captured_tests {
-    //! What a call leaves behind, read back the way `mvmctl logs` reads it.
+    //! What a call leaves behind, read back the way `mvmctl machine logs` reads it.
     //!
     //! Driven against a real plane over a real encrypted transcript: the
     //! entrypoint source's whole reason to exist is that a reader can ask for
@@ -1935,34 +2047,154 @@ mod captured_tests {
 
 #[cfg(test)]
 mod auto_stdin_tests {
-    use super::{AutoStdinError, read_auto_stdin_from};
+    use super::{AutoStdin, AutoStdinError, read_auto_stdin_from};
     use std::io::Cursor;
 
     #[test]
     fn tty_stdin_yields_empty_payload() {
         // A terminal on stdin is interactive, not input: never block reading it.
-        let got = read_auto_stdin_from(Cursor::new(b"ignored" as &[u8]), true, 1024).unwrap();
+        let got = read_auto_stdin_from(Cursor::new(b"ignored" as &[u8]), AutoStdin::Terminal, 1024)
+            .unwrap();
         assert!(got.is_empty());
     }
 
     #[test]
     fn piped_stdin_under_cap_is_read_whole() {
-        let got = read_auto_stdin_from(Cursor::new(b"STDIN-RT-42" as &[u8]), false, 1024).unwrap();
+        let got =
+            read_auto_stdin_from(Cursor::new(b"STDIN-RT-42" as &[u8]), AutoStdin::Ready, 1024)
+                .unwrap();
         assert_eq!(got, b"STDIN-RT-42");
     }
 
     #[test]
     fn piped_stdin_over_cap_fails_closed() {
         let payload = vec![b'x'; 2048];
-        let err = read_auto_stdin_from(Cursor::new(&payload[..]), false, 1024).unwrap_err();
+        let err =
+            read_auto_stdin_from(Cursor::new(&payload[..]), AutoStdin::Ready, 1024).unwrap_err();
         assert!(matches!(err, AutoStdinError::TooLarge { cap: 1024 }));
     }
 
     #[test]
     fn piped_stdin_exactly_at_cap_passes() {
         let payload = vec![b'x'; 1024];
-        let got = read_auto_stdin_from(Cursor::new(&payload[..]), false, 1024).unwrap();
+        let got = read_auto_stdin_from(Cursor::new(&payload[..]), AutoStdin::Ready, 1024).unwrap();
         assert_eq!(got.len(), 1024);
+    }
+
+    /// An inherited pipe must not be touched at all. Asserted with a reader that
+    /// panics if anyone reads it, because "returned empty" and "never read" are
+    /// different facts and only the second one cannot hang.
+    #[test]
+    fn idle_stdin_is_never_read() {
+        struct Explode;
+        impl std::io::Read for Explode {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                panic!("idle stdin must not be read — this is the blocking read that hung a launch")
+            }
+        }
+        let got = read_auto_stdin_from(Explode, AutoStdin::Idle, 1024).unwrap();
+        assert!(got.is_empty());
+    }
+
+    /// The probe itself, against real pipes. The first case is the bug: a pipe
+    /// with a live writer that has sent nothing is what `ssh host 'mvmctl ...'`,
+    /// CI runners and any script hand us, and reading it parks the launch
+    /// forever before a VM is ever created.
+    #[test]
+    fn the_readiness_probe_distinguishes_an_idle_pipe_from_a_written_one() {
+        use std::io::Write as _;
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+
+        let mut fds = [0 as libc::c_int; 2];
+        // SAFETY: `fds` is a two-element array, which is what `pipe` writes.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe()");
+        // `pipe` hands back descriptors *without* close-on-exec, unlike every
+        // fd Rust's std opens. This suite spawns subprocesses continuously, and
+        // any child forked while these are open inherits them — including the
+        // write end. A surviving writer means the final assertion below never
+        // sees EOF, which is a load-sensitive failure that looks like a bug in
+        // the probe rather than a leaked descriptor.
+        //
+        // Set it before touching the pipe, so the window a concurrent spawn
+        // could land in is these two adjacent syscalls rather than the whole
+        // test body. macOS has no `pipe2`, so the window cannot be closed
+        // outright; leaking a descriptor into every process the suite starts is
+        // the part actually worth fixing.
+        for fd in fds {
+            // SAFETY: `fd` is a live descriptor from the successful `pipe` above.
+            assert_ne!(
+                unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+                -1,
+                "set FD_CLOEXEC"
+            );
+        }
+        // SAFETY: both fds come from a successful `pipe` and are owned here.
+        let (read_end, mut write_end) = unsafe {
+            (
+                std::fs::File::from_raw_fd(fds[0]),
+                std::fs::File::from_raw_fd(fds[1]),
+            )
+        };
+        let fd = read_end.as_raw_fd();
+
+        assert!(
+            !super::fd_is_readable_now(fd),
+            "a pipe whose writer has sent nothing must not read as ready"
+        );
+
+        write_end.write_all(b"payload").unwrap();
+        assert!(
+            super::fd_is_readable_now(fd),
+            "a pipe carrying data must read as ready"
+        );
+
+        // A closed writer is EOF, which is available immediately — reading it
+        // returns empty rather than blocking, so it counts as ready.
+        //
+        // Spawning a child here is the point, not incidental setup. This
+        // assertion was flaky before `FD_CLOEXEC` was set above: it failed
+        // roughly once in twelve full-suite runs, and only under load, because
+        // some *other* test's subprocess happened to be forked while this pipe
+        // was open and inherited the write end — leaving a writer alive, so no
+        // EOF, so no readiness. Holding a child open deliberately turns that
+        // race into a fact: without close-on-exec this fails every time.
+        // The child must be past `exec` before the write end is dropped.
+        // Close-on-exec applies *at* exec; between fork and exec the child holds
+        // a copy of every parent descriptor, so polling in that window sees a
+        // live writer no matter what `FD_CLOEXEC` says. Waiting for a byte the
+        // child could only emit after exec removes the race rather than
+        // out-running it — the first version of this test spawned and polled
+        // immediately, and duly failed under a loaded full-suite run while
+        // passing alone.
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("echo exec-done; sleep 30")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn a child to hold any inherited descriptor open");
+        {
+            use std::io::BufRead as _;
+            let stdout = child.stdout.as_mut().expect("child stdout is piped");
+            let mut line = String::new();
+            std::io::BufReader::new(stdout)
+                .read_line(&mut line)
+                .expect("read the child's post-exec marker");
+            assert_eq!(line.trim(), "exec-done", "child must reach exec");
+        }
+
+        let mut drain = [0u8; 7];
+        std::io::Read::read_exact(&mut { &read_end }, &mut drain).unwrap();
+        drop(write_end);
+        // Read the answer before cleaning up, so a failure still reaps the child.
+        let ready_at_eof = super::fd_is_readable_now(fd);
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            ready_at_eof,
+            "a closed writer is EOF and must read as ready — a live child still \
+             holding the inherited write end means the pipe was not close-on-exec"
+        );
     }
 }
 
@@ -1990,7 +2222,7 @@ mod tests {
 
         let lowered_secrets = LoweredPlanSecrets::default();
         let admitted = admit_entrypoint_boot(
-            EntrypointAdmissionParams::builder(&rootfs, "invoke-proof-sealed", "firecracker")
+            EntrypointAdmissionParams::builder(&rootfs, None, "invoke-proof-sealed", "firecracker")
                 .cpus(1)
                 .mem_mib(256)
                 .lowered_secrets(&lowered_secrets)
@@ -2047,7 +2279,7 @@ mod tests {
         let policy = NetworkPolicy::allow_list(vec![HostPort::new("127.0.0.1", 443)]);
         let lowered_secrets = LoweredPlanSecrets::default();
         let admitted = admit_entrypoint_boot(
-            EntrypointAdmissionParams::builder(&rootfs, "invoke-proof-allow", "firecracker")
+            EntrypointAdmissionParams::builder(&rootfs, None, "invoke-proof-allow", "firecracker")
                 .cpus(1)
                 .mem_mib(256)
                 .lowered_secrets(&lowered_secrets)
@@ -2114,6 +2346,15 @@ mod tests {
             message: "segfault".into(),
         };
         assert_eq!(exit_code_for(&evt), 137);
+    }
+
+    #[test]
+    fn test_exit_code_canceled_maps_to_130() {
+        let evt = mvm_agentd::vsock::EntrypointEvent::Error {
+            kind: mvm_agentd::vsock::RunEntrypointError::Canceled,
+            message: "controller canceled the call".into(),
+        };
+        assert_eq!(exit_code_for(&evt), 130);
     }
 
     #[test]
@@ -2216,7 +2457,7 @@ mod tests {
         let env = super::vsock_egress_env("plain-vm");
         assert!(
             env.iter()
-                .any(|(k, v)| k == "ALL_PROXY" && v == "http://127.0.0.1:1080")
+                .any(|(k, v)| k == "ALL_PROXY" && v == "socks5h://127.0.0.1:1080")
         );
         assert!(
             env.iter()
@@ -2314,6 +2555,7 @@ mod streamed_stdin_tests {
             memory_mib: 256,
             from_workload_ir: None,
             agent_verb_override: Vec::new(),
+            caller_commitment: None,
             reset: false,
             keep_alive: false,
             keep_alive_dev: false,
@@ -2321,6 +2563,7 @@ mod streamed_stdin_tests {
             r#fn: None,
             attach: true,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            hypervisor: None,
         }
     }
 

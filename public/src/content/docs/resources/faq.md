@@ -17,10 +17,12 @@ The builder VM provides a Linux execution boundary for Nix builds and microVM im
 
 ## Does Windows support ship today?
 
-Partially. Native Windows is still future work tracked by
-[mvm#428](https://github.com/tinylabscom/mvm/issues/428), but WSL2 with nested
-`/dev/kvm` is the supported Windows-adjacent workload path for the libkrun
-backend.
+No. Native Windows is future work tracked by
+[mvm#428](https://github.com/tinylabscom/mvm/issues/428), and **WSL2 is not a
+supported workload path either** — mvm detects WSL2 as its own platform and
+refuses the libkrun backend there unconditionally, whether or not the distro
+exposes nested `/dev/kvm`. `mvmctl doctor` says so directly. Use native Linux
+with `/dev/kvm` or an Apple Silicon Mac.
 
 ## Which SDK should I use?
 

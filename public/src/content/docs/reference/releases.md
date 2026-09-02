@@ -24,7 +24,7 @@ GitHub Release:
 | `install.sh` (curl one-liner) | `mvmctl-<target>.tar.gz` + `checksums-sha256.txt` (+ cosign `.bundle` if cosign present) |
 | `brew install tinylabscom/mvm/mvmctl` | the same tarball, via the tap formula |
 | `cargo install mvmctl` | source from crates.io (CLI binary only; no adjacent helper bundle) |
-| `mvmctl update` | the tarball for the latest release, in-place swap |
+| `mvmctl env update` | the tarball for the latest release, in-place swap |
 | `mvmctl kernel build --source download` | `vmlinux-<arch>-<variant>` + `kernel-<arch>-checksums-sha256.txt`, pinned to the binary's own release tag |
 | `mvmctl build runtime-overlay build --source download` | `runtime-overlay-<arch>.tar.gz` + `runtime-overlay-<arch>.tar.gz.sha256`; the tarball contains `overlay.ext4`, `overlay.verity`, `overlay.roothash`, `VERSION`, and `checksums-sha256.txt`, installed into `~/.mvm/cache/runtime-overlay/<version>/<arch>/` |
 
@@ -98,7 +98,7 @@ cosign verify-blob \
   mvmctl-<target>.tar.gz
 ```
 
-`install.sh` and `mvmctl update` run this automatically when `cosign` is on
+`install.sh` and `mvmctl env update` run this automatically when `cosign` is on
 `PATH`.
 
 ## Homebrew tap setup (one-time, maintainers)

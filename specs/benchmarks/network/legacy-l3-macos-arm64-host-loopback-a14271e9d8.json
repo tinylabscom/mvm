@@ -1,0 +1,165 @@
+{
+  "schema_version": 1,
+  "implementation": "legacy_l3",
+  "host": {
+    "id": "macos-arm64-apple-m4-max",
+    "os": "macos",
+    "arch": "aarch64",
+    "cpu": "Apple M4 Max"
+  },
+  "backend": "host-loopback",
+  "storage": "apfs-ssd",
+  "build": {
+    "profile": "release",
+    "source_commit": "a14271e9d832c15688ba6e78fd2a90b95f6e83c9",
+    "command": "cargo run --release -p mvm-hostd --features network-perf --example network_perf_probe"
+  },
+  "matrix": {
+    "payload_bytes": [
+      64,
+      1024
+    ],
+    "concurrency": [
+      1
+    ],
+    "samples_per_case": 30
+  },
+  "cases": [
+    {
+      "path": "opaque_tcp",
+      "payload_bytes": 64,
+      "concurrency": 1,
+      "samples": 30,
+      "metrics": {
+        "connect_latency_micros": {
+          "p50": 109,
+          "p95": 182
+        },
+        "request_latency_micros": {
+          "p50": 48,
+          "p95": 56
+        },
+        "throughput_bytes_per_second": 730009,
+        "cpu_time_nanos": 3525000,
+        "peak_rss_bytes": 8110080
+      }
+    },
+    {
+      "path": "udp",
+      "payload_bytes": 64,
+      "concurrency": 1,
+      "samples": 30,
+      "metrics": {
+        "request_latency_micros": {
+          "p50": 92,
+          "p95": 145
+        },
+        "throughput_bytes_per_second": 1319002,
+        "cpu_time_nanos": 2497000,
+        "peak_rss_bytes": 8241152
+      }
+    },
+    {
+      "path": "dns",
+      "payload_bytes": 64,
+      "concurrency": 1,
+      "samples": 30,
+      "metrics": {
+        "request_latency_micros": {
+          "p50": 160,
+          "p95": 576
+        },
+        "operations_per_second": 4083,
+        "cpu_time_nanos": 2449000,
+        "peak_rss_bytes": 8568832
+      }
+    },
+    {
+      "path": "transformed_http",
+      "payload_bytes": 64,
+      "concurrency": 1,
+      "samples": 30,
+      "metrics": {
+        "connect_latency_micros": {
+          "p50": 7,
+          "p95": 10
+        },
+        "request_latency_micros": {
+          "p50": 2255,
+          "p95": 2540
+        },
+        "throughput_bytes_per_second": 111883,
+        "cpu_time_nanos": 72165000,
+        "peak_rss_bytes": 17072128
+      }
+    },
+    {
+      "path": "opaque_tcp",
+      "payload_bytes": 1024,
+      "concurrency": 1,
+      "samples": 30,
+      "metrics": {
+        "connect_latency_micros": {
+          "p50": 107,
+          "p95": 174
+        },
+        "request_latency_micros": {
+          "p50": 45,
+          "p95": 68
+        },
+        "throughput_bytes_per_second": 12339413,
+        "cpu_time_nanos": 3215000,
+        "peak_rss_bytes": 16826368
+      }
+    },
+    {
+      "path": "udp",
+      "payload_bytes": 1024,
+      "concurrency": 1,
+      "samples": 30,
+      "metrics": {
+        "request_latency_micros": {
+          "p50": 102,
+          "p95": 123
+        },
+        "throughput_bytes_per_second": 19513279,
+        "cpu_time_nanos": 2658000,
+        "peak_rss_bytes": 16826368
+      }
+    },
+    {
+      "path": "dns",
+      "payload_bytes": 1024,
+      "concurrency": 1,
+      "samples": 30,
+      "metrics": {
+        "request_latency_micros": {
+          "p50": 191,
+          "p95": 453
+        },
+        "operations_per_second": 4594,
+        "cpu_time_nanos": 1903000,
+        "peak_rss_bytes": 16809984
+      }
+    },
+    {
+      "path": "transformed_http",
+      "payload_bytes": 1024,
+      "concurrency": 1,
+      "samples": 30,
+      "metrics": {
+        "connect_latency_micros": {
+          "p50": 6,
+          "p95": 10
+        },
+        "request_latency_micros": {
+          "p50": 2217,
+          "p95": 2377
+        },
+        "throughput_bytes_per_second": 1247217,
+        "cpu_time_nanos": 70405000,
+        "peak_rss_bytes": 17219584
+      }
+    }
+  ]
+}

@@ -90,11 +90,6 @@ pub mod compile;
 /// Closed `mvm.*` helper allowlist; non-literal kwargs rejected.
 pub mod decorator;
 
-/// In-guest host-services C-ABI cdylib (`libmvm_host_services.so`) loaded by
-/// the Python and TypeScript SDKs. Unsafe code is confined to this module.
-#[allow(unsafe_code)]
-mod host_services_ffi;
-
 /// Deploy-bundle assembly and local attestation for mvmd-owned control-plane
 /// flows. Builds the single `.tar.gz` (compile output plus embedded
 /// `mvmd-spec.json`) and exposes the authenticated shipping seam.
@@ -152,7 +147,7 @@ pub use crate::ir::{
     EnvValue as IrEnvValue, Format as IrFormat, HostPort, Image as IrImage, Mount as IrMount,
     MountMode, MountSource, Network as IrNetwork, NetworkDns as IrNetworkDns,
     NetworkEgress as IrNetworkEgress, NetworkMode as IrNetworkMode, NodeTool as IrNodeTool,
-    PortForward as IrPortForward, PortProto, PythonTool as IrPythonTool, Resources as IrResources,
-    SecretMount, SecretRef, Source as IrSource, ValidationError, Volume as IrVolume,
-    Workload as IrWorkload, ir_hash,
+    PortForward as IrPortForward, PortProto, PortTransform, PythonTool as IrPythonTool,
+    Resources as IrResources, SecretMount, SecretRef, Source as IrSource, ValidationError,
+    Volume as IrVolume, Workload as IrWorkload, ir_hash,
 };

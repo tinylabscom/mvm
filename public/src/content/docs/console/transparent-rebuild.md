@@ -4,7 +4,7 @@ description: Rebuild a development image while preserving intentional workspace 
 ---
 
 > **Status:** Planned product workflow. The current safe workflow is explicit:
-> edit the flake or manifest, run `mvmctl build`, restart or replace the VM,
+> edit the flake or manifest, run `mvmctl machine build`, restart or replace the VM,
 > and keep persistent data in declared workspace state.
 
 Transparent rebuilds are the target developer experience for package changes:

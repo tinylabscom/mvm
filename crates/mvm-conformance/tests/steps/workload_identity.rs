@@ -2,15 +2,14 @@
 //!
 //! Each `When` runs the real binary against a fixture and records the raw
 //! `Output` (so failing-exit scenarios can still assert). On a zero exit it
-//! parses the `--json` report and stashes the semantic address + ir-hash by
+//! parses the `--json` report and stashes the workload address + ir-hash by
 //! fixture name, which the `Then` steps compare.
 
 use std::path::PathBuf;
-use std::process::Command;
 
-use assert_cmd::cargo::CommandCargoExt;
 use cucumber::{then, when};
 
+use crate::steps::cli::mvmctl_command;
 use crate::world::CliWorld;
 
 /// Absolute path to a fixture under this suite, resolved from the crate
@@ -30,10 +29,7 @@ fn fixture_path(name: &str) -> PathBuf {
 #[when(expr = "I compute the workload address of fixture {string}")]
 fn compute_address(world: &mut CliWorld, fixture: String) {
     let path = fixture_path(&fixture);
-    #[allow(deprecated)] // matches the sibling cli.rs use of this API
-    let mut cmd = Command::cargo_bin("mvmctl").unwrap_or_else(|e| {
-        panic!("mvmctl binary not found ({e}) — run `cargo build --bin mvmctl` before `just bdd`")
-    });
+    let mut cmd = mvmctl_command();
     let output = cmd
         .args(["build", "address", "--from-ir"])
         .arg(&path)
@@ -46,9 +42,9 @@ fn compute_address(world: &mut CliWorld, fixture: String) {
         let report: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
             panic!("build address --json did not emit valid JSON ({e}); stdout:\n{stdout}")
         });
-        let addr = report["semantic_address"]
+        let addr = report["workload_address"]
             .as_str()
-            .expect("report carries a string semantic_address")
+            .expect("report carries a string workload_address")
             .to_string();
         let ih = report["ir_hash"]
             .as_str()
@@ -65,7 +61,7 @@ fn address_equals(world: &mut CliWorld, a: String, b: String) {
     assert_eq!(
         world.address_of(&a),
         world.address_of(&b),
-        "expected {a:?} and {b:?} to share a semantic address"
+        "expected {a:?} and {b:?} to share a workload address"
     );
 }
 
@@ -74,12 +70,12 @@ fn address_differs(world: &mut CliWorld, a: String, b: String) {
     assert_ne!(
         world.address_of(&a),
         world.address_of(&b),
-        "expected {a:?} and {b:?} to have different semantic addresses"
+        "expected {a:?} and {b:?} to have different workload addresses"
     );
 }
 
-#[then(expr = "the semantic address of {string} matches its ir-hash")]
-fn semantic_matches_ir_hash(world: &mut CliWorld, fixture: String) {
+#[then(expr = "the workload address of {string} matches its ir-hash")]
+fn workload_address_matches_ir_hash(world: &mut CliWorld, fixture: String) {
     let addr = world.address_of(&fixture);
     let ih = world
         .ir_hashes
@@ -88,6 +84,6 @@ fn semantic_matches_ir_hash(world: &mut CliWorld, fixture: String) {
     assert_eq!(
         addr.strip_prefix("sha256:"),
         Some(ih.as_str()),
-        "semantic address {addr:?} must be sha256: + ir-hash {ih:?}"
+        "workload address {addr:?} must be sha256: + ir-hash {ih:?}"
     );
 }

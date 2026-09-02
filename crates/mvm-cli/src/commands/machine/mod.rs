@@ -20,7 +20,7 @@ mod list;
 mod portable;
 pub(crate) mod prewarm;
 mod receipt;
-mod runtime;
+pub(crate) mod runtime;
 mod spec_ops;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -78,7 +78,10 @@ pub(in crate::commands) struct Args {
 #[allow(clippy::large_enum_variant)]
 pub(in crate::commands) enum MachineAction {
     /// Boot an OCI image, run a command, then tear the VM down
-    #[command(display_order = 1)]
+    #[command(
+        display_order = 1,
+        after_long_help = "MOUNTS:\n    --mount snapshots the whole host tree without honoring `.gitignore`. Stage or\n    narrow directories containing large build outputs before mounting them."
+    )]
     Run(MachineRunArgs),
     /// Build a microVM image from a manifest or Nix flake
     #[command(display_order = 2)]
@@ -186,70 +189,12 @@ impl MachineAction {
     }
 }
 
-/// How a machine reaches the network.
-///
-/// **Not an operator choice, and not a host-dependent one.** The transport
-/// follows from a single question: does this workload need a real in-guest
-/// IP stack?
-///
-/// - **No** (almost always) → the socket-aware transport. It is the
-///   stronger posture: the host originates every connection, so secret
-///   substitution, cleartext redaction, and L7 policy all apply.
-/// - **Yes** → the L3 tunnel, which is the compatibility mode for raw
-///   sockets, ICMP, non-TCP/UDP protocols, and in-guest resolvers.
-///
-/// The need is declared by the *workload*, so the same workload resolves
-/// the same way on every host and the plan is reproducible. Host capability
-/// is deliberately **not** an input here — it is an admission check
-/// ([`check_host_can_serve`]), because a host that silently rewrote the
-/// transport would make one plan mean different things in different places.
-pub(in crate::commands) fn derive_network_mode(
-    needs_raw_ip_stack: bool,
-) -> mvm_contract::plan::NetworkMode {
-    if needs_raw_ip_stack {
-        mvm_contract::plan::NetworkMode::L3Vsock
-    } else {
-        mvm_contract::plan::NetworkMode::HostVsockProxy
-    }
-}
-
-/// Refuse a launch this host cannot serve.
-///
-/// Separate from the derivation on purpose: the mode is a property of the
-/// workload, and whether *this* machine can run it is a property of the
-/// host. Conflating them is how a plan starts meaning different things in
-/// different places.
-pub(in crate::commands) fn check_host_can_serve(
-    mode: mvm_contract::plan::NetworkMode,
-) -> anyhow::Result<()> {
-    if !mode.is_l3_vsock() {
-        return Ok(());
-    }
-    if let Err(err) = mvm_hostd::netd::host_datapath().is_available() {
-        anyhow::bail!(
-            "this workload needs a real in-guest IP stack, which this host cannot \
-             provide: {err}\n\
-             Workloads that do not set `raw_ip_stack` run here normally."
-        );
-    }
-    Ok(())
-}
-
 /// Settle and validate the networking configuration before anything boots.
 ///
-/// A workload declaring `raw_ip_stack` is refused here, at the declaration it
-/// wrote, rather than deeper down at a transport it never named: the in-guest
-/// IP stack has been retired, and the refusal names the loopback adapters and
-/// typed connectors that replace it. Everything below this point still
-/// resolves the tunnel for a VM that is already running, which is what lets
-/// those drain instead of being killed mid-flight.
-pub(in crate::commands) fn preflight_network(
-    needs_raw_ip_stack: bool,
-) -> anyhow::Result<mvm_contract::plan::NetworkMode> {
-    mvm_core::plan::refuse_raw_ip_stack(needs_raw_ip_stack)?;
-    let mode = derive_network_mode(needs_raw_ip_stack);
-    check_host_can_serve(mode)?;
-    Ok(mode)
+/// The public raw-packet mode is retired. Every newly admitted networked
+/// workload uses the authenticated, host-mediated FlowMux endpoint.
+pub(in crate::commands) fn preflight_network() -> mvm_contract::plan::NetworkMode {
+    mvm_contract::plan::NetworkMode::HostVsockProxy
 }
 
 /// Ephemeral image-backed run. Mirrors the relevant subset of `mvmctl run`'s
@@ -267,13 +212,13 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Keep the machine running and return.
     #[arg(short = 'd', long)]
     pub detach: bool,
-    /// Forward HOST:GUEST (or PORT) while attached.
+    /// Declare signed TCP ingress HOST:GUEST (or PORT) before boot.
     #[arg(
         short,
         long,
         value_name = "HOST_PORT:GUEST_PORT",
         value_parser = super::shared::clap_port_spec,
-        conflicts_with_all = ["detach", "json", "tty", "interactive", "entrypoint"]
+        conflicts_with_all = ["json", "tty", "interactive", "entrypoint"]
     )]
     pub port: Vec<String>,
     /// Return machine startup details as JSON.
@@ -414,7 +359,7 @@ impl MachineRunArgs {
     }
 
     /// `-d`/`--detach`, `--up-json`, `--ttl`, a declared `--healthcheck`, or
-    /// an attached port forward
+    /// declared FlowMux ingress
     /// makes the machine survive the command. `--tty`/`--name` are deliberately
     /// not consulted — persistence, interactivity, and identity are independent
     /// axes.
@@ -428,12 +373,13 @@ impl MachineRunArgs {
 
     /// Resolve the lifecycle mode purely from the flags. Fresh foreground runs
     /// need an image source and an argv; persistent runs just boot and return.
-    fn resolve_mode(&self) -> Result<MachineRunMode> {
-        if !self.port.is_empty() && !self.run.argv.is_empty() {
-            bail!(
-                "`machine run --port` cannot also run an ad-hoc command; start the service from the image or manifest, or forward it afterward with `machine forward`"
-            );
-        }
+    /// `image_supplies_entrypoint` is the caller's answer to "does the thing
+    /// being booted already carry a command?". It is a parameter rather than a
+    /// field read because the flake is *consumed* before this runs: the runtime
+    /// path takes `run.flake`, builds it, and leaves a manifest slot behind, so
+    /// checking `run.flake` here sees `None` for exactly the launches that do
+    /// carry an entrypoint.
+    fn resolve_mode(&self, image_supplies_entrypoint: bool) -> Result<MachineRunMode> {
         let mode = match (self.interactive(), self.persistent()) {
             (true, true) => bail!(
                 "`machine run -it` is foreground-only; use `machine exec <name> -it -- <cmd>` for an interactive command in a long-lived machine"
@@ -449,9 +395,20 @@ impl MachineRunArgs {
             }
             (false, false) => {
                 self.require_image_for_fresh_boot()?;
-                // The wasm backend runs the module itself; there is no guest
-                // agent command to dispatch, so an empty argv is allowed.
-                if self.run.argv.is_empty() && self.run.hypervisor.as_deref() != Some("wasm") {
+                // Two shapes carry their own entrypoint, so an empty argv is
+                // not a missing argument:
+                //
+                //   - the wasm backend runs the module itself, with no guest
+                //     agent command to dispatch;
+                //   - a flake's `entrypoint.command` is baked into the image by
+                //     mkGuest. `examples/exit_code` exists precisely to run its
+                //     own entrypoint and hand back that exit code, and the
+                //     README teaches `machine run --flake examples/<name>`
+                //     with nothing after it.
+                let carries_own_entrypoint = self.run.hypervisor.as_deref() == Some("wasm")
+                    || self.run.flake.is_some()
+                    || image_supplies_entrypoint;
+                if self.run.argv.is_empty() && !carries_own_entrypoint {
                     bail!(
                         "machine run needs a command: pass `-- <cmd>`, \
                          or `-d`/`--detach` to boot a persistent machine, \
@@ -527,7 +484,7 @@ pub(super) fn local_deployment_image_source(
         rootfs_path: deployment.rootfs.display().to_string(),
         initrd_path: None,
         label: format!("deployment:{}", deployment.directory.display()),
-        virtiofs_oci_root: None,
+        unpacked_oci_root: None,
     })
 }
 
@@ -673,6 +630,7 @@ fn machine_run_spec(
         cpu_limit_millicores: args.run.cpu_limit,
         timeout_secs: args.run.timeout,
         allow_host: &args.run.allow_host,
+        peer: &args.run.peer,
         net: args.run.net,
         grants_file: args.run.grants_file.as_deref(),
         // A persistent `machine run` names its source on the command line and
@@ -680,6 +638,7 @@ fn machine_run_spec(
         // a `[grants]` table.
         manifest: None,
         config: &config,
+        ai: None,
     })?;
     let _ = validate_machine_memory(&args.run.memory, None)?;
     let profile = run_profile_name(args.run.profile).to_string();
@@ -693,6 +652,8 @@ fn machine_run_spec(
         runtime_pack: args.run.runtime_pack,
         net: args.run.net,
         allow_host: args.run.allow_host.clone(),
+        peer: Vec::new(),
+        ai: None,
         ports: args.port.clone(),
         cpus: args.run.cpus,
         memory: args.run.memory.clone(),
@@ -701,6 +662,7 @@ fn machine_run_spec(
         volumes: machine_run_volume_specs(args)?,
         init: Vec::new(),
         agent_verb: args.run.agent_verb.clone(),
+        caller_commitment: args.run.caller_commitment.clone(),
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
         health_check: crate::exec::build_healthcheck(
@@ -734,6 +696,9 @@ pub(in crate::commands) struct MachineCreateArgs {
     /// Allow egress only to these hosts: `HOST[:PORT]` (repeatable).
     #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
     pub allow_host: Vec<String>,
+    /// Bind a peer route this machine may dial (repeatable).
+    #[arg(long = "peer", value_name = "NAME:PORT=ADDR:PORT")]
+    pub peer: Vec<String>,
     /// vCPU cores the guest sees on lifecycle starts (not a host CPU share).
     #[arg(long)]
     pub cpus: Option<u32>,
@@ -830,6 +795,9 @@ pub(in crate::commands) struct MachineStartCreateFlags {
     /// Allow egress only to these hosts: `HOST[:PORT]` (repeatable).
     #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
     pub allow_host: Vec<String>,
+    /// Bind a peer route this machine may dial (repeatable).
+    #[arg(long = "peer", value_name = "NAME:PORT=ADDR:PORT")]
+    pub peer: Vec<String>,
     /// vCPU cores the guest sees on lifecycle starts (not a host CPU share).
     #[arg(long)]
     pub cpus: Option<u32>,
@@ -1053,6 +1021,12 @@ pub(in crate::commands) struct MachineWarmRestoreArgs {
     /// Name for the fresh child VM (auto-generated if omitted).
     #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
+    /// Declare a child secret binding (`VAR` or `VAR=ADDRESS`). Repeatable.
+    #[arg(long = "secret")]
+    pub secret: Vec<String>,
+    /// Permit intentionally omitting one or more parent secret bindings.
+    #[arg(long)]
+    pub allow_secret_drop: bool,
     /// Output the result as JSON.
     #[arg(long)]
     pub json: bool,
@@ -1069,6 +1043,12 @@ pub(in crate::commands) struct MachineForkArgs {
     /// Auto-name the child as `<parent>-<branch>-<timestamp>`.
     #[arg(long, value_name = "BRANCH", conflicts_with = "child_name")]
     pub branch: Option<String>,
+    /// Declare a child secret binding (`VAR` or `VAR=ADDRESS`). Repeatable.
+    #[arg(long = "secret")]
+    pub secret: Vec<String>,
+    /// Permit intentionally omitting one or more parent secret bindings.
+    #[arg(long)]
+    pub allow_secret_drop: bool,
     /// Output the result as JSON.
     #[arg(long)]
     pub json: bool,
@@ -1085,6 +1065,12 @@ pub(in crate::commands) struct MachineRestoreArgs {
     /// Auto-name the child as `<checkpoint>-<branch>-<timestamp>`.
     #[arg(long, value_name = "BRANCH", conflicts_with = "child_name")]
     pub branch: Option<String>,
+    /// Declare a child secret binding (`VAR` or `VAR=ADDRESS`). Repeatable.
+    #[arg(long = "secret")]
+    pub secret: Vec<String>,
+    /// Permit intentionally omitting one or more parent secret bindings.
+    #[arg(long)]
+    pub allow_secret_drop: bool,
     /// Output the result as JSON.
     #[arg(long)]
     pub json: bool,
@@ -1116,6 +1102,8 @@ struct MachineSpecInputs<'a> {
     image: Option<&'a str>,
     net: bool,
     allow_host: &'a [String],
+    peer: &'a [String],
+    ai: Option<&'a mvm_core::network_policy::AiPolicy>,
     cpus: Option<u32>,
     cpu_limit: Option<u32>,
     timeout: Option<u64>,
@@ -1149,6 +1137,9 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
     } else {
         inputs.allow_host.to_vec()
     };
+    let ai = inputs
+        .ai
+        .or(workflow.and_then(|workflow| workflow.ai.as_ref()));
     // Resolving grants also settles the egress policy, so validating it
     // here validates the same policy the machine will actually boot under.
     let config = mvm_core::user_config::load(None);
@@ -1156,10 +1147,12 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         cpu_limit_millicores: inputs.cpu_limit,
         timeout_secs: inputs.timeout,
         allow_host: &allow_host,
+        peer: inputs.peer,
         net,
         grants_file: inputs.grants_file,
         manifest: workflow.map(|workflow| &workflow.grants),
         config: &config,
+        ai,
     })?;
     let cpus = inputs
         .cpus
@@ -1194,6 +1187,8 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         runtime_pack: false,
         net,
         allow_host,
+        peer: inputs.peer.to_vec(),
+        ai: ai.cloned(),
         ports: Vec::new(),
         cpus,
         memory,
@@ -1202,6 +1197,7 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         volumes: inputs.volumes.to_vec(),
         init: inputs.init.to_vec(),
         agent_verb: Vec::new(),
+        caller_commitment: None,
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
         health_check: None,
@@ -1247,6 +1243,8 @@ impl MachineCreateArgs {
             image: self.image.as_deref(),
             net: self.net,
             allow_host: &self.allow_host,
+            peer: &self.peer,
+            ai: None,
             cpus: self.cpus,
             cpu_limit: self.cpu_limit,
             timeout: self.timeout,
@@ -1272,7 +1270,7 @@ fn load_machine_manifest_source(arg: &Path) -> Result<MachineManifestSource> {
         .with_context(|| format!("reading machine manifest {}", manifest_path.display()))?;
     let workflow = manifest.machine_workflow().ok_or_else(|| {
         anyhow!(
-            "machine create --manifest requires an image-backed manifest; flake-backed manifests belong to `mvmctl up`"
+            "machine create --manifest requires an image-backed manifest; flake-backed manifests belong to `mvmctl machine run --flake`"
         )
     })?;
     let base_dir = manifest_path
@@ -1602,9 +1600,12 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
 
 /// Run `machine warm-restore`: fork a vm_full checkpoint into a fresh child VM.
 fn run_warm_restore(args: MachineWarmRestoreArgs) -> Result<()> {
+    let declared_secrets = super::vm::checkpoint::parse_declared_secrets(&args.secret)?;
     fork_vm_full_machine(ForkVmFullMachineInput {
         checkpoint_id: args.checkpoint,
         child_vm_name: args.name,
+        declared_secrets,
+        allow_secret_drop: args.allow_secret_drop,
         json: args.json,
     })?;
     Ok(())
@@ -1612,20 +1613,26 @@ fn run_warm_restore(args: MachineWarmRestoreArgs) -> Result<()> {
 
 /// Run `machine fork`: capture and branch a running machine into a fresh child VM.
 fn run_fork(args: MachineForkArgs) -> Result<()> {
+    let declared_secrets = super::vm::checkpoint::parse_declared_secrets(&args.secret)?;
     checkpoint::fork_machine(checkpoint::ForkMachineInput {
         parent_name: args.parent,
         child_name: args.child_name,
         branch: args.branch,
+        declared_secrets,
+        allow_secret_drop: args.allow_secret_drop,
         json: args.json,
     })
 }
 
 /// Run `machine restore`: branch a vm_full checkpoint into a fresh child VM.
 fn run_restore(args: MachineRestoreArgs) -> Result<()> {
+    let declared_secrets = super::vm::checkpoint::parse_declared_secrets(&args.secret)?;
     checkpoint::restore_machine(checkpoint::RestoreMachineInput {
         checkpoint_id: args.checkpoint,
         child_name: args.child_name,
         branch: args.branch,
+        declared_secrets,
+        allow_secret_drop: args.allow_secret_drop,
         json: args.json,
     })
 }

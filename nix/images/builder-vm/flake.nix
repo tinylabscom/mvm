@@ -79,6 +79,16 @@
         in
         if envPath != "" then /. + envPath else ../../..;
 
+      # Evaluate the workspace-owned runtime-overlay flake against this
+      # flake's pinned nixpkgs. A remote flake input would make contributor
+      # source changes unreachable from Stage 0 and could silently drift from
+      # the exact checkout the builder is compiling.
+      runtimeOverlay =
+        (import (workspaceRoot + "/nix/images/runtime-overlay/flake.nix")).outputs {
+          self = { };
+          inherit nixpkgs;
+        };
+
       # Host binaries are embedded in mvmctl and extracted by
       # `host_binaries::ensure_extracted()` before invoking
       # `nix build path:... --impure`. The dir is passed in via env var;
@@ -153,6 +163,17 @@
           };
         });
 
+      # Use the same static privilege-drop helper as workload init. Including
+      # it in the package list gives the builder rootfs a stable
+      # `/sbin/mvm-setpriv` symlink through mkGuest's package population loop.
+      builderSetprivFor = pkgs:
+        import (workspace + "/nix/packages/mvm-setpriv.nix") {
+          inherit pkgs;
+          rustPlatform = pkgs.pkgsStatic.rustPlatform;
+          lib = pkgs.lib;
+          mvmSrc = workspace;
+        };
+
       # Narrower than the interactive image. See module-level docs
       # above for the rationale on each.
       #
@@ -216,6 +237,7 @@
         iptables-legacy
         e2fsprogs
         util-linux
+        (builderSetprivFor pkgs)
         # The host VM spawns one Firecracker workload microVM per
         # `WorkloadStart` dispatch inside itself. Sourced from the pinned
         # nixpkgs above — an upstream Nix package, never an
@@ -415,7 +437,7 @@
               "vmlinux":      { "sha256": "$kernel_sha", "size": $kernel_size },
               "rootfs_ext4":  { "sha256": "$rootfs_sha", "size": $rootfs_size },
               "cmdline": "${builderCmdline}",
-              "cache_contract_version": 3,
+              "cache_contract_version": 4,
               "runtime_overlay_ready": true,
               "vsock_egress_ready": true
             }
@@ -456,7 +478,7 @@
             "system": "${system}",
             "rootfs_ext4": { "sha256": "$rootfs_sha", "size": $rootfs_size },
             "cmdline": "${builderCmdline}",
-            "cache_contract_version": 3,
+            "cache_contract_version": 4,
             "runtime_overlay_ready": true,
             "vsock_egress_ready": true,
             "stage0_rootfs_only": true
@@ -531,6 +553,17 @@
         workload-kernel-configfile = mkWorkloadKernelConfigfile system;
         workload-sizeopt-kernel = mkWorkloadKernelSizeopt system;
         workload-sizeopt-kernel-configfile = mkWorkloadKernelSizeoptConfigfile system;
+        # SDK sidecar images for Stage 0 builds. The builder VM needs the
+        # sidecar to build guest workloads, so this exposes the runtime-overlay's
+        # sdk-sidecar-image outputs through the builder-vm flake.
+        #
+        # Both libc variants are exposed, because which one a workload needs is
+        # a property of the guest image it boots, not of the builder. A guest
+        # linked against the other libc cannot dlopen the cdylib at all, and
+        # exposing only one moves that failure from this evaluation into the
+        # guest, where it surfaces as a relocation error.
+        sdk-sidecar-image = runtimeOverlay.packages.${system}.sdk-sidecar-image;
+        sdk-sidecar-image-musl = runtimeOverlay.packages.${system}.sdk-sidecar-image-musl;
       });
     };
 }

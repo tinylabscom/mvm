@@ -14,7 +14,21 @@ use crate::client::dto::{
     PauseOutcome, ReconfigureRequest, ResumeOpts, ResumeOutcome,
 };
 use crate::client::error::{MvmError, Result};
-use mvm_contract::protocol::capability_negotiation::BackendCapabilityReport;
+use mvm_contract::protocol::capability_negotiation::{
+    BackendCapabilityReport, ClientOperationCapabilities,
+};
+
+fn gateway_operations() -> ClientOperationCapabilities {
+    ClientOperationCapabilities::builder()
+        .list(true)
+        .inspect(true)
+        .run(true)
+        .stop(true)
+        .remove(true)
+        .logs(true)
+        .reconfigure(true)
+        .build()
+}
 
 /// How to reach a gateway: its base URL and the bearer token to present.
 pub struct GatewayConfig {
@@ -625,9 +639,10 @@ impl MvmClient for GatewayBackend {
         if let Some(e) = status_error(resp.status(), "") {
             return Err(e);
         }
-        resp.json().await.map_err(|e| MvmError::Backend {
+        let report: BackendCapabilityReport = resp.json().await.map_err(|e| MvmError::Backend {
             reason: format!("decode capability report: {e}"),
-        })
+        })?;
+        Ok(report.with_operations(gateway_operations()))
     }
 
     async fn list_machines(&self, filter: MachineFilter) -> Result<Vec<MachineState>> {
@@ -861,6 +876,20 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::{Once, mpsc};
     use std::time::Duration;
+
+    #[test]
+    fn gateway_operation_report_omits_unwired_facade_calls() {
+        let operations = gateway_operations();
+        assert!(operations.list && operations.inspect && operations.run);
+        assert!(operations.stop && operations.remove && operations.logs);
+        assert!(operations.reconfigure);
+        assert!(!operations.create);
+        assert!(!operations.start);
+        assert!(!operations.pause);
+        assert!(!operations.resume);
+        assert!(!operations.exec);
+        assert!(!operations.set_ttl);
+    }
 
     fn install_rustls_provider() {
         static INSTALL: Once = Once::new();

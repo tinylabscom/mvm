@@ -46,25 +46,30 @@ pub(crate) const READINESS_INTERVAL: Duration = Duration::from_millis(200);
 pub(crate) fn init_entrypoint_validation(boot_state: &Arc<AgentBootState>) {
     let result = match EntrypointPolicy::production().validate() {
         Ok(v) => {
-            eprintln!(
-                "mvm-guest-agent: entrypoint validated at {} (held open for fexecve)",
-                v.resolved.display()
-            );
             boot_state.set_entrypoint(ComponentState::Ready);
             Ok(v)
         }
         Err(e) if e.is_entrypoint_not_offered() => {
-            // Boot-script image: the entrypoint is baked as PID 1's boot
-            // command, not a per-call wrapper under /usr/lib/mvm/wrappers/.
-            // RunEntrypoint is simply not offered here — a clean state, not a
-            // failure (the default/sealed-idle image and every command/shell
-            // image today). Reported as `Disabled`, logged calmly.
-            eprintln!(
-                "mvm-guest-agent: no per-call entrypoint wrapper baked; \
-                 RunEntrypoint not offered for this image"
-            );
-            boot_state.set_entrypoint(ComponentState::Disabled);
-            Err("this image does not offer a per-call entrypoint (RunEntrypoint)".to_string())
+            // Sealed images currently bake the entrypoint as a script inside
+            // `/etc/mvm/entrypoint` rather than a wrapper path. Try the
+            // fallback policy that validates the marker file itself, so
+            // `RunEntrypoint` works for these images until mkGuest produces
+            // the `/usr/lib/mvm/wrappers/` layout.
+            match EntrypointPolicy::sealed_script_marker().validate() {
+                Ok(v) => {
+                    boot_state.set_entrypoint(ComponentState::Ready);
+                    Ok(v)
+                }
+                Err(e2) => {
+                    // Boot-script image: the marker is not a usable wrapper
+                    // or sealed script. RunEntrypoint is not offered — a
+                    // clean state, not a failure.
+                    boot_state.set_entrypoint(ComponentState::Disabled);
+                    Err(format!(
+                        "this image does not offer a per-call entrypoint (RunEntrypoint): {e2}"
+                    ))
+                }
+            }
         }
         Err(e) => {
             let msg = e.to_string();

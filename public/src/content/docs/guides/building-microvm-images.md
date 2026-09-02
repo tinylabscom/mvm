@@ -15,9 +15,13 @@ Every mvm project has a `mvm.toml` and a `flake.nix`:
 # my-app/mvm.toml
 flake     = "."
 profile   = "default"
-vcpus     = 1
-memory_mib = 256
+cpus      = 1          # `vcpus` is an accepted alias
+mem       = "256M"
 ```
+
+`mvm.toml` uses `deny_unknown_fields`, so a key it does not define is a parse
+error. Memory is `mem` (a size string); `memory_mib` is a `mkGuest` argument,
+not a manifest key.
 
 ```nix
 # my-app/flake.nix
@@ -32,26 +36,30 @@ memory_mib = 256
   outputs = { self, nixpkgs, mvm, ... }: {
     packages.x86_64-linux.default = mvm.lib.x86_64-linux.mkGuest {
       name = "my-app";
-      services.web = {
-        command = [ "/usr/local/bin/web" ];
-      };
+      # `entrypoint` is required — mkGuest throws without exactly one of
+      # `shell` / `command` / `services`.
+      entrypoint.command = [ "/usr/local/bin/web" ];
     };
   };
 }
 ```
 
-That's the whole user-side surface. `mvmctl build` reads `mvm.toml`, follows `flake = "."` to your flake, and runs `nix build` against it.
+That's the whole user-side surface. `mvmctl machine build` reads `mvm.toml`, follows `flake = "."` to your flake, and runs `nix build` against it.
 
 ## Building
 
 From your project directory:
 
 ```sh
-mvmctl build              # reads mvm.toml; builds the named flake target
-mvmctl run                # builds (if needed) + boots
+mvmctl machine build                      # reads mvm.toml; builds the named flake target
+mvmctl machine run --manifest . -- <cmd>  # boots the built image and runs <cmd>
 ```
 
-`mvmctl build` is a host command. You run it from macOS or Linux, and mvm sends the Linux-only Nix work into the builder VM. The builder VM is headless — there is no shell into it, not even for debugging; you never need one before or during a normal build.
+A bare `mvmctl run` refuses with "needs a command" — it takes a trailing argv
+(or `--launch-plan`), and it never inspects `flake.nix` to decide what to
+build.
+
+`mvmctl machine build` is a host command. You run it from macOS or Linux, and mvm sends the Linux-only Nix work into the builder VM. The builder VM is headless — there is no shell into it, not even for debugging; you never need one before or during a normal build.
 
 `mvmctl` selects the runtime backend automatically when you boot the finished image. Use `--hypervisor` on runtime commands when you want to force a specific runtime backend:
 
@@ -76,7 +84,7 @@ That direct Nix command is only for users who intentionally manage their own Nix
 |---|---|---|
 | `name` | `string` | Human-readable identifier; baked into the rootfs at `/etc/mvm/name`. |
 | `entrypoint` | `attrs` | The boot-time workload. Exactly one of three forms (see below). |
-| `services` | `attrs` (optional) | Auxiliary supervised services. Same shape as `entrypoint.services`. |
+| `services` | `attrs` (optional) | Declared and recorded, but **not enforced** — the multi-service supervisor is not wired. |
 | `packages` | `[pkg]` (optional) | Extra Nix packages added to the rootfs closure. |
 | `hypervisor` | `string` (optional) | Override the default (`firecracker`). |
 | `vcpus`, `memory_mib` | `int` (optional) | Resource defaults; `mvm.toml` overrides at run time. |
@@ -101,7 +109,8 @@ entrypoint.shell = "/bin/bash";
 # Form 2 — single sealed program (production default)
 entrypoint.command = [ "/usr/local/bin/serve" "--port" "8080" ];
 
-# Form 3 — supervised multi-service
+# Form 3 — supervised multi-service (NOT WIRED: the boot falls through
+# to a recovery shell; the multi-service supervisor is not built yet)
 entrypoint.services = {
   web    = { command = [ "/bin/web" ]; };
   worker = { command = [ "/bin/worker" ]; restart = "always"; };
@@ -117,14 +126,17 @@ Independent of the sealed/accessible distinction, mvm exposes two **runtime life
 | `attached` | VM lifecycle bound to the calling process — Ctrl-C / process exit sends SIGTERM to the VM. | `mvmctl run` interactive, `mvmctl machine run -it` shell sessions, test harnesses that want deterministic teardown. |
 | `detached` | VM survives caller exit — only `mvmctl machine stop` (or `VmBackend::stop`) terminates it. | `mvmctl machine run` (background), production agents, CI fixtures that boot once and run multiple phases. |
 
-The default is `detached`. Override:
+The default is `attached`. Pass `-d` to detach:
 
 ```sh
-mvmctl run --attached         # attached mode; CLI Ctrl-C kills VM
-mvmctl run                    # detached mode (default); VM keeps running
-mvmctl detach my-app          # convert a running attached VM to detached
-mvmctl wait my-app            # block until VM exits (only meaningful for attached)
+mvmctl machine run --flake .      # attached (default); Ctrl-C stops the VM
+mvmctl machine run --flake . -d   # detached; the VM outlives this command
+mvmctl machine wait my-app        # block until the guest reports ready (hidden verb)
+mvmctl machine stop my-app        # terminate a detached VM
 ```
+
+There is no command that converts a running VM between the two modes: the
+mode is fixed at launch.
 
 The lifecycle mode is **orthogonal** to the sealed/accessible distinction:
 
@@ -135,7 +147,7 @@ The lifecycle mode is **orthogonal** to the sealed/accessible distinction:
 | sealed + attached | Test harness running an entrypoint to completion, exit captured. |
 | sealed + detached | Production: `entrypoint.command`, runs forever until `mvmctl machine stop`. |
 
-The trait surface lives at `mvm_core::vm_backend::{StartMode, VmBackend::start_with_mode, VmBackend::wait, VmBackend::detach}`. The libkrun backend records `StartMode` intent at `~/.mvm/vms/<name>/mode.json`; `mvmctl status` surfaces it.
+The trait surface lives at `mvm_core::vm_backend::{StartMode, VmBackend::start_with_mode, VmBackend::wait, VmBackend::detach}`. The libkrun backend records `StartMode` intent at `~/.mvm/vms/<name>/mode.json`; `mvmctl machine inspect` surfaces it.
 
 ## Sealed vs accessible — the same flake works for both
 
@@ -171,17 +183,21 @@ The `mkGuest` library produces a **busybox-as-PID-1** rootfs (no NixOS, no syste
 
 ## Boot-time targets
 
-**Floor: ≤ 300 ms cold p50 on every backend.** A backend that can't hit it is a backend we drop.
+**Hard floor: every prepared-cold boot must complete in strictly under 200 ms
+on every supported backend.** This is a per-boot maximum, not a percentile that
+can hide a slow launch. A backend that cannot meet it is not release-ready.
 
 | Backend | Cold p50 | Snapshot-cloned p50 | Notes |
 |---|---|---|---|
-| Firecracker (Linux/KVM) | ≤ 300 ms | ≤ 30 ms | Default for typical workloads. |
-| Cloud Hypervisor (Linux/KVM) | ≤ 300 ms | ≤ 50 ms | Tier-1 peer of FC. Adds VFIO/GPU, virtio-gpu, virtio-fs, larger guests. Opt-in via `--hypervisor cloud-hypervisor`. |
-| libkrun / libkrun (Linux/KVM) | ≤ 300 ms | ≤ 30 ms | Cross-platform default; libkrun-backed. |
-| libkrun / libkrun (macOS HVF) | ≤ 300 ms | ≤ 60 ms | macOS path; HVF adds ~100ms over KVM. |
-| Apple Virtualization framework | ≤ 300 ms | ≤ 200 ms | Legacy ladder; superseded by libkrun per ADR-013. |
+| Firecracker (Linux/KVM) | < 200 ms | ≤ 30 ms | Hard prepared-cold requirement; every measured dispatch must pass. |
+| HVF (macOS 26+, Apple Silicon) | < 200 ms | ≤ 60 ms | In-house Hypervisor.framework VMM; macOS default. |
+| libkrun (macOS 13-25, Linux/KVM) | < 200 ms | ≤ 30 ms | Third-party in-process VMM; needs the `slp/krun/*` Homebrew trio on macOS. |
+| QEMU (Linux dev/test) | — | — | Opt-in dev/test substrate; no snapshot support. |
 
-The numbers are surfaced on every `mkGuest` derivation as `passthru.mvm.expectedBootMs` so you can `nix eval .#default.passthru.mvm.expectedBootMs` to confirm. Phase 9 enforces with `xtask perf --backend <name> --p50-ms 300 --runs 100`. See [ADR-013 §"Boot-time budget"](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/013-libkrun-libkrun-microvm-nix-pivot.md) for rationale.
+The artifact expectation is surfaced on every `mkGuest` derivation as
+`passthru.mvm.expectedBootMs`, while `mvmctl bench --lane prepared-cold` enforces the
+runtime maximum from raw samples. See [ADR-013 §"Boot-time budget"](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/013-libkrun-libkrun-microvm-nix-pivot.md)
+for the original backend rationale.
 
 The floor is achievable because the rootfs uses **busybox-as-PID-1** with a custom `/init` (no NixOS, no systemd, no OpenRC). See [ADR-030](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/030-libkrun-pivot.md) for why this matters and the implementation breadcrumb.
 
@@ -201,14 +217,14 @@ cd my-app
 nix flake check --no-build
 ```
 
-`mvmctl validate` does the same with extra `mvm.toml` checks layered on.
+`mvmctl build validate` does the same with extra `mvm.toml` checks layered on.
 
 ## Cross-platform notes
 
 mvm runs Nix builds inside the project builder VM and copies the finished kernel/rootfs artifacts back to the host cache. You don't need host-side Nix, and you don't need to enter a dev shell before building.
 
 - **Linux**: the builder VM provides the Linux build boundary and cache policy. Firecracker is the default runtime backend when `/dev/kvm` is available.
-- **macOS**: the host `mvmctl build` command orchestrates a Linux builder VM. The resulting runtime image boots on the HVF backend by default on macOS 26+ (Hypervisor.framework, vsock-only), or libkrun on macOS 13–25.
+- **macOS**: the host `mvmctl machine build` command orchestrates a Linux builder VM. The resulting runtime image boots on the HVF backend by default on macOS 26+ (Hypervisor.framework, vsock-only), or libkrun on macOS 13–25.
 - **Windows**: Tauri-only (the `mvm-studio` desktop app packages a WSL2-backed builder + runtime). See [ADR-009](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/009-cross-platform-strategy.md).
 
 ## Rootless workloads
@@ -221,7 +237,7 @@ PID 1 must be uid 0 (kernel mandate). Everything else can — and by default in 
 | `mvm-guest-agent` | 990 | Vsock RPC handler (never needs root); supervised by `/init` |
 | Entrypoint (workload) | **0 in dev**, **1000 in prod** | Your service or shell |
 
-> **Agent binary status:** as of Phase 1 W6.1.1 the agent at `/usr/local/bin/mvm-guest-agent` is a **stub** — a sh script that logs startup and sleeps. The supervision pattern is real (init forks it under uid 990 before setpriv-exec'ing the entrypoint); the vsock RPC surface lands when W6.1.2 swaps in the cross-compiled Rust binary. Every derivation surfaces `passthru.mvm.agentBinary = "stub" | "real"` so production deployments can refuse to boot a stub image.
+> **Agent binary status:** the agent is the cross-compiled Rust binary; `mkGuest` emits `passthru.mvm.agentBinary = "real"` unconditionally. The `"stub"` value is retained only as something a consumer may refuse — nothing produces it any more.
 
 The dev/prod default split is intentional:
 
@@ -252,7 +268,7 @@ mkGuest {
 }
 ```
 
-The resolved values surface as `passthru.mvm.uids = { agent; entrypoint; }` and `passthru.mvm.rootlessEntrypoint :: bool` so `mvmctl status` can cross-check against `/proc/<pid>/status` at runtime.
+The resolved values surface as `passthru.mvm.uids = { agent; entrypoint; }` and `passthru.mvm.rootlessEntrypoint :: bool` so `mvmctl machine inspect` can cross-check against `/proc/<pid>/status` at runtime.
 
 ## Why no OCI
 

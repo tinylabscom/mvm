@@ -30,7 +30,7 @@ use mvm_core::checkpoint::{
 };
 use mvm_vmm::host::hvf_supervisor::{HvfDisk, HvfSupervisorConfig};
 
-use crate::driver::hvf_legacy::{
+use crate::driver::hvf_process::{
     PID_FILE_NAME, PID_FILE_TIMEOUT, read_pid, resolve_supervisor_path,
 };
 
@@ -153,12 +153,21 @@ pub fn hvf_child_restore_config(
     Ok(HvfSupervisorConfig {
         // Same tier as the parent it forked from.
         trusted_builder_egress: parent.trusted_builder_egress,
+        // Never inherited. The request names the *parent's* VM, state dir and
+        // identity drive; a child adopting it would spawn a second endpoint
+        // over the parent's socket and overwrite the identity drive of a VM
+        // that is still running off it. A restored child is not a builder.
+        builder_egress_endpoint: None,
         kernel: parent.kernel.clone(),
         cmdline: parent.cmdline.clone(),
         memory_mib: parent.memory_mib,
+        // A restored child resumes the parent's saved vCPU state, so it must
+        // come up with the parent's CPU topology. Booting a different count
+        // against a snapshot taken under another one is not a smaller machine —
+        // it is a mismatched one.
+        vcpus: parent.vcpus,
         initramfs: parent.initramfs.clone(),
         disks,
-        virtiofs_root: parent.virtiofs_root.clone(),
         virtiofs_shares: parent.virtiofs_shares.clone(),
         vsock: parent.vsock,
         console_log: req.state_dir.join("console.log"),
@@ -219,6 +228,31 @@ fn bounded_restore_command(supervisor: &Path, req: &HvfRestoreRequest<'_>) -> Co
     )
 }
 
+/// Persist the child's own launch config, and clear the state the run this
+/// directory last held left behind.
+///
+/// The config is written before spawning because a later capture of this VM
+/// reads it back through `supervisor_config_path`, so a restored child is
+/// itself checkpointable.
+///
+/// The sidecar clear matters here for a reason the fork paths do not have: a
+/// same-identity restore lands back in the state directory the pre-checkpoint
+/// run wrote into, so that run's captured exit code and usage record are
+/// already sitting there. A restored run that is killed rather than reaching
+/// its own teardown writes neither, and the exit report would read the
+/// pre-checkpoint run's numbers and sign them as this run's measurement.
+fn prepare_child_state_dir(req: &HvfRestoreRequest<'_>, cfg: &HvfSupervisorConfig) -> Result<()> {
+    let config_path = req.state_dir.join("supervisor.json");
+    std::fs::write(
+        &config_path,
+        serde_json::to_vec(cfg).context("serializing the restored HVF launch config")?,
+    )
+    .with_context(|| format!("writing {}", config_path.display()))?;
+    mvm_core::run_sidecars::clear_prior_run(req.state_dir);
+    let _ = std::fs::remove_file(req.state_dir.join("pause.state"));
+    Ok(())
+}
+
 /// Start a supervisor that loads `req`'s materialized saved state instead of
 /// booting a kernel, and wait for it to confirm the VM is live.
 #[tracing::instrument(name = "hvf.restore", skip_all, fields(vm = %req.vm_name))]
@@ -234,24 +268,16 @@ pub fn restore_hvf_vm(req: &HvfRestoreRequest<'_>) -> Result<RestoredHvfVm> {
     let anchors = read_anchors(req.state_dir)?;
     let cfg = hvf_child_restore_config(&parent, &anchors, req)?;
 
-    // Persist the child's own launch config before spawning: a later capture of
-    // this VM reads it back through `supervisor_config_path`, so a restored
-    // child is itself checkpointable.
-    let config_path = req.state_dir.join("supervisor.json");
-    std::fs::write(
-        &config_path,
-        serde_json::to_vec(&cfg).context("serializing the restored HVF launch config")?,
-    )
-    .with_context(|| format!("writing {}", config_path.display()))?;
-    let _ = std::fs::remove_file(&cfg.workload_exit);
-    let _ = std::fs::remove_file(req.state_dir.join("pause.state"));
+    prepare_child_state_dir(req, &cfg)?;
 
     let supervisor = resolve_supervisor_path()?;
     let json = serde_json::to_string(&cfg).context("serializing HvfSupervisorConfig")?;
     let mut child = bounded_restore_command(&supervisor, req)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
+        .stderr(mvm_vmm::host::console_capture::supervisor_stderr(
+            req.state_dir,
+        ))
         .spawn()
         .with_context(|| format!("spawning {}", supervisor.display()))?;
     child
@@ -277,17 +303,19 @@ pub fn restore_hvf_vm(req: &HvfRestoreRequest<'_>) -> Result<RestoredHvfVm> {
         }
         if let Some(status) = child.try_wait().context("polling the HVF supervisor")? {
             bail!(
-                "HVF restore of '{}' exited before publishing its pid (status: {status}); see {}",
+                "HVF restore of '{}' exited before publishing its pid (status: {status}); see {}{}",
                 req.vm_name,
-                cfg.console_log.display()
+                cfg.console_log.display(),
+                mvm_vmm::host::console_capture::supervisor_stderr_detail(req.state_dir)
             );
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
             bail!(
-                "HVF restore of '{}' did not confirm within {PID_FILE_TIMEOUT:?}; see {}",
+                "HVF restore of '{}' did not confirm within {PID_FILE_TIMEOUT:?}; see {}{}",
                 req.vm_name,
-                cfg.console_log.display()
+                cfg.console_log.display(),
+                mvm_vmm::host::console_capture::supervisor_stderr_detail(req.state_dir)
             );
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -301,12 +329,13 @@ mod tests {
     fn parent_config(state: &Path, disks: Vec<HvfDisk>) -> HvfSupervisorConfig {
         HvfSupervisorConfig {
             trusted_builder_egress: false,
+            builder_egress_endpoint: None,
             kernel: state.join("Image"),
             cmdline: Some("console=ttyAMA0 root=/dev/vda ro".into()),
             memory_mib: 512,
+            vcpus: 1,
             initramfs: None,
             disks,
-            virtiofs_root: None,
             virtiofs_shares: Vec::new(),
             vsock: true,
             console_log: PathBuf::from("/parent/console.log"),
@@ -362,6 +391,83 @@ mod tests {
             state_dir: dir,
             cpu_grant: None,
         }
+    }
+
+    #[test]
+    fn preparing_the_child_state_dir_drops_the_pre_checkpoint_runs_exit_and_usage() {
+        // A same-identity restore lands back in the directory the
+        // pre-checkpoint run wrote into, unlike a fork, which gets a child dir
+        // of its own. Leaving that run's usage record here would let a restored
+        // run that is killed before its own teardown sign the pre-checkpoint
+        // run's CPU into its receipt as a measurement.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let anchors = materialized(dir);
+        let parent = parent_config(
+            dir,
+            vec![HvfDisk {
+                path: PathBuf::from("/parent/rootfs.ext4"),
+                read_only: true,
+                ephemeral: false,
+            }],
+        );
+        let req = request("restored", dir);
+        let cfg = hvf_child_restore_config(&parent, &anchors, &req).unwrap();
+
+        std::fs::write(mvm_core::exit_capture::exit_file_path(dir), b"0\n").unwrap();
+        mvm_core::usage_capture::write_captured(
+            dir,
+            &mvm_core::usage_capture::UsageCapture {
+                cpu_ms: mvm_core::usage_capture::Metric::measured(
+                    4210,
+                    mvm_core::usage_capture::Mechanism::HvfSummedVcpuClock,
+                ),
+                ..mvm_core::usage_capture::UsageCapture::default()
+            },
+        )
+        .unwrap();
+        std::fs::write(dir.join("pause.state"), b"paused").unwrap();
+
+        prepare_child_state_dir(&req, &cfg).unwrap();
+
+        assert_eq!(
+            mvm_core::usage_capture::read_captured(dir),
+            mvm_core::usage_capture::UsageCapture::default(),
+            "the pre-checkpoint run's usage must not survive the restore"
+        );
+        assert_eq!(mvm_core::exit_capture::read_captured(dir), None);
+        assert!(!dir.join("pause.state").exists());
+        // The half this function exists for is still done: a restored child is
+        // itself checkpointable only if its own launch config is on disk.
+        assert!(dir.join("supervisor.json").is_file());
+    }
+
+    #[test]
+    fn a_restored_child_never_inherits_the_parents_egress_endpoint_request() {
+        // The request names the *parent's* vm, state dir, socket and identity
+        // drive. A child that inherited it would spawn a second endpoint over
+        // the running parent's socket and rewrite the identity drive that
+        // parent's guest is still authenticating against — so this is the same
+        // family as the relay drop the module docs describe, not an
+        // optimisation.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let anchors = materialized(dir);
+        let mut parent = parent_config(dir, vec![]);
+        parent.builder_egress_endpoint =
+            Some(mvm_vmm::host::hvf_supervisor::BuilderEgressEndpoint {
+                vm_name: "the-parent".into(),
+                state_dir: dir.join("parent-state"),
+                socket: dir.join("parent.sock"),
+                identity_drive: dir.join("parent-identity.ext4"),
+            });
+
+        let cfg = hvf_child_restore_config(&parent, &anchors, &request("child", dir)).unwrap();
+
+        assert!(
+            cfg.builder_egress_endpoint.is_none(),
+            "a restored child must not adopt its parent's endpoint request"
+        );
     }
 
     #[test]

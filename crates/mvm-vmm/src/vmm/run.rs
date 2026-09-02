@@ -44,6 +44,14 @@ pub trait RunDevice {
     /// explicitly for a restored child.
     fn prepare_snapshot(&mut self) {}
 
+    /// Recreate host-owned runtime handles after the live parent leaves its
+    /// pause hold.
+    ///
+    /// Restored children bind their own authorized channels before first run;
+    /// this hook is only for the already-live parent whose handles were parked
+    /// by [`Self::prepare_snapshot`].
+    fn resume_after_snapshot(&mut self) {}
+
     /// Expose deterministic device state to the pause snapshot hook.
     fn snapshot_device(&self) -> Option<&dyn SnapshotDeviceState> {
         None
@@ -73,6 +81,106 @@ pub enum RunOutcome {
     /// A caller hook (or an unmodeled exit) stopped the run.
     Stopped,
 }
+
+/// Exclusive access to the device model, for as long as one access takes.
+///
+/// The run loop reaches devices only through this, so the same loop body serves
+/// a machine with one vCPU and a machine with several. With one, the devices are
+/// borrowed directly and nothing is locked. With several, every vCPU thread
+/// shares one device model and the bus is what serialises them: the device
+/// structs hold queue indices and raw pointers into guest RAM, and two CPUs
+/// servicing a virtqueue at once would corrupt both.
+///
+/// Deliberately scoped to a single access rather than handed out as a guard. A
+/// guard could be held across a sleep or a blocking read, and one vCPU parked in
+/// the pause hold while holding the device model would freeze every other CPU
+/// with it. Passing a closure makes the narrow hold the only thing expressible.
+pub trait DeviceBus {
+    /// Run `f` with exclusive access to every device.
+    fn with_devices<R>(&self, f: impl FnOnce(&mut [&mut dyn RunDevice]) -> R) -> R;
+}
+
+/// The device model of a single-vCPU machine, borrowed by the one thread that
+/// drives it.
+///
+/// A `RefCell` rather than a `Mutex`: there is no second thread to exclude, so
+/// paying for an atomic on every MMIO exit would buy nothing. The borrow is
+/// checked all the same, which is what catches a re-entrant `with_devices` —
+/// a device whose handler dispatched back into the bus would deadlock a `Mutex`
+/// silently and panics here instead.
+pub struct SoleBus<'a, 'd> {
+    devices: core::cell::RefCell<&'a mut [&'d mut dyn RunDevice]>,
+}
+
+impl<'a, 'd> SoleBus<'a, 'd> {
+    /// Borrow `devices` for the run.
+    pub fn new(devices: &'a mut [&'d mut dyn RunDevice]) -> Self {
+        Self {
+            devices: core::cell::RefCell::new(devices),
+        }
+    }
+}
+
+impl DeviceBus for SoleBus<'_, '_> {
+    fn with_devices<R>(&self, f: impl FnOnce(&mut [&mut dyn RunDevice]) -> R) -> R {
+        f(&mut self.devices.borrow_mut()[..])
+    }
+}
+
+/// The device model of an SMP machine, shared by every vCPU thread.
+///
+/// One lock over all devices rather than one per device. MMIO exits are rare
+/// next to the guest execution between them and each access is a register
+/// read or a queue kick, so the contention a coarse lock costs is not
+/// measurable — while the bugs a fine-grained one invites (two CPUs in two
+/// devices reaching the same guest page) are not the kind that show up in
+/// testing.
+pub struct SharedBus<'a, 'd> {
+    devices: std::sync::Mutex<&'a mut [&'d mut dyn RunDevice]>,
+}
+
+impl<'a, 'd> SharedBus<'a, 'd> {
+    /// Share `devices` across the vCPU threads of one run.
+    pub fn new(devices: &'a mut [&'d mut dyn RunDevice]) -> Self {
+        Self {
+            devices: std::sync::Mutex::new(devices),
+        }
+    }
+}
+
+impl DeviceBus for SharedBus<'_, '_> {
+    fn with_devices<R>(&self, f: impl FnOnce(&mut [&mut dyn RunDevice]) -> R) -> R {
+        // A poisoned device model cannot be reasoned about: a panic mid-access
+        // leaves a virtqueue half-updated, and the guest has already been told
+        // the descriptor was consumed. Take the inner value and let the caller
+        // fail rather than resuming against state nothing has validated.
+        let mut guard = self
+            .devices
+            .lock()
+            .expect("device model poisoned by a panicking vCPU thread");
+        f(&mut guard[..])
+    }
+}
+
+// SAFETY: `RunDevice` implementors in this crate are not `Send` because they
+// hold raw `*mut u8` pointers into guest RAM. Sharing them across the vCPU
+// threads of one VM is sound for the reasons the pointer is sound at all:
+//
+// - The pointee is the single `hv_vm_map`ped guest RAM allocation, which
+//   outlives every vCPU thread. The threads are scoped (`std::thread::scope`),
+//   so they are joined before the mapping is torn down or the allocation freed.
+// - Every access goes through `with_devices`, which holds the `Mutex`, so no
+//   two threads touch a device — or the RAM it points into — concurrently.
+// - The pointer is not thread-affine. It addresses a plain shared mapping, not
+//   a thread-local or a handle bound to the thread that opened it, so reading
+//   it from a different thread than the one that formed it is well defined.
+//
+// This is the same argument `GuestMem` makes one module over, for the same
+// allocation.
+unsafe impl Send for SharedBus<'_, '_> {}
+// SAFETY: as above — `&SharedBus` grants access only through the `Mutex`, so
+// sharing the reference is exactly as safe as sending the value.
+unsafe impl Sync for SharedBus<'_, '_> {}
 
 /// Dispatch one decoded access (MMIO or PIO, keyed by `addr`) to `devices`,
 /// completing a read through `vcpu` and raising any triggered IRQ via `set_irq`.
@@ -239,7 +347,7 @@ pub fn run_with_hooks<C, S, X, Q, P, H, T>(
     vcpu: &C,
     set_irq: S,
     devices: &mut [&mut dyn RunDevice],
-    mut hooks: RunHooks<C, X, Q, P, H, T>,
+    hooks: RunHooks<C, X, Q, P, H, T>,
 ) -> Result<RunOutcome, C::Error>
 where
     C: HypervisorVcpu,
@@ -250,6 +358,58 @@ where
     H: FnMut(&C, &[&dyn SnapshotDeviceState]) -> Result<(), C::Error>,
     T: Fn() -> bool,
 {
+    run_on_bus(vcpu, set_irq, &SoleBus::new(devices), hooks)
+}
+
+/// Run one vCPU against a device model reached through `bus`.
+///
+/// The single loop body, shared by every backend and by every vCPU of an SMP
+/// machine. It differs from [`run_with_hooks`] only in reaching devices through
+/// the bus rather than owning them, which is what lets several threads drive it
+/// at once.
+///
+/// Each device touch takes the bus for exactly that touch. The two hold loops
+/// below — pause and throttle — sleep *outside* it: this vCPU is parked, and
+/// keeping the device model to itself while it sleeps would park every other
+/// vCPU behind it.
+pub fn run_on_bus<C, S, B, X, Q, P, H, T>(
+    vcpu: &C,
+    set_irq: S,
+    bus: &B,
+    mut hooks: RunHooks<C, X, Q, P, H, T>,
+) -> Result<RunOutcome, C::Error>
+where
+    C: HypervisorVcpu,
+    S: Fn(u32, bool) -> Result<(), C::Error>,
+    B: DeviceBus,
+    X: FnMut(&C, u64, u64) -> Result<RunControl, C::Error>,
+    Q: Fn() -> bool,
+    P: Fn() -> bool,
+    H: FnMut(&C, &[&dyn SnapshotDeviceState]) -> Result<(), C::Error>,
+    T: Fn() -> bool,
+{
+    /// Poll every device once and raise whatever interrupts they ask for.
+    fn poll_all<C, S, B>(bus: &B, set_irq: &S) -> Result<(), C::Error>
+    where
+        C: HypervisorVcpu,
+        S: Fn(u32, bool) -> Result<(), C::Error>,
+        B: DeviceBus,
+    {
+        // Collect under the bus, raise outside it: `set_irq` is the backend's
+        // interrupt controller, and holding the device model across it would
+        // widen the hold for no reason.
+        let irqs = bus.with_devices(|devices| {
+            devices
+                .iter_mut()
+                .filter_map(|d| d.poll())
+                .collect::<Vec<_>>()
+        });
+        for irq in irqs {
+            set_irq(irq, true)?;
+        }
+        Ok(())
+    }
+
     let mut pause_prepared = false;
     loop {
         match vcpu.step()? {
@@ -257,22 +417,14 @@ where
                 // Host→guest async work each timer tick (e.g. drain an egress
                 // socket into the guest's rx queue), so delivery happens even
                 // when the guest is idle in WFI rather than doing MMIO.
-                for d in devices.iter_mut() {
-                    if let Some(irq) = d.poll() {
-                        set_irq(irq, true)?;
-                    }
-                }
+                poll_all::<C, _, _>(bus, &set_irq)?;
             }
             VcpuExit::Canceled => {
                 // A forced exit: either a real stop or a heartbeat wake. Poll
                 // host-side async work either way (this is how an egress reply
                 // reaches a guest blocked in WFI), then end only if a stop was
                 // actually requested.
-                for d in devices.iter_mut() {
-                    if let Some(irq) = d.poll() {
-                        set_irq(irq, true)?;
-                    }
-                }
+                poll_all::<C, _, _>(bus, &set_irq)?;
                 if (hooks.should_stop)() {
                     return Ok(RunOutcome::Canceled);
                 }
@@ -282,31 +434,41 @@ where
                 // already drained any in-flight host reply before we park.
                 if (hooks.should_pause)() {
                     if !pause_prepared {
-                        for device in devices.iter_mut() {
-                            device.prepare_snapshot();
-                        }
+                        bus.with_devices(|devices| {
+                            for device in devices.iter_mut() {
+                                device.prepare_snapshot();
+                            }
+                        });
                         pause_prepared = true;
                     }
-                    let snapshot_devices = devices
-                        .iter()
-                        .filter_map(|device| device.snapshot_device())
-                        .collect::<Vec<_>>();
-                    (hooks.on_pause)(vcpu, &snapshot_devices)?;
+                    bus.with_devices(|devices| {
+                        let snapshot_devices = devices
+                            .iter()
+                            .filter_map(|device| device.snapshot_device())
+                            .collect::<Vec<_>>();
+                        (hooks.on_pause)(vcpu, &snapshot_devices)
+                    })?;
                 } else {
                     pause_prepared = false;
                 }
                 while (hooks.should_pause)() && !(hooks.should_stop)() {
-                    for d in devices.iter_mut() {
-                        if let Some(irq) = d.poll() {
-                            set_irq(irq, true)?;
-                        }
-                    }
-                    let snapshot_devices = devices
-                        .iter()
-                        .filter_map(|device| device.snapshot_device())
-                        .collect::<Vec<_>>();
-                    (hooks.on_pause)(vcpu, &snapshot_devices)?;
+                    poll_all::<C, _, _>(bus, &set_irq)?;
+                    bus.with_devices(|devices| {
+                        let snapshot_devices = devices
+                            .iter()
+                            .filter_map(|device| device.snapshot_device())
+                            .collect::<Vec<_>>();
+                        (hooks.on_pause)(vcpu, &snapshot_devices)
+                    })?;
                     std::thread::sleep(Duration::from_millis(1));
+                }
+                if pause_prepared && !(hooks.should_stop)() {
+                    bus.with_devices(|devices| {
+                        for device in devices.iter_mut() {
+                            device.resume_after_snapshot();
+                        }
+                    });
+                    pause_prepared = false;
                 }
                 // Throttle hold: a throttle is not a pause. The vCPU is parked
                 // to stay inside its CPU quota, and the guest's device state
@@ -315,11 +477,7 @@ where
                 // out of guest execution; nothing else from the pause path runs.
                 while (hooks.should_throttle)() && !(hooks.should_stop)() && !(hooks.should_pause)()
                 {
-                    for d in devices.iter_mut() {
-                        if let Some(irq) = d.poll() {
-                            set_irq(irq, true)?;
-                        }
-                    }
+                    poll_all::<C, _, _>(bus, &set_irq)?;
                     std::thread::sleep(Duration::from_millis(1));
                 }
                 // A stop that arrived while we were throttled must still end the
@@ -336,7 +494,9 @@ where
                 len,
                 data,
             } => {
-                dispatch(vcpu, &set_irq, devices, phys_addr, write, len, data)?;
+                bus.with_devices(|devices| {
+                    dispatch(vcpu, &set_irq, devices, phys_addr, write, len, data)
+                })?;
             }
             VcpuExit::Io {
                 port,
@@ -344,15 +504,17 @@ where
                 size,
                 data,
             } => {
-                dispatch(
-                    vcpu,
-                    &set_irq,
-                    devices,
-                    u64::from(port),
-                    write,
-                    size,
-                    u64::from(data),
-                )?;
+                bus.with_devices(|devices| {
+                    dispatch(
+                        vcpu,
+                        &set_irq,
+                        devices,
+                        u64::from(port),
+                        write,
+                        size,
+                        u64::from(data),
+                    )
+                })?;
             }
             VcpuExit::Exception {
                 syndrome,
@@ -477,6 +639,9 @@ impl RunDevice for super::vsock::VirtioVsock {
     }
     fn prepare_snapshot(&mut self) {
         super::vsock::VirtioVsock::prepare_snapshot(self);
+    }
+    fn resume_after_snapshot(&mut self) {
+        super::vsock::VirtioVsock::resume_after_snapshot(self);
     }
     fn snapshot_device(&self) -> Option<&dyn SnapshotDeviceState> {
         Some(self)
@@ -990,16 +1155,21 @@ mod tests {
     /// A device that counts how many times the snapshot machinery touches it.
     struct SnapshotCountDev {
         prepare_count: RefCell<usize>,
+        resume_count: RefCell<usize>,
     }
 
     impl SnapshotCountDev {
         fn new() -> Self {
             Self {
                 prepare_count: RefCell::new(0),
+                resume_count: RefCell::new(0),
             }
         }
         fn prepare_count(&self) -> usize {
             *self.prepare_count.borrow()
+        }
+        fn resume_count(&self) -> usize {
+            *self.resume_count.borrow()
         }
     }
 
@@ -1018,6 +1188,9 @@ mod tests {
         }
         fn prepare_snapshot(&mut self) {
             *self.prepare_count.borrow_mut() += 1;
+        }
+        fn resume_after_snapshot(&mut self) {
+            *self.resume_count.borrow_mut() += 1;
         }
         fn snapshot_device(&self) -> Option<&dyn SnapshotDeviceState> {
             Some(self)
@@ -1164,6 +1337,11 @@ mod tests {
         assert!(
             dev2.prepare_count() > 0,
             "pause hold must prepare a snapshot"
+        );
+        assert_eq!(
+            dev2.resume_count(),
+            1,
+            "the live parent must recreate host handles exactly once"
         );
     }
 

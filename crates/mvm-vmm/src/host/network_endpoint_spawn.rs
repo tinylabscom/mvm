@@ -9,11 +9,11 @@
 //! workload paths use the authenticated vsock/UDS endpoint transport.
 
 use crate::host::drive_file::DriveFile;
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use mvm_contract::builder::BuilderError;
 use mvm_contract::stream::secret_fingerprint::SecretFingerprint;
 use mvm_core::crypto::egress_ca::EgressCa;
-use mvm_core::plan::SecretBinding;
+use mvm_core::plan::{IngressMapping, SecretBinding};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -183,6 +183,118 @@ pub const SUBST_PID_FILE: &str = "substitution.pid";
 /// Per-VM file the endpoint writes when a guest completes an authenticated
 /// session on it.
 pub const SUBST_SESSION_FILE: &str = "substitution.session";
+
+/// Per-VM Unix socket that wakes the launcher after the first authenticated
+/// FlowMux session. The marker above remains the durable evidence; this socket
+/// is only the event that avoids racing a one-shot marker check.
+pub const SUBST_SESSION_READY_SOCKET: &str = "substitution-session-ready.sock";
+
+/// Where the session-readiness socket lives.
+///
+/// Through `vm_socket_dir_at`, not `state_dir` directly: a deep `MVM_HOME`
+/// overflows macOS's ~104-byte `sun_path` limit, and that helper falls back to
+/// a short hashed `/tmp` namespace. Binding it from the state dir made every
+/// launch under a worktree-local home fail with "path must be shorter than
+/// SUN_LEN" while the substitution socket — which already used the helper —
+/// bound fine.
+fn session_ready_socket_path(state_dir: &std::path::Path) -> std::path::PathBuf {
+    mvm_core::config::vm_socket_dir_at(state_dir).join(SUBST_SESSION_READY_SOCKET)
+}
+
+/// Same treatment for the connector socket, which shares the directory and the
+/// same limit.
+fn connector_socket_path(state_dir: &std::path::Path) -> std::path::PathBuf {
+    mvm_core::config::vm_socket_dir_at(state_dir).join(SUBST_CONNECTOR_SOCKET)
+}
+/// Host-local typed-connector socket served by the same per-VM endpoint that
+/// owns guest FlowMux egress. Broker/tool code may authorize a request, but it
+/// reaches the network only by sending that request here.
+pub const SUBST_CONNECTOR_SOCKET: &str = "network-endpoint-connector.sock";
+
+/// Bound on the gap between guest-agent readiness and FlowMux authentication.
+/// A healthy guest normally authenticates before the launcher connects, so
+/// this is a failure deadline rather than launch-path latency.
+const DEFAULT_SESSION_READY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Wait for the endpoint's first authenticated FlowMux session.
+///
+/// The endpoint binds its readiness socket before reporting process readiness,
+/// then writes one byte only after it has recorded the durable session marker.
+/// This gives launch a real happens-before edge without polling or a fixed
+/// sleep. A boot with no endpoint remains valid and returns immediately.
+pub fn wait_for_endpoint_session(vm_name: &str, state_dir: &Path) -> anyhow::Result<()> {
+    wait_for_endpoint_session_with_timeout(vm_name, state_dir, DEFAULT_SESSION_READY_TIMEOUT)
+}
+
+fn wait_for_endpoint_session_with_timeout(
+    vm_name: &str,
+    state_dir: &Path,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    use std::io::Read as _;
+
+    if endpoint_session_established(state_dir) {
+        return Ok(());
+    }
+
+    let pid_file = state_dir.join(SUBST_PID_FILE);
+    let Some(pid) = read_pid(&pid_file) else {
+        return Ok(());
+    };
+    if !pid_alive(pid) {
+        return refuse_launch_without_endpoint_session(vm_name, state_dir);
+    }
+
+    let socket = session_ready_socket_path(state_dir);
+    let mut stream = std::os::unix::net::UnixStream::connect(&socket).map_err(|e| {
+        if pid_alive(pid) {
+            anyhow!(
+                "VM {vm_name}: connect to network endpoint session readiness socket {}: {e}",
+                socket.display()
+            )
+        } else {
+            anyhow!(
+                "VM {vm_name}: the network endpoint exited before any guest authenticated \
+                 against it — the workload has no network."
+            )
+        }
+    })?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .with_context(|| format!("set network endpoint readiness timeout for VM {vm_name}"))?;
+
+    let mut signal = [0_u8; 1];
+    match stream.read_exact(&mut signal) {
+        Ok(()) if signal == [1] => {}
+        Ok(()) => anyhow::bail!(
+            "VM {vm_name}: network endpoint sent an invalid authenticated-session signal"
+        ),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
+        {
+            anyhow::bail!(
+                "VM {vm_name}: the network endpoint is running but no guest authenticated \
+                 within {timeout:?} — the workload has no network. Check that the guest \
+                 found its FlowMux identity drive."
+            )
+        }
+        Err(e) => {
+            if !pid_alive(pid) {
+                return refuse_launch_without_endpoint_session(vm_name, state_dir);
+            }
+            return Err(anyhow!(
+                "VM {vm_name}: waiting for the network endpoint's authenticated session: {e}"
+            ));
+        }
+    }
+
+    // The event is only a wakeup. The marker is the durable source of truth,
+    // and final verification keeps a malformed or premature signal fail-closed.
+    refuse_launch_without_endpoint_session(vm_name, state_dir)
+}
 
 /// Whether a guest has authenticated against this VM's endpoint.
 #[must_use]
@@ -384,6 +496,10 @@ pub struct SubstitutionSpawnParams<'a> {
     /// egress itself (the relay path — the run loop no longer gates); `None` ⇒
     /// ungated here (the legacy in-loop gate is the enforcer).
     pub network_policy: Option<&'a mvm_core::policy::network_policy::NetworkPolicy>,
+    /// Transport-neutral resource ceilings from the admitted execution plan.
+    pub network_limits: mvm_core::plan::NetworkLimits,
+    /// Exact signed ingress mappings this endpoint must own.
+    pub ingress: &'a [IngressMapping],
     /// `Some` ⇒ the endpoint resolves secret *values* remotely (see
     /// [`RemoteResolverSpawnConfig`]) instead of its local encrypted store.
     /// `None` preserves today's `Local` (unchanged) resolver behavior.
@@ -419,6 +535,8 @@ pub struct SubstitutionSpawnParamsBuilder<'a> {
     terminator_listen: Option<SocketAddr>,
     tls_intermediate: Option<(String, String)>,
     network_policy: Option<&'a mvm_core::policy::network_policy::NetworkPolicy>,
+    network_limits: Option<mvm_core::plan::NetworkLimits>,
+    ingress: Option<&'a [IngressMapping]>,
     resolver_remote: Option<RemoteResolverSpawnConfig<'a>>,
     binding_store_dir: Option<&'a Path>,
     flowmux_identity: Option<FlowMuxIdentitySpawnConfig>,
@@ -439,6 +557,8 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
             terminator_listen: None,
             tls_intermediate: None,
             network_policy: None,
+            network_limits: None,
+            ingress: None,
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -515,6 +635,20 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
         self
     }
 
+    /// Set the admitted transport-neutral networking ceilings.
+    #[must_use]
+    pub fn network_limits(mut self, network_limits: mvm_core::plan::NetworkLimits) -> Self {
+        self.network_limits = Some(network_limits);
+        self
+    }
+
+    /// Set the exact signed ingress mappings.
+    #[must_use]
+    pub fn ingress(mut self, ingress: &'a [IngressMapping]) -> Self {
+        self.ingress = Some(ingress);
+        self
+    }
+
     /// Set `resolver_remote`. Takes a value or an `Option`; unset means `None`.
     #[must_use]
     pub fn resolver_remote(
@@ -577,6 +711,13 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
             terminator_listen: self.terminator_listen,
             tls_intermediate: self.tls_intermediate,
             network_policy: self.network_policy,
+            network_limits: self.network_limits.ok_or(BuilderError::missing(
+                "SubstitutionSpawnParams",
+                "network_limits",
+            ))?,
+            ingress: self
+                .ingress
+                .ok_or(BuilderError::missing("SubstitutionSpawnParams", "ingress"))?,
             resolver_remote: self.resolver_remote,
             binding_store_dir: self.binding_store_dir,
             flowmux_identity: self.flowmux_identity,
@@ -653,6 +794,8 @@ pub fn endpoint_config_for_identity(
         session_marker: None,
         tls_intermediate: None,
         network_policy: None,
+        network_limits: mvm_core::plan::NetworkLimits::default(),
+        ingress: &[],
         resolver_remote: None,
         binding_store_dir: None,
         flowmux_identity,
@@ -682,9 +825,16 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
         } else {
             "wire"
         },
+        "network_limits": params.network_limits,
+        "ingress": params.ingress,
     });
     if let Some(marker) = params.session_marker.as_ref() {
         cfg["session_marker"] = serde_json::json!(marker);
+    }
+    if params.flowmux_identity.is_some() {
+        cfg["session_ready_socket"] =
+            serde_json::json!(session_ready_socket_path(params.state_dir));
+        cfg["connector_uds_path"] = serde_json::json!(connector_socket_path(params.state_dir));
     }
     if let Some(proxy) = params.egress_proxy.as_ref() {
         // `EndpointConfig.proxy_*`: the operator's upstream proxy for the
@@ -775,10 +925,12 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
         params.egress_proxy = EgressProxySpawnConfig::from_host_env();
     }
     let session_marker = params.state_dir.join(SUBST_SESSION_FILE);
+    let session_ready_socket = session_ready_socket_path(params.state_dir);
     // A stale marker from a previous boot would make this launch look ready
     // before any guest had connected, which is the exact failure the check
     // exists to catch.
     let _ = std::fs::remove_file(&session_marker);
+    let _ = std::fs::remove_file(&session_ready_socket);
     params.session_marker = Some(session_marker);
     let cfg = build_endpoint_config_json(&params);
     let SubstitutionSpawnParams {
@@ -1020,6 +1172,8 @@ pub fn reap_network_endpoint(state_dir: &Path, vm_name: &str) {
         kill(spid, libc::SIGTERM);
     }
     let _ = std::fs::remove_file(state_dir.join(SUBST_PID_FILE));
+    let _ = std::fs::remove_file(session_ready_socket_path(state_dir));
+    let _ = std::fs::remove_file(state_dir.join(SUBST_CONNECTOR_SOCKET));
     let _ = std::fs::remove_file(mvm_core::config::vm_substitution_env_path(vm_name));
     // The endpoint's secrets are gone; the shapes the gate recognised them by
     // go with them, so a recycled VM name cannot inherit them.
@@ -1085,6 +1239,149 @@ mod tests {
         assert!(refuse_launch_without_endpoint_session("vm-1", dir.path()).is_ok());
     }
 
+    #[test]
+    fn a_launch_waits_for_a_delayed_authenticated_session() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(SUBST_PID_FILE),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        let ready_socket = dir.path().join(SUBST_SESSION_READY_SOCKET);
+        let listener = std::os::unix::net::UnixListener::bind(&ready_socket).unwrap();
+        let marker = dir.path().join(SUBST_SESSION_FILE);
+        let endpoint = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            std::fs::write(marker, b"1").unwrap();
+            let _ = stream.write_all(&[1]);
+        });
+
+        let result = wait_for_endpoint_session_with_timeout(
+            "vm-1",
+            dir.path(),
+            std::time::Duration::from_secs(1),
+        );
+        let _ = std::os::unix::net::UnixStream::connect(&ready_socket);
+        endpoint.join().unwrap();
+        result.expect("the authenticated-session event admits the launch");
+    }
+
+    #[test]
+    fn a_launch_does_not_wait_when_the_session_is_already_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(SUBST_SESSION_FILE), b"1").unwrap();
+
+        wait_for_endpoint_session_with_timeout("vm-1", dir.path(), std::time::Duration::ZERO)
+            .expect("durable session evidence admits immediately");
+    }
+
+    #[test]
+    fn a_launch_reports_an_endpoint_that_exited_before_authentication() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(SUBST_PID_FILE), "2147483646").unwrap();
+
+        let err = wait_for_endpoint_session("vm-1", dir.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("exited before any guest authenticated"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn a_launch_times_out_when_a_live_endpoint_never_authenticates() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(SUBST_PID_FILE),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        let _listener =
+            std::os::unix::net::UnixListener::bind(dir.path().join(SUBST_SESSION_READY_SOCKET))
+                .unwrap();
+
+        let err = wait_for_endpoint_session_with_timeout(
+            "vm-1",
+            dir.path(),
+            std::time::Duration::from_millis(20),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("no guest authenticated within"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn a_launch_rejects_an_invalid_session_signal_even_when_a_marker_exists() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(SUBST_PID_FILE),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        let ready_socket = dir.path().join(SUBST_SESSION_READY_SOCKET);
+        let listener = std::os::unix::net::UnixListener::bind(&ready_socket).unwrap();
+        let marker = dir.path().join(SUBST_SESSION_FILE);
+        let endpoint = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            std::fs::write(marker, b"1").unwrap();
+            let _ = stream.write_all(&[2]);
+        });
+
+        let result = wait_for_endpoint_session_with_timeout(
+            "vm-1",
+            dir.path(),
+            std::time::Duration::from_secs(1),
+        );
+        if result.is_ok() {
+            let _ = std::os::unix::net::UnixStream::connect(&ready_socket);
+        }
+        endpoint.join().unwrap();
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid authenticated-session signal"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn a_launch_reports_a_broken_readiness_channel_from_a_live_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(SUBST_PID_FILE),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        let ready_socket = dir.path().join(SUBST_SESSION_READY_SOCKET);
+        let listener = std::os::unix::net::UnixListener::bind(&ready_socket).unwrap();
+        let endpoint = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            drop(stream);
+        });
+
+        let result = wait_for_endpoint_session_with_timeout(
+            "vm-1",
+            dir.path(),
+            std::time::Duration::from_secs(1),
+        );
+        if result.is_ok() {
+            let _ = std::os::unix::net::UnixStream::connect(&ready_socket);
+        }
+        endpoint.join().unwrap();
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("waiting for the network endpoint's authenticated session"),
+            "unexpected: {err}"
+        );
+    }
+
     /// The marker is per-boot. A file left by a previous run would make the
     /// next launch look ready before any guest had connected — the exact
     /// failure this check exists to catch, reintroduced by staleness.
@@ -1112,6 +1409,8 @@ mod tests {
             .tenant("local")
             .secrets(&[])
             .redaction(&redaction)
+            .network_limits(mvm_contract::plan::NetworkLimits::default())
+            .ingress(&[])
             .transport(EndpointTransport::Uds {
                 path: dir.path().join("sub.sock"),
             })
@@ -1120,6 +1419,94 @@ mod tests {
         params.session_marker = Some(marker.clone());
         let cfg = build_endpoint_config_json(&params);
         assert_eq!(cfg["session_marker"], serde_json::json!(marker));
+    }
+
+    #[test]
+    fn tls_delivery_debug_redacts_the_private_key() {
+        let delivery = EgressTlsDelivery {
+            guest_cert: DriveFile {
+                name: EGRESS_CERT_DRIVE_NAME.to_string(),
+                content: "guest certificate".to_string(),
+                mode: 0o444,
+            },
+            endpoint_cert_pem: "endpoint certificate".to_string(),
+            endpoint_key_pem: "never-print-this-private-key".to_string(),
+        };
+
+        let rendered = format!("{delivery:?}");
+        assert!(rendered.contains(EGRESS_CERT_DRIVE_NAME));
+        assert!(rendered.contains("<intermediate cert>"));
+        assert!(rendered.contains("<redacted>"));
+        assert!(!rendered.contains("never-print-this-private-key"));
+    }
+
+    #[test]
+    fn substitution_spawn_builder_preserves_every_optional_endpoint_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let redaction = mvm_core::policy::RedactionPolicy::default();
+        let network_policy = mvm_core::policy::network_policy::NetworkPolicy::default();
+        let limits = mvm_core::plan::NetworkLimits::default();
+        let terminator: SocketAddr = "127.0.0.1:18080".parse().unwrap();
+        let tls = ("certificate".to_string(), "private-key".to_string());
+        let resolver = RemoteResolverSpawnConfig {
+            uds_path: dir.path(),
+            timeout_secs: 9,
+        };
+        let identity = FlowMuxIdentitySpawnConfig {
+            session_id: "session-builder".to_string(),
+            host_signing_key_base64: "host-key".to_string(),
+            guest_verifying_key_base64: "guest-key".to_string(),
+        };
+        let proxy = EgressProxySpawnConfig {
+            https: Some("http://proxy.example:8443".to_string()),
+            http: Some("http://proxy.example:8080".to_string()),
+            no_proxy: Some("localhost".to_string()),
+        };
+
+        let params = SubstitutionSpawnParams::builder()
+            .vm_name("vm-builder")
+            .state_dir(dir.path())
+            .tenant("tenant-builder")
+            .secrets(&[])
+            .redaction(&redaction)
+            .transport(EndpointTransport::Uds {
+                path: dir.path().join("endpoint.sock"),
+            })
+            .network_limits(limits)
+            .ingress(&[])
+            .terminator_listen(terminator)
+            .tls_intermediate(tls.clone())
+            .network_policy(&network_policy)
+            .resolver_remote(resolver)
+            .binding_store_dir(dir.path())
+            .flowmux_identity(identity.clone())
+            .egress_proxy(proxy.clone())
+            .build()
+            .expect("every named builder input is retained");
+
+        assert_eq!(params.terminator_listen, Some(terminator));
+        assert_eq!(params.tls_intermediate, Some(tls));
+        assert_eq!(params.network_policy, Some(&network_policy));
+        assert_eq!(params.resolver_remote, Some(resolver));
+        assert_eq!(params.binding_store_dir, Some(dir.path()));
+        assert_eq!(params.flowmux_identity, Some(identity));
+        assert_eq!(params.egress_proxy, Some(proxy));
+    }
+
+    #[test]
+    fn endpoint_config_for_identity_selects_flowmux_and_carries_the_anchor() {
+        let identity = FlowMuxIdentitySpawnConfig {
+            session_id: "session-config".to_string(),
+            host_signing_key_base64: "host-signing-key".to_string(),
+            guest_verifying_key_base64: "guest-verifying-key".to_string(),
+        };
+
+        let config = endpoint_config_for_identity(Some(identity));
+        assert_eq!(config["egress_mode"], "flow_mux");
+        assert_eq!(
+            config["flowmux_identity"]["guest_verifying_key_base64"],
+            "guest-verifying-key"
+        );
     }
     use super::*;
     use mvm_contract::stream::secret_fingerprint::SecretCategory;
@@ -1596,6 +1983,8 @@ mod tests {
             session_marker: None,
             tls_intermediate: None,
             network_policy: None,
+            network_limits: mvm_core::plan::NetworkLimits::default(),
+            ingress: &[],
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -1657,6 +2046,8 @@ mod tests {
             session_marker: None,
             tls_intermediate: None,
             network_policy: None,
+            network_limits: mvm_core::plan::NetworkLimits::default(),
+            ingress: &[],
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -1723,6 +2114,8 @@ mod tests {
             session_marker: None,
             tls_intermediate: None,
             network_policy: None,
+            network_limits: mvm_core::plan::NetworkLimits::default(),
+            ingress: &[],
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -1790,6 +2183,8 @@ mod tests {
             session_marker: None,
             tls_intermediate: None,
             network_policy: None,
+            network_limits: mvm_core::plan::NetworkLimits::default(),
+            ingress: &[],
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -1850,6 +2245,8 @@ mod tests {
             session_marker: None,
             tls_intermediate: None,
             network_policy,
+            network_limits: mvm_core::plan::NetworkLimits::default(),
+            ingress: &[],
             resolver_remote: None,
             binding_store_dir: None,
             flowmux_identity: None,
@@ -2003,6 +2400,33 @@ mod tests {
         assert_eq!(id["session_id"], "vm-123-boot-456");
         assert_eq!(id["host_signing_key_base64"], "aG9zdC1rZXktYnl0ZXM");
         assert_eq!(id["guest_verifying_key_base64"], "Z3Vlc3Qta2V5LWJ5dGVz");
+        assert_eq!(
+            cfg["session_ready_socket"],
+            serde_json::json!(Path::new("/tmp").join(SUBST_SESSION_READY_SOCKET))
+        );
+        assert_eq!(
+            cfg["connector_uds_path"],
+            serde_json::json!(Path::new("/tmp").join(SUBST_CONNECTOR_SOCKET))
+        );
+    }
+
+    #[test]
+    fn endpoint_config_json_carries_admitted_network_limits() {
+        let redaction = mvm_core::policy::RedactionPolicy::default();
+        let sock = Path::new("/tmp/vsock-5253.sock");
+        let mut params = minimal_params(&redaction, sock, None);
+        params.network_limits = mvm_core::plan::NetworkLimits::builder()
+            .max_tcp_flows(7)
+            .max_udp_associations(5)
+            .max_dns_bindings(3)
+            .max_ingress_listeners(2)
+            .build()
+            .unwrap();
+
+        let cfg = build_endpoint_config_json(&params);
+        let round: mvm_core::plan::NetworkLimits =
+            serde_json::from_value(cfg["network_limits"].clone()).unwrap();
+        assert_eq!(round, params.network_limits);
     }
 
     // ── the cert-to-guest / key-to-endpoint split ──

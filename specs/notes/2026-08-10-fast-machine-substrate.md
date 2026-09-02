@@ -104,7 +104,9 @@ comparable only within a matching host, backend, artifact, and sizing context.
 
 The report consumer adds the publication gate shared by all native backends:
 20 measured samples after exactly two warm-ups, per-sample contamination and
-capability validation, and the prepared-cold 200/250/300 ms p50/p95/p99 budget.
+capability validation, the prepared-cold 200/250/300 ms percentile diagnostics,
+and the stricter requirement that every prepared boot dispatch stays under
+200 ms.
 Warm claims retain the independent 30/50 ms p50/p99 target. The report now
 summarizes ready resident memory, first-command resident-memory growth/reclaim, and
 fault deltas without turning an unavailable platform counter into a zero.

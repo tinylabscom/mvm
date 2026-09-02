@@ -88,6 +88,7 @@ fn collect_help_width_violations(
 
 // Group module aliases — give tests short names (`cleanup`, `up`, etc.) that
 // follow the dispatcher's naming, regardless of which group they live in.
+use super::agent_session;
 use super::build::build;
 use super::build::compile;
 use super::build::group as build_group;
@@ -887,7 +888,7 @@ fn volume_mount_managed_omits_host() {
         "--volume",
         "work",
         "--guest",
-        "/mnt/work",
+        "/data/work",
     ])
     .unwrap();
     let Commands::Machine(mg) = cli.command else {
@@ -908,7 +909,7 @@ fn volume_mount_managed_omits_host() {
             assert_eq!(name, "vm-1");
             assert_eq!(volume, "work");
             assert_eq!(host, None);
-            assert_eq!(guest, "/mnt/work");
+            assert_eq!(guest, "/data/work");
             assert!(!rw);
             assert!(!remote);
         }
@@ -1018,6 +1019,19 @@ fn build_runtime_overlay_subcommand_parses() {
     assert!(
         matches!(bg.action, build_group::BuildCmd::RuntimeOverlay(_)),
         "expected runtime-overlay build command"
+    );
+}
+
+#[test]
+fn build_sdk_sidecar_subcommand_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "build", "sdk-sidecar", "build", "--force"])
+        .expect("SDK sidecar source-build command must parse");
+    let Commands::Build(bg) = cli.command else {
+        panic!("expected build group");
+    };
+    assert!(
+        matches!(bg.action, build_group::BuildCmd::SdkSidecar(_)),
+        "expected sdk-sidecar build command"
     );
 }
 
@@ -1527,7 +1541,7 @@ fn test_run_volume_persistent() {
         "--image",
         "alpine:latest",
         "--mount",
-        "/data:/mnt/data:4G",
+        "/data:/data/vol:4G",
         "--",
         "sh",
     ])
@@ -1539,7 +1553,7 @@ fn test_run_volume_persistent() {
                 ..
             }) => {
                 assert_eq!(volume.len(), 1);
-                assert_eq!(volume[0], "/data:/mnt/data:4G");
+                assert_eq!(volume[0], "/data:/data/vol:4G");
             }
             _ => panic!("Expected machine run"),
         },
@@ -1566,7 +1580,7 @@ fn test_parse_volume_spec_dir_share() {
 
 #[test]
 fn test_parse_volume_spec_disk() {
-    let spec = parse_volume_spec("/data:/mnt/data:4G").unwrap();
+    let spec = parse_volume_spec("/data:/data/vol:4G").unwrap();
     match spec {
         VolumeSpec::Disk {
             host,
@@ -1576,7 +1590,7 @@ fn test_parse_volume_spec_disk() {
             ..
         } => {
             assert_eq!(host, "/data");
-            assert_eq!(guest, "/mnt/data");
+            assert_eq!(guest, "/data/vol");
             assert_eq!(size, "4G");
             assert!(!encrypted);
         }
@@ -1594,10 +1608,10 @@ fn test_parse_volume_spec_invalid() {
 fn test_parse_volume_spec_generic_dir_share() {
     // A generic guest mount (not /mnt/config|secrets) now parses as a
     // dir share — the old "unsupported mount" bail is gone.
-    let spec = parse_volume_spec("/tmp/foo:/mnt/custom").unwrap();
+    let spec = parse_volume_spec("/tmp/foo:/data/custom").unwrap();
     match spec {
         VolumeSpec::DirShare { guest_mount, .. } => {
-            assert_eq!(guest_mount, "/mnt/custom");
+            assert_eq!(guest_mount, "/data/custom");
         }
         _ => panic!("Expected DirShare"),
     }
@@ -1846,8 +1860,8 @@ fn test_forward_multiple_positional() {
 
 #[test]
 fn test_forward_no_ports_parses() {
-    // forward with no ports should parse successfully — the runtime path
-    // falls back to persisted ports from run-info.json
+    // Stale invocations still parse so execution can return the targeted
+    // signed-ingress migration error.
     let cli = Cli::try_parse_from(["mvmctl", "machine", "forward", "swift"]).unwrap();
     let Commands::Machine(mg) = cli.command else {
         panic!("expected vm group")
@@ -1904,6 +1918,152 @@ fn test_parse_port_spec_invalid() {
 fn top_level_listing_verbs_are_unrecognized() {
     assert!(Cli::try_parse_from(["mvmctl", "ls"]).is_err());
     assert!(Cli::try_parse_from(["mvmctl", "ps"]).is_err());
+}
+
+// --- `agent-session`: the durable-agent-session operator surface ---
+
+#[test]
+fn agent_session_ls_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "agent-session", "ls"]).unwrap();
+    assert!(matches!(cli.command, Commands::AgentSession(_)));
+}
+
+#[test]
+fn agent_session_open_requires_an_id_and_takes_repeatable_members() {
+    assert!(Cli::try_parse_from(["mvmctl", "agent-session", "open"]).is_err());
+
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "agent-session",
+        "open",
+        "sess-a",
+        "--member",
+        "vm-one",
+        "--member",
+        "vm-two",
+        "--resume-point",
+        "sha256:abababababababababababababababababababababababababababababababab",
+    ])
+    .unwrap();
+    let Commands::AgentSession(args) = cli.command else {
+        panic!("expected the agent-session command")
+    };
+    let agent_session::AgentSessionAction::Open(open) = args.action else {
+        panic!("expected the open subcommand")
+    };
+    assert_eq!(open.session_id, "sess-a");
+    assert_eq!(open.members, vec!["vm-one", "vm-two"]);
+    assert!(open.resume_point.is_some());
+}
+
+#[test]
+fn agent_session_open_needs_neither_a_member_nor_a_resume_point() {
+    // Both are legal to omit: a session with no resume point is refused at
+    // resume time, not at open time, and one with no member simply cannot
+    // chain its park.
+    let cli = Cli::try_parse_from(["mvmctl", "agent-session", "open", "sess-a"]).unwrap();
+    let Commands::AgentSession(args) = cli.command else {
+        panic!("expected the agent-session command")
+    };
+    let agent_session::AgentSessionAction::Open(open) = args.action else {
+        panic!("expected the open subcommand")
+    };
+    assert!(open.members.is_empty());
+    assert!(open.resume_point.is_none());
+}
+
+#[test]
+fn agent_session_show_requires_an_id() {
+    assert!(Cli::try_parse_from(["mvmctl", "agent-session", "show"]).is_err());
+    assert!(Cli::try_parse_from(["mvmctl", "agent-session", "show", "sess-alpha"]).is_ok());
+}
+
+#[test]
+fn agent_session_verb_is_not_named_session() {
+    // `mvmctl machine session` already means machine-session residency.
+    // A bare `session` verb would collide with it in the operator's head.
+    assert!(Cli::try_parse_from(["mvmctl", "session", "ls"]).is_err());
+}
+
+#[test]
+fn agent_session_park_requires_a_reason() {
+    assert!(Cli::try_parse_from(["mvmctl", "agent-session", "park", "sess-a"]).is_err());
+    assert!(
+        Cli::try_parse_from([
+            "mvmctl",
+            "agent-session",
+            "park",
+            "sess-a",
+            "--reason",
+            "approval-wait",
+        ])
+        .is_ok()
+    );
+}
+
+#[test]
+fn agent_session_resume_requires_the_workload_material() {
+    // The session record deliberately carries no image, kernel or size, so
+    // the operator supplies them. A resume that could be typed without them
+    // would have to guess, which is the thing the flags exist to prevent.
+    assert!(Cli::try_parse_from(["mvmctl", "agent-session", "resume", "sess-a"]).is_err());
+
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "agent-session",
+        "resume",
+        "sess-a",
+        "--backend",
+        "hvf",
+        "--image",
+        "demo",
+        "--image-sha256",
+        "abababababababababababababababababababababababababababababababab",
+        "--cpus",
+        "2",
+        "--mem-mib",
+        "512",
+    ])
+    .unwrap();
+    let Commands::AgentSession(args) = cli.command else {
+        panic!("expected the agent-session command")
+    };
+    let agent_session::AgentSessionAction::Resume(resume) = args.action else {
+        panic!("expected the resume subcommand")
+    };
+    assert_eq!(resume.backend, "hvf");
+    assert_eq!(resume.image, "demo");
+    assert_eq!(resume.cpus, 2);
+    assert_eq!(resume.mem_mib, 512);
+    assert!(
+        resume.kernel_sha256.is_none(),
+        "a backend that carries its own kernel supplies no sha"
+    );
+}
+
+#[test]
+fn agent_session_park_takes_a_journal_cursor_and_an_approval_head() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "agent-session",
+        "park",
+        "sess-a",
+        "--reason",
+        "idle",
+        "--journal-cursor",
+        "42",
+        "--approval-head",
+        "sha256:abababababababababababababababababababababababababababababababab",
+    ])
+    .unwrap();
+    let Commands::AgentSession(args) = cli.command else {
+        panic!("expected the agent-session command")
+    };
+    let agent_session::AgentSessionAction::Park(park) = args.action else {
+        panic!("expected the park subcommand")
+    };
+    assert_eq!(park.journal_cursor, 42);
+    assert!(park.approval_head.is_some());
 }
 
 #[test]
@@ -2046,6 +2206,20 @@ fn test_metrics_command_parses() {
             action: ops::group::OpsCmd::Metrics(metrics::Args {
                 json: false,
                 instance: None,
+            })
+        })
+    ));
+}
+
+#[test]
+fn mcp_stdio_command_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "ops", "mcp", "stdio"])
+        .expect("the named MCP stdio consumer must parse");
+    assert!(matches!(
+        cli.command,
+        Commands::Ops(ops::group::Args {
+            action: ops::group::OpsCmd::Mcp(ops::mcp::Args {
+                transport: ops::mcp::Transport::Stdio
             })
         })
     ));
@@ -2477,12 +2651,18 @@ fn test_audit_receipts_export_parses() {
                             tenant,
                             plan_id,
                             json,
+                            archive,
+                            full_chain,
                         },
                 },
         }) => {
             assert_eq!(tenant, "acme");
             assert_eq!(plan_id, None);
             assert!(json);
+            // The archive flags default off, so the pre-existing print path is
+            // what a bare `--json` export still takes.
+            assert_eq!(archive, None);
+            assert!(!full_chain);
         }
         _ => panic!("Expected Audit::Receipts::Export"),
     }
@@ -3218,7 +3398,7 @@ fn run_transient_default_manifest_argv_only() {
                 ..
             }) => {
                 assert!(manifest.is_none());
-                assert_eq!(cpus, 2);
+                assert_eq!(cpus, crate::commands::shared::default_vcpus());
                 assert_eq!(memory, "512M");
                 assert!(volume.is_empty());
                 assert!(env.is_empty());
@@ -3301,7 +3481,7 @@ fn run_default_profile_argv_only() {
                 assert_eq!(image.as_deref(), Some("alpine:latest"));
                 assert!(!net, "deny-all by default");
                 assert!(allow_host.is_empty());
-                assert_eq!(cpus, 2);
+                assert_eq!(cpus, crate::commands::shared::default_vcpus());
                 assert_eq!(memory, "512M");
                 assert_eq!(profile, exec::RunProfile::Standard);
                 assert!(volume.is_empty());
@@ -4720,6 +4900,21 @@ fn emits_machine_readable_stdout(argv: &[&str]) -> bool {
         .emits_machine_readable_stdout()
 }
 
+#[test]
+fn a_transient_run_with_a_command_reserves_stdout_for_the_guest() {
+    // The guest's own stdout is relayed to the caller, so host chrome must not
+    // share the stream — a warning printed there lands glued to the workload's
+    // output and breaks anything reading it.
+    assert!(emits_machine_readable_stdout(&[
+        "mvmctl", "machine", "run", "--image", "alpine", "--", "echo", "hi"
+    ]));
+
+    // Nothing to relay: a detached boot prints host chrome and no guest output.
+    assert!(!emits_machine_readable_stdout(&[
+        "mvmctl", "machine", "run", "--image", "alpine", "-d"
+    ]));
+}
+
 fn exits_early(argv: &[&str]) -> bool {
     Cli::try_parse_from(argv)
         .unwrap()
@@ -5101,7 +5296,6 @@ fn machine_console_refused_on_sealed_image() {
             mode: StartModeKind::Detached,
             accessible: false,
             rootfs_path: None,
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
             runtime_overlay_version: None,
             observability_target: None,
         },
@@ -5146,6 +5340,79 @@ fn machine_run_up_json_guards_stdout() {
     assert!(
         cli.command.emits_machine_readable_stdout(),
         "--up-json must guard stdout via emits_machine_readable_stdout"
+    );
+}
+
+#[test]
+fn up_json_reports_prod_when_the_launch_grant_is_prodsafe_only() {
+    // The SDK gates its DevOnly surfaces on this field:
+    //   if self.build_mode != "dev": raise SandboxDevOnly
+    // Reporting the *image* posture let that gate pass for a launch whose grant
+    // admits no DevOnly verb, so the SDK proceeded and the guest refused
+    // instead — with a verb-grant error rather than the documented
+    // SandboxDevOnly. The field has to answer the question it is asked: can
+    // this launch use DevOnly verbs?
+    //
+    // This is the exact argv the Python SDK's live transport shells: no tty, no
+    // trailing argv, no --profile dev. That is grant-eligible, so the launch
+    // carries the attenuated ProdSafe set.
+    let args = parse_machine_run(&["-d", "--up-json", "--name", "vm", "--image", "alpine"])
+        .expect("sdk-shaped run args parse");
+    assert!(
+        crate::commands::machine::runtime::launch_carries_restricted_grant(&args),
+        "an SDK-shaped launch is grant-eligible and gets the ProdSafe-only set"
+    );
+}
+
+#[test]
+fn a_trailing_argv_launch_is_not_grant_restricted() {
+    // Trailing argv means an ad-hoc Exec, which is DevOnly — such a launch must
+    // not receive the attenuated grant, so it is free to report the image's own
+    // posture.
+    let args = parse_machine_run(&["-d", "--name", "vm", "--image", "alpine", "--", "sh"])
+        .expect("argv run args parse");
+    assert!(
+        !crate::commands::machine::runtime::launch_carries_restricted_grant(&args),
+        "a trailing-argv run keeps the unrestricted grant"
+    );
+}
+
+#[test]
+fn machine_run_up_json_withholds_the_started_banner() {
+    // The test above pins a parse-level flag and passed the whole time stdout
+    // was in fact being polluted: `run -d --up-json` printed
+    // "started machine <name>" ahead of the envelope, so the SDK's live
+    // transport died on `json.loads(stdout)` at line 1 column 1. Declaring
+    // stdout machine-readable is not the same as withholding the banner, so
+    // pin the banner decision itself.
+    let args = parse_machine_run(&["--up-json", "--name", "vm", "--image", "alpine"])
+        .expect("up-json run args parse");
+    assert!(
+        crate::commands::machine::runtime::banner_suppressed(&args),
+        "--up-json reserves stdout for the envelope, so the banner must be withheld"
+    );
+    // Pin the wiring too, not just the decision: a mapping that stopped
+    // consulting `banner_suppressed` would leave the assertion above green
+    // while stdout went back to carrying the banner.
+    assert!(
+        crate::commands::machine::runtime::start_args_for_run(&args, "vm").quiet,
+        "the start arguments a --up-json run boots under must carry quiet"
+    );
+}
+
+#[test]
+fn machine_run_without_up_json_keeps_the_started_banner() {
+    // The banner is the only feedback an interactive `-d` run gives, so
+    // suppressing it unconditionally would be a regression of its own.
+    let args = parse_machine_run(&["-d", "--name", "vm", "--image", "alpine"])
+        .expect("detached run args parse");
+    assert!(
+        !crate::commands::machine::runtime::banner_suppressed(&args),
+        "a plain detached run still tells the user the machine started"
+    );
+    assert!(
+        !crate::commands::machine::runtime::start_args_for_run(&args, "vm").quiet,
+        "a plain detached run boots without quiet"
     );
 }
 

@@ -52,21 +52,31 @@ default image:
 ## Sharing host directories: `--mount`
 
 `--mount HOST:GUEST[:MODE]` shares a host directory into the guest at
-`GUEST`. `MODE` is `ro` (default) or `rw`; a writable share requires
-`--profile dev` or `--profile permissive`. The flag is repeatable. `--volume`
-remains accepted as a compatibility alias, but `-v` is global verbosity.
+`GUEST`. The flag is repeatable. `--volume` remains accepted as a
+compatibility alias, but `-v` is global verbosity.
+
+`GUEST` must sit under **`/data` or `/work`** — those are the only two
+allow-roots. Anything else is refused, including `/mnt/*`, which is excluded
+so a share cannot shadow the runtime's own `/mnt/config` and `/mnt/secrets`
+drives.
 
 ### Read-only (default)
 
 ```bash
 echo "hello" > /tmp/foo
-mvmctl machine run --image alpine --mount /tmp:/host -- cat /host/foo     # prints "hello"
+mvmctl machine run --image alpine --mount /tmp:/data/host -- cat /data/host/foo   # prints "hello"
 ```
 
-### Writable: `:rw`
+### Writable: `:rw` needs a persistent machine
+
+A **transient** run's live shares are read-only under *every* profile —
+`--profile dev` does not change that. `:rw` is accepted only on a persistent
+machine (`--name` plus `-d`), and only under `--profile dev` or
+`--profile permissive`:
 
 ```bash
-mvmctl machine run --flake . --profile dev --mount .:/work:rw -- sh -c 'echo result > /work/output.txt'
+mvmctl machine run --flake . --profile dev --name builder -d --mount .:/work:rw
+mvmctl machine exec builder -- sh -c 'echo result > /work/output.txt'
 cat ./output.txt       # "result" — written by the guest
 ```
 
@@ -80,10 +90,10 @@ and host-visibility semantics of the current volume backend, see the
 Modes are independent per directory:
 
 ```bash
-mvmctl machine run --flake . --profile dev \
-  --mount ./src:/work:rw \
-  --mount ~/.cargo:/root/.cargo:ro \
-  -- cargo build --manifest-path /work/Cargo.toml
+mvmctl machine run --flake . --profile dev --name build -d \
+  --mount ./src:/work/src:rw \
+  --mount ~/.cargo:/data/cargo:ro
+mvmctl machine exec build -- cargo build --manifest-path /work/src/Cargo.toml
 ```
 
 ## Injecting environment variables: `--env`
@@ -122,7 +132,11 @@ mvmctl machine run --flake . --cpus 4 --memory 1G -- ./benchmark.sh
 mvmctl machine run --flake . --timeout 300 -- ./long-running-task.sh
 ```
 
-Defaults: 2 vCPUs, 512 MiB, 60-second timeout per command.
+Defaults: 2 vCPUs (`--cpus`), 512 MiB (`--memory`). **`--timeout` has no
+default** — omit it and the run is unbounded. A sealed run fails closed when
+its selected backend cannot enforce a wall-clock grant; currently Firecracker
+and QEMU do not own a long-lived supervisor timer. Use `mvmctl doctor` to check
+the active backend before relying on `--timeout` for a sealed workload.
 
 ## Driving from a launch plan
 
@@ -197,7 +211,8 @@ highest):
 - **Non-zero exit**: same as normal exit; `mvmctl machine run` propagates the
   guest's exit code.
 - **Ctrl-C**: a SIGINT handler triggers teardown so the Firecracker
-  process and any tap interface don't get orphaned.
+  process and the per-VM network endpoint don't get orphaned. (There is no
+  tap interface to orphan — a workload microVM has no guest NIC.)
 - **Hard kill** (`kill -9` on `mvmctl machine run` itself): teardown is
   best-effort; you may need `mvmctl machine ls` and `mvmctl machine stop <name>` to
   clean up. Each unnamed transient VM gets a generated name like
@@ -213,16 +228,21 @@ highest):
 - **Network access.** The guest gets the same network configuration
   any other transient VM gets -- if your `--manifest` exposes outbound
   internet, so does `mvmctl machine run` from that template.
-- **Stdin** is currently *not* forwarded to the guest. Pipe data via a
-  `--mount`-shared file instead. Streaming stdin is a future
-  improvement.
-- **Persistent state** doesn't survive teardown beyond what `:rw`
-  `--mount` rsyncs back. For larger or longer-lived state, use
-  `mvmctl machine run` with a persistent volume.
+- **Stdin** is not forwarded to a trailing-argv run. It *is* available to a
+  baked-entrypoint run via `machine run --entrypoint --stdin -`, which needs
+  the `host.stream.v1` grant on the signed plan — see
+  [Workload input](/guides/workload-input/). For a trailing-argv run, pipe
+  data via a `--mount`-shared file instead.
+- **Persistent state** doesn't survive teardown. A transient run cannot take
+  a `:rw` share at all, so nothing is written back to the host. For state
+  that has to outlive the run, boot a persistent machine (`--name` + `-d`)
+  with a `:rw` share or a managed volume.
 
 ## See also
 
 - [CLI reference: One-shot Exec](/reference/cli-commands/#one-shot-exec)
 - [Manifests guide](/guides/manifests/) -- build a reusable base image
-  via `mvm.toml`; `mvmctl machine run [PATH]` accepts the manifest path directly
+  via `mvm.toml`. Only `mvmctl machine build` takes a positional `[PATH]`;
+  `machine run` and `run` take `-m/--manifest <PATH>`, because their
+  positional slot is the trailing argv.
 - [Quick Start](/getting-started/quickstart/#7-sandboxed-one-shot-commands)

@@ -7,7 +7,7 @@ The console is the human debugging path into a running microVM. Use it when
 you need a terminal, a shell prompt, or a one-off command with terminal
 semantics.
 
-Programmatic automation should usually use `mvmctl machine exec`, `mvmctl proc`, or
+Programmatic automation should usually use `mvmctl machine exec`, `mvmctl machine proc`, or
 the SDK runtime surface instead. Those paths are easier to script, test, and
 audit.
 
@@ -41,9 +41,12 @@ but not an interactive session. Use `mvmctl machine exec` for normal automation.
 | --- | --- |
 | Human debugging | `mvmctl machine console <name>` |
 | Scripted command execution | `mvmctl machine exec <name> -- <cmd>` |
-| Process lifecycle control | `mvmctl proc start/list/wait/kill` |
-| File transfer | `mvmctl machine fs` or `mvmctl cp` |
+| Process lifecycle control | `mvmctl machine proc start/ls/wait/kill` |
+| File transfer | `mvmctl machine fs` or `mvmctl machine cp` |
 | Service logs | `mvmctl machine logs <name>` |
+
+`machine proc`, `machine fs`, and `machine cp` are advanced verbs: they work,
+but they are hidden from `machine --help`.
 
 ## Related pages
 

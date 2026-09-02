@@ -10,9 +10,10 @@
 //! guest has no NIC to inherit an address on.
 
 use anyhow::{Context, Result};
+use mvm_contract::protocol::vm_backend::BackendKind;
 use mvm_core::checkpoint::{CheckpointId, VmFullOrigin, vm_full_origin};
 use mvm_core::config::vm_state_dir;
-use mvm_runtime::checkpoint::{CheckpointStore, ForkParams, fork_vm_full};
+use mvm_runtime::checkpoint::{CheckpointStore, ForkParams, ForkParentLiveness, fork_vm_full};
 
 use super::{
     CheckpointForkJson, SignedChainAnchor, bind_checkpoint_forked, grant_predecessor_from_vm_name,
@@ -22,17 +23,24 @@ use crate::ui;
 
 /// Inputs for [`fork_vm_full_arm`]. Grouped to stay under the
 /// `clippy::too_many_arguments` workspace ceiling.
-struct ForkVmFullArmParams<'a> {
-    store: &'a CheckpointStore,
-    checkpoint: &'a CheckpointId,
-    new_id: Option<String>,
+pub(in crate::commands) struct ForkVmFullArmParams<'a> {
+    pub(in crate::commands) store: &'a CheckpointStore,
+    pub(in crate::commands) checkpoint: &'a CheckpointId,
+    pub(in crate::commands) new_id: Option<String>,
     /// Refused with a user-visible error: a vm_full fork restores the saved
     /// machine state (cpu/mem baked into the snapshot), so the shape is fixed.
     /// Use an fs_quick fork to boot a resized child.
-    cpus_override: Option<u32>,
+    pub(in crate::commands) cpus_override: Option<u32>,
     /// Refused with a user-visible error for the same reason as `cpus_override`.
-    memory_override: Option<&'a str>,
-    json: bool,
+    pub(in crate::commands) memory_override: Option<&'a str>,
+    pub(in crate::commands) json: bool,
+    /// Whether the caller explicitly opted into Firecracker's experimental
+    /// full-memory fork. This is ignored for checkpoints from other backends.
+    pub(in crate::commands) bypass_experimental_guard: bool,
+    /// Secret bindings declared for the child. Empty reproduces the prior
+    /// behaviour: a child admitted with no bindings.
+    pub(in crate::commands) declared_secrets: &'a [mvm_core::plan::SecretBinding],
+    pub(in crate::commands) allow_secret_drop: bool,
 }
 
 /// vm_full fork: clone the captured triple into a new child identity, admit a
@@ -51,22 +59,8 @@ fn fc_vm_full_fork_experimental_enabled() -> bool {
     std::env::var_os("MVM_FORK_VMFULL_FC_EXPERIMENTAL").is_some()
 }
 
-pub(super) fn fork_vm_full_arm(
-    store: &CheckpointStore,
-    checkpoint: &CheckpointId,
-    new_id: Option<String>,
-    cpus_override: Option<u32>,
-    memory_override: Option<&str>,
-    json: bool,
-) -> Result<()> {
-    fork_vm_full_arm_inner(ForkVmFullArmParams {
-        store,
-        checkpoint,
-        new_id,
-        cpus_override,
-        memory_override,
-        json,
-    })
+pub(in crate::commands) fn fork_vm_full_arm(p: ForkVmFullArmParams<'_>) -> Result<()> {
+    fork_vm_full_arm_inner(p)
 }
 
 fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
@@ -111,6 +105,8 @@ fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
             child_id,
             now,
             json: p.json,
+            declared_secrets: p.declared_secrets,
+            allow_secret_drop: p.allow_secret_drop,
         }),
         Some(VmFullOrigin::Firecracker) => {
             fork_vm_full_arm_fc(ForkVmFullArmFcParams {
@@ -122,7 +118,9 @@ fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
                 child_id,
                 now,
                 json: p.json,
-                bypass_experimental_guard: false,
+                bypass_experimental_guard: p.bypass_experimental_guard,
+                declared_secrets: p.declared_secrets,
+                allow_secret_drop: p.allow_secret_drop,
             })?;
             Ok(())
         }
@@ -153,6 +151,10 @@ pub(in crate::commands) struct ForkVmFullArmFcParams<'a> {
     /// stays on the lower-level `vm checkpoint fork` path; the user-facing
     /// `machine warm-restore` verb opts in explicitly.
     pub(in crate::commands) bypass_experimental_guard: bool,
+    /// Secret bindings declared for the child. Empty reproduces the prior
+    /// behaviour: a child admitted with no bindings.
+    pub(in crate::commands) declared_secrets: &'a [mvm_core::plan::SecretBinding],
+    pub(in crate::commands) allow_secret_drop: bool,
 }
 
 /// FC vm_full fork: clone the captured triple, admit a fresh claim-8 plan for
@@ -211,7 +213,9 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
         checkpoint: p.checkpoint,
         parent_meta: &p.parent_meta,
         child_vm_name: &p.child_vm_name,
-        backend_name: "firecracker",
+        backend_kind: BackendKind::Firecracker,
+        declared_secrets: p.declared_secrets,
+        allow_secret_drop: p.allow_secret_drop,
     })?;
 
     // Verify the parent against the signed audit chain before cloning/restoring.
@@ -226,6 +230,7 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
             child_vm_name: p.child_vm_name.clone(),
             dest_dir: p.dest_dir,
             created_unix: p.now,
+            parent_liveness: ForkParentLiveness::MustBeStopped,
             child_plan_json,
             child_tenant_id,
         },
@@ -244,7 +249,14 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
     let meta = fork_result
         .with_context(|| format!("forking FC vm_full checkpoint {:?}", p.checkpoint.as_str()))?;
 
-    bind_checkpoint_forked(p.checkpoint, &meta, &p.child_vm_name, p.store)?;
+    bind_checkpoint_forked(
+        p.checkpoint,
+        &meta,
+        &p.child_vm_name,
+        p.store,
+        p.declared_secrets,
+        &crate::commands::vm::tenant_resolution::resolve_tenant(None),
+    )?;
     crate::commands::vm::up::emit_launched_if(&admission, "firecracker", true);
 
     // Deliver the fresh generation token to every restored child. A grant is
@@ -303,7 +315,24 @@ struct AdmitForkedChildParams<'a> {
     checkpoint: &'a CheckpointId,
     parent_meta: &'a mvm_core::checkpoint::CheckpointMeta,
     child_vm_name: &'a str,
-    backend_name: &'a str,
+    /// The tier that will boot this child. Typed, not a label: the grant gate
+    /// measures against it, and a grant checked against a string is checked
+    /// against whatever the caller typed. The plan's `backend_name` is derived
+    /// from this, so the two cannot disagree.
+    backend_kind: BackendKind,
+    /// Secret bindings the caller declares for this child.
+    ///
+    /// Declared, never inherited: the parent's set is not consulted, so the
+    /// child's capability is readable from the child's own plan without
+    /// walking the lineage. An empty set is the default and reproduces the
+    /// prior behaviour exactly.
+    ///
+    /// Carries a name and a source reference only. The destination binding
+    /// (`auth_type` + `allowed_hosts`) is resolved by name against the
+    /// tenant's `BindingStore` at the substitution endpoint, so a name the
+    /// operator has not bound grants nothing.
+    declared_secrets: &'a [mvm_core::plan::SecretBinding],
+    allow_secret_drop: bool,
 }
 
 /// The admitted claim-8 envelope a vm_full fork boots its child under.
@@ -339,23 +368,41 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
         .find(|b| b.name == mvm_core::checkpoint::ROOTFS_BLOB)
         .map(|b| b.sha256.clone());
     let parent_agent_verbs = parent_agent_verb_override(p.checkpoint, p.store);
-    super::warn_dropped_parent_secrets(p.checkpoint, p.store);
     let tenant = crate::commands::vm::tenant_resolution::resolve_tenant(None);
+    super::validate_fork_secret_policy(
+        p.checkpoint,
+        p.store,
+        &tenant,
+        p.declared_secrets,
+        p.allow_secret_drop,
+    )?;
     let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::new();
     let admission = crate::commands::vm::up::admit_plan_for_boot(
         crate::commands::vm::up::AdmitPlanForBootParams {
             network_mode: super::parent_network_mode(p.checkpoint, p.store),
             tenant: &tenant,
             vm_name: p.child_vm_name,
-            backend_name: p.backend_name,
+            backend_name: p.backend_kind.as_str(),
             rootfs_path: &rootfs_blob,
+            // A fork resumes a saved VM state rather than booting a kernel of
+            // its own, so this admission has no kernel to name. Deliberately
+            // not the parent's: a child admitted under an environment it did
+            // not itself load would record a pin nothing here verified.
+            kernel_path: None,
             precomputed_image_sha256: recorded_sha,
             boot_artifact_identity: None,
             cpus: user_cfg.default_cpus,
             mem_mib: user_cfg.default_memory_mib as u64,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::default(),
-            secrets: Vec::new(),
+            // Derived from the set, never defaulted: `SecretReleasePolicy`
+            // defaults to `None` — "no secrets may be released" — so a child
+            // admitted with declared bindings under the default would carry a
+            // list nothing could ever release.
+            secret_release: crate::commands::vm::managed_secrets::secret_release_for_bindings(
+                p.declared_secrets,
+            ),
+            secrets: p.declared_secrets.to_vec(),
+            caller_commitment: None,
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: None,
@@ -377,7 +424,12 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
             // is the widest ask rather than the narrowest — an absent CPU or
             // wall-clock grant means unbounded.
             grants: p.parent_meta.grants.clone(),
-            backend_kind: None,
+            // The tier that will actually boot this child, typed rather than
+            // parsed from a label. `None` here made the gate take its
+            // fail-closed "no backend object, no answer" arm, and a fork child
+            // is admitted prod-profile, so that arm is a refusal: a parent
+            // carrying any cpu or wall-clock grant could not be forked at all.
+            backend_kind: Some(p.backend_kind),
             entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
                 "a checkpoint fork boots the image the parent booted; this path resolves no entrypoint",
             ),
@@ -417,6 +469,10 @@ struct ForkVmFullArmHvfParams<'a> {
     child_id: CheckpointId,
     now: u64,
     json: bool,
+    /// Secret bindings declared for the child. Empty reproduces the prior
+    /// behaviour: a child admitted with no bindings.
+    declared_secrets: &'a [mvm_core::plan::SecretBinding],
+    allow_secret_drop: bool,
 }
 
 /// HVF vm_full fork: clone the captured state into a fresh child identity, admit
@@ -438,7 +494,9 @@ fn fork_vm_full_arm_hvf(p: ForkVmFullArmHvfParams<'_>) -> Result<()> {
         checkpoint: p.checkpoint,
         parent_meta: &p.parent_meta,
         child_vm_name: &p.child_vm_name,
-        backend_name: "hvf",
+        backend_kind: BackendKind::Hvf,
+        declared_secrets: p.declared_secrets,
+        allow_secret_drop: p.allow_secret_drop,
     })?;
 
     // Verify the parent against the signed audit chain before cloning anything.
@@ -452,6 +510,7 @@ fn fork_vm_full_arm_hvf(p: ForkVmFullArmHvfParams<'_>) -> Result<()> {
             child_vm_name: p.child_vm_name.clone(),
             dest_dir: p.dest_dir,
             created_unix: p.now,
+            parent_liveness: ForkParentLiveness::MayBeRunning,
             child_plan_json,
             child_tenant_id,
         },
@@ -464,7 +523,14 @@ fn fork_vm_full_arm_hvf(p: ForkVmFullArmHvfParams<'_>) -> Result<()> {
     let meta = fork_result
         .with_context(|| format!("forking HVF vm_full checkpoint {:?}", p.checkpoint.as_str()))?;
 
-    bind_checkpoint_forked(p.checkpoint, &meta, &p.child_vm_name, p.store)?;
+    bind_checkpoint_forked(
+        p.checkpoint,
+        &meta,
+        &p.child_vm_name,
+        p.store,
+        p.declared_secrets,
+        &crate::commands::vm::tenant_resolution::resolve_tenant(None),
+    )?;
     crate::commands::vm::up::emit_launched_if(&admission, "hvf", true);
 
     if let Err(error) = deliver_hvf_fork_post_restore(
@@ -533,10 +599,7 @@ fn deliver_hvf_fork_post_restore(
     let token = mvm_core::crypto::vmgenid::fresh_generation_token(parent_snapshot_digest).token;
     let outcome = mvm_vmm::post_restore::signal_post_restore(
         child_vm_name,
-        &mvm_vmm::post_restore::VsockPostRestoreSignal {
-            token,
-            grant_envelope,
-        },
+        &mvm_vmm::post_restore::VsockPostRestoreSignal::for_resumed_child(token, grant_envelope),
         mvm_vmm::post_restore::POST_RESTORE_READY_TIMEOUT,
     )
     .with_context(|| format!("sending PostRestore to '{child_vm_name}'"))?;
@@ -608,6 +671,277 @@ fn require_fork_post_restore_success(reply: mvm_agentd::vsock::PostRestoreReply)
 mod tests {
     use super::*;
 
+    use mvm_contract::ir::AuthType;
+    use mvm_contract::plan::{SecretBinding, SecretSource};
+    use mvm_core::checkpoint::{CheckpointClass, CheckpointMeta, ContentBlob, ROOTFS_BLOB};
+    use mvm_hostd::keyholder::{BindingStore, FileBindingStore, SecretBindingMeta};
+
+    /// A parent checkpoint whose recorded rootfs sha matches a real blob on
+    /// disk. The blob has to exist: admission *verifies* the recorded digest
+    /// against the bytes rather than trusting it, so a fixture that records a
+    /// sha without writing the file fails before it reaches the plan.
+    fn parent_with_grants(
+        store: &CheckpointStore,
+        id: &str,
+        grants: Option<mvm_contract::grants::Grants>,
+    ) -> CheckpointMeta {
+        use sha2::{Digest, Sha256};
+        let content_dir = store.content_dir(&CheckpointId::new(id));
+        std::fs::create_dir_all(&content_dir).unwrap();
+        let bytes = b"fixture rootfs";
+        std::fs::write(content_dir.join(ROOTFS_BLOB), bytes).unwrap();
+
+        let mut meta =
+            CheckpointMeta::builder(CheckpointId::new(id), CheckpointClass::VmFull, "parent-vm")
+                .content(vec![ContentBlob {
+                    name: ROOTFS_BLOB.to_string(),
+                    sha256: hex::encode(Sha256::digest(bytes)),
+                }])
+                .supervisor_config_digest("d")
+                .created_unix(1)
+                .build();
+        meta.grants = grants;
+        store.write_meta(&meta).unwrap();
+        meta
+    }
+
+    fn admitted_child_secrets(declared: &[SecretBinding], vm: &str) -> Vec<SecretBinding> {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let id = format!("ck-{vm}");
+        // `parent_with_grants` is the helper that survived on main; the
+        // binding-store seeding below is what the enforcement tests need, so
+        // this keeps both rather than choosing one.
+        let parent_meta = parent_with_grants(&store, &id, None);
+        let binding_store = FileBindingStore::default_location().unwrap();
+        for binding in declared {
+            let SecretSource::Keystore { address } = &binding.source else {
+                continue;
+            };
+            binding_store
+                .put(
+                    "local",
+                    address,
+                    &SecretBindingMeta {
+                        auth_type: AuthType::Bearer,
+                        allowed_hosts: vec!["api.example.com".into()],
+                        sigv4: None,
+                        provider: None,
+                    },
+                )
+                .unwrap();
+        }
+        let admitted = admit_forked_child(&AdmitForkedChildParams {
+            store: &store,
+            checkpoint: &CheckpointId::new(&id),
+            parent_meta: &parent_meta,
+            child_vm_name: vm,
+            backend_kind: BackendKind::Hvf,
+            declared_secrets: declared,
+            allow_secret_drop: false,
+        })
+        .expect("a fork child is admitted");
+        admitted
+            .admission
+            .expect("the fork path never sets no_supervisor, so admission is Some")
+            .admitted
+            .plan()
+            .secrets
+            .clone()
+    }
+
+    /// The declared set reaches the child's own signed plan. Declared, not
+    /// inherited: the parent above holds no bindings, so anything present here
+    /// came from the caller.
+    #[test]
+    fn a_declared_binding_lands_in_the_forked_childs_plan() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+
+        let declared = vec![SecretBinding {
+            name: "STRIPE_KEY".to_string(),
+            source: SecretSource::Keystore {
+                address: "stripe".to_string(),
+            },
+        }];
+        let got = admitted_child_secrets(&declared, "child-declared");
+        assert_eq!(got, declared);
+    }
+
+    /// The default is unchanged behaviour: declare nothing, carry nothing. This
+    /// is the half that keeps the parent's set from leaking in by accident.
+    #[test]
+    fn a_fork_declaring_nothing_admits_a_child_with_no_bindings() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+
+        assert!(admitted_child_secrets(&[], "child-bare").is_empty());
+    }
+
+    /// The tier this test must use to mean anything: one that actually meters
+    /// CPU on the host running it.
+    ///
+    /// `ResourceControls::for_backend` answers per host, not per kind alone —
+    /// HVF reports `HvfVcpuQuota` only under `cfg!(target_os = "macos")`, and
+    /// `CpuControl::None` elsewhere, because there is no in-process vCPU
+    /// scheduler to enforce a share on Linux. Firecracker is the mirror image:
+    /// `CgroupShare` on Linux, nothing on macOS. Hardcoding either one makes
+    /// the test assert the opposite thing on the other platform — which is why
+    /// it passed locally on a Mac and failed in Linux CI, where the refusal it
+    /// was written to disprove is the correct answer.
+    const CPU_METERING_TIER: BackendKind = if cfg!(target_os = "macos") {
+        BackendKind::Hvf
+    } else {
+        BackendKind::Firecracker
+    };
+
+    /// A parent that bounded its CPU can still be forked.
+    ///
+    /// The child inherits the parent's grants and is admitted prod-profile, so
+    /// the grant gate refuses anything it cannot name a mechanism for. Passing
+    /// no backend made that refusal unconditional: every such parent became
+    /// unforkable, with an error naming the missing backend rather than the
+    /// grant. The tier is known here — each arm is one backend — so the gate
+    /// measures against it.
+    ///
+    /// The companion `a_share_the_tier_cannot_serve_is_still_refused` covers
+    /// the other direction, so this pair says "admitted where a mechanism
+    /// exists, refused where it does not" rather than either alone.
+    #[test]
+    fn a_parent_that_bounded_cpu_can_still_be_forked() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let id = "ck-cpu-bounded";
+        let parent_meta = parent_with_grants(
+            &store,
+            id,
+            Some(mvm_contract::grants::Grants {
+                cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 500 }),
+                ..Default::default()
+            }),
+        );
+
+        let admitted = admit_forked_child(&AdmitForkedChildParams {
+            store: &store,
+            checkpoint: &CheckpointId::new(id),
+            parent_meta: &parent_meta,
+            child_vm_name: "child-cpu-bounded",
+            backend_kind: CPU_METERING_TIER,
+            declared_secrets: &[],
+            // Strict default: these cases do not exercise attenuation.
+            allow_secret_drop: false,
+        })
+        .expect("a cpu-bounded parent is forkable on a tier that meters CPU");
+
+        let plan = admitted
+            .admission
+            .as_ref()
+            .expect("the fork path never sets no_supervisor")
+            .admitted
+            .plan();
+        assert_eq!(
+            plan.grants.as_ref().and_then(|g| g.cpu),
+            Some(mvm_contract::grants::CpuGrant::Share { millicores: 500 }),
+            "the inherited grant rides in the child's signed plan"
+        );
+    }
+
+    /// The other half: passing the backend did not weaken the gate. A share the
+    /// tier genuinely cannot serve is still refused — and now the refusal names
+    /// the tier and its limit, instead of reporting a missing backend.
+    ///
+    /// 1000 millicores is hvf's ceiling, so 1500 is unenforceable there. That is
+    /// a property of the tier, not of forking: the same grant is refused on the
+    /// same tier however the run was started.
+    #[test]
+    fn a_share_the_tier_cannot_serve_is_still_refused() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let id = "ck-cpu-unenforceable";
+        let parent_meta = parent_with_grants(
+            &store,
+            id,
+            Some(mvm_contract::grants::Grants {
+                cpu: Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 }),
+                ..Default::default()
+            }),
+        );
+
+        let err = match admit_forked_child(&AdmitForkedChildParams {
+            store: &store,
+            checkpoint: &CheckpointId::new(id),
+            parent_meta: &parent_meta,
+            child_vm_name: "child-cpu-unenforceable",
+            backend_kind: BackendKind::Hvf,
+            declared_secrets: &[],
+            // Strict default: these cases do not exercise attenuation.
+            allow_secret_drop: false,
+        }) {
+            // `AdmittedForkChild` carries the child's plan JSON and is
+            // deliberately not `Debug`, so this cannot use `expect_err`.
+            Ok(_) => panic!("a share above the tier's ceiling must be refused"),
+            Err(e) => e,
+        };
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains("hvf"), "the refusal names the tier: {msg}");
+        assert!(
+            msg.contains("cpu.share"),
+            "the refusal names the grant: {msg}"
+        );
+        assert!(
+            !msg.contains("without the backend"),
+            "the refusal must not be the no-backend arm any more: {msg}"
+        );
+    }
+
+    /// The plan records the tier the gate measured against. Two values derived
+    /// from one typed kind cannot drift into disagreeing about what boots.
+    #[test]
+    fn the_childs_plan_names_the_backend_the_gate_measured() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let id = "ck-tier-agrees";
+        let parent_meta = parent_with_grants(&store, id, None);
+
+        let admitted = admit_forked_child(&AdmitForkedChildParams {
+            store: &store,
+            checkpoint: &CheckpointId::new(id),
+            parent_meta: &parent_meta,
+            child_vm_name: "child-tier-agrees",
+            backend_kind: BackendKind::Hvf,
+            declared_secrets: &[],
+            // Strict default: these cases do not exercise attenuation.
+            allow_secret_drop: false,
+        })
+        .expect("a grantless parent is forkable");
+
+        let plan = admitted
+            .admission
+            .as_ref()
+            .expect("the fork path never sets no_supervisor")
+            .admitted
+            .plan();
+        // The gate refuses outright when the plan's recorded tier disagrees
+        // with the one it measures against, so these being one value is what
+        // keeps a fork admissible at all.
+        assert_eq!(plan.runtime_profile.0, BackendKind::Hvf.as_str());
+    }
+
     #[test]
     fn fork_post_restore_requires_acknowledgement_and_reseed() {
         let acknowledged = mvm_agentd::vsock::PostRestoreReply {
@@ -672,6 +1006,9 @@ mod tests {
             cpus_override: Some(8),
             memory_override: None,
             json: false,
+            bypass_experimental_guard: false,
+            declared_secrets: &[],
+            allow_secret_drop: false,
         })
         .unwrap_err();
         let msg = err.to_string();
@@ -693,6 +1030,9 @@ mod tests {
             cpus_override: None,
             memory_override: Some("2G"),
             json: false,
+            bypass_experimental_guard: false,
+            declared_secrets: &[],
+            allow_secret_drop: false,
         })
         .unwrap_err();
         let msg = err.to_string();

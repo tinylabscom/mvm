@@ -23,7 +23,7 @@ pub(super) fn check_cmd(name: &'static str, category: &'static str, args: &[&str
             name,
             category,
             ok: false,
-            info: e.to_string(),
+            info: format!("{e:#}"),
         },
     }
 }
@@ -46,7 +46,7 @@ pub(super) fn check_vm_cmd(name: &'static str, category: &'static str, cmd: &'st
             name,
             category,
             ok: false,
-            info: e.to_string(),
+            info: format!("{e:#}"),
         },
     }
 }
@@ -92,31 +92,43 @@ fn which_version(cmd: &str, args: &[&str]) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// The success arm, against a binary at a fixed absolute path rather than
+    /// a host toolchain.
+    ///
+    /// This replaces a pair of tests that ran `rustup --version` and `cargo
+    /// --version`. Those asserted a property of the developer's machine rather
+    /// than of `check_cmd`, and failed outright for anyone whose cargo came
+    /// from a distro package or from nix — neither installs rustup. Naming an
+    /// absolute path also drops the PATH lookup, so the assertion is about the
+    /// helper and nothing else.
     #[test]
-    fn check_cmd_rustup_on_host() {
-        let c = check_cmd("rustup", "tools", &["--version"]);
-        assert!(c.ok, "rustup should be available: {}", c.info);
-        assert!(
-            c.info.contains("rustup"),
-            "expected version string, got: {}",
-            c.info
-        );
-    }
-
-    #[test]
-    fn check_cmd_cargo_on_host() {
-        let c = check_cmd("cargo", "tools", &["--version"]);
-        assert!(c.ok, "cargo should be available: {}", c.info);
-        assert!(
-            c.info.contains("cargo"),
-            "expected version string, got: {}",
-            c.info
-        );
+    fn check_cmd_reports_the_stdout_of_a_successful_command() {
+        let c = check_cmd("/bin/echo", "tools", &["mvm"]);
+        assert!(c.ok, "/bin/echo should succeed: {}", c.info);
+        assert_eq!(c.info, "mvm", "stdout is captured and trimmed");
+        assert_eq!(c.category, "tools");
     }
 
     #[test]
     fn check_cmd_missing_tool() {
         let c = check_cmd("nonexistent-mvm-tool-xyz", "tools", &["--version"]);
         assert!(!c.ok, "nonexistent tool should fail");
+    }
+
+    #[test]
+    fn a_spawn_failure_reports_why_it_failed() {
+        let c = check_cmd("nonexistent-mvm-tool-xyz", "tools", &["--version"]);
+        assert!(
+            c.info.contains("nonexistent-mvm-tool-xyz"),
+            "expected the command to be named, got: {}",
+            c.info
+        );
+        assert!(
+            c.info.contains("os error"),
+            "a spawn failure must carry the underlying OS error, not just the \
+             context line — without it doctor reports a reason-free failure and \
+             an intermittent one cannot be told from a missing tool. got: {}",
+            c.info
+        );
     }
 }

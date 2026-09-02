@@ -63,7 +63,12 @@ fn lower_env_map(env: &std::collections::BTreeMap<String, EnvValue>, out: &mut V
     }
 }
 
-fn secret_release_for_bindings(bindings: &[SecretBinding]) -> SecretReleasePolicy {
+/// `PlanBound` the moment a plan declares any binding. A plan that lists
+/// bindings under `None` would declare capability it can never release, so
+/// this is derived from the set rather than chosen by each caller.
+pub(in crate::commands::vm) fn secret_release_for_bindings(
+    bindings: &[SecretBinding],
+) -> SecretReleasePolicy {
     if bindings.is_empty() {
         SecretReleasePolicy::None
     } else {

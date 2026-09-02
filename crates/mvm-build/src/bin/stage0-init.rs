@@ -51,12 +51,6 @@ mod linux {
     use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
     use std::time::{Duration, Instant};
 
-    /// Fixed set of virtio-blk candidates Stage 0 ever attaches. Small and
-    /// explicit rather than a `/sys/class/block` walk — a RootDir guest never
-    /// has more than a handful of disks, and a missing candidate is just a
-    /// failed `File::open` (cheap, non-fatal).
-    const STAGE0_DISK_CANDIDATES: &[&str] = &["/dev/vda", "/dev/vdb", "/dev/vdc", "/dev/vdd"];
-
     const VSOCK_EGRESS_PROXY_URL: &str = mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_URL;
     const VSOCK_EGRESS_NO_PROXY: &str = "127.0.0.1,localhost";
     const VSOCK_EGRESS_PROXY_LISTEN_ADDR: &str = mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN;
@@ -80,7 +74,9 @@ mod linux {
     /// launcher attaches this before the virtio-fs shares, so it enumerates as
     /// `/dev/vda`. QEMU uses `/dev/vda` as the rootfs, so this is libkrun-only.
     const LIBKRUN_STAGE0_NIX_STORE_DEV: &str = "/dev/vda";
-    const QEMU_STAGE0_NIX_STORE_DEV: &str = "/dev/vde";
+    /// QEMU attaches seed, work, output, and host binaries first, then the
+    /// read-only FlowMux identity. The persistent store follows as `/dev/vdf`.
+    const QEMU_STAGE0_NIX_STORE_DEV: &str = "/dev/vdf";
     /// Mount point for the persistent Stage 0 Nix store before binding it over
     /// `/nix`.
     const STAGE0_NIX_STORE_MOUNT: &str = "/nix-stage0-store";
@@ -468,9 +464,7 @@ mod linux {
     /// or Nix. Without this, TLS validation observes 1970 and every fresh
     /// bootstrap download fails with a misleading certificate error.
     fn sync_clock_from_host_epoch(cmdline: &str) -> Result<(), String> {
-        let Some(epoch_seconds) =
-            mvm_vmm::host::boot_config::builder_hostepoch_from_cmdline(cmdline)
-        else {
+        let Some(epoch_seconds) = mvm_core::vm_backend::decode_host_epoch_cmdline(cmdline) else {
             return Ok(());
         };
         mvm_agentd::restore_clock::resync(epoch_seconds)
@@ -594,7 +588,12 @@ mod linux {
         // letter stays as a fallback for a store image formatted before it
         // carried a label.
         let label = mvm_build::rootfs::STAGE0_NIX_STORE_EXT4_LABEL;
-        let by_label = find_labeled_ext4_disk(STAGE0_DISK_CANDIDATES, label)
+        // Every attached virtio disk, not a fixed prefix of them. The QEMU path
+        // attaches seed, work, out, mvm-bins and the FlowMux identity ahead of
+        // the store, so a four-entry list stopped two devices short of the disk
+        // it was looking for — the lookup could never succeed there, fell back
+        // to enumeration order, and picked the 32 KiB identity image.
+        let by_label = find_labeled_ext4_disk_among(virtio_block_devices(), label)
             .map(|d| d.to_string_lossy().into_owned());
         let device: &str = match by_label.as_deref() {
             Some(dev) => {
@@ -678,7 +677,8 @@ mod linux {
     /// writeback ahead of that marker and makes kernel error accounting part of
     /// the guest result.
     fn finalize_persistent_nix_store() -> Result<(), String> {
-        if is_qemu() {
+        if !persistent_store_finalization_required(is_qemu(), is_mountpoint(STAGE0_NIX_STORE_MOUNT))
+        {
             return Ok(());
         }
 
@@ -690,6 +690,10 @@ mod linux {
         unmount(NIX_TARGET)?;
         unmount(STAGE0_NIX_STORE_MOUNT)?;
         Ok(())
+    }
+
+    fn persistent_store_finalization_required(qemu: bool, persistent_mounted: bool) -> bool {
+        !qemu && persistent_mounted
     }
 
     fn reject_ext4_errors(errors_count_path: &Path) -> Result<(), String> {
@@ -742,8 +746,7 @@ mod linux {
 
     fn format_ext4_with(mkfs: &Path, dev: &str) -> Result<(), String> {
         let blocks_4k = device_size_4k_blocks(dev)?;
-        let status = Command::new(mkfs)
-            .args(["-F", "-q", "-b", "4096", dev, &blocks_4k.to_string()])
+        let status = ext4_format_command(mkfs, dev, blocks_4k)
             .status()
             .map_err(|e| format!("spawn {}: {e}", mkfs.display()))?;
         if !status.success() {
@@ -754,6 +757,16 @@ mod linux {
             ));
         }
         Ok(())
+    }
+
+    fn ext4_format_command(mkfs: &Path, dev: &str, blocks_4k: u64) -> Command {
+        let mut command = Command::new(mkfs);
+        command
+            .args(["-F", "-q", "-b", "4096", "-L"])
+            .arg(mvm_build::rootfs::STAGE0_NIX_STORE_EXT4_LABEL)
+            .arg(dev)
+            .arg(blocks_4k.to_string());
+        command
     }
 
     fn device_size_4k_blocks(dev: &str) -> Result<u64, String> {
@@ -1102,12 +1115,29 @@ mod linux {
 
     /// Output by mode: image = kernel + rootfs.ext4 + cmdline + manifest;
     /// kernel = kernel only; rootfs = rootfs + cmdline (+ manifest when
-    /// present).
+    /// present); sdk-sidecar = the resolver's three-file sidecar contract.
     fn copy_artifacts(out: &Path, mode: &str) -> Result<(), String> {
         copy_artifacts_into(out, mode, Path::new("/out"))
     }
 
     fn copy_artifacts_into(out: &Path, mode: &str, out_root: &Path) -> Result<(), String> {
+        if mode == "sdk-sidecar" {
+            for name in [
+                mvm_fs::sdk_sidecar::SDK_SIDECAR_IMAGE_FILE,
+                mvm_fs::sdk_sidecar::SDK_SIDECAR_VERSION_FILE,
+                mvm_fs::overlay::CHECKSUM_MANIFEST_FILE,
+            ] {
+                let source = out.join(name);
+                if !source.is_file() {
+                    return Err(format!(
+                        "SDK sidecar output {} is missing {name}",
+                        out.display()
+                    ));
+                }
+                copy_deref(&source, &out_root.join(name))?;
+            }
+            return Ok(());
+        }
         if mode != "rootfs" {
             let kernel = ["vmlinux", "Image", "bzImage"]
                 .iter()
@@ -1171,7 +1201,7 @@ mod linux {
     // `mvm_agentd::flowmux_drive`: Stage 0 mounts `/work` by label and the
     // identity drive by label, and a second copy of the superblock layout is
     // exactly the kind of duplicate that drifts.
-    use mvm_agentd::flowmux_drive::find_labeled_ext4_disk;
+    use mvm_agentd::flowmux_drive::{find_labeled_ext4_disk_among, virtio_block_devices};
 
     /// Mounts `/work` for the libkrun backend. Prefers the ext4 disk
     /// carrying [`mvm_build::rootfs::STAGE0_WORK_EXT4_LABEL`] — the host
@@ -1183,7 +1213,10 @@ mod linux {
     fn mount_libkrun_work_share() -> Result<(), String> {
         std::fs::create_dir_all("/work").map_err(|e| format!("create /work: {e}"))?;
         let label = mvm_build::rootfs::STAGE0_WORK_EXT4_LABEL;
-        match find_labeled_ext4_disk(STAGE0_DISK_CANDIDATES, label) {
+        // Same enumeration as the store lookup, for the same reason: a fixed
+        // prefix of device letters is the positional assumption the label
+        // removes, and /work is not guaranteed to land inside it either.
+        match find_labeled_ext4_disk_among(virtio_block_devices(), label) {
             Some(dev) => {
                 let dev = dev.to_string_lossy().into_owned();
                 mount_fs_ro(&dev, "/work", "ext4")?;
@@ -1314,6 +1347,14 @@ mod linux {
         Ok(find_seed_bin_in(store, "nix").is_ok() && find_seed_cacert_in(store).is_ok())
     }
 
+    fn nul_terminated_c_chars(chars: &[libc::c_char]) -> Vec<u8> {
+        chars
+            .iter()
+            .take_while(|&&c| c != 0)
+            .map(|&c| u8::from_ne_bytes(c.to_ne_bytes()))
+            .collect()
+    }
+
     /// `uname -m` via libc (no coreutils in the seed). aarch64 / x86_64.
     fn machine_arch() -> Result<String, String> {
         let mut uts: libc::utsname = unsafe { std::mem::zeroed() };
@@ -1321,18 +1362,13 @@ mod linux {
         if unsafe { libc::uname(&mut uts) } != 0 {
             return Err("uname() failed".into());
         }
-        let bytes: Vec<u8> = uts
-            .machine
-            .iter()
-            .take_while(|&&c| c != 0)
-            .map(|&c| c as u8)
-            .collect();
+        let bytes = nul_terminated_c_chars(&uts.machine);
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     /// Minimal `KEY=VALUE` / `KEY="VALUE"` reader for the optional
-    /// host-dropped build conf — the host only ever writes two plain
-    /// assignments (`MVM_STAGE0_BUILD_ATTR`, `MVM_STAGE0_OUTPUT_MODE`).
+    /// host-dropped build conf — the host writes a small fixed set of plain
+    /// `MVM_STAGE0_*` assignments after validating every value as a token.
     fn read_build_conf(path: &str) -> std::collections::HashMap<String, String> {
         let mut map = std::collections::HashMap::new();
         let Ok(text) = std::fs::read_to_string(path) else {
@@ -1384,7 +1420,36 @@ mod linux {
         #[test]
         fn stage0_nix_store_device_matches_backend_disk_order() {
             assert_eq!(stage0_nix_store_device(false), "/dev/vda");
-            assert_eq!(stage0_nix_store_device(true), "/dev/vde");
+            assert_eq!(stage0_nix_store_device(true), "/dev/vdf");
+        }
+
+        #[test]
+        fn c_char_bytes_preserve_bytes_and_stop_at_nul() {
+            let chars: [libc::c_char; 5] = [109, 118, 109, 0, 120];
+            assert_eq!(super::nul_terminated_c_chars(&chars), b"mvm");
+        }
+
+        #[test]
+        fn guest_ext4_format_pins_stage0_store_label_and_block_count() {
+            let command = super::ext4_format_command(
+                std::path::Path::new("/sbin/mkfs.ext4"),
+                "/dev/vda",
+                4096,
+            );
+            assert_eq!(command.get_program(), "/sbin/mkfs.ext4");
+            assert_eq!(
+                command.get_args().collect::<Vec<_>>(),
+                [
+                    "-F",
+                    "-q",
+                    "-b",
+                    "4096",
+                    "-L",
+                    mvm_build::rootfs::STAGE0_NIX_STORE_EXT4_LABEL,
+                    "/dev/vda",
+                    "4096",
+                ]
+            );
         }
 
         #[test]
@@ -1411,6 +1476,14 @@ mod linux {
             std::fs::write(&errors, "7\n").expect("write nonzero count");
             let error = super::reject_ext4_errors(&errors).expect_err("errors must fail");
             assert!(error.contains("7 filesystem error(s)"), "{error}");
+        }
+
+        #[test]
+        fn ext4_finalization_applies_only_to_a_mounted_libkrun_store() {
+            assert!(super::persistent_store_finalization_required(false, true));
+            assert!(!super::persistent_store_finalization_required(false, false));
+            assert!(!super::persistent_store_finalization_required(true, true));
+            assert!(!super::persistent_store_finalization_required(true, false));
         }
 
         #[test]
@@ -1553,6 +1626,32 @@ mod linux {
                 std::fs::read(copied.join("manifest.json")).expect("read copied manifest"),
                 std::fs::read(out.join("manifest.json")).expect("read source manifest")
             );
+        }
+
+        #[test]
+        fn copy_artifacts_promotes_only_the_sdk_sidecar_contract() {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let out = temp.path().join("sidecar-out");
+            let copied = temp.path().join("copied");
+            std::fs::create_dir_all(&out).expect("create out dir");
+            std::fs::create_dir_all(&copied).expect("create copied dir");
+            std::fs::write(out.join("sdk.ext4"), b"sidecar").expect("write sidecar image");
+            std::fs::write(out.join("VERSION"), b"0.18.0\n").expect("write version");
+            std::fs::write(
+                out.join("checksums-sha256.txt"),
+                b"digest  sdk.ext4\ndigest  VERSION\n",
+            )
+            .expect("write checksum manifest");
+            std::fs::write(out.join("rootfs.ext4"), b"must not copy")
+                .expect("write unrelated rootfs");
+
+            copy_artifacts_into(&out, "sdk-sidecar", &copied).expect("copy SDK sidecar outputs");
+
+            assert_eq!(std::fs::read(copied.join("sdk.ext4")).unwrap(), b"sidecar");
+            assert_eq!(std::fs::read(copied.join("VERSION")).unwrap(), b"0.18.0\n");
+            assert!(copied.join("checksums-sha256.txt").is_file());
+            assert!(!copied.join("vmlinux").exists());
+            assert!(!copied.join("rootfs.ext4").exists());
         }
 
         #[test]

@@ -1,0 +1,30 @@
+{
+  "description": "Frozen .mvmev evidence archive: 3-entry tenant-scoped chain signed under a committed test-only key. A conforming verifier must reproduce the outcomes below from the archive alone.",
+  "host_pubkey_hex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+  "integrity": "pass",
+  "inclusion": "pass",
+  "completeness": "derived",
+  "exit_code": 0,
+  "negatives": [
+    {
+      "name": "tampered-manifest",
+      "mutation": "edit manifest.manifest.tenant, leaving valid JSON",
+      "fails": "integrity"
+    },
+    {
+      "name": "missing-member",
+      "mutation": "remove every proofs/ member named by the manifest",
+      "fails": "integrity"
+    },
+    {
+      "name": "digest-drift",
+      "mutation": "append one byte to a proofs/ member, manifest untouched",
+      "fails": "integrity"
+    },
+    {
+      "name": "proof-moved-to-another-leaf",
+      "mutation": "swap two proof bodies, then repair and re-sign the manifest so integrity stays clean",
+      "fails": "inclusion"
+    }
+  ]
+}

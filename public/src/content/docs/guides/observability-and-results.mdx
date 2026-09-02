@@ -14,17 +14,52 @@ return command status and enough evidence to debug or verify the run later.
 
 ## Evidence model
 
-| Evidence | Best for | Do not store |
-| --- | --- | --- |
-| Command result | Immediate caller decision: success, failure, timeout. | Unbounded stdout/stderr or raw secrets. |
-| Receipt | Portable verification for one run. | Raw argv, env values, stdout, stderr, or host paths. |
-| Audit ID | Correlating local lifecycle and policy events. | Guest payload bytes. |
-| Logs | Operator debugging. | Unredacted secrets, full model prompts, large file contents. |
-| Boot report | Readiness and startup debugging. | Application payloads. |
-| Metrics | Dashboards, alerts, trend analysis. | Labels with argv, env values, file contents, or secret names. |
+| Evidence       | Best for                                              | Do not store                                                  |
+| -------------- | ----------------------------------------------------- | ------------------------------------------------------------- |
+| Command result | Immediate caller decision: success, failure, timeout. | Unbounded stdout/stderr or raw secrets.                       |
+| Receipt        | Portable verification for one run.                    | Raw argv, env values, stdout, stderr, or host paths.          |
+| Audit ID       | Correlating local lifecycle and policy events.        | Guest payload bytes.                                          |
+| Logs           | Operator debugging.                                   | Unredacted secrets, full model prompts, large file contents.  |
+| Boot report    | Readiness and startup debugging.                      | Application payloads.                                         |
+| Metrics        | Dashboards, alerts, trend analysis.                   | Labels with argv, env values, file contents, or secret names. |
 
 Keep identifiers everywhere. Keep payloads only where the caller explicitly
 asked for bounded output.
+
+## Host-side eBPF egress telemetry
+
+On Linux, `mvm` can attach a host-side [eBPF](https://ebpf.io/) probe to the
+per-VM egress substitution process. The probe observes outbound `tcp_connect`
+events from the host-side path that forwards guest vsock traffic to real
+endpoints, so network telemetry stays attached to the same process that enforces
+policy decisions.
+
+What the probe records:
+
+- destination IPv4 address and port for each observed `tcp_connect`;
+- events through an eBPF ring buffer, read by a dedicated worker thread;
+- a procfs fallback when the eBPF object is unavailable or the host lacks BPF
+  load permissions.
+
+What it does **not** do:
+
+- It does not give the guest a network device; the vsock-only invariant still
+  holds.
+- It does not read guest memory, payloads, or TLS cleartext.
+- It is not a data-plane enforcement point; policy decisions happen at the
+  existing admission and forwarding seams.
+
+The eBPF object is built separately with nightly Rust and `bpf-linker`:
+
+```sh
+just build-ebpf
+```
+
+The `test-ebpf-telemetry` CI lane loads and attaches the probe on every
+code-bearing merge group, so a broken object or loader surfaces before it can
+reach `main`. On macOS and on Linux builds without the `ebpf-telemetry` feature,
+the loader returns a no-op stub and telemetry continues from the audit and
+metrics surfaces above.
 
 ## CLI result workflow
 
@@ -41,9 +76,9 @@ mvmctl run \
 Then verify and inspect:
 
 ```sh
-mvmctl receipt verify /tmp/agent-run-receipt.json
-mvmctl audit tail -n 20
-mvmctl metrics --json
+mvmctl trust receipt verify /tmp/agent-run-receipt.json
+mvmctl trust audit tail -n 20
+mvmctl ops metrics --json
 ```
 
 Store the receipt path, exit status, run identifier, audit identifier, and
@@ -56,10 +91,10 @@ For a long-running sandbox:
 
 ```sh
 mvmctl machine run --flake ./service --name service-dev -d
-mvmctl wait service-dev --for all
-mvmctl boot-report service-dev --json
+mvmctl machine wait service-dev --for all
+mvmctl machine boot-report service-dev --json
 mvmctl machine logs service-dev -n 200
-mvmctl metrics --json
+mvmctl ops metrics --json
 ```
 
 Use:
@@ -164,16 +199,16 @@ Metrics are for aggregate behavior. Use receipts and audit IDs for drill-down.
 
 Return typed failures to callers:
 
-| Failure | Example caller action |
-| --- | --- |
-| Validation failed | Reject the model/tool request before launch. |
-| Policy denied | Ask for a reviewed policy change or remove the operation. |
-| Build failed | Inspect build logs and artifact inputs. |
-| Boot not ready | Inspect boot report, backend logs, and guest readiness. |
-| Command failed | Return bounded stderr/stdout and exit code. |
-| Timeout | Stop, snapshot, or retry intentionally. |
-| Transport failed | Retry only if the operation is idempotent. |
-| Cleanup failed | Mark retained state sensitive and ask an operator to clean up. |
+| Failure           | Example caller action                                          |
+| ----------------- | -------------------------------------------------------------- |
+| Validation failed | Reject the model/tool request before launch.                   |
+| Policy denied     | Ask for a reviewed policy change or remove the operation.      |
+| Build failed      | Inspect build logs and artifact inputs.                        |
+| Boot not ready    | Inspect boot report, backend logs, and guest readiness.        |
+| Command failed    | Return bounded stderr/stdout and exit code.                    |
+| Timeout           | Stop, snapshot, or retry intentionally.                        |
+| Transport failed  | Retry only if the operation is idempotent.                     |
+| Cleanup failed    | Mark retained state sensitive and ask an operator to clean up. |
 
 Do not collapse these into one generic runtime error. Policy denial, command
 failure, timeout, and cleanup failure all imply different next steps.

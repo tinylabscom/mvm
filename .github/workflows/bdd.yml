@@ -20,6 +20,8 @@ jobs:
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v8.2.0
+        with:
+          version: "0.12.5"
 
       - name: Set up Node
         uses: actions/setup-node@v6
@@ -27,16 +29,18 @@ jobs:
           node-version: "22"
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-25
+          components: rustc-codegen-cranelift
 
-      - name: Install system build dependencies
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list
-          sudo apt-get update
-          sudo apt-get install -y libcap-ng-dev lld
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: libcap-ng-dev lld
 
-      - uses: ./.github/actions/install-zigbuild
-
+      # No zig here: `just bdd` builds mvmctl without `embed-host-bins`, and the
+      # scenarios that would need the payload are `@live`-tagged, which this
+      # hermetic lane skips. The live job below does need it.
       - name: Install just
         uses: taiki-e/install-action@v2
         with:
@@ -69,3 +73,85 @@ jobs:
       # already installs uv, Node and the TypeScript dependencies.
       - name: Run the language SDK unit suites
         run: just sdk-test
+
+  # The hermetic suite is intentionally cheap enough for every PR update. This
+  # companion proves the smallest useful documented lifecycle against a real
+  # Firecracker guest only after the PR reaches the merge queue, where the
+  # repository already runs its KVM-backed boot gate.
+  bdd-live:
+    name: BDD live microVM witness
+    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Must track `FC_VERSION_DEFAULT` in mvm-core. The workload launch path
+      # passes flags older Firecracker releases reject before opening the API
+      # socket, which otherwise surfaces as an unhelpful socket timeout.
+      FC_VERSION: v1.14.1
+      # Hosted runners protect their distro kernel under /boot. Use the
+      # published, hash-verified workload kernel instead of falling back to a
+      # Stage 0 source build that attempts to boot that unreadable host file.
+      MVM_KERNEL_SOURCE: download
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/free-disk
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: libcap-ng-dev lld qemu-system-x86 qemu-utils
+
+      # Kept: `just bdd-live-ci` builds with `embed-host-bins`, because the
+      # `@live` scenarios boot real microVMs and reach the builder VM. That is
+      # the cross-compile, and it needs the pinned zig.
+      - uses: ./.github/actions/install-zigbuild
+
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - uses: ./.github/actions/rust-cache
+        with:
+          key: bdd-live
+
+      - name: Install firecracker
+        run: |
+          set -euo pipefail
+          curl -fL -o firecracker.tgz \
+            "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-x86_64.tgz"
+          tar -xzf firecracker.tgz
+          sudo install -m 0755 \
+            "release-${FC_VERSION}-x86_64/firecracker-${FC_VERSION}-x86_64" \
+            /usr/bin/firecracker
+          /usr/bin/firecracker --version
+
+      - name: Grant /dev/kvm access for the job
+        run: |
+          set -euo pipefail
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm missing on this runner — live BDD cannot run." >&2
+            exit 1
+          fi
+          sudo chmod 666 /dev/kvm
+          ls -la /dev/kvm
+
+      - name: Run the fast live BDD witness
+        run: just bdd-live-ci
+
+      - name: Dump VMM diagnostics on failure
+        if: failure()
+        run: |
+          for d in "$HOME"/.mvm/vms/*/; do
+            echo "===== $d ====="
+            ls -la "$d" || true
+            for f in firecracker.log console.log; do
+              if [ -s "$d$f" ]; then
+                echo "--- $f ---"
+                tail -50 "$d$f"
+              fi
+            done
+          done

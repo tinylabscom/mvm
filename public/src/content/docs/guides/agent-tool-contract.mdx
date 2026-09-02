@@ -67,7 +67,7 @@ the CLI while preserving the same contract the SDK target should expose.
 mvmctl machine build --flake ./agent-tool
 mvmctl machine run --flake ./agent-tool --name agent-tool-call -d
 mvmctl machine fs write agent-tool-call /work/main.py < /tmp/request-main.py
-mvmctl machine exec agent-tool-call --timeout 20 -- python /work/main.py
+mvmctl machine exec agent-tool-call -- python /work/main.py
 mvmctl machine logs agent-tool-call
 mvmctl machine stop agent-tool-call
 ```
@@ -91,15 +91,15 @@ security decisions:
 <TabItem label="Python">
 
 ```python
-from mvm import NetworkPolicy, Sandbox
+from mvm import Sandbox
 
 def run_agent_tool(request: dict) -> dict:
     checked = validate_request(request)
 
+    # Egress is deny-by-default; naming no allow-list is what denies it.
     with Sandbox.create(
         image=checked["image"],
-        network=NetworkPolicy.deny_by_default(),
-        ttl_seconds=checked["ttl_seconds"],
+        ttl=checked["ttl_seconds"],
     ) as sandbox:
         for item in checked["files"]:
             sandbox.files.write(item["path"], item["content"])
@@ -121,15 +121,15 @@ def run_agent_tool(request: dict) -> dict:
 </TabItem>
 <TabItem label="TypeScript">
 
-```ts
-import { NetworkPolicy, Sandbox } from "@mvm/sdk";
+```text
+import { Sandbox } from "@runmvm/mvm";
 
 async function runAgentTool(request: Record<string, unknown>) {
   const checked = validateRequest(request);
 
+  // Egress is deny-by-default; naming no allow-list is what denies it.
   using sandbox = await Sandbox.create({
     image: checked.image,
-    network: NetworkPolicy.denyByDefault(),
     ttlSeconds: checked.ttlSeconds,
   });
 

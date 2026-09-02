@@ -26,7 +26,13 @@ jobs:
     uses: ./.github/workflows/bdd.yml
 
   kernel:
-    name: Build kernels (${{ matrix.arch }})
+    # Deliberately NOT "Build kernels (<arch>)": that is ci.yml's job, and
+    # it is a required status check. Two workflows publishing one context
+    # name is readable only while their triggers stay disjoint — this one
+    # is tags and dispatch, ci.yml is pull_request and merge_group — and
+    # nothing about the name itself says so. This one publishes; ci.yml
+    # validates.
+    name: Publish kernels (${{ matrix.arch }})
     needs: [bdd]
     if: ${{ always() && (needs.bdd.result == 'success' || needs.bdd.result == 'skipped') }}
     strategy:
@@ -49,7 +55,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Build builder + workload kernels
         env:

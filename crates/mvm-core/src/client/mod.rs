@@ -12,7 +12,9 @@
 
 use async_trait::async_trait;
 
-pub use mvm_contract::protocol::capability_negotiation::BackendCapabilityReport;
+pub use mvm_contract::protocol::capability_negotiation::{
+    BackendCapabilityReport, ClientOperationCapabilities, ClientOperationCapabilitiesBuilder,
+};
 
 pub mod dto;
 pub mod error;
@@ -32,6 +34,7 @@ use dto::{
 /// `dyn MvmClient` stays object-safe — callers hold one backend behind a trait
 /// object and never see which transport is underneath.
 #[async_trait]
+#[must_use = "MvmClient futures do nothing unless awaited"]
 pub trait MvmClient: Send + Sync {
     /// List machines matching `filter`.
     async fn list_machines(&self, filter: MachineFilter) -> Result<Vec<MachineState>>;

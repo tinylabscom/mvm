@@ -165,18 +165,24 @@ fn builder_vm_artifact_names_match_release_workflow() {
 
 #[test]
 fn builder_vm_bootstrap_uses_cache_even_in_source_checkout() {
-    let action =
-        resolve_builder_vm_bootstrap_action(Ok("/repo/nix/images/builder-vm".to_string()), true)
-            .expect("cache hit should be usable in a source checkout");
+    let action = resolve_builder_vm_bootstrap_action(
+        Ok("/repo/nix/images/builder-vm".to_string()),
+        true,
+        mvm_build::boot_image_select::BootImageAcquisition::Build,
+    )
+    .expect("cache hit should be usable in a source checkout");
 
     assert_eq!(action, BuilderVmBootstrapAction::UseCached);
 }
 
 #[test]
 fn builder_vm_bootstrap_source_checkout_builds_from_source_on_cache_miss() {
-    let action =
-        resolve_builder_vm_bootstrap_action(Ok("/repo/nix/images/builder-vm".to_string()), false)
-            .expect("source checkout cache miss should route to local source build");
+    let action = resolve_builder_vm_bootstrap_action(
+        Ok("/repo/nix/images/builder-vm".to_string()),
+        false,
+        mvm_build::boot_image_select::BootImageAcquisition::Build,
+    )
+    .expect("source checkout cache miss should route to local source build");
 
     assert_eq!(
         action,
@@ -188,11 +194,42 @@ fn builder_vm_bootstrap_source_checkout_builds_from_source_on_cache_miss() {
 
 #[test]
 fn builder_vm_bootstrap_installed_binary_may_download_on_cache_miss() {
-    let action =
-        resolve_builder_vm_bootstrap_action(Err(anyhow::anyhow!("no source flake")), false)
-            .expect("installed binaries may use published prebuilts");
+    let action = resolve_builder_vm_bootstrap_action(
+        Err(anyhow::anyhow!("no source flake")),
+        false,
+        mvm_build::boot_image_select::BootImageAcquisition::Fetch,
+    )
+    .expect("installed binaries may use published prebuilts");
 
     assert_eq!(action, BuilderVmBootstrapAction::DownloadPublished);
+}
+
+#[test]
+fn builder_vm_bootstrap_fetch_override_bypasses_source_build() {
+    let action = resolve_builder_vm_bootstrap_action(
+        Ok("/repo/nix/images/builder-vm".to_string()),
+        false,
+        mvm_build::boot_image_select::BootImageAcquisition::Fetch,
+    )
+    .expect("an explicit fetch in a source checkout must use the published image");
+
+    assert_eq!(action, BuilderVmBootstrapAction::DownloadPublished);
+}
+
+#[test]
+fn builder_vm_bootstrap_build_override_needs_a_source_flake() {
+    let error = resolve_builder_vm_bootstrap_action(
+        Err(anyhow::anyhow!("no source flake")),
+        false,
+        mvm_build::boot_image_select::BootImageAcquisition::Build,
+    )
+    .expect_err("an installed binary cannot satisfy a forced local build");
+
+    assert!(
+        error
+            .to_string()
+            .contains("requires the in-repo builder VM flake")
+    );
 }
 
 #[cfg(feature = "builder-vm")]
@@ -271,6 +308,27 @@ fn stage0_locked_input_sources_read_builder_flake_lock() {
 /// `#[cfg(feature = "release-artifact-bootstrap")]` would need a
 /// network mock; we cover the structural-failure side here because
 /// it's the one contributors hit.
+#[cfg(not(feature = "release-artifact-bootstrap"))]
+#[test]
+fn the_refusal_says_the_flake_is_present_when_it_is() {
+    // The message used to assert the in-repo flake was missing without ever
+    // looking for one, so a checkout that had it — and had merely been routed
+    // down the fetch path by `MVM_BOOT_IMAGE=fetch` — sent the reader hunting
+    // for a file in front of them. These tests run from a source checkout, so
+    // this is the branch a contributor actually hits.
+    let err = perform_builder_vm_download_published("aarch64", "/tmp/mvm-flake-present-test")
+        .expect_err("download must refuse without release-artifact-bootstrap");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("IS present"),
+        "a checkout with the flake must not be told the flake is missing: {msg}"
+    );
+    assert!(
+        msg.contains("MVM_BOOT_IMAGE"),
+        "the message must name the knob that routed it here: {msg}"
+    );
+}
+
 #[cfg(not(feature = "release-artifact-bootstrap"))]
 #[test]
 fn perform_builder_vm_download_published_bails_without_feature() {
@@ -1161,6 +1219,40 @@ fn builder_vm_stage0_promotion_replaces_stale_valid_cache() {
 
     assert!(!staging.exists(), "staging dir should be moved away");
     assert!(builder_vm_source_cache_ready(&final_dir, "new"));
+}
+
+#[test]
+fn stage0_promotion_leaves_the_cached_workload_kernel_alone() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cache_dir = tmp.path().join("cache");
+    let final_dir = cache_dir.join("builder-vm").join("aarch64");
+    let staging = cache_dir.join("builder-vm").join(".aarch64.stage0-test");
+
+    // A previously-built, verified workload kernel sits in the cache.
+    let kernel = mvm_build::kernel_fetch::cached_kernel_path(&cache_dir, "aarch64", "workload");
+    std::fs::create_dir_all(kernel.parent().expect("kernel parent")).expect("mkdir kernels");
+    std::fs::write(&kernel, b"a real workload kernel").expect("write kernel");
+    mvm_build::kernel_fetch::record_kernel_digest(&kernel).expect("record digest");
+    assert!(
+        matches!(
+            mvm_build::kernel_fetch::resolve_kernel(&cache_dir, "aarch64", "workload", true),
+            mvm_build::kernel_fetch::KernelResolution::Cached(_)
+        ),
+        "precondition: the planted kernel must resolve as a verified cache hit"
+    );
+
+    // The builder-VM source fingerprint changes, so Stage 0 rebuilds and promotes.
+    write_valid_builder_vm_artifacts(&final_dir);
+    write_builder_vm_source_cache_metadata(&final_dir, "old");
+    write_valid_builder_vm_artifacts(&staging);
+    write_builder_vm_source_cache_metadata(&staging, "new");
+    promote_builder_vm_stage0_cache(&staging, &final_dir, "new").expect("promote");
+
+    assert!(
+        kernel.exists(),
+        "promoting a new builder-VM image must not delete the cached workload kernel at {}",
+        kernel.display()
+    );
 }
 
 // -------------------------------------------------------------------

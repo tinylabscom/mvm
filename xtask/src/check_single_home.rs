@@ -61,6 +61,14 @@ const ALL_RULES: &[Rule] = &[
 /// narrowest rule class that the file legitimately needs.
 const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
     (
+        "crates/mvm-conformance/src/lib.rs",
+        &[Rule::HomeRead],
+        "locates rustup's and cargo's own roots, not mvm state: a scenario replaces \
+         HOME to isolate ~/.mvm, which also hides the installed Rust toolchain from \
+         any command that compiles, so the real $HOME is read to pass RUSTUP_HOME / \
+         CARGO_HOME through",
+    ),
+    (
         "crates/mvm-core/src/config.rs",
         ALL_RULES,
         "the single legitimate resolver: owns the MVM_HOME | $HOME/.mvm derivation and the child layout",
@@ -95,7 +103,7 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
          redirects at itself",
     ),
     (
-        "crates/mvm-cli/src/host_binaries/toolchain.rs",
+        "crates/mvm-build/src/embed_toolchain.rs",
         &[Rule::HomeRead],
         "host toolchain discovery (~/.cargo/bin/rustup, mise python installs) lives in the real $HOME",
     ),
@@ -126,6 +134,12 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
         &[Rule::HomeLiteral],
         ".mvm-shaped test fixtures asserting host paths are redacted from normalized event detail; \
          it derives no mvm path",
+    ),
+    (
+        "tests/release_assets.rs",
+        &[Rule::HomeLiteral],
+        "structural release tests inspect the boot workflow's shell command and pin its canonical \
+         production cache path; the test derives no host path",
     ),
 ];
 

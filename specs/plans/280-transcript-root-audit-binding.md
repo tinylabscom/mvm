@@ -31,6 +31,10 @@ fail closed on export rather than being silently treated as authenticated.
 - [x] Cover the operator path with hermetic BDD scenarios for successful
       anchored export and fail-closed manifest tampering; pass formatting,
       workspace tests, documentation tests, check, and clippy.
+- [x] Production follow-up: make the operator `disarm` path load the VM's real
+      persisted admitted plan and emit the host-signed seal itself. Refuse a
+      missing or cross-tenant plan, and keep repeated disarms idempotent so
+      export still sees exactly one anchor.
 
 ## Security acceptance
 

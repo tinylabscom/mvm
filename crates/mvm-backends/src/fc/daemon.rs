@@ -148,15 +148,25 @@ pub(crate) fn sudo_prefix_for_euid(euid: u32) -> &'static str {
     if euid == 0 { "" } else { "sudo " }
 }
 
+fn effective_user_id() -> u32 {
+    // SAFETY: `geteuid` takes no arguments, dereferences no pointers, and
+    // always returns the effective uid of the calling process.
+    unsafe { libc::geteuid() }
+}
+
 fn firecracker_launch_script(
     abs_dir: &str,
     abs_socket: &str,
     clean_vsock: bool,
     cpu_scope: &str,
 ) -> String {
-    firecracker_launch_script_as(abs_dir, abs_socket, clean_vsock, cpu_scope, unsafe {
-        libc::geteuid()
-    })
+    firecracker_launch_script_as(
+        abs_dir,
+        abs_socket,
+        clean_vsock,
+        cpu_scope,
+        effective_user_id(),
+    )
 }
 
 fn firecracker_launch_script_as(
@@ -250,7 +260,24 @@ pub fn api_put_socket(socket: &str, path: &str, data: &str) -> Result<()> {
 /// the invoking user needs to dial it, so transfer ownership and keep the mode
 /// private instead of making the control plane world-writable.
 pub fn secure_vsock_socket_for_caller(vsock: &str) -> Result<()> {
-    let quoted = shell_quote(vsock);
+    secure_socket_for_caller_as(vsock, effective_user_id())
+}
+
+/// Restrict a Firecracker-created control socket to the invoking user.
+///
+/// A root caller already owns sockets created by the root Firecracker process,
+/// so changing their ownership through another shell is redundant. Non-root
+/// callers retain the privileged ownership transfer that makes the socket
+/// reachable without widening it to other users.
+fn secure_socket_for_caller_as(socket: &str, euid: u32) -> Result<()> {
+    if euid == 0 {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        return std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restrict Firecracker socket {socket}"));
+    }
+
+    let quoted = shell_quote(socket);
     run_in_vm_visible(&format!(
         "set -eu\nsudo chown -- \"$(id -u):$(id -g)\" {quoted}\nchmod 0600 {quoted}"
     ))
@@ -298,10 +325,7 @@ fn fc_api_call(method: &str, socket: &str, path: &str, data: Option<&str>) -> Re
 /// can reach the API socket directly. Mode 0600 keeps it off-limits to every
 /// other user on the host.
 pub fn adopt_api_socket(socket: &str) -> Result<()> {
-    let quoted = shell_quote(socket);
-    run_in_vm_visible(&format!(
-        "set -eu\nsudo chown -- \"$(id -u):$(id -g)\" {quoted}\nchmod 0600 {quoted}"
-    ))
+    secure_socket_for_caller_as(socket, effective_user_id())
 }
 
 /// Read the pid recorded by [`start_vm_firecracker`].
@@ -386,7 +410,7 @@ mod tests {
             shell_mock::MockResponse::empty()
         });
 
-        secure_vsock_socket_for_caller("/tmp/vm with quote'/runtime/v.sock")
+        secure_socket_for_caller_as("/tmp/vm with quote'/runtime/v.sock", 1000)
             .expect("secure socket");
 
         let scripts = scripts.lock().unwrap();
@@ -395,6 +419,39 @@ mod tests {
         assert!(scripts[0].contains("chmod 0600"));
         assert!(scripts[0].contains("'/tmp/vm with quote'\\''/runtime/v.sock'"));
         assert!(!scripts[0].contains("chmod 0666"));
+    }
+
+    #[test]
+    fn root_secures_a_socket_without_spawning_a_shell() {
+        use mvm_vmm::host::shell::mock as shell_mock;
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("fc.socket");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind socket");
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o666))
+            .expect("make initial mode broad");
+
+        let scripts = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&scripts);
+        let _guard = shell_mock::install_handler(move |script| {
+            captured
+                .lock()
+                .expect("scripts lock")
+                .push(script.to_string());
+            shell_mock::MockResponse::empty()
+        });
+
+        secure_socket_for_caller_as(&socket.to_string_lossy(), 0).expect("secure root socket");
+
+        assert!(scripts.lock().expect("scripts lock").is_empty());
+        let mode = std::fs::metadata(&socket)
+            .expect("socket metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     /// Firecracker is the one per-VM process started through a shell, so its

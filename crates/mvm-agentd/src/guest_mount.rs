@@ -20,9 +20,17 @@ pub const WORKLOAD_UID: u32 = 901;
 /// Fixed group used by the guest agent and workload command runner.
 pub const WORKLOAD_GID: u32 = 901;
 
-/// Home directory used by workload processes when the rootfs is writable.
+/// Home directory used by workload processes.
+///
+/// The workload root is mounted read-only, so this is a *mount point*: image
+/// materialization bakes the empty directory in, and [`mount_workload_home`]
+/// lays a writable tmpfs over it at boot.
 pub const WORKLOAD_HOME: &str = "/home/mvm-worker";
-/// Writable fallback home for read-only workload rootfs images.
+/// [`WORKLOAD_HOME`] relative to the rootfs root, for host-side materialization
+/// into a staging directory. Kept in step by `home_paths_name_the_same_dir`.
+pub const WORKLOAD_HOME_REL: &str = "home/mvm-worker";
+/// Writable fallback home for an image that carries no [`WORKLOAD_HOME`] mount
+/// point — one mvm neither built nor materialized.
 pub const WORKLOAD_HOME_FALLBACK: &str = "/tmp";
 
 /// Linux capability used by the authenticated guest agent to signal PID 1.
@@ -43,7 +51,7 @@ pub const RESTORE_AGENT_CAPABILITIES: u32 = (1u32 << CAP_KILL) | (1u32 << CAP_SY
 #[derive(Debug, thiserror::Error)]
 pub enum MountError {
     /// A syscall (mount, mkdir, pivot_root, setuid, ...) failed.
-    #[error("syscall failed: {context}")]
+    #[error("syscall failed: {context}: {source}")]
     Syscall {
         context: String,
         #[source]
@@ -143,6 +151,28 @@ pub fn mount_early_filesystems() -> Result<()> {
         // branched off before the early mounts.
         ensure_dir("/dev")?;
         mount("devtmpfs", "/dev", "devtmpfs", libc::MS_NOSUID, "")?;
+
+        // The activated workload root is deliberately read-only. Runtime
+        // state and scratch files therefore need their own writable mounts,
+        // created before the pivot and carried across with the pseudofs
+        // mounts by `pivot_to_root`. OCI materialization guarantees both
+        // target directories exist in the sealed root.
+        ensure_dir("/run")?;
+        mount(
+            "tmpfs",
+            "/run",
+            "tmpfs",
+            libc::MS_NOSUID | libc::MS_NODEV,
+            "mode=0755",
+        )?;
+        ensure_dir("/tmp")?;
+        mount(
+            "tmpfs",
+            "/tmp",
+            "tmpfs",
+            libc::MS_NOSUID | libc::MS_NODEV,
+            "mode=1777",
+        )?;
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -199,7 +229,7 @@ pub fn mount_rootfs(rootfs: &RootfsConfig) -> Result<PathBuf> {
             let fd = ctrl.as_raw_fd();
             dm_version(fd)?;
             setup_verity_target(fd, "root", &rootfs.data_dev, hash_dev, roothash)?;
-            let root_dm = resolved_dm_device("root", 0)?;
+            let root_dm = resolved_dm_device("root")?;
             mount(&root_dm, ROOTFS_STAGING, "ext4", libc::MS_RDONLY, "")?;
         } else {
             mount(
@@ -236,7 +266,7 @@ pub fn mount_runtime_overlay(runtime: Option<&RuntimeOverlayConfig>, root: &Path
             &runtime.hash_dev,
             &runtime.roothash,
         )?;
-        let runtime_dm = resolved_dm_device("runtime", 1)?;
+        let runtime_dm = resolved_dm_device("runtime")?;
         mount(
             &runtime_dm,
             &target.to_string_lossy(),
@@ -358,7 +388,26 @@ fn ensure_volume_mount_target(
     }
 }
 
-fn resolve_volume_mount_source(volume: &VolumeConfig) -> Result<(&str, &'static str)> {
+/// Find the attached block device whose ext4 label is `label`.
+///
+/// Delegates to `flowmux_drive`, which already solved this for the FlowMux
+/// identity disk: it enumerates from `/sys/class/block` rather than guessing a
+/// `/dev/vd[a-z]` range, checks the ext4 magic before trusting the label field,
+/// and is the same decoder the writer's stamp is tested against. A second
+/// superblock parser here would be a second thing to keep in sync with the
+/// on-disk format.
+fn device_for_label(label: &str) -> Result<String> {
+    crate::flowmux_drive::find_labeled_ext4_disk_among(
+        crate::flowmux_drive::virtio_block_devices(),
+        label,
+    )
+    .map(|path| path.to_string_lossy().into_owned())
+    .ok_or_else(|| {
+        MountError::InvalidConfig(format!("no block device carries volume label {label:?}"))
+    })
+}
+
+fn resolve_volume_mount_source(volume: &VolumeConfig) -> Result<(String, &'static str)> {
     if volume.tag.is_empty() {
         return Err(MountError::InvalidConfig(
             "volume tag must not be empty".to_string(),
@@ -372,7 +421,13 @@ fn resolve_volume_mount_source(volume: &VolumeConfig) -> Result<(&str, &'static 
                     volume.tag
                 )));
             }
-            Ok((&volume.tag, "virtiofs"))
+            if volume.label.is_some() {
+                return Err(MountError::InvalidConfig(format!(
+                    "virtio-fs volume {:?} must not carry a volume label",
+                    volume.tag
+                )));
+            }
+            Ok((volume.tag.clone(), "virtiofs"))
         }
         VolumeConfigKind::Block => {
             let device = volume.device.as_deref().ok_or_else(|| {
@@ -382,7 +437,14 @@ fn resolve_volume_mount_source(volume: &VolumeConfig) -> Result<(&str, &'static 
                 ))
             })?;
             validate_virtio_block_device(device, "block volume")?;
-            Ok((device, "ext4"))
+            // A label, when the host wrote one, wins over the node. Resolution
+            // failure is fatal rather than a fallback to `device`: the host
+            // asserted an identity, and mounting the slot anyway would be
+            // exactly the silent wrong-image mount the label exists to stop.
+            match volume.label.as_deref() {
+                Some(label) => Ok((device_for_label(label)?, "ext4")),
+                None => Ok((device.to_string(), "ext4")),
+            }
         }
     }
 }
@@ -420,7 +482,7 @@ pub fn mount_volumes(volumes: &[VolumeConfig], root: &Path) -> Result<()> {
         #[cfg(target_os = "linux")]
         {
             let flags = if vol.read_only { libc::MS_RDONLY } else { 0 };
-            mount(source, &target.to_string_lossy(), filesystem, flags, "")?;
+            mount(&source, &target.to_string_lossy(), filesystem, flags, "")?;
             if let Some((uid, gid)) = writable_block_volume_owner(vol) {
                 chown(&target.to_string_lossy(), uid, gid)?;
             }
@@ -431,21 +493,21 @@ pub fn mount_volumes(volumes: &[VolumeConfig], root: &Path) -> Result<()> {
 
 /// Pivot into the mounted rootfs, making it the active `/`.
 ///
-/// Moves `/proc`, `/sys`, and `/dev` into the new root, then performs the
-/// canonical switch_root sequence (chdir + MS_MOVE + chroot).  The agent
-/// process keeps running; it does not exec a new init.
+/// Moves `/proc`, `/sys`, `/dev`, `/run`, and `/tmp` into the new root, then
+/// performs the canonical switch_root sequence (chdir + MS_MOVE + chroot).
+/// The agent process keeps running; it does not exec a new init.
 pub fn pivot_to_root(new_root: &Path) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         // Ensure the target directories exist in the new root.
-        for sub in ["proc", "sys", "dev"] {
+        for sub in ["proc", "sys", "dev", "run", "tmp"] {
             let dst = new_root.join(sub);
             ensure_dir(&dst.to_string_lossy())?;
         }
 
         // Move the initramfs pseudo-filesystems into the new root so the
         // workload (and the agent itself) keeps seeing them.
-        for sub in ["/proc", "/sys", "/dev"] {
+        for sub in ["/proc", "/sys", "/dev", "/run", "/tmp"] {
             let dst = new_root.join(&sub[1..]).to_string_lossy().to_string();
             let _ = ensure_dir(&dst);
             move_mount(sub, &dst)
@@ -490,6 +552,10 @@ pub fn drop_guest_agent_privilege(uid: u32, gid: u32) -> Result<()> {
 }
 
 /// Ensure the preferred workload home exists before the agent drops privilege.
+///
+/// Only reachable on a writable root. A read-only root gets its home from
+/// [`mount_workload_home`] instead, over a mount point baked in at image
+/// materialization.
 #[cfg(target_os = "linux")]
 pub fn ensure_workload_home() -> Result<()> {
     ensure_dir(WORKLOAD_HOME)?;
@@ -501,13 +567,185 @@ pub fn ensure_workload_home() -> Result<()> {
     Ok(())
 }
 
+/// Where the pseudo-terminal slave filesystem is mounted.
+pub const DEVPTS_MOUNT_POINT: &str = "/dev/pts";
+
+/// Standard tty-group layout for the slave nodes `devpts` hands out.
+///
+/// `gid=5` is the `tty` group and `mode=0620` is what every distro's
+/// `/etc/fstab` uses; a shell that wants `mesg y` needs both.
+pub const DEVPTS_OPTIONS: &str = "mode=0620,gid=5";
+
+/// Symlinks the guest needs under `/dev` that no filesystem provides.
+///
+/// devtmpfs creates device *nodes*; the `/dev/fd` family are symlinks into
+/// `/proc/self/fd` that udev or systemd-tmpfiles would normally lay down, and
+/// this guest runs neither. Without them bash process substitution
+/// (`< <(...)`) fails with "/dev/fd/63: No such file or directory" and
+/// anything opening `/dev/stdout` by name fails the same way.
+pub const DEV_FD_SYMLINKS: &[(&str, &str)] = &[
+    ("/proc/self/fd", "/dev/fd"),
+    ("/proc/self/fd/0", "/dev/stdin"),
+    ("/proc/self/fd/1", "/dev/stdout"),
+    ("/proc/self/fd/2", "/dev/stderr"),
+];
+
+/// Mount the pseudo-terminal slave filesystem an interactive console needs.
+///
+/// `openpty(3)` opens `/dev/ptmx` and then the slave the kernel allocated for
+/// it at `/dev/pts/N`. devtmpfs supplies the `ptmx` node but not the slave
+/// filesystem, so with `/dev/pts` an empty directory every `ConsoleOpen`
+/// request — `machine run -it`, `machine console` — dies at `openpty()`, and
+/// the caller is told only "openpty() failed".
+///
+/// Runs after the pivot, so the mount lands on the `/dev` the workload will
+/// actually see, and before the privilege drop, which is the last moment root
+/// is available to make it. The slave node is owned by whoever opened the
+/// master, so the unprivileged workload still gets a usable PTY.
+#[cfg(target_os = "linux")]
+pub fn mount_pty_filesystem() -> Result<()> {
+    if devpts_is_mounted(&std::fs::read_to_string("/proc/mounts").unwrap_or_default()) {
+        // A shared-kernel container runtime mounted it for the namespace and
+        // took CAP_SYS_ADMIN away afterwards; mounting again would fail for a
+        // reason that is not a defect.
+        return Ok(());
+    }
+    ensure_dir(DEVPTS_MOUNT_POINT)?;
+    mount(
+        "devpts",
+        DEVPTS_MOUNT_POINT,
+        "devpts",
+        libc::MS_NOSUID | libc::MS_NOEXEC,
+        DEVPTS_OPTIONS,
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn mount_pty_filesystem() -> Result<()> {
+    Ok(())
+}
+
+/// Whether `/proc/mounts` already shows a `devpts` at [`DEVPTS_MOUNT_POINT`].
+///
+/// Split from the mount so the container arm is testable without a guest:
+/// that arm is the only one a host test can never reach through the syscall.
+#[must_use]
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn devpts_is_mounted(mounts: &str) -> bool {
+    mounts.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        let (Some(_dev), Some(target), Some(fstype)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            return false;
+        };
+        target == DEVPTS_MOUNT_POINT && fstype == "devpts"
+    })
+}
+
+/// Lay down the [`DEV_FD_SYMLINKS`], reporting each one that could not be made.
+///
+/// Best-effort by construction: `/dev` is devtmpfs and writable on every guest
+/// that reaches here, but an image that already ships one of these gets an
+/// `AlreadyExists` that is the desired end state rather than a failure.
+pub fn link_dev_fd_family() -> Vec<String> {
+    let mut failures = Vec::new();
+    for (target, link) in DEV_FD_SYMLINKS {
+        if Path::new(link).exists() {
+            continue;
+        }
+        // `AlreadyExists` lost the race with something else creating it, which
+        // is the desired end state and not a failure.
+        if let Err(e) = std::os::unix::fs::symlink(target, link)
+            && e.kind() != std::io::ErrorKind::AlreadyExists
+        {
+            failures.push(format!("{link} -> {target}: {e}"));
+        }
+    }
+    failures
+}
+
+/// Lay a writable tmpfs over the workload's home.
+///
+/// Every workload root is mounted read-only, so the baked-in home is an empty
+/// directory its owner cannot write — which is not a home. Mounting over it
+/// needs no write to the underlying filesystem, so this works on a sealed
+/// dm-verity root exactly as it does on a plain one. Must run after the pivot
+/// and before the privilege drop.
+///
+/// An image with no mount point gets nothing mounted; [`workload_home`] then
+/// reports the `/tmp` fallback, which is writable for a different reason.
+#[cfg(target_os = "linux")]
+pub fn mount_workload_home() -> Result<()> {
+    if !Path::new(WORKLOAD_HOME).is_dir() {
+        // No mount point to mount over. Leave the resolution unrecorded so
+        // `workload_home` falls through to its own probe, which covers the
+        // writable root that creates the directory a moment later.
+        return Ok(());
+    }
+    let result = mount(
+        "tmpfs",
+        WORKLOAD_HOME,
+        "tmpfs",
+        libc::MS_NOSUID | libc::MS_NODEV,
+        &format!("mode=0755,uid={WORKLOAD_UID},gid={WORKLOAD_GID}"),
+    );
+    // Record either way. On failure the mount point is still *there*, so the
+    // probe in `workload_home` would report a directory the workload cannot
+    // write as its home — worse than the fallback it is supposed to get.
+    let _ = RESOLVED_HOME.set(home_after_mount(result.is_ok()));
+    result
+}
+
+/// Which home a mount attempt leaves the workload with.
+///
+/// Split out from [`mount_workload_home`] so the rule is testable without a
+/// guest: the failure arm is the whole point, and it is the arm no host test
+/// can reach through the syscall.
+#[must_use]
+#[cfg(any(target_os = "linux", test))]
+pub(crate) const fn home_after_mount(mounted: bool) -> &'static str {
+    if mounted {
+        WORKLOAD_HOME
+    } else {
+        WORKLOAD_HOME_FALLBACK
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn mount_workload_home() -> Result<()> {
+    Ok(())
+}
+
+/// What [`mount_workload_home`] settled on, once it has run.
+static RESOLVED_HOME: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
 /// Resolve the writable home directory for workload processes.
+///
+/// Prefers what the boot path actually secured. The probe below is the answer
+/// before that runs, and on a writable root where the directory is created
+/// rather than mounted: a present [`WORKLOAD_HOME`] there really is writable,
+/// which on a read-only root it would not be.
 pub fn workload_home() -> &'static str {
+    if let Some(home) = RESOLVED_HOME.get() {
+        return home;
+    }
     if Path::new(WORKLOAD_HOME).is_dir() {
         WORKLOAD_HOME
     } else {
         WORKLOAD_HOME_FALLBACK
     }
+}
+
+/// Whether optional writes into the image-owned root can be attempted.
+///
+/// Runtime state has dedicated writable mounts. Cosmetic image changes such
+/// as creating a preferred home or naming the workload uid do not, so a
+/// sealed root skips them without issuing syscalls that must fail.
+#[must_use]
+#[cfg(any(target_os = "linux", test))]
+pub(crate) const fn optional_image_writes_allowed(rootfs_read_only: bool) -> bool {
+    !rootfs_read_only
 }
 
 /// The privilege drop as bare syscalls, allocating nothing on any path.
@@ -1136,17 +1374,37 @@ fn setup_verity_target(
 }
 
 #[cfg(target_os = "linux")]
-fn resolved_dm_device(name: &str, index: usize) -> Result<String> {
+fn resolved_dm_device(name: &str) -> Result<String> {
     let mapper = format!("/dev/mapper/{name}");
     if Path::new(&mapper).exists() {
         return Ok(mapper);
     }
-    let fallback = format!("/dev/dm-{index}");
-    if Path::new(&fallback).exists() {
-        return Ok(fallback);
+    // devtmpfs always creates /dev/dm-<minor>, but the minor is allocated
+    // dynamically and is not the creation order when earlier targets are
+    // absent (e.g. a plain rootfs means the runtime overlay is dm-0, not
+    // dm-1).  Resolve the actual node by reading the kernel's name record
+    // under /sys/block.
+    let sys_block = Path::new("/sys/block");
+    let entries =
+        std::fs::read_dir(sys_block).map_err(|e| MountError::syscall("read /sys/block", e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| MountError::syscall("read /sys/block entry", e))?;
+        let fname = entry.file_name();
+        let fname = fname.to_string_lossy();
+        if !fname.starts_with("dm-") {
+            continue;
+        }
+        let name_file = entry.path().join("dm/name");
+        let dm_name = match std::fs::read_to_string(&name_file) {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        if dm_name.trim() == name {
+            return Ok(format!("/dev/{fname}"));
+        }
     }
     Err(MountError::VeritySetup(format!(
-        "neither {mapper} nor {fallback} exists after DM_DEV_SUSPEND"
+        "no /sys/block/dm-* device named {name} after DM_DEV_SUSPEND"
     )))
 }
 
@@ -1339,6 +1597,16 @@ mod tests {
 
     const FAKE_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+    #[test]
+    fn syscall_error_display_includes_os_error() {
+        let source = std::io::Error::from_raw_os_error(libc::EINVAL);
+        let expected_source = source.to_string();
+        let rendered = MountError::syscall("mount rootfs", source).to_string();
+
+        assert!(rendered.contains("syscall failed: mount rootfs:"));
+        assert!(rendered.contains(&expected_source));
+    }
+
     /// Every early mount target must be created before it is mounted.
     ///
     /// The universal initramfs carries the init binary and nothing else, so
@@ -1361,7 +1629,7 @@ mod tests {
             .next()
             .expect("function body is delimited by the next item");
 
-        for target in ["/proc", "/sys", "/dev"] {
+        for target in ["/proc", "/sys", "/dev", "/run", "/tmp"] {
             let created = body
                 .find(&format!("ensure_dir(\"{target}\")"))
                 .unwrap_or_else(|| {
@@ -1378,6 +1646,239 @@ mod tests {
                 "{target}: ensure_dir must come before the mount, not after"
             );
         }
+    }
+
+    /// Runtime writes belong on tmpfs, and those mounts must survive the
+    /// switch from the universal initramfs to the sealed workload root.
+    #[test]
+    fn writable_runtime_mounts_are_tmpfs_and_move_into_the_workload_root() {
+        let src = include_str!("guest_mount.rs");
+        let early = src
+            .split("pub fn mount_early_filesystems")
+            .nth(1)
+            .expect("mount_early_filesystems must exist")
+            .split("\npub fn ")
+            .next()
+            .expect("function body is delimited by the next item");
+        let pivot = src
+            .split("pub fn pivot_to_root")
+            .nth(1)
+            .expect("pivot_to_root must exist")
+            .split("\npub fn ")
+            .next()
+            .expect("function body is delimited by the next item");
+
+        for target in ["/run", "/tmp"] {
+            assert!(
+                early.contains(&format!(
+                    "\"tmpfs\",\n            \"{target}\",\n            \"tmpfs\""
+                )),
+                "{target} must be mounted as tmpfs before the read-only root is activated"
+            );
+            assert!(
+                pivot.contains(&format!("\"{target}\"")),
+                "{target} must move into the activated workload root"
+            );
+        }
+    }
+
+    /// A failed home mount must fall back, not hand the workload the
+    /// read-only mount point it was going to cover. The mount point exists
+    /// either way, so the `is_dir` probe alone gets this wrong.
+    #[test]
+    fn a_failed_home_mount_falls_back_instead_of_reporting_a_read_only_home() {
+        assert_eq!(home_after_mount(true), WORKLOAD_HOME);
+        assert_eq!(home_after_mount(false), WORKLOAD_HOME_FALLBACK);
+    }
+
+    /// The home is mounted over, never written into: a write cannot land on
+    /// the read-only root every workload actually boots with.
+    #[test]
+    fn the_workload_home_is_secured_by_a_mount_not_a_write() {
+        let src = include_str!("guest_mount.rs");
+        let body = src
+            .split("pub fn mount_workload_home")
+            .nth(1)
+            .expect("mount_workload_home must exist")
+            .split("\n#[cfg(not(target_os = \"linux\"))]")
+            .next()
+            .expect("the Linux arm is delimited by the non-Linux one");
+        assert!(
+            body.contains("mount(") && body.contains("tmpfs"),
+            "the home must come from a tmpfs mount: {body}"
+        );
+        assert!(
+            body.contains("uid={WORKLOAD_UID}"),
+            "the workload must own its home: {body}"
+        );
+    }
+
+    /// `openpty(3)` needs the slave filesystem, not just the `ptmx` node.
+    ///
+    /// devtmpfs gives `/dev/ptmx` and the empty `/dev/pts` directory the image
+    /// happens to ship, which together look like a working PTY setup and are
+    /// not one: every `ConsoleOpen` fails at `openpty()` with no indication
+    /// that a mount is missing. `mount_pty_filesystem` must therefore mount
+    /// `devpts` — creating the directory is what the broken version did.
+    #[test]
+    fn the_pty_filesystem_is_mounted_not_merely_created() {
+        let src = include_str!("guest_mount.rs");
+        let body = src
+            .split("pub fn mount_pty_filesystem")
+            .nth(1)
+            .expect("mount_pty_filesystem must exist")
+            .split("\n#[cfg(not(target_os = \"linux\"))]")
+            .next()
+            .expect("the Linux arm is delimited by the non-Linux one");
+        assert!(
+            body.contains("mount(") && body.contains("\"devpts\""),
+            "a PTY comes from a devpts mount, not from mkdir: {body}"
+        );
+        let created = body
+            .find("ensure_dir(DEVPTS_MOUNT_POINT)")
+            .expect("the mount point must be created before it is mounted onto");
+        let mounted = body.find("mount(").expect("checked above");
+        assert!(created < mounted, "ensure_dir must precede the mount");
+    }
+
+    /// The tty-group layout the slave nodes are handed out with.
+    #[test]
+    fn devpts_uses_the_standard_tty_group_layout() {
+        assert_eq!(DEVPTS_MOUNT_POINT, "/dev/pts");
+        assert!(DEVPTS_OPTIONS.contains("mode=0620"));
+        assert!(DEVPTS_OPTIONS.contains("gid=5"));
+    }
+
+    /// A container runtime already mounted it, and took away the capability
+    /// to mount it again. Skipping is correct there and only there.
+    #[test]
+    fn an_existing_devpts_mount_is_recognised_and_not_remounted() {
+        let mounted = "\
+devtmpfs /dev devtmpfs rw,nosuid,relatime 0 0
+devpts /dev/pts devpts rw,nosuid,noexec,relatime,mode=620,gid=5 0 0
+";
+        assert!(devpts_is_mounted(mounted));
+    }
+
+    /// The empty directory is exactly the state that produced the bug, so a
+    /// probe that cannot tell it from a mount would skip the fix forever.
+    #[test]
+    fn a_dev_pts_directory_without_a_mount_is_not_a_mount() {
+        // devtmpfs carries /dev/pts as a plain directory: nothing in
+        // /proc/mounts names it, which is what this must report.
+        let unmounted = "\
+devtmpfs /dev devtmpfs rw,nosuid,relatime 0 0
+tmpfs /tmp tmpfs rw,nosuid,nodev,relatime 0 0
+";
+        assert!(!devpts_is_mounted(unmounted));
+        // A devpts mounted somewhere else is not this mount either.
+        let elsewhere = "devpts /mnt/root/dev/pts devpts rw,relatime 0 0\n";
+        assert!(!devpts_is_mounted(elsewhere));
+        // Nor is some other filesystem sitting on the mount point.
+        let wrong_fs = "tmpfs /dev/pts tmpfs rw,relatime 0 0\n";
+        assert!(!devpts_is_mounted(wrong_fs));
+    }
+
+    /// The `/dev/fd` family points into `/proc/self/fd` and nowhere else.
+    #[test]
+    fn the_dev_fd_family_resolves_through_proc_self_fd() {
+        let links: Vec<&str> = DEV_FD_SYMLINKS.iter().map(|(_, link)| *link).collect();
+        assert_eq!(
+            links,
+            ["/dev/fd", "/dev/stdin", "/dev/stdout", "/dev/stderr"]
+        );
+        for (target, link) in DEV_FD_SYMLINKS {
+            assert!(
+                target.starts_with("/proc/self/fd"),
+                "{link} must resolve through /proc/self/fd, not {target}"
+            );
+        }
+    }
+
+    // The two tests below assert how `guest_bootstrap` wires this module's
+    // mount into the boot path. They live here rather than beside that code
+    // because `mvm_agentd::guest_bootstrap` is `cfg(target_os = "linux")`, so
+    // its own test module is invisible on the macOS hosts most of this is
+    // developed on — which is where the missing mount would have been caught.
+    // Both read source text and need no guest.
+
+    /// The PTY mount has to be one of the provisioning steps, not something a
+    /// single init does on its way past.
+    ///
+    /// It shipped missing entirely — `ensure_runtime_dirs` created `/dev/pts`
+    /// and nothing ever mounted onto it — so `machine run -it` failed at
+    /// `openpty()` on every OCI image. `guest_bootstrap` exists so a step
+    /// cannot be quietly lost; this is that guarantee for this step.
+    #[test]
+    fn the_pty_filesystem_is_provisioned_before_the_workload_identity() {
+        let steps = provisioning_steps();
+        let dirs = steps
+            .iter()
+            .position(|s| s == "ensure_runtime_dirs()")
+            .expect("the runtime directories must still be created");
+        let pty = steps
+            .iter()
+            .position(|s| s == "provision_pty_devices()")
+            .expect(
+                "devpts must be mounted during provisioning, or every \
+                 interactive console fails at openpty()",
+            );
+        assert!(
+            dirs < pty,
+            "/dev/pts must exist before devpts is mounted onto it: {steps:?}"
+        );
+    }
+
+    /// The calls `provision_guest_environment` actually makes, in order.
+    ///
+    /// Comment lines are dropped first. A plain substring search over the
+    /// function body matches `// provision_pty_devices();` just as happily as
+    /// the call, so commenting the step out — the exact shape of losing it —
+    /// left the test green.
+    fn provisioning_steps() -> Vec<String> {
+        let src = include_str!("guest_bootstrap.rs");
+        let body = src
+            .split("pub fn provision_guest_environment")
+            .nth(1)
+            .expect("provision_guest_environment must exist")
+            .split("\n}")
+            .next()
+            .expect("the function body ends at the first closing brace");
+        body.lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//"))
+            .filter_map(|line| line.strip_suffix(';'))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Provisioning runs between the pivot and the privilege drop, and both
+    /// bounds matter: before the pivot the mount lands on a `/dev` the
+    /// workload never sees, and after the drop there is no CAP_SYS_ADMIN left
+    /// to mount with.
+    #[test]
+    fn provisioning_runs_after_the_pivot_and_before_the_privilege_drop() {
+        let init = include_str!("bin/mvm-guest-agent/init.rs");
+        let pivot = init
+            .find("pivot_to_root(")
+            .expect("activation must still pivot into the workload root");
+        let bootstrap = init
+            .find("bootstrap_guest_environment()?")
+            .expect("activation must still run the provisioning steps");
+        let drop = init
+            .find("drop_guest_agent_privilege(")
+            .expect("activation must still drop privilege");
+        assert!(pivot < bootstrap, "provisioning must follow the pivot");
+        assert!(
+            bootstrap < drop,
+            "provisioning must finish while root is still available"
+        );
+    }
+
+    #[test]
+    fn sealed_roots_refuse_optional_image_writes() {
+        assert!(!optional_image_writes_allowed(true));
+        assert!(optional_image_writes_allowed(false));
     }
 
     /// devtmpfs must be mounted unconditionally, never gated on `/dev/console`.
@@ -1496,7 +1997,7 @@ mod tests {
     #[test]
     fn validate_volume_mountpoint_accepts_normal_paths() {
         assert!(validate_volume_mountpoint("/data").is_ok());
-        assert!(validate_volume_mountpoint("/mnt/app").is_ok());
+        assert!(validate_volume_mountpoint("/data/app").is_ok());
         assert!(validate_volume_mountpoint("/work/nested/other").is_ok());
     }
 
@@ -1548,6 +2049,41 @@ mod tests {
     }
 
     #[test]
+    fn a_virtiofs_volume_may_not_carry_a_volume_label() {
+        // A share is addressed by tag and has no filesystem to read a label
+        // from, so a label here means the host built a contradictory config.
+        let volume = VolumeConfig {
+            tag: "uvol0".to_string(),
+            mountpoint: "/mnt/data".to_string(),
+            read_only: true,
+            kind: VolumeConfigKind::VirtioFs,
+            device: None,
+            label: Some("mvmmnt0".to_string()),
+        };
+        assert!(resolve_volume_mount_source(&volume).is_err());
+    }
+
+    #[test]
+    fn a_labelled_block_volume_that_matches_no_device_refuses() {
+        // Fail closed. Falling back to the device node would mount whatever
+        // landed in that slot, which is the failure the label prevents.
+        let volume = VolumeConfig {
+            tag: "uvol0".to_string(),
+            mountpoint: "/mnt/data".to_string(),
+            read_only: true,
+            kind: VolumeConfigKind::Block,
+            device: Some("/dev/vdb".to_string()),
+            label: Some("mvm-no-such-label".to_string()),
+        };
+        let err = resolve_volume_mount_source(&volume)
+            .expect_err("an unmatched label must refuse rather than fall back");
+        assert!(
+            err.to_string().contains("mvm-no-such-label"),
+            "error should name the label: {err}"
+        );
+    }
+
+    #[test]
     fn volume_mount_source_distinguishes_virtiofs_and_block() {
         let share = VolumeConfig {
             tag: "uvol0".to_string(),
@@ -1555,10 +2091,11 @@ mod tests {
             read_only: true,
             kind: crate::vsock::VolumeConfigKind::VirtioFs,
             device: None,
+            label: None,
         };
         assert_eq!(
             resolve_volume_mount_source(&share).unwrap(),
-            ("uvol0", "virtiofs")
+            ("uvol0".to_string(), "virtiofs")
         );
 
         let block = VolumeConfig {
@@ -1567,10 +2104,11 @@ mod tests {
             read_only: false,
             kind: crate::vsock::VolumeConfigKind::Block,
             device: Some("/dev/vdb".to_string()),
+            label: None,
         };
         assert_eq!(
             resolve_volume_mount_source(&block).unwrap(),
-            ("/dev/vdb", "ext4")
+            ("/dev/vdb".to_string(), "ext4")
         );
     }
 
@@ -1582,6 +2120,7 @@ mod tests {
             read_only: false,
             kind: crate::vsock::VolumeConfigKind::VirtioFs,
             device: Some("/dev/vdb".to_string()),
+            label: None,
         };
         assert!(resolve_volume_mount_source(&share_with_device).is_err());
 
@@ -1591,6 +2130,7 @@ mod tests {
             read_only: false,
             kind: crate::vsock::VolumeConfigKind::Block,
             device: Some("/dev/sda".to_string()),
+            label: None,
         };
         assert!(resolve_volume_mount_source(&invalid_block).is_err());
     }
@@ -1611,6 +2151,7 @@ mod tests {
             read_only: false,
             kind: crate::vsock::VolumeConfigKind::Block,
             device: Some("/dev/vdb".to_string()),
+            label: None,
         };
 
         assert_eq!(
@@ -1627,6 +2168,7 @@ mod tests {
             read_only: true,
             kind: crate::vsock::VolumeConfigKind::Block,
             device: Some("/dev/vdb".to_string()),
+            label: None,
         };
         let writable_share = VolumeConfig {
             tag: "uvol1".to_string(),
@@ -1634,6 +2176,7 @@ mod tests {
             read_only: false,
             kind: crate::vsock::VolumeConfigKind::VirtioFs,
             device: None,
+            label: None,
         };
 
         assert_eq!(writable_block_volume_owner(&read_only_block), None);

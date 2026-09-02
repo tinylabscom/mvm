@@ -4,16 +4,12 @@
 
 use anyhow::{Context, Result};
 use mvm_core::manifest::{PersistedManifest, is_slot_hash_dirname, slot_dir, slot_revision_dir};
-use mvm_core::template::{
-    SnapshotInfo, TemplateRevision, TemplateSpec, template_revision_dir, template_snapshot_dir,
-};
+use mvm_core::template::{SnapshotInfo, TemplateRevision, TemplateSpec};
 use tracing::instrument;
 
 use super::artifacts::{
-    bundle_artifacts_for_sha, current_revision_id, current_revision_id_for_slot,
-    template_artifacts, template_artifacts_for_slot,
+    bundle_artifacts_for_sha, current_revision_id_for_slot, template_artifacts_for_slot,
 };
-use super::crud::template_load;
 use super::slots::template_load_slot;
 
 /// Whether the slot's current revision has a Firecracker snapshot.
@@ -51,7 +47,6 @@ fn persisted_to_synthetic_spec(p: &PersistedManifest) -> TemplateSpec {
         template_id: p.manifest_hash.clone(),
         flake_ref: p.flake_ref.clone(),
         profile: p.profile.clone(),
-        role: String::new(),
         vcpus: p.vcpus,
         mem_mib: p.mem_mib,
         mem_initial_mib: p.mem_initial_mib,
@@ -80,29 +75,36 @@ fn persisted_to_synthetic_spec(p: &PersistedManifest) -> TemplateSpec {
 pub fn template_artifacts_dispatched(
     id_or_slot: &str,
 ) -> Result<(TemplateSpec, String, Option<String>, String, String)> {
-    if is_slot_hash_dirname(id_or_slot) {
-        // A 64-char hex string is ambiguous: it could be a templates/
-        // slot hash OR a bundle sha256. Resolve by checking which
-        // directory actually exists. Templates-slot wins when both
-        // are present (legacy build-on-this-host stays the primary
-        // path).
-        let slot_path = std::path::Path::new(&slot_dir(id_or_slot)).to_path_buf();
-        if slot_path.exists() {
-            let (persisted, vmlinux, initrd, rootfs, rev) =
-                template_artifacts_for_slot(id_or_slot)?;
-            Ok((
-                persisted_to_synthetic_spec(&persisted),
-                vmlinux,
-                initrd,
-                rootfs,
-                rev,
-            ))
-        } else {
-            bundle_artifacts_for_sha(id_or_slot)
-        }
+    // A 64-char hex string is ambiguous: it could be a templates/ slot hash OR
+    // a bundle sha256. Resolve by checking which directory actually exists; the
+    // templates slot wins when both are present.
+    let slot_path = require_slot_key(id_or_slot)?;
+    if slot_path.exists() {
+        let (persisted, vmlinux, initrd, rootfs, rev) = template_artifacts_for_slot(id_or_slot)?;
+        Ok((
+            persisted_to_synthetic_spec(&persisted),
+            vmlinux,
+            initrd,
+            rootfs,
+            rev,
+        ))
     } else {
-        template_artifacts(id_or_slot)
+        bundle_artifacts_for_sha(id_or_slot)
     }
+}
+
+/// Every template key is a slot hash or a bundle sha256 — both 64-char
+/// lowercase hex. Anything else used to fall through to a name-keyed lookup;
+/// there are no name-keyed slots, so it is rejected here with the shape it
+/// failed, rather than as a missing directory further down.
+fn require_slot_key(id_or_slot: &str) -> Result<std::path::PathBuf> {
+    if !is_slot_hash_dirname(id_or_slot) {
+        anyhow::bail!(
+            "{id_or_slot:?} is not a template slot: expected a 64-character \
+             lowercase-hex slot hash or bundle sha256"
+        );
+    }
+    Ok(std::path::Path::new(&slot_dir(id_or_slot)).to_path_buf())
 }
 
 /// Boot-path variant of [`template_artifacts_dispatched`].
@@ -169,19 +171,15 @@ pub fn installed_bundle_arch_for_export(id_or_slot: &str) -> Option<String> {
 /// when the 64-char hex name doesn't have a templates/ slot dir,
 /// look it up in the bundle registry.
 pub fn template_load_dispatched(id_or_slot: &str) -> Result<TemplateSpec> {
-    if is_slot_hash_dirname(id_or_slot) {
-        let slot_path = std::path::Path::new(&slot_dir(id_or_slot)).to_path_buf();
-        if slot_path.exists() {
-            let persisted = template_load_slot(id_or_slot)?;
-            Ok(persisted_to_synthetic_spec(&persisted))
-        } else {
-            // Reuse the artifact-resolver to derive a TemplateSpec
-            // from an installed bundle — same fields, same defaults.
-            let (spec, _vm, _ir, _rf, _rev) = bundle_artifacts_for_sha(id_or_slot)?;
-            Ok(spec)
-        }
+    let slot_path = require_slot_key(id_or_slot)?;
+    if slot_path.exists() {
+        let persisted = template_load_slot(id_or_slot)?;
+        Ok(persisted_to_synthetic_spec(&persisted))
     } else {
-        template_load(id_or_slot)
+        // Reuse the artifact-resolver to derive a TemplateSpec from an
+        // installed bundle — same fields, same defaults.
+        let (spec, _vm, _ir, _rf, _rev) = bundle_artifacts_for_sha(id_or_slot)?;
+        Ok(spec)
     }
 }
 
@@ -191,15 +189,11 @@ pub fn template_load_dispatched(id_or_slot: &str) -> Result<TemplateSpec> {
 /// the machine that built it); the bundle fallthrough returns
 /// `None` rather than erroring.
 pub fn template_snapshot_info_dispatched(id_or_slot: &str) -> Result<Option<SnapshotInfo>> {
-    if is_slot_hash_dirname(id_or_slot) {
-        let slot_path = std::path::Path::new(&slot_dir(id_or_slot)).to_path_buf();
-        if slot_path.exists() {
-            template_snapshot_info_for_slot(id_or_slot)
-        } else {
-            Ok(None)
-        }
+    let slot_path = require_slot_key(id_or_slot)?;
+    if slot_path.exists() {
+        template_snapshot_info_for_slot(id_or_slot)
     } else {
-        template_snapshot_info(id_or_slot)
+        Ok(None)
     }
 }
 
@@ -208,38 +202,12 @@ pub fn template_snapshot_info_dispatched(id_or_slot: &str) -> Result<Option<Snap
 /// shape as `template_snapshot_info_dispatched`: bundles never
 /// have snapshots in v1.
 pub fn template_has_snapshot_dispatched(id_or_slot: &str) -> Result<bool> {
-    if is_slot_hash_dirname(id_or_slot) {
-        let slot_path = std::path::Path::new(&slot_dir(id_or_slot)).to_path_buf();
-        if slot_path.exists() {
-            template_has_snapshot_for_slot(id_or_slot)
-        } else {
-            Ok(false)
-        }
+    let slot_path = require_slot_key(id_or_slot)?;
+    if slot_path.exists() {
+        template_has_snapshot_for_slot(id_or_slot)
     } else {
-        template_has_snapshot(id_or_slot)
+        Ok(false)
     }
-}
-
-/// Check if the current revision of a template has a snapshot.
-pub fn template_has_snapshot(id: &str) -> Result<bool> {
-    let rev = current_revision_id(id)?;
-    let snap_dir = template_snapshot_dir(id, &rev);
-    let vmstate = std::path::Path::new(&snap_dir).join("vmstate.bin");
-    let mem = std::path::Path::new(&snap_dir).join("mem.bin");
-    Ok(vmstate.exists() && mem.exists())
-}
-
-/// Load the snapshot metadata for a template revision.
-pub fn template_snapshot_info(id: &str) -> Result<Option<SnapshotInfo>> {
-    let rev = current_revision_id(id)?;
-    let rev_dir = template_revision_dir(id, &rev);
-    let meta_path = format!("{}/revision.json", rev_dir);
-    // Read directly from host filesystem
-    let data = std::fs::read_to_string(&meta_path)
-        .with_context(|| format!("Failed to read revision.json for template {}", id))?;
-    let revision: TemplateRevision = serde_json::from_str(&data)
-        .with_context(|| format!("Corrupt revision.json for template {}", id))?;
-    Ok(revision.snapshot)
 }
 
 #[cfg(test)]

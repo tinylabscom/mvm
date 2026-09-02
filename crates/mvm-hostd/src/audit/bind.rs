@@ -10,8 +10,17 @@ use mvm_contract::provenance::{
 };
 use mvm_core::checkpoint::{CheckpointClass, CheckpointId, CheckpointMeta};
 use mvm_core::plan::ExecutionPlan;
+use serde::Serialize;
 
 use crate::audit::emitter::AuditEmitter;
+
+/// Non-secret fork capability metadata recorded in `checkpoint.forked`.
+/// Keystore addresses, providers, and values are intentionally absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CheckpointForkSecretBinding {
+    pub name: String,
+    pub allowed_hosts: Vec<String>,
+}
 
 /// Stable on-the-wire string for a checkpoint class.
 pub fn class_str(class: CheckpointClass) -> &'static str {
@@ -101,6 +110,7 @@ pub fn bind_checkpoint_forked(
     parent: &CheckpointId,
     child: &CheckpointMeta,
     child_vm_name: &str,
+    secret_bindings: &[CheckpointForkSecretBinding],
 ) -> Result<()> {
     // A forked child is built by the fork path, which always hash-links it to
     // its parent's content-address. A genesis-shaped child (no parent) must not
@@ -109,13 +119,17 @@ pub fn bind_checkpoint_forked(
         .parent
         .as_ref()
         .expect("a forked child always carries a parent hash-link");
+    let secret_bindings_json = serde_json::to_string(secret_bindings)?;
     emitter.emit_checkpoint_forked(
         plan,
-        parent.as_str(),
-        child.id.as_str(),
-        child_vm_name,
-        parent_digest.as_str(),
-        child.meta_digest.as_str(),
+        crate::audit::emitter::CheckpointForkedAudit {
+            parent_id: parent.as_str(),
+            child_id: child.id.as_str(),
+            child_vm_name,
+            parent_digest: parent_digest.as_str(),
+            child_digest: child.meta_digest.as_str(),
+            secret_bindings_json: &secret_bindings_json,
+        },
     )
 }
 
@@ -239,7 +253,18 @@ mod tests {
         .created_unix(2)
         .build();
 
-        bind_checkpoint_forked(&emitter, &plan, &parent.id, &child, &child.vm_name).unwrap();
+        bind_checkpoint_forked(
+            &emitter,
+            &plan,
+            &parent.id,
+            &child,
+            &child.vm_name,
+            &[CheckpointForkSecretBinding {
+                name: "API_KEY".into(),
+                allowed_hosts: vec!["api.example.com".into()],
+            }],
+        )
+        .unwrap();
 
         let path = dir.path().join("local.jsonl");
         let content = std::fs::read_to_string(&path).unwrap();
@@ -249,6 +274,10 @@ mod tests {
         assert!(content.contains("child_digest"));
         assert!(content.contains(parent.meta_digest.as_str()));
         assert!(content.contains(child.meta_digest.as_str()));
+        assert!(content.contains("API_KEY"));
+        assert!(content.contains("api.example.com"));
+        assert!(!content.contains("keystore-address"));
+        assert!(!content.contains("secret-value"));
         assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
     }
 }

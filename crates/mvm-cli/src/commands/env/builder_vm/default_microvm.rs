@@ -1,7 +1,4 @@
 use super::*;
-use crate::commands::runtime_overlay::{
-    RuntimeOverlayAcquireMode, runtime_overlay_acquire_mode, runtime_overlay_source_checkout_root,
-};
 use mvm_build::boot_image_select::{self, BootImageAcquisition};
 
 pub(crate) fn ensure_default_microvm_image(
@@ -121,10 +118,19 @@ fn workload_kernel_source(source_checkout: bool) -> KernelSource {
 }
 
 pub(super) fn default_workload_kernel_source(source_checkout: bool) -> KernelSource {
-    if source_checkout {
-        KernelSource::Compile
-    } else {
-        KernelSource::Download
+    default_workload_kernel_source_for(
+        mvm_build::artifact_acquisition::compiled_channel(),
+        source_checkout,
+    )
+}
+
+pub(super) fn default_workload_kernel_source_for(
+    channel: mvm_build::artifact_acquisition::DistributionChannel,
+    source_checkout: bool,
+) -> KernelSource {
+    match mvm_build::artifact_acquisition::default_acquisition(channel, source_checkout) {
+        mvm_build::artifact_acquisition::DefaultAcquisition::Build => KernelSource::Compile,
+        mvm_build::artifact_acquisition::DefaultAcquisition::Download => KernelSource::Download,
     }
 }
 
@@ -189,11 +195,7 @@ pub(crate) fn assert_workload_kernel_supports_verity(kernel_path: &str) -> Resul
 }
 
 pub(super) fn evict_incompatible_workload_kernel(kernel: &std::path::Path) -> Result<()> {
-    for path in [
-        kernel.to_path_buf(),
-        mvm_build::kernel_fetch::kernel_digest_sidecar(kernel),
-        kernel.with_file_name("config"),
-    ] {
+    for path in mvm_build::kernel_fetch::kernel_entry_files(kernel) {
         match std::fs::remove_file(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -208,64 +210,6 @@ pub(super) fn evict_incompatible_workload_kernel(kernel: &std::path::Path) -> Re
         }
     }
     Ok(())
-}
-
-pub(crate) fn ensure_workload_verity_initrd() -> Result<String> {
-    let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
-    let version = env!("CARGO_PKG_VERSION");
-    let arch = mvm_core::arch::GuestArch::host();
-    let layout = mvm_build::verity_initrd::VerityInitrdLayout::under(&cache_root, version, arch);
-    let workspace_root = workload_verity_initrd_source_checkout_root().filter(|_| {
-        runtime_overlay_acquire_mode() == RuntimeOverlayAcquireMode::BuildFromSourceCheckout
-    });
-    if let Some(ws) = workspace_root {
-        return mvm_build::verity_initrd::resolve_or_build_verity_initrd(
-            &cache_root,
-            version,
-            arch,
-            &ws,
-        )
-        .map(|p| p.display().to_string())
-        .context("build verity initrd from the source checkout");
-    }
-    if layout.initrd.is_file() {
-        return Ok(layout.initrd.display().to_string());
-    }
-
-    if let Some(bytes) = embedded_verity_init_bytes() {
-        return mvm_build::verity_initrd::install_prebuilt_verity_initrd(
-            bytes,
-            &cache_root,
-            version,
-            arch,
-        )
-        .map(|p| p.display().to_string())
-        .context("install embedded verity initrd");
-    }
-
-    anyhow::bail!(
-        "no verity initrd available: this build embeds no mvm-verity-init binary and there is no source checkout to cross-compile from"
-    )
-}
-
-fn workload_verity_initrd_source_checkout_root() -> Option<std::path::PathBuf> {
-    runtime_overlay_source_checkout_root().or_else(|| {
-        super::find_builder_vm_flake().ok().and_then(|flake_dir| {
-            std::path::PathBuf::from(flake_dir)
-                .parent()
-                .and_then(|p| p.parent())
-                .and_then(|p| p.parent())
-                .map(std::path::Path::to_path_buf)
-        })
-    })
-}
-
-fn embedded_verity_init_bytes() -> Option<&'static [u8]> {
-    crate::host_binaries::embedded::EMBEDDED
-        .iter()
-        .find(|b| b.name == "mvm-verity-init")
-        .map(|b| b.bytes)
-        .filter(|b| !b.is_empty())
 }
 
 pub(super) fn missing_workload_kernel_message(expected_path: &str) -> String {
@@ -556,8 +500,11 @@ fn download_default_microvm_image(
     kernel_path: &str,
     rootfs_path: &str,
 ) -> Result<(String, String)> {
-    let version = env!("CARGO_PKG_VERSION");
-    let base_url = format!("https://github.com/tinylabscom/mvm/releases/download/v{version}");
+    // The default microVM ships on the boot image counter, not the CLI's. See
+    // `update::boot_image_release` for why deriving this from CARGO_PKG_VERSION
+    // 404s for most of a release cycle.
+    let (tag, image_version) = crate::update::boot_image_release()?;
+    let base_url = format!("https://github.com/tinylabscom/mvm/releases/download/{tag}");
     let arch = if cfg!(target_arch = "aarch64") {
         "aarch64"
     } else {
@@ -567,16 +514,15 @@ fn download_default_microvm_image(
     let assets = default_microvm_assets(cache_dir, arch);
     let checksums_name = format!("default-microvm-{arch}-checksums-sha256.txt");
 
-    ui::info(&format!(
-        "Downloading default microVM image (v{version})..."
-    ));
+    ui::info(&format!("Downloading default microVM image ({tag})..."));
 
     let asset_names: Vec<&str> = assets.iter().map(|(n, _)| n.as_str()).collect();
     let expected = fetch_expected_hashes(
         &ChecksumManifest {
             base_url: &base_url,
             asset: &checksums_name,
-            version,
+            version: &image_version,
+            train: mvm_build::release_signature::ReleaseTrain::BootImage,
         },
         &asset_names,
     )?;

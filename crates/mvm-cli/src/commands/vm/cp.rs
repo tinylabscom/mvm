@@ -74,10 +74,12 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             copy_guest_to_host(vm, path, host, &args)
         }
         (Endpoint::Guest { .. }, Endpoint::Guest { .. }) => {
-            bail!("mvmctl cp supports exactly one VM endpoint; use `mvmctl fs mv` inside one VM")
+            bail!(
+                "mvmctl machine cp supports exactly one VM endpoint; use `mvmctl machine fs mv` inside one VM"
+            )
         }
         (Endpoint::Host(_), Endpoint::Host(_)) => {
-            bail!("mvmctl cp requires one endpoint in `VM:/absolute/path` form")
+            bail!("mvmctl machine cp requires one endpoint in `VM:/absolute/path` form")
         }
     }?;
     if args.json {

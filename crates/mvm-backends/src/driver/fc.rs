@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use mvm_agentd::vsock::{
     CONSOLE_PORT_BASE, GUEST_AGENT_PORT, GUEST_CID, GuestRequest, GuestResponse,
-    WORKLOAD_EXIT_PORT, connect_to_port, dev_console_data_ports, send_request_stream,
+    WORKLOAD_EXIT_PORT, connect_to_port, connect_to_port_once, dev_console_data_ports,
+    send_request_stream,
 };
 use mvm_core::config::vm_state_dir;
 use mvm_core::launch_trace::LaunchTraceRecorder;
@@ -50,9 +51,35 @@ const VSOCK_CONNECT_TIMEOUT_SECS: u64 = 30;
 /// `InstanceStart` — the boot-confirmation signal that the guest is up.
 const AGENT_READY_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Per-attempt bound inside the outer boot-readiness deadline.
+const AGENT_READY_PROBE_TIMEOUT_SECS: u64 = 1;
+
+/// Readiness is the hard-budget boundary, so its observation error must stay
+/// materially smaller than the budget. This is intentionally tighter than the
+/// shared recovery backoff used for slow, externally owned state.
+fn guest_ready_poll_delay(attempt: u32) -> Duration {
+    mvm_core::poll_backoff::poll_delay(attempt).min(Duration::from_millis(5))
+}
+
 /// Bound the guest's stop-time filesystem drain. A clean stop refuses to tear
 /// down Firecracker until the guest confirms its filesystems are durable.
 const GUEST_STOP_DRAIN_TIMEOUT_SECS: u64 = 10;
+
+/// The most vCPUs Firecracker will boot a guest on.
+///
+/// A limit of the VMM, not of the wire format. This was `u8::MAX` on the
+/// reasoning that `vcpu_count` is a byte, which is true and irrelevant:
+/// `/machine-config` validates the value as well as deserializing it, and
+/// answers anything above 32 with *"The number of vCPUs must be greater than 0,
+/// less than 32 and must be 1 or an even number if SMT is enabled"*. So a
+/// request clamped to the protocol ceiling still failed to boot — the same
+/// launch, refused a step later with a second message instead of the first.
+/// Declaring the real ceiling is what makes the clamp above the backend produce
+/// a count that boots.
+///
+/// Probed against the API rather than read out of Firecracker's source: 32 is
+/// accepted (204) and 64 refused, on v1.14.1.
+const MAX_VCPUS: u32 = 32;
 
 /// The Firecracker VMM driver: pure VMM mechanics, no policy and no admission.
 /// It boots what a `VmmSpec` describes and relays the guest's egress port to the
@@ -110,7 +137,7 @@ fn verbosity_token_for(requested: Option<&str>) -> &'static str {
     }
 }
 
-fn fc_base_bootargs(virtiofs_root: bool, has_disk: bool) -> String {
+fn fc_base_bootargs(has_disk: bool) -> String {
     // Serial console + reboot/panic behavior + stable interface naming. The NIC
     // fields the raw Firecracker TAP path appends here are deliberately absent.
     let console = format!(
@@ -118,9 +145,7 @@ fn fc_base_bootargs(virtiofs_root: bool, has_disk: bool) -> String {
         fc_console_verbosity()
     );
     let console = console.as_str();
-    if virtiofs_root {
-        format!("{console} rootfstype=virtiofs root=mvmroot ro init=/init")
-    } else if has_disk {
+    if has_disk {
         // No `root=` declaration here: Firecracker itself appends the
         // authoritative `root=/dev/vda ro|rw` to the boot args from the root
         // drive's `is_root_device`/`is_read_only` flags, so emitting our own
@@ -188,10 +213,10 @@ fn fc_drive_puts(blocks: &[BlockDev]) -> Vec<FcApiPut> {
 
 /// Assemble the full NIC-less Firecracker API config sequence for a spec:
 /// logger, boot-source (kernel + initramfs + **`spec.cmdline` verbatim**),
-/// machine-config, slot-ordered drives, the vsock device, and — only when the
-/// spec opts into balloon elasticity — the virtio-balloon device. There is
-/// deliberately no `/network-interfaces` PUT: the converged Firecracker path
-/// attaches no guest NIC.
+/// machine-config, an unthrottled entropy device, slot-ordered drives, the
+/// vsock device, and — only when the spec opts into balloon elasticity — the
+/// virtio-balloon device. There is deliberately no `/network-interfaces` PUT:
+/// the converged Firecracker path attaches no guest NIC.
 pub fn fc_config_api_puts(
     spec: &VmmSpec,
     kernel_for_boot: &str,
@@ -211,7 +236,7 @@ pub fn fc_config_api_puts(
     let has_disk = spec.initramfs.is_none() && !spec.blocks.is_empty();
     let trimmed = spec.cmdline.trim();
     let cmdline = if trimmed.is_empty() {
-        fc_base_bootargs(false, has_disk)
+        fc_base_bootargs(has_disk)
     } else {
         trimmed.to_string()
     };
@@ -224,9 +249,24 @@ pub fn fc_config_api_puts(
         body: boot_source_body(kernel_for_boot, &cmdline, initrd.as_deref()),
     });
 
+    // Hold the count to what the VMM accepts at the point it is serialized, the
+    // way the libkrun and qemu drivers do. The clamp that *reports* itself to
+    // the user lives above the backend, where the request is still the user's;
+    // this one is the floor under callers that never passed through it, and it
+    // keeps the declared ceiling and the emitted body from drifting apart.
     puts.push(FcApiPut {
         path: "/machine-config".to_string(),
-        body: machine_config_body(spec.vcpus, spec.memory_mib),
+        body: machine_config_body(spec.vcpus.clamp(1, MAX_VCPUS), spec.memory_mib),
+    });
+
+    // The guest creates a fresh signing identity before accepting its first
+    // control connection. Feed the kernel CSPRNG from Firecracker's host-backed
+    // virtio-rng device so early userspace never waits for an unseeded pool.
+    // An empty device config means no rate limiter, which keeps boot entropy
+    // off the latency-critical path.
+    puts.push(FcApiPut {
+        path: "/entropy".to_string(),
+        body: "{}".to_string(),
     });
 
     puts.extend(fc_drive_puts(&spec.blocks));
@@ -337,10 +377,11 @@ fn spawn_workload_exit_capture(runtime_dir: &Path, state_dir: &Path) {
 /// endpoint, its broker, and its exit reporter the instant it resumes, whereas a
 /// cold-booted guest spends a kernel boot getting there.
 ///
-/// A prior run's captured exit code is cleared first, so a reader observes this
-/// launch's exit status and never a stale one.
+/// A prior run's captured exit code and usage record are cleared first, so a
+/// reader observes this launch's exit status and this launch's consumption,
+/// never a stale one.
 fn arm_host_channels(channels: &[VsockPort], state_dir: &Path, runtime_dir: &Path) -> Result<()> {
-    let _ = std::fs::remove_file(mvm_core::exit_capture::exit_file_path(state_dir));
+    mvm_core::run_sidecars::clear_prior_run(state_dir);
     wire_guest_dial_bridges(channels, runtime_dir)?;
     spawn_workload_exit_capture(runtime_dir, state_dir);
     Ok(())
@@ -526,7 +567,7 @@ pub(crate) fn terminate_firecracker_pid(name: &str, pid: u32, pid_file: &Path) -
         fc_sudo_signal(pid, FcStopSignal::Terminate);
         let exited = mvm_vmm::host::process_exit::wait_for_pid_exit(
             pid as libc::pid_t,
-            Instant::now() + crate::driver::libkrun_legacy::STOP_TIMEOUT,
+            Instant::now() + crate::driver::libkrun_process::STOP_TIMEOUT,
             Some(&observer),
         );
         if exited {
@@ -545,7 +586,7 @@ pub(crate) fn terminate_firecracker_pid(name: &str, pid: u32, pid_file: &Path) -
         }
     } else {
         escalate_kill(
-            crate::driver::libkrun_legacy::STOP_TIMEOUT,
+            crate::driver::libkrun_process::STOP_TIMEOUT,
             mvm_core::poll_backoff::poll_delay,
             || crate::fc::is_firecracker_pid_running(pid),
             |signal| fc_sudo_signal(pid, signal),
@@ -619,6 +660,10 @@ impl VmmDriver for FcDriver {
         // authenticated identity handshake still gates admission after
         // resume, so preloading changes placement of VMM work, not authority.
         VmCapabilities {
+            // What Firecracker will actually boot, so a portable oversized
+            // request is clamped to a count that runs rather than to one the
+            // API refuses a step later. See `MAX_VCPUS`.
+            max_vcpus: Some(MAX_VCPUS),
             pause_resume: true,
             snapshots: false,
             snapshot_capability: SnapshotCapability::Unsupported,
@@ -627,10 +672,6 @@ impl VmmDriver for FcDriver {
             tap_networking: false,
             no_routable_guest_nic: true,
             host_vsock_proxy: true,
-            // Firecracker workload VMs are configured with vsock and no
-            // network-interfaces entry at all, so the L3 tunnel's
-            // no-NIC precondition holds structurally.
-            l3_vsock: true,
             balloon: true,
             fs_quick_checkpoint: false,
             // Named explicitly, not left at the all-`None` struct-update
@@ -658,8 +699,8 @@ impl VmmDriver for FcDriver {
         }
     }
 
-    fn workload_base_bootargs(&self, virtiofs_root: bool, has_disk: bool) -> String {
-        fc_base_bootargs(virtiofs_root, has_disk)
+    fn workload_base_bootargs(&self, has_disk: bool) -> String {
+        fc_base_bootargs(has_disk)
     }
 
     fn spawn_standby_parent(
@@ -709,6 +750,7 @@ impl VmmDriver for FcDriver {
             spawned_unix_secs: mvm_core::time::now_unix_secs(),
             state: StandbyState::Idle,
             image_sha256: spec.image_sha256.clone(),
+            root_strategy: spec.root_strategy,
             vsock_egress: spec.vsock_egress,
             // The caller captures the parent and stamps this.
             parent_checkpoint: None,
@@ -969,7 +1011,16 @@ impl VmmDriver for FcDriver {
                     abs_dir
                 );
             }
-            if connect_to_port(&vsock_uds, GUEST_AGENT_PORT, VSOCK_CONNECT_TIMEOUT_SECS).is_ok() {
+            // This loop already owns the deadline and backoff. A normal RPC
+            // connection retries transient races internally, starting with a
+            // 100 ms delay; nesting that cadence here charged every fast boot
+            // whose first probe was early an extra 100 ms. Firecracker exposes
+            // no stable host event for "the guest bound this vsock port", so
+            // retain this bounded compatibility poll with one CONNECT attempt
+            // per probe and verify VMM identity on every pass above.
+            if connect_to_port_once(&vsock_uds, GUEST_AGENT_PORT, AGENT_READY_PROBE_TIMEOUT_SECS)
+                .is_ok()
+            {
                 break;
             }
             if Instant::now() >= deadline {
@@ -978,7 +1029,7 @@ impl VmmDriver for FcDriver {
                     abs_dir
                 );
             }
-            std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
+            std::thread::sleep(guest_ready_poll_delay(attempt));
             attempt = attempt.saturating_add(1);
         }
 
@@ -1249,6 +1300,8 @@ mod tests {
                 log_path: "/tmp/console.log".into(),
             },
             trusted_builder: false,
+            // Not a persistent builder: nothing here outlives its launcher.
+            builder_egress_endpoint: None,
             plan_binding: None,
         }
     }
@@ -1369,6 +1422,7 @@ mod tests {
         assert!(caps.no_routable_guest_nic);
         assert!(caps.host_vsock_proxy);
         assert!(!caps.tap_networking);
+        assert_eq!(caps.max_vcpus, Some(MAX_VCPUS));
         assert_eq!(d.snapshot_capability(), SnapshotCapability::Unsupported);
         // The driver reports the claim-bearing tier itself now, rather than
         // asking a legacy shell for it.
@@ -1378,7 +1432,7 @@ mod tests {
     #[test]
     fn workload_base_bootargs_uses_ttys0_and_carries_no_nic_or_other_console() {
         let d = FcDriver::new();
-        let disk = d.workload_base_bootargs(false, true);
+        let disk = d.workload_base_bootargs(true);
         assert!(disk.contains("console=ttyS0"), "got: {disk}");
         // The disk base carries rootwait+init but NO `root=` declaration:
         // Firecracker appends the authoritative `root=/dev/vda ro|rw` from the
@@ -1393,15 +1447,13 @@ mod tests {
         assert!(!disk.contains("ttyAMA0"), "got: {disk}");
 
         // Verity / initramfs base: serial console only, no root/init token.
-        let verity = d.workload_base_bootargs(false, false);
+        let verity = d.workload_base_bootargs(false);
         assert_eq!(verity, "console=ttyS0 quiet reboot=k panic=1 net.ifnames=0");
         assert!(!verity.contains("root="), "got: {verity}");
 
-        // The virtiofs-root variant still uses ttyS0, not another VMM's console.
-        let virtiofs = d.workload_base_bootargs(true, false);
-        assert!(virtiofs.contains("console=ttyS0"), "got: {virtiofs}");
-        assert!(virtiofs.contains("rootfstype=virtiofs"), "got: {virtiofs}");
-        assert!(!virtiofs.contains("mvm.ip="), "got: {virtiofs}");
+        // There is no third shape: Firecracker never served a virtiofs root
+        // and no driver does now, so neither base can name one.
+        assert!(!disk.contains("virtiofs") && !verity.contains("virtiofs"));
     }
 
     #[test]
@@ -1490,6 +1542,10 @@ mod tests {
         assert!(machine.contains("\"vcpu_count\": 2"), "{machine}");
         assert!(machine.contains("\"mem_size_mib\": 512"), "{machine}");
 
+        // Fresh guest entropy is available before userspace creates its
+        // per-boot signing identity.
+        assert_eq!(body_for(&puts, "/entropy"), "{}");
+
         // vsock device carries the guest CID + the mux uds.
         let vsock = body_for(&puts, "/vsock");
         assert!(
@@ -1504,10 +1560,63 @@ mod tests {
                 "/logger",
                 "/boot-source",
                 "/machine-config",
+                "/entropy",
                 "/drives/blk0",
                 "/vsock"
             ]
         );
+    }
+
+    /// The declared ceiling is the one the emitted body is held to.
+    ///
+    /// Both halves matter and neither is enough alone. `capabilities()` is what
+    /// the clamp above the backend measures the user's `--cpus` against, and
+    /// this body is what Firecracker parses — a ceiling naming a number the API
+    /// refuses is how `--cpus 9999` reached `/machine-config` verbatim and died
+    /// there, so the two are asserted against the same constant.
+    #[test]
+    fn an_oversized_vcpu_request_is_held_to_the_ceiling_the_driver_declares() {
+        let ceiling = FcDriver::new()
+            .capabilities()
+            .max_vcpus
+            .expect("the driver declares a vCPU ceiling");
+
+        for (requested, expected) in [(9999, ceiling), (ceiling + 1, ceiling), (0, 1)] {
+            let mut spec = spec_with(
+                KernelImage::Path("/img/vmlinux".into()),
+                vec![guest_dials(GuestService::NetworkFlow, "/run/egress.sock")],
+                vec![ro_block("/img/rootfs.ext4", 0)],
+            );
+            spec.vcpus = requested;
+
+            let puts = config_puts(&spec);
+            let machine = body_for(&puts, "/machine-config");
+            assert!(
+                machine.contains(&format!("\"vcpu_count\": {expected}")),
+                "{requested} vCPUs requested; expected {expected} on the wire, got {machine}"
+            );
+        }
+    }
+
+    /// A count at or under the ceiling reaches the API untouched — the bound
+    /// bounds the request rather than rewriting it.
+    #[test]
+    fn a_vcpu_request_within_the_ceiling_reaches_the_api_unchanged() {
+        for requested in [1u32, 2, MAX_VCPUS] {
+            let mut spec = spec_with(
+                KernelImage::Path("/img/vmlinux".into()),
+                vec![guest_dials(GuestService::NetworkFlow, "/run/egress.sock")],
+                vec![ro_block("/img/rootfs.ext4", 0)],
+            );
+            spec.vcpus = requested;
+
+            let puts = config_puts(&spec);
+            let machine = body_for(&puts, "/machine-config");
+            assert!(
+                machine.contains(&format!("\"vcpu_count\": {requested}")),
+                "{requested} vCPUs is within the ceiling and must not be rewritten: {machine}"
+            );
+        }
     }
 
     #[test]
@@ -1521,7 +1630,7 @@ mod tests {
         let puts = config_puts(&spec);
         let boot = body_for(&puts, "/boot-source");
         assert!(
-            boot.contains(&fc_base_bootargs(false, true)),
+            boot.contains(&fc_base_bootargs(true)),
             "empty cmdline should default to the disk base: {boot}"
         );
         assert!(
@@ -1615,6 +1724,47 @@ mod tests {
         let status = mvm_vmm::host::workload_wait::wait_for_workload_exit(state_dir.path());
         assert_eq!(status.code, Some(3));
         assert!(!status.success);
+    }
+
+    #[test]
+    fn arming_the_host_channels_drops_the_previous_runs_exit_and_usage() {
+        // A state directory is reused across starts, and both sidecars are
+        // written best-effort — so a reader that finds one takes it at face
+        // value. Leaving the previous run's usage record here would let a run
+        // stopped by a signal, which writes nothing of its own, sign the
+        // previous run's CPU into its receipt as a measurement.
+        let state_dir = tempfile::tempdir().unwrap();
+        let runtime = state_dir.path().join("runtime");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::write(
+            mvm_core::exit_capture::exit_file_path(state_dir.path()),
+            b"0\n",
+        )
+        .unwrap();
+        mvm_core::usage_capture::write_captured(
+            state_dir.path(),
+            &mvm_core::usage_capture::UsageCapture {
+                cpu_ms: mvm_core::usage_capture::Metric::measured(
+                    4210,
+                    mvm_core::usage_capture::Mechanism::HostProcessCpu,
+                ),
+                ..mvm_core::usage_capture::UsageCapture::default()
+            },
+        )
+        .unwrap();
+
+        arm_host_channels(&[], state_dir.path(), &runtime).unwrap();
+
+        assert_eq!(
+            mvm_core::usage_capture::read_captured(state_dir.path()),
+            mvm_core::usage_capture::UsageCapture::default(),
+            "a prior run's usage must not survive into this launch"
+        );
+        assert_eq!(
+            mvm_core::exit_capture::read_captured(state_dir.path()),
+            None,
+            "a prior run's exit code must not survive into this launch"
+        );
     }
 
     #[test]
@@ -1762,6 +1912,21 @@ mod tests {
             .expect("a dead process leaves a removable stale marker");
 
         assert!(!pid_file.exists());
+    }
+
+    #[test]
+    fn boot_agent_poll_stays_fine_through_the_fast_boot_window() {
+        let delays = (0..80)
+            .map(guest_ready_poll_delay)
+            .collect::<Vec<Duration>>();
+        assert_eq!(delays[0], Duration::from_millis(1));
+        assert_eq!(delays[1], Duration::from_millis(2));
+        assert!(
+            delays
+                .iter()
+                .all(|delay| *delay <= Duration::from_millis(5)),
+            "a readiness poll coarser than 5ms can consume the hard boot budget"
+        );
     }
 
     #[test]
@@ -2168,11 +2333,11 @@ mod console_verbosity_tests {
     /// not narrate itself across it.
     #[test]
     fn the_default_firecracker_cmdline_is_quiet() {
-        for (virtiofs_root, has_disk) in [(false, false), (false, true), (true, false)] {
-            let args = fc_base_bootargs(virtiofs_root, has_disk);
+        for has_disk in [false, true] {
+            let args = fc_base_bootargs(has_disk);
             assert!(
                 args.contains("console=ttyS0 quiet"),
-                "boot shape ({virtiofs_root}, {has_disk}) lost the quiet token: {args}"
+                "boot shape (has_disk={has_disk}) lost the quiet token: {args}"
             );
         }
     }
@@ -2182,13 +2347,15 @@ mod console_verbosity_tests {
     #[test]
     fn quiet_is_additive_and_leaves_the_boot_shape_tokens_alone() {
         assert_eq!(
-            fc_base_bootargs(false, true),
+            fc_base_bootargs(true),
             "console=ttyS0 quiet reboot=k panic=1 net.ifnames=0 rootwait init=/init"
         );
+        // The other shape is the verity/initramfs boot, where the initramfs
+        // PID 1 owns root/init selection. The virtiofs-root shape that used to
+        // be here is gone.
         assert_eq!(
-            fc_base_bootargs(true, false),
-            "console=ttyS0 quiet reboot=k panic=1 net.ifnames=0 \
-             rootfstype=virtiofs root=mvmroot ro init=/init"
+            fc_base_bootargs(false),
+            "console=ttyS0 quiet reboot=k panic=1 net.ifnames=0"
         );
     }
 

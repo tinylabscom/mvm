@@ -75,7 +75,11 @@ from mvm._cli import MVM_CLI_BIN_ENV, cli_resolution_hint, resolve_cli_bin
 from mvm._dsl import literal as _literal_value
 # Owned by the Rust registry (crates/mvm-sdk/src/env.rs), generated into
 # `_env/vars.py`. Re-exported from this module for existing importers.
-from mvm._env.vars import MVM_SDK_MODE_ENV, MVM_SDK_OUT_PATH_ENV
+from mvm._env.vars import (
+    MVM_SDK_MODE_ENV,
+    MVM_SDK_OUT_PATH_ENV,
+    MVM_SDK_RUN_PROFILE_ENV,
+)
 from mvm._runtime.runtime import (
     RuntimeFsEntry,
     RuntimeFsStat,
@@ -84,6 +88,7 @@ from mvm._runtime.runtime import (
 __all__ = [
     "DEFAULT_TTL_SECONDS",
     "MVM_CLI_BIN_ENV",
+    "MVM_SDK_RUN_PROFILE_ENV",
     "ExecResult",
     "FsEntry",
     "FsStat",
@@ -480,6 +485,95 @@ def _encode_network(network: Any) -> dict[str, Any] | None:
     )
 
 
+def _reject_live_option(name: str, reason: str) -> None:
+    raise SandboxModeError(
+        f"Sandbox live mode cannot represent `{name}` safely: {reason}"
+    )
+
+
+def _format_allow_host(host: Any, port: Any) -> str:
+    if not isinstance(host, str) or not host or host in {
+        "*",
+        "0.0.0.0",
+        "::",
+        "0.0.0.0/0",
+        "::/0",
+    }:
+        _reject_live_option("network.egress", "allowlist hosts must be specific")
+    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+        _reject_live_option("network.egress", "allowlist ports must be 1..65535")
+    rendered_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    return f"{rendered_host}:{port}"
+
+
+def _lower_live_options(
+    *,
+    env: dict[str, Any] | None,
+    include: list[str] | None,
+    tags: dict[str, str] | None,
+    resources: Any,
+    network: Any,
+) -> list[str]:
+    """Lower the subset with exact CLI equivalents; reject everything else.
+
+    Live mode must never accept an option and then silently boot a different
+    workload. Secret references also stay off argv by construction.
+    """
+    argv: list[str] = []
+    encoded_env = _encode_env_map(env)
+    for key in sorted(encoded_env):
+        value = encoded_env[key]
+        if set(value) != {"kind", "value"} or value.get("kind") != "literal":
+            _reject_live_option("env", "only literal values can be placed on CLI argv")
+        literal = value.get("value")
+        if not isinstance(literal, str):
+            _reject_live_option("env", "literal values must be strings")
+        argv.extend(["--env", f"{key}={literal}"])
+
+    if include:
+        _reject_live_option("include", "the live CLI has no source-bundle equivalent")
+    if tags:
+        _reject_live_option("tags", "the live CLI has no tag equivalent")
+    if resources is not None:
+        _reject_live_option(
+            "resources",
+            "rootfs_size_mb has no live CLI equivalent, so partial lowering is refused",
+        )
+
+    encoded_network = _encode_network(network)
+    if encoded_network is None:
+        return argv
+    unknown = set(encoded_network) - {
+        "mode",
+        "egress",
+        "ports",
+        "peers",
+        "dns",
+    }
+    if unknown:
+        _reject_live_option("network", f"unknown fields: {sorted(unknown)}")
+    if encoded_network.get("mode", "none") != "none":
+        _reject_live_option("network.mode", "only the NIC-less `none` mode is supported")
+    if encoded_network.get("peers"):
+        _reject_live_option("network.peers", "the live CLI has no peer equivalent")
+    if encoded_network.get("dns") is not None:
+        _reject_live_option("network.dns", "the live CLI has no DNS equivalent")
+
+    egress = encoded_network.get("egress")
+    if egress is None:
+        return argv
+    if not isinstance(egress, dict) or set(egress) != {"allowlist"}:
+        _reject_live_option("network.egress", "expected only an allowlist")
+    allowlist = egress.get("allowlist")
+    if not isinstance(allowlist, list):
+        _reject_live_option("network.egress", "allowlist must be a list")
+    for entry in allowlist:
+        if not isinstance(entry, dict) or set(entry) != {"host", "port"}:
+            _reject_live_option("network.egress", "entries must contain host and port")
+        argv.extend(["--allow-host", _format_allow_host(entry["host"], entry["port"])])
+    return argv
+
+
 # ────────────────────────────────────────────────────────────────────
 # Sandbox.
 # ────────────────────────────────────────────────────────────────────
@@ -639,20 +733,20 @@ class _LiveTransport:
         self.vm_id = vm_id
         self.build_mode = build_mode
         self._killed = False
-        # Long-running `mvmctl forward` proxies spawned by `forward()`.
-        # Torn down in `kill()` so a port forwarder never outlives the VM.
-        self._forwards: list[subprocess.Popen[bytes]] = []
-
     @classmethod
-    def for_template(
+    def for_source(
         cls,
         *,
-        template: str,
+        source_kind: str,
+        source: str,
         workload_id: str,
         ttl_seconds: int,
+        create_args: list[str],
+        boot_command: list[str] | None,
+        ports: list[dict[str, Any]],
     ) -> "_LiveTransport":
-        """Run ``mvmctl machine run -d --up-json --name <id> --manifest
-        <template>`` and parse the JSON envelope. Raises
+        """Run ``mvmctl machine run`` with a typed boot source and parse its
+        JSON envelope. Raises
         :class:`SandboxLiveError` on any failure."""
         try:
             mvm_cli_bin = resolve_cli_bin(purpose="Sandbox live mode")
@@ -669,15 +763,37 @@ class _LiveTransport:
             mvm_cli_bin,
             "machine",
             "run",
-            "-d",
-            "--up-json",
-            "--name",
-            vm_id,
-            "--manifest",
-            template,
-            "--ttl",
-            f"{ttl_seconds}s",
         ]
+        if not ports:
+            argv.append("-d")
+        argv.extend(["--up-json", "--name", vm_id])
+        profile = os.environ.get(MVM_SDK_RUN_PROFILE_ENV)
+        if profile is not None:
+            profile = profile.strip().lower()
+            if profile not in {"restrictive", "standard", "dev", "permissive"}:
+                raise SandboxModeError(
+                    f"{MVM_SDK_RUN_PROFILE_ENV}={profile!r} is invalid — expected one of: "
+                    "restrictive, standard, dev, permissive"
+                )
+            argv.extend(["--profile", profile])
+        argv.extend(["--manifest" if source_kind == "manifest" else "--image", source])
+        argv.extend(create_args)
+        argv.extend(["--ttl", f"{ttl_seconds}s"])
+        for port in ports:
+            if (
+                port.get("proto") != "tcp"
+                or port.get("transform") != "opaque"
+                or port.get("host_addr") != "127.0.0.1"
+                or port.get("guest_addr") != "127.0.0.1"
+            ):
+                raise SandboxModeError(
+                    "Sandbox live mode currently accepts only opaque TCP ingress "
+                    "bound to host and guest 127.0.0.1"
+                )
+            argv.extend(["--port", f"{port['host']}:{port['guest']}"])
+        if boot_command is not None:
+            argv.append("--")
+            argv.extend(boot_command)
         try:
             result = subprocess.run(
                 argv,
@@ -1073,27 +1189,6 @@ class _LiveTransport:
                 stderr=result.stderr.decode("utf-8", errors="replace"),
             )
 
-    def forward(self, host_port: int, guest_port: int) -> None:
-        """Spawn ``mvmctl machine forward <vm> --port <host>:<guest>`` in the
-        background. `mvmctl machine forward` blocks (it runs the proxy until
-        signalled), so it is launched detached and tracked; `kill()`
-        terminates every forwarder so none outlives the sandbox."""
-        spec = f"{host_port}:{guest_port}"
-        self._require_dev("forward", ["machine", "forward", self.vm_id, "--port", spec])
-        shell = [self.mvm_cli_bin, "machine", "forward", self.vm_id, "--port", spec]
-        try:
-            proc = subprocess.Popen(
-                shell,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except FileNotFoundError as exc:
-            raise SandboxLiveError(
-                f"`{self.mvm_cli_bin}` not found on disk; {cli_resolution_hint()}",
-                argv=shell,
-            ) from exc
-        self._forwards.append(proc)
-
     def kill(self) -> None:
         """Shell ``mvmctl machine stop <vm>``. Idempotent — repeated kills
         from the context manager + an explicit `sb.kill()` are
@@ -1101,11 +1196,6 @@ class _LiveTransport:
         if self._killed:
             return
         self._killed = True
-        # Tear down any port forwarders before the VM goes away.
-        for proc in self._forwards:
-            if proc.poll() is None:
-                proc.terminate()
-        self._forwards.clear()
         # `--yes` skips the interactive confirmation prompt; the sandbox tears
         # down non-interactively.
         shell = [self.mvm_cli_bin, "machine", "stop", self.vm_id, "--yes"]
@@ -1284,6 +1374,7 @@ class Sandbox:
         ttl: str | int | None = None,
         resources: Any = None,
         network: Any = None,
+        command: list[str] | None = None,
     ) -> "Sandbox":
         """Start a new sandbox session.
 
@@ -1295,12 +1386,10 @@ class Sandbox:
         rejects them — that failure surfaces as
         :class:`SandboxLiveError` here.
 
-        Plan 120 §Task 5 — ``image=<name>`` is the friendlier
-        keyword alias for ``template=<name>``, matching the
-        ``docker run <image>`` / ``podman run <image>`` shape the
-        demo's five-line snippet uses. Exactly one of ``template``
-        (positional or keyword) or ``image`` (keyword) must be
-        provided.
+        ``template`` selects a manifest/template source; ``image`` selects an
+        OCI source. Exactly one must be provided. ``command`` overrides the
+        OCI image command in live mode and records the same entrypoint in
+        record mode.
 
         ``workload_id`` defaults to the resolved template (the CLI
         overrides with the script's basename when invoked via
@@ -1323,21 +1412,38 @@ class Sandbox:
             raise ValueError(
                 "Sandbox.create accepts `template` OR `image`, not both"
             )
-        resolved_template = template if template is not None else image
-        if not isinstance(resolved_template, str) or not resolved_template:
+        source = template if template is not None else image
+        if not isinstance(source, str) or not source:
             raise ValueError(
                 "template/image must be a non-empty str"
             )
+        if command is not None:
+            if not isinstance(command, list) or not command or not all(
+                isinstance(arg, str) and arg for arg in command
+            ):
+                raise ValueError("command must be a non-empty list[str]")
+            command = list(command)
         ttl_seconds = _parse_ttl(ttl)
         if ttl_seconds is None:
             ttl_seconds = DEFAULT_TTL_SECONDS
-        wid = workload_id or resolved_template
+        wid = workload_id or source
 
         if mode == "live":
-            live = _LiveTransport.for_template(
-                template=resolved_template,
+            create_args = _lower_live_options(
+                env=env,
+                include=include,
+                tags=tags,
+                resources=resources,
+                network=network,
+            )
+            live = _LiveTransport.for_source(
+                source_kind="manifest" if template is not None else "image",
+                source=source,
                 workload_id=wid,
                 ttl_seconds=ttl_seconds,
+                create_args=create_args,
+                boot_command=command,
+                ports=list((_encode_network(network) or {}).get("ports", [])),
             )
             sb = cls(wid, live=live)
             _register_live(sb)
@@ -1345,7 +1451,7 @@ class Sandbox:
 
         # record mode (existing path).
         create_dict: dict[str, Any] = {
-            "template": resolved_template,
+            "template" if template is not None else "image": source,
             "env": _encode_env_map(env),
             "include": list(include) if include else [],
             "tags": dict(tags) if tags else {},
@@ -1359,7 +1465,11 @@ class Sandbox:
         _recording = {
             "workload_id": wid,
             "create": create_dict,
-            "ops": [],
+            "ops": (
+                [{"kind": "command_start", "argv": command, "env": {}}]
+                if command is not None
+                else []
+            ),
         }
         return cls(wid)
 
@@ -1538,14 +1648,10 @@ class Sandbox:
         self._live.cp(f"{self._live.vm_id}:{guest_path}", host_path)
 
     def forward(self, host_port: int, guest_port: int) -> None:
-        """Forward ``host_port`` on the host to ``guest_port`` in the
-        sandbox. Spawns ``mvmctl machine forward <vm> --port <host>:<guest>`` as
-        a background proxy that runs until the sandbox is torn down
-        (``kill`` / ``__exit__`` terminate it).
+        """Refuse dynamic ingress changes after admission.
 
-        Live mode only: exposing a port is a runtime action, so in record
-        mode this raises :class:`SandboxModeError`. To declare a port
-        mapping for a recorded workload, use ``mvm.network(ports=...)``.
+        Declare the mapping with ``network=mvm.network(ports=[...])`` when
+        creating the sandbox so it is covered by the signed admission plan.
         """
         if not isinstance(host_port, int) or isinstance(host_port, bool):
             raise TypeError("host_port must be an int")
@@ -1553,12 +1659,10 @@ class Sandbox:
             raise TypeError("guest_port must be an int")
         if not (0 < host_port < 65536) or not (0 < guest_port < 65536):
             raise ValueError("ports must be in 1..65535")
-        if self._live is None:
-            raise SandboxModeError(
-                "`Sandbox.forward` is a live-mode operation; under "
-                "MVM_SDK_MODE=record declare ports with `mvm.network(ports=...)`."
-            )
-        self._live.forward(host_port, guest_port)
+        raise SandboxModeError(
+            "dynamic `Sandbox.forward` is retired; declare ingress with "
+            "`Sandbox.create(..., network=mvm.network(ports=[...]))` before boot"
+        )
 
     def kill(self) -> None:
         """Issue a ``kill`` against the active transport.

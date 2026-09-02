@@ -9,6 +9,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import * as fs from "node:fs";
+import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as mvm from "../src/index.js";
@@ -137,12 +138,14 @@ beforeEach(() => {
   mvm.resetRecording();
   delete process.env.MVM_SDK_MODE;
   delete process.env.MVM_CLI_BIN;
+  delete process.env.MVM_SDK_RUN_PROFILE;
 });
 
 afterEach(() => {
   mvm.resetRecording();
   delete process.env.MVM_SDK_MODE;
   delete process.env.MVM_CLI_BIN;
+  delete process.env.MVM_SDK_RUN_PROFILE;
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -321,6 +324,81 @@ describe("Sandbox.create (live mode)", () => {
     expect(calls[0]).toContain("--ttl");
   });
 
+  it("propagates an explicit dev profile", () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "sb-dev-vm", build_mode: "dev" },
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+    process.env[mvm.MVM_SDK_RUN_PROFILE_ENV] = "dev";
+
+    mvm.Sandbox.create("python-3.12", { workloadId: "testwid" });
+
+    expect(readFixtureLog()[0]).toContain("--profile dev");
+  });
+
+  it("rejects an unknown profile before boot", () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "unused", build_mode: "dev" },
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+    process.env[mvm.MVM_SDK_RUN_PROFILE_ENV] = "unknown";
+
+    expect(() => mvm.Sandbox.create("python-3.12")).toThrow(/MVM_SDK_RUN_PROFILE/);
+    expect(readFixtureLog()).toEqual([]);
+  });
+
+  it("lowers an image, literal env, allowlist, and boot command", () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "browser", build_mode: "dev" },
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+    mvm.Sandbox.create(
+      { image: mvm.OBSCURA_IMAGE },
+      {
+        env: { MODE: "safe" },
+        network: {
+          mode: "none",
+          egress: { allowlist: [{ host: "example.com", port: 443 }] },
+        },
+        command: ["/obscura", "serve"],
+      },
+    );
+    const call = readFixtureLog()[0];
+    expect(call).toContain(`--image ${mvm.OBSCURA_IMAGE}`);
+    expect(call).toContain("--env MODE=safe");
+    expect(call).toContain("--allow-host example.com:443");
+    expect(call).toContain("-- /obscura serve");
+  });
+
+  it("rejects secrets and unrepresentable options before boot", () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "unused", build_mode: "dev" },
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+    expect(() =>
+      mvm.Sandbox.create("minimal", {
+        env: { TOKEN: mvm.secret("token", { type: "bearer", hosts: ["example.com"] }) },
+      }),
+    ).toThrow(/only literal/);
+    expect(readFixtureLog()).toEqual([]);
+    expect(() =>
+      mvm.Sandbox.create("minimal", {
+        resources: { cpu_cores: 1, memory_mb: 256, rootfs_size_mb: 512 },
+      }),
+    ).toThrow(/resources/);
+    expect(readFixtureLog()).toEqual([]);
+    expect(() =>
+      mvm.Sandbox.create("minimal", {
+        network: { raw_ip_stack: true } as never,
+      }),
+    ).toThrow(/unknown fields/);
+    expect(readFixtureLog()).toEqual([]);
+  });
+
   it("propagates mvmctl failure", () => {
     const script = writeFixtureMvmctl({
       upEnvelope: null,
@@ -495,11 +573,11 @@ describe("runtime process and filesystem surface", () => {
       () => sb.files.move("/app/x", "/app/y"),
       () => sb.copyIn("/tmp/x", "/app/x"),
       () => sb.copyOut("/app/x", "/tmp/x"),
-      () => sb.forward(8080, 80),
     ];
     for (const operation of operations) {
       expect(operation).toThrow(mvm.SandboxDevOnly);
     }
+    expect(() => sb.forward(8080, 80)).toThrow(mvm.SandboxModeError);
     expect(readFixtureLog().slice(1).some((call) =>
       call.startsWith("machine proc") ||
       call.startsWith("machine fs") ||
@@ -611,12 +689,10 @@ describe("Sandbox.copyIn / copyOut (live mode)", () => {
   });
 });
 
-// ── forward / ports (Plan 125 B1b) ───────────────────────────────────
-
-type ForwardsPeek = { forwards: import("node:child_process").ChildProcess[] };
+// ── declared ingress ─────────────────────────────────────────────────
 
 describe("Sandbox.forward (live mode)", () => {
-  it("spawns mvmctl machine forward --port host:guest", async () => {
+  it("refuses dynamic forwarding with the signed-plan migration", () => {
     const script = writeFixtureMvmctl({
       upEnvelope: { schema_version: 1, vm_id: "sb-fwd-vm", build_mode: "dev" },
     });
@@ -624,36 +700,35 @@ describe("Sandbox.forward (live mode)", () => {
     process.env.MVM_CLI_BIN = script;
 
     const sb = mvm.Sandbox.create("python-dev");
-    sb.forward(8080, 80);
-
-    // The fixture `forward` exits immediately (sleep 0); await its exit so
-    // its log line is flushed before we assert.
-    const live = sb._live as unknown as ForwardsPeek;
-    await new Promise<void>((resolve) =>
-      live.forwards[0].on("exit", () => resolve()),
-    );
-    const calls = readFixtureLog();
-    expect(
-      calls.some((c) => c.startsWith("machine forward sb-fwd-vm --port 8080:80")),
-    ).toBe(true);
+    expect(() => sb.forward(8080, 80)).toThrow(/before boot/);
+    expect(readFixtureLog().some((c) => c.startsWith("machine forward"))).toBe(false);
   });
 
-  it("terminates the forwarder on kill", () => {
+  it("passes declared opaque TCP ingress to machine run", () => {
     const script = writeFixtureMvmctl({
       upEnvelope: { schema_version: 1, vm_id: "sb-fwd-vm", build_mode: "dev" },
-      forwardSleep: 30,
     });
     process.env.MVM_SDK_MODE = "live";
     process.env.MVM_CLI_BIN = script;
 
-    const sb = mvm.Sandbox.create("python-dev");
-    sb.forward(8080, 80);
-    const live = sb._live as unknown as ForwardsPeek;
-    const proc = live.forwards[0];
-    expect(proc.killed).toBe(false); // running (blocked on sleep)
-
-    sb.kill();
-    expect(proc.killed).toBe(true); // terminated by teardown
+    mvm.Sandbox.create("python-dev", {
+      network: {
+        mode: "none",
+        ports: [{
+          mapping_id: 1,
+          proto: "tcp",
+          host_addr: "127.0.0.1",
+          host: 8080,
+          guest_addr: "127.0.0.1",
+          guest: 80,
+          transform: "opaque",
+        }],
+      },
+    });
+    const run = readFixtureLog()[0];
+    expect(run).toContain("machine run");
+    expect(run).toContain("--port 8080:80");
+    expect(run.split(" ")).not.toContain("-d");
   });
 
   it("is refused in record mode", () => {
@@ -897,7 +972,73 @@ describe("CodeSandbox", () => {
 // ── BrowserSandbox typed helper — Plan 125 C2 ────────────────────────
 
 describe("BrowserSandbox", () => {
-  it("forwards the CDP port and endpoint() returns the host URL", async () => {
+  it("uses the pinned image, fixed proxy/loopback command, and allowlist", () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "obscura", build_mode: "dev" },
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+    const bs = new mvm.BrowserSandbox("obscura", {
+      network: {
+        mode: "none",
+        egress: { allowlist: [{ host: "example.com", port: 443 }] },
+      },
+    });
+    try {
+      const call = readFixtureLog()[0];
+      expect(call).toContain(`--image ${mvm.OBSCURA_IMAGE}`);
+      expect(call).toContain("--allow-host example.com:443");
+      expect(call).toContain("-- /obscura --proxy http://127.0.0.1:1080 serve");
+      expect(call).toContain("--host 127.0.0.1 --port 9222");
+      expect(call).not.toContain("private");
+      expect(call).not.toContain("stealth");
+    } finally {
+      bs.kill();
+    }
+  });
+
+  it("refuses an Obscura command override before boot", () => {
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "unused", build_mode: "dev" },
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+    expect(() => new mvm.BrowserSandbox("obscura", { command: ["/bin/sh"] })).toThrow(
+      /does not allow command overrides/,
+    );
+    expect(readFixtureLog()).toEqual([]);
+  });
+
+  it("validates CDP readiness and cleans up after timeout", async () => {
+    const server = http.createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ webSocketDebuggerUrl: "ws://127.0.0.1/devtools/browser/test" }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("expected TCP address");
+    const script = writeFixtureMvmctl({
+      upEnvelope: { schema_version: 1, vm_id: "browser", build_mode: "dev" },
+    });
+    process.env.MVM_SDK_MODE = "live";
+    process.env.MVM_CLI_BIN = script;
+    const bs = new mvm.BrowserSandbox("chromium", { hostPort: address.port });
+    expect(await bs.waitUntilReady({ timeoutMs: 1000 })).toBe(
+      "ws://127.0.0.1/devtools/browser/test",
+    );
+    bs.kill();
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+
+    const failing = new mvm.BrowserSandbox("chromium", { hostPort: address.port });
+    await expect(failing.waitUntilReady({ timeoutMs: 20, retryMs: 2 })).rejects.toBeInstanceOf(
+      mvm.BrowserReadyError,
+    );
+    expect(readFixtureLog().some((call) => call.startsWith("machine stop browser --yes"))).toBe(true);
+  });
+
+  it("declares the CDP port and endpoint() returns the host URL", () => {
     const script = writeFixtureMvmctl({
       upEnvelope: { schema_version: 1, vm_id: "sb-br-vm", build_mode: "dev" },
     });
@@ -907,15 +1048,13 @@ describe("BrowserSandbox", () => {
     const bs = new mvm.BrowserSandbox("chromium");
     try {
       expect(bs.endpoint()).toBe("http://localhost:9222");
-      const live = bs.sandbox._live as unknown as ForwardsPeek;
-      await new Promise<void>((resolve) => live.forwards[0].on("exit", () => resolve()));
-      expect(readFixtureLog().some((c) => c.startsWith("machine forward sb-br-vm --port 9222:9222"))).toBe(true);
+      expect(readFixtureLog()[0]).toContain("--port 9222:9222");
     } finally {
       bs.kill();
     }
   });
 
-  it("honours a custom host port", async () => {
+  it("honours a custom host port", () => {
     const script = writeFixtureMvmctl({
       upEnvelope: { schema_version: 1, vm_id: "sb-br-vm", build_mode: "dev" },
     });
@@ -925,9 +1064,7 @@ describe("BrowserSandbox", () => {
     const bs = new mvm.BrowserSandbox("chromium", { hostPort: 18222 });
     try {
       expect(bs.endpoint()).toBe("http://localhost:18222");
-      const live = bs.sandbox._live as unknown as ForwardsPeek;
-      await new Promise<void>((resolve) => live.forwards[0].on("exit", () => resolve()));
-      expect(readFixtureLog().some((c) => c.startsWith("machine forward sb-br-vm --port 18222:9222"))).toBe(true);
+      expect(readFixtureLog()[0]).toContain("--port 18222:9222");
     } finally {
       bs.kill();
     }

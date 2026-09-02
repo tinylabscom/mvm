@@ -32,7 +32,7 @@ use anyhow::{Context, Result};
 use mvm_core::receipt::SignedExecutionReceipt;
 use serde::{Deserialize, Serialize};
 
-use crate::audit::emitter::{write_atomic, write_atomic_unsynced};
+use crate::audit::emitter::write_atomic_unsynced;
 use crate::supervisor::audit_file::flock_exclusive;
 
 /// Head file content: the chain tip for one tenant's receipt store.
@@ -94,6 +94,13 @@ impl ReceiptStore {
     where
         F: FnOnce(Option<String>) -> Result<SignedExecutionReceipt>,
     {
+        self.append_chained_inner(build)
+    }
+
+    fn append_chained_inner<F>(&self, build: F) -> Result<u64>
+    where
+        F: FnOnce(Option<String>) -> Result<SignedExecutionReceipt>,
+    {
         let _guard = self.lock()?;
         let mut head = self.read_head();
         let receipt = build(head.last_receipt_id.take())?;
@@ -104,7 +111,11 @@ impl ReceiptStore {
 
         let bytes =
             serde_json::to_vec_pretty(&receipt).context("serializing signed execution receipt")?;
-        write_atomic(&receipt_path, &bytes)?;
+        // Receipts are a reconstructible view over the durable audit chain,
+        // not a control that authorizes the workload. Keep atomic publication
+        // for concurrent readers, but do not add a second stable-storage wait
+        // to the admission boundary.
+        write_atomic_unsynced(&receipt_path, &bytes)?;
 
         head.last_receipt_id = Some(receipt.payload.receipt_id.clone());
         self.write_head(&head)?;
@@ -173,8 +184,7 @@ impl ReceiptStore {
     /// them — which is what [`Self::read_head`] now does. On a host where
     /// fdatasync costs ~42 ms this was a second synchronous flush, ahead of a
     /// VMM start, for a value that can be rebuilt.
-    /// The chain tip, from the head file when it is current and from the
-    /// receipts themselves when it is not.
+    /// The chain tip reconstructed from the receipt files.
     ///
     /// A head that is missing, truncated, or unparseable used to read as
     /// `Head::default()` — sequence 0 — while the receipts it named were still
@@ -182,18 +192,12 @@ impl ReceiptStore {
     /// existing receipt, and linked to no parent. This module's own preamble
     /// says what that looks like downstream: two receipts naming one parent,
     /// which every offline verifier is obliged to read as a deleted or
-    /// reordered receipt. Taking the later of the head and the files makes a
-    /// lost head recoverable instead of destructive.
+    /// reordered receipt. The receipt files therefore remain authoritative in
+    /// both directions: a head behind them cannot reuse a sequence, and a head
+    /// ahead of them after interrupted publication cannot link to a receipt
+    /// that did not survive.
     fn read_head(&self) -> Head {
-        let stored = std::fs::read_to_string(&self.head_path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<Head>(&s).ok());
-        match (stored, self.scan_tip()) {
-            (Some(head), Some(tip)) if tip.sequence > head.sequence => tip,
-            (Some(head), _) => head,
-            (None, Some(tip)) => tip,
-            (None, None) => Head::default(),
-        }
+        self.scan_tip().unwrap_or_default()
     }
 
     fn write_head(&self, head: &Head) -> Result<()> {
@@ -264,6 +268,11 @@ mod tests {
             outcome: ReceiptOutcome::Authorized,
             granted_by: None,
             prev_receipt_id: prev,
+            started_at: None,
+            ended_at: None,
+            exit_code: None,
+            granted_capabilities: Vec::new(),
+            network_destinations: Vec::new(),
             issued_at: "2026-08-06T00:00:00+00:00".into(),
             extensions: BTreeMap::new(),
         };
@@ -471,6 +480,32 @@ mod tests {
         let recovered = store.head().unwrap();
         assert_eq!(recovered.sequence, 3, "the receipts win over a stale head");
         assert_eq!(recovered.last_receipt_id, tip.last_receipt_id);
+    }
+
+    #[test]
+    fn a_head_ahead_of_the_receipt_files_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ReceiptStore::open(dir.path(), "t1").unwrap();
+        store
+            .append_chained(|prev| Ok(sample_receipt(prev, 1)))
+            .unwrap();
+
+        let ahead = serde_json::json!({
+            "last_receipt_id": "sha256:receipt-that-did-not-survive",
+            "sequence": 2
+        });
+        std::fs::write(
+            dir.path().join("receipts/t1/head.json"),
+            serde_json::to_vec_pretty(&ahead).unwrap(),
+        )
+        .unwrap();
+
+        let recovered = store.head().unwrap();
+        assert_eq!(recovered.sequence, 1);
+        assert_ne!(
+            recovered.last_receipt_id,
+            Some("sha256:receipt-that-did-not-survive".to_string())
+        );
     }
 
     /// A head left truncated or unparseable by a partial write must not

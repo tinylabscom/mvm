@@ -1204,6 +1204,73 @@ mod tests {
     }
 
     #[test]
+    fn pinned_checkpoints_derived_from_a_real_session_protects_its_checkpoint() {
+        // Task 1's other test builds the pinned set by hand, which proves the
+        // sweep honours whatever set it's handed but not that the set the CLI
+        // actually derives from disk is the right one. This test closes that
+        // gap: a real `AgentSessionRecord` naming a real checkpoint's
+        // `meta_digest` as its `parent_checkpoint`, run through the same
+        // `pinned_checkpoints` the prune path calls, must protect that exact
+        // checkpoint — and only that one.
+        use mvm_contract::protocol::agent_session::AgentSessionId;
+        use mvm_core::checkpoint::{CheckpointClass, CheckpointId, CheckpointMeta};
+        use mvm_runtime::agent_session::{AgentSessionRecord, AgentSessionStore, SandboxResidency};
+        use mvm_runtime::checkpoint::CheckpointStore;
+
+        let ckpt_tmp = tempfile::tempdir().unwrap();
+        let ckpt_store = CheckpointStore::at(ckpt_tmp.path());
+        let mk = |id: &str, age: u64| {
+            CheckpointMeta::builder(CheckpointId::new(id), CheckpointClass::FsQuick, "vm")
+                .content(vec![mvm_core::checkpoint::ContentBlob {
+                    name: "rootfs.ext4".into(),
+                    sha256: "h".into(),
+                }])
+                .supervisor_config_digest("d")
+                .created_unix(age)
+                .build()
+        };
+        let resumed_from = mk("resumed-from", 0);
+        let orphaned = mk("orphaned", 0);
+        ckpt_store.write_meta(&resumed_from).unwrap();
+        ckpt_store.write_meta(&orphaned).unwrap();
+
+        let session_tmp = tempfile::tempdir().unwrap();
+        let session_store = AgentSessionStore::at(session_tmp.path());
+        let record = AgentSessionRecord {
+            session_id: AgentSessionId::parse("sess-parked").unwrap(),
+            generation: 1,
+            state: SandboxResidency::Hibernated,
+            members: vec!["vm-alpha".to_string()],
+            parent_checkpoint: Some(resumed_from.meta_digest.clone()),
+            created_unix: 0,
+            updated_unix: 0,
+            journal_cursor: 0,
+            approval_head: None,
+            storage_tier: None,
+            park_reason: None,
+        };
+        session_store.write(&record).unwrap();
+
+        let pinned = mvm_runtime::agent_session::pinned_checkpoints(&session_store).unwrap();
+
+        let now = 10_000_000u64;
+        let removed = super::sweep_untagged_checkpoints(&ckpt_store, now, 1, &pinned).unwrap();
+        assert_eq!(removed, 1, "only the orphaned checkpoint should be reaped");
+        assert!(
+            ckpt_store
+                .read_meta(&CheckpointId::new("resumed-from"))
+                .is_ok(),
+            "the checkpoint the parked session actually resumes from must survive"
+        );
+        assert!(
+            ckpt_store
+                .read_meta(&CheckpointId::new("orphaned"))
+                .is_err(),
+            "a checkpoint no session names must still be reaped"
+        );
+    }
+
+    #[test]
     fn flow_byte_log_sweep_targets_audit_flow_bytes_dir() {
         // The cache-prune wiring sweeps `<audit>/flow-bytes/`; assert that
         // path contract (the supervisor writer must agree) and that the

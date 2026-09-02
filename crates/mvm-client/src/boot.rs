@@ -11,6 +11,139 @@
 
 use crate::{MvmError, Result};
 use mvm_core::protocol::vm_backend::{VmId, VmStatus};
+use std::path::Path;
+
+/// A durable-session resume whose backend is selected at the client boundary.
+///
+/// The CLI owns the stores and admission material, but it must not own the
+/// concrete VMM dispatcher. This request keeps those concerns grouped while
+/// letting [`resume_and_boot_local`] resolve the named backend here.
+pub struct ResumeBootLocalRequest<'a> {
+    sessions: &'a mvm_runtime::agent_session::AgentSessionStore,
+    checkpoints: &'a mvm_runtime::checkpoint::CheckpointStore,
+    resume: &'a mvm_hostd::session_resume::ResumeRequest<'a>,
+    backend_name: &'a str,
+    state_dir: &'a Path,
+    kernel_path: Option<&'a Path>,
+    emitter: Option<&'a mvm_hostd::audit::emitter::AuditEmitter>,
+}
+
+impl<'a> ResumeBootLocalRequest<'a> {
+    /// Start a validated request builder.
+    #[must_use]
+    pub fn builder() -> ResumeBootLocalRequestBuilder<'a> {
+        ResumeBootLocalRequestBuilder::default()
+    }
+}
+
+/// Builder for [`ResumeBootLocalRequest`].
+#[derive(Default)]
+pub struct ResumeBootLocalRequestBuilder<'a> {
+    sessions: Option<&'a mvm_runtime::agent_session::AgentSessionStore>,
+    checkpoints: Option<&'a mvm_runtime::checkpoint::CheckpointStore>,
+    resume: Option<&'a mvm_hostd::session_resume::ResumeRequest<'a>>,
+    backend_name: Option<&'a str>,
+    state_dir: Option<&'a Path>,
+    kernel_path: Option<&'a Path>,
+    emitter: Option<&'a mvm_hostd::audit::emitter::AuditEmitter>,
+}
+
+impl<'a> ResumeBootLocalRequestBuilder<'a> {
+    #[must_use]
+    pub fn sessions(mut self, sessions: &'a mvm_runtime::agent_session::AgentSessionStore) -> Self {
+        self.sessions = Some(sessions);
+        self
+    }
+
+    #[must_use]
+    pub fn checkpoints(
+        mut self,
+        checkpoints: &'a mvm_runtime::checkpoint::CheckpointStore,
+    ) -> Self {
+        self.checkpoints = Some(checkpoints);
+        self
+    }
+
+    #[must_use]
+    pub fn resume(mut self, resume: &'a mvm_hostd::session_resume::ResumeRequest<'a>) -> Self {
+        self.resume = Some(resume);
+        self
+    }
+
+    #[must_use]
+    pub fn backend_name(mut self, backend_name: &'a str) -> Self {
+        self.backend_name = Some(backend_name);
+        self
+    }
+
+    #[must_use]
+    pub fn state_dir(mut self, state_dir: &'a Path) -> Self {
+        self.state_dir = Some(state_dir);
+        self
+    }
+
+    #[must_use]
+    pub fn kernel_path(mut self, kernel_path: Option<&'a Path>) -> Self {
+        self.kernel_path = kernel_path;
+        self
+    }
+
+    #[must_use]
+    pub fn emitter(mut self, emitter: Option<&'a mvm_hostd::audit::emitter::AuditEmitter>) -> Self {
+        self.emitter = emitter;
+        self
+    }
+
+    /// Validate the required request fields.
+    pub fn build(self) -> anyhow::Result<ResumeBootLocalRequest<'a>> {
+        Ok(ResumeBootLocalRequest {
+            sessions: self
+                .sessions
+                .ok_or_else(|| anyhow::anyhow!("resume boot needs a session store"))?,
+            checkpoints: self
+                .checkpoints
+                .ok_or_else(|| anyhow::anyhow!("resume boot needs a checkpoint store"))?,
+            resume: self
+                .resume
+                .ok_or_else(|| anyhow::anyhow!("resume boot needs a resume request"))?,
+            backend_name: self
+                .backend_name
+                .ok_or_else(|| anyhow::anyhow!("resume boot needs a backend name"))?,
+            state_dir: self
+                .state_dir
+                .ok_or_else(|| anyhow::anyhow!("resume boot needs a state directory"))?,
+            kernel_path: self.kernel_path,
+            emitter: self.emitter,
+        })
+    }
+}
+
+/// Resolve the named local backend and drive a durable-session resume boot.
+///
+/// Backend selection lives here with the other host-local VMM dispatch seams,
+/// so a CLI caller cannot bypass the client boundary by constructing
+/// `AnyBackend` directly.
+pub fn resume_and_boot_local(
+    req: &ResumeBootLocalRequest<'_>,
+    clock: &dyn mvm_hostd::plan_admission::Clock,
+    ledger: &mvm_hostd::plan_admission::InMemoryNonceLedger,
+) -> anyhow::Result<mvm_hostd::session_resume::BootedSession> {
+    require_hypervisor_selectable(req.backend_name)?;
+    let backend = mvm_runtime::backend::AnyBackend::from_hypervisor(req.backend_name);
+    mvm_hostd::session_resume::resume_and_boot(
+        req.sessions,
+        req.checkpoints,
+        &mvm_hostd::session_resume::ResumeBootRequest {
+            resume: req.resume,
+            backend: &backend,
+            state_dir: req.state_dir,
+            kernel_path: req.kernel_path,
+            emitter: req.emitter,
+        },
+        clock,
+        ledger,
+    )
+}
 
 /// Select the VMM for `backend_name`, verify it supports workloads, and start
 /// the fully-prepared config. Mirrors the CLI's former inline
@@ -31,6 +164,14 @@ pub fn start_prepared(
         reason: format!("{e:#}"),
     })?;
     Ok(())
+}
+
+/// Clamp a requested vCPU count against the selected backend before admission
+/// records the grant and before the backend serializes its machine config.
+#[must_use]
+pub fn clamp_vcpus_for_backend(backend_name: &str, requested: u32) -> Option<u32> {
+    let backend = mvm_runtime::backend::AnyBackend::from_hypervisor(backend_name);
+    mvm_core::vm_backend::clamp_vcpus(requested, backend.capabilities().max_vcpus)
 }
 
 /// Report what actually bounded the VM [`start_prepared`] just started.
@@ -112,4 +253,42 @@ pub fn require_hypervisor_selectable(name: &str) -> Result<()> {
             reason: format!("{e:#}"),
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ResumeBootLocalRequest;
+
+    /// An oversized request is granted the largest count the backend will
+    /// actually boot — 32 for Firecracker, which is what `/machine-config`
+    /// accepts, not the 255 its `u8` `vcpu_count` field can carry. Clamping to
+    /// the wire type's ceiling produced a request the API refused, so the
+    /// number is written out here rather than read back off the same
+    /// `capabilities()` this delegates to, which would assert nothing.
+    #[test]
+    fn firecracker_vcpus_are_clamped_to_a_count_the_vmm_boots() {
+        assert_eq!(
+            super::clamp_vcpus_for_backend("firecracker", 9_999),
+            Some(32)
+        );
+        assert_eq!(super::clamp_vcpus_for_backend("firecracker", 2), None);
+    }
+
+    /// The same contract on the other backend that declared the wire ceiling.
+    /// libkrun accepts every count its config call can carry and aborts at
+    /// start on the ones it cannot honour, so 64 is the measured bound.
+    #[test]
+    fn libkrun_vcpus_are_clamped_to_a_count_the_vmm_boots() {
+        assert_eq!(super::clamp_vcpus_for_backend("libkrun", 9_999), Some(64));
+        assert_eq!(super::clamp_vcpus_for_backend("libkrun", 2), None);
+    }
+
+    #[test]
+    fn resume_boot_builder_reports_the_first_missing_required_field() {
+        let error = match ResumeBootLocalRequest::builder().build() {
+            Ok(_) => panic!("an empty builder must be refused"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("session store"), "{error:#}");
+    }
 }

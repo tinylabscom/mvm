@@ -123,6 +123,28 @@ mod workload_proxy;
 #[path = "mvm-host-vm-init/builder_hooks.rs"]
 mod builder_hooks;
 
+/// Parse the exact device path emitted by `losetup --find --show`.
+///
+/// Kept outside the Linux-only mount module so every host exercises the
+/// validation that stands between subprocess output and a privileged mount.
+#[cfg(any(target_os = "linux", test))]
+fn parse_loop_device(output: &[u8]) -> Result<std::path::PathBuf, std::io::Error> {
+    let text = std::str::from_utf8(output)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let path = text.strip_suffix('\n').unwrap_or(text);
+    let Some(number) = path.strip_prefix("/dev/loop") else {
+        return Err(std::io::Error::other(format!(
+            "losetup returned unexpected device path {path:?}"
+        )));
+    };
+    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(std::io::Error::other(format!(
+            "losetup returned unexpected device path {path:?}"
+        )));
+    }
+    Ok(std::path::PathBuf::from(path))
+}
+
 fn main() -> ExitCode {
     // Subcommand dispatch for builder-VM utility operations. When invoked
     // as `mvm-host-vm-init run-before-build-hook <rootfs.ext4>`, mount the
@@ -133,6 +155,11 @@ fn main() -> ExitCode {
     #[cfg(target_os = "linux")]
     if std::env::args().nth(1).as_deref() == Some("run-before-build-hook") {
         return run_before_build_hook_subcommand();
+    }
+
+    #[cfg(target_os = "linux")]
+    if std::env::args().nth(1).as_deref() == Some("seal-rootfs-journal") {
+        return seal_rootfs_journal_subcommand();
     }
 
     #[cfg(target_os = "linux")]
@@ -163,6 +190,21 @@ fn run_before_build_hook_subcommand() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("mvm-host-vm-init: run-before-build-hook failed: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn seal_rootfs_journal_subcommand() -> ExitCode {
+    let rootfs = std::env::args().nth(2).unwrap_or_else(|| {
+        eprintln!("usage: mvm-host-vm-init seal-rootfs-journal <rootfs.ext4>");
+        std::process::exit(2);
+    });
+    match builder_hooks::seal_rootfs_journal(std::path::Path::new(&rootfs)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("mvm-host-vm-init: seal-rootfs-journal failed: {e}");
             ExitCode::FAILURE
         }
     }
@@ -437,18 +479,6 @@ const EGRESS_CLIENT_BIN_CANDIDATES: [&str; 2] = [
 #[cfg(target_os = "linux")]
 const RUNTIME_OVERLAY_MOUNT: &str = "/mvm/runtime";
 
-/// Builder/dev VMs still default to the compatibility posture until their
-/// attach path is ready: prefer the overlay when present, but allow the baked
-/// rootfs copy when the host omitted the token.
-#[cfg(any(target_os = "linux", test))]
-fn runtime_source_policy_from_cmdline(cmdline: &str) -> mvm_core::vm_backend::RuntimeSourcePolicy {
-    cmdline
-        .split_whitespace()
-        .find_map(|tok| tok.strip_prefix("mvm.runtime_source_policy="))
-        .and_then(mvm_core::vm_backend::RuntimeSourcePolicy::from_cmdline_value)
-        .unwrap_or(mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay)
-}
-
 #[cfg(any(target_os = "linux", test))]
 fn runtime_overlay_device_from_cmdline(cmdline: &str) -> Option<String> {
     cmdline
@@ -482,7 +512,7 @@ fn vsock_egress_requested_from_cmdline(cmdline: &str) -> bool {
 /// non-positive values so a malformed token can't wind the clock backwards.
 #[cfg(any(target_os = "linux", test))]
 fn hostepoch_from_cmdline(cmdline: &str) -> Option<i64> {
-    mvm_vmm::host::boot_config::builder_hostepoch_from_cmdline(cmdline)
+    mvm_core::vm_backend::decode_host_epoch_cmdline(cmdline)
         .and_then(|seconds| seconds.try_into().ok())
 }
 
@@ -554,17 +584,8 @@ fn append_init_breadcrumb_at(
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn resolve_egress_client_binary(
-    runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
-    is_exec: impl Fn(&Path) -> bool,
-) -> Option<PathBuf> {
-    let candidates: &[&str] = match runtime_source_policy {
-        mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay => {
-            &EGRESS_CLIENT_BIN_CANDIDATES[..1]
-        }
-        mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay => &EGRESS_CLIENT_BIN_CANDIDATES,
-        mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly => &EGRESS_CLIENT_BIN_CANDIDATES[1..],
-    };
+fn resolve_egress_client_binary(is_exec: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    let candidates: &[&str] = &EGRESS_CLIENT_BIN_CANDIDATES[..1];
     candidates
         .iter()
         .map(Path::new)
@@ -584,15 +605,8 @@ fn runtime_overlay_mount_flag_bits() -> libc::c_ulong {
 /// agent-less, which is non-fatal and surfaced in `mvmctl status`,
 /// exactly as the workload path treats a missing agent.
 #[cfg(any(target_os = "linux", test))]
-fn resolve_agent_binary(
-    runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
-    is_exec: impl Fn(&Path) -> bool,
-) -> Option<PathBuf> {
-    let candidates: &[&str] = match runtime_source_policy {
-        mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay => &AGENT_BIN_CANDIDATES[..1],
-        mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay => &AGENT_BIN_CANDIDATES,
-        mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly => &AGENT_BIN_CANDIDATES[1..],
-    };
+fn resolve_agent_binary(is_exec: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    let candidates: &[&str] = &AGENT_BIN_CANDIDATES[..1];
     candidates
         .iter()
         .map(Path::new)
@@ -600,18 +614,19 @@ fn resolve_agent_binary(
         .map(Path::to_path_buf)
 }
 
-/// Build the `setpriv` command that forks the guest agent under the agent
-/// uid. Mirrors the workload `/init` invocation in `nix/lib/mk-guest.nix`:
-/// `setpriv --reuid --regid --clear-groups --securebits=keep-caps
-/// --inh-caps=+kill --ambient-caps=+kill --inh-caps=+sys_time
-/// --ambient-caps=+sys_time --no-new-privs -- <agent>`.
+/// Build the `setsid` + `mvm-setpriv` command that forks the guest agent under
+/// the agent uid. Mirrors the workload `/init` invocation in
+/// `nix/lib/mk-guest.nix`; the builder image installs the same static helper at
+/// `/sbin/mvm-setpriv`.
 /// The agent receives only `CAP_KILL` and `CAP_SYS_TIME`: the former permits
 /// the authenticated agent to signal PID 1, and the latter corrects a
 /// restored wall clock. No workload process inherits either capability.
 #[cfg(any(target_os = "linux", test))]
 fn agent_spawn_command(agent_bin: &Path) -> Command {
-    let mut c = Command::new("setpriv");
-    c.arg(format!("--reuid={AGENT_UID}"))
+    let mut c = Command::new("/bin/busybox");
+    c.arg("setsid")
+        .arg("/sbin/mvm-setpriv")
+        .arg(format!("--reuid={AGENT_UID}"))
         .arg(format!("--regid={AGENT_UID}"))
         .arg("--clear-groups")
         .arg("--securebits=keep-caps")
@@ -663,6 +678,23 @@ fn closure_marker_contents(closure_hash: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn loop_device_parser_accepts_only_kernel_loop_paths() {
+        assert_eq!(
+            parse_loop_device(b"/dev/loop12\n").expect("valid loop device"),
+            Path::new("/dev/loop12")
+        );
+        for invalid in [
+            b"".as_slice(),
+            b"/dev/loop\n".as_slice(),
+            b"/tmp/loop12\n".as_slice(),
+            b"/dev/loop12 extra\n".as_slice(),
+            b"/dev/loopx\n".as_slice(),
+        ] {
+            assert!(parse_loop_device(invalid).is_err(), "accepted {invalid:?}");
+        }
+    }
+
     // ── ext4 store damage detection ──
 
     /// A minimal ext4 superblock with the magic set and `s_state` as given.
@@ -713,11 +745,13 @@ mod tests {
     #[test]
     fn agent_spawn_command_mirrors_workload_init_setpriv() {
         let cmd = agent_spawn_command(Path::new("/usr/local/bin/mvm-guest-agent"));
-        assert_eq!(cmd.get_program().to_str().unwrap(), "setpriv");
+        assert_eq!(cmd.get_program().to_str().unwrap(), "/bin/busybox");
         let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(
             args,
             [
+                "setsid",
+                "/sbin/mvm-setpriv",
                 "--reuid=990",
                 "--regid=990",
                 "--clear-groups",
@@ -734,105 +768,36 @@ mod tests {
     }
 
     #[test]
-    fn resolve_agent_binary_prefers_runtime_overlay() {
-        // Both present → the verity overlay path wins.
-        let got = resolve_agent_binary(
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-            |_| true,
-        );
+    fn resolve_agent_binary_resolves_the_runtime_overlay_copy() {
+        let got = resolve_agent_binary(|_| true);
         assert_eq!(got, Some(PathBuf::from("/mvm/runtime/agent")));
     }
 
     #[test]
-    fn resolve_agent_binary_falls_back_to_baked_copy() {
-        // Overlay absent, baked copy present → the rootfs copy.
-        let got = resolve_agent_binary(
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-            |p| p == Path::new("/usr/local/bin/mvm-guest-agent"),
-        );
-        assert_eq!(got, Some(PathBuf::from("/usr/local/bin/mvm-guest-agent")));
-    }
-
-    #[test]
-    fn resolve_agent_binary_none_when_neither_present() {
+    fn resolve_agent_binary_none_when_the_overlay_copy_is_absent() {
         // Neither present → boot agent-less (non-fatal, surfaced in status).
-        let got = resolve_agent_binary(
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-            |_| false,
-        );
+        assert_eq!(resolve_agent_binary(|_| false), None);
+    }
+
+    /// The overlay is the single runtime source, so a binary sitting at the old
+    /// baked path must not satisfy the lookup.
+    #[test]
+    fn resolve_agent_binary_ignores_a_binary_at_the_old_baked_path() {
+        let got = resolve_agent_binary(|p| p == Path::new("/usr/local/bin/mvm-guest-agent"));
         assert_eq!(got, None);
     }
 
     #[test]
-    fn resolve_agent_binary_refuses_baked_fallback_when_overlay_is_required() {
-        let got = resolve_agent_binary(
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-            |p| p == Path::new("/usr/local/bin/mvm-guest-agent"),
-        );
-        assert_eq!(got, None);
-    }
-
-    #[test]
-    fn resolve_agent_binary_rootfs_only_skips_runtime_overlay() {
-        let got =
-            resolve_agent_binary(mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly, |p| {
-                p == Path::new("/usr/local/bin/mvm-guest-agent")
-            });
-        assert_eq!(got, Some(PathBuf::from("/usr/local/bin/mvm-guest-agent")));
-    }
-
-    #[test]
-    fn resolve_egress_client_binary_prefers_runtime_overlay() {
-        let got = resolve_egress_client_binary(
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-            |_| true,
-        );
+    fn resolve_egress_client_binary_resolves_the_runtime_overlay_copy() {
+        let got = resolve_egress_client_binary(|_| true);
         assert_eq!(got, Some(PathBuf::from("/mvm/runtime/egress-client")));
     }
 
     #[test]
-    fn resolve_egress_client_binary_falls_back_to_baked_copy() {
-        let got = resolve_egress_client_binary(
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-            |p| p == Path::new("/usr/local/bin/mvm-egress-client"),
-        );
-        assert_eq!(got, Some(PathBuf::from("/usr/local/bin/mvm-egress-client")));
-    }
-
-    #[test]
-    fn resolve_egress_client_binary_refuses_baked_fallback_when_overlay_is_required() {
-        let got = resolve_egress_client_binary(
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-            |p| p == Path::new("/usr/local/bin/mvm-egress-client"),
-        );
+    fn resolve_egress_client_binary_ignores_a_binary_at_the_old_baked_path() {
+        let got =
+            resolve_egress_client_binary(|p| p == Path::new("/usr/local/bin/mvm-egress-client"));
         assert_eq!(got, None);
-    }
-
-    #[test]
-    fn resolve_egress_client_binary_rootfs_only_skips_runtime_overlay() {
-        let got = resolve_egress_client_binary(
-            mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
-            |p| p == Path::new("/usr/local/bin/mvm-egress-client"),
-        );
-        assert_eq!(got, Some(PathBuf::from("/usr/local/bin/mvm-egress-client")));
-    }
-
-    #[test]
-    fn runtime_source_policy_from_cmdline_defaults_to_prefer_overlay() {
-        assert_eq!(
-            runtime_source_policy_from_cmdline("console=hvc0 root=/dev/vda"),
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay
-        );
-    }
-
-    #[test]
-    fn runtime_source_policy_from_cmdline_decodes_required_overlay() {
-        assert_eq!(
-            runtime_source_policy_from_cmdline(
-                "console=hvc0 mvm.runtime_source_policy=required_overlay root=/dev/vda"
-            ),
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
-        );
     }
 
     #[test]
@@ -1390,37 +1355,15 @@ mod linux {
     /// RPC on port 5252; without it the host can boot the builder VM but
     /// can't reach the agent.
     fn fork_guest_agent() {
-        use std::os::unix::process::CommandExt;
-
-        let runtime_source_policy = crate::runtime_source_policy_from_cmdline(
-            &std::fs::read_to_string("/proc/cmdline").unwrap_or_default(),
-        );
-        let Some(agent_bin) = crate::resolve_agent_binary(runtime_source_policy, is_executable)
-        else {
-            if runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay {
-                eprintln!(
-                    "mvm-host-vm-init: runtime overlay required but /mvm/runtime/agent is missing; refusing boot"
-                );
-                std::process::exit(1);
-            }
+        let Some(agent_bin) = crate::resolve_agent_binary(is_executable) else {
             eprintln!(
-                "mvm-host-vm-init: no mvm-guest-agent found at {:?}; booting agent-less",
-                crate::AGENT_BIN_CANDIDATES
+                "mvm-host-vm-init: runtime overlay required but /mvm/runtime/agent is missing; refusing boot"
             );
-            return;
+            std::process::exit(1);
         };
         let mut cmd = crate::agent_spawn_command(&agent_bin);
-        // New session so the agent isn't in PID 1's signal / controlling-
-        // terminal group — the workload /init uses `setsid` for the same
-        // reason. stdio is inherited so the agent's logs reach the console.
-        unsafe {
-            cmd.pre_exec(|| {
-                // SAFETY: async-signal-safe, no allocation, runs in the
-                // forked child before execve.
-                libc::setsid();
-                Ok(())
-            });
-        }
+        // BusyBox `setsid` puts the agent in a new session, matching the
+        // workload init path. Stdio is inherited so logs reach the console.
         match cmd.spawn() {
             Ok(child) => eprintln!(
                 "mvm-host-vm-init: forked mvm-guest-agent pid={} from {}",
@@ -1428,19 +1371,11 @@ mod linux {
                 agent_bin.display()
             ),
             Err(e) => {
-                if runtime_source_policy
-                    == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
-                {
-                    eprintln!(
-                        "mvm-host-vm-init: failed to fork required overlay agent from {}: {e}; refusing boot",
-                        agent_bin.display()
-                    );
-                    std::process::exit(1);
-                }
                 eprintln!(
-                    "mvm-host-vm-init: failed to fork mvm-guest-agent from {}: {e}; booting agent-less",
+                    "mvm-host-vm-init: failed to fork the overlay agent from {}: {e}; refusing boot",
                     agent_bin.display()
-                )
+                );
+                std::process::exit(1);
             }
         }
     }
@@ -1462,20 +1397,10 @@ mod linux {
             return;
         }
 
-        let runtime_source_policy = crate::runtime_source_policy_from_cmdline(cmdline);
-        let Some(egress_client) =
-            crate::resolve_egress_client_binary(runtime_source_policy, is_executable)
-        else {
-            if runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay {
-                eprintln!(
-                    "mvm-host-vm-init: runtime overlay required but /mvm/runtime/egress-client is missing; refusing boot"
-                );
-                std::process::exit(1);
-            }
-            refuse_boot(EgressProbe::ClientMissing(format!(
-                "{:?}",
-                crate::EGRESS_CLIENT_BIN_CANDIDATES
-            )));
+        let Some(egress_client) = crate::resolve_egress_client_binary(is_executable) else {
+            refuse_boot(EgressProbe::ClientMissing(
+                "/mvm/runtime/egress-client".to_string(),
+            ));
         };
 
         let _ = Command::new("/bin/busybox")
@@ -1783,7 +1708,6 @@ mod linux {
 
         let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
         append_init_breadcrumb("cmdline_loaded", cmdline.trim());
-        let runtime_source_policy = crate::runtime_source_policy_from_cmdline(&cmdline);
         match mount_runtime_overlay(&cmdline) {
             Ok(true) => {
                 append_init_breadcrumb("runtime_overlay_mount_ok", crate::RUNTIME_OVERLAY_MOUNT);
@@ -1794,37 +1718,28 @@ mod linux {
             }
             Ok(false) => {
                 append_init_breadcrumb("runtime_overlay_mount_none", "no runtime disk declared");
-                if runtime_source_policy
-                    == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
-                {
-                    eprintln!(
-                        "mvm-host-vm-init: runtime overlay required but no runtime disk was declared; refusing boot"
-                    );
-                    write_result(
-                        2,
-                        "runtime overlay required but no runtime disk was declared",
-                    );
-                    stamp(&timings, |t| {
-                        t.poweroff_start_ms = Some(BootTimings::ms_since(anchor))
-                    });
-                    write_boot_timings(&timings);
-                    return power_off();
-                }
+                eprintln!(
+                    "mvm-host-vm-init: runtime overlay required but no runtime disk was declared; refusing boot"
+                );
+                write_result(
+                    2,
+                    "runtime overlay required but no runtime disk was declared",
+                );
+                stamp(&timings, |t| {
+                    t.poweroff_start_ms = Some(BootTimings::ms_since(anchor))
+                });
+                write_boot_timings(&timings);
+                return power_off();
             }
             Err(e) => {
                 append_init_breadcrumb("runtime_overlay_mount_error", &e);
-                if runtime_source_policy
-                    == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
-                {
-                    eprintln!("mvm-host-vm-init: {e}; refusing boot");
-                    write_result(2, &e);
-                    stamp(&timings, |t| {
-                        t.poweroff_start_ms = Some(BootTimings::ms_since(anchor))
-                    });
-                    write_boot_timings(&timings);
-                    return power_off();
-                }
-                eprintln!("mvm-host-vm-init: runtime overlay mount warning (non-fatal): {e}");
+                eprintln!("mvm-host-vm-init: {e}; refusing boot");
+                write_result(2, &e);
+                stamp(&timings, |t| {
+                    t.poweroff_start_ms = Some(BootTimings::ms_since(anchor))
+                });
+                write_boot_timings(&timings);
+                return power_off();
             }
         }
         // Optional accelerator: a builder pack may carry a pre-fetched
@@ -1875,7 +1790,7 @@ mod linux {
                     None
                 }
             };
-            let _exit_code = run_dispatch_loop(cold_boot_timings);
+            let _exit_code = run_dispatch_loop(cold_boot_timings, disk_transport);
             stamp(&timings, |t| {
                 t.poweroff_start_ms = Some(BootTimings::ms_since(anchor))
             });
@@ -2300,7 +2215,14 @@ mod linux {
     ///
     /// Returns `0` on graceful `Shutdown`, non-zero on listener
     /// setup failure (caller `power_off`s either way).
-    fn run_dispatch_loop(mut cold_boot_timings: Option<BootTimings>) -> i32 {
+    /// `disk_transport` is `Some` when the host staged this VM's inputs on a
+    /// raw block device rather than virtio-fs shares. A persistent builder then
+    /// re-reads `/job` off that device per dispatch and writes each dispatch's
+    /// artifacts back onto the output device — see [`restage_disk_transport_job`].
+    fn run_dispatch_loop(
+        mut cold_boot_timings: Option<BootTimings>,
+        disk_transport: Option<crate::DiskTransport>,
+    ) -> i32 {
         // No accept timeout — the dispatch loop is persistent and
         // blocks waiting for the supervisor's next submit. The
         // outer `mvmctl persistent-builder stop` signals shutdown via a
@@ -2362,6 +2284,28 @@ mod linux {
                     eprintln!(
                         "mvm-host-vm-init: dispatch loop: starting job {job_id} at {job_dir_relpath}"
                     );
+                    // Disk transport: this dispatch's `/job` contents are on the
+                    // input disk the host just rewrote. Fatal for the dispatch
+                    // rather than the VM — a persistent builder must survive one
+                    // bad job, so this reports a failed Result and keeps serving.
+                    if let Some(t) = &disk_transport
+                        && let Err(e) = restage_disk_transport_job(t)
+                    {
+                        eprintln!("mvm-host-vm-init: dispatch loop: job staging failed: {e}");
+                        let failed = crate::dispatch_response::DispatchResponse {
+                            job_id: job_id.clone(),
+                            exit_code: 2,
+                            stderr_tail: format!("disk-transport job staging failed: {e}"),
+                            boot_timings: cold_boot_timings.take(),
+                            build_ms: 0,
+                        };
+                        if !write_frame(&mut conn, failed.to_json().as_bytes()) {
+                            eprintln!(
+                                "mvm-host-vm-init: dispatch loop: write staging-failure Result failed"
+                            );
+                        }
+                        continue;
+                    }
                     let response = execute_dispatched_job(
                         &mut conn,
                         job_id,
@@ -2369,6 +2313,14 @@ mod linux {
                         &job_dir_relpath,
                         cold_boot_timings.take(),
                     );
+                    // Publish this dispatch's artifacts before the host is told
+                    // the job is done: the host reads the output disk as soon as
+                    // it sees the Result, so collecting afterwards would race it.
+                    if let Some(t) = &disk_transport
+                        && let Err(e) = collect_disk_transport_output(t)
+                    {
+                        eprintln!("mvm-host-vm-init: dispatch loop: output collection failed: {e}");
+                    }
                     eprintln!("mvm-host-vm-init: dispatch loop: job completed; writing Result");
                     if !write_frame(&mut conn, response.as_bytes()) {
                         eprintln!("mvm-host-vm-init: dispatch loop: write Result failed mid-frame");
@@ -3295,6 +3247,55 @@ mod linux {
     /// below is on this disk, not tmpfs.
     const DISK_INPUT_STAGE: &str = "/nix-store/builder-input";
 
+    /// Empty `dir`, creating it when it is absent.
+    ///
+    /// The staging root lives on the persistent nix-store disk, so it outlives
+    /// the build that wrote it. `tar x` merges into whatever it finds and never
+    /// removes an entry the new archive omits, so without this reset every
+    /// build reads a `/work` that is the union of every tree ever staged on
+    /// this host. A source file deleted upstream keeps being compiled: loudly
+    /// when it collides with what replaced it — a module turned into a
+    /// directory gives `E0761` — and silently when it does not, which is the
+    /// worse half, because the build then succeeds against sources that are not
+    /// the checkout's.
+    fn reset_stage_dir(dir: &str) -> Result<(), String> {
+        match std::fs::remove_dir_all(dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("clear {dir}: {e}")),
+        }
+        std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {dir}: {e}"))
+    }
+
+    /// Empty `dir` **without replacing the directory itself**.
+    ///
+    /// [`reset_stage_dir`] removes and recreates, which is right at boot and
+    /// wrong for anything already bind-mounted: `/job` and `/out` are binds onto
+    /// these inodes, so removing the source leaves the mount pointing at a
+    /// deleted directory and every later write lands somewhere nothing reads.
+    /// A persistent builder re-stages between dispatches, after the binds exist,
+    /// so it needs this form.
+    fn clear_dir_contents(dir: &str) -> Result<(), String> {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {dir}: {e}"));
+            }
+            Err(e) => return Err(format!("read {dir}: {e}")),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("read entry under {dir}: {e}"))?;
+            let path = entry.path();
+            let removed = if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            removed.map_err(|e| format!("remove {}: {e}", path.display()))?;
+        }
+        Ok(())
+    }
+
     /// Populate `/job`, `/work`, `/mvm-bins`, and (when the host packed one)
     /// `/closure-seed` from the input disk, and back `/out` with a writable
     /// dir on the persistent nix-store disk. This is the disk-transport
@@ -3302,8 +3303,7 @@ mod linux {
     /// Rootfs-image libkrun builder VM, and the only option for the hvf VMM
     /// (which has no virtio-fs).
     fn stage_disk_transport_input(t: &crate::DiskTransport) -> Result<(), String> {
-        std::fs::create_dir_all(DISK_INPUT_STAGE)
-            .map_err(|e| format!("mkdir {DISK_INPUT_STAGE}: {e}"))?;
+        reset_stage_dir(DISK_INPUT_STAGE)?;
         // Extract the input tar straight off the raw block device; tar stops at
         // the archive EOF marker before the disk's zero padding.
         let status = Command::new("/bin/busybox")
@@ -3329,10 +3329,82 @@ mod linux {
                 disk_bind_mount(&src, target)?;
             }
         }
+        // `/out` carries this job's artifacts and nothing else. It is backed by
+        // the same persistent disk as the input stage, so without a reset the
+        // host reads back a tar of every artifact any earlier build left here —
+        // including `result-*` symlinks into guest-only store paths, which are
+        // dangling on the host and fail the extraction outright.
         let out_backing = format!("{NIX_STORE_MOUNT}/out");
-        std::fs::create_dir_all(&out_backing).map_err(|e| format!("mkdir {out_backing}: {e}"))?;
+        reset_stage_dir(&out_backing)?;
+        // A dispatched job runs under `setpriv --reuid=BUILDER_UID`, and this
+        // directory is created by PID 1 as root. Under the virtio-fs transport
+        // the host made its side of `/out` group/other-writable before the
+        // guest ever saw it; on a disk there is no host side to do that, so it
+        // has to happen here or every dispatched write to `/out` fails with
+        // EACCES — including the artifacts the output disk exists to carry.
+        chown_builder(&out_backing)?;
         std::fs::create_dir_all(OUT_DIR).map_err(|e| format!("mkdir {OUT_DIR}: {e}"))?;
         disk_bind_mount(&out_backing, OUT_DIR)?;
+        Ok(())
+    }
+
+    /// Give the builder uid ownership of a directory PID 1 created.
+    ///
+    /// Ownership rather than a permissive mode: `clear_dir_contents` empties
+    /// `/out` between dispatches without recreating it, so the owner set here
+    /// survives the whole session, and nothing outside the build ever needs to
+    /// write there.
+    fn chown_builder(dir: &str) -> Result<(), String> {
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = std::ffi::CString::new(std::ffi::OsStr::new(dir).as_bytes())
+            .map_err(|e| format!("path {dir}: {e}"))?;
+        // SAFETY: `c_path` is a NUL-terminated path valid for this call, and
+        // chown takes it by const pointer without retaining it.
+        let rc = unsafe { libc::chown(c_path.as_ptr(), BUILDER_UID, BUILDER_GID) };
+        if rc != 0 {
+            return Err(format!(
+                "chown {dir} to {BUILDER_UID}:{BUILDER_GID}: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Re-stage `/job` for one dispatch of a *persistent* builder.
+    ///
+    /// The one-shot path stages once at boot and powers off after a single job.
+    /// A persistent VM takes many, and each carries its own `cmd.sh` /
+    /// `install_spec.json`. The host rewrites the input disk — a raw tar, so it
+    /// can be replaced wholesale — before it sends the `Run` frame, and this
+    /// re-reads the `job` member off the device. Ordering is what makes it safe:
+    /// the host finishes writing before it sends, and dispatches serialize
+    /// behind the supervisor's mutex, so no read ever straddles a write.
+    ///
+    /// Only the `job` member is extracted. `work`, `mvm-bins` and the closure
+    /// seed are boot-time inputs that do not change between dispatches, and
+    /// re-extracting a large `work` tree per job would cost real time for no
+    /// effect.
+    fn restage_disk_transport_job(t: &crate::DiskTransport) -> Result<(), String> {
+        let job_stage = format!("{DISK_INPUT_STAGE}/job");
+        // Contents-only: `/job` is bind-mounted onto this directory.
+        clear_dir_contents(&job_stage)?;
+        let status = Command::new("/bin/busybox")
+            .args(["tar", "xf", &t.input_dev, "-C", DISK_INPUT_STAGE, "job"])
+            .status()
+            .map_err(|e| format!("spawn tar x job {}: {e}", t.input_dev))?;
+        if !status.success() {
+            return Err(format!(
+                "tar x job {} exited {:?}",
+                t.input_dev,
+                status.code()
+            ));
+        }
+        // `/out` accumulates across dispatches the same way it accumulates
+        // across builds, and for the same reason the boot path resets it: the
+        // host would otherwise read back a tar of every artifact any earlier
+        // dispatch left behind, including `result-*` symlinks into guest-only
+        // store paths that are dangling on the host and fail extraction.
+        clear_dir_contents(&format!("{NIX_STORE_MOUNT}/out"))?;
         Ok(())
     }
 
@@ -4106,6 +4178,92 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// The staging root survives on the persistent nix-store disk, and
+        /// `tar x` only adds. A file the current archive does not carry — one
+        /// deleted upstream since the last build — has to be gone before the
+        /// extract, or the guest compiles a tree that is not the checkout's.
+        #[test]
+        fn reset_stage_dir_drops_a_tree_an_earlier_build_left() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let stage = dir.path().join("builder-input");
+            std::fs::create_dir_all(stage.join("work/crates/mvm-core/src/policy"))
+                .expect("seed a previous build's tree");
+            let stale = stage.join("work/crates/mvm-core/src/policy/audit.rs");
+            std::fs::write(&stale, b"// deleted upstream").expect("write stale source");
+
+            reset_stage_dir(stage.to_str().expect("utf-8 path")).expect("reset");
+
+            assert!(
+                stage.is_dir(),
+                "tar needs the staging root to exist to extract into"
+            );
+            assert!(
+                !stale.exists(),
+                "a source deleted upstream must not survive"
+            );
+            assert_eq!(
+                std::fs::read_dir(&stage)
+                    .expect("read staging root")
+                    .count(),
+                0,
+                "the staging root must be empty before the extract"
+            );
+        }
+
+        /// First boot on a fresh nix-store disk: nothing to clear, and the
+        /// root still has to exist afterwards.
+        #[test]
+        fn reset_stage_dir_creates_the_root_when_absent() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let stage = dir.path().join("builder-input");
+
+            reset_stage_dir(stage.to_str().expect("utf-8 path")).expect("reset");
+
+            assert!(stage.is_dir());
+        }
+
+        /// The property the persistent path depends on, and the reason it
+        /// cannot reuse `reset_stage_dir`: `/job` is bind-mounted onto the
+        /// staging directory, so the directory must survive being emptied.
+        /// Remove and recreate and the bind points at a deleted inode — every
+        /// later write lands somewhere nothing reads, silently.
+        #[test]
+        fn clear_dir_contents_empties_without_replacing_the_directory() {
+            use std::os::unix::fs::MetadataExt;
+
+            let dir = tempfile::tempdir().expect("tempdir");
+            let stage = dir.path().join("job");
+            std::fs::create_dir_all(stage.join("nested")).expect("nested");
+            std::fs::write(stage.join("cmd.sh"), b"old").expect("file");
+            std::fs::write(stage.join("nested/leftover"), b"old").expect("nested file");
+            let before = std::fs::metadata(&stage).expect("stat").ino();
+
+            clear_dir_contents(stage.to_str().expect("utf-8 path")).expect("clear");
+
+            assert_eq!(
+                std::fs::metadata(&stage).expect("stat").ino(),
+                before,
+                "the directory itself must survive, or the bind mount is orphaned"
+            );
+            assert_eq!(
+                std::fs::read_dir(&stage).expect("read").count(),
+                0,
+                "a previous dispatch's files must not leak into the next one"
+            );
+        }
+
+        /// Same first-boot tolerance `reset_stage_dir` has: a persistent VM
+        /// re-stages before the directory necessarily exists.
+        #[test]
+        fn clear_dir_contents_creates_the_directory_when_absent() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let stage = dir.path().join("job");
+
+            clear_dir_contents(stage.to_str().expect("utf-8 path")).expect("clear");
+
+            assert!(stage.is_dir());
+        }
 
         #[test]
         fn json_escape_plain() {

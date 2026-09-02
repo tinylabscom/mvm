@@ -51,6 +51,9 @@ pub enum CapabilityAlternative {
     /// Reach the per-VM substitution endpoint through the wasm tier's
     /// `mvm:egress` host import. Same endpoint, same policy and audit path.
     NetworkEndpointOverWasmImport,
+    /// Reach the per-VM substitution endpoint through a browser MessagePort /
+    /// Worker channel. Same endpoint, same policy and audit path.
+    NetworkEndpointOverBrowserChannel,
     /// Send bytes on the workload's stdin route rather than opening an
     /// interactive terminal. Not a terminal: no program selection, no argv
     /// or environment change.
@@ -84,6 +87,9 @@ impl CapabilityAlternative {
             }
             Self::NetworkEndpointOverWasmImport => {
                 "reach the per-VM substitution endpoint through the `mvm:egress` host import"
+            }
+            Self::NetworkEndpointOverBrowserChannel => {
+                "reach the per-VM substitution endpoint through a browser MessagePort/Worker channel"
             }
             Self::WorkloadStdinRoute => {
                 "write to the workload's stdin route instead of opening an interactive terminal"
@@ -135,15 +141,25 @@ fn alternative_for(capability: &'static str, backend: BackendKind) -> Capability
             BackendKind::Firecracker | BackendKind::Libkrun | BackendKind::Hvf => {
                 CapabilityAlternative::StandbyPool
             }
-            _ => CapabilityAlternative::ColdStartFromSignedPlan,
+            BackendKind::Qemu
+            | BackendKind::Mock
+            | BackendKind::Wasm
+            | BackendKind::WebLinux
+            | BackendKind::AppleContainer => CapabilityAlternative::ColdStartFromSignedPlan,
         },
 
         // Transport capabilities. Every one of these ends at the same per-VM
         // substitution endpoint, so the substitute changes how the workload
         // reaches the seam, never whether policy and audit apply to it.
-        "vsock" | "host_vsock_proxy" | "l3_vsock" => match backend {
+        "vsock" | "host_vsock_proxy" => match backend {
             BackendKind::Wasm => CapabilityAlternative::NetworkEndpointOverWasmImport,
-            _ => CapabilityAlternative::NetworkEndpointOverUds,
+            BackendKind::WebLinux => CapabilityAlternative::NetworkEndpointOverBrowserChannel,
+            BackendKind::Firecracker
+            | BackendKind::Libkrun
+            | BackendKind::Qemu
+            | BackendKind::Mock
+            | BackendKind::Hvf
+            | BackendKind::AppleContainer => CapabilityAlternative::NetworkEndpointOverUds,
         },
 
         // Interactive access. The stdin route carries bytes to an already
@@ -277,6 +293,76 @@ impl VmCapabilities {
 /// needed: an alternative depends on the pair, so a matrix without its
 /// backend cannot be negotiated against.
 ///
+/// Which facade operations a particular `MvmClient` implementation serves.
+///
+/// These are deliberately separate from [`VmCapabilities`]: two clients can
+/// target the same hypervisor while exposing different transports. The
+/// deny-all default keeps an older capability response safe when decoded by a
+/// newer consumer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
+pub struct ClientOperationCapabilities {
+    pub list: bool,
+    pub inspect: bool,
+    pub create: bool,
+    pub run: bool,
+    pub start: bool,
+    pub stop: bool,
+    pub pause: bool,
+    pub resume: bool,
+    pub remove: bool,
+    pub logs: bool,
+    pub exec: bool,
+    pub reconfigure: bool,
+    pub set_ttl: bool,
+}
+
+impl ClientOperationCapabilities {
+    /// Start a deny-all operation declaration.
+    pub fn builder() -> ClientOperationCapabilitiesBuilder {
+        ClientOperationCapabilitiesBuilder::default()
+    }
+}
+
+/// Builder for [`ClientOperationCapabilities`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClientOperationCapabilitiesBuilder {
+    operations: ClientOperationCapabilities,
+}
+
+macro_rules! operation_setter {
+    ($name:ident) => {
+        #[must_use]
+        pub fn $name(mut self, enabled: bool) -> Self {
+            self.operations.$name = enabled;
+            self
+        }
+    };
+}
+
+impl ClientOperationCapabilitiesBuilder {
+    operation_setter!(list);
+    operation_setter!(inspect);
+    operation_setter!(create);
+    operation_setter!(run);
+    operation_setter!(start);
+    operation_setter!(stop);
+    operation_setter!(pause);
+    operation_setter!(resume);
+    operation_setter!(remove);
+    operation_setter!(logs);
+    operation_setter!(exec);
+    operation_setter!(reconfigure);
+    operation_setter!(set_ttl);
+
+    /// Finish the declaration.
+    #[must_use]
+    pub fn build(self) -> ClientOperationCapabilities {
+        self.operations
+    }
+}
+
 /// Serializable on purpose. A remote client answers this over the wire, and
 /// [`negotiate`](Self::negotiate) then runs locally against the answer — so
 /// negotiation costs no round trip and a gateway needs no negotiation
@@ -288,11 +374,26 @@ pub struct BackendCapabilityReport {
     pub kind: BackendKind,
     /// What it advertises.
     pub capabilities: VmCapabilities,
+    /// Which facade calls the selected client transport can serve.
+    #[serde(default)]
+    pub operations: ClientOperationCapabilities,
 }
 
 impl BackendCapabilityReport {
     pub fn new(kind: BackendKind, capabilities: VmCapabilities) -> Self {
-        Self { kind, capabilities }
+        Self {
+            kind,
+            capabilities,
+            operations: ClientOperationCapabilities::default(),
+        }
+    }
+
+    /// Attach the operation surface of the client implementation returning
+    /// this report.
+    #[must_use]
+    pub fn with_operations(mut self, operations: ClientOperationCapabilities) -> Self {
+        self.operations = operations;
+        self
     }
 
     /// Check `required` against this report, naming a substitute for every
@@ -356,6 +457,18 @@ mod tests {
         assert_eq!(
             gaps[0].alternative,
             CapabilityAlternative::NetworkEndpointOverWasmImport
+        );
+    }
+
+    #[test]
+    fn the_web_linux_tier_reaches_the_endpoint_through_its_browser_channel() {
+        let required = require(|r| r.vsock = true);
+        let gaps = barren()
+            .negotiate(&required, BackendKind::WebLinux)
+            .expect_err("the browser-hosted tier has no native vsock device");
+        assert_eq!(
+            gaps[0].alternative,
+            CapabilityAlternative::NetworkEndpointOverBrowserChannel
         );
     }
 
@@ -557,13 +670,12 @@ mod tests {
             vsock: true,
             no_routable_guest_nic: true,
             host_vsock_proxy: true,
-            l3_vsock: true,
             pty_exec: true,
         };
         let gaps = barren()
             .negotiate(&required, BackendKind::Firecracker)
             .expect_err("a barren backend serves nothing");
-        assert_eq!(gaps.len(), 10, "every capability must produce a gap");
+        assert_eq!(gaps.len(), 9, "every capability must produce a gap");
         for gap in &gaps {
             assert!(
                 !gap.alternative
@@ -582,6 +694,77 @@ mod report_tests {
     use alloc::vec;
 
     #[test]
+    fn client_operations_default_to_deny_all() {
+        assert_eq!(
+            ClientOperationCapabilities::default(),
+            ClientOperationCapabilities::builder().build()
+        );
+        assert!(!ClientOperationCapabilities::default().exec);
+    }
+
+    #[test]
+    fn client_operations_builder_preserves_every_enabled_operation() {
+        let operations = ClientOperationCapabilities::builder()
+            .list(true)
+            .inspect(true)
+            .create(true)
+            .run(true)
+            .start(true)
+            .stop(true)
+            .pause(true)
+            .resume(true)
+            .remove(true)
+            .logs(true)
+            .exec(true)
+            .reconfigure(true)
+            .set_ttl(true)
+            .build();
+
+        assert!(operations.list);
+        assert!(operations.inspect);
+        assert!(operations.create);
+        assert!(operations.run);
+        assert!(operations.start);
+        assert!(operations.stop);
+        assert!(operations.pause);
+        assert!(operations.resume);
+        assert!(operations.remove);
+        assert!(operations.logs);
+        assert!(operations.exec);
+        assert!(operations.reconfigure);
+        assert!(operations.set_ttl);
+    }
+
+    #[test]
+    fn client_operations_round_trip_through_json() {
+        let operations = ClientOperationCapabilities::builder()
+            .list(true)
+            .run(true)
+            .stop(true)
+            .build();
+        let json = serde_json::to_string(&operations).expect("operations serialize");
+        let back: ClientOperationCapabilities =
+            serde_json::from_str(&json).expect("operations deserialize");
+        assert_eq!(back, operations);
+    }
+
+    #[test]
+    fn a_legacy_report_without_operations_defaults_to_deny_all() {
+        let mut legacy = serde_json::to_value(BackendCapabilityReport::new(
+            BackendKind::Mock,
+            VmCapabilities::default(),
+        ))
+        .expect("report serializes");
+        legacy
+            .as_object_mut()
+            .expect("report is an object")
+            .remove("operations");
+        let report: BackendCapabilityReport = serde_json::from_value(legacy)
+            .expect("a report written before operation discovery still decodes");
+        assert_eq!(report.operations, ClientOperationCapabilities::default());
+    }
+
+    #[test]
     fn a_report_round_trips_through_json() {
         let report = BackendCapabilityReport::new(
             BackendKind::Wasm,
@@ -590,6 +773,12 @@ mod report_tests {
                 pty_exec: false,
                 ..VmCapabilities::default()
             },
+        )
+        .with_operations(
+            ClientOperationCapabilities::builder()
+                .list(true)
+                .inspect(true)
+                .build(),
         );
         let json = serde_json::to_string(&report).expect("report serializes");
         let back: BackendCapabilityReport =

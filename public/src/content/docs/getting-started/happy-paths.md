@@ -18,7 +18,7 @@ nothing more, nothing less.
 | [Prebuilt bundle operator](#bundle-run) | `--workflow bundle-run` | Launch a signed `.mvmpkg` artifact. |
 | [Interactive shell user](#dev-shell) | `--workflow dev-shell` | Boot a dev-tier image and drop into an interactive shell. |
 
-The preflight filter (plan 74 W5 / ADR-017 §1) only fails on missing
+The preflight filter only fails on missing
 prerequisites your workflow actually needs. A bundle operator no
 longer sees a "missing `cargo`" failure they don't care about; an
 interactive-shell user no longer needs host rustup.
@@ -135,9 +135,17 @@ You're not building anything — you have a signed `.mvmpkg` artifact
 to launch.
 
 ```bash
-mvmctl doctor --workflow bundle-run             # preflight (no host rust needed)
-mvmctl machine check-artifact ./my-app.mvm   # verify the signed artifact before launch
-mvmctl machine stop --all                                     # tear down
+mvmctl doctor --workflow bundle-run          # preflight (no host rust needed)
+mvmctl bundle fetch ./my-app.mvmpkg          # verify the signed bundle
+mvmctl bundle install ./my-app.mvmpkg        # install it into ~/.mvm/bundles/
+```
+
+`.mvmpkg` bundles go through `mvmctl bundle`. `mvmctl machine check-artifact` is
+a different verb for a different artifact kind — it verifies a signed `.mvm`
+artifact without booting:
+
+```bash
+mvmctl machine check-artifact ./my-app.mvm
 ```
 
 `bundle-run` doctor scope explicitly drops `prerequisites` and
@@ -149,7 +157,7 @@ remain.
 
 - `bundle signature invalid` → the `.mvmpkg`'s manifest signature
   didn't match the local trust store. Source bundles from a
-  trusted publisher; `mvmctl bundle verify <path>` exits non-zero
+  trusted publisher; `mvmctl bundle fetch <path>` exits non-zero
   on mismatch without launching.
 - `bundle pin missing` (audit-chain admission) → the supervisor's
   signed-plan path failed to find a matching `PlanArtifact`. Pull
@@ -191,8 +199,7 @@ shell devbox`.
 ## See also
 
 - [`mvmctl doctor`](/reference/cli-commands/#doctor) — the full
-  diagnostic command, including the `--workflow` flag added by
-  plan 74 W5.
+  diagnostic command, including the `--workflow` flag.
 - [Quick Start](/getting-started/quickstart/) — the broader
   feature tour.
 - [Your First MicroVM](/getting-started/first-microvm/) — write a

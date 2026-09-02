@@ -5,7 +5,8 @@
 //! `mvm_core::crypto::policy::MountPathPolicy` before the agent
 //! touches `mount(2)` or `umount(2)`, so a compromised host can't
 //! mount over `/etc`, `/usr`, `/nix/*`, or any other
-//! verity-protected subtree (claim 3 of the security model).
+//! verity-protected subtree (claim 3 of the security model), nor
+//! shadow a runtime path by mounting over its parent.
 //!
 //! # Volume name format
 //!
@@ -72,9 +73,9 @@ fn map_policy_error(err: MountPathError) -> VolumeMountResult {
         | MountPathError::NotAbsolute { .. }
         | MountPathError::EmbeddedNul { .. }
         | MountPathError::PathTraversal { .. } => VolumeMountErrorKind::BadPath,
-        MountPathError::Denied { .. } | MountPathError::OutsideAllowRoots { .. } => {
-            VolumeMountErrorKind::PolicyDenied
-        }
+        MountPathError::Denied { .. }
+        | MountPathError::Shadows { .. }
+        | MountPathError::OutsideAllowRoots { .. } => VolumeMountErrorKind::PolicyDenied,
     };
     VolumeMountResult::Error {
         kind,
@@ -278,10 +279,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((path.to_path_buf(), force));
-            if self.umount_busy_unless_force && !force {
-                return Ok(false);
-            }
-            Ok(true)
+            Ok(!self.umount_busy_unless_force || force)
         }
     }
 

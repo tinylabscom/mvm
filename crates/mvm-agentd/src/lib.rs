@@ -36,8 +36,10 @@ pub mod entrypoint;
 /// threads, so a consumer that blocks — a host that stopped reading — cannot
 /// defer the child's deadline or grow the pump's queue without bound.
 pub mod entrypoint_stream;
+/// Boot-validated optional extension executables.
+pub mod extension;
 /// Guest-side FlowMux client for the converged single networking path.
-#[cfg(feature = "addons")]
+#[cfg(feature = "flowmux-async")]
 pub mod flowmux;
 /// Load the per-boot FlowMux identity material used by the guest-side adapters.
 pub mod flowmux_drive;
@@ -61,6 +63,9 @@ pub mod genid;
 /// legacy per-rootfs initrd and the universal-initramfs agent cannot drift.
 #[cfg(target_os = "linux")]
 pub mod guest_bootstrap;
+/// Guest hostname validation and provisioning shared by cold boot and warm
+/// post-restore identity delivery.
+pub mod guest_hostname;
 pub mod guest_mount;
 /// Shared in-guest network bring-up (eth0 up + DHCP + static fallback), used by
 /// both the builder VM init and the workload guest netinit.
@@ -74,15 +79,13 @@ pub mod host_audit;
 /// In-guest `host.cost.v1` typed methods: `workload` / `tenant` spend queries
 /// over the broker transport.
 pub mod host_cost;
+pub mod host_kv;
 /// In-guest `host.time.v1` typed method: `now` host wall-clock query over the
 /// broker transport.
 pub mod host_time;
 pub mod icmp_client;
+pub mod icmp_mediator;
 pub mod integrations;
-/// The in-guest half of the L3 TUN-over-vsock tunnel: the `mvm0` device,
-/// its host-assigned configuration, the privilege drop, and the packet
-/// pump. `mvm0` terminates only in this agent.
-pub mod l3;
 pub mod lifecycle_hooks;
 /// Guest-side network defense. The `mvm-guest-netinit`
 /// binary calls into this module at boot to install kernel blackhole
@@ -91,9 +94,8 @@ pub mod lifecycle_hooks;
 /// `RawNetlinkInstaller` (a synchronous `AF_NETLINK` socket via libc)
 /// is Linux-only and gated inside the module.
 pub mod netinit;
-/// Shared rtnetlink plumbing: the kernel ABI constants, the request
-/// framing, and the synchronous socket that both `netinit`'s blackhole
-/// routes and the L3 agent's IPv6 bring-up send through.
+/// Shared rtnetlink plumbing: kernel ABI constants, request framing, and the
+/// synchronous socket used by `netinit`'s blackhole routes.
 pub mod netlink;
 pub mod probes;
 /// Restore-time guest wall-clock synchronization.
@@ -118,6 +120,11 @@ pub mod volume;
 pub mod vsock;
 pub mod worker_pool;
 pub mod worker_protocol;
+/// The single resolver for a workload's environment and working directory.
+/// Both the entrypoint runner and the interactive console read the image's
+/// declared runtime config through it.
+pub mod workload_env;
+
 /// Names the fixed workload uid/gid in the workload rootfs account databases,
 /// so `whoami`/`id`/`getpwuid` resolve inside images mvm did not build.
 pub mod workload_identity;

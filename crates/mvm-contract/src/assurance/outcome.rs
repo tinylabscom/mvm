@@ -192,6 +192,8 @@ pub struct EvidenceSet {
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum InconclusiveReason {
+    /// A durable dispatch claim exists, but no committed result survived.
+    ExecutionInterrupted,
     /// The candidate echoed a binding that is not the one MVM issued.
     BindingMismatch,
     /// The executed identity was never joined to the admitted plan.

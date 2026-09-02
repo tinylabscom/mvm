@@ -1,11 +1,11 @@
 ---
 title: Policy profiles
-description: Choose the right run profile, host-share mode, environment policy, and seccomp tier for a sandboxed workload.
+description: Choose the right run profile, host-share mode, and environment policy for a sandboxed workload.
 ---
 
 Policy profiles are the first security decision for a sandbox run. Pick the
 least permissive profile that lets the workload do its job, then add filesystem,
-environment, network, and seccomp permissions deliberately.
+environment, and network permissions deliberately.
 
 For generated code, third-party code, model tool calls, and CI jobs, start with
 `restrictive` and relax only the specific boundary that blocks the workload.
@@ -17,9 +17,13 @@ For generated code, third-party code, model tool calls, and CI jobs, start with
 | Profile | Default use | Host shares | Environment injection |
 | --- | --- | --- | --- |
 | `restrictive` | Generated or untrusted code. | Not allowed. | Not allowed. |
-| `standard` | Normal local one-shot runs. | Read-only only. | Explicit `--env KEY=VAL` allowed. |
-| `dev` | Local iteration against a project tree. | Read-only or writable. | Explicit `--env KEY=VAL` allowed. |
-| `permissive` | Last-resort local debugging. | Broadest local mode. | Explicit `--env KEY=VAL` allowed. |
+| `standard` | Normal local one-shot runs. | Read-only. | Explicit `--env KEY=VAL` allowed. |
+| `dev` | Local iteration against a project tree. | Read-only here; writable only on a *persistent* machine. | Explicit `--env KEY=VAL` allowed. |
+| `permissive` | Last-resort local debugging. | Same as `dev`, plus `MVM_ACK_PERMISSIVE_RUN=1`. | Explicit `--env KEY=VAL` allowed. |
+
+A one-shot run's host shares are **read-only under every profile** — the
+writable grant applies only when the machine is persistent. Guest mount paths
+must be under `/data` or `/work`.
 
 The default is `standard`. Use `restrictive` when the workload does not need
 host files or host-provided environment values:
@@ -32,7 +36,7 @@ Use `standard` when the workload needs explicit environment values or
 read-only input files:
 
 ```sh
-mvmctl run --profile standard --mount ./fixtures:/fixtures:ro -- python task.py
+mvmctl run --profile standard --mount ./fixtures:/data/fixtures:ro -- python task.py
 ```
 
 Use `dev` for local development commands that need the broader development
@@ -59,12 +63,21 @@ mvmctl run --mount HOST:GUEST:ro -- command
 
 Rules:
 
-- the mode must be `ro`;
+- the mode must be `ro` — a transient run refuses `:rw` under every profile;
+- `GUEST` must be under `/data` or `/work`; every other root is refused, and
+  `/mnt/*` is refused specifically so a share cannot shadow the runtime's own
+  config and secrets drives;
 - `restrictive` rejects host directory shares;
 - `standard` accepts read-only host shares.
 
 Prefer read-only shares for test inputs, source snapshots, fixtures, and model
-context. Use `mvmctl cp` or a managed volume when changes must persist.
+context. Use `mvmctl machine cp` or a managed volume when changes must persist.
+
+:::note[Hidden verbs]
+`machine cp`, `machine fs`, `machine volume`, `machine wait`, `machine
+boot-report`, `machine checkpoint`, `machine pause` and `machine resume` all
+work but are marked hidden, so they do not appear in `--help` output.
+:::
 
 ## Environment policy
 
@@ -97,25 +110,22 @@ mvmctl run --dry-run --json --profile restrictive -- python task.py
 Dry-run output is redacted. It is useful in CI because policy failures can be
 caught before a workload starts.
 
-## Seccomp tiers for named VMs
+## Seccomp tier
 
-Named VM launches expose a separate seccomp tier:
+There is **no per-launch seccomp selector**. Every plan `mvmctl` synthesises
+hardcodes the `standard` tier, and `--profile` carries no seccomp field — a
+profile governs `--env`, host shares, writable-share eligibility, the dev
+guest profile, and whether an acknowledgement is required, and nothing else.
 
-```sh
-mvmctl machine run --flake ./my-app --name agent-sandbox -d --profile standard
-```
+The tier is still recorded in the signed admission profile, so an audit can
+show which tier was admitted; it just cannot vary per run today. The
+`PlanSeccompTier` type has five values (`essential`, `minimal`, `standard`,
+`network`, `unrestricted`) and the plumbing to carry them, but no CLI flag
+and no manifest key feeds it.
 
-Supported tiers are:
-
-| Tier | Use it when |
-| --- | --- |
-| `essential` | The workload needs the smallest syscall surface the current guest can boot with. |
-| `minimal` | The workload is simple and should run with a reduced syscall set. |
-| `standard` | Default named-VM posture. |
-| `network` | The workload needs network-oriented syscalls beyond the standard profile. |
-| `unrestricted` | Local debugging only; avoid for untrusted code. |
-
-The selected tier is recorded in the signed admission profile for audit.
+The one place you can name a tier is the hidden developer command
+`mvmctl seccomp-audit --tier <tier>`, which is Linux-only, boots no microVM,
+and installs no filter — it only reports on a syscall set.
 
 ## Recommended defaults
 
@@ -137,7 +147,7 @@ runs:
 
 ```sh
 mvmctl run --profile restrictive --receipt /tmp/run-receipt.json -- python task.py
-mvmctl receipt verify /tmp/run-receipt.json
+mvmctl trust receipt verify /tmp/run-receipt.json
 ```
 
 Use [audit and receipts](/guides/audit-and-receipts/) for portable proof and

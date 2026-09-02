@@ -25,57 +25,14 @@ pub use mvm_contract::protocol::resource_controls::{
 pub use mvm_contract::protocol::vm_backend::{
     BackendKind, BackendSecurityProfile, BalloonState, ClaimStatus, GuestChannelInfo,
     LayerCoverage, RequiredCapabilities, ReseedStatus, RuntimeSourceLaunchKind,
-    RuntimeSourcePolicy, RuntimeSourceRootStrategy, SnapshotCapability, StandbyCompat,
-    StandbyError, StandbyHandle, StandbySpec, StandbyState, StartMode, VmCapabilities,
-    VmExitStatus, VmFile, VmId, VmInfo, VmNetworkInfo, VmPortMapping, VmStatus, VmVolume,
-    VmVolumeKind, WarmArtifactIdentity, WarmClaimOutcome, WarmClaimRefusal, WarmClaimTiming,
-    WarmLaunchMode, WarmPrewarmSource, WarmServiceRequest, WarmServiceResponse, WarmStartError,
-    WarmStartOutcome, encode_egress_ca_cmdline, encode_runtime_source_policy_cmdline,
-    encode_secret_env_cmdline, encode_user_volumes_cmdline,
+    RuntimeSourceRootStrategy, SnapshotCapability, StandbyCompat, StandbyError, StandbyHandle,
+    StandbySpec, StandbyState, StartMode, VmCapabilities, VmExitStatus, VmFile, VmId, VmInfo,
+    VmNetworkInfo, VmPortMapping, VmStatus, VmVolume, VmVolumeKind, WarmArtifactIdentity,
+    WarmClaimOutcome, WarmClaimRefusal, WarmClaimTiming, WarmLaunchMode, WarmPrewarmSource,
+    WarmServiceRequest, WarmServiceResponse, WarmStartError, WarmStartOutcome, clamp_vcpus,
+    decode_host_epoch_cmdline, encode_egress_ca_cmdline, encode_secret_env_cmdline,
+    encode_user_volumes_cmdline,
 };
-
-/// Inputs to the shared runtime-source policy selector.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RuntimeSourcePolicySelection<'a> {
-    pub backend_name: Option<&'a str>,
-    pub sealed: bool,
-    pub root_strategy: Option<RuntimeSourceRootStrategy>,
-    pub launch_kind: RuntimeSourceLaunchKind,
-}
-
-/// Shared runtime-source selector. This centralizes the rollout matrix so call
-/// sites stop inferring policy from whichever launch shape they happen to own.
-pub fn select_runtime_source_policy(
-    selection: RuntimeSourcePolicySelection<'_>,
-) -> RuntimeSourcePolicy {
-    match selection.launch_kind {
-        RuntimeSourceLaunchKind::InjectedRootfs => {
-            if selection.root_strategy == Some(RuntimeSourceRootStrategy::VirtiofsRoot) {
-                RuntimeSourcePolicy::RootfsOnly
-            } else {
-                RuntimeSourcePolicy::PreferOverlay
-            }
-        }
-        RuntimeSourceLaunchKind::BuilderDevVm => RuntimeSourcePolicy::PreferOverlay,
-        RuntimeSourceLaunchKind::WorkloadImage => {
-            // Every block-rooted workload boot on a real backend sources its
-            // guest binaries from the runtime overlay — the overlay is the
-            // single source, so a missing overlay must fail closed (build or
-            // acquire), never silently fall back to a baked rootfs copy. Only
-            // the virtiofs-root shape (no block-attach path) and non-real
-            // backends keep the soft preference.
-            if matches!(
-                selection.backend_name,
-                Some("firecracker" | "hvf" | "qemu" | "libkrun")
-            ) && selection.root_strategy != Some(RuntimeSourceRootStrategy::VirtiofsRoot)
-            {
-                RuntimeSourcePolicy::RequiredOverlay
-            } else {
-                RuntimeSourcePolicy::PreferOverlay
-            }
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // VmStartConfig — backend-agnostic VM launch configuration
@@ -113,12 +70,6 @@ pub struct VmStartConfig {
     pub template_id: Option<String>,
     /// Absolute path to the root filesystem (ext4 image).
     pub rootfs_path: String,
-    /// When set, boot from a read-only **virtiofs root** serving this host
-    /// directory (the unpacked+injected OCI tree) instead of a block `rootfs_path`
-    /// — the Plan-223 dev-tier boot on a virtiofs-capable backend. The run-path
-    /// tier gate sets this only for non-prod, non-sealed dev workloads; other
-    /// backends/tiers leave it `None` and use `rootfs_path`.
-    pub virtiofs_root: Option<String>,
     /// Absolute path to the kernel image (Firecracker needs this; others may ignore).
     pub kernel_path: Option<String>,
     /// Absolute path to the initial ramdisk (NixOS stage-1), if present.
@@ -153,11 +104,6 @@ pub struct VmStartConfig {
     /// runtime metadata so lifecycle operations can reason about the exact
     /// overlay the VM booted with rather than consulting mutable cache state.
     pub runtime_overlay_version: Option<String>,
-    /// Declared guest-runtime source contract for this boot. The rollout starts
-    /// by making this explicit in launch configs and audit surfaces; later
-    /// slices will make selected backends fail closed when the policy is
-    /// `RequiredOverlay`.
-    pub runtime_source_policy: RuntimeSourcePolicy,
     /// Nix store revision hash.
     pub revision_hash: String,
     /// Original flake reference (for display / status).
@@ -196,6 +142,14 @@ pub struct VmStartConfig {
     pub ports: Vec<VmPortMapping>,
     /// Extra volumes to mount in the guest.
     pub volumes: Vec<VmVolume>,
+    /// Exact optional extension bindings re-verified during admission. Empty
+    /// for every ordinary launch.
+    pub extensions: Vec<mvm_contract::protocol::extension_pack::ExtensionPlanBinding>,
+    /// Plan identity shared by all entries in `extensions`.
+    pub extension_plan_id: Option<String>,
+    /// Optional controller-backed typed broker services. Empty for ordinary
+    /// launches; populated only after admission creates a host-only endpoint.
+    pub service_proxies: Vec<mvm_contract::protocol::broker_control::ServiceProxyBinding>,
     /// Extra config files to make available to the guest.
     pub config_files: Vec<VmFile>,
     /// Secret files (written with restricted permissions).
@@ -485,9 +439,9 @@ pub trait VmBackend: Send + Sync {
     ///
     /// Returns the [`VmId`] assigned to the running VM.
     /// Equivalent to [`start_with_mode`](Self::start_with_mode) with
-    /// [`StartMode::Detached`] — preserved for back-compat with
-    /// existing consumers + because Detached is the right default
-    /// for the most common path (`mvmctl up`).
+    /// [`StartMode::Detached`], which is the right default for the most common
+    /// path (`mvmctl up`) — this is a default-argument convenience, not a
+    /// compatibility shim.
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {
         self.start_with_mode(config, StartMode::Detached)
     }
@@ -686,6 +640,7 @@ mod tests {
             vm_state_dir: "/p/standby-x".into(),
             image_path: None,
             image_sha256: None,
+            root_strategy: RuntimeSourceRootStrategy::BlockExt4,
             vsock_egress: false,
         }
     }
@@ -726,6 +681,7 @@ mod tests {
                 spawned_unix_secs: 1,
                 state: StandbyState::Idle,
                 image_sha256: None,
+                root_strategy: RuntimeSourceRootStrategy::BlockExt4,
                 parent_checkpoint: None,
                 vsock_egress: false,
                 preloaded_child_vm_name: None,
@@ -870,127 +826,6 @@ mod tests {
             Err(WarmStartError::Failed(_)) => {}
             other => panic!("expected Failed, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn select_runtime_source_policy_requires_overlay_for_block_firecracker_workloads() {
-        // Block-rooted workload boots require the overlay whether or not the
-        // rootfs is sealed — the overlay is the single binary source.
-        assert_eq!(
-            select_runtime_source_policy(RuntimeSourcePolicySelection {
-                backend_name: Some("firecracker"),
-                sealed: false,
-                root_strategy: Some(RuntimeSourceRootStrategy::BlockExt4),
-                launch_kind: RuntimeSourceLaunchKind::WorkloadImage,
-            }),
-            RuntimeSourcePolicy::RequiredOverlay
-        );
-    }
-
-    #[test]
-    fn select_runtime_source_policy_requires_overlay_for_block_hvf_workloads() {
-        assert_eq!(
-            select_runtime_source_policy(RuntimeSourcePolicySelection {
-                backend_name: Some("hvf"),
-                sealed: false,
-                root_strategy: Some(RuntimeSourceRootStrategy::BlockExt4),
-                launch_kind: RuntimeSourceLaunchKind::WorkloadImage,
-            }),
-            RuntimeSourcePolicy::RequiredOverlay
-        );
-    }
-
-    #[test]
-    fn select_runtime_source_policy_requires_overlay_for_block_qemu_workloads() {
-        assert_eq!(
-            select_runtime_source_policy(RuntimeSourcePolicySelection {
-                backend_name: Some("qemu"),
-                sealed: false,
-                root_strategy: Some(RuntimeSourceRootStrategy::BlockExt4),
-                launch_kind: RuntimeSourceLaunchKind::WorkloadImage,
-            }),
-            RuntimeSourcePolicy::RequiredOverlay
-        );
-    }
-
-    #[test]
-    fn select_runtime_source_policy_prefers_overlay_for_non_required_backends() {
-        assert_eq!(
-            select_runtime_source_policy(RuntimeSourcePolicySelection {
-                backend_name: Some("mock"),
-                sealed: true,
-                root_strategy: Some(RuntimeSourceRootStrategy::BlockExt4),
-                launch_kind: RuntimeSourceLaunchKind::WorkloadImage,
-            }),
-            RuntimeSourcePolicy::PreferOverlay
-        );
-    }
-
-    #[test]
-    fn select_runtime_source_policy_requires_overlay_for_block_libkrun_workloads() {
-        assert_eq!(
-            select_runtime_source_policy(RuntimeSourcePolicySelection {
-                backend_name: Some("libkrun"),
-                sealed: false,
-                root_strategy: Some(RuntimeSourceRootStrategy::BlockExt4),
-                launch_kind: RuntimeSourceLaunchKind::WorkloadImage,
-            }),
-            RuntimeSourcePolicy::RequiredOverlay
-        );
-    }
-
-    #[test]
-    fn select_runtime_source_policy_keeps_virtiofs_workload_on_prefer_overlay() {
-        // The virtiofs-root shape has no block-attach path for the overlay, so
-        // it stays a soft preference even on a real backend.
-        assert_eq!(
-            select_runtime_source_policy(RuntimeSourcePolicySelection {
-                backend_name: Some("hvf"),
-                sealed: false,
-                root_strategy: Some(RuntimeSourceRootStrategy::VirtiofsRoot),
-                launch_kind: RuntimeSourceLaunchKind::WorkloadImage,
-            }),
-            RuntimeSourcePolicy::PreferOverlay
-        );
-    }
-
-    #[test]
-    fn select_runtime_source_policy_keeps_virtiofs_injected_rootfs_rootfs_only() {
-        assert_eq!(
-            select_runtime_source_policy(RuntimeSourcePolicySelection {
-                backend_name: Some("hvf"),
-                sealed: false,
-                root_strategy: Some(RuntimeSourceRootStrategy::VirtiofsRoot),
-                launch_kind: RuntimeSourceLaunchKind::InjectedRootfs,
-            }),
-            RuntimeSourcePolicy::RootfsOnly
-        );
-    }
-
-    #[test]
-    fn select_runtime_source_policy_prefers_overlay_for_block_injected_rootfs() {
-        assert_eq!(
-            select_runtime_source_policy(RuntimeSourcePolicySelection {
-                backend_name: Some("hvf"),
-                sealed: false,
-                root_strategy: Some(RuntimeSourceRootStrategy::BlockExt4),
-                launch_kind: RuntimeSourceLaunchKind::InjectedRootfs,
-            }),
-            RuntimeSourcePolicy::PreferOverlay
-        );
-    }
-
-    #[test]
-    fn select_runtime_source_policy_keeps_builder_dev_on_prefer_overlay() {
-        assert_eq!(
-            select_runtime_source_policy(RuntimeSourcePolicySelection {
-                backend_name: None,
-                sealed: false,
-                root_strategy: None,
-                launch_kind: RuntimeSourceLaunchKind::BuilderDevVm,
-            }),
-            RuntimeSourcePolicy::PreferOverlay
-        );
     }
 
     #[test]

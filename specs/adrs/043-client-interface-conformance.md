@@ -68,10 +68,10 @@ plan.
    it. A second entry point that reaches a backend without admission does not
    weaken claim 8, it voids it.
 
-2. **One egress decision point.** Claim 10 holds because the per-VM
-   substitution endpoint's shared `EgressGate` is the sole decision point, and
-   `xtask check-uniform-vsock-egress` pins Firecracker, libkrun, and HVF to one
-   spawn site so a backend cannot grow a second gate. A conformance surface
+2. **One egress decision point.** Claim 10 holds because the per-VM network
+   endpoint's shared `EgressGate` is the sole decision point, and `xtask
+   check-single-network-path` pins Firecracker, libkrun, and HVF to one spawn
+   site and rejects a second workload socket owner. A conformance surface
    must inherit that seam verbatim. Any request field that appears to configure
    networking must resolve to a policy the existing gate evaluates, or be
    refused.

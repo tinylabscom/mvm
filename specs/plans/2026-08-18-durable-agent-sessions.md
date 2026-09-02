@@ -34,8 +34,12 @@ Three things follow, and none of them are covered today:
 3. **The memory image has no retention ladder.** `STANDBY_POOL_TTL` is 30
    minutes with a `PARKED_TTL_MULTIPLIER` of 6
    (`crates/mvm-runtime/src/standby_pool.rs:19-27`), tuned for warm-pool
-   capacity rather than for a task parked overnight. Nothing GCs
-   `checkpoints_dir()` (`crates/mvm-core/src/config.rs:766`) at all.
+   capacity rather than for a task parked overnight. `checkpoints_dir()`
+   (`crates/mvm-core/src/config.rs:766`) already has an age-based, tag-aware
+   sweep (`sweep_untagged_checkpoints`, reached from `mvmctl cache prune`) —
+   but it knows nothing about sessions, so a session parked past the sweep's
+   age cut loses the checkpoint it resumes from with no reachability check at
+   all.
 
 ## Framing
 
@@ -199,8 +203,15 @@ session record governed **separately**: a session may retain its record for 90
 days while its memory image expires in 48 hours. Losing the memory image costs
 speed, never resumability — the journal remains the durable record.
 
-This introduces the first actual GC over `checkpoints_dir()`. It must not
-reap a checkpoint that any live or hibernated session names as its parent.
+`checkpoints_dir()` already has a GC — the age-based, tag-aware
+`sweep_untagged_checkpoints` reached from `mvmctl cache prune`. What is
+missing is teaching it about sessions: it must not reap a checkpoint that any
+live or hibernated session names as its parent.
+(Delivered by `specs/plans/2026-08-18-session-retention.md`: the sweep now
+consults `mvm_runtime::agent_session::pinned_checkpoints` and a manual
+`mvmctl vm checkpoint rm` refuses the same way. Retention classes, expiry,
+and a scheduler that calls `demote` remain undelivered — see that plan's
+"Deferred to later plans" section.)
 
 ### D5 — Resume is re-admission, and it is incremental
 
@@ -234,28 +245,20 @@ not the signature check this sketch names.
 
 `specs/plans/2026-08-18-resume-session-orchestrator.md` landed
 `resume_session` (`crates/mvm-hostd/src/session_resume.rs`), which covers
-step 4 (fresh `ExecutionPlan` synthesis) and step 5 (admission): it loads the
-record, refuses anything but `Hibernated`, resolves the resume point named by
-`parent_checkpoint`, checks the record's stored `meta_digest` against a fresh
-`compute_meta_digest()` of its own fields — refusing a record whose
-`content[].sha256` was rewritten to vouch for a tampered blob, since
-`by_digest` and `verify_content` both otherwise trust the same file a
-tamperer who can edit a blob can also edit — then runs `verify_content`
-against it. Neither step is `verify_lineage` against a signed
-`CheckpointChainAnchor`, so the pair catches a tampered blob and a
-self-consistently forged record but not a checkpoint that was never audited
-in the first place. Resume then synthesizes a plan naming the session and
-the generation the resume opens,
-and admits it through `mvm_hostd::plan_admission::admit_for_run`. Only then
-does it transition the record, so a refusal at any earlier point leaves the
-session parked and unchanged. Steps 1 (audit-chain head), 3 (`PolicySet`
-evaluation at current time), 6 (tier selection), 7 (`PostRestore`), 8
-(credential minting), and 9 (the chain entry) remain design only — nothing in
-the workspace does any of them. `resume_session` itself has no caller
-anywhere in the workspace outside its own tests: it is wired to no CLI verb,
-broker handler, or other host code path, so none of steps 4–5 runs on a real
-resume yet either. Nothing calls `ApprovalLedger::head()` to produce the
-value either side of the step-2 comparison carries — a caller supplies both
+step 4 (fresh `ExecutionPlan` synthesis) and step 5 (admission).
+`specs/plans/2026-08-19-resume-boot.md` lands the cold-tier half of step 6:
+`mvmctl agent-session resume --boot` drives `resume_and_boot`, which refuses
+`Parked` and `Resident` tiers by name, transitions the record, and then boots
+a fresh VM from the resume point's rootfs through the shared
+`start_admitted` post-admission tail. The config carries the resume point's
+runtime-source policy, attaches the runtime overlay from the host cache, and
+threads dm-verity roothash tokens when the checkpoint has them. Step 9's
+`session.resumed` chain entry is emitted before the boot attempt, so a boot
+failure leaves the chain consistent with the moved record. Steps 1
+(audit-chain head), 3 (`PolicySet` evaluation at current time), 7
+(`PostRestore` fabric re-registration), and 8 (credential minting) remain
+design only. Nothing calls `ApprovalLedger::head()` to produce the value
+either side of the step-2 comparison carries — a caller supplies both
 `ParkInput::approval_head` and `resume`'s `current_head` itself today,
 `resume_session` included: its `ResumeRequest::current_approval_head` is read
 straight off the record the caller already holds. A session parked with
@@ -434,18 +437,64 @@ Numbering was reconciled before these documents landed on main (PR #2691):
       `resume_session`, via `ResumeRequest::current_approval_head` — supplies
       it directly today by reading it off the record; there is no tier
       selection, no `PostRestore` fabric re-registration, no credential
-      minting at the substitution endpoint, and no chain entry (WS7).
-      `resume_session` itself has no caller anywhere in the workspace outside
-      its own tests — nothing in `mvmctl` or elsewhere invokes it, so none of
-      the above runs on a real resume yet. A session parked with
+      minting at the substitution endpoint.
+      `resume_session` now has one production caller, `mvmctl agent-session
+      resume` (WS6), so the steps above that it does implement do run on a
+      real resume; the steps it does not implement — tier selection,
+      `PostRestore`, credential minting — still do not. A session parked with
       `approval_head: None` resumes with no ledger fence at all.
-- [ ] **WS5 — Retention ladder + GC.** Retention classes, one-way demotion,
-      first GC over `checkpoints_dir()` with parent-reachability refusal.
-- [ ] **WS6 — CLI.** `mvmctl session {open,ls,show,park,resume,approve,close}`.
-- [ ] **WS7 — Chain records.** `session.opened`, `sandbox.admitted`,
-      `sandbox.parked`, `approval.requested`, `approval.granted`,
-      `sandbox.resumed`, `session.hibernated`, `session.closed`, wired through
-      the existing `AgentApprovalEvent::audit_action` projection.
+- [ ] **WS5 — Retention ladder + GC.** Partially delivered by
+      `specs/plans/2026-08-18-session-retention.md`: the existing
+      `checkpoints_dir()` sweep (`mvmctl cache prune`) now refuses to reap a
+      checkpoint any live or hibernated session names as its parent, a manual
+      `mvmctl vm checkpoint rm` carries the same refusal, and
+      `AgentSessionRecord::demote` gives a parked session a one-way step down
+      the storage ladder. Not yet delivered: retention classes or expiry on
+      the record, a scheduler that calls `demote`, or any actual movement of
+      bytes between tiers — demoting only sets a field, nothing relocates a
+      memory image, and nothing reads `storage_tier` to decide how to resume.
+      A `Cold` session's checkpoint is still pinned by `pinned_checkpoints`
+      regardless of tier, so the ladder does not yet make anything
+      reclaimable — closing a session remains the only thing that frees its
+      resume point.
+- [x] **WS6 — CLI.** Delivered as `mvmctl agent-session
+      {open,ls,show,park,resume}`
+      (`crates/mvm-cli/src/commands/agent_session.rs`,
+      `specs/plans/2026-08-19-session-cli-and-audit.md`). Named
+      `agent-session`, not `session`: `mvmctl machine session` already means
+      machine-session residency — a warm VM held across `invoke` calls — over
+      a different store.
+      `open` writes the initial record (Active, generation 1) and is what
+      makes the other four reachable at all; before it existed no code path
+      anywhere created an `AgentSessionRecord`, so `ls` printed nothing
+      forever and `park`/`resume` could only refuse. `resume` is the first
+      production caller of `mvm_hostd::session_resume::resume_session` — a
+      caller that is both correctly constructed and, with `open` in place,
+      exercisable end to end.
+      `approve` and `close` are **not** delivered: there is no `close()`
+      transition on the record and no approval-grant surface for a CLI to
+      drive.
+- [ ] **WS7 — Chain records.** Partial. `session.parked` and
+      `session.resumed` are emitted by the CLI's park and resume paths
+      (`AuditEmitter::emit_session_parked` / `emit_session_resumed`), each
+      carrying non-colliding extras so a per-event label cannot overwrite a
+      signed plan label of the same name. Still open: nothing verifies a
+      session's chain as a unit the way `verify_audit_chain` walks a tenant's;
+      there is no `session.closed` entry because no `close()` transition
+      exists to emit one; and a chain-entry write failure downgrades to a
+      warning with exit 0 (the precedent `bind_checkpoint_created` set), so a
+      scripted operator cannot detect a missing entry from the exit status.
+      `session.opened`, `sandbox.admitted`, `approval.requested`,
+      `approval.granted` and `session.hibernated` are unwritten, and nothing
+      yet routes through the `AgentApprovalEvent::audit_action` projection.
+
+      **Event naming.** The two entries that exist are spelled `session.parked`
+      and `session.resumed`, not the `sandbox.parked` / `sandbox.resumed` this
+      spec first proposed. The code's spelling is the better one and the spec
+      follows it: parking and resuming are transitions of a *session*, and
+      `SandboxResidency` is a field of the session record rather than the
+      subject of the event. A `sandbox.` prefix would also read as a sibling of
+      `sandbox.admitted`, which is genuinely about one sandbox.
 - [ ] **WS8 — Tests + BDD** per the Testing section.
 
 ## Out of scope

@@ -13,6 +13,7 @@ mod parse;
 mod resolve;
 mod start;
 mod state;
+mod vcpu_default;
 mod vsock;
 
 pub(super) use build_mode::BuildModeFlags;
@@ -23,12 +24,15 @@ pub(super) use hints::with_hints;
 pub(crate) use parse::{DirShareSpec, parse_dir_share_spec};
 pub(super) use parse::{
     VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec,
-    materialize_disk_volume, parse_port_spec, parse_volume_spec, vm_volume_from_spec_validated,
+    materialize_disk_volume, parse_port_spec, parse_volume_spec, validate_volume_spec,
+    vm_volume_from_spec_validated,
 };
 pub(super) use resolve::{
-    ManifestArgRef, egress_enforcement_label, resolve_effective_hypervisor, resolve_flake_ref,
-    resolve_manifest_arg, resolve_run_network_policy, resolve_running_vm,
+    ManifestArgRef, egress_enforcement_label, parse_peer_binding, resolve_effective_hypervisor,
+    resolve_flake_ref, resolve_manifest_arg, resolve_run_network_policy,
+    resolve_run_network_policy_with_peers,
 };
 pub(super) use start::VmStartParams;
 pub(super) use state::{CHILD_PIDS, IN_CONSOLE_MODE};
+pub(crate) use vcpu_default::default_vcpus;
 pub(super) use vsock::{emit_vsock_rpc_audit, wait_for_guest_agent};

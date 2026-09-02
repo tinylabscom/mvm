@@ -9,7 +9,6 @@ use mvm_build::guest_agent_build::{
     GuestBinarySource, GuestRuntimeBinaryPaths, RuntimeOverlayGuestLayout, guest_binary_source,
     install_into_cache, runtime_overlay_source_checkout_fingerprint,
 };
-use mvm_build::verity_initrd::install_verity_initrd_from_binary;
 use mvm_core::arch::GuestArch;
 use mvm_core::plan::test_support::PlanFixture;
 use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
@@ -18,6 +17,7 @@ use mvm_runtime::vm::volume_registry::LocalVolumeCatalog;
 use crate::world::CliWorld;
 
 use super::cli::{mvmctl_command, workspace_root};
+use mvm_conformance::IsolatedHome;
 
 fn isolated_home(world: &CliWorld) -> &Path {
     world
@@ -42,21 +42,16 @@ fn managed_volume_path(world: &CliWorld, volume_name: &str) -> PathBuf {
 
 #[given("a cached live workload kernel")]
 fn cached_live_workload_kernel(world: &mut CliWorld) {
-    let source = PathBuf::from(
-        std::env::var_os("MVM_BDD_WORKLOAD_KERNEL")
-            .expect("MVM_BDD_WORKLOAD_KERNEL must name the live workload kernel"),
+    // The `@workload_kernel` gate guarantees this resolves before the scenario
+    // is selected, so reaching here without one is a harness bug, not an
+    // operator mistake.
+    let source = crate::workload_kernel_path()
+        .expect("`@workload_kernel` scenarios only run when a kernel resolves");
+    let destination = mvm_build::kernel_fetch::cached_kernel_path(
+        &isolated_home(world).join("cache"),
+        std::env::consts::ARCH,
+        "workload",
     );
-    assert!(
-        source.is_file(),
-        "MVM_BDD_WORKLOAD_KERNEL does not name a file: {source:?}"
-    );
-    let destination = isolated_home(world)
-        .join("cache")
-        .join("builder-vm")
-        .join(std::env::consts::ARCH)
-        .join("kernels")
-        .join("workload")
-        .join("vmlinux");
     fs::create_dir_all(
         destination
             .parent()
@@ -81,12 +76,10 @@ fn cache_live_guest_binaries(world: &CliWorld) {
     let source = guest_binary_source().expect("resolve guest-runtime cache generation");
     install_into_cache(
         GuestRuntimeBinaryPaths {
-            oci_init: &source_dir.join("mvm-oci-init"),
             agent: &source_dir.join("mvm-guest-agent"),
             netinit: &source_dir.join("mvm-guest-netinit"),
             egress_client: &source_dir.join("mvm-egress-client"),
             entrypoint_runner: &source_dir.join("mvm-oci-entrypoint"),
-            verity_init: &source_dir.join("mvm-verity-init"),
         },
         &isolated_home(world).join("cache").join("oci"),
         source.cache_key(),
@@ -96,14 +89,6 @@ fn cache_live_guest_binaries(world: &CliWorld) {
     if let GuestBinarySource::SourceCheckout { workspace_root, .. } = source {
         let fingerprint = runtime_overlay_source_checkout_fingerprint(&workspace_root)
             .expect("fingerprint local runtime-overlay sources");
-        install_verity_initrd_from_binary(
-            &source_dir.join("mvm-verity-init"),
-            &isolated_home(world).join("cache"),
-            env!("CARGO_PKG_VERSION"),
-            GuestArch::host(),
-            Some(&fingerprint),
-        )
-        .expect("seed isolated verity initrd cache from the prebuilt runtime");
         cache_live_runtime_overlay(world, &source_dir, &fingerprint);
     }
 }
@@ -120,12 +105,12 @@ fn cache_live_runtime_overlay(world: &CliWorld, source_dir: &Path, fingerprint: 
         ("mvm-guest-agent", &layout.agent),
         ("mvm-guest-netinit", &layout.netinit),
         ("mvm-seccomp-apply", &layout.seccomp_apply),
-        ("mvm-verity-init", &layout.verity_init),
         ("mvm-runner", &layout.runner),
         ("mvm-egress-client", &layout.egress_client),
         ("mvm-addon-dns", &layout.addon_dns),
         ("mvm-exit-report", &layout.exit_report),
         ("mvm-ping", &layout.ping),
+        ("mvm-forward-proxy", &layout.forward_proxy),
     ] {
         let source = source_dir.join(source_name);
         fs::copy(&source, destination).unwrap_or_else(|error| {
@@ -209,8 +194,7 @@ fn execute_machine_shell(world: &mut CliWorld, script: String, machine: String) 
     let output = mvmctl_command()
         .current_dir(workspace_root())
         .args(["machine", "exec", &machine, "--", "/bin/sh", "-c", &script])
-        .env("HOME", home)
-        .env("MVM_HOME", home)
+        .isolated_home(home)
         .output()
         .expect("execute command in live volume machine");
     world.last_run = Some(output);
@@ -228,8 +212,7 @@ fn attempt_direct_start(world: &mut CliWorld, machine: String, backend: String) 
     let output = mvmctl_command()
         .current_dir(workspace_root())
         .args(["machine", "start", &machine, "--hypervisor", &backend])
-        .env("HOME", home)
-        .env("MVM_HOME", home)
+        .isolated_home(home)
         .env("MVM_DIRECT_BOOT", "1")
         .env("MVM_KERNEL_PATH", &kernel)
         .env("MVM_ROOTFS_PATH", &rootfs)

@@ -30,6 +30,13 @@ defeat the scan permanently.
 Three limits below (§"What this does not do") are stated as limits, not as
 future work. They are true of the shipped code.
 
+The input half now also has its second production caller: mvmd PR
+[#238](https://github.com/tinylabscom/mvmd/pull/238) validates fleet DAGs and
+signed edge grants before boot, resolves opaque bindings, and drives the
+caller-owned `EdgeConnector` into the exact admitted input route. This does not
+promote claim 17. Its remaining `Preview` limits are properties of fingerprint
+scanning and shell-entrypoint classification, not missing reachability.
+
 ## Context
 
 A production microVM has no shell. Claim 4 removes `do_exec` from the agent
@@ -458,9 +465,9 @@ says the repetition is expected.
 **Unaffected.** Claims 1–3 (host-fs access, uid 0, verity): a stream is a read
 of a file the host already writes and a read of frames the host already
 receives. Claim 4: no exec path is added — the input half writes to a fixed
-entrypoint's stdin and cannot start a process. Claim 10: no NIC anywhere on
-this path; `check-vsock-only-egress` and `check-uniform-vsock-egress` stay
-green.
+entrypoint's stdin and cannot start a process. Claim 10: no NIC or second
+network protocol exists on this path; `check-single-network-path` and
+`check-one-guest-protocol` stay green.
 
 **Weakened, deliberately.** Claim 15. The console capture is still opened
 read-only and the trait still cannot hand out a writable handle, so

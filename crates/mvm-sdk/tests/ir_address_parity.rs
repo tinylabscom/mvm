@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
-use mvm_core::semantic_address::semantic_address;
+use mvm_core::{WorkloadAddress, workload_address};
 use mvm_sdk::ir::{App, Entrypoint, EnvValue, Image, Resources, Source, Workload};
 
-const EXPECTED_SEMANTIC_ADDRESS: &str =
+const EXPECTED_WORKLOAD_ADDRESS: &str =
     "sha256:b7106af4133c7d678744adb3b617e7289bc3f4c131b2df03a8e9cc49aac90037";
 
 fn rust_fixture() -> Workload {
@@ -60,7 +60,7 @@ fn emitted_fixture(source: &str, json: &str) -> Workload {
 }
 
 #[test]
-fn python_typescript_and_rust_resolve_to_one_semantic_address() {
+fn python_typescript_and_rust_resolve_to_one_workload_address() {
     let rust = rust_fixture();
     let python = emitted_fixture(
         "Python",
@@ -71,10 +71,10 @@ fn python_typescript_and_rust_resolve_to_one_semantic_address() {
         include_str!("../../../tests/ir-parity-fixtures/hello-parity.typescript.ir.json"),
     );
 
-    assert_eq!(python, rust, "Python SDK changed the shared IR meaning");
+    assert_eq!(python, rust, "Python SDK changed the shared IR value");
     assert_eq!(
         typescript, rust,
-        "TypeScript SDK changed the shared IR meaning"
+        "TypeScript SDK changed the shared IR value"
     );
 
     for (source, workload) in [
@@ -82,8 +82,8 @@ fn python_typescript_and_rust_resolve_to_one_semantic_address() {
         ("Python", &python),
         ("TypeScript", &typescript),
     ] {
-        let address = semantic_address(workload)
+        let address: WorkloadAddress = workload_address(workload)
             .unwrap_or_else(|error| panic!("addressing {source} fixture failed: {error}"));
-        assert_eq!(address.as_str(), EXPECTED_SEMANTIC_ADDRESS, "{source}");
+        assert_eq!(address.as_str(), EXPECTED_WORKLOAD_ADDRESS, "{source}");
     }
 }

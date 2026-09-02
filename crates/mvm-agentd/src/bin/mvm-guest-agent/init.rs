@@ -4,15 +4,12 @@
 //! this harness before entering the normal vsock control plane:
 //!
 //!   1. Mount `/proc`, `/sys`, and `/dev`.
-//!   2. Start the orphan reaper so descendants re-parented to PID 1 are
-//!      collected instead of accumulating as zombies. It is a thread, not
-//!      a SIGCHLD handler, so it can publish the statuses of children the
-//!      agent owns rather than destroying them — see
-//!      [`mvm_agentd::child_wait`].
-//!   3. Hand control back to `main`; the normal vsock accept loop serves
+//!   2. Hand control back to `main`; the normal vsock accept loop serves
 //!      `ActivateEnvironment` as the only allowed verb.
-//!   4. `apply_activation` mounts the rootfs, runtime overlay, and volumes,
+//!   3. `apply_activation` mounts the rootfs, runtime overlay, and volumes,
 //!      drops privilege, and flips the boot state to `Activated`.
+//!   4. Only after that single-threaded privilege transition does `main`
+//!      start the orphan reaper and other background threads.
 //!
 //! Linux-only.  On non-Linux targets the functions are no-ops so the
 //! workspace still compiles on macOS.
@@ -20,6 +17,7 @@
 use mvm_agentd::guest_mount;
 use mvm_agentd::vsock::ActivateEnvironment;
 
+use crate::globals::VALIDATED_EXTENSIONS;
 use crate::state::{ActivationState, AgentBootState};
 
 /// True when this process is PID 1 in the initramfs.
@@ -33,24 +31,27 @@ pub(crate) fn early_setup() {
     if !is_pid1() {
         return;
     }
-    eprintln!("mvm-guest-agent: running as PID 1, performing early initramfs setup");
-
     #[cfg(target_os = "linux")]
     {
         if crate::transport::unix_transport_selected() {
             // A shared-kernel container runtime has already mounted /proc,
             // /sys, and /dev for the namespace and drops CAP_SYS_ADMIN, so
-            // the initramfs early mounts would fail with EPERM. The agent
-            // is still PID 1 of the container's PID namespace, so the
-            // orphan reaper is still required.
+            // the initramfs early mounts would fail with EPERM.
             eprintln!(
                 "mvm-guest-agent: unix transport — container runtime provides early filesystems"
             );
-        } else if let Err(e) = guest_mount::mount_early_filesystems() {
-            fatal(&format!("early filesystem mount failed: {e}"));
+        } else {
+            if let Err(e) = guest_mount::mount_early_filesystems() {
+                fatal(&format!("early filesystem mount failed: {e}"));
+            }
+            seed_wall_clock_from_host_epoch();
         }
         provision_host_signer_anchor();
-        mvm_agentd::child_wait::install_orphan_reaper();
+        // In the universal initramfs path there is no second init to copy the
+        // signed verb-grant into /run/mvm before the agent starts listening.
+        // Pin it now from the kernel cmdline so the pre-activation trust
+        // decision sees the pinned grant before the agent accepts requests.
+        mvm_agentd::guest_bootstrap::provision_verb_grant();
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -60,10 +61,31 @@ pub(crate) fn early_setup() {
     }
 }
 
+/// Start the PID-1 orphan reaper after activation has dropped privilege on the
+/// main thread. Starting it earlier would leave a pre-existing thread outside
+/// the capability and `no_new_privs` transition.
+pub(crate) fn start_orphan_reaper() {
+    if is_pid1() {
+        mvm_agentd::child_wait::install_orphan_reaper();
+    }
+}
+
+/// Apply the host's launch epoch before trust-policy timestamps or workload
+/// TLS validation can observe the RTC-less guest's kernel clock.
+#[cfg(target_os = "linux")]
+fn seed_wall_clock_from_host_epoch() {
+    let cmdline = std::fs::read_to_string("/proc/cmdline")
+        .unwrap_or_else(|error| fatal(&format!("read /proc/cmdline for wall clock: {error}")));
+    match mvm_agentd::restore_clock::resync_from_cmdline(&cmdline) {
+        Ok(epoch) => eprintln!("mvm-guest-agent: wall clock set from host epoch {epoch}"),
+        Err(error) => fatal(&format!("wall clock synchronization failed: {error}")),
+    }
+}
+
 /// Copy the host-signer anchor off the kernel cmdline into the filesystem the
 /// control listener reads it from.
 ///
-/// A block-backed guest gets this from `mvm-oci-init`, which copies the key off
+/// A block-backed guest gets this from the init, which copies the key off
 /// the config drive. The universal initramfs has no config drive and no second
 /// init — the agent itself is `/init` — so without this the anchor never lands,
 /// every control connection is refused for want of a pinned key, and the run
@@ -83,7 +105,7 @@ fn provision_host_signer_anchor() {
             )
         });
     match result {
-        Ok(true) => eprintln!("mvm-guest-agent: host-signer anchor provisioned from cmdline"),
+        Ok(true) => {}
         Ok(false) => {
             eprintln!("mvm-guest-agent: no host-signer anchor on cmdline; control stays closed")
         }
@@ -124,10 +146,21 @@ pub(crate) fn apply_activation(
     // It has to land after the pivot (it writes into the workload's root) and
     // before the privilege drop (mounts and interface changes need root).
     bootstrap_guest_environment()?;
+    let validated_extensions = mvm_agentd::extension::validate_extensions(
+        &env.extensions,
+        std::path::Path::new("/run/mvm/extension-markers"),
+    );
+    if let Err(error) = &validated_extensions {
+        return Err(guest_mount::MountError::InvalidConfig(error.clone()));
+    }
+    VALIDATED_EXTENSIONS
+        .set(validated_extensions)
+        .map_err(|_| {
+            guest_mount::MountError::InvalidConfig("extensions already activated".into())
+        })?;
     guest_mount::drop_guest_agent_privilege(guest_mount::WORKLOAD_UID, guest_mount::WORKLOAD_GID)?;
 
     boot_state.set_activation(ActivationState::Activated);
-    eprintln!("mvm-guest-agent: activation complete, serving operational RPCs");
     Ok(())
 }
 

@@ -22,11 +22,15 @@ day-to-day development for no proportional benefit.
 | Workflow | Trigger | Purpose |
 |---|---|---|
 | `ci.yml` | `pull_request` + `merge_group` + `workflow_dispatch` | parallel compiler/policy/feature and workspace/Linux lanes with stable `lint` and `test` aggregate checks; Nix is added in the merge queue / manual dispatch |
-| `architecture.yml` | `pull_request` + `merge_group` + `workflow_dispatch` | structural/architectural invariants; skips the actual work on docs-only PRs, always runs in merge queue |
-| `ci-full.yml` | `workflow_dispatch` only | the full platform + live-VM + OCI-ratification matrix; operator-triggered, never automatic |
-| `security.yml` | `push: tags: v*` + nightly cron + `workflow_dispatch` | dependency audit / advisory scan; release-time backstop plus nightly catch for new advisories |
-| `windows.yml` | `push: tags: v*` + `workflow_dispatch` | non-blocking informational Windows build check; never a required check |
+| `architecture.yml` | `workflow_dispatch` only | structural/architectural invariants. Its required check name `Invariant` moved to `ci.yml`'s `lint-policy` job, and its one script is a step there, so the file no longer runs on a pull request despite this row once saying it did |
+| `ci-full.yml` (`Extended CI`) | nightly cron + `workflow_dispatch` | the platform + live-VM matrix, including the `aarch64-no-kvm-smoke` QEMU TCG path. Was `workflow_dispatch` only, and in that state ran **zero times** between being written and 2026-08-21 — including the only macOS lanes in the repository. "Operator-triggered" turned out to mean "never", so it now has a cadence |
+| `security.yml` | `push: tags: v*` + nightly cron + `workflow_dispatch` | dependency audit / advisory scan, plus every claim witness that is not a `fn:` test. Release-time backstop plus nightly catch for new advisories. **See "Open: no security lane gates a merge" below** |
+| `pack-signing-smoke.yml` | nightly cron + `workflow_dispatch` | keyless cosign round-trip against the real Sigstore stack. Also ran zero times while dispatch-only |
 | `release.yml` | `push: tags: v*` | builds and publishes release artifacts |
+
+`windows.yml` was deleted on 2026-08-21: it was the only workflow in the
+tree with no consumer of any kind — no test, no script, no gate, no
+dispatch from another workflow — and had never run.
 
 ### `ci.yml` shares expensive work and keeps required results conclusive
 
@@ -108,6 +112,43 @@ pushing. The workflow additionally exercises Linux-only real-kernel
 filesystem behavior, no-std cross-target boundaries, and Nix
 evaluation on the hosted Linux runner.
 
+## Open: no security lane gates a merge
+
+This ADR's decision that heavy gates run "at release time + nightly cron
+only" is unchanged, and the cost argument behind it still holds for the
+expensive lanes. But the decision was taken about *cost*, and its effect on
+*enforcement* was not stated: because no job in `security.yml` runs on a
+pull request or in the merge queue, **no security claim witness blocks a
+merge**. A witness can go red and the branch that broke it still lands
+green. The only enforcement surface is `security-lane-watch.yml` and the
+tracking issue it opens.
+
+Two defects found on 2026-08-21 survived a fortnight each for that reason:
+the `mvm-hostd` mutation shards timing out nightly, and the watcher's own
+inability to report a timeout. A third instance — a five-week window in
+which `Security` did not run at all — is recorded in
+`claim-witness-freshness.yml`'s header.
+
+The cost objection does not apply uniformly. Measured on the 2026-08-21
+nightly, the lanes divide sharply:
+
+| band | lanes | cost |
+|---|---|---|
+| trivial | `no-ssh-forwarding`, `flake-locks-clean`, `seccomp-functional`, `guest-agent-runtime-boundary`, `cargo-deny`, `cargo-audit`, `prod-agent-no-authority`, `builderd-no-authority` | 0–3 min each |
+| moderate | `hash-verify-tests`, `verified-boot-artifacts`, `sealed-prod-no-ssh`, `builder-vm-image-reproducibility`, `reproducibility` | 10–29 min |
+| expensive | `fuzz`, `mutation-witnesses` | 235 min and up to 330 min per shard |
+
+Six of ADR-001's ten `ci:` witnesses sit in the first two bands, and
+`ci.yml`'s own critical path is ~30 minutes — so promoting them to
+`pull_request` would add no wall-clock to a merge, only runner cost.
+
+Amending the trigger row for the cheap bands is therefore a live proposal,
+deliberately **not** taken unilaterally in the change that documented it:
+this ADR is Accepted, and the trade it encodes between iteration speed and
+enforcement is a maintainer's to re-make. Recorded here so the next person
+to ask "why did that lane not block the merge?" finds the answer and the
+measurements together.
+
 ## Consequences
 
 A pull-request update gets fast, complete feedback from the checks that
@@ -123,10 +164,12 @@ commit on `main` does not run them a third time. An operator opts into the expen
 SDK-publication dry-run, and OCI-ratification matrix deliberately through
 `ci-full.yml`, rather than paying for it on every update.
 
-A change that only breaks on macOS or under live KVM is not caught until
-someone runs `ci-full.yml`, or until a release-time gate runs — there is
-a real gap between "the PR is green" and "every platform has been
-exercised."
+A change that only breaks on macOS, under live KVM, or on the aarch64 no-KVM
+QEMU TCG path is not caught until `ci-full.yml` runs (nightly or on manual
+dispatch) — there is a real gap between "the PR is green" and "every
+platform has been exercised." The `aarch64-no-kvm-smoke` job was moved out
+of the merge queue because a cold TCG build can take hours and serialized
+merges; it remains in `ci-full.yml` so the path is still exercised.
 
 Release-time-only gates (`security.yml`, `windows.yml`, `release.yml`)
 stay timed to minimize development cost while still forming a hard backstop

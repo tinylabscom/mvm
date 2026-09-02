@@ -424,7 +424,7 @@ pub(in crate::commands) fn build_event_plan(
         stream_edges: Vec::new(),
         kernel_sha256: None,
         network_mode: Default::default(),
-        l3_network: None,
+        ingress: Vec::new(),
         vm_name: workload,
         tenant: None,
         backend_name: workload,
@@ -450,10 +450,13 @@ pub(in crate::commands) fn build_event_plan(
         shares: Vec::new(),
         redaction: mvm_core::policy::RedactionPolicy::default(),
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
+        caller_commitment: None,
         audit_labels: Default::default(),
         agent_verbs: None,
         services: Vec::new(),
+        extensions: Vec::new(),
         stream_retention: Default::default(),
+        attestation_mode: mvm_contract::plan::AttestationMode::Noop,
     };
     synthesize_plan(&input).context("synthesizing the image-lineage audit-envelope plan")
 }
@@ -1457,7 +1460,6 @@ mod tests {
             },
             built_at: "2026-01-01T00:00:00Z".into(),
             profile: "worker".into(),
-            role: String::new(),
             vcpus: 2,
             mem_mib: 512,
             data_disk_mib: 0,
@@ -1576,7 +1578,6 @@ mod tests {
             },
             built_at: "2026-01-01T00:00:00Z".into(),
             profile: "minimal".into(),
-            role: String::new(),
             vcpus: 2,
             mem_mib: 512,
             data_disk_mib: 0,

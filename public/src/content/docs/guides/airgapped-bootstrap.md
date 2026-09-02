@@ -17,7 +17,8 @@ path specifically for the dev/workload microVM image, verified against
 a cosign-signed manifest — was removed along with the standalone
 `mvmctl dev` command. Its would-be successor (the `dev-image` pack
 class) has no publish/fetch path wired yet: `mvmctl pack download
---kind dev-image` refuses explicitly rather than pretending to work.
+dev-image` refuses explicitly rather than pretending to work. (The pack
+kind is a positional argument; `--kind` is a filter on `pack list` only.)
 Signed bundles are the current sanctioned air-gapped path for shipping
 a prebuilt workload; this guide describes that flow.
 :::
@@ -89,8 +90,8 @@ today," not an error.
 On a connected host, fetch and verify the builder pack:
 
 ```bash
-mvmctl pack download --kind builder    # fetch + verify, don't activate
-mvmctl pack update --kind builder      # fetch + verify + activate
+mvmctl pack download builder    # fetch + verify, don't activate
+mvmctl pack update builder      # fetch + verify + activate
 ```
 
 Carrying the resulting cache into a fully air-gapped host isn't a wired

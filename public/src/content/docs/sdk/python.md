@@ -10,20 +10,22 @@ The Python SDK currently exposes both runtime and declarative surfaces.
 Current:
 
 - `mvm.Sandbox.create(template, ...)`
-- `sandbox.commands.start(argv, env=...)`
-- `sandbox.files.write(path, content)`
-- context-manager cleanup with `with`
+- `sandbox.commands.start(argv, env=...)` — the only method on `commands`
+- `sandbox.exec(*argv, ...)` / `sandbox.aexec(...)` / `sandbox.shell(...)` — one-shot with a captured `ExecResult` (live mode only)
+- `sandbox.files.write/read/list/stat/mkdir/remove/move(...)` — everything but `write` is live mode only
+- `sandbox.copy_in(...)` / `sandbox.copy_out(...)`
+- context-manager cleanup with `with` (or `async with`)
 - record mode for `mvmctl build compile` and `mvmctl run --mode plan`
 - live mode for `mvmctl run --mode live`
 
 Planned:
 
-- command result capture through `commands.run(...)`;
-- file read/list/remove;
 - logs and event streams;
-- port helpers;
 - snapshot, cold, resume, detach, destroy;
 - additional lifecycle result types once the local runtime transport supports them.
+
+There is no `commands.run(...)`. `sandbox.forward(...)` exists only to refuse:
+ingress is declared before boot through `network=mvm.network(ports=[...])`.
 
 ## Decorator
 
@@ -36,13 +38,36 @@ import mvm
     name="worker",
     source=mvm.local_path("."),
     image=mvm.nix_packages(["python312"]),
-    network=mvm.network(mode="deny"),
+    resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
+    network=mvm.network(mode="none"),
 )
 def run() -> str:
     return "ok"
 ```
 
 The static compiler extracts literal decorator declarations without importing the module.
+
+
+### AI egress budget
+
+```python
+@mvm.app(
+    name="llm-worker",
+    source=mvm.local_path("."),
+    image=mvm.python_image(python="3.12"),
+    resources=mvm.resources(cpu_cores=1, memory_mb=512, rootfs_size_mb=1024),
+    network=mvm.network(
+        mode="bridge",
+        egress=mvm.egress([mvm.host_port("api.openai.com", 443)]),
+        ai=mvm.ai_policy(
+            metering=True,
+            budget=mvm.ai_budget(max_total_tokens=100_000),
+        ),
+    ),
+)
+def run(prompt: str) -> str:
+    ...
+```
 
 ## Security notes
 

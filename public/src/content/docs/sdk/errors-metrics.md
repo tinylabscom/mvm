@@ -58,6 +58,24 @@ Metrics are operational metadata. They should not include argv values, env
 values, file contents, stdout/stderr payloads, or secret names unless a policy
 explicitly permits the label.
 
+
+## AI egress metrics
+
+When AI egress metering is enabled, the runtime emits Prometheus counters per
+microVM instance. These counters contain counts only — no request bodies,
+headers, prompts, or credentials.
+
+| Metric | Type | Description |
+| --- | --- | --- |
+| `mvm_instance_ai_requests_total` | counter | Number of AI API requests observed. |
+| `mvm_instance_ai_tokens_input_total` | counter | Input tokens reported by the provider. |
+| `mvm_instance_ai_tokens_output_total` | counter | Output tokens reported by the provider. |
+| `mvm_instance_ai_tokens_total_total` | counter | Total tokens reported by the provider. |
+
+A budget is enforced on the next request after a limit is crossed, so a
+single response may slightly exceed the cap before refusal takes effect.
+
+
 ## Debug logging
 
 Debug logs are useful but risky. Recommended rules:
@@ -69,14 +87,16 @@ Debug logs are useful but risky. Recommended rules:
 
 ## Current CLI tools
 
-Use these while SDK error and metric helpers mature:
+Use these while SDK error and metric helpers mature. `machine boot-report` is a
+hidden advanced verb: it works, but it does not appear in
+`mvmctl machine --help`.
 
 ```sh
 mvmctl run --receipt /tmp/receipt.json -- python task.py
-mvmctl boot-report devbox --json
+mvmctl machine boot-report devbox --json
 mvmctl machine logs devbox
-mvmctl audit tail -n 20
-mvmctl audit verify --tenant local
+mvmctl trust audit tail -n 20
+mvmctl trust audit verify --tenant local
 mvmctl doctor --json
 ```
 

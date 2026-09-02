@@ -4,7 +4,7 @@ use crate::ir::error_codes::ErrorCode;
 use crate::ir::version::{VersionError, validate_schema_version};
 use crate::ir::workload::{
     Concurrency, Entrypoint, EnvValue, InProcessMode, JsonSchemaShape, NetworkDns, NetworkMode,
-    Resources, Source, WarmProcessConfig, Workload,
+    PortProto, PortTransform, Resources, Source, WarmProcessConfig, Workload,
 };
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
@@ -334,6 +334,96 @@ pub fn validate(workload: &Workload) -> Result<(), Vec<ValidationError>> {
                              (host is forbidden for function workloads)."
                         .to_string(),
                 });
+            }
+            let mut mapping_ids = BTreeSet::new();
+            let mut listener_binds = BTreeSet::new();
+            for (index, mapping) in network.ports.iter().enumerate() {
+                let path = format!("{base}.network.ports[{index}]");
+                if mapping.mapping_id == 0 {
+                    errors.push(ValidationError {
+                        code: ErrorCode::IngressInvalidMapping,
+                        path: format!("{path}.mapping_id"),
+                        detail: "ingress mapping_id must be non-zero".to_string(),
+                    });
+                } else if !mapping_ids.insert(mapping.mapping_id) {
+                    errors.push(ValidationError {
+                        code: ErrorCode::IngressDuplicateMapping,
+                        path: format!("{path}.mapping_id"),
+                        detail: format!(
+                            "ingress mapping_id {} is declared more than once",
+                            mapping.mapping_id
+                        ),
+                    });
+                }
+
+                if mapping.host == 0 || mapping.guest == 0 {
+                    errors.push(ValidationError {
+                        code: ErrorCode::NetworkInvalidPort,
+                        path: path.clone(),
+                        detail: "ingress host and guest ports must be in 1..65535".to_string(),
+                    });
+                }
+                if mapping.host_addr.parse::<core::net::IpAddr>().is_err() {
+                    errors.push(ValidationError {
+                        code: ErrorCode::IngressInvalidMapping,
+                        path: format!("{path}.host_addr"),
+                        detail: "ingress host_addr must be an exact IPv4 or IPv6 address"
+                            .to_string(),
+                    });
+                }
+                let bind = (mapping.proto, mapping.host_addr.as_str(), mapping.host);
+                if !listener_binds.insert(bind) {
+                    errors.push(ValidationError {
+                        code: ErrorCode::IngressDuplicateBind,
+                        path: path.clone(),
+                        detail: "ingress protocol/address/port bind is declared more than once"
+                            .to_string(),
+                    });
+                }
+                let guest_loopback = mapping
+                    .guest_addr
+                    .parse::<core::net::IpAddr>()
+                    .is_ok_and(|addr| addr.is_loopback());
+                if !guest_loopback {
+                    errors.push(ValidationError {
+                        code: ErrorCode::IngressGuestNotLoopback,
+                        path: format!("{path}.guest_addr"),
+                        detail: "ingress guest_addr must be an exact loopback address".to_string(),
+                    });
+                }
+                if mapping.proto == PortProto::Udp && mapping.transform != PortTransform::Opaque {
+                    errors.push(ValidationError {
+                        code: ErrorCode::IngressUnsupportedTransform,
+                        path: format!("{path}.transform"),
+                        detail: "UDP ingress supports only the explicit opaque transform class"
+                            .to_string(),
+                    });
+                }
+                match (mapping.transform, mapping.tls_secret.as_deref()) {
+                    (PortTransform::Tls, Some("")) => {
+                        errors.push(ValidationError {
+                            code: ErrorCode::IngressInvalidMapping,
+                            path: format!("{path}.tls_secret"),
+                            detail: "TLS ingress secret reference must not be empty".to_string(),
+                        });
+                    }
+                    (PortTransform::Tls, None) => errors.push(ValidationError {
+                        code: ErrorCode::IngressInvalidMapping,
+                        path: format!("{path}.tls_secret"),
+                        detail: "TLS ingress requires a plan-bound PEM secret reference"
+                            .to_string(),
+                    }),
+                    (PortTransform::Opaque | PortTransform::Http, Some(_)) => {
+                        errors.push(ValidationError {
+                            code: ErrorCode::IngressInvalidMapping,
+                            path: format!("{path}.tls_secret"),
+                            detail: "only TLS ingress may declare a PEM secret reference"
+                                .to_string(),
+                        });
+                    }
+                    (PortTransform::Tls, Some(_))
+                    | (PortTransform::Opaque | PortTransform::Http, None) => {}
+                }
             }
             if is_function_entrypoint && network.mode == NetworkMode::Host {
                 errors.push(ValidationError {

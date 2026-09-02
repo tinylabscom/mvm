@@ -22,7 +22,7 @@
 //! shouldn't pollute the plan chain), but the **emit surface** is
 //! one type, one trait, one place to grep.
 //!
-//! ## Categories (11)
+//! ## Categories (12)
 //!
 //! The comprehensive audit catalog (the `mvmctl audit tail` `cat`
 //! filter):
@@ -97,14 +97,6 @@ pub enum EventCategory {
     /// plan-bound. Recording echo under `flow` would mean either threading a
     /// plan into that process or silently dropping every entry.
     Icmp,
-    /// L3 tunnel gateway decisions. `l3.<verb>`.
-    ///
-    /// Its own category for the reason `icmp` and `dns` are: the gateway runs
-    /// as a per-machine process holding a plan *digest* and no
-    /// `ExecutionPlan`, and `flow` is mandatorily plan-bound. Recording a
-    /// tunnel decision under `flow` would mean either threading a plan into
-    /// that process or dropping every entry it makes.
-    L3,
     /// Workload-emitted audit entries via `host.audit.v1`. Distinct
     /// from system-emitted categories so the chain verifier can
     /// compute workload-asserted
@@ -130,7 +122,6 @@ impl EventCategory {
             Self::Audit => "audit",
             Self::Dns => "dns",
             Self::Icmp => "icmp",
-            Self::L3 => "l3",
             Self::WorkloadAudit => "workload_audit",
         }
     }
@@ -278,6 +269,34 @@ impl Recorder {
         Ok(())
     }
 
+    /// Emit a `host.ai.usage` chain-signed audit entry.
+    ///
+    /// The record carries only provider-reported counts and routing metadata;
+    /// request/response bodies, headers, and credentials are never included.
+    pub async fn record_ai_usage(
+        &self,
+        record: &mvm_core::policy::audit::ai_usage::AiUsageRecord,
+    ) -> Result<(), RecorderError> {
+        self.record_unbound(EventCategory::Host, "host.ai.usage", record.to_labels())
+            .await
+    }
+
+    /// Emit a `host.ai.budget_exceeded` chain-signed audit entry.
+    ///
+    /// Emitted when the VM's AI egress budget has been exceeded and a
+    /// subsequent request is refused before forwarding.
+    pub async fn record_ai_budget_exceeded(
+        &self,
+        record: &mvm_core::policy::audit::ai_usage::AiUsageRecord,
+    ) -> Result<(), RecorderError> {
+        self.record_unbound(
+            EventCategory::Host,
+            "host.ai.budget_exceeded",
+            record.to_labels(),
+        )
+        .await
+    }
+
     fn bump_metric(&self, category: EventCategory) {
         let Some(ref m) = self.metrics else {
             return;
@@ -294,7 +313,6 @@ impl Recorder {
             EventCategory::Audit => &m.audit_audit_total,
             EventCategory::Dns => &m.audit_dns_total,
             EventCategory::Icmp => &m.audit_icmp_total,
-            EventCategory::L3 => &m.audit_l3_total,
             EventCategory::WorkloadAudit => &m.audit_workload_audit_total,
         };
         counter.fetch_add(1, Ordering::Relaxed);
@@ -317,6 +335,7 @@ impl Recorder {
             image_name: UNBOUND_IMAGE_NAME.to_string(),
             image_sha256: UNBOUND_IMAGE_SHA256.to_string(),
             event: event_name,
+            caller_commitment: None,
             labels,
         }
     }

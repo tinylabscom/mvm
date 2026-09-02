@@ -17,10 +17,10 @@ mv "$tmpdir/${wasmtime_base}/wasmtime" "$HOME/.wasmtime/bin/wasmtime"
 rm -rf "$tmpdir"
 export PATH="$HOME/.wasmtime/bin:$PATH"
 
-cargo +1.96.0 build -p mvm-contract --target wasm32-unknown-unknown
-cargo +1.96.0 build -p mvm-contract --lib \
+cargo +1.97.1 build -p mvm-contract --target wasm32-unknown-unknown
+cargo +1.97.1 build -p mvm-contract --lib \
   --target riscv32imac-unknown-none-elf
-cargo +1.96.0 test -p mvm-contract --target wasm32-wasip1
+cargo +1.97.1 test -p mvm-contract --target wasm32-wasip1
 
 # Browser wasm demo: build + wasm-opt + gzipped size budget, plus Rust
 # fixture-parity tests. wasm-pack and binaryen/wabt are installed here because
@@ -30,7 +30,7 @@ sudo apt-get update && sudo apt-get install -y binaryen wabt
 (
   cd web/mvm-demo
   ./build.sh
-  cargo +1.96.0 test
+  cargo +1.97.1 test
 )
 
 cargo run -p mvm-fs --example write_sample -- /tmp/sample.ext4 \

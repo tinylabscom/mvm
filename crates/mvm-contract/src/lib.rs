@@ -35,13 +35,12 @@ pub mod entrypoint;
 /// A workload's permission set — CPU, wall clock, egress destinations.
 #[cfg(feature = "protocol")]
 pub mod grants;
+/// Which C library a guest rootfs is built against. Shared vocabulary between
+/// the crate that detects it and the crate that keys the SDK sidecar cache on
+/// it; those are siblings, so it sits underneath both.
+pub mod guest_libc;
 #[cfg(feature = "protocol")]
 pub mod ir;
-/// The L3-over-vsock tunnel protocol: framing, control messages, and
-/// bounded IP validation. Shared by the in-guest agent and the host
-/// gateway.
-#[cfg(feature = "protocol")]
-pub mod l3;
 /// Guest lifecycle markers + snapshot timing (the `mvm-init` ↔ host contract).
 #[cfg(feature = "protocol")]
 pub mod lifecycle;
@@ -50,6 +49,10 @@ pub mod lifecycle;
 pub mod merkle;
 /// OCI distribution types with no host dependency (manifest parsing).
 pub mod oci;
+/// Names one workload uses to address another over the existing
+/// host-mediated egress path.
+#[cfg(feature = "protocol")]
+pub mod peer;
 #[cfg(feature = "protocol")]
 pub mod plan;
 #[cfg(feature = "protocol")]

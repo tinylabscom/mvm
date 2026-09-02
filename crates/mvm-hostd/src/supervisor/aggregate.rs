@@ -1317,7 +1317,7 @@ mod tests {
             snapshot_at: Default::default(),
             network_mode: Default::default(),
             stream_retention: Default::default(),
-            l3_network: None,
+            ingress: Vec::new(),
             network_limits: Default::default(),
             schema_version: SCHEMA_VERSION,
             // Overwritten below with the content-address, matching what
@@ -1358,6 +1358,7 @@ mod tests {
                 capture_paths: vec!["/artifacts".to_string()],
                 retention_days: 30,
             },
+            caller_commitment: None,
             audit_labels: BTreeMap::new(),
             key_rotation: KeyRotationSpec { interval_days: 7 },
             attestation: AttestationRequirement {
@@ -1381,6 +1382,7 @@ mod tests {
             shares: Vec::new(),
             agent_verbs: None,
             services: Vec::new(),
+            extensions: Vec::new(),
             stream_edges: Vec::new(),
         };
         plan.plan_id = mvm_core::plan::compute_plan_id(&plan);

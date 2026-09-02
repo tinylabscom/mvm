@@ -227,12 +227,23 @@ where
     let raw = read_http_request(stream)?;
     // A parse failure or a relay error is surfaced to the workload as a 502 —
     // never the host's internals, never a panic.
+    //
+    // Logged as well as answered generically. A relay that cannot open its session fails
+    // every request identically, and a `502` a client reports as "Bad Gateway"
+    // without its body is indistinguishable from a destination the policy
+    // refused. Whoever is reading the guest console should see which it was.
+    //
+    // The full chain belongs only in the trusted guest log. Returning it to an
+    // untrusted workload would disclose filesystem and endpoint details.
     let resp = match parse_proxied_request(&raw) {
-        Ok(req) => relay(&req).unwrap_or_else(|e| WireResponse::Refused {
-            message: e.to_string(),
+        Ok(req) => relay(&req).unwrap_or_else(|e| {
+            tracing::warn!(error = format!("{e:#}"), "forward-proxy relay failed");
+            WireResponse::Refused {
+                message: "forward proxy relay failed".to_string(),
+            }
         }),
         Err(e) => WireResponse::Refused {
-            message: format!("bad proxied request: {e}"),
+            message: format!("bad proxied request: {e:#}"),
         },
     };
     let out = render_response(&resp)?;
@@ -432,6 +443,52 @@ mod tests {
     fn proxy_env_url_is_loopback_on_the_proxy_port() {
         assert_eq!(proxy_env_url(), "http://127.0.0.1:18080");
         assert_eq!(FORWARD_PROXY_PORT, 18080);
+    }
+
+    /// A relay error must be actionable without exposing the privileged
+    /// process's filesystem or endpoint details to the workload.
+    #[test]
+    fn a_relay_failure_is_reported_without_exposing_its_cause() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::thread;
+
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping proxy relay-failure test: {err}");
+                return;
+            }
+            Err(err) => panic!("proxy test listener bind failed: {err}"),
+        };
+        let addr = listener.local_addr().unwrap();
+
+        let server = thread::spawn(move || {
+            let mut conn = listener.accept().unwrap().0;
+            let relay = |_: &WireRequest| -> Result<WireResponse> {
+                Err(anyhow::anyhow!("Permission denied (os error 13)")
+                    .context("reading the guest signing key"))
+            };
+            handle_connection(&mut conn, &relay).unwrap();
+        });
+
+        let mut client = TcpStream::connect(addr).unwrap();
+        client
+            .write_all(b"GET http://api.example.com/ HTTP/1.1\r\n\r\n")
+            .unwrap();
+        let mut resp = String::new();
+        client.read_to_string(&mut resp).unwrap();
+        server.join().unwrap();
+
+        assert!(resp.starts_with("HTTP/1.1 502"), "{resp}");
+        assert!(
+            resp.contains("forward proxy relay failed"),
+            "the workload still needs an actionable failure class: {resp}"
+        );
+        assert!(
+            !resp.contains("reading the guest signing key") && !resp.contains("Permission denied"),
+            "privileged relay details must stay in the guest log: {resp}"
+        );
     }
 
     #[test]

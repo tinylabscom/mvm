@@ -251,6 +251,13 @@ impl VsockHandlerRegistry {
             .bind_ports(ports)
     }
 
+    pub(crate) fn set_long_lived_host_dial_ports(&mut self, ports: impl IntoIterator<Item = u32>) {
+        self.host_handler_mut::<HostDialVsockHandler>()
+            .expect("console handler present")
+            .bridge
+            .set_long_lived_ports(ports);
+    }
+
     pub(crate) fn set_host_dial_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
         self.host_handler_mut::<HostDialVsockHandler>()
             .expect("console handler present")
@@ -461,7 +468,22 @@ impl GuestPortHandler for StreamRelayHandler {
 
     fn on_packet(&mut self, ctx: &mut VsockHandlerContext<'_>, hdr: VsockHdr, payload: &[u8]) {
         match hdr.op {
-            OP_REQUEST => ctx.queue_reply(&hdr, OP_RESPONSE, &[]),
+            // Open the endpoint side now, not on the guest's first payload.
+            // The endpoint speaks first here — a FlowMux session opens with the
+            // host's `SessionHello` — so a guest that connects goes straight
+            // into a read. Dialing lazily leaves nothing on the host end to
+            // send it, and both sides wait forever. Remembering the header is
+            // the other half: `drain` can only push endpoint bytes at a
+            // connection it has a header for.
+            OP_REQUEST => {
+                if self.bridge.open_connection(hdr.src_port) {
+                    self.headers.insert(hdr.src_port, hdr);
+                    ctx.queue_reply(&hdr, OP_RESPONSE, &[]);
+                } else {
+                    self.headers.remove(&hdr.src_port);
+                    ctx.queue_reply(&hdr, OP_RST, &[]);
+                }
+            }
             OP_RW => {
                 let n = (hdr.len as usize).min(payload.len());
                 if !ctx.try_add_recv(&hdr, n as u32) {

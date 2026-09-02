@@ -6,10 +6,11 @@
 //! populated cache can never make a scenario pass for the wrong reason.
 
 use cucumber::{given, then, when};
+use mvm_build::guest_libc::GuestLibc;
 use mvm_contract::protocol::broker::ServiceId;
 use mvm_core::arch::GuestArch;
 use mvm_core::plan::test_support::PlanFixture;
-use mvm_core::vm_backend::{RuntimeSourcePolicy, VmStartConfig, VmVolume, VmVolumeKind};
+use mvm_core::vm_backend::{VmStartConfig, VmVolume, VmVolumeKind};
 use mvm_fs::sdk_sidecar::{
     SDK_SIDECAR_IMAGE_FILE, SDK_SIDECAR_VERSION_FILE, SdkSidecarLayout, SdkSidecarResolver,
 };
@@ -19,6 +20,12 @@ use mvm_runtime::driver::VmmDriver;
 use crate::world::CliWorld;
 
 const FIXTURE_VERSION: &str = "1.2.3";
+
+/// The variant these scenarios stage and resolve.
+///
+/// This scenario chooses glibc; the sibling musl acquisition path is covered by
+/// the downloader's focused release-fixture regression.
+const SCENARIO_LIBC: GuestLibc = GuestLibc::Glibc;
 
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
@@ -38,7 +45,12 @@ fn sidecar_ext4_bytes() -> Vec<u8> {
         Node::File {
             path: "/lib/libmvm_host_services.so".into(),
             mode: 0o555,
-            data: b"\x7fELF-stub".to_vec(),
+            data: mvm_fs::elf::test_fixture::shared_object(&[
+                "libgcc_s.so.1",
+                SCENARIO_LIBC
+                    .libc_soname()
+                    .expect("a fixture names a real libc"),
+            ]),
             xattrs: Vec::new(),
         },
     ];
@@ -55,7 +67,12 @@ fn cache_root(world: &mut CliWorld) -> std::path::PathBuf {
 
 fn layout(world: &mut CliWorld) -> SdkSidecarLayout {
     let root = cache_root(world);
-    SdkSidecarLayout::under(&root, FIXTURE_VERSION, &GuestArch::host().to_string())
+    SdkSidecarLayout::under(
+        &root,
+        FIXTURE_VERSION,
+        &GuestArch::host().to_string(),
+        SCENARIO_LIBC,
+    )
 }
 
 #[given(expr = "a verified SDK sidecar in the cache")]
@@ -136,8 +153,10 @@ fn stage_release(world: &mut CliWorld, checksum_over: &[u8]) {
         .to_path_buf();
     let release_dir = base.join(format!("v{FIXTURE_VERSION}"));
     std::fs::create_dir_all(&release_dir).expect("create the versioned release dir");
-    let names =
-        mvm_build::sdk_sidecar::SdkSidecarArtifactNames::for_arch(&GuestArch::host().to_string());
+    let names = mvm_build::sdk_sidecar::SdkSidecarArtifactNames::for_target(
+        &GuestArch::host().to_string(),
+        GuestLibc::Glibc,
+    );
     std::fs::write(release_dir.join(&names.archive), &archive).expect("write the release archive");
     std::fs::write(
         release_dir.join(&names.archive_checksum),
@@ -182,17 +201,23 @@ fn acquire_sidecar_from_release(world: &mut CliWorld) {
     env.set(mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
 
     world.sdk_sidecar_result = Some(
-        mvm_build::sdk_sidecar::download_sdk_sidecar(FIXTURE_VERSION, GuestArch::host(), &cache)
+        mvm_build::sdk_sidecar::download_sdk_sidecar(
+            FIXTURE_VERSION,
+            GuestArch::host(),
+            SCENARIO_LIBC,
+            &cache,
+        )
+        .map_err(|e| format!("{e:#}"))
+        .and_then(|_installed| {
+            let resolver = SdkSidecarResolver::new(cache.clone(), FIXTURE_VERSION.to_string());
+            mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(
+                &services,
+                &resolver,
+                GuestArch::host(),
+                SCENARIO_LIBC,
+            )
             .map_err(|e| format!("{e:#}"))
-            .and_then(|_installed| {
-                let resolver = SdkSidecarResolver::new(cache.clone(), FIXTURE_VERSION.to_string());
-                mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(
-                    &services,
-                    &resolver,
-                    GuestArch::host(),
-                )
-                .map_err(|e| format!("{e:#}"))
-            }),
+        }),
     );
 }
 
@@ -233,6 +258,8 @@ fn read_only_directory_mount(world: &mut CliWorld, guest_path: String) {
         read_only: true,
         kind: VmVolumeKind::DirShare,
         encrypted: false,
+        materialized_image: None,
+        volume_label: None,
     });
 }
 
@@ -246,6 +273,7 @@ fn resolve_sidecar(world: &mut CliWorld) {
             &services,
             &resolver,
             GuestArch::host(),
+            SCENARIO_LIBC,
         )
         .map_err(|e| format!("{e:#}")),
     );
@@ -378,16 +406,43 @@ fn attached_volumes(world: &CliWorld) -> Vec<mvm_core::vm_backend::VmVolume> {
 
 #[then(expr = "admission accepts the launch with no sidecar attachment")]
 fn admission_accepts_without_sidecar(world: &mut CliWorld) {
-    mvm_hostd::plan_admission::enforce_sdk_sidecar_attachment(&[], plan_of(world))
-        .expect("a plan binding no SDK host service must admit with no sidecar");
+    mvm_hostd::plan_admission::enforce_sdk_sidecar_attachment(
+        &[],
+        plan_of(world),
+        GuestLibc::Unknown,
+    )
+    .expect("a plan binding no SDK host service must admit with no sidecar");
 }
 
 #[then(expr = "admission accepts the launch with the sidecar attachment")]
 fn admission_accepts_with_sidecar(world: &mut CliWorld) {
     let volumes = attached_volumes(world);
     assert!(!volumes.is_empty(), "no sidecar volume was resolved");
-    mvm_hostd::plan_admission::enforce_sdk_sidecar_attachment(&volumes, plan_of(world))
-        .expect("the resolved attachment must satisfy the admission gate");
+    mvm_hostd::plan_admission::enforce_sdk_sidecar_attachment(
+        &volumes,
+        plan_of(world),
+        SCENARIO_LIBC,
+    )
+    .expect("the resolved attachment must satisfy the admission gate");
+}
+
+#[then(expr = "wasm admission refuses the requested SDK host service before backend start")]
+fn wasm_admission_refuses_sdk_host_service(world: &mut CliWorld) {
+    let bound = world
+        .sdk_sidecar_services
+        .first()
+        .expect("a prior step must bind an SDK host service")
+        .as_str();
+    let err = mvm_hostd::plan_admission::enforce_sdk_sidecar_backend_compatibility(
+        mvm_core::vm_backend::BackendKind::Wasm,
+        plan_of(world),
+    )
+    .expect_err("wasm must refuse the native SDK sidecar delivery mechanism");
+    let message = err.to_string();
+    assert!(message.contains(bound), "{message}");
+    assert!(message.contains("wasm"), "{message}");
+    assert!(message.contains("SDK host service"), "{message}");
+    assert!(!message.contains("DiskVolumeNotSupported"), "{message}");
 }
 
 #[then(expr = "admission refuses a sidecar attachment for this plan")]
@@ -400,10 +455,15 @@ fn admission_refuses_sidecar(world: &mut CliWorld) {
         read_only: true,
         kind: mvm_core::vm_backend::VmVolumeKind::Disk,
         encrypted: false,
+        materialized_image: None,
+        volume_label: None,
     };
-    let err =
-        mvm_hostd::plan_admission::enforce_sdk_sidecar_attachment(&[smuggled], plan_of(world))
-            .expect_err("an unauthorized sidecar must be refused");
+    let err = mvm_hostd::plan_admission::enforce_sdk_sidecar_attachment(
+        &[smuggled],
+        plan_of(world),
+        GuestLibc::Unknown,
+    )
+    .expect_err("an unauthorized sidecar must be refused");
     assert!(
         err.to_string().contains("binds no SDK host service"),
         "unexpected refusal reason: {err}"
@@ -456,7 +516,6 @@ fn assembled_cmdline(world: &mut CliWorld) -> String {
         runtime_overlay_path: Some("/image/runtime.ext4".to_string()),
         runtime_overlay_verity_path: Some("/image/runtime.verity".to_string()),
         runtime_overlay_roothash: Some("b".repeat(64)),
-        runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
         volumes: attached_volumes(world),
         ..Default::default()
     };

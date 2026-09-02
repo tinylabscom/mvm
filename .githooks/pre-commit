@@ -11,7 +11,7 @@
 #   1. Skip entirely if the staged set is empty.
 #   2. Run cargo fmt --all if any Rust files are staged (auto-fixes,
 #      re-stages).
-#   3. Run cargo clippy --all-targets -- -D warnings if any Rust files
+#   3. Run stable cargo clippy --all-targets -- -D warnings if any Rust files
 #      are staged, scoped to the packages that own them when every one
 #      of those packages is a leaf (nothing in the workspace depends on
 #      it) and no manifest changed; otherwise across --workspace. A leaf
@@ -53,6 +53,36 @@ owning_package() {
     if [ -f "Cargo.toml" ]; then
         sed -n 's/^name[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' Cargo.toml | head -1
     fi
+}
+
+# Package names `cargo -p` can address from this workspace root: the root
+# package plus every path in the root manifest's `members` list.
+#
+# `owning_package` walks up to the nearest Cargo.toml, and several real
+# packages in this tree are not workspace members — `web/mvm-demo/` declares
+# `mvm-demo-web`, and each detached fuzz crate declares its own name. For any
+# of those `cargo clippy -p <name>` exits with "did not match any packages",
+# and this hook reported that as **"clippy failed"** — the one thing a lint
+# hook must never say when lint is fine. Any merge commit carrying changes
+# under `web/` hit it.
+#
+# Deliberately not "every Cargo.toml under the tree": that glob matches the
+# fuzz crates and `mvm-hostd-ebpf`, which is the same mistake in a new place.
+workspace_members() {
+    [ -f Cargo.toml ] || return 0
+    sed -n 's/^name[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' Cargo.toml | head -1
+    sed -n '/^members[[:space:]]*=[[:space:]]*\[/,/^\]/p' Cargo.toml \
+        | sed -n 's/^[[:space:]]*"\([^"]*\)".*/\1/p' \
+        | while IFS= read -r dir; do
+            [ -f "$dir/Cargo.toml" ] || continue
+            sed -n 's/^name[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' \
+                "$dir/Cargo.toml" | head -1
+        done
+}
+
+# True when $1 is one of the names workspace_members prints.
+is_workspace_member() {
+    printf '%s\n' "$WORKSPACE_MEMBERS" | grep -qxF "$1"
 }
 
 # True when no other manifest in the tree declares $1 as a dependency.
@@ -132,8 +162,26 @@ if [ "$has_rust" -eq 1 ]; then
         # commit that touches one leaf crate. Narrow to the touched packages
         # when doing so provably checks the same code (see is_leaf_package),
         # and keep the full run in every case where it might not.
-        scope_args="--workspace"
-        scope_label="--workspace"
+        #
+        # `--all-targets` is 5x the whole cost, not a trim on it. Measured after
+        # a one-line mvm-core edit against a warm stable target dir:
+        #
+        #   --workspace --all-targets            4m37s
+        #   --workspace (libs + bins only)         54s
+        #   --workspace, then -p mvm-core
+        #     --all-targets                        60s
+        #
+        # So the non-leaf case runs two narrower passes instead of one wide one:
+        # every crate's libs and bins (which is what catches a change to a
+        # depended-on crate breaking a dependent), plus the full target set of
+        # just the crates you staged (which is where your own test-code lint
+        # drift lives). What that gives up is test-target lints in crates the
+        # commit did not touch — those can only newly fire if this change
+        # altered an API their test code uses, which is narrow, and CI still
+        # runs the full `--workspace --all-targets` sweep regardless.
+        sweep_args="--workspace --all-targets"
+        focus_args=""
+        scope_label="--workspace --all-targets"
         scope_reason="a staged crate has dependents"
 
         # A manifest, lockfile or cargo/toolchain config change can alter
@@ -144,11 +192,18 @@ if [ "$has_rust" -eq 1 ]; then
         else
             pkgs=""
             unresolved=0
+            unresolved_reason="a staged Rust file belongs to no package"
+            WORKSPACE_MEMBERS="$(workspace_members)"
             while IFS= read -r f; do
                 [ -z "$f" ] && continue
                 pkg="$(owning_package "$f")"
                 if [ -z "$pkg" ]; then
                     unresolved=1
+                    break
+                fi
+                if ! is_workspace_member "$pkg"; then
+                    unresolved=1
+                    unresolved_reason="$pkg is not a workspace member, so -p cannot address it"
                     break
                 fi
                 case " $pkgs " in
@@ -158,7 +213,7 @@ if [ "$has_rust" -eq 1 ]; then
             done <<< "$staged_rust"
 
             if [ "$unresolved" -eq 1 ]; then
-                scope_reason="a staged Rust file belongs to no package"
+                scope_reason="$unresolved_reason"
             else
                 all_leaf=1
                 for pkg in $pkgs; do
@@ -168,25 +223,41 @@ if [ "$has_rust" -eq 1 ]; then
                         break
                     fi
                 done
+                pkg_args=""
+                for pkg in $pkgs; do
+                    pkg_args="$pkg_args -p $pkg"
+                done
                 if [ "$all_leaf" -eq 1 ]; then
-                    scope_args=""
-                    for pkg in $pkgs; do
-                        scope_args="$scope_args -p $pkg"
-                    done
-                    scope_label="${scope_args# }"
-                    echo "pre-commit: clippy scoped to$scope_args (nothing depends on these)"
+                    # Nothing depends on these, so the touched packages alone
+                    # cover everything the wide run would have.
+                    sweep_args=""
+                    focus_args="${pkg_args# } --all-targets"
+                    scope_label="${pkg_args# } --all-targets"
+                    echo "pre-commit: clippy scoped to$pkg_args (nothing depends on these)"
+                else
+                    sweep_args="--workspace"
+                    focus_args="${pkg_args# } --all-targets"
+                    scope_label="--workspace, then${pkg_args} --all-targets"
                 fi
             fi
         fi
 
-        if [ "$scope_label" = "--workspace" ]; then
+        if [ "$scope_label" = "--workspace --all-targets" ]; then
             echo "pre-commit: clippy covering the whole workspace — $scope_reason"
         fi
 
-        echo "pre-commit: cargo clippy $scope_label --all-targets -- -D warnings"
-        # Unquoted on purpose: $scope_args is a list of flags we built.
-        # shellcheck disable=SC2086
-        if ! cargo clippy $scope_args --all-targets -- -D warnings; then
+        echo "pre-commit: stable cargo clippy $scope_label -- -D warnings"
+        clippy_failed=0
+        for pass in "$sweep_args" "$focus_args"; do
+            [ -z "$pass" ] && continue
+            # Unquoted on purpose: $pass is a list of flags we built.
+            # shellcheck disable=SC2086
+            if ! ./scripts/cargo-stable.sh clippy $pass -- -D warnings; then
+                clippy_failed=1
+                break
+            fi
+        done
+        if [ "$clippy_failed" -eq 1 ]; then
             echo
             echo "  clippy failed. CI gates on the same '-D warnings' rule, so"
             echo "  this commit will fail on push. Re-run with MVM_SKIP_CLIPPY=1"

@@ -12,7 +12,9 @@
 //! including the verity-sealed runtime overlay that is the single source of the
 //! guest agent — is reduced to a factory parent's and handed to the same
 //! mappers a workload boot uses: [`workload_device_spec`] for the device model
-//! and [`cmdline::runner_cmdline`] for the kernel cmdline.
+//! and [`cmdline::runner_cmdline_without_hostname`] for the kernel cmdline. A
+//! parent cannot carry a workload hostname because the pool may serve more
+//! than one named child; claim-time identity delivery installs the child name.
 //!
 //! The reduction is written as an exhaustive destructure plus an exhaustive
 //! struct literal, both without a `..` rest. Adding a field to `VmStartConfig`
@@ -25,7 +27,7 @@
 use std::path::Path;
 
 use mvm_core::policy::network_policy::NetworkPolicy;
-use mvm_core::vm_backend::{RuntimeSourcePolicy, StandbyError, StandbySpec, VmStartConfig};
+use mvm_core::vm_backend::{RuntimeSourceRootStrategy, StandbyError, StandbySpec, VmStartConfig};
 
 use crate::driver::VmmSpec;
 use mvm_vmm::host::cmdline;
@@ -49,9 +51,7 @@ fn ensure_parent_can_reach_an_agent(
     id: &str,
     config: &VmStartConfig,
 ) -> std::result::Result<(), StandbyError> {
-    if config.runtime_source_policy == RuntimeSourcePolicy::RequiredOverlay
-        && cmdline::runtime_overlay(config).is_none()
-    {
+    if cmdline::runtime_overlay(config).is_none() {
         return Err(StandbyError::SpawnFailed(format!(
             "standby '{id}' would boot without the runtime overlay its launch requires: the \
              overlay is the only source of the guest agent, so the parent would panic before it \
@@ -138,6 +138,9 @@ pub fn factory_parent_config(
         memory_mib: _,
         ports: _,
         volumes: _,
+        extensions: _,
+        extension_plan_id: _,
+        service_proxies: _,
         config_files: _,
         secret_files: _,
         runner_dir: _,
@@ -149,7 +152,6 @@ pub fn factory_parent_config(
         dev_console: _,
         // ── The guest's boot shape: carried verbatim, because a child inherits
         // all of it from the parent's restored memory.
-        virtiofs_root,
         initrd_path,
         verity_path,
         roothash,
@@ -157,9 +159,21 @@ pub fn factory_parent_config(
         runtime_overlay_verity_path,
         runtime_overlay_roothash,
         runtime_overlay_version,
-        runtime_source_policy,
         mem_initial_mib,
     } = launch;
+
+    // Every launch resolves a block root now. The comparison is kept rather
+    // than dropped because a standby spec written before that was true is
+    // still on disk, and it records the strategy it was warmed under: a parent
+    // recorded as a virtiofs root must be refused, not claimed by a child that
+    // will boot a different shape out of its restored memory.
+    let launch_root_strategy = RuntimeSourceRootStrategy::BlockExt4;
+    if spec.root_strategy != launch_root_strategy {
+        return Err(StandbyError::SpawnFailed(format!(
+            "standby '{}' records {:?} but its launch resolves {:?}",
+            spec.id, spec.root_strategy, launch_root_strategy
+        )));
+    }
 
     let parent = VmStartConfig {
         name: spec.id.clone(),
@@ -169,7 +183,6 @@ pub fn factory_parent_config(
         cpus: u32::from(spec.vcpus),
         cpu_grant: None,
         memory_mib: spec.mem_mib,
-        virtiofs_root: virtiofs_root.clone(),
         initrd_path: initrd_path.clone(),
         verity_path: verity_path.clone(),
         roothash: roothash.clone(),
@@ -177,13 +190,15 @@ pub fn factory_parent_config(
         runtime_overlay_verity_path: runtime_overlay_verity_path.clone(),
         runtime_overlay_roothash: runtime_overlay_roothash.clone(),
         runtime_overlay_version: runtime_overlay_version.clone(),
-        runtime_source_policy: *runtime_source_policy,
         mem_initial_mib: *mem_initial_mib,
         revision_hash: String::new(),
         flake_ref: String::new(),
         profile: None,
         ports: Vec::new(),
         volumes: Vec::new(),
+        extensions: Vec::new(),
+        extension_plan_id: None,
+        service_proxies: Vec::new(),
         config_files: Vec::new(),
         secret_files: Vec::new(),
         runner_dir: None,
@@ -200,8 +215,9 @@ pub fn factory_parent_config(
 }
 
 /// The factory parent's `VmmSpec`, assembled by the same mappers a workload
-/// boot uses, so a drive or cmdline token added to the workload's boot reaches
-/// the parent's too.
+/// boot uses, so a drive or boot-shape cmdline token added to the workload's
+/// boot reaches the parent's too. The hostname is intentionally excluded: a
+/// shared parent has no child's identity until the claim handshake.
 ///
 /// Saved-state parents deliberately carry no host channels. The live-HVF
 /// variant below adds authority-free stable agent, egress, broker, and exit
@@ -231,7 +247,7 @@ pub fn factory_parent_config(
 pub fn factory_parent_spec(
     config: &VmStartConfig,
     state_dir: &Path,
-    base_bootargs: impl Fn(bool, bool) -> String,
+    base_bootargs: impl Fn(bool) -> String,
 ) -> VmmSpec {
     factory_parent_spec_inner(config, state_dir, base_bootargs, false)
 }
@@ -242,7 +258,7 @@ pub fn factory_parent_spec(
 pub fn factory_parent_spec_live(
     config: &VmStartConfig,
     state_dir: &Path,
-    base_bootargs: impl Fn(bool, bool) -> String,
+    base_bootargs: impl Fn(bool) -> String,
 ) -> VmmSpec {
     factory_parent_spec_inner(config, state_dir, base_bootargs, true)
 }
@@ -250,10 +266,10 @@ pub fn factory_parent_spec_live(
 fn factory_parent_spec_inner(
     config: &VmStartConfig,
     state_dir: &Path,
-    base_bootargs: impl Fn(bool, bool) -> String,
+    base_bootargs: impl Fn(bool) -> String,
     live_handoff: bool,
 ) -> VmmSpec {
-    let cmdline = cmdline::runner_cmdline(config, state_dir, base_bootargs);
+    let cmdline = cmdline::runner_cmdline_without_hostname(config, state_dir, base_bootargs);
     if !live_handoff {
         return workload_device_spec(config, &cmdline, &state_dir.join("console.log"));
     }
@@ -266,10 +282,7 @@ fn factory_parent_spec_inner(
         egress_gateway: Some(&egress),
         exit: &exit,
         broker: Some(&broker),
-        network_control: None,
-        network_data: None,
         console_data: Vec::new(),
-        ingress_tcp: Vec::new(),
     };
     VmmSpec {
         vsock: workload_vsock_ports(&sockets),
@@ -285,7 +298,7 @@ mod tests {
     use std::sync::MutexGuard;
 
     use mvm_core::util::test_env::TestEnv;
-    use mvm_core::vm_backend::{RuntimeSourcePolicy, VmVolume, VmVolumeKind};
+    use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
     use mvm_net::channel::GuestService;
 
     use mvm_vmm::host::spec_map::{WorkloadSockets, WorkloadSpecInputs, workload_spec};
@@ -313,7 +326,7 @@ mod tests {
     /// the console, and the disk shape adds rootwait/init (never a `root=`
     /// declaration — Firecracker appends the authoritative one from the root
     /// drive's flags).
-    fn fc_base(_virtiofs_root: bool, has_disk: bool) -> String {
+    fn fc_base(has_disk: bool) -> String {
         let console = "console=ttyS0 reboot=k panic=1 net.ifnames=0";
         if has_disk {
             format!("{console} rootwait init=/init")
@@ -323,26 +336,24 @@ mod tests {
     }
 
     /// A sealed launch of the shape the live Firecracker workload path
-    /// produces: verity-sealed rootfs, the sibling initramfs that runs the
+    /// produces: verity-sealed rootfs, the universal initramfs that runs the
     /// verity setup, and the required runtime overlay carrying the guest agent.
-    fn sealed_launch(dir: &Path) -> VmStartConfig {
+    fn sealed_launch(dir: &Path, home: &Path) -> VmStartConfig {
         let rootfs = dir.join("rootfs.ext4");
         let verity = dir.join("rootfs.verity");
-        let initrd = dir.join("rootfs.initrd");
         std::fs::write(&rootfs, b"rootfs").unwrap();
         std::fs::write(&verity, b"verity").unwrap();
-        std::fs::write(&initrd, b"initrd").unwrap();
         VmStartConfig {
             name: "workload-a".into(),
             rootfs_path: rootfs.display().to_string(),
             kernel_path: Some(dir.join("vmlinux").display().to_string()),
+            initrd_path: Some(cmdline::seed_universal_initramfs(home)),
             verity_path: Some(verity.display().to_string()),
             roothash: Some("a".repeat(64)),
             runtime_overlay_path: Some(dir.join("overlay.ext4").display().to_string()),
             runtime_overlay_verity_path: Some(dir.join("overlay.verity").display().to_string()),
             runtime_overlay_roothash: Some("b".repeat(64)),
             runtime_overlay_version: Some("0.18.0".into()),
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
             cpus: 2,
             memory_mib: 512,
             ..Default::default()
@@ -368,6 +379,7 @@ mod tests {
             vm_state_dir: dir.join("standby-abc").display().to_string(),
             image_path: Some(launch.rootfs_path.clone()),
             image_sha256: Some("e".repeat(64)),
+            root_strategy: mvm_core::vm_backend::RuntimeSourceRootStrategy::BlockExt4,
             vsock_egress: mvm_vmm::host::egress_shared::effective_vsock_egress(launch),
         }
     }
@@ -383,14 +395,21 @@ mod tests {
                 egress_gateway: Some(Path::new("/run/egress.sock")),
                 exit: Path::new("/run/workload.exit"),
                 broker: None,
-                network_control: None,
-                network_data: None,
                 console_data: Vec::new(),
-                ingress_tcp: Vec::new(),
             },
             cmdline: cmdline::runner_cmdline(launch, state_dir, fc_base),
             console_log: state_dir.join("console.log"),
         })
+    }
+
+    fn without_per_boot_tokens(cmdline: &str) -> String {
+        cmdline
+            .split_whitespace()
+            .filter(|token| {
+                !token.starts_with("mvm.hostname=") && !token.starts_with("mvm.hostepoch=")
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     /// The regression guard for the shipped defect: the parent booted a bare
@@ -404,9 +423,9 @@ mod tests {
     /// two shapes stay in step without anyone remembering to keep them there.
     #[test]
     fn parent_boots_the_same_device_model_and_cmdline_the_workload_does() {
-        let _home = isolated_home();
+        let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let launch = sealed_launch(tmp.path());
+        let launch = sealed_launch(tmp.path(), home.path());
         let spec = standby_spec_for(&launch, tmp.path());
 
         let workload = workload_boot(&launch, &tmp.path().join("workload-a"));
@@ -418,10 +437,12 @@ mod tests {
             "the parent must attach the workload's whole disk stack, overlay included"
         );
         assert_eq!(
-            parent.cmdline, workload.cmdline,
+            without_per_boot_tokens(&parent.cmdline),
+            without_per_boot_tokens(&workload.cmdline),
             "the parent must boot the workload's kernel cmdline, verity and runtime-source \
-             tokens included"
+             tokens included, leaving claim identity for post-restore"
         );
+        assert!(!parent.cmdline.contains("mvm.hostname="));
         assert_eq!(parent.kernel, workload.kernel);
         assert_eq!(parent.initramfs, workload.initramfs);
         assert_eq!(parent.vcpus, workload.vcpus);
@@ -429,8 +450,26 @@ mod tests {
         assert_eq!(parent.mem_initial_mib, workload.mem_initial_mib);
     }
 
-    /// An egress-allowing launch: the parent must boot the *identical* cmdline
-    /// the workload does, egress token included.
+    #[test]
+    fn a_parent_serves_no_shares_because_the_workload_asks_for_none() {
+        let (_env, home, _lock) = isolated_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let launch = sealed_launch(tmp.path(), home.path());
+        let spec = standby_spec_for(&launch, tmp.path());
+
+        assert_eq!(spec.root_strategy, RuntimeSourceRootStrategy::BlockExt4);
+        let workload = workload_boot(&launch, &tmp.path().join("workload-a"));
+        let parent_cfg = factory_parent_config(&launch, &spec).unwrap();
+        let parent = factory_parent_spec(&parent_cfg, Path::new(&spec.vm_state_dir), fc_base);
+
+        // The parent must boot the shape its children will be forked from, and
+        // that shape has no host directory in it at all.
+        assert_eq!(parent.shares, workload.shares);
+        assert!(parent.shares.is_empty());
+    }
+
+    /// An egress-allowing launch: the parent must boot the same shape cmdline
+    /// the workload does, egress token included and claim identity excluded.
     ///
     /// `mvm.vsock_egress=1` starts the guest's in-guest egress client, and a
     /// restored child inherits it from the parent's saved memory rather than
@@ -440,9 +479,9 @@ mod tests {
     /// on: whatever the workload path adds, the parent adds too.
     #[test]
     fn a_parent_warmed_for_an_egress_allowing_launch_boots_the_launchs_own_cmdline() {
-        let _home = isolated_home();
+        let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let mut launch = sealed_launch(tmp.path());
+        let mut launch = sealed_launch(tmp.path(), home.path());
         launch.network_policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
             mvm_core::network_policy::HostPort::new("api.example.com", 443),
         ]);
@@ -462,7 +501,8 @@ mod tests {
             workload.cmdline
         );
         assert_eq!(
-            parent.cmdline, workload.cmdline,
+            without_per_boot_tokens(&parent.cmdline),
+            without_per_boot_tokens(&workload.cmdline),
             "a parent warmed for an egress-allowing launch must boot that launch's cmdline"
         );
         assert_eq!(
@@ -477,8 +517,9 @@ mod tests {
     /// child's own endpoint instead, and never rides the parent.
     #[test]
     fn the_parent_carries_the_egress_enablement_but_none_of_the_launchs_destinations() {
+        let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let mut launch = sealed_launch(tmp.path());
+        let mut launch = sealed_launch(tmp.path(), home.path());
         launch.network_policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
             mvm_core::network_policy::HostPort::new("api.example.com", 443),
             mvm_core::network_policy::HostPort::new("secret.internal", 8443),
@@ -509,9 +550,9 @@ mod tests {
     /// not perturb anything else.
     #[test]
     fn a_parent_warmed_for_a_deny_all_launch_boots_no_egress_client() {
-        let _home = isolated_home();
+        let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let launch = sealed_launch(tmp.path());
+        let launch = sealed_launch(tmp.path(), home.path());
         let spec = standby_spec_for(&launch, tmp.path());
         assert!(
             !spec.vsock_egress,
@@ -528,20 +569,24 @@ mod tests {
             "a deny-all workload boots no egress client: {}",
             workload.cmdline
         );
-        assert_eq!(parent.cmdline, workload.cmdline);
+        assert_eq!(
+            without_per_boot_tokens(&parent.cmdline),
+            without_per_boot_tokens(&workload.cmdline)
+        );
+        assert!(!parent.cmdline.contains("mvm.hostname="));
     }
 
     /// The case that must never come out permissive. A secret-bearing workload's
     /// outbound traffic belongs to the host-side substitution endpoint, so a cold
     /// boot suppresses the guest's own egress client even though the policy allows
     /// egress. The pool keys on that *effective* value, so the parent warmed for
-    /// such a launch suppresses it too — and the two cmdlines come out equal, not
-    /// merely both token-less.
+    /// such a launch suppresses it too; the remaining difference is only the
+    /// child hostname delivered after restore.
     #[test]
     fn a_secret_bearing_launch_warms_a_parent_with_no_egress_client_either() {
-        let _home = isolated_home();
+        let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let mut launch = sealed_launch(tmp.path());
+        let mut launch = sealed_launch(tmp.path(), home.path());
         launch.network_policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
             mvm_core::network_policy::HostPort::new("api.example.com", 443),
         ]);
@@ -581,7 +626,11 @@ mod tests {
             "so must the parent warmed for it: {}",
             parent.cmdline
         );
-        assert_eq!(parent.cmdline, workload.cmdline);
+        assert_eq!(
+            without_per_boot_tokens(&parent.cmdline),
+            without_per_boot_tokens(&workload.cmdline)
+        );
+        assert!(!parent.cmdline.contains("mvm.hostname="));
         assert!(!parent_cfg.network_policy.allows_egress());
         assert_eq!(parent_cfg.plan_json, None, "a parent still holds no plan");
     }
@@ -590,15 +639,14 @@ mod tests {
     /// recorded, so a failure names what the guest will miss rather than only
     /// that two values differ.
     ///
-    /// `sealed_launch` is the legacy sibling-initramfs shape, whose PID 1 reads
-    /// the roothashes and device paths off the kernel cmdline — it is never sent
-    /// `ActivateEnvironment`. A parent booted without those tokens aborts in PID
-    /// 1 and panics the kernel, so there is nothing left to capture.
+    /// The universal initramfs receives the roothashes and device paths over the
+    /// authenticated activation channel, so the parent keeps those secrets off
+    /// the kernel cmdline while still attaching the complete sealed disk stack.
     #[test]
     fn parent_carries_the_overlay_drives_and_runtime_tokens_the_guest_agent_needs() {
-        let _home = isolated_home();
+        let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let launch = sealed_launch(tmp.path());
+        let launch = sealed_launch(tmp.path(), home.path());
         let spec = standby_spec_for(&launch, tmp.path());
         let parent_cfg = factory_parent_config(&launch, &spec).unwrap();
         let parent = factory_parent_spec(&parent_cfg, Path::new(&spec.vm_state_dir), fc_base);
@@ -611,14 +659,7 @@ mod tests {
         );
         assert!(parent.blocks.iter().all(|b| b.read_only));
 
-        assert!(
-            parent
-                .cmdline
-                .contains("mvm.runtime_source_policy=required_overlay"),
-            "parent cmdline missing runtime-source policy: {}",
-            parent.cmdline
-        );
-        for token in [
+        for legacy_token in [
             "mvm.roothash=",
             "mvm.data=/dev/vda",
             "mvm.hash=/dev/vdb",
@@ -627,8 +668,8 @@ mod tests {
             "mvm.runtime_hash=/dev/vdd",
         ] {
             assert!(
-                parent.cmdline.contains(token),
-                "parent cmdline missing {token} its legacy PID 1 needs: {}",
+                !parent.cmdline.contains(legacy_token),
+                "parent cmdline leaked legacy token {legacy_token}: {}",
                 parent.cmdline
             );
         }
@@ -642,8 +683,7 @@ mod tests {
     fn parent_on_the_universal_initramfs_carries_no_roothash_tokens() {
         let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let mut launch = sealed_launch(tmp.path());
-        launch.initrd_path = Some(cmdline::seed_universal_initramfs(home.path()));
+        let launch = sealed_launch(tmp.path(), home.path());
         let spec = standby_spec_for(&launch, tmp.path());
         let parent_cfg = factory_parent_config(&launch, &spec).unwrap();
         let parent = factory_parent_spec(&parent_cfg, Path::new(&spec.vm_state_dir), fc_base);
@@ -666,20 +706,13 @@ mod tests {
                 parent.cmdline
             );
         }
-        assert!(
-            parent
-                .cmdline
-                .contains("mvm.runtime_source_policy=required_overlay"),
-            "parent cmdline missing runtime-source policy: {}",
-            parent.cmdline
-        );
     }
 
     #[test]
     fn parent_drops_every_workload_authority_field_the_launch_carried() {
-        let _home = isolated_home();
+        let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let mut launch = sealed_launch(tmp.path());
+        let mut launch = sealed_launch(tmp.path(), home.path());
         launch.plan_json = Some("{\"signed\":\"plan\"}".into());
         launch.bundle_json = Some("{\"pin\":\"bundle\"}".into());
         launch.tenant_id = Some("tenant-a".into());
@@ -687,6 +720,8 @@ mod tests {
         launch.dev_console = true;
         launch.network_policy = NetworkPolicy::unrestricted();
         launch.volumes = vec![VmVolume {
+            materialized_image: None,
+            volume_label: None,
             host: tmp.path().join("data.img").display().to_string(),
             guest: "/data".into(),
             size: String::new(),
@@ -732,9 +767,9 @@ mod tests {
 
     #[test]
     fn live_parent_uses_stable_handoff_channels_without_workload_endpoints() {
-        let _home = isolated_home();
+        let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let launch = sealed_launch(tmp.path());
+        let launch = sealed_launch(tmp.path(), home.path());
         let spec = standby_spec_for(&launch, tmp.path());
         let parent_cfg = factory_parent_config(&launch, &spec).unwrap();
         let parent = factory_parent_spec_live(&parent_cfg, Path::new(&spec.vm_state_dir), fc_base);
@@ -768,8 +803,9 @@ mod tests {
 
     #[test]
     fn parent_identity_and_resources_come_from_the_pool_record_not_the_launch() {
+        let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let launch = sealed_launch(tmp.path());
+        let launch = sealed_launch(tmp.path(), home.path());
         let mut spec = standby_spec_for(&launch, tmp.path());
         spec.template_id = Some("tpl-7".into());
 
@@ -784,8 +820,9 @@ mod tests {
 
     #[test]
     fn factory_parent_config_refuses_a_record_without_a_rootfs_image() {
+        let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let launch = sealed_launch(tmp.path());
+        let launch = sealed_launch(tmp.path(), home.path());
         let mut spec = standby_spec_for(&launch, tmp.path());
         spec.image_path = None;
 
@@ -803,8 +840,9 @@ mod tests {
     /// agent-readiness timeout.
     #[test]
     fn factory_parent_config_refuses_a_required_overlay_launch_carrying_no_overlay() {
+        let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let mut launch = sealed_launch(tmp.path());
+        let mut launch = sealed_launch(tmp.path(), home.path());
         launch.runtime_overlay_path = None;
         launch.runtime_overlay_verity_path = None;
         launch.runtime_overlay_roothash = None;
@@ -823,9 +861,10 @@ mod tests {
     /// mounts them, which is the second shape of the same failure.
     #[test]
     fn factory_parent_config_refuses_a_sealed_rootfs_with_no_resolvable_initramfs() {
+        let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let launch = sealed_launch(tmp.path());
-        std::fs::remove_file(tmp.path().join("rootfs.initrd")).unwrap();
+        let mut launch = sealed_launch(tmp.path(), home.path());
+        launch.initrd_path = None;
         let spec = standby_spec_for(&launch, tmp.path());
 
         let err = factory_parent_config(&launch, &spec)
@@ -836,36 +875,11 @@ mod tests {
         );
     }
 
-    /// The guard is keyed on the launch's own policy, so an unsealed
-    /// rootfs-only launch — a dev image with the agent baked in — still warms.
-    #[test]
-    fn factory_parent_config_admits_a_rootfs_only_launch_with_no_overlay() {
-        let tmp = tempfile::tempdir().unwrap();
-        let rootfs = tmp.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"rootfs").unwrap();
-        let launch = VmStartConfig {
-            name: "workload-a".into(),
-            rootfs_path: rootfs.display().to_string(),
-            kernel_path: Some(tmp.path().join("vmlinux").display().to_string()),
-            cpus: 2,
-            memory_mib: 512,
-            ..Default::default()
-        };
-        let spec = standby_spec_for(&launch, tmp.path());
-
-        let parent = factory_parent_config(&launch, &spec)
-            .expect("a rootfs-only launch needs no overlay to reach its agent");
-        assert_eq!(
-            parent.runtime_source_policy,
-            RuntimeSourcePolicy::RootfsOnly
-        );
-    }
-
     #[test]
     fn parent_console_is_captured_into_its_own_state_dir() {
-        let _home = isolated_home();
+        let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let launch = sealed_launch(tmp.path());
+        let launch = sealed_launch(tmp.path(), home.path());
         let spec = standby_spec_for(&launch, tmp.path());
         let parent_cfg = factory_parent_config(&launch, &spec).unwrap();
         let state_dir = PathBuf::from(&spec.vm_state_dir);

@@ -283,7 +283,7 @@ fn runtime_pack_image_source(dir: &mvm_core::pack_cache::VerifiedPackDir) -> Ima
             .to_string(),
         initrd_path: None,
         label: format!("runtime-pack:{}", dir.verified.pack_hash.as_str()),
-        virtiofs_oci_root: None,
+        unpacked_oci_root: None,
     }
 }
 
@@ -317,7 +317,7 @@ mod tests {
             kernel_path,
             rootfs_path,
             initrd_path,
-            virtiofs_oci_root,
+            unpacked_oci_root,
             ..
         } = &image
         else {
@@ -327,7 +327,7 @@ mod tests {
         assert_eq!(rootfs_path, "/cache/packs/deadbeef/rootfs.ext4");
         assert!(rootfs_path.ends_with("rootfs.ext4"));
         assert!(initrd_path.is_none());
-        assert!(virtiofs_oci_root.is_none());
+        assert!(unpacked_oci_root.is_none());
     }
 
     #[test]

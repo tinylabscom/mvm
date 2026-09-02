@@ -1,19 +1,13 @@
 # Plan 329 — Run-first CLI ergonomics and upstream-sandbox adoption
 
-**Status: COMPLETE** (2026-08-18). Every phase is landed, refused with its
-reason, or moved to the plan that owns the work — nothing is ticked to make the
-plan look finished. Two items were **refused** (the MCP server revival, and an
-install.sh bullet whose premise no longer exists); four were **moved** to the
-plans that own them (see "Where the remaining work went"); three phases turned
-out to be partly shipped already, and two were specified against verbs that had
-been removed. Those corrections are recorded in place rather than quietly
-absorbed. Two were **refused** rather than built — the MCP server
-revival in Phase 6, and Phase 8's install.sh bullet whose premise (the Docker
-backend) no longer exists — and one, the Homebrew tap, is left open as a
-maintainer decision with the evaluation written down. Three phases were found
-to be partly shipped already, and two were specified against verbs that had
-been removed; those corrections are recorded below rather than quietly
-absorbed.
+**Status: COMPLETE** (2026-08-18; amended 2026-08-19). Every phase is landed,
+refused with its reason, superseded, or moved to the plan that owns the work.
+The install.sh bullet remains deliberately refused because its Docker-backend
+premise no longer exists. The earlier MCP refusal is superseded by ADR-048,
+which permits only a capability-derived `MvmClient` adapter with a named
+consumer. Four items were moved to their owning plans, the Homebrew tap remains
+a documented maintainer decision, and the already-shipped or removed-verb
+corrections stay recorded in place.
 
 **Bound by:** [ADR-027](../adrs/027-cli-surface-consolidation.md) (amended
 2026-08-17),
@@ -147,12 +141,11 @@ against something other than what is there.
    when given no source flag. Wire the existing discovery in rather than
    adding a second config idiom.
 
-4. **Phase 6 is blocked by a standing decision this plan did not acknowledge.**
-   [ADR-002](../adrs/002-local-mcp-server.md) is **Withdrawn** — the server,
-   its `mcp` Cargo feature, the `mvmctl ops mcp stdio` verb and the CI lane
-   were deleted — and `xtask check-workflow-paths` enforces
-   `removed_mcp_server_stays_out_of_ci`. Reviving MCP means superseding an ADR
-   and deciding that gate's fate before any code is written.
+4. **Phase 6 required a decision this plan did not originally acknowledge.**
+   [ADR-002](../adrs/002-local-mcp-server.md) withdrew the bespoke server.
+   ADR-048 now supersedes it with a strict `MvmClient` adapter and a named
+   consumer. The workflow gate is retained in narrower form: no dedicated MCP
+   smoke lane is added to CI.
 
 ## Phase A — CLI truth: ADR amendment, verb visibility, docs gate
 
@@ -361,32 +354,25 @@ admission.
 
 ### Phase 6 — Agent integration (MCP / plugins)
 
-- [x] **Refused, deliberately.** [ADR-002](../adrs/002-local-mcp-server.md)
-      shipped a local MCP server and withdrew it as "a surface nobody drove …
-      duplicated authority that the CLI's JSON output and the SDKs already
-      expose". That reasoning still holds, so rebuilding it identically would
-      fail identically. ADR-002 stays withdrawn and
-      `xtask check-workflow-paths`'s `removed_mcp_server_stays_out_of_ci` stays
-      in force. The distribution problem it was reached for — getting agents to
-      use mvm — is solved below without a protocol layer.
+- [x] **Superseded by ADR-048.** ADR-002's bespoke lifecycle/session server
+      remains withdrawn. The revived surface is a strict `dyn MvmClient`
+      adapter whose catalog is derived from the selected client's declared
+      operations. `scripts/test-mcp-roundtrip.sh` is its named no-boot consumer;
+      ordinary workspace tests replace a dedicated MCP CI lane.
 - [x] Add `mvmctl plugin install <agent>` emitting the files an agent needs.
       **Claude Code only.** Emitting a config for an agent whose schema was
       guessed at produces a file that looks installed and does nothing, so only
       a format that can be verified is offered; `plugin list` names what that
       is.
-- [x] The tool set is the CLI. `mvmctl run` already covers `run_command`, and
-      `machine create/exec/ls/stop` the rest — each admitting through a signed
-      plan and auditing itself. A parallel tool surface would be a second name
-      for each.
-- [x] Covered by unit tests instead, and more sharply than a scenario would:
-      every flag and every command the emitted skill names is resolved against
-      the real clap tree, so the skill cannot tell an agent to type something
-      that does not exist. Both mutation-checked red.
+- [x] The MCP tool set is projected from the same `MvmClient` facade used by
+      local and remote consumers; it owns no parallel lifecycle or admission
+      implementation.
+- [x] Protocol behavior is covered against `MockBackend`, and the CLI grammar
+      is covered by unit, integration, and BDD help scenarios without a boot.
 
-**Acceptance:** `mvmctl plugin install claude` writes a skill that tells Claude
-Code to sandbox untrusted commands through `mvmctl run` — which is audited like
-any other run, because it *is* any other run. No `/sandbox` command and no
-server: the skill shells to the CLI.
+**Acceptance:** `mvmctl plugin install claude` still writes a skill that shells
+to the audited CLI. Separately, the named MCP consumer discovers only operations
+the selected `MvmClient` reports and adds no parallel authority path.
 
 ### Phase 7 — Observability and performance
 
@@ -399,9 +385,12 @@ server: the skill shells to the CLI.
       prints, and every run writes, the same versioned report the CI gate
       produces, so a user's report and a CI report are comparable artifacts.
 - [x] Warm-start budgets were already defined and published (200/250/300 ms
-      prepared-cold p50/p95/p99; 30/50 ms warm-claim p50/p99). `bench` now
-      prints each measured percentile beside the budget judging it. Density
-      SLOs remain undefined — Plan 265 WS3.
+      prepared-cold p50/p95/p99 diagnostics; 30/50 ms warm-claim p50/p99).
+      `bench` prints each percentile beside its budget and separately enforces
+      the strict per-boot `<200 ms` prepared-cold maximum. Default output is a
+      plain-text timing table with PASS/FAIL and phase remarks; `--json` schema
+      v6 carries the same hard verdict. Density SLOs remain undefined — Plan
+      265 WS3.
 - [x] Published and gated already (the launch-budget page and the
       boot-latency lane). This adds the user-facing way to check a host
       against them.

@@ -27,8 +27,8 @@ use mvm_core::domain::instance::InstanceReadiness;
 use mvm_core::plan::ExecutionPlan;
 use mvm_core::protocol::vm_backend::{VmId, VmStatus};
 use mvm_core::rootfs_source::RootfsSource;
-use mvm_hostd::audit::emitter::AuditEmitter;
-use mvm_hostd::plan_admission::{InMemoryNonceLedger, StartedMachine, SystemClock};
+use mvm_hostd::audit::emitter::{AuditEmitter, ExitRecord};
+use mvm_hostd::plan_admission::{AdmittedPlan, InMemoryNonceLedger, StartedMachine, SystemClock};
 use mvm_hostd::run::{LocalRunContext, LocalRunRequest, admit_and_boot_local};
 use mvm_runtime::AnyBackend;
 use mvm_runtime::machine::persist as mp;
@@ -52,8 +52,20 @@ pub struct LaunchOutcome {
     pub machine: MachineState,
     /// Content-addressed id of the admitted plan.
     pub plan_id: String,
+    /// The admitted authority object used for this boot.
+    ///
+    /// Fleet stream orchestration needs the exact admitted plan to open the
+    /// consumer's default-deny input route. Exposing that object keeps the
+    /// caller from admitting a second copy with a second nonce merely to gain
+    /// an input capability.
+    pub admitted: AdmittedPlan,
     pub(crate) mode: LifecycleMode,
     pub(crate) plan: ExecutionPlan,
+    /// When this process admitted the boot, for measuring the launch-to-exit
+    /// wall span. `None` when this outcome was not built from a fresh launch
+    /// in this process (there is no honest span to report), which keeps the
+    /// wall metric `unavailable` rather than fabricated.
+    pub(crate) launched_at: Option<std::time::Instant>,
 }
 
 /// Exit report for a waited-on transient machine.
@@ -186,6 +198,11 @@ pub(crate) struct BootParams {
     /// The request's permission set, carried into the signed plan and — for
     /// its egress dimension — into the policy the gate enforces.
     pub(crate) grants: Option<mvm_contract::grants::Grants>,
+    /// A fleet-issued signed plan to admit instead of synthesizing one.
+    /// `Some` only when the launch request carried one; admission then
+    /// verifies it against the operator-pinned `trusted_plan_signers` and the
+    /// plan becomes the authority for sizing, grants, and teardown intent.
+    pub(crate) signed_plan: Option<mvm_core::plan::SignedExecutionPlan>,
     /// Path to an operator-authored campaign declaration, when one was asked
     /// for. Read and validated here, so a malformed declaration refuses the
     /// launch instead of producing a boot with no campaign on it.
@@ -240,7 +257,7 @@ impl LocalBackend {
         // binding it before its ready handshake; a non-running machine owns
         // no live state there, so recover by starting from an empty dir.
         if !self.machine_running(&params.name) {
-            remove_dir_if_present(&vm_state_dir(&params.name))?;
+            remove_vm_runtime_dirs(&params.name)?;
         }
         let rootfs = crate::local::resolve_local_rootfs(&params.image, &params.name).await?;
         let (verity_path, roothash) = crate::local::host_verity_sidecars(&rootfs);
@@ -258,6 +275,7 @@ impl LocalBackend {
             volumes: params.volumes,
             destroy_on_exit: params.transient,
             grants: params.grants.clone(),
+            signed_plan: params.signed_plan.clone(),
         };
 
         // A fresh per-launch ledger: local launches are one-shot from this
@@ -466,6 +484,8 @@ fn persisted_spec_from_request(request: &LaunchRequest, name: &str) -> mp::Machi
         runtime_pack: false,
         net: false,
         allow_host: vec![],
+        peer: Vec::new(),
+        ai: None,
         ports: vec![],
         cpus: request.cpus,
         memory: format!("{}M", request.memory_mib),
@@ -474,6 +494,7 @@ fn persisted_spec_from_request(request: &LaunchRequest, name: &str) -> mp::Machi
         volumes: vec![],
         init: vec![],
         agent_verb: vec![],
+        caller_commitment: None,
         created_at: Some(mvm_core::util::time::utc_now()),
         last_started_at: None,
         health_check: None,
@@ -681,12 +702,15 @@ impl LocalBackend {
         request: &LaunchRequest,
         transient: bool,
     ) -> Result<LaunchOutcome> {
+        let launched_at = std::time::Instant::now();
         let profile = AdmittedProfile::from_profile_name(&request.profile);
         let mut preparation = self.acquire_leases(name, profile)?;
         let volumes: Vec<mvm_core::vm_backend::VmVolume> = preparation
             .volumes
             .iter()
             .map(|volume| mvm_core::vm_backend::VmVolume {
+                materialized_image: None,
+                volume_label: None,
                 host: volume.host.clone(),
                 guest: volume.guest.clone(),
                 size: volume.size.clone(),
@@ -706,13 +730,14 @@ impl LocalBackend {
                 volumes,
                 transient,
                 grants: request.grants.clone(),
+                signed_plan: request.signed_plan.clone(),
                 assurance_campaign: request.assurance_campaign.clone(),
             })
             .await?;
         preparation.commit();
 
         self.register_started(name, request, transient);
-        Ok(self.launch_outcome(name, request, started, transient))
+        Ok(self.launch_outcome(name, request, started, transient, launched_at))
     }
 
     /// Post-boot bookkeeping: name-registry registration (with TTL),
@@ -740,7 +765,9 @@ impl LocalBackend {
         request: &LaunchRequest,
         started: StartedMachine,
         transient: bool,
+        launched_at: std::time::Instant,
     ) -> LaunchOutcome {
+        let plan = started.admitted.plan().clone();
         LaunchOutcome {
             machine: MachineState {
                 id: MachineId(started.vm_id.0.clone()),
@@ -757,12 +784,14 @@ impl LocalBackend {
                 ..Default::default()
             },
             plan_id: started.admitted.plan_id().0.clone(),
+            admitted: started.admitted,
             mode: if transient {
                 LifecycleMode::Transient
             } else {
                 LifecycleMode::Persistent
             },
-            plan: started.admitted.plan().clone(),
+            plan,
+            launched_at: Some(launched_at),
         }
     }
 }
@@ -872,7 +901,7 @@ impl LocalBackend {
             // Drop the per-VM runtime dir too: a stale substitution-endpoint
             // socket left behind blocks the next launch under the same name
             // (the endpoint dies binding it, before its ready handshake).
-            remove_dir_if_present(&vm_state_dir(name))?;
+            remove_vm_runtime_dirs(name)?;
             // The definition directory carries machine.json plus the
             // secret-refs sidecar (already cleared above) — drop it whole.
             remove_dir_if_present(&machine_state_dir(name))?;
@@ -921,7 +950,7 @@ impl LocalBackend {
             self.stop_for_recreate(name);
         }
         self.release_session_resources(name)?;
-        remove_dir_if_present(&vm_state_dir(name))?;
+        remove_vm_runtime_dirs(name)?;
         // The state dir under machines/ only carries session sidecars for a
         // transient (no machine.json); never touch a persistent definition.
         if !machine_spec_path(name).exists() {
@@ -961,14 +990,50 @@ impl LocalBackend {
     /// idempotent cleanup.
     pub fn report_exit(&self, outcome: &LaunchOutcome) -> Result<ExitReport> {
         let name = outcome.machine.name.as_str();
-        let exit_code = mvm_core::exit_capture::read_captured(&vm_state_dir(name));
+        let state_dir = vm_state_dir(name);
+        let exit_code = mvm_core::exit_capture::read_captured(&state_dir);
         // Capture fidelity: a missing capture is recorded as uncaptured,
         // never attested as exit 0.
-        if let Some(emitter) = build_audit_emitter()
-            && let Err(e) =
-                emitter.emit_exited_with_capture(&outcome.plan, exit_code, &outcome.machine.backend)
-        {
-            tracing::warn!(error = %e, machine = name, "audit emit_exited failed (non-fatal)");
+        //
+        // Whatever the process that owned the VM managed to observe. An
+        // absent sidecar reads as all-unavailable, which is the honest
+        // answer for a tier that cannot observe, a run that crashed before
+        // teardown, and a backend that has not been taught to write one yet.
+        let mut usage = mvm_core::usage_capture::read_captured(&state_dir);
+        // Two dimensions the host observes about itself, so they hold on
+        // every backend regardless of what the VMM could report.
+        usage.host_state_bytes = mvm_core::usage_capture::host_state_bytes(&state_dir);
+        if let Some(span) = outcome.launched_at.map(|at| at.elapsed()) {
+            usage.wall_ms = mvm_core::usage_capture::wall_ms(span);
+        }
+        if let Some(emitter) = build_audit_emitter() {
+            if let Err(e) = emitter.emit_exited_with_capture(
+                &outcome.plan,
+                ExitRecord {
+                    exit_code,
+                    backend: &outcome.machine.backend,
+                    usage,
+                },
+            ) {
+                tracing::warn!(error = %e, machine = name, "audit emit_exited failed (non-fatal)");
+            }
+            // The closing bracket of the run. Admission published the opening
+            // one, so a verifier can prove the log only grew across the whole
+            // execution rather than changing underneath it. Best-effort for
+            // the same reason as at admission: a workload that already ran
+            // must not fail its exit report over a weakened later check.
+            match emitter.publish_root(&outcome.plan.tenant.0) {
+                Ok(_) => mvm_hostd::audit::witness::flush_configured(
+                    emitter.audit_dir(),
+                    &outcome.plan.tenant.0,
+                ),
+                Err(e) => tracing::warn!(
+                    error = %format!("{e:#}"),
+                    machine = name,
+                    "could not publish an audit root at exit; the log stays intact but a later \
+                     consistency check has one fewer point to verify against"
+                ),
+            }
         }
         if outcome.mode == LifecycleMode::Transient {
             self.cleanup_transient(name)?;
@@ -1014,6 +1079,24 @@ impl LocalBackend {
 }
 
 /// Remove a directory tree, treating "already absent" as success.
+/// Drop a VM's runtime state *and* the directory its sockets live in.
+///
+/// Those are not always the same place. When the state dir is deep enough that
+/// a socket path would overflow macOS's `sun_path` limit, `vm_socket_dir_at`
+/// puts the sockets under a short hashed `/tmp/mvm-sock/<hash>` namespace
+/// instead. Removing only the state dir then leaves the substitution socket
+/// behind, and the next launch under that name dies binding it with "Address
+/// already in use" — the same stale-socket failure this cleanup exists to
+/// prevent, just relocated.
+fn remove_vm_runtime_dirs(name: &str) -> Result<()> {
+    let state_dir = vm_state_dir(name);
+    let socket_dir = mvm_core::config::vm_socket_dir_at(&state_dir);
+    if socket_dir != state_dir {
+        remove_dir_if_present(&socket_dir)?;
+    }
+    remove_dir_if_present(&state_dir)
+}
+
 fn remove_dir_if_present(dir: &std::path::Path) -> Result<()> {
     match std::fs::remove_dir_all(dir) {
         Ok(()) => Ok(()),

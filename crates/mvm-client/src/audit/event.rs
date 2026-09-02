@@ -365,6 +365,7 @@ pub(crate) fn classify_lifecycle_event(event: &str) -> AuditEventKind {
 fn classify_lifecycle_prefix(event: &str) -> AuditEventKind {
     if event.starts_with("lifecycle.")
         || event.starts_with("checkpoint.")
+        || event.starts_with("session.")
         || event.starts_with("cmd.")
     {
         AuditEventKind::Lifecycle
@@ -601,6 +602,8 @@ mod tests {
             ("plan.exited", Lifecycle),
             ("lifecycle.tenant.destroyed", Lifecycle),
             ("checkpoint.forked", Lifecycle),
+            ("session.parked", Lifecycle),
+            ("session.resumed", Lifecycle),
             ("cmd.up.completed", Lifecycle),
             ("readiness.probe", Readiness),
             ("volume.sealed", Volume),

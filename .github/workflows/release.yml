@@ -24,11 +24,34 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  MVMCTL_RELEASE_FEATURES: host,user,template-registry-s3,release-artifact-bootstrap
+  # `embed-host-bins` is what makes a released binary self-sufficient: it
+  # cross-compiles the Linux host binaries and embeds them, so a downloaded
+  # mvmctl can bootstrap a builder VM with nothing else installed. It is off by
+  # default (a dev build does not need the payload and should not pay the
+  # cross-compile), which means the *only* place it gets turned on for a shipped
+  # artifact is here.
+  MVMCTL_RELEASE_FEATURES: host,user,template-registry-s3,release-artifact-bootstrap,release-channel,embed-host-bins
 
 jobs:
   bdd:
     uses: ./.github/workflows/bdd.yml
+
+  # Every documented example, booted on both backends, before anything is
+  # published. The hermetic `bdd` lane above drives `--help` and refusal paths
+  # and boots no guest, so on its own it cannot see a documented command that
+  # parses and then fails at runtime — which is exactly what `machine run -it`
+  # did, on every OCI image, while the README told readers to run it.
+  #
+  # This is a release blocker on purpose. It is the slowest thing here; a tag
+  # that cannot wait for it is a tag published without evidence that its own
+  # README works.
+  e2e-docs:
+    uses: ./.github/workflows/e2e-docs.yml
+    with:
+      # Stated rather than inherited. A tag must not be cut without live macOS
+      # evidence, so a macOS host that cannot boot a guest fails this workflow
+      # here even though Extended CI tolerates it nightly.
+      macos_blocks_on_unusable_host: true
 
   build:
     strategy:
@@ -63,7 +86,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.96.0
+        uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: ${{ matrix.target }}
 
@@ -88,10 +111,7 @@ jobs:
       # formula ... from untrusted tap slp/krun". Tap + trust before installing.
       - name: Install libkrun (macOS backend FFI)
         if: runner.os == 'macOS'
-        run: |
-          brew tap slp/krun
-          brew trust slp/krun
-          brew install slp/krun/libkrun slp/krun/libkrunfw
+        uses: ./.github/actions/install-libkrun
 
       - name: Install cross-compilation tools (Linux aarch64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -115,7 +135,7 @@ jobs:
           # Use vendored OpenSSL for cross-compilation to avoid linking issues
           OPENSSL_STATIC: 1
           OPENSSL_VENDORED: 1
-        run: cargo build --release --target "${TARGET}" --features "${MVMCTL_RELEASE_FEATURES}"
+        run: cargo build --profile release-min --target "${TARGET}" --features "${MVMCTL_RELEASE_FEATURES}"
 
       # The per-VM host processes mvmctl spawns at runtime (one process per
       # guest). They are SEPARATE bin targets in `mvm-hostd` — the root
@@ -153,7 +173,6 @@ jobs:
             --bin mvm-host-agent \
             --bin mvm-signer-helper \
             --bin mvm-network-endpoint \
-            --bin mvm-netd \
             --bin mvm-broker \
             --bin mvm-audit-signer
 
@@ -163,7 +182,7 @@ jobs:
           TARGET: ${{ matrix.target }}
         shell: bash
         run: |
-          BIN="target/${TARGET}/release/mvmctl"
+          BIN="target/${TARGET}/release-min/mvmctl"
           "$BIN" --version
           "$BIN" --help > /dev/null
           "$BIN" ops metrics --json | python3 -c "
@@ -177,18 +196,17 @@ jobs:
       - name: Binary size within budget (measured targets only)
         # Per-target byte budget for the release `mvmctl`. Only targets with a
         # measured baseline are gated; add a branch here once a new target is
-        # measured. aarch64-apple-darwin measured 30,007,616 bytes at v0.17.0
-        # (2026-07-08) — the 0.16→0.17 feature arc (guest RAM, healthcheck,
-        # signing, docs) grew it past the old 28 MiB budget. Budget 33,554,432
-        # (32 MiB) for headroom.
+        # measured. aarch64-apple-darwin measured 19,206,160 bytes with the
+        # `release-min` profile at v0.18.0 (2026-08-20). Budget 25,165,824
+        # (24 MiB) for headroom while keeping the size ratchet tight.
         if: matrix.target == 'aarch64-apple-darwin'
         env:
           TARGET: ${{ matrix.target }}
         shell: bash
         run: |
           cargo run --package xtask -- check-binary-size \
-            --path "target/${TARGET}/release/mvmctl" \
-            --budget-bytes 33554432
+            --path "target/${TARGET}/release-min/mvmctl" \
+            --budget-bytes 25165824
 
       - name: Generate man pages
         shell: bash
@@ -205,7 +223,7 @@ jobs:
           ARCHIVE_NAME="mvmctl-${TARGET}"
 
           mkdir -p "staging/${ARCHIVE_NAME}"
-          cp "target/${TARGET}/release/${BIN_NAME}" "staging/${ARCHIVE_NAME}/"
+          cp "target/${TARGET}/release-min/${BIN_NAME}" "staging/${ARCHIVE_NAME}/"
           # Per-VM host processes (built in the prior step), shipped next to
           # mvmctl so the backend's adjacent-to-exe resolver finds them on a
           # downloaded install. Kept in step with PER_VM_HOST_BINARIES by
@@ -214,7 +232,7 @@ jobs:
           # Fail closed rather than copy-if-exists: a binary that failed to
           # build would otherwise be silently dropped from the tarball and
           # surface much later as a spawn failure on a user's machine.
-          REQUIRED_HOSTBINS="mvm-host-agent mvm-signer-helper mvm-network-endpoint mvm-netd mvm-broker mvm-audit-signer"
+          REQUIRED_HOSTBINS="mvm-host-agent mvm-signer-helper mvm-network-endpoint mvm-broker mvm-audit-signer"
           if [[ "${TARGET}" == *apple-darwin ]]; then
             REQUIRED_HOSTBINS="${REQUIRED_HOSTBINS} mvm-hvf-supervisor mvm-libkrun-supervisor"
           fi
@@ -248,19 +266,88 @@ jobs:
             staging/*.tar.gz
             staging/*.sha256
 
+  # The universal initramfs, without which a published prod image cannot be
+  # sealed-booted from its own release assets.
+  #
+  # the universal initramfs agent runs from this as PID 1: it sets up the dm-verity target
+  # over the rootfs, mounts the runtime overlay at /sysroot/mvm/runtime, and
+  # switch_roots. A source checkout builds one locally
+  # (`resolve_or_build_local_initramfs`); an installed binary calls
+  # `download_initramfs`, which fetches `initramfs-<arch>.tar.gz` from this
+  # release. That download has never once succeeded, because nothing published
+  # the file — so every installed mvmctl has been unable to boot the sealed path
+  # its own rootfs is built for.
+  #
+  # This train, not `boot-image/v*`: `release_base_url` builds `{base}/v{version}`,
+  # and the initramfs bundles this workspace's guest agent, so it versions with
+  # the CLI rather than with the image.
+  initramfs-image:
+    if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
+    strategy:
+      # One arch must not cancel the other; the completeness check in `release`
+      # refuses a partial set, so letting both finish tells the truth about
+      # which one failed.
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+          - arch: x86_64
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - name: Build the universal initramfs
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          SYSTEM="${ARCH}-linux"
+          STORE_PATH=$(nix build "./nix/images/initramfs#packages.${SYSTEM}.default" \
+            --no-link --print-out-paths | head -1)
+          mkdir -p "staging/initramfs-${ARCH}"
+          # cp -L so each file resolves through its nix-store symlink.
+          for f in initramfs.cpio.gz initramfs.hash initramfs.size VERSION; do
+            cp -L "$STORE_PATH/$f" "staging/initramfs-${ARCH}/$f"
+          done
+          # The derivation emits four of the five members `download_initramfs`
+          # requires; the manifest over them is packaging's job, exactly as it
+          # is for the runtime overlay.
+          (
+            cd "staging/initramfs-${ARCH}"
+            sha256sum initramfs.cpio.gz initramfs.hash initramfs.size VERSION \
+              > checksums-sha256.txt
+          )
+          tar -C "staging/initramfs-${ARCH}" \
+            -czf "staging/initramfs-${ARCH}.tar.gz" \
+            initramfs.cpio.gz initramfs.hash initramfs.size VERSION checksums-sha256.txt
+          (
+            cd staging
+            sha256sum "initramfs-${ARCH}.tar.gz" > "initramfs-${ARCH}.tar.gz.sha256"
+          )
+
+      - name: Upload initramfs artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: initramfs-image-${{ matrix.arch }}
+          path: |
+            staging/initramfs-${{ matrix.arch }}.tar.gz
+            staging/initramfs-${{ matrix.arch }}.tar.gz.sha256
+
   release:
-    needs: [bdd, build]
-    # Gate the published release on the mvmctl binary build ONLY. The boot
-    # image artifacts are attached when the boot image train has published
-    # them (see the dual-publish step below), but their absence must not
-    # block the binary download (mvmctl tarballs + checksums) that
-    # install.sh / `mvmctl update` / the Homebrew tap consume. `!cancelled()`
-    # keeps that posture; the result check keeps the binary build a hard
-    # requirement.
+    needs: [bdd, e2e-docs, build, initramfs-image]
+    # The CLI binary and universal initramfs form one usable release. Waiting
+    # for the job is not enough under `!cancelled()`: its result must be a hard
+    # success requirement or a failed initramfs build can still publish a tag
+    # whose sealed-boot downloader always returns 404.
     # Dry-run guard: a `workflow_dispatch` with dry_run=true builds + packages
     # (the `build` job) but never reaches this publish job — only a tag push or
     # an explicit dry_run=false dispatch publishes.
-    if: ${{ !cancelled() && needs.bdd.result == 'success' && needs.build.result == 'success' && (github.event_name == 'push' || github.event.inputs.dry_run == 'false') }}
+    if: ${{ !cancelled() && needs.bdd.result == 'success' && needs.build.result == 'success' && needs.initramfs-image.result == 'success' && (github.event_name == 'push' || github.event.inputs.dry_run == 'false') }}
     # This job mints the one keyless identity every installed mvmctl trusts:
     # `release.yml@refs/tags/v{version}`, the sole entry in
     # RELEASE_IDENTITY_TEMPLATES. The environment's policy admits `v*` tags and
@@ -275,7 +362,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.96.0
+        uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Install cargo-cyclonedx
         run: cargo install cargo-cyclonedx --locked
@@ -327,8 +414,12 @@ jobs:
           # property of the version, not of the order someone happened to push.
           # The strict N.N.N match also drops anything that is not a plain
           # release tag rather than trying to order it.
+          # No `-r`: `gh --jq` already prints a string result raw, and gh has no
+          # such flag. Passing one consumes `--jq`'s value, demoting the real
+          # expression to a positional argument, and gh rejects the whole
+          # invocation with `unknown command "<the entire jq program>"`.
           BOOT_TAG="$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 100 \
-            --json tagName --jq -r '
+            --json tagName --jq '
               [ .[].tagName
                 | select(test("^boot-image/v[0-9]+\\.[0-9]+\\.[0-9]+$"))
                 | {tag: ., v: (ltrimstr("boot-image/v") | split(".") | map(tonumber))} ]
@@ -358,8 +449,16 @@ jobs:
               "default-microvm-${arch}-checksums-sha256.txt" \
               "builder-vm-vmlinux-${arch}" \
               "builder-vm-rootfs-${arch}.ext4" \
-              "builder-vm-${arch}-checksums-sha256.txt"; do
+              "builder-vm-${arch}-checksums-sha256.txt" \
+              "runtime-overlay-${arch}.tar.gz"; do
               [ -s "artifacts/${f}" ] || missing+=("${f}")
+            done
+            for libc in glibc musl; do
+              for f in \
+                "sdk-sidecar-${arch}-${libc}.tar.gz" \
+                "sdk-sidecar-${arch}-${libc}.tar.gz.sha256"; do
+                [ -s "artifacts/${f}" ] || missing+=("${f}")
+              done
             done
           done
           if [ ${#missing[@]} -gt 0 ]; then
@@ -458,32 +557,48 @@ jobs:
           mkdir -p "${STAGE}"
 
           checked=0
-          for kind in runtime-overlay sdk-sidecar; do
-            for arch in aarch64 x86_64; do
-              archive="artifacts/${kind}-${arch}.tar.gz"
-              [ -f "${archive}" ] || continue
-              for suffix in "" ".sha256" ".bundle"; do
-                src="${archive}${suffix}"
-                if [ ! -f "${src}" ]; then
-                  echo "::error::${src} is missing — a published archive without its checksum and signature cannot be acquired" >&2
-                  exit 1
-                fi
-                cp "${src}" "${STAGE}/"
-              done
+          verify_archive() {
+            local kind="$1"
+            local arch="$2"
+            local libc="${3:-}"
+            local archive example_kind
+            if [ "${kind}" = sdk-sidecar ]; then
+              archive="artifacts/sdk-sidecar-${arch}-${libc}.tar.gz"
+              example_kind=sidecar
+            else
+              archive="artifacts/runtime-overlay-${arch}.tar.gz"
+              example_kind=overlay
+            fi
+            [ -f "${archive}" ] || return 0
+            for suffix in "" ".sha256" ".bundle"; do
+              src="${archive}${suffix}"
+              if [ ! -f "${src}" ]; then
+                echo "::error::${src} is missing — a published archive without its checksum and signature cannot be acquired" >&2
+                exit 1
+              fi
+              cp "${src}" "${STAGE}/"
+            done
 
-              case "${kind}" in
-                runtime-overlay) example_kind=overlay ;;
-                sdk-sidecar)     example_kind=sidecar ;;
-              esac
-              echo "Consuming ${kind}-${arch} through the production download path..."
-              cargo run --release -p mvm-build --example download-release-artifact \
-                --features manifest-verify -- \
-                --kind "${example_kind}" \
-                --base-url "file://$(pwd)/consumer-check" \
-                --version "${VERSION}" \
-                --arch "${arch}" \
-                --cache "$(mktemp -d)"
-              checked=$((checked + 1))
+            consumer_args=(
+              --kind "${example_kind}"
+              --base-url "file://$(pwd)/consumer-check"
+              --version "${VERSION}"
+              --arch "${arch}"
+              --cache "$(mktemp -d)"
+            )
+            if [ -n "${libc}" ]; then
+              consumer_args+=(--libc "${libc}")
+            fi
+            echo "Consuming ${kind}-${arch}${libc:+-${libc}} through the production download path..."
+            cargo run --release -p mvm-build --example download-release-artifact \
+              --features manifest-verify -- "${consumer_args[@]}"
+            checked=$((checked + 1))
+          }
+
+          for arch in aarch64 x86_64; do
+            verify_archive runtime-overlay "${arch}"
+            for libc in glibc musl; do
+              verify_archive sdk-sidecar "${arch}" "${libc}"
             done
           done
 
@@ -553,10 +668,15 @@ jobs:
             artifacts/builder-vm-*-checksums-sha256.txt.bundle
             artifacts/runtime-overlay-*.tar.gz
             artifacts/runtime-overlay-*.tar.gz.sha256
-            artifacts/sdk-sidecar-*.tar.gz
-            artifacts/sdk-sidecar-*.tar.gz.sha256
+            artifacts/initramfs-*.tar.gz
+            artifacts/initramfs-*.tar.gz.sha256
+            artifacts/sdk-sidecar-*-glibc.tar.gz
+            artifacts/sdk-sidecar-*-glibc.tar.gz.sha256
+            artifacts/sdk-sidecar-*-musl.tar.gz
+            artifacts/sdk-sidecar-*-musl.tar.gz.sha256
             artifacts/runtime-overlay-*.tar.gz.bundle
-            artifacts/sdk-sidecar-*.tar.gz.bundle
+            artifacts/sdk-sidecar-*-glibc.tar.gz.bundle
+            artifacts/sdk-sidecar-*-musl.tar.gz.bundle
             artifacts/default-microvm-vmlinux-*
             artifacts/default-microvm-rootfs-*
             artifacts/default-microvm-meta-*

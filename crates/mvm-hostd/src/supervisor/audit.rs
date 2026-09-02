@@ -49,6 +49,7 @@ pub fn for_plan(
         image_name: plan.image.name.clone(),
         image_sha256: plan.image.sha256.to_ascii_lowercase(),
         event: event.into(),
+        caller_commitment: plan.caller_commitment.clone(),
         labels,
     }
 }
@@ -132,6 +133,7 @@ pub fn transcript_sealed(
     vm_name: &str,
     sealed_root_hex: &str,
     chunk_count: usize,
+    adopted: bool,
 ) -> PlanAuditEntry {
     for_plan(
         plan,
@@ -145,6 +147,10 @@ pub fn transcript_sealed(
                 sealed_root_hex.to_string(),
             ),
             (LABEL_CHUNK_COUNT.to_string(), chunk_count.to_string()),
+            // A rebuilt seal cannot account for records the departed writer
+            // shed after its last durable append, so an entry that did not say
+            // so would attest a floor as if it were the whole capture.
+            (LABEL_ADOPTED.to_string(), adopted.to_string()),
         ],
     )
 }
@@ -169,6 +175,10 @@ pub const LABEL_VM_NAME: &str = "vm_name";
 pub const LABEL_TRANSCRIPT_ROOT: &str = "transcript_root";
 /// Label containing the number of ordered ciphertext chunks.
 pub const LABEL_CHUNK_COUNT: &str = "chunk_count";
+
+/// Whether the seal was rebuilt from the journal rather than written by the
+/// process that owned the capture. `true` marks an incomplete record.
+pub const LABEL_ADOPTED: &str = "adopted";
 
 /// Per-direction flow label for [`flow_opened`] /
 /// [`flow_closed`]. Egress = guest → internet,
@@ -323,7 +333,7 @@ pub(crate) mod tests {
             snapshot_at: Default::default(),
             network_mode: Default::default(),
             stream_retention: Default::default(),
-            l3_network: None,
+            ingress: Vec::new(),
             network_limits: Default::default(),
             schema_version: SCHEMA_VERSION,
             plan_id: PlanId("plan-x".to_string()),
@@ -361,6 +371,7 @@ pub(crate) mod tests {
                 capture_paths: vec![],
                 retention_days: 0,
             },
+            caller_commitment: None,
             audit_labels: BTreeMap::from([("workflow".to_string(), "etl-1".to_string())]),
             key_rotation: KeyRotationSpec { interval_days: 0 },
             attestation: AttestationRequirement {
@@ -381,6 +392,7 @@ pub(crate) mod tests {
             shares: Vec::new(),
             agent_verbs: None,
             services: Vec::new(),
+            extensions: Vec::new(),
             stream_edges: Vec::new(),
         }
     }
@@ -419,6 +431,7 @@ pub(crate) mod tests {
             image_name: "img".to_string(),
             image_sha256: "deadbeef".to_string(),
             event: "plan.verified".to_string(),
+            caller_commitment: None,
             labels: BTreeMap::from([("actor".to_string(), "supervisor".to_string())]),
         };
         let bytes = serde_json::to_vec(&entry).unwrap();
@@ -442,6 +455,15 @@ pub(crate) mod tests {
         assert_eq!(entry.event, "plan.verified");
         // Plan's audit_labels merged in.
         assert_eq!(entry.labels.get("workflow"), Some(&"etl-1".to_string()));
+    }
+
+    #[test]
+    fn entry_for_plan_copies_the_typed_caller_commitment() {
+        let mut plan = sample_plan();
+        let commitment = mvm_core::plan::CallerCommitment::from_bytes([0x5a; 32]);
+        plan.caller_commitment = Some(commitment.clone());
+        let entry = for_plan(&plan, None, "plan.admitted", []);
+        assert_eq!(entry.caller_commitment, Some(commitment));
     }
 
     #[test]
@@ -549,7 +571,7 @@ pub(crate) mod tests {
     fn transcript_sealed_helper_carries_only_ciphertext_root_metadata() {
         let plan = sample_plan();
         let root = "ab".repeat(32);
-        let entry = transcript_sealed(&plan, None, "capture-1", "vm-1", &root, 7);
+        let entry = transcript_sealed(&plan, None, "capture-1", "vm-1", &root, 7, false);
 
         assert_eq!(entry.event, TRANSCRIPT_SEALED_EVENT);
         assert_eq!(
@@ -559,8 +581,52 @@ pub(crate) mod tests {
         assert_eq!(entry.labels.get(LABEL_VM_NAME), Some(&"vm-1".to_string()));
         assert_eq!(entry.labels.get(LABEL_TRANSCRIPT_ROOT), Some(&root));
         assert_eq!(entry.labels.get(LABEL_CHUNK_COUNT), Some(&"7".to_string()));
+        assert_eq!(entry.labels.get(LABEL_ADOPTED), Some(&"false".to_string()));
         assert_eq!(entry.plan_id, plan.plan_id);
         assert_eq!(entry.tenant, plan.tenant);
+
+        // The exhaustive key set is the assertion that matters. Checking only
+        // the labels this test thought of would let a future label carrying
+        // captured bytes or a plaintext digest through, which is the one thing
+        // this entry exists to keep out of the chain.
+        //
+        // Operator-supplied `audit_labels` ride along on every plan entry via
+        // `for_plan`, so they are subtracted rather than enumerated: what is
+        // pinned here is exactly the set this helper itself contributes.
+        let mut contributed: Vec<&str> = entry
+            .labels
+            .keys()
+            .map(String::as_str)
+            .filter(|k| !plan.audit_labels.contains_key(*k))
+            .collect();
+        contributed.sort_unstable();
+        assert_eq!(
+            contributed,
+            [
+                LABEL_ADOPTED,
+                LABEL_CAPTURE_ID,
+                LABEL_CHUNK_COUNT,
+                LABEL_TRANSCRIPT_ROOT,
+                LABEL_VM_NAME,
+            ]
+        );
+    }
+
+    #[test]
+    fn an_adopted_seal_is_distinguishable_from_one_its_writer_produced() {
+        // A rebuilt seal cannot account for records the departed writer shed
+        // after its last durable append. An entry that did not carry the
+        // distinction would attest a floor as though it were the whole
+        // capture -- a wrong record rather than a missing one.
+        let plan = sample_plan();
+        let root = "cd".repeat(32);
+
+        let owned = transcript_sealed(&plan, None, "capture-2", "vm-2", &root, 4, false);
+        let adopted = transcript_sealed(&plan, None, "capture-2", "vm-2", &root, 4, true);
+
+        assert_eq!(owned.labels.get(LABEL_ADOPTED), Some(&"false".to_string()));
+        assert_eq!(adopted.labels.get(LABEL_ADOPTED), Some(&"true".to_string()));
+        assert_ne!(owned.labels, adopted.labels);
     }
 
     #[test]

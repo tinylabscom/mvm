@@ -22,6 +22,10 @@
 //! positives worth the name: a real symbol appears in the tree, and a
 //! fabricated one does not.
 //!
+//! "Appears in the tree" means appears in **code**, not in a comment or a
+//! string literal. See [`crate::prose_citations`] for why that distinction
+//! turned out to be load-bearing rather than fussy.
+//!
 //! ## What it does not catch
 //!
 //! A citation naming a real symbol that is not actually a witness for the
@@ -32,124 +36,9 @@ use anyhow::{Result, bail};
 use std::collections::HashSet;
 use std::path::Path;
 
-/// Prose that makes claims, and is therefore worth holding to its citations.
-const PROSE: &[&str] = &[
-    "CLAUDE.md",
-    "README.md",
-    "AGENTS.md",
-    "specs/adrs/001-microvm-security-posture.md",
-    "specs/adrs/035-workload-stream-plane.md",
-];
-
-/// Minimum length for a citation to be worth checking. Short snake_case words
-/// (`plan_id`, `vm_name`) are field names, not witnesses, and they are common
-/// enough that including them buys noise rather than coverage.
-const MIN_LEN: usize = 12;
-
-/// Words that look like identifiers but are prose, config keys, or paths.
-const IGNORED: &[&str] = &[
-    "cargo-mutants",
-    "workflow_dispatch",
-    "pull_request",
-    "merge_group",
-    "continue-on-error",
-    "ubuntu-latest",
-    "macos-latest",
-    "windows-latest",
-    "actions-rs",
-    "dtolnay-rust-toolchain",
-    "no-default-features",
-    "all-features",
-    "deny-warnings",
-];
-
-/// Whether `s` is shaped like a Rust test name.
-fn is_snake_ident(s: &str) -> bool {
-    s.len() >= MIN_LEN
-        && s.contains('_')
-        && s.chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-        && !s.starts_with('_')
-        && !s.ends_with('_')
-}
-
-/// Whether `s` is shaped like a CI job name.
-fn is_kebab_job(s: &str) -> bool {
-    s.len() >= MIN_LEN
-        && s.contains('-')
-        && s.chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        && !s.starts_with('-')
-        && !s.ends_with('-')
-}
-
-/// Backticked spans in `text`, each with the line it sat on.
-///
-/// The line matters for kebab-case: a job citation says "job" beside it, while
-/// `rust-version` and `cargo-semver-checks` are a manifest key and a tool that
-/// claim no enforcement.
-fn backticked_with_line(text: &str) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    for line in text.lines() {
-        for token in backticked(line) {
-            out.push((line.to_string(), token));
-        }
-    }
-    out
-}
-
-/// Backticked spans in `text`.
-fn backticked(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let bytes: Vec<char> = text.chars().collect();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == '`' {
-            let start = i + 1;
-            let mut j = start;
-            while j < bytes.len() && bytes[j] != '`' && bytes[j] != '\n' {
-                j += 1;
-            }
-            if j < bytes.len() && bytes[j] == '`' {
-                out.push(bytes[start..j].iter().collect());
-                i = j + 1;
-                continue;
-            }
-        }
-        i += 1;
-    }
-    out
-}
-
-/// Read every file under `dir` with one of `exts` into one haystack.
-fn haystack(root: &Path, dirs: &[&str], exts: &[&str]) -> String {
-    let mut buf = String::new();
-    for dir in dirs {
-        let mut stack = vec![root.join(dir)];
-        while let Some(d) = stack.pop() {
-            let Ok(entries) = std::fs::read_dir(&d) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    if entry.file_name() == "target" {
-                        continue;
-                    }
-                    stack.push(path);
-                } else if exts
-                    .iter()
-                    .any(|e| path.extension().is_some_and(|x| x == *e))
-                    && let Ok(src) = std::fs::read_to_string(&path)
-                {
-                    buf.push_str(&src);
-                    buf.push('\n');
-                }
-            }
-        }
-    }
-    buf
-}
+use crate::prose_citations::{
+    PROSE, Resolver, backticked_with_line, ignored_set, is_kebab_job, is_snake_ident,
+};
 
 /// Run the gate.
 ///
@@ -158,9 +47,8 @@ fn haystack(root: &Path, dirs: &[&str], exts: &[&str]) -> String {
 /// When a prose file cites a test- or job-shaped name that appears nowhere in
 /// the sources or workflows.
 pub fn run(root: &Path) -> Result<()> {
-    let sources = haystack(root, &["crates", "xtask", "src"], &["rs"]);
-    let workflows = haystack(root, &[".github"], &["yml", "yaml"]);
-    let ignored: HashSet<&str> = IGNORED.iter().copied().collect();
+    let resolver = Resolver::build(root);
+    let ignored = ignored_set();
 
     let mut errors = Vec::new();
     let mut checked = 0usize;
@@ -170,15 +58,22 @@ pub fn run(root: &Path) -> Result<()> {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
+        let absent = crate::check_asserted_absence::absent_line_numbers(&text);
         let mut seen: HashSet<String> = HashSet::new();
-        for (line, token) in backticked_with_line(&text) {
+        for (lineno, line, token) in backticked_with_line(&text) {
+            // A name inside an absence region is asserted *not* to exist.
+            // `check-asserted-absence` owns it; requiring it to resolve here
+            // would make the two gates contradict each other.
+            if absent.contains(&lineno) {
+                continue;
+            }
             let token = token.trim();
             if ignored.contains(token) || !seen.insert(token.to_string()) {
                 continue;
             }
             if is_snake_ident(token) {
                 checked += 1;
-                if !sources.contains(token) {
+                if !resolver.resolves(token) {
                     errors.push(format!(
                         "{rel}: cites `{token}`, which appears nowhere in the Rust sources. If it \
                          is a witness, it does not exist; if it was renamed, the prose still \
@@ -187,7 +82,7 @@ pub fn run(root: &Path) -> Result<()> {
                 }
             } else if is_kebab_job(token) && line.contains("job") {
                 checked += 1;
-                if !workflows.contains(token) && !sources.contains(token) {
+                if !resolver.resolves(token) {
                     errors.push(format!(
                         "{rel}: cites `{token}`, which no workflow defines. A job name that \
                          resolves to nothing reads as enforcement that is not there."
@@ -214,39 +109,6 @@ pub fn run(root: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn shapes_are_recognised() {
-        assert!(is_snake_ident("audit_chain_carries_no_payload_bytes"));
-        assert!(is_kebab_job("prod-agent-runentry-contract"));
-        // Too short to be worth checking: a field, not a witness.
-        assert!(!is_snake_ident("plan_id"));
-        assert!(!is_kebab_job("read-only"));
-        // Mixed case is a type or a path, not a test name.
-        assert!(!is_snake_ident("ExecutionPlan"));
-        assert!(!is_snake_ident("crates/mvm-core"));
-    }
-
-    #[test]
-    fn backticked_spans_are_extracted_without_crossing_lines() {
-        let found = backticked("see `first_symbol_here` and `second-symbol-here`\n`third`");
-        assert_eq!(
-            found,
-            vec!["first_symbol_here", "second-symbol-here", "third"]
-        );
-        // An unterminated backtick must not swallow the rest of the document.
-        assert_eq!(backticked("`unclosed\nnext line"), Vec::<String>::new());
-    }
-
-    /// The exact drift this exists for: a witness name that was cited for
-    /// months and never existed.
-    #[test]
-    fn a_fabricated_witness_name_is_the_shape_that_gets_checked() {
-        assert!(
-            is_snake_ident("audit_chain_carries_no_payload_bytes"),
-            "the name that survived in CLAUDE.md must be one this gate inspects"
-        );
-    }
 
     /// The gate must pass on the tree as it stands.
     #[test]

@@ -14,9 +14,10 @@
 # workspace, restricted to the single bin so the workspace's heavier members
 # don't enter the closure.
 
-{ pkgs
-, lib
-, mvmSrc
+{
+  pkgs,
+  lib,
+  mvmSrc,
 }:
 
 pkgs.rustPlatform.buildRustPackage {
@@ -25,15 +26,21 @@ pkgs.rustPlatform.buildRustPackage {
 
   src = mvmSrc;
 
-  cargoLock.lockFile = mvmSrc + "/Cargo.lock";
+  cargoDeps = import ../lib/static-crates-cargo-deps.nix {
+    inherit pkgs;
+    lockFile = mvmSrc + "/Cargo.lock";
+  };
 
   cargoBuildFlags = [
-    "--package" "mvm-agentd"
-    "--bin" "audit-probe"
+    "--package"
+    "mvm-agentd"
+    "--bin"
+    "audit-probe"
   ];
 
   cargoTestFlags = [
-    "--package" "mvm-agentd"
+    "--package"
+    "mvm-agentd"
   ];
 
   # Tests run in the workspace's host-side `cargo test` lane (the probe's
@@ -42,8 +49,7 @@ pkgs.rustPlatform.buildRustPackage {
   doCheck = false;
 
   meta = with lib; {
-    description =
-      "mvm in-guest host.audit.v1 probe — live-VM audit round-trip fixture";
+    description = "mvm in-guest host.audit.v1 probe — live-VM audit round-trip fixture";
     homepage = "https://github.com/tinylabscom/mvm";
     license = licenses.asl20;
     platforms = platforms.linux;

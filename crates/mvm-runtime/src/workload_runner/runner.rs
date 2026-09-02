@@ -5,11 +5,10 @@
 //! `NetworkEndpointSpawner` trait so the runner is unit-testable with no real VM and no
 //! real endpoint process.
 
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-use anyhow::{Context, Result};
 
 use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
 use mvm_core::config::{vm_network_endpoint_socket, vm_state_dir, vms_dir};
@@ -53,23 +52,27 @@ use mvm_vmm::host::network_endpoint_spawn::{
     EndpointTransport, SubstitutionSpawnParams, reap_network_endpoint, spawn_network_endpoint,
 };
 use mvm_vmm::host::spec_map::{
-    WorkloadSpecInputs, ensure_dir_share_support, workload_spec, workload_vsock_ports,
+    WorkloadSpecInputs, ensure_no_dir_share_volumes, workload_spec, workload_vsock_ports,
 };
 use mvm_vmm::post_restore::PostRestoreOutcome;
 
+mod admission;
 mod backend;
+mod broker;
+mod console_boot;
 mod refusal;
 mod sockets;
 mod spawner;
 mod warm_claim;
 
+use admission::{admitted_ingress, admitted_network_limits};
+pub use broker::RealBrokerRegistrar;
 use refusal::{map_lineage_refusal, refuse, require_fresh_child_identity};
 use sockets::standing_sockets;
 pub use spawner::{
     FlowMuxIdentitySource, NetworkEndpointSpawnRequest, NetworkEndpointSpawner,
     RealNetworkEndpointSpawner, SpawnedEndpoint,
 };
-
 /// What the runner needs to register the per-VM host-services broker after boot.
 pub struct BrokerRegisterRequest<'a> {
     /// VM name — the registration's `vm_id`, workload id, and per-VM chain key.
@@ -86,6 +89,10 @@ pub struct BrokerRegisterRequest<'a> {
     /// Host services from the admitted plan. Empty means no broker process is
     /// needed and every broker call remains fail-closed.
     pub services: &'a [ServiceId],
+    /// Exact typed capabilities carried by admitted extension bindings.
+    pub capability_bindings: &'a [mvm_contract::protocol::agent_capability::CapabilityBinding],
+    /// Controller-backed typed services prepared by the admitting process.
+    pub service_proxies: &'a [mvm_contract::protocol::broker_control::ServiceProxyBinding],
 }
 
 /// Register/spawn the per-VM host-services broker for an admitted workload,
@@ -102,6 +109,12 @@ pub trait BrokerRegistrar: Send + Sync {
 pub struct BrokerGuard(mvm_vmm::host::host_agent_spawn::ServicesGuard);
 
 impl BrokerGuard {
+    pub(crate) fn from_services_guard(
+        guard: mvm_vmm::host::host_agent_spawn::ServicesGuard,
+    ) -> Self {
+        Self(guard)
+    }
+
     /// A guard that reaps nothing on drop — the unadmitted / spawn-failed path.
     fn defused() -> Self {
         Self(mvm_vmm::host::host_agent_spawn::ServicesGuard::None)
@@ -123,54 +136,6 @@ impl BrokerGuard {
     #[must_use]
     pub fn services_healthy(&self, requested: &[ServiceId]) -> bool {
         requested.is_empty() || self.0.is_registered()
-    }
-}
-
-/// The production `BrokerRegistrar`: delegates to the existing per-tenant
-/// host-agent registration (default) or the per-VM broker fork
-/// (`MVM_HOST_AGENT_DAEMON=0`). No broker logic is reimplemented here — this is
-/// the same registration the raw backend `start` paths run, lifted onto the
-/// runner so a workload moved here keeps its host services.
-pub struct RealBrokerRegistrar;
-
-impl BrokerRegistrar for RealBrokerRegistrar {
-    fn register(&self, req: &BrokerRegisterRequest<'_>) -> Result<BrokerGuard> {
-        // Unadmitted or carrying no service bindings: register nothing. The
-        // spec carries no usable broker channel, so a stray guest dial fails closed.
-        if req.services.is_empty() {
-            return Ok(BrokerGuard::defused());
-        }
-        let (Some(tenant), Some(broker_listen_socket)) = (req.tenant, req.broker_listen_socket)
-        else {
-            return Ok(BrokerGuard::defused());
-        };
-
-        let guard = if mvm_vmm::host::host_agent_spawn::host_agent_daemon_enabled() {
-            mvm_vmm::host::host_agent_spawn::register_host_agent_services_if_admitted(
-                mvm_vmm::host::host_agent_spawn::HostAgentServicesParams {
-                    workload_id: req.vm_name,
-                    tenant_id: Some(tenant),
-                    vm_name: req.vm_name,
-                    state_dir: req.state_dir,
-                    broker_listen_socket,
-                    services: req.services,
-                },
-            )
-            .map(mvm_vmm::host::host_agent_spawn::ServicesGuard::Agent)?
-        } else {
-            mvm_vmm::host::broker_services_spawn::spawn_broker_services_if_admitted(
-                mvm_vmm::host::broker_services_spawn::BrokerServicesSpawnParams {
-                    workload_id: req.vm_name,
-                    tenant_id: Some(tenant),
-                    vm_name: req.vm_name,
-                    state_dir: req.state_dir,
-                    broker_listen_socket,
-                    services: req.services,
-                },
-            )
-            .map(mvm_vmm::host::host_agent_spawn::ServicesGuard::Fork)?
-        };
-        Ok(BrokerGuard(guard))
     }
 }
 
@@ -387,7 +352,12 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // `DirShare` volume has no `VmmSpec` representation on this driver
         // seam, so refuse it here rather than silently dropping it later in
         // `workload_blocks`.
-        ensure_dir_share_support(inputs.config, self.driver.supports_directory_shares())?;
+        // No driver serves a live directory share any more: a `--mount` is
+        // materialized into an image before it reaches here. A volume still
+        // asking to be shared is one nothing materialized, and it must refuse
+        // rather than be dropped — a workload booting without its mount is
+        // worse than one that will not boot.
+        ensure_no_dir_share_volumes(inputs.config)?;
 
         // A caller times this call from outside and cannot see past it, yet the
         // VMM boot and every post-boot registration happen in here. Off unless
@@ -398,6 +368,8 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         let state_dir = vm_state_dir(&inputs.config.name);
         std::fs::create_dir_all(&state_dir)
             .with_context(|| format!("create state dir {}", state_dir.display()))?;
+        let network_limits = admitted_network_limits(inputs.config.plan_json.as_deref())?;
+        let ingress = admitted_ingress(inputs.config.plan_json.as_deref())?;
 
         // Spawn the per-child substitution endpoint through the shared
         // `ClaimGuards`, so a warm claim stands up the identical guarded endpoint
@@ -412,6 +384,8 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 secrets: inputs.secrets,
                 redaction: inputs.redaction,
                 network_policy: inputs.network_policy,
+                network_limits,
+                ingress: &ingress,
                 // A cold boot mints this guest's identity and hands it a drive.
                 identity: FlowMuxIdentitySource::Mint,
             },
@@ -428,19 +402,22 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         });
 
         trace.mark("spec_assembly");
-        let vm = self.driver.boot(&spec)?;
-        trace.mark("driver_boot");
 
-        // Unconditional and best-effort, and before the fallible activation
-        // handshake below rather than after it: the console is the only
-        // channel that still carries output if boot never reaches the guest
-        // agent, which includes a failure in that very handshake.
-        self.console_streamer.start(&ConsoleCapture {
+        // Unconditional and best-effort. The follower can wait for a console
+        // file that does not exist yet, so install it alongside VMM boot rather
+        // than serializing its process setup after guest readiness.
+        let capture = ConsoleCapture {
             vm_name: &inputs.config.name,
             console_log: &socks.console_log,
             redaction: inputs.redaction,
             retention: plan_stream_retention(inputs.config.plan_json.as_deref()),
-        });
+        };
+        let streamer = Arc::clone(&self.console_streamer);
+        let vm = console_boot::boot_while_starting_console(
+            || self.driver.boot(&spec),
+            || streamer.start(&capture),
+            || trace.mark("driver_boot"),
+        )?;
         trace.mark("console_stream_start");
 
         // Universal initramfs path: the guest PID-1 agent waits for a signed
@@ -457,13 +434,16 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // Register the per-VM broker for the exact admitted host-service set.
         // The guard's Drop reaps on any early return until it is defused. A
         // requested service whose broker cannot start fails the launch closed.
-        let services = admitted_services(inputs.config.plan_json.as_deref())?;
+        let (services, capability_bindings) =
+            admitted_broker_bindings(inputs.config.plan_json.as_deref())?;
         let mut broker_guard = self.broker.register(&BrokerRegisterRequest {
             vm_name: &inputs.config.name,
             state_dir: &state_dir,
             tenant: inputs.config.tenant_id.as_deref(),
             broker_listen_socket: socks.broker.as_deref(),
             services: &services,
+            capability_bindings: &capability_bindings,
+            service_proxies: &inputs.config.service_proxies,
         })?;
         endpoint.defuse();
         broker_guard.defuse();
@@ -646,10 +626,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // boots: the sidecar describes how the image was built and is not part
         // of the captured snapshot, so it exists only beside the image.
         guards
-            .admit_overlay_contract(
-                std::path::Path::new(&claim.rootfs_path),
-                child_cfg.runtime_source_policy,
-            )
+            .admit_overlay_contract(std::path::Path::new(&claim.rootfs_path))
             .map_err(|e| StandbyError::ClaimFailed(format!("overlay contract: {e}")))?;
 
         let grant_envelope = issue_child_grant(&plan, &child_cfg, ctx.grant_issuer)
@@ -659,6 +636,10 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             mvm_core::plan::secrets_from_signed_json(&claim.plan_json).unwrap_or_default();
         let redaction =
             mvm_core::plan::redaction_from_signed_json(&claim.plan_json).unwrap_or_default();
+        let network_limits = plan
+            .effective_network_limits()
+            .map_err(|e| StandbyError::ClaimFailed(format!("network limits: {e}")))?;
+        let ingress = plan.ingress.clone();
         if let Some(file) = claim_debug.as_mut() {
             let _ = writeln!(
                 file,
@@ -677,6 +658,8 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                     secrets: &secrets,
                     redaction: &redaction,
                     network_policy: &claim.network_policy,
+                    network_limits,
+                    ingress: &ingress,
                     // A restored child already holds its parent's signing key
                     // in the memory image it woke from, and there is no way to
                     // put a different one there. Its endpoint pins what the
@@ -697,6 +680,11 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // Register the child's exact admitted host-service set before the fork,
         // because the restored guest can dial `BROKER_PORT` immediately. Any
         // registration failure refuses the claim; the guard reaps until commit.
+        let child_capabilities: Vec<_> = plan
+            .extensions
+            .iter()
+            .flat_map(|extension| extension.capabilities.iter().cloned())
+            .collect();
         let mut broker_guard = self
             .broker
             .register(&BrokerRegisterRequest {
@@ -705,6 +693,8 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 tenant: child_cfg.tenant_id.as_deref(),
                 broker_listen_socket: socks.broker.as_deref(),
                 services: &plan.services,
+                capability_bindings: &child_capabilities,
+                service_proxies: &child_cfg.service_proxies,
             })
             .map_err(|e| StandbyError::ClaimFailed(format!("register child broker: {e}")))?;
         claim_phase!("broker_registered");
@@ -810,8 +800,9 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
     ///
     /// The parent's boot inputs are derived here, from the launch it will
     /// serve, through the same mappers `start_workload` uses — a factory parent
-    /// boots the device model and kernel cmdline a workload boots, minus the
-    /// host channels a workload is entitled to and it is not. That is not a
+    /// boots the device model and boot-shape cmdline a workload boots, minus
+    /// the claim-time hostname and host channels a workload is entitled to and
+    /// it is not. That is not a
     /// nicety: a child is restored out of the parent's saved memory and
     /// inherits both, so a parent assembled by a second recipe hands every
     /// child whatever that recipe got wrong.
@@ -834,7 +825,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         let launch = ctx.launch.ok_or_else(|| {
             StandbyError::SpawnFailed(format!(
                 "standby '{}' has no launch config to mirror: a warm parent boots the same \
-                 device model and kernel cmdline a workload does, so it cannot be assembled \
+                 device model and boot-shape kernel cmdline a workload does, so it cannot be assembled \
                  without the launch it will serve",
                 spec.id
             ))
@@ -857,8 +848,8 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             ))
         })?;
 
-        let boot = factory_parent_spec(&parent_config, &state_dir, |virtiofs_root, has_disk| {
-            self.driver.workload_base_bootargs(virtiofs_root, has_disk)
+        let boot = factory_parent_spec(&parent_config, &state_dir, |has_disk| {
+            self.driver.workload_base_bootargs(has_disk)
         });
         // The same truncation refusal a workload boot gets, for the same reason
         // and then some: a child inherits its parent's cmdline out of restored
@@ -888,7 +879,6 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             id: CheckpointId::new(format!("standby-{}", spec.id)),
             vm_name: spec.id.clone(),
             supervisor_config_digest: String::new(),
-            runtime_source_policy: None,
             runtime_overlay_version: None,
             // Firecracker keeps no supervisor-config blob; its presence is
             // what marks a checkpoint as originating from a backend that does.
@@ -1375,12 +1365,29 @@ fn claim_plan(claim: &StandbyClaim) -> std::result::Result<ExecutionPlan, Standb
         .map_err(|_| refuse(ClaimRefusal::PlanMissing))
 }
 
-fn admitted_services(plan_json: Option<&str>) -> Result<Vec<ServiceId>> {
+fn admitted_broker_bindings(
+    plan_json: Option<&str>,
+) -> Result<(
+    Vec<ServiceId>,
+    Vec<mvm_contract::protocol::agent_capability::CapabilityBinding>,
+)> {
     plan_json
         .map(mvm_core::plan::plan_from_admitted_json)
         .transpose()
         .context("parse admitted plan host services")
-        .map(|plan| plan.map_or_else(Vec::new, |plan| plan.services))
+        .map(|plan| {
+            plan.map_or_else(
+                || (Vec::new(), Vec::new()),
+                |plan| {
+                    let capabilities = plan
+                        .extensions
+                        .iter()
+                        .flat_map(|extension| extension.capabilities.iter().cloned())
+                        .collect();
+                    (plan.services, capabilities)
+                },
+            )
+        })
 }
 
 /// How many times to redraw a fresh child name before giving up. A collision is
@@ -1494,6 +1501,16 @@ mod tests {
     use crate::backends::hvf::HvfDriver;
     use crate::driver::MockDriver;
 
+    fn without_per_boot_tokens(cmdline: &str) -> String {
+        cmdline
+            .split_whitespace()
+            .filter(|token| {
+                !token.starts_with("mvm.hostname=") && !token.starts_with("mvm.hostepoch=")
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     /// An `NetworkEndpointSpawner` test double: records the request it was handed and
     /// returns a canned UDS without spawning any process. `Mutex` (not `RefCell`)
     /// so it satisfies the `Send + Sync` a `VmBackend` spawner must be.
@@ -1507,6 +1524,7 @@ mod tests {
         tenant: String,
         secrets_len: usize,
         policy: NetworkPolicy,
+        network_limits: mvm_core::plan::NetworkLimits,
     }
 
     impl RecordingSpawner {
@@ -1525,6 +1543,7 @@ mod tests {
                 tenant: req.tenant.to_string(),
                 secrets_len: req.secrets.len(),
                 policy: req.network_policy.clone(),
+                network_limits: req.network_limits,
             });
             Ok(SpawnedEndpoint {
                 egress_uds: self.uds.clone(),
@@ -1635,6 +1654,28 @@ mod tests {
                     .insert(vm_name.to_string(), bytes);
             }
         }
+    }
+
+    #[test]
+    fn boot_and_console_start_run_concurrently() {
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+        let booted = console_boot::boot_while_starting_console(
+            || {
+                started_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .map_err(|error| {
+                        anyhow::anyhow!("console start did not overlap boot: {error}")
+                    })?;
+                Ok(7_u8)
+            },
+            || {
+                let _ = started_tx.send(());
+            },
+            || {},
+        )
+        .expect("the console-start task runs while the driver boot is in progress");
+
+        assert_eq!(booted, 7);
     }
 
     fn config(name: &str) -> VmStartConfig {
@@ -1925,6 +1966,10 @@ mod tests {
              does not fork on whether secrets are present"
         );
         assert_eq!(recorded.secrets_len, 1);
+        assert_eq!(
+            recorded.network_limits,
+            mvm_core::plan::NetworkLimits::default()
+        );
     }
 
     #[test]
@@ -2254,18 +2299,24 @@ mod tests {
         let cfg = VmStartConfig {
             name: vm_name.into(),
             rootfs_path: rootfs.display().to_string(),
+            initrd_path: Some(mvm_vmm::host::cmdline::seed_universal_initramfs(
+                home.path(),
+            )),
             verity_path: Some(verity.display().to_string()),
             roothash: Some("a".repeat(64)),
             network_policy: NetworkPolicy::preset(mvm_core::network_policy::NetworkPreset::Dev),
             ..Default::default()
         };
 
+        let driver = MockDriver::default();
+        let guest = spawn_activation_guest(driver.clone(), vm_name);
         let runner = WorkloadRunner::new(
-            MockDriver::default(),
+            driver,
             RecordingSpawner::new("/run/ep.sock"),
             RecordingBrokerRegistrar::new(),
         );
         runner.start(&cfg).expect("start succeeds");
+        guest.join().expect("guest thread");
 
         let specs = runner.driver.booted_specs();
         assert_eq!(specs.len(), 1);
@@ -2274,14 +2325,13 @@ mod tests {
         let require_grant = mvm_vmm::host::egress_bridge::require_grant_cmdline_token(vm_name)
             .expect("sidecar present ⇒ enforcement token");
         // Roothash and block-device tokens travel over vsock via
-        // ActivateEnvironment, so the kernel cmdline only carries policy,
-        // egress, and grant tokens.
+        // ActivateEnvironment, so the kernel cmdline only carries egress and
+        // grant tokens.
         for needle in [
             "mvm.verb_grant=",
             require_grant.as_str(),
             "mvm.host_signer_pub=",
             "mvm.vsock_egress=1",
-            "mvm.runtime_source_policy=",
         ] {
             assert!(
                 cmdline.contains(needle),
@@ -2324,7 +2374,7 @@ mod tests {
         assert_eq!(specs.len(), 1);
         let cmdline = &specs[0].cmdline;
 
-        let expected_base = driver.workload_base_bootargs(false, true);
+        let expected_base = driver.workload_base_bootargs(true);
         assert!(
             cmdline.starts_with(&expected_base),
             "cmdline did not start with the driver's base bootargs {expected_base:?}: {cmdline}"
@@ -2333,6 +2383,46 @@ mod tests {
             !cmdline.contains("ttyAMA0"),
             "cmdline carried the hardcoded HVF console rather than the driver's: {cmdline}"
         );
+    }
+
+    fn spawn_activation_guest(driver: MockDriver, vm_name: &str) -> std::thread::JoinHandle<()> {
+        use ed25519_dalek::SigningKey;
+        use mvm_agentd::vsock::{AuthenticatedSession, GuestRequest, GuestResponse};
+
+        let host_signer = [7u8; 32];
+        let keys_dir = mvm_core::config::mvm_keys_dir();
+        std::fs::create_dir_all(&keys_dir).unwrap();
+        std::fs::write(keys_dir.join("host-signer.ed25519"), host_signer).unwrap();
+        let vm_id = VmId(vm_name.to_string());
+
+        std::thread::spawn(move || {
+            let mut stream = {
+                let mut found = None;
+                for _ in 0..200 {
+                    if let Some(end) = driver.take_guest_end(&vm_id, GUEST_AGENT_PORT) {
+                        found = Some(end);
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                found.expect("the runner connected to the guest agent port")
+            };
+            let host_key = SigningKey::from_bytes(&host_signer).verifying_key();
+            let mut session = AuthenticatedSession::guest(
+                &mut stream,
+                SigningKey::from_bytes(&[9u8; 32]),
+                &host_key,
+            )
+            .expect("guest handshake");
+            let req: GuestRequest = session.read(&mut stream).expect("read request");
+            assert!(
+                matches!(req, GuestRequest::ActivateEnvironment(_)),
+                "the first post-boot verb must be ActivateEnvironment, got: {req:?}"
+            );
+            session
+                .write(&mut stream, &GuestResponse::ActivateEnvironmentAck)
+                .expect("write ack");
+        })
     }
 
     /// A boot that attached the universal initramfs must be sent
@@ -2351,13 +2441,6 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
         env.set("MVM_HOME", home.path());
-
-        // The activation handshake authenticates against the host signer;
-        // seed one so both ends of the loopback share the identity.
-        let host_signer = [7u8; 32];
-        let keys_dir = mvm_core::config::mvm_keys_dir();
-        std::fs::create_dir_all(&keys_dir).unwrap();
-        std::fs::write(keys_dir.join("host-signer.ed25519"), host_signer).unwrap();
 
         // An initramfs artifact under the shared cache is the discriminant
         // for the universal-initramfs boot path.
@@ -2382,41 +2465,9 @@ mod tests {
         let policy = NetworkPolicy::deny_all();
         let redaction = RedactionPolicy::default();
 
-        // The guest side of the loopback: authenticate, assert the request
-        // is exactly the activation verb, ACK it.
-        let guest = std::thread::spawn(move || {
-            use ed25519_dalek::SigningKey;
-            use mvm_agentd::vsock::{AuthenticatedSession, GuestRequest, GuestResponse};
-
-            let mut stream = {
-                let mut found = None;
-                for _ in 0..200 {
-                    if let Some(end) =
-                        driver.take_guest_end(&VmId("runner-activation".into()), GUEST_AGENT_PORT)
-                    {
-                        found = Some(end);
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                found.expect("the runner connected to the guest agent port")
-            };
-            let host_key = SigningKey::from_bytes(&host_signer).verifying_key();
-            let mut session = AuthenticatedSession::guest(
-                &mut stream,
-                SigningKey::from_bytes(&[9u8; 32]),
-                &host_key,
-            )
-            .expect("guest handshake");
-            let req: GuestRequest = session.read(&mut stream).expect("read request");
-            assert!(
-                matches!(req, GuestRequest::ActivateEnvironment(_)),
-                "the first post-boot verb must be ActivateEnvironment, got: {req:?}"
-            );
-            session
-                .write(&mut stream, &GuestResponse::ActivateEnvironmentAck)
-                .expect("write ack");
-        });
+        // The guest side of the loopback authenticates, verifies that the first
+        // request is the activation verb, and acknowledges it.
+        let guest = spawn_activation_guest(driver, "runner-activation");
 
         runner
             .start_workload(&WorkloadLaunchInputs {
@@ -2481,6 +2532,8 @@ mod tests {
 
     fn disk_volume(host: &str, guest: &str, read_only: bool) -> mvm_core::vm_backend::VmVolume {
         mvm_core::vm_backend::VmVolume {
+            materialized_image: None,
+            volume_label: None,
             host: host.into(),
             guest: guest.into(),
             size: String::new(),
@@ -2492,6 +2545,8 @@ mod tests {
 
     fn dir_share_volume(host: &str, guest: &str) -> mvm_core::vm_backend::VmVolume {
         mvm_core::vm_backend::VmVolume {
+            materialized_image: None,
+            volume_label: None,
             host: host.into(),
             guest: guest.into(),
             size: String::new(),
@@ -2888,6 +2943,12 @@ mod tests {
             kernel_path: Some("/img/kernel".into()),
             cpus: 2,
             memory_mib: 512,
+            // Every launch carries the overlay triple — it is the only source
+            // of the guest agent, so a parent warmed without one cannot reach
+            // an agent to be captured.
+            runtime_overlay_path: Some("/img/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/img/runtime.verity".into()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
             ..Default::default()
         }
     }
@@ -2914,6 +2975,7 @@ mod tests {
             vm_state_dir: vm_state_dir.display().to_string(),
             image_path: Some(rootfs.display().to_string()),
             image_sha256: Some("c".repeat(64)),
+            root_strategy: Default::default(),
             vsock_egress: false,
         }
     }
@@ -3034,7 +3096,9 @@ mod tests {
         // cmdline, so force an overflow with an oversized verb grant instead.
         launch.verity_path = Some(tmp.path().join("rootfs.verity").display().to_string());
         launch.roothash = Some("a".repeat(4096));
-        launch.initrd_path = Some(tmp.path().join("rootfs.initrd").display().to_string());
+        launch.initrd_path = Some(mvm_vmm::host::cmdline::seed_universal_initramfs(
+            home.path(),
+        ));
         let state_dir = mvm_core::config::vm_state_dir("parent-oversized");
         std::fs::create_dir_all(&state_dir).unwrap();
         let nonce = mvm_core::plan::Nonce::from_bytes([3u8; 16]);
@@ -3137,12 +3201,14 @@ mod tests {
 
         let (dir, rootfs) = overlay_aware_rootfs("shape-parity");
         std::fs::write(dir.path().join("rootfs.verity"), b"verity").unwrap();
-        std::fs::write(dir.path().join("rootfs.initrd"), b"initrd").unwrap();
 
         let launch = VmStartConfig {
             name: "shape-parity".into(),
             rootfs_path: rootfs.clone(),
             kernel_path: Some("/img/kernel".into()),
+            initrd_path: Some(mvm_vmm::host::cmdline::seed_universal_initramfs(
+                home.path(),
+            )),
             verity_path: Some(dir.path().join("rootfs.verity").display().to_string()),
             roothash: Some("a".repeat(64)),
             runtime_overlay_path: Some(dir.path().join("overlay.ext4").display().to_string()),
@@ -3151,20 +3217,22 @@ mod tests {
             ),
             runtime_overlay_roothash: Some("b".repeat(64)),
             runtime_overlay_version: Some("0.18.0".into()),
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
             cpus: 2,
             memory_mib: 512,
             ..Default::default()
         };
 
         let store = CheckpointStore::at(home.path().join("checkpoints"));
+        let driver = MockDriver::default().with_vm_full_rootfs(Path::new(&rootfs));
+        let guest = spawn_activation_guest(driver.clone(), "shape-parity");
         let runner = WorkloadRunner::new(
-            MockDriver::default().with_vm_full_rootfs(Path::new(&rootfs)),
+            driver,
             RecordingSpawner::new("/run/ep.sock"),
             RecordingBrokerRegistrar::new(),
         );
 
         runner.start(&launch).expect("workload boots");
+        guest.join().expect("guest thread");
         let spec = standby_spec_for(
             "standby-parity",
             &home.path().join("standby-parity"),
@@ -3190,21 +3258,15 @@ mod tests {
             4,
             "fixture must boot rootfs + verity + overlay + overlay verity"
         );
-        assert!(
-            workload
-                .cmdline
-                .contains("mvm.runtime_source_policy=required_overlay"),
-            "fixture must boot the required-overlay contract: {}",
-            workload.cmdline
-        );
         assert_eq!(
             parent.blocks, workload.blocks,
             "the warm parent must attach the workload's whole disk stack, overlay included"
         );
         assert_eq!(
-            parent.cmdline, workload.cmdline,
-            "the warm parent must boot the workload's kernel cmdline"
+            without_per_boot_tokens(&parent.cmdline),
+            without_per_boot_tokens(&workload.cmdline)
         );
+        assert!(!parent.cmdline.contains("mvm.hostname="));
         assert_eq!(parent.kernel, workload.kernel);
         assert_eq!(parent.initramfs, workload.initramfs);
     }
@@ -3239,6 +3301,9 @@ mod tests {
             network_policy: NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)]),
             cpus: 2,
             memory_mib: 512,
+            runtime_overlay_path: Some("/img/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/img/runtime.verity".into()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
             ..Default::default()
         };
 
@@ -3282,7 +3347,11 @@ mod tests {
             "the parent must boot it too, or every child restored from it has no network: {}",
             parent.cmdline
         );
-        assert_eq!(parent.cmdline, workload.cmdline);
+        assert_eq!(
+            without_per_boot_tokens(&parent.cmdline),
+            without_per_boot_tokens(&workload.cmdline)
+        );
+        assert!(!parent.cmdline.contains("mvm.hostname="));
         assert_eq!(parent.blocks, workload.blocks);
         assert!(
             !parent.cmdline.contains("api.example.com"),
@@ -3407,7 +3476,6 @@ mod tests {
                 vm_name: "warm-parent".into(),
                 rootfs,
                 supervisor_config_digest: "d".into(),
-                runtime_source_policy: None,
                 runtime_overlay_version: None,
                 tag: None,
                 created_unix: 1,
@@ -3613,6 +3681,28 @@ mod tests {
         serde_json::to_string(&mvm_core::plan::sign_plan(&plan, &key, "host:test")).unwrap()
     }
 
+    #[test]
+    fn admitted_network_limits_are_extracted_without_defaulting() {
+        let expected = mvm_core::plan::NetworkLimits::builder()
+            .max_tcp_flows(7)
+            .max_udp_associations(5)
+            .max_dns_bindings(3)
+            .max_ingress_listeners(2)
+            .build()
+            .unwrap();
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.network_limits = expected;
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let json =
+            serde_json::to_string(&mvm_core::plan::sign_plan(&plan, &key, "host:test")).unwrap();
+
+        assert_eq!(admitted_network_limits(Some(&json)).unwrap(), expected);
+        assert_eq!(
+            admitted_network_limits(None).unwrap(),
+            mvm_core::plan::NetworkLimits::default()
+        );
+    }
+
     #[derive(Default)]
     struct TestChildGrantIssuer {
         seen_child: Mutex<Option<String>>,
@@ -3655,6 +3745,7 @@ mod tests {
             spawned_unix_secs: 1,
             state: StandbyState::Idle,
             image_sha256: None,
+            root_strategy: Default::default(),
             parent_checkpoint: None,
             preloaded_child_vm_name: None,
             vsock_egress: false,
@@ -5016,6 +5107,7 @@ mod tests {
             vcpus: _,
             mem_mib: _,
             image_sha256: _,
+            root_strategy: _,
             vsock_egress: _,
         } = handle.compat();
 

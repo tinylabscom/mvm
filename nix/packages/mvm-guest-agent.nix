@@ -4,7 +4,7 @@
 # `crates/mvm-agentd/src/bin/mvm-guest-agent.rs` (~2400 LOC of vsock
 # RPC + worker-pool dispatch + integration manifest + system
 # metrics). Side-bins `mvm-seccomp-apply` (the per-service seccomp
-# shim) and `mvm-verity-init` (the verity-initrd PID 1) ride the
+# shim) rides the
 # same derivation since the rootfs needs them too.
 #
 # ## Build environment
@@ -32,9 +32,10 @@
 # the guest agent's runtime profile and signed verb grant, after protocol
 # authentication; image construction does not select a handler set.
 
-{ pkgs
-, lib
-, mvmSrc
+{
+  pkgs,
+  lib,
+  mvmSrc,
 }:
 
 pkgs.rustPlatform.buildRustPackage {
@@ -46,7 +47,10 @@ pkgs.rustPlatform.buildRustPackage {
   # Workspace's Cargo.lock is the source of truth for every crate
   # we vendor. `buildRustPackage` vendors the closure even though
   # we only build mvm-agentd; the unused deps compile zero code.
-  cargoLock.lockFile = mvmSrc + "/Cargo.lock";
+  cargoDeps = import ../lib/static-crates-cargo-deps.nix {
+    inherit pkgs;
+    lockFile = mvmSrc + "/Cargo.lock";
+  };
 
   unpackPhase = import ./workspace-unpack.nix { inherit mvmSrc; };
 
@@ -54,14 +58,21 @@ pkgs.rustPlatform.buildRustPackage {
   # has heavier members (libkrun via mvm-build, libkrun via
   # mvm-providers, etc.) that aren't in the guest closure.
   cargoBuildFlags = [
-    "--package" "mvm-agentd"
-    "--bin" "mvm-guest-agent"
-    "--bin" "mvm-seccomp-apply"
-    "--bin" "mvm-verity-init"
+    "--package"
+    "mvm-agentd"
+    "--bin"
+    "mvm-guest-agent"
+    "--bin"
+    "mvm-seccomp-apply"
     # Guest-side network defense. Installs kernel blackhole routes
     # for `MANDATORY_DENY_RANGES` at boot from `/init` (uid 0) before
     # the main agent forks under setpriv.
-    "--bin" "mvm-guest-netinit"
+    "--bin"
+    "mvm-guest-netinit"
+    # Runtime-lean OCI roots still need their entrypoint wrapper; PID 1 is
+    # the universal initramfs agent, not a binary baked into the rootfs.
+    "--bin"
+    "mvm-oci-entrypoint"
   ];
 
   # Same selection for the `nix flake check`-equivalent test run.
@@ -69,7 +80,8 @@ pkgs.rustPlatform.buildRustPackage {
   # parsing, seccomp filter golden tests) so they run inside the
   # sandbox without privilege.
   cargoTestFlags = [
-    "--package" "mvm-agentd"
+    "--package"
+    "mvm-agentd"
   ];
 
   # Skip tests by default — they need a Linux build host and the

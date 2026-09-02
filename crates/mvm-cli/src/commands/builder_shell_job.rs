@@ -38,7 +38,7 @@ pub struct Args {
     pub artifact_out: Option<PathBuf>,
 }
 
-pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
+pub(in crate::commands) fn run(cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     let script = std::fs::read_to_string(&args.script)
         .with_context(|| format!("reading script {}", args.script.display()))?;
     let work_dir = match args.work_dir {
@@ -62,8 +62,11 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     };
 
     let choice = resolve_choice();
+    admit_source_builder_image(choice, || {
+        crate::commands::env::builder_vm::bootstrap_builder_vm_image()
+    })?;
     let result = match choice {
-        BuilderBackendChoice::Libkrun => LibkrunBuilderVm::default()
+        BuilderBackendChoice::Libkrun => libkrun_shell_builder(cli.verbose)
             .run_shell_script(&job)
             .map_err(builder_vm_err)?,
         BuilderBackendChoice::Hvf => {
@@ -78,6 +81,12 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             bail!(
                 "builder shell jobs are not yet wired for the QEMU backend; \
                  use --builder hvf or --builder libkrun"
+            )
+        }
+        BuilderBackendChoice::WebLinux => {
+            bail!(
+                "builder shell jobs are not available for the WebLinux backend; \
+                 WebLinux is browser-only; use --builder hvf or --builder libkrun"
             )
         }
     };
@@ -100,6 +109,65 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     Ok(())
 }
 
+fn libkrun_shell_builder(verbosity: u8) -> LibkrunBuilderVm {
+    LibkrunBuilderVm::default().with_verbose(verbosity > 0)
+}
+
+fn admit_source_builder_image(
+    choice: BuilderBackendChoice,
+    bootstrap: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    if choice == BuilderBackendChoice::Libkrun {
+        bootstrap().context("admitting the current source builder VM image")?;
+    }
+    Ok(())
+}
+
 fn builder_vm_err(e: BuilderVmError) -> anyhow::Error {
     anyhow::anyhow!("builder VM shell job failed: {e}")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    #[test]
+    fn libkrun_shell_jobs_admit_the_current_source_image() {
+        let called = Cell::new(false);
+        admit_source_builder_image(BuilderBackendChoice::Libkrun, || {
+            called.set(true);
+            Ok(())
+        })
+        .expect("source image admission");
+        assert!(called.get());
+    }
+
+    #[test]
+    fn source_image_admission_failure_refuses_the_shell_job() {
+        let err = admit_source_builder_image(BuilderBackendChoice::Libkrun, || {
+            anyhow::bail!("fingerprint mismatch")
+        })
+        .expect_err("admission failure must propagate");
+        assert!(err.to_string().contains("admitting the current source"));
+    }
+
+    #[test]
+    fn hvf_uses_its_dedicated_image_resolver() {
+        let called = Cell::new(false);
+        admit_source_builder_image(BuilderBackendChoice::Hvf, || {
+            called.set(true);
+            Ok(())
+        })
+        .expect("hvf skips source builder bootstrap");
+        assert!(!called.get());
+    }
+
+    #[test]
+    fn verbose_cli_streams_the_libkrun_guest_console() {
+        assert!(!libkrun_shell_builder(0).verbose);
+        assert!(libkrun_shell_builder(1).verbose);
+        assert!(libkrun_shell_builder(u8::MAX).verbose);
+    }
 }

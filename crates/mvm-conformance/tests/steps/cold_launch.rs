@@ -10,7 +10,8 @@ use cucumber::{given, then, when};
 
 use mvm_cli::bench::cold_launch::{
     ArtifactPaths, BuildProfile, GuestSizing, LAUNCH_SAMPLE_SCHEMA_VERSION, LaunchLane, LaunchMode,
-    LaunchRootStrategy, LaunchSample, LaunchSubTimings, LaunchWork, RunPhaseTimings, validate_lane,
+    LaunchRootStrategy, LaunchSample, LaunchSubTimings, LaunchWork, RunPhaseTimings,
+    validate_hard_boot_timing, validate_lane,
 };
 
 use crate::world::CliWorld;
@@ -72,6 +73,15 @@ fn clean_launch_sample(world: &mut CliWorld, profile: String) {
     world.cold_launch_sample = Some(clean_sample(profile));
 }
 
+#[given(regex = r"^a prepared-cold launch with a dispatch window of ([0-9.]+) ms$")]
+fn launch_with_dispatch_window(world: &mut CliWorld, milliseconds: f64) {
+    let mut sample = clean_sample(BuildProfile::Release);
+    sample.phases.backend_start_ms = milliseconds;
+    sample.phases.vsock_wait_ms = 0.0;
+    sample.phases.warm_window_ms = milliseconds;
+    world.cold_launch_sample = Some(sample);
+}
+
 #[given(
     regex = r"^a release launch sample whose launch performed (image_pull|image_build|mount_materialize|warm_claim|artifact_hash|process_table_scan)$"
 )]
@@ -119,6 +129,18 @@ fn offer_to_the_prepared_cold_lane(world: &mut CliWorld) {
         Some(validate_lane(LaunchLane::PreparedCold, sample).map_err(|e| e.to_string()));
 }
 
+#[when("the dispatch timing is checked against the hard boot requirement")]
+fn check_hard_boot_requirement(world: &mut CliWorld) {
+    let sample = world
+        .cold_launch_sample
+        .as_ref()
+        .expect("a launch sample was staged");
+    world.cold_launch_lane_result = Some(
+        validate_hard_boot_timing(LaunchLane::PreparedCold, sample.phases.dispatch_window_ms())
+            .map_err(|error| error.to_string()),
+    );
+}
+
 #[then("the prepared-cold lane accepts the sample")]
 fn the_lane_accepts(world: &mut CliWorld) {
     let outcome = world
@@ -126,6 +148,20 @@ fn the_lane_accepts(world: &mut CliWorld) {
         .as_ref()
         .expect("the lane was offered a sample");
     assert_eq!(outcome, &Ok(()), "the lane refused a clean launch");
+}
+
+#[then("the hard boot requirement passes")]
+fn hard_boot_requirement_passes(world: &mut CliWorld) {
+    the_lane_accepts(world);
+}
+
+#[then("the hard boot requirement fails and says every boot must be under 200 ms")]
+fn hard_boot_requirement_fails(world: &mut CliWorld) {
+    let rendered = refusal(world);
+    assert!(
+        rendered.contains("every boot must be under 200.0ms"),
+        "hard-limit refusal was not explicit: {rendered}"
+    );
 }
 
 #[then(

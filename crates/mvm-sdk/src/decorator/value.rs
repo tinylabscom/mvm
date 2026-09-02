@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 
 use crate::ir::{
     App, AuthType, Dependencies, Entrypoint, EnvValue, Format, HookCmd, Hooks, Image, Mount,
-    Network, NetworkEgress, NetworkMode, NodeTool, PortForward, PortProto, PythonTool, Resources,
-    SecretMount, SecretRef, Source, Workload,
+    Network, NetworkEgress, NetworkMode, NodeTool, PortForward, PortProto, PortTransform,
+    PythonTool, Resources, SecretMount, SecretRef, Source, Workload,
 };
 
 use super::ParseError;
@@ -22,9 +22,9 @@ use super::ParseError;
 /// kwarg-value position. Anything outside this set is rejected with
 /// [`ParseError::UnknownHelper`].
 ///
-/// Documented surface: `mvm.python_image`, `mvm.node_image`,
-/// `mvm.nix_packages`, `mvm.resources`, `mvm.network`, `mvm.secret`,
-/// `mvm.literal`, `mvm.hook`, `mvm.addons.database`,
+/// Documented surface: `mvm.local_path`, `mvm.python_image`,
+/// `mvm.node_image`, `mvm.nix_packages`, `mvm.resources`, `mvm.network`,
+/// `mvm.secret`, `mvm.literal`, `mvm.hook`, `mvm.addons.database`,
 /// `mvm.addons.service`. The list lives in code so adding a helper
 /// is a reviewed code change rather than a config update.
 ///
@@ -32,6 +32,7 @@ use super::ParseError;
 /// a TypeScript `app({...})` import becomes `mvm.app` before lookup)
 /// so the allowlist is a single source of truth.
 pub const HELPER_ALLOWLIST: &[&str] = &[
+    "mvm.local_path",
     "mvm.python_image",
     "mvm.node_image",
     "mvm.nix_packages",
@@ -175,7 +176,8 @@ pub fn lower_to_workload(
                     detail: format!("expected string list, got element {other:?}"),
                 }),
             })
-            .collect::<Result<Vec<_>, _>>()?,
+            .collect::<Result<Vec<_>, _>>()?
+            .into(),
         Some(other) => {
             return Err(ParseError::HelperBadKwarg {
                 path: path.to_path_buf(),
@@ -185,7 +187,29 @@ pub fn lower_to_workload(
                 detail: format!("expected string list, got {other:?}"),
             });
         }
-        None => vec!["**".to_string()],
+        None => None,
+    };
+
+    let source = match kwargs.remove("source") {
+        Some(value) => {
+            let mut source = helper_to_source(value, path, decorator_line)?;
+            if let Some(include) = include {
+                let Source::LocalPath {
+                    include: source_include,
+                    ..
+                } = &mut source
+                else {
+                    unreachable!("mvm.local_path always lowers to a local source")
+                };
+                *source_include = include;
+            }
+            source
+        }
+        None => Source::LocalPath {
+            path: ".".to_string(),
+            include: include.unwrap_or_else(|| vec!["**".to_string()]),
+            exclude: vec![],
+        },
     };
 
     // `addons` lowering deferred — Phase 4 ships with the IR field
@@ -219,11 +243,7 @@ pub fn lower_to_workload(
 
     let app = App {
         name: workload_id.clone(),
-        source: Source::LocalPath {
-            path: ".".to_string(),
-            include,
-            exclude: vec![],
-        },
+        source,
         image,
         entrypoints: vec![Entrypoint::Function {
             language: language.to_string(),
@@ -257,6 +277,92 @@ pub fn lower_to_workload(
         volumes: vec![],
         extensions: BTreeMap::new(),
     })
+}
+
+fn helper_to_source(v: Value, path: &Path, line: usize) -> Result<Source, ParseError> {
+    let Value::Helper {
+        name,
+        mut kwargs,
+        positional,
+    } = v
+    else {
+        return Err(ParseError::HelperBadKwarg {
+            path: path.to_path_buf(),
+            line,
+            helper: "mvm.app".to_string(),
+            kwarg: "source".to_string(),
+            detail: format!("expected mvm.local_path(...), got {v:?}"),
+        });
+    };
+    if name != "mvm.local_path" {
+        return Err(ParseError::HelperBadKwarg {
+            path: path.to_path_buf(),
+            line,
+            helper: "mvm.app".to_string(),
+            kwarg: "source".to_string(),
+            detail: format!("expected mvm.local_path(...), got {name}(...)"),
+        });
+    }
+
+    let source_path = match positional.as_slice() {
+        [Value::Str(value)] => value.clone(),
+        [] => {
+            pop_string_kwarg(&mut kwargs, "path").ok_or_else(|| ParseError::HelperMissingKwarg {
+                path: path.to_path_buf(),
+                line,
+                helper: "mvm.local_path".to_string(),
+                kwarg: "path",
+            })?
+        }
+        other => {
+            return Err(ParseError::HelperBadKwarg {
+                path: path.to_path_buf(),
+                line,
+                helper: "mvm.local_path".to_string(),
+                kwarg: "path".to_string(),
+                detail: format!("expected one string path, got {other:?}"),
+            });
+        }
+    };
+
+    let include =
+        strict_string_list_kwarg(&mut kwargs, "include", vec!["**".to_string()], path, line)?;
+    let exclude = strict_string_list_kwarg(&mut kwargs, "exclude", vec![], path, line)?;
+    if let Some((kwarg, value)) = kwargs.into_iter().next() {
+        return Err(ParseError::HelperBadKwarg {
+            path: path.to_path_buf(),
+            line,
+            helper: "mvm.local_path".to_string(),
+            kwarg,
+            detail: format!("unrecognized kwarg with value {value:?}"),
+        });
+    }
+
+    Ok(Source::LocalPath {
+        path: source_path,
+        include,
+        exclude,
+    })
+}
+
+fn strict_string_list_kwarg(
+    kwargs: &mut BTreeMap<String, Value>,
+    name: &str,
+    default: Vec<String>,
+    path: &Path,
+    line: usize,
+) -> Result<Vec<String>, ParseError> {
+    match kwargs.remove(name) {
+        Some(Value::List(items)) => list_of_strings(&items, path, line, "mvm.local_path", name),
+        Some(other) => Err(ParseError::HelperBadKwarg {
+            path: path.to_path_buf(),
+            line,
+            helper: "mvm.local_path".to_string(),
+            kwarg: name.to_string(),
+            detail: format!("expected string list, got {other:?}"),
+        }),
+        None => Ok(default),
+    }
 }
 
 fn helper_to_image(v: Value, path: &Path, line: usize) -> Result<Image, ParseError> {
@@ -419,14 +525,20 @@ fn helper_to_network(v: Value, path: &Path, line: usize) -> Result<Network, Pars
             });
         }
     };
-    // Declares that the workload needs a real in-guest IP stack. This is
-    // what selects the L3 tunnel; leaving it off keeps the socket-aware
-    // transport, which is the stronger posture.
-    let raw_ip_stack = pop_bool_kwarg(&mut kwargs, "raw_ip_stack", path, line, "mvm.network")?;
+    if kwargs.remove("raw_ip_stack").is_some() {
+        return Err(ParseError::HelperBadKwarg {
+            path: path.to_path_buf(),
+            line,
+            helper: "mvm.network".to_string(),
+            kwarg: "raw_ip_stack".to_string(),
+            detail: "retired; use the guest loopback HTTP proxy, SOCKS5h/UDP, controlled DNS, mediated ping, or a typed connector".to_string(),
+        });
+    }
     let ports = match kwargs.remove("ports") {
         Some(Value::List(items)) => items
             .into_iter()
-            .map(|v| match v {
+            .enumerate()
+            .map(|(index, v)| match v {
                 Value::Dict(mut d) => {
                     let guest = match d.remove("guest") {
                         Some(Value::Int(n)) => n as u16,
@@ -467,7 +579,85 @@ fn helper_to_network(v: Value, path: &Path, line: usize) -> Result<Network, Pars
                             });
                         }
                     };
-                    Ok(PortForward { guest, host, proto })
+                    let mapping_id = match d.remove("mapping_id") {
+                        Some(Value::Int(n)) => n as u16,
+                        None => u16::try_from(index.saturating_add(1)).unwrap_or(u16::MAX),
+                        other => {
+                            return Err(ParseError::HelperBadKwarg {
+                                path: path.to_path_buf(),
+                                line,
+                                helper: "mvm.network".to_string(),
+                                kwarg: "ports[].mapping_id".to_string(),
+                                detail: format!("expected integer, got {other:?}"),
+                            });
+                        }
+                    };
+                    let host_addr = match d.remove("host_addr") {
+                        Some(Value::Str(value)) => value,
+                        None => "127.0.0.1".to_string(),
+                        other => {
+                            return Err(ParseError::HelperBadKwarg {
+                                path: path.to_path_buf(),
+                                line,
+                                helper: "mvm.network".to_string(),
+                                kwarg: "ports[].host_addr".to_string(),
+                                detail: format!("expected string, got {other:?}"),
+                            });
+                        }
+                    };
+                    let guest_addr = match d.remove("guest_addr") {
+                        Some(Value::Str(value)) => value,
+                        None => "127.0.0.1".to_string(),
+                        other => {
+                            return Err(ParseError::HelperBadKwarg {
+                                path: path.to_path_buf(),
+                                line,
+                                helper: "mvm.network".to_string(),
+                                kwarg: "ports[].guest_addr".to_string(),
+                                detail: format!("expected string, got {other:?}"),
+                            });
+                        }
+                    };
+                    let transform = match d.remove("transform") {
+                        Some(Value::Str(value)) if value == "opaque" => PortTransform::Opaque,
+                        Some(Value::Str(value)) if value == "http" => PortTransform::Http,
+                        Some(Value::Str(value)) if value == "tls" => PortTransform::Tls,
+                        None => PortTransform::Opaque,
+                        other => {
+                            return Err(ParseError::HelperBadKwarg {
+                                path: path.to_path_buf(),
+                                line,
+                                helper: "mvm.network".to_string(),
+                                kwarg: "ports[].transform".to_string(),
+                                detail: format!(
+                                    "expected \"opaque\"/\"http\"/\"tls\", got {other:?}"
+                                ),
+                            });
+                        }
+                    };
+                    let tls_secret = match d.remove("tls_secret") {
+                        Some(Value::Str(value)) => Some(value),
+                        None => None,
+                        other => {
+                            return Err(ParseError::HelperBadKwarg {
+                                path: path.to_path_buf(),
+                                line,
+                                helper: "mvm.network".to_string(),
+                                kwarg: "ports[].tls_secret".to_string(),
+                                detail: format!("expected string, got {other:?}"),
+                            });
+                        }
+                    };
+                    Ok(PortForward {
+                        mapping_id,
+                        host_addr,
+                        guest,
+                        host,
+                        proto,
+                        guest_addr,
+                        transform,
+                        tls_secret,
+                    })
                 }
                 other => Err(ParseError::HelperBadKwarg {
                     path: path.to_path_buf(),
@@ -492,11 +682,11 @@ fn helper_to_network(v: Value, path: &Path, line: usize) -> Result<Network, Pars
     let _ = kwargs;
     Ok(Network {
         mode,
-        raw_ip_stack,
         ports,
         egress: None::<NetworkEgress>,
         peers: vec![],
         dns: None,
+        ai: None,
     })
 }
 
@@ -785,29 +975,6 @@ fn list_of_strings(
             }),
         })
         .collect()
-}
-
-/// Pop a boolean kwarg. Absent yields `false`; a non-boolean value is a
-/// parse error rather than a silent default, because the kwargs this is used
-/// for change what a workload is admitted for.
-fn pop_bool_kwarg(
-    map: &mut BTreeMap<String, Value>,
-    key: &str,
-    path: &Path,
-    line: usize,
-    helper: &str,
-) -> Result<bool, ParseError> {
-    match map.remove(key) {
-        None | Some(Value::None) => Ok(false),
-        Some(Value::Bool(b)) => Ok(b),
-        Some(other) => Err(ParseError::HelperBadKwarg {
-            path: path.to_path_buf(),
-            line,
-            helper: helper.to_string(),
-            kwarg: key.to_string(),
-            detail: format!("expected True/False, got {other:?}"),
-        }),
-    }
 }
 
 fn pop_string_kwarg(map: &mut BTreeMap<String, Value>, key: &str) -> Option<String> {

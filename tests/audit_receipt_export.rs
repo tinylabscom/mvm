@@ -67,6 +67,7 @@ fn sample_audit_entry(event: &str, labels: BTreeMap<String, String>) -> PlanAudi
         image_name: "test-image".into(),
         image_sha256: "sha256:0000000000000000000000000000000000000000000000000000000000000002"
             .into(),
+        caller_commitment: None,
         event: event.into(),
         labels,
     }
@@ -244,4 +245,234 @@ fn receipts_export_empty_chain_reports_no_receipts() {
     let receipts: Vec<mvm_core::receipt::SignedExecutionReceipt> =
         serde_json::from_str(&stdout).expect("parsing empty receipt array");
     assert!(receipts.is_empty());
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Completeness: every in-scope entry is accounted for
+// ─────────────────────────────────────────────────────────────────
+
+/// A chain carrying the event families a real run emits — including the ones
+/// that have no receipt mapping and used to fall out of an export silently.
+fn write_chain_with_egress_and_input(sandbox: &ExportSandbox) -> SigningKey {
+    let keys_dir = sandbox.keys_dir();
+    std::fs::create_dir_all(&keys_dir).unwrap();
+    let audit_dir = sandbox.audit_dir();
+    std::fs::create_dir_all(&audit_dir).unwrap();
+
+    let signing_key = SigningKey::from_bytes(&[9u8; 32]);
+    let signer = FileAuditSigner::open(signing_key.clone(), &audit_dir).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let entries = vec![
+        sample_audit_entry("plan.admitted", BTreeMap::new()),
+        sample_audit_entry("plan.launched", BTreeMap::new()),
+        {
+            let mut labels = BTreeMap::new();
+            labels.insert("host".into(), "evil.example".into());
+            sample_audit_entry("flow.egress.denied", labels)
+        },
+        {
+            let mut labels = BTreeMap::new();
+            labels.insert("stream_input_holder".into(), "writer-1".into());
+            sample_audit_entry("stream.input_granted", labels)
+        },
+        sample_audit_entry("plan.exited", BTreeMap::new()),
+    ];
+
+    for entry in &entries {
+        rt.block_on(signer.sign_and_emit(entry)).unwrap();
+    }
+
+    std::fs::write(
+        keys_dir.join("host-signer.pub"),
+        signing_key.verifying_key().to_bytes(),
+    )
+    .unwrap();
+    std::fs::write(keys_dir.join("host-signer.ed25519"), signing_key.to_bytes()).unwrap();
+    set_secret_permissions(&keys_dir.join("host-signer.ed25519"));
+
+    signing_key
+}
+
+#[test]
+fn every_in_scope_entry_is_either_a_receipt_or_a_citation() {
+    let sandbox = ExportSandbox::new();
+    let key = write_chain_with_egress_and_input(&sandbox);
+    let plan_id = sample_plan_id().0;
+
+    let evidence = mvm_hostd::audit::receipt_export::export_evidence(
+        &sandbox.audit_dir(),
+        "local",
+        Some(&plan_id),
+        &key,
+    )
+    .expect("export");
+
+    let path = mvm_hostd::audit::emitter::audit_path_for_tenant(&sandbox.audit_dir(), "local");
+    let chain =
+        mvm_hostd::supervisor::audit_file::verify_audit_chain_entries(&path, &key.verifying_key())
+            .expect("chain");
+    let in_scope = chain.iter().filter(|e| e.plan_id.0 == plan_id).count();
+
+    assert_eq!(
+        evidence.receipts.len() + evidence.cited.len(),
+        in_scope,
+        "every in-scope entry must be accounted for exactly once: {} receipts + {} cited != {} entries",
+        evidence.receipts.len(),
+        evidence.cited.len(),
+        in_scope,
+    );
+}
+
+#[test]
+fn egress_decisions_are_cited_rather_than_dropped() {
+    let sandbox = ExportSandbox::new();
+    let key = write_chain_with_egress_and_input(&sandbox);
+    let plan_id = sample_plan_id().0;
+
+    let evidence = mvm_hostd::audit::receipt_export::export_evidence(
+        &sandbox.audit_dir(),
+        "local",
+        Some(&plan_id),
+        &key,
+    )
+    .expect("export");
+
+    assert!(
+        evidence
+            .cited
+            .iter()
+            .any(|c| c.event == "flow.egress.denied"),
+        "an egress denial must appear as a citation; cited events were {:?}",
+        evidence.cited.iter().map(|c| &c.event).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn a_citation_carries_the_leaf_index_that_addresses_the_real_tree() {
+    let sandbox = ExportSandbox::new();
+    let key = write_chain_with_egress_and_input(&sandbox);
+    let plan_id = sample_plan_id().0;
+
+    let evidence = mvm_hostd::audit::receipt_export::export_evidence(
+        &sandbox.audit_dir(),
+        "local",
+        Some(&plan_id),
+        &key,
+    )
+    .expect("export");
+
+    // The egress denial is the third entry written, so leaf index 2. An index
+    // counted within the filtered set would not build a verifying proof.
+    let egress = evidence
+        .cited
+        .iter()
+        .find(|c| c.event == "flow.egress.denied")
+        .expect("egress citation");
+    assert_eq!(
+        egress.leaf_index, 2,
+        "leaf index must address the full chain"
+    );
+}
+
+#[test]
+fn an_exported_receipt_names_the_chain_position_it_came_from() {
+    let sandbox = ExportSandbox::new();
+    let key = write_chain_with_egress_and_input(&sandbox);
+    let plan_id = sample_plan_id().0;
+
+    let evidence = mvm_hostd::audit::receipt_export::export_evidence(
+        &sandbox.audit_dir(),
+        "local",
+        Some(&plan_id),
+        &key,
+    )
+    .expect("export");
+
+    let first = evidence.receipts.first().expect("at least one receipt");
+    let ext = &first.payload.extensions;
+    for k in [
+        mvm_core::receipt::extension_key::AUDIT_DIGEST,
+        mvm_core::receipt::extension_key::AUDIT_ROOT,
+        mvm_core::receipt::extension_key::TREE_SIZE,
+    ] {
+        assert!(ext.contains_key(k), "missing extension {k}; had {ext:?}");
+    }
+
+    // The extensions are inside the signed payload, so a receipt carrying them
+    // still verifies and its content address still matches.
+    first
+        .verify()
+        .expect("receipt still verifies with extensions present");
+}
+
+#[test]
+fn every_exported_receipt_shares_one_audit_root() {
+    // Proofs in an archive all bind to a single root; receipts exported in the
+    // same pass must therefore name that same root, not one root each.
+    let sandbox = ExportSandbox::new();
+    let key = write_chain_with_egress_and_input(&sandbox);
+    let plan_id = sample_plan_id().0;
+
+    let evidence = mvm_hostd::audit::receipt_export::export_evidence(
+        &sandbox.audit_dir(),
+        "local",
+        Some(&plan_id),
+        &key,
+    )
+    .expect("export");
+
+    let roots: std::collections::BTreeSet<String> = evidence
+        .receipts
+        .iter()
+        .map(|r| {
+            r.payload
+                .extensions
+                .get(mvm_core::receipt::extension_key::AUDIT_ROOT)
+                .and_then(|v| v.as_str())
+                .expect("audit root extension")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        roots.len(),
+        1,
+        "all receipts must cite one root, got {roots:?}"
+    );
+}
+
+#[test]
+fn the_audit_digest_extension_resolves_to_the_entry_it_came_from() {
+    let sandbox = ExportSandbox::new();
+    let key = write_chain_with_egress_and_input(&sandbox);
+    let plan_id = sample_plan_id().0;
+
+    let evidence = mvm_hostd::audit::receipt_export::export_evidence(
+        &sandbox.audit_dir(),
+        "local",
+        Some(&plan_id),
+        &key,
+    )
+    .expect("export");
+
+    let path = mvm_hostd::audit::emitter::audit_path_for_tenant(&sandbox.audit_dir(), "local");
+    let chain =
+        mvm_hostd::supervisor::audit_file::verify_audit_chain_entries(&path, &key.verifying_key())
+            .expect("chain");
+
+    // First receipt is plan.admitted, the first chain entry.
+    let want = mvm_hostd::audit::evidence::audit_entry_digest_hex(&chain[0]).expect("digest");
+    let got = evidence.receipts[0]
+        .payload
+        .extensions
+        .get(mvm_core::receipt::extension_key::AUDIT_DIGEST)
+        .and_then(|v| v.as_str())
+        .expect("audit digest extension");
+    assert_eq!(
+        got, want,
+        "the digest must identify the exact signed entry bytes"
+    );
 }

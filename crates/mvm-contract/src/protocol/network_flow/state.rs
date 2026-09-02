@@ -29,7 +29,7 @@
 //! an open naming anything else — so a listener that was never signed for
 //! cannot be conjured by sending a frame about it.
 
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::BTreeMap;
 
 use super::frame::{Direction, SESSION_STREAM_ID};
 use super::limits::{
@@ -238,11 +238,21 @@ fn ceiling_for(class: FlowClass) -> Option<usize> {
 pub struct SessionValidator {
     session: SessionState,
     streams: BTreeMap<u32, Stream>,
-    declared_ingress: BTreeSet<u16>,
+    declared_ingress: BTreeMap<u16, IngressFlowKind>,
     /// Highest guest-initiated (odd) ID ever admitted.
     guest_watermark: u32,
     /// Highest host-initiated (even, non-zero) ID ever admitted.
     host_watermark: u32,
+}
+
+/// Transport projected from one signed ingress mapping into the protocol
+/// state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum IngressFlowKind {
+    /// Byte-stream ingress using common `Data` and credit frames.
+    Tcp,
+    /// Datagram ingress using `UdpRecv` and `UdpSend` frames.
+    Udp,
 }
 
 impl SessionValidator {
@@ -253,6 +263,18 @@ impl SessionValidator {
     /// naming anything outside it is refused.
     #[must_use]
     pub fn new(ingress_mappings: impl IntoIterator<Item = u16>) -> Self {
+        Self::new_with_ingress(
+            ingress_mappings
+                .into_iter()
+                .map(|mapping| (mapping, IngressFlowKind::Tcp)),
+        )
+    }
+
+    /// A validator with each signed ingress mapping's transport projected in.
+    #[must_use]
+    pub fn new_with_ingress(
+        ingress_mappings: impl IntoIterator<Item = (u16, IngressFlowKind)>,
+    ) -> Self {
         Self {
             session: SessionState::AwaitingHello,
             streams: BTreeMap::new(),
@@ -391,7 +413,6 @@ impl SessionValidator {
     }
 
     fn admit_open(&mut self, facts: &FrameFacts) -> Result<(), StateError> {
-        let class = facts.opcode.class();
         let host_initiated = facts.opcode == Opcode::InboundOpen;
 
         // Parity first: a stream ID from the wrong space is refused before
@@ -421,16 +442,20 @@ impl SessionValidator {
             });
         }
 
-        if host_initiated {
+        let class = if host_initiated {
             let mapping = facts
                 .ingress_mapping
                 .ok_or(StateError::MissingIngressMapping {
                     stream_id: facts.stream_id,
                 })?;
-            if !self.declared_ingress.contains(&mapping) {
-                return Err(StateError::UndeclaredIngressMapping { mapping });
+            match self.declared_ingress.get(&mapping) {
+                Some(IngressFlowKind::Tcp) => FlowClass::Ingress,
+                Some(IngressFlowKind::Udp) => FlowClass::Udp,
+                None => return Err(StateError::UndeclaredIngressMapping { mapping }),
             }
-        }
+        } else {
+            facts.opcode.class()
+        };
 
         if let Some(max) = ceiling_for(class)
             && self.streams.values().filter(|s| s.class == class).count() >= max
@@ -465,7 +490,20 @@ impl SessionValidator {
         // The opcode must belong to this stream's class, or be one of the
         // shared byte/teardown opcodes.
         let class = facts.opcode.class();
-        if class != FlowClass::Common && class != stream.class {
+        let ingress_confirmation =
+            matches!(facts.opcode, Opcode::InboundReady | Opcode::InboundRefused)
+                && matches!(stream.class, FlowClass::Ingress | FlowClass::Udp);
+        if class != FlowClass::Common && class != stream.class && !ingress_confirmation {
+            return Err(StateError::WrongFlowClass {
+                opcode,
+                class: stream.class,
+            });
+        }
+        let byte_stream_opcode = matches!(
+            facts.opcode,
+            Opcode::Data | Opcode::WindowUpdate | Opcode::HalfClose
+        );
+        if byte_stream_opcode && !matches!(stream.class, FlowClass::Tcp | FlowClass::Ingress) {
             return Err(StateError::WrongFlowClass {
                 opcode,
                 class: stream.class,
@@ -500,6 +538,7 @@ impl SessionValidator {
                 Ok(())
             }
             Opcode::Refused
+            | Opcode::ConnectFailed
             | Opcode::InboundRefused
             | Opcode::Reset
             | Opcode::CloseUdp
@@ -934,6 +973,48 @@ mod tests {
             v.admit(&FrameFacts::new(H, Opcode::InboundOpen, 2)),
             Err(StateError::MissingIngressMapping { stream_id: 2 })
         );
+    }
+
+    #[test]
+    fn declared_udp_ingress_uses_datagram_frames_after_readiness() {
+        let mut v = SessionValidator::new_with_ingress([(9_u16, IngressFlowKind::Udp)]);
+        v.admit(&FrameFacts::new(G, Opcode::Hello, 0))
+            .expect("hello");
+        v.admit(&FrameFacts::new(H, Opcode::HelloAck, 0))
+            .expect("ack");
+        v.admit(&FrameFacts::new(H, Opcode::InboundOpen, 2).with_ingress_mapping(9))
+            .expect("host UDP open");
+        v.admit(&FrameFacts::new(G, Opcode::InboundReady, 2))
+            .expect("guest UDP ready");
+        v.admit(&FrameFacts::new(H, Opcode::UdpRecv, 2).with_payload(64))
+            .expect("external datagram reaches guest");
+        v.admit(&FrameFacts::new(G, Opcode::UdpSend, 2).with_payload(64))
+            .expect("guest reply reaches known external peer");
+        v.admit(&FrameFacts::new(H, Opcode::CloseUdp, 2))
+            .expect("host closes UDP ingress peer");
+    }
+
+    #[test]
+    fn declared_udp_ingress_refuses_byte_stream_frames() {
+        let mut v = SessionValidator::new_with_ingress([(9_u16, IngressFlowKind::Udp)]);
+        v.admit(&FrameFacts::new(G, Opcode::Hello, 0))
+            .expect("hello");
+        v.admit(&FrameFacts::new(H, Opcode::HelloAck, 0))
+            .expect("ack");
+        v.admit(&FrameFacts::new(H, Opcode::InboundOpen, 2).with_ingress_mapping(9))
+            .expect("host UDP open");
+        v.admit(&FrameFacts::new(G, Opcode::InboundReady, 2))
+            .expect("guest UDP ready");
+
+        for opcode in [Opcode::Data, Opcode::WindowUpdate, Opcode::HalfClose] {
+            assert_eq!(
+                v.admit(&FrameFacts::new(G, opcode, 2).with_payload(1)),
+                Err(StateError::WrongFlowClass {
+                    opcode: opcode.as_u8(),
+                    class: FlowClass::Udp,
+                })
+            );
+        }
     }
 
     /// The default session declares nothing, so every ingress open fails.

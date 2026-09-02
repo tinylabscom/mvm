@@ -42,11 +42,5 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         args.preset.clone()
     };
 
-    crate::template_cmd::init(
-        &args.dir,
-        true,
-        ".",
-        preset.as_deref(),
-        args.prompt.as_deref(),
-    )
+    crate::template_cmd::init(&args.dir, ".", preset.as_deref(), args.prompt.as_deref())
 }

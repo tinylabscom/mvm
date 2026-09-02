@@ -117,6 +117,13 @@ pub enum GuestRequest {
         #[serde(default)]
         stream_input: bool,
     },
+    /// Run one exact optional extension admitted and mounted at activation.
+    /// The request carries identities and bounded stdin only; the executable,
+    /// mount, environment, and resource ceilings are fixed by admission.
+    RunExtension { dispatch: ExtensionDispatch },
+    /// Cancel one exact active optional-extension invocation. There is no PID,
+    /// signal, command, or cleanup selector on this surface.
+    CancelExtension { cancellation: ExtensionCancellation },
     /// Run an arbitrary argv as a detached workload (dev-only).
     ///
     /// Mirrors how the image's `/init` runs its baked entrypoint, but
@@ -147,6 +154,11 @@ pub enum GuestRequest {
     PostRestore {
         #[serde(default)]
         token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+        /// Workload identity to install as the kernel hostname after a warm
+        /// parent is restored into a named child. Legacy resume callers omit
+        /// it and leave the current hostname unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hostname: Option<String>,
         /// Host wall-clock epoch seconds to apply before the init restart
         /// hook. Omitted by legacy callers that do not request clock sync.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -160,10 +172,6 @@ pub enum GuestRequest {
     },
     /// Request filesystem diff (changes since boot, from overlay or snapshot).
     FsDiff,
-    /// Start a vsock→TCP port forwarder for the given guest port.
-    /// The agent binds vsock port `PORT_FORWARD_BASE + guest_port` and
-    /// forwards each connection to `localhost:guest_port`.
-    StartPortForward { guest_port: u16 },
     /// Bind a guest Unix socket and forward each accepted connection to a host
     /// vsock port. The guest path must live under `/run/mvm/` (see
     /// `validate_unix_forward_guest_path`).
@@ -496,10 +504,11 @@ impl GuestRequest {
             Self::Exec { .. } => "exec",
             Self::ExecBatch { .. } => "exec-batch",
             Self::RunEntrypoint { .. } => "run-entrypoint",
+            Self::RunExtension { .. } => "run-extension",
+            Self::CancelExtension { .. } => "cancel-extension",
             Self::RunDetached { .. } => "run-detached",
             Self::PostRestore { .. } => "post-restore",
             Self::FsDiff => "fs-diff",
-            Self::StartPortForward { .. } => "start-port-forward",
             Self::StartUnixSocketForward { .. } => "start-unix-socket-forward",
             Self::ConsoleOpen { .. } => "console-open",
             Self::ConsoleClose { .. } => "console-close",
@@ -577,11 +586,11 @@ mod tests {
             },
             GuestRequest::PostRestore {
                 token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+                hostname: None,
                 host_epoch_secs: None,
                 grant_envelope: None,
             },
             GuestRequest::FsDiff,
-            GuestRequest::StartPortForward { guest_port: 8080 },
             GuestRequest::StartUnixSocketForward {
                 guest_path: "/run/mvm/forward.sock".to_string(),
                 host_vsock_port: BROKER_PORT,
@@ -698,6 +707,7 @@ mod tests {
         // A non-zero generation token survives the JSON round-trip intact.
         let req = GuestRequest::PostRestore {
             token: [9u8; GENID_BYTES],
+            hostname: Some("worker-9".to_string()),
             host_epoch_secs: Some(1_717_000_000),
             grant_envelope: None,
         };
@@ -705,10 +715,12 @@ mod tests {
         match serde_json::from_str::<GuestRequest>(&json).unwrap() {
             GuestRequest::PostRestore {
                 token,
+                hostname,
                 host_epoch_secs,
                 ..
             } => {
                 assert_eq!(token, [9u8; GENID_BYTES]);
+                assert_eq!(hostname.as_deref(), Some("worker-9"));
                 assert_eq!(host_epoch_secs, Some(1_717_000_000));
             }
             other => panic!("expected PostRestore, got {other:?}"),
@@ -838,10 +850,9 @@ mod tests {
                 .unwrap_or_else(|e| panic!("seed {} failed to parse: {e}", path.display()));
             count += 1;
         }
-        // 5 baseline (ping, port-fwd, run-entrypoint, sleep-prep,
-        // worker-status) + 7 fs-* (A1) + 6 proc-* (A2) + 2 share-*
-        // (D) = 20.
-        assert!(count >= 20, "expected ≥20 corpus seeds, got {count}");
+        // 4 baseline (ping, run-entrypoint, sleep-prep, worker-status) +
+        // 7 fs-* + 6 proc-* + 2 share-* = 19.
+        assert!(count >= 19, "expected ≥19 corpus seeds, got {count}");
     }
 
     /// `follow_symlinks` defaults to `true` for read-shaped verbs and
@@ -1188,16 +1199,13 @@ mod tests {
             (
                 GuestRequest::PostRestore {
                     token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+                    hostname: None,
                     host_epoch_secs: None,
                     grant_envelope: None,
                 },
                 "post-restore",
             ),
             (GuestRequest::FsDiff, "fs-diff"),
-            (
-                GuestRequest::StartPortForward { guest_port: 0 },
-                "start-port-forward",
-            ),
             (
                 GuestRequest::StartUnixSocketForward {
                     guest_path: "/run/mvm/forward.sock".to_string(),
@@ -1267,7 +1275,6 @@ mod tests {
             GuestRequest::EntrypointStatus,
             GuestRequest::ReadinessStatus,
             GuestRequest::FsDiff,
-            GuestRequest::StartPortForward { guest_port: 0 },
             GuestRequest::CheckpointIntegrations {
                 integrations: vec![],
             },
@@ -1351,8 +1358,70 @@ mod tests {
                 roothash: "b".repeat(64),
             }),
             volumes: Vec::new(),
+            extensions: Vec::new(),
             verb_grant_envelope: None,
         });
         assert_eq!(req.kind_name(), "activate-environment");
+    }
+
+    #[test]
+    fn run_extension_has_no_command_or_host_authority() {
+        let request = serde_json::json!({
+            "RunExtension": { "dispatch": {
+                "extension_id": "org.example.extension",
+                "pack_digest": vec![1; 32],
+                "contract_digest": vec![2; 32],
+                "request_id": "mvm-request-1",
+                "session_id": "session-1",
+                "campaign_id": "campaign-1",
+                "trial_id": "trial-1",
+                "plan_id": "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "idempotency_key": "trial-key-1",
+                "grant_digest": format!("sha256:{}", "b".repeat(64)),
+                "nonce": "nonce-1",
+                "input": [123, 125]
+            }}
+        });
+        let parsed: GuestRequest = serde_json::from_value(request.clone()).expect("strict request");
+        assert_eq!(parsed.kind_name(), "run-extension");
+        assert_eq!(parsed.class(), RequestClass::ProdSafe);
+        let encoded = serde_json::to_string(&parsed).expect("encode");
+        for forbidden in ["command", "argv", "env", "host_path", "destination"] {
+            assert!(!encoded.contains(forbidden), "{encoded}");
+        }
+
+        let mut forged = request;
+        forged["RunExtension"]["dispatch"]["command"] = serde_json::json!("/bin/sh");
+        assert!(serde_json::from_value::<GuestRequest>(forged).is_err());
+    }
+
+    #[test]
+    fn cancel_extension_is_identity_only_and_rejects_process_authority() {
+        let request = serde_json::json!({
+            "CancelExtension": { "cancellation": {
+                "extension_id": "org.example.extension",
+                "pack_digest": vec![1; 32],
+                "contract_digest": vec![2; 32],
+                "request_id": "mvm-request-1",
+                "session_id": "session-1",
+                "campaign_id": "campaign-1",
+                "trial_id": "trial-1",
+                "plan_id": "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "idempotency_key": "trial-key-1",
+                "grant_digest": format!("sha256:{}", "b".repeat(64)),
+                "nonce": "nonce-1"
+            }}
+        });
+        let parsed: GuestRequest = serde_json::from_value(request.clone()).expect("strict request");
+        assert_eq!(parsed.kind_name(), "cancel-extension");
+        assert_eq!(parsed.class(), RequestClass::ProdSafe);
+        let encoded = serde_json::to_string(&parsed).expect("encode");
+        for forbidden in ["pid", "signal", "command", "path", "cleanup"] {
+            assert!(!encoded.contains(forbidden), "{encoded}");
+        }
+
+        let mut forged = request;
+        forged["CancelExtension"]["cancellation"]["signal"] = serde_json::json!(9);
+        assert!(serde_json::from_value::<GuestRequest>(forged).is_err());
     }
 }

@@ -224,7 +224,7 @@ pub mod test_support {
             snapshot_at: Default::default(),
             network_mode: Default::default(),
             stream_retention: Default::default(),
-            l3_network: None,
+            ingress: Vec::new(),
             network_limits: Default::default(),
             schema_version: SCHEMA_VERSION,
             plan_id: PlanId("01HXTESTPLAN000000000000".to_string()),
@@ -262,6 +262,7 @@ pub mod test_support {
                 capture_paths: vec!["/artifacts".to_string()],
                 retention_days: 30,
             },
+            caller_commitment: None,
             audit_labels: BTreeMap::from([("workflow".to_string(), "etl-1".to_string())]),
             key_rotation: KeyRotationSpec { interval_days: 7 },
             attestation: AttestationRequirement {
@@ -281,6 +282,7 @@ pub mod test_support {
             deps_volume: None,
             shares: Vec::new(),
             services: Vec::new(),
+            extensions: Vec::new(),
             stream_edges: Vec::new(),
         }
     }

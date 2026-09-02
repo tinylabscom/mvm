@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use mvm_agentd::entrypoint::ValidatedEntrypoint;
+use mvm_agentd::extension::ValidatedExtension;
 use mvm_agentd::worker_pool::WorkerPool;
 
 use crate::config::DEFAULT_SAMPLE_INTERVAL_SECS;
@@ -75,6 +76,11 @@ pub(crate) const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 /// `/proc/self/fd/<n>` (Linux) instead of re-resolving the path, defeating
 /// any TOCTOU between validation and spawn.
 pub(crate) static VALIDATED_ENTRYPOINT: OnceLock<Result<ValidatedEntrypoint, String>> =
+    OnceLock::new();
+
+/// Optional extension executables validated from the authenticated activation
+/// message after their read-only artifacts are mounted.
+pub(crate) static VALIDATED_EXTENSIONS: OnceLock<Result<Vec<ValidatedExtension>, String>> =
     OnceLock::new();
 
 /// One in-flight `RunEntrypoint` per VM — applies to the cold

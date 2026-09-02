@@ -203,7 +203,15 @@ describe("network()", () => {
   it("bridge mode with ports", () => {
     const n = mvm.network({
       mode: "bridge",
-      ports: [{ guest: 8080, host: 0, proto: "tcp" }],
+      ports: [{
+        mapping_id: 1,
+        proto: "tcp",
+        host_addr: "127.0.0.1",
+        host: 0,
+        guest_addr: "127.0.0.1",
+        guest: 8080,
+        transform: "opaque",
+      }],
     });
     expect(n.mode).toBe("bridge");
     expect(n.ports).toHaveLength(1);

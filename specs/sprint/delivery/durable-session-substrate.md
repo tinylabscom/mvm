@@ -50,9 +50,15 @@ CheckpointStore`: one `<id>/session.json` per session, `write`/`load`/`list`,
 
 Everything past the substrate: WS3 park path (`ParkReason`, quiesce
 sequencing), WS4 resume path (`resume_session`, incremental ledger-head
-verification, fresh-plan synthesis), WS5 retention ladder + the first GC over
-`checkpoints_dir()`, WS6 CLI (`mvmctl session ...`), WS7 chain records
-(`session.opened`, `sandbox.parked`, ...), WS8 BDD scenarios. `SessionBinding`
-and `parent_checkpoint` are what that later GC reads to refuse reaping a
-checkpoint a live or hibernated session still names as its parent, but
-nothing enforces that refusal yet.
+verification, fresh-plan synthesis), WS5 retention ladder + teaching the
+existing `checkpoints_dir()` sweep about sessions (that sweep,
+`sweep_untagged_checkpoints`, already existed — this branch does not add the
+first GC, only the session-awareness it lacked), WS6 CLI (`mvmctl session
+...`), WS7 chain records (`session.opened`, `sandbox.parked`, ...), WS8 BDD
+scenarios. `SessionBinding` and `parent_checkpoint` are what that GC reads to
+refuse reaping a checkpoint a live or hibernated session still names as its
+parent, but nothing enforced that refusal at the time this was written.
+`specs/plans/2026-08-18-session-retention.md` has since delivered the refusal
+(both the sweep and a manual `mvmctl vm checkpoint rm`) plus a one-way
+`demote` transition; retention classes, expiry, and a scheduler that calls
+`demote` remain undelivered.

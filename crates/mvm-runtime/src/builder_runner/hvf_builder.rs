@@ -35,7 +35,7 @@ const DEFAULT_NIX_STORE_MIB: u32 = 64 * 1024;
 const DEFAULT_OUTPUT_MIB: u32 = 4 * 1024;
 /// Default builder resources.
 const DEFAULT_VCPUS: u32 = 4;
-const DEFAULT_MEMORY_MIB: u32 = 8 * 1024;
+const DEFAULT_MEMORY_MIB: u32 = 16 * 1024;
 
 /// The HVF builder VM, exposed through the `BuilderVm` seam.
 pub struct HvfBuilderVm {
@@ -105,7 +105,7 @@ impl HvfBuilderVm {
             ))
         })?;
 
-        let name = format!("mvm-hvf-builder-shell-{job_id}");
+        let name = mvm_core::naming::builder_shell_vm_name(&job_id);
         let runtime_overlay = require_runtime_overlay_ext4()?;
         let outcome = BuilderRunner::new(HvfDriver::new())
             .build(&BuilderBuild {
@@ -117,7 +117,7 @@ impl HvfBuilderVm {
                 work_src: &job.work_dir,
                 host_bin_dir: &host_bin_dir,
                 runtime_overlay: Some(runtime_overlay.as_path()),
-                closure_nar: None,
+                closure_nar: self.closure_nar.as_deref(),
                 output_size: u64::from(self.output_mib) << 20,
                 vcpus: self.vcpus,
                 memory_mib: self.memory_mib,
@@ -133,6 +133,16 @@ impl HvfBuilderVm {
         let result = read_job_result_with_diagnostics(&outcome.output_dir, &vm_state_dir)?;
         if result.exit_code != 0 {
             return Err(shell_job_exit_error(result.exit_code, &result.stderr_tail));
+        }
+
+        if outcome.output_dir != job.artifact_out {
+            copy_tree(&outcome.output_dir, &job.artifact_out).map_err(|e| {
+                BuilderVmError::ExtractionFailed(format!(
+                    "mirroring builder shell artifacts {} -> {}: {e}",
+                    outcome.output_dir.display(),
+                    job.artifact_out.display()
+                ))
+            })?;
         }
 
         Ok(mvm_build::libkrun_builder::BuilderShellResult {
@@ -178,7 +188,7 @@ fn map_runner_failure(detail: String) -> BuilderVmError {
 /// layout and source-checkout rebuild policy stay single-sourced. Mapped to
 /// [`BuilderVmError::RuntimeOverlayUnavailable`] (not a VMM-level failure), so
 /// it surfaces unchanged with no auto-fallback to another builder backend.
-fn require_runtime_overlay_ext4() -> Result<PathBuf, BuilderVmError> {
+pub(super) fn require_runtime_overlay_ext4() -> Result<PathBuf, BuilderVmError> {
     mvm_build::libkrun_builder::require_runtime_overlay_ext4()
         .map_err(|e| BuilderVmError::RuntimeOverlayUnavailable(format!("{e:#}")))
 }

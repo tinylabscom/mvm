@@ -18,7 +18,7 @@ pub fn vsock_uds_path(instance_dir: &str) -> String {
 }
 
 /// Check if an IO error is a timeout (EAGAIN/EWOULDBLOCK or TimedOut).
-fn is_timeout_error(err: &std::io::Error) -> bool {
+pub(crate) fn is_timeout_error(err: &std::io::Error) -> bool {
     matches!(
         err.kind(),
         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
@@ -149,8 +149,13 @@ fn parse_connect_ack(line: &str) -> Result<u32, ConnectAckError> {
         .map_err(|_| ConnectAckError::PortOverflow)
 }
 
-/// Single attempt to connect and perform the Firecracker CONNECT handshake.
-fn try_connect_once(uds_path: &str, port: u32, timeout_secs: u64) -> Result<UnixStream> {
+/// Make one connection attempt and perform the Firecracker CONNECT handshake.
+///
+/// Callers that already own a bounded readiness loop use this entry point so
+/// they do not nest the general reconnect cadence inside their own backoff.
+/// Ordinary RPC callers should use [`connect_to_port`], which retries transient
+/// transport races for them.
+pub fn connect_to_port_once(uds_path: &str, port: u32, timeout_secs: u64) -> Result<UnixStream> {
     let timeout = Duration::from_secs(timeout_secs);
 
     // Pre-flight: verify the socket file exists and is actually a socket.
@@ -229,7 +234,7 @@ pub fn connect_to_port(uds_path: &str, port: u32, timeout_secs: u64) -> Result<U
     let mut last_err = None;
 
     for attempt in 0..CONNECT_RETRIES {
-        match try_connect_once(uds_path, port, timeout_secs) {
+        match connect_to_port_once(uds_path, port, timeout_secs) {
             Ok(stream) => return Ok(stream),
             Err(e) => {
                 if !should_retry_connect_error(e.root_cause()) {
@@ -446,14 +451,24 @@ mod tests {
     }
 
     #[test]
-    fn test_try_connect_once_nonexistent_path() {
-        let result = try_connect_once("/nonexistent/v.sock", GUEST_AGENT_PORT, 1);
+    fn test_connect_to_port_once_nonexistent_path() {
+        let result = connect_to_port_once("/nonexistent/v.sock", GUEST_AGENT_PORT, 1);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("Vsock socket not found at"),
             "Error was: {}",
             err_msg
+        );
+    }
+
+    #[test]
+    fn test_single_connect_attempt_surfaces_the_first_failure() {
+        let error = connect_to_port_once("/nonexistent/v.sock", GUEST_AGENT_PORT, 1)
+            .expect_err("a missing mux socket must fail without an internal retry loop");
+        assert!(
+            error.to_string().contains("Vsock socket not found"),
+            "{error:#}"
         );
     }
 
@@ -469,6 +484,18 @@ mod tests {
             elapsed.as_secs() < 3,
             "connect_to took {:?}, suggesting an unbounded reconnect loop",
             elapsed
+        );
+    }
+
+    #[test]
+    fn single_connect_attempt_does_not_charge_the_reconnect_backoff() {
+        let started = std::time::Instant::now();
+        let result = connect_to_port_once("/nonexistent/v.sock", GUEST_AGENT_PORT, 1);
+
+        assert!(result.is_err());
+        assert!(
+            started.elapsed() < Duration::from_millis(CONNECT_RETRY_BASE_DELAY_MS),
+            "one readiness probe must not sleep for the multi-attempt reconnect cadence"
         );
     }
 
@@ -558,7 +585,8 @@ mod tests {
             stream.flush().unwrap();
         });
 
-        let mut stream = try_connect_once(socket.to_str().unwrap(), GUEST_AGENT_PORT, 1).unwrap();
+        let mut stream =
+            connect_to_port_once(socket.to_str().unwrap(), GUEST_AGENT_PORT, 1).unwrap();
         let mut sentinel = [0_u8; 8];
         stream.read_exact(&mut sentinel).unwrap();
         assert_eq!(&sentinel, b"sentinel");

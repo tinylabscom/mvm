@@ -63,23 +63,7 @@ fn run_persistent(
         return Ok(());
     }
 
-    let booted = persist_and_boot_machine(
-        &name,
-        &spec,
-        action,
-        MachineStartArgs {
-            name: name.clone(),
-            create_flags: MachineStartCreateFlags::default(),
-            receipt: args.run.receipt.clone(),
-            json: args.run.json,
-            dry_run: false,
-            quiet: false,
-            hypervisor: args.run.hypervisor.clone(),
-            no_supervisor: args.no_supervisor,
-            kernel_pin: args.kernel_pin.clone(),
-            has_ad_hoc_argv: !args.run.argv.is_empty(),
-        },
-    )?;
+    let booted = persist_and_boot_machine(&name, &spec, action, start_args_for_run(&args, &name))?;
     if !booted && !args.run.json && !args.up_json {
         println!("machine {name} already running");
     }
@@ -139,7 +123,6 @@ fn run_persistent_post_start(
         );
     }
     match post_start_action(args) {
-        PostStart::Forward => crate::commands::vm::forward::forward_ports(name, &args.port),
         PostStart::Envelope => {
             let build_mode_str = resolve_build_mode_for_envelope(args, name);
             let envelope = serde_json::json!({
@@ -162,8 +145,6 @@ fn run_persistent_post_start(
 /// What `machine run` does once a persistent machine is up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PostStart {
-    /// Keep this CLI attached as the owner of the requested host port forwards.
-    Forward,
     /// `--up-json`: the SDK boot envelope, and nothing else on stdout.
     Envelope,
     /// `--json`: the caller is parsing stdout, so say nothing extra.
@@ -174,13 +155,44 @@ pub(super) enum PostStart {
     Attach,
 }
 
+/// Whether the human `started machine <name>` banner must be withheld.
+///
+/// `--up-json` reserves stdout for exactly one JSON envelope. The banner was
+/// printed to stdout ahead of it, so a caller doing `json.loads(stdout)` failed
+/// on line 1 — which is how the SDK's live transport broke: it shells
+/// `machine run -d --up-json ...` and parses the result. `--json` is already
+/// withheld inside the start path itself, by the branch that prints the summary
+/// instead.
+pub(crate) fn banner_suppressed(args: &MachineRunArgs) -> bool {
+    args.up_json
+}
+
+/// Translate a persistent `machine run` into the start arguments it boots
+/// under.
+///
+/// Split out from the boot call so the `quiet` wiring is testable without a VM.
+/// A test that only pinned `banner_suppressed` would keep passing if this
+/// mapping stopped calling it, which is the shape of the bug it exists for.
+pub(crate) fn start_args_for_run(args: &MachineRunArgs, name: &str) -> MachineStartArgs {
+    MachineStartArgs {
+        name: name.to_string(),
+        create_flags: MachineStartCreateFlags::default(),
+        receipt: args.run.receipt.clone(),
+        json: args.run.json,
+        dry_run: false,
+        quiet: banner_suppressed(args),
+        hypervisor: args.run.hypervisor.clone(),
+        no_supervisor: args.no_supervisor,
+        kernel_pin: args.kernel_pin.clone(),
+        has_ad_hoc_argv: !args.run.argv.is_empty(),
+    }
+}
+
 /// Resolve the post-start behaviour from the flags alone, so the choice is
 /// testable without booting anything.
 pub(super) fn post_start_action(args: &MachineRunArgs) -> PostStart {
     if args.up_json {
         PostStart::Envelope
-    } else if !args.port.is_empty() {
-        PostStart::Forward
     } else if args.run.json {
         PostStart::Quiet
     } else if args.detach {
@@ -241,8 +253,37 @@ fn apply_machine_ttl(name: &str, dur_str: &str) -> Result<()> {
     }
 }
 
+/// `build_mode` for the SDK boot envelope: the tier of the grant this launch
+/// actually carries, not the tier of the image it booted.
+///
+/// The SDK gates its DevOnly surfaces on this field —
+/// `if self.build_mode != "dev": raise SandboxDevOnly`. Reporting the image
+/// posture made that gate pass for a launch whose grant is ProdSafe-only, so
+/// the SDK went ahead and the *guest* refused instead, with a verb-grant error
+/// rather than the documented `SandboxDevOnly`. A caller cannot act on a field
+/// that answers a different question than the one it is asked.
+///
+/// A grant-eligible launch receives the attenuated ProdSafe verb set
+/// (`default_agent_verbs`), which admits no DevOnly verb — `--agent-verb`
+/// rejects them outright — so `fs`/`proc`/`exec` will be refused no matter how
+/// the image was built. That is `prod` from the SDK's point of view whatever
+/// the template says.
 fn resolve_build_mode_for_envelope(args: &MachineRunArgs, name: &str) -> &'static str {
+    if launch_carries_restricted_grant(args) {
+        return "prod";
+    }
     resolve_machine_build_mode(args.run.manifest.as_deref(), name)
+}
+
+/// Whether this launch is admitted with the attenuated ProdSafe-only verb
+/// grant. Mirrors the `restrict_agent_verbs` decision the persistent OCI start
+/// makes, so the envelope cannot disagree with the grant that was issued.
+pub(crate) fn launch_carries_restricted_grant(args: &MachineRunArgs) -> bool {
+    crate::commands::vm::agent_verbs::grant_eligible(
+        args.tty,
+        !args.run.argv.is_empty(),
+        matches!(args.run.profile, crate::commands::vm::exec::RunProfile::Dev),
+    )
 }
 
 /// Resolve a machine's `build_mode` (`"dev"` / `"prod"`) for the boot-time
@@ -292,6 +333,7 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
         memory_mib,
         from_workload_ir: args.from_workload_ir.clone(),
         agent_verb_override: args.run.agent_verb.clone(),
+        caller_commitment: args.run.caller_commitment.clone(),
         reset: args.reset,
         keep_alive: args.persistent(),
         keep_alive_dev: false,
@@ -299,6 +341,7 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
         r#fn: None,
         attach: args.attach,
         network_policy,
+        hypervisor: args.run.hypervisor.clone(),
     })
 }
 
@@ -314,10 +357,7 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
 /// - a path — read that file and send it as one payload; a file has an end the
 ///   host already knows, so there is nothing to stream.
 fn resolve_entrypoint_stdin(spec: Option<&str>) -> Result<invoke::EntrypointStdin> {
-    resolve_entrypoint_stdin_with(spec, || {
-        use std::io::IsTerminal as _;
-        invoke::read_auto_stdin(std::io::stdin().is_terminal())
-    })
+    resolve_entrypoint_stdin_with(spec, invoke::read_auto_stdin)
 }
 
 /// The mapping itself, with the one arm that reads this process's own stdin
@@ -335,23 +375,6 @@ fn resolve_entrypoint_stdin_with(
         )),
         None => Ok(invoke::EntrypointStdin::OneShot(piped()?)),
     }
-}
-
-/// Whether the launch's workload declared that it needs a real in-guest IP
-/// stack.
-///
-/// Reads the same `network.raw_ip_stack` field the admission path reads, so
-/// a workload cannot be admitted for one transport and booted on another.
-/// Absent IR, or IR with no app declaring it, means no: silence must never
-/// select the tunnel, because it is the weaker posture.
-fn workload_needs_raw_ip_stack(workload_ir: Option<&std::path::Path>) -> Result<bool> {
-    let Some(workload) = crate::commands::vm::up::load_workload_ir(workload_ir)? else {
-        return Ok(false);
-    };
-    Ok(workload
-        .apps
-        .iter()
-        .any(|app| app.network.as_ref().is_some_and(|n| n.raw_ip_stack)))
 }
 
 pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig) -> Result<()> {
@@ -379,24 +402,19 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
         .map(super::resolve_local_deployment)
         .transpose()?;
 
-    // Settle the networking configuration before any build or boot work.
-    // There is no mode to choose: the derivation picks the strongest
-    // transport this workload and this host can actually support.
-    //
-    // The declaration lives in the workload IR, so a run that carries one
-    // is the only run that can ask for the tunnel. An ad-hoc `--image`
-    // launch has no workload to declare anything and keeps the
-    // socket-aware default.
-    let network_mode = super::preflight_network(workload_needs_raw_ip_stack(
-        args.from_workload_ir.as_deref(),
-    )?)?;
+    // Parsing the workload IR happens at the compile/admission boundary. A
+    // stale raw-network declaration is refused there before this single-path
+    // runtime selection can be reached.
+    let network_mode = super::preflight_network();
     tracing::debug!(?network_mode, "derived machine networking");
 
     if args.entrypoint {
         return run_entrypoint_action(args, resolved_flake_slot);
     }
 
-    let mode = args.resolve_mode()?;
+    // A flake was built into a manifest slot above, and that image carries its
+    // own `entrypoint.command` — so an empty argv is the image supplying one.
+    let mode = args.resolve_mode(resolved_flake_slot.is_some())?;
     let warm_pool_size = mode.warm_pool_size(None, args.name.is_some());
     // The wasm backend is a claim-free, host-wasmtime runner: it has no
     // standby-pool machinery and should never be blocked by a warm-pool
@@ -417,8 +435,7 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
             // both the transport decision and the signed plan.
             run_args.network_mode = network_mode;
             run_args.warm_pool_size = warm_pool_size;
-            use std::io::IsTerminal as _;
-            run_args.stdin = invoke::read_auto_stdin(std::io::stdin().is_terminal())?;
+            run_args.stdin = invoke::read_auto_stdin()?;
             let source = local_deployment
                 .as_ref()
                 .map(super::local_deployment_image_source)
@@ -440,7 +457,7 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
             run_args.network_mode = network_mode;
             run_args.pty = true;
             run_args.warm_pool_size = warm_pool_size;
-            run_args.stdin = invoke::read_auto_stdin(std::io::stdin().is_terminal())?;
+            run_args.stdin = invoke::read_auto_stdin()?;
             let source = local_deployment
                 .as_ref()
                 .map(super::local_deployment_image_source)
@@ -581,8 +598,7 @@ mod entrypoint_stdin_tests {
 }
 
 #[cfg(test)]
-mod raw_ip_stack_tests {
-    use super::*;
+mod network_surface_tests {
 
     /// Build the fixture from the real IR types rather than hand-rolled
     /// JSON, so it cannot drift from the schema it is meant to exercise.
@@ -628,43 +644,53 @@ mod raw_ip_stack_tests {
         path
     }
 
-    fn net(raw_ip_stack: bool) -> mvm_contract::ir::Network {
+    fn net() -> mvm_contract::ir::Network {
         mvm_contract::ir::Network {
             mode: mvm_contract::ir::NetworkMode::Bridge,
             ports: vec![],
             egress: None,
             peers: vec![],
             dns: None,
-            raw_ip_stack,
+            ai: None,
         }
     }
 
     #[test]
     fn a_launch_with_no_workload_ir_keeps_the_socket_aware_default() {
-        // An ad-hoc `--image` run has nothing to declare a need.
-        assert!(!workload_needs_raw_ip_stack(None).expect("no ir"));
+        assert_eq!(
+            super::super::preflight_network(),
+            mvm_contract::plan::NetworkMode::HostVsockProxy
+        );
     }
 
     #[test]
-    fn a_workload_that_declares_the_need_reaches_the_boot_path() {
-        // The regression this pins: the boot path once passed a hardcoded
-        // `false`, so a workload admitted for the tunnel booted on the
-        // socket-aware transport instead.
+    fn a_stale_raw_declaration_is_refused_while_loading_the_ir() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let ir = write_ir(dir.path(), Some(net(true)));
-        assert!(workload_needs_raw_ip_stack(Some(&ir)).expect("ir parses"));
+        let ir = dir.path().join("workload.json");
+        std::fs::write(
+            &ir,
+            br#"{"schema_version":"0.1","id":"legacy","apps":[{"name":"probe","source":{"kind":"local_path","path":"."},"image":{"kind":"nix_packages","packages":[]},"entrypoints":[],"resources":{"cpu_cores":1,"memory_mb":256,"rootfs_size_mb":512},"network":{"mode":"bridge","raw_ip_stack":true}}]}"#,
+        )
+        .expect("write stale IR");
+        let err = crate::commands::vm::up::load_workload_ir(Some(&ir))
+            .expect_err("the retired field must fail at the IR boundary");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("raw_ip_stack has been retired"),
+            "{message}"
+        );
     }
 
     #[test]
     fn a_workload_that_declares_nothing_does_not_get_the_tunnel() {
         let dir = tempfile::tempdir().expect("temp dir");
-        for network in [Some(net(false)), None] {
+        for network in [Some(net()), None] {
             let described = format!("{network:?}");
             let ir = write_ir(dir.path(), network);
-            assert!(
-                !workload_needs_raw_ip_stack(Some(&ir)).expect("ir parses"),
-                "silence must not select the tunnel ({described})"
-            );
+            let loaded = crate::commands::vm::up::load_workload_ir(Some(&ir))
+                .expect("IR loads")
+                .expect("workload present");
+            assert_eq!(loaded.apps.len(), 1, "{described}");
         }
     }
 
@@ -674,6 +700,6 @@ mod raw_ip_stack_tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let bad = dir.path().join("workload.json");
         std::fs::write(&bad, b"{ not json").expect("write");
-        assert!(workload_needs_raw_ip_stack(Some(&bad)).is_err());
+        assert!(crate::commands::vm::up::load_workload_ir(Some(&bad)).is_err());
     }
 }

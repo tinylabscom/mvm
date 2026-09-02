@@ -40,6 +40,20 @@ def test_create_records_the_template_and_default_ttl() -> None:
     assert rec["ops"] == []
 
 
+def test_create_records_pinned_image_and_explicit_command() -> None:
+    mvm.Sandbox.create(
+        image="docker.io/example/browser@sha256:" + "a" * 64,
+        command=["/browser", "serve"],
+    )
+    rec = mvm.current_recording()
+    assert rec is not None
+    assert "template" not in rec["create"]
+    assert rec["create"]["image"].endswith("a" * 64)
+    assert rec["ops"] == [
+        {"kind": "command_start", "argv": ["/browser", "serve"], "env": {}}
+    ]
+
+
 def test_workload_id_defaults_to_template() -> None:
     sb = mvm.Sandbox.create("python-3.12")
     assert sb.workload_id == "python-3.12"

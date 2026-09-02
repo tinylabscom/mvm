@@ -13,11 +13,11 @@ mvm release ships the substrate and the SDK in lockstep.
 
 | mvmforge surface                   | mvm equivalent                                              |
 | ---------------------------------- | ----------------------------------------------------------- |
-| `mvmforge-ir` crate                | `crates/mvm-ir`                                             |
+| `mvmforge-ir` crate                | `crates/mvm-contract/src/ir/`                               |
 | `mvmforge-sdk` crate (Rust builder)| `crates/mvm-sdk` (`builder` module)                         |
 | `mvmforge-addon` crate             | `crates/mvm-sdk/src/addon/`                                 |
 | `mvmforge` host CLI compile path   | `crates/mvm-sdk/src/compile/` + `mvmctl build compile`            |
-| `mvmforge-runtime` (in-guest)      | `crates/mvm-runner` + `nix/lib/factories/mkFunctionService` |
+| `mvmforge-runtime` (in-guest)      | `crates/mvm-agentd` + `nix/lib/factories/mkFunctionService` |
 | Python SDK (`@mv.func`)            | `crates/mvm-sdk/sdks/python/mvm/` (`@mvm.app`)                             |
 | TypeScript SDK                     | `crates/mvm-sdk/sdks/typescript/`                                          |
 
@@ -49,7 +49,7 @@ surface.
 ## Migration steps
 
 1. **Update imports.** Search-and-replace `from mvmforge` →
-   `from mvm` (Python) or `from "mvmforge-sdk"` → `from "mvm-sdk"`
+   `from mvm` (Python) or `from "mvmforge-sdk"` → `from "@runmvm/mvm"`
    (TypeScript).
 2. **Rename the decorator.** `@mv.func(...)` → `@mvm.app(...)`. The
    kwargs are unchanged.

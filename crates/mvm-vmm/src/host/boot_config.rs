@@ -23,17 +23,6 @@ pub fn builder_hostepoch_cmdline_token() -> String {
     format!("mvm.hostepoch={secs}")
 }
 
-/// Parse the positive Unix epoch carried by an `mvm.hostepoch=` kernel
-/// command-line token. Malformed, zero, and negative values are rejected so a
-/// guest cannot accidentally wind its clock back to the Unix epoch.
-pub fn builder_hostepoch_from_cmdline(cmdline: &str) -> Option<u64> {
-    cmdline
-        .split_whitespace()
-        .find_map(|token| token.strip_prefix("mvm.hostepoch="))
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|seconds| *seconds > 0)
-}
-
 pub fn probe_verity_sidecar(rootfs_path: &str) -> (Option<String>, Option<String>) {
     use std::path::Path;
 
@@ -116,17 +105,14 @@ pub fn booted_with_universal_initramfs(config: &mvm_core::vm_backend::VmStartCon
 /// on a NON-verity workload boot, or `None` to attach nothing.
 ///
 /// A sealed (verity) boot instead attaches the dm-verity overlay pair that the
-/// verity initramfs sets up, so this is only consulted on the non-verity
-/// branch of each backend. The gate mirrors the firecracker path: attach only
-/// when the resolved overlay triple is present and the boot is not rootfs-only
-/// (the virtiofs-root shape carries no block overlay). Returned to the
-/// backends that assign the overlay the next free `/dev/vdN` after the rootfs
-/// — always `/dev/vdb` on the non-verity branch, matching
-/// [`build_runtime_overlay_cmdline_args`]`(None, true)`.
+/// universal initramfs sets up, so this is only consulted on the non-verity
+/// branch of each backend. Attach whenever the resolved overlay triple is
+/// present — including on the virtiofs-root shape, which reaches its guest
+/// binaries the same way every other shape does now that the overlay is the
+/// single runtime source. Returned to the backends that assign the overlay the
+/// next free `/dev/vdN` after the rootfs — always `/dev/vdb` on the non-verity
+/// branch, matching [`build_runtime_overlay_cmdline_args`]`(None, true)`.
 pub fn non_verity_overlay_ext4(config: &mvm_core::vm_backend::VmStartConfig) -> Option<&str> {
-    if config.runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly {
-        return None;
-    }
     // The three overlay fields are populated together; require the full triple
     // so a half-populated config can't attach a device the guest can't
     // corroborate against the cmdline token.
@@ -207,23 +193,6 @@ pub fn balloon_body(amount_mib: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn builder_hostepoch_parser_accepts_only_positive_unix_epochs() {
-        assert_eq!(
-            builder_hostepoch_from_cmdline(
-                "console=ttyAMA0 mvm.hostepoch=1786425335 root=/dev/vda"
-            ),
-            Some(1_786_425_335)
-        );
-        assert_eq!(builder_hostepoch_from_cmdline("mvm.hostepoch=0"), None);
-        assert_eq!(builder_hostepoch_from_cmdline("mvm.hostepoch=-5"), None);
-        assert_eq!(
-            builder_hostepoch_from_cmdline("mvm.hostepoch=notanumber"),
-            None
-        );
-        assert_eq!(builder_hostepoch_from_cmdline("root=/dev/vda"), None);
-    }
 
     // ------------------------------------------------------------------
     // Firecracker API body builders — byte-identical pins
@@ -424,22 +393,18 @@ mod tests {
     }
 
     #[test]
-    fn non_verity_overlay_ext4_requires_full_triple_and_non_rootfs_only() {
-        use mvm_core::vm_backend::{RuntimeSourcePolicy, VmStartConfig};
+    fn non_verity_overlay_ext4_requires_the_full_triple() {
+        use mvm_core::vm_backend::VmStartConfig;
 
         // Bare rootfs, no overlay resolved → nothing to attach.
-        let bare = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::PreferOverlay,
-            ..Default::default()
-        };
+        let bare = VmStartConfig::default();
         assert_eq!(non_verity_overlay_ext4(&bare), None);
 
-        // Full triple + a non-rootfs-only policy → attach the ext4.
+        // Full triple → attach the ext4.
         let resolved = VmStartConfig {
             runtime_overlay_path: Some("/cache/runtime.ext4".into()),
             runtime_overlay_verity_path: Some("/cache/runtime.verity".into()),
             runtime_overlay_roothash: Some("b".repeat(64)),
-            runtime_source_policy: RuntimeSourcePolicy::PreferOverlay,
             ..Default::default()
         };
         assert_eq!(
@@ -451,17 +416,29 @@ mod tests {
         // corroborate against the cmdline token.
         let partial = VmStartConfig {
             runtime_overlay_path: Some("/cache/runtime.ext4".into()),
-            runtime_source_policy: RuntimeSourcePolicy::PreferOverlay,
             ..Default::default()
         };
         assert_eq!(non_verity_overlay_ext4(&partial), None);
+    }
 
-        // Rootfs-only (the virtiofs-root shape) never attaches a block overlay.
-        let rootfs_only = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RootfsOnly,
-            ..resolved.clone()
+    /// With the overlay as the single runtime source there is no baked copy of
+    /// the guest binaries to fall back to, so a boot that declares no rootfs
+    /// verity still has to carry the overlay device.
+    #[test]
+    fn a_non_verity_boot_still_attaches_the_runtime_overlay() {
+        use mvm_core::vm_backend::VmStartConfig;
+
+        let cfg = VmStartConfig {
+            runtime_overlay_path: Some("/cache/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/cache/runtime.verity".into()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
+            ..Default::default()
         };
-        assert_eq!(non_verity_overlay_ext4(&rootfs_only), None);
+        assert_eq!(
+            non_verity_overlay_ext4(&cfg),
+            Some("/cache/runtime.ext4"),
+            "there are no baked guest binaries left to fall back to"
+        );
     }
 
     #[test]

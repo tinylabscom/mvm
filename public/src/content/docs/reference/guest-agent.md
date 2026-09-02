@@ -22,15 +22,15 @@ their next boot.
 
 ## Capabilities
 
-| Capability | Description |
-|------------|-------------|
-| **Health checks** | Runs per-service health commands on a schedule, reports results to the host |
-| **Worker status** | Tracks idle/busy state by sampling `/proc/loadavg` — used by fleet autoscaling |
-| **Snapshot lifecycle** | Coordinates sleep/wake: flushes data, drops page cache before snapshot, signals restore |
-| **Integration management** | Loads service definitions from `/etc/mvm/integrations.d/*.json` |
-| **Probes** | Loads read-only system checks from `/etc/mvm/probes.d/*.json` (disk usage, custom metrics) |
-| **Filesystem diff** | Walks the overlay upper dir to report files created, modified, or deleted since boot |
-| **Remote command** | Dev-only: execute commands inside the guest via vsock |
+| Capability                 | Description                                                                                |
+| -------------------------- | ------------------------------------------------------------------------------------------ |
+| **Health checks**          | Runs per-service health commands on a schedule, reports results to the host                |
+| **Worker status**          | Tracks idle/busy state by sampling `/proc/loadavg` — used by fleet autoscaling             |
+| **Snapshot lifecycle**     | Coordinates sleep/wake: flushes data, drops page cache before snapshot, signals restore    |
+| **Integration management** | Loads service definitions from `/etc/mvm/integrations.d/*.json`                            |
+| **Probes**                 | Loads read-only system checks from `/etc/mvm/probes.d/*.json` (disk usage, custom metrics) |
+| **Filesystem diff**        | Walks the overlay upper dir to report files created, modified, or deleted since boot       |
+| **Remote command**         | Dev-only: execute commands inside the guest via vsock                                      |
 
 ## Runtime location
 
@@ -53,14 +53,36 @@ and version-pinned for the life of a running VM.
 
 ## Protocol
 
-The agent communicates using **length-prefixed JSON frames** over vsock on every
-supported microVM backend:
+The agent communicates using a **binary protocol with length-prefixed JSON frames** over vsock on every supported microVM backend.
+
+### Frame Structure
+
+Each message consists of:
+
+1. **4-byte length header** (big-endian `u32`) - the size of the JSON payload in bytes
+2. **JSON payload** - a serialized request or response object
+
+```
+[4-byte length][JSON payload bytes...]
+```
+
+### Connection Establishment
 
 1. Host writes `CONNECT 5252\n` to the socket
 2. Agent responds with `OK 5252\n`
-3. All subsequent communication is request/response pairs
+3. All subsequent communication uses length-prefixed frames
 
-Request types: `ping`, `status`, `sleep-prep`, `wake`, and more.
+### Request/Response Flow
+
+Each request receives exactly one response:
+
+- **Requests** are serialized JSON objects with a `type` field indicating the verb (e.g., `{"ping": {}}`)
+- **Responses** are serialized JSON objects with a `type` field indicating the response type (e.g., `{"pong": {}}`)
+
+### Frame Size Limits
+
+- Maximum frame size: **256 KiB** (including length header + JSON payload)
+- User-content chunks: **15.5 KiB** maximum (for streaming operations)
 
 ## Control plane and data plane
 
@@ -72,8 +94,14 @@ readiness, lifecycle, and cancellation requests. A saturated transfer cannot
 consume all control capacity.
 
 Every encoded request and response is capped symmetrically at 256 KiB before
-any bytes are written. User-content chunks are at most 48 KiB, leaving enough
-headroom for worst-case JSON encoding and the response envelope. The split is
+any bytes are written. User-content chunks are at most 15.5 KiB, leaving enough
+headroom for worst-case JSON encoding and the response envelope.
+
+That chunk size is derived from the 256 KiB cap rather than chosen. Content is
+encoded twice on its way to the wire: once as a `Vec<u8>` in the request or
+response body, and again as the sealed envelope's ciphertext, which is itself a
+`Vec<u8>`. Neither hop is base64, so the worst case — four characters per byte,
+`255,` — applies twice and the expansions multiply. The split is
 orthogonal to the agent profile gate: `Exec` is dev-only and data-plane;
 `Ping` is always available and control-plane.
 
@@ -81,38 +109,37 @@ orthogonal to the agent profile gate: `Exec` is dev-only and data-plane;
 
 Small bounded JSON in and out, with no user process or file payload bytes.
 
-| Verb | Response shape | Notes |
-|---|---|---|
-| `ProtocolHello` | `ProtocolHelloAck` / `ProtocolMismatch` | Required first request in every session; protocol v2 is a hard cutover. |
-| `Ping` | `Pong` | Reachability probe. Requires `Ping` capability. |
-| `WorkerStatus` | `WorkerStatus { status, last_busy_at }` | Idle/busy sampled from `/proc/loadavg`. |
-| `ReadinessStatus` | `ReadinessStatusReport` | Component-level readiness (see "Readiness model" below). |
-| `IntegrationStatus` | `IntegrationStatusReport { integrations: Vec<…> }` | One per declared integration. |
-| `EntrypointStatus` | `EntrypointStatusReport` | Validation result + warm-pool state. |
-| `ProbeStatus` | `ProbeStatusReport { probes: Vec<ProbeResult> }` | One per declared probe. |
-| `SleepPrep` / `Wake` / `PostRestore` / `CheckpointIntegrations` | Ack | Snapshot lifecycle handshakes. |
-| `UpdateIdleTimeout` | Ack with previous + new values | Adjusts the idle-eviction window. |
-| `MountVolume` / `UnmountVolume` | `MountVolumeResult` (closed enum) | Volume metadata only — no file contents. |
-| `StartPortForward` | `PortForwardStarted { vsock_port, … }` | Sets up a vsock→TCP forwarder. The data plane on that forwarder is byte-for-byte; the *control* plane that asks for it is one frame. |
-| `ProcStart` / `ProcSignal` / `ProcKill` / `ProcList` | `ProcResult` (closed enum) | Process control. `ProcStart` accepts an `argv` up to capped length but does not echo it back. |
-| `FsStat` / `FsMkdir` / `FsRemove` / `FsMove` | `FsResult` (closed enum) | Bounded filesystem metadata and mutations. |
-| `ConsoleOpen` / `ConsoleClose` / `ConsoleResize` | Ack with vsock port | Allocates a PTY forwarder. The PTY itself runs on a different vsock port — that's the data plane. |
+| Verb                                                            | Response shape                                     | Notes                                                                                             |
+| --------------------------------------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `ProtocolHello`                                                 | `ProtocolHelloAck` / `ProtocolMismatch`            | Required first request in every session; protocol v2 is a hard cutover.                           |
+| `Ping`                                                          | `Pong`                                             | Reachability probe. Requires `Ping` capability.                                                   |
+| `WorkerStatus`                                                  | `WorkerStatus { status, last_busy_at }`            | Idle/busy sampled from `/proc/loadavg`.                                                           |
+| `ReadinessStatus`                                               | `ReadinessStatusReport`                            | Component-level readiness (see "Readiness model" below).                                          |
+| `IntegrationStatus`                                             | `IntegrationStatusReport { integrations: Vec<…> }` | One per declared integration.                                                                     |
+| `EntrypointStatus`                                              | `EntrypointStatusReport`                           | Validation result + warm-pool state.                                                              |
+| `ProbeStatus`                                                   | `ProbeStatusReport { probes: Vec<ProbeResult> }`   | One per declared probe.                                                                           |
+| `SleepPrep` / `Wake` / `PostRestore` / `CheckpointIntegrations` | Ack                                                | Snapshot lifecycle handshakes.                                                                    |
+| `UpdateIdleTimeout`                                             | Ack with previous + new values                     | Adjusts the idle-eviction window.                                                                 |
+| `MountVolume` / `UnmountVolume`                                 | `MountVolumeResult` (closed enum)                  | Volume metadata only — no file contents.                                                          |
+| `ProcStart` / `ProcSignal` / `ProcKill` / `ProcList`            | `ProcResult` (closed enum)                         | Process control. `ProcStart` accepts an `argv` up to capped length but does not echo it back.     |
+| `FsStat` / `FsMkdir` / `FsRemove` / `FsMove`                    | `FsResult` (closed enum)                           | Bounded filesystem metadata and mutations.                                                        |
+| `ConsoleOpen` / `ConsoleClose` / `ConsoleResize`                | Ack with vsock port                                | Allocates a PTY forwarder. The PTY itself runs on a different vsock port — that's the data plane. |
 
 ### Data-plane verbs
 
 Streaming, chunked, or potentially large bounded transfers. These requests
 share the 48-request data admission budget.
 
-| Verb | Flow | Frame cap | Chunk size | Terminal | Backpressure | Payload in audit? |
-|---|---|---|---|---|---|---|
-| `RunEntrypoint` | Request → `EntrypointEvent` stream | 256 KiB per event | 48 KiB stdout/stderr | `Exit` / `Killed` / `TimedOut` / `Error` | Bounded process buffers. | No. |
-| `ProcWait` | Request → `ProcWaitEvent` stream | 256 KiB per event | 48 KiB stdout/stderr | `Exit` / `Killed` / `TimedOut` / `Error` | Typed non-terminal backpressure events. | No. |
-| `ProcSendInput` | Bounded request → ack | 256 KiB | At most 48 KiB per protocol frame | `InputAccepted` | Caller retries subsequent chunks. | No; byte count only. |
-| `FsRead` / `FsWrite` | Repeated offset requests → bounded responses | 256 KiB | 48 KiB | Each chunk response | Caller advances the offset; the first write truncates and later chunks do not. | No; offsets, sizes, and counts only. |
-| `FsList` / `FsDiff` | Request → bounded metadata response | 256 KiB | Protocol-bounded result | Response itself | Result caps and frame cap fail closed. | No file contents. |
-| `Exec` / `ExecBatch` / `RunCode` (dev-only) | One-shot request and capture | 256 KiB | Protocol-bounded result | Response itself | Oversized encoded responses fail closed. | No. |
-| Console PTY traffic | Raw bytes on a dedicated vsock port | Raw transport | TTY-shaped reads | Close or PTY exit | Kernel/socket backpressure; only the host CID may connect. | No. |
-| Port-forward TCP traffic | Bidirectional bytes over the vsock port returned by `StartPortForward` | None — raw TCP | TCP-shaped reads | TCP teardown | None — kernel TCP. | No. Forwarded bytes never enter audit. |
+| Verb                                        | Flow                                          | Frame cap         | Chunk size                          | Terminal                                 | Backpressure                                                                   | Payload in audit?                               |
+| ------------------------------------------- | --------------------------------------------- | ----------------- | ----------------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------ | ----------------------------------------------- |
+| `RunEntrypoint`                             | Request → `EntrypointEvent` stream            | 256 KiB per event | 15.5 KiB stdout/stderr              | `Exit` / `Killed` / `TimedOut` / `Error` | Bounded process buffers.                                                       | No.                                             |
+| `ProcWait`                                  | Request → `ProcWaitEvent` stream              | 256 KiB per event | 15.5 KiB stdout/stderr              | `Exit` / `Killed` / `TimedOut` / `Error` | Typed non-terminal backpressure events.                                        | No.                                             |
+| `ProcSendInput`                             | Bounded request → ack                         | 256 KiB           | At most 15.5 KiB per protocol frame | `InputAccepted`                          | Caller retries subsequent chunks.                                              | No; byte count only.                            |
+| `FsRead` / `FsWrite`                        | Repeated offset requests → bounded responses  | 256 KiB           | 15.5 KiB                            | Each chunk response                      | Caller advances the offset; the first write truncates and later chunks do not. | No; offsets, sizes, and counts only.            |
+| `FsList` / `FsDiff`                         | Request → bounded metadata response           | 256 KiB           | Protocol-bounded result             | Response itself                          | Result caps and frame cap fail closed.                                         | No file contents.                               |
+| `Exec` / `ExecBatch` / `RunCode` (dev-only) | One-shot request and capture                  | 256 KiB           | Protocol-bounded result             | Response itself                          | Oversized encoded responses fail closed.                                       | No.                                             |
+| Console PTY traffic                         | Raw bytes on a dedicated vsock port           | Raw transport     | TTY-shaped reads                    | Close or PTY exit                        | Kernel/socket backpressure; only the host CID may connect.                     | No.                                             |
+| Declared ingress                            | Authenticated FlowMux frames on `NetworkFlow` | 256 KiB per frame | Credit-bounded stream chunks        | Flow close/refusal                       | Shared per-VM FlowMux budget.                                                  | Metadata only; payload bytes never enter audit. |
 
 ### Redaction invariant
 
@@ -132,7 +159,7 @@ payload bytes. The list is the authoritative one:
   string is metadata only: byte counts, threshold, and cap.
 - `BackpressureReason::ServiceHealthPending { pending }` — service
   names only.
-- Receipts written by `mvmctl run` / `mvmctl machine run` / `mvmctl build`
+- Receipts written by `mvmctl run` / `mvmctl machine run` / `mvmctl machine build`
   store hashes and metadata. Raw stdout / stderr /
   stdin / env / argv values are never written.
 - `mvmctl machine ls --json` rows — the `readiness` and
@@ -150,11 +177,11 @@ Every guest image declares an **agent profile** in its
 dispatcher-side allowlist for vsock verbs — dev-only requests
 sent to a sealed-prod agent are rejected before any handler runs:
 
-| Profile | Effective verb set | Used by |
-|---------|-------------------|---------|
-| `sealed-prod` (default) | Lifecycle, status, entrypoint, sleep/wake, volume mount/unmount, idle-timeout updates, and the entrypoint stdin verbs `StreamInput` / `CloseStreamInput`. The full ADR-001 production-safe surface. The stdin verbs write to an entrypoint fixed at admission and select nothing; the host gates them on a grant in the signed plan, so a prod-safe verb is not an ungated one — see [Workload input](/guides/workload-input/). | Production images. The policy file lives on a dm-verity rootfs (ADR-001 §W3) so the profile cannot be widened at runtime. |
-| `dev` | `sealed-prod` plus shell `Exec`, process RPC, filesystem RPC, console PTY, port forwarding, and `RunCode`. | Dev-tier images built with the `interactive` feature — the ones `mvmctl machine console` or `mvmctl machine run -it` can attach to. |
-| `builder` | Reserved for builder-only verbs. The current builder agent speaks a separate `BuilderRequest` protocol, so this profile is wire-stable but unused for the tenant agent. | Future builder VM agent if/when its verbs land on the tenant wire. |
+| Profile                 | Effective verb set                                                                                                                                                                                                                                                                                                                                                                                                              | Used by                                                                                                                             |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `sealed-prod` (default) | Lifecycle, status, entrypoint, sleep/wake, volume mount/unmount, idle-timeout updates, and the entrypoint stdin verbs `StreamInput` / `CloseStreamInput`. The full ADR-001 production-safe surface. The stdin verbs write to an entrypoint fixed at admission and select nothing; the host gates them on a grant in the signed plan, so a prod-safe verb is not an ungated one — see [Workload input](/guides/workload-input/). | Production images. The policy file lives on a dm-verity rootfs (ADR-001 §W3) so the profile cannot be widened at runtime.           |
+| `dev`                   | `sealed-prod` plus shell `Exec`, process RPC, filesystem RPC, console PTY, port forwarding, and `RunCode`.                                                                                                                                                                                                                                                                                                                      | Dev-tier images built with the `interactive` feature — the ones `mvmctl machine console` or `mvmctl machine run -it` can attach to. |
+| `builder`               | Reserved for builder-only verbs. The current builder agent speaks a separate `BuilderRequest` protocol, so this profile is wire-stable but unused for the tenant agent.                                                                                                                                                                                                                                                         | Future builder VM agent if/when its verbs land on the tenant wire.                                                                  |
 
 Rejected requests return a typed `UnsupportedInProfile` response:
 
@@ -230,12 +257,12 @@ A host queries the live state via the `ReadinessStatus` verb:
 
 `ComponentState` values:
 
-| State | Meaning |
-|-------|---------|
-| `disabled` | Subsystem isn't configured for this image (no policy → no state machine to advance). Distinct from `ready` so the host can tell "image opted out" from "still warming". |
-| `starting` | Background init in progress. `RunEntrypoint` while `entrypoint = starting` returns `NotReady` — the host should poll readiness and retry. |
-| `ready` | Subsystem is up and accepting work. |
-| `failed` | Subsystem failed to initialize. Carries a short human-readable `message` (no secrets, no host paths the caller doesn't already know). For `entrypoint`, this maps to `RunEntrypoint` returning the existing `EntrypointInvalid`. |
+| State      | Meaning                                                                                                                                                                                                                          |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `disabled` | Subsystem isn't configured for this image (no policy → no state machine to advance). Distinct from `ready` so the host can tell "image opted out" from "still warming".                                                          |
+| `starting` | Background init in progress. `RunEntrypoint` while `entrypoint = starting` returns `NotReady` — the host should poll readiness and retry.                                                                                        |
+| `ready`    | Subsystem is up and accepting work.                                                                                                                                                                                              |
+| `failed`   | Subsystem failed to initialize. Carries a short human-readable `message` (no secrets, no host paths the caller doesn't already know). For `entrypoint`, this maps to `RunEntrypoint` returning the existing `EntrypointInvalid`. |
 
 `BootTimingReport` exposes monotonic milliseconds since agent
 process start. Phase 3 closed out the per-component `*_ready_ms`
@@ -246,7 +273,14 @@ once a background init thread actually ran.
 
 ### Host commands
 
-- `mvmctl wait <vm> --for <component> [--timeout <secs>]` —
+:::note[These verbs are hidden, not missing]
+`machine wait`, `machine boot-report`, and `machine diff` (below) are marked
+`hide = true` in the CLI. They work exactly as documented, but they do not appear
+in `mvmctl machine --help` — so don't read their absence from the help output as
+their absence from the binary.
+:::
+
+- `mvmctl machine wait <vm> --for <component> [--timeout <secs>]` —
   Blocks until the named component reaches `Ready`, `Disabled`,
   or `Failed`. Targets: `control-plane`, `entrypoint`,
   `warm-pool`, `integrations`, `probes`, or `all` (the default).
@@ -255,8 +289,8 @@ once a background init thread actually ran.
   `Disabled` counts as `Ready` (intentionally — a cold-tier
   image asking `--for warm-pool` must not spin forever).
 
-- `mvmctl boot-report <vm> [--json]` — Single round-trip; prints
-  the same `ReadinessReport` `mvmctl wait` polls, including the
+- `mvmctl machine boot-report <vm> [--json]` — Single round-trip; prints
+  the same `ReadinessReport` `mvmctl machine wait` polls, including the
   per-phase timing table. Useful right after `mvmctl machine run` to
   inspect cold-path latency.
 
@@ -266,22 +300,32 @@ protocol-hello prelude; the agent advertises it in
 
 ## Health Checks
 
-Health checks defined in `mkGuest`'s `healthChecks` parameter are automatically written to `/etc/mvm/integrations.d/` at build time:
+Health checks defined in `mkGuest`'s `healthChecks` parameter are written at
+build time to **`/etc/mvm/probes.d/<name>.json`** — the probe drop-in directory,
+not `integrations.d/`. Each entry renders as:
 
 ```json
 {
   "name": "my-service",
-  "health_cmd": "curl -sf http://localhost:8080/health",
-  "health_interval_secs": 10,
-  "health_timeout_secs": 5
+  "cmd": "curl -sf http://localhost:8080/health",
+  "interval_secs": 10,
+  "timeout_secs": 5,
+  "output_format": "exit_code"
 }
 ```
 
-The agent picks them up on boot and begins periodic checks immediately.
+`mkGuest` reads exactly three keys per check: `healthCmd` (required — omitting it
+throws), `healthIntervalSecs` (default 30), and `healthTimeoutSecs` (default 10).
+The agent picks the drop-ins up on boot and begins periodic checks immediately;
+results come back over vsock as `ProbeStatus`.
 
-### Startup Grace Period
+### Integrations and the startup grace period
 
-Services that take time to initialize (e.g., running database migrations) can specify a grace period. During the grace period, health check failures are suppressed and the service reports `Starting` status instead of `Error`:
+`/etc/mvm/integrations.d/*.json` is a separate drop-in directory with its own
+schema, loaded by the integration manager (checkpoint/restore commands plus a
+health loop). Its entries use `health_cmd` / `health_interval_secs` /
+`health_timeout_secs`, and only *these* support a grace period during which
+health failures are not logged:
 
 ```json
 {
@@ -293,17 +337,9 @@ Services that take time to initialize (e.g., running database migrations) can sp
 }
 ```
 
-In a Nix flake, set the grace period via `startupGraceSecs`:
-
-```nix
-healthChecks.my-app = {
-  healthCmd = "curl -sf http://localhost:8080/health";
-  healthIntervalSecs = 10;
-  startupGraceSecs = 120;  # suppress failures for 2 minutes after boot
-};
-```
-
-After the grace period expires, normal health reporting resumes.
+There is **no `startupGraceSecs` key in `mkGuest`**, and `mkGuest` does not write
+integration drop-ins at all — a flake that sets it gets no grace period. Write
+the integration JSON yourself via `extraFiles` if you need one.
 
 ## Querying from the Host
 
@@ -327,10 +363,17 @@ Probes are read-only system checks loaded from `/etc/mvm/probes.d/*.json`:
 ```json
 {
   "name": "disk-usage",
-  "command": "df -h /mnt/data | tail -1 | awk '{print $5}'",
-  "interval_secs": 60
+  "cmd": "df -h /data | tail -1 | awk '{print $5}'",
+  "interval_secs": 60,
+  "timeout_secs": 10,
+  "output_format": "exit_code"
 }
 ```
+
+The command field is `cmd`, not `command`. `interval_secs` defaults to 30,
+`timeout_secs` to 10, and `output_format` to `exit_code` (the alternative is
+`json`, which parses stdout into the report). An optional `description` string is
+also accepted.
 
 Probe results are reported via the vsock protocol and included in guest console logs.
 
@@ -356,8 +399,8 @@ The agent can report all filesystem changes since boot by walking the overlay up
 Query the diff from the host:
 
 ```bash
-mvmctl diff my-vm         # human-readable output
-mvmctl diff my-vm --json  # JSON array of {path, kind, size}
+mvmctl machine diff my-vm         # human-readable output
+mvmctl machine diff my-vm --json  # JSON array of {path, kind, size}
 ```
 
 This is useful for auditing what an AI agent modified during execution.

@@ -369,7 +369,26 @@ pub fn merkle_root(leaf_lines: &[impl AsRef<[u8]>]) -> [u8; 32] {
     if leaf_lines.is_empty() {
         return hash_line(&[]);
     }
-    let mut level: Vec<[u8; 32]> = leaf_lines.iter().map(|l| leaf_hash(l.as_ref())).collect();
+    let level: Vec<[u8; 32]> = leaf_lines.iter().map(|l| leaf_hash(l.as_ref())).collect();
+    merkle_root_of_leaf_hashes(&level)
+}
+
+/// The Merkle root over leaves that have already been hashed.
+///
+/// [`merkle_root`] is this preceded by one [`leaf_hash`] per line. Splitting
+/// them lets a caller that holds the leaf hashes fold them without the lines:
+/// hashing the leaves is proportional to the log's bytes, folding them is
+/// proportional to its entries, and only the first has to be paid again when
+/// nothing about a prefix has changed.
+///
+/// Same tree as [`merkle_root`] over the same leaves — the empty case included,
+/// which is why it is stated here rather than left to the caller.
+#[must_use]
+pub fn merkle_root_of_leaf_hashes(leaf_hashes: &[[u8; 32]]) -> [u8; 32] {
+    if leaf_hashes.is_empty() {
+        return hash_line(&[]);
+    }
+    let mut level = leaf_hashes.to_vec();
     while level.len() > 1 {
         level = reduce_level(&level);
     }
@@ -788,8 +807,109 @@ pub fn verify_signed_root(root: &SignedAuditRoot, vk: &VerifyingKey) -> Result<(
         .map_err(|_| MerkleError::SignatureInvalid)
 }
 
+/// Why [`verify_membership`] refused.
+///
+/// Each arm names one of the four checks, so a refusal says which half of the
+/// membership property failed rather than just that verification failed.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum MembershipError {
+    /// The signed root did not verify under the trusted key.
+    #[error("signed-root verification failed: {0}")]
+    RootSignature(MerkleError),
+    /// The root is genuinely signed, but for a different tenant.
+    #[error("tenant binding failed: signed root is for '{signed}', expected '{expected}'")]
+    TenantMismatch {
+        /// Tenant the signed root names.
+        signed: String,
+        /// Tenant the caller intended.
+        expected: String,
+    },
+    /// The proof is not internally consistent.
+    #[error("inclusion-proof verification failed: {0}")]
+    Inclusion(MerkleError),
+    /// The proof folds to a root other than the signed one.
+    #[error("root binding failed: proof root {proof} is not the signed root {signed}")]
+    RootBinding {
+        /// Root the proof folds to.
+        proof: String,
+        /// Root the host signed.
+        signed: String,
+    },
+    /// The proof's tree size disagrees with the signed root's.
+    #[error("tree-size binding failed: proof says {proof}, signed root says {signed}")]
+    TreeSizeBinding {
+        /// Tree size the proof carries.
+        proof: u64,
+        /// Tree size the signed root carries.
+        signed: u64,
+    },
+}
+
+/// The full membership check: a verified proof, plus the binding that makes it
+/// attest membership in a real published log rather than in its own arithmetic.
+///
+/// [`verify_inclusion`] alone checks a proof against the root the proof itself
+/// carries, so a wholly fabricated proof self-verifies. The binding steps here
+/// are what close that: the root has to be one the host signed, for the tenant
+/// the caller meant, and the proof has to fold to *that* root at *that* tree
+/// size.
+///
+/// Ordered and fail-closed, so the first failure names the check that failed.
+pub fn verify_membership(
+    proof: &InclusionProof,
+    root: &SignedAuditRoot,
+    vk: &VerifyingKey,
+    expected_tenant: &str,
+) -> Result<(), MembershipError> {
+    verify_signed_root(root, vk).map_err(MembershipError::RootSignature)?;
+    if root.tenant != expected_tenant {
+        return Err(MembershipError::TenantMismatch {
+            signed: root.tenant.clone(),
+            expected: String::from(expected_tenant),
+        });
+    }
+    verify_inclusion(proof).map_err(MembershipError::Inclusion)?;
+    if proof.root != root.root_hash {
+        return Err(MembershipError::RootBinding {
+            proof: proof.root.clone(),
+            signed: root.root_hash.clone(),
+        });
+    }
+    if proof.tree_size != root.tree_size {
+        return Err(MembershipError::TreeSizeBinding {
+            proof: proof.tree_size,
+            signed: root.tree_size,
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// The split must be a refactor, not a second tree. Anything that folds
+    /// cached leaf hashes has to land on the byte-identical root the line-based
+    /// path produces, or a cached prefix would silently describe a different
+    /// log than the one the signed root committed to.
+    #[test]
+    fn folding_leaf_hashes_gives_the_same_root_as_folding_lines() {
+        for n in 0..40usize {
+            let lines: Vec<alloc::string::String> =
+                (0..n).map(|i| alloc::format!("line-{i}")).collect();
+            let hashes: Vec<[u8; 32]> = lines.iter().map(|l| leaf_hash(l.as_bytes())).collect();
+            assert_eq!(
+                merkle_root(&lines),
+                merkle_root_of_leaf_hashes(&hashes),
+                "tree of {n} leaves disagrees between the two entry points"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_leaf_hash_set_is_the_empty_tree() {
+        let no_lines: [&[u8]; 0] = [];
+        assert_eq!(merkle_root_of_leaf_hashes(&[]), merkle_root(&no_lines));
+    }
     use super::*;
     use alloc::string::ToString;
     use alloc::vec;
@@ -1723,5 +1843,48 @@ mod tests {
         value["surprise"] = serde_json::Value::Bool(true);
         let json = serde_json::to_string(&value).unwrap();
         assert!(serde_json::from_str::<SignedAuditRoot>(&json).is_err());
+    }
+
+    #[test]
+    fn membership_rejects_a_self_consistent_proof_over_an_unsigned_root() {
+        let key = signing_key();
+        let l = lines(8);
+        let root_hash = encode_hex32(&merkle_root(&l));
+        let signed = signed_root(&key, "local", 8, &root_hash);
+        // A proof over a different leaf set folds to its own root perfectly
+        // well; that root is simply not the one the host signed.
+        let other = lines(4);
+        let proof = build_inclusion_proof(&other, 1).expect("proof over the other tree");
+        let err = verify_membership(&proof, &signed, &key.verifying_key(), "local")
+            .expect_err("a proof over a different tree must not pass");
+        assert!(
+            matches!(err, MembershipError::RootBinding { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn membership_rejects_a_genuinely_signed_root_for_another_tenant() {
+        let key = signing_key();
+        let l = lines(8);
+        let root_hash = encode_hex32(&merkle_root(&l));
+        let signed = signed_root(&key, "other-tenant", 8, &root_hash);
+        let proof = build_inclusion_proof(&l, 3).expect("proof");
+        let err = verify_membership(&proof, &signed, &key.verifying_key(), "local")
+            .expect_err("a root for another tenant is not evidence for this one");
+        assert!(
+            matches!(err, MembershipError::TenantMismatch { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn membership_accepts_a_proof_bound_to_its_own_signed_root() {
+        let key = signing_key();
+        let l = lines(8);
+        let root_hash = encode_hex32(&merkle_root(&l));
+        let signed = signed_root(&key, "local", 8, &root_hash);
+        let proof = build_inclusion_proof(&l, 3).expect("proof");
+        verify_membership(&proof, &signed, &key.verifying_key(), "local").expect("membership");
     }
 }

@@ -95,7 +95,6 @@ libkrun-sys = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-ext4-view.workspace = true
 # `.mvm` packed artifacts carry an Ed25519
 # manifest signature. We verify (and produce, when the caller
 # hands us a signing key) signatures inside this crate so the
@@ -150,6 +149,9 @@ required-features = ["manifest-verify"]
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
+# The sidecar resolver proves an artifact's libc from its `DT_NEEDED`, so a
+# test that seeds a sidecar cache needs a real ELF object, not a stub.
+mvm-fs = { workspace = true, features = ["test-support"] }
 # Test-only: `PackTrustConfig` (the operator trust config the producer's output
 # must verify against) stores publisher pubkeys base64-encoded, and there is no
 # constructor from a raw key. Already in the build graph via mvm-core; workspace-
@@ -170,6 +172,9 @@ xattr.workspace = true
 
 [features]
 default = []
+# Marks an official binary distribution so artifact resolvers do not infer
+# contributor behavior from the checkout that happens to launch the binary.
+release-channel = []
 # Forwards to mvm-core's sigstore keyless-verification feature so
 # `builder_pack`'s tests can exercise `verify_pack_keyless_at` without
 # every mvm-build build pulling the sigstore dependency tree.

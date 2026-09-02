@@ -8,9 +8,11 @@
 //! another?", and "how much credit remains?".
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use mvm_contract::protocol::network_flow::{Direction, MAX_STREAM_CREDIT};
+use mvm_core::plan::NetworkLimits;
 use tracing::warn;
 
 /// Why a stream/association operation was refused.
@@ -75,6 +77,8 @@ pub struct StreamEntry {
     pub state: StreamState,
     pub guest_credit: u32,
     pub host_credit: u32,
+    /// VM-wide capacity held for as long as this stream is live.
+    budget_permit: Option<VmBudgetPermit>,
 }
 
 /// Resource ceilings and runtime bounds for one registry.
@@ -128,6 +132,181 @@ impl Default for RegistryLimits {
     }
 }
 
+impl RegistryLimits {
+    /// Apply the signed plan ceilings while retaining host-owned timing,
+    /// credit, peer, ICMP, and rate defaults.
+    #[must_use]
+    pub fn from_network_limits(network: NetworkLimits) -> Self {
+        let mut limits = Self::default();
+        let max_tcp_flows = usize_from_u32(network.max_tcp_flows);
+        limits.max_tcp = max_tcp_flows;
+        // The signed field is aggregate across opaque TCP and typed HTTP. The
+        // VM budget enforces that aggregate; both per-session registries retain
+        // the same upper bound so neither class is narrowed independently.
+        limits.max_http = max_tcp_flows;
+        limits.max_udp = usize_from_u32(network.max_udp_associations);
+        limits.max_dns = usize_from_u32(network.max_dns_bindings);
+        limits
+    }
+}
+
+fn usize_from_u32(value: u32) -> usize {
+    usize::try_from(value).expect("u32 network limit fits usize on supported targets")
+}
+
+/// A resource class whose capacity is owned once per VM, not once per session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VmBudgetResource {
+    TcpHttp,
+    Udp,
+    Dns,
+    Icmp,
+    IngressListener,
+}
+
+/// A VM-wide FlowMux resource owner shared by every authenticated session.
+#[derive(Debug)]
+pub struct VmFlowBudget {
+    limits: VmFlowBudgetLimits,
+    live: Mutex<VmFlowCounts>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct VmFlowBudgetLimits {
+    tcp_http: usize,
+    udp: usize,
+    dns: usize,
+    icmp: usize,
+    ingress_listeners: usize,
+}
+
+#[derive(Debug, Default)]
+struct VmFlowCounts {
+    tcp_http: usize,
+    udp: usize,
+    dns: usize,
+    icmp: usize,
+    ingress_listeners: usize,
+}
+
+/// A VM-wide capacity reservation. Dropping it returns the slot, including
+/// when a session exits without explicitly retiring its live streams.
+#[derive(Debug)]
+pub struct VmBudgetPermit {
+    budget: Arc<VmFlowBudget>,
+    resource: VmBudgetResource,
+}
+
+/// A non-stream VM budget is exhausted.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum VmBudgetError {
+    /// The requested resource has reached its admitted ceiling.
+    #[error("{resource} ceiling reached ({limit})")]
+    Ceiling {
+        resource: &'static str,
+        limit: usize,
+    },
+}
+
+impl VmFlowBudget {
+    /// Build the per-VM owner from signed ceilings plus the host's ICMP cap.
+    #[must_use]
+    pub fn new(network: NetworkLimits, max_icmp: usize) -> Self {
+        Self {
+            limits: VmFlowBudgetLimits {
+                tcp_http: usize_from_u32(network.max_tcp_flows),
+                udp: usize_from_u32(network.max_udp_associations),
+                dns: usize_from_u32(network.max_dns_bindings),
+                icmp: max_icmp,
+                ingress_listeners: usize::from(network.max_ingress_listeners),
+            },
+            live: Mutex::new(VmFlowCounts::default()),
+        }
+    }
+
+    pub(crate) fn from_registry_limits(limits: RegistryLimits) -> Self {
+        Self {
+            limits: VmFlowBudgetLimits {
+                tcp_http: limits.max_tcp.max(limits.max_http),
+                udp: limits.max_udp,
+                dns: limits.max_dns,
+                icmp: limits.max_icmp,
+                // Ingress has no per-session registry path. A standalone
+                // registry therefore leaves it unavailable; the endpoint
+                // constructs the shared owner from signed `NetworkLimits`.
+                ingress_listeners: 0,
+            },
+            live: Mutex::new(VmFlowCounts::default()),
+        }
+    }
+
+    fn reserve_flow(self: &Arc<Self>, class: FlowClass) -> Result<VmBudgetPermit, RegistryError> {
+        let resource = match class {
+            FlowClass::Tcp | FlowClass::Http => VmBudgetResource::TcpHttp,
+            FlowClass::Udp => VmBudgetResource::Udp,
+            FlowClass::Dns => VmBudgetResource::Dns,
+            FlowClass::Icmp => VmBudgetResource::Icmp,
+        };
+        self.reserve(resource)
+            .map_err(|VmBudgetError::Ceiling { limit, .. }| RegistryError::Ceiling { class, limit })
+    }
+
+    /// Reserve one admitted ingress listener for the endpoint lifetime.
+    pub fn reserve_ingress_listener(self: &Arc<Self>) -> Result<VmBudgetPermit, VmBudgetError> {
+        self.reserve(VmBudgetResource::IngressListener)
+    }
+
+    fn reserve(
+        self: &Arc<Self>,
+        resource: VmBudgetResource,
+    ) -> Result<VmBudgetPermit, VmBudgetError> {
+        let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+        let (count, limit, name) = match resource {
+            VmBudgetResource::TcpHttp => {
+                (&mut live.tcp_http, self.limits.tcp_http, "tcp/http flow")
+            }
+            VmBudgetResource::Udp => (&mut live.udp, self.limits.udp, "udp association"),
+            VmBudgetResource::Dns => (&mut live.dns, self.limits.dns, "dns binding"),
+            VmBudgetResource::Icmp => (&mut live.icmp, self.limits.icmp, "icmp exchange"),
+            VmBudgetResource::IngressListener => (
+                &mut live.ingress_listeners,
+                self.limits.ingress_listeners,
+                "ingress listener",
+            ),
+        };
+        if *count >= limit {
+            return Err(VmBudgetError::Ceiling {
+                resource: name,
+                limit,
+            });
+        }
+        *count += 1;
+        drop(live);
+        Ok(VmBudgetPermit {
+            budget: Arc::clone(self),
+            resource,
+        })
+    }
+}
+
+impl Drop for VmBudgetPermit {
+    fn drop(&mut self) {
+        let mut live = self.budget.live.lock().unwrap_or_else(|e| e.into_inner());
+        let count = match self.resource {
+            VmBudgetResource::TcpHttp => &mut live.tcp_http,
+            VmBudgetResource::Udp => &mut live.udp,
+            VmBudgetResource::Dns => &mut live.dns,
+            VmBudgetResource::Icmp => &mut live.icmp,
+            VmBudgetResource::IngressListener => &mut live.ingress_listeners,
+        };
+        if *count == 0 {
+            warn!(resource = ?self.resource, "FlowMux VM budget release was unbalanced");
+        } else {
+            *count -= 1;
+        }
+    }
+}
+
 /// Host-side registry for one authenticated FlowMux session.
 #[derive(Debug)]
 pub struct StreamRegistry {
@@ -135,17 +314,26 @@ pub struct StreamRegistry {
     next_guest_id: u32,
     next_host_id: u32,
     streams: BTreeMap<u32, StreamEntry>,
+    budget: Arc<VmFlowBudget>,
 }
 
 impl StreamRegistry {
     /// Create a registry with the given ceilings.
     #[must_use]
     pub fn new(limits: RegistryLimits) -> Self {
+        let budget = Arc::new(VmFlowBudget::from_registry_limits(limits));
+        Self::with_budget(limits, budget)
+    }
+
+    /// Create a per-session registry drawing capacity from a shared VM owner.
+    #[must_use]
+    pub fn with_budget(limits: RegistryLimits, budget: Arc<VmFlowBudget>) -> Self {
         Self {
             limits,
             next_guest_id: 1, // guest-initiated IDs are odd
-            next_host_id: 0,  // host-initiated IDs are even
+            next_host_id: 2,  // host-initiated flow IDs are non-zero and even
             streams: BTreeMap::new(),
+            budget,
         }
     }
 
@@ -211,10 +399,12 @@ impl StreamRegistry {
             // Defensive: the allocator should always produce odd IDs.
             return Err(RegistryError::InvalidStreamId { stream_id: id });
         }
-        self.next_guest_id = id.checked_add(2).ok_or(RegistryError::InvalidStreamId {
+        let next_id = id.checked_add(2).ok_or(RegistryError::InvalidStreamId {
             stream_id: u32::MAX,
         })?;
-        self.insert(id, class);
+        let permit = self.budget.reserve_flow(class)?;
+        self.next_guest_id = next_id;
+        self.insert(id, class, permit);
         Ok(id)
     }
 
@@ -236,15 +426,16 @@ impl StreamRegistry {
                 state: StreamState::Opening,
             });
         }
+        let permit = self.budget.reserve_flow(class)?;
         self.next_guest_id = self.next_guest_id.max(stream_id + 2);
-        self.insert(stream_id, class);
+        self.insert(stream_id, class, permit);
         Ok(())
     }
 
     /// Record a host-initiated stream ID supplied by the local ingress handler.
     /// The ID must be even, not already live, and within the class ceiling.
     pub fn open_host(&mut self, stream_id: u32, class: FlowClass) -> Result<(), RegistryError> {
-        if !stream_id.is_multiple_of(2) {
+        if stream_id == 0 || !stream_id.is_multiple_of(2) {
             return Err(RegistryError::InvalidStreamId { stream_id });
         }
         if self.live_count(class) >= self.class_limit(class) {
@@ -259,8 +450,9 @@ impl StreamRegistry {
                 state: StreamState::Opening,
             });
         }
+        let permit = self.budget.reserve_flow(class)?;
         self.next_host_id = self.next_host_id.max(stream_id + 2);
-        self.insert(stream_id, class);
+        self.insert(stream_id, class, permit);
         Ok(())
     }
 
@@ -286,10 +478,12 @@ impl StreamRegistry {
         if !id.is_multiple_of(2) {
             return Err(RegistryError::InvalidStreamId { stream_id: id });
         }
-        self.next_host_id = id.checked_add(2).ok_or(RegistryError::InvalidStreamId {
+        let next_id = id.checked_add(2).ok_or(RegistryError::InvalidStreamId {
             stream_id: u32::MAX,
         })?;
-        self.insert(id, class);
+        let permit = self.budget.reserve_flow(class)?;
+        self.next_host_id = next_id;
+        self.insert(id, class, permit);
         Ok(id)
     }
 
@@ -339,6 +533,7 @@ impl StreamRegistry {
             .get_mut(&stream_id)
             .ok_or(RegistryError::NotLive { stream_id })?;
         entry.state = StreamState::Closed;
+        entry.budget_permit.take();
         Ok(())
     }
 
@@ -369,6 +564,33 @@ impl StreamRegistry {
             .saturating_add(delta)
             .min(MAX_STREAM_CREDIT);
         Ok(())
+    }
+
+    /// Restore guest credit once at least half of the initial window has been
+    /// consumed, returning the delta the peer must be told about.
+    ///
+    /// Batching updates avoids one authenticated frame per small payload while
+    /// retaining a bounded window. A payload that consumes the whole window is
+    /// replenished immediately; smaller writes share one update when the
+    /// remaining credit reaches the low-water mark.
+    pub fn replenish_guest_credit_if_low(
+        &mut self,
+        stream_id: u32,
+    ) -> Result<Option<u32>, RegistryError> {
+        let entry = self
+            .streams
+            .get_mut(&stream_id)
+            .ok_or(RegistryError::NotLive { stream_id })?;
+        let low_water = self.limits.initial_credit / 2;
+        if entry.guest_credit > low_water {
+            return Ok(None);
+        }
+        let delta = self
+            .limits
+            .initial_credit
+            .saturating_sub(entry.guest_credit);
+        entry.guest_credit = self.limits.initial_credit;
+        Ok((delta > 0).then_some(delta))
     }
 
     /// Consume `len` bytes of host credit on `stream_id`.
@@ -404,7 +626,7 @@ impl StreamRegistry {
         self.live_in_class(class)
     }
 
-    fn insert(&mut self, stream_id: u32, class: FlowClass) {
+    fn insert(&mut self, stream_id: u32, class: FlowClass, permit: VmBudgetPermit) {
         let prev = self.streams.insert(
             stream_id,
             StreamEntry {
@@ -412,6 +634,7 @@ impl StreamRegistry {
                 state: StreamState::Opening,
                 guest_credit: self.limits.initial_credit,
                 host_credit: self.limits.initial_credit,
+                budget_permit: Some(permit),
             },
         );
         if prev.is_some() {
@@ -457,9 +680,18 @@ mod tests {
     #[test]
     fn host_ids_are_even_and_monotonic() {
         let mut reg = StreamRegistry::new(RegistryLimits::default());
-        assert_eq!(reg.alloc_host(FlowClass::Tcp).unwrap(), 0);
         assert_eq!(reg.alloc_host(FlowClass::Tcp).unwrap(), 2);
-        assert_eq!(reg.alloc_host(FlowClass::Udp).unwrap(), 4);
+        assert_eq!(reg.alloc_host(FlowClass::Tcp).unwrap(), 4);
+        assert_eq!(reg.alloc_host(FlowClass::Udp).unwrap(), 6);
+    }
+
+    #[test]
+    fn host_open_refuses_the_control_stream() {
+        let mut reg = StreamRegistry::new(RegistryLimits::default());
+        assert_eq!(
+            reg.open_host(0, FlowClass::Tcp),
+            Err(RegistryError::InvalidStreamId { stream_id: 0 })
+        );
     }
 
     #[test]
@@ -522,6 +754,42 @@ mod tests {
     }
 
     #[test]
+    fn guest_credit_updates_are_batched_at_half_window() {
+        let mut reg = StreamRegistry::new(RegistryLimits {
+            max_tcp: 1,
+            max_udp: 0,
+            max_dns: 64,
+            initial_credit: 100,
+            ..Default::default()
+        });
+        let id = reg.alloc_guest(FlowClass::Tcp).unwrap();
+
+        reg.consume_guest_credit(id, 49).unwrap();
+        assert_eq!(reg.replenish_guest_credit_if_low(id).unwrap(), None);
+        assert_eq!(reg.get(id).unwrap().guest_credit, 51);
+
+        reg.consume_guest_credit(id, 1).unwrap();
+        assert_eq!(reg.replenish_guest_credit_if_low(id).unwrap(), Some(50));
+        assert_eq!(reg.get(id).unwrap().guest_credit, 100);
+    }
+
+    #[test]
+    fn whole_guest_window_is_replenished_immediately() {
+        let mut reg = StreamRegistry::new(RegistryLimits {
+            max_tcp: 1,
+            max_udp: 0,
+            max_dns: 64,
+            initial_credit: 100,
+            ..Default::default()
+        });
+        let id = reg.alloc_guest(FlowClass::Tcp).unwrap();
+
+        reg.consume_guest_credit(id, 100).unwrap();
+        assert_eq!(reg.replenish_guest_credit_if_low(id).unwrap(), Some(100));
+        assert_eq!(reg.get(id).unwrap().guest_credit, 100);
+    }
+
+    #[test]
     fn host_credit_is_tracked() {
         let mut reg = StreamRegistry::new(RegistryLimits {
             max_tcp: 1,
@@ -559,5 +827,87 @@ mod tests {
         assert_eq!(initiator(1), Direction::GuestToHost);
         assert_eq!(initiator(0), Direction::HostToGuest);
         assert_eq!(initiator(42), Direction::HostToGuest);
+    }
+
+    #[test]
+    fn signed_limits_replace_registry_class_defaults() {
+        let network = NetworkLimits::builder()
+            .max_tcp_flows(7)
+            .max_udp_associations(5)
+            .max_dns_bindings(3)
+            .max_ingress_listeners(2)
+            .build()
+            .unwrap();
+        let limits = RegistryLimits::from_network_limits(network);
+
+        assert_eq!(limits.max_tcp, 7);
+        assert_eq!(limits.max_http, 7);
+        assert_eq!(limits.max_udp, 5);
+        assert_eq!(limits.max_dns, 3);
+        assert_eq!(
+            limits.initial_credit,
+            RegistryLimits::default().initial_credit
+        );
+    }
+
+    #[test]
+    fn tcp_and_http_share_one_vm_ceiling_across_sessions() {
+        let network = NetworkLimits::builder().max_tcp_flows(1).build().unwrap();
+        let limits = RegistryLimits::from_network_limits(network);
+        let budget = Arc::new(VmFlowBudget::new(network, limits.max_icmp));
+        let mut first = StreamRegistry::with_budget(limits, Arc::clone(&budget));
+        let mut second = StreamRegistry::with_budget(limits, budget);
+
+        assert_eq!(first.alloc_guest(FlowClass::Tcp).unwrap(), 1);
+        assert!(matches!(
+            second.alloc_guest(FlowClass::Http),
+            Err(RegistryError::Ceiling {
+                class: FlowClass::Http,
+                limit: 1
+            })
+        ));
+
+        first.retire(1).unwrap();
+        assert_eq!(
+            second.alloc_guest(FlowClass::Http).unwrap(),
+            1,
+            "a refused global reservation must not consume the session's stream id"
+        );
+    }
+
+    #[test]
+    fn dropping_a_session_releases_every_vm_reservation() {
+        let network = NetworkLimits::builder()
+            .max_udp_associations(1)
+            .build()
+            .unwrap();
+        let limits = RegistryLimits::from_network_limits(network);
+        let budget = Arc::new(VmFlowBudget::new(network, limits.max_icmp));
+        {
+            let mut first = StreamRegistry::with_budget(limits, Arc::clone(&budget));
+            first.open_guest(1, FlowClass::Udp).unwrap();
+        }
+
+        let mut second = StreamRegistry::with_budget(limits, budget);
+        second.open_guest(1, FlowClass::Udp).unwrap();
+    }
+
+    #[test]
+    fn ingress_listener_capacity_is_vm_wide_and_drop_guarded() {
+        let network = NetworkLimits::builder()
+            .max_ingress_listeners(1)
+            .build()
+            .unwrap();
+        let budget = Arc::new(VmFlowBudget::new(network, 1));
+        let first = budget.reserve_ingress_listener().unwrap();
+        assert_eq!(
+            budget.reserve_ingress_listener().unwrap_err(),
+            VmBudgetError::Ceiling {
+                resource: "ingress listener",
+                limit: 1
+            }
+        );
+        drop(first);
+        assert!(budget.reserve_ingress_listener().is_ok());
     }
 }

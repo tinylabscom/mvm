@@ -70,7 +70,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -o pipefail
-          if cargo run -p xtask -- check-claim-witness-freshness 2>&1 | tee freshness.log; then
+          # --check-reporting additionally asks whether the watcher fired for
+          # each lane's last completed run. Scheduled runs only: an
+          # unreported run is history, and no pull request can fix it — a
+          # branch reddened for it teaches the author to ignore this gate.
+          # Staleness stays checked everywhere, because a cron edit under
+          # review can cause it.
+          extra=""
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            extra="--check-reporting"
+          fi
+          # shellcheck disable=SC2086
+          if cargo run -p xtask -- check-claim-witness-freshness $extra 2>&1 | tee freshness.log; then
             echo "stale=false" >> "$GITHUB_OUTPUT"
           else
             echo "stale=true" >> "$GITHUB_OUTPUT"

@@ -22,7 +22,7 @@ fn fixture_plan(nonce: [u8; 16]) -> ExecutionPlan {
         snapshot_at: Default::default(),
         network_mode: Default::default(),
         stream_retention: Default::default(),
-        l3_network: None,
+        ingress: Vec::new(),
         network_limits: Default::default(),
         schema_version: SCHEMA_VERSION,
         plan_id: PlanId("test-plan-001".to_string()),
@@ -57,6 +57,7 @@ fn fixture_plan(nonce: [u8; 16]) -> ExecutionPlan {
             capture_paths: vec![],
             retention_days: 0,
         },
+        caller_commitment: None,
         audit_labels: BTreeMap::new(),
         key_rotation: KeyRotationSpec { interval_days: 0 },
         attestation: AttestationRequirement {
@@ -76,6 +77,7 @@ fn fixture_plan(nonce: [u8; 16]) -> ExecutionPlan {
         deps_volume: None,
         shares: Vec::new(),
         services: Vec::new(),
+        extensions: Vec::new(),
         stream_edges: Vec::new(),
     }
 }

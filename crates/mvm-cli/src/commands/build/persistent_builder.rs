@@ -50,7 +50,8 @@ use mvm_build::libkrun_builder::{
     DISPATCH_SOCK_MARKER, LibkrunPersistentHostVm, PersistentVmHandle,
 };
 use mvm_build::persistent_builder::{
-    DispatchOutcome, PersistentBuilderSupervisor, current_unix_secs,
+    DispatchOutcome, PersistentBuilderSupervisor, SessionDiskTransport, current_unix_secs,
+    guest_artifact_dir, read_dispatch_artifacts, repack_dispatch_input,
 };
 
 use crate::commands::Cli;
@@ -116,10 +117,15 @@ struct SessionRecord {
     /// Path libkrun exposes for AF_VSOCK port 21471 proxy. The
     /// supervisor connects here.
     dispatch_socket_path: PathBuf,
-    /// Per-VM job dir (bound at `/job` in the guest). `submit`
-    /// stages each call's cmd.sh under a fresh
-    /// `<job_dir_relpath>` here.
+    /// Per-VM job dir. `submit` stages each call's cmd.sh under a fresh
+    /// `<job_dir_relpath>` here and reads that dispatch's artifacts back here.
+    /// Reaches the guest as a `/job` share, or — when `disk_transport` is set —
+    /// over the transport disks, in which case the guest never sees this path.
     job_dir: PathBuf,
+    /// Set when this session exchanges jobs over raw disks rather than shares.
+    /// Absent means shares, which is what the libkrun backend uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    disk_transport: Option<SessionDiskTransport>,
     /// Workspace bound at `/work` in the guest. Recorded for
     /// `status` output; not load-bearing.
     workspace_root: PathBuf,
@@ -206,6 +212,10 @@ fn persistent_backend(explicit: Option<BuilderBackendChoice>) -> Result<Persiste
              (QEMU is a one-shot dev/test backend). Use `--builder libkrun` \
              (or omit `--builder` for libkrun)."
         ),
+        Some(BuilderBackendChoice::WebLinux) => bail!(
+            "`mvmctl persistent-builder start` has no WebLinux persistent builder \
+             (WebLinux is browser-only). Use `--builder libkrun` or `--builder hvf`."
+        ),
     }
 }
 
@@ -276,6 +286,7 @@ fn as_build_record(record: &SessionRecord) -> mvm_build::persistent_builder::Ses
         dispatch_socket_path: record.dispatch_socket_path.clone(),
         job_dir: record.job_dir.clone(),
         workspace_root: record.workspace_root.clone(),
+        disk_transport: record.disk_transport.clone(),
         supervisor_pid: record.supervisor_pid,
         last_activity_unix_secs: record.last_activity_unix_secs,
     }
@@ -311,19 +322,24 @@ fn ensure_persistent_host_bins() -> Result<PathBuf> {
 /// can outlive this command.
 fn start_hvf_persistent(workspace: PathBuf, memory_mib: u32) -> Result<SessionRecord> {
     let host_bin_dir = ensure_persistent_host_bins()?;
-    let (kernel, rootfs, _closure_nar) =
+    let (kernel, rootfs, closure_nar) =
         crate::commands::build::hvf_builder_image::resolve_hvf_builder_image()
             .map_err(|e| anyhow::anyhow!(e))
             .context("resolving the hvf builder image for the persistent builder")?;
 
     let session_id = format!("{:x}", current_unix_secs());
-    let vm = mvm_runtime::builder_runner::HvfPersistentHostVm::new(
+    let mut vm = mvm_runtime::builder_runner::HvfPersistentHostVm::new(
         kernel,
         rootfs,
         &workspace,
         host_bin_dir,
     )
     .with_resources(DEFAULT_PERSISTENT_VCPUS, memory_mib);
+    // A builder pack may ship a pre-fetched toolchain closure. It rides the
+    // input disk, so it has to be known before the disk is packed.
+    if let Some(nar) = closure_nar {
+        vm = vm.with_closure_nar(nar);
+    }
     let session = vm
         .start(&session_id)
         .context("spawning persistent builder VM (HvfPersistentHostVm::start)")?;
@@ -332,6 +348,11 @@ fn start_hvf_persistent(workspace: PathBuf, memory_mib: u32) -> Result<SessionRe
         session_id: session.session_id().to_string(),
         dispatch_socket_path: session.dispatch_socket_path(),
         job_dir: session.job_dir().to_path_buf(),
+        // HVF has no virtio-fs: every job and every artifact crosses on a disk.
+        disk_transport: Some(SessionDiskTransport {
+            input_disk: session.input_disk().to_path_buf(),
+            output_disk: session.output_disk().to_path_buf(),
+        }),
         workspace_root: workspace,
         supervisor_pid: session
             .supervisor_pid()
@@ -361,6 +382,9 @@ fn start_libkrun_persistent(workspace: PathBuf, memory_mib: u32) -> Result<Sessi
         session_id: handle.session_id().to_string(),
         dispatch_socket_path: handle.dispatch_socket_path(),
         job_dir: handle.job_dir().to_path_buf(),
+        // libkrun serves `/job` and `/out` as virtio-fs shares, so the host
+        // already sees what the guest writes and needs no transport disks.
+        disk_transport: None,
         workspace_root: workspace,
         supervisor_pid: read_supervisor_pid(handle.vm_state_dir()),
         last_activity_unix_secs: Some(current_unix_secs()),
@@ -397,7 +421,16 @@ fn run_submit(args: SubmitArgs) -> Result<()> {
         .attr
         .unwrap_or_else(|| format!("packages.{}-linux.default", host_arch_for_attr()));
     let _ = mvm_build::persistent_builder::touch_active_session(current_unix_secs());
-    let job_dir_relpath = stage_flake_cmd_sh(&record.job_dir, &args.flake, &attr)?;
+    let transport = record.disk_transport.as_ref();
+    let job_dir_relpath = stage_flake_cmd_sh(&record.job_dir, &args.flake, &attr, transport)?;
+
+    // Disk-backed session: the job has to be on the input disk before the
+    // guest is told to run it. `submit` below is what sends the frame, so
+    // finishing here is what makes the ordering safe.
+    if let Some(t) = transport {
+        repack_dispatch_input(t, &record.job_dir, &job_dir_relpath)
+            .context("packing the dispatch input disk")?;
+    }
 
     let supervisor = PersistentBuilderSupervisor::new(&record.dispatch_socket_path)
         // Nix can spend a long time in a quiet compiler phase while the
@@ -418,6 +451,19 @@ fn run_submit(args: SubmitArgs) -> Result<()> {
     let _ = mvm_build::persistent_builder::touch_active_session(current_unix_secs());
 
     print_outcome(&outcome);
+
+    // The guest wrote its artifact tar before answering, so reading now cannot
+    // race it. This lands them where `artifact_dir_for` looks, which is what
+    // keeps the reporting below identical across both transports.
+    if let Some(t) = transport
+        && let Err(e) = read_dispatch_artifacts(t, &record.job_dir, &job_dir_relpath)
+    {
+        // Best-effort on a failed dispatch: the guest still collects after
+        // every job, so this usually carries the Nix log even when the build
+        // did not produce artifacts. A hard error here would replace the
+        // build's own diagnosis with a transport one.
+        eprintln!("warning: reading the dispatch output disk failed: {e}");
+    }
 
     if outcome.exit_code == 0 {
         let artifact_dir = artifact_dir_for(&record.job_dir, &job_dir_relpath);
@@ -574,7 +620,12 @@ const ARTIFACT_SUBDIR: &str = "out";
 /// Matches the shape `LibkrunBuilderVm::run_build` produces for
 /// the single-shot path so the guest's `run_job` helper accepts
 /// the input unchanged.
-fn stage_flake_cmd_sh(job_dir: &std::path::Path, flake_ref: &str, attr: &str) -> Result<String> {
+fn stage_flake_cmd_sh(
+    job_dir: &std::path::Path,
+    flake_ref: &str,
+    attr: &str,
+    transport: Option<&SessionDiskTransport>,
+) -> Result<String> {
     let job_id = uuid::Uuid::new_v4().to_string();
     let sub = job_dir.join(&job_id);
     let artifact_dir = sub.join(ARTIFACT_SUBDIR);
@@ -638,14 +689,14 @@ fn stage_flake_cmd_sh(job_dir: &std::path::Path, flake_ref: &str, attr: &str) ->
          stalled-download-timeout = 300'\n\
          mkdir -p \"$XDG_CACHE_HOME\" \"$XDG_STATE_HOME\"\n\
          nix() {{ env HOME=\"$HOME\" XDG_CACHE_HOME=\"$XDG_CACHE_HOME\" XDG_STATE_HOME=\"$XDG_STATE_HOME\" /sbin/nix \"$@\"; }}\n\
-         OUT_DIR='/job/{job_id}/{artifact_subdir}'\n\
-         JOB_DIR='/job/{job_id}'\n\
-         NIX_LOG=\"$JOB_DIR/nix-stderr.log\"\n\
-         NIX_STATUS=\"$JOB_DIR/nix-exit-status\"\n\
+         OUT_DIR='{out_dir}'\n\
+         NIX_LOG=\"$OUT_DIR/nix-stderr.log\"\n\
+         NIX_STATUS=\"$OUT_DIR/nix-exit-status\"\n\
          mkdir -p \"$OUT_DIR\"\n\
-         # Keep the complete Nix diagnostic on the host-visible job share.\n\
-         # A build can terminate before the terminal Result frame is\n\
-         # written; this file remains available for post-mortem inspection.\n\
+         # Keep the complete Nix diagnostic beside the artifacts, which is\n\
+         # the one directory the host reads back on either transport. A build\n\
+         # can terminate before the terminal Result frame is written; this\n\
+         # file remains available for post-mortem inspection.\n\
          set +e\n\
          STORE_PATH=$(nix --extra-experimental-features 'nix-command flakes' \\\n\
              build --no-link --print-out-paths \\\n\
@@ -686,7 +737,7 @@ fn stage_flake_cmd_sh(job_dir: &std::path::Path, flake_ref: &str, attr: &str) ->
                  cp -L \"$STORE_PATH/$sidecar\" \"$OUT_DIR/$sidecar\"\n\
              fi\n\
          done\n",
-        artifact_subdir = ARTIFACT_SUBDIR,
+        out_dir = guest_artifact_dir(transport, &job_id),
         flake_ref = shell_escape(flake_ref),
         attr = shell_escape(attr),
         egress_proxy_url = mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_URL,
@@ -866,8 +917,13 @@ mod tests {
     fn stage_flake_cmd_sh_writes_valid_shell_under_per_job_subdir() {
         let scratch = tempfile::tempdir().expect("tempdir");
         let job_dir = scratch.path().to_path_buf();
-        let relpath = stage_flake_cmd_sh(&job_dir, "path:/work", "packages.aarch64-linux.default")
-            .expect("stage");
+        let relpath = stage_flake_cmd_sh(
+            &job_dir,
+            "path:/work",
+            "packages.aarch64-linux.default",
+            None,
+        )
+        .expect("stage");
         let cmd_path = job_dir.join(&relpath).join("cmd.sh");
         assert!(cmd_path.is_file(), "{}", cmd_path.display());
         let body = std::fs::read_to_string(&cmd_path).expect("read");
@@ -887,6 +943,7 @@ mod tests {
             scratch.path(),
             "path:/work",
             "packages.aarch64-linux.default",
+            None,
         )
         .expect("stage");
         let body =
@@ -929,8 +986,13 @@ mod tests {
         // racing the guest's mkdir).
         let scratch = tempfile::tempdir().expect("tempdir");
         let job_dir = scratch.path().to_path_buf();
-        let relpath = stage_flake_cmd_sh(&job_dir, "path:/work", "packages.aarch64-linux.default")
-            .expect("stage");
+        let relpath = stage_flake_cmd_sh(
+            &job_dir,
+            "path:/work",
+            "packages.aarch64-linux.default",
+            None,
+        )
+        .expect("stage");
         let artifact_dir = artifact_dir_for(&job_dir, &relpath);
         assert!(
             artifact_dir.is_dir(),
@@ -976,8 +1038,10 @@ mod tests {
         assert!(body.contains("stalled-download-timeout = 300"));
         assert!(body.contains("export XDG_STATE_HOME=/tmp/.local/state"));
         assert!(body.contains("nix() { env HOME=\"$HOME\""));
-        assert!(body.contains("NIX_LOG=\"$JOB_DIR/nix-stderr.log\""));
-        assert!(body.contains("NIX_STATUS=\"$JOB_DIR/nix-exit-status\""));
+        // Beside the artifacts, not in the job dir: `$OUT_DIR` is the one
+        // directory the host reads back on either transport.
+        assert!(body.contains("NIX_LOG=\"$OUT_DIR/nix-stderr.log\""));
+        assert!(body.contains("NIX_STATUS=\"$OUT_DIR/nix-exit-status\""));
         assert!(body.contains("cat \"$NIX_LOG\" >&2"));
         assert!(body.contains("--impure --no-write-lock-file"));
         let expected_guest_path = format!("/job/{relpath}/out");
@@ -994,6 +1058,57 @@ mod tests {
         // `cp -L` (not just `cp`) so the host gets real bytes,
         // not store-path symlinks that don't resolve.
         assert!(body.contains("cp -L"), "must use cp -L: {body}");
+    }
+
+    #[test]
+    fn a_disk_backed_dispatch_writes_artifacts_to_the_collected_directory() {
+        // The trap this pins: the guest tars `/out` — and only `/out` — onto
+        // the output disk. Under the disk transport `/job` is a bind onto the
+        // guest's own input stage, so a cmd.sh still pointing at
+        // `/job/<id>/out` runs clean and produces nothing the host can read.
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let transport = SessionDiskTransport {
+            input_disk: scratch.path().join("input.img"),
+            output_disk: scratch.path().join("output.img"),
+        };
+        let relpath = stage_flake_cmd_sh(
+            scratch.path(),
+            "path:/work",
+            "packages.aarch64-linux.default",
+            Some(&transport),
+        )
+        .expect("stage");
+        let body =
+            std::fs::read_to_string(scratch.path().join(&relpath).join("cmd.sh")).expect("read");
+
+        assert!(body.contains("OUT_DIR='/out'"), "{body}");
+        assert!(
+            !body.contains(&format!("/job/{relpath}/out")),
+            "a disk-backed dispatch must not target the uncollected job dir: {body}"
+        );
+    }
+
+    #[test]
+    fn a_share_backed_dispatch_still_writes_into_the_shared_job_dir() {
+        // The other half of the same contract: with shares, `/job` and `/out`
+        // are the same host directory, and `artifact_dir_for` looks under the
+        // job dir. Retargeting this one at `/out` would write to the wrong
+        // place on libkrun.
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let relpath = stage_flake_cmd_sh(
+            scratch.path(),
+            "path:/work",
+            "packages.aarch64-linux.default",
+            None,
+        )
+        .expect("stage");
+        let body =
+            std::fs::read_to_string(scratch.path().join(&relpath).join("cmd.sh")).expect("read");
+
+        assert!(
+            body.contains(&format!("OUT_DIR='/job/{relpath}/out'")),
+            "{body}"
+        );
     }
 
     #[test]
@@ -1034,6 +1149,7 @@ mod tests {
         let record = SessionRecord {
             session_id: "abc123".to_string(),
             dispatch_socket_path: PathBuf::from("/tmp/sock"),
+            disk_transport: None,
             job_dir: PathBuf::from("/tmp/jobs"),
             workspace_root: PathBuf::from("/work"),
             supervisor_pid: 4242,

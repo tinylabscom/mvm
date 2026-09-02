@@ -28,7 +28,8 @@
 //! per-verb labels (success exit codes, duration) without touching
 //! `mod.rs`'s dispatch.
 
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, Weak};
 
 use mvm_core::plan::TenantId;
 use mvm_hostd::supervisor::{EventCategory, FileAuditSigner, Recorder};
@@ -38,6 +39,46 @@ use super::machine;
 use super::vm::audit_chain::default_audit_dir;
 use super::vm::host_signer;
 
+struct ActiveCmdSigner {
+    audit_dir: PathBuf,
+    signer: Weak<FileAuditSigner>,
+}
+
+static ACTIVE_CMD_SIGNER: Mutex<Option<ActiveCmdSigner>> = Mutex::new(None);
+
+/// Owns the command recorder and keeps its concrete file signer available to
+/// launch audit emitters for the duration of dispatch.
+pub(crate) struct CommandAudit {
+    recorder: Recorder,
+    _signer: Arc<FileAuditSigner>,
+}
+
+impl CommandAudit {
+    pub(crate) fn recorder(&self) -> &Recorder {
+        &self.recorder
+    }
+}
+
+impl Drop for CommandAudit {
+    fn drop(&mut self) {
+        *ACTIVE_CMD_SIGNER
+            .lock()
+            .expect("active command signer poisoned") = None;
+    }
+}
+
+/// Reuse the command signer only when it targets this exact primary audit
+/// directory. Policy replicas continue to own their separate signers.
+pub(crate) fn active_signer_for(audit_dir: &Path) -> Option<Arc<FileAuditSigner>> {
+    let active = ACTIVE_CMD_SIGNER
+        .lock()
+        .expect("active command signer poisoned");
+    let active = active.as_ref()?;
+    (active.audit_dir == audit_dir)
+        .then(|| active.signer.upgrade())
+        .flatten()
+}
+
 /// Best-effort Recorder for `cmd.*` envelopes. Returns `None` (with
 /// a `tracing::warn`) when any setup step fails — the CLI runs
 /// without cmd-level audit in that case.
@@ -45,7 +86,7 @@ use super::vm::host_signer;
 /// The Recorder is category-agnostic (callers pass
 /// `EventCategory::Cmd` for both `cmd.<verb>` and `cmd.tool.<verb>`
 /// events), so one builder serves every consumer.
-pub(crate) fn build_cmd_recorder() -> Option<Recorder> {
+pub(crate) fn build_cmd_recorder() -> Option<CommandAudit> {
     let signer = match host_signer::load_or_init() {
         Ok(s) => s,
         Err(e) => {
@@ -65,16 +106,22 @@ pub(crate) fn build_cmd_recorder() -> Option<Recorder> {
         }
     };
     let file_signer = match FileAuditSigner::open(signer.signing, &audit_dir) {
-        Ok(s) => s,
+        Ok(s) => Arc::new(s),
         Err(e) => {
             tracing::warn!(error = %e, "plan 60 Phase 4 cmd recorder not wired (FileAuditSigner)");
             return None;
         }
     };
-    Some(Recorder::new(
-        Arc::new(file_signer),
-        TenantId("local".to_string()),
-    ))
+    *ACTIVE_CMD_SIGNER
+        .lock()
+        .expect("active command signer poisoned") = Some(ActiveCmdSigner {
+        audit_dir,
+        signer: Arc::downgrade(&file_signer),
+    });
+    Some(CommandAudit {
+        recorder: Recorder::new(file_signer.clone(), TenantId("local".to_string())),
+        _signer: file_signer,
+    })
 }
 
 /// Emit `cmd.<verb>.invoked` before the dispatch arm runs. Returns
@@ -143,7 +190,13 @@ impl Commands {
                 // `machine run --json` streams a structured MachineRunSummary;
                 // `machine run --up-json` emits the SDK boot envelope;
                 // reserve stdout so reconcile chrome can't interleave.
-                machine::MachineAction::Run(r) => r.run.json || r.up_json,
+                //
+                // A trailing argv reserves it too. That run relays the guest's
+                // own stdout to the caller, so anything the host prints there
+                // lands in the middle of the workload's output — a caller
+                // reading `machine run -- echo hi` got the greeting with an
+                // `[mvm]` warning glued to the front of it.
+                machine::MachineAction::Run(r) => r.run.json || r.up_json || !r.run.argv.is_empty(),
                 // `machine timeline --json` prints a structured lineage.
                 machine::MachineAction::Timeline(t) => t.json,
                 // A `--json` restore reuses the fork path's structured output.
@@ -232,7 +285,7 @@ impl Commands {
             Commands::Build(a) => a.action.verb_name(),
             Commands::Deploy(_) => "deploy",
             Commands::ShellInit(_) => "shell-init",
-            // `ops <sub>` delegates to the per-op verb (metrics/bench/config).
+            // `ops <sub>` delegates to the per-op verb (metrics/config/MCP).
             Commands::Ops(a) => a.action.verb_name(),
             Commands::Network(_) => "network",
             Commands::Catalog(_) => "catalog",
@@ -245,7 +298,9 @@ impl Commands {
             // `trust <sub>` delegates: attest/receipt/audit keep their own
             // verbs, publisher add/list/remove keep `trust`.
             Commands::Trust(a) => a.action.verb_name(),
+            Commands::AgentSession(_) => "agent-session",
             Commands::Deps(_) => "deps",
+            Commands::Capture(a) => a.action.verb_name(),
             Commands::Artifact(_) => "artifact",
             Commands::SeccompAudit(_) => "seccomp-audit",
             #[cfg(feature = "builder-vm")]
@@ -268,6 +323,33 @@ mod tests {
         let signer = Arc::new(CapturingAuditSigner::new());
         let rec = Recorder::new(signer.clone(), TenantId("local".to_string()));
         (rec, signer)
+    }
+
+    #[test]
+    fn the_active_file_signer_is_scoped_to_the_command_and_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let signer = Arc::new(
+            FileAuditSigner::open(ed25519_dalek::SigningKey::from_bytes(&[41; 32]), dir.path())
+                .unwrap(),
+        );
+        *ACTIVE_CMD_SIGNER
+            .lock()
+            .expect("active command signer poisoned") = Some(ActiveCmdSigner {
+            audit_dir: dir.path().to_path_buf(),
+            signer: Arc::downgrade(&signer),
+        });
+        let audit = CommandAudit {
+            recorder: Recorder::new(signer.clone(), TenantId("local".to_string())),
+            _signer: signer.clone(),
+        };
+
+        let active = active_signer_for(dir.path()).expect("matching directory shares the signer");
+        assert!(Arc::ptr_eq(&active, &signer));
+        assert!(active_signer_for(other.path()).is_none());
+
+        drop(audit);
+        assert!(active_signer_for(dir.path()).is_none());
     }
 
     #[test]

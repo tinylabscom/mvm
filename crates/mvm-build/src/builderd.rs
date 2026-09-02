@@ -505,10 +505,38 @@ fn copy_rootfs_with_hook(src_rootfs: &Path, dst: &Path) -> Result<(), String> {
         )
     })?;
     run_before_build_hook(&tmp_path)?;
-    std::fs::copy(&tmp_path, dst)
-        .map_err(|e| format!("copy {} -> {}: {e}", tmp_path.display(), dst.display()))?;
+    copy_artifact(&tmp_path, dst)?;
+    run_builder_rootfs_command("seal-rootfs-journal", dst)?;
     let _ = tmp.close();
     Ok(())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn e2fsck_repair_exit_code_is_success(code: i32) -> bool {
+    matches!(code, 0..=2)
+}
+
+/// Repair a writable ext4 rootfs copy before it reaches a read-only guest.
+#[cfg(target_os = "linux")]
+pub fn repair_ext4_filesystem(path: &Path) -> Result<(), String> {
+    let status = std::process::Command::new("/sbin/e2fsck")
+        .args(["-f", "-y"])
+        .arg(path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|e| format!("spawn e2fsck on {}: {e}", path.display()))?;
+    match status.code() {
+        Some(code) if e2fsck_repair_exit_code_is_success(code) => Ok(()),
+        Some(code) => Err(format!(
+            "e2fsck on {} exited with status {code}; the rootfs journal may still be dirty",
+            path.display()
+        )),
+        None => Err(format!(
+            "e2fsck on {} was terminated by a signal; the rootfs journal may still be dirty",
+            path.display()
+        )),
+    }
 }
 
 /// Run the builder-VM before_build hook runner on `rootfs_path`.
@@ -517,20 +545,24 @@ fn copy_rootfs_with_hook(src_rootfs: &Path, dst: &Path) -> Result<(), String> {
 /// `export_image_artifacts` on a dev host), the hook is skipped. The
 /// binary is always baked into the builder VM rootfs in production.
 fn run_before_build_hook(rootfs_path: &Path) -> Result<(), String> {
+    run_builder_rootfs_command("run-before-build-hook", rootfs_path)
+}
+
+fn run_builder_rootfs_command(command: &str, rootfs_path: &Path) -> Result<(), String> {
     let runner = std::path::Path::new("/sbin/mvm-host-vm-init");
     if !runner.is_file() {
         return Ok(());
     }
     let status = std::process::Command::new(runner)
-        .arg("run-before-build-hook")
+        .arg(command)
         .arg(rootfs_path)
         .status()
-        .map_err(|e| format!("spawn before_build hook runner: {e}"))?;
+        .map_err(|e| format!("spawn rootfs command {command}: {e}"))?;
     if status.success() {
         Ok(())
     } else {
         Err(format!(
-            "before_build hook failed (exit {:?})",
+            "rootfs command {command} failed (exit {:?})",
             status.code()
         ))
     }
@@ -539,9 +571,21 @@ fn run_before_build_hook(rootfs_path: &Path) -> Result<(), String> {
 /// Copy one artifact, dereferencing symlinks (nix store paths are read-only
 /// symlink farms), with a path-named error.
 fn copy_artifact(src: &Path, dst: &Path) -> Result<(), String> {
-    std::fs::copy(src, dst)
-        .map(|_| ())
-        .map_err(|e| format!("copy {} -> {}: {e}", src.display(), dst.display()))
+    let permissions = std::fs::metadata(src)
+        .map_err(|e| format!("stat {}: {e}", src.display()))?
+        .permissions();
+    let mut source =
+        std::fs::File::open(src).map_err(|e| format!("open {}: {e}", src.display()))?;
+    let mut output =
+        std::fs::File::create(dst).map_err(|e| format!("create {}: {e}", dst.display()))?;
+    std::io::copy(&mut source, &mut output)
+        .map_err(|e| format!("copy {} -> {}: {e}", src.display(), dst.display()))?;
+    output
+        .set_permissions(permissions)
+        .map_err(|e| format!("set permissions on {}: {e}", dst.display()))?;
+    output
+        .sync_all()
+        .map_err(|e| format!("sync {}: {e}", dst.display()))
 }
 
 /// The `nix flake prefetch --json` argv for a
@@ -1304,6 +1348,39 @@ mod tests {
     }
 
     #[test]
+    fn copy_artifact_flushes_a_read_only_source_without_changing_its_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        let destination = tmp.path().join("destination");
+        std::fs::write(&source, b"sealed artifact").unwrap();
+        let mut permissions = std::fs::metadata(&source).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&source, permissions).unwrap();
+
+        copy_artifact(&source, &destination).unwrap();
+
+        assert_eq!(std::fs::read(&destination).unwrap(), b"sealed artifact");
+        assert!(
+            std::fs::metadata(&destination)
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+    }
+
+    #[test]
+    fn copy_artifact_names_a_missing_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("missing");
+        let destination = tmp.path().join("destination");
+
+        let error = copy_artifact(&source, &destination).unwrap_err();
+
+        assert!(error.contains(&source.display().to_string()), "{error}");
+        assert!(!destination.exists());
+    }
+
+    #[test]
     fn export_errors_when_dir_out_path_has_no_rootfs() {
         let tmp = tempfile::tempdir().unwrap();
         let nix_out = tmp.path().join("store-img");
@@ -1686,5 +1763,15 @@ mod tests {
             })
             .starts_with("unreachable")
         );
+    }
+
+    #[test]
+    fn ext4_repair_accepts_clean_and_corrected_e2fsck_exit_codes_only() {
+        for code in [0, 1, 2] {
+            assert!(e2fsck_repair_exit_code_is_success(code));
+        }
+        for code in [3, 4, 8, 16, 32, 128] {
+            assert!(!e2fsck_repair_exit_code_is_success(code));
+        }
     }
 }

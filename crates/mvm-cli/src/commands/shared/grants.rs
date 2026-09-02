@@ -15,7 +15,7 @@ use mvm_contract::grants::{CpuGrant, EgressGrant, Grants, WallClockGrant};
 use mvm_core::grants_resolve::{
     GrantLayer, GrantProvenance, GrantSurface, load_grants_file, resolve_grants,
 };
-use mvm_core::network_policy::NetworkPolicy;
+use mvm_core::network_policy::{AiPolicy, NetworkPolicy};
 use mvm_core::user_config::MvmConfig;
 
 /// The grant-authoring flags of one invocation, plus the lower surfaces it
@@ -30,6 +30,10 @@ pub(in crate::commands) struct GrantInputs<'a> {
     pub timeout_secs: Option<u64>,
     /// `--allow-host`: the CLI's egress allow-list, in `HOST[:PORT]` form.
     pub allow_host: &'a [String],
+    /// `--peer`: peer routes this workload may dial, in
+    /// `NAME:PORT=ADDR:PORT` form. Orthogonal to the egress dimensions above:
+    /// a workload may dial a peer while admitting no outbound egress at all.
+    pub peer: &'a [String],
     /// `--net`: the dev-tier preset. It has no grant representation — it names
     /// a preset rather than destinations — so it only reaches the policy when
     /// nothing authored an egress grant.
@@ -40,6 +44,9 @@ pub(in crate::commands) struct GrantInputs<'a> {
     pub manifest: Option<&'a Grants>,
     /// The operator's host config, for the dimensions nothing above named.
     pub config: &'a MvmConfig,
+    /// Optional AI egress metering/budget policy, usually from the
+    /// project manifest's `[network.ai]` table.
+    pub ai: Option<&'a AiPolicy>,
 }
 
 /// One invocation's resolved permission set and the egress policy that follows
@@ -87,7 +94,15 @@ pub(in crate::commands) fn resolve_run_grants(inputs: GrantInputs<'_>) -> Result
         plan_grants.as_ref().and_then(|g| g.egress.as_ref()),
         inputs.net,
         inputs.allow_host,
-    )?;
+    )?
+    .with_ai(inputs.ai.cloned())
+    .with_peers(
+        inputs
+            .peer
+            .iter()
+            .map(|raw| super::parse_peer_binding(raw))
+            .collect::<Result<Vec<_>>>()?,
+    );
     Ok(RunGrants {
         plan_grants,
         network_policy,
@@ -201,10 +216,12 @@ mod tests {
             cpu_limit_millicores: None,
             timeout_secs: None,
             allow_host,
+            peer: &[],
             net: false,
             grants_file: None,
             manifest: None,
             config,
+            ai: None,
         }
     }
 
@@ -217,6 +234,22 @@ mod tests {
             resolved.network_policy.resolve_rules().as_deref(),
             Some(&[][..]),
             "no grant and no flags is deny-all"
+        );
+    }
+
+    #[test]
+    fn ai_policy_from_input_is_attached_to_network_policy() {
+        let cfg = MvmConfig::default();
+        let ai = AiPolicy::metered_with_total_budget(100_000);
+        let resolved = resolve_run_grants(GrantInputs {
+            ai: Some(&ai),
+            ..inputs(&cfg, &[])
+        })
+        .expect("resolves");
+        assert_eq!(
+            resolved.network_policy.ai(),
+            Some(&ai),
+            "the input AI policy must ride through to the enforced network policy"
         );
     }
 
@@ -407,5 +440,39 @@ mod tests {
                 secs: std::num::NonZeroU32::new(600).expect("nonzero")
             })
         );
+    }
+
+    /// `enforced_network_policy` has two arms — a projected egress grant and
+    /// the legacy `--net`/`--allow-host` resolution — and peers are attached
+    /// after both. A run that authored an egress grant must not silently drop
+    /// its peers, which is the shape a per-arm attachment would have missed.
+    #[test]
+    fn peers_survive_both_egress_arms() {
+        let config = MvmConfig::default();
+        let peer = vec!["db.mvm.peer:5432=127.0.0.1:34567".to_string()];
+
+        // Legacy arm: no egress grant authored.
+        let mut i = inputs(&config, &[]);
+        i.peer = &peer;
+        let resolved = resolve_run_grants(i).expect("resolves");
+        assert_eq!(resolved.network_policy.peers().len(), 1);
+
+        // Grant arm: `--allow-host` authors an egress grant that is projected.
+        let allow = vec!["api.example.com".to_string()];
+        let mut i = inputs(&config, &allow);
+        i.peer = &peer;
+        let resolved = resolve_run_grants(i).expect("resolves");
+        assert_eq!(
+            resolved.network_policy.peers().len(),
+            1,
+            "a projected egress grant must not drop the peer set"
+        );
+    }
+
+    #[test]
+    fn no_peer_input_leaves_the_policy_peerless() {
+        let config = MvmConfig::default();
+        let resolved = resolve_run_grants(inputs(&config, &[])).expect("resolves");
+        assert!(resolved.network_policy.peers().is_empty());
     }
 }

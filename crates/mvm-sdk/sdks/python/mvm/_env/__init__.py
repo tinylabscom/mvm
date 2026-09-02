@@ -11,6 +11,7 @@ from mvm._env.vars import (
     MVM_MACHINE_TIMEOUT_ENV,
     MVM_SDK_MODE_ENV,
     MVM_SDK_OUT_PATH_ENV,
+    MVM_SDK_RUN_PROFILE_ENV,
 )
 
 __all__ = [
@@ -19,4 +20,5 @@ __all__ = [
     "MVM_MACHINE_TIMEOUT_ENV",
     "MVM_SDK_MODE_ENV",
     "MVM_SDK_OUT_PATH_ENV",
+    "MVM_SDK_RUN_PROFILE_ENV",
 ]

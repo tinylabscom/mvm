@@ -401,10 +401,43 @@ fn stream_input_result(
 pub fn send_run_entrypoint<F>(
     stream: &mut UnixStream,
     call: RunEntrypointCall,
-    mut on_event: F,
+    on_event: F,
 ) -> Result<EntrypointEvent>
 where
     F: FnMut(&EntrypointEvent),
+{
+    send_run_entrypoint_while(stream, call, on_event, || true)
+}
+
+/// How long a silent entrypoint stream is left alone before the caller's
+/// liveness check is consulted.
+///
+/// Not a timeout on the workload: a build or a test run is legitimately quiet
+/// for minutes. It is only how often "is the guest still there" gets asked.
+const ENTRYPOINT_LIVENESS_POLL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// [`send_run_entrypoint`], but giving up when the guest is gone.
+///
+/// The plain loop blocks in `read` forever if the guest dies mid-stream: the
+/// host-side socket stays open, so no EOF ever arrives and `mvmctl machine run`
+/// sits in `epoll` indefinitely. Observed on a KVM host as a 25-minute
+/// `machine run --image alpine -- /bin/echo` with no VM alive, and `--timeout`
+/// could not save it — that bounds the command *inside* the guest, so a guest
+/// that never runs one is never bounded at all.
+///
+/// `still_alive` is polled only when the stream has been quiet for
+/// [`ENTRYPOINT_LIVENESS_POLL`], so a long silent workload is unaffected: the
+/// check costs nothing while output flows, and only decides the case where
+/// nothing is coming because nothing is left to send it.
+pub fn send_run_entrypoint_while<F, L>(
+    stream: &mut UnixStream,
+    call: RunEntrypointCall,
+    mut on_event: F,
+    mut still_alive: L,
+) -> Result<EntrypointEvent>
+where
+    F: FnMut(&EntrypointEvent),
+    L: FnMut() -> bool,
 {
     require_capabilities(stream, &[GuestCapability::RunEntrypoint])?;
     let RunEntrypointCall {
@@ -422,20 +455,106 @@ where
     let mut session = RpcSession::open(stream)?;
     session.write(stream, &req)?;
 
-    loop {
-        let resp: GuestResponse = session.read(stream)?;
+    // Restored before returning: the caller may keep using this stream, and a
+    // read timeout left behind would turn its next blocking read into a
+    // spurious failure.
+    let previous_timeout = stream.read_timeout().ok().flatten();
+    let _ = stream.set_read_timeout(Some(ENTRYPOINT_LIVENESS_POLL));
+
+    let outcome = loop {
+        let resp: GuestResponse = match session.read(stream) {
+            Ok(resp) => resp,
+            Err(error) if is_read_timeout(&error) => {
+                if still_alive() {
+                    continue;
+                }
+                break Err(anyhow::anyhow!(
+                    "the guest exited without reporting a result — no VM process is \
+                     alive for this run. The entrypoint stream went quiet and stayed \
+                     quiet; waiting longer cannot help."
+                ));
+            }
+            Err(error) => break Err(error),
+        };
         let event = match resp {
             GuestResponse::EntrypointEvent(e) => e,
+            GuestResponse::Error { message } => {
+                break Err(anyhow::anyhow!("guest agent error: {message}"));
+            }
+            GuestResponse::WorkloadPrivilegeRefused { verb, uid } => {
+                break Err(RpcError::WorkloadPrivilegeRefused { verb, uid }.into());
+            }
+            other => {
+                break Err(anyhow::anyhow!(
+                    "expected EntrypointEvent during RunEntrypoint stream, got {other:?}"
+                ));
+            }
+        };
+        if event.is_terminal() {
+            break Ok(event);
+        }
+        on_event(&event);
+    };
+
+    let _ = stream.set_read_timeout(previous_timeout);
+    outcome
+}
+
+/// Whether an error is the read timeout this loop sets, rather than a real
+/// transport failure. Platforms differ: Linux reports `WouldBlock`, others
+/// `TimedOut`.
+fn is_read_timeout(error: &anyhow::Error) -> bool {
+    // The kind test itself lives in `connection`, which already had it for the
+    // connect retry loop. Only the chain walk is new: `session.read` returns an
+    // `anyhow::Error` that has usually been given context by the time it
+    // arrives here, so the `io::Error` is a cause rather than the error.
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .is_some_and(super::connection::is_timeout_error)
+}
+
+/// Dispatch one exact admitted optional extension and consume its bounded
+/// output stream.
+pub fn send_run_extension<F>(
+    stream: &mut UnixStream,
+    dispatch: ExtensionDispatch,
+    mut on_event: F,
+) -> Result<EntrypointEvent>
+where
+    F: FnMut(&EntrypointEvent),
+{
+    require_capabilities(stream, &[GuestCapability::RunExtension])?;
+    let request = GuestRequest::RunExtension { dispatch };
+    let mut session = RpcSession::open(stream)?;
+    session.write(stream, &request)?;
+    loop {
+        let response: GuestResponse = session.read(stream)?;
+        let event = match response {
+            GuestResponse::EntrypointEvent(event) => event,
             GuestResponse::Error { message } => bail!("guest agent error: {message}"),
             GuestResponse::WorkloadPrivilegeRefused { verb, uid } => {
                 return Err(RpcError::WorkloadPrivilegeRefused { verb, uid }.into());
             }
-            other => bail!("expected EntrypointEvent during RunEntrypoint stream, got {other:?}"),
+            other => bail!("expected extension EntrypointEvent stream, got {other:?}"),
         };
         if event.is_terminal() {
             return Ok(event);
         }
         on_event(&event);
+    }
+}
+
+/// Cancel one exact active optional-extension invocation.
+pub fn send_cancel_extension(
+    stream: &mut UnixStream,
+    cancellation: ExtensionCancellation,
+) -> Result<()> {
+    require_capabilities(stream, &[GuestCapability::RunExtension])?;
+    let request = GuestRequest::CancelExtension { cancellation };
+    match call_unary(stream, &request)? {
+        GuestResponse::ExtensionCancellationAck => Ok(()),
+        other => bail!("expected extension cancellation acknowledgement, got {other:?}"),
     }
 }
 
@@ -559,6 +678,54 @@ where
 
 #[cfg(test)]
 mod tests {
+
+    /// The timeout classifier decides whether a quiet stream consults the
+    /// liveness probe or aborts the run. Misclassify a real transport error as
+    /// a timeout and a dead connection spins forever; misclassify a timeout as
+    /// an error and every quiet workload dies.
+    #[test]
+    fn read_timeouts_are_told_apart_from_real_errors() {
+        use std::io::{Error, ErrorKind};
+
+        for kind in [ErrorKind::WouldBlock, ErrorKind::TimedOut] {
+            let error = anyhow::Error::from(Error::new(kind, "poll expired"));
+            assert!(
+                super::is_read_timeout(&error),
+                "{kind:?} must read as the liveness poll expiring"
+            );
+        }
+
+        for kind in [
+            ErrorKind::BrokenPipe,
+            ErrorKind::ConnectionReset,
+            ErrorKind::UnexpectedEof,
+        ] {
+            let error = anyhow::Error::from(Error::new(kind, "gone"));
+            assert!(
+                !super::is_read_timeout(&error),
+                "{kind:?} is a transport failure, not a poll expiry"
+            );
+        }
+    }
+
+    /// The classifier has to see through the context the RPC layer adds, or a
+    /// wrapped timeout reads as a hard error and kills a healthy quiet run.
+    #[test]
+    fn a_wrapped_read_timeout_is_still_a_timeout() {
+        let error = anyhow::Error::from(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "poll expired",
+        ))
+        .context("reading the entrypoint stream");
+        assert!(super::is_read_timeout(&error));
+    }
+
+    #[test]
+    fn a_plain_error_with_no_io_cause_is_not_a_timeout() {
+        assert!(!super::is_read_timeout(&anyhow::anyhow!(
+            "guest agent error"
+        )));
+    }
     use super::*;
     use rand::Rng;
 
@@ -569,6 +736,34 @@ mod tests {
             stdin: stdin.to_vec(),
             timeout_secs: 30,
             ..RunEntrypointCall::default()
+        }
+    }
+
+    fn extension_cancellation() -> ExtensionCancellation {
+        ExtensionCancellation {
+            extension_id: mvm_contract::protocol::extension_pack::ExtensionId::parse(
+                "org.example.extension",
+            )
+            .expect("extension id"),
+            pack_digest: [1; 32],
+            contract_digest: [2; 32],
+            request_id: mvm_contract::assurance::AssuranceId::parse("request-1").expect("request"),
+            session_id: mvm_contract::assurance::AssuranceId::parse("session-1").expect("session"),
+            campaign_id: mvm_contract::assurance::AssuranceId::parse("campaign-1")
+                .expect("campaign"),
+            trial_id: mvm_contract::assurance::AssuranceId::parse("trial-1").expect("trial"),
+            plan_id: mvm_contract::assurance::AssuranceId::parse(format!(
+                "sha256-{}",
+                "a".repeat(64)
+            ))
+            .expect("plan"),
+            idempotency_key: mvm_contract::assurance::AssuranceId::parse("trial-1").expect("key"),
+            grant_digest: mvm_contract::assurance::Sha256Digest::parse(format!(
+                "sha256:{}",
+                "b".repeat(64)
+            ))
+            .expect("grant"),
+            nonce: mvm_contract::assurance::AssuranceId::parse("nonce-1").expect("nonce"),
         }
     }
 
@@ -633,6 +828,42 @@ mod tests {
         guest_thread.join().unwrap();
         assert!(err.to_string().contains("protocol mismatch"));
         assert!(err.to_string().contains("rebuild guest image"));
+    }
+
+    #[test]
+    fn extension_cancellation_round_trips_over_mock_io() {
+        let (mut host, mut guest) = UnixStream::pair().expect("socket pair");
+        let expected = extension_cancellation();
+        let expected_by_guest = expected.clone();
+        let guest_thread = std::thread::spawn(move || {
+            let hello: GuestRequest = read_frame(&mut guest).expect("hello");
+            let GuestRequest::ProtocolHello {
+                host_protocol_version,
+                min_supported_version,
+                host_version,
+                requested_capabilities,
+            } = hello
+            else {
+                panic!("expected protocol hello");
+            };
+            let response = protocol_hello_response(
+                host_protocol_version,
+                min_supported_version,
+                &host_version,
+                &requested_capabilities,
+            );
+            write_frame(&mut guest, &response).expect("hello response");
+            let request: GuestRequest = read_frame(&mut guest).expect("cancel request");
+            assert!(matches!(
+                request,
+                GuestRequest::CancelExtension { cancellation }
+                    if cancellation == expected_by_guest
+            ));
+            write_frame(&mut guest, &GuestResponse::ExtensionCancellationAck).expect("cancel ack");
+        });
+
+        send_cancel_extension(&mut host, expected).expect("cancel extension");
+        guest_thread.join().expect("guest thread");
     }
 
     #[test]

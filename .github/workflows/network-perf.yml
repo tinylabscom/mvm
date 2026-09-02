@@ -1,0 +1,67 @@
+name: Network performance evidence
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/network-perf.yml"
+      - "crates/mvm-agentd/src/flowmux.rs"
+      - "crates/mvm-agentd/src/flowmux_sync.rs"
+      - "crates/mvm-hostd/examples/network_perf_probe.rs"
+      - "crates/mvm-hostd/src/supervisor/flowmux/**"
+      - "xtask/src/network_perf.rs"
+      - "specs/benchmarks/network/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux-x86-64-host-loopback:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: lld
+
+      - name: Build release probe and harness
+        run: |
+          cargo build --release -p mvm-hostd --features network-perf --example network_perf_probe
+          cargo build -p xtask
+
+      - name: Record FlowMux report
+        env:
+          MVM_NETWORK_PERF_HOST_ID: github-hosted-ubuntu-24.04-x86_64
+          MVM_NETWORK_PERF_STORAGE: github-hosted-ephemeral-ssd
+          MVM_NETWORK_PERF_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p network-perf-results
+          export MVM_NETWORK_PERF_CPU
+          MVM_NETWORK_PERF_CPU="$(lscpu | sed -n 's/^Model name:[[:space:]]*//p' | head -1)"
+
+          MVM_NETWORK_PERF_IMPLEMENTATION=flow_mux \
+            target/debug/xtask network-perf run-probe \
+              --backend host-loopback \
+              --output network-perf-results/flow-mux-linux-x86_64-host-loopback.json \
+              -- target/release/examples/network_perf_probe
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: network-perf-linux-x86-64-${{ github.sha }}
+          path: network-perf-results/
+          if-no-files-found: error

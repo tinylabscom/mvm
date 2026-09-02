@@ -1,107 +1,148 @@
-// Fuzz the *signed* path of the authenticated-frame
-// pipeline. The two existing targets (`fuzz_authenticated_frame`,
-// `fuzz_guest_request`) cover the *pre-auth* parsers — they feed raw
-// bytes into `serde_json::from_slice` and assert "never panic." That
-// proves the unauthenticated parser is safe, but it doesn't exercise
-// what happens after the envelope deserializes: the protocol-version,
-// session-ID, replay, signature-length, Ed25519 verification, and
-// inner-payload-deserialize stages.
+// Fuzz the control plane's *post-auth* path: `Session::open`.
 //
-// This target drives `verify_authenticated_frame::<GuestRequest>`
-// directly, with a deterministic Ed25519 keypair. For each random
-// input it picks one of four scenarios:
+// `fuzz_sealed_frame` covers the pre-auth parser — arbitrary bytes into
+// `SealedFrame::decode`, asserting only "never panic". This target starts
+// where that one stops, from a frame that already decoded, and drives the
+// checks that decide whether its payload is ever handed back: protocol
+// version, session id, sequence (replay and gap), signer identity, Ed25519
+// signature over the frame context, and AES-GCM decryption.
 //
-//   0  Sign with the *correct* key (well-formed envelope).
-//   1  Sign with the *wrong* key (signature verification must fail).
-//   2  Stuff a 64-byte signature blob from fuzzer bytes (almost
-//      certainly invalid; mostly exercises the wrong-sig branch).
-//   3  Strip the signature to a wrong length (length check must fire).
+// The load-bearing property is that **no frame failing any of those checks
+// yields plaintext**.
 //
-// Properties asserted:
-//   • Never panic on any (scenario × payload × envelope-tweak) input.
-//   • For scenarios 1–3, the result is always `Err` — i.e., the
-//     inner-payload deserializer is never reached on a tampered
-//     frame. The static call ordering in `verify_authenticated_frame`
-//     (signature check at line 498, deserialize at line 503) is the
-//     load-bearing invariant; this fuzzer guards against a future
-//     refactor reordering them.
-//   • For scenario 0, no assertion on Ok/Err — random bytes rarely
-//     deserialize as a valid `GuestRequest`, so Err from the inner
-//     parser is expected and benign. The point is: under a valid
-//     signature the deserializer runs without panicking.
+// What each scenario actually isolates, established by deleting the check and
+// re-running rather than by reading the code:
+//
+//   1, 2  the signature check — these tamper fields the signature covers.
+//   3, 4  the sequence check. Deleting it is caught here, because the frame
+//         is genuinely signed and nothing else refuses a gap or a replay.
+//   5     *not* the session-id check. Deleting that check leaves this case
+//         still rejected, because `derive_session_key` mixes the session id
+//         into the key, so a cross-session frame fails AES-GCM decryption on
+//         its own. That is defence in depth working, not the scenario
+//         failing — but the scenario cannot be cited as the session check's
+//         witness, and is not.
+//
+// The first draft of this target tampered the sequence and session id on an
+// otherwise valid frame. Both are covered by the signature, so the signature
+// check refused them and deleting the sequence check changed nothing — a
+// target that would have stayed green through the removal of the property it
+// was named for.
+//
+// This replaced a target that drove `verify_authenticated_frame`, a
+// signature-only path over the old JSON envelope. Once the control plane moved
+// to the binary sealed envelope that function had no production callers, so
+// the target was exercising code nothing took — a witness for a claim about a
+// path that no longer existed.
 #![no_main]
 
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::SigningKey;
 use libfuzzer_sys::fuzz_target;
-use mvm_core::security::{AuthenticatedFrame, PROTOCOL_VERSION_AUTHENTICATED, SIG_ALG_ED25519};
-use mvm_core::signing::SignedPayload;
-use mvm_agentd::vsock::{GuestRequest, verify_authenticated_frame};
+use mvm_core::net::session::{Session, paired_sessions_for_test};
 
 const SESSION_ID: &str = "fuzz-session";
-const EXPECTED_MIN_SEQUENCE: u64 = 0;
 
-fn key_from_seed(seed: u8) -> SigningKey {
-    SigningKey::from_bytes(&[seed; 32])
+/// Deterministic peers. Rebuilt per iteration rather than shared, so one
+/// input's accepted frame cannot advance a sequence counter the next input
+/// then trips over — the corpus stays reproducible input-by-input.
+fn peers() -> (Session, Session) {
+    paired_sessions_for_test(
+        SigningKey::from_bytes(&[0x42; 32]),
+        SigningKey::from_bytes(&[0x07; 32]),
+        [0x5a; 32],
+        SESSION_ID,
+    )
 }
 
 fuzz_target!(|data: &[u8]| {
     if data.is_empty() {
         return;
     }
-
-    let scenario = data[0] % 4;
+    let scenario = data[0] % 6;
     let payload = &data[1..];
 
-    let signing_key = key_from_seed(0x42);
-    let verifying_key = signing_key.verifying_key();
-    let other_key = key_from_seed(0x07);
+    let (mut host, mut guest) = peers();
 
-    let signature_bytes: Vec<u8> = match scenario {
-        0 => signing_key.sign(payload).to_bytes().to_vec(),
-        1 => other_key.sign(payload).to_bytes().to_vec(),
-        2 => {
-            // Borrow up to 64 bytes from the fuzzer corpus, zero-pad
-            // to exactly 64 so the length check passes and the
-            // verifier itself is what rejects (mostly).
-            let mut sig = vec![0u8; 64];
-            for (i, b) in payload.iter().take(64).enumerate() {
-                sig[i] = *b;
+    // Scenarios 3, 4 and 5 must reach the check they name, which means the
+    // frame has to be *validly signed* when it gets there. Tampering a field
+    // the signature covers only ever exercises the signature check — that is
+    // what scenarios 1 and 2 are for, and conflating the two produces a target
+    // that stays green when the replay check is deleted.
+    match scenario {
+        0 | 1 | 2 => {
+            let Ok(mut sealed) = host.seal(payload) else {
+                return;
+            };
+            match scenario {
+                1 => sealed.ciphertext = payload.to_vec(),
+                2 => {
+                    let mut sig = vec![0u8; 64];
+                    for (i, b) in payload.iter().take(64).enumerate() {
+                        sig[i] = *b;
+                    }
+                    sealed.signature = sig;
+                }
+                _ => {}
             }
-            sig
+            let opened = guest.open(&sealed);
+            if scenario == 0 {
+                match opened {
+                    Ok(plaintext) => assert_eq!(
+                        plaintext, payload,
+                        "an untampered frame must open to exactly what was sealed"
+                    ),
+                    Err(error) => panic!("an untampered frame was rejected: {error}"),
+                }
+            } else {
+                assert!(
+                    opened.is_err(),
+                    "a tampered frame yielded plaintext; scenario={scenario}"
+                );
+            }
         }
+        // A gap. The host seals twice and the peer is offered the second
+        // frame first: the signature is genuine, so only the sequence check
+        // can refuse it.
+        3 => {
+            let (Ok(_first), Ok(second)) = (host.seal(payload), host.seal(payload)) else {
+                return;
+            };
+            assert!(
+                guest.open(&second).is_err(),
+                "a validly signed frame that skipped a sequence was accepted"
+            );
+        }
+        // A replay. The first delivery must succeed, the second must not —
+        // again with a genuine signature, so the replay check is the only
+        // thing standing in the way.
+        4 => {
+            let Ok(sealed) = host.seal(payload) else {
+                return;
+            };
+            if guest.open(&sealed).is_err() {
+                return;
+            }
+            assert!(
+                guest.open(&sealed).is_err(),
+                "a replayed frame was accepted the second time"
+            );
+        }
+        // A frame from a different session, signed by the same identity, so
+        // the signature verifies and only the session-id check can refuse it.
         _ => {
-            // Wrong-length signature → length check fires before
-            // ed25519 even sees the bytes.
-            payload.iter().take(63).copied().collect()
+            let (mut other_host, _other_guest) = paired_sessions_for_test(
+                SigningKey::from_bytes(&[0x42; 32]),
+                SigningKey::from_bytes(&[0x07; 32]),
+                [0x5a; 32],
+                "a-different-session",
+            );
+            let Ok(sealed) = other_host.seal(payload) else {
+                return;
+            };
+            assert!(
+                guest.open(&sealed).is_err(),
+                "a frame addressed to another session was accepted"
+            );
         }
-    };
-
-    let frame = AuthenticatedFrame {
-        version: PROTOCOL_VERSION_AUTHENTICATED,
-        sig_alg: SIG_ALG_ED25519,
-        session_id: SESSION_ID.to_string(),
-        sequence: EXPECTED_MIN_SEQUENCE,
-        timestamp: "2026-05-05T00:00:00Z".to_string(),
-        signed: SignedPayload {
-            payload: payload.to_vec(),
-            signature: signature_bytes,
-            signer_id: "fuzz".to_string(),
-        },
-    };
-
-    let result = verify_authenticated_frame::<GuestRequest>(
-        &frame,
-        &verifying_key,
-        SESSION_ID,
-        EXPECTED_MIN_SEQUENCE,
-    );
-
-    if scenario != 0 {
-        assert!(
-            result.is_err(),
-            "tampered/wrong-key/short-sig frame was accepted by verify_authenticated_frame; \
-             scenario={scenario}, payload_len={}",
-            payload.len()
-        );
     }
 });

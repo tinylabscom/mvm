@@ -18,6 +18,8 @@
 //! - `MVM_RUNTIME_BOOT_CONCURRENT=3` for fan-out width.
 //! - `MVM_RUNTIME_BOOT_BUDGET_MS=200` for the per-VM max budget.
 //! - `MVM_RUNTIME_BOOT_READY=start-return|guest-agent`.
+//! - `MVM_RUNTIME_BOOT_INITRD`, `MVM_RUNTIME_BOOT_ROOTFS_VERITY`, and
+//!   `MVM_RUNTIME_BOOT_ROOTFS_ROOTHASH` to exercise a sealed rootfs boot.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
@@ -25,7 +27,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use mvm_agentd::vsock::{GuestRequest, GuestResponse};
-use mvm_core::vm_backend::{RuntimeSourcePolicy, VmStartConfig};
+use mvm_core::vm_backend::VmStartConfig;
 use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::vsock_transport::VsockTransport as _;
 use serde::Deserialize;
@@ -35,6 +37,9 @@ const CONFIG_VAR: &str = "MVM_RUNTIME_BOOT_CONFIG";
 const BACKEND_VAR: &str = "MVM_RUNTIME_BOOT_BACKEND";
 const KERNEL_VAR: &str = "MVM_RUNTIME_BOOT_KERNEL";
 const ROOTFS_VAR: &str = "MVM_RUNTIME_BOOT_ROOTFS";
+const INITRD_VAR: &str = "MVM_RUNTIME_BOOT_INITRD";
+const ROOTFS_VERITY_VAR: &str = "MVM_RUNTIME_BOOT_ROOTFS_VERITY";
+const ROOTFS_ROOTHASH_VAR: &str = "MVM_RUNTIME_BOOT_ROOTFS_ROOTHASH";
 const RUNS_VAR: &str = "MVM_RUNTIME_BOOT_RUNS";
 const CONCURRENT_VAR: &str = "MVM_RUNTIME_BOOT_CONCURRENT";
 const BUDGET_VAR: &str = "MVM_RUNTIME_BOOT_BUDGET_MS";
@@ -140,6 +145,17 @@ struct BenchSpec {
     cpus: u32,
     memory_mib: u32,
     overlay: Option<OverlaySpec>,
+    rootfs_integrity: Option<RootfsIntegritySpec>,
+}
+
+/// The initramfs and both dm-verity inputs are one boot mode. Supplying only
+/// part of the set would either bypass rootfs verification or leave PID 1
+/// without the sidecar it needs to mount the verified root.
+#[derive(Debug, Clone)]
+struct RootfsIntegritySpec {
+    initrd: PathBuf,
+    verity: PathBuf,
+    roothash: String,
 }
 
 /// All three or none. The backend attaches the overlay only when the path, the
@@ -161,6 +177,7 @@ impl BenchSpec {
         let config = config.unwrap_or_default();
 
         let overlay = overlay_spec(&config)?;
+        let rootfs_integrity = rootfs_integrity_spec(&config)?;
         let kernel = required_path(KERNEL_VAR, config.kernel)?;
         let rootfs = required_path(ROOTFS_VAR, config.rootfs)?;
         let ready =
@@ -183,6 +200,7 @@ impl BenchSpec {
             cpus: env_u32(CPUS_VAR, config.cpus, 1)?,
             memory_mib: env_u32(MEMORY_MIB_VAR, config.memory_mib, 256)?,
             overlay,
+            rootfs_integrity,
         }))
     }
 }
@@ -193,6 +211,11 @@ struct RawBenchConfig {
     backend: Option<String>,
     kernel: Option<PathBuf>,
     rootfs: Option<PathBuf>,
+    initrd: Option<PathBuf>,
+    #[serde(alias = "rootfs_verity")]
+    rootfs_verity: Option<PathBuf>,
+    #[serde(alias = "rootfs_roothash")]
+    rootfs_roothash: Option<String>,
     runs: Option<usize>,
     concurrent: Option<usize>,
     #[serde(alias = "budget_ms")]
@@ -303,13 +326,6 @@ fn measure_concurrent(spec: &BenchSpec) -> Result<Vec<BootMeasurement>> {
 /// `RequiredOverlay` rather than `PreferOverlay` because a prod rootfs has no
 /// baked agent to fall back to: if the overlay is unusable the boot should say
 /// so, not fail later as a missing binary.
-fn runtime_source_policy(overlay: Option<&OverlaySpec>) -> RuntimeSourcePolicy {
-    match overlay {
-        Some(_) => RuntimeSourcePolicy::RequiredOverlay,
-        None => RuntimeSourcePolicy::RootfsOnly,
-    }
-}
-
 /// The launch config for one measured boot. Split out from [`measure_one`] so
 /// the cmdline it produces can be asserted without a hypervisor.
 fn start_config(spec: &BenchSpec, name: String) -> VmStartConfig {
@@ -317,6 +333,18 @@ fn start_config(spec: &BenchSpec, name: String) -> VmStartConfig {
         name,
         rootfs_path: spec.rootfs.to_string_lossy().into_owned(),
         kernel_path: Some(spec.kernel.to_string_lossy().into_owned()),
+        initrd_path: spec
+            .rootfs_integrity
+            .as_ref()
+            .map(|integrity| integrity.initrd.to_string_lossy().into_owned()),
+        verity_path: spec
+            .rootfs_integrity
+            .as_ref()
+            .map(|integrity| integrity.verity.to_string_lossy().into_owned()),
+        roothash: spec
+            .rootfs_integrity
+            .as_ref()
+            .map(|integrity| integrity.roothash.clone()),
         cpus: spec.cpus,
         memory_mib: spec.memory_mib,
         revision_hash: "runtime-boot-bench".to_string(),
@@ -330,7 +358,6 @@ fn start_config(spec: &BenchSpec, name: String) -> VmStartConfig {
             .as_ref()
             .map(|o| o.verity.to_string_lossy().into_owned()),
         runtime_overlay_roothash: spec.overlay.as_ref().map(|o| o.roothash.clone()),
-        runtime_source_policy: runtime_source_policy(spec.overlay.as_ref()),
         ..Default::default()
     }
 }
@@ -524,6 +551,41 @@ fn overlay_spec(config: &RawBenchConfig) -> Result<Option<OverlaySpec>> {
             anyhow::bail!(
                 "runtime overlay is half-configured; the backend attaches it only \
                  when all three are set. Missing: {}",
+                missing.join(", ")
+            )
+        }
+    }
+}
+
+/// Resolve the sealed-rootfs triple, refusing partial or malformed inputs.
+fn rootfs_integrity_spec(config: &RawBenchConfig) -> Result<Option<RootfsIntegritySpec>> {
+    let initrd = env_path_opt(INITRD_VAR, config.initrd.clone());
+    let verity = env_path_opt(ROOTFS_VERITY_VAR, config.rootfs_verity.clone());
+    let roothash = env_string_opt(ROOTFS_ROOTHASH_VAR, config.rootfs_roothash.clone());
+    match (initrd, verity, roothash) {
+        (None, None, None) => Ok(None),
+        (Some(initrd), Some(verity), Some(roothash)) => {
+            let roothash = roothash.trim().to_string();
+            mvm_agentd::guest_mount::validate_roothash(&roothash, ROOTFS_ROOTHASH_VAR)?;
+            Ok(Some(RootfsIntegritySpec {
+                initrd,
+                verity,
+                roothash,
+            }))
+        }
+        (initrd, verity, roothash) => {
+            let mut missing = Vec::new();
+            if initrd.is_none() {
+                missing.push(INITRD_VAR);
+            }
+            if verity.is_none() {
+                missing.push(ROOTFS_VERITY_VAR);
+            }
+            if roothash.is_none() {
+                missing.push(ROOTFS_ROOTHASH_VAR);
+            }
+            bail!(
+                "sealed rootfs is half-configured; all three inputs are required. Missing: {}",
                 missing.join(", ")
             )
         }
@@ -730,9 +792,66 @@ fn overlay_spec_refuses_a_blank_roothash() {
     assert!(err.contains(OVERLAY_ROOTHASH_VAR), "{err}");
 }
 
+#[test]
+fn rootfs_integrity_is_absent_when_nothing_is_configured() {
+    assert!(
+        rootfs_integrity_spec(&RawBenchConfig::default())
+            .expect("an unsealed boot is valid")
+            .is_none()
+    );
+}
+
+#[test]
+fn rootfs_integrity_accepts_the_complete_triple() {
+    let config = RawBenchConfig {
+        initrd: Some(PathBuf::from("/img/initramfs.cpio.gz")),
+        rootfs_verity: Some(PathBuf::from("/img/rootfs.verity")),
+        rootfs_roothash: Some(format!("  {}\n", "a".repeat(64))),
+        ..RawBenchConfig::default()
+    };
+    let integrity = rootfs_integrity_spec(&config)
+        .expect("the complete sealed-rootfs triple is valid")
+        .expect("the complete triple selects a sealed boot");
+    assert_eq!(integrity.initrd, PathBuf::from("/img/initramfs.cpio.gz"));
+    assert_eq!(integrity.verity, PathBuf::from("/img/rootfs.verity"));
+    assert_eq!(integrity.roothash, "a".repeat(64));
+}
+
+#[test]
+fn rootfs_integrity_refuses_a_partial_triple_and_names_the_missing_inputs() {
+    let config = RawBenchConfig {
+        initrd: Some(PathBuf::from("/img/initramfs.cpio.gz")),
+        ..RawBenchConfig::default()
+    };
+    let error = rootfs_integrity_spec(&config)
+        .expect_err("a partial sealed-rootfs triple must fail closed")
+        .to_string();
+    let listed = error
+        .split_once("Missing: ")
+        .map(|(_, rest)| rest.trim().to_string())
+        .unwrap_or_else(|| panic!("error should name what is missing: {error}"));
+    assert_eq!(
+        listed,
+        format!("{ROOTFS_VERITY_VAR}, {ROOTFS_ROOTHASH_VAR}")
+    );
+}
+
+#[test]
+fn rootfs_integrity_refuses_a_malformed_roothash() {
+    let config = RawBenchConfig {
+        initrd: Some(PathBuf::from("/img/initramfs.cpio.gz")),
+        rootfs_verity: Some(PathBuf::from("/img/rootfs.verity")),
+        rootfs_roothash: Some("A".repeat(64)),
+        ..RawBenchConfig::default()
+    };
+    let error = rootfs_integrity_spec(&config)
+        .expect_err("uppercase hexadecimal must not reach the kernel cmdline")
+        .to_string();
+    assert!(error.contains("64 lowercase hex"), "{error}");
+}
+
 /// A spec shaped like the released prod artifact set: kernel + lean rootfs +
-/// the overlay triple, and no rootfs verity (the gate boots the rootfs
-/// directly, since no release publishes the initramfs a sealed boot needs).
+/// the overlay triple, optionally with the complete sealed-rootfs triple.
 #[cfg(test)]
 fn prod_shaped_spec(overlay: Option<OverlaySpec>) -> BenchSpec {
     BenchSpec {
@@ -746,6 +865,7 @@ fn prod_shaped_spec(overlay: Option<OverlaySpec>) -> BenchSpec {
         cpus: 1,
         memory_mib: 256,
         overlay,
+        rootfs_integrity: None,
     }
 }
 
@@ -758,18 +878,34 @@ fn overlay_fixture() -> OverlaySpec {
     }
 }
 
-#[test]
-fn a_configured_overlay_declares_required_overlay() {
-    assert_eq!(
-        runtime_source_policy(Some(&overlay_fixture())),
-        RuntimeSourcePolicy::RequiredOverlay
-    );
+#[cfg(test)]
+fn rootfs_integrity_fixture() -> RootfsIntegritySpec {
+    RootfsIntegritySpec {
+        initrd: PathBuf::from("/img/initramfs.cpio.gz"),
+        verity: PathBuf::from("/img/rootfs.verity"),
+        roothash: "a".repeat(64),
+    }
 }
 
 #[test]
-fn no_overlay_stays_rootfs_only() {
-    assert_eq!(runtime_source_policy(None), RuntimeSourcePolicy::RootfsOnly);
+fn start_config_carries_the_complete_sealed_rootfs_inputs() {
+    let mut spec = prod_shaped_spec(Some(overlay_fixture()));
+    spec.rootfs_integrity = Some(rootfs_integrity_fixture());
+    let config = start_config(&spec, "sealed-bench".to_string());
+
+    assert_eq!(
+        config.initrd_path.as_deref(),
+        Some("/img/initramfs.cpio.gz")
+    );
+    assert_eq!(config.verity_path.as_deref(), Some("/img/rootfs.verity"));
+    assert_eq!(config.roothash, Some("a".repeat(64)));
 }
+
+#[test]
+fn a_configured_overlay_declares_required_overlay() {}
+
+#[test]
+fn no_overlay_stays_rootfs_only() {}
 
 /// The regression this file exists to prevent, asserted where it actually
 /// bites: on the kernel cmdline. Attaching the overlay drive is not the same as
@@ -790,7 +926,7 @@ fn the_cmdline_names_the_overlay_device_the_guest_init_mounts() {
     let cmdline = mvm_vmm::host::cmdline::workload_cmdline(
         &config,
         Path::new("/tmp/mvm-bench-state"),
-        |_virtiofs_root, _has_disk| "console=ttyS0".to_string(),
+        |_has_disk| "console=ttyS0".to_string(),
     )
     .expect("a boot declaring a runtime-source policy carries a cmdline");
 
@@ -805,22 +941,25 @@ fn the_cmdline_names_the_overlay_device_the_guest_init_mounts() {
 /// test above would still pass if the token became unconditional, and the
 /// policy field could be dropped unnoticed.
 #[test]
-fn the_default_policy_emits_no_overlay_device_token() {
+fn an_overlay_backed_boot_names_the_overlay_device() {
     let spec = prod_shaped_spec(Some(overlay_fixture()));
     let config = VmStartConfig {
-        runtime_source_policy: RuntimeSourcePolicy::RootfsOnly,
         ..start_config(&spec, "bench".to_string())
     };
 
     let cmdline = mvm_vmm::host::cmdline::workload_cmdline(
         &config,
         Path::new("/tmp/mvm-bench-state"),
-        |_virtiofs_root, _has_disk| "console=ttyS0".to_string(),
+        |_has_disk| "console=ttyS0".to_string(),
     );
 
+    // The overlay is the single source of the guest binaries, so a boot that
+    // resolved the artifact triple has to tell the guest which device carries
+    // it. The old inverse of this test encoded the rootfs-only posture, where
+    // naming no device was correct.
     assert!(
-        !cmdline.unwrap_or_default().contains("mvm.runtime_data="),
-        "RootfsOnly must not name an overlay device; the bug was that it names none"
+        cmdline.unwrap_or_default().contains("mvm.runtime_data="),
+        "an overlay-backed boot must name the device the overlay landed on"
     );
 }
 

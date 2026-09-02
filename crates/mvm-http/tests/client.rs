@@ -27,9 +27,18 @@ async fn serve_raw_then(
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
         let (mut sock, _) = listener.accept().await.unwrap();
-        let mut req = vec![0u8; 8192];
-        let n = sock.read(&mut req).await.unwrap_or(0);
-        req.truncate(n);
+        let mut req = Vec::with_capacity(8192);
+        loop {
+            let mut chunk = [0u8; 1024];
+            let n = sock.read(&mut chunk).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            req.extend_from_slice(&chunk[..n]);
+            if request_is_complete(&req) || req.len() >= 8192 {
+                break;
+            }
+        }
         sock.write_all(reply).await.ok();
         if !abrupt {
             sock.shutdown().await.ok();
@@ -37,6 +46,21 @@ async fn serve_raw_then(
         req
     });
     (addr, handle)
+}
+
+fn request_is_complete(request: &[u8]) -> bool {
+    let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") else {
+        return false;
+    };
+    let body_start = header_end + 4;
+    let headers = String::from_utf8_lossy(&request[..header_end]);
+    let content_length = headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("content-length")
+            .then(|| value.trim().parse::<usize>().ok())
+            .flatten()
+    });
+    content_length.is_none_or(|length| request.len() >= body_start + length)
 }
 
 fn client_for(addr: SocketAddr) -> Client {
@@ -66,6 +90,154 @@ async fn fixed_length_body_round_trips() {
     assert!(req.starts_with("GET /path HTTP/1.1\r\n"), "{req}");
     assert!(req.contains("host: test.local:"), "{req}");
     assert!(req.contains("connection: close\r\n"), "{req}");
+}
+
+async fn serve_streamed_request(body_len: usize) -> (SocketAddr, tokio::task::JoinHandle<Vec<u8>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut received = Vec::new();
+        let head_end = loop {
+            let mut chunk = [0_u8; 256];
+            let n = sock.read(&mut chunk).await.unwrap();
+            assert!(n > 0, "client closed before the request head");
+            received.extend_from_slice(&chunk[..n]);
+            if let Some(pos) = received.windows(4).position(|w| w == b"\r\n\r\n") {
+                break pos + 4;
+            }
+        };
+        while received.len().saturating_sub(head_end) < body_len {
+            let mut chunk = [0_u8; 256];
+            let n = sock.read(&mut chunk).await.unwrap();
+            assert!(n > 0, "client closed before the declared request body");
+            received.extend_from_slice(&chunk[..n]);
+        }
+        sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            .await
+            .unwrap();
+        received
+    });
+    (addr, handle)
+}
+
+#[tokio::test]
+async fn request_body_stream_is_bounded_and_preserves_chunk_order() {
+    let (addr, server) = serve_streamed_request(11).await;
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    let producer = tokio::spawn(async move {
+        tx.send(b"hello ".to_vec()).await.unwrap();
+        tx.send(b"world".to_vec()).await.unwrap();
+    });
+    let response = client_for(addr)
+        .post(url_for(addr))
+        .body_stream(11, rx)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    producer.await.unwrap();
+    let received = server.await.unwrap();
+    let head_end = received.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+    assert_eq!(&received[head_end..], b"hello world");
+    assert!(String::from_utf8_lossy(&received[..head_end]).contains("content-length: 11\r\n"));
+}
+
+#[tokio::test]
+async fn a_short_request_body_stream_fails_closed() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut sink = [0_u8; 1024];
+        while socket.read(&mut sink).await.unwrap_or(0) > 0 {}
+    });
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    tx.send(b"short".to_vec()).await.unwrap();
+    drop(tx);
+    let error = client_for(addr)
+        .post(url_for(addr))
+        .body_stream(6, rx)
+        .send()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::IncompleteRequestBody { remaining: 1 }),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn transformed_request_body_uses_bounded_chunked_framing() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut received = Vec::new();
+        loop {
+            let mut chunk = [0_u8; 256];
+            let n = socket.read(&mut chunk).await.unwrap();
+            assert!(n > 0, "client closed before the terminating chunk");
+            received.extend_from_slice(&chunk[..n]);
+            if received.windows(5).any(|window| window == b"0\r\n\r\n") {
+                break;
+            }
+        }
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            .await
+            .unwrap();
+        received
+    });
+
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    let producer = tokio::spawn(async move {
+        tx.send(b"hello ".to_vec()).await.unwrap();
+        tx.send(b"world".to_vec()).await.unwrap();
+    });
+    let response = client_for(addr)
+        .post(url_for(addr))
+        .body_chunked(rx)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    producer.await.unwrap();
+    let received = server.await.unwrap();
+    let head_end = received.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+    let head = String::from_utf8_lossy(&received[..head_end]);
+    assert!(head.contains("transfer-encoding: chunked\r\n"), "{head}");
+    assert_eq!(
+        &received[head_end..],
+        b"6\r\nhello \r\n5\r\nworld\r\n0\r\n\r\n"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_transform_closes_without_completing_the_chunked_body() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut received = Vec::new();
+        socket.read_to_end(&mut received).await.unwrap();
+        received
+    });
+    let (tx, rx) = tokio::sync::mpsc::channel(2);
+    tx.send(Ok(b"partial".to_vec())).await.unwrap();
+    tx.send(Err("transform failed closed".into()))
+        .await
+        .unwrap();
+    drop(tx);
+    let error = client_for(addr)
+        .post(url_for(addr))
+        .body_checked_chunked(rx)
+        .send()
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::RequestBodyProducer(_)), "{error:?}");
+    let received = server.await.unwrap();
+    assert!(!received.ends_with(b"0\r\n\r\n"));
 }
 
 #[tokio::test]
@@ -215,7 +387,7 @@ async fn a_204_carries_no_body() {
 
 #[tokio::test]
 async fn request_body_and_headers_reach_the_server() {
-    let (addr, srv) = serve_raw(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+    let (addr, srv) = serve_streamed_request(9).await;
     let c = client_for(addr);
     let resp = c
         .post(url_for(addr))

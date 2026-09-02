@@ -5,12 +5,14 @@
 Accepted — boundary ratified; scoped as the **claim-free portability / demo /
 browser tier** (host `wasmtime`, opt-in, honest capabilities, zero numbered
 claims). The seam design of record is
-[specs/refactor/11-wasm-backend.md](../refactor/11-wasm-backend.md); executing
-a wasm workload as more than a demo (attacker-controlled production) stays
-deferred under the engine-in-guest rule below. No implementation has landed yet:
-`BackendKind` (`mvm_runtime::…::catalog`) still enumerates the microVM backends
-only; no `wasmtime` dependency is in the workspace. The three constraints below
-bind the implementation.
+[specs/refactor/11-wasm-backend.md](../refactor/11-wasm-backend.md).
+
+A browser-hosted Linux backend is now in implementation under
+[ADR-049](049-weblinux-browser-backend-and-local-builder.md); ADR-049
+supersedes ADR-024 only where it rejected emulating Linux in WebAssembly and
+where it limited browser execution to a throwaway/direct-WASI demo. The direct-
+WASI tier (host `wasmtime`, `BackendKind::Wasm`) continues to be governed by
+this ADR and remains claim-free.
 
 ## Context
 
@@ -68,9 +70,10 @@ service is.
 
 ## Consequences
 
-- Until built, mvm has exactly one portability story: run a real microVM,
-  on whichever of the five current backends the host supports. There is
-  no fallback tier for hosts with none of them.
+- mvm has two claim-free portability tiers: the direct-WASI tier governed by
+  this ADR and the browser-hosted Linux tier governed by ADR-049. Both are
+  opt-in and never auto-selected. The hardware-isolated microVM backends remain
+  the only path that carries the numbered security claims.
 - A future implementation is scoped by this ADR before a line of code
   lands: opt-in, honestly-capable, claim-free, and — if it ever executes
   real workloads — engine-in-guest rather than engine-in-host.

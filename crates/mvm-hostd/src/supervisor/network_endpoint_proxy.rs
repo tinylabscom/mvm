@@ -20,9 +20,14 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use tokio::net::{UnixListener, UnixStream};
 use url::Url;
+use zeroize::Zeroizing;
 
 use mvm_contract::ir::AuthType;
+use mvm_core::observability::instance_metrics::{
+    InstanceLabels, InstanceMetricsRegistry, global as instance_metrics_global,
+};
 use mvm_core::plan::SecretBinding;
+use mvm_core::policy::audit::ai_usage::AiUsageRecord;
 use mvm_core::substitution_wire::{WireRequest, WireResponse};
 
 use crate::framing::{FrameError, read_json_frame, write_json_frame};
@@ -34,9 +39,12 @@ use crate::keyholder::{
 use crate::supervisor::accept_loop::{
     AcceptAction, classify_accept_error, record_listener_stopped,
 };
-use crate::supervisor::audit_recorder::Recorder;
+use crate::supervisor::ai_meter;
+use crate::supervisor::audit_recorder::{EventCategory, Recorder};
 use crate::supervisor::network::stages::{RedactingSubstitution, RedactionHits};
-use crate::supervisor::reversible_replacement::{ReplacementEngine, ReplacementFlow};
+use crate::supervisor::reversible_replacement::{
+    ReplacementEngine, ReplacementFlow, StreamingReinjector,
+};
 use crate::supervisor::secret_audit::{
     emit_rewrite_proof, emit_secret_placeholder_dropped, emit_secret_redacted,
     emit_secret_substituted,
@@ -51,6 +59,9 @@ pub use mvm_contract::substitution::{
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// The response body must fit inside the bounded guest-facing response frame.
 const MAX_FORWARD_RESPONSE_BYTES: usize = MAX_FRAME_BYTES;
+/// Typed FlowMux request ceiling, independent of transport frame size.
+const MAX_HTTP_STREAM_BODY_BYTES: usize = 32 * 1024 * 1024;
+const HTTP_REQUEST_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 #[cfg(not(target_os = "linux"))]
 const RVPROXY_ORIGINAL_DST_MAGIC: &[u8; 8] = b"RVPXOD01";
 
@@ -423,6 +434,18 @@ pub(crate) fn redaction_active(action: &mvm_core::policy::RedactionAction) -> bo
         || !matches!(action.names, mvm_core::policy::NameMode::Off)
 }
 
+/// Whether the policy's catch-all action explicitly opts every destination
+/// into inspection beyond the curated baseline. `RedactionAction::default()`
+/// remains compatible with ordinary opaque relay; it is applied when a caller
+/// deliberately chooses the typed HTTP class. Non-default detector modes are
+/// an admitted requirement and therefore make opaque relay dishonest.
+fn explicit_default_redaction(action: &mvm_core::policy::RedactionAction) -> bool {
+    !matches!(action.entropy, mvm_core::policy::EntropyMode::Off)
+        || !matches!(action.names, mvm_core::policy::NameMode::Off)
+        || action.pii.mode.is_some()
+        || !matches!(action.secrets, mvm_core::policy::SecretAction::Block)
+}
+
 #[cfg(test)]
 mod redaction_category_tests {
     use super::redaction_categories;
@@ -687,6 +710,17 @@ pub struct ForwardResponse {
     pub body: Vec<u8>,
 }
 
+/// A real-destination response whose decoded body is delivered incrementally.
+///
+/// The bounded receiver makes backpressure part of the type: the upstream
+/// reader cannot outrun the FlowMux writer by more than four HTTP chunks.
+pub struct ForwardStreamResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body_len: Option<u64>,
+    pub body: tokio::sync::mpsc::Receiver<Result<Vec<u8>, ForwardError>>,
+}
+
 /// Errors from the forward leg.
 #[derive(Debug, thiserror::Error)]
 pub enum ForwardError {
@@ -718,6 +752,9 @@ pub enum FromPlanError {
 pub struct FromPlanInputs<'a> {
     pub plan_secrets: &'a [SecretBinding],
     pub tenant: &'a str,
+    /// VM instance identifier used to attribute AI egress metrics and audit
+    /// records. An empty string means the endpoint has no instance context.
+    pub instance_id: &'a str,
     pub bindings: &'a dyn BindingStore,
     /// The value resolver the service resolves each bound secret through. Built
     /// by the caller (`assemble`) from `EndpointConfig.resolver`: a
@@ -732,6 +769,9 @@ pub struct FromPlanInputs<'a> {
     pub reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy,
     pub tls_intermediate: Option<mvm_core::crypto::egress_ca::VmIntermediate>,
     pub recorder: Option<Recorder>,
+    /// Per-VM AI egress metering/budget policy. `None` means AI egress is not
+    /// metered and no budget is enforced.
+    pub ai_policy: Option<mvm_contract::policy::network_policy::AiPolicy>,
 }
 
 /// Forwards a prepared (credential-substituted) request to the real
@@ -741,6 +781,55 @@ pub struct FromPlanInputs<'a> {
 #[async_trait]
 pub trait Forwarder: Send + Sync {
     async fn forward(&self, req: PreparedRequest) -> Result<ForwardResponse, ForwardError>;
+
+    /// Forward with a bounded incremental response body.
+    ///
+    /// Test doubles and compatibility forwarders get a safe buffered adapter;
+    /// the production forwarder overrides this and reads the upstream socket
+    /// only as the receiver makes room.
+    async fn forward_stream(
+        &self,
+        req: PreparedRequest,
+    ) -> Result<ForwardStreamResponse, ForwardError> {
+        let response = self.forward(req).await?;
+        let body_len = Some(response.body.len() as u64);
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        sender
+            .send(Ok(response.body))
+            .await
+            .map_err(|_| ForwardError::Failed("response consumer closed".into()))?;
+        Ok(ForwardStreamResponse {
+            status: response.status,
+            headers: response.headers,
+            body_len,
+            body: receiver,
+        })
+    }
+
+    /// Forward a request whose body arrives through a bounded channel.
+    ///
+    /// The default adapter is for test doubles: it preserves their existing
+    /// whole-request assertions while enforcing the production body ceiling.
+    /// The production forwarder overrides it and writes chunks directly to the
+    /// upstream socket.
+    async fn forward_body_stream(
+        &self,
+        mut req: PreparedRequest,
+        mut body: tokio::sync::mpsc::Receiver<Result<Vec<u8>, String>>,
+    ) -> Result<ForwardStreamResponse, ForwardError> {
+        let mut collected = Vec::new();
+        while let Some(next) = body.recv().await {
+            let chunk = next.map_err(ForwardError::Failed)?;
+            if collected.len().saturating_add(chunk.len()) > MAX_FORWARD_RESPONSE_BYTES {
+                return Err(ForwardError::Failed(format!(
+                    "request body exceeds the {MAX_FORWARD_RESPONSE_BYTES} byte limit"
+                )));
+            }
+            collected.extend_from_slice(&chunk);
+        }
+        req.body = collected;
+        self.forward_stream(req).await
+    }
 }
 
 /// Flatten an error and its `source()` chain into one message. The client wraps
@@ -785,11 +874,12 @@ impl HardenedForwarder {
         self.proxy = proxy;
         self
     }
-}
 
-#[async_trait]
-impl Forwarder for HardenedForwarder {
-    async fn forward(&self, req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
+    async fn send_streaming(
+        &self,
+        req: PreparedRequest,
+        stream_body: Option<tokio::sync::mpsc::Receiver<Result<Vec<u8>, String>>>,
+    ) -> Result<ForwardStreamResponse, ForwardError> {
         let method = mvm_http::Method::from_bytes(req.method.as_bytes())
             .map_err(|e| ForwardError::Failed(format!("bad method: {e}")))?;
         let client = hardened_client_builder_via(self.timeout_secs, self.proxy.as_ref())
@@ -800,10 +890,12 @@ impl Forwarder for HardenedForwarder {
         for (k, v) in &req.headers {
             rb = rb.header(k, v);
         }
-        if !req.body.is_empty() {
-            rb = rb.body(req.body);
-        }
-        let resp = rb
+        rb = match stream_body {
+            Some(receiver) => rb.body_checked_chunked(receiver),
+            None if !req.body.is_empty() => rb.body(req.body),
+            None => rb,
+        };
+        let mut resp = rb
             .send()
             .await
             .map_err(|e| ForwardError::Failed(err_chain(&e)))?;
@@ -814,16 +906,63 @@ impl Forwarder for HardenedForwarder {
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or_default().to_string()))
             .collect();
         check_forward_response_length(resp.content_length())?;
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| ForwardError::Failed(err_chain(&e)))?
-            .to_vec();
-        Ok(ForwardResponse {
+        let body_len = resp.content_length();
+        let (sender, body) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            loop {
+                match resp.chunk().await {
+                    Ok(Some(chunk)) => {
+                        if sender.send(Ok(chunk.to_vec())).await.is_err() {
+                            return;
+                        }
+                    }
+                    Ok(None) => return,
+                    Err(error) => {
+                        let _ = sender
+                            .send(Err(ForwardError::Failed(err_chain(&error))))
+                            .await;
+                        return;
+                    }
+                }
+            }
+        });
+        Ok(ForwardStreamResponse {
             status,
             headers,
+            body_len,
             body,
         })
+    }
+}
+
+#[async_trait]
+impl Forwarder for HardenedForwarder {
+    async fn forward(&self, req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
+        let mut response = self.forward_stream(req).await?;
+        let mut body = Vec::new();
+        while let Some(chunk) = response.body.recv().await {
+            body.extend_from_slice(&chunk?);
+        }
+        Ok(ForwardResponse {
+            status: response.status,
+            headers: response.headers,
+            body,
+        })
+    }
+
+    async fn forward_stream(
+        &self,
+        req: PreparedRequest,
+    ) -> Result<ForwardStreamResponse, ForwardError> {
+        self.send_streaming(req, None).await
+    }
+
+    async fn forward_body_stream(
+        &self,
+        req: PreparedRequest,
+        body: tokio::sync::mpsc::Receiver<Result<Vec<u8>, String>>,
+    ) -> Result<ForwardStreamResponse, ForwardError> {
+        self.send_streaming(req, Some(body)).await
     }
 }
 
@@ -843,7 +982,7 @@ pub struct SubstitutionService {
     redactor: RedactingSubstitution,
     /// Optional chain-signed audit recorder. When set, each substitution emits
     /// a `secret.substituted` entry (metadata only — claim 13).
-    recorder: Option<Recorder>,
+    recorder: Option<Arc<Recorder>>,
     /// The per-VM name-constrained intermediate the `https` terminator mints
     /// per-SNI leaves under. `None` ⇒ no TLS leg (`http`-only). Set from
     /// `EndpointConfig.tls_intermediate` at assemble.
@@ -859,7 +998,170 @@ pub struct SubstitutionService {
     /// against the VM's resolved network policy before any forward — an
     /// unadmitted `host:port` is refused here. `None` ⇒ this endpoint does not
     /// gate (the run loop's gate is still active); a `Some` gate fails closed.
-    egress_gate: Option<mvm_runtime::vmm::egress_gate::EgressGate>,
+    egress_gate: Option<Arc<mvm_runtime::vmm::egress_gate::EgressGate>>,
+    /// Per-VM AI egress metering/budget policy. `None` means AI egress is not
+    /// metered and no budget is enforced.
+    ai_policy: Option<mvm_contract::policy::network_policy::AiPolicy>,
+    /// Per-VM AI token budget tracker, present only when metering is enabled.
+    ai_tracker: Option<Arc<ai_meter::AiBudgetTracker>>,
+    /// VM instance identifier used to attribute AI egress metrics.
+    instance_id: Option<String>,
+    /// Optional per-VM metrics registry for AI counters. When `None`, the
+    /// process-global registry is used.
+    instance_metrics:
+        Option<Arc<mvm_core::observability::instance_metrics::InstanceMetricsRegistry>>,
+}
+
+/// Failure to resolve host-owned transformation material by its signed plan
+/// reference. Errors name only the reference, never the secret bytes.
+#[derive(Debug, thiserror::Error)]
+pub enum HostMaterialError {
+    #[error("host transformation material `{name}` is absent from the admitted plan")]
+    NotAdmitted { name: String },
+    #[error("host transformation material `{name}` could not be resolved")]
+    Unavailable {
+        name: String,
+        #[source]
+        source: crate::keyholder::ResolveError,
+    },
+}
+
+/// Security state retained from request preparation through response
+/// completion. It contains metadata and rewrite state, never an extra copy of
+/// the request or a credential value.
+struct PreparedFlow {
+    request: Option<PreparedRequest>,
+    destination: Option<String>,
+    substituted: Vec<(String, AuthType)>,
+    replacement_flow: ReplacementFlow,
+    replacement_proofs: Vec<mvm_core::policy::RewriteProofRecord>,
+    redaction_hits: RedactionHits,
+    redaction_action: mvm_core::policy::RedactionAction,
+}
+
+/// Raw suffix retained between transform chunks. A 64 KiB window is larger
+/// than every configured secret/PII fingerprint; an adversarial pattern that
+/// still cannot reach a stable cut by twice that bound fails closed.
+const STREAM_TRANSFORM_OVERLAP: usize = 64 * 1024;
+const MAX_STREAM_TRANSFORM_PENDING: usize = STREAM_TRANSFORM_OVERLAP * 2;
+/// Cap on how much of a streaming AI response body we retain for trailing
+/// usage extraction. SSE usage blocks are small and appear at the end of the
+/// stream; this buffer only keeps the tail so guest bandwidth is unaffected.
+const MAX_AI_STREAM_BUFFER_BYTES: usize = 256 * 1024;
+
+pub(crate) struct StreamingRedactor {
+    pending: Zeroizing<Vec<u8>>,
+}
+
+impl StreamingRedactor {
+    pub(crate) fn new() -> Self {
+        Self {
+            pending: Zeroizing::new(Vec::new()),
+        }
+    }
+
+    pub(crate) fn push(
+        &mut self,
+        redactor: &RedactingSubstitution,
+        action: &mvm_core::policy::RedactionAction,
+        chunk: &[u8],
+    ) -> Result<(Vec<u8>, RedactionHits), SensitiveDetectionError> {
+        self.pending.extend_from_slice(chunk);
+        if self.pending.len() <= STREAM_TRANSFORM_OVERLAP {
+            return Ok((Vec::new(), RedactionHits::default()));
+        }
+
+        let safe_len = self.pending.len() - STREAM_TRANSFORM_OVERLAP;
+        let (prefix, prefix_hits) = redact_or_copy(redactor, action, &self.pending[..safe_len])?;
+        let (whole, _) = redact_or_copy(redactor, action, &self.pending)?;
+        if whole.starts_with(&prefix) {
+            let suffix = self.pending.split_off(safe_len);
+            *self.pending = suffix;
+            return Ok((prefix, prefix_hits));
+        }
+        if self.pending.len() > MAX_STREAM_TRANSFORM_PENDING {
+            return Err(SensitiveDetectionError);
+        }
+        Ok((Vec::new(), RedactionHits::default()))
+    }
+
+    pub(crate) fn finish(
+        &mut self,
+        redactor: &RedactingSubstitution,
+        action: &mvm_core::policy::RedactionAction,
+    ) -> Result<(Vec<u8>, RedactionHits), SensitiveDetectionError> {
+        let pending = std::mem::take(&mut *self.pending);
+        redact_or_copy(redactor, action, &pending)
+    }
+}
+
+fn redact_or_copy(
+    redactor: &RedactingSubstitution,
+    action: &mvm_core::policy::RedactionAction,
+    bytes: &[u8],
+) -> Result<(Vec<u8>, RedactionHits), SensitiveDetectionError> {
+    match redactor.redact_bytes_for(bytes, action) {
+        Some((_redacted, hits)) if hits.detector_failures > 0 => Err(SensitiveDetectionError),
+        Some((redacted, hits)) => Ok((redacted, hits)),
+        None => Ok((bytes.to_vec(), RedactionHits::default())),
+    }
+}
+
+#[cfg(test)]
+mod streaming_redactor_tests {
+    use super::*;
+
+    #[test]
+    fn a_secret_split_across_chunks_is_withheld_and_redacted() {
+        let secret = b"sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let split = 17;
+        let mut first = vec![b'x'; STREAM_TRANSFORM_OVERLAP - split];
+        first.extend_from_slice(&secret[..split]);
+
+        let redactor = RedactingSubstitution::with_default_rules();
+        let action = mvm_core::policy::RedactionAction::default();
+        let mut stream = StreamingRedactor::new();
+        let (ready, _) = stream.push(&redactor, &action, &first).unwrap();
+        assert!(ready.is_empty(), "the possible prefix must stay withheld");
+        let (ready, _) = stream.push(&redactor, &action, &secret[split..]).unwrap();
+        let (tail, hits) = stream.finish(&redactor, &action).unwrap();
+        let output = [ready, tail].concat();
+        assert!(!output.windows(secret.len()).any(|window| window == secret));
+        assert!(!hits.secrets.is_empty(), "the split token must be detected");
+    }
+
+    #[test]
+    fn clean_streams_release_every_byte_in_order_with_bounded_carry() {
+        let redactor = RedactingSubstitution::with_default_rules();
+        let action = mvm_core::policy::RedactionAction::default();
+        let mut stream = StreamingRedactor::new();
+        let input = vec![b'x'; STREAM_TRANSFORM_OVERLAP + 123];
+        let (ready, _) = stream.push(&redactor, &action, &input).unwrap();
+        assert_eq!(ready.len(), 123);
+        assert!(stream.pending.len() <= STREAM_TRANSFORM_OVERLAP);
+        let (tail, _) = stream.finish(&redactor, &action).unwrap();
+        assert_eq!([ready, tail].concat(), input);
+    }
+
+    #[test]
+    fn a_long_clean_stream_never_grows_the_overlap_buffer() {
+        let redactor = RedactingSubstitution::with_default_rules();
+        let action = mvm_core::policy::RedactionAction::default();
+        let mut stream = StreamingRedactor::new();
+        let chunk = vec![b'x'; 8 * 1024];
+        let mut emitted = 0usize;
+
+        for _ in 0..1024 {
+            let (ready, hits) = stream.push(&redactor, &action, &chunk).unwrap();
+            assert!(hits.is_empty());
+            emitted = emitted.saturating_add(ready.len());
+            assert!(stream.pending.len() <= STREAM_TRANSFORM_OVERLAP);
+        }
+        let (tail, hits) = stream.finish(&redactor, &action).unwrap();
+        assert!(hits.is_empty());
+        emitted = emitted.saturating_add(tail.len());
+        assert_eq!(emitted, chunk.len() * 1024);
+    }
 }
 /// Which audit an error path owes, given the cause and whether the request
 /// carried a placeholder.
@@ -919,6 +1221,10 @@ impl SubstitutionService {
             reversible_replacement_policy: mvm_core::policy::ReversibleReplacementPolicy::default(),
             replacement_engine: ReplacementEngine::new(),
             egress_gate: None,
+            ai_policy: None,
+            ai_tracker: None,
+            instance_id: None,
+            instance_metrics: None,
         }
     }
 
@@ -941,6 +1247,110 @@ impl SubstitutionService {
     ) -> Self {
         self.reversible_replacement_policy = policy;
         self
+    }
+
+    /// Resolve a host-only transformation secret by its signed plan name.
+    /// The returned `SecretBox` zeroizes on drop; callers must parse it in
+    /// place and must never serialize or log the exposed bytes.
+    pub fn resolve_host_material(
+        &self,
+        name: &str,
+    ) -> Result<secrecy::SecretBox<Vec<u8>>, HostMaterialError> {
+        let secret =
+            self.registry
+                .resolve_name(name)
+                .ok_or_else(|| HostMaterialError::NotAdmitted {
+                    name: name.to_string(),
+                })?;
+        self.resolver
+            .resolve(secret)
+            .map_err(|source| HostMaterialError::Unavailable {
+                name: name.to_string(),
+                source,
+            })
+    }
+
+    /// Build per-connection ingress HTTP transformation state from the same
+    /// admitted policies used by typed egress. `profile_key` is the signed host
+    /// bind address; no peer-controlled Host header selects policy.
+    pub fn ingress_transformer(
+        &self,
+        profile_key: &str,
+    ) -> crate::supervisor::ingress_transform::IngressTransformer {
+        let redaction =
+            crate::supervisor::redaction_resolve::resolve(&self.redaction_policy, profile_key)
+                .clone();
+        let replacement = crate::supervisor::reversible_replacement_resolve::resolve(
+            &self.reversible_replacement_policy,
+            profile_key,
+        )
+        .clone();
+        crate::supervisor::ingress_transform::IngressTransformer::new(
+            &self.tenant,
+            redaction,
+            replacement,
+        )
+    }
+
+    /// Append one payload-free signed audit event for a transformed ingress
+    /// exchange. The runtime handle belongs to the endpoint; transform workers
+    /// are bounded blocking threads and use it only for the short signer call.
+    pub fn audit_ingress_transform(
+        &self,
+        runtime: &tokio::runtime::Handle,
+        mapping_id: u16,
+        result: &Result<
+            crate::supervisor::ingress_transform::IngressTransformSummary,
+            crate::supervisor::ingress_transform::IngressTransformError,
+        >,
+    ) {
+        let Some(recorder) = self.recorder.clone() else {
+            return;
+        };
+        let (event_name, labels) = ingress_transform_audit(mapping_id, result);
+        let _ = runtime.block_on(recorder.record_unbound(EventCategory::Host, event_name, labels));
+    }
+
+    /// Explain why an opaque flow to `destination` cannot honestly satisfy the
+    /// admitted transformation policy.
+    ///
+    /// Secret bindings and explicitly enabled replacement/redaction profiles
+    /// are destination-bound. Letting the same destination use opaque TCP or
+    /// UDP would silently bypass the only path that can inspect, substitute,
+    /// or redact its bytes. The caller refuses before DNS resolution or socket
+    /// creation. The curated default redaction action does not make every
+    /// opaque destination transformed; only an explicit profile/default opt-in
+    /// or a bound secret does.
+    pub(crate) fn opaque_refusal_reason(&self, destination: &str) -> Option<&'static str> {
+        if self.registry.host_is_bound(destination) {
+            return Some("destination requires secret substitution over typed HTTP");
+        }
+
+        if crate::supervisor::reversible_replacement_resolve::resolve(
+            &self.reversible_replacement_policy,
+            destination,
+        )
+        .enabled
+        {
+            return Some("destination requires reversible replacement over typed HTTP");
+        }
+
+        let explicit_redaction = self
+            .redaction_policy
+            .profiles
+            .iter()
+            .find(|profile| mvm_contract::ir::host_matches(&profile.host, destination))
+            .map(|profile| redaction_active(&profile.action))
+            .unwrap_or_else(|| explicit_default_redaction(&self.redaction_policy.default));
+        explicit_redaction.then_some("destination requires redaction over typed HTTP")
+    }
+
+    /// Record cancellation/failure metadata for a typed HTTP stream without
+    /// ever placing request bytes, headers, credentials, or the full URL in
+    /// the audit record.
+    pub(crate) async fn audit_http_stream_failure(&self, url: &str, reason: &str) {
+        let destination = destination_host(url).ok();
+        self.audit_fail_closed(destination.as_deref(), reason).await;
     }
 
     /// The attached redaction policy. Test-only: lets the threading tests prove
@@ -973,6 +1383,12 @@ impl SubstitutionService {
     /// Attach a chain-signed audit recorder; each substitution then emits a
     /// `secret.substituted` entry (metadata only — claim 13).
     pub fn with_recorder(mut self, recorder: Recorder) -> Self {
+        self.recorder = Some(Arc::new(recorder));
+        self
+    }
+
+    /// Attach the endpoint's shared chain-signed audit sink.
+    pub fn with_shared_recorder(mut self, recorder: Arc<Recorder>) -> Self {
         self.recorder = Some(recorder);
         self
     }
@@ -990,7 +1406,59 @@ impl SubstitutionService {
     /// Attach the claim-10 egress gate. Once attached, `process` refuses any
     /// destination the VM's network policy doesn't admit before forwarding.
     pub fn with_egress_gate(mut self, gate: mvm_runtime::vmm::egress_gate::EgressGate) -> Self {
+        self.egress_gate = Some(Arc::new(gate));
+        self
+    }
+
+    /// Attach the endpoint's shared claim-10 policy object.
+    pub fn with_shared_egress_gate(
+        mut self,
+        gate: Arc<mvm_runtime::vmm::egress_gate::EgressGate>,
+    ) -> Self {
         self.egress_gate = Some(gate);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shared_projection_ids(&self) -> (Option<usize>, Option<usize>) {
+        (
+            self.egress_gate
+                .as_ref()
+                .map(|gate| Arc::as_ptr(gate).cast::<()>() as usize),
+            self.recorder
+                .as_ref()
+                .map(|recorder| Arc::as_ptr(recorder).cast::<()>() as usize),
+        )
+    }
+
+    /// Attach the VM instance identifier used to attribute AI egress metrics
+    /// and audit records. Empty strings are treated as absent.
+    pub fn with_instance_id(mut self, instance_id: impl Into<String>) -> Self {
+        let id = instance_id.into();
+        self.instance_id = (!id.is_empty()).then_some(id);
+        self
+    }
+
+    /// Attach a per-VM AI egress metering/budget policy. Metering is only
+    /// active when `policy.metering` is `true`.
+    pub fn with_ai_policy(
+        mut self,
+        policy: mvm_contract::policy::network_policy::AiPolicy,
+    ) -> Self {
+        if policy.metering {
+            self.ai_tracker = Some(Arc::new(ai_meter::AiBudgetTracker::new(policy.budget)));
+        }
+        self.ai_policy = Some(policy);
+        self
+    }
+
+    /// Override the per-VM metrics registry used for AI counters. When not
+    /// set, the process-global registry is used.
+    pub fn with_instance_metrics(
+        mut self,
+        registry: Arc<mvm_core::observability::instance_metrics::InstanceMetricsRegistry>,
+    ) -> Self {
+        self.instance_metrics = Some(registry);
         self
     }
 
@@ -1007,6 +1475,7 @@ impl SubstitutionService {
         let FromPlanInputs {
             plan_secrets,
             tenant,
+            instance_id,
             bindings,
             resolver,
             forward_timeout_secs,
@@ -1015,11 +1484,14 @@ impl SubstitutionService {
             reversible_replacement,
             tls_intermediate,
             recorder,
+            ai_policy,
         } = inputs;
         let (registry, handed) = assemble_registry(plan_secrets, tenant, bindings)?;
         let forwarder: Arc<dyn Forwarder> =
             Arc::new(HardenedForwarder::new(forward_timeout_secs)?.with_proxy(proxy));
-        let mut service = Self::new(Arc::new(registry), resolver, forwarder).with_tenant(tenant);
+        let mut service = Self::new(Arc::new(registry), resolver, forwarder)
+            .with_tenant(tenant)
+            .with_instance_id(instance_id);
         service = service.with_redaction_policy(redaction);
         service = service.with_reversible_replacement_policy(reversible_replacement);
         if let Some(intermediate) = tls_intermediate {
@@ -1027,6 +1499,9 @@ impl SubstitutionService {
         }
         if let Some(recorder) = recorder {
             service = service.with_recorder(recorder);
+        }
+        if let Some(policy) = ai_policy {
+            service = service.with_ai_policy(policy);
         }
         Ok((Arc::new(service), handed))
     }
@@ -1056,7 +1531,7 @@ impl SubstitutionService {
                     AcceptAction::Fatal => {
                         tracing::error!(error = %e, "substitution endpoint accept failed; stopping");
                         record_listener_stopped(
-                            self.recorder.as_ref(),
+                            self.recorder.as_deref(),
                             "substitution-uds",
                             &e.to_string(),
                         )
@@ -1095,7 +1570,7 @@ impl SubstitutionService {
                     AcceptAction::Fatal => {
                         tracing::error!(error = %e, "vsock substitution accept failed; stopping");
                         record_listener_stopped(
-                            self.recorder.as_ref(),
+                            self.recorder.as_deref(),
                             "substitution-vsock",
                             &e.to_string(),
                         )
@@ -1108,7 +1583,7 @@ impl SubstitutionService {
                 Err(e) => {
                     tracing::error!(error = %e, "vsock accept task panicked; stopping");
                     record_listener_stopped(
-                        self.recorder.as_ref(),
+                        self.recorder.as_deref(),
                         "substitution-vsock",
                         &e.to_string(),
                     )
@@ -1169,7 +1644,7 @@ impl SubstitutionService {
                     AcceptAction::Fatal => {
                         tracing::error!(error = %e, "terminator accept failed; stopping");
                         record_listener_stopped(
-                            self.recorder.as_ref(),
+                            self.recorder.as_deref(),
                             "terminator",
                             &e.to_string(),
                         )
@@ -1448,12 +1923,478 @@ impl SubstitutionService {
     /// destination binding, the claim-10 gate, payload-free audit — happens
     /// here and only here, on every transport.
     pub(crate) async fn process(&self, wire: WireRequest) -> WireResponse {
+        let mut flow = match self.prepare_flow(wire).await {
+            Ok(flow) => flow,
+            Err(refusal) => return refusal,
+        };
+        let request = flow
+            .request
+            .take()
+            .expect("a prepared flow owns exactly one request");
+        if self.ai_budget_exceeded() && ai_meter::is_known_ai_provider(&request.url) {
+            self.audit_ai_budget_exceeded(&flow, &request.url).await;
+            return WireResponse::Refused {
+                message: "AI egress budget exceeded".into(),
+            };
+        }
+        let ai_meta = self.ai_tracker().map(|_| AiRequestMeta {
+            method: request.method.clone(),
+            url: request.url.clone(),
+        });
+        match self.forwarder.forward(request).await {
+            Ok(mut response) => {
+                let reinject_proofs = flow.replacement_flow.reinject_response(&mut response);
+                self.audit_completed_flow(&flow, &reinject_proofs).await;
+                if let Some(meta) = ai_meta {
+                    self.record_ai_usage(&meta, response.status, &response.body)
+                        .await;
+                }
+                WireResponse::Ok {
+                    status: response.status,
+                    headers: response.headers,
+                    body_b64: B64.encode(response.body),
+                }
+            }
+            Err(error) => WireResponse::Refused {
+                message: error.to_string(),
+            },
+        }
+    }
+
+    /// Substitute and forward one FlowMux request while keeping the upstream
+    /// response body incremental and bounded.
+    pub(crate) async fn process_stream(
+        self: &Arc<Self>,
+        wire: WireRequest,
+    ) -> Result<ForwardStreamResponse, WireResponse> {
+        let mut flow = self.prepare_flow(wire).await?;
+        let request = flow
+            .request
+            .take()
+            .expect("a prepared flow owns exactly one request");
+        if self.ai_budget_exceeded() && ai_meter::is_known_ai_provider(&request.url) {
+            self.audit_ai_budget_exceeded(&flow, &request.url).await;
+            return Err(WireResponse::Refused {
+                message: "AI egress budget exceeded".into(),
+            });
+        }
+        let ai_meta = self.ai_tracker().map(|_| AiRequestMeta {
+            method: request.method.clone(),
+            url: request.url.clone(),
+        });
+        let upstream = self
+            .forwarder
+            .forward_stream(request)
+            .await
+            .map_err(|error| WireResponse::Refused {
+                message: error.to_string(),
+            })?;
+
+        self.transform_response_stream(flow, upstream, ai_meta)
+            .await
+    }
+
+    /// Process a FlowMux request body as bounded chunks. Signing and
+    /// reversible request-body replacement need replay after seeing the full
+    /// payload, so those explicit classes retain a bounded zeroizing replay
+    /// buffer; every other typed request streams through the inspector.
+    pub(crate) async fn process_body_stream(
+        self: &Arc<Self>,
+        head: mvm_core::substitution_wire::HttpFlowHead,
+        mut body: tokio::sync::mpsc::Receiver<Zeroizing<Vec<u8>>>,
+    ) -> Result<ForwardStreamResponse, WireResponse> {
+        let destination = destination_host(&head.url).ok();
+        let replacement_action = destination
+            .as_deref()
+            .map(|dest| {
+                crate::supervisor::reversible_replacement_resolve::resolve(
+                    &self.reversible_replacement_policy,
+                    dest,
+                )
+            })
+            .cloned()
+            .unwrap_or_default();
+        let endpoint = NetworkEndpoint::new(&self.registry, self.resolver.as_ref());
+        let signs_body = head.headers.iter().any(|(_, value)| {
+            find_placeholder(value).is_some_and(|placeholder| {
+                matches!(
+                    endpoint.auth_type(placeholder),
+                    Some(AuthType::Sigv4 | AuthType::Hmac)
+                )
+            })
+        });
+        let replaces_body =
+            replacement_action.replaces_on(mvm_core::policy::RewriteSurface::RequestBody);
+
+        if signs_body || replaces_body {
+            let mut replay = Zeroizing::new(Vec::new());
+            loop {
+                let next = match tokio::time::timeout(HTTP_REQUEST_IDLE_TIMEOUT, body.recv()).await
+                {
+                    Ok(next) => next,
+                    Err(_) => {
+                        self.audit_fail_closed(destination.as_deref(), "request_body_idle_timeout")
+                            .await;
+                        return Err(WireResponse::Refused {
+                            message: "request body idle timeout".into(),
+                        });
+                    }
+                };
+                let Some(chunk) = next else {
+                    break;
+                };
+                if replay.len().saturating_add(chunk.len()) > MAX_HTTP_STREAM_BODY_BYTES {
+                    self.audit_fail_closed(destination.as_deref(), "request_body_limit_exceeded")
+                        .await;
+                    return Err(WireResponse::Refused {
+                        message: format!(
+                            "request body exceeds the {MAX_HTTP_STREAM_BODY_BYTES} byte limit"
+                        ),
+                    });
+                }
+                replay.extend_from_slice(&chunk);
+            }
+            if replay.len() as u64 != head.body_len {
+                self.audit_fail_closed(destination.as_deref(), "request_body_truncated")
+                    .await;
+                return Err(WireResponse::Refused {
+                    message: "request body ended before its declared length".into(),
+                });
+            }
+            return self
+                .process_stream(WireRequest {
+                    method: head.method,
+                    url: head.url,
+                    headers: head.headers,
+                    body_b64: B64.encode(&*replay),
+                })
+                .await;
+        }
+
+        let wire = WireRequest {
+            method: head.method,
+            url: head.url,
+            headers: head.headers,
+            body_b64: String::new(),
+        };
+        let mut flow = self.prepare_flow(wire).await?;
+        let request = flow
+            .request
+            .take()
+            .expect("a prepared flow owns exactly one request");
+        if self.ai_budget_exceeded() && ai_meter::is_known_ai_provider(&request.url) {
+            self.audit_ai_budget_exceeded(&flow, &request.url).await;
+            return Err(WireResponse::Refused {
+                message: "AI egress budget exceeded".into(),
+            });
+        }
+        let ai_meta = self.ai_tracker().map(|_| AiRequestMeta {
+            method: request.method.clone(),
+            url: request.url.clone(),
+        });
+        let expected_len = head.body_len;
+        let (sender, receiver) = tokio::sync::mpsc::channel(4);
+        let service = Arc::clone(self);
+        let action = flow.redaction_action.clone();
+        let producer_destination = destination.clone();
+        let producer = tokio::spawn(async move {
+            let mut redactor = StreamingRedactor::new();
+            let mut hits = RedactionHits::default();
+            let mut received = 0_u64;
+            loop {
+                let next = match tokio::time::timeout(HTTP_REQUEST_IDLE_TIMEOUT, body.recv()).await
+                {
+                    Ok(next) => next,
+                    Err(_) => {
+                        service
+                            .audit_fail_closed(
+                                producer_destination.as_deref(),
+                                "request_body_idle_timeout",
+                            )
+                            .await;
+                        let _ = sender.send(Err("request body idle timeout".into())).await;
+                        return Err(SensitiveDetectionError);
+                    }
+                };
+                let Some(chunk) = next else {
+                    break;
+                };
+                received = received.saturating_add(chunk.len() as u64);
+                if received > expected_len {
+                    service
+                        .audit_fail_closed(
+                            producer_destination.as_deref(),
+                            "request_body_length_exceeded",
+                        )
+                        .await;
+                    let _ = sender
+                        .send(Err("request body exceeded its declared length".into()))
+                        .await;
+                    return Err(SensitiveDetectionError);
+                }
+                let (ready, chunk_hits) = match redactor.push(&service.redactor, &action, &chunk) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        service
+                            .audit_fail_closed(
+                                producer_destination.as_deref(),
+                                "request_body_detector_failed",
+                            )
+                            .await;
+                        let _ = sender
+                            .send(Err("sensitive-data detector failed closed".into()))
+                            .await;
+                        return Err(error);
+                    }
+                };
+                hits.merge(chunk_hits);
+                if !ready.is_empty() && sender.send(Ok(ready)).await.is_err() {
+                    service
+                        .audit_fail_closed(
+                            producer_destination.as_deref(),
+                            "request_body_stream_canceled",
+                        )
+                        .await;
+                    return Err(SensitiveDetectionError);
+                }
+            }
+            if received != expected_len {
+                service
+                    .audit_fail_closed(producer_destination.as_deref(), "request_body_truncated")
+                    .await;
+                let _ = sender
+                    .send(Err("request body ended before its declared length".into()))
+                    .await;
+                return Err(SensitiveDetectionError);
+            }
+            let (tail, tail_hits) = match redactor.finish(&service.redactor, &action) {
+                Ok(result) => result,
+                Err(error) => {
+                    service
+                        .audit_fail_closed(
+                            producer_destination.as_deref(),
+                            "request_body_detector_failed",
+                        )
+                        .await;
+                    return Err(error);
+                }
+            };
+            hits.merge(tail_hits);
+            if !tail.is_empty() && sender.send(Ok(tail)).await.is_err() {
+                service
+                    .audit_fail_closed(
+                        producer_destination.as_deref(),
+                        "request_body_stream_canceled",
+                    )
+                    .await;
+                return Err(SensitiveDetectionError);
+            }
+            Ok(hits)
+        });
+        let upstream = self
+            .forwarder
+            .forward_body_stream(request, receiver)
+            .await
+            .map_err(|error| WireResponse::Refused {
+                message: error.to_string(),
+            })?;
+        let request_hits = producer
+            .await
+            .map_err(|_| WireResponse::Refused {
+                message: "request transform task failed closed".into(),
+            })?
+            .map_err(|_| WireResponse::Refused {
+                message: "request transform failed closed".into(),
+            })?;
+        flow.redaction_hits.merge(request_hits);
+        self.transform_response_stream(flow, upstream, ai_meta)
+            .await
+    }
+
+    async fn transform_response_stream(
+        self: &Arc<Self>,
+        mut flow: PreparedFlow,
+        mut upstream: ForwardStreamResponse,
+        ai_meta: Option<AiRequestMeta>,
+    ) -> Result<ForwardStreamResponse, WireResponse> {
+        // Reinject and redact response headers before any body byte can cross
+        // to the guest. HTTP transfer framing belongs to the upstream leg, not
+        // FlowMux; remove it because transforms may change decoded length.
+        let mut head = ForwardResponse {
+            status: upstream.status,
+            headers: upstream.headers,
+            body: Vec::new(),
+        };
+        let mut reinject_proofs = flow.replacement_flow.reinject_response(&mut head);
+        head.headers.retain(|(name, _)| {
+            !name.eq_ignore_ascii_case("content-length")
+                && !name.eq_ignore_ascii_case("transfer-encoding")
+        });
+        for (_, value) in &mut head.headers {
+            if let Some((redacted, hits)) = self
+                .redactor
+                .redact_bytes_for(value.as_bytes(), &flow.redaction_action)
+            {
+                if hits.detector_failures > 0 {
+                    self.audit_fail_closed(
+                        flow.destination.as_deref(),
+                        "response_header_detector_failed",
+                    )
+                    .await;
+                    return Err(WireResponse::Refused {
+                        message: "sensitive-data detector failed closed; refusing response".into(),
+                    });
+                }
+                *value = String::from_utf8_lossy(&redacted).into_owned();
+                flow.redaction_hits.merge(hits);
+            }
+        }
+
+        let response_status = head.status;
+        let response_headers = std::mem::take(&mut head.headers);
+        let (sender, receiver) = tokio::sync::mpsc::channel(4);
+        let service = Arc::clone(self);
+        let response_destination = flow.destination.clone();
+        let meter_streaming = ai_meta.is_some();
+        tokio::spawn(async move {
+            let mut redactor = StreamingRedactor::new();
+            let mut ai_body_buffer = if meter_streaming {
+                Some(Vec::with_capacity(0))
+            } else {
+                None
+            };
+            let mut reinjector = StreamingReinjector::new();
+            while let Some(next) = upstream.body.recv().await {
+                let chunk = match next {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        let _ = sender.send(Err(error)).await;
+                        return;
+                    }
+                };
+                if let Some(buf) = ai_body_buffer.as_mut().filter(|buf| {
+                    buf.len().saturating_add(chunk.len()) <= MAX_AI_STREAM_BUFFER_BYTES
+                }) {
+                    buf.extend_from_slice(&chunk);
+                }
+                let (reintroduced, proofs) = reinjector.push(&mut flow.replacement_flow, &chunk);
+                reinject_proofs.extend(proofs);
+                let (ready, hits) =
+                    match redactor.push(&service.redactor, &flow.redaction_action, &reintroduced) {
+                        Ok(result) => result,
+                        Err(_) => {
+                            service
+                                .audit_fail_closed(
+                                    response_destination.as_deref(),
+                                    "response_body_detector_failed",
+                                )
+                                .await;
+                            let _ = sender
+                                .send(Err(ForwardError::Failed(
+                                    "sensitive-data detector failed closed".into(),
+                                )))
+                                .await;
+                            return;
+                        }
+                    };
+                flow.redaction_hits.merge(hits);
+                if !ready.is_empty() && sender.send(Ok(ready)).await.is_err() {
+                    service
+                        .audit_fail_closed(
+                            response_destination.as_deref(),
+                            "response_body_stream_canceled",
+                        )
+                        .await;
+                    return;
+                }
+            }
+            let (reintroduced_tail, proofs) = reinjector.finish(&mut flow.replacement_flow);
+            reinject_proofs.extend(proofs);
+            let (ready, hits) = match redactor.push(
+                &service.redactor,
+                &flow.redaction_action,
+                &reintroduced_tail,
+            ) {
+                Ok(result) => result,
+                Err(_) => {
+                    service
+                        .audit_fail_closed(
+                            response_destination.as_deref(),
+                            "response_body_detector_failed",
+                        )
+                        .await;
+                    let _ = sender
+                        .send(Err(ForwardError::Failed(
+                            "sensitive-data detector failed closed".into(),
+                        )))
+                        .await;
+                    return;
+                }
+            };
+            flow.redaction_hits.merge(hits);
+            if !ready.is_empty() && sender.send(Ok(ready)).await.is_err() {
+                service
+                    .audit_fail_closed(
+                        response_destination.as_deref(),
+                        "response_body_stream_canceled",
+                    )
+                    .await;
+                return;
+            }
+            let (tail, hits) = match redactor.finish(&service.redactor, &flow.redaction_action) {
+                Ok(result) => result,
+                Err(_) => {
+                    service
+                        .audit_fail_closed(
+                            response_destination.as_deref(),
+                            "response_body_detector_failed",
+                        )
+                        .await;
+                    let _ = sender
+                        .send(Err(ForwardError::Failed(
+                            "sensitive-data detector failed closed".into(),
+                        )))
+                        .await;
+                    return;
+                }
+            };
+            flow.redaction_hits.merge(hits);
+            if !tail.is_empty() && sender.send(Ok(tail)).await.is_err() {
+                service
+                    .audit_fail_closed(
+                        response_destination.as_deref(),
+                        "response_body_stream_canceled",
+                    )
+                    .await;
+                return;
+            }
+            service.audit_completed_flow(&flow, &reinject_proofs).await;
+            if let (Some(meta), Some(body)) = (ai_meta, ai_body_buffer) {
+                service
+                    .record_streaming_ai_usage(&meta, response_status, &body)
+                    .await;
+            }
+        });
+
+        Ok(ForwardStreamResponse {
+            status: response_status,
+            headers: response_headers,
+            // Header/body transforms can change decoded length. Completion is
+            // explicit and the guest applies an independent hard cap.
+            body_len: None,
+            body: receiver,
+        })
+    }
+
+    /// Apply every pre-connect security decision once, returning the prepared
+    /// request plus the state needed to transform and audit its response.
+    async fn prepare_flow(&self, wire: WireRequest) -> Result<PreparedFlow, WireResponse> {
         let body = match B64.decode(wire.body_b64.as_bytes()) {
             Ok(b) => b,
             Err(e) => {
-                return WireResponse::Refused {
+                return Err(WireResponse::Refused {
                     message: format!("bad body encoding: {e}"),
-                };
+                });
             }
         };
         let req = ProxyRequest {
@@ -1475,6 +2416,20 @@ impl SubstitutionService {
         // refused here. (Audit of the claim-10 denial is a later increment; the
         // refusal itself is the enforcement.)
         if let Some(gate) = &self.egress_gate {
+            // A peer name is refused here even when the plan binds it. Peer
+            // traffic goes over FlowMux as raw TCP; this leg substitutes
+            // secrets into outbound HTTP, and whether a peer request should
+            // receive a substituted credential is a question nobody has
+            // answered. Refusing is the conservative answer and, unlike
+            // falling through to `decide_request`, it says so.
+            if let Some(host) = destination.as_deref()
+                && mvm_contract::peer::PeerName::is_peer_target(host)
+            {
+                return Err(WireResponse::Refused {
+                    message: "peer destinations are not reachable through the substitution proxy"
+                        .into(),
+                });
+            }
             let admitted = url_host_port(&req.url).as_deref().is_some_and(|hp| {
                 matches!(
                     gate.decide_request(hp),
@@ -1482,9 +2437,9 @@ impl SubstitutionService {
                 )
             });
             if !admitted {
-                return WireResponse::Refused {
+                return Err(WireResponse::Refused {
                     message: "egress destination not admitted by network policy (claim-10)".into(),
-                };
+                });
             }
         }
         let substituted = collect_substituted_meta(&endpoint, &req.headers);
@@ -1512,11 +2467,11 @@ impl SubstitutionService {
         // cleartext terminator cores so the gate can't drift.
         if let Some(reason) = fail_closed_reason(&req.headers, req.body.len(), &action) {
             self.audit_fail_closed(destination.as_deref(), reason).await;
-            return WireResponse::Refused {
+            return Err(WireResponse::Refused {
                 message: "egress redaction enabled for destination but body is \
                           compressed or over the scan cap; refusing (fail-closed)"
                     .into(),
-            };
+            });
         }
         // Whether the request smuggled a host placeholder at all — decides if a
         // refusal is a claim-12 placeholder drop (audited) or a plain bad request.
@@ -1539,9 +2494,9 @@ impl SubstitutionService {
             Err(_) => {
                 self.audit_fail_closed(destination.as_deref(), "fail_closed_detector")
                     .await;
-                return WireResponse::Refused {
+                return Err(WireResponse::Refused {
                     message: "sensitive-data detector failed closed; refusing request".into(),
-                };
+                });
             }
         };
         let prepared = match prepare_request(&endpoint, req) {
@@ -1553,32 +2508,39 @@ impl SubstitutionService {
                 if carried_placeholder {
                     self.audit_placeholder_dropped(destination.as_deref()).await;
                 }
-                return WireResponse::Refused {
+                return Err(WireResponse::Refused {
                     message: e.to_string(),
-                };
+                });
             }
         };
-        match self.forwarder.forward(prepared).await {
-            Ok(mut r) => {
-                let reinject_proofs = replacement_flow.reinject_response(&mut r);
-                self.audit_substitutions(&substituted, destination.as_deref())
-                    .await;
-                self.audit_rewrite_proofs("replace", &replacement_proofs, destination.as_deref())
-                    .await;
-                self.audit_rewrite_proofs("reinject", &reinject_proofs, destination.as_deref())
-                    .await;
-                self.audit_redactions(&redaction_hits, destination.as_deref())
-                    .await;
-                WireResponse::Ok {
-                    status: r.status,
-                    headers: r.headers,
-                    body_b64: B64.encode(r.body),
-                }
-            }
-            Err(e) => WireResponse::Refused {
-                message: e.to_string(),
-            },
-        }
+        Ok(PreparedFlow {
+            request: Some(prepared),
+            destination,
+            substituted,
+            replacement_flow,
+            replacement_proofs,
+            redaction_hits,
+            redaction_action: action,
+        })
+    }
+
+    async fn audit_completed_flow(
+        &self,
+        flow: &PreparedFlow,
+        reinject_proofs: &[mvm_core::policy::RewriteProofRecord],
+    ) {
+        self.audit_substitutions(&flow.substituted, flow.destination.as_deref())
+            .await;
+        self.audit_rewrite_proofs(
+            "replace",
+            &flow.replacement_proofs,
+            flow.destination.as_deref(),
+        )
+        .await;
+        self.audit_rewrite_proofs("reinject", reinject_proofs, flow.destination.as_deref())
+            .await;
+        self.audit_redactions(&flow.redaction_hits, flow.destination.as_deref())
+            .await;
     }
 
     /// Mask undeclared secret-shaped / PII content out of a guest-authored
@@ -1638,6 +2600,44 @@ impl SubstitutionService {
         if let Err(e) = emit_secret_redacted(recorder, dest, &categories.join(",")).await {
             tracing::warn!(error = %e, "secret.redacted audit emit failed");
         }
+    }
+}
+
+fn ingress_transform_audit(
+    mapping_id: u16,
+    result: &Result<
+        crate::supervisor::ingress_transform::IngressTransformSummary,
+        crate::supervisor::ingress_transform::IngressTransformError,
+    >,
+) -> (&'static str, std::collections::BTreeMap<String, String>) {
+    match result {
+        Ok(summary) => (
+            "host.ingress.transformed",
+            std::collections::BTreeMap::from([
+                ("mapping_id".to_string(), mapping_id.to_string()),
+                ("verdict".to_string(), "allowed".to_string()),
+                (
+                    "request_rewrites".to_string(),
+                    summary.request_rewrites.to_string(),
+                ),
+                (
+                    "response_reinjections".to_string(),
+                    summary.response_reinjections.to_string(),
+                ),
+                (
+                    "redaction_events".to_string(),
+                    summary.redaction_events.to_string(),
+                ),
+            ]),
+        ),
+        Err(error) => (
+            "host.ingress.transform_refused",
+            std::collections::BTreeMap::from([
+                ("mapping_id".to_string(), mapping_id.to_string()),
+                ("verdict".to_string(), "denied".to_string()),
+                ("reason".to_string(), error.audit_reason().to_string()),
+            ]),
+        ),
     }
 }
 
@@ -2315,6 +3315,10 @@ mod server_tests {
         seen: Mutex<Option<PreparedRequest>>,
     }
 
+    struct RedirectForwarder {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
     #[async_trait]
     impl Forwarder for MockForwarder {
         async fn forward(&self, req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
@@ -2323,6 +3327,18 @@ mod server_tests {
                 status: 200,
                 headers: vec![("x-mock".into(), "1".into())],
                 body: b"pong".to_vec(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Forwarder for RedirectForwarder {
+        async fn forward(&self, _req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ForwardResponse {
+                status: 302,
+                headers: vec![("location".into(), "https://unbound.example/steal".into())],
+                body: Vec::new(),
             })
         }
     }
@@ -2387,6 +3403,201 @@ mod server_tests {
             service = service.with_reversible_replacement_policy(policy);
         }
         (Arc::new(service), ph, forwarder, dir)
+    }
+
+    #[test]
+    fn host_material_resolves_by_signed_name_without_serializing_its_value() {
+        use secrecy::ExposeSecret as _;
+
+        let marker = "-----BEGIN PRIVATE KEY-----\nhost-only";
+        let (service, placeholder, _forwarder, _dir) =
+            service_with(marker, &["ingress-material.local"]);
+        let resolved = service.resolve_host_material("openai").unwrap();
+        assert_eq!(resolved.expose_secret().as_slice(), marker.as_bytes());
+        assert!(!placeholder.contains(marker));
+        assert!(matches!(
+            service.resolve_host_material("not-admitted"),
+            Err(HostMaterialError::NotAdmitted { .. })
+        ));
+    }
+
+    #[test]
+    fn a_secret_bound_destination_requires_the_typed_transform_class() {
+        let (service, _placeholder, _forwarder, _dir) =
+            service_with("sk-live-zzz", &["api.openai.com"]);
+
+        assert_eq!(
+            service.opaque_refusal_reason("api.openai.com"),
+            Some("destination requires secret substitution over typed HTTP")
+        );
+        assert_eq!(service.opaque_refusal_reason("example.com"), None);
+    }
+
+    #[test]
+    fn explicit_redaction_and_replacement_require_the_typed_transform_class() {
+        use mvm_core::policy::{
+            EntropyMode, RedactionAction, RedactionPolicy, RedactionProfile,
+            ReversibleReplacementAction, ReversibleReplacementPolicy, ReversibleReplacementProfile,
+        };
+
+        let redaction = RedactionPolicy {
+            profiles: vec![RedactionProfile {
+                host: "redact.example".into(),
+                action: RedactionAction {
+                    entropy: EntropyMode::Redact {
+                        min_bits_per_char: 4.0,
+                        min_run_len: 20,
+                    },
+                    ..Default::default()
+                },
+            }],
+            ..Default::default()
+        };
+        let replacement = ReversibleReplacementPolicy {
+            profiles: vec![ReversibleReplacementProfile {
+                host: "replace.example".into(),
+                action: ReversibleReplacementAction {
+                    enabled: true,
+                    ..Default::default()
+                },
+            }],
+            ..Default::default()
+        };
+        let (service, _placeholder, _forwarder, _dir) = service_with_policies(
+            "sk-live-zzz",
+            &["secret.example"],
+            Some(redaction),
+            Some(replacement),
+        );
+
+        assert_eq!(
+            service.opaque_refusal_reason("redact.example"),
+            Some("destination requires redaction over typed HTTP")
+        );
+        assert_eq!(
+            service.opaque_refusal_reason("replace.example"),
+            Some("destination requires reversible replacement over typed HTTP")
+        );
+        assert_eq!(service.opaque_refusal_reason("opaque.example"), None);
+    }
+
+    #[test]
+    fn curated_default_redaction_does_not_claim_to_transform_opaque_flows() {
+        let (service, _placeholder, _forwarder, _dir) =
+            service_with("sk-live-zzz", &["api.openai.com"]);
+
+        assert_eq!(service.opaque_refusal_reason("opaque.example"), None);
+    }
+
+    #[tokio::test]
+    async fn flowmux_request_body_streams_through_split_token_redaction() {
+        let (service, placeholder, forwarder, _dir) =
+            service_with("sk-live-zzz", &["api.openai.com"]);
+        let secret = b"sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let split = 13;
+        let mut first = vec![b'x'; STREAM_TRANSFORM_OVERLAP - split];
+        first.extend_from_slice(&secret[..split]);
+        let second = secret[split..].to_vec();
+        let body_len = (first.len() + second.len()) as u64;
+        let (sender, receiver) = tokio::sync::mpsc::channel(4);
+        sender.send(Zeroizing::new(first)).await.unwrap();
+        sender.send(Zeroizing::new(second)).await.unwrap();
+        drop(sender);
+
+        let mut response = service
+            .process_body_stream(
+                mvm_core::substitution_wire::HttpFlowHead {
+                    method: "POST".into(),
+                    url: "https://api.openai.com/v1".into(),
+                    headers: vec![("authorization".into(), format!("Bearer {placeholder}"))],
+                    body_len,
+                },
+                receiver,
+            )
+            .await
+            .expect("streamed request");
+        let mut response_body = Vec::new();
+        while let Some(chunk) = response.body.recv().await {
+            response_body.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(response_body, b"pong");
+
+        let seen = forwarder.seen.lock().unwrap();
+        let request = seen.as_ref().expect("forwarded request");
+        assert!(
+            !request
+                .body
+                .windows(secret.len())
+                .any(|window| window == secret),
+            "split secret crossed the request inspector"
+        );
+        assert_eq!(request.headers[0].1, "Bearer sk-live-zzz");
+    }
+
+    #[tokio::test]
+    async fn signing_flow_uses_the_bounded_replay_buffer_before_forwarding() {
+        let dir = tempdir().unwrap();
+        let store = FileSecretStore::with_dir(dir.path());
+        store
+            .put(
+                "local",
+                "hook",
+                &SecretBox::new(Box::new("Jefe".to_string())),
+            )
+            .unwrap();
+        let resolver: Arc<dyn SecretResolver> =
+            Arc::new(LocalResolver::new("local", Arc::new(store)));
+        let mut registry = SubstitutionRegistry::new();
+        let placeholder = registry
+            .mint(SecretRef {
+                name: "hook".into(),
+                mount: SecretMount::Env { var: "K".into() },
+                auth_type: AuthType::Hmac,
+                allowed_hosts: vec!["hooks.example.com".into()],
+                sigv4: None,
+            })
+            .as_str()
+            .to_string();
+        let forwarder = Arc::new(MockForwarder {
+            seen: Mutex::new(None),
+        });
+        let service = Arc::new(SubstitutionService::new(
+            Arc::new(registry),
+            resolver,
+            forwarder.clone(),
+        ));
+        let body = b"what do ya want for nothing?";
+        let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        sender
+            .send(Zeroizing::new(body[..10].to_vec()))
+            .await
+            .unwrap();
+        sender
+            .send(Zeroizing::new(body[10..].to_vec()))
+            .await
+            .unwrap();
+        drop(sender);
+        let mut response = service
+            .process_body_stream(
+                mvm_core::substitution_wire::HttpFlowHead {
+                    method: "POST".into(),
+                    url: "https://hooks.example.com/event".into(),
+                    headers: vec![("x-sig".into(), placeholder)],
+                    body_len: body.len() as u64,
+                },
+                receiver,
+            )
+            .await
+            .expect("signed request");
+        while response.body.recv().await.is_some() {}
+
+        let seen = forwarder.seen.lock().unwrap();
+        let request = seen.as_ref().expect("forwarded request");
+        assert_eq!(request.body, body);
+        assert!(request.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("x-mvm-signature")
+                && value == "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        }));
     }
 
     /// End-to-end over a **real AF_VSOCK** connection (Linux vsock loopback,
@@ -2533,6 +3744,101 @@ mod server_tests {
             server.abort();
         });
         rt.shutdown_timeout(std::time::Duration::from_millis(50));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_streaming_request_hits_the_idle_deadline_without_forwarding() {
+        let (service, _placeholder, forwarder, _dir) =
+            service_with("sk-live-zzz", &["api.openai.com"]);
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let task_service = Arc::clone(&service);
+        let request = tokio::spawn(async move {
+            task_service
+                .process_body_stream(
+                    mvm_core::substitution_wire::HttpFlowHead {
+                        method: "POST".into(),
+                        url: "https://api.openai.com/v1".into(),
+                        headers: Vec::new(),
+                        body_len: 1,
+                    },
+                    receiver,
+                )
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(HTTP_REQUEST_IDLE_TIMEOUT + std::time::Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        drop(sender);
+        let refusal = match request.await.expect("request task") {
+            Ok(_) => panic!("idle request must refuse"),
+            Err(refusal) => refusal,
+        };
+        assert!(
+            matches!(
+                refusal,
+                WireResponse::Refused { ref message }
+                    if message.contains("idle timeout") || message.contains("failed closed")
+            ),
+            "unexpected refusal: {refusal:?}"
+        );
+        assert!(
+            forwarder.seen.lock().unwrap().is_none(),
+            "an incomplete request must never reach the destination"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_redirect_is_returned_without_following_or_rebinding_substitution() {
+        let dir = tempdir().unwrap();
+        let store = FileSecretStore::with_dir(dir.path());
+        store
+            .put(
+                "local",
+                "openai",
+                &SecretBox::new(Box::new("sk-live-zzz".to_string())),
+            )
+            .unwrap();
+        let resolver: Arc<dyn SecretResolver> =
+            Arc::new(LocalResolver::new("local", Arc::new(store)));
+        let mut registry = SubstitutionRegistry::new();
+        let placeholder = registry
+            .mint(bearer_ref("openai", &["api.openai.com"]))
+            .as_str()
+            .to_string();
+        let forwarder = Arc::new(RedirectForwarder {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let service = Arc::new(SubstitutionService::new(
+            Arc::new(registry),
+            resolver,
+            forwarder.clone(),
+        ));
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        drop(sender);
+        let mut response = service
+            .process_body_stream(
+                mvm_core::substitution_wire::HttpFlowHead {
+                    method: "GET".into(),
+                    url: "https://api.openai.com/v1".into(),
+                    headers: vec![("authorization".into(), format!("Bearer {placeholder}"))],
+                    body_len: 0,
+                },
+                receiver,
+            )
+            .await
+            .expect("redirect response");
+        while response.body.recv().await.is_some() {}
+
+        assert_eq!(response.status, 302);
+        assert!(response.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("location") && value == "https://unbound.example/steal"
+        }));
+        assert_eq!(
+            forwarder.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the endpoint must surface a redirect, never follow it with the bound credential"
+        );
     }
 
     #[tokio::test]
@@ -2985,6 +4291,8 @@ mod server_tests {
         let (_service, handed) = SubstitutionService::from_plan(FromPlanInputs {
             plan_secrets: &plan,
             tenant: "local",
+            instance_id: "",
+            ai_policy: None,
             bindings: &bindings,
             resolver,
             forward_timeout_secs: 30,
@@ -3057,6 +4365,8 @@ mod server_tests {
         let (service, _handed) = SubstitutionService::from_plan(FromPlanInputs {
             plan_secrets: &plan,
             tenant: "local",
+            instance_id: "",
+            ai_policy: None,
             bindings: &bindings,
             resolver,
             forward_timeout_secs: 30,
@@ -3360,6 +4670,208 @@ mod server_tests {
     }
 }
 
+/// Minimal request metadata captured for AI metering so the streaming path
+/// doesn't need to own the whole prepared request after it has been handed
+/// to the forwarder.
+#[derive(Debug, Clone)]
+struct AiRequestMeta {
+    method: String,
+    url: String,
+}
+
+impl SubstitutionService {
+    fn ai_tracker(&self) -> Option<&std::sync::Arc<ai_meter::AiBudgetTracker>> {
+        self.ai_tracker.as_ref()
+    }
+
+    fn ai_budget_exceeded(&self) -> bool {
+        self.ai_tracker().map(|t| t.is_exceeded()).unwrap_or(false)
+    }
+
+    async fn record_ai_usage(&self, meta: &AiRequestMeta, status: u16, body: &[u8]) {
+        let Some(tracker) = self.ai_tracker() else {
+            return;
+        };
+        let Some(usage) = ai_meter::extract_usage(&meta.url, body) else {
+            return;
+        };
+        let totals = tracker.record(&usage);
+        self.update_ai_metrics(totals);
+        if let Some(recorder) = &self.recorder {
+            let record = self.build_ai_usage_record(meta, status, &usage, totals.exceeded);
+            if let Err(e) = recorder.record_ai_usage(&record).await {
+                tracing::warn!(error = %e, "ai.usage audit emit failed");
+            }
+            if totals.exceeded {
+                emit_ai_budget_exceeded(recorder, &record).await;
+            }
+        }
+    }
+
+    async fn record_streaming_ai_usage(&self, meta: &AiRequestMeta, status: u16, body: &[u8]) {
+        let Some(tracker) = self.ai_tracker() else {
+            return;
+        };
+        let Some(usage) = ai_meter::extract_streaming_usage(&meta.url, body) else {
+            return;
+        };
+        let totals = tracker.record(&usage);
+        self.update_ai_metrics(totals);
+        if let Some(recorder) = &self.recorder {
+            let record = self.build_ai_usage_record(meta, status, &usage, totals.exceeded);
+            if let Err(e) = recorder.record_ai_usage(&record).await {
+                tracing::warn!(error = %e, "ai.usage audit emit failed");
+            }
+            if totals.exceeded {
+                emit_ai_budget_exceeded(recorder, &record).await;
+            }
+        }
+    }
+
+    async fn audit_ai_budget_exceeded(&self, flow: &PreparedFlow, url: &str) {
+        let Some(recorder) = &self.recorder else {
+            return;
+        };
+        let (host, port, path) = parse_url_parts(url);
+        let destination = flow.destination.as_deref().unwrap_or(&host);
+        let record = AiUsageRecord {
+            trace_id: String::new(),
+            span_id: String::new(),
+            host: destination.to_string(),
+            port,
+            method: String::new(),
+            path,
+            provider: String::new(),
+            model: None,
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            status: 0,
+            budget_exceeded: true,
+        };
+        if let Err(e) = recorder.record_ai_budget_exceeded(&record).await {
+            tracing::warn!(error = %e, destination, "ai.budget_exceeded audit emit failed");
+        }
+    }
+
+    fn update_ai_metrics(&self, totals: ai_meter::UsageTotals) {
+        let Some(instance_id) = self.instance_id.as_deref() else {
+            return;
+        };
+        let registry: &InstanceMetricsRegistry = match &self.instance_metrics {
+            Some(r) => r.as_ref(),
+            None => instance_metrics_global(),
+        };
+        if !registry.update_ai_counters(
+            instance_id,
+            totals.requests,
+            totals.input_tokens,
+            totals.output_tokens,
+            totals.total_tokens,
+        ) {
+            let labels = InstanceLabels {
+                instance_id: instance_id.to_string(),
+                tenant: self.tenant.clone(),
+                template: String::new(),
+            };
+            registry.register(labels);
+            let _ = registry.update_ai_counters(
+                instance_id,
+                totals.requests,
+                totals.input_tokens,
+                totals.output_tokens,
+                totals.total_tokens,
+            );
+        }
+    }
+
+    fn build_ai_usage_record(
+        &self,
+        meta: &AiRequestMeta,
+        status: u16,
+        usage: &ai_meter::ExtractedUsage,
+        budget_exceeded: bool,
+    ) -> AiUsageRecord {
+        let (host, port, path) = parse_url_parts(&meta.url);
+        AiUsageRecord {
+            trace_id: String::new(),
+            span_id: String::new(),
+            host,
+            port,
+            method: meta.method.clone(),
+            path,
+            provider: usage.provider.to_string(),
+            model: usage.model.clone(),
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            total_tokens: usage.total_tokens,
+            status,
+            budget_exceeded,
+        }
+    }
+}
+
+async fn emit_ai_budget_exceeded(recorder: &Recorder, record: &AiUsageRecord) {
+    if let Err(e) = recorder.record_ai_budget_exceeded(record).await {
+        tracing::warn!(error = %e, "ai.budget_exceeded audit emit failed");
+    }
+}
+
+fn parse_url_parts(url: &str) -> (String, u16, String) {
+    let Some(u) = Url::parse(url).ok() else {
+        return (String::new(), 0, String::new());
+    };
+    let host = u.host_str().unwrap_or("").to_string();
+    let port = u.port_or_known_default().unwrap_or(0);
+    let path = u.path().to_string();
+    (host, port, path)
+}
+
+#[cfg(test)]
+#[test]
+fn ingress_transform_audit_contains_only_bounded_metadata() {
+    let result = Ok(
+        crate::supervisor::ingress_transform::IngressTransformSummary {
+            request_rewrites: 2,
+            response_reinjections: 1,
+            redaction_events: 3,
+        },
+    );
+    let (event, labels) = ingress_transform_audit(17, &result);
+    let encoded = serde_json::to_string(&labels).unwrap();
+
+    assert_eq!(event, "host.ingress.transformed");
+    assert_eq!(labels.get("mapping_id").map(String::as_str), Some("17"));
+    assert_eq!(
+        labels.get("request_rewrites").map(String::as_str),
+        Some("2")
+    );
+    assert!(!encoded.contains("payload"));
+    assert!(!encoded.contains("PRIVATE KEY"));
+    assert!(!encoded.contains("sk-"));
+}
+
+#[cfg(test)]
+#[test]
+fn ingress_transform_refusal_audit_contains_only_a_stable_reason() {
+    let result = Err(crate::supervisor::ingress_transform::IngressTransformError::BodyTooLarge);
+    let (event, labels) = ingress_transform_audit(19, &result);
+    let encoded = serde_json::to_string(&labels).unwrap();
+
+    assert_eq!(event, "host.ingress.transform_refused");
+    assert_eq!(
+        labels,
+        std::collections::BTreeMap::from([
+            ("mapping_id".to_string(), "19".to_string()),
+            ("reason".to_string(), "body_too_large".to_string()),
+            ("verdict".to_string(), "denied".to_string()),
+        ])
+    );
+    assert!(!encoded.contains("payload"));
+    assert!(!encoded.contains("PRIVATE KEY"));
+    assert!(!encoded.contains("sk-"));
+}
+
 #[cfg(test)]
 mod error_audit_tests {
     use super::*;
@@ -3406,5 +4918,244 @@ mod error_audit_tests {
             assert_eq!(error_audit(&err, false), ErrorAudit::Silent, "{err}");
             assert_eq!(error_audit(&err, true), ErrorAudit::Silent, "{err}");
         }
+    }
+}
+
+#[cfg(test)]
+mod ai_metering_tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as B64;
+
+    use super::*;
+    use crate::keyholder::SubstitutionRegistry;
+    use mvm_contract::policy::network_policy::AiPolicy;
+    use mvm_core::observability::instance_metrics::InstanceMetricsRegistry;
+    use secrecy::SecretBox;
+
+    struct NullResolver;
+
+    impl crate::keyholder::SecretResolver for NullResolver {
+        fn resolve(
+            &self,
+            _r: &crate::keyholder::SecretRef,
+        ) -> Result<SecretBox<Vec<u8>>, crate::keyholder::ResolveError> {
+            Err(crate::keyholder::ResolveError::Unbound {
+                name: String::new(),
+            })
+        }
+    }
+
+    struct TestForwarder {
+        status: u16,
+        body: Vec<u8>,
+    }
+
+    impl TestForwarder {
+        fn ok(body: impl Into<Vec<u8>>) -> Self {
+            Self {
+                status: 200,
+                body: body.into(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Forwarder for TestForwarder {
+        async fn forward(&self, _req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
+            Ok(ForwardResponse {
+                status: self.status,
+                headers: Vec::new(),
+                body: self.body.clone(),
+            })
+        }
+
+        async fn forward_stream(
+            &self,
+            _req: PreparedRequest,
+        ) -> Result<ForwardStreamResponse, ForwardError> {
+            let (sender, receiver) = tokio::sync::mpsc::channel(2);
+            for chunk in self.body.chunks(64) {
+                sender
+                    .send(Ok(chunk.to_vec()))
+                    .await
+                    .map_err(|_| ForwardError::Failed("consumer closed".into()))?;
+            }
+            Ok(ForwardStreamResponse {
+                status: self.status,
+                headers: Vec::new(),
+                body_len: Some(self.body.len() as u64),
+                body: receiver,
+            })
+        }
+    }
+
+    fn openai_response() -> Vec<u8> {
+        br#"{"model":"gpt-4","usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#
+            .to_vec()
+    }
+
+    fn openai_stream() -> Vec<u8> {
+        b"data: {\"choices\":[]}\n\ndata: {\"model\":\"gpt-4\",\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n".to_vec()
+    }
+
+    fn wire_to(url: &str) -> WireRequest {
+        WireRequest {
+            method: "POST".into(),
+            url: url.into(),
+            headers: Vec::new(),
+            body_b64: B64.encode(b""),
+        }
+    }
+
+    fn metered_service(
+        forwarder: Arc<dyn Forwarder>,
+        policy: AiPolicy,
+    ) -> (Arc<SubstitutionService>, Arc<InstanceMetricsRegistry>) {
+        let metrics = Arc::new(InstanceMetricsRegistry::new());
+        let service = Arc::new(
+            SubstitutionService::new(
+                Arc::new(SubstitutionRegistry::default()),
+                Arc::new(NullResolver),
+                forwarder,
+            )
+            .with_instance_id("vm-1")
+            .with_ai_policy(policy)
+            .with_instance_metrics(Arc::clone(&metrics)),
+        );
+        (service, metrics)
+    }
+
+    #[tokio::test]
+    async fn process_records_openai_usage_in_tracker_and_metrics() {
+        let (service, metrics) = metered_service(
+            Arc::new(TestForwarder::ok(openai_response())),
+            AiPolicy::metered(),
+        );
+        let resp = service
+            .process(wire_to("https://api.openai.com/v1/chat/completions"))
+            .await;
+        assert!(matches!(resp, WireResponse::Ok { status: 200, .. }));
+
+        let tracker = service.ai_tracker().expect("metering was enabled");
+        assert_eq!(tracker.totals().requests, 1);
+        assert_eq!(tracker.totals().input_tokens, 10);
+        assert_eq!(tracker.totals().output_tokens, 5);
+        assert_eq!(tracker.totals().total_tokens, 15);
+
+        let (_, values) = metrics.get("vm-1").expect("instance registered");
+        assert_eq!(values.ai_requests_total, 1);
+        assert_eq!(values.ai_tokens_input_total, 10);
+        assert_eq!(values.ai_tokens_output_total, 5);
+        assert_eq!(values.ai_tokens_total_total, 15);
+    }
+
+    #[tokio::test]
+    async fn process_allows_request_that_exceeds_budget_then_refuses_the_next() {
+        let (service, _metrics) = metered_service(
+            Arc::new(TestForwarder::ok(openai_response())),
+            AiPolicy::metered_with_total_budget(5),
+        );
+
+        let first = service
+            .process(wire_to("https://api.openai.com/v1/chat/completions"))
+            .await;
+        assert!(matches!(first, WireResponse::Ok { status: 200, .. }));
+
+        let second = service
+            .process(wire_to("https://api.openai.com/v1/chat/completions"))
+            .await;
+        assert!(
+            matches!(second, WireResponse::Refused { ref message, .. } if message.contains("AI egress budget")),
+            "expected budget refusal, got {second:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_stream_records_openai_streaming_usage() {
+        let (service, metrics) = metered_service(
+            Arc::new(TestForwarder::ok(openai_stream())),
+            AiPolicy::metered(),
+        );
+        let stream = service
+            .process_stream(wire_to("https://api.openai.com/v1/chat/completions"))
+            .await
+            .expect("stream request succeeded");
+        assert_eq!(stream.status, 200);
+
+        // Drain the body so the spawned transform task finishes and records usage.
+        let mut receiver = stream.body;
+        let mut received = 0;
+        while let Some(chunk) = receiver.recv().await {
+            let chunk = chunk.expect("chunk ok");
+            received += chunk.len();
+        }
+        assert!(received > 0);
+
+        // Give the spawned task a moment to record usage.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let tracker = service.ai_tracker().expect("metering was enabled");
+        assert_eq!(tracker.totals().input_tokens, 3);
+        assert_eq!(tracker.totals().output_tokens, 2);
+        assert_eq!(tracker.totals().total_tokens, 5);
+
+        let (_, values) = metrics.get("vm-1").expect("instance registered");
+        assert_eq!(values.ai_tokens_total_total, 5);
+    }
+
+    #[tokio::test]
+    async fn unknown_provider_is_not_metered() {
+        let (service, metrics) = metered_service(
+            Arc::new(TestForwarder::ok(openai_response())),
+            AiPolicy::metered(),
+        );
+        let resp = service.process(wire_to("https://example.com/v1")).await;
+        assert!(matches!(resp, WireResponse::Ok { status: 200, .. }));
+
+        let tracker = service.ai_tracker().expect("metering was enabled");
+        assert_eq!(tracker.totals().requests, 0);
+        assert!(metrics.get("vm-1").is_none());
+    }
+
+    #[tokio::test]
+    async fn budget_refusal_only_blocks_known_ai_providers() {
+        let (service, _metrics) = metered_service(
+            Arc::new(TestForwarder::ok(openai_response())),
+            AiPolicy::metered_with_total_budget(5),
+        );
+
+        // First OpenAI call pushes the VM over budget.
+        let first = service
+            .process(wire_to("https://api.openai.com/v1/chat/completions"))
+            .await;
+        assert!(matches!(first, WireResponse::Ok { status: 200, .. }));
+
+        // A non-AI destination is still allowed after the budget is exhausted.
+        let other = service.process(wire_to("https://example.com/v1")).await;
+        assert!(matches!(other, WireResponse::Ok { status: 200, .. }));
+
+        // Another OpenAI call is refused.
+        let second = service
+            .process(wire_to("https://api.openai.com/v1/chat/completions"))
+            .await;
+        assert!(
+            matches!(second, WireResponse::Refused { ref message, .. } if message.contains("AI egress budget")),
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_policy_skips_metering() {
+        let (service, _metrics) = metered_service(
+            Arc::new(TestForwarder::ok(openai_response())),
+            AiPolicy::disabled(),
+        );
+        let resp = service
+            .process(wire_to("https://api.openai.com/v1/chat/completions"))
+            .await;
+        assert!(matches!(resp, WireResponse::Ok { status: 200, .. }));
+        assert!(service.ai_tracker().is_none());
     }
 }

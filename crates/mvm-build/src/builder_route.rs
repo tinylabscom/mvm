@@ -2,24 +2,23 @@
 //!
 //! The builder VM's stable API is the typed `mvm-builderd` request set
 //! (`builderd_protocol`), driven from the host by `builderd_client::BuilderdClient`.
-//! The legacy controlled-shell-job channel (`builder_protocol::HostVmRequest::Run`,
-//! dispatched by `persistent_builder`) is being migrated onto that typed client
-//! one operation at a time.
+//! The controlled-shell-job channel (`builder_protocol::HostVmRequest::Run`,
+//! dispatched by `persistent_builder`) is still the only channel for generic
+//! builder jobs; it is being migrated onto that typed client one operation at
+//! a time.
 //!
 //! Typed operations live here as `run_*` (one connection, one op) + `try_typed_*`
 //! (route-decide then dispatch): `flake_check` and `build` (guest image).
 //!
-//! This module is the decision seam for that migration. A host build path asks
-//! [`resolve_route`] whether a given dispatch should use the typed `mvm-builderd`
-//! route or fall back to the legacy shell-job channel, and emits
-//! [`legacy_shell_diagnostic`] whenever the legacy channel is taken — so the
-//! remaining shell surface stays visible and shrinkable (the
-//! `xtask check-builder-shell-job-sites` allowlist is the static counterpart).
+//! A typed operation takes the daemon whenever one is reachable. There is no
+//! route flag and no opt-in: reachability is the whole decision, and a caller
+//! that finds no daemon runs its own in-VM path instead. `xtask
+//! check-builder-shell-job-sites` is the static counterpart, keeping the
+//! remaining shell surface visible and shrinkable.
 //!
 //! The **build** route is typed-only: a reachable daemon builds guest images
-//! and there is no legacy in-VM shell build to fall back to (the caller drops to
-//! the single-shot builder instead). The **flake-check** route is still opt-in
-//! via [`BUILDERD_TYPED_OPT_IN_ENV`] until it gets the same live proof.
+//! and there is no in-VM shell build to fall back to (the caller drops to the
+//! single-shot builder instead).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -33,11 +32,6 @@ use crate::builderd_client::{
 };
 use crate::builderd_protocol::{BuilderRequest, OperationId};
 
-/// Opt-in env flag letting a host build path prefer the typed `mvm-builderd`
-/// route when the daemon is reachable. Gates the *flake-check* route
-/// (`try_typed_flake_check`); the *build* route is typed-only and needs no flag.
-pub const BUILDERD_TYPED_OPT_IN_ENV: &str = "MVM_BUILDERD_TYPED";
-
 /// Readiness-probe timeout when deciding whether to route typed: the daemon
 /// answers a handshake immediately or it isn't there.
 const READINESS_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
@@ -47,48 +41,6 @@ const READINESS_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 /// `nix flake check` synchronously before the terminal reply, so it must
 /// comfortably exceed a real flake evaluation.
 const FLAKE_CHECK_OP_TIMEOUT: Duration = Duration::from_secs(600);
-
-/// Which channel a host-side builder dispatch takes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BuilderRoute {
-    /// Typed request over vsock to the resident `mvm-builderd`.
-    Typed,
-    /// Legacy controlled-shell-job channel (the compatibility adapter).
-    LegacyShell,
-}
-
-/// Resolve the dispatch route: typed only when the daemon is reachable **and**
-/// the caller opted in; otherwise the legacy shell channel. Pure so the
-/// opt-in-then-default phasing is a one-line change once a typed op is proven.
-pub fn resolve_route(daemon_reachable: bool, typed_opt_in: bool) -> BuilderRoute {
-    if daemon_reachable && typed_opt_in {
-        BuilderRoute::Typed
-    } else {
-        BuilderRoute::LegacyShell
-    }
-}
-
-/// Read the typed opt-in flag from an env getter (`1`/`true`/`yes`,
-/// case-insensitive, whitespace-trimmed). Injected rather than reading the
-/// process env directly so it is unit-testable.
-pub fn typed_opt_in(getter: impl Fn(&str) -> Option<String>) -> bool {
-    matches!(
-        getter(BUILDERD_TYPED_OPT_IN_ENV)
-            .as_deref()
-            .map(|v| v.trim().to_ascii_lowercase())
-            .as_deref(),
-        Some("1") | Some("true") | Some("yes")
-    )
-}
-
-/// The structured diagnostic emitted whenever a dispatch takes the legacy
-/// shell-job channel, naming the job so the remaining shell surface is visible.
-pub fn legacy_shell_diagnostic(job_label: &str) -> String {
-    format!(
-        "builder dispatch via legacy shell-job channel (job {job_label}); \
-         not yet migrated to the typed mvm-builderd route"
-    )
-}
 
 /// Verdict of a typed flake check run through the daemon.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,8 +59,7 @@ pub enum FlakeCheckDispatch {
     /// The typed route was taken; carries the daemon result (or a transport
     /// error once we had committed to the typed path).
     Took(Result<FlakeCheckVerdict, BuilderdClientError>),
-    /// Not routed typed (caller not opted in, or no ready daemon) — the
-    /// caller should use its legacy in-VM path.
+    /// No ready daemon — the caller should use its own in-VM path.
     Fellback,
 }
 
@@ -153,13 +104,11 @@ pub fn run_flake_check(
     }
 }
 
-/// Route a flake check: take the typed daemon path when the caller opted in
-/// (`MVM_BUILDERD_TYPED`) **and** a ready builder daemon is reachable under
-/// `vms_root`; otherwise fall back (emitting the compat diagnostic). Flake
-/// check has no host-side legacy equivalent that honours the no-host-nix
-/// invariant, so the caller's fallback is its existing in-VM shell path.
+/// Route a flake check: take the typed daemon path whenever a ready builder
+/// daemon is reachable under `vms_root`, otherwise report that nothing was
+/// dispatched. Flake check has no host-side equivalent that honours the
+/// no-host-nix invariant, so the caller's other path is its in-VM shell run.
 pub fn try_typed_flake_check(vms_root: &Path, flake_path: &str) -> FlakeCheckDispatch {
-    let opt_in = typed_opt_in(|k| std::env::var(k).ok());
     let socket = resolve_running_builder_socket(vms_root);
     let reachable = socket.as_deref().is_some_and(|s| {
         matches!(
@@ -167,20 +116,11 @@ pub fn try_typed_flake_check(vms_root: &Path, flake_path: &str) -> FlakeCheckDis
             BuilderdReadiness::Ready { .. }
         )
     });
-    match resolve_route(reachable, opt_in) {
-        BuilderRoute::Typed => {
-            let socket = socket.expect("reachable implies a resolved socket");
-            FlakeCheckDispatch::Took(run_flake_check(&socket, flake_path, FLAKE_CHECK_OP_TIMEOUT))
-        }
-        BuilderRoute::LegacyShell => {
-            tracing::debug!(
-                target: "mvm::builder",
-                "{}",
-                legacy_shell_diagnostic("flake-check")
-            );
-            FlakeCheckDispatch::Fellback
-        }
+    if !reachable {
+        return FlakeCheckDispatch::Fellback;
     }
+    let socket = socket.expect("reachable implies a resolved socket");
+    FlakeCheckDispatch::Took(run_flake_check(&socket, flake_path, FLAKE_CHECK_OP_TIMEOUT))
 }
 
 /// Per-read timeout for a typed guest-image build. A `nix build` of a guest
@@ -315,32 +255,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn typed_route_needs_both_reachable_and_opt_in() {
-        assert_eq!(resolve_route(true, true), BuilderRoute::Typed);
-        assert_eq!(resolve_route(true, false), BuilderRoute::LegacyShell);
-        assert_eq!(resolve_route(false, true), BuilderRoute::LegacyShell);
-        assert_eq!(resolve_route(false, false), BuilderRoute::LegacyShell);
-    }
-
-    #[test]
-    fn opt_in_parses_truthy_values_case_insensitively() {
-        let on = |v: &str| {
-            let v = v.to_string();
-            typed_opt_in(move |_| Some(v.clone()))
-        };
-        assert!(on("1"));
-        assert!(on("true"));
-        assert!(on("TRUE"));
-        assert!(on("  yes  "));
-        assert!(!on("0"));
-        assert!(!on("false"));
-        assert!(!on("off"));
-        assert!(!on(""));
-        // Absent var → not opted in.
-        assert!(!typed_opt_in(|_| None));
-    }
-
-    #[test]
     fn render_build_event_passes_log_text_through_verbatim() {
         // Log chunks already carry nix's derivation-prefixed lines; surface them
         // unchanged so the typed route is as visible as the legacy in-VM build.
@@ -391,14 +305,6 @@ mod tests {
             render_build_event(&under).as_deref(),
             Some("[build   0%] starting\n")
         );
-    }
-
-    #[test]
-    fn legacy_diagnostic_names_the_job() {
-        let msg = legacy_shell_diagnostic("job-7f3a");
-        assert!(msg.contains("job-7f3a"));
-        assert!(msg.contains("legacy shell-job channel"));
-        assert!(msg.contains("mvm-builderd"));
     }
 }
 

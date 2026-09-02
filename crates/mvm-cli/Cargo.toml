@@ -26,9 +26,14 @@ mvm-hostd.workspace = true
 # The `MvmClient` facade: read-only listing/inspect commands route through
 # `mvm_client::LocalBackend` instead of reaching `mvm_runtime` internals.
 mvm-client.workspace = true
+mvm-mcp.workspace = true
 # `mvmctl compile` reads the Workload IR (mvm_contract::ir, re-exported from
 # mvm_contract::ir) and routes it through the compile pipeline.
-mvm-sdk.workspace = true
+# `deploy-remote` carries the HTTPS upload behind `mvmctl deploy`. It is off by
+# default in `mvm-sdk` so the in-guest cdylib built from that crate's lib target
+# links no rustls/ring/tokio; the CLI is the one consumer that needs it.
+mvm-sdk = { workspace = true, features = ["deploy-remote"] }
+mvm-capture.workspace = true
 # Direct IR access (`mvm_contract::ir::…`) for the command surfaces that
 # only need the DTOs, not the rest of the SDK's build-time tooling.
 mvm-contract.workspace = true
@@ -43,14 +48,12 @@ base64.workspace = true
 chrono.workspace = true
 ed25519-dalek.workspace = true
 rand.workspace = true
-secrecy.workspace = true
 uuid.workspace = true
 clap.workspace = true
 rustls.workspace = true
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_jcs = "0.1"
 sha2.workspace = true
 tar.workspace = true
 flate2.workspace = true
@@ -61,7 +64,6 @@ notify = { workspace = true, optional = true }
 notify-debouncer-mini = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["io-util", "net", "rt", "time"] }
 tracing.workspace = true
-tracing-subscriber.workspace = true
 which.workspace = true
 
 [[example]]
@@ -80,8 +82,9 @@ sha2.workspace = true
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
-# Reached only from `#[cfg(test)] mod tests` in commands/machine.
-mvm-net.workspace = true
+# The sidecar resolver proves an artifact's libc from its `DT_NEEDED`, so a
+# test that seeds a sidecar cache needs a real ELF object, not a stub.
+mvm-fs = { workspace = true, features = ["test-support"] }
 assert_cmd.workspace = true
 ed25519-dalek.workspace = true
 rand.workspace = true
@@ -97,6 +100,15 @@ name = "wasm_run"
 required-features = ["wasm-backend"]
 
 [features]
+# Cross-compile the Linux host binaries (`mvm-host-vm-init`, `stage0-init`, …)
+# and `include_bytes!` them into `mvmctl`. Off by default: it is the only thing
+# left in `build.rs`, it needs the pinned zig + cargo-zigbuild toolchain, and a
+# dev build that is not booting a VM does not need the payload. With it off the
+# build script watches four files and writes an empty table, so cargo runs it
+# once and never again on the inner loop. `just embed` and the release workflow
+
+# turn it on; `host_binaries::extract` refuses with that hint when it is off.
+embed-host-bins = []
 # Forward to `mvm-runtime/wasm-backend`: enables `mvmctl --hypervisor wasm`.
 # Off by default so the default workspace build carries no `wasmtime` dependency.
 wasm-backend = ["mvm-runtime/wasm-backend"]
@@ -140,6 +152,12 @@ libkrun-live = []
 # release artifact. The feature is only intended to be enabled when cutting
 # an end-user-binary release that legitimately wants the download fallback.
 release-artifact-bootstrap = []
+# Mark an official distribution separately from the builder-image bootstrap
+# capability. CI exercises the published-builder path from a source checkout;
+# coupling these features makes that test refuse its local runtime overlay
+# before it can boot the workload. Official artifacts also verify the signed
+# builder manifest before using a published image.
+release-channel = ["mvm-build/release-channel", "manifest-verify"]
 custom-dns = ["mvm-hostd/custom-dns"]
 dev-watch = ["dep:notify", "dep:notify-debouncer-mini"]
 manifest-verify = [

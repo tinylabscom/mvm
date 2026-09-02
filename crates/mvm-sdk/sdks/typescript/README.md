@@ -26,17 +26,17 @@ export const greet = mvm.app({
 ```
 
 ```sh
-mvmctl compile app.ts     # parse the file (no execution) → flake.nix + launch plan
-mvmctl up --flake .       # build the image and boot the microVM
+mvmctl build compile app.ts   # parse the file (no execution) → flake.nix + launch plan
+mvmctl machine run --flake .  # build the image and boot the microVM
 ```
 
 `mvm.app({...})` is higher-order: it records the declaration and returns the
 function unchanged, so the same file runs normally under `tsx` / `node` and is
-also read statically by `mvmctl compile`.
+also read statically by `mvmctl build compile`.
 
 ## How it builds
 
-`mvmctl compile` reads your file **statically** — the `mvm.app({...})` call and
+`mvmctl build compile` reads your file **statically** — the `mvm.app({...})` call and
 the `import` are parsed as data, never executed, so nothing in your module runs
 on the host. At image-build time the framework call and the `@runmvm/mvm` import
 are **stripped** from the bundled source, so the guest runs your plain function
@@ -164,6 +164,30 @@ Published SDK packages use the ordinary `mvmctl` release; source-checkout
 users can still point `MVM_CLI_BIN` at a locally built `mvmctl`. CLI process
 failures raise `MachineError` with `argv`, `exitCode`, and captured `stderr`.
 
+## Experimental Obscura browser provider
+
+`new BrowserSandbox()` still defaults to Chromium. Obscura is an explicit,
+experimental opt-in for live development:
+
+```ts
+import { BrowserSandbox } from "@runmvm/mvm";
+
+const browser = new BrowserSandbox("obscura", {
+  network: {
+    mode: "none",
+    egress: { allowlist: [{ host: "example.com", port: 443 }] },
+  },
+});
+const websocketUrl = await browser.waitUntilReady();
+```
+
+Set `MVM_SDK_MODE=live`. The provider uses the exported `OBSCURA_IMAGE`, a
+digest-pinned OCI reference; fixes CDP to guest loopback; explicitly routes
+browser traffic through the mvm proxy; and rejects command overrides. It does
+not enable private-network access, stealth behavior, or unrestricted egress.
+Obscura is not a guaranteed drop-in replacement for every Playwright or
+Puppeteer flow.
+
 ## Local SDK development
 
 When changing the TypeScript SDK in this repo:
@@ -171,6 +195,7 @@ When changing the TypeScript SDK in this repo:
 ```sh
 cargo build -p mvm-cli
 export MVM_CLI_BIN="$PWD/target/debug/mvmctl"
+export MVM_SDK_RUN_PROFILE=dev  # explicit opt-in for files/process verbs
 just sdk-install-typescript
 just sdk-build-typescript
 ```

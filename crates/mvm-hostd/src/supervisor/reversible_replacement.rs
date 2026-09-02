@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use hmac::{Hmac, KeyInit, Mac};
 use rand::Rng;
 use sha2::Sha256;
+use zeroize::Zeroizing;
 
 use mvm_core::policy::{
     OpaqueRewriteToken, ReversibleReplacementAction, RewriteFlowId, RewriteProofRecord,
@@ -99,6 +100,123 @@ pub struct ReplacementFlow {
     values_by_token: HashMap<String, TokenEntry>,
     next_token_index: u64,
     next_event_index: u64,
+}
+
+/// Bounded exact-token reinjection across arbitrary response chunk boundaries.
+pub(crate) struct StreamingReinjector {
+    pending: Zeroizing<Vec<u8>>,
+}
+
+/// Bounded request-side replacement across arbitrary transport chunk
+/// boundaries. The retained overlap exceeds every configured detector
+/// fingerprint. A detected span that crosses the proposed cut moves the cut
+/// back to the span's start, so each byte is replaced exactly once and tokens
+/// remain eligible for response reinjection.
+pub(crate) struct StreamingReplacer {
+    pending: Zeroizing<Vec<u8>>,
+}
+
+const STREAM_REPLACEMENT_OVERLAP: usize = 64 * 1024;
+const MAX_STREAM_REPLACEMENT_PENDING: usize = STREAM_REPLACEMENT_OVERLAP * 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("streaming replacement could not establish a bounded safe cut")]
+pub(crate) struct StreamingReplacementError;
+
+impl StreamingReplacer {
+    pub(crate) fn new() -> Self {
+        Self {
+            pending: Zeroizing::new(Vec::new()),
+        }
+    }
+
+    pub(crate) fn push(
+        &mut self,
+        flow: &mut ReplacementFlow,
+        chunk: &[u8],
+    ) -> Result<(Vec<u8>, Vec<RewriteProofRecord>), StreamingReplacementError> {
+        self.pending.extend_from_slice(chunk);
+        if self.pending.len() <= STREAM_REPLACEMENT_OVERLAP {
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        let proposed = self.pending.len() - STREAM_REPLACEMENT_OVERLAP;
+        let stable = flow
+            .detect_spans(&self.pending)
+            .into_iter()
+            .filter(|span| span.start < proposed && span.end > proposed)
+            .map(|span| span.start)
+            .min()
+            .unwrap_or(proposed);
+        if stable == 0 && self.pending.len() > MAX_STREAM_REPLACEMENT_PENDING {
+            return Err(StreamingReplacementError);
+        }
+        if stable == 0 {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let suffix = self.pending.split_off(stable);
+        let ready = std::mem::replace(&mut *self.pending, suffix);
+        Ok(flow.replace_body(&ready))
+    }
+
+    pub(crate) fn finish(
+        &mut self,
+        flow: &mut ReplacementFlow,
+    ) -> (Vec<u8>, Vec<RewriteProofRecord>) {
+        let pending = std::mem::take(&mut *self.pending);
+        flow.replace_body(&pending)
+    }
+}
+
+impl StreamingReinjector {
+    pub(crate) fn new() -> Self {
+        Self {
+            pending: Zeroizing::new(Vec::new()),
+        }
+    }
+
+    pub(crate) fn push(
+        &mut self,
+        flow: &mut ReplacementFlow,
+        chunk: &[u8],
+    ) -> (Vec<u8>, Vec<RewriteProofRecord>) {
+        self.pending.extend_from_slice(chunk);
+        let longest = flow
+            .values_by_token
+            .keys()
+            .map(String::len)
+            .max()
+            .unwrap_or(0);
+        if longest == 0 {
+            return (std::mem::take(&mut *self.pending), Vec::new());
+        }
+        let candidate = self.pending.len().saturating_sub(longest.saturating_sub(1));
+        let stable =
+            flow.values_by_token
+                .keys()
+                .flat_map(|token| {
+                    self.pending.windows(token.len()).enumerate().filter_map(
+                        move |(start, window)| {
+                            let end = start + token.len();
+                            (window == token.as_bytes() && start < candidate && end > candidate)
+                                .then_some(start)
+                        },
+                    )
+                })
+                .min()
+                .unwrap_or(candidate);
+        let suffix = self.pending.split_off(stable);
+        let ready = std::mem::replace(&mut *self.pending, suffix);
+        flow.reinject_bytes(&ready, RewriteSurface::ResponseBody, None)
+    }
+
+    pub(crate) fn finish(
+        &mut self,
+        flow: &mut ReplacementFlow,
+    ) -> (Vec<u8>, Vec<RewriteProofRecord>) {
+        let pending = std::mem::take(&mut *self.pending);
+        flow.reinject_bytes(&pending, RewriteSurface::ResponseBody, None)
+    }
 }
 
 impl ReplacementFlow {
@@ -434,6 +552,49 @@ mod tests {
         let text = String::from_utf8(response.body).unwrap();
         assert!(text.contains("+14155550123"));
         assert!(text.contains("sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+    }
+
+    #[test]
+    fn response_token_split_across_chunks_is_reinjected_once() {
+        let engine = ReplacementEngine::new();
+        let mut flow = engine.start_flow("tenant-a", &enabled_action());
+        let secret = b"sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let (token, replace_proofs) = flow.replace_body(secret);
+        assert_eq!(replace_proofs.len(), 1);
+        let split = token.len() / 2;
+        let mut stream = StreamingReinjector::new();
+        let (first, first_proofs) = stream.push(&mut flow, &token[..split]);
+        assert!(first.is_empty());
+        assert!(first_proofs.is_empty());
+        let (second, mut proofs) = stream.push(&mut flow, &token[split..]);
+        let (tail, tail_proofs) = stream.finish(&mut flow);
+        proofs.extend(tail_proofs);
+        assert_eq!([first, second, tail].concat(), secret);
+        assert_eq!(proofs.len(), 1, "one token produces one reinjection proof");
+    }
+
+    #[test]
+    fn request_secret_split_across_chunks_is_replaced_once() {
+        let engine = ReplacementEngine::new();
+        let mut flow = engine.start_flow("tenant-a", &enabled_action());
+        let secret = b"sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut first = vec![b'x'; STREAM_REPLACEMENT_OVERLAP - 10];
+        first.extend_from_slice(&secret[..10]);
+        let mut stream = StreamingReplacer::new();
+        let (ready, proofs) = stream.push(&mut flow, &first).unwrap();
+        assert!(ready.is_empty());
+        assert!(proofs.is_empty());
+
+        let (middle, mut proofs) = stream.push(&mut flow, &secret[10..]).unwrap();
+        let (tail, tail_proofs) = stream.finish(&mut flow);
+        proofs.extend(tail_proofs);
+        let transformed = [middle, tail].concat();
+        assert!(
+            !transformed
+                .windows(secret.len())
+                .any(|bytes| bytes == secret)
+        );
+        assert_eq!(proofs.len(), 1);
     }
 
     #[test]

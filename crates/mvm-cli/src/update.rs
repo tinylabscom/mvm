@@ -107,10 +107,74 @@ fn strip_v_prefix(tag: &str) -> &str {
 /// serve one picks the artifact; TLS says nothing about who wrote it. Refuses
 /// on a missing, unparseable, or foreign-signed bundle — the shared release
 /// verifier does the deciding.
-fn fetch_signed_checksum_manifest(base_url: &str, asset: &str, version: &str) -> Result<String> {
+/// Download a GitHub release asset.
+///
+/// Release asset URLs always answer `302` and redirect to blob storage, and
+/// `mvm_http` deliberately does not follow redirects ("no HTTP/2, no redirect
+/// following ..." — every one of its other callers has already disabled them).
+/// So a release fetch routed through it fails on the redirect no matter how
+/// correct the URL is. Reuses the curl downloader the working release paths
+/// already use, whose `-fSL` follows the redirect and fails on HTTP error.
+fn download_release_asset(url: &str, dest: &Path) -> Result<()> {
+    let dest_str = dest
+        .to_str()
+        .with_context(|| format!("release asset destination is not UTF-8: {}", dest.display()))?;
+    crate::commands::env::artifact_verify::download_file(url, dest_str)
+}
+
+/// The boot image release every published guest artifact is fetched from, as
+/// `(tag, bare-semver)`.
+///
+/// Deliberately *not* the CLI's own version. Those are separate counters: the
+/// CLI ships from `v<crate version>` and the images from `boot-image/vN`, so a
+/// kernel fix does not wait for a CLI release. Deriving the image URL from
+/// `CARGO_PKG_VERSION` meant every build between two CLI releases pointed at a
+/// tag nobody had published — a 404 on the first boot of a fresh install, for
+/// most of the CLI's life rather than at its edges.
+///
+/// The bare semver is what `release_trust`'s boot image identity template
+/// interpolates, so it is derived here rather than re-split at each call site.
+pub(crate) fn boot_image_release() -> Result<(String, String)> {
+    let tag = mvm_core::config::DEFAULT_BOOT_IMAGE_TAG;
+    let version = tag.rsplit_once("/v").map(|(_, v)| v).with_context(|| {
+        format!("boot image tag {tag:?} is not of the form `boot-image/v<semver>`")
+    })?;
+    Ok((tag.to_string(), version.to_string()))
+}
+
+/// Asset and checksum-manifest names for a kernel variant on the boot image
+/// release.
+///
+/// The two release trains name the same bytes differently: `kernel-build.yml`
+/// publishes `vmlinux-<arch>-<variant>`, while `release-boot-image.yml`
+/// publishes the kernel *inside* the image it belongs to. The workload kernel
+/// is `nix/images/default-tenant`'s, whose flake states it is "the single
+/// shared definition in `nix/images/kernel/`, identical to the one builder-vm
+/// builds" — so the mapping is a rename, not a substitution.
+fn boot_image_kernel_assets(arch: &str, variant: &str) -> Result<(String, String)> {
+    let image = match variant {
+        "workload" => "default-microvm",
+        "builder" => "builder-vm",
+        other => anyhow::bail!(
+            "unknown kernel variant {other:?}: the boot image publishes only the \
+             workload (default-microvm) and builder (builder-vm) kernels"
+        ),
+    };
+    Ok((
+        format!("{image}-vmlinux-{arch}"),
+        format!("{image}-{arch}-checksums-sha256.txt"),
+    ))
+}
+
+fn fetch_signed_checksum_manifest(
+    base_url: &str,
+    asset: &str,
+    version: &str,
+    train: mvm_build::release_signature::ReleaseTrain,
+) -> Result<String> {
     let staged = tempfile::NamedTempFile::new()
         .with_context(|| format!("creating staging file for {asset}"))?;
-    http::download_file(&format!("{base_url}/{asset}"), staged.path())
+    download_release_asset(&format!("{base_url}/{asset}"), staged.path())
         .with_context(|| format!("downloading {asset} — cannot verify integrity"))?;
     mvm_build::release_signature::verify_release_archive_signature(
         &mvm_build::release_signature::ReleaseSignatureRequest {
@@ -118,6 +182,7 @@ fn fetch_signed_checksum_manifest(base_url: &str, asset: &str, version: &str) ->
             asset,
             archive_path: staged.path(),
             version,
+            train,
         },
     )
     .with_context(|| format!("refusing to parse an unauthenticated checksum manifest ({asset})"))?;
@@ -213,7 +278,7 @@ fn download_release(version: &str, target: &str, tmp_dir: &Path) -> Result<()> {
 
     let sp = ui::spinner(&format!("Downloading {}...", download_url));
 
-    http::download_file(&download_url, &dest).with_context(|| {
+    download_release_asset(&download_url, &dest).with_context(|| {
         format!(
             "Download failed. Check that {} has a release for {}.",
             version, target
@@ -290,9 +355,8 @@ fn kernel_fetch_hint(tag: &str, asset: &str, release_exists: bool) -> String {
 /// locally, so downloading the release-matched kernel is their supported
 /// acquisition path.
 pub(crate) fn download_kernel(arch: &str, variant: &str, dest: &Path) -> Result<()> {
-    let tag = format!("v{}", current_version());
-    let asset = format!("vmlinux-{arch}-{variant}");
-    let checksums = format!("kernel-{arch}-checksums-sha256.txt");
+    let (tag, image_version) = boot_image_release()?;
+    let (asset, checksums) = boot_image_kernel_assets(arch, variant)?;
     let base = github_download_base();
 
     if let Some(parent) = dest.parent() {
@@ -314,7 +378,7 @@ pub(crate) fn download_kernel(arch: &str, variant: &str, dest: &Path) -> Result<
         })?
         .into_temp_path();
     let sp = ui::spinner(&format!("Downloading {asset} ({tag})..."));
-    let dl = http::download_file(&asset_url, &download);
+    let dl = download_release_asset(&asset_url, &download);
     sp.finish_and_clear();
     dl.with_context(|| kernel_fetch_hint(&tag, &asset, release_exists(&tag)))?;
 
@@ -322,7 +386,12 @@ pub(crate) fn download_kernel(arch: &str, variant: &str, dest: &Path) -> Result<
     // waives comparing the digest, not the question of who published the
     // manifest the digest comes from. Waiving the publisher takes the separate
     // MVM_SKIP_COSIGN_VERIFY.
-    let manifest = fetch_signed_checksum_manifest(&release_base, &checksums, current_version())?;
+    let manifest = fetch_signed_checksum_manifest(
+        &release_base,
+        &checksums,
+        &image_version,
+        mvm_build::release_signature::ReleaseTrain::BootImage,
+    )?;
 
     if std::env::var("MVM_SKIP_HASH_VERIFY").is_ok() {
         ui::warn("MVM_SKIP_HASH_VERIFY set — skipping kernel checksum verification (never in CI).");
@@ -716,7 +785,7 @@ fn verify_signature(version: &str, archive_name: &str, archive_path: &Path) -> R
         .join(&bundle_name);
 
     ui::info("Downloading signature bundle...");
-    http::download_file(&bundle_url, &bundle_path)
+    download_release_asset(&bundle_url, &bundle_path)
         .context("Failed to download cosign bundle — cannot verify signature")?;
 
     let output = std::process::Command::new(&cosign)
@@ -903,6 +972,64 @@ pub fn update(check_only: bool, force: bool, skip_verify: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// The image counter and the CLI counter are different numbers, and the
+    /// fetch URL has to follow the image one.
+    #[test]
+    fn the_boot_image_release_is_not_the_cli_version() {
+        let (tag, version) = boot_image_release().expect("a well-formed pinned tag");
+        assert!(
+            tag.starts_with("boot-image/v"),
+            "images ship on their own counter: {tag}"
+        );
+        assert_eq!(tag, format!("boot-image/v{version}"));
+        assert_ne!(
+            tag,
+            format!("v{}", current_version()),
+            "deriving the image tag from the CLI version is the bug this fixes"
+        );
+    }
+
+    /// The bare semver is what the boot image identity template interpolates,
+    /// so a tag that does not split cleanly would silently accept no identity.
+    #[test]
+    fn the_image_version_matches_the_signing_identity_template() {
+        let (_tag, version) = boot_image_release().expect("tag");
+        let identities = mvm_core::release_trust::accepted_boot_image_identities(&version);
+        assert!(
+            identities
+                .iter()
+                .any(|i| i.ends_with(&format!("refs/tags/boot-image/v{version}"))),
+            "identity must bind the published tag: {identities:?}"
+        );
+    }
+
+    /// The two release trains name the same kernel differently; this is the
+    /// rename, and getting it wrong would fetch the *other* kernel.
+    #[test]
+    fn kernel_variants_map_to_their_published_image_assets() {
+        assert_eq!(
+            boot_image_kernel_assets("aarch64", "workload").unwrap(),
+            (
+                "default-microvm-vmlinux-aarch64".to_string(),
+                "default-microvm-aarch64-checksums-sha256.txt".to_string()
+            )
+        );
+        assert_eq!(
+            boot_image_kernel_assets("x86_64", "builder").unwrap(),
+            (
+                "builder-vm-vmlinux-x86_64".to_string(),
+                "builder-vm-x86_64-checksums-sha256.txt".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn an_unknown_kernel_variant_is_refused_rather_than_guessed() {
+        let err = boot_image_kernel_assets("aarch64", "initramfs")
+            .expect_err("only workload and builder kernels are published");
+        assert!(format!("{err}").contains("unknown kernel variant"), "{err}");
+    }
+
     use super::*;
     use sha2::{Digest, Sha256};
     use std::io::Write;

@@ -2,7 +2,7 @@
 //! chain-signed audit log.
 //!
 //! Reads the same tamper-evident `~/.mvm/audit/<tenant>.jsonl` stream
-//! `mvmctl audit tail --chain` / `mvmctl audit verify` already read,
+//! `mvmctl trust audit tail --chain` / `mvmctl audit verify` already read,
 //! selects the entries bound to one run, and renders its lifecycle,
 //! outcome, backend, and source provenance — with a loud footer when
 //! the chain fails verification. No new storage or signing surface;
@@ -207,7 +207,7 @@ pub(in crate::commands) fn collect_run(
     if matches.is_empty() {
         bail!(
             "no run {run_id:?} found in the audit chain for tenant {tenant:?}; \
-             try `mvmctl audit tail` to list recent runs"
+             try `mvmctl trust audit tail` to list recent runs"
         );
     }
 

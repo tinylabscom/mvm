@@ -61,7 +61,7 @@ SUMMARY="${OUT_DIR}/summary.txt"
 cd "${ROOT}"
 
 if [[ "${SKIP_BUILD}" != "1" ]]; then
-  cargo build -p mvmctl --bin mvmctl
+  cargo build -p mvmctl --bin mvmctl --features embed-host-bins
   cargo build -p mvm-hostd --bin mvm-network-endpoint
   cargo build -p mvm-hostd --bin mvm-hvf-supervisor
 fi

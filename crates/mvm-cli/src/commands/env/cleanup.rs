@@ -181,7 +181,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resul
     {
         anyhow::bail!(
             "refusing to run cleanup --{} while VM '{}' appears to be running.\n\
-             Stop it first (`mvmctl stop {}`), or pass --force to wipe anyway.",
+             Stop it first (`mvmctl machine stop {}`), or pass --force to wipe anyway.",
             t.name(),
             running,
             running,

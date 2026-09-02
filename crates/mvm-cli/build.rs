@@ -1,8 +1,12 @@
-#[path = "build_aux_helpers.rs"]
-mod build_aux_helpers;
 #[path = "build_embed_cache.rs"]
 mod build_embed_cache;
-#[path = "src/host_binaries/toolchain.rs"]
+#[path = "build_support.rs"]
+mod build_support;
+// The pinned-toolchain resolution is shared with `mvm-build`, whose
+// builder-VM bootstrap asks whether an `embed-host-bins` build can succeed
+// before spawning one. A build script cannot depend on a workspace crate, so
+// it reads the same file off disk.
+#[path = "../mvm-build/src/embed_toolchain.rs"]
 mod host_binaries_toolchain;
 
 use std::path::{Path, PathBuf};
@@ -32,8 +36,7 @@ struct KeyRequest<'a> {
 
 /// The content store, plus the per-package source hashes its keys are built
 /// from. Hashing a closure is the expensive part, so it is memoised: the six
-/// embedded binaries share two root packages between them, and the aux
-/// helpers all share one.
+/// embedded binaries share two root packages between them.
 struct EmbedCache {
     workspace_root: PathBuf,
     graph: build_embed_cache::WorkspaceGraph,
@@ -109,7 +112,7 @@ impl EmbedCache {
         build_embed_cache::install(root, key, binary, source);
     }
 
-    /// Keep the store inside its ceiling. Runs after both legs, so a build
+    /// Keep the store inside its ceiling. Runs once at the end, so a build
     /// that published several artifacts prunes once rather than per binary.
     fn prune(&self) {
         let Some(root) = self.root.as_ref() else {
@@ -147,6 +150,169 @@ fn main() {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let workspace_root = workspace_root_from_manifest_dir(&manifest_dir);
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+
+    emit_pinned_toolchain_env(&workspace_root);
+
+    // The cross-compile is opt-in. Off, this script never compiles anything —
+    // it only restores a payload the content store can already prove belongs to
+    // this tree. On, it produces the real set.
+    if !embedding_requested() {
+        write_unembedded_table(&workspace_root, &out_dir);
+        return;
+    }
+    embed_host_binaries(&workspace_root, &out_dir);
+}
+
+/// Whether this build wants the Linux host binaries compiled into `mvmctl`.
+///
+/// Cargo sets `CARGO_FEATURE_<NAME>` for each enabled feature of the package
+/// being built, so this reads the `embed-host-bins` feature without the build
+/// script needing to know how it was turned on.
+fn embedding_requested() -> bool {
+    std::env::var_os("CARGO_FEATURE_EMBED_HOST_BINS").is_some()
+}
+
+/// Export the pinned zig / rust / cargo-zigbuild versions `mvmctl doctor`
+/// reports. Needed under both arms: doctor tells you what the embed toolchain
+/// *would* be even when this build did not use it.
+fn emit_pinned_toolchain_env(workspace_root: &Path) {
+    let pin = read_pinned_toolchain(workspace_root);
+    println!("cargo:rustc-env=MVM_PINNED_RUST={}", pin.rust);
+    println!("cargo:rustc-env=MVM_PINNED_ZIG={}", pin.zig);
+    println!(
+        "cargo:rustc-env=MVM_PINNED_CARGO_ZIGBUILD={}",
+        pin.cargo_zigbuild
+    );
+    println!("cargo:rustc-env=MVM_PINNED_TARGET={}", pin.target);
+}
+
+/// The unembedded arm. It never cross-compiles — but it does reuse a payload
+/// the content store can prove belongs to this source tree.
+///
+/// Both feature variants write the same `target/<profile>/mvmctl`, so whichever
+/// cargo invocation ran last decides whether the binary on `PATH` carries the
+/// payload. A cached, zero-compile `cargo build` is enough to take it away,
+/// which is why an unembedded `mvmctl` kept coming back after a `just embed`
+/// that had genuinely worked. Restoring here closes that: the key covers each
+/// binary's dependency closure, `Cargo.lock` and the pinned toolchain, so a hit
+/// is exactly the bytes this tree produces — the same proof the embedding arm
+/// relies on when it skips a rebuild.
+///
+/// A miss, an unreachable store, or `MVM_EMBED_NO_CACHE=1` writes the empty
+/// table as before. This arm compiles nothing, so a payload it cannot prove is
+/// one it does not ship.
+///
+/// At least one `rerun-if-*` line is mandatory. Emitting none does not mean
+/// "never re-run" — it restores cargo's default, which re-runs the script on
+/// *any* change to the package, i.e. every edit to `mvm-cli`'s 251 files.
+fn write_unembedded_table(workspace_root: &Path, out_dir: &Path) {
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=build_support.rs");
+    println!("cargo:rerun-if-changed=build_embed_cache.rs");
+    println!("cargo:rerun-if-changed=src/host_binaries/manifest.rs");
+    println!("cargo:rerun-if-changed=../mvm-build/src/embed_toolchain.rs");
+    println!("cargo:rerun-if-env-changed=MVM_EMBED_NO_CACHE");
+    println!("cargo:rerun-if-env-changed=MVM_EMBED_CACHE_DIR");
+
+    let entries = restore_embedded_from_store(workspace_root, out_dir);
+    std::fs::write(out_dir.join("embedded.rs"), render_embedded_rs(&entries)).unwrap();
+    println!(
+        "cargo:rustc-env=MVM_EMBEDDED_BINS_REUSED={}",
+        if entries.is_empty() { "0" } else { "1" }
+    );
+}
+
+/// Restore the whole embedded set from the content store, or nothing.
+///
+/// All-or-nothing on purpose: extraction verifies the table as a unit, and a
+/// builder VM missing one binary fails later and somewhere else, which reads as
+/// a corrupted cache rather than as a partial restore.
+fn restore_embedded_from_store(
+    workspace_root: &Path,
+    out_dir: &Path,
+) -> Vec<(String, PathBuf, String)> {
+    let mut cache = EmbedCache::discover(workspace_root);
+    let Some(store_root) = cache.root.clone() else {
+        return Vec::new();
+    };
+    // Watch the store itself, not just the sources. Publishing from a
+    // `just embed` changes no file this unit already watches, so without this
+    // the restore below would never re-run and the next plain build would keep
+    // shipping the empty table it cached — the exact swap this arm exists to
+    // stop. Created when absent so the watch is a stable directory rather than
+    // a missing path, which cargo treats as permanently dirty.
+    let _ = std::fs::create_dir_all(&store_root);
+    println!("cargo:rerun-if-changed={}", store_root.display());
+
+    let pin = read_pinned_toolchain(workspace_root);
+    let bins_out = out_dir.join("mvm-host-bins");
+    let mut entries = Vec::new();
+    for binary in read_embedded_manifest(workspace_root) {
+        let out_file = bins_out.join(&binary.name);
+        let key = artifact_key_for(&mut cache, &binary, &pin);
+        if !cache.restore(key.as_deref(), &binary.name, &out_file) {
+            // Watch the closure anyway: a later edit has to be able to bring
+            // this unit back for another look once the store carries the
+            // matching bytes.
+            cache.emit_rerun();
+            return Vec::new();
+        }
+        let sha = sha256_hex(&out_file);
+        entries.push((binary.name.clone(), out_file, sha));
+    }
+    // Editing any source the payload is built from must invalidate the restore,
+    // or this arm would keep serving bytes that no longer match the tree.
+    cache.emit_rerun();
+    eprintln!(
+        "[build.rs] embedded host binaries restored from the content store \
+         without `embed-host-bins` ({} binaries)",
+        entries.len()
+    );
+    entries
+}
+
+/// Every binary that gets cross-compiled and embedded.
+///
+/// `HOST_BINARIES` (installed into the builder/dev VM rootfs) and
+/// `SEED_BINARIES` (host-side only, e.g. the Stage 0 nix-seed's `/init`) are
+/// both `mvm-build` `[[bin]]`s; the bootstrap support list carries its own
+/// package names, so it cannot assume one.
+fn read_embedded_manifest(workspace_root: &Path) -> Vec<EmbeddedSourceBinary> {
+    let mut manifest: Vec<EmbeddedSourceBinary> = read_rust_manifest(workspace_root)
+        .into_iter()
+        .chain(read_seed_binaries(workspace_root))
+        .map(|name| EmbeddedSourceBinary {
+            package: "mvm-build".to_string(),
+            name,
+            features: String::new(),
+        })
+        .collect();
+    manifest.extend(read_bootstrap_support_binaries(workspace_root));
+    manifest
+}
+
+/// The content-store key for one embedded binary under the pinned toolchain.
+fn artifact_key_for(
+    cache: &mut EmbedCache,
+    binary: &EmbeddedSourceBinary,
+    pin: &Pin,
+) -> Option<String> {
+    cache.key_for(&KeyRequest {
+        package: &binary.package,
+        binary: &binary.name,
+        features: &binary.features,
+        target: &pin.target,
+        toolchain: &format!(
+            "rust={} zig={} zigbuild={}",
+            pin.rust, pin.zig, pin.cargo_zigbuild
+        ),
+        flavor: "musl-static",
+    })
+}
+
+fn embed_host_binaries(workspace_root: &Path, out_dir: &Path) {
+    let workspace_root = workspace_root.to_path_buf();
+    let out_dir = out_dir.to_path_buf();
     let bins_out = out_dir.join("mvm-host-bins");
     std::fs::create_dir_all(&bins_out).expect("create OUT_DIR/mvm-host-bins");
 
@@ -161,35 +327,16 @@ fn main() {
     // A separate target dir under the profile's build directory has its own
     // lock → no contention. It is shared across mvm-cli feature fingerprints,
     // so identical embedded binaries are not rebuilt for each OUT_DIR.
-    let nested_target_dir = build_aux_helpers::shared_nested_target_dir(&out_dir);
+    let nested_target_dir = build_support::shared_nested_target_dir(&out_dir);
     let host_target_dir = nested_target_dir.join("host-vm-target");
 
     let pin = read_pinned_toolchain(&workspace_root);
-    println!("cargo:rustc-env=MVM_PINNED_ZIG={}", pin.zig);
-    println!(
-        "cargo:rustc-env=MVM_PINNED_CARGO_ZIGBUILD={}",
-        pin.cargo_zigbuild
-    );
-    println!("cargo:rustc-env=MVM_PINNED_TARGET={}", pin.target);
     println!("cargo:rerun-if-env-changed=MVM_EMBED_CARGO");
     println!("cargo:rerun-if-env-changed=MVM_EMBED_RUSTC");
     println!("cargo:rerun-if-env-changed=MVM_EMBED_ZIG");
+    println!("cargo:rerun-if-env-changed=MVM_EMBED_NO_CACHE");
 
-    // HOST_BINARIES (installed into the builder/dev VM rootfs), SEED_BINARIES
-    // (host-side only, e.g. the Stage 0 nix-seed's /init), and bootstrap
-    // support binaries all get cross-compiled + embedded. The support list
-    // includes binaries owned by crates other than mvm-build, so retain the
-    // package name alongside each binary instead of assuming one package.
-    let mut manifest: Vec<EmbeddedSourceBinary> = read_rust_manifest(&workspace_root)
-        .into_iter()
-        .chain(read_seed_binaries(&workspace_root))
-        .map(|name| EmbeddedSourceBinary {
-            package: "mvm-build".to_string(),
-            name,
-            features: String::new(),
-        })
-        .collect();
-    manifest.extend(read_bootstrap_support_binaries(&workspace_root));
+    let manifest = read_embedded_manifest(&workspace_root);
     let mut entries = Vec::new();
 
     // The host-vm bins are statically musl-linked and embedded for the host
@@ -241,14 +388,7 @@ fn main() {
             .join(strip_glibc(&pin.target))
             .join("release")
             .join(&binary.name);
-        let key = cache.key_for(&KeyRequest {
-            package: &binary.package,
-            binary: &binary.name,
-            features: &binary.features,
-            target: &pin.target,
-            toolchain: &format!("zig={} zigbuild={}", pin.zig, pin.cargo_zigbuild),
-            flavor: "musl-static",
-        });
+        let key = artifact_key_for(&mut cache, binary, &pin);
 
         if cache.restore(key.as_deref(), &binary.name, &out_file) {
             eprintln!(
@@ -300,6 +440,7 @@ fn main() {
                 .with_binary(&binary.name)
                 .with_features(&binary.features)
                 .with_target(&pin.target)
+                .with_rust_pin(&pin.rust)
                 .with_zig_pin(&pin.zig)
                 .with_output(&out_file)
                 .build(),
@@ -332,8 +473,6 @@ fn main() {
         );
     }
 
-    build_native_aux_helpers(&workspace_root, &nested_target_dir, &mut cache);
-
     let embedded_rs = render_embedded_rs(&entries);
     std::fs::write(out_dir.join("embedded.rs"), embedded_rs).unwrap();
     println!(
@@ -358,9 +497,8 @@ fn main() {
         "cargo:rerun-if-changed={}",
         workspace_root.join("rust-toolchain.toml").display()
     );
-    // Every crate the cached binaries actually link, taken from the manifest
-    // graph rather than named here. Both legs have contributed their roots by
-    // now, so this covers the embedded set and the per-VM helpers alike.
+    // Every crate the embedded binaries actually link, taken from the manifest
+    // graph rather than named here.
     cache.emit_rerun();
     cache.prune();
 }
@@ -385,125 +523,6 @@ fn emit_rerun_for_tree(root: &Path) {
     }
 }
 
-/// Compile the native per-VM host helpers into a dedicated target dir under
-/// OUT_DIR and export that dir as `MVM_AUX_BIN_DIR`, so `cargo run` produces
-/// them during its build phase rather than mvmctl shelling out to `cargo` at
-/// run time. The dedicated target dir avoids the outer build-lock deadlock the
-/// same way the embedded-bins path does (see the note in `main`).
-fn build_native_aux_helpers(
-    workspace_root: &Path,
-    nested_target_dir: &Path,
-    cache: &mut EmbedCache,
-) {
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
-    let host_target = std::env::var("TARGET").unwrap_or_default();
-    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
-    let aux_target = nested_target_dir.join("aux-helper-target");
-    let bin_dir = aux_target.join(&profile);
-
-    // Always export the dir — even on skip or an unbuildable helper — so
-    // `env!("MVM_AUX_BIN_DIR")` compiles in mvm-cli; resolution `is_file`-checks
-    // each candidate, so a dir with missing bins is harmless.
-    println!("cargo:rustc-env=MVM_AUX_BIN_DIR={}", bin_dir.display());
-
-    // These are the supervisors, where a stale binary silently produces a
-    // running guest that ignores your edit — so they were rebuilt
-    // unconditionally, on every `cargo check` and `clippy` too. The content
-    // key is what makes skipping them safe: it cannot match unless the bytes
-    // are the ones this tree produces. Note the profile is part of the
-    // flavour, because unlike the musl leg these follow the outer profile.
-    let libkrun_present = libkrun_header_present();
-    let aux_manifest_src = std::fs::read_to_string(
-        workspace_root.join("crates/mvm-cli/src/host_binaries/manifest.rs"),
-    )
-    .expect("read host-binaries manifest");
-    for spec in build_aux_helpers::aux_helper_specs_from(
-        &aux_manifest_src,
-        &target_os,
-        &target_arch,
-        libkrun_present,
-    ) {
-        let features = spec.features.join(",");
-        let (spec_package, spec_bin) = (spec.package.as_str(), spec.bin.as_str());
-        let key = cache.key_for(&KeyRequest {
-            package: spec_package,
-            binary: spec_bin,
-            features: &features,
-            target: &host_target,
-            toolchain: "native",
-            flavor: &format!("native-host-{profile}"),
-        });
-        let installed = bin_dir.join(spec_bin);
-
-        if cache.restore(key.as_deref(), spec_bin, &installed) {
-            eprintln!(
-                "[build.rs] per-VM host helper {} restored from the content store",
-                spec_bin
-            );
-            continue;
-        }
-
-        run_cargo_native_build(workspace_root, &aux_target, &profile, &spec);
-        if installed.is_file() {
-            cache.publish(key.as_deref(), spec_bin, &installed);
-        }
-    }
-}
-
-/// Nested native `cargo build` for one helper into `target_dir`. Fail-open: a
-/// helper this host can't build must not break the outer compile — aux_bin
-/// surfaces a precise error only if the helper is actually needed at run time.
-fn run_cargo_native_build(
-    root: &Path,
-    target_dir: &Path,
-    profile: &str,
-    spec: &build_aux_helpers::AuxHelperSpec,
-) {
-    eprintln!(
-        "[build.rs] building per-VM host helper: {} (-p {})",
-        spec.bin, spec.package
-    );
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let mut cmd = Command::new(cargo);
-    cmd.args(["build", "-p", &spec.package, "--bin", &spec.bin]);
-    if profile == "release" {
-        cmd.arg("--release");
-    }
-    if !spec.features.is_empty() {
-        cmd.arg("--features").arg(spec.features.join(","));
-    }
-    // Dedicated target dir — the outer `cargo` holds the workspace `target/`
-    // lock for the whole build-script run; a nested cargo aimed at it deadlocks.
-    cmd.env("CARGO_TARGET_DIR", target_dir).current_dir(root);
-    match cmd.status() {
-        Ok(status) if status.success() => {}
-        other => eprintln!(
-            "[build.rs] per-VM helper {} not built ({other:?}); it will be \
-             resolved at run time only if needed",
-            spec.bin
-        ),
-    }
-}
-
-/// Whether `libkrun.h` is installed, mirroring the probe `libkrun-sys`'s build
-/// script uses to decide the `-lkrun` link. Gate for building the libkrun
-/// supervisor so an HVF-only / CI host does not attempt (and noisily fail) it.
-fn libkrun_header_present() -> bool {
-    if let Some(p) = std::env::var_os("MVM_LIBKRUN_HEADER")
-        && Path::new(&p).is_file()
-    {
-        return true;
-    }
-    [
-        "/opt/homebrew/include/libkrun.h",
-        "/usr/local/include/libkrun.h",
-        "/usr/include/libkrun.h",
-    ]
-    .iter()
-    .any(|p| Path::new(p).is_file())
-}
-
 fn read_pinned_toolchain(root: &Path) -> Pin {
     let arch = std::env::var("CARGO_CFG_TARGET_ARCH")
         .expect("CARGO_CFG_TARGET_ARCH is set by cargo for build scripts");
@@ -511,7 +530,7 @@ fn read_pinned_toolchain(root: &Path) -> Pin {
 }
 
 #[cfg(test)]
-fn resolve_target_for_arch(toolchain: &toml::Value, arch: &str) -> String {
+fn resolve_target_for_arch(toolchain: &toml::Value, arch: &str) -> Result<String, String> {
     host_binaries_toolchain::resolve_target_for_arch(toolchain, arch)
 }
 
@@ -584,7 +603,7 @@ fn read_manifest_section<'a>(src: &'a str, name: &str) -> &'a str {
 fn read_quoted_field_block(src: &str, section: &str, field: &str) -> Vec<String> {
     read_manifest_section(src, section)
         .lines()
-        .filter_map(|line| build_aux_helpers::extract_quoted_after(line, field))
+        .filter_map(|line| build_support::extract_quoted_after(line, field))
         .collect()
 }
 
@@ -608,6 +627,7 @@ struct ZigbuildRequest<'a> {
     binary: Option<&'a str>,
     features: Option<&'a str>,
     target: Option<&'a str>,
+    rust_pin: Option<&'a str>,
     zig_pin: Option<&'a str>,
     output: Option<&'a Path>,
 }
@@ -643,6 +663,11 @@ impl<'a> ZigbuildRequest<'a> {
         self
     }
 
+    fn with_rust_pin(mut self, rust_pin: &'a str) -> Self {
+        self.rust_pin = Some(rust_pin);
+        self
+    }
+
     fn with_zig_pin(mut self, zig_pin: &'a str) -> Self {
         self.zig_pin = Some(zig_pin);
         self
@@ -661,6 +686,7 @@ impl<'a> ZigbuildRequest<'a> {
             binary: self.binary.expect("zigbuild request binary"),
             features: self.features.expect("zigbuild request features"),
             target: self.target.expect("zigbuild request target"),
+            rust_pin: self.rust_pin.expect("zigbuild request Rust pin"),
             zig_pin: self.zig_pin.expect("zigbuild request Zig pin"),
             output: self.output.expect("zigbuild request output"),
         }
@@ -674,6 +700,7 @@ struct ZigbuildSpec<'a> {
     binary: &'a str,
     features: &'a str,
     target: &'a str,
+    rust_pin: &'a str,
     zig_pin: &'a str,
     output: &'a Path,
 }
@@ -687,7 +714,8 @@ fn run_cargo_zigbuild(spec: ZigbuildSpec<'_>) {
     // cargo sets RUSTC=rustc which doesn't have the cross targets, and that
     // value propagates into the nested `cargo build` that cargo-zigbuild
     // spawns. Using the rustup cargo avoids that.
-    let (cargo, rustc) = rustup_cargo_and_rustc(strip_glibc(spec.target));
+    let (cargo, rustc) = rustup_cargo_and_rustc(strip_glibc(spec.target), spec.rust_pin);
+    let rust_sysroot = rustc_sysroot(&rustc);
     let mut cmd = Command::new(&cargo);
     cmd.args([
         "zigbuild",
@@ -702,13 +730,8 @@ fn run_cargo_zigbuild(spec: ZigbuildSpec<'_>) {
     if !spec.features.is_empty() {
         cmd.args(["--features", spec.features]);
     }
-    cmd.env("RUSTC", &rustc)
-        // Dedicated target dir — see the deadlock note in main().
-        .env("CARGO_TARGET_DIR", spec.target_dir)
-        .env_remove("RUSTUP_TOOLCHAIN")
-        .env_remove("RUSTC_WRAPPER")
-        .env_remove("RUSTC_WORKSPACE_WRAPPER")
-        .current_dir(spec.root);
+    apply_nested_rust_env(&mut cmd, &rustc, spec.target_dir, spec.root, &rust_sysroot);
+    cmd.current_dir(spec.root);
     apply_zigbuild_env(&mut cmd, spec.target_dir);
     // Pin the zig binary cargo-zigbuild uses. Left to PATH, a Homebrew-upgraded
     // zig (newer than the pin) fails downstream with a cryptic `CacheCheckFailed`.
@@ -717,7 +740,7 @@ fn run_cargo_zigbuild(spec: ZigbuildSpec<'_>) {
     }
     let status = cmd.status().expect(
         "spawn `cargo zigbuild` — \
-         install with: `cargo install cargo-zigbuild --version 0.20.0`",
+         install with: `cargo install cargo-zigbuild --version 0.23.0`",
     );
     assert!(
         status.success(),
@@ -732,6 +755,70 @@ fn run_cargo_zigbuild(spec: ZigbuildSpec<'_>) {
         .join(spec.binary);
     std::fs::copy(&built, spec.output)
         .unwrap_or_else(|e| panic!("copy {} → {}: {e}", built.display(), spec.output.display()));
+}
+
+fn apply_nested_rust_env(
+    cmd: &mut Command,
+    rustc: &str,
+    target_dir: &Path,
+    workspace_root: &Path,
+    rust_sysroot: &Path,
+) {
+    cmd.env("RUSTC", rustc)
+        // Dedicated target dir — see the deadlock note in main().
+        .env("CARGO_TARGET_DIR", target_dir)
+        .env("RUSTC_WORKSPACE_WRAPPER", "")
+        .env_remove("RUSTUP_TOOLCHAIN")
+        // The outer nightly's frontend flags are incompatible with the pinned
+        // stable compiler used for reproducible embedded binaries.
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS");
+    // Empty values normally prevent a global sccache wrapper from leaking
+    // into the reproducible nested build. On macOS the pinned rust-objcopy
+    // binary needs the sysroot loader wrapper after nested Cargo reconstructs
+    // its dynamic-library environment.
+    #[cfg(target_os = "macos")]
+    {
+        cmd.env(
+            "RUSTC_WRAPPER",
+            workspace_root.join("scripts/rustc-macos-loader.sh"),
+        );
+        let loader_path = std::env::join_paths(
+            std::iter::once(rust_sysroot.join("lib")).chain(
+                std::env::var_os("DYLD_FALLBACK_LIBRARY_PATH")
+                    .iter()
+                    .flat_map(std::env::split_paths),
+            ),
+        )
+        .expect("Rust sysroot paths are valid DYLD_FALLBACK_LIBRARY_PATH entries");
+        // cargo-zigbuild invokes rust-objcopy itself after compilation, so the
+        // wrapper alone cannot repair that process. Seed the nested command as
+        // well; its own Cargo children inherit this value.
+        cmd.env("DYLD_FALLBACK_LIBRARY_PATH", loader_path);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (workspace_root, rust_sysroot);
+        cmd.env("RUSTC_WRAPPER", "");
+    }
+}
+
+fn rustc_sysroot(rustc: &str) -> PathBuf {
+    let output = Command::new(rustc)
+        .args(["--print", "sysroot"])
+        .output()
+        .unwrap_or_else(|error| panic!("run {rustc} --print sysroot: {error}"));
+    assert!(
+        output.status.success(),
+        "{rustc} --print sysroot failed with {}",
+        output.status
+    );
+    let path = String::from_utf8(output.stdout)
+        .expect("rustc sysroot is UTF-8")
+        .trim()
+        .to_string();
+    assert!(!path.is_empty(), "{rustc} returned an empty sysroot");
+    PathBuf::from(path)
 }
 
 fn apply_zigbuild_env(cmd: &mut Command, target_dir: &Path) {
@@ -813,6 +900,60 @@ mod tests {
     use super::*;
 
     #[test]
+    fn nested_rust_env_drops_outer_nightly_flags_and_selects_safe_wrapper() {
+        let mut cmd = Command::new("cargo");
+        cmd.env("RUSTFLAGS", "-Zthreads=8")
+            .env("CARGO_ENCODED_RUSTFLAGS", "-Zthreads=8")
+            .env("RUSTC_WRAPPER", "sccache");
+
+        apply_nested_rust_env(
+            &mut cmd,
+            "/toolchain/rustc",
+            Path::new("/nested-target"),
+            Path::new("/workspace"),
+            Path::new("/toolchain"),
+        );
+
+        let env = cmd
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|item| item.to_string_lossy().into_owned()),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(env.get("RUSTC"), Some(&Some("/toolchain/rustc".into())));
+        assert_eq!(
+            env.get("CARGO_TARGET_DIR"),
+            Some(&Some("/nested-target".into()))
+        );
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(
+                env.get("RUSTC_WRAPPER"),
+                Some(&Some(
+                    "/workspace/scripts/rustc-macos-loader.sh".to_string()
+                ))
+            );
+            let loader_path = env
+                .get("DYLD_FALLBACK_LIBRARY_PATH")
+                .and_then(Option::as_deref)
+                .expect("nested loader path");
+            assert!(loader_path.starts_with("/toolchain/lib"), "{loader_path}");
+        }
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(env.get("RUSTC_WRAPPER"), Some(&Some(String::new())));
+        assert_eq!(
+            env.get("RUSTC_WORKSPACE_WRAPPER"),
+            Some(&Some(String::new()))
+        );
+        assert_eq!(env.get("RUSTFLAGS"), Some(&None));
+        assert_eq!(env.get("CARGO_ENCODED_RUSTFLAGS"), Some(&None));
+        assert_eq!(env.get("RUSTUP_TOOLCHAIN"), Some(&None));
+    }
+
+    #[test]
     fn strip_glibc_removes_version_suffix() {
         assert_eq!(
             strip_glibc("aarch64-unknown-linux-gnu.2.17"),
@@ -849,28 +990,28 @@ pub const BOOTSTRAP_SUPPORT_BINARIES: &[SourceBuiltBinary] = &[
     fn resolve_target_for_arch_picks_pinned_triple() {
         let toolchain: toml::Value = toml::from_str(
             "zig = \"0.13.0\"\n\
-             cargo-zigbuild = \"0.20.0\"\n\
+             cargo-zigbuild = \"0.23.0\"\n\
              [targets]\n\
              aarch64 = \"aarch64-unknown-linux-musl\"\n\
              x86_64 = \"x86_64-unknown-linux-musl\"\n",
         )
         .unwrap();
         assert_eq!(
-            resolve_target_for_arch(&toolchain, "aarch64"),
+            resolve_target_for_arch(&toolchain, "aarch64").unwrap(),
             "aarch64-unknown-linux-musl"
         );
         assert_eq!(
-            resolve_target_for_arch(&toolchain, "x86_64"),
+            resolve_target_for_arch(&toolchain, "x86_64").unwrap(),
             "x86_64-unknown-linux-musl"
         );
     }
 
     #[test]
-    #[should_panic(expected = "does not yet")]
-    fn resolve_target_for_arch_unsupported_arch_panics() {
+    fn resolve_target_for_arch_refuses_an_unsupported_arch() {
         let toolchain: toml::Value =
             toml::from_str("[targets]\naarch64 = \"aarch64-unknown-linux-musl\"\n").unwrap();
-        let _ = resolve_target_for_arch(&toolchain, "riscv64");
+        let reason = resolve_target_for_arch(&toolchain, "riscv64").unwrap_err();
+        assert!(reason.contains("does not yet"), "{reason}");
     }
 
     #[test]

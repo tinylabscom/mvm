@@ -10,7 +10,6 @@ use mvm_core::template::{
 };
 use tracing::instrument;
 
-use super::crud::template_load;
 use super::slots::template_load_slot;
 
 pub(super) fn slot_kernel_source(
@@ -21,17 +20,50 @@ pub(super) fn slot_kernel_source(
     if built_vmlinux.is_file() {
         return Ok(built_vmlinux.to_path_buf());
     }
-    let fallback = cache_root
+    let arch_str = arch.to_string();
+    let builder_kernel = cache_root
         .join("builder-vm")
-        .join(arch.to_string())
+        .join(&arch_str)
         .join("vmlinux");
-    if fallback.is_file() {
-        return Ok(fallback);
+    let verified_workload_kernel = || match mvm_build::kernel_fetch::resolve_kernel(
+        cache_root, &arch_str, "workload", false,
+    ) {
+        mvm_build::kernel_fetch::KernelResolution::Cached(verified) => {
+            Some(verified.path().to_path_buf())
+        }
+        mvm_build::kernel_fetch::KernelResolution::NeedsBuild(_)
+        | mvm_build::kernel_fetch::KernelResolution::NeedsFetch(_) => None,
+    };
+
+    // AArch64 guests need the workload kernel's platform and dm-verity support.
+    // The x86_64 builder kernel is the established persistent-machine kernel;
+    // keep it first there so an unrelated cached workload kernel cannot change
+    // a previously working boot path.
+    match arch {
+        GuestArch::Aarch64 => {
+            if let Some(workload_kernel) = verified_workload_kernel() {
+                return Ok(workload_kernel);
+            }
+            if builder_kernel.is_file() {
+                return Ok(builder_kernel);
+            }
+        }
+        GuestArch::X86_64 => {
+            if builder_kernel.is_file() {
+                return Ok(builder_kernel);
+            }
+            if let Some(workload_kernel) = verified_workload_kernel() {
+                return Ok(workload_kernel);
+            }
+        }
     }
+    let workload_path =
+        mvm_build::kernel_fetch::cached_kernel_path(cache_root, &arch_str, "workload");
     anyhow::bail!(
-        "flake build produced no vmlinux at {} and the cached builder kernel fallback is absent at {}",
+        "flake build produced no vmlinux at {} and no verified workload kernel is cached at {} \
+         (create one with `mvmctl kernel build --which workload`)",
         built_vmlinux.display(),
-        fallback.display()
+        workload_path.display()
     )
 }
 
@@ -316,7 +348,6 @@ pub(super) fn bundle_artifacts_for_sha(
         template_id: bundle_sha256.to_string(),
         flake_ref: format!("bundle:{bundle_sha256}"),
         profile: installed.manifest.profile.clone().unwrap_or_default(),
-        role: String::new(),
         vcpus: u8::try_from(vcpus_u32.min(u32::from(u8::MAX))).unwrap_or(u8::MAX),
         mem_mib,
         mem_initial_mib: None,
@@ -415,52 +446,6 @@ pub struct Checksums {
     pub files: std::collections::BTreeMap<String, String>,
 }
 
-/// Resolve a built template to its current artifact paths.
-///
-/// Returns `(spec, vmlinux, initrd, rootfs, revision_hash)`.
-/// The artifact paths are absolute and valid on the host.
-#[instrument(skip_all, fields(template_id = id))]
-pub fn template_artifacts(
-    id: &str,
-) -> Result<(TemplateSpec, String, Option<String>, String, String)> {
-    let spec = template_load(id)?;
-    let rev = current_revision_id(id)?;
-    let rev_dir = template_revision_dir(id, &rev);
-
-    let vmlinux = format!("{rev_dir}/vmlinux");
-    let rootfs = format!("{rev_dir}/rootfs.ext4");
-    let initrd_candidate = format!("{rev_dir}/initrd");
-
-    if !std::path::Path::new(&vmlinux).exists() {
-        anyhow::bail!(
-            "Template '{}' has no vmlinux (run `mvmctl template build {}`)",
-            id,
-            id
-        );
-    }
-    if !std::path::Path::new(&rootfs).exists() {
-        anyhow::bail!(
-            "Template '{}' has no rootfs (run `mvmctl template build {}`)",
-            id,
-            id
-        );
-    }
-
-    let has_initrd = std::path::Path::new(&initrd_candidate).exists();
-
-    Ok((
-        spec,
-        vmlinux,
-        if has_initrd {
-            Some(initrd_candidate)
-        } else {
-            None
-        },
-        rootfs,
-        rev,
-    ))
-}
-
 #[instrument(skip_all, fields(template_id))]
 pub fn current_revision_id(template_id: &str) -> Result<String> {
     use std::os::unix::ffi::OsStrExt;
@@ -509,7 +494,59 @@ mod tests {
     }
 
     #[test]
-    fn slot_kernel_source_uses_builder_kernel_fallback() {
+    fn slot_kernel_source_prefers_verified_workload_kernel_for_aarch64() {
+        let tmp = tempfile::tempdir().unwrap();
+        let built = tmp.path().join("build").join("vmlinux");
+        let workload = mvm_build::kernel_fetch::cached_kernel_path(
+            &tmp.path().join("cache"),
+            "aarch64",
+            "workload",
+        );
+        std::fs::create_dir_all(workload.parent().unwrap()).unwrap();
+        std::fs::write(&workload, b"workload-kernel").unwrap();
+        mvm_build::kernel_fetch::record_kernel_digest(&workload).unwrap();
+
+        let selected =
+            slot_kernel_source(&built, &tmp.path().join("cache"), GuestArch::Aarch64).unwrap();
+
+        assert_eq!(selected, workload);
+    }
+
+    #[test]
+    fn slot_kernel_source_prefers_builder_kernel_for_x86_64() {
+        let tmp = tempfile::tempdir().unwrap();
+        let built = tmp.path().join("build").join("vmlinux");
+        let cache = tmp.path().join("cache");
+        let builder = cache.join("builder-vm").join("x86_64").join("vmlinux");
+        let workload = mvm_build::kernel_fetch::cached_kernel_path(&cache, "x86_64", "workload");
+        std::fs::create_dir_all(builder.parent().unwrap()).unwrap();
+        std::fs::write(&builder, b"builder-kernel").unwrap();
+        std::fs::create_dir_all(workload.parent().unwrap()).unwrap();
+        std::fs::write(&workload, b"workload-kernel").unwrap();
+        mvm_build::kernel_fetch::record_kernel_digest(&workload).unwrap();
+
+        let selected = slot_kernel_source(&built, &cache, GuestArch::X86_64).unwrap();
+
+        assert_eq!(selected, builder);
+    }
+
+    #[test]
+    fn slot_kernel_source_uses_verified_workload_kernel_for_x86_64_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let built = tmp.path().join("build").join("vmlinux");
+        let cache = tmp.path().join("cache");
+        let workload = mvm_build::kernel_fetch::cached_kernel_path(&cache, "x86_64", "workload");
+        std::fs::create_dir_all(workload.parent().unwrap()).unwrap();
+        std::fs::write(&workload, b"workload-kernel").unwrap();
+        mvm_build::kernel_fetch::record_kernel_digest(&workload).unwrap();
+
+        let selected = slot_kernel_source(&built, &cache, GuestArch::X86_64).unwrap();
+
+        assert_eq!(selected, workload);
+    }
+
+    #[test]
+    fn slot_kernel_source_falls_back_to_builder_kernel_when_workload_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let built = tmp.path().join("build").join("vmlinux");
         let fallback = tmp
@@ -536,7 +573,7 @@ mod tests {
             .to_string();
 
         assert!(err.contains("flake build produced no vmlinux"));
-        assert!(err.contains("builder-vm/x86_64/vmlinux"));
+        assert!(err.contains("kernels/x86_64/workload/vmlinux"));
     }
 
     #[test]

@@ -28,6 +28,19 @@ describe("Sandbox.create", () => {
     expect(rec.ops).toEqual([]);
   });
 
+  it("records a pinned image and explicit command", () => {
+    mvm.Sandbox.create(
+      { image: `docker.io/example/browser@sha256:${"a".repeat(64)}` },
+      { command: ["/browser", "serve"] },
+    );
+    const rec = currentRecording()!;
+    expect(rec.create.template).toBeUndefined();
+    expect(rec.create.image).toMatch(/a{64}$/);
+    expect(rec.ops).toEqual([
+      { kind: "command_start", argv: ["/browser", "serve"], env: {} },
+    ]);
+  });
+
   it("defaults workloadId to template", () => {
     const sb = mvm.Sandbox.create("python-3.12");
     expect(sb.workloadId).toBe("python-3.12");

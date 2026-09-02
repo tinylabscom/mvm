@@ -16,7 +16,7 @@ backed by a pinned `uv.lock`. The compile step is the same shape as
 This example is the positive-path fixture for the Followup D CI gate
 (`.github/workflows/security.yml::app-deps-audit`): the lockfile is
 hash-pinned, the resolved deps scan clean under pip-audit at the time
-this example was added, and the `mvmctl compile` step emits a launch.json
+this example was added, and the `mvmctl build compile` step emits a launch.json
 with a `dependencies` field the supervisor wires into the workload's
 mount layout.
 
@@ -37,11 +37,11 @@ jq '.dependencies' /tmp/hello-with-deps/launch.json
 ## Build + run (needs a working builder VM)
 
 ```sh
-mvmctl build examples/python/hello-app-with-deps/
+mvmctl machine build examples/python/hello-app-with-deps/
 # … installs deps inside the builder VM, seals the volume …
 mvmctl machine run examples/python/hello-app-with-deps/ --prod
 # claim 9 gate: the supervisor verifies the sealed volume before launching
-mvmctl machine run --flake examples/python/hello-app-with-deps/ --profile prod --entrypoint
+mvmctl machine run --flake examples/python/hello-app-with-deps/ --prod --entrypoint
 # expect: "hello ari"
 ```
 

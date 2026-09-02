@@ -16,7 +16,7 @@ use anyhow::{Context, Result, bail};
 use mvm_build::rootfs_inject::{InjectBinary, build_inject_initramfs};
 use mvm_vmm::host::hvf_supervisor::{HvfDisk, HvfSupervisorConfig};
 
-use mvm_backends::driver::hvf_legacy::resolve_supervisor_path;
+use mvm_backends::driver::hvf_process::resolve_supervisor_path;
 
 /// A rootfs-injection request.
 pub struct InjectRequest<'a> {
@@ -56,6 +56,8 @@ pub fn inject_host_binaries(req: &InjectRequest<'_>) -> Result<()> {
 
     let console_log = req.work_dir.join("inject-console.log");
     let cfg = HvfSupervisorConfig {
+        // A one-shot inject VM; nothing outlives this process.
+        builder_egress_endpoint: None,
         // Irrelevant here: this helper VM carries no egress relay at all.
         trusted_builder_egress: false,
         kernel: req.kernel.to_path_buf(),
@@ -63,13 +65,15 @@ pub fn inject_host_binaries(req: &InjectRequest<'_>) -> Result<()> {
         // is plenty for a mount + copy.
         cmdline: None,
         memory_mib: 0,
+        // One CPU: this helper VM mounts an image and copies files. Defaulting
+        // rather than inheriting anything — it is not the workload's machine.
+        vcpus: 1,
         initramfs: Some(initramfs_path),
         disks: vec![HvfDisk {
             path: req.out_rootfs.to_path_buf(),
             read_only: false,
             ephemeral: false,
         }],
-        virtiofs_root: None,
         virtiofs_shares: vec![],
         vsock: false,
         console_log: console_log.clone(),

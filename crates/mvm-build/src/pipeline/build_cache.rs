@@ -89,10 +89,13 @@ const INCLUDED_TOP_LEVEL: &[&str] = &[
     "build.rs",
     "src",
     "crates",
+    "third_party",
     "xtask",
     "tests",
+    "third_party",
     "schema",
     "nix",
+    ".github",
 ];
 
 /// Directory basenames excluded from the source fingerprint.

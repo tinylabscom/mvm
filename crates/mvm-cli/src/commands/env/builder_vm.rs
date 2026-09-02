@@ -14,6 +14,8 @@ mod builder_vm_bootstrap_tests;
 pub(in crate::commands) mod default_microvm;
 mod image_ops;
 mod kernel;
+mod sdk_sidecar;
+mod stage0_artifact;
 mod stage0_cache;
 #[cfg(test)]
 mod tests;
@@ -43,7 +45,6 @@ use default_microvm::DefaultMicrovmVariant;
 use default_microvm::workload_config_carries_dm_verity;
 pub(crate) use default_microvm::{
     assert_workload_kernel_supports_verity, ensure_default_microvm_image, ensure_workload_kernel,
-    ensure_workload_verity_initrd,
 };
 #[cfg(test)]
 use default_microvm::{
@@ -59,6 +60,8 @@ pub(crate) use kernel::resolve_kernel_source;
 pub(crate) use kernel::{KernelVariant, build_kernel_via_stage0};
 #[cfg(all(test, feature = "builder-vm"))]
 use kernel::{format_compile_elapsed, format_compile_start};
+#[cfg(feature = "builder-vm")]
+pub(crate) use sdk_sidecar::build_sdk_sidecar_from_checkout;
 #[cfg(feature = "builder-vm")]
 use stage0_cache::Stage0FailureStage;
 #[cfg(any(

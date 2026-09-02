@@ -56,10 +56,11 @@ impl GuestRequest {
             GuestRequest::Exec { .. } => Verb::Exec,
             GuestRequest::ExecBatch { .. } => Verb::ExecBatch,
             GuestRequest::RunEntrypoint { .. } => Verb::RunEntrypoint,
+            GuestRequest::RunExtension { .. } => Verb::RunExtension,
+            GuestRequest::CancelExtension { .. } => Verb::CancelExtension,
             GuestRequest::RunDetached { .. } => Verb::RunDetached,
             GuestRequest::PostRestore { .. } => Verb::PostRestore,
             GuestRequest::FsDiff => Verb::FsDiff,
-            GuestRequest::StartPortForward { .. } => Verb::StartPortForward,
             GuestRequest::StartUnixSocketForward { .. } => Verb::StartUnixSocketForward,
             GuestRequest::ConsoleOpen { .. } => Verb::ConsoleOpen,
             GuestRequest::ConsoleClose { .. } => Verb::ConsoleClose,
@@ -118,6 +119,8 @@ impl GuestRequest {
             | GuestRequest::ProbeStatus
             | GuestRequest::PrimedStatus
             | GuestRequest::RunEntrypoint { .. }
+            | GuestRequest::RunExtension { .. }
+            | GuestRequest::CancelExtension { .. }
             | GuestRequest::PostRestore { .. }
             | GuestRequest::EntrypointStatus
             | GuestRequest::ReadinessStatus
@@ -141,7 +144,6 @@ impl GuestRequest {
             | GuestRequest::ExecBatch { .. }
             | GuestRequest::RunDetached { .. }
             | GuestRequest::FsDiff
-            | GuestRequest::StartPortForward { .. }
             | GuestRequest::StartUnixSocketForward { .. }
             | GuestRequest::ConsoleOpen { .. }
             | GuestRequest::ConsoleClose { .. }
@@ -203,6 +205,8 @@ impl GuestRequest {
             "post-restore",
             "entrypoint-status",
             "run-entrypoint",
+            "run-extension",
+            "cancel-extension",
             "stream-input",
             "close-stream-input",
             "mount-volume",
@@ -278,11 +282,11 @@ mod tests {
             },
             GuestRequest::PostRestore {
                 token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+                hostname: None,
                 host_epoch_secs: None,
                 grant_envelope: None,
             },
             GuestRequest::FsDiff,
-            GuestRequest::StartPortForward { guest_port: 1 },
             GuestRequest::StartUnixSocketForward {
                 guest_path: "/run/mvm/forward.sock".to_string(),
                 host_vsock_port: BROKER_PORT,
@@ -519,7 +523,6 @@ mod tests {
                 length: 1,
                 follow_symlinks: true,
             },
-            GuestRequest::StartPortForward { guest_port: 8080 },
         ];
 
         for req in &dev_only_samples {
@@ -566,6 +569,7 @@ mod tests {
             GuestRequest::Wake,
             GuestRequest::PostRestore {
                 token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+                hostname: None,
                 host_epoch_secs: None,
                 grant_envelope: None,
             },
@@ -669,7 +673,9 @@ mod tests {
                 read_only: false,
                 kind: crate::vsock::VolumeConfigKind::VirtioFs,
                 device: None,
+                label: None,
             }],
+            extensions: Vec::new(),
             verb_grant_envelope: None,
         });
         assert_eq!(req.verb(), Verb::ActivateEnvironment);

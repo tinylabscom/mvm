@@ -258,3 +258,14 @@ cover fork/exec plus a first write plus one poll.
 - [x] F3. Python + TypeScript suites green
 - [x] F4. `specs/REFACTOR-STATUS.md` rollup updated
 - [x] F5. Delivery note under `specs/sprint/delivery/`
+
+### WS-J — post-landing guest RPC refusal repair
+
+- [x] J1. Route filesystem and process unary calls through the shared response
+      contract so universal policy refusals remain typed errors.
+- [x] J2. Preserve the standard-profile default while propagating an explicit
+      `mvmctl run --mode live --profile dev` choice into the nested SDK launch.
+- [x] J3. Keep Python and TypeScript profile validation, live argv, and refusal
+      behavior in parity, including the generated environment-name registry.
+- [x] J4. Record the issue closeout in
+      `specs/sprint/delivery/2887-guest-rpc-refusals.md`.

@@ -2,27 +2,43 @@
 //! its exit code / stdout. Covers the CLI-surface suite; scenarios that need
 //! a running microVM call through `mvm-client` instead as those suites land.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use assert_cmd::cargo::CommandCargoExt;
 use cucumber::{given, then, when};
 use tokio::task::spawn_blocking;
 use tokio::time::timeout;
 
 use crate::world::CliWorld;
+use mvm_conformance::IsolatedHome;
 
 /// Build an `mvmctl` subprocess with the same binary discovery the rest of
 /// the conformance suite uses, plus the target directory on `PATH` so helper
 /// binaries built alongside `mvmctl` are visible during live boots.
 pub(crate) fn mvmctl_command() -> Command {
-    #[allow(deprecated)] // matches crates/mvm-cli/tests/cli.rs's use of this API
-    let mut cmd = Command::cargo_bin("mvmctl").unwrap_or_else(|e| {
-        panic!("mvmctl binary not found ({e}) — run `cargo build --bin mvmctl` before `just bdd`")
-    });
-
-    let bin_path = PathBuf::from(cmd.get_program());
+    let cargo_path = std::env::var_os("CARGO_BIN_EXE_mvmctl")
+        .map(PathBuf::from)
+        .or_else(|| {
+            let mut dir = std::env::current_exe().ok()?;
+            dir.pop();
+            if dir.ends_with("deps") {
+                dir.pop();
+            }
+            Some(dir.join("mvmctl"))
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "mvmctl binary path unavailable — run `cargo build --bin mvmctl` before `just bdd`"
+            )
+        });
+    let bin_path = if cargo_path.is_absolute() {
+        cargo_path
+    } else {
+        workspace_root().join(cargo_path)
+    };
+    let mut cmd = Command::new(&bin_path);
     if let Some(bin_dir) = bin_path.parent() {
         let mut path = bin_dir.as_os_str().to_os_string();
         path.push(":");
@@ -50,12 +66,9 @@ pub(crate) fn workspace_root() -> PathBuf {
 
 #[when(expr = "I run mvmctl with {string}")]
 fn run_mvmctl(world: &mut CliWorld, args: String) {
-    #[allow(deprecated)] // matches crates/mvm-cli/tests/cli.rs's use of this API
-    let mut cmd = Command::cargo_bin("mvmctl").unwrap_or_else(|e| {
-        panic!("mvmctl binary not found ({e}) — run `cargo build --bin mvmctl` before `just bdd`")
-    });
+    let mut cmd = mvmctl_command();
     let output = cmd
-        .args(args.split_whitespace())
+        .args(mvm_conformance::doc_examples::tokenize(&args))
         .output()
         .expect("failed to spawn mvmctl");
     world.last_run = Some(output);
@@ -68,7 +81,7 @@ async fn run_mvmctl_with_timeout(world: &mut CliWorld, args: String, seconds: i6
 
     let handle = spawn_blocking(move || {
         mvmctl_command()
-            .args(args.split_whitespace())
+            .args(mvm_conformance::doc_examples::tokenize(&args))
             .output()
             .expect("failed to spawn mvmctl")
     });
@@ -88,14 +101,10 @@ fn run_mvmctl_isolated_home(world: &mut CliWorld, args: String) {
     // dev's real `~/.mvm`. The run is synchronous (`output()` blocks to exit)
     // and the fail-fast path spawns no VM, so the temp dir can drop right after.
     let home = tempfile::tempdir().expect("create isolated MVM_HOME");
-    #[allow(deprecated)] // matches crates/mvm-cli/tests/cli.rs's use of this API
-    let mut cmd = Command::cargo_bin("mvmctl").unwrap_or_else(|e| {
-        panic!("mvmctl binary not found ({e}) — run `cargo build --bin mvmctl` before `just bdd`")
-    });
+    let mut cmd = mvmctl_command();
     let output = cmd
-        .args(args.split_whitespace())
-        .env("HOME", home.path())
-        .env("MVM_HOME", home.path())
+        .args(mvm_conformance::doc_examples::tokenize(&args))
+        .isolated_home(home.path())
         .output()
         .expect("failed to spawn mvmctl");
     world.last_run = Some(output);
@@ -114,13 +123,9 @@ fn run_mvmctl_in_isolated_home(world: &mut CliWorld, args: String) {
         .isolated_home
         .as_ref()
         .expect("`Given an isolated mvm home` must run before this step");
-    #[allow(deprecated)] // matches the sibling steps' use of this API
-    let mut cmd = Command::cargo_bin("mvmctl").unwrap_or_else(|e| {
-        panic!("mvmctl binary not found ({e}) — run `cargo build --bin mvmctl` before `just bdd`")
-    });
-    cmd.args(args.split_whitespace())
-        .env("HOME", home.path())
-        .env("MVM_HOME", home.path());
+    let mut cmd = mvmctl_command();
+    cmd.args(mvm_conformance::doc_examples::tokenize(&args))
+        .isolated_home(home.path());
     if world.kernel_reacquisition_must_fail {
         cmd.env("MVM_KERNEL_SOURCE", "download")
             .env("MVM_UPDATE_DOWNLOAD_URL", "http://127.0.0.1:9");
@@ -138,13 +143,8 @@ fn isolated_mvm_home(world: &mut CliWorld) {
 fn isolated_mvm_home_with_non_verity_kernel(world: &mut CliWorld) {
     let home = tempfile::tempdir().expect("create isolated MVM_HOME");
     let arch = std::env::consts::ARCH;
-    let kernel_dir = home
-        .path()
-        .join("cache")
-        .join("builder-vm")
-        .join(arch)
-        .join("kernels")
-        .join("workload");
+    let kernel_dir =
+        mvm_build::kernel_fetch::kernel_cache_dir(&home.path().join("cache"), arch, "workload");
     std::fs::create_dir_all(&kernel_dir).expect("create fake workload kernel cache dir");
     let kernel = kernel_dir.join("vmlinux");
     std::fs::write(&kernel, b"KALLSYMS-free fake kernel bytes\n")
@@ -166,13 +166,11 @@ fn incompatible_workload_kernel_cache_is_evicted(world: &mut CliWorld) {
         .isolated_home
         .as_ref()
         .expect("isolated home must remain available");
-    let kernel_dir = home
-        .path()
-        .join("cache")
-        .join("builder-vm")
-        .join(std::env::consts::ARCH)
-        .join("kernels")
-        .join("workload");
+    let kernel_dir = mvm_build::kernel_fetch::kernel_cache_dir(
+        &home.path().join("cache"),
+        std::env::consts::ARCH,
+        "workload",
+    );
     for name in ["vmlinux", "vmlinux.sha256", "config"] {
         assert!(
             !kernel_dir.join(name).exists(),
@@ -186,6 +184,59 @@ fn warm_residency_enabled(world: &mut CliWorld) {
     world.warm_residency = true;
 }
 
+fn selected_live_home(world: &mut CliWorld) -> PathBuf {
+    let warm_home = std::env::var_os("MVM_E2E_HOME").map(PathBuf::from);
+    if warm_home.is_none() && world.isolated_home.is_none() {
+        world.isolated_home = Some(tempfile::tempdir().expect("create isolated MVM_HOME"));
+    }
+    let scenario_home = world.isolated_home.as_ref().map(|dir| dir.path());
+    mvm_conformance::live_home_precedence(scenario_home, warm_home.as_deref())
+        .expect("one of the two is set above")
+        .to_path_buf()
+}
+
+fn vm_state_dirs(home: &Path) -> std::io::Result<HashSet<PathBuf>> {
+    let vms_dir = home.join("vms");
+    let entries = match std::fs::read_dir(&vms_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(error) => return Err(error),
+    };
+
+    entries
+        .map(|entry| entry.map(|entry| entry.path()))
+        .filter_map(|entry| match entry {
+            Ok(path) if path.is_dir() => Some(Ok(path)),
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect()
+}
+
+fn transient_request_dirs(home: &Path) -> std::io::Result<HashSet<PathBuf>> {
+    Ok(vm_state_dirs(home)?
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_none_or(|name| !name.starts_with("standby-"))
+        })
+        .collect())
+}
+
+#[given(expr = "the live mvm home request state is recorded")]
+fn record_live_request_state(world: &mut CliWorld) {
+    let home = selected_live_home(world);
+    let request_dirs = vm_state_dirs(&home).unwrap_or_else(|error| {
+        panic!(
+            "read transient VM state under the live home {}: {error}",
+            home.display()
+        )
+    });
+    world.last_live_home = Some(home);
+    world.live_request_dirs_before = Some(request_dirs);
+}
+
 #[when(expr = "I run mvmctl in an isolated live home with {string}")]
 pub(crate) fn run_mvmctl_isolated_live_home(world: &mut CliWorld, args: String) {
     // Like `run_mvmctl_isolated_home`, but for scenarios that boot a real
@@ -193,23 +244,28 @@ pub(crate) fn run_mvmctl_isolated_live_home(world: &mut CliWorld, args: String) 
     // paths (e.g. `examples/exit_code`) resolve the same way as a manual run
     // from the repo root, and the target directory is prepended to `PATH` so
     // helper binaries built alongside `mvmctl` are found.
-    if world.isolated_home.is_none() {
-        world.isolated_home = Some(tempfile::tempdir().expect("create isolated MVM_HOME"));
-    }
-    let home = world
-        .isolated_home
-        .as_ref()
-        .expect("isolated home is set above");
+    //
+    // The home is the artifact-warm one when `MVM_E2E_HOME` names it. A fresh
+    // tempdir per scenario looks like better isolation, but the guest binaries
+    // are cached *under the home*, so every such scenario re-cross-compiles
+    // them from scratch — minutes each, repeated across the live suite. The
+    // warm home is what makes a live run finish in a sane time.
+    //
+    // A home the scenario declared for itself still wins: `Given an isolated
+    // mvm home` exists so a scenario can be hermetic, or can seed a cache and
+    // then assert on it, and honouring the warm home over that put `machine
+    // create` and `machine start` in two different directories.
+    let home = selected_live_home(world);
     let mut command = mvmctl_command();
     command
         .current_dir(workspace_root())
-        .args(args.split_whitespace())
-        .env("HOME", home.path())
-        .env("MVM_HOME", home.path());
+        .args(mvm_conformance::doc_examples::tokenize(&args))
+        .isolated_home(&home);
     if world.warm_residency {
         command.env("MVM_RESIDENCY", "warm");
     }
     let output = command.output().expect("failed to spawn mvmctl");
+    world.last_live_home = Some(home);
     world.last_run = Some(output);
 }
 
@@ -218,21 +274,18 @@ pub(crate) fn run_mvmctl_isolated_live_home(world: &mut CliWorld, args: String) 
 /// guarantees the fixture exists before this scenario is selected.
 #[when(expr = "I install the bundle fixture")]
 fn install_bundle_fixture(world: &mut CliWorld) {
+    trust_the_fixture_publisher(world);
     let fixture = crate::bundle_fixture_path()
         .expect("`@bundle` scenarios only run when MVM_BDD_BUNDLE names a real file");
-    if world.isolated_home.is_none() {
-        world.isolated_home = Some(tempfile::tempdir().expect("create isolated MVM_HOME"));
-    }
     let home = world
         .isolated_home
         .as_ref()
-        .expect("isolated home is set above");
+        .expect("isolated home is set by trust_the_fixture_publisher");
     let output = mvmctl_command()
         .current_dir(workspace_root())
         .args(["bundle", "install"])
         .arg(&fixture)
-        .env("HOME", home.path())
-        .env("MVM_HOME", home.path())
+        .isolated_home(home.path())
         .output()
         .expect("failed to spawn mvmctl");
     // `Installed bundle <sha> (N artifacts, publisher key_id=...)`
@@ -272,9 +325,8 @@ fn boot_installed_bundle(world: &mut CliWorld, args: String) {
     let output = mvmctl_command()
         .current_dir(workspace_root())
         .args(["machine", "run", "--manifest", &sha])
-        .args(args.split_whitespace())
-        .env("HOME", home.path())
-        .env("MVM_HOME", home.path())
+        .args(mvm_conformance::doc_examples::tokenize(&args))
+        .isolated_home(home.path())
         .output()
         .expect("failed to spawn mvmctl");
     world.last_run = Some(output);
@@ -299,26 +351,38 @@ fn isolated_home_no_transient_request_dirs(world: &mut CliWorld) {
         .isolated_home
         .as_ref()
         .expect("isolated home must be created before checking it");
-    let vms_dir = home.path().join("vms");
-    let entries = match std::fs::read_dir(&vms_dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
-        Err(error) => panic!("read transient VM state directory {vms_dir:?}: {error}"),
-    };
-
-    let request_dirs = entries
-        .map(|entry| entry.expect("read transient VM state entry").path())
-        .filter(|path| {
-            path.is_dir()
-                && path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_none_or(|name| !name.starts_with("standby-"))
-        })
-        .collect::<Vec<_>>();
+    let request_dirs = transient_request_dirs(home.path()).unwrap_or_else(|error| {
+        panic!(
+            "read transient VM state under isolated home {}: {error}",
+            home.path().display()
+        )
+    });
     assert!(
         request_dirs.is_empty(),
         "generated transient request state directories remain: {request_dirs:?}"
+    );
+}
+
+#[then(expr = "the live mvm home has no new transient request state directories")]
+fn live_home_no_new_transient_request_dirs(world: &mut CliWorld) {
+    let home = world
+        .last_live_home
+        .as_ref()
+        .expect("a live command must run before checking its home");
+    let before = world
+        .live_request_dirs_before
+        .as_ref()
+        .expect("record the live request state before running the journey");
+    let after = vm_state_dirs(home).unwrap_or_else(|error| {
+        panic!(
+            "read transient VM state under live home {}: {error}",
+            home.display()
+        )
+    });
+    let leaked = after.difference(before).cloned().collect::<Vec<_>>();
+    assert!(
+        leaked.is_empty(),
+        "new transient request state directories remain: {leaked:?}"
     );
 }
 
@@ -682,7 +746,7 @@ fn run_mvmctl_against_local_registry(world: &mut CliWorld, args: String) {
     let registry_url = format!("file://{}", reg.path().display());
 
     let output = mvmctl_command()
-        .args(args.split_whitespace())
+        .args(mvm_conformance::doc_examples::tokenize(&args))
         .env("MVM_TEMPLATE_REGISTRY", registry_url)
         .output()
         .expect("failed to spawn mvmctl");
@@ -715,8 +779,7 @@ fn generate_project_from_template(world: &mut CliWorld, name: String) {
             &project_dir.to_string_lossy(),
         ])
         .env("MVM_TEMPLATE_REGISTRY", registry_url)
-        .env("HOME", &home_path)
-        .env("MVM_HOME", &home_path)
+        .isolated_home(&home_path)
         .env("MVM_SKIP_RECONCILE", "1")
         .output()
         .expect("failed to spawn mvmctl");
@@ -733,5 +796,73 @@ fn generated_project_contains_file(world: &mut CliWorld, file: String) {
     assert!(
         path.is_file(),
         "expected generated project to contain {file:?} at {path:?}"
+    );
+}
+
+/// Enrol the fixture's publisher key into the scenario's isolated trust store.
+///
+/// A bundle installs into a fresh `MVM_HOME`, whose trust store starts empty,
+/// and `read_and_verify_bundle` refuses an unknown `key_id` — correctly, that
+/// is claim 9. So an install scenario has to establish the trust anchor first,
+/// exactly as an operator adopting a publisher does.
+fn trust_the_fixture_publisher(world: &mut CliWorld) {
+    if world.isolated_home.is_none() {
+        world.isolated_home = Some(tempfile::tempdir().expect("create isolated MVM_HOME"));
+    }
+    let home = world
+        .isolated_home
+        .as_ref()
+        .expect("isolated home is set above");
+    let pubkey = crate::bundle_pubkey_path()
+        .expect("`@bundle` scenarios only run when MVM_BDD_BUNDLE_PUBKEY names a real file");
+    let output = mvmctl_command()
+        .current_dir(workspace_root())
+        .args(["trust", "add"])
+        .arg(&pubkey)
+        .isolated_home(home.path())
+        .output()
+        .expect("failed to spawn mvmctl trust add");
+    assert!(
+        output.status.success(),
+        "enrolling the fixture publisher failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Install the fixture into a home that has *not* enrolled its publisher.
+#[when(expr = "I install the bundle fixture without trusting its publisher")]
+fn install_bundle_fixture_untrusted(world: &mut CliWorld) {
+    let fixture = crate::bundle_fixture_path()
+        .expect("`@bundle` scenarios only run when MVM_BDD_BUNDLE names a real file");
+    if world.isolated_home.is_none() {
+        world.isolated_home = Some(tempfile::tempdir().expect("create isolated MVM_HOME"));
+    }
+    let home = world
+        .isolated_home
+        .as_ref()
+        .expect("isolated home is set above");
+    world.last_run = Some(
+        mvmctl_command()
+            .current_dir(workspace_root())
+            .args(["bundle", "install"])
+            .arg(&fixture)
+            .isolated_home(home.path())
+            .output()
+            .expect("failed to spawn mvmctl"),
+    );
+}
+
+#[then(expr = "the failure names the untrusted publisher key")]
+fn failure_names_untrusted_key(world: &mut CliWorld) {
+    let run = world.last_run.as_ref().expect("a command has run");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        text.contains("trust store has no entry for key_id"),
+        "refusal must say the publisher is untrusted, not fail for some other \
+         reason; output was:\n{text}"
     );
 }

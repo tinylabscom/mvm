@@ -9,11 +9,21 @@ alongside in C2.
 from __future__ import annotations
 
 import os
+import json
+import time
+import urllib.request
+from dataclasses import dataclass
 from typing import Any
 
-from mvm._sandbox import Sandbox
+from mvm._sandbox import Sandbox, _encode_network
 
-__all__ = ["BrowserSandbox", "CodeError", "CodeSandbox"]
+__all__ = [
+    "BrowserReadyError",
+    "BrowserSandbox",
+    "CodeError",
+    "CodeSandbox",
+    "OBSCURA_IMAGE",
+]
 
 
 class CodeError(RuntimeError):
@@ -112,19 +122,50 @@ class CodeSandbox:
         return result.stdout
 
 
-# Browser → (image, default CDP/remote-debugging port). Chromium-family
-# browsers expose the Chrome DevTools Protocol on 9222.
-_BROWSERS: dict[str, tuple[str, int]] = {
-    "chromium": ("chromium", 9222),
-    "chrome": ("chrome", 9222),
+OBSCURA_IMAGE = (
+    "docker.io/h4ckf0r0day/obscura@"
+    "sha256:78c99ac89d010d444d96d85c183a2db912c41f807b7807d697df98ab7e4bd3c2"
+)
+_MVM_EGRESS_PROXY = "http://127.0.0.1:1080"
+
+
+class BrowserReadyError(RuntimeError):
+    """The browser did not expose a valid CDP version endpoint in time."""
+
+
+@dataclass(frozen=True)
+class _BrowserPreset:
+    source_kind: str
+    source: str
+    cdp_port: int
+    command: tuple[str, ...] = ()
+
+
+_BROWSERS: dict[str, _BrowserPreset] = {
+    "chromium": _BrowserPreset("manifest", "chromium", 9222),
+    "chrome": _BrowserPreset("manifest", "chrome", 9222),
+    "obscura": _BrowserPreset(
+        "image",
+        OBSCURA_IMAGE,
+        9222,
+        (
+            "/obscura",
+            "--proxy",
+            _MVM_EGRESS_PROXY,
+            "serve",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "9222",
+        ),
+    ),
 }
 
 
 class BrowserSandbox:
     """A `Sandbox` preset for a headless browser: a baked browser image with
-    its CDP port forwarded to the host. Image + port preset only — no new
-    mechanism (the forward is `Sandbox.forward`, the protocol is the
-    browser's own CDP).
+    its CDP port declared as signed ingress before boot. Image + port preset
+    only — no new mechanism (the protocol is the browser's own CDP).
 
     `endpoint()` returns the host-side CDP HTTP base; pass it to a CDP client
     (Playwright/Puppeteer `connectOverCDP` / `browserURL`), which discovers
@@ -148,13 +189,46 @@ class BrowserSandbox:
             raise ValueError(
                 f"unknown browser {browser!r}; supported: {sorted(_BROWSERS)}"
             )
-        image, cdp_port = _BROWSERS[browser]
-        self._cdp_port = cdp_port
-        self._host_port = host_port if host_port is not None else cdp_port
-        self._sandbox = Sandbox.create(
-            image=image, workload_id=workload_id, **create_kwargs
+        preset = _BROWSERS[browser]
+        caller_command = create_kwargs.pop("command", None)
+        if preset.command and caller_command is not None:
+            raise ValueError("the obscura provider does not allow command overrides")
+        command = list(preset.command) if preset.command else caller_command
+        self._cdp_port = preset.cdp_port
+        self._host_port = host_port if host_port is not None else preset.cdp_port
+        source_kwargs = (
+            {"template": preset.source}
+            if preset.source_kind == "manifest"
+            else {"image": preset.source}
         )
-        self._sandbox.forward(self._host_port, cdp_port)
+        network = _encode_network(create_kwargs.pop("network", None)) or {
+            "mode": "none",
+            "ports": [],
+        }
+        ports = list(network.get("ports", []))
+        mapping_id = max(
+            (int(port["mapping_id"]) for port in ports),
+            default=0,
+        ) + 1
+        ports.append(
+            {
+                "mapping_id": mapping_id,
+                "proto": "tcp",
+                "host_addr": "127.0.0.1",
+                "host": self._host_port,
+                "guest_addr": "127.0.0.1",
+                "guest": preset.cdp_port,
+                "transform": "opaque",
+            }
+        )
+        network["ports"] = ports
+        self._sandbox = Sandbox.create(
+            workload_id=workload_id,
+            command=command,
+            network=network,
+            **source_kwargs,
+            **create_kwargs,
+        )
 
     @property
     def sandbox(self) -> Sandbox:
@@ -164,6 +238,38 @@ class BrowserSandbox:
     def endpoint(self) -> str:
         """Host-side CDP HTTP endpoint (e.g. ``http://localhost:9222``)."""
         return f"http://localhost:{self._host_port}"
+
+    def wait_until_ready(
+        self, *, timeout: float = 10.0, retry_interval: float = 0.1
+    ) -> str:
+        """Wait for a bounded CDP `/json/version` response and return its
+        WebSocket debugger URL. Failure tears down the sandbox and forwarder."""
+        if timeout <= 0 or retry_interval <= 0:
+            raise ValueError("timeout and retry_interval must be positive")
+        endpoint = f"http://127.0.0.1:{self._host_port}/json/version"
+        deadline = time.monotonic() + timeout
+        last_error: Exception | None = None
+        while time.monotonic() < deadline:
+            try:
+                remaining = max(deadline - time.monotonic(), 0.001)
+                with urllib.request.urlopen(endpoint, timeout=min(remaining, 1.0)) as response:
+                    payload = response.read(65537)
+                if len(payload) > 65536:
+                    raise ValueError("CDP version response exceeds 64 KiB")
+                parsed = json.loads(payload)
+                websocket = parsed.get("webSocketDebuggerUrl") if isinstance(parsed, dict) else None
+                if not isinstance(websocket, str) or not websocket:
+                    raise ValueError("CDP response lacks webSocketDebuggerUrl")
+                return websocket
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                last_error = exc
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    time.sleep(min(retry_interval, remaining))
+        self.kill()
+        raise BrowserReadyError(
+            f"browser CDP endpoint {endpoint} was not ready within {timeout:g}s"
+        ) from last_error
 
     def kill(self) -> None:
         self._sandbox.kill()

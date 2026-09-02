@@ -1,13 +1,13 @@
 //! `xtask check-guest-init-parity`
 //!
 //! Guest init parity: a workload guest is brought up by one of two inits —
-//! `mvm-oci-init` as PID 1 on the legacy per-rootfs initrd, and the guest agent's
+//! the guest agent's
 //! activation path when the universal initramfs boots it as PID 1. Both must run
 //! the same post-mount setup, and they do it by calling one shared
 //! `provision_guest_environment`.
 //!
 //! This gate exists because that parity was silently lost once. The universal
-//! initramfs replaced `mvm-oci-init` but carried over only its mounting: the
+//! initramfs replaced the per-rootfs init but carried over only its mounting: the
 //! workload booted with `lo` down, no resolver, and nothing listening on the
 //! loopback proxy port, while still being handed the proxy environment
 //! variables. Every egress attempt failed as `Network unreachable` rather than
@@ -39,9 +39,10 @@ const BOOTSTRAP_RS: &str = "crates/mvm-agentd/src/guest_bootstrap.rs";
 /// The agent's PID-1 activation path, which also carries the ordering rule.
 const AGENT_INIT_RS: &str = "crates/mvm-agentd/src/bin/mvm-guest-agent/init.rs";
 
-/// Every guest init entry point. Adding an init means adding it here — the list
-/// is what makes "both inits" checkable rather than aspirational.
-const GUEST_INITS: &[&str] = &["crates/mvm-agentd/src/bin/mvm-oci-init.rs", AGENT_INIT_RS];
+/// Every guest init entry point. There is one — the universal initramfs agent —
+/// and adding another means adding it here, which is what keeps the parity
+/// check real rather than aspirational.
+const GUEST_INITS: &[&str] = &[AGENT_INIT_RS];
 
 /// Steps `provision_guest_environment` must still perform.
 ///
