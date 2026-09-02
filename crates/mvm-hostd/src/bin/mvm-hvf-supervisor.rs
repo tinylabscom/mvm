@@ -529,6 +529,7 @@ fn spawn_owned_builder_endpoint(
     .context("spawning the builder's egress endpoint")
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn duration_micros(duration: std::time::Duration) -> u64 {
     u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
