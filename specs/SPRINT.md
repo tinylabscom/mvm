@@ -27,6 +27,19 @@
       ledger with a BDD suite (`s33_content_addressed_assets`, 4 scenarios).
       Workspace check, host tests, gated Linux cross-check, clippy, fmt, and
       the claim/CLI lint gates are green. Merge delivery remains.
+- [ ] **Aux host-helper contract verification.**
+      `specs/plans/2026-09-02-aux-helper-contract.md`.
+      Host helpers now carry a compiled-in contract version and answer a
+      `--contract-version` probe; `mvmctl` probes before spawn and never
+      hands a moved-on config contract to a helper built from an older
+      revision or the other cargo profile. A stale helper inside a source
+      checkout is rebuilt automatically in the running binary's profile;
+      anything else is a hard error naming both versions and the exact
+      rebuild command. A shape pin on `HvfSupervisorConfig` forces the
+      contract version to move with the schema. Focused resolver, probe, and
+      spawn-path regressions, the mvm-vmm / mvm-backends / mvm-hostd /
+      mvm-runtime suites, zero-warning Clippy, and Linux/BDD gated
+      compilation are green; merge delivery remains.
 
 - [ ] **Mounted PTY image environment.**
       `specs/plans/2026-09-01-mounted-pty-image-environment.md`.

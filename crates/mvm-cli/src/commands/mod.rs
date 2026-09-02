@@ -280,6 +280,10 @@ pub fn cli_command() -> clap::Command {
 }
 
 pub fn run() -> Result<()> {
+    // The qemu vsock bridge re-execs this binary as a per-VM host helper, so
+    // mvmctl answers the host-helper contract probe like every other helper —
+    // before clap sees the unknown flag.
+    mvm_vmm::host::helper_contract::exit_with_probe_answer_if_requested("mvmctl");
     let result = run_command();
     // Emitted after the command settles so the profile covers teardown as well.
     // A no-op unless MVM_SPAN_TIMINGS is set.

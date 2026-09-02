@@ -26,6 +26,7 @@ use mvm_vmm::hvf_handoff::HvfHandoffRequest;
 
 use crate::driver::hvf_process::{
     self as hvf_backend, PID_FILE_NAME, PID_FILE_TIMEOUT, resolve_supervisor_path,
+    resolve_supervisor_path_verified,
 };
 use mvm_contract::grants::CpuGrant;
 use mvm_core::checkpoint::{DeviceAnchors, HVF_FRAME_BLOB};
@@ -327,7 +328,7 @@ fn boot_with_handoff(
     .map_err(|e| anyhow!("write supervisor config {}: {e}", config_path.display()))?;
     let json =
         serde_json::to_string(&cfg).map_err(|e| anyhow!("serialize HvfSupervisorConfig: {e}"))?;
-    let supervisor = resolve_supervisor_path()?;
+    let supervisor = resolve_supervisor_path_verified()?;
     let mut child = bounded_supervisor_command(&supervisor, spec, &paths.state_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())

@@ -16,7 +16,7 @@ use anyhow::{Context, Result, bail};
 use mvm_build::rootfs_inject::{InjectBinary, build_inject_initramfs};
 use mvm_vmm::host::hvf_supervisor::{HvfDisk, HvfSupervisorConfig};
 
-use mvm_backends::driver::hvf_process::resolve_supervisor_path;
+use mvm_backends::driver::hvf_process::resolve_supervisor_path_verified;
 
 /// A rootfs-injection request.
 pub struct InjectRequest<'a> {
@@ -110,7 +110,7 @@ pub fn inject_host_binaries(req: &InjectRequest<'_>) -> Result<()> {
     };
     let json = serde_json::to_string(&cfg).context("serialize inject supervisor config")?;
 
-    let supervisor = resolve_supervisor_path()?;
+    let supervisor = resolve_supervisor_path_verified()?;
     let mut child = Command::new(&supervisor)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
