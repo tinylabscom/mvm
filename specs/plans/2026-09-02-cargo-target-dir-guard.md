@@ -3,7 +3,7 @@
 Backing: shipped-source
 Validation: check-sprint-append
 
-**Status: IMPLEMENTED — merge delivery remains.** Companion to the
+**Status: MERGED via #3135 (squash bf5916cd79).** Companion to the
 stale-helper contract fix (PR #3132): that one stops a *runtime* helper from
 an older revision being silently reused; this one stops cargo itself from
 type-checking this tree against *artifacts* built from another source tree.
@@ -66,4 +66,4 @@ the guard is a no-op there.
 - `CARGO_TARGET_DIR=<contaminated shared dir> bash scripts/cargo-fast.sh
   --version` reclaims loudly and exits 0; an inside-tree value stays silent;
   `MVM_DEV_ENV_KEEP_INHERITED=1` keeps the value loudly.
-- Merge delivery: PR, full CI matrix.
+- Merge delivery: full CI matrix green; squash-merged via #3135.

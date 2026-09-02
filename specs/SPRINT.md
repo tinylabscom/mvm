@@ -3571,4 +3571,4 @@ writes the plan:
 - [x] Gate-test all four policy cases (unset, inside-honored,
       outside-reclaimed, keep-inherited) and wire shellcheck + the gate
       test into CI.
-- [ ] Merge the guard through the queue.
+- [x] Merge the guard through the queue (#3135).
