@@ -18,6 +18,21 @@ originates every outbound connection**. That is what makes default-deny egress,
 "no raw secret reaches the guest", and the audit chain mechanically enforceable
 rather than merely intended.
 
+## Role of the `mvmctl` crate
+
+The repository root is also the `mvmctl` Cargo package. Its binary is the thin
+process entry point that initializes platform-specific main-thread behavior and
+calls `mvm_cli::run()`. Its library is a convenience facade that re-exports the
+core, runtime, build, guest-agent, and host-daemon crates for embedders that
+want one dependency.
+
+The CLI is the main consumer of this package. External Rust automation can use
+the facade, while `mvm-conformance` uses the built binary and selected library
+surfaces in end-to-end tests. Implementation remains in the narrower workspace
+crates so each layer can be tested and depended on independently; the root
+crate should contain composition and re-exports, not a second implementation
+of lifecycle or security policy.
+
 ```
 macOS 26+ (Apple Silicon)  →  in-house HVF VMM (Hypervisor.framework, zero extra deps)
 macOS 13–25                →  libkrun (Homebrew)
