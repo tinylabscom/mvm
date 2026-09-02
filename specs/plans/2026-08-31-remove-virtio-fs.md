@@ -508,16 +508,38 @@ Five coordinated changes, host and guest:
       libkrun's two sites pass `None` explicitly, with a comment saying why.
       See the corrected checkbox at the top of this stage.
 
-- [ ] The QEMU **workload** driver's share arm is a different matter and *is*
+- [x] The QEMU **workload** driver's share arm is a different matter and *is*
       free: workload specs carry `shares: Vec::new()` unconditionally since
       Stage A, so `qemu.rs`'s share handling is unreachable for workloads.
+      **Deleted** — the `virtiofsd` spawn loop, the `memory-backend-memfd` +
+      `-numa` object, the `vhost-user-fs-pci` loop, the socket-path helper and
+      the guard field on the running-VM handle. Proven unreachable before
+      deleting rather than assumed: *every* `VmmSpec.shares` assignment in the
+      tree is empty, so no spec reaching any driver carries one.
 
-- [ ] Only once both builders are on the disk transport can
+      The test that asserted the mapping was replaced rather than dropped.
+      `argv_emits_no_virtio_fs_arguments_even_for_a_spec_that_carries_shares`
+      builds a spec **with** a share and asserts the argv still contains no
+      virtiofs wiring — so the arm is pinned as *deleted*, not merely
+      unreached, and re-introducing it fails the suite.
+
+- [x] Only once both builders are on the disk transport can
       `crates/mvm-vmm/src/host/virtiofsd.rs` (382 lines), its QEMU call sites,
       and the `virtiofsd` host dependency in the Linux install docs go — and
-      with them the `--sandbox none` flag that started this plan. That is also
-      when `check-no-virtio-fs` drops to FFI-only rows and the ratchet becomes
-      an absolute rather than a ceiling.
+      with them the `--sandbox none` flag that started this plan.
+
+      **Done.** Both builders landed on the disk transport (QEMU, then the
+      persistent HVF builder), which is what unblocked this. The module is
+      deleted, its only consumer was the QEMU workload arm above, and the
+      `which` dependency it alone needed is out of `mvm-vmm`'s manifest. The
+      install docs turned out to carry no `virtiofsd` prerequisite to remove.
+
+      **`--sandbox none` is gone with it** — the flag that opened this plan no
+      longer exists anywhere in the tree.
+
+      The gate has not reached FFI-only rows yet: the libkrun builder's Stage 0
+      `RootDir` path and the now-dead HVF device model still hold entries. It
+      dropped from 46 sites across 14 files to 41 across 13.
 - [ ] The **libkrun** persistent builder still serves `work`/`mvm-bins`/`job`/
       `out` as shares (`libkrun_builder.rs`). Its VMM has virtio-fs, so nothing
       forced the move; the session record already carries the two-state
