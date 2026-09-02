@@ -53,6 +53,19 @@ Feature: every README-documented CLI launch mode boots a real guest
     And the guest printed "console-ok"
     And the guest control plane came up
 
+  # A host-directory mount used to route an otherwise absolute PTY command
+  # through `/bin/sh -lc`. The image's `/etc/profile` then replaced its OCI
+  # PATH before bash started, hiding tools such as Rust's cargo even though the
+  # binaries were present in the rootfs.
+  @live @dir_share
+  Scenario: an interactive mounted run preserves the image environment
+    When I launch "machine run --image rust --env NAME=ari --mount .:/work -it -- /bin/bash -c 'tty; command -v cargo; printf NAME=%s $NAME; test -f /work/README.md'" on a terminal
+    Then the launch succeeds
+    And the guest console is a pseudo-terminal
+    And the guest printed "/usr/local/cargo/bin/cargo"
+    And the guest printed "NAME=ari"
+    And the guest control plane came up
+
   # The same defect stated as the mount it actually is, on the non-interactive
   # path so it runs on a host with no terminal to give — a CI runner, or this
   # suite under `just bdd`. devtmpfs supplies /dev/ptmx and the image supplies

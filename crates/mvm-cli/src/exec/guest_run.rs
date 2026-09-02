@@ -185,7 +185,7 @@ struct PtyConsoleRequest {
 
 fn pty_console_request(req: &ExecRequest, wrapper: String) -> PtyConsoleRequest {
     match &req.target {
-        ExecTarget::Inline { argv } if direct_pty_inline_argv(argv, req) => PtyConsoleRequest {
+        ExecTarget::Inline { argv } if direct_pty_inline_argv(argv) => PtyConsoleRequest {
             argv: argv.clone(),
             env: req.env.clone(),
         },
@@ -196,8 +196,8 @@ fn pty_console_request(req: &ExecRequest, wrapper: String) -> PtyConsoleRequest 
     }
 }
 
-fn direct_pty_inline_argv(req_argv: &[String], req: &ExecRequest) -> bool {
-    req.dir_shares.is_empty() && req_argv.first().is_some_and(|argv0| argv0.starts_with('/'))
+fn direct_pty_inline_argv(req_argv: &[String]) -> bool {
+    req_argv.first().is_some_and(|argv0| argv0.starts_with('/'))
 }
 
 #[cfg(test)]
@@ -234,6 +234,41 @@ mod tests {
 
         assert_eq!(pty.argv, vec!["/bin/sh"]);
         assert_eq!(pty.env, vec![("TERM".into(), "xterm-256color".into())]);
+    }
+
+    #[test]
+    fn pty_console_request_with_mount_passes_absolute_argv_directly() {
+        let req = ExecRequest {
+            name: None,
+            warm_pool_size: 0,
+            image: ImageSource::Template("t".into()),
+            cpus: 1,
+            memory_mib: 256,
+            mem_initial_mib: None,
+            dir_shares: vec![DirShareSpec {
+                host_dir: "/host/src".into(),
+                guest_mount: "/work/src".into(),
+                read_only: true,
+            }],
+            disk_volumes: Vec::new(),
+            env: vec![("NAME".into(), "ari".into())],
+            target: ExecTarget::Inline {
+                argv: vec!["/bin/bash".into()],
+            },
+            timeout_secs: None,
+            pty: true,
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            stdin: Vec::new(),
+            healthcheck: None,
+            hypervisor: None,
+            sdk_host_services: Vec::new(),
+            declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
+        };
+
+        let pty = pty_console_request(&req, "unused wrapper".to_string());
+
+        assert_eq!(pty.argv, vec!["/bin/bash"]);
+        assert_eq!(pty.env, vec![("NAME".into(), "ari".into())]);
     }
 
     #[test]
