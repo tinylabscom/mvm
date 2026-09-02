@@ -593,19 +593,25 @@ Five coordinated changes, host and guest:
       snapshot was captured under. The constants are now documented as a
       reserved hole, and `RNG_MMIO_BASE` derives *from* it so the dependency is
       stated once instead of restated. Same address as before.
-- [ ] The `virtio.rs` VirtioFs MMIO **device** itself, its test suite, the
-      1,108-line `virtio_fs.rs` FuseServer, and that module's fuzz target
-      (`fuzz-backend/fuzz_targets/fuse_dispatch.rs`). Split out of the wiring
-      above once the size became clear: it is a much larger deletion that also
-      removes a fuzzing harness, and the fuzz crate carries its own lockfile
-      that a dep change has to refresh. The FUSE parser is not cited as a claim
-      witness in ADR-001 or `model/claims.toml`, so this does not touch the
-      ledger — but deleting a guest-driven parser's fuzzer deserves its own
-      reviewable change rather than riding along.
-- [x] Delete `crates/mvm-vmm/src/host/virtiofsd.rs`, both QEMU call sites, and
-      the `virtiofsd` host dependency from the Linux install docs. (Duplicate of
-      the entry above; both were open. Done — and the install docs turned out to
-      carry no `virtiofsd` prerequisite to remove.)
+- [x] The `virtio.rs` VirtioFs MMIO **device**, its test suite, the 1,108-line
+      `virtio_fs.rs` FuseServer, and that module's fuzz target. **Done.**
+
+      The strongest form of this plan's argument: the fuzz target's own premise
+      was *"the VirtioFs device hands guest-supplied bytes straight to
+      `FuseServer::dispatch`; the guest is untrusted, so a byte pattern that
+      panics the parser is a guest-triggerable host DoS."* That premise is false
+      once no device hands it guest bytes — so the parser is deleted rather than
+      fuzzed, and the DoS surface is removed rather than defended. The FUSE
+      parser was cited as a witness in neither ADR-001 nor `model/claims.toml`,
+      so the ledger is untouched.
+
+      Went with it: the `RunDevice` impl, the shared-memory-region MMIO
+      registers (a DAX-window concern, virtio-fs only), sixteen FUSE/FS
+      constants, the differential reference-walk test suite, the
+      `security.yml` fuzz step, and the fuzz crate's lockfile entry. The
+      workflow gate's target floor moved 15 → 14, with a note that the floor
+      guards against the parser failing to resolve targets rather than
+      mandating a count.
 
 ### Stage D — the gate
 
