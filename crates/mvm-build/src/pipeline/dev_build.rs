@@ -657,6 +657,26 @@ fn try_typed_persistent_build(
     use crate::builder_vm::host_system_linux;
     use crate::libkrun_builder::GUEST_WORK_DIR;
 
+    // This route reaches its artifacts through the `/job` share: it stages into
+    // a host directory and tells the daemon to export to the guest path the
+    // share backs. A disk-transport session has no such share — the record's
+    // own `job_dir` doc says the guest never sees that path — and the transport
+    // collects `/out`, not `/job/<id>/out`. Running anyway stages into a
+    // directory nothing writes to and reads it back empty.
+    //
+    // Fall through to the single-shot builder rather than refusing outright:
+    // unlike the install arm, which fails closed because a claim-11 sealed
+    // volume would silently lose its SBOM and CVE sidecars, this route has a
+    // safety net and taking it costs build time rather than correctness.
+    if record.disk_transport.is_some() {
+        tracing::warn!(
+            session_id = %record.session_id,
+            "persistent session uses the disk transport, which does not read back \
+             /job/<id>/out; falling through to the single-shot builder"
+        );
+        return None;
+    }
+
     let system = host_system_linux();
     let attr_path = match profile {
         Some(p) if p != "default" => format!("packages.{system}.tenant-{p}"),
@@ -750,12 +770,26 @@ fn finalize_typed_persistent_build(
 
 #[cfg(feature = "builder-vm")]
 fn copy_staged_artifacts(staging: &str, final_dir: &str) -> Result<()> {
+    let mut copied = 0usize;
     for entry in
         std::fs::read_dir(staging).with_context(|| format!("reading staging dir {staging}"))?
     {
         let entry = entry?;
         let dst = std::path::Path::new(final_dir).join(entry.file_name());
         copy_staged_artifact(&entry.path(), &dst)?;
+        copied += 1;
+    }
+    // An empty export is a failed build that looked like a successful one. The
+    // loop above simply does not run, so this returned `Ok` and the caller went
+    // on to build `vmlinux`/`rootfs.ext4` paths for files that were never
+    // written, log "build complete", and hand back a `DevBuildResult` — with the
+    // real failure surfacing much later, at boot, far from its cause. Refusing
+    // here also keeps it out of the persistent route's fallback, which only
+    // triggers on an `Err`.
+    if copied == 0 {
+        anyhow::bail!(
+            "the builder exported no artifacts to {staging}; the build produced nothing to copy"
+        );
     }
     Ok(())
 }
@@ -926,6 +960,45 @@ fn nix_system() -> &'static str {
         "aarch64-linux"
     } else {
         "x86_64-linux"
+    }
+}
+
+#[cfg(all(test, feature = "builder-vm"))]
+mod typed_export_tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_export_is_an_error_rather_than_an_empty_success() {
+        // The regression this guards: the copy loop over an empty directory
+        // does not run, so it used to return Ok and the caller went on to
+        // report a complete build whose vmlinux and rootfs paths named files
+        // that were never written.
+        let scratch = tempfile::tempdir().unwrap();
+        let staging = scratch.path().join("out");
+        let final_dir = scratch.path().join("final");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::create_dir_all(&final_dir).unwrap();
+
+        let err = copy_staged_artifacts(staging.to_str().unwrap(), final_dir.to_str().unwrap())
+            .expect_err("an empty export must not look like a successful build");
+        assert!(
+            err.to_string().contains("exported no artifacts"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn a_populated_export_still_copies() {
+        let scratch = tempfile::tempdir().unwrap();
+        let staging = scratch.path().join("out");
+        let final_dir = scratch.path().join("final");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::create_dir_all(&final_dir).unwrap();
+        std::fs::write(staging.join("vmlinux"), b"kernel").unwrap();
+
+        copy_staged_artifacts(staging.to_str().unwrap(), final_dir.to_str().unwrap())
+            .expect("a populated export copies");
+        assert_eq!(std::fs::read(final_dir.join("vmlinux")).unwrap(), b"kernel");
     }
 }
 
