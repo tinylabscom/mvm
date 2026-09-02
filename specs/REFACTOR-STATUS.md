@@ -4,14 +4,6 @@ Last updated: 2026-09-01
 
 ## In progress
 
-- [ ] **Signed caller commitment — issue #3070.**
-      `specs/plans/2026-09-01-signed-caller-commitment.md`.
-      Replaces reliance on overwriteable free-form audit labels with one typed,
-      opaque 32-byte commitment covered by the plan identity/signature and
-      copied into chain-signed audit entries. Workspace tests, zero-warning
-      Clippy, Linux/BDD gated checks, frozen-wire compatibility, and the full
-      non-live BDD suite are green; merge delivery remains.
-
 - [ ] **Extended CI residual regressions — issues #3051 and #3052.**
       `specs/plans/2026-08-28-extended-ci-red-repair.md`.
       Persistent launches clamp vCPUs before admission, authenticated frame
@@ -264,6 +256,15 @@ Last updated: 2026-09-01
       delivery remains.
 
 ## Completed
+
+- [x] **Signed caller commitment — issue #3070, PR #3076.**
+      `specs/plans/2026-09-01-signed-caller-commitment.md`.
+      Replaces reliance on overwriteable free-form audit labels with one typed,
+      opaque 32-byte commitment covered by the plan identity/signature and
+      copied into chain-signed audit entries. Workspace tests, zero-warning
+      Clippy, Linux/BDD gated checks, frozen-wire compatibility, and the full
+      non-live BDD suite were green before merge. Landed on main as
+      `8623950746`; issue #3070 is closed.
 
 - [x] **SDK sidecar selection from the image's own libc — issue #2969, PR #3060.**
       `specs/sprint/delivery/sdk-sidecar-image-libc-selection.md`.

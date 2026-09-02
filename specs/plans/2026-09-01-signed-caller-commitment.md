@@ -3,7 +3,7 @@
 Backing: shipped-source
 Validation: check-sprint-append
 
-**Status: IMPLEMENTED AND VALIDATED — MERGE DELIVERY REMAINS**
+**Status: COMPLETE — LANDED IN PR #3076**
 
 Issue #3070 asks whether an external settlement or escrow verifier can bind a
 pre-agreed task-spec digest to the exact execution MVM admits. `audit_labels`
@@ -43,4 +43,4 @@ and accepted by the user-facing launch commands.
 - [x] Run workspace tests/check, gated-target checks, formatting, and
       zero-warning workspace Clippy.
 - [x] Update the sprint delivery record and refactor rollup.
-- [ ] Merge through the queue and close #3070 from landed evidence.
+- [x] Merge through the queue and close #3070 from landed evidence.
