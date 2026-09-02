@@ -374,3 +374,50 @@ fn supervisor_build_requires_a_detected_libkrun_header() {
         "the libkrun-sys helper must only build after a real header is found"
     );
 }
+
+/// The suite must create the mvm home private, the way `mvmctl` would.
+///
+/// With `MVM_E2E_HOME` unset the home falls back to the real `$HOME/.mvm`, and
+/// creating it under the caller's umask leaves it 0755 on a CI runner. That is
+/// a W1.5 violation the suite's own `doctor` scenario then reports as `data dir
+/// mode: MISSING`, so the lane went red for a directory the harness made wrong
+/// before mvmctl ever saw it. Nothing repairs it either: the `ensure_home_dir`
+/// helper that would has no callers anywhere in the workspace.
+#[test]
+fn the_documented_surface_creates_its_mvm_home_private() {
+    let script = documented_surface_script();
+    assert!(
+        !script.contains("mkdir -p \"$E2E_HOME\""),
+        "the mvm home must not be created bare; the umask makes it 0755 and \
+         doctor fails the lane on it"
+    );
+    assert!(
+        script.contains("chmod 700 \"$1\""),
+        "the mvm home helper must chmod unconditionally — `mkdir -m` applies the \
+         mode only to directories it creates, leaving an already-loose home loose"
+    );
+}
+
+/// The aarch64 smoke must print its captured log however it dies.
+///
+/// The boot is redirected wholesale to a file, and the tail used to sit inside
+/// the wrong-exit-code branch, so a run killed before reaching that branch
+/// printed nothing at all: the job reported `exit code 143` over an empty step
+/// with no way to tell what the guest had been doing. A lane that cannot say
+/// why it failed is one nobody can fix.
+#[test]
+fn the_aarch64_smoke_prints_its_boot_log_on_any_failure() {
+    let workflow =
+        fs::read_to_string(".github/workflows/ci-full.yml").expect("read extended CI workflow");
+    let trap = workflow
+        .find("trap 'echo \"::group::mvmctl first-boot log (tail)\"")
+        .expect("the first-boot step must dump its log from an EXIT trap");
+    let branch = workflow
+        .find("expected guest exit code 7 from first boot")
+        .expect("the first-boot step must still assert the exit code");
+    assert!(
+        trap < branch,
+        "the log dump must be armed before the run, or a death that skips the \
+         exit-code branch still prints nothing"
+    );
+}
