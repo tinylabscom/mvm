@@ -127,6 +127,32 @@ fn qemu_boot_argv_for_arch(
     let mut args: Vec<String> = Vec::new();
     args.push("-m".into());
     args.push(spec.memory_mib.to_string());
+    // A floor that keeps an absurd `--cpus` from being fatal, deliberately not
+    // a claim about how many vCPUs QEMU will start. This backend therefore
+    // declares no `max_vcpus` in `capabilities()`, and the reporting clamp
+    // above the backends stays quiet on it.
+    //
+    // Nothing reachable from here knows the real number. QEMU's ceiling is a
+    // property of the machine type, and the machine type on x86_64 is whichever
+    // one the distribution packaged as its default -- omitted from this argv on
+    // purpose, so it moves without mvm moving. One host, one 8.2.2 binary:
+    // `pc-i440fx-noble-v2` (that default) stops at 255, every `pc-q35` from 5.2
+    // on reports 288, and `virt-8.2` on aarch64 stops at 512.
+    //
+    // Asking does not help either, which is the part worth writing down. QMP
+    // `query-machines` reports `cpu-max: 288` for q35, and that machine refuses
+    // `-smp 256` with `apic initialization failed. APIC ID 255 is invalid`.
+    // A probe would spend a subprocess on every launch to obtain a count 33
+    // above the one the machine boots -- the failure a declared ceiling exists
+    // to prevent, bought at a higher price.
+    //
+    // And no host-side number is the one the caller observes: the guest kernel
+    // binds first. `--cpus 100` and `--cpus 300` both pass QEMU's check, boot,
+    // and report 64 (`CPU topo: Allowing 64 present CPUs`) -- `CONFIG_NR_CPUS`,
+    // which `nix/images/kernel/` does not set, so it is nixpkgs' arch-dependent
+    // default. A warning naming any ceiling above 64 would misdescribe the
+    // machine the caller got, which is why silence here is the accurate answer
+    // rather than the unfinished one.
     let vcpus = spec.vcpus.clamp(1, u32::from(u8::MAX));
     args.push("-smp".into());
     args.push(vcpus.to_string());
@@ -993,6 +1019,57 @@ mod tests {
         let append = argvalue(&argv, "-append").expect("append");
         assert!(append.contains("console=ttyAMA0"), "got: {append}");
         assert!(!append.contains("console=ttyS0"), "got: {append}");
+    }
+
+    /// This backend declares no vCPU ceiling, and that is the answer rather
+    /// than a gap left for someone to fill in.
+    ///
+    /// The other backends declare one because they have one to declare:
+    /// Firecracker's API refuses above 32, libkrun aborts at 65, HVF asks the
+    /// host. QEMU's limit belongs to the machine type -- 255 on the x86_64
+    /// default, 288 reported for q35, 512 on aarch64 `virt` -- and this driver
+    /// names no machine on x86_64, so the number is the distribution's to
+    /// change. Asking QEMU is worse than not asking: `query-machines` reports
+    /// 288 for a q35 that will not start at 256.
+    ///
+    /// The measurement that settles it is on the other side. `--cpus 100` and
+    /// `--cpus 300` both boot and both report 64 vCPUs, because the guest
+    /// kernel's `CONFIG_NR_CPUS` binds well under any of those ceilings. A
+    /// declared ceiling exists to make the clamp warning truthful, and here
+    /// every candidate would make it name a count four times what the caller
+    /// got.
+    ///
+    /// So the contract still holds -- an over-large `--cpus` boots rather than
+    /// failing -- and it is `-smp` that holds it, not a declaration.
+    #[test]
+    fn no_vcpu_ceiling_is_declared_and_an_oversized_request_still_boots() {
+        assert_eq!(
+            QemuDriver::new().capabilities().max_vcpus,
+            None,
+            "a ceiling declared here would be a guess about the host's QEMU \
+             package, and would still sit above the guest kernel's own limit"
+        );
+
+        // The floor in the argv is what keeps the request non-fatal. QEMU
+        // refuses `-smp 9999` outright, so an unclamped value would turn an
+        // over-large request into a failed launch on this backend alone.
+        for (requested, expected) in [(9999, "255"), (300, "255"), (100, "100"), (0, "1")] {
+            let mut spec = spec_with(KernelImage::Path("/img/vmlinux".into()), vec![], vec![]);
+            spec.vcpus = requested;
+            let argv = qemu_boot_argv_for_arch(
+                &spec,
+                Path::new("/img/vmlinux"),
+                3,
+                true,
+                Path::new("/state/w/qemu.pid"),
+                "x86_64",
+            );
+            assert_eq!(
+                argvalue(&argv, "-smp"),
+                Some(expected),
+                "{requested} vCPUs requested"
+            );
+        }
     }
 
     #[test]
