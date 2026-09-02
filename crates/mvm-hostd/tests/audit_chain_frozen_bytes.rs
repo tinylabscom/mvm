@@ -94,6 +94,7 @@ fn frozen_entries() -> Vec<PlanAuditEntry> {
             image_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
                 .to_string(),
             event: "plan.admitted".to_string(),
+            caller_commitment: None,
             labels: BTreeMap::new(),
         },
         PlanAuditEntry {
@@ -107,6 +108,7 @@ fn frozen_entries() -> Vec<PlanAuditEntry> {
             image_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
                 .to_string(),
             event: "plan.policy_resolved".to_string(),
+            caller_commitment: None,
             labels: labels.clone(),
         },
         PlanAuditEntry {
@@ -120,6 +122,7 @@ fn frozen_entries() -> Vec<PlanAuditEntry> {
             image_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
                 .to_string(),
             event: "plan.launched".to_string(),
+            caller_commitment: None,
             labels,
         },
     ]

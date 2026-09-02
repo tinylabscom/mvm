@@ -33,6 +33,7 @@ fn entry(n: usize) -> PlanAuditEntry {
         image_name: "img".to_string(),
         image_sha256: "0".repeat(64),
         event: "plan.launched".to_string(),
+        caller_commitment: None,
         labels: std::collections::BTreeMap::from([("n".to_string(), n.to_string())]),
     }
 }

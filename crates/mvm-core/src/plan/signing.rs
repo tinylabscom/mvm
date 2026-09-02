@@ -262,6 +262,7 @@ pub mod test_support {
                 capture_paths: vec!["/artifacts".to_string()],
                 retention_days: 30,
             },
+            caller_commitment: None,
             audit_labels: BTreeMap::from([("workflow".to_string(), "etl-1".to_string())]),
             key_rotation: KeyRotationSpec { interval_days: 7 },
             attestation: AttestationRequirement {

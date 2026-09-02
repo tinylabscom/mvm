@@ -4,6 +4,14 @@ Last updated: 2026-09-01
 
 ## In progress
 
+- [ ] **Signed caller commitment — issue #3070.**
+      `specs/plans/2026-09-01-signed-caller-commitment.md`.
+      Replaces reliance on overwriteable free-form audit labels with one typed,
+      opaque 32-byte commitment covered by the plan identity/signature and
+      copied into chain-signed audit entries. Workspace tests, zero-warning
+      Clippy, Linux/BDD gated checks, frozen-wire compatibility, and the full
+      non-live BDD suite are green; merge delivery remains.
+
 - [x] **Contributor SDK-sidecar recovery guidance.**
       `specs/plans/2026-09-01-contributor-sidecar-recovery.md`.
       The source-checkout recovery path now distinguishes debug and release

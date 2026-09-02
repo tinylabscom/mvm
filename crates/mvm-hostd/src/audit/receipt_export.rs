@@ -644,6 +644,7 @@ mod tests {
             image_sha256: "sha256:0000000000000000000000000000000000000000000000000000000000000002"
                 .into(),
             event: event.into(),
+            caller_commitment: None,
             labels,
         }
     }

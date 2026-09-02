@@ -559,6 +559,7 @@ async fn start_refuses_spec_shapes_the_in_process_backend_cannot_honor() {
     let _home = Isolated::new();
     let client = mock_client();
     let mut spec = mvm_runtime::machine::persist::MachineSpec {
+        caller_commitment: None,
         schema_version: mvm_runtime::machine::persist::MACHINE_SPEC_SCHEMA_VERSION,
         name: "p-net".into(),
         image: Some("alpine:latest".into()),
@@ -998,6 +999,7 @@ fn a_restart_re_admits_under_the_persisted_grants_not_deny_all() {
     // the "my allowlist stopped applying" failure in its purest form: closed
     // for egress, so nothing breaks loudly, and silent for CPU and wall clock.
     let mut spec = mp::MachineSpec {
+        caller_commitment: None,
         schema_version: mp::MACHINE_SPEC_SCHEMA_VERSION,
         name: "p-restart".to_string(),
         image: Some("alpine:latest".to_string()),

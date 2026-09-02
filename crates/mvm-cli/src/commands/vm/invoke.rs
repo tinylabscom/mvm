@@ -60,6 +60,8 @@ pub(in crate::commands) struct EntrypointCall {
     /// Explicit ProdSafe agent-verb override to mint into the admitted grant
     /// for the transient entrypoint boot. Empty => use the computed default.
     pub agent_verb_override: Vec<String>,
+    /// Opaque commitment to bind into the transient entrypoint plan.
+    pub caller_commitment: Option<mvm_core::plan::CallerCommitment>,
     /// Restore the session VM from its post-boot snapshot before the call.
     /// Wired but no-op in this build (session-pool plan).
     pub reset: bool,
@@ -151,6 +153,7 @@ struct EntrypointAdmissionParams<'a> {
     mem_mib: u64,
     lowered_secrets: &'a super::managed_secrets::LoweredPlanSecrets,
     agent_verb_override: &'a [String],
+    caller_commitment: Option<mvm_core::plan::CallerCommitment>,
     keep_alive_dev: bool,
     network_policy: mvm_core::network_policy::NetworkPolicy,
     /// Whether this call asked for a host→guest stdin stream. The only thing
@@ -174,6 +177,7 @@ impl<'a> EntrypointAdmissionParams<'a> {
             mem_mib: 256,
             lowered_secrets: None,
             agent_verb_override: &[],
+            caller_commitment: None,
             keep_alive_dev: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             stream_stdin: false,
@@ -190,6 +194,7 @@ struct EntrypointAdmissionParamsBuilder<'a> {
     mem_mib: u64,
     lowered_secrets: Option<&'a super::managed_secrets::LoweredPlanSecrets>,
     agent_verb_override: &'a [String],
+    caller_commitment: Option<mvm_core::plan::CallerCommitment>,
     keep_alive_dev: bool,
     network_policy: mvm_core::network_policy::NetworkPolicy,
     stream_stdin: bool,
@@ -216,6 +221,14 @@ impl<'a> EntrypointAdmissionParamsBuilder<'a> {
 
     fn agent_verb_override(mut self, agent_verb_override: &'a [String]) -> Self {
         self.agent_verb_override = agent_verb_override;
+        self
+    }
+
+    fn caller_commitment(
+        mut self,
+        caller_commitment: Option<mvm_core::plan::CallerCommitment>,
+    ) -> Self {
+        self.caller_commitment = caller_commitment;
         self
     }
 
@@ -246,6 +259,7 @@ impl<'a> EntrypointAdmissionParamsBuilder<'a> {
                 .lowered_secrets
                 .expect("entrypoint admission params require lowered secrets"),
             agent_verb_override: self.agent_verb_override,
+            caller_commitment: self.caller_commitment,
             keep_alive_dev: self.keep_alive_dev,
             network_policy: self.network_policy,
             stream_stdin: self.stream_stdin,
@@ -281,6 +295,7 @@ fn admit_entrypoint_boot(
         seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
         secret_release: params.lowered_secrets.secret_release,
         secrets: params.lowered_secrets.secrets.clone(),
+        caller_commitment: params.caller_commitment,
         no_supervisor: false,
         ledger: &ledger,
         keys_dir: None,
@@ -445,6 +460,7 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
     let cpus = call.cpus;
     let mem = call.memory_mib as u64;
     let agent_verb_override = call.agent_verb_override.clone();
+    let caller_commitment = call.caller_commitment.clone();
     let keep_alive_dev = call.keep_alive_dev;
     let network_policy = call.network_policy.clone();
     let admit_network_policy = network_policy.clone();
@@ -467,6 +483,7 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
                 .mem_mib(mem)
                 .lowered_secrets(&lowered_secrets)
                 .agent_verb_override(&agent_verb_override)
+                .caller_commitment(caller_commitment.clone())
                 .keep_alive_dev(keep_alive_dev)
                 .network_policy(admit_network_policy.clone())
                 .stream_stdin(stream_stdin)
@@ -2538,6 +2555,7 @@ mod streamed_stdin_tests {
             memory_mib: 256,
             from_workload_ir: None,
             agent_verb_override: Vec::new(),
+            caller_commitment: None,
             reset: false,
             keep_alive: false,
             keep_alive_dev: false,

@@ -160,6 +160,7 @@ fn entry_for(
         image_name: identity.image_name.clone(),
         image_sha256: identity.image_sha256.clone(),
         event: event.to_string(),
+        caller_commitment: identity.caller_commitment.clone(),
         labels,
     }
 }
@@ -173,6 +174,7 @@ pub fn identity_of(plan: &ExecutionPlan) -> PlanIdentity {
         plan_version: plan.plan_version,
         image_name: plan.image.name.clone(),
         image_sha256: plan.image.sha256.to_ascii_lowercase(),
+        caller_commitment: plan.caller_commitment.clone(),
         audit_labels: plan.audit_labels.clone(),
     }
 }
@@ -650,6 +652,7 @@ mod sink_tests {
             image_name: "vm".to_string(),
             image_sha256: "a".repeat(64),
             event: event.to_string(),
+            caller_commitment: None,
             labels: Default::default(),
         }
     }

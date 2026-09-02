@@ -1116,6 +1116,7 @@ mod tests {
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
+            caller_commitment: None,
             audit_labels: Default::default(),
             agent_verbs: None,
             services: Vec::new(),

@@ -335,6 +335,7 @@ impl Recorder {
             image_name: UNBOUND_IMAGE_NAME.to_string(),
             image_sha256: UNBOUND_IMAGE_SHA256.to_string(),
             event: event_name,
+            caller_commitment: None,
             labels,
         }
     }

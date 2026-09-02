@@ -181,15 +181,25 @@ order and asks for no shares). What is left is narrower than "the builder VM":
 
 - [x] `work`, `job`, `mvm-bins` — inbound. Done for the one-shot builder via
       the disk transport; `work` was already done on Stage 0.
-- [ ] **The closure seed is not done, and this box used to claim it was.** It is
-      the one inbound tree still on virtio-fs in the one-shot libkrun builder:
-      `libkrun_builder.rs` calls `closure_seed_share` +
-      `add_virtio_fs(CLOSURE_SEED_TAG, …)` at both transport sites, while
-      `prepare_builder_transport_disks` passed a hardcoded `None`. The helper now
-      takes a real `closure_nar` — the QEMU builder uses it — so flipping libkrun
-      is two tokens. Held back only because it changes the macOS default builder
-      and the QEMU work was validated on Linux/KVM; it needs its own live
-      libkrun run.
+- [x] **The closure seed is done now.** This box used to claim it was done while
+      `prepare_builder_transport_disks` passed a hardcoded `None` and both
+      transport sites attached the NAR over virtio-fs a few lines later. Both
+      now pass `self.closure_nar.as_deref()` and attach no share, so the
+      one-shot libkrun builder boots with an empty `virtio_fs_mounts` list —
+      verified against the supervisor config a live `--builder libkrun` run
+      wrote, not just its exit status.
+
+      `run_stage0_impl` keeps its share deliberately: Stage 0 boots a virtio-fs
+      *root* and has no transport disks, so it predates this seam rather than
+      lagging it.
+
+      **The live run could not exercise the closure-carrying arm.** No builder
+      pack on the dev host emits a `nix-closure.nar`, so
+      `closure_nar_for_host_arch()` is `None` and old and new code produce
+      identical bytes. That arm is unit-tested instead
+      (`prepare_transport_disks_lands_the_closure_under_its_fixed_name`), which
+      also pins the rename to `CLOSURE_FILE` — a differently-named source
+      landing under its own name would make the guest's import a silent no-op.
 **The guest is already most of the way there.** `mvm-host-vm-init` has a
 complete disk-transport mode, selected by `mvm.builder_transport=disk` with
 `mvm.builder_input=` / `mvm.builder_output=` naming the devices:
@@ -204,6 +214,48 @@ rewrite between dispatches; the guest re-reads it with `tar xf` per dispatch, so
 `Run.job_dir_relpath` keeps working and stays pointing into `/job`. Sequencing is
 already safe: the host finishes writing before it sends `Run`, and V1 serializes
 dispatches behind the supervisor's mutex.
+
+> **Re-scoped against the tree. Read this before the five boxes below.**
+>
+> The recipe that follows targets the `HostVmRequest::Run` shell-job dispatch.
+> **A build does not take that path any more.** `dev_build.rs` says so in as
+> many words — *"The legacy in-VM shell-job dispatch was removed; typed is the
+> only persistent path"* — and routes through `try_typed_persistent_build`,
+> where a reachable `mvm-builderd` builds `/work#<attr>` and **exports its
+> artifacts into `/job/<uuid>/out`**, which the host then reads from the host
+> side of that same share. `PersistentBuilderSupervisor::submit` still exists
+> and is still called by the hidden `mvmctl persistent-builder` subcommand, but
+> migrating it would move a path no build takes while leaving the live one on
+> virtio-fs.
+>
+> **Two more corrections to this stage's framing:**
+>
+> *The blast radius is far smaller than stated.* The box below claiming "the
+> persistent builder is what `mvmctl build` uses on macOS 26+" is wrong.
+> `HvfPersistentHostVm` has exactly one caller, `mvmctl persistent-builder`,
+> declared `#[command(hide = true)]`. `dev_build` routes through it only when a
+> session record exists *and* residency policy allows, and **any** dispatch
+> failure falls back to the single-shot builder — which the code itself calls
+> "the safety net". This is opt-in, hidden, and already has a fallback.
+>
+> *The inbound half is not separately shippable.* "Move `work` and `mvm-bins`
+> to the input disk, keep `/job` as a share" is not expressible:
+> `mvm.builder_transport=disk` is all-or-nothing in the guest.
+> `setup_modules_and_virtiofs` skips **every** virtio-fs mount when it is set,
+> because in that mode the host declares no tags at all and each attempt would
+> fail with "tag not found". A hybrid needs a guest change and an image rebuild.
+>
+> **So the remaining work is a protocol question, not a spec change:** how does
+> the typed `mvm-builderd` export return artifacts without a writable host
+> directory? Candidates are (a) builderd writes the artifact tar onto the output
+> disk itself, which needs the device inside the guest and a raw-tar writer in
+> the daemon; or (b) the dispatch loop collects `/job/<uuid>/out` onto the
+> output disk on a new request, which reintroduces a dependency on that loop
+> running alongside the daemon. Neither is a line-edit, and (a) is the shape
+> that matches how every other tier now works. Resolve this before writing code.
+>
+> Everything below is preserved as the original recipe, and is accurate only for
+> the `Run` dispatch path it was written against.
 
 Five coordinated changes, host and guest:
 
@@ -270,10 +322,12 @@ Five coordinated changes, host and guest:
 
       **Runs only in the Linux test lane.** The guest bin is `cfg`-gated, so
       these tests compile on macOS via `just check-gated` but execute in CI.
-- [ ] **Cannot be validated in CI or on a non-macOS host.** Every guest-booting
-      lane skips on hosted runners, and the persistent builder is what
-      `mvmctl build` uses on macOS 26+. Land this only behind a real
-      `mvmctl build` on Apple Silicon; a broken builder has no CI witness.
+- [ ] **Cannot be validated in CI**, though it is validatable by hand: every
+      guest-booting lane skips on hosted runners, so this needs a real Apple
+      Silicon run. The rest of this box was wrong and is struck — the persistent
+      builder is **not** what `mvmctl build` uses on macOS 26+. It is a hidden,
+      opt-in subcommand with a single-shot fallback, so a break here degrades to
+      a slower build rather than a broken one.
 - [ ] **Sequence the guest half first.** `mvm-host-vm-init` is cross-compiled and
       baked into the builder rootfs, so a guest change only takes effect after
       the image is rebuilt. Landing the guest's per-dispatch staging while the

@@ -328,6 +328,17 @@ pub(in crate::commands) struct RunArgs {
     /// Write a signed execution receipt to this path.
     #[arg(long, value_name = "PATH")]
     pub receipt: Option<PathBuf>,
+    /// Bind a caller commitment into the signed execution plan.
+    ///
+    /// The value is 64 lowercase hex characters encoding opaque 32-byte data.
+    /// It is also copied into every chain-signed plan audit entry.
+    #[arg(
+        long,
+        value_name = "HEX",
+        help = "Bind a caller commitment into the signed execution plan",
+        long_help = "Bind a 32-byte commitment into the signed plan and audit chain"
+    )]
+    pub caller_commitment: Option<mvm_core::plan::CallerCommitment>,
     /// Print a redacted JSON execution summary (no guest output).
     #[arg(long)]
     pub json: bool,
@@ -450,6 +461,7 @@ impl Default for RunArgs {
             env: Vec::new(),
             timeout: None,
             receipt: None,
+            caller_commitment: None,
             json: false,
             dry_run: false,
             launch_plan: None,
@@ -653,6 +665,7 @@ pub(in crate::commands) fn run_secure_with_source(
     let admit_mem_mib = u64::from(parse_human_size(&args.memory).context("Invalid --memory")?);
     let admit_network_policy = network_policy.clone();
     let admit_agent_verb = args.agent_verb.clone();
+    let admit_caller_commitment = args.caller_commitment.clone();
     let admit_host_services =
         super::host_services::parse_host_service_bindings(&args.host_service)?;
     let admit_pty = args.pty;
@@ -693,6 +706,7 @@ pub(in crate::commands) fn run_secure_with_source(
             // No secrets on the plain transient path; deny secret release.
             secret_release: mvm_core::plan::SecretReleasePolicy::default(),
             secrets: vec![],
+            caller_commitment: admit_caller_commitment.clone(),
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: None,
@@ -2101,6 +2115,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn run_parses_a_canonical_caller_commitment() {
+        use clap::Parser;
+
+        let digest = "ab".repeat(32);
+        let parsed = crate::commands::Cli::try_parse_from([
+            "mvmctl",
+            "run",
+            "--caller-commitment",
+            &digest,
+            "--",
+            "x",
+        ])
+        .expect("run commitment parses");
+        let crate::commands::Commands::Run(parsed) = parsed.command else {
+            panic!("expected Commands::Run");
+        };
+        assert_eq!(
+            parsed
+                .run
+                .caller_commitment
+                .as_ref()
+                .map(ToString::to_string),
+            Some(digest)
+        );
+    }
+
+    #[test]
+    fn run_rejects_a_malformed_caller_commitment() {
+        use clap::Parser;
+
+        let error = crate::commands::Cli::try_parse_from([
+            "mvmctl",
+            "run",
+            "--caller-commitment",
+            "abcd",
+            "--",
+            "x",
+        ])
+        .expect_err("short commitment must be rejected");
+        assert!(error.to_string().contains("exactly 64 chars"));
+    }
+
     /// The shared half of `machine run` is the same `RunArgs`, so its defaults
     /// are the same values — including `--profile`, which the two verbs used to
     /// disagree about.
@@ -2145,6 +2202,37 @@ mod tests {
         assert_eq!(
             parsed.health_start_period, expected.health_start_period,
             "--health-start-period default"
+        );
+    }
+
+    #[test]
+    fn machine_run_shares_the_caller_commitment_flag() {
+        use clap::Parser;
+
+        let digest = "cd".repeat(32);
+        let parsed = crate::commands::Cli::try_parse_from([
+            "mvmctl",
+            "machine",
+            "run",
+            "--caller-commitment",
+            &digest,
+            "--",
+            "x",
+        ])
+        .expect("machine run commitment parses");
+        let crate::commands::Commands::Machine(machine) = parsed.command else {
+            panic!("expected Commands::Machine");
+        };
+        let crate::commands::machine::MachineAction::Run(parsed) = machine.action else {
+            panic!("expected MachineAction::Run");
+        };
+        assert_eq!(
+            parsed
+                .run
+                .caller_commitment
+                .as_ref()
+                .map(ToString::to_string),
+            Some(digest)
         );
     }
 

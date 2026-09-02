@@ -2,7 +2,11 @@
 mod build_embed_cache;
 #[path = "build_support.rs"]
 mod build_support;
-#[path = "src/host_binaries/toolchain.rs"]
+// The pinned-toolchain resolution is shared with `mvm-build`, whose
+// builder-VM bootstrap asks whether an `embed-host-bins` build can succeed
+// before spawning one. A build script cannot depend on a workspace crate, so
+// it reads the same file off disk.
+#[path = "../mvm-build/src/embed_toolchain.rs"]
 mod host_binaries_toolchain;
 
 use std::path::{Path, PathBuf};
@@ -206,6 +210,7 @@ fn write_unembedded_table(workspace_root: &Path, out_dir: &Path) {
     println!("cargo:rerun-if-changed=build_support.rs");
     println!("cargo:rerun-if-changed=build_embed_cache.rs");
     println!("cargo:rerun-if-changed=src/host_binaries/manifest.rs");
+    println!("cargo:rerun-if-changed=../mvm-build/src/embed_toolchain.rs");
     println!("cargo:rerun-if-env-changed=MVM_EMBED_NO_CACHE");
     println!("cargo:rerun-if-env-changed=MVM_EMBED_CACHE_DIR");
 
@@ -525,7 +530,7 @@ fn read_pinned_toolchain(root: &Path) -> Pin {
 }
 
 #[cfg(test)]
-fn resolve_target_for_arch(toolchain: &toml::Value, arch: &str) -> String {
+fn resolve_target_for_arch(toolchain: &toml::Value, arch: &str) -> Result<String, String> {
     host_binaries_toolchain::resolve_target_for_arch(toolchain, arch)
 }
 
@@ -992,21 +997,21 @@ pub const BOOTSTRAP_SUPPORT_BINARIES: &[SourceBuiltBinary] = &[
         )
         .unwrap();
         assert_eq!(
-            resolve_target_for_arch(&toolchain, "aarch64"),
+            resolve_target_for_arch(&toolchain, "aarch64").unwrap(),
             "aarch64-unknown-linux-musl"
         );
         assert_eq!(
-            resolve_target_for_arch(&toolchain, "x86_64"),
+            resolve_target_for_arch(&toolchain, "x86_64").unwrap(),
             "x86_64-unknown-linux-musl"
         );
     }
 
     #[test]
-    #[should_panic(expected = "does not yet")]
-    fn resolve_target_for_arch_unsupported_arch_panics() {
+    fn resolve_target_for_arch_refuses_an_unsupported_arch() {
         let toolchain: toml::Value =
             toml::from_str("[targets]\naarch64 = \"aarch64-unknown-linux-musl\"\n").unwrap();
-        let _ = resolve_target_for_arch(&toolchain, "riscv64");
+        let reason = resolve_target_for_arch(&toolchain, "riscv64").unwrap_err();
+        assert!(reason.contains("does not yet"), "{reason}");
     }
 
     #[test]

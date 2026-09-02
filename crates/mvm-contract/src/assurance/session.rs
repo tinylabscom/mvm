@@ -40,6 +40,9 @@ pub struct PlanIdentity {
     pub plan_version: u32,
     pub image_name: String,
     pub image_sha256: String,
+    /// Opaque caller commitment copied from the admitted plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_commitment: Option<crate::plan::CallerCommitment>,
     /// Labels the plan asks to be copied onto every entry it generates.
     #[serde(default)]
     pub audit_labels: BTreeMap<String, String>,
