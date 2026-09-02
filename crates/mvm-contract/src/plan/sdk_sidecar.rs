@@ -62,9 +62,12 @@ pub fn sdk_host_services_in(services: &[ServiceId]) -> Vec<&ServiceId> {
 }
 
 /// Whether a workload bound to `services` needs the SDK sidecar attached.
+/// The `sdk_uses_sidecar` flag allows workloads that can speak the broker
+/// protocol directly (e.g., Python with AF_VSOCK, Go with golang.org/x/sys/unix)
+/// to opt out of the glibc sidecar even when bound to SDK services.
 #[must_use]
-pub fn sdk_sidecar_required_for(services: &[ServiceId]) -> bool {
-    services.iter().any(is_sdk_host_service)
+pub fn sdk_sidecar_required_for(services: &[ServiceId], sdk_uses_sidecar: bool) -> bool {
+    sdk_uses_sidecar && services.iter().any(is_sdk_host_service)
 }
 
 /// Whether `plan` needs the SDK sidecar attached. The single question every
@@ -72,7 +75,7 @@ pub fn sdk_sidecar_required_for(services: &[ServiceId]) -> bool {
 /// between them.
 #[must_use]
 pub fn sdk_sidecar_required(plan: &ExecutionPlan) -> bool {
-    sdk_sidecar_required_for(&plan.services)
+    sdk_sidecar_required_for(&plan.services, plan.sdk_uses_sidecar)
 }
 
 #[cfg(test)]
@@ -87,7 +90,7 @@ mod tests {
 
     #[test]
     fn no_services_needs_no_sidecar() {
-        assert!(!sdk_sidecar_required_for(&[]));
+        assert!(!sdk_sidecar_required_for(&[], true));
         assert!(sdk_host_services_in(&[]).is_empty());
     }
 
@@ -96,7 +99,7 @@ mod tests {
         for id in SDK_HOST_SERVICES {
             let bound = vec![svc(id)];
             assert!(
-                sdk_sidecar_required_for(&bound),
+                sdk_sidecar_required_for(&bound, true),
                 "{id} must require the SDK sidecar"
             );
             assert!(is_sdk_host_service(&svc(id)));
@@ -108,7 +111,7 @@ mod tests {
         // `broker.v1` is the transport's own meta service, and a
         // non-SDK-served host service must not pull in the glibc closure.
         let bound = vec![svc("broker.v1"), svc("host.frobnicate.v1")];
-        assert!(!sdk_sidecar_required_for(&bound));
+        assert!(!sdk_sidecar_required_for(&bound, true));
         assert!(sdk_host_services_in(&bound).is_empty());
     }
 
@@ -116,13 +119,13 @@ mod tests {
     fn a_version_bump_of_an_sdk_service_is_not_assumed_compatible() {
         // Only the exact versioned ids the cdylib serves count. A future
         // `host.audit.v2` must be added deliberately, not inherited.
-        assert!(!sdk_sidecar_required_for(&[svc("host.audit.v2")]));
+        assert!(!sdk_sidecar_required_for(&[svc("host.audit.v2")], true));
     }
 
     #[test]
     fn one_sdk_binding_among_unrelated_ones_still_requires_the_sidecar() {
         let bound = vec![svc("broker.v1"), svc("host.time.v1"), svc("host.other.v1")];
-        assert!(sdk_sidecar_required_for(&bound));
+        assert!(sdk_sidecar_required_for(&bound, true));
         let matched = sdk_host_services_in(&bound);
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].as_str(), "host.time.v1");
@@ -172,7 +175,7 @@ mod tests {
     /// a workload could use it.
     #[test]
     fn binding_the_key_value_store_attaches_the_sidecar() {
-        assert!(sdk_sidecar_required_for(&[svc("host.kv.v1")]));
+        assert!(sdk_sidecar_required_for(&[svc("host.kv.v1")], true));
         assert!(is_sdk_host_service(&svc("host.kv.v1")));
     }
 
