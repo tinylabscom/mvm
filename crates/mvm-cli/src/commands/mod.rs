@@ -11,6 +11,7 @@ mod cmd_audit;
 mod completions;
 mod dashboard;
 mod deploy;
+mod deployments;
 mod deps;
 mod dispatch;
 pub(crate) mod env;
@@ -134,6 +135,9 @@ pub(in crate::commands) enum Commands {
     /// Build, seal, and record a workload; optionally ship it to mvmd
     #[command(display_order = 4)]
     Deploy(deploy::Args),
+    /// Inventory of recorded local deployments
+    #[command(display_order = 4)]
+    Deployments(deployments::Args),
     /// Build the custom microVM kernels (builder / workload)
     #[command(display_order = 3)]
     Kernel(build::kernel::Args),

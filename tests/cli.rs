@@ -46,6 +46,63 @@ fn machine_create_readme_form_persists_the_named_spec() {
     assert_eq!(spec["memory"], "512M");
 }
 
+/// `deployments ls` inventories the local-first deploy store
+/// (`<mvm_home>/deployments/<ir-hash>/deploy.json`) without contacting a
+/// control plane, and `--workload` filters to one workload.
+#[test]
+fn deployments_ls_inventories_local_deploy_store() {
+    let mvm_home = tempfile::tempdir().unwrap();
+    let record_dir = mvm_home.path().join("deployments").join("aaaa");
+    std::fs::create_dir_all(&record_dir).unwrap();
+    let hex64 = "ab".repeat(32);
+    std::fs::write(
+        record_dir.join("deploy.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 2,
+            "workload_id": "wl-a",
+            "ir_hash": "aaaa",
+            "image": {"blake3": hex64, "sha256": hex64, "size_bytes": 3},
+            "boot_artifact": {
+                "kind": "rootfs.ext4",
+                "blake3": hex64,
+                "sha256": hex64,
+                "size_bytes": 1
+            },
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", mvm_home.path())
+        .env("HOME", mvm_home.path())
+        .env("MVM_NO_AUTO_DEV", "1")
+        .args(["deployments", "ls", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "deployments ls must succeed; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rows: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("ls --json emits rows");
+    assert_eq!(rows.as_array().expect("rows").len(), 1);
+    assert_eq!(rows[0]["workload_id"], "wl-a");
+    assert_eq!(rows[0]["ir_hash"], "aaaa");
+
+    let filtered = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", mvm_home.path())
+        .env("HOME", mvm_home.path())
+        .env("MVM_NO_AUTO_DEV", "1")
+        .args(["deployments", "ls", "--workload", "wl-missing", "--json"])
+        .output()
+        .unwrap();
+    assert!(filtered.status.success());
+    let rows: serde_json::Value = serde_json::from_slice(&filtered.stdout).unwrap();
+    assert_eq!(rows.as_array().expect("rows").len(), 0);
+}
+
 /// Regression guard on how `machine run` takes stdin.
 ///
 /// This previously asserted `--stdin` must never appear, because piped stdin

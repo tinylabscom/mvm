@@ -14,6 +14,14 @@ Last updated: 2026-09-02
       reclaimed loudly, MVM_DEV_ENV_KEEP_INHERITED=1 keeps them anyway. Gate
       tests and CI shellcheck green; merged via #3135.
 
+- [ ] **Supply-chain evidence carryover (WS1.1 beacon + WS1.4 deployments
+      inventory).**
+      `specs/plans/2026-09-02-supply-chain-evidence-carryover.md` on
+      `feat/supply-chain-evidence`. Boot-liveness beacon recorded as a
+      chain-signed `lifecycle.beacon_reported` entry; local deploy store
+      gains its first read path (`mvmctl deployments ls`). Cross-repo
+      items (mvmd registry/queries, studio pages) remain open in the plan.
+
 - [ ] **Signed caller commitment — issue #3070.**
       `specs/plans/2026-09-01-signed-caller-commitment.md`.
       Replaces reliance on overwriteable free-form audit labels with one typed,

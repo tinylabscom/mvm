@@ -15,8 +15,8 @@ pub mod volume_bridge;
 // host_cost,host_kv,host_signer,host_time,routing,signing}::X`
 // path keeps resolving unchanged.
 pub use mvm_contract::protocol::{
-    audit_signer, broker, dns, host_audit, host_cost, host_kv, host_signer, host_time, routing,
-    signing,
+    audit_signer, broker, dns, host_audit, host_beacon, host_cost, host_kv, host_signer, host_time,
+    routing, signing,
 };
 
 // Flatten protocol.rs contents up to `mvm_core::protocol::*`.

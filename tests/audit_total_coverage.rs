@@ -205,6 +205,9 @@ const PACK_SUB: &[(&str, AuditPosture)] = &[
     ("update", AuditPosture::Emits("PackCacheChange")),
 ];
 
+/// `deployments` is a read-only inventory of the local deploy store.
+const DEPLOYMENTS_SUB: &[(&str, AuditPosture)] = &[("ls", AuditPosture::ReadOnly)];
+
 // Plan 200 — beginner machine UX. `machine run` translates into the same
 // transient-runner path as top-level `run`, so it shares `run`'s
 // `InteractiveOrControl` posture (it streams guest output; the admitted
@@ -544,6 +547,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // Deploy mutates the local sealed-artifact store and is wrapped by the
     // top-level cmd.* audit envelope even when no remote is configured.
     ("deploy", AuditPosture::Emits("cmd.deploy")),
+    ("deployments", AuditPosture::DelegatesToSub(DEPLOYMENTS_SUB)),
     // Runtime-pack readiness report — reads the local pack cache only, no
     // mutation and no audit-chain emission.
     ("prepare", AuditPosture::ReadOnly),

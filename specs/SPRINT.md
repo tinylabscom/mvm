@@ -19,6 +19,18 @@
       Workspace, Clippy, gated-target, formatting, and non-live BDD validation
       are green; merge delivery remains.
 
+- [ ] **Supply-chain evidence carryover — Phase 1 slice (boot beacon +
+      deployments inventory).**
+      `specs/plans/2026-09-02-supply-chain-evidence-carryover.md`.
+      WS1.1: `host.beacon.v1` broker service — the guest agent reports
+      boot liveness and the host appends a chain-signed
+      `lifecycle.beacon_reported` entry with supervisor-authoritative
+      identity (fail-open, rate-limited, default-on where an audit signer
+      exists). WS1.4: `mvmctl deployments ls [--workload] [--json]` reads
+      the local-first deploy store, surfacing unreadable records as named
+      skips. Workspace tests, zero-warning Clippy, and Linux/BDD gated
+      checks are green; merge delivery remains.
+
 - [x] **Signed caller commitment — issue #3070, PR #3076.**
       `specs/plans/2026-09-01-signed-caller-commitment.md`.
       One typed opaque 32-byte commitment now reaches the signed execution
