@@ -412,8 +412,14 @@ warm_launch_artifacts() {
   # older checkout. A plain file-existence check bypasses that validation and
   # can boot stale guest-agent behavior while testing a new host binary.
   echo "    validating the source-matched universal initramfs"
+  # Captured, not discarded. This went to /dev/null, and a warm-up that failed
+  # in seconds was indistinguishable from one that succeeded in seconds: a
+  # nightly reported `warm-up done (10s)` for a step that cannot build an
+  # initramfs in ten seconds, then ran the whole suite against whatever was
+  # already cached. The budget below is not the only way this ends early.
+  local warm_log="${TMPDIR:-/tmp}/mvm-e2e-warmup.$$.log"
   MVM_HOME="$E2E_HOME" "$MVMCTL" machine run --name bdd-warmup --image alpine \
-    -- /bin/true >/dev/null 2>&1 &
+    -- /bin/true >"$warm_log" 2>&1 &
   local warm_pid=$! waited=0
   while kill -0 "$warm_pid" 2>/dev/null; do
     if (( waited >= ${MVM_E2E_WARMUP_SECS:-900} )); then
@@ -429,8 +435,19 @@ warm_launch_artifacts() {
       echo "    ... still warming (${waited}s)"
     fi
   done
-  wait "$warm_pid" 2>/dev/null || true
-  echo "    warm-up done (${waited}s)"
+  local warm_status=0
+  wait "$warm_pid" 2>/dev/null || warm_status=$?
+  if (( warm_status != 0 )); then
+    # Still non-fatal — this is a warm-up, and the scenarios that need the
+    # artifact will fail on their own terms. But it says so now, with the
+    # reason, instead of reporting a duration that reads like success.
+    echo "    warm-up FAILED (exit ${warm_status}, ${waited}s) — scenarios will run against"
+    echo "    whatever is already cached. Last lines:"
+    sed 's/^/      /' <"$warm_log" | tail -20
+  else
+    echo "    warm-up done (${waited}s)"
+  fi
+  rm -f "$warm_log"
 }
 warm_launch_artifacts
 
