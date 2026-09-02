@@ -32,16 +32,6 @@ pub struct HvfDisk {
     pub ephemeral: bool,
 }
 
-/// One read-only host directory served as a guest virtio-fs volume.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HvfVirtioFsShare {
-    /// Host directory to serve.
-    pub path: PathBuf,
-    /// Guest-visible virtio-fs tag, for example `uvol0`.
-    pub tag: String,
-}
-
 /// A host UDS the supervisor binds on behalf of one guest vsock port the guest
 /// listens on and the host dials — a console data stream or a builder control
 /// channel. Which ports appear is a policy decision made by the caller;
@@ -144,10 +134,7 @@ pub struct HvfSupervisorConfig {
     /// (initramfs / freestanding) boot.
     #[serde(default)]
     pub disks: Vec<HvfDisk>,
-    /// When set, serve this host directory (the unpacked+injected OCI tree) to the
-    /// Read-only live host-directory shares mounted after the image root.
-    #[serde(default)]
-    pub virtiofs_shares: Vec<HvfVirtioFsShare>,
+
     /// Attach a virtio-vsock device.
     #[serde(default)]
     pub vsock: bool,
@@ -317,7 +304,6 @@ mod tests {
                     ephemeral: false,
                 },
             ],
-            virtiofs_shares: vec![],
             vsock: true,
             trusted_builder_egress: false,
             builder_egress_endpoint: None,
@@ -421,7 +407,6 @@ mod tests {
             vcpus: 1,
             initramfs: None,
             disks: vec![],
-            virtiofs_shares: vec![],
             vsock: true,
             trusted_builder_egress: false,
             builder_egress_endpoint: None,

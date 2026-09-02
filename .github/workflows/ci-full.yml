@@ -554,6 +554,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$MVM_HOME"
+          # Print the captured log on *any* death, not only on a wrong exit
+          # code. The tail used to live inside the `-ne 7` branch, so a run
+          # killed before that branch — which is exactly what happened when
+          # this step was SIGTERMed five minutes in — emitted nothing at all:
+          # the whole boot is redirected to the file, and the file was never
+          # read. The job reported `exit code 143` over an empty step and there
+          # was nothing to diagnose it with.
+          trap 'echo "::group::mvmctl first-boot log (tail)"; tail -250 /tmp/mvmctl-first-boot.log 2>/dev/null || echo "(no log produced)"; echo "::endgroup::"' EXIT
           set +e
           /tmp/mvmctl-source-under-test machine run \
             --flake examples/exit_code \
@@ -566,7 +574,6 @@ jobs:
           set -e
           if [ "$actual" -ne 7 ]; then
             echo "::error::expected guest exit code 7 from first boot, got $actual"
-            tail -250 /tmp/mvmctl-first-boot.log
             exit 1
           fi
           echo "ok: sealed aarch64 workload built and exited $actual under QEMU TCG"

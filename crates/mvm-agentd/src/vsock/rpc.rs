@@ -409,12 +409,18 @@ where
     send_run_entrypoint_while(stream, call, on_event, || true)
 }
 
-/// How long a silent entrypoint stream is left alone before the caller's
+/// How long a silent response stream is left alone before the caller's
 /// liveness check is consulted.
 ///
 /// Not a timeout on the workload: a build or a test run is legitimately quiet
 /// for minutes. It is only how often "is the guest still there" gets asked.
-const ENTRYPOINT_LIVENESS_POLL: std::time::Duration = std::time::Duration::from_secs(5);
+///
+/// Every streaming read sets this for itself and restores what it found,
+/// because the value it would otherwise inherit is a *connect* budget.
+/// `connect_vsock_uds` arms `set_read_timeout` to bound the agent handshake
+/// and never disarms it, so without this a quiet gap in a long transfer
+/// surfaces as `EAGAIN` on a frame boundary and reads as a transport failure.
+const STREAM_LIVENESS_POLL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// [`send_run_entrypoint`], but giving up when the guest is gone.
 ///
@@ -426,7 +432,7 @@ const ENTRYPOINT_LIVENESS_POLL: std::time::Duration = std::time::Duration::from_
 /// that never runs one is never bounded at all.
 ///
 /// `still_alive` is polled only when the stream has been quiet for
-/// [`ENTRYPOINT_LIVENESS_POLL`], so a long silent workload is unaffected: the
+/// [`STREAM_LIVENESS_POLL`], so a long silent workload is unaffected: the
 /// check costs nothing while output flows, and only decides the case where
 /// nothing is coming because nothing is left to send it.
 pub fn send_run_entrypoint_while<F, L>(
@@ -459,7 +465,7 @@ where
     // read timeout left behind would turn its next blocking read into a
     // spurious failure.
     let previous_timeout = stream.read_timeout().ok().flatten();
-    let _ = stream.set_read_timeout(Some(ENTRYPOINT_LIVENESS_POLL));
+    let _ = stream.set_read_timeout(Some(STREAM_LIVENESS_POLL));
 
     let outcome = loop {
         let resp: GuestResponse = match session.read(stream) {
@@ -654,8 +660,45 @@ fn read_exec_stream_with_session<F>(
 where
     F: FnMut(&ExecEvent),
 {
+    // Poll on our own budget and restore what we found, exactly as the
+    // entrypoint stream does.
+    //
+    // Without this the stream keeps whatever `connect_vsock_uds` armed to bound
+    // the agent handshake, and a gap longer than that connect budget — routine
+    // between two multi-megabyte wheels on one `pip install` — arrives as
+    // `EAGAIN` on a frame boundary. The read below then treated it as a
+    // transport failure and aborted a transfer that was working: the first
+    // 11 MB wheel completed, the second died partway.
+    //
+    // The classifier this relies on already existed and was already correct;
+    // what was missing is that only the entrypoint loop ever consulted it. An
+    // exec stream is quiet for exactly the same reasons and had none.
+    let previous_timeout = stream.read_timeout().ok().flatten();
+    let _ = stream.set_read_timeout(Some(STREAM_LIVENESS_POLL));
+    let outcome = read_exec_stream_frames(stream, session, &mut on_event);
+    let _ = stream.set_read_timeout(previous_timeout);
+    outcome
+}
+
+/// The frame loop itself, so the timeout above is restored on every exit.
+fn read_exec_stream_frames<F>(
+    stream: &mut UnixStream,
+    session: &mut RpcSession,
+    on_event: &mut F,
+) -> Result<ExecEvent>
+where
+    F: FnMut(&ExecEvent),
+{
     loop {
-        let resp: GuestResponse = session.read(stream)?;
+        let resp: GuestResponse = match session.read(stream) {
+            Ok(resp) => resp,
+            // Quiet, not broken. A guest that is actually gone fails the read
+            // with a hangup rather than a timeout, so this cannot spin on a
+            // dead peer; and the command's own `timeout_secs` bounds it inside
+            // the guest.
+            Err(error) if is_read_timeout(&error) => continue,
+            Err(error) => return Err(error),
+        };
         let event = match resp {
             GuestResponse::ExecEvent(e) => e,
             GuestResponse::Error { message } => bail!("guest exec error: {message}"),
@@ -1313,6 +1356,110 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert!(matches!(got[0], ExecEvent::Stderr { ref chunk } if chunk == b"e"));
         assert!(matches!(term, ExecEvent::Exit { code: 2 }));
+    }
+
+    /// A gap between frames longer than the inherited read timeout must not
+    /// end the stream.
+    ///
+    /// This is the shape of a real failure, not a hypothetical. `pip install
+    /// pandas` over admitted egress finished an 11 MB wheel, went quiet while
+    /// the next 16.7 MB one was fetched, and died with `control frame read
+    /// failed: Resource temporarily unavailable (os error 11)` — a transfer
+    /// that was working, aborted on a quiet frame boundary.
+    ///
+    /// The timeout is not something the exec path asks for. `connect_vsock_uds`
+    /// arms `set_read_timeout` to bound the agent handshake and never disarms
+    /// it, so every later read inherits a *connect* budget. The entrypoint
+    /// stream had always overridden it with its own poll and retried; the exec
+    /// stream inherited it and treated it as fatal.
+    ///
+    /// This covers the *override*: the inherited 50 ms budget is replaced by
+    /// the stream's own poll, so a 400 ms gap never reaches the retry at all.
+    /// That is the half which fixes the reported failure, where the gap
+    /// between two wheels is well under the poll interval.
+    /// `a_gap_longer_than_the_liveness_poll_is_retried_not_failed` covers the
+    /// other half — deleting the retry does **not** fail this test, and a
+    /// mutation run says so.
+    #[test]
+    fn a_quiet_gap_between_exec_frames_does_not_end_the_stream() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        // What a caller inherits from the connect helper: short, and never
+        // meant to bound the response stream.
+        host.set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+
+        let guest_handle = std::thread::spawn(move || {
+            write_frame(
+                &mut guest,
+                &GuestResponse::ExecEvent(ExecEvent::Stdout {
+                    chunk: b"first wheel".to_vec(),
+                }),
+            )
+            .unwrap();
+            // Several times the inherited budget — a download, not a hang.
+            std::thread::sleep(Duration::from_millis(400));
+            write_frame(
+                &mut guest,
+                &GuestResponse::ExecEvent(ExecEvent::Exit { code: 0 }),
+            )
+            .unwrap();
+        });
+
+        let mut got = Vec::new();
+        let term = read_exec_stream(&mut host, |e| got.push(e.clone()))
+            .expect("a quiet gap is not a transport failure");
+        guest_handle.join().unwrap();
+
+        assert_eq!(got.len(), 1, "the pre-gap chunk must still arrive");
+        assert!(matches!(term, ExecEvent::Exit { code: 0 }));
+    }
+
+    /// A gap longer than the liveness poll is retried, not failed.
+    ///
+    /// Drives the frame loop directly, because the wrapper replaces the read
+    /// timeout with `STREAM_LIVENESS_POLL` and a test that went through it
+    /// would have to sleep past five seconds to reach the retry. Here the
+    /// timeout stays short, so every gap times out underneath and only the
+    /// retry can carry the stream to its terminal frame.
+    ///
+    /// Written after the sibling test above was found to pass with the retry
+    /// deleted: the override alone was carrying it, and the assertion that it
+    /// covered EAGAIN handling was false.
+    #[test]
+    fn a_gap_longer_than_the_liveness_poll_is_retried_not_failed() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+
+        let guest_handle = std::thread::spawn(move || {
+            for _ in 0..3 {
+                std::thread::sleep(Duration::from_millis(60));
+                write_frame(
+                    &mut guest,
+                    &GuestResponse::ExecEvent(ExecEvent::Stdout {
+                        chunk: b"chunk".to_vec(),
+                    }),
+                )
+                .unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(60));
+            write_frame(
+                &mut guest,
+                &GuestResponse::ExecEvent(ExecEvent::Exit { code: 0 }),
+            )
+            .unwrap();
+        });
+
+        let mut session = RpcSession::open(&mut host).unwrap();
+        let mut got = Vec::new();
+        let term = read_exec_stream_frames(&mut host, &mut session, &mut |e: &ExecEvent| {
+            got.push(e.clone())
+        })
+        .expect("each quiet gap must be retried, not treated as a transport failure");
+        guest_handle.join().unwrap();
+
+        assert_eq!(got.len(), 3, "every chunk across the gaps must arrive");
+        assert!(matches!(term, ExecEvent::Exit { code: 0 }));
     }
 
     #[test]

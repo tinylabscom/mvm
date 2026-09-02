@@ -41,19 +41,12 @@ impl DecisionStore {
     /// `decisions_dir`.
     pub fn open(decisions_dir: &Path, tenant: &str) -> Result<Self> {
         let tenant_dir = decisions_dir.join(tenant);
-        std::fs::create_dir_all(&tenant_dir)
-            .with_context(|| format!("creating decision store dir {}", tenant_dir.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o700);
-            std::fs::set_permissions(&tenant_dir, perms).with_context(|| {
-                format!(
-                    "setting 0700 on decision store dir {}",
-                    tenant_dir.display()
-                )
-            })?;
-        }
+        mvm_core::config::create_private_dir(&tenant_dir).with_context(|| {
+            format!(
+                "creating decision store dir {} privately",
+                tenant_dir.display()
+            )
+        })?;
         let lock_path = tenant_dir.join(".lock");
         Ok(Self {
             tenant_dir,

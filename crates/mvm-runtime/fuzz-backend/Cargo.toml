@@ -24,16 +24,6 @@ arbitrary = "1"
 [dependencies.mvm-runtime]
 path = ".."
 
-# FUSE-server request parser. The virtio-fs device hands guest-supplied bytes to
-# `FuseServer::dispatch`; this target asserts it never panics on any input (a
-# guest-triggerable host DoS) and always emits a well-formed `fuse_out_header`.
-[[bin]]
-name = "fuse_dispatch"
-path = "fuzz_targets/fuse_dispatch.rs"
-test = false
-doc = false
-bench = false
-
 # virtio-vsock queue-geometry + descriptor-table hardening guard. Feeds a random
 # RAM image plus a random register-programming sequence into the vsock transport
 # and asserts no panic / no unbounded allocation — the regression guard for the

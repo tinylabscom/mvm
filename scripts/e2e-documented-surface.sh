@@ -31,6 +31,23 @@ REPO="$PWD"
 # That made worktree-based e2e work impossible by construction, so every
 # verification had to run in the main checkout.
 E2E_HOME="${MVM_E2E_HOME:-${MVM_HOME:-$HOME/.mvm}}"
+
+# Create the mvm home the way mvmctl would, not the way a bare mkdir would.
+#
+# With `MVM_E2E_HOME` unset this falls back to the real `$HOME/.mvm`, and
+# creating that under the runner's umask leaves it 0755. That is a live W1.5
+# violation — `~/.mvm` and every child are 0700 — and the suite's own
+# `mvmctl doctor` scenario duly reports `data dir mode: MISSING (expected
+# 0700, got 0755)`. The lane then goes red for a directory this harness made
+# wrong before mvmctl ever saw it.
+#
+# The chmod is unconditional rather than folded into `mkdir -m`, which applies
+# the mode only to directories it actually creates: a home left loose by an
+# earlier run would otherwise keep that mode forever.
+ensure_private_home() {
+  mkdir -p "$1"
+  chmod 700 "$1"
+}
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 MVMCTL="$TARGET_DIR/debug/mvmctl"
 UNEMBEDDED_MVMCTL="$E2E_HOME/mvmctl-unembedded-e2e"
@@ -63,7 +80,7 @@ machine_names() {
 }
 
 snapshot_machines() {
-  mkdir -p "$E2E_HOME"
+  ensure_private_home "$E2E_HOME"
   machine_names > "$SNAPSHOT" 2>/dev/null || : > "$SNAPSHOT"
 }
 
@@ -209,7 +226,7 @@ if [[ -f "$LOCK" ]] && kill -0 "$(cat "$LOCK" 2>/dev/null)" 2>/dev/null; then
   trap - EXIT
   exit 1
 fi
-mkdir -p "$E2E_HOME"
+ensure_private_home "$E2E_HOME"
 echo $$ > "$LOCK"
 release_lock() { [[ -f "$LOCK" ]] && [[ "$(cat "$LOCK" 2>/dev/null)" == "$$" ]] && rm -f "$LOCK"; }
 

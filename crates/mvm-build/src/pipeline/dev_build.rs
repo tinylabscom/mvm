@@ -427,6 +427,27 @@ fn dev_build_via_builder_vm_uncached(
             session_id = %record.session_id,
             "store image is busy; sharing the persistent builder that holds it"
         );
+        // A disk-transport session cannot serve the typed route, and it is also
+        // the process holding the store image open. Falling through from here
+        // does not "queue" in any useful sense: the holder is a resident VM
+        // that releases the image when it stops, so the single-shot builder
+        // waits for a lock that will not come free on its own. Measured: a
+        // build sat on `still waiting for the builder image lock` for ten
+        // minutes against a live HVF session before being killed.
+        //
+        // Refuse with the way out instead. This is the one place that can tell
+        // the difference between "busy, try again" and "busy forever", so it is
+        // the one place that can say so.
+        if record.disk_transport.is_some() {
+            anyhow::bail!(
+                "the persistent builder session {} holds the Nix store image and cannot \
+                 serve this build: it exchanges jobs over the disk transport, which does \
+                 not read back /job/<id>/out. A single-shot build would wait for the store \
+                 image until that session stops. Run `mvmctl persistent-builder stop` and \
+                 build again.",
+                record.session_id,
+            );
+        }
         match try_typed_persistent_build(env, &record, profile) {
             Some(Ok(result)) => return Ok(result),
             Some(Err(e)) => {
@@ -664,10 +685,12 @@ fn try_typed_persistent_build(
     // collects `/out`, not `/job/<id>/out`. Running anyway stages into a
     // directory nothing writes to and reads it back empty.
     //
-    // Fall through to the single-shot builder rather than refusing outright:
-    // unlike the install arm, which fails closed because a claim-11 sealed
-    // volume would silently lose its SBOM and CVE sidecars, this route has a
-    // safety net and taking it costs build time rather than correctness.
+    // Returning `None` here only declines the typed route. It is *not* the
+    // whole answer, and an earlier version of this comment claiming the
+    // fallback "costs build time rather than correctness" was wrong: the same
+    // session holds the Nix store image, so the single-shot fallback waits on a
+    // lock that only comes free when the session stops. The contended-store
+    // block below is what turns that into a refusal naming the way out.
     if record.disk_transport.is_some() {
         tracing::warn!(
             session_id = %record.session_id,
