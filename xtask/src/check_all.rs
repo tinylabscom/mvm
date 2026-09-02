@@ -100,6 +100,7 @@ pub const GATES: &[Gate] = &[
     ("check-sprint-append", crate::check_sprint_append::run),
     ("check-plan-names", crate::check_plan_names::run),
     ("check-mutation-witnesses", mutation_witnesses_surface_pin),
+    ("check-sdk-cdylib-deps", crate::check_sdk_cdylib_deps::run),
     (
         "check-witness-citations",
         crate::check_witness_citations::run,
