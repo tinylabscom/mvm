@@ -1380,16 +1380,22 @@ mod tests {
         assert_eq!(scalar_u64("    other: 1\n", "timeout-minutes"), None);
     }
 
-    /// The live assertion. Seventeen targets at half an hour each is nine
+    /// The live assertion. Seventeen targets at half an hour each was nine
     /// hours in a six-hour job, which is what the nightly lane was actually
     /// running: killed partway down the list, every target below the cut
     /// silently never fuzzed.
+    ///
+    /// The floor below guards against the *parser* failing to resolve targets
+    /// and reporting a trivially-fitting budget — it is not a mandate to keep a
+    /// given number of them. Deleting a target legitimately lowers it; the FUSE
+    /// dispatch target went when the virtio-fs device it fuzzed was deleted,
+    /// taking the count from 15 to 14.
     #[test]
     fn the_fuzz_lane_fits_inside_its_own_timeout() {
         let budget =
             fuzz_budget(&workflow("security.yml")).expect("security.yml declares a fuzz budget");
         assert!(
-            budget.targets >= 15,
+            budget.targets >= 14,
             "the target count did not resolve: {budget:?}"
         );
         assert!(

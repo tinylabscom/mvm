@@ -462,19 +462,6 @@ jobs:
         # must return Err, never abort.
         run: cargo fuzz run --fuzz-dir fuzz-ext4 fuzz_build_image -- -max_total_time="$DURATION"
 
-      - name: Fuzz FUSE dispatch (virtio-fs request parser)
-        working-directory: crates/mvm-runtime
-        env:
-          DURATION: ${{ steps.duration.outputs.secs }}
-          RUSTUP_TOOLCHAIN: nightly-2026-06-11
-        # The virtio-fs device hands guest-supplied bytes to
-        # `FuseServer::dispatch`; the guest is untrusted, so a byte pattern that
-        # panics the parser is a guest-triggerable host DoS. This target asserts
-        # dispatch never panics on any input and always emits a well-formed
-        # fuse_out_header. Path-confinement is a separate structural property
-        # pinned by a unit test.
-        run: cargo fuzz run --fuzz-dir fuzz-backend fuse_dispatch -- -max_total_time="$DURATION"
-
       - name: Fuzz virtqueue geometry (virtio-vsock ring walk)
         working-directory: crates/mvm-runtime
         env:

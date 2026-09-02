@@ -100,15 +100,6 @@ const PINNED: &[(&str, usize, &str)] = &[
         1,
         "a test: Firecracker must keep *refusing* a share",
     ),
-    // ── the HVF device model ─────────────────────────────────────────────────
-    (
-        "crates/mvm-vmm/src/vmm/virtio.rs",
-        1,
-        "the VirtioFs MMIO device and its tests. Now unreachable by construction, \
-         not just by policy: the HVF backend no longer maps a share, the wire \
-         config no longer carries one, and nothing attaches the device. It goes \
-         with `virtio_fs.rs`'s FuseServer and that module's fuzz target",
-    ),
 ];
 
 pub fn run(workspace: &Path) -> Result<()> {
