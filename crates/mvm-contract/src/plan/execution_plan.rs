@@ -288,6 +288,22 @@ pub struct ExecutionPlan {
     /// deserialize as [`StreamRetention::Persist`], the recording default.
     #[serde(default)]
     pub stream_retention: StreamRetention,
+
+    /// Whether the workload uses the SDK sidecar (glibc cdylib) to reach host
+    /// services, or speaks the broker protocol directly. This controls whether
+    /// the optional SDK sidecar must be attached: when `true`, the admission
+    /// gate requires the sidecar; when `false`, the sidecar is forbidden and
+    /// the workload must reach services via direct vsock calls.
+    ///
+    /// `true` (default) preserves existing behavior: workloads bound to SDK
+    /// services receive the glibc sidecar. Set to `false` when the workload
+    /// can speak the broker protocol natively (e.g., Python with AF_VSOCK,
+    /// Go with golang.org/x/sys/unix).
+    ///
+    /// Always serialized so a plan that doesn't set it still states the
+    /// default in the signed bytes.
+    #[serde(default)]
+    pub sdk_uses_sidecar: bool,
 }
 
 impl ExecutionPlan {
@@ -389,6 +405,7 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
         extensions: Vec::new(),
         stream_edges: Vec::new(),
         stream_retention: StreamRetention::Persist,
+        sdk_uses_sidecar: true,
     }
 }
 
