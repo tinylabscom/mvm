@@ -1272,13 +1272,43 @@ fn chown(path: &str, uid: u32, gid: u32) -> Result<()> {
 // dm-verity helpers (Linux only)
 // ---------------------------------------------------------------------------
 
+/// Open the device-mapper control node, distinguishing "this kernel has no
+/// device-mapper" from every other way the open can fail.
+///
+/// The bare syscall error was unactionable. A guest booted on a kernel built
+/// without `CONFIG_BLK_DEV_DM` reported `open /dev/mapper/control: No such
+/// file or directory`, which reads as a missing mount or a verity bug — and
+/// sent a real investigation through the guest's early-mount ordering, the
+/// kernel's devtmpfs config, and the published kernel artifact before landing
+/// on the kernel that was actually booted. devtmpfs creates this node when
+/// device-mapper registers its misc device; no device-mapper, no node, and
+/// nothing about the mount is wrong.
 #[cfg(target_os = "linux")]
 fn open_dm_control() -> Result<std::fs::File> {
     std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open("/dev/mapper/control")
-        .map_err(|e| MountError::syscall("open /dev/mapper/control", e))
+        .map_err(dm_control_open_error)
+}
+
+/// Classify a failed `/dev/mapper/control` open.
+///
+/// Split out so the message is reachable from a test: the host running the
+/// suite has a working control node, so the only way to pin what a guest
+/// without device-mapper reports is to call this directly.
+#[cfg(target_os = "linux")]
+fn dm_control_open_error(e: std::io::Error) -> MountError {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        return MountError::VeritySetup(format!(
+            "/dev/mapper/control is absent, so this guest kernel has no device-mapper and \
+             cannot bring up a dm-verity target. devtmpfs creates the node when device-mapper \
+             registers, so this is the kernel's configuration (CONFIG_BLK_DEV_DM), not a \
+             missing mount. A kernel built by a user flake rather than by nix/images/kernel/ \
+             is the usual way to get here. ({e})"
+        ));
+    }
+    MountError::syscall("open /dev/mapper/control", e)
 }
 
 #[cfg(target_os = "linux")]
@@ -1596,6 +1626,61 @@ mod tests {
     use std::io::{Seek, SeekFrom, Write};
 
     const FAKE_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// A guest kernel without device-mapper says so, rather than reporting a
+    /// missing file.
+    ///
+    /// The bare `open /dev/mapper/control: No such file or directory` sent a
+    /// real investigation through the guest's early-mount ordering, the
+    /// kernel's devtmpfs config and the published kernel artifact before
+    /// reaching the kernel that had actually booted — which was a user flake's
+    /// own, built without `CONFIG_BLK_DEV_DM`. The node is absent *because*
+    /// there is no device-mapper to register it, and nothing about the mount
+    /// is wrong.
+    ///
+    /// Asserted on the rendered message because that string is the whole
+    /// deliverable: this is the only place a guest can explain the condition,
+    /// and the host sees nothing but this text.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_kernel_without_device_mapper_is_named_as_the_cause() {
+        let rendered =
+            dm_control_open_error(std::io::Error::from(std::io::ErrorKind::NotFound)).to_string();
+
+        assert!(
+            rendered.contains("no device-mapper"),
+            "the message must name the missing subsystem: {rendered}"
+        );
+        assert!(
+            rendered.contains("CONFIG_BLK_DEV_DM"),
+            "the message must name the config that fixes it: {rendered}"
+        );
+        assert!(
+            rendered.contains("not a missing mount"),
+            "the message must rule out the reading it previously invited: {rendered}"
+        );
+    }
+
+    /// Every other failure keeps the plain syscall shape.
+    ///
+    /// The NotFound arm is a claim about the kernel's configuration. Making it
+    /// on a permission error or a busy device would be a confident wrong
+    /// answer, which is worse than the unhelpful one it replaces.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_non_missing_dm_control_failure_stays_a_syscall_error() {
+        let rendered =
+            dm_control_open_error(std::io::Error::from_raw_os_error(libc::EACCES)).to_string();
+
+        assert!(
+            !rendered.contains("no device-mapper"),
+            "a permission failure is not a kernel-configuration claim: {rendered}"
+        );
+        assert!(
+            rendered.contains("open /dev/mapper/control"),
+            "it must still say which syscall failed: {rendered}"
+        );
+    }
 
     #[test]
     fn syscall_error_display_includes_os_error() {

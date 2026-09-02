@@ -126,7 +126,7 @@ fn stale_supervisor_hint(stderr_tail: &str) -> String {
 /// they do not use and watch the next launch fail identically.
 fn helper_rebuild_command(profile: Option<crate::host::aux_bin::BuildProfile>) -> String {
     let flag = profile.map_or("", crate::host::aux_bin::BuildProfile::cargo_flag);
-    format!("cargo build{flag} -p mvm-hostd --bins")
+    format!("just build-supervisors{flag}")
 }
 
 #[cfg(test)]
@@ -216,7 +216,7 @@ mod tests {
         .unwrap();
         let detail = supervisor_stderr_detail(dir.path());
         assert!(
-            detail.contains("-p mvm-hostd --bins"),
+            detail.contains("just build-supervisors"),
             "an unknown field must name the rebuild: {detail}"
         );
         assert!(
@@ -235,18 +235,15 @@ mod tests {
 
         assert_eq!(
             helper_rebuild_command(Some(BuildProfile::Release)),
-            "cargo build --release -p mvm-hostd --bins"
+            "just build-supervisors --release"
         );
         assert_eq!(
             helper_rebuild_command(Some(BuildProfile::Debug)),
-            "cargo build -p mvm-hostd --bins"
+            "just build-supervisors"
         );
         // An installed binary, or this very test harness, which sits under
         // `target/<profile>/deps` and so reads as no profile at all.
-        assert_eq!(
-            helper_rebuild_command(None),
-            "cargo build -p mvm-hostd --bins"
-        );
+        assert_eq!(helper_rebuild_command(None), "just build-supervisors");
     }
 
     #[test]
@@ -258,7 +255,7 @@ mod tests {
         )
         .unwrap();
         let detail = supervisor_stderr_detail(dir.path());
-        assert!(!detail.contains("-p mvm-hostd --bins"), "got: {detail}");
+        assert!(!detail.contains("just build-supervisors"), "got: {detail}");
         assert!(detail.contains("HV_ERROR"), "got: {detail}");
     }
 }

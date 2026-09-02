@@ -432,6 +432,9 @@ build-supervisors *ARGS:
 # relinks mvmctl; that is why this is a deliberate step and not part of `build`.
 # Bare, this writes `target/debug/mvmctl` — pass `--release` if the mvmctl you
 # invoke is the release one, or the release binary is left untouched.
+#
+
+# Build an mvmctl carrying the embedded Linux host binaries (--release for a release one)
 embed *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail

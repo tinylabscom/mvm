@@ -21,9 +21,7 @@ use mvm_core::vm_backend::{
     VmId, VmStatus,
 };
 use mvm_net::channel::GuestService;
-use mvm_vmm::host::hvf_supervisor::{
-    HostDialSocket, HvfDisk, HvfSupervisorConfig, HvfVirtioFsShare,
-};
+use mvm_vmm::host::hvf_supervisor::{HostDialSocket, HvfDisk, HvfSupervisorConfig};
 use mvm_vmm::hvf_handoff::HvfHandoffRequest;
 
 use crate::driver::hvf_process::{
@@ -228,14 +226,6 @@ fn relay_supervisor_config_with_handoff(
         vcpus: spec.vcpus,
         initramfs: spec.initramfs.clone(),
         disks,
-        virtiofs_shares: spec
-            .shares
-            .iter()
-            .map(|share| HvfVirtioFsShare {
-                path: share.host_path.clone(),
-                tag: share.tag.clone(),
-            })
-            .collect(),
         vsock: true,
         trusted_builder_egress: spec.trusted_builder,
         // Only a VM that outlives its launcher sets this; everyone else spawns

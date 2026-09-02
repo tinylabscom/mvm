@@ -36,7 +36,7 @@ use crate::vmm::device::Pl011;
 use crate::vmm::device_state::{SnapshotDeviceState, capture_device_states};
 use crate::vmm::hv::{CoreReg, HypervisorVcpu, SysReg, VcpuHandle};
 use crate::vmm::run::{self, RunControl, RunDevice, RunOutcome};
-use crate::vmm::virtio::{DiskImage, VirtioBlk, VirtioFs};
+use crate::vmm::virtio::{DiskImage, VirtioBlk};
 use crate::vmm::virtio_rng::VirtioRng;
 use crate::vmm::vsock::VirtioVsock;
 use crate::vmm::{fdt, kernel_image};
@@ -110,17 +110,25 @@ const VIRTIO_MMIO_BASE: u64 = 0x0a00_0000;
 const VIRTIO_IRQ: u32 = 48;
 const VSOCK_MMIO_BASE: u64 = 0x0a00_0200;
 const VSOCK_IRQ: u32 = 49;
-/// virtio-fs windows start above the disk band (MAX_DISKS=6 → up to
-/// base+6*stride) and vsock. The first slot is the optional virtio-fs root;
-/// following slots are live user directory shares.
+/// A **reserved hole** where the virtio-fs windows used to live, above the disk
+/// band (MAX_DISKS=6 → up to base+6*stride) and vsock.
+///
+/// No device is placed here any more — the HVF virtio-fs device is deleted. The
+/// constants stay because `RNG_MMIO_BASE` and `RNG_IRQ` are computed *from*
+/// them: collapsing the hole would silently move the entropy device to a
+/// different address and SPI, which changes the device tree a guest boots
+/// against and the layout a saved snapshot was captured under. Reclaiming this
+/// range is a deliberate, separately-validated change, not a tidy-up.
 const FS_MMIO_BASE: u64 = VIRTIO_MMIO_BASE + 7 * MMIO_STRIDE;
 const FS_IRQ: u32 = 55;
-/// Maximum number of user virtio-fs shares in one HVF guest. The bound keeps the
-/// MMIO and SPI allocations fixed and leaves the entropy device at a stable slot.
+/// Width of the reserved hole above, in MMIO slots and SPIs.
 const MAX_VIRTIOFS_SHARES: usize = 8;
 /// The entropy device follows every optional disk/vsock/virtio-fs window, so its
 /// stable address cannot collide with a device combination selected at runtime.
-const RNG_MMIO_BASE: u64 = VIRTIO_MMIO_BASE + (8 + MAX_VIRTIOFS_SHARES as u64) * MMIO_STRIDE;
+/// Derived from the reserved hole above rather than restated, so the fact that
+/// the entropy device sits *past* it is expressed once. Same address as before:
+/// `VIRTIO_MMIO_BASE + 7*stride` + `8*stride` + one slot = `base + 16*stride`.
+const RNG_MMIO_BASE: u64 = FS_MMIO_BASE + (MAX_VIRTIOFS_SHARES as u64 + 1) * MMIO_STRIDE;
 const RNG_IRQ: u32 = FS_IRQ + MAX_VIRTIOFS_SHARES as u32 + 1;
 /// virtio-mmio window stride; each device occupies one 0x200 slot.
 const MMIO_STRIDE: u64 = 0x200;
@@ -379,7 +387,6 @@ pub struct HostChannels {
     /// secondaries; fewer, and the extra vCPUs are never onlined.
     pub vcpus: u32,
     /// Read-only live host-directory shares as `(virtio-fs tag, host path)`.
-    pub virtiofs_shares: Vec<(String, PathBuf)>,
     /// Host console log to mirror guest output into as the guest emits it.
     ///
     /// The whole-run transcript comes back in [`KernelBootResult::console`]
@@ -757,19 +764,6 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
     if vsock {
         virtio_nodes.push((VSOCK_MMIO_BASE, VSOCK_IRQ));
     }
-    let fs_count = channels.virtiofs_shares.len();
-    if fs_count > MAX_VIRTIOFS_SHARES {
-        return Err(HvfError::BadBoot(BootFault::TooManyFilesystems {
-            given: fs_count,
-            max: MAX_VIRTIOFS_SHARES,
-        }));
-    }
-    for index in 0..fs_count {
-        virtio_nodes.push((
-            FS_MMIO_BASE + index as u64 * MMIO_STRIDE,
-            FS_IRQ + index as u32,
-        ));
-    }
     virtio_nodes.push((RNG_MMIO_BASE, RNG_IRQ));
     // Fresh host entropy per boot covers the window before the virtio-rng driver
     // probes. The device below then replenishes entropy for the VM's lifetime.
@@ -826,7 +820,6 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
                 broker_socket: channels.broker_socket,
                 console_data_sockets: channels.console_data_sockets,
                 builder_control_sockets: channels.builder_control_sockets,
-                virtiofs_shares: channels.virtiofs_shares,
                 console_log: channels.console_log,
                 pause_state: channels.pause_state,
                 snapshot_request: channels.snapshot_request,
@@ -891,7 +884,6 @@ struct RunInputs {
     /// data port). Empty for a sealed prod config — nothing bound (claim 15).
     console_data_sockets: Vec<(u32, PathBuf)>,
     builder_control_sockets: Vec<(u32, PathBuf)>,
-    virtiofs_shares: Vec<(String, PathBuf)>,
     /// Host console log the PL011 mirrors guest output into as it arrives.
     console_log: Option<PathBuf>,
     pause_state: Option<PathBuf>,
@@ -1534,7 +1526,6 @@ unsafe fn run(
         broker_socket,
         console_data_sockets,
         builder_control_sockets,
-        virtiofs_shares,
         console_log,
         pause_state,
         snapshot_request,
@@ -1727,20 +1718,6 @@ unsafe fn run(
             .collect();
         let mut vsock_dev =
             vsock.then(|| VirtioVsock::new(VSOCK_MMIO_BASE, VSOCK_IRQ, ram, RAM_BASE, ram_size));
-        let mut fs_devs = Vec::with_capacity(virtiofs_shares.len());
-        for (index, (tag, root)) in virtiofs_shares.into_iter().enumerate() {
-            // SAFETY: `ram` is the mapped guest RAM valid for the run (this fn body
-            // is within an `unsafe` block), same contract as the other devices.
-            fs_devs.push(VirtioFs::with_tag(
-                FS_MMIO_BASE + index as u64 * MMIO_STRIDE,
-                FS_IRQ + index as u32,
-                ram,
-                RAM_BASE,
-                ram_size,
-                root,
-                tag,
-            ));
-        }
         // SAFETY: `ram` is the mapped guest RAM valid for the run. The device
         // retains no generated bytes, so restored guests continue from fresh OS
         // entropy rather than replaying device-owned state.
@@ -1884,9 +1861,6 @@ unsafe fn run(
             if let Some(device) = vsock_dev.as_mut() {
                 restore_devices.push(device);
             }
-            for device in &mut fs_devs {
-                restore_devices.push(device);
-            }
             restore_devices.push(&mut rng_dev);
             let mut snapshot_targets = restore_devices
                 .iter_mut()
@@ -1945,9 +1919,6 @@ unsafe fn run(
             }
             if let Some(v) = vsock_dev.as_mut() {
                 devices.push(v);
-            }
-            for fs in &mut fs_devs {
-                devices.push(fs);
             }
             devices.push(&mut rng_dev);
 

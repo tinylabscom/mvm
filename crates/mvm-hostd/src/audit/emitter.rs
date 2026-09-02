@@ -333,22 +333,17 @@ impl AuditEmitter {
     /// OS-default umask, but for hard guarantees the caller should
     /// pre-create it.
     pub fn with_dir(signing_key: SigningKey, audit_dir: &Path) -> Result<Self> {
-        // Tighten the audit dir to 0700 if we created it. We use
-        // `create_dir_all` first (idempotent) then `set_permissions`.
-        // The audit chain inherits the same mode-0700 posture as the
-        // rest of ~/.mvm, since its contents bind to plan-signed entries.
-        if !audit_dir.exists() {
-            std::fs::create_dir_all(audit_dir)
-                .with_context(|| format!("creating audit dir at {}", audit_dir.display()))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let perms = std::fs::Permissions::from_mode(0o700);
-                std::fs::set_permissions(audit_dir, perms).with_context(|| {
-                    format!("setting 0700 on audit dir {}", audit_dir.display())
-                })?;
-            }
-        }
+        // The audit chain inherits the same 0700 posture as the rest of
+        // ~/.mvm, since its contents bind to plan-signed entries.
+        //
+        // Unconditionally, and over the whole chain. The previous version
+        // tightened the directory only `if !audit_dir.exists()` — so a chain
+        // directory that arrived loose, from a bare `mkdir` or an unpacked
+        // archive, was left exactly as found, which is the one case the mode
+        // mattered. It also chmodded this leaf alone while `create_dir_all`
+        // made its ancestors at the umask.
+        mvm_core::config::create_private_dir(audit_dir)
+            .with_context(|| format!("creating audit dir at {} privately", audit_dir.display()))?;
         let signer = Arc::new(
             FileAuditSigner::open(signing_key.clone(), audit_dir)
                 .with_context(|| format!("opening FileAuditSigner at {}", audit_dir.display()))?,
@@ -383,10 +378,8 @@ impl AuditEmitter {
         audit_dir: &Path,
         signer: Arc<FileAuditSigner>,
     ) -> Result<Self> {
-        if !audit_dir.exists() {
-            std::fs::create_dir_all(audit_dir)
-                .with_context(|| format!("creating audit dir at {}", audit_dir.display()))?;
-        }
+        mvm_core::config::create_private_dir(audit_dir)
+            .with_context(|| format!("creating audit dir at {} privately", audit_dir.display()))?;
         Ok(Self {
             signers: vec![signer],
             signing_key,

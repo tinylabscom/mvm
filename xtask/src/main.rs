@@ -60,6 +60,7 @@ mod check_no_vz;
 mod check_one_guest_protocol;
 mod check_per_vm_host_binaries_sync;
 mod check_plan_names;
+mod check_private_mvm_dirs;
 mod check_require_grant_token_allowlist;
 mod check_runtime_overlay_version;
 mod check_sdk_cdylib_deps;
@@ -395,6 +396,10 @@ fn main() -> Result<()> {
         Some("check-vcpu-ceilings") => {
             let workspace = workspace_root();
             check_vcpu_ceilings::run(&workspace)
+        }
+        Some("check-private-mvm-dirs") => {
+            let workspace = workspace_root();
+            check_private_mvm_dirs::run(&workspace)
         }
         Some("check-guest-init-parity") => {
             let workspace = workspace_root();

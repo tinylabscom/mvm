@@ -229,6 +229,42 @@ fn attach_to_output(name: &str) -> Result<()> {
     }
 }
 
+/// Say so when a transient run's name carries volume registrations it will not
+/// attach.
+///
+/// `mvmctl machine volume mount <NAME> …` registers against a VM name, but only
+/// the *persistent* start path consumes the registry (`start_machine` →
+/// `start_persistent_oci_machine` → `merge_registered_volumes_for_launch`). A
+/// transient `machine run --name <NAME>` with the same name ignores it.
+///
+/// Defensible — a transient VM has no `machine stop` to release the exclusive
+/// attachment lease with — but it was entirely silent. Measured on macOS 26: a
+/// registered mount at `/data/probe` still listed by `machine volume ls`
+/// produced `ls: /data/probe: No such file or directory` inside a guest that
+/// booted cleanly, with no diagnostic on either side.
+///
+/// A warning rather than a refusal: attaching would take a lease this run
+/// cannot release, and refusing would break a run whose registrations are
+/// simply irrelevant to it. Best-effort — a registry that cannot be read must
+/// not fail a boot that never depended on it.
+fn warn_registered_volumes_are_not_attached(name: Option<&str>) {
+    let Some(name) = name else {
+        return;
+    };
+    let Ok(records) = crate::commands::vm::volume::list_registered_attachments(name) else {
+        return;
+    };
+    if records.is_empty() {
+        return;
+    }
+    mvm_runtime::base::ui::warn(&format!(
+        "machine {name:?} has {n} registered volume mount(s) that a transient run does not \
+         attach — those apply to `mvmctl machine start`. Use `--mount` to attach one here, or \
+         `mvmctl machine volume ls {name}` to list them.",
+        n = records.len(),
+    ));
+}
+
 fn apply_machine_ttl(name: &str, dur_str: &str) -> Result<()> {
     // Duration parsing stays a CLI concern; the facade's `set_ttl` applies the
     // resolved `expires_at` to the host registry (same op the `set-ttl` verb
@@ -427,6 +463,7 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
     tracing::debug!(?mode, warm_pool_size, "machine run warm-pool eligibility");
     match mode {
         MachineRunMode::Transient => {
+            warn_registered_volumes_are_not_attached(args.name.as_deref());
             if let Some(slot) = resolved_flake_slot {
                 args.run.manifest = Some(slot);
             }
