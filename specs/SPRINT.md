@@ -3562,3 +3562,13 @@ writes the plan:
       sustained egress transfers.
 - [ ] Complete the broad validation matrix and merge the repair for #3051,
       and #3052.
+
+## 2026-09-02 cargo target-dir guard
+
+- [x] Reclaim a CARGO_TARGET_DIR inherited from another source tree in both
+      cargo wrapper scripts, loudly, honoring inside-tree overrides and the
+      MVM_DEV_ENV_KEEP_INHERITED=1 escape hatch.
+- [x] Gate-test all four policy cases (unset, inside-honored,
+      outside-reclaimed, keep-inherited) and wire shellcheck + the gate
+      test into CI.
+- [ ] Merge the guard through the queue.

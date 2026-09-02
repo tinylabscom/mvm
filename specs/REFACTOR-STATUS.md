@@ -1,8 +1,18 @@
 # Refactor status
 
-Last updated: 2026-09-01
+Last updated: 2026-09-02
 
 ## In progress
+
+- [ ] **Cargo target-dir guard.**
+      `specs/plans/2026-09-02-cargo-target-dir-guard.md`.
+      Both cargo wrapper scripts reclaim a CARGO_TARGET_DIR pointing outside
+      the current source tree — the compile-time sibling of the stale-helper
+      bug, observed as an E0063 naming a field deleted by a merged PR, served
+      from rlibs in a shared target dir inherited from unrelated work. Policy
+      mirrors dev-env.sh: inside-tree values honored, outside-tree values
+      reclaimed loudly, MVM_DEV_ENV_KEEP_INHERITED=1 keeps them anyway. Gate
+      tests and CI shellcheck green; merge delivery remains.
 
 - [ ] **Signed caller commitment — issue #3070.**
       `specs/plans/2026-09-01-signed-caller-commitment.md`.

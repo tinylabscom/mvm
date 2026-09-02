@@ -198,6 +198,10 @@ jobs:
                      scripts/check-no-orchestration-server.test.sh \
                      scripts/security-lane-verdict.sh \
                      scripts/security-lane-verdict.test.sh \
+                     scripts/cargo-fast.sh \
+                     scripts/cargo-stable.sh \
+                     scripts/cargo-target-dir-guard.sh \
+                     scripts/cargo-target-dir-guard.test.sh \
                      .githooks/pre-commit \
                      .githooks/pre-commit.test.sh
 
@@ -291,6 +295,9 @@ jobs:
 
       - name: Orchestration-server gate tests
         run: bash scripts/check-no-orchestration-server.test.sh
+
+      - name: Cargo target dir guard tests
+        run: bash scripts/cargo-target-dir-guard.test.sh
 
       # The nightly security lanes do not run on a PR, so this is the only
       # place their failure reporting is exercised before it has to work.
