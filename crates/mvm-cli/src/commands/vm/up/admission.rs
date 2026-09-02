@@ -2045,6 +2045,10 @@ mod admit_plan_tests {
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
         let rootfs = write_rootfs(rootfs_dir.path(), b"non-shell-entrypoint-payload");
+        // A real directory the share digest can be hashed over — the shared
+        // system /tmp carries entries no test (and on multi-user hosts, no
+        // admission) can read.
+        let share_dir = tempfile::tempdir().unwrap();
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
@@ -2071,7 +2075,7 @@ mod admit_plan_tests {
             deps_volume: None,
             shares: vec![mvm_core::plan::HostShareGrant {
                 tag: "uvol0".into(),
-                host_path: "/tmp".into(),
+                host_path: share_dir.path().to_string_lossy().into_owned(),
                 guest_path: "/data".into(),
                 kind: mvm_core::plan::ShareKind::DirShare,
                 read_only: true,

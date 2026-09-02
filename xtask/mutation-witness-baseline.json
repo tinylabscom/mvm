@@ -93,6 +93,13 @@
       ]
     },
     {
+      "path": "crates/mvm-cli/src/commands/tests.rs",
+      "package": "mvm-cli",
+      "claims": [
+        19
+      ]
+    },
+    {
       "path": "crates/mvm-cli/src/commands/vm/console.rs",
       "package": "mvm-cli",
       "claims": [
@@ -109,6 +116,13 @@
       "package": "mvm-cli",
       "claims": [
         17
+      ]
+    },
+    {
+      "path": "crates/mvm-contract/src/plan/types.rs",
+      "package": "mvm-contract",
+      "claims": [
+        19
       ]
     },
     {
@@ -171,7 +185,8 @@
       "path": "crates/mvm-core/src/plan/synthesis.rs",
       "package": "mvm-core",
       "claims": [
-        8
+        8,
+        19
       ]
     },
     {
@@ -193,6 +208,13 @@
       "package": "mvm-hostd",
       "claims": [
         18
+      ]
+    },
+    {
+      "path": "crates/mvm-hostd/src/audit/emitter.rs",
+      "package": "mvm-hostd",
+      "claims": [
+        19
       ]
     },
     {
@@ -222,7 +244,8 @@
       "claims": [
         1,
         8,
-        18
+        18,
+        19
       ]
     },
     {

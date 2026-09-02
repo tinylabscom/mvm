@@ -1649,7 +1649,7 @@ mod tests {
         };
         let policy = mvm_core::network_policy::NetworkPolicy::deny_all();
         let shape = LaunchShape {
-            assets: &req.assets,
+            assets: &[],
             name: None,
             image: &image,
             cpus: 2,

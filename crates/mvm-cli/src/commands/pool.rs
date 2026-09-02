@@ -2029,6 +2029,7 @@ mod tests {
         let policy = mvm_core::network_policy::NetworkPolicy::deny_all();
         let shape = |name: Option<&'static str>| crate::exec::LaunchShape {
             name,
+            assets: &[],
             image: &image,
             cpus: 2,
             memory_mib: 1024,
