@@ -29,6 +29,7 @@ pub use types::{
     StreamRetention, TenantId, TimeoutSpec, Variant, WorkloadId, WorkloadIntent,
     validate_ingress_mappings, validate_ingress_material,
 };
+pub use types::{AssetIdentity, AssetKind};
 pub use validity::FreshnessClaims;
 pub use verb::{VerbId, VerbIdError};
 pub use verb_grant::{VERB_GRANT_BASELINE, VerbGrant, VerbGrantError};

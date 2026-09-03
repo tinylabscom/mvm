@@ -106,7 +106,7 @@ use super::vm::{
     checkpoint, console, cp, exec, forward, group, sandbox, session, snapshot, volume,
 };
 
-use audit::AuditAction;
+use audit::{AssetAction, AuditAction};
 use cache::CacheAction;
 use catalog::CatalogAction;
 use config::ConfigAction;
@@ -2532,6 +2532,29 @@ fn test_audit_verify_with_tenant() {
         }) => assert_eq!(tenant, "acme"),
         _ => panic!("Expected Audit::Verify"),
     }
+}
+
+#[test]
+fn test_audit_asset_id_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "trust", "audit", "asset", "id", "/data/model.bin"])
+        .unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
+            action:
+                AuditAction::Asset {
+                    action: AssetAction::Id { path },
+                },
+        }) => assert_eq!(path, std::path::PathBuf::from("/data/model.bin")),
+        _ => panic!("Expected Audit::Asset::Id"),
+    }
+}
+
+#[test]
+fn test_audit_asset_id_rejects_missing_path() {
+    assert!(Cli::try_parse_from(["mvmctl", "trust", "audit", "asset", "id"]).is_err());
 }
 
 #[test]

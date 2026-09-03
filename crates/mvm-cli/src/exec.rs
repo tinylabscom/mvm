@@ -159,6 +159,9 @@ pub struct LaunchShape<'a> {
     pub memory_mib: u32,
     pub mem_initial_mib: Option<u32>,
     pub dir_shares: &'a [DirShareSpec],
+    /// Declared `--asset` bindings hashed into content identities at
+    /// admission.
+    pub assets: &'a [crate::commands::shared::AssetSpec],
     /// Block-device mounts supplied by transient `--mount` disk syntax.
     pub disk_volumes: &'a [VmVolume],
     pub pty: bool,
@@ -198,6 +201,10 @@ pub struct ExecRequest {
     pub mem_initial_mib: Option<u32>,
     /// Live read-only host-directory shares requested by `machine run --mount`.
     pub dir_shares: Vec<DirShareSpec>,
+    /// Declared `--asset KIND:PATH` bindings hashed into content identities
+    /// at admission. Nothing is attached to the guest — the hash is recorded
+    /// in the signed plan and the chain-signed audit log.
+    pub assets: Vec<crate::commands::shared::AssetSpec>,
     /// Materialized disk-image volumes requested by `machine run --mount`.
     pub disk_volumes: Vec<VmVolume>,
     pub env: Vec<(String, String)>,
@@ -254,6 +261,7 @@ impl ExecRequest {
     /// the same config — which is what makes the warm-pool compat key match.
     pub fn launch_shape(&self) -> LaunchShape<'_> {
         LaunchShape {
+            assets: &self.assets,
             name: self.name.as_deref(),
             image: &self.image,
             cpus: self.cpus,
@@ -1366,6 +1374,7 @@ pub fn resolve_launch(
                 .map(std::path::Path::new),
             vm_name: &vm_name,
             sdk_sidecar: sdk_sidecar.as_ref(),
+            assets: shape.assets,
         })?
     {
         start_config.tenant_id = Some(sub.tenant_id);
@@ -1470,6 +1479,7 @@ mod tests {
             timeout_secs: Some(120),
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            assets: Vec::new(),
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
@@ -1587,7 +1597,9 @@ mod tests {
             module_path: module_path.to_string(),
             label: "wasm:test".to_string(),
         };
+        let no_assets: &[crate::commands::shared::AssetSpec] = &[];
         let shape = LaunchShape {
+            assets: no_assets,
             name: Some("wasm-test"),
             image: &image,
             cpus: 1,
@@ -1700,6 +1712,7 @@ mod tests {
             timeout_secs: Some(30),
             pty: true,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            assets: Vec::new(),
             stdin: b"ignored".to_vec(),
             healthcheck: None,
             hypervisor: Some("mock".into()),
@@ -1761,6 +1774,7 @@ mod tests {
         };
         let policy = mvm_core::network_policy::NetworkPolicy::deny_all();
         let shape = LaunchShape {
+            assets: &[],
             name: None,
             image: &image,
             cpus: 2,
@@ -1853,6 +1867,7 @@ mod tests {
             timeout_secs: Some(30),
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            assets: Vec::new(),
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
@@ -1881,6 +1896,7 @@ mod tests {
             timeout_secs: Some(30),
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            assets: Vec::new(),
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
@@ -1917,6 +1933,7 @@ mod tests {
             timeout_secs: Some(30),
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            assets: Vec::new(),
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
@@ -1972,6 +1989,7 @@ mod tests {
             timeout_secs: Some(30),
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            assets: Vec::new(),
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
@@ -2007,6 +2025,7 @@ mod tests {
             timeout_secs: Some(30),
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            assets: Vec::new(),
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
@@ -2052,6 +2071,7 @@ mod tests {
             timeout_secs: Some(30),
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            assets: Vec::new(),
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,

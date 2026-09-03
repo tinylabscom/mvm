@@ -72,6 +72,9 @@ pub struct AdmitInputs<'a> {
     /// decides which variant it is — and handed to both halves from here, so
     /// the plan grant and the attached volume cannot describe different bytes.
     pub sdk_sidecar: Option<&'a crate::commands::vm::up::SdkSidecarAttachment>,
+    /// Declared `--asset` bindings forwarded to admission for content
+    /// identity hashing.
+    pub assets: &'a [crate::commands::shared::AssetSpec],
 }
 
 pub fn boot_session_vm(
@@ -152,6 +155,9 @@ pub fn boot_session_vm(
             // A session VM binds no SDK host service; `invoke` is the only
             // caller and it admits its own plan without one.
             sdk_sidecar: None,
+            // `invoke` declares no standalone assets; its function payload is
+            // admitted as the workload itself.
+            assets: &[],
         })?
     {
         start_config.tenant_id = Some(sub.tenant_id);
@@ -217,6 +223,7 @@ pub fn dispatch_in_session(
         dir_shares: vec![],
         disk_volumes: vec![],
         env: vec![],
+        assets: Vec::new(),
         target: ExecTarget::Inline {
             argv: vec!["bash".to_string(), "-c".to_string(), code],
         },

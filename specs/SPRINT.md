@@ -10,6 +10,24 @@
 
 ## In progress
 
+- [ ] **Content-addressed asset identity.**
+      `specs/plans/2026-09-02-content-addressed-asset-identity.md`.
+      Every dataset, model, prompt, agent, policy, and compute environment a
+      workload names now carries a content-derived identity in the signed
+      plan: `AssetIdentity{kind, locator, content_sha256}` records ride
+      `ExecutionPlan.asset_identities` (empty-by-default, so existing plans
+      stay byte-identical), `--asset KIND:HOST_PATH` on `run`/`machine run`
+      hashes caller assets through the canonical `hash_source` tree walk at
+      admission, and directory-share digests are pinned at admission and
+      re-verified by `enforce_admitted_shares` at attach time, closing the
+      host-dir TOCTOU window. A chain-signed `plan.asset_identities` entry
+      carries kind/locator/digest labels, `mvmctl trust audit asset id
+      <path>` recomputes the same digest offline, and claim 19
+      (MVM-SEC-19) is registered in the ADR-001 narrative + machine-checked
+      ledger with a BDD suite (`s33_content_addressed_assets`, 4 scenarios).
+      Workspace check, host tests, gated Linux cross-check, clippy, fmt, and
+      the claim/CLI lint gates are green. Merge delivery remains.
+
 - [ ] **Mounted PTY image environment.**
       `specs/plans/2026-09-01-mounted-pty-image-environment.md`.
       Absolute PTY commands now bypass the login-shell wrapper even when the

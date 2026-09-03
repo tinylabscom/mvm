@@ -390,6 +390,7 @@ pub(crate) mod tests {
             bundle: None,
             deps_volume: None,
             shares: Vec::new(),
+            asset_identities: Vec::new(),
             agent_verbs: None,
             services: Vec::new(),
             extensions: Vec::new(),

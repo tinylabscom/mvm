@@ -103,6 +103,7 @@ pub fn synthesis_for_resume<'a>(
         // The local-run path projects its caller's volumes; a resume carries
         // none, so no host-fs share is admitted.
         shares: Vec::new(),
+        assets: Vec::new(),
         redaction: Default::default(),
         reversible_replacement: Default::default(),
         caller_commitment: None,

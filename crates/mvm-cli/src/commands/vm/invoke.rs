@@ -304,6 +304,7 @@ fn admit_entrypoint_boot(
         bundle_pin: None,
         deps_volume: None,
         shares: vec![],
+        assets: Vec::new(),
         redaction: mvm_core::policy::RedactionPolicy::default(),
         network_policy: params.network_policy.clone(),
         agent_verb_override: params.agent_verb_override.to_vec(),
@@ -476,6 +477,7 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
             kernel,
             vm_name,
             sdk_sidecar: _,
+            assets: _,
         } = inputs;
         let admitted = admit_entrypoint_boot(
             EntrypointAdmissionParams::builder(rootfs, kernel, vm_name, &admit_backend)

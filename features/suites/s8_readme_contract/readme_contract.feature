@@ -117,7 +117,7 @@ Feature: README CLI contract
     And the error output contains "requires a digest-pinned reference"
 
   Scenario: the README's claim count matches the machine-checked ledger
-    # The README summarizes fifteen numbered claims; the in-tree conformance
+    # The README summarizes sixteen numbered claims; the in-tree conformance
     # catalog is the machine-checked claim -> witness ledger. Locking them
     # together fails this scenario the moment either drifts.
-    Then the README and the claim catalog agree on 15 numbered claims
+    Then the README and the claim catalog agree on 16 numbered claims

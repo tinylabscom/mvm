@@ -59,6 +59,9 @@ pub(in crate::commands) struct Args {
     /// `machine run --mount` or the public `run --mount` surface.
     #[arg(skip)]
     pub mounts: Vec<String>,
+    /// Content-addressed asset binding. See `run --asset`.
+    #[arg(long = "asset", value_name = "KIND:HOST_PATH")]
+    pub assets: Vec<String>,
     /// Environment variable to inject (KEY=VALUE). Repeatable. Overrides any env vars
     /// carried by `--launch-plan`.
     #[arg(short, long)]
@@ -312,6 +315,16 @@ pub(in crate::commands) struct RunArgs {
         value_name = "HOST:GUEST[:ro|SIZE]"
     )]
     pub mounts: Vec<String>,
+    /// Declare a content-addressed asset (KIND:HOST_PATH, repeatable).
+    //
+    // HOST_PATH is hashed with the canonical tree walk and the digest lands
+    // in the signed plan + audit chain; nothing is attached to the guest.
+    // KIND is one of dataset, model, prompt, agent, or policy — the compute
+    // environment is derived from the measured boot state. Plain comment, not
+    // doc: clap derives long_help from doc comments and the machine-run
+    // summary gate caps that at 64 characters too.
+    #[arg(long = "asset", value_name = "KIND:HOST_PATH")]
+    pub assets: Vec<String>,
     /// Not a flag: the libc of the image this run will boot, when it is known
     /// before the rootfs exists. A catalogued `--runtime` pins its image, so
     /// the entry states the libc and detection copies it here; an arbitrary
@@ -462,6 +475,7 @@ impl Default for RunArgs {
             timeout: None,
             receipt: None,
             caller_commitment: None,
+            assets: Vec::new(),
             json: false,
             dry_run: false,
             launch_plan: None,
@@ -525,6 +539,7 @@ impl RunArgs {
             cpus: self.cpus,
             memory: self.memory,
             mounts: self.mounts,
+            assets: self.assets,
             env: self.env,
             timeout: self.timeout,
             launch_plan: self.launch_plan,
@@ -689,6 +704,7 @@ pub(in crate::commands) fn run_secure_with_source(
             kernel,
             vm_name,
             sdk_sidecar,
+            assets,
         } = inputs;
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
         let ctx = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
@@ -736,6 +752,7 @@ pub(in crate::commands) fn run_secure_with_source(
             entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
                 "an ad-hoc argv run replaces the image entrypoint",
             ),
+            assets: assets.to_vec(),
         })?;
         let Some(c) = ctx else { return Ok(None) };
         // Persist the bare plan so the pre-start moat / endpoint can read it
@@ -1307,6 +1324,11 @@ fn build_exec_request(
         hypervisor: args.hypervisor,
         sdk_host_services,
         declared_libc: args.detected_libc,
+        assets: args
+            .assets
+            .iter()
+            .map(|s| crate::commands::shared::parse_asset_spec(s))
+            .collect::<anyhow::Result<Vec<_>>>()?,
     })
 }
 

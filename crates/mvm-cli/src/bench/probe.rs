@@ -84,6 +84,7 @@ pub fn admit_probe_plan(
         bundle_pin: None,
         deps_volume: None,
         shares: Vec::new(),
+        assets: Vec::new(),
         redaction: mvm_core::policy::RedactionPolicy::default(),
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
         caller_commitment: None,
