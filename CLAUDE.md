@@ -249,12 +249,16 @@ for the claim numbering, threat model, and per-backend tier matrix;
 this section is the summary.
 
 **The ledger is the claims table inside ADR-001**, not a separate
-catalog file: `xtask check-claim-catalog` parses that table (rows 1–18,
+catalog file: `xtask check-claim-catalog` parses that table (rows 1–19,
 witnesses spelled `fn:<test_name>` / `ci:<job_name>`) and fails when a
 named witness stops existing. `model/claims.toml` is the parallel
 conformance ID register that `xtask check-conformance` reads. There is
-no `specs/claims/` directory; earlier revisions of this file pointed at
-`specs/claims/catalog.md`, which has never existed on this branch.
+no `specs/claims/` directory today; it existed and was deleted by the v1
+simplification restructure, which also removed the ADR 052–111 range and
+renumbered a fresh 001–051 set into the same namespace. Inbound
+references to either were not swept at the time, so treat a citation of
+`specs/claims/…` or of an ADR above 051 as stale rather than as a file
+you have failed to find.
 
 Keep the ADR-001 table in sync when you rename or move a witness. The
 prose below is the narrative and the table is the ledger — and when the
@@ -643,6 +647,22 @@ plan, since auditing a child's kill under its parent's identity would write a
 wrong entry rather than a missing one.
 ADR-001's ledger carries the "Preview 18 limits" note; do not paraphrase
 this row as enforced without it.
+
+19. **Every dataset, model, prompt, agent, policy, and compute environment
+    named by a workload carries a content-derived identity in the signed plan,
+    and a pinned host share that drifts after admission fails closed.** Row 19
+    of the ADR-001 table, `Shipped`. `--asset KIND:PATH` hashes the asset into
+    `AssetIdentity` records inside the signed `ExecutionPlan`; admission also
+    pins each directory share's content digest and re-verifies it at mount
+    enforcement, so a post-admission edit of the host directory is refused
+    (`admitted_share_digest_refuses_directory_changed_after_admission`).
+    Synthesis derives the compute-environment identity from the measured
+    image/kernel/verity state
+    (`synthesized_plan_records_share_and_caller_asset_identities`), and a
+    `plan.asset_identities` chain-signed entry carries the kind, locator and
+    digest labels. Note this claim is numbered 19 in the ledger even though it
+    is `Shipped` and rows 16–18 are `Preview`: the ledger numbers rows in the
+    order claims were added, not by status.
 
 The guest agent itself runs as uid 901 under setpriv (W4.5); the
 host-side vsock proxy socket is mode 0700 (W1.2), the proxy port

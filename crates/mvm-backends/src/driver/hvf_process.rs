@@ -152,13 +152,24 @@ pub(crate) fn wait_for_pause_state(path: &Path, paused: bool) -> Result<()> {
     }
 }
 
-/// Locate the per-VM HVF supervisor binary. Compiled by mvmctl's build script;
-/// see [`mvm_vmm::host::aux_bin`] for the search order.
+/// Locate the per-VM HVF supervisor binary without verifying its freshness —
+/// for availability probes and codesign enumeration, not for spawning.
 pub fn resolve_supervisor_path() -> Result<PathBuf> {
-    mvm_vmm::host::aux_bin::resolve(&mvm_vmm::host::aux_bin::AuxBin {
+    mvm_vmm::host::aux_bin::resolve(&hvf_supervisor_spec())
+}
+
+/// Locate the supervisor and refuse a stale one: the spawn path must not hand
+/// a moved-on config contract to a helper built from an older revision.
+pub fn resolve_supervisor_path_verified() -> Result<PathBuf> {
+    mvm_vmm::host::aux_bin::resolve_verified(&hvf_supervisor_spec())
+}
+
+fn hvf_supervisor_spec() -> mvm_vmm::host::aux_bin::AuxBin<'static> {
+    mvm_vmm::host::aux_bin::AuxBin {
         bin: "mvm-hvf-supervisor",
         env_var: "MVM_HVF_SUPERVISOR_PATH",
-    })
+        rebuild_package: "mvm-hostd",
+    }
 }
 
 pub fn vms_root() -> PathBuf {

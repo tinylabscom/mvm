@@ -11,6 +11,7 @@ mod cmd_audit;
 mod completions;
 mod dashboard;
 mod deploy;
+mod deployments;
 mod deps;
 mod dispatch;
 pub(crate) mod env;
@@ -134,6 +135,9 @@ pub(in crate::commands) enum Commands {
     /// Build, seal, and record a workload; optionally ship it to mvmd
     #[command(display_order = 4)]
     Deploy(deploy::Args),
+    /// Inventory of recorded local deployments
+    #[command(display_order = 4)]
+    Deployments(deployments::Args),
     /// Build the custom microVM kernels (builder / workload)
     #[command(display_order = 3)]
     Kernel(build::kernel::Args),
@@ -280,6 +284,10 @@ pub fn cli_command() -> clap::Command {
 }
 
 pub fn run() -> Result<()> {
+    // The qemu vsock bridge re-execs this binary as a per-VM host helper, so
+    // mvmctl answers the host-helper contract probe like every other helper —
+    // before clap sees the unknown flag.
+    mvm_vmm::host::helper_contract::exit_with_probe_answer_if_requested("mvmctl");
     let result = run_command();
     // Emitted after the command settles so the profile covers teardown as well.
     // A no-op unless MVM_SPAN_TIMINGS is set.

@@ -69,6 +69,10 @@ path = "catalog list"
 tier = "exec"
 
 [[command]]
+path = "deployments ls"
+tier = "exec"
+
+[[command]]
 path = "deps audit"
 tier = "parse"
 reason = "same sealed-volume fixture as deps inspect"

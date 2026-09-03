@@ -415,12 +415,14 @@ fn stderr_tail(path: &Path, max_bytes: usize) -> Option<String> {
     (!collapsed.is_empty()).then_some(collapsed)
 }
 
-/// Locate the `mvm-network-endpoint` binary. Compiled by mvmctl's build
-/// script; see [`mvm_vmm::host::aux_bin`] for the search order.
+/// Locate the `mvm-network-endpoint` binary and refuse a stale one — the
+/// endpoint holds the workload's substituted secrets, so a moved-on config
+/// contract failing mid-boot is the worst place to discover the mismatch.
 fn resolve_network_endpoint_path() -> Result<PathBuf> {
-    crate::host::aux_bin::resolve(&crate::host::aux_bin::AuxBin {
+    crate::host::aux_bin::resolve_verified(&crate::host::aux_bin::AuxBin {
         bin: "mvm-network-endpoint",
         env_var: "MVM_SUBSTITUTION_ENDPOINT_PATH",
+        rebuild_package: "mvm-hostd",
     })
 }
 
@@ -1199,6 +1201,19 @@ fn kill(pid: libc::pid_t, sig: libc::c_int) {
 #[cfg(test)]
 mod tests {
 
+    /// Stub endpoint scripts run through the verified resolver before they
+    /// can play their role, so every stub answers the contract probe first.
+    /// Generated from the real response so a contract bump rewrites the
+    /// stubs instead of breaking them.
+    fn stub_preamble() -> String {
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"{flag}\" ]; then echo '{answer}'; exit 0; fi\n",
+            flag = crate::host::helper_contract::CONTRACT_PROBE_FLAG,
+            answer =
+                crate::host::helper_contract::probe_response("mvm-network-endpoint").trim_end(),
+        )
+    }
+
     /// A launch whose endpoint never carried a session must fail, and say
     /// which of the two ways it failed.
     #[test]
@@ -1951,7 +1966,8 @@ mod tests {
         std::fs::write(
             &stub,
             format!(
-                "#!/bin/sh\ncat > {}\necho '{}'\n",
+                "{}cat > {}\necho '{}'\n",
+                stub_preamble(),
                 cfg_out.display(),
                 READY_HANDSHAKE
             ),
@@ -2017,7 +2033,10 @@ mod tests {
         let stub = dir.join("stub-endpoint.sh");
         std::fs::write(
             &stub,
-            format!("#!/bin/sh\ncat >/dev/null\necho '{READY_HANDSHAKE}'\n"),
+            format!(
+                "{}cat >/dev/null\necho '{READY_HANDSHAKE}'\n",
+                stub_preamble()
+            ),
         )
         .unwrap();
         {
@@ -2091,7 +2110,14 @@ mod tests {
         env.set("MVM_HOME", &dir);
 
         let stub = dir.join("stub-endpoint.sh");
-        std::fs::write(&stub, "#!/bin/sh\ncat >/dev/null\necho 'ready handshake'\n").unwrap();
+        std::fs::write(
+            &stub,
+            format!(
+                "{}cat >/dev/null\necho 'ready handshake'\n",
+                stub_preamble()
+            ),
+        )
+        .unwrap();
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -2154,7 +2180,8 @@ mod tests {
         std::fs::write(
             &stub,
             format!(
-                "#!/bin/sh\ncat >/dev/null\necho $$ > {}\ntrap 'echo stopped > {}; exit 0' TERM\necho '{}'\nwhile :; do sleep 1; done\n",
+                "{}cat >/dev/null\necho $$ > {}\ntrap 'echo stopped > {}; exit 0' TERM\necho '{}'\nwhile :; do sleep 1; done\n",
+                stub_preamble(),
                 pid_capture.display(),
                 stopped.display(),
                 READY_HANDSHAKE

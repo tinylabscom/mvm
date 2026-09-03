@@ -76,6 +76,7 @@ pub mod guest_vsock_session;
 /// In-guest `host.audit.v1` typed methods: `emit` / `emit_batch` over the
 /// broker transport, letting a workload append to the chain-signed audit log.
 pub mod host_audit;
+pub mod host_beacon;
 /// In-guest `host.cost.v1` typed methods: `workload` / `tenant` spend queries
 /// over the broker transport.
 pub mod host_cost;
