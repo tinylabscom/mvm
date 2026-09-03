@@ -370,3 +370,39 @@ witnesses = [
     "fn:the_refusal_names_the_ceiling_and_the_request",
     "fn:pool_matching_is_unchanged_by_the_bound",
 ]
+
+[[claim]]
+id = "MVM-SEC-20"
+level = "build"
+witness_kinds = ["fn", "ci"]
+suite = "supply_chain"
+statement = "Every published release artifact is signed under the release workflow's identity, and the build and fetch paths refuse an unsigned or mis-signed one"
+# `release.yml` signs every release blob keyless through GitHub OIDC and
+# publishes a bundle carrying the Fulcio certificate and the Rekor inclusion
+# proof; the `verify-release` job re-downloads the published set and verifies it
+# against an identity regexp pinned to this workflow at a tag. On the consuming
+# side the build gate refuses a missing or malformed bundle and the fetch gate
+# refuses an unsigned manifest before parsing it, with the hash-skip hatch
+# explicitly not waiving the signature.
+#
+# The limit, which the statement carries deliberately: the two enforcement paths
+# do not share a posture. `verify_signature` on the self-update path returns Ok
+# with a warning when cosign is absent, so there the signature is best-effort and
+# the SHA-256 pin is what still holds. A claim that said "every path refuses"
+# would be false.
+#
+# `a_malformed_bundle_is_refused` is deliberately NOT listed. It exists, it is a
+# good test, and it passes — but it is `#[cfg(feature = "manifest-verify")]`, and
+# every use of that feature in CI is `cargo run --example`, never `cargo test
+# --features`. No lane executes it. `check-claim-catalog` resolves `fn:` needles
+# by text search and cannot see a cfg gate, so listing it would buy a witness
+# that is green because nothing runs it — the same shape as the retired
+# `mvm.secret_env` witness on claim 13. Wire the feature into a test lane and it
+# becomes citable.
+witnesses = [
+    "ci:verify-release",
+    "fn:accepted_identities_are_the_versioned_release_workflow",
+    "fn:a_missing_bundle_refuses_and_names_the_asset",
+    "fn:fetch_expected_hashes_refuses_an_unsigned_manifest_before_parsing",
+    "fn:skip_hash_verify_does_not_waive_the_manifest_signature",
+]
