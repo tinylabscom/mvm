@@ -30,11 +30,30 @@ All Nix builds/evals, Firecracker operations, `mvmctl` runtime commands (anythin
 
 **Important:** `mvmctl` (via `cargo run`) commands like `build`, `up`, `down`, `logs`, and `ls` must be run inside the builder VM — they talk to Linux-only microVM tooling. The exception is an explicit `--hypervisor wasm` target, which may run on the macOS host. `cargo test` / `cargo check` / `cargo build` should run on the macOS host by default (see "Run cargo on the macOS host" above); only `cargo clippy --workspace --all-targets`, Nix eval/build checks, and tests gated on `target_os = "linux"` need the builder VM.
 
-## Worktree Workflow for Features
+## Worktree Workflow for All Changes
 
-> **Active exception — the cleanup rewrite.** The in-progress complete refactor (`specs/plans/117-cleanup-and-rearchitecture-brief.md`, branch `cleanup-rearchitecture`) runs on a **single long-lived branch, not worktrees**, and all stale worktrees are being cleaned up first so it starts from a clean state. The worktree workflow below is the standard for **all work after** the rewrite lands — and the rewrite's own plans instruct future sessions to return to it.
+Every change is developed in a git worktree, including documentation, typo fixes,
+dependency bumps, features, refactors, and bug fixes. Code edits and cargo
+invocations happen inside the worktree directory. Git operations (status, add,
+commit, stash, rebase, push, fetch, pull, hook execution) happen from the main
+`mvm/` checkout, with `-C` pointing at the worktree when needed. The main checkout
+is the single git operator; worktree directories are code+build sandboxes only.
 
-Every feature, refactor, or non-trivial bug fix is developed in a git worktree — code edits and cargo invocations happen inside the worktree directory. Git operations (status, add, commit, stash, rebase, push, fetch, pull, hook execution) happen from the main `mvm/` checkout, with `-C` pointing at the worktree when needed. The main checkout is the single git operator; worktree directories are code+build sandboxes only.
+### Keep the main checkout on synchronized `main`
+
+The main `mvm/` checkout is a control plane for git operations and must always
+remain checked out on `main`. Never create, check out, or do change work on a
+topic branch there, even temporarily. Create every topic branch in its worktree
+with `git worktree add ... -b <branch>`, or attach an existing branch with
+`git worktree add ... <branch>`.
+
+At the start and end of every task, verify that the main checkout is clean, is on
+`main`, and is synchronized with `origin/main`. Run `git fetch origin` followed
+by `git pull --ff-only origin main` from the main checkout whenever synchronization
+is needed. If a topic branch is accidentally checked out there, first preserve
+all changes and confirm the branch is clean, then switch the main checkout back
+to `main`, synchronize it, and attach the topic branch to a worktree before doing
+any further work.
 
 ### Never commit directly to `main`
 
@@ -148,9 +167,11 @@ After the feature merges:
 git worktree remove ../.worktrees/mvm-<feature-slug>
 ```
 
-### When NOT to use a worktree
+### No worktree exceptions
 
-Trivial single-line changes (typo fixes, doc word swaps, dependency bumps) can land directly on a topic branch in the main checkout. The worktree rule applies to anything that touches code, runtime state, or the registry.
+All changes use a worktree. There is no docs-only, one-line, dependency-bump, or
+other trivial-change exception that permits checking out a topic branch in the
+main checkout.
 
 ## Definition of Done
 
