@@ -149,16 +149,36 @@ pub(super) fn resolve_or_pull_run_image_with(
         match unpacked_dir_if_present(cache_root, &image.resolved_digest) {
             Some(unpacked_root) => {
                 sweep_before_builder_vm();
-                materialize(
+                let signer;
+                let evidence = if prod {
+                    signer = crate::commands::vm::host_signer::load_or_init()
+                        .context("load host signing key for the provenance mark")?;
+                    Some(
+                        mvm_build::provenance_mark::SealEvidence::builder(&signer.signing)
+                            .with_image_ref(&image.reference)
+                            .with_image_digest(&image.resolved_digest)
+                            .build(),
+                    )
+                } else {
+                    None
+                };
+                materialize(super::materialize::MaterializeCall {
                     cache_root,
-                    &unpacked_root,
-                    &rootfs_path,
-                    &image.reference,
-                    oci_entrypoint_from_cache_path(cache_root, image.config_path.as_deref())?
-                        .as_ref(),
-                    prod,
-                    super::cache::read_deferred_nodes(cache_root, &image.resolved_digest)?,
-                )
+                    unpacked_root: &unpacked_root,
+                    rootfs_abs: &rootfs_path,
+                    image_label: &image.reference,
+                    entrypoint: oci_entrypoint_from_cache_path(
+                        cache_root,
+                        image.config_path.as_deref(),
+                    )?
+                    .as_ref(),
+                    sealed: prod,
+                    deferred_nodes: super::cache::read_deferred_nodes(
+                        cache_root,
+                        &image.resolved_digest,
+                    )?,
+                    evidence,
+                })
                 .with_context(|| {
                     format!(
                         "re-materializing cached OCI rootfs artifacts for {} from {}",
@@ -345,15 +365,16 @@ fn pull_image_ref(
     let rootfs_path = format!("rootfs/{manifest_hex}-{runtime_tag}/rootfs.ext4");
     let rootfs_abs = cache_root.join(&rootfs_path);
     super::cache::write_deferred_nodes(cache_root, &manifest.digest, &deferred_nodes)?;
-    inject_runtime_and_materialize(
+    inject_runtime_and_materialize(super::materialize::MaterializeCall {
         cache_root,
-        &unpacked_root,
-        &rootfs_abs,
-        &image_ref.canonical(),
-        None,
-        false,
+        unpacked_root: &unpacked_root,
+        rootfs_abs: &rootfs_abs,
+        image_label: &image_ref.canonical(),
+        entrypoint: None,
+        sealed: false,
         deferred_nodes,
-    )?;
+        evidence: None,
+    })?;
 
     let provenance = super::oci_types::OciProvenance {
         schema_version: 1,
@@ -542,7 +563,6 @@ fn is_gzip_layer(media_type: &str) -> bool {
 mod tests {
     use super::super::oci_types::OciCacheIndex;
     use super::*;
-    use mvm_build::oci_runtime_inject::ImageRuntimeConfig;
 
     fn sample_image(reference: &str, digest: &str, layer_path: &str) -> CachedOciImage {
         CachedOciImage {
@@ -618,25 +638,22 @@ mod tests {
     }
 
     fn fake_runtime_materialize(
-        _cache_root: &Path,
-        unpacked_root: &Path,
-        rootfs_abs: &Path,
-        image_label: &str,
-        _entrypoint: Option<&ImageRuntimeConfig>,
-        _sealed: bool,
-        deferred_nodes: Vec<mvm_fs::ext4::Node>,
+        call: super::super::materialize::MaterializeCall<'_>,
     ) -> Result<()> {
-        assert!(unpacked_root.is_dir(), "unpacked root must exist");
-        let parent = rootfs_abs.parent().expect("rootfs has parent");
+        assert!(call.unpacked_root.is_dir(), "unpacked root must exist");
+        let parent = call.rootfs_abs.parent().expect("rootfs has parent");
         fs::create_dir_all(parent)?;
-        fs::write(rootfs_abs, format!("materialized:{image_label}"))?;
+        fs::write(
+            call.rootfs_abs,
+            format!("materialized:{}", call.image_label),
+        )?;
         fs::write(parent.join("rootfs.verity"), b"fake-verity")?;
         fs::write(parent.join("rootfs.roothash"), b"abc\n")?;
         // A fn pointer can't capture, so the deferred set the materializer
         // was handed is recorded on disk for the caller to assert on.
         fs::write(
             parent.join("deferred-seen.json"),
-            serde_json::to_vec(&deferred_nodes)?,
+            serde_json::to_vec(&call.deferred_nodes)?,
         )?;
         Ok(())
     }

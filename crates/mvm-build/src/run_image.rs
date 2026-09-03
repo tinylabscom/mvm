@@ -12,6 +12,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use crate::oci_runtime_inject::{ImageRuntimeConfig, MvmRuntimeBinaries};
+use crate::provenance_mark::SealEvidence;
 use crate::rootfs::MaterializeExt4Input;
 use mvm_fs::oci_to_rootfs::{
     MaterializedRootfs, OciUnpackError, VeritySealedRootfs, VeritysetupOptions, seal_with_verity,
@@ -25,6 +26,7 @@ pub struct InjectAndMaterializeRequest<'a> {
     entrypoint: Option<&'a ImageRuntimeConfig>,
     sealed: bool,
     deferred_nodes: Vec<mvm_fs::ext4::Node>,
+    evidence: Option<SealEvidence<'a>>,
 }
 
 impl<'a> InjectAndMaterializeRequest<'a> {
@@ -42,6 +44,7 @@ impl<'a> InjectAndMaterializeRequest<'a> {
             entrypoint: None,
             sealed: false,
             deferred_nodes: Vec::new(),
+            evidence: None,
         }
     }
 }
@@ -54,6 +57,7 @@ pub struct InjectAndMaterializeRequestBuilder<'a> {
     entrypoint: Option<&'a ImageRuntimeConfig>,
     sealed: bool,
     deferred_nodes: Vec<mvm_fs::ext4::Node>,
+    evidence: Option<SealEvidence<'a>>,
 }
 
 impl<'a> InjectAndMaterializeRequestBuilder<'a> {
@@ -74,6 +78,16 @@ impl<'a> InjectAndMaterializeRequestBuilder<'a> {
         self
     }
 
+    /// Seal-evidence inputs: when set on a `sealed` request, a signed
+    /// provenance mark is written into the rootfs before the dm-verity
+    /// hash is computed (so the mark is tamper-evident under verified
+    /// boot) and an in-toto/DSSE provenance sidecar is written beside
+    /// the sealed image. Ignored for unsealed requests.
+    pub fn evidence(mut self, evidence: Option<SealEvidence<'a>>) -> Self {
+        self.evidence = evidence;
+        self
+    }
+
     pub fn build(self) -> InjectAndMaterializeRequest<'a> {
         InjectAndMaterializeRequest {
             cache_root: self.cache_root,
@@ -83,6 +97,7 @@ impl<'a> InjectAndMaterializeRequestBuilder<'a> {
             entrypoint: self.entrypoint,
             sealed: self.sealed,
             deferred_nodes: self.deferred_nodes,
+            evidence: self.evidence,
         }
     }
 }
@@ -109,11 +124,19 @@ pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Resul
         entrypoint,
         sealed,
         deferred_nodes,
+        evidence,
     } = request;
     let bins = resolve_guest_binaries(cache_root)?;
     crate::oci_runtime_inject::inject_mvm_runtime(unpacked_root, &bins, entrypoint, sealed)
         .context("inject mvm runtime into OCI rootfs")?;
     ensure_volume_mount_roots(unpacked_root)?;
+
+    // The provenance mark must land inside the tree BEFORE any hashing:
+    // both the materializer's sizing pass below and the verity seal hash
+    // the exact bytes they see, so a mark written later would change the
+    // roothash and break the signature's coverage.
+    let seal_started = chrono::Utc::now().to_rfc3339();
+    maybe_write_provenance_mark(unpacked_root, sealed, evidence.as_ref())?;
 
     // Measure AFTER injection so the ext4 sizing covers everything injected.
     let tree_size = unpacked_tree_size(unpacked_root)
@@ -128,6 +151,18 @@ pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Resul
     // verity-boot.
     if sealed {
         seal_rootfs_for_run(output)?;
+        if let Some(evidence) = &evidence {
+            let subject_sha256 = mvm_core::crypto::image_verify::sha256_file(output)
+                .context("hash sealed rootfs for provenance sidecar")?;
+            crate::intoto::write_sidecar(
+                output,
+                &subject_sha256,
+                evidence,
+                &seal_started,
+                &chrono::Utc::now().to_rfc3339(),
+            )
+            .context("write in-toto provenance sidecar")?;
+        }
     }
 
     // The sidecar lives next to rootfs.ext4 so the backend's admit_runtime_overlay_contract
@@ -139,6 +174,34 @@ pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Resul
         .write_to_dir(rootfs_dir)
         .with_context(|| format!("write OCI sidecar in {}", rootfs_dir.display()))?;
     Ok(())
+}
+
+/// Write the signed provenance mark into the tree being sealed, when the
+/// caller asked for a sealed image and supplied seal evidence.
+///
+/// A sealed image with no evidence is a caller mistake worth a loud warning,
+/// not a hard failure: the verity seal itself still stands, and the run-path
+/// self-heal may seal again with evidence present. An unsealed image never
+/// carries the mark — without the verity boot chain there is nothing for the
+/// signature to be tamper-evident under.
+fn maybe_write_provenance_mark(
+    unpacked_root: &Path,
+    sealed: bool,
+    evidence: Option<&SealEvidence<'_>>,
+) -> Result<()> {
+    if !sealed {
+        return Ok(());
+    }
+    match evidence {
+        Some(evidence) => crate::provenance_mark::write_mark(unpacked_root, evidence)
+            .context("write provenance mark into rootfs"),
+        None => {
+            tracing::warn!(
+                "sealed rootfs carries no provenance mark: caller supplied no seal evidence"
+            );
+            Ok(())
+        }
+    }
 }
 
 /// Build the sidecar describing a materialized OCI run rootfs.
@@ -567,6 +630,70 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(read.libc, crate::guest_libc::GuestLibc::Unknown);
+    }
+
+    fn test_evidence<'a>(
+        signer: &'a ed25519_dalek::SigningKey,
+        image_ref: &'a str,
+        image_digest: &'a str,
+    ) -> SealEvidence<'a> {
+        SealEvidence::builder(signer)
+            .with_image_ref(image_ref)
+            .with_image_digest(image_digest)
+            .build()
+    }
+
+    #[test]
+    fn sealed_request_with_evidence_writes_a_verifiable_mark() {
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let tree = tempfile::tempdir().unwrap();
+
+        maybe_write_provenance_mark(
+            tree.path(),
+            true,
+            Some(&test_evidence(&signer, "app:1", "sha256:abc")),
+        )
+        .expect("mark write succeeds");
+
+        let mark_path = tree.path().join("mvm/provenance.json");
+        let sig_path = tree.path().join("mvm/provenance.sig");
+        assert!(mark_path.is_file(), "mark must land in the tree");
+        assert!(
+            sig_path.is_file(),
+            "detached signature must land beside the mark"
+        );
+        let verified = crate::provenance_mark::verify_mark(
+            &std::fs::read(&mark_path).unwrap(),
+            std::fs::read_to_string(&sig_path).unwrap().trim(),
+        )
+        .expect("mark verifies against the signer");
+        assert_eq!(verified.mark.image_ref.as_deref(), Some("app:1"));
+    }
+
+    #[test]
+    fn sealed_request_without_evidence_warns_but_leaves_no_mark() {
+        let tree = tempfile::tempdir().unwrap();
+
+        maybe_write_provenance_mark(tree.path(), true, None)
+            .expect("missing evidence is not a hard failure");
+
+        assert!(!tree.path().join("mvm/provenance.json").exists());
+        assert!(!tree.path().join("mvm/provenance.sig").exists());
+    }
+
+    #[test]
+    fn unsealed_request_never_carries_the_mark() {
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let tree = tempfile::tempdir().unwrap();
+
+        maybe_write_provenance_mark(
+            tree.path(),
+            false,
+            Some(&test_evidence(&signer, "app:1", "sha256:abc")),
+        )
+        .expect("unsealed request is a no-op");
+
+        assert!(!tree.path().join("mvm/provenance.json").exists());
     }
 
     #[test]

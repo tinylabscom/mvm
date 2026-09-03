@@ -94,6 +94,11 @@ hex.workspace = true
 libkrun-sys = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
+# JCS canonicalization for the in-rootfs provenance mark and the
+# in-toto DSSE sidecar — the same canonical form the audit chain uses.
+serde_jcs = "0.1"
+# DSSE envelope payloads and signatures are base64 on the wire.
+base64.workspace = true
 sha2.workspace = true
 # `.mvm` packed artifacts carry an Ed25519
 # manifest signature. We verify (and produce, when the caller

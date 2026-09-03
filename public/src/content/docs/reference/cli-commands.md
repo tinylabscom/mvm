@@ -1106,6 +1106,7 @@ running microVM.
 | `mvmctl template info <name>`          | Show details for one bundled or remote template                                                                                                                           |
 | `mvmctl deploy <ir.json>`              | Build, seal, and record a workload into a local deployment directory (`image.tar.gz`, `rootfs.ext4`, `deploy.json`); optionally ship it to mvmd                           |
 | `mvmctl deploy --from-ir <path>`       | Read the Workload IR from a file instead of a positional path or stdin                                                                                                    |
+| `mvmctl deployments ls`                | Inventory of recorded local deployments (`--workload <ir-hash>` to filter, `--json` for machine output); unreadable records surface as named skips                        |
 | `mvmctl prepare`                       | Report whether a verified runtime pack is ready for instant launch                                                                                                        |
 | `mvmctl plugin list`                   | List the coding agents mvm can emit an integration for                                                                                                                    |
 | `mvmctl plugin install <agent>`        | Write that agent's integration files into the project (`--dir`, `--dry-run`, `--force`). Emits config only — mvm runs no agent-facing server                              |

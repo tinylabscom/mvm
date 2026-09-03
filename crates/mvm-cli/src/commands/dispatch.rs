@@ -32,6 +32,7 @@ impl TopLevelCommand for Commands {
             Commands::Prepare(a) => vm::prepare::run(a),
             Commands::Build(a) => build::group::run(cli, a, cfg),
             Commands::Deploy(a) => deploy::run(cli, a, cfg),
+            Commands::Deployments(a) => deployments::run(cli, a, cfg),
             Commands::Kernel(a) => build::kernel::run(cli, a, cfg),
             Commands::Generate(a) => generate::run(cli, a, cfg),
             Commands::Template(a) => template::run(cli, a, cfg),

@@ -445,6 +445,74 @@ pub fn write_deploy_record(record: &DeployRecord, path: &Path) -> Result<(), Dep
     Ok(())
 }
 
+/// A readable deployment plus its content-addressed store key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeploymentEntry {
+    /// Directory name under the deployments store — the IR hash key.
+    pub ir_hash: String,
+    /// The recorded deployment.
+    pub record: DeployRecord,
+}
+
+/// A deployment directory that could not be read, with the reason.
+/// Listing is a read-only inventory: one unreadable record must not
+/// hide the rest, but silently dropping it would hide schema drift, so
+/// the caller surfaces these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeploymentSkip {
+    /// Directory name under the deployments store.
+    pub dir: String,
+    /// Human-readable refusal reason.
+    pub reason: String,
+}
+
+/// Enumerate the local deployment store (`<mvm_home>/deployments/`).
+///
+/// Every subdirectory is one deployment keyed by its IR hash; the
+/// record lives in `deploy.json` inside it. A missing store is an
+/// empty inventory, not an error. Directories whose record is absent,
+/// malformed, or a schema version this reader doesn't know are
+/// returned as skips alongside the readable entries.
+pub fn list_deployments(
+    dir: &Path,
+) -> Result<(Vec<DeploymentEntry>, Vec<DeploymentSkip>), DeployError> {
+    let mut entries = Vec::new();
+    let mut skips = Vec::new();
+    let read_dir = match std::fs::read_dir(dir) {
+        Ok(read_dir) => read_dir,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((entries, skips));
+        }
+        Err(e) => return Err(DeployError::Io(e)),
+    };
+    for item in read_dir {
+        let item = item.map_err(DeployError::Io)?;
+        let dir_name = item.file_name().to_string_lossy().into_owned();
+        let record_path = item.path().join("deploy.json");
+        if !record_path.is_file() {
+            skips.push(DeploymentSkip {
+                dir: dir_name,
+                reason: "no deploy.json in directory".to_string(),
+            });
+            continue;
+        }
+        match read_deploy_record(&record_path) {
+            Ok(record) => entries.push(DeploymentEntry {
+                ir_hash: dir_name,
+                record,
+            }),
+            Err(e) => skips.push(DeploymentSkip {
+                dir: dir_name,
+                reason: e.to_string(),
+            }),
+        }
+    }
+    // Deterministic output order: key by the IR hash / directory name.
+    entries.sort_by(|a, b| a.ir_hash.cmp(&b.ir_hash));
+    skips.sort_by(|a, b| a.dir.cmp(&b.dir));
+    Ok((entries, skips))
+}
+
 /// Read a deploy record and reject stale or future schemas before any of its
 /// fields can influence admission.
 pub fn read_deploy_record(path: &Path) -> Result<DeployRecord, DeployError> {
@@ -1101,5 +1169,106 @@ mod tests {
         assert!(body.contains("{\"workload_id\":\"demo\"}"));
         assert!(body.contains("name=\"bundle\"; filename=\"image.tar.gz\""));
         assert!(body.ends_with("\r\n"));
+    }
+
+    fn sample_record(workload_id: &str, ir_hash: &str) -> DeployRecord {
+        DeployRecord {
+            schema_version: DEPLOY_RECORD_SCHEMA_VERSION,
+            workload_id: workload_id.to_string(),
+            ir_hash: ir_hash.to_string(),
+            image: ArtifactDigests {
+                blake3: "b3".repeat(32),
+                sha256: "ab".repeat(32),
+                size_bytes: 1024,
+            },
+            boot_artifact: BootArtifactIdentity {
+                kind: "rootfs.ext4".to_string(),
+                blake3: "c4".repeat(32),
+                sha256: "cd".repeat(32),
+                size_bytes: 512,
+            },
+            environment: None,
+            dependency_volume: None,
+        }
+    }
+
+    #[test]
+    fn list_deployments_returns_empty_for_missing_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let (entries, skips) =
+            list_deployments(&dir.path().join("nope")).expect("missing store is empty");
+        assert!(entries.is_empty());
+        assert!(skips.is_empty());
+    }
+
+    #[test]
+    fn list_deployments_reads_records_sorted_and_skips_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("deployments");
+
+        write_deploy_record(
+            &sample_record("wl-b", "bbbb"),
+            &store.join("bbbb/deploy.json"),
+        )
+        .unwrap();
+        write_deploy_record(
+            &sample_record("wl-a", "aaaa"),
+            &store.join("aaaa/deploy.json"),
+        )
+        .unwrap();
+        // A directory with no record.
+        std::fs::create_dir_all(store.join("cccc")).unwrap();
+        // A record with a future schema version.
+        std::fs::create_dir_all(store.join("dddd")).unwrap();
+        std::fs::write(
+            store.join("dddd/deploy.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": DEPLOY_RECORD_SCHEMA_VERSION + 1,
+                "workload_id": "wl-future",
+                "ir_hash": "dddd",
+                "image": {"blake3": "e".repeat(64), "sha256": "e".repeat(64), "size_bytes": 1},
+                "boot_artifact": {
+                    "kind": "rootfs.ext4",
+                    "blake3": "f".repeat(64),
+                    "sha256": "f".repeat(64),
+                    "size_bytes": 1
+                },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let (entries, skips) = list_deployments(&store).expect("lists");
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| e.ir_hash.as_str())
+                .collect::<Vec<_>>(),
+            ["aaaa", "bbbb"],
+            "entries sort by IR hash"
+        );
+        assert_eq!(entries[0].record.workload_id, "wl-a");
+        assert_eq!(skips.len(), 2);
+        assert_eq!(skips[0].dir, "cccc");
+        assert!(skips[0].reason.contains("no deploy.json"));
+        assert_eq!(skips[1].dir, "dddd");
+        assert!(
+            skips[1].reason.contains("schema version"),
+            "future schema must be surfaced, got: {}",
+            skips[1].reason
+        );
+    }
+
+    #[test]
+    fn list_deployments_surfaces_malformed_records_as_skips() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("deployments");
+        std::fs::create_dir_all(store.join("bad")).unwrap();
+        std::fs::write(store.join("bad/deploy.json"), b"{not json").unwrap();
+
+        let (entries, skips) = list_deployments(&store).expect("lists");
+        assert!(entries.is_empty());
+        assert_eq!(skips.len(), 1);
+        assert_eq!(skips[0].dir, "bad");
     }
 }
