@@ -284,9 +284,9 @@ pub struct HvfSupervisorConfig {
 mod tests {
     use super::*;
 
-    #[test]
-    fn json_roundtrip_with_all_fields() {
-        let cfg = HvfSupervisorConfig {
+    /// Every field populated, so the shape pin below sees the whole schema.
+    fn full_config_fixture() -> HvfSupervisorConfig {
+        HvfSupervisorConfig {
             kernel: "/k/Image".into(),
             cmdline: Some("console=ttyAMA0 root=/dev/vda ro init=/sbin/mvm-host-vm-init".into()),
             memory_mib: 8192,
@@ -332,11 +332,34 @@ mod tests {
             handoff_verify_key: Some("11".repeat(32)),
             cpu_millicores: Some(500),
             quota_record: Some("/state/quota.json".into()),
-        };
+        }
+    }
+
+    #[test]
+    fn json_roundtrip_with_all_fields() {
+        let cfg = full_config_fixture();
         let json = serde_json::to_string(&cfg).unwrap();
         assert_eq!(
             serde_json::from_str::<HvfSupervisorConfig>(&json).unwrap(),
             cfg
+        );
+    }
+
+    /// The config contract is version-stamped (see `host::helper_contract`),
+    /// and this pin forces the stamp to move with the schema: serializing
+    /// the full fixture must hash to the pinned value, so adding, renaming,
+    /// or retyping a field fails here until the contract version and the pin
+    /// are updated together. Without it a same-tree config change could keep
+    /// the old version number and an older helper would be probed as current
+    /// while still refusing the new field at spawn.
+    #[test]
+    fn config_shape_matches_the_pinned_hash() {
+        let json = serde_json::to_string(&full_config_fixture()).unwrap();
+        let hash = crate::host::helper_contract::fnv1a_64(json.as_bytes());
+        assert_eq!(
+            hash,
+            crate::host::helper_contract::HVF_CONFIG_SHAPE_HASH,
+            "HvfSupervisorConfig's shape changed: bump              HOST_HELPER_CONTRACT_VERSION in host::helper_contract and update              HVF_CONFIG_SHAPE_HASH to 0x{hash:016x}"
         );
     }
 

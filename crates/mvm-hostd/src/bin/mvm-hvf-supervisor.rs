@@ -9,6 +9,7 @@
 
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 fn main() {
+    mvm_vmm::host::helper_contract::exit_with_probe_answer_if_requested("mvm-hvf-supervisor");
     eprintln!(
         "mvm-hvf-supervisor runs only on macOS / Apple silicon (Hypervisor.framework); \
          this is a stub build"
@@ -216,6 +217,7 @@ fn main() -> anyhow::Result<()> {
     use anyhow::Context;
     use mvm_vmm::host::hvf_supervisor::{HvfShutdownTimingRecord, HvfSupervisorConfig};
 
+    mvm_vmm::host::helper_contract::exit_with_probe_answer_if_requested("mvm-hvf-supervisor");
     // Sign + re-exec before anything else (preserves the stdin config pipe).
     ensure_self_signed();
 

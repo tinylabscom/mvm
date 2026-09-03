@@ -31,7 +31,7 @@ use mvm_core::checkpoint::{
 use mvm_vmm::host::hvf_supervisor::{HvfDisk, HvfSupervisorConfig};
 
 use crate::driver::hvf_process::{
-    PID_FILE_NAME, PID_FILE_TIMEOUT, read_pid, resolve_supervisor_path,
+    PID_FILE_NAME, PID_FILE_TIMEOUT, read_pid, resolve_supervisor_path_verified,
 };
 
 /// A materialized HVF checkpoint about to be booted under a fresh identity.
@@ -269,7 +269,7 @@ pub fn restore_hvf_vm(req: &HvfRestoreRequest<'_>) -> Result<RestoredHvfVm> {
 
     prepare_child_state_dir(req, &cfg)?;
 
-    let supervisor = resolve_supervisor_path()?;
+    let supervisor = resolve_supervisor_path_verified()?;
     let json = serde_json::to_string(&cfg).context("serializing HvfSupervisorConfig")?;
     let mut child = bounded_restore_command(&supervisor, req)
         .stdin(Stdio::piped())

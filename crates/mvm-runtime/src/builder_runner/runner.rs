@@ -266,7 +266,15 @@ mod tests {
         let stub = tmp.path().join("stub-endpoint.sh");
         std::fs::write(
             &stub,
-            "#!/bin/sh\ncat >/dev/null\necho '{\"env\":[],\"input_fingerprints\":[]}'\nsleep 30\n",
+            // The stub runs through the verified resolver before it can
+            // play its role, so it answers the contract probe first.
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"{flag}\" ]; then echo '{answer}'; exit 0; fi\n\
+                 cat >/dev/null\necho '{{\"env\":[],\"input_fingerprints\":[]}}'\nsleep 30\n",
+                flag = mvm_vmm::host::helper_contract::CONTRACT_PROBE_FLAG,
+                answer = mvm_vmm::host::helper_contract::probe_response("mvm-network-endpoint")
+                    .trim_end(),
+            ),
         )
         .unwrap();
         {

@@ -527,9 +527,12 @@ pub(crate) fn cleanup_vsock_bridge_sockets(state_dir: &Path) {
 }
 
 pub fn resolve_bridge_executable() -> Result<PathBuf> {
-    mvm_vmm::host::aux_bin::resolve(&mvm_vmm::host::aux_bin::AuxBin {
+    // Verified even though the bridge is a re-exec of mvmctl itself: the
+    // resolved copy can be the other profile's binary, built whenever.
+    mvm_vmm::host::aux_bin::resolve_verified(&mvm_vmm::host::aux_bin::AuxBin {
         bin: "mvmctl",
         env_var: "MVM_QEMU_BRIDGE_PATH",
+        rebuild_package: "mvmctl",
     })
 }
 

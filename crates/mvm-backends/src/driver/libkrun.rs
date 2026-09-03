@@ -406,7 +406,7 @@ impl VmmDriver for LibkrunDriver {
         let json = serde_json::to_string(&cfg)
             .map_err(|e| anyhow!("serialize libkrun SupervisorConfig: {e}"))?;
 
-        let supervisor = crate::driver::libkrun_process::resolve_supervisor_path()?;
+        let supervisor = crate::driver::libkrun_process::resolve_supervisor_path_verified()?;
         let stdout = mvm_vmm::host::console_capture::open_console_capture(&console_log)
             .map(Stdio::from)
             .unwrap_or_else(|_| Stdio::null());
