@@ -836,6 +836,70 @@ pub fn flag_set(argv: &[String]) -> BTreeSet<String> {
     flags
 }
 
+/// Each flag in `argv` paired with the value it was given, if any.
+///
+/// [`flag_set`] deliberately discards values, because most of them vary freely
+/// between a documented example and the scenario exercising it — `--image
+/// alpine` stands in for `--image python:3.12` and the request shape is the
+/// same. That is right for a path, a host, or a size, and wrong for a flag
+/// whose value *selects what the command does*: `--source download` and
+/// `--source compile` are two different operations behind one flag name, and
+/// name-only matching let a scenario running the first be accepted as a
+/// witness for the second.
+///
+/// Callers pair this with the clap tree to decide which flags are mode-like —
+/// see the enum-valued check in the README contract steps — rather than
+/// comparing every value and rejecting the `--image` case this exists to allow.
+///
+/// Handles both `--flag=value` and `--flag value`. A flag followed by another
+/// flag, or ending the argv, binds to `None`.
+#[must_use]
+pub fn flag_bindings(argv: &[String]) -> std::collections::BTreeMap<String, Option<String>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut i = 0;
+    while i < argv.len() {
+        let token = &argv[i];
+        if token == "--" {
+            break;
+        }
+        if let Some(long) = token.strip_prefix("--") {
+            if long.is_empty() {
+                break;
+            }
+            match long.split_once('=') {
+                Some((name, value)) => {
+                    out.insert(format!("--{name}"), Some(value.to_string()));
+                }
+                None => {
+                    let value = argv
+                        .get(i + 1)
+                        .filter(|next| !next.starts_with('-') && *next != "--")
+                        .cloned();
+                    out.insert(format!("--{long}"), value);
+                }
+            }
+        } else if let Some(body) = token.strip_prefix('-')
+            && !body.is_empty()
+        {
+            // A short cluster binds its value to the last flag in the cluster,
+            // which is the only one clap would accept a value for.
+            let chars: Vec<char> = body.chars().take_while(|c| *c != '=').collect();
+            for (n, ch) in chars.iter().enumerate() {
+                let value = if n + 1 == chars.len() {
+                    argv.get(i + 1)
+                        .filter(|next| !next.starts_with('-') && *next != "--")
+                        .cloned()
+                } else {
+                    None
+                };
+                out.insert(format!("-{ch}"), value);
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
 /// The tier each documented command path is verified at.
 ///
 /// Keyed by command path (`["machine", "run"]`), because the CLI surface is
@@ -915,6 +979,70 @@ fn collect_markdown(dir: &Path, out: &mut Vec<PathBuf>) {
 
 #[cfg(test)]
 mod tests {
+    fn argv(line: &str) -> Vec<String> {
+        line.split_whitespace().map(str::to_string).collect()
+    }
+
+    /// Both spellings of a value bind identically, because a documented example
+    /// and the scenario exercising it are free to differ in spelling.
+    #[test]
+    fn a_value_binds_whether_spelled_with_a_space_or_an_equals() {
+        let spaced = flag_bindings(&argv("build kernel build --source download"));
+        let equals = flag_bindings(&argv("build kernel build --source=download"));
+        assert_eq!(spaced.get("--source"), Some(&Some("download".to_string())));
+        assert_eq!(spaced, equals);
+    }
+
+    /// The distinction the whole function exists for: two invocations with an
+    /// identical flag *set* that select different operations.
+    #[test]
+    fn two_modes_of_one_flag_are_distinguishable() {
+        let download = flag_bindings(&argv(
+            "build kernel build --which workload --source download",
+        ));
+        let compile = flag_bindings(&argv(
+            "build kernel build --which workload --source compile",
+        ));
+        assert_ne!(download, compile);
+        assert_eq!(
+            download.keys().collect::<Vec<_>>(),
+            compile.keys().collect::<Vec<_>>(),
+            "the names are the same — only the values tell them apart, which is \
+             why matching on names alone accepted one as a witness for the other"
+        );
+    }
+
+    /// A flag with no value, and a flag followed by another flag, both bind to
+    /// `None` rather than swallowing the next token.
+    #[test]
+    fn a_valueless_flag_does_not_swallow_the_next_flag() {
+        let b = flag_bindings(&argv("machine run --detach --image alpine"));
+        assert_eq!(b.get("--detach"), Some(&None));
+        assert_eq!(b.get("--image"), Some(&Some("alpine".to_string())));
+    }
+
+    /// Everything after `--` is the guest's argv and says nothing about which
+    /// mvm code path runs, so parsing stops there.
+    #[test]
+    fn the_guest_argv_after_the_separator_is_not_parsed() {
+        let b = flag_bindings(&argv("machine run --image alpine -- sh --source compile"));
+        assert!(b.contains_key("--image"));
+        assert!(
+            !b.contains_key("--source"),
+            "a flag-looking token in the guest argv must not bind"
+        );
+    }
+
+    /// A short cluster binds its value to the last flag, which is the only one
+    /// clap would accept a value for.
+    #[test]
+    fn a_short_cluster_binds_its_value_to_the_last_flag() {
+        let b = flag_bindings(&argv("machine run -it -c 2"));
+        assert_eq!(b.get("-i"), Some(&None));
+        assert_eq!(b.get("-t"), Some(&None));
+        assert_eq!(b.get("-c"), Some(&Some("2".to_string())));
+    }
+
     use super::*;
 
     fn examples(body: &str) -> Vec<DocExample> {

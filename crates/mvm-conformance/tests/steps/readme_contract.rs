@@ -162,7 +162,71 @@ pub(crate) fn witness_covers_example(
     }
     let wanted = normalize_flags(&flag_set(example), &path, tree);
     let have = normalize_flags(&flag_set(witness), &path, tree);
-    wanted.is_subset(&have)
+    if !wanted.is_subset(&have) {
+        return false;
+    }
+    mode_flag_values_agree(example, witness, &path, tree)
+}
+
+/// Whether the two invocations select the same *mode* wherever one is chosen
+/// by a flag value.
+///
+/// Flag values are otherwise ignored on purpose — `--image alpine` standing in
+/// for `--image python:3.12` is the same request shape, and demanding equality
+/// there would reject nearly every honest witness. But some values are not
+/// interchangeable: `--source download` fetches a prebuilt kernel and `--source
+/// compile` builds one, and matching on the flag *name* alone accepted a
+/// scenario running the first as proof of the second. That is how a documented
+/// command can be reported as covered by a scenario that never runs it.
+///
+/// The line between the two cases is one clap already draws: an argument with
+/// possible values is an enum, and an enum is a mode. Everything else is a
+/// path, a host, a size — free to differ.
+fn mode_flag_values_agree(
+    example: &[String],
+    witness: &[String],
+    path: &[String],
+    tree: &ClapCommand,
+) -> bool {
+    use mvm_conformance::doc_examples::flag_bindings;
+
+    let mut command = tree;
+    for segment in path {
+        match command
+            .get_subcommands()
+            .find(|sub| sub.get_name() == segment)
+        {
+            Some(sub) => command = sub,
+            // An unresolvable path cannot be checked for mode flags; the flag
+            // set comparison above already ran, so fall back to it rather than
+            // inventing a refusal.
+            None => return true,
+        }
+    }
+
+    let example_bindings = flag_bindings(example);
+    let witness_bindings = flag_bindings(witness);
+
+    for arg in command.get_arguments() {
+        if arg.get_possible_values().is_empty() {
+            continue;
+        }
+        let Some(long) = arg.get_long() else {
+            continue;
+        };
+        let key = format!("--{long}");
+        // Only constrain a mode the example actually pins. An example that
+        // leaves the flag off takes the default, and a witness passing it
+        // explicitly is still exercising that command.
+        let Some(Some(wanted)) = example_bindings.get(&key) else {
+            continue;
+        };
+        let given = witness_bindings.get(&key).and_then(Option::as_ref);
+        if given.map(String::as_str) != Some(wanted.as_str()) {
+            return false;
+        }
+    }
+    true
 }
 
 /// One README example's proof obligation, as recorded by a human.
