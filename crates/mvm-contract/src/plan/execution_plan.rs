@@ -432,6 +432,54 @@ mod tests {
 
     use super::*;
 
+    /// A plan written before `sdk_uses_sidecar` existed must deserialize as
+    /// *requiring* the sidecar, not forbidding one.
+    ///
+    /// The field is a two-sided assertion: admission reads `true` as "the
+    /// sidecar must be attached" and `false` as "it must not be"
+    /// (`enforce_sdk_sidecar_attachment`). So the default is not a tie-break
+    /// between equivalent options — one of them refuses to admit every plan
+    /// that predates the field, and it is the one a bare `#[serde(default)]`
+    /// would pick, because `bool::default()` is `false`.
+    ///
+    /// Four PRs proposed exactly that substitution. This test is what makes
+    /// the fifth fail in CI instead of in production.
+    #[test]
+    fn an_absent_sdk_uses_sidecar_defaults_to_requiring_the_sidecar() {
+        let plan = minimal_plan();
+        let mut value = serde_json::to_value(&plan).expect("plan serializes");
+        value
+            .as_object_mut()
+            .expect("plan is a JSON object")
+            .remove("sdk_uses_sidecar");
+
+        let back: ExecutionPlan =
+            serde_json::from_value(value).expect("a plan without the field still deserializes");
+        assert!(
+            back.sdk_uses_sidecar,
+            "an absent sdk_uses_sidecar must default to true; false makes admission \
+             refuse the sidecar for every plan written before the field existed"
+        );
+    }
+
+    /// The serialized default and the synthesized value are one decision.
+    ///
+    /// `synthesize_plan` hardcodes `true`, so a default of `false` would mean a
+    /// round-trip through JSON changed a plan's meaning depending only on
+    /// whether the field happened to be written. Pinning them together is
+    /// cheaper than discovering the divergence through an admission refusal.
+    #[test]
+    fn the_sdk_sidecar_default_matches_what_synthesis_produces() {
+        assert!(
+            default_sdk_uses_sidecar(),
+            "the serde default must equal the value plan synthesis writes"
+        );
+        assert!(
+            minimal_plan().sdk_uses_sidecar,
+            "the canonical minimal plan must carry the same answer"
+        );
+    }
+
     #[test]
     fn default_network_limits_preserve_existing_signed_bytes() {
         let plan = minimal_plan();
