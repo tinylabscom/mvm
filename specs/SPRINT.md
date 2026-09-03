@@ -49,7 +49,9 @@
       anything else is a hard error naming both versions and the exact
       rebuild command. A shape pin on `HvfSupervisorConfig` forces the
       contract version to move with the schema. Focused resolver, probe, and
-      spawn-path regressions, the mvm-vmm / mvm-backends / mvm-hostd /
+      spawn-path regressions, including a follow-up for a freshly rebuilt
+      macOS helper whose first probe transiently times out, the mvm-vmm /
+      mvm-backends / mvm-hostd /
       mvm-runtime suites, zero-warning Clippy, and Linux/BDD gated
       compilation are green; merged via #3132.
 
