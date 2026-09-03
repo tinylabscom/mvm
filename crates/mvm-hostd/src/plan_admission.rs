@@ -1368,7 +1368,14 @@ pub fn enforce_sdk_sidecar_backend_compatibility(
 ) -> std::result::Result<(), SdkSidecarBackendCompatibilityError> {
     use mvm_core::plan::{sdk_host_services_in, sdk_sidecar_required};
 
-    if backend != mvm_core::vm_backend::BackendKind::Wasm || !sdk_sidecar_required(plan) {
+    // When sdk_uses_sidecar is false, the workload speaks the broker protocol
+    // directly and doesn't need the SDK sidecar regardless of backend.
+    if !plan.sdk_uses_sidecar || backend != mvm_core::vm_backend::BackendKind::Wasm {
+        return Ok(());
+    }
+
+    // Only wasm backends need the SDK sidecar for host services.
+    if !sdk_sidecar_required(plan) {
         return Ok(());
     }
 
@@ -1394,6 +1401,23 @@ pub fn enforce_sdk_sidecar_attachment(
 ) -> Result<()> {
     use mvm_core::plan::{SDK_SIDECAR_GUEST_PATH, sdk_host_services_in, sdk_sidecar_required};
     use mvm_core::vm_backend::VmVolumeKind;
+
+    // When sdk_uses_sidecar is false, the workload speaks the broker protocol
+    // directly and may not carry the SDK sidecar.
+    if !plan.sdk_uses_sidecar {
+        let attached: Vec<_> = volumes
+            .iter()
+            .filter(|v| v.guest == SDK_SIDECAR_GUEST_PATH)
+            .collect();
+        if let Some(stray) = attached.first() {
+            anyhow::bail!(
+                "refusing to attach '{}' at {SDK_SIDECAR_GUEST_PATH}: the signed ExecutionPlan \
+                 sets sdk_uses_sidecar=false, so this workload must not carry the SDK sidecar",
+                stray.host,
+            );
+        }
+        return Ok(());
+    }
 
     let attached: Vec<_> = volumes
         .iter()
@@ -3149,6 +3173,25 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn direct_protocol_binding_requires_no_sidecar_and_refuses_a_stray_one() {
+        let mut plan = plan_binding(&["host.kv.v1"]);
+        plan.sdk_uses_sidecar = false;
+
+        assert!(
+            enforce_sdk_sidecar_backend_compatibility(
+                mvm_core::vm_backend::BackendKind::Wasm,
+                &plan,
+            )
+            .is_ok()
+        );
+        assert!(enforce_sdk_sidecar_attachment(&[], &plan, LOADABLE_LIBC).is_ok());
+
+        let err = enforce_sdk_sidecar_attachment(&[sdk_sidecar_volume()], &plan, LOADABLE_LIBC)
+            .expect_err("a direct-protocol plan must refuse a stray sidecar");
+        assert!(err.to_string().contains("sdk_uses_sidecar=false"), "{err}");
     }
 
     /// A bound SDK host service with no sidecar attachment fails closed, and the

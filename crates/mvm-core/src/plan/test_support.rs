@@ -36,6 +36,7 @@ pub struct PlanFixture {
     extensions: Vec<mvm_contract::protocol::extension_pack::ExtensionPlanBinding>,
     stream_edges: Vec<mvm_contract::stream::StreamEdge>,
     stream_retention: StreamRetention,
+    sdk_uses_sidecar: bool,
     audit_labels: BTreeMap<String, String>,
     caller_commitment: Option<crate::plan::CallerCommitment>,
     grants: Option<mvm_contract::grants::Grants>,
@@ -56,6 +57,7 @@ impl Default for PlanFixture {
             extensions: Vec::new(),
             stream_edges: Vec::new(),
             stream_retention: StreamRetention::default(),
+            sdk_uses_sidecar: true,
             audit_labels: BTreeMap::new(),
             caller_commitment: None,
             grants: None,
@@ -118,6 +120,13 @@ impl PlanFixture {
     /// signed opt-out.
     pub fn stream_retention(mut self, retention: StreamRetention) -> Self {
         self.stream_retention = retention;
+        self
+    }
+
+    /// Whether the workload uses the SDK sidecar (glibc cdylib) to reach host
+    /// services, or speaks the broker protocol directly. Default `true`.
+    pub fn sdk_uses_sidecar(mut self, value: bool) -> Self {
+        self.sdk_uses_sidecar = value;
         self
     }
 
@@ -221,6 +230,7 @@ impl PlanFixture {
             extensions: self.extensions,
             stream_edges: self.stream_edges.clone(),
             stream_retention: self.stream_retention,
+            sdk_uses_sidecar: self.sdk_uses_sidecar,
         }
     }
 }

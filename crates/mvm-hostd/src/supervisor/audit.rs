@@ -395,6 +395,7 @@ pub(crate) mod tests {
             services: Vec::new(),
             extensions: Vec::new(),
             stream_edges: Vec::new(),
+            sdk_uses_sidecar: true,
         }
     }
 

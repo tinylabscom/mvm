@@ -80,6 +80,7 @@ fn fixture_plan(nonce: [u8; 16]) -> ExecutionPlan {
         services: Vec::new(),
         extensions: Vec::new(),
         stream_edges: Vec::new(),
+        sdk_uses_sidecar: true,
     }
 }
 

@@ -300,6 +300,26 @@ pub struct ExecutionPlan {
     /// deserialize as [`StreamRetention::Persist`], the recording default.
     #[serde(default)]
     pub stream_retention: StreamRetention,
+
+    /// Whether the workload uses the SDK sidecar (glibc cdylib) to reach host
+    /// services, or speaks the broker protocol directly. This controls whether
+    /// the optional SDK sidecar must be attached: when `true`, the admission
+    /// gate requires the sidecar; when `false`, the sidecar is forbidden and
+    /// the workload must reach services via direct vsock calls.
+    ///
+    /// `true` (default) preserves existing behavior: workloads bound to SDK
+    /// services receive the glibc sidecar. Set to `false` when the workload
+    /// can speak the broker protocol natively (e.g., Python with AF_VSOCK,
+    /// Go with golang.org/x/sys/unix).
+    ///
+    /// Always serialized so a plan that doesn't set it still states the
+    /// default in the signed bytes.
+    #[serde(default = "default_sdk_uses_sidecar")]
+    pub sdk_uses_sidecar: bool,
+}
+
+const fn default_sdk_uses_sidecar() -> bool {
+    true
 }
 
 impl ExecutionPlan {
@@ -402,6 +422,7 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
         extensions: Vec::new(),
         stream_edges: Vec::new(),
         stream_retention: StreamRetention::Persist,
+        sdk_uses_sidecar: true,
     }
 }
 
@@ -473,6 +494,26 @@ mod tests {
         assert_eq!(round.services, bound.services);
         assert!(crate::plan::sdk_sidecar::sdk_sidecar_required(&round));
         assert!(!crate::plan::sdk_sidecar::sdk_sidecar_required(&plan));
+    }
+
+    #[test]
+    fn sdk_sidecar_defaults_on_for_legacy_plans_and_roundtrips_opt_out() {
+        let plan = minimal_plan();
+        let mut legacy = serde_json::to_value(&plan).expect("plan serializes");
+        legacy
+            .as_object_mut()
+            .expect("plan serializes as an object")
+            .remove("sdk_uses_sidecar");
+        let restored: ExecutionPlan =
+            serde_json::from_value(legacy).expect("legacy plan deserializes");
+        assert!(restored.sdk_uses_sidecar);
+
+        let mut direct = plan;
+        direct.sdk_uses_sidecar = false;
+        let round: ExecutionPlan =
+            serde_json::from_str(&serde_json::to_string(&direct).expect("direct plan serializes"))
+                .expect("direct plan deserializes");
+        assert!(!round.sdk_uses_sidecar);
     }
 
     #[test]

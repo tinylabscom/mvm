@@ -285,6 +285,7 @@ pub mod test_support {
             services: Vec::new(),
             extensions: Vec::new(),
             stream_edges: Vec::new(),
+            sdk_uses_sidecar: true,
         }
     }
 }
