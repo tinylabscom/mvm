@@ -664,13 +664,17 @@ this row as enforced without it.
     is `Shipped` and rows 16–18 are `Preview`: the ledger numbers rows in the
     order claims were added, not by status.
 
-20. **Every published release artifact is signed under the release workflow's
-    identity, and the build and fetch paths refuse an unsigned or mis-signed
-    one.** Row 20, `Shipped`. `release.yml` signs every release blob keyless
-    through GitHub OIDC and publishes a bundle carrying the Fulcio certificate
-    and the Rekor inclusion proof; the `verify-release` job re-downloads the
-    published set and verifies it against an identity regexp pinned to this
-    workflow at a tag. The build gate refuses a missing bundle
+20. **Every published release artifact is authenticated under the release
+    workflow's identity, directly or through a signed checksum manifest, and
+    the build and fetch paths refuse an artifact whose required signature is
+    missing or invalid.** Row 20, `Shipped`. `release.yml` signs archives and
+    checksum manifests keyless through GitHub OIDC and publishes bundles
+    carrying the Fulcio certificate and Rekor inclusion proof. Raw kernels,
+    root filesystems, and metadata are covered by the signed manifests rather
+    than individual bundles. The `verify-release` job re-downloads the
+    published set, verifies the signatures against an identity regexp pinned
+    to this workflow at a tag, and checks the covered blobs against their
+    authenticated digests. The build gate refuses a missing bundle
     (`a_missing_bundle_refuses_and_names_the_asset`) and accepts only the
     versioned release workflow
     (`accepted_identities_are_the_versioned_release_workflow`); the

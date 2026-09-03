@@ -9,7 +9,7 @@ Feature: s19_supply_chain
     Then the witness tests pass
 
   @MVM-SEC-20 @build
-  Scenario: Published release artifacts are signed and refused when unsigned
+  Scenario: Published release artifacts are authenticated and refused when signatures fail
     Given the scenario is registered for MVM-SEC-20
     When the suite for MVM-SEC-20 is implemented
     Then the witness tests pass
