@@ -350,10 +350,29 @@ Inside the guest, the files appear at the mount paths:
 default. `:rw` needs `--profile dev` or `--profile permissive`; a *transient*
 run's share is read-only under every profile.
 
-The three-part form `host:guest:SIZE` selects a **disk image**, not a directory
-share: the host path is a file mvm creates and attaches as virtio-blk, sized in
-MB. Two-part `host:guest` is a live directory share over virtio-fs. Add `:rw`
+The three-part form `host:guest:SIZE` selects an **empty disk image**: the host
+path is a file mvm creates and attaches as virtio-blk, sized in MB. Add `:rw`
 after the size for a writable disk.
+
+Two-part `host:guest` shares the contents of an existing host directory. mvm
+copies the directory into an ext4 image at launch and attaches that, so the
+guest sees a **point-in-time snapshot** rather than a live view: edits you make
+on the host while the VM is running are not visible inside it, and the guest
+never writes back. Re-run to pick up changes.
+
+This replaced a live virtio-fs share, and the reason is the security model —
+virtio-fs put a FUSE server on the host parsing requests an untrusted guest
+composed, which was the one mechanism by which a guest addressed host
+filesystem *structure* rather than opaque blocks. A disk image has no protocol
+for a guest to drive. The snapshot is also read-only under every profile for a
+transient run, so mid-run visibility is the only thing that changed.
+
+There is no size limit: the walk records each file's path and size and the
+bytes are streamed into the image as it is written, so peak memory is a block
+per file rather than the whole tree. Mounting a directory does still *copy* it,
+and `.gitignore` is deliberately not consulted — a user who mounts a directory
+means the directory — so mounting a large build tree costs the time and disk to
+write it.
 
 Your entrypoint can read config and write data at runtime — no rebuild needed:
 

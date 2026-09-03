@@ -10,6 +10,18 @@
 
 ## In progress
 
+- [ ] **Workload output affordance — durable writable inline disks.**
+      `specs/plans/2026-09-02-workload-output-affordance.md`.
+      Foreground transient runs with writable sized disks now issue the
+      existing authenticated `SleepPrep` request before VM stop; arbitrary OCI
+      guests flush through a direct `sync(2)` helper shared with the detached
+      exit reporter. Flush refusal fails an otherwise successful run, disk
+      image locks remain held through teardown, and directory snapshots remain
+      read-only. A no-explicit-sync write survived into a second fresh Alpine
+      VM on macOS HVF. Gated compilation, the full workspace nextest suite, doc
+      tests, all-targets zero-warning Clippy, policy checks, and BDD are green;
+      the plan's broader output-surface design and merge delivery remain.
+
 - [ ] **Content-addressed asset identity.**
       `specs/plans/2026-09-02-content-addressed-asset-identity.md`.
       Every dataset, model, prompt, agent, policy, and compute environment a
@@ -3623,11 +3635,13 @@ writes the plan:
       test into CI.
 - [x] Merge the guard through the queue (#3135).
 
-## 2026-09-02 persistent directory-volume refusal witness
+## 2026-09-03 persistent directory-volume snapshot
 
-- [x] Register a real host-directory attachment against a persistent machine
-      in the live Firecracker BDD suite.
-- [x] Prove the persistent launch consumes the registration and fails closed
-      before boot because the workload runner cannot express a live directory
-      share, rather than silently dropping the registered data.
-- [ ] Merge the witness through the queue.
+- [x] Snapshot a real `--host <directory>` attachment into a namespaced ext4
+      image at registration time and resolve it as a block volume.
+- [x] Fail closed unless both the source and snapshot destination have verified
+      encrypted backing; create the snapshot directory and image with private
+      permissions before copying source bytes.
+- [x] Cover valid snapshot materialization and launch-lease resolution, invalid
+      ext4 refusal, missing-image failure, and the CLI registration workflow.
+- [ ] Merge the implementation through the queue.

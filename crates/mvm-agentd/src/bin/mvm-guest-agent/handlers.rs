@@ -33,23 +33,27 @@ use crate::socket::write_response;
 
 /// Sync filesystems and drop page cache.
 fn do_sleep_prep() -> (bool, String) {
-    // Sync all filesystems.
-    let sync_ok = std::process::Command::new("sync")
-        .status()
-        .is_ok_and(|s| s.success());
+    do_sleep_prep_with(mvm_agentd::filesystem_sync::flush_filesystems, || {
+        std::fs::write("/proc/sys/vm/drop_caches", "3").is_ok()
+    })
+}
 
-    // Drop page cache (requires root, best-effort).
-    let drop_ok = std::fs::write("/proc/sys/vm/drop_caches", "3").is_ok();
+fn do_sleep_prep_with(
+    flush_filesystems: impl FnOnce(),
+    drop_page_cache: impl FnOnce() -> bool,
+) -> (bool, String) {
+    // The direct syscall is part of the runtime agent, so even a scratch OCI
+    // image with no `sync` executable can acknowledge durable teardown.
+    flush_filesystems();
+    let drop_ok = drop_page_cache();
 
-    if sync_ok && drop_ok {
+    if drop_ok {
         (true, "filesystems synced, page cache dropped".to_string())
-    } else if sync_ok {
+    } else {
         (
             true,
             "filesystems synced, page cache drop failed (non-root?)".to_string(),
         )
-    } else {
-        (false, "sync failed".to_string())
     }
 }
 
@@ -933,5 +937,36 @@ pub(crate) fn handle_update_idle_timeout(secs: u64) -> GuestResponse {
             previous_secs: 0,
             applied_secs: 0,
         },
+    }
+}
+
+#[cfg(test)]
+mod sleep_prep_tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    #[test]
+    fn sleep_prep_flushes_before_dropping_cache_and_acknowledging() {
+        let flushed = Cell::new(false);
+        let (success, detail) = do_sleep_prep_with(
+            || flushed.set(true),
+            || {
+                assert!(flushed.get(), "cache drop must follow the filesystem flush");
+                true
+            },
+        );
+
+        assert!(success);
+        assert_eq!(detail, "filesystems synced, page cache dropped");
+    }
+
+    #[test]
+    fn cache_drop_failure_does_not_downgrade_a_completed_flush() {
+        let (success, detail) = do_sleep_prep_with(|| {}, || false);
+
+        assert!(success);
+        assert!(detail.contains("filesystems synced"), "{detail}");
+        assert!(detail.contains("cache drop failed"), "{detail}");
     }
 }

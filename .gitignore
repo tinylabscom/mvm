@@ -98,3 +98,6 @@ output/
 # Local generated output and QA scratch data.
 /artifacts/
 /qa/
+
+# Local agent memory — findings stay on the author's machine, not in the repo.
+.agent-memory/

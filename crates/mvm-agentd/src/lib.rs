@@ -38,6 +38,8 @@ pub mod entrypoint;
 pub mod entrypoint_stream;
 /// Boot-validated optional extension executables.
 pub mod extension;
+/// Guest-wide filesystem flush shared by forced-shutdown paths.
+pub mod filesystem_sync;
 /// Guest-side FlowMux client for the converged single networking path.
 #[cfg(feature = "flowmux-async")]
 pub mod flowmux;

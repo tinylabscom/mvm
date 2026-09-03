@@ -12,6 +12,25 @@ Last updated: 2026-09-03
       The generated conformance ledger and all 68 policy/model gates are green;
       provenance and checksum-policy decisions remain in WS-B and WS-C.
 
+- [ ] **Persistent host-directory snapshots.**
+      `specs/plans/2026-09-02-retire-dirshare.md`.
+      Ad-hoc `--host <directory>` registration now creates a private ext4
+      snapshot on verified encrypted backing and registers it as a block
+      volume. Focused materialization, validation, error-path, launch-lease,
+      full workspace, and BDD tests are green; merge delivery remains.
+
+- [ ] **Workload output affordance — durable writable inline disks.**
+      `specs/plans/2026-09-02-workload-output-affordance.md`.
+      Foreground transient runs now flush writable disks through the existing
+      authenticated guest-agent `SleepPrep` request before forced teardown.
+      The OCI-safe handler uses `sync(2)` directly, shares that implementation
+      with the detached exit reporter, treats a failed flush as a run failure,
+      and holds caller-owned image locks through teardown. Sized writable disk
+      mounts are admitted while directory snapshots remain read-only. A
+      no-explicit-sync write survived a second fresh Alpine VM on macOS HVF;
+      gated compilation, the full workspace nextest suite, doc tests, all-targets Clippy,
+      policy checks, and BDD are green. Broader surface design and merge remain.
+
 - [x] **Cargo target-dir guard.**
       `specs/plans/2026-09-02-cargo-target-dir-guard.md`.
       Both cargo wrapper scripts reclaim a CARGO_TARGET_DIR pointing outside

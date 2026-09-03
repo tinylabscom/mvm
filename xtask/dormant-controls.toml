@@ -34,6 +34,28 @@ indistinguishable from an unbounded one. Losing its caller in the CLI start \
 path puts it straight back there."""
 
 [[control]]
+symbol = "default_sdk_uses_sidecar"
+file = "crates/mvm-contract/src/plan/execution_plan.rs"
+dormant = true
+why = """
+`ExecutionPlan::sdk_uses_sidecar` is a two-sided assertion — `true` makes \
+admission *require* the SDK sidecar, `false` makes it *forbid* one — but no \
+production path can produce `false`. Both construction sites hardcode `true` \
+(`plan/synthesis.rs`, `commands/vm/policy_resolver.rs`), there is no CLI flag, \
+and no workload IR field feeds it, so the forbidding half is reachable only by \
+hand-building a plan in a test.
+
+That is what makes this entry worth having. The default is the only observable \
+thing about the field, so it attracted four separate PRs proposing to change \
+it, one of which would have flipped it to `false` and refused the sidecar for \
+every signed plan predating the field. A dormant control whose only visible \
+knob is its default invites exactly that.
+
+Wiring it requires a launch-time way to declare that a workload speaks the \
+broker protocol directly. This entry fails the moment that path lands and \
+`false` becomes producible, which is the signal to delete it."""
+
+[[control]]
 symbol = "enforced_grants_after_start"
 file = "crates/mvm-client/src/boot.rs"
 dormant = false

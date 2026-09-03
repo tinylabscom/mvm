@@ -3,12 +3,6 @@ use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
 
 use crate::commands::DirShareSpec;
 
-/// The current directory walker retains every file's contents until the ext4
-/// layout has been assembled. Refuse trees that can exhaust an ordinary host
-/// before allocating those buffers. Larger shares need a genuinely streaming
-/// node source, not an opt-out that restores the SIGKILL failure mode.
-const MAX_IN_MEMORY_MOUNT_TREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-
 /// The ext4 volume label for the `index`-th `--mount` image.
 ///
 /// One authority, called both when the image is written and when the volume
@@ -88,37 +82,57 @@ pub(crate) fn materialize_mount_volumes(
 /// Nothing a transient guest writes reaches the host either, in any shape. A
 /// workload that has to hand results back needs a registered volume and
 /// `mvmctl machine start`, not this path.
+///
+/// # Memory
+///
+/// The walk records each file's path and size and leaves its bytes on the host
+/// until the emit pass streams them into their allocated blocks
+/// ([`mvm_fs::rootfs::FileContentPolicy::DeferToEmit`]). Peak memory is a block
+/// per file rather than the tree's size.
+///
+/// This used to refuse any tree over 2 GiB, because the walk read every file
+/// into memory first and a larger one risked the host killing `mvmctl`. That
+/// refusal made `--mount .` — printed in the docs, and the natural thing to
+/// reach for — fail on any built checkout, since `.gitignore` is deliberately
+/// not consulted and `target/` is counted like everything else. The cap is gone
+/// rather than raised: a bound picked to protect against holding the tree in
+/// memory has no meaning once the tree is not held.
 pub(crate) fn materialize_mount_image(
     share: &DirShareSpec,
     state_dir: &std::path::Path,
     index: usize,
 ) -> Result<std::path::PathBuf> {
     let host_dir = std::path::PathBuf::from(&share.host_dir);
-    if !host_dir.is_dir() {
-        anyhow::bail!(
-            "--mount {}:{}: the host path is not a directory",
-            share.host_dir,
-            share.guest_mount
-        );
-    }
     let output = state_dir.join(format!("mount-{index}.ext4"));
-    let tree_bytes = tree_size_bytes_up_to(&host_dir, MAX_IN_MEMORY_MOUNT_TREE_BYTES);
-    if tree_bytes > MAX_IN_MEMORY_MOUNT_TREE_BYTES {
-        anyhow::bail!(
-            "--mount {}:{} contains more than {} of regular-file data; the current ext4 snapshotter retains file contents in memory and would risk the host killing mvmctl. Mount a narrower directory or stage a copy that excludes generated trees such as target/ and .claude/worktrees/",
-            share.host_dir,
-            share.guest_mount,
-            mvm_core::pool::format_bytes(MAX_IN_MEMORY_MOUNT_TREE_BYTES),
-        );
+    materialize_directory_snapshot(&host_dir, &output, &mount_volume_label(index)).with_context(
+        || {
+            format!(
+                "materializing --mount {}:{}",
+                share.host_dir, share.guest_mount
+            )
+        },
+    )
+}
+
+/// Materialize a directory into a streaming, labelled ext4 snapshot.
+///
+/// Both transient `--mount` and persistent `machine volume mount --host`
+/// depend on this single implementation so their node policy, streaming
+/// behavior, and image construction cannot drift apart.
+pub(crate) fn materialize_directory_snapshot(
+    host_dir: &std::path::Path,
+    output: &std::path::Path,
+    volume_label: &str,
+) -> Result<std::path::PathBuf> {
+    if !host_dir.is_dir() {
+        anyhow::bail!("snapshot source {} is not a directory", host_dir.display());
     }
-    // Labelled so the guest mounts by identity rather than by enumeration
-    // order, the same reason `stage0-init` reads its work disk by label.
-    let label = mount_volume_label(index);
+    let tree_bytes = tree_size_bytes(host_dir);
     let input = mvm_build::rootfs::MaterializeExt4Input::builder()
-        .unpacked_root(host_dir.clone())
-        .output(output.clone())
+        .unpacked_root(host_dir.to_path_buf())
+        .output(output.to_path_buf())
         .uncompressed_size_bytes(tree_bytes)
-        .volume_label(label)
+        .volume_label(volume_label.to_owned())
         .emit_verity(false)
         // Only an OCI unpack on a case-folding host defers nodes; a host
         // directory is read as it is.
@@ -126,16 +140,14 @@ pub(crate) fn materialize_mount_image(
         .build()
         .context("assembling the mount image inputs")?;
     let options = mvm_fs::rootfs::WalkOptions::new(mvm_fs::rootfs::UnsupportedNodePolicy::Reject)
-        .with_vanished_node_policy(mvm_fs::rootfs::VanishedNodePolicy::Skip);
-    mvm_build::rootfs::materialize_ext4_pure_with_walk_options(&input, options).with_context(
-        || {
-            format!(
-                "materializing --mount {} into an ext4 image",
-                share.host_dir
-            )
-        },
-    )?;
-    Ok(output)
+        .with_vanished_node_policy(mvm_fs::rootfs::VanishedNodePolicy::Skip)
+        // The whole reason a mount can be a working directory of any size: the
+        // walk records paths and sizes, and the bytes are streamed into the
+        // image as it is written.
+        .with_file_content_policy(mvm_fs::rootfs::FileContentPolicy::DeferToEmit);
+    mvm_build::rootfs::materialize_ext4_pure_with_walk_options(&input, options)
+        .with_context(|| format!("materializing {} into an ext4 image", host_dir.display()))?;
+    Ok(output.to_path_buf())
 }
 
 /// Sum of the regular-file bytes under `dir`, for sizing the image.
@@ -144,7 +156,7 @@ pub(crate) fn materialize_mount_image(
 /// failing the launch, because this only feeds a size *estimate* and the
 /// writer grows the image to fit what it actually writes. Symlinks are not
 /// followed, so a link out of the tree is counted as the link it is.
-fn tree_size_bytes_up_to(dir: &std::path::Path, limit: u64) -> u64 {
+fn tree_size_bytes(dir: &std::path::Path) -> u64 {
     let mut total = 0u64;
     let mut pending = vec![dir.to_path_buf()];
     while let Some(next) = pending.pop() {
@@ -161,9 +173,6 @@ fn tree_size_bytes_up_to(dir: &std::path::Path, limit: u64) -> u64 {
                 && let Ok(meta) = entry.metadata()
             {
                 total = total.saturating_add(meta.len());
-                if total > limit {
-                    return total;
-                }
             }
         }
     }
@@ -188,28 +197,44 @@ mod tests {
             read_only: true,
         };
         let err = materialize_mount_image(&share, scratch.path(), 0).unwrap_err();
-        assert!(err.to_string().contains("not a directory"), "{err:#}");
+        let message = format!("{err:#}");
+        assert!(message.contains("not a directory"), "{message}");
         assert!(!scratch.path().join("mount-0.ext4").exists());
     }
 
+    /// Sizing counts the whole tree.
+    ///
+    /// It used to stop as soon as it passed a 2 GiB ceiling, because its only
+    /// consumer was a refusal. It now feeds the image's initial size, so
+    /// returning early would under-size the image for exactly the trees that
+    /// motivated removing the ceiling.
     #[test]
-    fn an_oversized_mount_is_refused_before_materialization() {
+    fn mount_sizing_counts_the_whole_tree_with_no_ceiling() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let source = scratch.path().join("source");
+        std::fs::create_dir_all(source.join("nested")).unwrap();
+        std::fs::write(source.join("a.bin"), vec![0u8; 1000]).unwrap();
+        std::fs::write(source.join("nested/b.bin"), vec![0u8; 2345]).unwrap();
+
+        assert_eq!(tree_size_bytes(&source), 3345);
+    }
+
+    /// A tree past the old 2 GiB refusal is no longer special.
+    ///
+    /// Sparse, so the fixture costs an inode rather than 3 GiB of disk: the
+    /// declared length is all the removed check ever looked at.
+    #[test]
+    fn a_tree_past_the_old_ceiling_is_no_longer_refused_for_its_size() {
         let scratch = tempfile::TempDir::new().unwrap();
         let source = scratch.path().join("source");
         std::fs::create_dir(&source).unwrap();
         let large = std::fs::File::create(source.join("large.bin")).unwrap();
-        large.set_len(MAX_IN_MEMORY_MOUNT_TREE_BYTES + 1).unwrap();
-        let share = DirShareSpec {
-            host_dir: source.display().to_string(),
-            guest_mount: "/work".to_string(),
-            read_only: true,
-        };
+        large.set_len(3 * 1024 * 1024 * 1024).unwrap();
 
-        let err = materialize_mount_image(&share, scratch.path(), 0).unwrap_err();
-        let message = format!("{err:#}");
-        assert!(message.contains("more than 2.0 GiB"), "{message}");
-        assert!(message.contains("target/"), "{message}");
-        assert!(!scratch.path().join("mount-0.ext4").exists());
+        assert!(
+            tree_size_bytes(&source) > 2 * 1024 * 1024 * 1024,
+            "the fixture must exceed the ceiling this test is about"
+        );
     }
 
     #[cfg(unix)]
@@ -223,14 +248,11 @@ mod tests {
         let outside = scratch.path().join("outside.bin");
         std::fs::File::create(&outside)
             .unwrap()
-            .set_len(MAX_IN_MEMORY_MOUNT_TREE_BYTES + 1)
+            .set_len(4096)
             .unwrap();
         symlink(&outside, source.join("link")).unwrap();
 
-        assert_eq!(
-            tree_size_bytes_up_to(&source, MAX_IN_MEMORY_MOUNT_TREE_BYTES),
-            0
-        );
+        assert_eq!(tree_size_bytes(&source), 0);
     }
 }
 

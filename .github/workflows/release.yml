@@ -344,10 +344,20 @@ jobs:
     # for the job is not enough under `!cancelled()`: its result must be a hard
     # success requirement or a failed initramfs build can still publish a tag
     # whose sealed-boot downloader always returns 404.
+    #
+    # `e2e-docs` was added to `needs` above when the documented-surface gate
+    # landed, and its result was never added here. `!cancelled()` overrides the
+    # implicit all-needs-succeeded rule, so for as long as that was true the
+    # release published whether or not a single documented example booted —
+    # the gate existed, was listed, was asserted by a test that only read the
+    # `needs` list, and enforced nothing. Every entry in `needs` must appear in
+    # this condition; a job listed and not checked is worse than one that was
+    # never added, because it reads as covered.
+    #
     # Dry-run guard: a `workflow_dispatch` with dry_run=true builds + packages
     # (the `build` job) but never reaches this publish job — only a tag push or
     # an explicit dry_run=false dispatch publishes.
-    if: ${{ !cancelled() && needs.bdd.result == 'success' && needs.build.result == 'success' && needs.initramfs-image.result == 'success' && (github.event_name == 'push' || github.event.inputs.dry_run == 'false') }}
+    if: ${{ !cancelled() && needs.bdd.result == 'success' && needs.e2e-docs.result == 'success' && needs.build.result == 'success' && needs.initramfs-image.result == 'success' && (github.event_name == 'push' || github.event.inputs.dry_run == 'false') }}
     # This job mints the one keyless identity every installed mvmctl trusts:
     # `release.yml@refs/tags/v{version}`, the sole entry in
     # RELEASE_IDENTITY_TEMPLATES. The environment's policy admits `v*` tags and

@@ -352,6 +352,27 @@ e2e-docs:
 e2e-docs-clean:
     ./scripts/e2e-documented-surface.sh --clean-only
 
+# `e2e-docs` records this for you on a clean run; this recipe is for
+# re-recording from a log you kept. The lane is `macos-hvf` or
+# `linux-firecracker`, and the log is the full output of the run that earned it
+# — the recorder parses the `[Summary]` block out of it and refuses a run with
+# failing scenarios, so a record cannot be minted from a red run.
+#
+
+# Record that a documented-surface lane ran clean against this tree
+record-e2e-evidence lane log:
+    cargo run -p xtask -- record-release-evidence {{ lane }} {{ log }}
+
+# The release-side half of the above: fails unless each lane's committed record
+# describes the tree you are about to tag. Run it before pushing a tag; CI runs
+# it too, for the macOS lane, whenever no runner could produce that evidence
+# live.
+#
+
+# Check every documented-surface lane's evidence covers this tree
+check-e2e-evidence *lanes:
+    cargo run -p xtask -- check-release-evidence {{ lanes }}
+
 # KVM-backed merge-queue witness for the cheap documented machine lifecycle.
 # The tag selector keeps registry/build-heavy live scenarios in their dedicated
 

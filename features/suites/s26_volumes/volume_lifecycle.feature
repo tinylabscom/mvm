@@ -120,26 +120,19 @@ Feature: Encrypted block volume lifecycle and attachment
     When I run mvmctl in the isolated mvm home with "machine stop bdd-readonly-volume --yes"
     Then the command exits with code 0
 
-  # A *directory*-kind registration, not a managed block volume. Every live
-  # scenario above registers `machine volume create` output, which resolves to
-  # `VmVolumeKind::Disk`. `--host <dir>` takes the other arm —
-  # `LocalVolumeKind::Directory` → an unmaterialized `VmVolumeKind::DirShare`.
+  # `--host <dir>` is the ad-hoc arm. It used to register a live directory
+  # share, which no workload backend can serve: `machine start` refused it at
+  # boot ("a live host-directory share can't be expressed", measured on both
+  # Firecracker and HVF) and `machine run` booted without the mount. The two
+  # launch paths disagreed about the same registration.
   #
-  # Measured for the *transient* path already: the registration is silently
-  # ignored, the mount point is absent, and the boot succeeds. That answer does
-  # not generalise, because `machine start` resolves through
-  # `merge_registered_volumes_for_launch` rather than dropping the volume.
-  # The persistent path does consume the registration. Because Firecracker has
-  # no directory-share device, it must refuse before boot rather than silently
-  # discard the grant or start a guest without the registered data.
-  @live @firecracker @workload_kernel @guest_bins
-  Scenario: a directory-kind registration is refused before persistent boot
+  # It now snapshots the directory into an ext4 image and registers that, the
+  # same treatment `--mount HOST:/GUEST` gives a transient run. So the
+  # registration succeeds and resolves as a block device rather than a share.
+  Scenario: a host directory is registered as a snapshot image
     Given an isolated mvm home
-    And a cached live workload kernel
     When I run mvmctl in the isolated mvm home with "machine create bdd-dir-volume --image alpine"
     Then the command exits with code 0
     When I register host directory volume "dirvol" at "/data/dirvol" for machine "bdd-dir-volume"
     Then the command exits with code 0
-    When I run mvmctl in an isolated live home with "machine start bdd-dir-volume --hypervisor firecracker"
-    Then the command exits with code 1
-    And the error output contains "live host-directory share can't be expressed"
+    And the output contains ".ext4"

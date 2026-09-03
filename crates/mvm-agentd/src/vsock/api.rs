@@ -21,8 +21,16 @@ pub fn query_worker_status(instance_dir: &str) -> Result<GuestResponse> {
 /// Ok(false) if guest NAKed or timed out.
 pub fn request_sleep_prep(instance_dir: &str, drain_timeout_secs: u64) -> Result<bool> {
     let mut stream = connect(instance_dir, drain_timeout_secs)?;
-    let resp = send_request(&mut stream, &GuestRequest::SleepPrep { drain_timeout_secs })?;
+    request_sleep_prep_on(&mut stream, drain_timeout_secs)
+}
 
+/// Request sleep preparation on an already-connected backend-agnostic stream.
+pub fn request_sleep_prep_on(stream: &mut UnixStream, drain_timeout_secs: u64) -> Result<bool> {
+    let resp = send_request(stream, &GuestRequest::SleepPrep { drain_timeout_secs })?;
+    interpret_sleep_prep(resp)
+}
+
+fn interpret_sleep_prep(resp: GuestResponse) -> Result<bool> {
     match resp {
         GuestResponse::SleepPrepAck { success, .. } => Ok(success),
         GuestResponse::Error { message } => {
@@ -660,6 +668,31 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn sleep_prep_response_requires_a_successful_ack() {
+        assert!(
+            interpret_sleep_prep(GuestResponse::SleepPrepAck {
+                success: true,
+                detail: Some("filesystems synced".into()),
+            })
+            .unwrap()
+        );
+        assert!(
+            !interpret_sleep_prep(GuestResponse::SleepPrepAck {
+                success: false,
+                detail: Some("sync failed".into()),
+            })
+            .unwrap()
+        );
+        assert!(
+            interpret_sleep_prep(GuestResponse::Error {
+                message: "agent refused".into(),
+            })
+            .is_err()
+        );
+        assert!(interpret_sleep_prep(GuestResponse::Pong).is_err());
     }
 
     #[test]

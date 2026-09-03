@@ -76,7 +76,7 @@ from `name`) and no `users` argument.
 
 ## Volume Mounts
 
-`volumeMounts` declares which virtio-fs volumes the guest expects at boot. Each entry maps an absolute guest path to a volume name and read-only flag:
+`volumeMounts` declares which volumes the guest expects at boot. Each entry maps an absolute guest path to a volume name and read-only flag:
 
 ```nix
 mkGuest {
@@ -97,9 +97,9 @@ nix eval .#mvm-worker.passthru.mvm.unenforced.volumeMounts --json
 
 **Nothing consumes them yet.** `mkGuest` accepts the attribute set, checks only
 that it *is* an attribute set, and records it; there is no eval-time validation
-of guest paths or volume names, and no host code attaches a virtio-fs device
-from this declaration. Runtime volume mounting is driven by the kernel cmdline
-the host writes, independently of this argument.
+of guest paths or volume names, and no host code attaches a device from this
+declaration. Runtime volume mounting is driven by the kernel cmdline the host
+writes, independently of this argument.
 
 When you do declare a guest path that the host will later mount, note that the
 host-side mount policy (`mvm_core::crypto::policy::MountPathPolicy`) allows

@@ -304,6 +304,12 @@ mod tests {
             "check-nextest-groups",
             "needs cargo-nextest; runs in the test job",
         ),
+        (
+            "check-release-evidence",
+            "asks whether a two-hour documented-surface run covered this exact \
+             tree, which is a release-time question and false for every PR by \
+             construction; runs in e2e-docs.yml's evidence job",
+        ),
     ];
 
     fn dispatched_gates() -> Vec<String> {

@@ -42,12 +42,16 @@ pub(crate) use backend_select::{
     select_exec_backend, validate_image_egress_backend, validate_image_egress_backend_name,
 };
 use guest_run::{emit_guest_console_diagnostic, run_in_guest, run_wasm_module};
+pub(crate) use mounts::materialize_directory_snapshot;
 use session::wait_for_agent_timed;
 pub use session::{
     AdmitInputs, SessionAdmit, SessionAuditSubstrate, SessionVm, boot_session_vm,
     dispatch_in_session, tear_down_session_vm, wait_for_agent,
 };
-use transient::{BootAttempt, boot_transient_vm, install_ctrlc_teardown, teardown_transient_vm};
+use transient::{
+    BootAttempt, boot_transient_vm, combine_run_and_flush, flush_writable_disks_before_teardown,
+    install_ctrlc_teardown, teardown_transient_vm,
+};
 
 pub const EXEC_TIMEOUT_EXIT_CODE: i32 = 124;
 
@@ -647,6 +651,15 @@ fn run_inner(
     let mut sub_marks = crate::commands::vm::phase_timing::LaunchSubMarks::new(timing);
     let t_start = timing.then(std::time::Instant::now);
 
+    // Keep every writable disk image's sidecar lock alive until after the VM
+    // has flushed and stopped. Materializing during request construction used
+    // to drop these guards before `run_inner` was even called.
+    let _disk_locks = req
+        .disk_volumes
+        .iter()
+        .map(crate::commands::shared::materialize_disk_volume)
+        .collect::<Result<Vec<_>>>()?;
+
     // Everything from backend selection through admission and the runtime
     // overlay attach. It yields a bootable config without booting, which is
     // also what `pool warm` needs — so it lives in one function both call
@@ -743,6 +756,10 @@ fn run_inner(
         Ok((either, vsock_ready)) => (Ok(either), vsock_ready),
         Err(e) => (Err(e), None),
     };
+    result = combine_run_and_flush(
+        result,
+        flush_writable_disks_before_teardown(&vm_name, &req.disk_volumes),
+    );
     let warm_memory_result = warm_memory_start.map(|start| {
         start.and_then(|start| finish_warm_memory_measurement(&backend, &vm_name, start))
     });

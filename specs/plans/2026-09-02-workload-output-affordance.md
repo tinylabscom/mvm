@@ -3,7 +3,7 @@
 Backing: shipped-source
 Validation: check-sprint-append
 
-**Status: NOT STARTED — design only.**
+**Status: IN PROGRESS — OCI teardown flush complete; surface design remains.**
 
 ## The gap, measured
 
@@ -74,7 +74,7 @@ So the blocker on `rw` is not policy, and not the lock. It is that a workload's
 writes are not durable unless it happens to sync, and losing data quietly is
 worse than refusing to write.
 
-- [ ] **Flush the OCI guest before teardown.** That is the whole prerequisite
+- [x] **Flush the OCI guest before teardown.** That is the whole prerequisite
       for making `HOST:/GUEST:SIZE:rw` safe, and it makes this plan's remaining
       scope much smaller: with a durable writable disk, a workload hands results
       back through an ordinary ext4 image the host reads with `ext4-view`, and
@@ -84,11 +84,25 @@ worse than refusing to write.
       **detached** path (its reaper is the only caller) and is correct there.
       The non-detached OCI run does not go through it — that is the gap.
 
-**Groundwork already landed** so the flag is one flush away rather than a
-rewrite: `materialize_disk_volume` now returns the `VolumeImageLock` instead of
-discarding it, and the transient run holds it for the VM's lifetime. The
-exclusion always existed and was released before boot, which was harmless only
-because every transient mount was read-only.
+      The foreground path now reuses the authenticated `SleepPrep` request
+      before stopping a transient VM whenever it carries a writable disk. The
+      guest handler calls `sync(2)` directly, so an arbitrary OCI image does
+      not need to contain a `sync` executable; the detached exit reporter uses
+      the same helper. A failed request makes an otherwise successful run fail
+      rather than silently claiming durability. This adds no verb, transport,
+      grant, or guest-to-host data path.
+
+      Live macOS HVF evidence used two fresh Alpine OCI VMs and one caller-owned
+      64 MiB image. The first wrote `mvm-oci-flush-survived-20260903` without an
+      explicit `sync`; the second mounted the image read-only and returned the
+      exact marker. `check-gated`, the full workspace nextest suite, workspace doc
+      tests, all-targets zero-warning Clippy, `check-all`, and BDD are green.
+
+**Lock groundwork had already landed** so the flag was one flush away rather
+than a rewrite: `materialize_disk_volume` returns the `VolumeImageLock` instead
+of discarding it. The foreground call site was still acquiring that guard in
+request construction and dropping it before boot; this work moves acquisition
+into the run lifecycle and holds the guard through the flush and teardown.
 
 ## Shape to build
 
