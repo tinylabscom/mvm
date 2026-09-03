@@ -123,17 +123,17 @@ Feature: Encrypted block volume lifecycle and attachment
   # A *directory*-kind registration, not a managed block volume. Every live
   # scenario above registers `machine volume create` output, which resolves to
   # `VmVolumeKind::Disk`. `--host <dir>` takes the other arm —
-  # `LocalVolumeKind::Directory` → an unmaterialized `VmVolumeKind::DirShare` —
-  # and whether that reaches a guest on the persistent path is the open
-  # question gating `specs/plans/2026-09-02-retire-dirshare.md`.
+  # `LocalVolumeKind::Directory` → an unmaterialized `VmVolumeKind::DirShare`.
   #
   # Measured for the *transient* path already: the registration is silently
   # ignored, the mount point is absent, and the boot succeeds. That answer does
   # not generalise, because `machine start` resolves through
   # `merge_registered_volumes_for_launch` rather than dropping the volume.
-  # This scenario is what settles the persistent half.
+  # The persistent path does consume the registration. Because Firecracker has
+  # no directory-share device, it must refuse before boot rather than silently
+  # discard the grant or start a guest without the registered data.
   @live @firecracker @workload_kernel @guest_bins
-  Scenario: a directory-kind registration reaches a persistent guest
+  Scenario: a directory-kind registration is refused before persistent boot
     Given an isolated mvm home
     And a cached live workload kernel
     When I run mvmctl in the isolated mvm home with "machine create bdd-dir-volume --image alpine"
@@ -141,9 +141,5 @@ Feature: Encrypted block volume lifecycle and attachment
     When I register host directory volume "dirvol" at "/data/dirvol" for machine "bdd-dir-volume"
     Then the command exits with code 0
     When I run mvmctl in an isolated live home with "machine start bdd-dir-volume --hypervisor firecracker"
-    Then the command exits with code 0
-    When I execute shell command "cat /data/dirvol/marker" in machine "bdd-dir-volume"
-    Then the command exits with code 0
-    And the output contains "dir-volume-visible"
-    When I run mvmctl in the isolated mvm home with "machine stop bdd-dir-volume --yes"
-    Then the command exits with code 0
+    Then the command exits with code 1
+    And the error output contains "live host-directory share can't be expressed"

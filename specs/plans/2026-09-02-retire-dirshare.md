@@ -109,13 +109,17 @@ inference was confident and wrong, and only the live run separated the two.
       a job. Nothing said so, which is what made it look like a bug rather than
       a boundary.
 
-      **"Can an unmaterialized `DirShare` reach a boot mount" therefore remains
-      open for the persistent case.** The transient answer (it does not — the
-      volume is dropped before `VolumeConfig` is built) does not generalise,
-      because the persistent path resolves through a different function that
-      returns `VmVolumeKind::Disk` for a managed volume. Exercising
-      `machine start` with a *directory*-kind registration is what would settle
-      it, and it is the remaining prerequisite for the `want_kind` change below.
+- [x] **Exercise the persistent path with a directory-kind registration.** It
+      does consume the registry and preserves the directory discriminator as
+      an unmaterialized `VmVolumeKind::DirShare`. The shared workload-runner
+      guard then refuses before assembling the backend spec because no
+      directory-share device can express the grant. The live BDD regression
+      pins that refusal instead of accepting either dangerous alternative:
+      silently dropping a registered volume or booting without its data.
+
+      This settles reachability, not the product decision above. Managed
+      directories still need either materialization or a durable discriminator
+      before the runtime enum can be removed.
 - [x] **Decide whether silently ignoring a registered volume is acceptable.**
       Decided: no, but a warning rather than a refusal, landed in
       `fix(mount): say what a transient run will and will not attach`.

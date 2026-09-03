@@ -132,7 +132,11 @@ Last updated: 2026-09-02
       unshared) `/job` onto a dispatch round trip, and the host rewrites the
       input disk per `Run` and reads the output disk per `Result`. Live-validated
       on macOS 26.5.2 — two `nix build` dispatches into one session, both exit 0.
-      Gate now at 41 sites across 13 files.
+      Gate now at 41 sites across 13 files. A live persistent Firecracker BDD
+      witness now pins the remaining unmaterialized-directory behavior: the
+      registry is consumed, and the workload runner refuses before boot because
+      it cannot express the directory grant. That settles reachability without
+      pretending the managed-directory product decision is complete.
       Remaining: libkrun's seeded closure, the guest's install arm (which writes
       to `/job/<job_id>/out` and is refused on a disk-backed session rather than
       silently losing its claim-11 sidecars), and deleting the now-dead share
