@@ -416,9 +416,16 @@ fn resolve_mount_entry(
     };
     let (resolved_source, kind) = match effective_source {
         VolumeMountSource::ManagedCatalog => resolve_managed_source(entry, catalog, &volume_name)?,
-        VolumeMountSource::AdHocHost => {
-            (ResolvedVolumeSource::AdHocHost, LocalVolumeKind::Directory)
-        }
+        // Honour the shape the registration recorded rather than assuming a
+        // directory. An ad-hoc registration used to be a live host-directory
+        // share and nothing else, so hardcoding `Directory` was accurate; it
+        // stopped being so once a granted directory could be materialized into
+        // an image, and the hardcode then coerced a perfectly good block image
+        // back into a share no backend can serve.
+        //
+        // Entries written before `kind` existed decode as `Directory` through
+        // its `serde(default)`, so this is the same answer for them.
+        VolumeMountSource::AdHocHost => (ResolvedVolumeSource::AdHocHost, entry.kind.clone()),
         VolumeMountSource::Legacy => bail!("legacy volume source was not normalized"),
     };
 

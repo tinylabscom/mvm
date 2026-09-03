@@ -3635,11 +3635,13 @@ writes the plan:
       test into CI.
 - [x] Merge the guard through the queue (#3135).
 
-## 2026-09-02 persistent directory-volume refusal witness
+## 2026-09-03 persistent directory-volume snapshot
 
-- [x] Register a real host-directory attachment against a persistent machine
-      in the live Firecracker BDD suite.
-- [x] Prove the persistent launch consumes the registration and fails closed
-      before boot because the workload runner cannot express a live directory
-      share, rather than silently dropping the registered data.
-- [ ] Merge the witness through the queue.
+- [x] Snapshot a real `--host <directory>` attachment into a namespaced ext4
+      image at registration time and resolve it as a block volume.
+- [x] Fail closed unless both the source and snapshot destination have verified
+      encrypted backing; create the snapshot directory and image with private
+      permissions before copying source bytes.
+- [x] Cover valid snapshot materialization and launch-lease resolution, invalid
+      ext4 refusal, missing-image failure, and the CLI registration workflow.
+- [ ] Merge the implementation through the queue.

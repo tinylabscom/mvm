@@ -3,9 +3,10 @@
 Backing: shipped-source
 Validation: check-sprint-append
 
-**Status: NOT STARTED — this is the design, not the change.** The last open box
-of `specs/plans/2026-08-31-remove-virtio-fs.md` Stage A. It is separated because
-it is not cleanup: it moves a fact the security model matches against.
+**Status: IN PROGRESS.** The registration-time snapshot prerequisite is
+implemented; moving the signed-plan discriminator and deleting the obsolete
+runtime variants remain. This is separated from mechanical cleanup because it
+moves a fact the security model matches against.
 
 ## What `DirShare` is now
 
@@ -100,13 +101,14 @@ So the first question is not about `VmVolumeKind` at all:
       fixture because the FileVault probe admits the registration. `#3146` pins
       the same refusal on Firecracker, so it holds on both backends.
 
-- [ ] **The transient path is now the inconsistent one.** `machine start`
-      refuses with a diagnostic; `machine run --name` accepts the
-      registration, lists it in `volume ls`, boots, and provides nothing — a
-      warning was added, but a warning after the fact is weaker than the
-      refusal the other path already gives. The information is available at
-      `machine volume mount` time, which is the one place both paths share, so
-      that is where a consistent refusal belongs.
+- [x] **Make `--host <directory>` registration useful and consistent.** The
+      shared `machine volume mount` boundary now snapshots the directory into
+      a namespaced ext4 image and registers that image as a disk attachment.
+      Persistent launch consumes the same block-volume shape as every other
+      image attachment instead of reaching the workload runner as an
+      unmaterialized directory share. The source and snapshot destination must
+      both have encrypted backing, and the snapshot is created with private
+      filesystem permissions before source bytes are written.
 
 ### What live testing established
 
@@ -140,17 +142,13 @@ inference was confident and wrong, and only the live run separated the two.
       a job. Nothing said so, which is what made it look like a bug rather than
       a boundary.
 
-- [x] **Exercise the persistent path with a directory-kind registration.** It
-      does consume the registry and preserves the directory discriminator as
-      an unmaterialized `VmVolumeKind::DirShare`. The shared workload-runner
-      guard then refuses before assembling the backend spec because no
-      directory-share device can express the grant. The live BDD regression
-      pins that refusal instead of accepting either dangerous alternative:
-      silently dropping a registered volume or booting without its data.
+- [x] **Exercise the persistent registration path.** The BDD regression now
+      proves that a real host directory registers as an ext4 snapshot, while
+      focused service tests prove the image validates, acquires a launch lease,
+      and resolves as `VmVolumeKind::Disk`. Malformed images are refused.
 
-      This settles reachability, not the product decision above. Managed
-      directories still need either materialization or a durable discriminator
-      before the runtime enum can be removed.
+      Managed directories still need either materialization or a durable
+      discriminator before the runtime enum can be removed.
 - [x] **Decide whether silently ignoring a registered volume is acceptable.**
       Decided: no, but a warning rather than a refusal, landed in
       `fix(mount): say what a transient run will and will not attach`.
@@ -162,6 +160,8 @@ inference was confident and wrong, and only the live run separated the two.
       not fail a boot that never depended on it.
 
 ## Ordered work
+- [x] Materialize ad-hoc `--host <directory>` registrations into private,
+      encrypted-destination ext4 snapshots and resolve them as block volumes.
 - [ ] Move the `want_kind` derivation off `VmVolumeKind` and onto
       `materialized_image`, with a test that a plan recording `ShareKind::DirShare`
       still admits a materialized mount, and that a `Disk` plan does not admit

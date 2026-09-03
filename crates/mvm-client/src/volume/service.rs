@@ -218,6 +218,54 @@ impl LocalVolumeService {
         )
     }
 
+    /// Run the host-encryption policy against a path.
+    ///
+    /// Exposed because snapshotting a directory into an image moves the
+    /// materialization to the caller, and the *source* directory still has to
+    /// satisfy the same at-rest policy it did when it was attached directly.
+    /// Dropping that check silently would be a posture change hiding inside a
+    /// refactor.
+    pub fn require_host_encryption(&self, path: &Path) -> Result<()> {
+        self.probe.require_encrypted(path)
+    }
+
+    /// Register an already-materialized ext4 image as an ad-hoc attachment.
+    ///
+    /// The block-image counterpart to [`Self::prepare_ad_hoc_host_attachment`].
+    /// A host *directory* cannot be served — no workload backend has a
+    /// virtio-fs device — so the caller snapshots it into an image and
+    /// registers that instead. This records the shape, and
+    /// `resolve_mount_entry` honours it at launch.
+    ///
+    /// Additive rather than a change to the directory method, whose contract
+    /// other consumers of this crate already depend on.
+    pub fn prepare_ad_hoc_image_attachment(
+        &self,
+        request: &AttachmentRequest,
+        image: &Path,
+        size_mib: u32,
+    ) -> Result<AttachmentRecord> {
+        let _lock = lifecycle::acquire_volume_lifecycle_lock()?;
+        lifecycle::recover_local_volume_catalog()?;
+        lifecycle::validate_volume_name(request.volume.as_str())?;
+        if !image.is_absolute() {
+            bail!("image path must be absolute, got {}", image.display());
+        }
+        if !image.is_file() {
+            bail!("image path {} is not an existing file", image.display());
+        }
+        // Same check the launch-time resolution runs, so a corrupt image is
+        // refused where the operator can act on it rather than at boot.
+        ext4_view::Ext4::load_from_path(image)
+            .with_context(|| format!("{} is not a valid ext4 image", image.display()))?;
+        register_attachment(
+            request,
+            image.to_string_lossy().into_owned(),
+            LocalVolumeKind::BlockImage { size_mib },
+            VolumeMountSource::AdHocHost,
+        )
+    }
+
     /// Create an immutable encrypted snapshot of a locked managed volume.
     pub fn snapshot_volume(&self, name: &str, snapshot: &str) -> Result<()> {
         super::snapshot::create(name, snapshot)
