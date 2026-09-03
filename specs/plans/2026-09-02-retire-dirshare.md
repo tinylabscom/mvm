@@ -72,10 +72,41 @@ constructs it for `VolumeSourceKind::ManagedDirectory` /
 
 So the first question is not about `VmVolumeKind` at all:
 
-- [ ] **Decide what a managed *directory* volume is.** Either it materializes
-      like `--mount` does (and `LocalVolumeKind::Directory` collapses into
-      `BlockImage`), or it stays a genuinely different thing and needs its own
-      discriminator.
+- [x] **Decide what a managed *directory* volume is.** Answered by measurement,
+      and the answer makes the retirement smaller than this plan assumed: **an
+      unmaterialized `DirShare` is unreachable on every path.** There is no
+      live configuration in which one serves a guest, so
+      `LocalVolumeKind::Directory` needs neither materialization nor a new
+      discriminator — it needs deleting.
+
+      The two paths reach that end differently, which is why one measurement
+      did not answer for both:
+
+      | path | behaviour |
+      | --- | --- |
+      | transient `machine run --name` | registration silently ignored; boot succeeds; mount absent |
+      | persistent `machine start` | **refused before boot**, naming the volume and two ways forward |
+
+      The persistent refusal comes from the workload runner, not the guest:
+      *"the WorkloadRunner has no virtio-fs device yet, so a live
+      host-directory share can't be expressed. Use a disk-image volume instead
+      (host:/guest:SIZE)"*. It never reaches guest init, so the predicted
+      virtiofs `ENODEV` never happens — worth recording, because the code path
+      (`resolve_mount_entry` ends `LocalVolumeKind::Directory => {}`, no
+      conversion) correctly predicted *that it fails* and wrongly predicted
+      *where*.
+
+      Measured on macOS 26 / HVF via `machine start`, which needs no LUKS
+      fixture because the FileVault probe admits the registration. `#3146` pins
+      the same refusal on Firecracker, so it holds on both backends.
+
+- [ ] **The transient path is now the inconsistent one.** `machine start`
+      refuses with a diagnostic; `machine run --name` accepts the
+      registration, lists it in `volume ls`, boots, and provides nothing — a
+      warning was added, but a warning after the fact is weaker than the
+      refusal the other path already gives. The information is available at
+      `machine volume mount` time, which is the one place both paths share, so
+      that is where a consistent refusal belongs.
 
 ### What live testing established
 
