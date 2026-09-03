@@ -661,9 +661,12 @@ mod tests {
 
         // Resolution order inside a checkout is release before debug, so the
         // rebuilt helper must win over the stale debug one.
+        // Explicit scratch dirs, not workspace_target_dirs_for: that helper
+        // also honors the process CARGO_TARGET_DIR, and under the per-worktree
+        // isolation env it would let a real helper shadow the fixture.
         let lookup = Lookup {
             override_path: None,
-            dirs: workspace_target_dirs_for(&root),
+            dirs: vec![root.join("target/release"), root.join("target/debug")],
         };
         let got = resolve_verified_in(&hvf_spec(), &lookup, &env).unwrap();
         assert_eq!(got, root.join("target/release/mvm-hvf-supervisor"));
@@ -683,9 +686,12 @@ mod tests {
 
         let mut env = test_env(Some(root.clone()));
         env.cargo = cargo;
+        // Explicit scratch dirs, not workspace_target_dirs_for: that helper
+        // also honors the process CARGO_TARGET_DIR, and under the per-worktree
+        // isolation env it would let a real helper shadow the fixture.
         let lookup = Lookup {
             override_path: None,
-            dirs: workspace_target_dirs_for(&root),
+            dirs: vec![root.join("target/release"), root.join("target/debug")],
         };
         let err = resolve_verified_in(&hvf_spec(), &lookup, &env)
             .unwrap_err()
@@ -710,9 +716,12 @@ mod tests {
 
         let mut env = test_env(Some(root.clone()));
         env.cargo = cargo;
+        // Explicit scratch dirs, not workspace_target_dirs_for: that helper
+        // also honors the process CARGO_TARGET_DIR, and under the per-worktree
+        // isolation env it would let a real helper shadow the fixture.
         let lookup = Lookup {
             override_path: None,
-            dirs: workspace_target_dirs_for(&root),
+            dirs: vec![root.join("target/release"), root.join("target/debug")],
         };
         let err = resolve_verified_in(&hvf_spec(), &lookup, &env)
             .unwrap_err()
