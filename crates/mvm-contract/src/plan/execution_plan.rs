@@ -312,10 +312,9 @@ pub struct ExecutionPlan {
     /// can speak the broker protocol natively (e.g., Python with AF_VSOCK,
     /// Go with golang.org/x/sys/unix).
     ///
+    #[serde(default)]
     pub sdk_uses_sidecar: bool,
->>>>>>> c16c96c4cf (fix(content-id): update plan address fixtures for sdk_uses_sidecar field)
 }
-
 impl ExecutionPlan {
     /// Validate all ingress mappings as one signed listener set.
     pub fn validate_ingress(&self) -> Result<(), IngressMappingsError> {
