@@ -10,6 +10,18 @@
 
 ## In progress
 
+- [ ] **Workload output affordance — durable writable inline disks.**
+      `specs/plans/2026-09-02-workload-output-affordance.md`.
+      Foreground transient runs with writable sized disks now issue the
+      existing authenticated `SleepPrep` request before VM stop; arbitrary OCI
+      guests flush through a direct `sync(2)` helper shared with the detached
+      exit reporter. Flush refusal fails an otherwise successful run, disk
+      image locks remain held through teardown, and directory snapshots remain
+      read-only. A no-explicit-sync write survived into a second fresh Alpine
+      VM on macOS HVF. Gated compilation, the full workspace nextest suite, doc
+      tests, all-targets zero-warning Clippy, policy checks, and BDD are green;
+      the plan's broader output-surface design and merge delivery remain.
+
 - [ ] **Content-addressed asset identity.**
       `specs/plans/2026-09-02-content-addressed-asset-identity.md`.
       Every dataset, model, prompt, agent, policy, and compute environment a

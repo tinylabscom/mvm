@@ -30,7 +30,7 @@ fn main() -> ExitCode {
     // Ordered before `report` so the bytes are on their way to the disk while
     // the exit round-trip is in flight, and unconditional: the guest cannot
     // know which of its mounts the host cares about.
-    flush_filesystems();
+    mvm_agentd::filesystem_sync::flush_filesystems();
     match report(code) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -39,21 +39,6 @@ fn main() -> ExitCode {
         }
     }
 }
-
-/// `sync(2)` — schedule every dirty page for writeback.
-///
-/// Best-effort and infallible by design: `sync` cannot fail in a way this
-/// helper could act on, and a guest must never block or abort its exit path
-/// over a flush.
-#[cfg(target_os = "linux")]
-fn flush_filesystems() {
-    // SAFETY: `sync` takes no arguments, returns nothing, and has no failure
-    // mode to check.
-    unsafe { libc::sync() };
-}
-
-#[cfg(not(target_os = "linux"))]
-fn flush_filesystems() {}
 
 #[cfg(target_os = "linux")]
 fn report(code: i32) -> std::io::Result<()> {

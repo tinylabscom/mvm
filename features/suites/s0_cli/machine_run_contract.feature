@@ -89,6 +89,14 @@ Feature: machine run request contract
     And the output contains "cpus=4"
     And the output contains "memory=1G (1024 MiB)"
 
+  # A sized disk persists at the caller's path. Unlike a directory snapshot,
+  # writes are not thrown away, and foreground teardown flushes the guest before
+  # the VMM releases the image.
+  Scenario: machine run accepts a writable sized disk
+    When I run mvmctl with "machine run --image alpine --dry-run --mount /tmp/mvm-bdd-output.img:/data:64M:rw -- /bin/true" and an isolated mvm home
+    Then the command exits with code 0
+    And the output contains "no VM will be booted"
+
   # Inference decides which image boots. It must not decide anything else: a
   # detected run carries the same profile and the same deny-all egress as one
   # that named its image, or the convenience would be a policy bypass.
