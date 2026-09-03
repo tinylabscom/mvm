@@ -514,6 +514,22 @@ impl NetworkPolicy {
         self.is_unrestricted() || self.resolve_rules().is_some_and(|rules| !rules.is_empty())
     }
 
+    /// Whether anything in this policy can take the workload off-box — an
+    /// egress rule, or a peer route.
+    ///
+    /// [`Self::allows_egress`] answers only the first, which is the narrower
+    /// question of whether the host allow-list admits a destination. Any
+    /// decision about whether to *build* the outbound machinery — the per-VM
+    /// endpoint, the identity drive, the guest's own dialer — has to ask this
+    /// one instead. A peer-only policy is deny-all for ordinary egress and
+    /// still dials out; asking the narrow question at those sites booted
+    /// guests whose documented `--peer` route had nothing to dial through, and
+    /// the dial failed inside the guest before any gate saw the name it was
+    /// supposed to decide.
+    pub fn admits_outbound(&self) -> bool {
+        self.allows_egress() || !self.peers().is_empty()
+    }
+
     /// Short, non-sensitive, human-readable summary of the effective
     /// egress posture for admission/audit/dry-run/receipt surfaces.
     ///

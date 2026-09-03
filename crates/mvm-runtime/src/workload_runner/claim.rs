@@ -248,7 +248,7 @@ impl<'a> ClaimGuards<'a> {
         inputs: &EndpointSpawnInputs<'_>,
     ) -> Result<EndpointHandle> {
         if inputs.secrets.is_empty()
-            && !inputs.network_policy.allows_egress()
+            && !inputs.network_policy.admits_outbound()
             && inputs.ingress.is_empty()
         {
             return Ok(EndpointHandle {

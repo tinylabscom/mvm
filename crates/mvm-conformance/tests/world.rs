@@ -202,6 +202,10 @@ pub struct CliWorld {
     /// the alternative — an argv assembled in Rust — is invisible to the
     /// structural check that reads commands out of quoted step text.
     pub scratch_dir: Option<tempfile::TempDir>,
+    /// Host-side listener standing in for the workload a `--peer` route points
+    /// at. Held for the scenario's lifetime: the accept loop runs on a clone
+    /// and ends when this drops.
+    pub peer_listener: Option<std::net::TcpListener>,
     /// Tempdir holding the file/directory trees the asset-identity
     /// scenarios hash; held so it outlives the scenario.
     pub asset_fixture_dir: Option<tempfile::TempDir>,

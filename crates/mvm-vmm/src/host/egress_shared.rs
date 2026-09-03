@@ -127,7 +127,7 @@ pub fn effective_vsock_egress(config: &VmStartConfig) -> bool {
         .plan_json
         .as_deref()
         .is_some_and(plan_json_has_ingress);
-    (config.network_policy.allows_egress() || plan_has_ingress)
+    (config.network_policy.admits_outbound() || plan_has_ingress)
         && !config
             .plan_json
             .as_deref()
@@ -273,6 +273,49 @@ mod phase_a_tests {
             "fixture must exercise the suppression, not a deny-all policy"
         );
         assert!(!effective_vsock_egress(&cfg));
+    }
+
+    /// A peer-only policy is deny-all for ordinary egress and still needs the
+    /// in-guest client: the workload dials the peer *by name* through it, and
+    /// the host decides that name against the signed binding.
+    ///
+    /// Without this the documented `--peer` line booted a guest with nothing
+    /// listening on the proxy port, so the dial died with ECONNREFUSED inside
+    /// the guest and no gate decision was ever reached. Adding `--allow-host`
+    /// masked it, which is why every existing peer test passed: they either
+    /// admitted a host too or never left the host at all.
+    #[test]
+    fn a_peer_binding_starts_the_client_though_no_host_is_admitted() {
+        let cfg = VmStartConfig {
+            network_policy: NetworkPolicy::deny_all().with_peers(vec![peer_binding()]),
+            ..Default::default()
+        };
+        assert!(
+            !cfg.network_policy.allows_egress(),
+            "fixture must exercise the peer route, not an allow-list"
+        );
+        assert!(effective_vsock_egress(&cfg));
+    }
+
+    /// The peer route does not widen the secret suppression: a secret-bearing
+    /// workload's outbound traffic still belongs to the substitution endpoint.
+    #[test]
+    fn a_peer_binding_does_not_reinstate_the_client_for_a_secret_bearing_plan() {
+        let cfg = VmStartConfig {
+            network_policy: NetworkPolicy::deny_all().with_peers(vec![peer_binding()]),
+            plan_json: Some(plan_json_with_one_bound_secret()),
+            ..Default::default()
+        };
+        assert!(!effective_vsock_egress(&cfg));
+    }
+
+    fn peer_binding() -> mvm_contract::peer::PeerBinding {
+        mvm_contract::peer::PeerBinding {
+            name: mvm_contract::peer::PeerName::parse("db.mvm.peer").expect("valid peer name"),
+            port: 5432,
+            host_addr: "127.0.0.1".parse().expect("loopback literal"),
+            host_port: 34567,
+        }
     }
 
     #[test]
