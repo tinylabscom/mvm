@@ -126,7 +126,14 @@ pub(super) fn run(args: Args) -> Result<()> {
 
 #[cfg(feature = "builder-vm")]
 fn install_in_builder(spec: &InstallSpec) -> Result<mvm_build::app_deps::InstallResult> {
-    let driver = mvm_build::builder_backend_select::resolve_builder_backend();
+    // The fallible resolver, deliberately. The infallible one panics when the
+    // registered constructor returns an error, and on the hvf arm that error is
+    // an ordinary user-facing condition — an mvmctl built without the embedded
+    // Linux host binaries cannot bootstrap a builder VM. It already carries the
+    // exact rebuild instruction; routed through the panicking path a reader saw
+    // a Rust backtrace and "CLI thread exited unexpectedly" instead.
+    let driver = mvm_build::builder_backend_select::try_resolve_builder_backend_with_override(None)
+        .context("resolving the builder backend for the dependency install")?;
     let install_driver = mvm_build::app_deps::BuilderInstallDriver::new(driver.as_ref());
     mvm_build::app_deps::install_app_deps(spec, Some(&install_driver))
         .context("installing declared dependencies in the builder environment")
