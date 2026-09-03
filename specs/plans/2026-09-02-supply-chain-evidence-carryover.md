@@ -1,5 +1,8 @@
 # Supply-Chain Evidence Carryover Plan
 
+Backing: shipped-source
+Validation: check-declared-backing
+
 Date: 2026-09-02
 Status: PROPOSED
 Repos: `mvm` (this repo), `mvmd`, `mvm-studio`, `mvm-assurance`
