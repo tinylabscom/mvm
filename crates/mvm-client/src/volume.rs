@@ -676,6 +676,8 @@ mod tests {
     #[test]
     fn ad_hoc_ext4_image_registers_and_resolves_as_a_block_volume() {
         let home = TestVolumeHome::new();
+        let source_dir = home.path().join("adhoc-source");
+        fs::create_dir(&source_dir).unwrap();
         home.create_block("source", 16);
         service().unlock_volume("source").unwrap();
         let image = host_path("source");
@@ -688,7 +690,13 @@ mod tests {
         let svc = LocalVolumeService::with_host_encryption_probe(super::probe_from_fn(|_| Ok(())));
 
         let record = svc
-            .prepare_ad_hoc_image_attachment(&request, &image, 16)
+            .prepare_ad_hoc_snapshot_attachment(
+                &request,
+                &source_dir,
+                &image,
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                16,
+            )
             .unwrap();
         assert_eq!(record.source, AttachmentSource::AdHocHost);
 
@@ -707,6 +715,8 @@ mod tests {
     #[test]
     fn ad_hoc_image_attachment_refuses_non_ext4_bytes() {
         let home = TestVolumeHome::new();
+        let source_dir = home.path().join("adhoc-source");
+        fs::create_dir(&source_dir).unwrap();
         let image = home.path().join("not-ext4.img");
         fs::write(&image, b"not an ext4 image").unwrap();
         let request = AttachmentRequest::builder("vm-1", "input")
@@ -718,7 +728,13 @@ mod tests {
         let svc = LocalVolumeService::with_host_encryption_probe(super::probe_from_fn(|_| Ok(())));
 
         let error = svc
-            .prepare_ad_hoc_image_attachment(&request, &image, 1)
+            .prepare_ad_hoc_snapshot_attachment(
+                &request,
+                &source_dir,
+                &image,
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                1,
+            )
             .unwrap_err();
         assert!(
             format!("{error:#}").contains("is not a valid ext4 image"),
