@@ -3590,3 +3590,12 @@ writes the plan:
       outside-reclaimed, keep-inherited) and wire shellcheck + the gate
       test into CI.
 - [x] Merge the guard through the queue (#3135).
+
+## 2026-09-02 persistent directory-volume refusal witness
+
+- [x] Register a real host-directory attachment against a persistent machine
+      in the live Firecracker BDD suite.
+- [x] Prove the persistent launch consumes the registration and fails closed
+      before boot because the workload runner cannot express a live directory
+      share, rather than silently dropping the registered data.
+- [ ] Merge the witness through the queue.
