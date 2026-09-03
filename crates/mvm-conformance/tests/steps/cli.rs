@@ -139,6 +139,55 @@ fn isolated_mvm_home(world: &mut CliWorld) {
     world.isolated_home = Some(tempfile::tempdir().expect("create isolated MVM_HOME"));
 }
 
+/// A working directory outside the repository for a command whose documented
+/// form takes a relative output path.
+///
+/// `mvmctl generate template python ./my-python-app` cannot be run from the
+/// workspace root — it would scaffold a project into the tree. Assembling the
+/// argv in Rust avoids that but hides the invocation from the README
+/// structural check, which reads commands out of quoted step text; that is
+/// exactly why the documented `generate template` line sat unexecuted behind an
+/// exemption. Running it verbatim inside a scratch directory satisfies both.
+#[given(expr = "a scratch working directory")]
+fn scratch_working_directory(world: &mut CliWorld) {
+    world.scratch_dir = Some(tempfile::tempdir().expect("create scratch working directory"));
+}
+
+#[when(expr = "I run mvmctl in the scratch directory with {string}")]
+fn run_mvmctl_in_scratch_directory(world: &mut CliWorld, args: String) {
+    let scratch = world
+        .scratch_dir
+        .as_ref()
+        .expect("`Given a scratch working directory` must run before this step");
+    let home = world
+        .isolated_home
+        .as_ref()
+        .expect("`Given an isolated mvm home` must run before this step");
+    let output = mvmctl_command()
+        .args(mvm_conformance::doc_examples::tokenize(&args))
+        .current_dir(scratch.path())
+        .isolated_home(home.path())
+        .output()
+        .expect("failed to spawn mvmctl");
+    world.last_run = Some(output);
+}
+
+#[then(expr = "the scratch directory contains file {string}")]
+fn scratch_directory_contains_file(world: &mut CliWorld, rel: String) {
+    let scratch = world
+        .scratch_dir
+        .as_ref()
+        .expect("`Given a scratch working directory` must run before this step");
+    let path = scratch.path().join(&rel);
+    assert!(
+        path.is_file(),
+        "expected {rel} under the scratch directory; it holds {:?}",
+        std::fs::read_dir(scratch.path())
+            .map(|d| d.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
+            .unwrap_or_default()
+    );
+}
+
 #[given(expr = "an isolated mvm home with a cached non-verity workload kernel")]
 fn isolated_mvm_home_with_non_verity_kernel(world: &mut CliWorld) {
     let home = tempfile::tempdir().expect("create isolated MVM_HOME");

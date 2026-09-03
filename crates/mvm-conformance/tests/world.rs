@@ -195,6 +195,13 @@ pub struct CliWorld {
     /// An isolated `MVM_HOME` created by a `Given` step and reused by later
     /// steps that need to inspect the filesystem after a run.
     pub isolated_home: Option<tempfile::TempDir>,
+    /// A throwaway working directory a documented command runs *inside*, so an
+    /// example whose argument is a relative path (`./my-python-app`) can be
+    /// spelled in the step exactly as the README prints it. Without it such a
+    /// command writes into the repository working tree, which is banned, and
+    /// the alternative — an argv assembled in Rust — is invisible to the
+    /// structural check that reads commands out of quoted step text.
+    pub scratch_dir: Option<tempfile::TempDir>,
     /// Tempdir holding the file/directory trees the asset-identity
     /// scenarios hash; held so it outlives the scenario.
     pub asset_fixture_dir: Option<tempfile::TempDir>,

@@ -107,7 +107,7 @@ witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented persis
 
 [[example]]
 command = "mvmctl bootstrap"
-exempt = "acquires the builder VM image, workload kernel, runtime overlay and initramfs — hundreds of megabytes and tens of minutes. Every live lane runs it as setup before its first scenario, so a broken bootstrap fails the whole suite at the door rather than as one assertion inside it."
+witness = "suites/s31_launch_e2e/documented_setup.feature::bootstrap succeeds and reports a ready host"
 
 [[example]]
 command = "mvmctl doctor"
@@ -116,7 +116,7 @@ reason = "doctor reports host posture and boots nothing, so a live lane has no g
 
 [[example]]
 command = "mvmctl build kernel build --which workload --source download"
-exempt = "downloads the published multi-hundred-megabyte kernel. The live lanes set MVM_KERNEL_SOURCE=download and every guest they boot uses the result, so the download path is exercised as their precondition."
+witness = "suites/s31_launch_e2e/documented_setup.feature::the documented workload kernel download resolves"
 
 [[example]]
 command = "mvmctl build kernel build --which workload --source compile"
@@ -141,9 +141,8 @@ reason = "queries the template registry and prints matches; boots nothing. The s
 
 [[example]]
 command = "mvmctl generate template python ./my-python-app"
-exempt = "run by `template_registry.feature::generate template fetches a remote template and scaffolds its files`, which drives it through a bespoke step (`I generate a project from template \"demo\"`) rather than a quoted command line. The structural check reads commands out of quoted step text, so it cannot confirm the shape here and is not asked to pretend otherwise. Spelling the invocation in the step would let it be a hermetic_witness."
-
-# ── Build and deps ───────────────────────────────────────────────────────────
+hermetic_witness = "suites/s0_cli/template_registry.feature::the documented generate template invocation scaffolds a python project"
+reason = "scaffolds a project directory on the host; there is no guest to boot. Runs the documented line verbatim inside a scratch working directory, because the argument is a relative path."
 
 [[example]]
 command = "mvmctl machine build --flake ."
