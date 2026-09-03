@@ -578,7 +578,7 @@ fn every_command_help_item_is_one_line_shorter_than(_world: &mut CliWorld, width
         .into_iter()
         .flat_map(|mut path| {
             path.push("--help".to_string());
-            help_invocation_violations(&path, width, true)
+            rendered_help_violations(&path, width, true)
         })
         .collect::<Vec<_>>();
 
@@ -594,11 +594,23 @@ fn every_alternative_help_entry_point_fits_within(_world: &mut CliWorld, width: 
     for path in all_command_paths() {
         let mut short_help_args = path.clone();
         short_help_args.push("-h".to_string());
-        assert_help_invocation_fits(&short_help_args, width, true);
+        assert_rendered_help_fits(&short_help_args, width, true);
 
         let mut help_subcommand_args = vec!["help".to_string()];
         help_subcommand_args.extend(path);
-        assert_help_invocation_fits(&help_subcommand_args, width, true);
+        assert_rendered_help_fits(&help_subcommand_args, width, true);
+    }
+
+    // Rendering is the same code the binary runs, but not the same *process*.
+    // One real invocation per entry-point form keeps that last inch honest:
+    // if `mvmctl --help` ever stopped reaching the arm this renders, every
+    // assertion above would still pass against a binary that printed nothing.
+    for probe in [
+        vec!["--help".to_string()],
+        vec!["-h".to_string()],
+        vec!["help".to_string()],
+    ] {
+        assert_help_invocation_fits(&probe, width, true);
     }
 }
 
@@ -607,6 +619,54 @@ fn all_command_paths() -> Vec<Vec<String>> {
     let mut command_paths = vec![Vec::new()];
     collect_command_paths(&command, &[], &mut command_paths);
     command_paths
+}
+
+/// The same assertions as [`assert_help_invocation_fits`], against help text
+/// rendered in-process instead of read from a spawned `mvmctl`.
+fn assert_rendered_help_fits(args: &[String], width: i64, require_single_line_items: bool) {
+    let violations = rendered_help_violations(args, width, require_single_line_items);
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+/// Width violations in the help text `mvmctl <args>` would print, obtained
+/// without spawning it.
+///
+/// The spawning version below is unchanged and still used, deliberately, for a
+/// few probe invocations. What it cost as the *bulk* check was one process per
+/// command path — a debug `mvmctl` is over 100 MB, and the CLI has enough paths
+/// that this single scenario dominated the suite and read as a freeze.
+///
+/// `mvm_cli::commands::help_text_for` runs the binary's own help arm: the same
+/// clap tree parses the same argv and the same output constraint is applied, so
+/// `--help`, `-h` and `help <path>` still dispatch and render as they really
+/// do. Nothing here re-implements the formatting it is checking.
+fn rendered_help_violations(
+    args: &[String],
+    width: i64,
+    require_single_line_items: bool,
+) -> Vec<String> {
+    let invocation = format!("mvmctl {}", args.join(" "));
+    let Some(help) = mvm_cli::commands::help_text_for(args) else {
+        return vec![format!("`{invocation}` did not render help")];
+    };
+    if help.trim().is_empty() {
+        return vec![format!("`{invocation}` rendered empty help")];
+    }
+
+    let mut violations = Vec::new();
+    if require_single_line_items {
+        collect_wrapped_help_items(&invocation, &help, &mut violations);
+    }
+    for (line_number, line) in help.lines().enumerate() {
+        let line_width = i64::try_from(line.chars().count()).expect("line width fits in i64");
+        if line_width >= width {
+            violations.push(format!(
+                "`{invocation}` line {} is {line_width} columns: {line}",
+                line_number + 1
+            ));
+        }
+    }
+    violations
 }
 
 fn assert_help_invocation_fits(args: &[String], width: i64, require_single_line_items: bool) {
