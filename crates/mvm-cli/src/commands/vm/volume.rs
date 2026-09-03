@@ -389,6 +389,17 @@ fn mount(
     guest: &str,
     rw: bool,
 ) -> Result<()> {
+    mount_with_service(&service(), vm_name, volume_name, host, guest, rw)
+}
+
+fn mount_with_service(
+    volume_service: &LocalVolumeService,
+    vm_name: &str,
+    volume_name: &str,
+    host: Option<&str>,
+    guest: &str,
+    rw: bool,
+) -> Result<()> {
     // The mvmctl volume surface is the interactive dev lane; the launch path
     // re-applies the access gate against the machine's admitted profile.
     let request = AttachmentRequest::builder(vm_name, volume_name)?
@@ -408,8 +419,7 @@ fn mount(
             }
             let cache = crate::mount_cache::MountImageCache::new();
             let fingerprint = cache.fingerprint(host, &host_snapshot_volume_label(volume_name))?;
-            let host_encrypted_check = service();
-            host_encrypted_check.require_host_encryption(fingerprint.source())?;
+            volume_service.require_host_encryption(fingerprint.source())?;
             let image = cache.lookup(fingerprint)?.resolve()?;
             let attachment_image = if rw {
                 image.writable_copy(&host_snapshot_image(vm_name, volume_name))?
@@ -417,7 +427,7 @@ fn mount(
                 image.path().to_path_buf()
             };
             let size_mib = image_size_mib(&attachment_image)?;
-            service().prepare_ad_hoc_snapshot_attachment(
+            volume_service.prepare_ad_hoc_snapshot_attachment(
                 &request,
                 image.fingerprint().source(),
                 &attachment_image,
@@ -425,7 +435,7 @@ fn mount(
                 size_mib,
             )?
         }
-        None => service().prepare_attachment(&request)?,
+        None => volume_service.prepare_attachment(&request)?,
     };
     println!(
         "{vm_name}: registered volume {volume_name:?} → {} (host={}, ro={})",
@@ -505,7 +515,15 @@ pub(super) fn merge_registered_volumes_for_launch(
     vm_name: &str,
     explicit: &[mvm_runtime::image::RuntimeVolume],
 ) -> Result<PreparedLaunchVolumes> {
-    refresh_registered_host_snapshots(vm_name)?;
+    merge_registered_volumes_with_service(&service(), vm_name, explicit)
+}
+
+fn merge_registered_volumes_with_service(
+    volume_service: &LocalVolumeService,
+    vm_name: &str,
+    explicit: &[mvm_runtime::image::RuntimeVolume],
+) -> Result<PreparedLaunchVolumes> {
+    refresh_registered_host_snapshots_with_service(volume_service, vm_name)?;
     // Persistent named machines are dev-accessible for their lifetime, so
     // the dev-tier access gate applies here; locked managed volumes keep
     // failing closed (the operator unlocks explicitly before launch).
@@ -514,13 +532,15 @@ pub(super) fn merge_registered_volumes_for_launch(
         .explicit_volumes(explicit.to_vec())
         .profile(AdmittedProfile::Dev)
         .build();
-    service()
+    volume_service
         .acquire_launch_lease(&request)
         .context("resolving registered local volumes for launch")
 }
 
-fn refresh_registered_host_snapshots(vm_name: &str) -> Result<()> {
-    let volume_service = service();
+fn refresh_registered_host_snapshots_with_service(
+    volume_service: &LocalVolumeService,
+    vm_name: &str,
+) -> Result<()> {
     let cache = crate::mount_cache::MountImageCache::new();
     for attachment in volume_service.list_attachments(vm_name)? {
         let Some(snapshot) = attachment.host_snapshot else {
@@ -820,15 +840,21 @@ mod tests {
             .unwrap()
     }
 
+    fn accepting_host_encryption_service() -> LocalVolumeService {
+        LocalVolumeService::with_host_encryption_probe(probe_from_fn(|_| Ok(())))
+    }
+
     #[test]
     fn changed_host_bytes_with_equal_mtime_refresh_before_launch() {
         let guard = DataDirGuard::new();
+        let volume_service = accepting_host_encryption_service();
         let source = guard.path().join("source");
         fs::create_dir(&source).unwrap();
         let marker = source.join("marker");
         fs::write(&marker, b"before").unwrap();
         let original_mtime = fs::metadata(&marker).unwrap().modified().unwrap();
-        mount(
+        mount_with_service(
+            &volume_service,
             "vm-1",
             "source",
             Some(source.to_str().unwrap()),
@@ -836,7 +862,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let before = service().list_attachments("vm-1").unwrap().remove(0);
+        let before = volume_service.list_attachments("vm-1").unwrap().remove(0);
         assert_eq!(read_snapshot_marker(Path::new(&before.host_path)), "before");
 
         fs::write(&marker, b"after!").unwrap();
@@ -846,8 +872,8 @@ mod tests {
             .unwrap()
             .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
             .unwrap();
-        refresh_registered_host_snapshots("vm-1").unwrap();
-        let after = service().list_attachments("vm-1").unwrap().remove(0);
+        refresh_registered_host_snapshots_with_service(&volume_service, "vm-1").unwrap();
+        let after = volume_service.list_attachments("vm-1").unwrap().remove(0);
         assert_ne!(before.host_path, after.host_path);
         assert_ne!(
             before.host_snapshot.unwrap().fingerprint,
@@ -859,10 +885,12 @@ mod tests {
     #[test]
     fn missing_host_snapshot_source_refuses_launch_and_keeps_last_image() {
         let guard = DataDirGuard::new();
+        let volume_service = accepting_host_encryption_service();
         let source = guard.path().join("source");
         fs::create_dir(&source).unwrap();
         fs::write(source.join("marker"), b"last-known").unwrap();
-        mount(
+        mount_with_service(
+            &volume_service,
             "vm-1",
             "source",
             Some(source.to_str().unwrap()),
@@ -870,10 +898,10 @@ mod tests {
             false,
         )
         .unwrap();
-        let registered = service().list_attachments("vm-1").unwrap().remove(0);
+        let registered = volume_service.list_attachments("vm-1").unwrap().remove(0);
         fs::remove_dir_all(&source).unwrap();
 
-        let error = match merge_registered_volumes_for_launch("vm-1", &[]) {
+        let error = match merge_registered_volumes_with_service(&volume_service, "vm-1", &[]) {
             Ok(_) => panic!("a missing source must refuse before a launch lease is acquired"),
             Err(error) => error,
         };
@@ -887,10 +915,12 @@ mod tests {
     #[test]
     fn changed_host_source_replaces_a_private_writable_snapshot() {
         let guard = DataDirGuard::new();
+        let volume_service = accepting_host_encryption_service();
         let source = guard.path().join("source");
         fs::create_dir(&source).unwrap();
         fs::write(source.join("marker"), b"first").unwrap();
-        mount(
+        mount_with_service(
+            &volume_service,
             "vm-1",
             "source",
             Some(source.to_str().unwrap()),
@@ -898,7 +928,7 @@ mod tests {
             true,
         )
         .unwrap();
-        let before = service().list_attachments("vm-1").unwrap().remove(0);
+        let before = volume_service.list_attachments("vm-1").unwrap().remove(0);
         assert_eq!(
             Path::new(&before.host_path),
             host_snapshot_image("vm-1", "source")
@@ -906,8 +936,8 @@ mod tests {
         assert_eq!(read_snapshot_marker(Path::new(&before.host_path)), "first");
 
         fs::write(source.join("marker"), b"second").unwrap();
-        refresh_registered_host_snapshots("vm-1").unwrap();
-        let after = service().list_attachments("vm-1").unwrap().remove(0);
+        refresh_registered_host_snapshots_with_service(&volume_service, "vm-1").unwrap();
+        let after = volume_service.list_attachments("vm-1").unwrap().remove(0);
         assert_eq!(before.host_path, after.host_path);
         assert_eq!(read_snapshot_marker(Path::new(&after.host_path)), "second");
     }
