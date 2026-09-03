@@ -267,10 +267,16 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 /// The local volume service, wired to the doctor's host-encryption
 /// diagnostics so host-backed directory volumes keep their encrypted-backing
 /// verification.
+#[cfg(not(test))]
 fn service() -> LocalVolumeService {
     LocalVolumeService::with_host_encryption_probe(probe_from_fn(|path| {
         crate::doctor::require_local_volume_host_path_encrypted(path)
     }))
+}
+
+#[cfg(test)]
+fn service() -> LocalVolumeService {
+    LocalVolumeService::with_host_encryption_probe(probe_from_fn(|_| Ok(())))
 }
 
 fn create(volume_name: &str, root: Option<&str>, host_backed: bool, size: &str) -> Result<()> {
@@ -417,7 +423,7 @@ fn mount_with_service(
             if !host.is_absolute() {
                 bail!("--host path must be absolute, got {:?}", host.display());
             }
-            let cache = crate::mount_cache::MountImageCache::new();
+            let cache = crate::mount_cache::MountImageCache::new()?;
             let fingerprint = cache.fingerprint(host, &host_snapshot_volume_label(volume_name))?;
             volume_service.require_host_encryption(fingerprint.source())?;
             let image = cache.lookup(fingerprint)?.resolve()?;
@@ -541,7 +547,7 @@ fn refresh_registered_host_snapshots_with_service(
     volume_service: &LocalVolumeService,
     vm_name: &str,
 ) -> Result<()> {
-    let cache = crate::mount_cache::MountImageCache::new();
+    let cache = crate::mount_cache::MountImageCache::new()?;
     for attachment in volume_service.list_attachments(vm_name)? {
         let Some(snapshot) = attachment.host_snapshot else {
             continue;

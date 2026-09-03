@@ -25,6 +25,9 @@ source refuses the start instead of silently serving stale bytes.
       fingerprint, lookup, and materialization timing spans.
 - [x] Cover cache hit/miss, equal-timestamp content changes, missing sources,
       cache tampering, and writable-copy isolation with unit and BDD tests.
+- [ ] Preserve unbounded, block-at-a-time materialization while binding every
+      emitted file to the digest captured during the source walk, and refuse
+      cache initialization unless its destination has encrypted backing.
 - [x] Update CLI/help documentation and the sprint/refactor rollups.
 - [x] Run workspace test/check, zero-warning Clippy, gated checks, `just bdd`,
       and live Firecracker validation of edit → stop → restart → changed guest
@@ -41,6 +44,14 @@ source refuses the start instead of silently serving stale bytes.
 - Cache images are immutable and verified against a strict manifest plus their
   exact image digest before attachment. Writable registrations receive a
   private reflink/copy and never mutate the cache object.
+- Source files are streamed once to select the cache identity and again into
+  the image. The emitter verifies the second stream against the captured
+  digest and refuses a short, long, unreadable, or changed file before the
+  staged image can be published. This avoids a whole-tree memory copy without
+  imposing an arbitrary source-size ceiling.
+- The cache root is created privately and its backing encryption is verified
+  before any snapshot bytes are written. Source encryption and cache
+  destination encryption are separate requirements and both fail closed.
 - An unchanged writable registration keeps its private image so guest writes
   persist across restarts. A host-source change replaces that private image
   from the newly selected cache object.

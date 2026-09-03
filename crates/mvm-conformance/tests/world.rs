@@ -195,6 +195,9 @@ pub struct CliWorld {
     /// An isolated `MVM_HOME` created by a `Given` step and reused by later
     /// steps that need to inspect the filesystem after a run.
     pub isolated_home: Option<tempfile::TempDir>,
+    /// Hermetic command search path whose encryption probes report that the
+    /// scenario-local mount cache is backed by encrypted storage.
+    pub encrypted_volume_probe_path: Option<std::ffi::OsString>,
     /// Tempdir holding the file/directory trees the asset-identity
     /// scenarios hash; held so it outlives the scenario.
     pub asset_fixture_dir: Option<tempfile::TempDir>,

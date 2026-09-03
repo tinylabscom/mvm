@@ -14,7 +14,6 @@ use sha2::{Digest, Sha256};
 
 const CACHE_SCHEMA_VERSION: u32 = 1;
 const CACHE_DIR_NAME: &str = "mount-images";
-pub(crate) const MAX_CACHED_MOUNT_TREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MountFingerprint {
@@ -124,7 +123,8 @@ impl MountCacheMiss {
                 self.fingerprint.source.display()
             )
         })?;
-        let after = mvm_fs::rootfs::fingerprint_ext4_nodes(&nodes);
+        let after = mvm_fs::rootfs::fingerprint_ext4_nodes(&nodes)
+            .context("fingerprinting the collected mount nodes")?;
         if after != self.fingerprint.source_sha256 {
             bail!(
                 "mount source {} changed while it was being snapshotted; retry the launch",
@@ -141,13 +141,6 @@ impl MountCacheMiss {
                 )
             },
         )?;
-        let final_fingerprint = fingerprint_source(&self.fingerprint.source)?;
-        if final_fingerprint != self.fingerprint.source_sha256 {
-            bail!(
-                "mount source {} changed while it was being snapshotted; retry the launch",
-                self.fingerprint.source.display()
-            );
-        }
 
         let image_sha256 = mvm_core::crypto::image_verify::sha256_file(&staged_image)
             .with_context(|| format!("hashing staged mount image {}", staged_image.display()))?;
@@ -187,16 +180,39 @@ pub(crate) struct MountImageCache {
 }
 
 impl MountImageCache {
-    pub(crate) fn new() -> Self {
-        Self::at(PathBuf::from(mvm_core::config::mvm_cache_dir()).join(CACHE_DIR_NAME))
+    pub(crate) fn new() -> Result<Self> {
+        let root = PathBuf::from(mvm_core::config::mvm_cache_dir()).join(CACHE_DIR_NAME);
+        #[cfg(test)]
+        {
+            Self::at_verified(root, |_| Ok(()))
+        }
+        #[cfg(not(test))]
+        {
+            Self::at_verified(
+                root,
+                crate::doctor::require_local_volume_host_path_encrypted,
+            )
+        }
+    }
+
+    fn at_verified(
+        root: PathBuf,
+        verify_encrypted: impl FnOnce(&Path) -> Result<()>,
+    ) -> Result<Self> {
+        let cache = Self::at(root);
+        let root = cache.ensure_private_root()?;
+        verify_encrypted(root).context("mount image cache is not on encrypted backing storage")?;
+        Ok(cache)
     }
 
     fn at(root: PathBuf) -> Self {
         Self { root }
     }
 
-    pub(crate) fn source_exceeds_limit(&self, source: &Path) -> bool {
-        tree_size_bytes_up_to(source, MAX_CACHED_MOUNT_TREE_BYTES) > MAX_CACHED_MOUNT_TREE_BYTES
+    pub(crate) fn ensure_private_root(&self) -> Result<&Path> {
+        mvm_core::config::create_private_dir(&self.root)
+            .with_context(|| format!("creating mount image cache {}", self.root.display()))?;
+        Ok(&self.root)
     }
 
     pub(crate) fn fingerprint(
@@ -213,14 +229,6 @@ impl MountImageCache {
         if !source.is_dir() {
             bail!("mount source is not a directory: {}", source.display());
         }
-        let tree_bytes = tree_size_bytes_up_to(&source, MAX_CACHED_MOUNT_TREE_BYTES);
-        if tree_bytes > MAX_CACHED_MOUNT_TREE_BYTES {
-            bail!(
-                "mount source {} contains more than {} of regular-file data; persistent host snapshots are bounded to keep repeated content hashing and cached image construction from exhausting host resources. Mount a narrower directory or stage a copy that excludes generated trees such as target/ and .claude/worktrees/",
-                source.display(),
-                mvm_core::pool::format_bytes(MAX_CACHED_MOUNT_TREE_BYTES),
-            );
-        }
         let source_sha256 = fingerprint_source(&source)?;
         let cache_key = cache_key(&source_sha256, volume_label);
         Ok(MountFingerprint {
@@ -232,8 +240,7 @@ impl MountImageCache {
     }
 
     pub(crate) fn lookup(&self, fingerprint: MountFingerprint) -> Result<MountCacheLookup> {
-        mvm_core::config::create_private_dir(&self.root)
-            .with_context(|| format!("creating mount image cache {}", self.root.display()))?;
+        self.ensure_private_root()?;
         let image_path = self.image_path(&fingerprint.cache_key);
         let lock = mvm_core::atomic_io::FileLock::acquire(&image_path)
             .context("locking cached mount image")?;
@@ -322,7 +329,7 @@ impl MountCacheManifest {
 fn mount_walk_options() -> mvm_fs::rootfs::WalkOptions {
     mvm_fs::rootfs::WalkOptions::new(mvm_fs::rootfs::UnsupportedNodePolicy::Reject)
         .with_vanished_node_policy(mvm_fs::rootfs::VanishedNodePolicy::Skip)
-        .with_file_content_policy(mvm_fs::rootfs::FileContentPolicy::DeferToEmit)
+        .with_file_content_policy(mvm_fs::rootfs::FileContentPolicy::DeferToEmitVerified)
 }
 
 fn fingerprint_source(source: &Path) -> Result<String> {
@@ -342,32 +349,6 @@ fn cache_key(source_sha256: &str, volume_label: &str) -> String {
 fn fold_cache_key_field(hasher: &mut Sha256, value: &[u8]) {
     hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
     hasher.update(value);
-}
-
-fn tree_size_bytes_up_to(dir: &Path, limit: u64) -> u64 {
-    let mut total = 0u64;
-    let mut pending = vec![dir.to_path_buf()];
-    while let Some(next) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(&next) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_dir() {
-                pending.push(entry.path());
-            } else if file_type.is_file()
-                && let Ok(metadata) = entry.metadata()
-            {
-                total = total.saturating_add(metadata.len());
-                if total > limit {
-                    return total;
-                }
-            }
-        }
-    }
-    total
 }
 
 fn is_regular_file(path: &Path) -> bool {
@@ -563,17 +544,29 @@ mod tests {
     }
 
     #[test]
-    fn oversized_sparse_tree_is_refused_before_an_image_is_written() {
+    fn mount_cache_uses_verified_deferred_file_contents() {
         let scratch = tempfile::tempdir().unwrap();
-        let cache_root = scratch.path().join("cache");
-        let cache = MountImageCache::at(cache_root.clone());
-        let source = source(scratch.path(), b"small");
-        std::fs::File::create(source.join("large"))
-            .unwrap()
-            .set_len(MAX_CACHED_MOUNT_TREE_BYTES + 1)
-            .unwrap();
-        let error = cache.fingerprint(&source, "mvmmnt0").unwrap_err();
-        assert!(format!("{error:#}").contains("more than 2.0 GiB"));
-        assert!(!cache_root.exists());
+        let source = source(scratch.path(), &[0x5a; 64 * 1024]);
+        let nodes = mvm_fs::rootfs::collect_nodes(&source, mount_walk_options()).unwrap();
+        assert!(nodes.iter().any(|node| matches!(
+            node,
+            mvm_fs::ext4::Node::FileFromHost {
+                expected_sha256: Some(_),
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn cache_initialization_refuses_unencrypted_backing_before_writing_bytes() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().join("cache");
+        let error = MountImageCache::at_verified(root.clone(), |path| {
+            assert!(path.is_dir());
+            anyhow::bail!("unencrypted test backing")
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("unencrypted test backing"));
+        assert_eq!(std::fs::read_dir(root).unwrap().count(), 0);
     }
 }

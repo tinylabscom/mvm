@@ -126,6 +126,7 @@ fn run_mvmctl_in_isolated_home(world: &mut CliWorld, args: String) {
     let mut cmd = mvmctl_command();
     cmd.args(mvm_conformance::doc_examples::tokenize(&args))
         .isolated_home(home.path());
+    apply_encrypted_volume_probe_path(world, &mut cmd);
     if world.kernel_reacquisition_must_fail {
         cmd.env("MVM_KERNEL_SOURCE", "download")
             .env("MVM_UPDATE_DOWNLOAD_URL", "http://127.0.0.1:9");
@@ -261,12 +262,19 @@ pub(crate) fn run_mvmctl_isolated_live_home(world: &mut CliWorld, args: String) 
         .current_dir(workspace_root())
         .args(mvm_conformance::doc_examples::tokenize(&args))
         .isolated_home(&home);
+    apply_encrypted_volume_probe_path(world, &mut command);
     if world.warm_residency {
         command.env("MVM_RESIDENCY", "warm");
     }
     let output = command.output().expect("failed to spawn mvmctl");
     world.last_live_home = Some(home);
     world.last_run = Some(output);
+}
+
+fn apply_encrypted_volume_probe_path(world: &CliWorld, command: &mut Command) {
+    if let Some(path) = &world.encrypted_volume_probe_path {
+        command.env("PATH", path);
+    }
 }
 
 /// Install the operator-supplied `.mvmpkg` into an isolated home and remember

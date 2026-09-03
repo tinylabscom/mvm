@@ -108,6 +108,12 @@ pub enum FileContentPolicy {
     /// image is written. A tree that changes underneath is tolerated rather
     /// than detected — see `Node::FileFromHost`.
     DeferToEmit,
+    /// Stream each file once during the walk to capture its digest, then
+    /// stream it again during emission and refuse if the bytes differ.
+    ///
+    /// This retains bounded memory while making the emitted image safe to
+    /// publish under a content-derived cache key.
+    DeferToEmitVerified,
 }
 
 impl WalkOptions {
@@ -270,14 +276,25 @@ fn read_walk_entry(
             mode: mode_of(&path, 0o755),
             xattrs: node_xattrs(options.xattrs, &path),
         }
-    } else if options.file_contents == FileContentPolicy::DeferToEmit
+    } else if options.file_contents != FileContentPolicy::ReadDuringWalk
         && let Some(len) = deferrable_file_len(&path)
     {
+        let expected_sha256 = if options.file_contents == FileContentPolicy::DeferToEmitVerified {
+            Some(
+                host_file_sha256(&path, len).map_err(|source| MaterializeError::Walk {
+                    path: path.clone(),
+                    source,
+                })?,
+            )
+        } else {
+            None
+        };
         Node::FileFromHost {
             path: guest_path,
             mode: mode_of(&path, 0o644),
             source: path.clone(),
             len,
+            expected_sha256,
             xattrs: node_xattrs(options.xattrs, &path),
         }
     } else {
@@ -319,6 +336,31 @@ fn deferrable_file_len(path: &Path) -> Option<u64> {
     // layout is already committed and the only recourse is a hole.
     std::fs::File::open(path).ok()?;
     Some(metadata.len())
+}
+
+fn host_file_sha256(path: &Path, expected_len: u64) -> std::io::Result<[u8; 32]> {
+    use std::io::Read as _;
+
+    let file = std::fs::File::open(path)?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut hasher = sha2::Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    let mut total = 0u64;
+    loop {
+        let read = reader.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+        total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+    }
+    if total != expected_len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("file length changed while hashing: expected {expected_len}, read {total}"),
+        ));
+    }
+    Ok(hasher.finalize().into())
 }
 
 /// Walk `root` into a flat [`Node`] list (guest-absolute paths), symlink-aware
@@ -418,7 +460,7 @@ pub fn fingerprint_ext4_source(
     options: WalkOptions,
 ) -> Result<String, MaterializeError> {
     let nodes = collect_nodes(root, options)?;
-    Ok(fingerprint_ext4_nodes(&nodes))
+    fingerprint_ext4_nodes(&nodes)
 }
 
 /// Hash an already-collected node set using the same identity as
@@ -427,8 +469,7 @@ pub fn fingerprint_ext4_source(
 /// This lets a content-addressed caller compare a fresh source snapshot with
 /// its expected identity and then consume those exact nodes to build the image,
 /// closing the race inherent in hashing and materializing with separate walks.
-#[must_use]
-pub fn fingerprint_ext4_nodes(nodes: &[Node]) -> String {
+pub fn fingerprint_ext4_nodes(nodes: &[Node]) -> Result<String, MaterializeError> {
     let mut ordered = nodes.iter().collect::<Vec<_>>();
     ordered.sort_by(|left, right| left.path().cmp(right.path()));
 
@@ -449,14 +490,21 @@ pub fn fingerprint_ext4_nodes(nodes: &[Node]) -> String {
                 mode,
                 source,
                 len,
+                expected_sha256,
                 xattrs,
                 ..
-            } => (
-                b'f',
-                *mode,
-                Some(digest_deferred_file(source, *len)),
-                xattrs.as_slice(),
-            ),
+            } => {
+                let digest = match expected_sha256 {
+                    Some(digest) => *digest,
+                    None => host_file_sha256(source, *len).map_err(|source_error| {
+                        MaterializeError::Walk {
+                            path: source.clone(),
+                            source: source_error,
+                        }
+                    })?,
+                };
+                (b'f', *mode, Some(digest.into()), xattrs.as_slice())
+            }
             Node::Symlink { target, .. } => {
                 fold_fingerprint_field(&mut hasher, node.path().as_bytes());
                 hasher.update(b"l");
@@ -480,45 +528,7 @@ pub fn fingerprint_ext4_nodes(nodes: &[Node]) -> String {
             fold_fingerprint_field(&mut hasher, &xattr.value);
         }
     }
-    hex::encode(hasher.finalize())
-}
-
-/// Hash the exact byte shape the streaming writer emits for a deferred file.
-///
-/// The writer truncates growth at the length captured by the walk and leaves
-/// a vanished or shortened tail as sparse zeroes. Mirroring that rule keeps a
-/// deferred node's content identity equal to its guest-visible bytes.
-fn digest_deferred_file(source: &Path, len: u64) -> sha2::digest::Output<sha2::Sha256> {
-    use std::io::Read;
-
-    let mut reader = std::fs::File::open(source)
-        .ok()
-        .map(std::io::BufReader::new);
-    let mut hasher = sha2::Sha256::new();
-    let mut remaining = len;
-    let mut buffer = vec![0u8; 64 * 1024];
-    while remaining > 0 {
-        let want = usize::try_from(remaining.min(buffer.len() as u64))
-            .expect("the chunk length is bounded by the in-memory buffer");
-        buffer[..want].fill(0);
-        let mut filled = 0usize;
-        while filled < want {
-            let Some(file) = reader.as_mut() else {
-                break;
-            };
-            match file.read(&mut buffer[filled..want]) {
-                Ok(0) => {
-                    reader = None;
-                }
-                Ok(read) => filled += read,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(_) => reader = None,
-            }
-        }
-        hasher.update(&buffer[..want]);
-        remaining -= want as u64;
-    }
-    hasher.finalize()
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn fold_fingerprint_field(hasher: &mut sha2::Sha256, value: &[u8]) {
@@ -1074,6 +1084,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn verified_deferred_file_contents_produce_a_byte_identical_image() {
+        let src = tempfile::tempdir().unwrap();
+        spread_of_file_sizes(src.path());
+
+        let eager =
+            crate::ext4::build_image(nodes_with(src.path(), FileContentPolicy::ReadDuringWalk))
+                .expect("eager image");
+        let verified = crate::ext4::build_image(nodes_with(
+            src.path(),
+            FileContentPolicy::DeferToEmitVerified,
+        ))
+        .expect("verified deferred image");
+
+        assert_eq!(eager, verified);
+    }
+
+    #[test]
+    fn verified_deferred_walk_keeps_only_file_digests() {
+        let src = tempfile::tempdir().unwrap();
+        spread_of_file_sizes(src.path());
+
+        let nodes = nodes_with(src.path(), FileContentPolicy::DeferToEmitVerified);
+        assert!(
+            nodes.iter().all(|node| !matches!(node, Node::File { .. })),
+            "a verified deferred walk must not retain readable file bytes"
+        );
+        assert!(nodes.iter().any(|node| matches!(
+            node,
+            Node::FileFromHost {
+                expected_sha256: Some(_),
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn verified_deferred_emit_refuses_a_same_length_change() {
+        let src = tempfile::tempdir().unwrap();
+        let path = src.path().join("payload");
+        std::fs::write(&path, b"before").unwrap();
+        let nodes = nodes_with(src.path(), FileContentPolicy::DeferToEmitVerified);
+
+        std::fs::write(&path, b"after!").unwrap();
+
+        let error = crate::ext4::build_image(nodes).unwrap_err();
+        assert!(
+            matches!(error, crate::ext4::Ext4Error::HostFileChanged(changed) if changed == path)
+        );
+    }
+
     /// The deferred walk must not read file contents. Without this, the policy
     /// could quietly regress to eager and every other test here would still
     /// pass — the images would be identical, which is exactly the point.
@@ -1097,25 +1158,6 @@ mod tests {
         assert!(
             nodes.iter().any(|n| matches!(n, Node::FileFromHost { .. })),
             "the deferred walk produced no deferred files at all"
-        );
-    }
-
-    #[test]
-    fn deferred_nodes_hash_the_same_guest_bytes_as_eager_nodes() {
-        let src = tempfile::tempdir().unwrap();
-        std::fs::write(src.path().join("payload"), b"content-addressed").unwrap();
-
-        let eager = nodes_with(src.path(), FileContentPolicy::ReadDuringWalk);
-        let deferred = nodes_with(src.path(), FileContentPolicy::DeferToEmit);
-
-        assert_eq!(
-            fingerprint_ext4_nodes(&eager),
-            fingerprint_ext4_nodes(&deferred)
-        );
-        std::fs::write(src.path().join("payload"), b"changed-address!!").unwrap();
-        assert_ne!(
-            fingerprint_ext4_nodes(&eager),
-            fingerprint_ext4_nodes(&deferred)
         );
     }
 

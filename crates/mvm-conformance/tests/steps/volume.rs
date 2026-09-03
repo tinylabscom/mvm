@@ -183,6 +183,8 @@ fn register_host_directory_volume(
     if let Some(path) = std::env::var_os("PATH") {
         command_path.extend(std::env::split_paths(&path));
     }
+    let command_path =
+        std::env::join_paths(command_path).expect("join hermetic encryption probe PATH");
     let mut cmd = mvmctl_command();
     cmd.args([
         "machine",
@@ -197,10 +199,8 @@ fn register_host_directory_volume(
         &guest_path,
     ])
     .isolated_home(&home)
-    .env(
-        "PATH",
-        std::env::join_paths(command_path).expect("join hermetic encryption probe PATH"),
-    );
+    .env("PATH", &command_path);
+    world.encrypted_volume_probe_path = Some(command_path);
     world.last_run = Some(cmd.output().expect("failed to spawn mvmctl"));
 }
 

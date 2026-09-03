@@ -147,9 +147,12 @@ mvmctl machine volume mount agent-sandbox \
   --rw
 ```
 
-Both the host directory and mvm's local snapshot destination must live on
-encrypted backing storage. If either check cannot verify encryption, the
-command fails closed before source bytes are written.
+The host directory must live on encrypted backing storage. If encryption cannot
+be verified, the command fails closed — the check runs against the source
+directory and independently against the private mount-image cache before any
+snapshot bytes are written. Files are streamed into the cache rather than held
+as a whole tree in memory, and a file that changes while its snapshot is being
+built refuses the launch instead of publishing mismatched bytes.
 
 ## Copy instead of mount
 

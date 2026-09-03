@@ -121,6 +121,13 @@ A mounted launch originally paid the materialization **every launch**. The
 content-addressed cache and now records the existing fingerprint, cache-lookup,
 and miss-only materialization spans.
 
+The cache does not impose a source-size ceiling or retain the tree in memory.
+It streams each regular file to capture its digest, then streams it into the
+staged image and verifies the emitted bytes against that digest. A short, long,
+unreadable, or changed file refuses publication. The cache root is private and
+must itself live on encrypted backing storage before any snapshot bytes are
+written.
+
 ## Not done
 
 - **`VmVolumeKind::DirShare` stays.** It is what records a *directory* grant in
@@ -144,9 +151,11 @@ and miss-only materialization spans.
 Persistent `machine volume mount --host` and transient `--mount` now share one
 verified content-addressed image cache. The cache key covers source bytes and
 guest-visible metadata, the ext4 materializer format version, and the volume
-label. A cache miss hashes the exact collected node set it emits, closing the
-mutable-tree race between identity and image creation. Read-only mounts attach
-the immutable cache image; writable persistent mounts receive a private
-reflink/copy. Registered host sources are fingerprinted again before each
-start, changed sources refresh, and missing sources refuse instead of serving
-the last snapshot.
+label. A cache miss hashes the exact collected node set and verifies each file
+again while streaming it into the staged image, closing the mutable-tree race
+between identity and image creation without buffering the tree. Read-only
+mounts attach the immutable cache image; writable persistent mounts receive a
+private reflink/copy. Registered host sources are fingerprinted again before
+each start, changed sources refresh, and missing sources refuse instead of
+serving the last snapshot. Source and cache destinations must both have
+encrypted backing.

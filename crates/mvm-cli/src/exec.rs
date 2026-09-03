@@ -1156,10 +1156,10 @@ fn resolve_boot_strategy(
 /// an ext4 image first.
 fn mount_volumes(
     shape: &LaunchShape<'_>,
-    vm_name: &str,
+    _vm_name: &str,
     sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
 ) -> Result<Vec<VmVolume>> {
-    mounts::materialize_mount_volumes(shape.dir_shares, vm_name, sub)
+    mounts::materialize_mount_volumes(shape.dir_shares, sub)
 }
 
 /// Build the `VmStartConfig` for the transient boot from the resolved image +
