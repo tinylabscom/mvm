@@ -14,13 +14,16 @@ Last updated: 2026-09-02
       reclaimed loudly, MVM_DEV_ENV_KEEP_INHERITED=1 keeps them anyway. Gate
       tests and CI shellcheck green; merged via #3135.
 
-- [ ] **Supply-chain evidence carryover (WS1.1 beacon + WS1.4 deployments
-      inventory).**
+- [ ] **Supply-chain evidence carryover (WS1.1 + WS1.4 + WS2.1 + WS3.1).**
       `specs/plans/2026-09-02-supply-chain-evidence-carryover.md` on
       `feat/supply-chain-evidence`. Boot-liveness beacon recorded as a
       chain-signed `lifecycle.beacon_reported` entry; local deploy store
-      gains its first read path (`mvmctl deployments ls`). Cross-repo
-      items (mvmd registry/queries, studio pages) remain open in the plan.
+      gains its first read path (`mvmctl deployments ls`); sealed OCI
+      rematerializes now write a JCS+Ed25519 provenance mark into the
+      rootfs before verity hashing (`/mvm/provenance.json` + detached
+      signature) and an in-toto/SLSA v1 DSSE sidecar (`rootfs.intoto.json`)
+      beside the sealed image. Cross-repo items (mvmd registry/queries,
+      studio pages, scout verification) remain open in the plan.
 
 - [ ] **Signed caller commitment — issue #3070.**
       `specs/plans/2026-09-01-signed-caller-commitment.md`.

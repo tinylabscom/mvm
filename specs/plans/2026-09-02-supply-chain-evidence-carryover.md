@@ -159,11 +159,15 @@ hash is computed, so the mark is not only embedded in the artifact but
 refuses to boot if tampered — tamper-evidence enforced by the kernel, not
 just a signature check.
 
-- [ ] WS2.1 (mvm-build): emit `ProvenanceMark` (canonical JSON, Ed25519-signed:
-      plan id, input digests, builder identity, timestamp, SBOM reference)
-      into the rootfs at `/mvm/provenance.json` + detached signature during
-      seal, before verity sidecar generation. Gate behind a plan/build flag,
-      default on for new builds.
+- [x] WS2.1 (mvm-build): emit `ProvenanceMark` (canonical JSON, Ed25519-signed:
+      input ref + resolved digest, builder identity, timestamp; SBOM reference
+      reserved as `None` until WS6) into the rootfs at `/mvm/provenance.json` +
+      detached signature during seal, before verity hashing. Emitted for every
+      sealed OCI rematerialize; the host signer is `~/.mvm/keys/host-signer.ed25519`
+      (same key as `artifact pack`). Deviation from the original text: no
+      separate build flag — the mark is tied to the existing `sealed` request
+      flag, so sealed images always carry it (a sealed request with no
+      evidence logs a warning instead). `crates/mvm-build/src/provenance_mark.rs`.
 - [ ] WS2.2 (mvm): `mvmctl artifact inspect <image|rootfs>` reads and verifies
       the mark offline (verity-aware: report whether the artifact's roothash
       matches a recomputation). Docker/OCI images additionally get the mark
@@ -180,11 +184,12 @@ Our provenance is bespoke canonical JSON. Compliance teams ask for SLSA-style
 statements. Emit them without changing our internal model — serialization
 decision only.
 
-- [ ] WS3.1 (mvm-build): emit an in-toto Statement (SLSA v1.0 provenance
+- [x] WS3.1 (mvm-build): emit an in-toto Statement (SLSA v1.0 provenance
       predicate) as a DSSE envelope at seal time, signed with the builder
-      Ed25519 key; optional keyless Sigstore signature using the existing
-      `sigstore-verify` dependency family. Ship alongside the artifact and
-      record its digest in the audit chain.
+      Ed25519 key, written as `rootfs.intoto.json` beside the sealed image
+      (subject = sha256 of the sealed rootfs's exact bytes). Deviation from
+      the original text: keyless Sigstore and audit-chain digest recording
+      not in this slice (WS4 covers publication). `crates/mvm-build/src/intoto.rs`.
 - [ ] WS3.2 (mvm-assurance): DSSE-wrap scout reports and the `scoutd` pack
       provenance block; verify on admission in `verify_pack_at`
       (`mvm-core/src/packs.rs`). SPDX already exists for scoutd — keep.

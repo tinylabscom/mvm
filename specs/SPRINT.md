@@ -20,7 +20,7 @@
       are green; merge delivery remains.
 
 - [ ] **Supply-chain evidence carryover — Phase 1 slice (boot beacon +
-      deployments inventory).**
+      deployments inventory, provenance mark, in-toto sidecar).**
       `specs/plans/2026-09-02-supply-chain-evidence-carryover.md`.
       WS1.1: `host.beacon.v1` broker service — the guest agent reports
       boot liveness and the host appends a chain-signed
@@ -28,7 +28,14 @@
       identity (fail-open, rate-limited, default-on where an audit signer
       exists). WS1.4: `mvmctl deployments ls [--workload] [--json]` reads
       the local-first deploy store, surfacing unreadable records as named
-      skips. Workspace tests, zero-warning Clippy, and Linux/BDD gated
+      skips. WS2.1: every sealed OCI rematerialize writes a
+      JCS-canonical Ed25519 provenance mark (`/mvm/provenance.json` +
+      detached signature) into the rootfs before the dm-verity hash is
+      computed, signed by the host key, so a tampered mark breaks the
+      verified boot chain. WS3.1: the seal also emits an in-toto
+      Statement (SLSA v1.0 provenance predicate) as a DSSE envelope
+      (`rootfs.intoto.json`) whose subject binds the sealed image's exact
+      bytes. Workspace tests, zero-warning Clippy, and Linux/BDD gated
       checks are green; merge delivery remains.
 
 - [x] **Signed caller commitment — issue #3070, PR #3076.**
