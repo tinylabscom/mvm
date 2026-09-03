@@ -12,7 +12,7 @@ Please include:
 
 - Affected mvm version(s) and platform(s) (macOS / Linux, arch, kernel version).
 - Reproduction steps or proof-of-concept code.
-- Your assessment of impact (confidentiality / integrity / availability) and the affected security claim (per [ADR-001 §"Security claims"](specs/adrs/001-microvm-security-posture.md)).
+- Your assessment of impact (confidentiality / integrity / availability) and the affected security claim (per the claims ledger in [ADR-001](specs/adrs/001-microvm-security-posture.md)).
 - Whether you've shared the finding with anyone else and on what timeline.
 
 We acknowledge within **2 business days**.
@@ -40,18 +40,18 @@ If we cannot meet a 90-day window, we will negotiate an extension before day 75 
 
 Security-relevant code:
 
-- All four broker subprocesses (`mvm-broker`, `mvm-secrets-dispatcher`, `mvm-host-signer`, `mvm-audit-signer`) — see [Plan 104 §Hardening posture](specs/plans/104-host-services-broker.md#hardening-posture-layers-111).
-- The per-VM supervisor (`crates/mvm-supervisor/`).
+- The broker subprocess set (`mvm-broker`, `mvm-host-signer`, `mvm-audit-signer`) — see [ADR-020](specs/adrs/020-host-services-broker.md).
+- The per-VM supervisors (`mvm-libkrun-supervisor`, `mvm-hvf-supervisor`) and the per-VM egress endpoint (`mvm-network-endpoint`), all under `crates/mvm-hostd/`.
 - The guest agent (`crates/mvm-agentd/`).
-- The CLI surface (`mvmctl`) including `mvmctl up`, `mvmctl run`, `mvmctl image pull`, `mvmctl deps`, `mvmctl audit`, `mvmctl host-key`, `mvmctl services`, `mvmctl doctor`.
-- Audit chain integrity / verifier (`mvmctl audit verify`).
+- The CLI surface (`mvmctl`) including `mvmctl machine run`, `mvmctl run`, `mvmctl image pull`, `mvmctl deps`, `mvmctl trust`, `mvmctl secret`, `mvmctl doctor`.
+- Audit chain integrity / verifier (`mvmctl trust audit verify`).
 - The signed-`ExecutionPlan` admission ceremony (per [ADR-014](specs/adrs/014-signed-audited-execution-plans.md)).
-- The OCI image runner (per [claim 10](specs/claims/claim-10-oci-image-provenance.md)).
+- The OCI image runner (claim 14 of [ADR-001](specs/adrs/001-microvm-security-posture.md)'s claims ledger).
 - The app-deps audit pipeline (per [ADR-014](specs/adrs/014-signed-audited-execution-plans.md)).
 
 ## What's out of scope
 
-- Vulnerabilities in upstream dependencies — please report those to the upstream project. We track their CVE surface per [ADR-020 §"Dependency CVE surface"](specs/adrs/020-host-services-broker.md#dependency-cve-surface) and will refresh our affected-version list per release. If an upstream CVE materially affects us, we coordinate with upstream and ship a doctor-refusal version of `mvmctl` once a fixed upstream is available.
+- Vulnerabilities in upstream dependencies — please report those to the upstream project. We track their CVE surface with `deny.toml` and the `deny` and `audit` CI jobs, which run on every pull request, and refresh our affected-version list per release. If an upstream CVE materially affects us, we coordinate with upstream and ship a doctor-refusal version of `mvmctl` once a fixed upstream is available.
 - Physical attacks on the host (cold-boot DRAM, DMA via Thunderbolt/PCIe, chip-off, hardware tampering) — per ADR-001 these are out of scope; the trust model assumes the host owner controls physical access.
 - Theoretical attacks without a reproducible exploit (we'll triage them but lower-priority).
 - Best-practice suggestions without a vulnerability ("you should use X instead of Y") — please open a GitHub Discussion instead.
@@ -59,8 +59,8 @@ Security-relevant code:
 ## How we ship fixes
 
 1. **Patch developed on a private branch** (security advisory draft on GitHub if applicable; otherwise local).
-2. **Patch reviewed** by at least two maintainers; for any patch touching the four broker subprocess crates or the audit-signer, the [CODEOWNERS](.github/CODEOWNERS) policy requires a second reviewer who didn't write the patch.
-3. **Patch released** under a new mvm version on the standard release pipeline. The release artefacts go through the hardening lanes per [Plan 104 W9](specs/plans/104-host-services-broker.md) — cosign signature, Sigstore/Rekor transparency entry, in-toto attestation, per-binary reproducibility-double-build.
+2. **Patch reviewed** by at least two maintainers; for any patch touching the broker subprocess set or the audit-signer, a second reviewer who didn't write the patch is required.
+3. **Patch released** under a new mvm version on the standard release pipeline: keyless cosign signature over every release blob, a Sigstore/Rekor inclusion proof carried in the signature bundle, a signed CycloneDX SBOM, and the reproducibility double-build lane.
 4. **Public advisory published** on GitHub Security Advisories simultaneously with or after the release tag, including:
    - Affected versions.
    - CVE ID (if assigned).
@@ -75,25 +75,28 @@ Security-relevant code:
 
 Every mvm release publishes:
 
-- **Cosign signatures** for each binary (`mvm-supervisor`, `mvmctl`, `mvm-broker`, `mvm-secrets-dispatcher`, `mvm-host-signer`, `mvm-audit-signer`). Public key shipped in `mvm-release-public-keys.json` in the release tarball.
-- **Sigstore / Rekor transparency log entry** per binary, queryable by `cosign tree --tag <release>`.
-- **In-toto attestation** documenting the build provenance (steps + materials + products).
-- **SLSA provenance** at build level.
-- **SHA-256 + SHA-512 checksums** for each artefact, signed under the cosign key.
+- **Keyless cosign signatures** over every release blob — the `mvmctl` tarballs, the boot-image artefacts, the checksum manifests, and the SBOM. There is no long-lived public key: each artefact ships a `.bundle` beside it carrying the Fulcio short-lived certificate and the Rekor inclusion proof.
+- **A Sigstore/Rekor inclusion proof** inside each bundle, so transparency-log membership is verified as part of signature verification rather than as a separate step.
+- **A CycloneDX SBOM** (`sbom.cdx.json`), itself signed.
+- **SHA-256 checksum manifests**, also signed.
 
-Verification command (will be added to a `tools/verify-release.sh` helper in Plan 104 W9):
+Verify a downloaded artefact with:
 
 ```sh
-cosign verify-blob --key mvm-release-public-keys.json \
-                   --signature mvm-supervisor-<version>.sig \
-                   mvm-supervisor-<version>
-cosign tree --tag <version>          # confirm Rekor entry exists
-# in-toto verification per https://in-toto.io/Specs/ instructions
+cosign verify-blob \
+  --bundle mvmctl-<target>.tar.gz.bundle \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp 'https://github.com/tinylabscom/mvm/.github/workflows/release.yml@refs/tags/.*' \
+  mvmctl-<target>.tar.gz
 ```
+
+Bundles use cosign's new bundle format, so verifying by hand needs cosign >= v2.4. `install.sh` and `mvmctl env update` run this automatically when `cosign` is on `PATH`. The full walkthrough is [Verifying a release](public/src/content/docs/guides/verify-release.md).
 
 ## Hardening status by claim
 
-Each of mvm's published security claims (currently 1–10; ADR-020 proposes two more on merge) is backed by a CI gate. The current claim → gate mapping is documented in [CLAUDE.md §"Security model"](CLAUDE.md#security-model) and per-claim files in [specs/claims/](specs/claims/).
+Each of mvm's published security claims is backed by a named witness — a test or a CI job. The claims ledger in [ADR-001](specs/adrs/001-microvm-security-posture.md) is the source of truth for the claim set, its witnesses, and each claim's status; `xtask check-claim-catalog` fails the build when a named witness stops existing. [CONFORMANCE.md](CONFORMANCE.md) is the generated view of the same register.
+
+Claims carrying a `Preview` status are held to a weaker bar than the shipped ones and their limits are stated in the ledger. Read the status column before relying on a claim.
 
 A vulnerability that breaks a claim is **Critical** by definition.
 
@@ -106,6 +109,6 @@ _(none yet — placeholder for future credits)_
 ## See also
 
 - [ADR-001 — microvm security posture](specs/adrs/001-microvm-security-posture.md) — the master security claim list and threat model.
-- [ADR-020 — host services broker](specs/adrs/020-host-services-broker.md) — the architecture of the broker subprocess set and the narrowed insider-threat clause.
-- [Plan 104 — host services broker](specs/plans/104-host-services-broker.md) — the hardening implementation specifics (Layers 1–11).
-- [threat model 02 — host services broker](specs/threat-models/02-host-services-broker.md) — STRIDE walk for the broker.
+- [ADR-020 — host services broker](specs/adrs/020-host-services-broker.md) — the architecture of the broker subprocess set, its trust gradient, and the narrowed insider-threat clause.
+- [ADR-023 — secrets subsystem and egress substitution](specs/adrs/023-secrets-subsystem-egress-substitution.md) — why no raw secret value crosses the broker channel.
+- [CONFORMANCE.md](CONFORMANCE.md) — the generated claim register with each claim's honesty level and witnesses.
