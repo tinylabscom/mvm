@@ -1072,6 +1072,7 @@ name = "mvm-build"
 version = "0.18.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "ed25519-dalek",
  "flate2",
@@ -1087,6 +1088,7 @@ dependencies = [
  "mvm-vmm",
  "nix",
  "serde",
+ "serde_jcs",
  "serde_json",
  "sha2",
  "tar",

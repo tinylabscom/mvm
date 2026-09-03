@@ -153,18 +153,23 @@ pub(super) fn ensure_rootfs_verity_sidecars(
     );
 }
 
+/// One rootfs materialize invocation, grouped so the materializer callback
+/// stays a single-argument signature no matter how many inputs a seal needs.
+pub(super) struct MaterializeCall<'a> {
+    pub(super) cache_root: &'a Path,
+    pub(super) unpacked_root: &'a Path,
+    pub(super) rootfs_abs: &'a Path,
+    pub(super) image_label: &'a str,
+    pub(super) entrypoint: Option<&'a ImageRuntimeConfig>,
+    pub(super) sealed: bool,
+    pub(super) deferred_nodes: Vec<mvm_fs::ext4::Node>,
+    pub(super) evidence: Option<mvm_build::provenance_mark::SealEvidence<'a>>,
+}
+
 /// Callback signature used to inject the mvm guest runtime and seal a rootfs.
 /// A type alias rather than a bare fn pointer everywhere it's threaded, and
 /// swappable in tests for a fake that skips the real Nix/ext4 machinery.
-pub(super) type RuntimeMaterializer = fn(
-    &Path,
-    &Path,
-    &Path,
-    &str,
-    Option<&ImageRuntimeConfig>,
-    bool,
-    Vec<mvm_fs::ext4::Node>,
-) -> Result<()>;
+pub(super) type RuntimeMaterializer = for<'a> fn(MaterializeCall<'a>) -> Result<()>;
 
 pub(super) fn rematerialize_cached_image(
     cache_root: &Path,
@@ -190,15 +195,30 @@ pub(super) fn rematerialize_cached_image(
     };
     let rootfs_abs = safe_cache_path(cache_root, &rootfs_path)?;
     if !rootfs_abs.is_file() {
-        materialize(
+        let signer;
+        let evidence = if prod {
+            signer = crate::commands::vm::host_signer::load_or_init()
+                .context("load host signing key for the provenance mark")?;
+            Some(
+                mvm_build::provenance_mark::SealEvidence::builder(&signer.signing)
+                    .with_image_ref(&image.reference)
+                    .with_image_digest(&image.resolved_digest)
+                    .build(),
+            )
+        } else {
+            None
+        };
+        materialize(MaterializeCall {
             cache_root,
-            &unpacked_root,
-            &rootfs_abs,
-            &image.reference,
-            oci_entrypoint_from_cache_path(cache_root, image.config_path.as_deref())?.as_ref(),
-            prod,
-            super::cache::read_deferred_nodes(cache_root, &image.resolved_digest)?,
-        )
+            unpacked_root: &unpacked_root,
+            rootfs_abs: &rootfs_abs,
+            image_label: &image.reference,
+            entrypoint: oci_entrypoint_from_cache_path(cache_root, image.config_path.as_deref())?
+                .as_ref(),
+            sealed: prod,
+            deferred_nodes: super::cache::read_deferred_nodes(cache_root, &image.resolved_digest)?,
+            evidence,
+        })
         .with_context(|| {
             format!(
                 "re-materializing cached OCI image {} from {}",
@@ -235,15 +255,17 @@ pub(super) fn materialize_run_rootfs(input: &MaterializeExt4Input) -> Result<()>
 /// injected `/init` + baked agent + `/mvm/runtime` mount point make the
 /// rootfs genuinely overlay-aware, so the `for_oci_run` sidecar admits
 /// honestly through `admit_runtime_overlay_contract` without weakening the gate.
-pub(super) fn inject_runtime_and_materialize(
-    cache_root: &Path,
-    unpacked_root: &Path,
-    rootfs_abs: &Path,
-    image_label: &str,
-    entrypoint: Option<&ImageRuntimeConfig>,
-    sealed: bool,
-    deferred_nodes: Vec<mvm_fs::ext4::Node>,
-) -> Result<()> {
+pub(super) fn inject_runtime_and_materialize(call: MaterializeCall<'_>) -> Result<()> {
+    let MaterializeCall {
+        cache_root,
+        unpacked_root,
+        rootfs_abs,
+        image_label,
+        entrypoint,
+        sealed,
+        deferred_nodes,
+        evidence,
+    } = call;
     mvm_build::run_image::inject_and_materialize(
         mvm_build::run_image::InjectAndMaterializeRequest::builder(
             cache_root,
@@ -254,6 +276,7 @@ pub(super) fn inject_runtime_and_materialize(
         .entrypoint(entrypoint)
         .sealed(sealed)
         .deferred_nodes(deferred_nodes)
+        .evidence(evidence)
         .build(),
     )
 }
@@ -308,15 +331,16 @@ pub(super) fn materialize_overlay_lean_rootfs(
             staging_root.display()
         )
     })?;
-    let result = inject_runtime_and_materialize(
+    let result = inject_runtime_and_materialize(MaterializeCall {
         cache_root,
-        &staging_root,
+        unpacked_root: &staging_root,
         rootfs_abs,
         image_label,
-        None,
-        false,
+        entrypoint: None,
+        sealed: false,
         deferred_nodes,
-    );
+        evidence: None,
+    });
     let cleanup = fs::remove_dir_all(&staging_root);
     if let Err(err) = cleanup
         && staging_root.exists()
@@ -641,6 +665,137 @@ mod tests {
         // A current tag with no materialized rootfs is still not bootable.
         image.rootfs_path = None;
         assert!(!cached_rootfs_is_current(&image, &current));
+    }
+
+    /// A fn-pointer materializer cannot capture, so the evidence the
+    /// rematerializer handed it is recorded on disk for the caller to
+    /// assert on — same pattern as the deferred-nodes recording in the
+    /// pull-path tests.
+    fn evidence_recording_materialize(call: MaterializeCall<'_>) -> Result<()> {
+        assert!(call.unpacked_root.is_dir(), "unpacked root must exist");
+        let parent = call.rootfs_abs.parent().expect("rootfs has parent");
+        fs::create_dir_all(parent)?;
+        let seen = serde_json::json!({
+            "sealed": call.sealed,
+            "label": call.image_label,
+            "evidence": call.evidence.map(|e| serde_json::json!({
+                "image_ref": e.image_ref(),
+                "image_digest": e.image_digest(),
+            })),
+        });
+        fs::write(
+            parent.join("evidence-seen.json"),
+            serde_json::to_vec(&seen)?,
+        )?;
+        fs::write(
+            call.rootfs_abs,
+            format!("materialized:{}", call.image_label),
+        )?;
+        Ok(())
+    }
+
+    fn seed_index_and_unpacked(cache_root: &Path, image: &CachedOciImage) {
+        let index = super::super::oci_types::OciCacheIndex {
+            schema_version: 1,
+            images: vec![image.clone()],
+        };
+        fs::create_dir_all(cache_root).expect("create cache root");
+        fs::write(
+            cache_root.join(super::super::oci_types::INDEX_FILE),
+            serde_json::to_vec_pretty(&index).expect("serialize index"),
+        )
+        .expect("write index");
+        let unpacked = cache_root
+            .join("unpacked")
+            .join(super::super::cache::sha256_hex(&image.resolved_digest).expect("digest hex"));
+        fs::create_dir_all(&unpacked).expect("create unpacked tree");
+    }
+
+    #[test]
+    fn prod_rematerialize_hands_seal_evidence_to_the_materializer() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let keys_home = tempfile::tempdir().expect("keys tempdir");
+        // The evidence builder loads (and may create) the host signing key;
+        // point the whole mvm world at a scratch home so the test never
+        // touches the developer's real keyring.
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(keys_home.path());
+        let digest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let mut image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
+        // No OCI config blob: the entrypoint lookup must not touch the network
+        // of config files a pull would have written.
+        image.config_path = None;
+        seed_index_and_unpacked(tmp.path(), &image);
+        let runtime_tag = oci_runtime_tag(tmp.path());
+
+        let repaired = rematerialize_cached_image(
+            tmp.path(),
+            image,
+            &runtime_tag,
+            evidence_recording_materialize,
+            true,
+        )
+        .expect("prod rematerialize succeeds")
+        .expect("unpacked tree present");
+
+        let rootfs_abs =
+            safe_cache_path(tmp.path(), repaired.rootfs_path.as_deref().expect("rootfs"))
+                .expect("resolve recorded rootfs");
+        let seen: serde_json::Value = serde_json::from_slice(
+            &fs::read(
+                rootfs_abs
+                    .parent()
+                    .expect("rootfs has parent")
+                    .join("evidence-seen.json"),
+            )
+            .expect("materializer recorded the evidence it was handed"),
+        )
+        .expect("parse recorded evidence");
+        assert_eq!(seen["sealed"], true, "prod request seals the rootfs");
+        assert_eq!(
+            seen["evidence"]["image_ref"], "docker.io/library/alpine:3.20",
+            "mark names the canonical image reference"
+        );
+        assert_eq!(seen["evidence"]["image_digest"], digest);
+    }
+
+    #[test]
+    fn dev_rematerialize_passes_no_seal_evidence() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let digest = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        let mut image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
+        image.config_path = None;
+        seed_index_and_unpacked(tmp.path(), &image);
+        let runtime_tag = oci_runtime_tag(tmp.path());
+
+        let repaired = rematerialize_cached_image(
+            tmp.path(),
+            image,
+            &runtime_tag,
+            evidence_recording_materialize,
+            false,
+        )
+        .expect("dev rematerialize succeeds")
+        .expect("unpacked tree present");
+
+        let rootfs_abs =
+            safe_cache_path(tmp.path(), repaired.rootfs_path.as_deref().expect("rootfs"))
+                .expect("resolve recorded rootfs");
+        let seen: serde_json::Value = serde_json::from_slice(
+            &fs::read(
+                rootfs_abs
+                    .parent()
+                    .expect("rootfs has parent")
+                    .join("evidence-seen.json"),
+            )
+            .expect("materializer recorded the evidence it was handed"),
+        )
+        .expect("parse recorded evidence");
+        assert_eq!(seen["sealed"], false);
+        assert!(
+            seen["evidence"].is_null(),
+            "unsealed requests must not carry provenance evidence"
+        );
     }
 
     #[test]

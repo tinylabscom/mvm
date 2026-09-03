@@ -27,6 +27,11 @@ deferred to Task 7 — see plan.)
 
 ## Groups (clap group = directory)
 
+**`deployments/`** (additive, 2026-09-02) — `deployments ls` reads the
+local-first deploy store (`<mvm_home>/deployments/<ir-hash>/deploy.json`).
+Sits beside `deploy` (the write path) the way `deps` sits beside build.
+
+
 **`build/`** (D1) — `build image`(was the bare `build`) · `build compile`
 · `build validate` · `build kernel`(from flat `kernel.rs`).
 

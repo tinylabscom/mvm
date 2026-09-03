@@ -39,6 +39,7 @@ use tracing::{error, info, warn};
 use mvm_hostd::broker::audit_client::AuditClient;
 use mvm_hostd::broker::config::{SubprocessConfig, parse as parse_config};
 use mvm_hostd::broker::handlers::host_audit_v1::HostAuditV1Handler;
+use mvm_hostd::broker::handlers::host_beacon_v1::HostBeaconV1Handler;
 use mvm_hostd::broker::handlers::register_bound_handlers;
 use mvm_hostd::broker::registry::Registry;
 use mvm_hostd::broker::server::serve_on_listener;
@@ -125,6 +126,7 @@ fn main() -> Result<()> {
 /// `Err(NotBound)` for the missing service.
 fn register_handlers(registry: &mut Registry, cfg: &SubprocessConfig) {
     let _bound = register_bound_handlers(registry, &cfg.services_bindings);
+    register_beacon(registry, cfg);
     let host_audit = mvm_core::protocol::broker::ServiceId::parse("host.audit.v1")
         .expect("host.audit.v1 is a valid ServiceId");
     if !cfg.services_bindings.contains(&host_audit) {
@@ -152,4 +154,23 @@ fn register_handlers(registry: &mut Registry, cfg: &SubprocessConfig) {
             );
         }
     }
+}
+
+/// Register `host.beacon.v1` when the audit-signer UDS is available.
+///
+/// Deliberately not gated on `services_bindings`: the beacon is emitted by
+/// the platform's own guest agent, not by workload code, and it is the
+/// default-on liveness signal for deployment evidence. Workloads without an
+/// audit signer (dev fixtures, doctor probes) get no registration and the
+/// guest's report returns `NotBound`, which the agent logs and ignores.
+fn register_beacon(registry: &mut Registry, cfg: &SubprocessConfig) {
+    let Some(path) = &cfg.audit_signer_uds_path else {
+        return;
+    };
+    let handler = Arc::new(HostBeaconV1Handler::new(AuditClient::new(path.clone())));
+    registry.register(handler);
+    info!(
+        audit_signer_uds_path = %path.display(),
+        "host.beacon.v1 handler registered"
+    );
 }
