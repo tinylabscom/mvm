@@ -332,6 +332,21 @@ mod tests {
     }
 
     impl mvm_build::builder_vm::BuilderVm for ScriptedBuilderVm {
+        fn run_stage0(
+            &self,
+            _guest_root_dir: &std::path::Path,
+            _entry_path: &str,
+            _workspace_dir: &std::path::Path,
+            _artifact_out: &std::path::Path,
+            _host_bin_dir: &std::path::Path,
+        ) -> Result<(), mvm_build::builder_vm::BuilderVmError> {
+            Err(mvm_build::builder_vm::BuilderVmError::NotYetImplemented)
+        }
+
+        fn capabilities(&self) -> mvm_build::builder_vm::BuilderCapabilities {
+            mvm_build::builder_vm::BuilderCapabilities::default()
+        }
+
         fn run_build(&self, _job: &BJ, _mounts: &BM) -> Result<BuilderArtifacts, BuilderVmError> {
             Ok(BuilderArtifacts::Image {
                 rootfs_path: self.rootfs_path.clone(),

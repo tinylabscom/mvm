@@ -734,6 +734,21 @@ mod tests {
     struct FailingBuilder;
 
     impl BuilderVm for FailingBuilder {
+        fn run_stage0(
+            &self,
+            _guest_root_dir: &std::path::Path,
+            _entry_path: &str,
+            _workspace_dir: &std::path::Path,
+            _artifact_out: &std::path::Path,
+            _host_bin_dir: &std::path::Path,
+        ) -> Result<(), BuilderVmError> {
+            Err(BuilderVmError::NotYetImplemented)
+        }
+
+        fn capabilities(&self) -> crate::builder_vm::BuilderCapabilities {
+            crate::builder_vm::BuilderCapabilities::default()
+        }
+
         fn run_build(
             &self,
             _job: &BuilderJob,

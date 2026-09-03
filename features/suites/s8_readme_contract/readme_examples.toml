@@ -167,20 +167,6 @@ command = "mvmctl machine run --entrypoint --flake ./out"
 witness = "suites/s29_doc_examples/documented_build_live.feature::the documented entrypoint launch runs the compiled workload"
 
 [[example]]
-command = "mvmctl deps install --lockfile uv.lock --language python"
-exempt = "installs a Python dependency set into a sealed volume inside the builder VM, which needs a real package index. Covered by the app-deps-audit lane in security.yml against a fixture, so a release does not depend on PyPI being up."
-
-[[example]]
-command = "mvmctl deps capture-live HASH --vm dev-vm --guest-content /mvm/deps/content --guest-sbom /mvm/deps/sbom.cdx.json --guest-fetch-log /mvm/deps/fetch.log --guest-cve /mvm/deps/cve.json"
-exempt = "captures a dependency tree out of a running dev VM that a reader has already installed into by hand. There is no fixture for the guest-side state it reads, so the scenario would have to build the thing it is meant to observe."
-
-[[example]]
-command = "mvmctl deps inspect HASH"
-exempt = "reads the sealed volume that `deps install` produced, addressed by its content hash. The app-deps-audit lane exercises it against a sealed fixture volume, including the byte-flip refusal."
-
-# ── Runtime SDK ──────────────────────────────────────────────────────────────
-
-[[example]]
 command = "mvmctl run --mode plan ./script.py"
 witness = "suites/s31_launch_e2e/sdk_and_library_modes.feature::a runtime-SDK script admits as a signed plan without booting"
 

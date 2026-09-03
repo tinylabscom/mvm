@@ -1154,6 +1154,21 @@ mod tests {
 
     #[cfg(feature = "builder-vm")]
     impl crate::builder_vm::BuilderVm for RecordingBuilderVm {
+        fn run_stage0(
+            &self,
+            _guest_root_dir: &std::path::Path,
+            _entry_path: &str,
+            _workspace_dir: &std::path::Path,
+            _artifact_out: &std::path::Path,
+            _host_bin_dir: &std::path::Path,
+        ) -> Result<(), crate::builder_vm::BuilderVmError> {
+            Err(crate::builder_vm::BuilderVmError::NotYetImplemented)
+        }
+
+        fn capabilities(&self) -> crate::builder_vm::BuilderCapabilities {
+            crate::builder_vm::BuilderCapabilities::default()
+        }
+
         fn run_build(
             &self,
             job: &crate::builder_vm::BuilderJob,

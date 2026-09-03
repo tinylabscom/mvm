@@ -22,11 +22,13 @@
 //! problem without aborting the build. Empty / unset env is treated
 //! the same as "no override."
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::builder_health;
-use crate::builder_vm::{BuilderArtifacts, BuilderJob, BuilderMounts, BuilderVm, BuilderVmError};
+use crate::builder_vm::{
+    BuilderArtifacts, BuilderCapabilities, BuilderJob, BuilderMounts, BuilderVm, BuilderVmError,
+};
 use crate::libkrun_builder::{
     DEFAULT_VCPUS, LibkrunBuilderVm, builder_vm_cache_dir, host_arch_tag,
 };
@@ -207,6 +209,51 @@ impl BuilderVm for WebLinuxBuilderVm {
             requested: "web-linux".to_string(),
             reason: "the web-linux builder is browser-only; run it in a WebAssembly browser environment, or select libkrun/qemu/hvf on a native host".to_string(),
         })
+    }
+
+    fn run_stage0(
+        &self,
+        _guest_root_dir: &Path,
+        _entry_path: &str,
+        _workspace_dir: &Path,
+        _artifact_out: &Path,
+        _host_bin_dir: &Path,
+    ) -> Result<(), BuilderVmError> {
+        Err(BuilderVmError::VmmUnavailable {
+            requested: "stage0-bootstrap".to_string(),
+            reason: "the web-linux builder is browser-only and cannot bootstrap a \
+                     builder VM; select libkrun or qemu on a native host"
+                .to_string(),
+        })
+    }
+
+    fn capabilities(&self) -> BuilderCapabilities {
+        BuilderCapabilities::default()
+    }
+}
+
+/// What each builder backend can do, readable without constructing one.
+///
+/// Constructing a backend can do real work — the hvf builder materializes the
+/// embedded Linux host binaries — so a pre-flight question ("can this host
+/// bootstrap?") must not require it. Asking through construction made `doctor`
+/// report hvf as *unavailable* on a machine where hvf was the working default,
+/// because the answer it got back was about a missing build payload rather than
+/// about capability.
+///
+/// `declared_capabilities_match_the_backend_impls` holds this in step with the
+/// `BuilderVm::capabilities` each backend returns, so the convenience copy
+/// cannot drift from the source of truth.
+#[must_use]
+pub fn declared_capabilities(choice: BuilderBackendChoice) -> BuilderCapabilities {
+    match choice {
+        BuilderBackendChoice::Libkrun | BuilderBackendChoice::Qemu => BuilderCapabilities {
+            stage0_bootstrap: true,
+            dependency_install: true,
+        },
+        BuilderBackendChoice::Hvf | BuilderBackendChoice::WebLinux => {
+            BuilderCapabilities::default()
+        }
     }
 }
 
@@ -573,6 +620,27 @@ pub fn linux_builder_vm_readiness() -> Result<(), BuilderVmError> {
 
 #[cfg(test)]
 mod tests {
+    /// The convenience copy and the trait impls must agree, or the table
+    /// `doctor` prints is a decoration a reader would be wrong to trust.
+    ///
+    /// Covers the backends that construct without I/O. The hvf backend is
+    /// asserted the same way in `mvm-runtime`, next to its impl.
+    #[test]
+    fn declared_capabilities_match_the_backend_impls() {
+        assert_eq!(
+            LibkrunBuilderVm::default().capabilities(),
+            declared_capabilities(BuilderBackendChoice::Libkrun)
+        );
+        assert_eq!(
+            QemuBuilderVm::new().capabilities(),
+            declared_capabilities(BuilderBackendChoice::Qemu)
+        );
+        assert_eq!(
+            WebLinuxBuilderVm.capabilities(),
+            declared_capabilities(BuilderBackendChoice::WebLinux)
+        );
+    }
+
     use super::*;
     use mvm_core::util::test_env::TestEnv;
 

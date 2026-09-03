@@ -423,6 +423,35 @@ impl GuestSidecar {
     }
 }
 
+/// What a builder backend can do on this host.
+///
+/// Deliberately declared rather than probed: probing Stage 0 means attempting
+/// Stage 0, which is the twenty-minute operation the caller is trying to
+/// decide about. Mirrors `VmCapabilities` on the workload seam.
+///
+/// Every field defaults to `false`, so a capability is opt-in and a backend
+/// that forgets one under-promises rather than over-promises.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BuilderCapabilities {
+    /// Whether [`BuilderVm::run_stage0`] is wired on this backend.
+    ///
+    /// `false` means Stage 0 refuses — the backend cannot bootstrap the
+    /// steady-state builder VM from nothing. It says nothing about
+    /// [`BuilderVm::run_build`], which a backend can serve perfectly well
+    /// against an already-bootstrapped builder.
+    pub stage0_bootstrap: bool,
+    /// Whether [`BuilderVm::run_build`] serves [`BuilderJob::Install`] — the
+    /// arm that installs a hash-pinned lockfile into a sealed dependency
+    /// volume.
+    ///
+    /// Separate from `stage0_bootstrap` because the two gaps are independent
+    /// and were being described by two different stale sentences: one said
+    /// Stage 0 was "implemented for the libkrun backend only" after qemu had
+    /// grown one, the other said the install pipeline "isn't wired for any
+    /// backend yet" while libkrun and qemu both served it.
+    pub dependency_install: bool,
+}
+
 /// Builder VM driver. Today this is a marker trait shape — the
 /// concrete impl arrives with the bootstrap wave. Defining it now
 /// lets call sites be wired against the future API and lets tests
@@ -456,10 +485,20 @@ pub trait BuilderVm {
     ///
     /// Lives on the trait — rather than as a libkrun-inherent method —
     /// so the orchestration dispatches Stage 0 through `&dyn BuilderVm`,
-    /// the same seam `run_build` uses. The default impl is a fail-closed
-    /// gap: Stage 0 is implemented for the libkrun backend only today.
-    /// A backend without an impl returns a clear error rather than
-    /// silently doing nothing.
+    /// the same seam `run_build` uses.
+    ///
+    /// Required, deliberately. This carried a default impl that returned
+    /// "implemented for the libkrun backend only", and by the time anyone
+    /// read it that was already false — qemu had grown a Stage 0 and the
+    /// sentence had not been revisited. A default is what let that rot: a
+    /// backend inherits it by saying nothing, so nothing forces the text to
+    /// stay true and nothing forces a new backend's author to decide.
+    ///
+    /// With no default, adding a backend does not compile until it answers
+    /// this question, and a backend that cannot Stage 0 refuses in its own
+    /// impl, naming itself. Pair the refusal with
+    /// [`BuilderCapabilities::stage0_bootstrap`] = `false` so callers can ask
+    /// before they spend the boot finding out.
     fn run_stage0(
         &self,
         guest_root_dir: &Path,
@@ -467,22 +506,15 @@ pub trait BuilderVm {
         workspace_dir: &Path,
         artifact_out: &Path,
         host_bin_dir: &Path,
-    ) -> Result<(), BuilderVmError> {
-        let _ = (
-            guest_root_dir,
-            entry_path,
-            workspace_dir,
-            artifact_out,
-            host_bin_dir,
-        );
-        Err(BuilderVmError::VmmUnavailable {
-            requested: "stage0-bootstrap".to_string(),
-            reason: "Stage 0 builder-VM bootstrap is implemented for the libkrun \
-                     backend only; the hvf and Firecracker Stage 0 paths are not \
-                     wired yet. Bootstrap with the libkrun builder backend."
-                .to_string(),
-        })
-    }
+    ) -> Result<(), BuilderVmError>;
+
+    /// What this backend can actually do on this host.
+    ///
+    /// The builder-side counterpart of `VmBackend::capabilities`, and required
+    /// for the same reason: a caller has to be able to ask before it commits
+    /// to a boot, and the builder auto-fallback needs a question it can answer
+    /// without provoking the failure it is trying to avoid.
+    fn capabilities(&self) -> BuilderCapabilities;
 
     /// Tear down any persistent state (warm builder pool entries,
     /// pulled images older than N days, etc.). No-op for stateless
@@ -762,6 +794,26 @@ impl BuilderVm for StubBuilderVm {
         _mounts: &BuilderMounts,
     ) -> Result<BuilderArtifacts, BuilderVmError> {
         Err(BuilderVmError::NotYetImplemented)
+    }
+
+    fn run_stage0(
+        &self,
+        _guest_root_dir: &Path,
+        _entry_path: &str,
+        _workspace_dir: &Path,
+        _artifact_out: &Path,
+        _host_bin_dir: &Path,
+    ) -> Result<(), BuilderVmError> {
+        Err(BuilderVmError::VmmUnavailable {
+            requested: "stage0-bootstrap".to_string(),
+            reason: "the stub builder runs no VM; it exists so tests can hold a \
+                     `BuilderVm` with deterministic errors."
+                .to_string(),
+        })
+    }
+
+    fn capabilities(&self) -> BuilderCapabilities {
+        BuilderCapabilities::default()
     }
 }
 
@@ -1366,18 +1418,44 @@ mod tests {
         assert!(matches!(err, BuilderVmError::NotYetImplemented));
     }
 
+    /// The declared capability has to match what the backend actually does.
+    ///
+    /// A matrix nothing checks is a decoration: `doctor` would report a
+    /// backend as able to bootstrap while `run_stage0` refused, which is worse
+    /// than not reporting at all because a user would trust it.
+    #[test]
+    fn a_backend_declaring_no_stage0_actually_refuses_it() {
+        let stub = StubBuilderVm;
+        assert!(!stub.capabilities().stage0_bootstrap);
+        assert!(
+            stub.run_stage0(
+                Path::new("/tmp/root"),
+                "/init",
+                Path::new("/tmp/work"),
+                Path::new("/tmp/out"),
+                Path::new("/tmp/mvm-bins"),
+            )
+            .is_err(),
+            "declared stage0_bootstrap=false but run_stage0 did not refuse"
+        );
+    }
+
     #[test]
     fn cleanup_default_is_ok() {
         // Stateless implementations get a free no-op cleanup.
         assert!(StubBuilderVm.cleanup().is_ok());
     }
 
+    /// A backend that cannot Stage 0 refuses in its own impl and names itself.
+    ///
+    /// This replaces a test of the trait default, which asserted the refusal
+    /// "names the supported backend" by looking for the word `libkrun`. That
+    /// assertion passed for years after it stopped being true — qemu had
+    /// implemented Stage 0 and the shared sentence still said libkrun was the
+    /// only one. A refusal written by the backend that is refusing cannot
+    /// drift that way, because there is no shared sentence to go stale.
     #[test]
-    fn run_stage0_default_is_a_documented_backend_gap() {
-        // Backends without a Stage 0 impl (e.g. Stub) inherit the trait
-        // default — a fail-closed error that
-        // names the gap and the recovery path, never a silent no-op or
-        // a todo!() panic.
+    fn a_backend_without_stage0_refuses_and_names_itself() {
         let stub = StubBuilderVm;
         let err = stub
             .run_stage0(
@@ -1387,14 +1465,13 @@ mod tests {
                 Path::new("/tmp/out"),
                 Path::new("/tmp/mvm-bins"),
             )
-            .expect_err("default Stage 0 impl must fail closed");
+            .expect_err("a backend without Stage 0 must fail closed");
         match err {
             BuilderVmError::VmmUnavailable { requested, reason } => {
                 assert_eq!(requested, "stage0-bootstrap");
-                assert!(reason.contains("libkrun"), "names the supported backend");
                 assert!(
-                    reason.contains("not") && reason.contains("wired"),
-                    "names the not-wired-yet gap"
+                    reason.contains("stub"),
+                    "the refusal names the backend refusing: {reason}"
                 );
             }
             other => panic!("unexpected error variant: {other}"),

@@ -23,7 +23,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::builder_vm::{BuilderArtifacts, BuilderJob, BuilderMounts, BuilderVm, BuilderVmError};
+use crate::builder_vm::{
+    BuilderArtifacts, BuilderCapabilities, BuilderJob, BuilderMounts, BuilderVm, BuilderVmError,
+};
 #[cfg(feature = "builder-vm")]
 use crate::builder_vm_runtime::acquire_nix_store_image_lock_named;
 #[cfg(feature = "builder-vm")]
@@ -67,6 +69,13 @@ impl QemuBuilderVm {
 }
 
 impl BuilderVm for QemuBuilderVm {
+    fn capabilities(&self) -> BuilderCapabilities {
+        BuilderCapabilities {
+            stage0_bootstrap: true,
+            dependency_install: true,
+        }
+    }
+
     fn run_build(
         &self,
         job: &BuilderJob,

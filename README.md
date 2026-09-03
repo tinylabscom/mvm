@@ -383,15 +383,14 @@ What that looks like today:
 ```bash
 mvmctl build compile app.py --out ./out   # declared deps; lockfiles must be hash-pinned
 mvmctl machine build --flake ./out        # installs deps into a SEALED volume
-mvmctl deps install --lockfile uv.lock --language python  # dev install + seal
-mvmctl deps capture-live HASH --vm dev-vm \
-  --guest-content /mvm/deps/content \
-  --guest-sbom /mvm/deps/sbom.cdx.json \
-  --guest-fetch-log /mvm/deps/fetch.log \
-  --guest-cve /mvm/deps/cve.json              # export + reseal
-mvmctl deps inspect HASH                  # SBOM + CVE + hash-chained meta, no VM needed
 mvmctl machine run --entrypoint --flake ./out
 ```
+
+The `mvmctl deps` verbs — a dev-loop install into a sealed volume, an export
+from a live guest, and an offline inspection of the result — are not documented
+here yet: the install arm does not run on the macOS builder backends, so the
+flow they belong to cannot be followed end to end on a Mac. They remain in
+`mvmctl deps --help`.
 
 Dependencies land in a sealed volume rather than in the image: hash-locked
 content, an SBOM, a CVE scan, and a hash-chained `meta.json`. The supervisor

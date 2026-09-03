@@ -185,6 +185,7 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     checks.push(platform_checks::nested_kvm_check(plat));
     checks.push(platform_checks::libkrun_check(plat));
     checks.push(builder::builder_backend_check(plat));
+    checks.push(builder::builder_capabilities_check());
     checks.push(builder::boot_image_acquisition_check());
     checks.push(runtime::runtime_backend_check(plat));
     checks.push(platform_checks::residency_check());
