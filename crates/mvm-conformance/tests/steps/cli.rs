@@ -582,9 +582,8 @@ fn assert_help_invocation_fits_with_timeout(
     let invocation = format!("mvmctl {}", args.join(" "));
     let duration = Duration::from_secs(30);
 
-    let handle = spawn_blocking(move || {
-        help_invocation_violations(args, width, require_single_line_items)
-    });
+    let handle =
+        spawn_blocking(move || help_invocation_violations(args, width, require_single_line_items));
 
     let violations = timeout(duration, handle)
         .await
