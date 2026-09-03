@@ -161,6 +161,65 @@ pub(super) fn install_ctrlc_teardown(
     interrupted
 }
 
+pub(super) fn has_writable_disk(volumes: &[VmVolume]) -> bool {
+    volumes
+        .iter()
+        .any(|volume| volume.kind == mvm_core::vm_backend::VmVolumeKind::Disk && !volume.read_only)
+}
+
+/// Ask the authenticated guest agent to flush every filesystem before the VMM
+/// is force-stopped. The existing sleep-preparation verb is a control-plane
+/// lifecycle operation and adds no new guest capability or transport surface.
+pub(super) fn flush_writable_disks_before_teardown(
+    vm_name: &str,
+    volumes: &[VmVolume],
+) -> Result<()> {
+    if !has_writable_disk(volumes) {
+        return Ok(());
+    }
+
+    let transport = vsock_transport::for_vm(vm_name)
+        .with_context(|| format!("resolving guest transport for '{vm_name}' filesystem flush"))?;
+    let mut stream = transport
+        .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
+        .with_context(|| format!("connecting to guest '{vm_name}' for filesystem flush"))?;
+    let timeout = std::time::Duration::from_secs(mvm_agentd::vsock::DEFAULT_TIMEOUT_SECS);
+    stream
+        .set_read_timeout(Some(timeout))
+        .context("bounding the guest filesystem-flush response")?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .context("bounding the guest filesystem-flush request")?;
+
+    let verb = "sleep-prep";
+    mvm_core::audit_emit!(
+        NetworkPolicyAllow,
+        vm: vm_name,
+        "scope=rpc,direction=in,kind=vsock,verb={verb}",
+        verb = verb,
+    );
+    let acknowledged = mvm_agentd::vsock::request_sleep_prep_on(
+        &mut stream,
+        mvm_agentd::vsock::DEFAULT_TIMEOUT_SECS,
+    )
+    .with_context(|| format!("requesting guest '{vm_name}' filesystem flush"))?;
+    if !acknowledged {
+        anyhow::bail!("guest '{vm_name}' did not acknowledge its filesystem flush");
+    }
+    Ok(())
+}
+
+pub(super) fn combine_run_and_flush<T>(run: Result<T>, flush: Result<()>) -> Result<T> {
+    match (run, flush) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(flush_error)) => Err(flush_error),
+        (Err(run_error), Ok(())) => Err(run_error),
+        (Err(run_error), Err(flush_error)) => Err(run_error.context(format!(
+            "guest filesystem flush also failed before teardown: {flush_error:#}"
+        ))),
+    }
+}
+
 /// Tear down the transient VM after the guest command finishes (or fails to
 /// dispatch): stop the backend VM, top up the warm pool toward its target,
 /// and remove the host VM state directory (`~/.mvm/vms/<name>`), which includes
@@ -283,6 +342,50 @@ pub(super) fn restore_via_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn volume(kind: mvm_core::vm_backend::VmVolumeKind, read_only: bool) -> VmVolume {
+        VmVolume {
+            kind,
+            read_only,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn only_a_writable_disk_requires_a_pre_teardown_flush() {
+        let writable_disk = volume(mvm_core::vm_backend::VmVolumeKind::Disk, false);
+        let read_only_disk = volume(mvm_core::vm_backend::VmVolumeKind::Disk, true);
+        let directory = volume(mvm_core::vm_backend::VmVolumeKind::DirShare, false);
+
+        assert!(has_writable_disk(&[writable_disk]));
+        assert!(!has_writable_disk(&[read_only_disk]));
+        assert!(!has_writable_disk(&[directory]));
+        assert!(!has_writable_disk(&[]));
+    }
+
+    #[test]
+    fn a_flush_failure_replaces_success_and_preserves_a_run_failure() {
+        let flush_failed = anyhow::anyhow!("flush unavailable");
+        let error = combine_run_and_flush::<i32>(Ok(0), Err(flush_failed))
+            .expect_err("a successful workload cannot hide a failed flush");
+        assert!(error.to_string().contains("flush unavailable"), "{error:#}");
+
+        let run_failed = anyhow::anyhow!("workload failed");
+        let flush_failed = anyhow::anyhow!("flush unavailable");
+        let error = combine_run_and_flush::<i32>(Err(run_failed), Err(flush_failed))
+            .expect_err("both failures must remain an error");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("workload failed"), "{rendered}");
+        assert!(rendered.contains("flush unavailable"), "{rendered}");
+    }
+
+    #[test]
+    fn a_successful_flush_preserves_the_workload_outcome() {
+        assert_eq!(combine_run_and_flush(Ok(7), Ok(())).unwrap(), 7);
+        let error = combine_run_and_flush::<i32>(Err(anyhow::anyhow!("workload failed")), Ok(()))
+            .expect_err("a flush must not hide the workload failure");
+        assert!(error.to_string().contains("workload failed"), "{error:#}");
+    }
 
     #[test]
     fn warm_claim_cleanup_removes_requested_and_effective_state_dirs() {
