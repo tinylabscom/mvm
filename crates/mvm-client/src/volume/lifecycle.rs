@@ -11,7 +11,7 @@
 //! new lifecycle operation proceeds.
 
 use std::fs::{self, File};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -26,15 +26,6 @@ use rand::Rng;
 use secrecy::ExposeSecret;
 
 use super::lease::ensure_volume_not_attached;
-use super::service::HostEncryptionProbe;
-
-/// Root for host-backed managed volume directories.
-pub(crate) fn default_managed_volume_root() -> PathBuf {
-    PathBuf::from(mvm_core::config::mvm_home())
-        .join("volumes")
-        .join("local")
-}
-
 /// Root for mvm-managed encrypted volume state (`encrypted/` + `unlocked/`).
 pub(crate) fn default_mvm_volume_root() -> PathBuf {
     PathBuf::from(mvm_core::config::mvm_home())
@@ -77,14 +68,11 @@ pub(crate) fn ensure_private_dir(path: &Path) -> Result<()> {
         .with_context(|| format!("creating {} privately", path.display()))
 }
 
-/// Volume-name shape check for creation: the name doubles as the virtio-fs
-/// tag the guest kernel sees, so it stays short and conservative.
+/// Volume-name shape check for creation. Names stay short and conservative
+/// because they are persisted as registry and lease identifiers.
 pub(crate) fn validate_volume_name(name: &str) -> Result<()> {
     if name.is_empty() || name.len() > 32 {
-        bail!(
-            "volume name length {} outside [1, 32] (used as virtio-fs tag)",
-            name.len()
-        );
+        bail!("volume name length {} outside [1, 32]", name.len());
     }
     if !name
         .chars()
@@ -101,12 +89,6 @@ pub(crate) fn validate_volume_name(name: &str) -> Result<()> {
 fn validate_materialized_volume(entry: &LocalVolumeEntry) -> Result<()> {
     let host_path = Path::new(&entry.host_path);
     match &entry.kind {
-        LocalVolumeKind::Directory if host_path.is_dir() => Ok(()),
-        LocalVolumeKind::Directory => bail!(
-            "materialized directory volume {:?} is missing: {}",
-            entry.volume_name,
-            host_path.display()
-        ),
         LocalVolumeKind::BlockImage { .. } if !host_path.is_file() => bail!(
             "materialized block volume {:?} is missing: {}",
             entry.volume_name,
@@ -129,12 +111,8 @@ fn remove_materialized_volume(entry: &LocalVolumeEntry) -> Result<()> {
     if !host_path.exists() {
         return Ok(());
     }
-    match &entry.kind {
-        LocalVolumeKind::Directory => fs::remove_dir_all(host_path)
-            .with_context(|| format!("removing directory volume {}", host_path.display())),
-        LocalVolumeKind::BlockImage { .. } => fs::remove_file(host_path)
-            .with_context(|| format!("removing block volume {}", host_path.display())),
-    }
+    fs::remove_file(host_path)
+        .with_context(|| format!("removing block volume {}", host_path.display()))
 }
 
 pub(crate) fn set_local_volume_state(
@@ -259,57 +237,6 @@ pub(crate) fn recover_local_volume_catalog() -> Result<LocalVolumeCatalog> {
         catalog.save()?;
     }
     Ok(catalog)
-}
-
-/// Create a host-backed managed directory volume. The probe must confirm the
-/// backing path lives on encrypted host storage.
-pub(crate) fn create_host_backed(
-    volume_name: &str,
-    root: Option<&Path>,
-    probe: &dyn HostEncryptionProbe,
-) -> Result<LocalVolumeEntry> {
-    let root = match root {
-        Some(root) => root.to_path_buf(),
-        None => default_managed_volume_root(),
-    };
-    if !root.is_absolute() {
-        bail!(
-            "managed volume root must be absolute, got {}",
-            root.display()
-        );
-    }
-    ensure_private_dir(&root)
-        .with_context(|| format!("creating managed volume root {}", root.display()))?;
-    probe.require_encrypted(&root)?;
-
-    let host_path = root.join(volume_name);
-    if host_path.exists() && !host_path.is_dir() {
-        bail!(
-            "managed volume path {} exists but is not a directory",
-            host_path.display()
-        );
-    }
-    ensure_private_dir(&host_path)
-        .with_context(|| format!("creating managed volume {}", host_path.display()))?;
-    probe.require_encrypted(&host_path)?;
-
-    let mut catalog = LocalVolumeCatalog::load()?;
-    let entry = LocalVolumeEntry {
-        volume_name: volume_name.to_string(),
-        host_path: host_path.to_string_lossy().into_owned(),
-        encrypted: true,
-        kind: LocalVolumeKind::Directory,
-        encryption: LocalVolumeEncryption::HostBacked,
-        created_at: mvm_core::util::time::utc_now(),
-    };
-    catalog.add(entry.clone())?;
-    catalog.save()?;
-    mvm_core::audit_emit!(
-        VolumeCreate,
-        "volume={volume_name} host={} encrypted=true",
-        host_path.display()
-    );
-    Ok(entry)
 }
 
 /// Create an mvm-managed encrypted block volume: an empty ext4 image sealed
@@ -545,51 +472,6 @@ pub(crate) fn unwrap_volume_key(entry: &LocalVolumeEntry) -> Result<secrecy::Sec
     Ok(secrecy::SecretBox::new(Box::new(dek)))
 }
 
-fn write_plain_archive(src_dir: &Path, archive_path: &Path) -> Result<()> {
-    let archive = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(archive_path)
-        .with_context(|| format!("creating archive {}", archive_path.display()))?;
-    let mut builder = tar::Builder::new(archive);
-    builder
-        .append_dir_all(".", src_dir)
-        .with_context(|| format!("archiving {}", src_dir.display()))?;
-    builder.finish().context("finishing volume archive")?;
-    Ok(())
-}
-
-pub(crate) fn write_encrypted_volume_archive(
-    src_dir: &Path,
-    ciphertext_path: &Path,
-    dek: &[u8],
-) -> Result<()> {
-    if let Some(parent) = ciphertext_path.parent() {
-        ensure_private_dir(parent)?;
-    }
-    let tmp = ciphertext_path.with_extension(format!("{}.plain.tmp", std::process::id()));
-    let result = (|| -> Result<()> {
-        write_plain_archive(src_dir, &tmp)?;
-        mvm_core::crypto::snapshot_encryption::encrypt_file_in_place(&tmp, dek)
-            .context("encrypting volume archive")?;
-        fs::rename(&tmp, ciphertext_path).with_context(|| {
-            format!(
-                "renaming encrypted archive {} -> {}",
-                tmp.display(),
-                ciphertext_path.display()
-            )
-        })?;
-        fs::set_permissions(ciphertext_path, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("chmod 0600 {}", ciphertext_path.display()))?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
-}
-
 pub(crate) fn write_encrypted_volume_file(
     src_file: &Path,
     ciphertext_path: &Path,
@@ -624,54 +506,6 @@ pub(crate) fn write_encrypted_volume_file(
     })();
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
-    }
-    result
-}
-
-fn decrypt_volume_archive_to_dir(
-    ciphertext_path: &Path,
-    dest_dir: &Path,
-    dek: &[u8],
-) -> Result<()> {
-    if dest_dir.exists() {
-        bail!(
-            "plaintext volume directory {} already exists",
-            dest_dir.display()
-        );
-    }
-    let staging = unlock_staging_path(dest_dir);
-    let tmp = dest_dir.with_extension("unlocking-archive");
-    let result = (|| -> Result<()> {
-        fs::create_dir(&staging)
-            .with_context(|| format!("creating unlock staging dir {}", staging.display()))?;
-        fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("chmod 0700 {}", staging.display()))?;
-        fs::copy(ciphertext_path, &tmp).with_context(|| {
-            format!(
-                "copy encrypted archive {} -> {}",
-                ciphertext_path.display(),
-                tmp.display()
-            )
-        })?;
-        mvm_core::crypto::snapshot_encryption::decrypt_file_in_place(&tmp, dek)
-            .context("decrypting volume archive")?;
-        let file = File::open(&tmp).with_context(|| format!("opening {}", tmp.display()))?;
-        let mut archive = tar::Archive::new(file);
-        archive
-            .unpack(&staging)
-            .with_context(|| format!("unpacking volume into {}", staging.display()))?;
-        fs::rename(&staging, dest_dir).with_context(|| {
-            format!(
-                "publishing unlocked directory {} -> {}",
-                staging.display(),
-                dest_dir.display()
-            )
-        })?;
-        Ok(())
-    })();
-    let _ = fs::remove_file(&tmp);
-    if result.is_err() {
-        let _ = fs::remove_dir_all(&staging);
     }
     result
 }
@@ -746,18 +580,11 @@ pub(crate) fn unlock_volume_locked(
     };
     set_local_volume_state(catalog, volume_name, LocalVolumeState::Unlocking)?;
     catalog.save()?;
-    match &entry.kind {
-        LocalVolumeKind::Directory => decrypt_volume_archive_to_dir(
-            &ciphertext_path,
-            Path::new(&entry.host_path),
-            dek.expose_secret(),
-        )?,
-        LocalVolumeKind::BlockImage { .. } => decrypt_volume_file(
-            &ciphertext_path,
-            Path::new(&entry.host_path),
-            dek.expose_secret(),
-        )?,
-    }
+    decrypt_volume_file(
+        &ciphertext_path,
+        Path::new(&entry.host_path),
+        dek.expose_secret(),
+    )?;
     set_local_volume_state(catalog, volume_name, LocalVolumeState::Unlocked)?;
     catalog.save()?;
     mvm_core::audit_emit!(VolumeOpen, "volume={volume_name} state=unlocked");
@@ -790,10 +617,6 @@ pub(crate) fn lock_volume_locked(
     };
     let host_path = PathBuf::from(&entry.host_path);
     match &entry.kind {
-        LocalVolumeKind::Directory if !host_path.is_dir() => bail!(
-            "plaintext volume directory {} is missing; cannot lock",
-            host_path.display()
-        ),
         LocalVolumeKind::BlockImage { .. } if !host_path.is_file() => bail!(
             "plaintext block volume {} is missing; cannot lock",
             host_path.display()
@@ -806,19 +629,11 @@ pub(crate) fn lock_volume_locked(
                 )
             })?;
         }
-        LocalVolumeKind::Directory => {}
     }
     set_local_volume_state(catalog, volume_name, LocalVolumeState::Locking)?;
     catalog.save()?;
     let tmp_ciphertext = lock_staging_path(&ciphertext_path);
-    match &entry.kind {
-        LocalVolumeKind::Directory => {
-            write_encrypted_volume_archive(&host_path, &tmp_ciphertext, dek.expose_secret())?
-        }
-        LocalVolumeKind::BlockImage { .. } => {
-            write_encrypted_volume_file(&host_path, &tmp_ciphertext, dek.expose_secret())?
-        }
-    }
+    write_encrypted_volume_file(&host_path, &tmp_ciphertext, dek.expose_secret())?;
     let new_hash = ciphertext_content_hash(&tmp_ciphertext)?;
     let catalog_entry = catalog
         .get_mut(volume_name)

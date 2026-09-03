@@ -8,9 +8,9 @@
 //! - **Preopens instead of mounts.** The runtime overlay's guest binaries
 //!   are preopened read-only at `/mvm/runtime` (the same guest path the
 //!   dm-verity overlay occupies on microVM backends), and each declared
-//!   `DirShare` volume is preopened at its guest mountpoint with its
-//!   read-only flag honored. WASI has no block devices: a `Disk` volume
-//!   fails closed before any of this, in
+//!   materialized directory grant is preopened at its guest mountpoint with
+//!   its read-only flag honored. WASI has no block devices: a direct disk
+//!   volume fails closed before any of this, in
 //!   [`crate::wasm_backend::WasmBackendError`].
 //! - **An activation file instead of a vsock verb.** The run's environment
 //!   summary — overlay guest path, volume mountpoints, the network
@@ -39,7 +39,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use mvm_core::vm_backend::{VmStartConfig, VmVolumeKind};
+use mvm_core::vm_backend::VmStartConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::wasm_backend::WasmBackendError;
@@ -103,7 +103,7 @@ pub struct WasmPreopenPlan {
 
 /// Translate a launch config into the preopen/env plan: the activation run
 /// dir first (read-only, always present), then the runtime overlay
-/// (read-only, when resolved), then every declared `DirShare` volume in
+/// (read-only, when resolved), then every materialized directory grant in
 /// config order with its read-only flag honored. Pure — no I/O, no
 /// wasmtime — so the exact tuples are assertable in a test.
 pub fn build_wasm_preopen_plan(
@@ -126,7 +126,7 @@ pub fn build_wasm_preopen_plan(
     for volume in config
         .volumes
         .iter()
-        .filter(|v| matches!(v.kind, VmVolumeKind::DirShare))
+        .filter(|v| v.materialized_image.is_some())
     {
         preopens.push(WasmPreopen {
             host_dir: PathBuf::from(&volume.host),
@@ -253,7 +253,7 @@ pub fn prepare_wasm_activation(
         volumes: config
             .volumes
             .iter()
-            .filter(|v| matches!(v.kind, VmVolumeKind::DirShare))
+            .filter(|v| v.materialized_image.is_some())
             .map(|v| WasmVolume {
                 guest_path: v.guest.clone(),
                 read_only: v.read_only,
@@ -285,13 +285,13 @@ mod tests {
 
     fn dir_share(host: &str, guest: &str, read_only: bool) -> VmVolume {
         VmVolume {
-            materialized_image: None,
+            materialized_image: Some("/state/materialized.ext4".to_string()),
             volume_label: None,
             host: host.into(),
             guest: guest.into(),
             size: String::new(),
             read_only,
-            kind: VmVolumeKind::DirShare,
+            kind: mvm_core::vm_backend::VmVolumeKind::Disk,
             encrypted: false,
         }
     }
@@ -304,7 +304,7 @@ mod tests {
             guest: guest.into(),
             size: String::new(),
             read_only: false,
-            kind: VmVolumeKind::Disk,
+            kind: mvm_core::vm_backend::VmVolumeKind::Disk,
             encrypted: false,
         }
     }

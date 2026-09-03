@@ -36,10 +36,10 @@ Almost all of it already existed, and most of what was left was deletion.
 
 ## The audit decision
 
-`plan_admission` maps `VmVolumeKind::DirShare` → `ShareKind::DirShare`, and the
-chain records the host path under claim 1. Had `--mount` simply become a `Disk`,
-the chain would record an ext4 image under `~/.mvm` and lose the fact that a
-host *directory* was granted.
+`plan_admission` now maps `materialized_image: Some(_)` →
+`ShareKind::DirShare`, and the chain records the host path under claim 1. Had
+`--mount` simply become an undifferentiated disk, the chain would record an
+ext4 image under `~/.mvm` and lose the fact that a host *directory* was granted.
 
 So `VmVolume.host` stays the granted directory and a new
 `VmVolume.materialized_image` carries what is actually attached. The grant and
@@ -49,10 +49,10 @@ record.
 ## One predicate, three callers
 
 The block list, the slot arithmetic and the guest device mapping all have to
-agree on which volumes are attached and in what order. They previously each
-matched on `kind`. They now all call `VmVolume::attaches_as_block`, because
-drift between them means a guest mounts a real device holding someone else's
-data and nothing errors.
+agree on which volumes are attached and in what order. All runtime volumes are
+now block images; the shared mapping derives each guest node from that one
+ordered list. Drift between them would mean a guest mounts a real device
+holding someone else's data and nothing errors.
 
 `a_materialized_grant_resolves_to_the_block_node_the_vmm_created` is the test
 for exactly that.
@@ -123,9 +123,9 @@ shared content-addressed store — which is the heavy feature this work avoided.
 
 ## Not done
 
-- **`VmVolumeKind::DirShare` stays.** It is what records a *directory* grant in
-  the signed plan, which `enforce_admitted_shares` matches against for claim 1.
-  Removing it means moving that fact somewhere else first.
+- **Subsequently completed:** `VmVolumeKind::DirShare` was retired after claim
+  1's derivation moved to `materialized_image`. `ShareKind::DirShare` remains in
+  the signed plan and still records the directory grant.
 - **`virtiofsd --sandbox none` is untouched.** It is on the QEMU path, which does
   not run on the macOS dev host, and landing a blind change to a sandbox flag is
   how it got there.

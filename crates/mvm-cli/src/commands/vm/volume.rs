@@ -61,10 +61,6 @@ pub(in crate::commands) enum VolumeCmd {
         /// will be created. Defaults to ~/.mvm/volumes/local.
         #[arg(long)]
         root: Option<String>,
-        /// Use the previous host-backed encryption gate instead of
-        /// an mvm-managed encrypted archive.
-        #[arg(long)]
-        host_backed: bool,
         /// Capacity of a new portable ext4 block volume.
         #[arg(long, default_value = "1G")]
         size: String,
@@ -172,19 +168,18 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         VolumeCmd::Create {
             volume,
             root,
-            host_backed,
             size,
             remote,
             bucket,
             storage_class,
         } => {
             if remote {
-                if root.is_some() || host_backed {
-                    bail!("--root and --host-backed are local-only volume options");
+                if root.is_some() {
+                    bail!("--root is a local-only volume option");
                 }
                 return remote::create(&volume, &size, bucket.as_deref(), storage_class.as_deref());
             }
-            create(&volume, root.as_deref(), host_backed, &size)
+            create(&volume, root.as_deref(), &size)
         }
         VolumeCmd::Unlock { volume } => unlock(&volume),
         VolumeCmd::Lock { volume } => lock(&volume),
@@ -264,26 +259,15 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     }
 }
 
-/// The local volume service, wired to the doctor's host-encryption
-/// diagnostics so host-backed directory volumes keep their encrypted-backing
-/// verification.
+/// The local volume service, wired to the doctor's host-encryption diagnostics
+/// so a directory snapshotted by `--host` is checked before it is read.
 fn service() -> LocalVolumeService {
     LocalVolumeService::with_host_encryption_probe(probe_from_fn(|path| {
         crate::doctor::require_local_volume_host_path_encrypted(path)
     }))
 }
 
-fn create(volume_name: &str, root: Option<&str>, host_backed: bool, size: &str) -> Result<()> {
-    if host_backed {
-        let record = service()
-            .create_host_backed_volume(volume_name, root.map(Path::new))
-            .with_context(|| format!("creating host-backed volume {volume_name:?}"))?;
-        println!(
-            "created encrypted local volume {volume_name:?} at {}",
-            record.host_artifact.as_deref().unwrap_or("<unknown>")
-        );
-        return Ok(());
-    }
+fn create(volume_name: &str, root: Option<&str>, size: &str) -> Result<()> {
     let size_mib = mvm_core::util::parse_human_size(size)
         .with_context(|| format!("invalid volume size {size:?}"))?;
     let mut builder = CreateBlockVolumeRequest::builder(volume_name)
@@ -633,7 +617,7 @@ mod tests {
     fn mvm_managed_volume_create_unlock_lock_roundtrip() {
         let guard = DataDirGuard::new();
         let root = guard.path().join("vol-root");
-        create("work", Some(root.to_str().unwrap()), false, "16M").unwrap();
+        create("work", Some(root.to_str().unwrap()), "16M").unwrap();
 
         let catalog = LocalVolumeCatalog::load().unwrap();
         let entry = catalog.get("work").unwrap();
@@ -730,7 +714,7 @@ mod tests {
     fn registered_managed_mount_is_consumed_by_launch_resolution() {
         let guard = DataDirGuard::new();
         let root = guard.path().join("vol-root");
-        create("work", Some(root.to_str().unwrap()), false, "16M").unwrap();
+        create("work", Some(root.to_str().unwrap()), "16M").unwrap();
         unlock("work").unwrap();
         mount("vm-1", "work", None, "/data/work", true).unwrap();
 
@@ -749,7 +733,7 @@ mod tests {
     fn block_attachment_lease_is_exclusive_and_released_on_stop() {
         let guard = DataDirGuard::new();
         let root = guard.path().join("vol-root");
-        create("work", Some(root.to_str().unwrap()), false, "16M").unwrap();
+        create("work", Some(root.to_str().unwrap()), "16M").unwrap();
         unlock("work").unwrap();
         mount("vm-1", "work", None, "/data/work", true).unwrap();
         mount("vm-2", "work", None, "/data/work", true).unwrap();
@@ -783,7 +767,7 @@ mod tests {
     fn launch_resolution_refuses_volume_locked_after_registration() {
         let guard = DataDirGuard::new();
         let root = guard.path().join("vol-root");
-        create("work", Some(root.to_str().unwrap()), false, "16M").unwrap();
+        create("work", Some(root.to_str().unwrap()), "16M").unwrap();
         unlock("work").unwrap();
         mount("vm-1", "work", None, "/data/work", false).unwrap();
         lock("work").unwrap();
@@ -796,7 +780,7 @@ mod tests {
     fn launch_resolution_refuses_explicit_guest_path_collision() {
         let guard = DataDirGuard::new();
         let root = guard.path().join("vol-root");
-        create("work", Some(root.to_str().unwrap()), false, "16M").unwrap();
+        create("work", Some(root.to_str().unwrap()), "16M").unwrap();
         unlock("work").unwrap();
         mount("vm-1", "work", None, "/data/work", false).unwrap();
         let explicit = mvm_runtime::image::RuntimeVolume {
@@ -804,6 +788,7 @@ mod tests {
             guest: "/data/work".to_string(),
             size: "1G".to_string(),
             read_only: true,
+            materialized_image: None,
             kind: mvm_core::vm_backend::VmVolumeKind::Disk,
             encrypted: false,
         };
@@ -819,7 +804,7 @@ mod tests {
     fn mvm_managed_mount_refuses_locked_volume() {
         let guard = DataDirGuard::new();
         let root = guard.path().join("vol-root");
-        create("work", Some(root.to_str().unwrap()), false, "16M").unwrap();
+        create("work", Some(root.to_str().unwrap()), "16M").unwrap();
         let err = mount("vm-1", "work", None, "/data/work", false).unwrap_err();
         assert!(format!("{err:#}").contains("is locked"), "got: {err:#}");
     }
@@ -828,7 +813,7 @@ mod tests {
     fn mvm_managed_unlock_rejects_tampered_ciphertext() {
         let guard = DataDirGuard::new();
         let root = guard.path().join("vol-root");
-        create("work", Some(root.to_str().unwrap()), false, "16M").unwrap();
+        create("work", Some(root.to_str().unwrap()), "16M").unwrap();
         let catalog = LocalVolumeCatalog::load().unwrap();
         let entry = catalog.get("work").unwrap();
         let ciphertext = match &entry.encryption {

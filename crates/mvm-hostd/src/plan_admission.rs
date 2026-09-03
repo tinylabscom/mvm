@@ -1291,11 +1291,11 @@ pub fn enforce_admitted_shares(
     volumes: &[mvm_core::vm_backend::VmVolume],
     plan: &ExecutionPlan,
 ) -> Result<()> {
-    use mvm_core::vm_backend::VmVolumeKind;
     for v in volumes {
-        let want_kind = match v.kind {
-            VmVolumeKind::DirShare => mvm_core::plan::ShareKind::DirShare,
-            VmVolumeKind::Disk => mvm_core::plan::ShareKind::Disk,
+        let want_kind = if v.materialized_image.is_some() {
+            mvm_core::plan::ShareKind::DirShare
+        } else {
+            mvm_core::plan::ShareKind::Disk
         };
         let admitted = plan.shares.iter().find(|g| {
             g.host_path == v.host
@@ -1400,7 +1400,6 @@ pub fn enforce_sdk_sidecar_attachment(
     image_libc: GuestLibc,
 ) -> Result<()> {
     use mvm_core::plan::{SDK_SIDECAR_GUEST_PATH, sdk_host_services_in, sdk_sidecar_required};
-    use mvm_core::vm_backend::VmVolumeKind;
 
     // When sdk_uses_sidecar is false, the workload speaks the broker protocol
     // directly and may not carry the SDK sidecar.
@@ -1465,7 +1464,7 @@ pub fn enforce_sdk_sidecar_attachment(
             sidecar.host,
         );
     }
-    if !matches!(sidecar.kind, VmVolumeKind::Disk) {
+    if sidecar.materialized_image.is_some() {
         anyhow::bail!(
             "refusing to attach '{}' at {SDK_SIDECAR_GUEST_PATH}: the SDK sidecar is a read-only \
              disk image, not a host-directory share",
@@ -2987,7 +2986,6 @@ mod tests {
             host: "/h/src".into(),
             guest: "/data".into(),
             read_only: true,
-            kind: mvm_core::vm_backend::VmVolumeKind::DirShare,
             materialized_image: Some("/state/mount-0.ext4".into()),
             volume_label: None,
             ..Default::default()
@@ -3004,6 +3002,22 @@ mod tests {
         assert!(
             enforce_admitted_shares(std::slice::from_ref(&ungranted), &plan).is_err(),
             "only the granted host path may reach a guest"
+        );
+
+        let mut disk_input = fixture_input("vm-materialized-share-as-disk");
+        disk_input.shares = vec![mvm_core::plan::HostShareGrant {
+            tag: "uvol0".into(),
+            host_path: "/h/src".into(),
+            guest_path: "/data".into(),
+            kind: mvm_core::plan::ShareKind::Disk,
+            read_only: true,
+            encrypted: false,
+            content_sha256: None,
+        }];
+        let disk_plan = synthesize_plan(&disk_input).expect("synthesize disk plan");
+        assert!(
+            enforce_admitted_shares(std::slice::from_ref(&materialized), &disk_plan).is_err(),
+            "a materialized directory must not satisfy a disk grant"
         );
     }
 
@@ -3032,7 +3046,7 @@ mod tests {
             host: host.into(),
             guest: "/data".into(),
             read_only: true,
-            kind: mvm_core::vm_backend::VmVolumeKind::DirShare,
+            materialized_image: Some("/state/mount-0.ext4".into()),
             ..Default::default()
         };
 
@@ -3064,7 +3078,7 @@ mod tests {
 
     #[test]
     fn enforce_admitted_shares_refuses_unadmitted_or_mismatched() {
-        use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
+        use mvm_core::vm_backend::VmVolume;
         let grant = mvm_core::plan::HostShareGrant {
             tag: "uvol0".into(),
             host_path: "/h/src".into(),
@@ -3082,7 +3096,7 @@ mod tests {
             host: "/h/src".into(),
             guest: "/data".into(),
             read_only: true,
-            kind: VmVolumeKind::DirShare,
+            materialized_image: Some("/state/mount-0.ext4".into()),
             ..Default::default()
         };
         // The exact admitted volume passes.
@@ -3093,7 +3107,7 @@ mod tests {
             host: "/etc".into(),
             guest: "/data".into(),
             read_only: true,
-            kind: VmVolumeKind::DirShare,
+            materialized_image: Some("/state/mount-1.ext4".into()),
             ..Default::default()
         };
         assert!(enforce_admitted_shares(&[unadmitted], &plan).is_err());
@@ -3213,7 +3227,6 @@ mod tests {
     /// attachment at the sidecar mount point is a different, unadmitted shape.
     #[test]
     fn a_writable_or_dir_share_sidecar_fails_closed() {
-        use mvm_core::vm_backend::VmVolumeKind;
         let plan = plan_binding(&["host.audit.v1"]);
 
         let writable = mvm_core::vm_backend::VmVolume {
@@ -3225,7 +3238,7 @@ mod tests {
         assert!(err.to_string().contains("read-only"), "{err}");
 
         let share = mvm_core::vm_backend::VmVolume {
-            kind: VmVolumeKind::DirShare,
+            materialized_image: Some("/state/mount.ext4".to_string()),
             ..sdk_sidecar_volume()
         };
         let err = enforce_sdk_sidecar_attachment(&[share], &plan, LOADABLE_LIBC)
@@ -5475,7 +5488,8 @@ mod tests {
                 host: "/etc".into(),
                 guest: "/data".into(),
                 read_only: true,
-                kind: VmVolumeKind::DirShare,
+                kind: VmVolumeKind::Disk,
+                materialized_image: Some("/state/mount.ext4".to_string()),
                 ..Default::default()
             }],
             ..Default::default()

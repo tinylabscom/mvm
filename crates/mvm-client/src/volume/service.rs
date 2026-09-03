@@ -23,10 +23,10 @@ use super::lifecycle;
 /// Verifies that a host path lives on encrypted backing storage.
 ///
 /// mvm-managed volumes carry their own encryption lifecycle, so they never
-/// consult the probe; host-backed and ad-hoc directory volumes are plaintext
-/// while mounted and must sit on encrypted host storage. The check is
-/// host-diagnostic work (platform tooling like `diskutil` / `lsblk`), so the
-/// presentation surface that owns the diagnostics injects it.
+/// consult the probe. An ad-hoc source directory is plaintext while being
+/// snapshotted and must sit on encrypted host storage. The check is diagnostic
+/// work (platform tooling like `diskutil` / `lsblk`), so the presentation
+/// surface that owns those diagnostics injects it.
 pub trait HostEncryptionProbe: Send + Sync {
     /// Return `Ok(())` only when `path` is confirmed to live on encrypted
     /// backing storage; unknown must fail closed.
@@ -164,58 +164,11 @@ impl LocalVolumeService {
         }
     }
 
-    /// Service with a caller-supplied host-encryption probe, enabling
-    /// host-backed directory volumes.
+    /// Service with a caller-supplied host-encryption probe, enabling ad-hoc
+    /// directory snapshotting.
     #[must_use]
     pub fn with_host_encryption_probe(probe: Box<dyn HostEncryptionProbe>) -> Self {
         Self { probe }
-    }
-
-    /// Create a host-backed managed directory volume (relies on encrypted
-    /// host storage, verified through the probe). Not part of the
-    /// [`VolumeService`] contract: host-directory volumes are a
-    /// CLI-compatibility surface, not a service-consumer feature.
-    pub fn create_host_backed_volume(
-        &self,
-        name: &str,
-        root: Option<&Path>,
-    ) -> Result<VolumeRecord> {
-        lifecycle::validate_volume_name(name)
-            .with_context(|| format!("invalid volume name: {name:?}"))?;
-        let _lock = lifecycle::acquire_volume_lifecycle_lock()?;
-        lifecycle::recover_local_volume_catalog()?;
-        let entry = lifecycle::create_host_backed(name, root, self.probe.as_ref())?;
-        volume_record(&entry, &AttachmentLeaseCatalog::load()?)
-    }
-
-    /// Register an operator-supplied host directory as an attachment. The
-    /// probe must confirm the directory lives on encrypted storage. Not part
-    /// of the [`VolumeService`] contract (arbitrary host-directory mounts are
-    /// out of the service's scope).
-    pub fn prepare_ad_hoc_host_attachment(
-        &self,
-        request: &AttachmentRequest,
-        host_dir: &Path,
-    ) -> Result<AttachmentRecord> {
-        let _lock = lifecycle::acquire_volume_lifecycle_lock()?;
-        lifecycle::recover_local_volume_catalog()?;
-        lifecycle::validate_volume_name(request.volume.as_str())?;
-        if !host_dir.is_absolute() {
-            bail!("host path must be absolute, got {}", host_dir.display());
-        }
-        if !host_dir.is_dir() {
-            bail!(
-                "host path {} is not an existing directory",
-                host_dir.display()
-            );
-        }
-        self.probe.require_encrypted(host_dir)?;
-        register_attachment(
-            request,
-            host_dir.to_string_lossy().into_owned(),
-            LocalVolumeKind::Directory,
-            VolumeMountSource::AdHocHost,
-        )
     }
 
     /// Run the host-encryption policy against a path.
@@ -231,14 +184,8 @@ impl LocalVolumeService {
 
     /// Register an already-materialized ext4 image as an ad-hoc attachment.
     ///
-    /// The block-image counterpart to [`Self::prepare_ad_hoc_host_attachment`].
-    /// A host *directory* cannot be served — no workload backend has a
-    /// virtio-fs device — so the caller snapshots it into an image and
-    /// registers that instead. This records the shape, and
-    /// `resolve_mount_entry` honours it at launch.
-    ///
-    /// Additive rather than a change to the directory method, whose contract
-    /// other consumers of this crate already depend on.
+    /// A host *directory* cannot be served, so the caller snapshots it into an
+    /// image and registers that block-image shape for launch.
     pub fn prepare_ad_hoc_image_attachment(
         &self,
         request: &AttachmentRequest,
@@ -373,12 +320,6 @@ impl VolumeService for LocalVolumeService {
             bail!("host path must be absolute, got {:?}", entry.host_path);
         }
         match &entry.kind {
-            LocalVolumeKind::Directory if !host_path.is_dir() => {
-                bail!(
-                    "host path {:?} is not an existing directory",
-                    entry.host_path
-                )
-            }
             LocalVolumeKind::BlockImage { .. } if !host_path.is_file() => {
                 bail!(
                     "managed block volume {:?} is not an existing file",
@@ -390,7 +331,6 @@ impl VolumeService for LocalVolumeService {
                     format!("managed block volume {:?} is not ext4", entry.host_path)
                 })?;
             }
-            LocalVolumeKind::Directory => {}
         }
         register_attachment(
             request,
@@ -563,12 +503,11 @@ fn enforce_profile_access(
     Ok(())
 }
 
-/// Lease intents for the caller-supplied explicit volume list (block volumes
-/// only — directory shares are not exclusive).
+/// Lease intents for the caller-supplied explicit block-volume list.
 fn explicit_lease_intents(owner: &str, explicit: &[RuntimeVolume]) -> Result<Vec<LeaseIntent>> {
     explicit
         .iter()
-        .filter(|volume| matches!(volume.kind, mvm_core::vm_backend::VmVolumeKind::Disk))
+        .filter(|volume| volume.materialized_image.is_none())
         .map(|volume| {
             Ok(LeaseIntent {
                 key: lease::lease_key(Path::new(&volume.host))?,
@@ -633,16 +572,6 @@ fn volume_record(
     leases: &AttachmentLeaseCatalog,
 ) -> Result<VolumeRecord> {
     let (source, encryption, host_artifact) = match (&entry.kind, &entry.encryption) {
-        (LocalVolumeKind::Directory, LocalVolumeEncryption::HostBacked) => (
-            VolumeSourceKind::ManagedDirectory,
-            EncryptionState::HostBacked,
-            Some(entry.host_path.clone()),
-        ),
-        (LocalVolumeKind::Directory, LocalVolumeEncryption::MvmManaged(enc)) => (
-            VolumeSourceKind::ManagedDirectory,
-            managed_encryption_state(enc.state),
-            (enc.state == LocalVolumeState::Unlocked).then(|| entry.host_path.clone()),
-        ),
         (LocalVolumeKind::BlockImage { size_mib }, LocalVolumeEncryption::HostBacked) => (
             VolumeSourceKind::ManagedBlock {
                 capacity_mib: *size_mib,
@@ -689,10 +618,4 @@ fn managed_encryption_state(state: LocalVolumeState) -> EncryptionState {
 #[must_use]
 pub fn default_block_volume_root() -> PathBuf {
     lifecycle::default_mvm_volume_root()
-}
-
-/// Default host-backed volume root helper.
-#[must_use]
-pub fn default_host_backed_volume_root() -> PathBuf {
-    lifecycle::default_managed_volume_root()
 }

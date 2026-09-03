@@ -161,7 +161,11 @@ Last updated: 2026-09-03
 
 - [x] **Remove virtio-fs — `specs/plans/2026-08-31-remove-virtio-fs.md`.**
       Stage A: `--mount` is materialized into an ext4 image and attached as
-      virtio-blk, and the directory-share capability seam is gone. Stage B: the
+      virtio-blk, the directory-share capability seam is gone, and the runtime
+      `VmVolumeKind::DirShare` / local `Directory` variants are retired while
+      signed plans retain `ShareKind::DirShare` for claim 1. Workspace, gated,
+      and BDD checks plus a live Firecracker `machine run --mount` witness are
+      green. Stage B: the
       dev-tier virtio-fs root is deleted end to end — the tier gate, the
       capability, the launch-config field, the driver bootargs arm, and the HVF
       device model's root channel including the `MVM_HVF_VIRTIOFS_ROOT` env hook

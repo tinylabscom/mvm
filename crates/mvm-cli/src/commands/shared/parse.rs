@@ -285,7 +285,7 @@ pub fn volume_spec_to_vm_volume(spec: &VolumeSpec) -> VmVolume {
             guest: guest_mount.clone(),
             size: String::new(),
             read_only: *read_only,
-            kind: VmVolumeKind::DirShare,
+            kind: VmVolumeKind::Disk,
             encrypted: false,
         },
         VolumeSpec::Disk {
@@ -308,9 +308,8 @@ pub fn volume_spec_to_vm_volume(spec: &VolumeSpec) -> VmVolume {
 }
 
 /// Sparse-create the backing image for one disk-image volume so the
-/// hypervisor can attach it (a directory share needs nothing). The image
-/// is created at its declared size if absent; an existing image is left
-/// intact so its data survives. No-op for a directory share.
+/// hypervisor can attach it. The image is created at its declared size if
+/// absent; an existing image is left intact so its data survives.
 ///
 /// The sidecar-lock guard from `ensure_persistent_volume_image` is
 /// released immediately: the hypervisor (HVF) takes its own exclusive lock
@@ -326,9 +325,6 @@ pub fn volume_spec_to_vm_volume(spec: &VolumeSpec) -> VmVolume {
 pub fn materialize_disk_volume(
     v: &VmVolume,
 ) -> Result<Option<mvm_build::volume_image::VolumeImageLock>> {
-    if !matches!(v.kind, VmVolumeKind::Disk) {
-        return Ok(None);
-    }
     let size_mib = mvm_core::util::parse_human_size(&v.size)
         .with_context(|| format!("disk volume '{}' size '{}'", v.guest, v.size))?;
     let size_bytes = u64::from(size_mib) * 1024 * 1024;
@@ -468,7 +464,7 @@ pub fn vm_volume_from_spec_validated(spec: &VolumeSpec) -> Result<VmVolume> {
     validate_volume_spec(spec)?;
 
     let mut vmv = volume_spec_to_vm_volume(spec);
-    let expect_dir = matches!(vmv.kind, VmVolumeKind::DirShare);
+    let expect_dir = matches!(spec, VolumeSpec::DirShare { .. });
     vmv.host = validate_host_path(&vmv.host, expect_dir)?;
     Ok(vmv)
 }
@@ -856,25 +852,6 @@ mod volume_spec_tests {
         assert!(
             len > requested - (1024 * 1024) && len <= requested,
             "a 10M request must produce very nearly 10 MiB, got {len} bytes"
-        );
-
-        // A directory share is not a disk and must not have an image
-        // written for it — the early return is its own mutant.
-        let share_host = tmp.path().join("share");
-        let share = VmVolume {
-            materialized_image: None,
-            volume_label: None,
-            host: share_host.to_string_lossy().into_owned(),
-            guest: "/share".to_string(),
-            size: "10M".to_string(),
-            read_only: false,
-            kind: VmVolumeKind::DirShare,
-            encrypted: false,
-        };
-        materialize_disk_volume(&share).expect("a dir share is a no-op");
-        assert!(
-            !share_host.exists(),
-            "a directory share must not materialise a disk image"
         );
     }
 }

@@ -139,9 +139,12 @@ pub struct RuntimeVolume {
     /// otherwise, which is also what a config omitting the field means.
     #[serde(default)]
     pub read_only: bool,
-    /// Disk image (virtio-blk) vs live directory share (virtio-fs).
-    /// Defaults to `Disk` so a runtime-config file written before this
-    /// field existed keeps its persistent-volume meaning.
+    /// Materialized block image for a directory grant. `host` retains the
+    /// granted directory for signed-plan admission; this is the file attached
+    /// by the backend. Older configs omit it and remain direct disk volumes.
+    #[serde(default)]
+    pub materialized_image: Option<String>,
+    /// Runtime transport kind. Defaults to `Disk` for older configs.
     #[serde(default)]
     pub kind: mvm_core::vm_backend::VmVolumeKind,
     /// `:enc` — route a disk volume through in-guest encryption.
@@ -157,6 +160,7 @@ impl From<&mvm_core::vm_backend::VmVolume> for RuntimeVolume {
             guest: v.guest.clone(),
             size: v.size.clone(),
             read_only: v.read_only,
+            materialized_image: v.materialized_image.clone(),
             kind: v.kind,
             encrypted: v.encrypted,
         }
@@ -727,6 +731,43 @@ ls -lh "$IMAGES_DIR/{name}.$(uname -m).elf"
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_volume_defaults_to_an_unmaterialized_disk() {
+        let config: RuntimeConfig = toml::from_str(
+            r#"
+[[volumes]]
+host = "/vol/data.ext4"
+guest = "/data"
+size = "1G"
+"#,
+        )
+        .unwrap();
+
+        let volume = config.volumes.first().unwrap();
+        assert_eq!(volume.kind, mvm_core::vm_backend::VmVolumeKind::Disk);
+        assert_eq!(volume.materialized_image, None);
+    }
+
+    #[test]
+    fn runtime_volume_records_a_materialized_directory_image() {
+        let config: RuntimeConfig = toml::from_str(
+            r#"
+[[volumes]]
+host = "/host/data"
+guest = "/data"
+size = "1G"
+materialized_image = "/state/data.ext4"
+"#,
+        )
+        .unwrap();
+
+        let volume = config.volumes.first().unwrap();
+        assert_eq!(
+            volume.materialized_image.as_deref(),
+            Some("/state/data.ext4")
+        );
+    }
 
     #[test]
     fn test_parse_minimal_config() {

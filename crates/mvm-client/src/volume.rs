@@ -45,7 +45,7 @@ pub use dto::{
 pub use lease::LaunchLease;
 pub use service::{
     DenyAllHostEncryptionProbe, HostEncryptionProbe, LaunchPreparation, LocalVolumeService,
-    VolumeService, default_block_volume_root, default_host_backed_volume_root, probe_from_fn,
+    VolumeService, default_block_volume_root, probe_from_fn,
 };
 
 #[cfg(test)]
@@ -108,6 +108,19 @@ mod tests {
                 .unwrap()
                 .host_path,
         )
+    }
+
+    fn create_ext4_image(path: &Path, size_mib: u32) {
+        let mut image = fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(path)
+            .expect("create ext4 image");
+        let size_bytes = u64::from(size_mib) * 1024 * 1024;
+        image.set_len(size_bytes).expect("size ext4 image");
+        mvm_fs::ext4::mkfs::format_empty_ext4(&mut image, size_bytes).expect("format ext4 image");
+        image.sync_all().expect("sync ext4 image");
     }
 
     #[test]
@@ -298,6 +311,7 @@ mod tests {
             guest: "/data/work".to_string(),
             size: "1G".to_string(),
             read_only: true,
+            materialized_image: None,
             kind: mvm_core::vm_backend::VmVolumeKind::Disk,
             encrypted: false,
         };
@@ -311,6 +325,29 @@ mod tests {
             format!("{err:#}").contains("duplicate guest mount path"),
             "got: {err:#}"
         );
+    }
+
+    #[test]
+    fn materialized_directory_grant_does_not_take_a_direct_disk_lease() {
+        let _home = TestVolumeHome::new();
+        let materialized = mvm_runtime::image::RuntimeVolume {
+            host: "/granted/directory".to_string(),
+            guest: "/work".to_string(),
+            size: "1G".to_string(),
+            read_only: true,
+            materialized_image: Some("/state/mount.ext4".to_string()),
+            kind: mvm_core::vm_backend::VmVolumeKind::Disk,
+            encrypted: false,
+        };
+        let request = LaunchLeaseRequest::builder("vm-1")
+            .unwrap()
+            .explicit_volumes(vec![materialized])
+            .profile(AdmittedProfile::Dev)
+            .build();
+
+        let prepared = service().acquire_launch_lease(&request).unwrap();
+        assert_eq!(prepared.volumes.len(), 1);
+        assert!(AttachmentLeaseCatalog::load().unwrap().leases.is_empty());
     }
 
     #[test]
@@ -620,12 +657,11 @@ mod tests {
     }
 
     #[test]
-    fn host_backed_creation_fails_closed_without_a_probe() {
+    fn host_directory_encryption_check_fails_closed_without_a_probe() {
         let home = TestVolumeHome::new();
         let root = home.path().join("plain");
-        let err = service()
-            .create_host_backed_volume("plainvol", Some(&root))
-            .unwrap_err();
+        fs::create_dir(&root).unwrap();
+        let err = service().require_host_encryption(&root).unwrap_err();
         assert!(
             format!("{err:#}").contains("no host encryption probe"),
             "got: {err:#}"
@@ -633,24 +669,20 @@ mod tests {
     }
 
     #[test]
-    fn host_backed_creation_works_through_an_injected_probe() {
+    fn host_directory_encryption_check_uses_the_injected_probe() {
         let home = TestVolumeHome::new();
         let root = home.path().join("encrypted-backing");
+        fs::create_dir(&root).unwrap();
         let probe = super::probe_from_fn(|_path: &Path| Ok(()));
         let svc = LocalVolumeService::with_host_encryption_probe(probe);
-        let record = svc
-            .create_host_backed_volume("hostvol", Some(&root))
-            .unwrap();
-        assert_eq!(record.source, VolumeSourceKind::ManagedDirectory);
-        assert_eq!(record.encryption, EncryptionState::HostBacked);
-        assert!(record.host_artifact.is_some());
+        svc.require_host_encryption(&root).unwrap();
     }
 
     #[test]
-    fn ad_hoc_host_attachment_requires_probe_and_registers() {
+    fn ad_hoc_image_attachment_registers_a_block_image() {
         let home = TestVolumeHome::new();
-        let host_dir = home.path().join("adhoc");
-        fs::create_dir(&host_dir).unwrap();
+        let image = home.path().join("adhoc.ext4");
+        create_ext4_image(&image, 16);
         let request = AttachmentRequest::builder("vm-1", "input")
             .unwrap()
             .guest_path("/work/input")
@@ -658,19 +690,11 @@ mod tests {
             .build()
             .unwrap();
 
-        let err = service()
-            .prepare_ad_hoc_host_attachment(&request, &host_dir)
-            .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("no host encryption probe"),
-            "got: {err:#}"
-        );
-
-        let svc = LocalVolumeService::with_host_encryption_probe(super::probe_from_fn(|_| Ok(())));
-        let record = svc
-            .prepare_ad_hoc_host_attachment(&request, &host_dir)
+        let record = service()
+            .prepare_ad_hoc_image_attachment(&request, &image, 16)
             .unwrap();
         assert_eq!(record.source, AttachmentSource::AdHocHost);
+        assert_eq!(record.host_path, image.display().to_string());
     }
 
     #[test]
@@ -727,15 +751,14 @@ mod tests {
     }
 
     #[test]
-    fn ad_hoc_host_attachment_refuses_names_unfit_for_virtiofs_tags() {
+    fn ad_hoc_image_attachment_refuses_invalid_volume_names() {
         let home = TestVolumeHome::new();
-        let host_dir = home.path().join("adhoc");
-        fs::create_dir(&host_dir).unwrap();
-        let svc = LocalVolumeService::with_host_encryption_probe(super::probe_from_fn(|_| Ok(())));
+        let image = home.path().join("adhoc.ext4");
+        create_ext4_image(&image, 16);
+        let svc = service();
 
-        // Accepted by the general name type but too loose for the virtio-fs
-        // tag the guest kernel sees: underscores and >32-char names must be
-        // refused with the same rule managed creation enforces.
+        // Accepted by the general name type but too loose for the conservative
+        // local-volume identity rule.
         for name in ["input_data", &"a".repeat(33)] {
             let request = AttachmentRequest::builder("vm-1", name)
                 .unwrap()
@@ -744,7 +767,7 @@ mod tests {
                 .build()
                 .unwrap();
             let err = svc
-                .prepare_ad_hoc_host_attachment(&request, &host_dir)
+                .prepare_ad_hoc_image_attachment(&request, &image, 16)
                 .unwrap_err();
             assert!(
                 format!("{err:#}").contains("volume name"),
@@ -754,20 +777,18 @@ mod tests {
     }
 
     #[test]
-    fn launch_reprobes_host_backed_attachments() {
+    fn launch_reprobes_ad_hoc_image_attachments() {
         let home = TestVolumeHome::new();
-        let host_dir = home.path().join("adhoc");
-        fs::create_dir(&host_dir).unwrap();
+        let image = home.path().join("adhoc.ext4");
+        create_ext4_image(&image, 16);
         let request = AttachmentRequest::builder("vm-1", "input")
             .unwrap()
             .guest_path("/work/input")
             .profile(AdmittedProfile::Dev)
             .build()
             .unwrap();
-        let permissive =
-            LocalVolumeService::with_host_encryption_probe(super::probe_from_fn(|_| Ok(())));
-        permissive
-            .prepare_ad_hoc_host_attachment(&request, &host_dir)
+        service()
+            .prepare_ad_hoc_image_attachment(&request, &image, 16)
             .unwrap();
 
         // The launch-time recheck runs with the deny-all probe: the host

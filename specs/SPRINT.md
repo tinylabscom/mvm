@@ -33,6 +33,17 @@
       tests, all-targets zero-warning Clippy, policy checks, and BDD are green;
       the plan's broader output-surface design and merge delivery remain.
 
+- [ ] **Retire runtime directory-share volume variants.**
+      `specs/plans/2026-09-02-retire-dirshare.md`.
+      Runtime volumes are disk-only, while signed plans retain
+      `ShareKind::DirShare` as the audited directory-grant fact and admission
+      derives it from `materialized_image`. Managed `--host` attachments are
+      registered as block images; obsolete persisted directory-kind records
+      fail closed. Workspace tests, check, formatting, zero-warning Clippy,
+      Linux/BDD gated compilation, the 248-scenario BDD suite, and a live
+      Firecracker `machine run --mount` boot witness are green; merge delivery
+      remains.
+
 - [ ] **Content-addressed asset identity.**
       `specs/plans/2026-09-02-content-addressed-asset-identity.md`.
       Every dataset, model, prompt, agent, policy, and compute environment a
@@ -2257,13 +2268,13 @@ Then unify + retire the old paths:
 
 - [ ] **Sub-second launch**, verified: a timed `mvmctl up` → PTY shell → `mvmctl down` e2e on Mac (HVF) and Linux (libkrun + FC), asserting sub-second boot + clean teardown.
 - [~] **Warm start / warm pool** (pre-warmed standby VMs), **snapshot / fork / restore** (bake once, fork many via CoW, fast restore), **streaming exec**, **`expose_tcp`** (host↔guest port forward), **live host-directory mount** — the fast-local-runtime capabilities, exposed through `mvm-client` + the SDK.
-      The transient `machine run --mount HOST:/GUEST:ro` path now uses a live
-      read-only virtio-fs share on HVF instead of materializing an ext4 image;
+      The transient `machine run --mount HOST:/GUEST:ro` path materializes a
+      read-only ext4 snapshot and attaches it as virtio-blk on every backend;
       warm-start remains separately gated on a backend standby-pool capability.
       Phase timing now labels every launch `launch_mode=cold|warm` and reports
       `pool_wait_ms`, `claim_ms`, `warm_window_ms`, and `warm_slo=ok|over|na`;
-      directory-share claims remain fail-closed until a
-      backend can late-bind the host path after warm-child materialization.
+      materialized mount claims remain cold-path-only until a backend can
+      late-bind the image after warm-child materialization.
       Plan 298 now breaks the implementation into eight owned issues: #2192
       defines the resident claim service and now has the typed warm/cold
       contract, service-owned lease registry, lease-origin reporting, and
