@@ -103,23 +103,36 @@ pub(crate) fn materialize_mount_image(
     index: usize,
 ) -> Result<std::path::PathBuf> {
     let host_dir = std::path::PathBuf::from(&share.host_dir);
-    if !host_dir.is_dir() {
-        anyhow::bail!(
-            "--mount {}:{}: the host path is not a directory",
-            share.host_dir,
-            share.guest_mount
-        );
-    }
     let output = state_dir.join(format!("mount-{index}.ext4"));
-    let tree_bytes = tree_size_bytes(&host_dir);
-    // Labelled so the guest mounts by identity rather than by enumeration
-    // order, the same reason `stage0-init` reads its work disk by label.
-    let label = mount_volume_label(index);
+    materialize_directory_snapshot(&host_dir, &output, &mount_volume_label(index)).with_context(
+        || {
+            format!(
+                "materializing --mount {}:{}",
+                share.host_dir, share.guest_mount
+            )
+        },
+    )
+}
+
+/// Materialize a directory into a streaming, labelled ext4 snapshot.
+///
+/// Both transient `--mount` and persistent `machine volume mount --host`
+/// depend on this single implementation so their node policy, streaming
+/// behavior, and image construction cannot drift apart.
+pub(crate) fn materialize_directory_snapshot(
+    host_dir: &std::path::Path,
+    output: &std::path::Path,
+    volume_label: &str,
+) -> Result<std::path::PathBuf> {
+    if !host_dir.is_dir() {
+        anyhow::bail!("snapshot source {} is not a directory", host_dir.display());
+    }
+    let tree_bytes = tree_size_bytes(host_dir);
     let input = mvm_build::rootfs::MaterializeExt4Input::builder()
-        .unpacked_root(host_dir.clone())
-        .output(output.clone())
+        .unpacked_root(host_dir.to_path_buf())
+        .output(output.to_path_buf())
         .uncompressed_size_bytes(tree_bytes)
-        .volume_label(label)
+        .volume_label(volume_label.to_owned())
         .emit_verity(false)
         // Only an OCI unpack on a case-folding host defers nodes; a host
         // directory is read as it is.
@@ -132,15 +145,9 @@ pub(crate) fn materialize_mount_image(
         // walk records paths and sizes, and the bytes are streamed into the
         // image as it is written.
         .with_file_content_policy(mvm_fs::rootfs::FileContentPolicy::DeferToEmit);
-    mvm_build::rootfs::materialize_ext4_pure_with_walk_options(&input, options).with_context(
-        || {
-            format!(
-                "materializing --mount {} into an ext4 image",
-                share.host_dir
-            )
-        },
-    )?;
-    Ok(output)
+    mvm_build::rootfs::materialize_ext4_pure_with_walk_options(&input, options)
+        .with_context(|| format!("materializing {} into an ext4 image", host_dir.display()))?;
+    Ok(output.to_path_buf())
 }
 
 /// Sum of the regular-file bytes under `dir`, for sizing the image.
@@ -190,7 +197,8 @@ mod tests {
             read_only: true,
         };
         let err = materialize_mount_image(&share, scratch.path(), 0).unwrap_err();
-        assert!(err.to_string().contains("not a directory"), "{err:#}");
+        let message = format!("{err:#}");
+        assert!(message.contains("not a directory"), "{message}");
         assert!(!scratch.path().join("mount-0.ext4").exists());
     }
 

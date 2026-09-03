@@ -674,6 +674,59 @@ mod tests {
     }
 
     #[test]
+    fn ad_hoc_ext4_image_registers_and_resolves_as_a_block_volume() {
+        let home = TestVolumeHome::new();
+        home.create_block("source", 16);
+        service().unlock_volume("source").unwrap();
+        let image = host_path("source");
+        let request = AttachmentRequest::builder("vm-1", "input")
+            .unwrap()
+            .guest_path("/work/input")
+            .profile(AdmittedProfile::Dev)
+            .build()
+            .unwrap();
+        let svc = LocalVolumeService::with_host_encryption_probe(super::probe_from_fn(|_| Ok(())));
+
+        let record = svc
+            .prepare_ad_hoc_image_attachment(&request, &image, 16)
+            .unwrap();
+        assert_eq!(record.source, AttachmentSource::AdHocHost);
+
+        let prepared = svc.acquire_launch_lease(&dev_launch("vm-1")).unwrap();
+        assert_eq!(prepared.volumes.len(), 1);
+        assert_eq!(
+            PathBuf::from(&prepared.volumes[0].host),
+            fs::canonicalize(&image).unwrap()
+        );
+        assert!(matches!(
+            prepared.volumes[0].kind,
+            mvm_core::vm_backend::VmVolumeKind::Disk
+        ));
+    }
+
+    #[test]
+    fn ad_hoc_image_attachment_refuses_non_ext4_bytes() {
+        let home = TestVolumeHome::new();
+        let image = home.path().join("not-ext4.img");
+        fs::write(&image, b"not an ext4 image").unwrap();
+        let request = AttachmentRequest::builder("vm-1", "input")
+            .unwrap()
+            .guest_path("/work/input")
+            .profile(AdmittedProfile::Dev)
+            .build()
+            .unwrap();
+        let svc = LocalVolumeService::with_host_encryption_probe(super::probe_from_fn(|_| Ok(())));
+
+        let error = svc
+            .prepare_ad_hoc_image_attachment(&request, &image, 1)
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("is not a valid ext4 image"),
+            "got: {error:#}"
+        );
+    }
+
+    #[test]
     fn ad_hoc_host_attachment_refuses_names_unfit_for_virtiofs_tags() {
         let home = TestVolumeHome::new();
         let host_dir = home.path().join("adhoc");

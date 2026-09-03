@@ -169,8 +169,44 @@ fn register_host_directory_volume(
         "--guest",
         &guest_path,
     ])
-    .isolated_home(&home);
+    .isolated_home(&home)
+    .env("PATH", encrypted_volume_probe_path(world));
     world.last_run = Some(cmd.output().expect("failed to spawn mvmctl"));
+}
+
+fn encrypted_volume_probe_path(world: &CliWorld) -> std::ffi::OsString {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let bin = isolated_home(world).join("encrypted-volume-probe-bin");
+        fs::create_dir_all(&bin).expect("create encrypted-volume probe bin");
+        for (name, body) in [
+            (
+                "diskutil",
+                "#!/bin/sh\nprintf 'Device Identifier: disk-test\\nEncrypted: Yes\\n'\n",
+            ),
+            ("findmnt", "#!/bin/sh\nprintf '/dev/mapper/mvm-test\\n'\n"),
+            ("lsblk", "#!/bin/sh\nprintf 'crypt\\n'\n"),
+        ] {
+            let path = bin.join(name);
+            fs::write(&path, body)
+                .unwrap_or_else(|error| panic!("write encrypted-volume probe {path:?}: {error}"));
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap_or_else(|error| {
+                panic!("make encrypted-volume probe executable {path:?}: {error}")
+            });
+        }
+        let mut paths = vec![bin];
+        if let Some(current) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&current));
+        }
+        std::env::join_paths(paths).expect("join encrypted-volume probe PATH")
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = world;
+        std::env::var_os("PATH").unwrap_or_default()
+    }
 }
 
 #[then(expr = "managed volume {string} ends with byte {int}")]

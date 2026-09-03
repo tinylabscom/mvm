@@ -368,6 +368,21 @@ fn host_snapshot_image(vm_name: &str, volume_name: &str) -> std::path::PathBuf {
         .join(format!("{volume_name}.ext4"))
 }
 
+fn ensure_private_snapshot_parent(output: &Path) -> Result<()> {
+    let parent = output
+        .parent()
+        .with_context(|| format!("snapshot path {} has no parent", output.display()))?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("creating snapshot dir {}", parent.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("restricting snapshot dir {}", parent.display()))?;
+    }
+    Ok(())
+}
+
 /// Materialize `host_dir` into an ext4 image for registration.
 ///
 /// The same pure-Rust writer `--mount` uses — no `mkfs`, no subprocess, and it
@@ -377,50 +392,30 @@ fn materialize_host_snapshot(
     vm_name: &str,
     volume_name: &str,
     host_dir: &Path,
-    read_only: bool,
 ) -> Result<std::path::PathBuf> {
     let output = host_snapshot_image(vm_name, volume_name);
-    if let Some(parent) = output.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating snapshot dir {}", parent.display()))?;
+    ensure_private_snapshot_parent(&output)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(&output)
+            .with_context(|| format!("creating private snapshot image {}", output.display()))?;
+        std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restricting snapshot image {}", output.display()))?;
     }
-    let _ = read_only;
-    let input = mvm_build::rootfs::MaterializeExt4Input::builder()
-        .unpacked_root(host_dir.to_path_buf())
-        .output(output.clone())
-        .uncompressed_size_bytes(host_tree_size_bytes(host_dir))
-        .volume_label(format!("mvmvol{volume_name}"))
-        .emit_verity(false)
-        .deferred_nodes(Vec::new())
-        .build()
-        .context("assembling the host snapshot inputs")?;
-    mvm_build::rootfs::materialize_ext4_pure(&input)
-        .with_context(|| format!("materializing {} into an image", host_dir.display()))?;
+    crate::exec::materialize_directory_snapshot(host_dir, &output, "mvmvol")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restricting snapshot image {}", output.display()))?;
+    }
     Ok(output)
-}
-
-/// Sum of regular-file bytes under `dir`, for sizing the image.
-///
-/// Best effort, matching `--mount`'s sizing: an unreadable entry contributes
-/// nothing rather than failing the registration, because this only feeds an
-/// estimate and the writer grows the image to fit what it actually writes.
-fn host_tree_size_bytes(dir: &Path) -> u64 {
-    let mut total = 0u64;
-    let mut pending = vec![dir.to_path_buf()];
-    while let Some(next) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(&next) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let Ok(meta) = entry.metadata() else { continue };
-            if meta.is_dir() {
-                pending.push(entry.path());
-            } else if meta.is_file() {
-                total = total.saturating_add(meta.len());
-            }
-        }
-    }
-    total
 }
 
 /// The registered size, in MiB, rounded up so a sub-MiB image is not recorded
@@ -472,7 +467,15 @@ fn mount(
             // directory. Re-register to refresh it.
             let host_encrypted_check = service();
             host_encrypted_check.require_host_encryption(host)?;
-            let image = materialize_host_snapshot(vm_name, volume_name, host, !rw)?;
+            let output = host_snapshot_image(vm_name, volume_name);
+            ensure_private_snapshot_parent(&output)?;
+            let output_parent = output
+                .parent()
+                .context("host snapshot output has no parent directory")?;
+            host_encrypted_check
+                .require_host_encryption(output_parent)
+                .context("host snapshot destination is not on encrypted backing storage")?;
+            let image = materialize_host_snapshot(vm_name, volume_name, host)?;
             let size_mib = image_size_mib(&image)?;
             service().prepare_ad_hoc_image_attachment(&request, &image, size_mib)?
         }
@@ -677,6 +680,50 @@ mod tests {
         let mut marker = [0u8; 1];
         image.read_exact(&mut marker).unwrap();
         assert_eq!(marker, [0x7a]);
+    }
+
+    #[test]
+    fn host_snapshot_helpers_materialize_a_namespaced_ext4_image() {
+        let guard = DataDirGuard::new();
+        let source = guard.path().join("source");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::write(source.join("nested/marker"), b"snapshot-visible\n").unwrap();
+
+        let image = materialize_host_snapshot("vm-1", "input", &source).unwrap();
+        assert_eq!(
+            image,
+            guard.path().join("volumes/host-snapshots/vm-1/input.ext4")
+        );
+        assert!(image_size_mib(&image).unwrap() >= 1);
+        let fs = ext4_view::Ext4::load_from_path(&image).unwrap();
+        assert!(fs.exists("/nested/marker").unwrap());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                fs::metadata(image.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            assert_eq!(
+                fs::metadata(&image).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn image_size_refuses_a_missing_snapshot() {
+        let guard = DataDirGuard::new();
+        let missing = guard.path().join("missing.ext4");
+        let error = image_size_mib(&missing).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("stat snapshot image"),
+            "got: {error:#}"
+        );
     }
 
     #[test]

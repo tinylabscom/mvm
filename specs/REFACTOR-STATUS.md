@@ -4,6 +4,13 @@ Last updated: 2026-09-03
 
 ## In progress
 
+- [ ] **Persistent host-directory snapshots.**
+      `specs/plans/2026-09-02-retire-dirshare.md`.
+      Ad-hoc `--host <directory>` registration now creates a private ext4
+      snapshot on verified encrypted backing and registers it as a block
+      volume. Focused materialization, validation, error-path, launch-lease,
+      full workspace, and BDD tests are green; merge delivery remains.
+
 - [ ] **Workload output affordance — durable writable inline disks.**
       `specs/plans/2026-09-02-workload-output-affordance.md`.
       Foreground transient runs now flush writable disks through the existing
