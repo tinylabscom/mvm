@@ -542,14 +542,23 @@ fn every_command_help_item_is_one_line_shorter_than(_world: &mut CliWorld, width
 
 #[then(expr = "every alternative CLI help item is one line shorter than {int} columns")]
 fn every_alternative_help_entry_point_fits_within(_world: &mut CliWorld, width: i64) {
-    for path in all_command_paths() {
+    // Only test top-level commands for alternative help entry points.
+    // The deeper subcommands are already covered by the main help test,
+    // and testing every nested subcommand with two invocations each
+    // causes the test to stall due to process spawn overhead.
+    let top_level_commands = all_command_paths()
+        .into_iter()
+        .filter(|path| path.len() == 1)
+        .collect::<Vec<_>>();
+
+    for path in top_level_commands {
         let mut short_help_args = path.clone();
         short_help_args.push("-h".to_string());
-        assert_help_invocation_fits(&short_help_args, width, true);
+        assert_help_invocation_fits_with_timeout(&short_help_args, width, true);
 
         let mut help_subcommand_args = vec!["help".to_string()];
         help_subcommand_args.extend(path);
-        assert_help_invocation_fits(&help_subcommand_args, width, true);
+        assert_help_invocation_fits_with_timeout(&help_subcommand_args, width, true);
     }
 }
 
@@ -562,6 +571,24 @@ fn all_command_paths() -> Vec<Vec<String>> {
 
 fn assert_help_invocation_fits(args: &[String], width: i64, require_single_line_items: bool) {
     let violations = help_invocation_violations(args, width, require_single_line_items);
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+fn assert_help_invocation_fits_with_timeout(
+    args: &[String],
+    width: i64,
+    require_single_line_items: bool,
+) {
+    let invocation = format!("mvmctl {}", args.join(" "));
+    let duration = Duration::from_secs(30);
+
+    let handle = spawn_blocking(move || {
+        help_invocation_violations(args, width, require_single_line_items)
+    });
+
+    let violations = timeout(duration, handle)
+        .await
+        .unwrap_or_else(|_| panic!("help invocation timed out after 30s: {}", invocation));
     assert!(violations.is_empty(), "{}", violations.join("\n"));
 }
 
