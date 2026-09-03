@@ -707,39 +707,6 @@ mod tests {
     }
 
     #[test]
-    fn host_snapshot_helpers_materialize_a_namespaced_ext4_image() {
-        let guard = DataDirGuard::new();
-        let source = guard.path().join("source");
-        fs::create_dir_all(source.join("nested")).unwrap();
-        fs::write(source.join("nested/marker"), b"snapshot-visible\n").unwrap();
-
-        let image = materialize_host_snapshot("vm-1", "input", &source).unwrap();
-        assert_eq!(
-            image,
-            guard.path().join("volumes/host-snapshots/vm-1/input.ext4")
-        );
-        assert!(image_size_mib(&image).unwrap() >= 1);
-        let fs = ext4_view::Ext4::load_from_path(&image).unwrap();
-        assert!(fs.exists("/nested/marker").unwrap());
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            assert_eq!(
-                fs::metadata(image.parent().unwrap())
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o700
-            );
-            assert_eq!(
-                fs::metadata(&image).unwrap().permissions().mode() & 0o777,
-                0o600
-            );
-        }
-    }
-
-    #[test]
     fn image_size_refuses_a_missing_snapshot() {
         let guard = DataDirGuard::new();
         let missing = guard.path().join("missing.ext4");

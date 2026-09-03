@@ -42,7 +42,6 @@ pub(crate) use backend_select::{
     select_exec_backend, validate_image_egress_backend, validate_image_egress_backend_name,
 };
 use guest_run::{emit_guest_console_diagnostic, run_in_guest, run_wasm_module};
-pub(crate) use mounts::materialize_directory_snapshot;
 use session::wait_for_agent_timed;
 pub use session::{
     AdmitInputs, SessionAdmit, SessionAuditSubstrate, SessionVm, boot_session_vm,
