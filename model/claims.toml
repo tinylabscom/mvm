@@ -402,8 +402,17 @@ statement = "Every published release artifact is authenticated under the release
 # that is green because nothing runs it — the same shape as the retired
 # `mvm.secret_env` witness on claim 13. Wire the feature into a test lane and it
 # becomes citable.
+#
+# `ci:release-provenance` anchors the step that attests the binary tarballs with
+# `actions/attest-build-provenance`. It witnesses authenticity because the
+# attestation is signed under the same workflow identity; it does not raise this
+# claim to say anything about build integrity. That is SLSA Build L2 — the same
+# workflow produces both artifact and attestation, so a compromised release job
+# forges both — and `ci:reproducibility` under claim 7 is the control for that
+# question.
 witnesses = [
     "ci:verify-release",
+    "ci:release-provenance",
     "fn:accepted_identities_are_the_versioned_release_workflow",
     "fn:a_missing_bundle_refuses_and_names_the_asset",
     "fn:fetch_expected_hashes_refuses_an_unsigned_manifest_before_parsing",
