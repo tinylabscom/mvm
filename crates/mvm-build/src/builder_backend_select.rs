@@ -374,17 +374,36 @@ fn stage0_backend_choice(choice: BuilderBackendChoice) -> BuilderBackendChoice {
 // Auto-fallback between builder backends on a VMM-level failure
 // ──────────────────────────────────────────────────────────────────
 
-/// Is `e` a VMM-level failure — the builder VM/supervisor couldn't run the
-/// build at all — rather than a genuine build error a different backend would
-/// hit identically? Only these justify an auto-fallback: a real
-/// `NixBuildFailed` (the build ran and failed) or a `DegradedBuilderStore`
-/// (shared Nix store) must surface unchanged.
+/// Is `e` a VMM-level failure — this backend could not run the job at all —
+/// rather than a genuine build error a different backend would hit
+/// identically? Only these justify an auto-fallback: a real `NixBuildFailed`
+/// (the build ran and failed) or a `DegradedBuilderStore` (shared Nix store)
+/// must surface unchanged.
+///
+/// `VmmUnavailable` counts, and did not until a backend that declined an
+/// operation outright was found to dead-end the auto-detected path. On macOS
+/// the default builder is hvf, which serves ordinary build jobs but wires
+/// neither Stage 0 nor the dependency install; libkrun wires both. Because the
+/// refusal was not in this set, `deps install` stopped at "hvf does not serve
+/// dependency installs" and never tried the backend that does — a fallback
+/// declining to fall back, for a failure that is precisely what it exists for.
+///
+/// This cannot override an operator: an explicit `--builder` /
+/// `MVM_BUILDER_BACKEND` makes [`builder_attempt_order`] return a single
+/// element, so there is no next backend to move to whatever this returns.
+///
+/// [`BuilderVmError::NotYetImplemented`] is deliberately excluded.
+/// `VmmUnavailable` says *not on this host*, which another backend may well
+/// answer; `NotYetImplemented` says *nowhere yet*, and retrying it elsewhere
+/// only trades one unimplemented path for another while making the eventual
+/// error name the wrong backend.
 pub fn is_builder_vm_level_failure(e: &BuilderVmError) -> bool {
     matches!(
         e,
         BuilderVmError::SupervisorExited { .. }
             | BuilderVmError::LibkrunUnavailable(_)
             | BuilderVmError::HvfVmmFailed { .. }
+            | BuilderVmError::VmmUnavailable { .. }
     )
 }
 
@@ -620,6 +639,48 @@ pub fn linux_builder_vm_readiness() -> Result<(), BuilderVmError> {
 
 #[cfg(test)]
 mod tests {
+    /// A backend declining an operation is a reason to try the next one.
+    ///
+    /// The regression this pins: hvf declines the dependency install, libkrun
+    /// serves it, and the auto-detected macOS order is exactly
+    /// `[hvf, libkrun]` — yet the refusal was not classified as VMM-level, so
+    /// the fallback stopped on the backend that could not do the job.
+    #[test]
+    fn a_backend_declining_an_operation_is_a_vmm_level_failure() {
+        assert!(is_builder_vm_level_failure(
+            &BuilderVmError::VmmUnavailable {
+                requested: "hvf-dependency-install".to_string(),
+                reason: "the hvf builder does not serve dependency installs".to_string(),
+            }
+        ));
+    }
+
+    /// "Nowhere yet" is not a reason to try somewhere else.
+    #[test]
+    fn a_globally_unimplemented_path_does_not_trigger_the_fallback() {
+        assert!(!is_builder_vm_level_failure(
+            &BuilderVmError::NotYetImplemented
+        ));
+    }
+
+    /// An operator who names a backend gets that backend, including its
+    /// refusals. The widened predicate must not reach past an explicit choice.
+    #[test]
+    fn an_explicit_choice_has_no_next_backend_whatever_the_predicate_says() {
+        for choice in [
+            BuilderBackendChoice::Hvf,
+            BuilderBackendChoice::Libkrun,
+            BuilderBackendChoice::Qemu,
+            BuilderBackendChoice::WebLinux,
+        ] {
+            assert_eq!(
+                builder_attempt_order(choice, /* explicit */ true, false, false),
+                vec![choice],
+                "an explicit --builder must never fall back"
+            );
+        }
+    }
+
     /// The convenience copy and the trait impls must agree, or the table
     /// `doctor` prints is a decoration a reader would be wrong to trust.
     ///
