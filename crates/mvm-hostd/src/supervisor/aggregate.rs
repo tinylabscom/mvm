@@ -1380,10 +1380,12 @@ mod tests {
             bundle: None,
             deps_volume: None,
             shares: Vec::new(),
+            asset_identities: Vec::new(),
             agent_verbs: None,
             services: Vec::new(),
             extensions: Vec::new(),
             stream_edges: Vec::new(),
+            sdk_uses_sidecar: true,
         };
         plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
         plan

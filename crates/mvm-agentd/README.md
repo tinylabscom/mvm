@@ -1,36 +1,62 @@
 # mvm-agentd
 
-Vsock protocol definitions and integration management for guest-side agents running inside Firecracker microVMs. Defines the wire protocol between host and guest — no SSH, ever.
+`mvm-agentd` is the guest-side runtime library and binary collection embedded
+in mvm images. It implements the host/guest vsock protocol, launches admitted
+workloads, reports health and exit status, and supplies narrowly scoped guest
+helpers for networking, mounts, egress, consoles, and host services.
 
-## Modules
+## Who uses it
 
-| Module | Purpose |
-|--------|---------|
-| `vsock` | Guest control protocol: `GuestRequest`/`GuestResponse` |
-| `builder_agent` | Host-VM dispatch protocol: `HostVmRequest`/`HostVmResponse` |
-| `integrations` | Integration manifest system: `IntegrationManifest`, `IntegrationEntry`, health checks |
+`mvm-build` compiles and injects the guest binaries into images. `mvm-runtime`,
+`mvm-vmm`, and `mvm-backends` share its session and wire behavior on the host
+side. `mvm-hostd` speaks the corresponding broker, audit, and supervisor
+protocols. `mvm-sdk` and `mvm-host-services` use its in-guest adapters. The root
+`mvmctl` crate re-exports selected protocol surfaces.
 
-## Wire Protocol
+## How it works
 
-All communication uses **4-byte big-endian length prefix + JSON body** over Firecracker vsock.
+The primary guest agent listens on an unprivileged vsock port. It authenticates
+and decodes bounded requests, applies the admitted runtime profile and verb
+grants, starts the workload, and multiplexes control, output, and exit events
+back to the host. Framing is a length-prefixed typed protocol rather than an
+SSH session.
 
-| Port | Direction | Purpose |
-|------|-----------|---------|
-| 5252 | Host -> Guest | Guest agent control (Ping, WorkerStatus, SleepPrep, Wake) |
-| 21470 | Host -> Guest | Builder agent (NixBuild, HealthCheck) |
+Specialized binaries keep privilege and dependency boundaries small:
 
-> Listen-side ports (Host → Guest direction) live above 1023 because the
-> agent runs as uid 901 with no `CAP_NET_BIND_SERVICE`.
+- `mvm-guest-agent` owns normal workload lifecycle and health.
+- `mvm-runner` and `mvm-oci-entrypoint` prepare and exec the workload.
+- `mvm-builder-agent` handles isolated builder sessions and file transfer.
+- `mvm-guest-netinit`, `mvm-forward-proxy`, and `mvm-egress-client` configure
+  or mediate network access.
+- `mvm-addon-dns` and `mvm-addon-vsock-bridge` expose optional local addon
+  services.
+- `mvm-seccomp-apply` and `mvm-setpriv` apply the final sandbox and identity.
 
-## Binaries
+The guest treats host replies as protocol input, while the host treats every
+guest request as untrusted. Secrets and authorization decisions remain
+host-side; the agent receives only the capabilities and values needed for the
+admitted execution.
 
-- **mvm-guest-agent** — Runs inside tenant instances on port 5252. Handles health checks, load sampling, sleep/wake lifecycle, and integration status reporting.
-- **mvm-builder-agent** — Runs inside ephemeral builder VMs on port 21470. Accepts `nix build` commands and reports results.
+## Main areas
 
-## Integration System
+| Area | Representative modules |
+|---|---|
+| Session transport | `guest_vsock_session`, `flowmux`, `exec_stream` |
+| Workload launch | `entrypoint`, `guest_bootstrap`, `runner`, `child_wait` |
+| Builder guest | `builder_agent`, `builder_session`, `builder_transfer` |
+| Host services | `broker_client`, `host_audit`, `host_time`, `host_cost`, `host_kv` |
+| Networking | `guest_net`, `netinit`, `forward_proxy`, `flowmux_egress` |
+| Guest resources | `guest_mount`, `genid`, `lifecycle_hooks`, `console` |
 
-Workloads declare themselves via JSON drop-in files in `/etc/mvm/integrations.d/`. The guest agent discovers, monitors, and reports integration health to the host.
+## Features and platforms
 
-## Dependencies
+`addons` enables the DNS/vsock bridge binaries and their async dependencies.
+`flowmux-async` enables Tokio transport support, and `schema` enables protocol
+schema generation. Linux-only helpers compile as stubs or are target-gated on
+other development hosts.
 
-- `mvm-core` (types, config)
+## Developing
+
+Run `cargo test -p mvm-agentd`. Wire changes require round trips through mock
+I/O plus malformed, oversized, unauthorized, and replay cases. Linux syscall
+and guest-image tests run in the project builder VM.

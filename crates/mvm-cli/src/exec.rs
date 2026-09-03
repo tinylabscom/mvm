@@ -159,6 +159,9 @@ pub struct LaunchShape<'a> {
     pub memory_mib: u32,
     pub mem_initial_mib: Option<u32>,
     pub dir_shares: &'a [DirShareSpec],
+    /// Declared `--asset` bindings hashed into content identities at
+    /// admission.
+    pub assets: &'a [crate::commands::shared::AssetSpec],
     /// Block-device mounts supplied by transient `--mount` disk syntax.
     pub disk_volumes: &'a [VmVolume],
     pub pty: bool,
@@ -198,6 +201,10 @@ pub struct ExecRequest {
     pub mem_initial_mib: Option<u32>,
     /// Live read-only host-directory shares requested by `machine run --mount`.
     pub dir_shares: Vec<DirShareSpec>,
+    /// Declared `--asset KIND:PATH` bindings hashed into content identities
+    /// at admission. Nothing is attached to the guest — the hash is recorded
+    /// in the signed plan and the chain-signed audit log.
+    pub assets: Vec<crate::commands::shared::AssetSpec>,
     /// Materialized disk-image volumes requested by `machine run --mount`.
     pub disk_volumes: Vec<VmVolume>,
     pub env: Vec<(String, String)>,
@@ -254,6 +261,7 @@ impl ExecRequest {
     /// the same config — which is what makes the warm-pool compat key match.
     pub fn launch_shape(&self) -> LaunchShape<'_> {
         LaunchShape {
+            assets: &self.assets,
             name: self.name.as_deref(),
             image: &self.image,
             cpus: self.cpus,
@@ -519,6 +527,83 @@ fn boots_baked_entrypoint(req: &ExecRequest) -> bool {
     matches!(&req.target, ExecTarget::Inline { argv } if argv.is_empty())
 }
 
+/// Run the image's baked entrypoint and return the status it exited with.
+///
+/// This shape — `machine run --flake <dir>` with nothing after it — used to
+/// boot the VM and then only *wait*, polling `<state_dir>/workload.exit` for a
+/// code. Nothing ever wrote that file, because nothing ever ran the workload:
+/// the guest agent validates `/etc/mvm/entrypoint` at boot and has no
+/// autostart, and the one binary that reports to the workload-exit vsock port
+/// is exec'd only by the agent's detached-run reaper. So the guest booted,
+/// idled, and the host failed after the full wait window with "stopped without
+/// reporting its exit code" — a message describing a workload that had not
+/// started.
+///
+/// The mechanism it was written against was real and is gone: the image `/init`
+/// used to source the entrypoint, capture `$?`, and call `mvm-exit-report`.
+/// The universal initramfs made the agent PID 1 and took that `/init` with it.
+///
+/// Dispatching `RunEntrypoint` is how the rest of the CLI already runs a baked
+/// entrypoint — it is exactly what `machine run --entrypoint` does, on a guest
+/// handler that works — so this reuses that path rather than reintroducing an
+/// autostart in the guest to feed a file the host is polling.
+fn dispatch_baked_entrypoint(
+    vm_name: &str,
+    req: &ExecRequest,
+    sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
+) -> Result<mvm_core::vm_backend::VmExitStatus> {
+    if !wait_for_agent_timed(vm_name, 30, sub) {
+        emit_guest_console_diagnostic(vm_name);
+        anyhow::bail!("guest agent did not become reachable within 30s");
+    }
+    use crate::commands::vm::invoke::{DispatchStdin, EntrypointDispatch, dispatch};
+    let code = dispatch(EntrypointDispatch {
+        vm_name,
+        stdin: DispatchStdin::OneShot(req.stdin.clone()),
+        // The same default the `--entrypoint` path applies to the same
+        // operation (`runtime.rs`: `args.run.timeout.unwrap_or(30)`), so the
+        // two spellings of "run this image's baked entrypoint" agree on how
+        // long it may take.
+        //
+        // Not 0. The agent reads this as a wall-clock ceiling and 0 means the
+        // wrapper has already exceeded it, not that it is unbounded — a live
+        // run with 0 came back `124: wrapper exceeded 0s timeout` before the
+        // workload could produce anything.
+        timeout_secs: baked_entrypoint_timeout_secs(req.timeout_secs),
+        session_id: None,
+    })
+    .with_context(|| format!("running the baked entrypoint in {vm_name}"))?;
+    Ok(dispatched_exit_status(code))
+}
+
+/// The wall-clock ceiling a baked entrypoint dispatch runs under.
+///
+/// Matches the `--entrypoint` path's default for the same operation
+/// (`runtime.rs`: `args.run.timeout.unwrap_or(30)`), so the two spellings of
+/// "run this image's baked entrypoint" cannot disagree about how long it may
+/// take.
+///
+/// Never 0: the agent reads this as a deadline the wrapper must finish inside,
+/// and 0 means it has already passed. A live run with 0 returned `124: wrapper
+/// exceeded 0s timeout` before the workload emitted anything.
+fn baked_entrypoint_timeout_secs(requested: Option<u64>) -> u64 {
+    requested.unwrap_or(30)
+}
+
+/// The exit status a dispatched entrypoint's code represents.
+///
+/// Always `Some`: a dispatch that returns at all returns a code, so this path
+/// can no longer produce `UNKNOWN`. That matters because `UNKNOWN` is what the
+/// old wait-only path yielded when nothing reported, and it is still the
+/// fail-closed signal [`baked_entrypoint_result`] refuses — which now means
+/// only "the dispatch itself failed", not "the workload was never started".
+fn dispatched_exit_status(code: i32) -> mvm_core::vm_backend::VmExitStatus {
+    mvm_core::vm_backend::VmExitStatus {
+        code: Some(code),
+        success: code == 0,
+    }
+}
+
 fn baked_entrypoint_result(
     status: mvm_core::vm_backend::VmExitStatus,
     capture: bool,
@@ -647,9 +732,7 @@ fn run_inner(
         }
     } else if boots_baked_entrypoint(&req) {
         let workload_started = timing.then(std::time::Instant::now);
-        backend
-            .wait(&mvm_core::vm_backend::VmId(vm_name.clone()))
-            .with_context(|| format!("waiting for baked workload in {vm_name}"))
+        dispatch_baked_entrypoint(&vm_name, &req, &mut sub_marks)
             .and_then(|status| baked_entrypoint_result(status, capture, &vm_name))
             .map(|result| (result, workload_started))
     } else {
@@ -1291,6 +1374,7 @@ pub fn resolve_launch(
                 .map(std::path::Path::new),
             vm_name: &vm_name,
             sdk_sidecar: sdk_sidecar.as_ref(),
+            assets: shape.assets,
         })?
     {
         start_config.tenant_id = Some(sub.tenant_id);
@@ -1395,6 +1479,7 @@ mod tests {
             timeout_secs: Some(120),
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            assets: Vec::new(),
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
@@ -1425,6 +1510,56 @@ mod tests {
         assert_eq!(result.left(), Some(7));
     }
 
+    /// A dispatch that inherits no `--timeout` must not inherit a deadline it
+    /// has already missed.
+    ///
+    /// `0` reads to the agent as "the wrapper has exceeded its window", not as
+    /// "unbounded". The first live run of this fix passed 0 and came back
+    /// `124: wrapper exceeded 0s timeout` — the workload never got to run, the
+    /// same symptom by a different route as the bug being fixed.
+    #[test]
+    fn a_baked_entrypoint_without_a_timeout_gets_the_entrypoint_paths_default() {
+        assert_eq!(
+            baked_entrypoint_timeout_secs(None),
+            30,
+            "must match `--entrypoint`'s `args.run.timeout.unwrap_or(30)` for the same operation"
+        );
+        assert_ne!(
+            baked_entrypoint_timeout_secs(None),
+            0,
+            "0 is an already-expired deadline, not an absent one"
+        );
+        assert_eq!(baked_entrypoint_timeout_secs(Some(120)), 120);
+        // An explicit 0 is the caller's to make; only the *default* is guarded.
+        assert_eq!(baked_entrypoint_timeout_secs(Some(0)), 0);
+    }
+
+    /// A dispatched entrypoint always yields a code, so this path can no
+    /// longer land in the fail-closed branch by *not running the workload*.
+    ///
+    /// That was the defect: `machine run --flake <dir>` with no trailing
+    /// command booted a guest, dispatched nothing, and waited for a report
+    /// nothing produced. The agent has no autostart, and the only writer of the
+    /// workload-exit port is exec'd solely by the detached-run reaper — so the
+    /// wait could only ever time out. The error named a workload that had never
+    /// started.
+    #[test]
+    fn a_dispatched_entrypoint_always_carries_a_code() {
+        for code in [0, 1, 7, 124, 255] {
+            let status = dispatched_exit_status(code);
+            assert_eq!(status.code, Some(code));
+            assert_eq!(status.success, code == 0);
+            assert_ne!(
+                status,
+                mvm_core::vm_backend::VmExitStatus::UNKNOWN,
+                "a dispatched entrypoint must never report UNKNOWN — that is \
+                 reserved for a workload that was never run"
+            );
+        }
+    }
+
+    /// Kept, and now narrower in meaning: UNKNOWN on this path can only come
+    /// from a dispatch that failed, never from a workload nobody started.
     #[test]
     fn a_baked_entrypoint_without_an_exit_report_fails_closed() {
         let result = baked_entrypoint_result(
@@ -1462,7 +1597,9 @@ mod tests {
             module_path: module_path.to_string(),
             label: "wasm:test".to_string(),
         };
+        let no_assets: &[crate::commands::shared::AssetSpec] = &[];
         let shape = LaunchShape {
+            assets: no_assets,
             name: Some("wasm-test"),
             image: &image,
             cpus: 1,
@@ -1575,6 +1712,7 @@ mod tests {
             timeout_secs: Some(30),
             pty: true,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            assets: Vec::new(),
             stdin: b"ignored".to_vec(),
             healthcheck: None,
             hypervisor: Some("mock".into()),
@@ -1636,6 +1774,7 @@ mod tests {
         };
         let policy = mvm_core::network_policy::NetworkPolicy::deny_all();
         let shape = LaunchShape {
+            assets: &[],
             name: None,
             image: &image,
             cpus: 2,
@@ -1728,6 +1867,7 @@ mod tests {
             timeout_secs: Some(30),
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            assets: Vec::new(),
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
@@ -1756,6 +1896,7 @@ mod tests {
             timeout_secs: Some(30),
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            assets: Vec::new(),
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
@@ -1792,6 +1933,7 @@ mod tests {
             timeout_secs: Some(30),
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            assets: Vec::new(),
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
@@ -1847,6 +1989,7 @@ mod tests {
             timeout_secs: Some(30),
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            assets: Vec::new(),
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
@@ -1882,6 +2025,7 @@ mod tests {
             timeout_secs: Some(30),
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            assets: Vec::new(),
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
@@ -1927,6 +2071,7 @@ mod tests {
             timeout_secs: Some(30),
             pty: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            assets: Vec::new(),
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,

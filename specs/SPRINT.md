@@ -10,6 +10,24 @@
 
 ## In progress
 
+- [ ] **Content-addressed asset identity.**
+      `specs/plans/2026-09-02-content-addressed-asset-identity.md`.
+      Every dataset, model, prompt, agent, policy, and compute environment a
+      workload names now carries a content-derived identity in the signed
+      plan: `AssetIdentity{kind, locator, content_sha256}` records ride
+      `ExecutionPlan.asset_identities` (empty-by-default, so existing plans
+      stay byte-identical), `--asset KIND:HOST_PATH` on `run`/`machine run`
+      hashes caller assets through the canonical `hash_source` tree walk at
+      admission, and directory-share digests are pinned at admission and
+      re-verified by `enforce_admitted_shares` at attach time, closing the
+      host-dir TOCTOU window. A chain-signed `plan.asset_identities` entry
+      carries kind/locator/digest labels, `mvmctl trust audit asset id
+      <path>` recomputes the same digest offline, and claim 19
+      (MVM-SEC-19) is registered in the ADR-001 narrative + machine-checked
+      ledger with a BDD suite (`s33_content_addressed_assets`, 4 scenarios).
+      Workspace check, host tests, gated Linux cross-check, clippy, fmt, and
+      the claim/CLI lint gates are green. Merge delivery remains.
+
 - [ ] **Mounted PTY image environment.**
       `specs/plans/2026-09-01-mounted-pty-image-environment.md`.
       Absolute PTY commands now bypass the login-shell wrapper even when the
@@ -3562,3 +3580,22 @@ writes the plan:
       sustained egress transfers.
 - [ ] Complete the broad validation matrix and merge the repair for #3051,
       and #3052.
+
+## 2026-09-02 cargo target-dir guard
+
+- [x] Reclaim a CARGO_TARGET_DIR inherited from another source tree in both
+      cargo wrapper scripts, loudly, honoring inside-tree overrides and the
+      MVM_DEV_ENV_KEEP_INHERITED=1 escape hatch.
+- [x] Gate-test all four policy cases (unset, inside-honored,
+      outside-reclaimed, keep-inherited) and wire shellcheck + the gate
+      test into CI.
+- [x] Merge the guard through the queue (#3135).
+
+## 2026-09-02 persistent directory-volume refusal witness
+
+- [x] Register a real host-directory attachment against a persistent machine
+      in the live Firecracker BDD suite.
+- [x] Prove the persistent launch consumes the registration and fails closed
+      before boot because the workload runner cannot express a live directory
+      share, rather than silently dropping the registered data.
+- [ ] Merge the witness through the queue.

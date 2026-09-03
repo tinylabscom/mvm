@@ -37,6 +37,12 @@ The three honesty levels (R2):
 | --- | --- | --- | --- |
 | `MVM-SEC-11` | `build` | Every app-dep volume is hash-locked, CVE-scanned and SBOM-enumerated | `fn:verify_sealed_volume`, `fn:apply_install_gate`, `ci:app-deps-audit` |
 
+## asset_identity
+
+| ID | Level | Statement | Witnesses |
+| --- | --- | --- | --- |
+| `MVM-SEC-19` | `build` | Every workload asset and pinned host share is content-identified in the signed plan, and share drift after admission fails closed | `fn:admitted_share_digest_refuses_directory_changed_after_admission`, `fn:synthesized_plan_records_share_and_caller_asset_identities`, `fn:asset_identities_event_carries_kind_name_digest_labels`, `fn:asset_identity_rejects_malformed_digests`, `fn:test_audit_asset_id_parses` |
+
 ## bundle_boot
 
 | ID | Level | Statement | Witnesses |

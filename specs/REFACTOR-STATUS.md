@@ -1,8 +1,18 @@
 # Refactor status
 
-Last updated: 2026-09-01
+Last updated: 2026-09-02
 
 ## In progress
+
+- [x] **Cargo target-dir guard.**
+      `specs/plans/2026-09-02-cargo-target-dir-guard.md`.
+      Both cargo wrapper scripts reclaim a CARGO_TARGET_DIR pointing outside
+      the current source tree — the compile-time sibling of the stale-helper
+      bug, observed as an E0063 naming a field deleted by a merged PR, served
+      from rlibs in a shared target dir inherited from unrelated work. Policy
+      mirrors dev-env.sh: inside-tree values honored, outside-tree values
+      reclaimed loudly, MVM_DEV_ENV_KEEP_INHERITED=1 keeps them anyway. Gate
+      tests and CI shellcheck green; merged via #3135.
 
 - [ ] **Signed caller commitment — issue #3070.**
       `specs/plans/2026-09-01-signed-caller-commitment.md`.
@@ -122,7 +132,11 @@ Last updated: 2026-09-01
       unshared) `/job` onto a dispatch round trip, and the host rewrites the
       input disk per `Run` and reads the output disk per `Result`. Live-validated
       on macOS 26.5.2 — two `nix build` dispatches into one session, both exit 0.
-      Gate now at 41 sites across 13 files.
+      Gate now at 41 sites across 13 files. A live persistent Firecracker BDD
+      witness now pins the remaining unmaterialized-directory behavior: the
+      registry is consumed, and the workload runner refuses before boot because
+      it cannot express the directory grant. That settles reachability without
+      pretending the managed-directory product decision is complete.
       Remaining: libkrun's seeded closure, the guest's install arm (which writes
       to `/job/<job_id>/out` and is refused on a disk-backed session rather than
       silently losing its claim-11 sidecars), and deleting the now-dead share

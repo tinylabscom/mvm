@@ -230,6 +230,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
             bundle_pin: None,
             deps_volume: None,
             shares: shares_from_volume_cfg(volumes),
+            assets: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: network_policy.clone(),
             agent_verb_override: agent_verb.to_vec(),

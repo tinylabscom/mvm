@@ -119,6 +119,7 @@ covered = [
     "mvmctl machine run --flake /tmp/hello-ts-deps",
     "mvmctl machine run --flake /tmp/secret-egress",
     "mvmctl machine run --flake /tmp/tool-build --name tool-dev",
+    "mvmctl machine run --hypervisor wasm",
     "mvmctl machine run --image alpine -- echo hi",
     "mvmctl machine run --image alpine -- uname -a",
     "mvmctl machine run --image alpine --mount /tmp:/data/host -- cat /data/host/foo",

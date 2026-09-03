@@ -1340,6 +1340,75 @@ fn validate_sha256_hex(s: String) -> Result<String, DepsVolumeBindingError> {
     Ok(s)
 }
 
+/// Deserialize an optional 64-hex SHA-256, validating the digest when present.
+fn deserialize_optional_sha256_hex<'de, D>(d: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<String>::deserialize(d)?;
+    opt.map(validate_sha256_hex)
+        .transpose()
+        .map_err(serde::de::Error::custom)
+}
+
+/// What kind of asset a content-derived identity names. The identity
+/// itself is content-only — the kind is a caller label so audit readers
+/// can group identities without inferring intent from a path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssetKind {
+    /// Training/eval data bound into the run (usually a directory share).
+    Dataset,
+    /// Model weights or checkpoints (a share, a disk, or an `--asset`).
+    Model,
+    /// A declared prompt file.
+    Prompt,
+    /// The workload's own code (the content-addressed bundle).
+    Agent,
+    /// An admitted policy (network, egress, tool, or filesystem).
+    Policy,
+    /// The boot environment: image + kernel pin + verity state.
+    ComputeEnvironment,
+    /// Anything the caller did not classify.
+    Other,
+}
+
+/// A content-derived identity for one asset bound to a run. The digest is
+/// the lowercase-hex SHA-256 of the asset's canonical bytes: a plain file
+/// hash for a single file, the deterministic manifest hash for a directory
+/// tree, or the already-published digest for artifacts (image, bundle,
+/// sealed deps volume) whose identity predates this record. Identities
+/// ride inside the signed `ExecutionPlan.asset_identities` and are mirrored
+/// into the chain-signed `plan.asset_identities` audit entry, so comparing
+/// two identities — never consulting mvm's local state — is the supported
+/// way to answer "is this the asset that was admitted?"
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetIdentity {
+    pub kind: AssetKind,
+    /// Caller-meaningful name (file/dir name, image name, policy ref).
+    pub name: String,
+    /// Lowercase-hex SHA-256, 64 chars.
+    #[serde(deserialize_with = "deserialize_sha256_hex")]
+    pub digest: String,
+}
+
+impl AssetIdentity {
+    /// Construct an identity. Returns `Err` if the digest is not 64
+    /// lowercase hex characters.
+    pub fn new(
+        kind: AssetKind,
+        name: impl Into<String>,
+        digest: impl Into<String>,
+    ) -> Result<Self, DepsVolumeBindingError> {
+        Ok(Self {
+            kind,
+            name: name.into(),
+            digest: validate_sha256_hex(digest.into())?,
+        })
+    }
+}
+
 fn deserialize_sha256_hex<'de, D>(d: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -1386,6 +1455,16 @@ pub struct HostShareGrant {
     /// directory share.
     #[serde(default)]
     pub encrypted: bool,
+    /// Content-derived identity of the shared directory's complete tree,
+    /// computed with the same canonical manifest the snapshot store uses, so
+    /// the admitted identity is exactly the bytes the guest sees. `None` for
+    /// disk shares and for grants written before the field existed.
+    /// Skip-serialized when absent so those grants stay byte-identical — the
+    /// grant rides inside the signed plan, and emitting `null` would move
+    /// every existing plan's identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_optional_sha256_hex")]
+    pub content_sha256: Option<String>,
 }
 
 /// Reject a non-absolute or empty guest path at deserialize time.
@@ -1414,6 +1493,7 @@ mod host_share_grant_tests {
             kind: ShareKind::DirShare,
             read_only: true,
             encrypted: false,
+            content_sha256: None,
         }
     }
 
@@ -1880,6 +1960,96 @@ mod attestation_mode_tests {
             let json = serde_json::to_string(&mode).unwrap();
             let back: AttestationMode = serde_json::from_str(&json).unwrap();
             assert_eq!(back, mode, "{json} round-trip failed");
+        }
+    }
+}
+
+#[cfg(test)]
+mod asset_identity_tests {
+    use super::*;
+
+    const HEX64: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn asset_identity_roundtrips_and_stays_canonical() {
+        let id = AssetIdentity::new(AssetKind::Dataset, "train-set", HEX64)
+            .expect("valid digest accepted");
+        let json = serde_json::to_string(&id).expect("serialize");
+        assert!(
+            json.contains("\"dataset\""),
+            "kind serializes snake_case: {json}"
+        );
+        let back: AssetIdentity = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn asset_identity_rejects_malformed_digests() {
+        let bad: Vec<String> = vec![
+            String::new(),
+            "abc".into(),
+            "a".repeat(63),
+            "a".repeat(65),
+            "A".repeat(64),
+            "zz".repeat(32),
+        ];
+        for digest in &bad {
+            let _ = AssetIdentity::new(AssetKind::Model, "m", digest)
+                .expect_err("malformed digest refused");
+        }
+    }
+
+    #[test]
+    fn asset_identity_rejects_unknown_fields() {
+        let json =
+            format!("{{\"kind\":\"model\",\"name\":\"m\",\"digest\":\"{HEX64}\",\"extra\":1}}");
+        let err = serde_json::from_str::<AssetIdentity>(&json)
+            .expect_err("deny_unknown_fields holds for asset identities");
+        let _ = err;
+    }
+
+    #[test]
+    fn share_grant_digest_field_defaults_and_validates() {
+        // Absent field deserializes as None (old plans keep parsing).
+        let json = "{\"tag\":\"uvol0\",\"host_path\":\"/h\",\"guest_path\":\"/g\",\"kind\":\"dir_share\",\"read_only\":true}";
+        let grant: HostShareGrant = serde_json::from_str(json).expect("absent digest = None");
+        assert_eq!(grant.content_sha256, None);
+        assert!(
+            !serde_json::to_string(&grant)
+                .expect("serialize")
+                .contains("content_sha256"),
+            "None digest is skip-serialized"
+        );
+
+        // Present digest roundtrips; malformed digest refuses at deserialize.
+        let with_digest = format!(
+            "{},\"content_sha256\":\"{HEX64}\"}}",
+            &json[..json.len() - 1]
+        );
+        let grant: HostShareGrant =
+            serde_json::from_str(&with_digest).expect("valid digest parses");
+        assert_eq!(grant.content_sha256.as_deref(), Some(HEX64));
+        let bad = format!("{},\"content_sha256\":\"nope\"}}", &json[..json.len() - 1]);
+        serde_json::from_str::<HostShareGrant>(&bad)
+            .expect_err("malformed digest refused at deserialize");
+    }
+
+    #[test]
+    fn asset_kind_covers_the_six_classes() {
+        // Exhaustive match: adding a variant breaks this test, forcing the
+        // audit label mapping in the emitter to be revisited.
+        for kind in [
+            AssetKind::Dataset,
+            AssetKind::Model,
+            AssetKind::Prompt,
+            AssetKind::Agent,
+            AssetKind::Policy,
+            AssetKind::ComputeEnvironment,
+            AssetKind::Other,
+        ] {
+            let json = serde_json::to_string(&kind).expect("serialize kind");
+            let back: AssetKind = serde_json::from_str(&json).expect("roundtrip kind");
+            assert_eq!(kind, back);
         }
     }
 }

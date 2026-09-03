@@ -30,7 +30,18 @@ Feature: Transient sandbox boot
     When I run mvmctl in an isolated live home with "machine run --name bdd-nix-boot --flake examples/exit_code"
     Then the command exits with code 7
 
-  @live
+  # Only a tier with no wall-clock mechanism refuses this. libkrun and HVF have
+  # a per-VM supervisor of ours that outlives the launch and can hold the
+  # deadline, so `negotiate_grants` finds no gap and admission accepts the
+  # grant — the workload then runs and exits 7, which is correct there and is
+  # what the scenario above already witnesses.
+  #
+  # Untagged, this ran on HVF and asserted a refusal that never came. It looked
+  # green for a while regardless, because the exit code it asserts is 1 and a
+  # separate bug — a baked entrypoint the host waited for and never dispatched —
+  # also exited 1. Two wrongs reading as one right is exactly what a capability
+  # gate is for.
+  @live @unenforceable_wall_clock
   Scenario: a sealed flake refuses a timeout the backend cannot enforce
     When I run mvmctl in an isolated live home with "machine run --name bdd-nix-timeout --flake examples/exit_code --timeout 120"
     Then the command exits with code 1

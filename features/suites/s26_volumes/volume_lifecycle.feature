@@ -119,3 +119,27 @@ Feature: Encrypted block volume lifecycle and attachment
     And the error output contains "Read-only file system"
     When I run mvmctl in the isolated mvm home with "machine stop bdd-readonly-volume --yes"
     Then the command exits with code 0
+
+  # A *directory*-kind registration, not a managed block volume. Every live
+  # scenario above registers `machine volume create` output, which resolves to
+  # `VmVolumeKind::Disk`. `--host <dir>` takes the other arm —
+  # `LocalVolumeKind::Directory` → an unmaterialized `VmVolumeKind::DirShare`.
+  #
+  # Measured for the *transient* path already: the registration is silently
+  # ignored, the mount point is absent, and the boot succeeds. That answer does
+  # not generalise, because `machine start` resolves through
+  # `merge_registered_volumes_for_launch` rather than dropping the volume.
+  # The persistent path does consume the registration. Because Firecracker has
+  # no directory-share device, it must refuse before boot rather than silently
+  # discard the grant or start a guest without the registered data.
+  @live @firecracker @workload_kernel @guest_bins
+  Scenario: a directory-kind registration is refused before persistent boot
+    Given an isolated mvm home
+    And a cached live workload kernel
+    When I run mvmctl in the isolated mvm home with "machine create bdd-dir-volume --image alpine"
+    Then the command exits with code 0
+    When I register host directory volume "dirvol" at "/data/dirvol" for machine "bdd-dir-volume"
+    Then the command exits with code 0
+    When I run mvmctl in an isolated live home with "machine start bdd-dir-volume --hypervisor firecracker"
+    Then the command exits with code 1
+    And the error output contains "live host-directory share can't be expressed"

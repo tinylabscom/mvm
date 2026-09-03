@@ -48,6 +48,7 @@ pub fn sdk_sidecar_attachment_for(
             kind: mvm_core::plan::ShareKind::Disk,
             read_only: true,
             encrypted: false,
+            content_sha256: None,
         },
         volume: mvm_core::vm_backend::VmVolume {
             materialized_image: None,
@@ -83,7 +84,7 @@ pub fn resolve_sdk_sidecar_attachment(
     arch: mvm_core::arch::GuestArch,
     libc: mvm_contract::guest_libc::GuestLibc,
 ) -> Result<Option<SdkSidecarAttachment>> {
-    if !mvm_core::plan::sdk_sidecar_required_for(services) {
+    if !mvm_core::plan::sdk_sidecar_required_for(services, true) {
         return Ok(None);
     }
     let bound: Vec<&str> = mvm_core::plan::sdk_host_services_in(services)

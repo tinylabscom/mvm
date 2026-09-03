@@ -18,6 +18,21 @@ originates every outbound connection**. That is what makes default-deny egress,
 "no raw secret reaches the guest", and the audit chain mechanically enforceable
 rather than merely intended.
 
+## Role of the `mvmctl` crate
+
+The repository root is also the `mvmctl` Cargo package. Its binary is the thin
+process entry point that initializes platform-specific main-thread behavior and
+calls `mvm_cli::run()`. Its library is a convenience facade that re-exports the
+core, runtime, build, guest-agent, and host-daemon crates for embedders that
+want one dependency.
+
+The CLI is the main consumer of this package. External Rust automation can use
+the facade, while `mvm-conformance` uses the built binary and selected library
+surfaces in end-to-end tests. Implementation remains in the narrower workspace
+crates so each layer can be tested and depended on independently; the root
+crate should contain composition and re-exports, not a second implementation
+of lifecycle or security policy.
+
 ```
 macOS 26+ (Apple Silicon)  →  in-house HVF VMM (Hypervisor.framework, zero extra deps)
 macOS 13–25                →  libkrun (Homebrew)
@@ -33,7 +48,7 @@ Linux + /dev/kvm           →  Firecracker
 - **SDKs for Python, TypeScript, and Rust** — a _decorator_ SDK for authoring
   workloads and a _runtime_ SDK for driving them, both thin wrappers over one
   conformance-pinned surface
-- **Security claims, CI-enforced** — 15+ numbered claims (signed execution
+- **Security claims, CI-enforced** — 16+ numbered claims (signed execution
   plans, chain-signed audit log, dm-verity boot, default-deny egress, run-shaped
   agent-verb grants, sealed prod images that refuse interactive access, secret
   substitution over vsock)
@@ -705,7 +720,7 @@ credential-substituting HTTP proxy, and peers are a transient-run capability —
 
 ## Security model
 
-mvm makes **fifteen numbered, CI-enforced security claims** (plus preview
+mvm makes **sixteen numbered, CI-enforced security claims** (plus preview
 claims), each backed by a named test or workflow gate. In summary:
 
 1. **No host-fs access from a guest beyond explicit shares** — per-service uid,
@@ -752,6 +767,10 @@ claims), each backed by a named test or workflow gate. In summary:
     entrypoint's stdin and nothing else — it cannot select a program, alter
     argv or env, or spawn anything, and it is refused outright without a grant
     in the signed plan.
+16. **Every workload asset and pinned host share is content-identified in the
+    signed plan, and share drift after admission fails closed** — `--asset
+    KIND:HOST_PATH` hashes the asset into the signed plan, and a directory
+    share whose contents change after admission is refused at attach time.
 
 Claim 15 used to hold by _absence_: there was no host→guest byte path at all.
 The workload input channel built one, so refusing input is now a policy

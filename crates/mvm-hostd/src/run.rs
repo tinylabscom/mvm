@@ -130,6 +130,7 @@ pub fn shares_from_vm_volumes(volumes: &[VmVolume]) -> Vec<mvm_core::plan::HostS
             },
             read_only: v.read_only,
             encrypted: v.encrypted,
+            content_sha256: None,
         })
         .collect()
 }
@@ -232,6 +233,7 @@ pub fn admit_and_boot_local(
         bundle_pin: None,
         deps_volume: None,
         shares: shares_from_vm_volumes(&req.volumes),
+        assets: Vec::new(),
         redaction: Default::default(),
         reversible_replacement: Default::default(),
         caller_commitment: None,

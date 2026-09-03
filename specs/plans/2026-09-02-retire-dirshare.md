@@ -98,16 +98,37 @@ the prediction was a failed boot. The volume never got that far: it is dropped
 before `VolumeConfig` is built, not attached-and-ignored. Recorded because the
 inference was confident and wrong, and only the live run separated the two.
 
-- [ ] **Find the launch path that *does* consume the registry.**
-      `registered_managed_mount_is_consumed_by_launch_resolution`
-      (`mvm-cli/src/commands/vm/volume.rs`) proves one exists; transient
-      `machine run --name` is not it. Until that path is exercised, "can an
-      unmaterialized `DirShare` reach a boot mount" is answered only for the
-      transient case.
-- [ ] **Decide whether silently ignoring a registered volume is acceptable.**
-      A user who registers a mount, sees it in `volume ls`, boots, and finds
-      nothing at the mount point got no error anywhere. That is its own defect
-      independent of this plan, and may be the more urgent one.
+- [x] **Find the launch path that *does* consume the registry.** It is
+      `start_machine` → `start_persistent_oci_machine` →
+      `merge_registered_volumes_for_launch`, i.e. `mvmctl machine start`. That
+      is the only production caller; transient `machine run --name` never
+      reaches it.
+
+      So the split is by *lifecycle*, not by volume kind: registrations belong
+      to a persistent named machine you start and stop, and a transient run is
+      a job. Nothing said so, which is what made it look like a bug rather than
+      a boundary.
+
+- [x] **Exercise the persistent path with a directory-kind registration.** It
+      does consume the registry and preserves the directory discriminator as
+      an unmaterialized `VmVolumeKind::DirShare`. The shared workload-runner
+      guard then refuses before assembling the backend spec because no
+      directory-share device can express the grant. The live BDD regression
+      pins that refusal instead of accepting either dangerous alternative:
+      silently dropping a registered volume or booting without its data.
+
+      This settles reachability, not the product decision above. Managed
+      directories still need either materialization or a durable discriminator
+      before the runtime enum can be removed.
+- [x] **Decide whether silently ignoring a registered volume is acceptable.**
+      Decided: no, but a warning rather than a refusal, landed in
+      `fix(mount): say what a transient run will and will not attach`.
+
+      Not a refusal because attaching would take the exclusive attachment lease
+      that `machine stop` releases, and a transient run has no stop to pair with
+      it; and refusing outright would break a run whose registrations are simply
+      irrelevant to it. Best-effort, too — a registry that cannot be read must
+      not fail a boot that never depended on it.
 
 ## Ordered work
 - [ ] Move the `want_kind` derivation off `VmVolumeKind` and onto

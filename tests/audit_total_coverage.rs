@@ -459,6 +459,10 @@ const DECISIONS_SUB: &[(&str, AuditPosture)] = &[
     ("similar", AuditPosture::ReadOnly),
 ];
 
+/// `trust audit asset id` reads a file or directory tree, hashes it, and
+/// prints — no state is written, so the leaf is `ReadOnly` like `verify`.
+const ASSET_SUB: &[(&str, AuditPosture)] = &[("id", AuditPosture::ReadOnly)];
+
 const AUDIT_SUB: &[(&str, AuditPosture)] = &[
     ("tail", AuditPosture::ReadOnly),
     ("verify", AuditPosture::ReadOnly),
@@ -477,6 +481,7 @@ const AUDIT_SUB: &[(&str, AuditPosture)] = &[
     ("provenance", AuditPosture::DelegatesToSub(PROVENANCE_SUB)),
     ("decisions", AuditPosture::DelegatesToSub(DECISIONS_SUB)),
     ("transcript", AuditPosture::DelegatesToSub(TRANSCRIPT_SUB)),
+    ("asset", AuditPosture::DelegatesToSub(ASSET_SUB)),
 ];
 
 const TRUST_SUB: &[(&str, AuditPosture)] = &[

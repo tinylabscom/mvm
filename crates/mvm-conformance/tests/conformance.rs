@@ -282,6 +282,7 @@ fn probe_caps() -> RuntimeCaps {
         tls_tunnel_client: std::env::var_os("MVM_BDD_TLS_CLIENT").is_some(),
         memory_snapshot: memory_snapshot_supported(),
         dir_share: dir_share_supported(),
+        wall_clock_enforced: wall_clock_enforced(),
     }
 }
 
@@ -352,6 +353,21 @@ fn dir_share_supported() -> bool {
 
 fn memory_snapshot_supported() -> bool {
     std::env::var_os("MVM_BDD_SNAPSHOT").is_some()
+}
+
+/// Whether the active backend can hold a wall-clock deadline for the workload's
+/// whole life, so `--timeout` is admitted rather than refused.
+///
+/// Declared, not probed, matching `dir_share_supported` and
+/// `memory_snapshot_supported`: `ResourceControls::for_backend` already answers
+/// this per backend, and deciding it here would mean re-deriving which backend a
+/// launch selects — a copy that drifts.
+///
+/// libkrun and HVF have a per-VM supervisor of ours that outlives the launch
+/// (`WallClockControl::SupervisorTimer`). Firecracker detaches its session and
+/// QEMU daemonizes, so neither leaves a process to fire a timer.
+fn wall_clock_enforced() -> bool {
+    std::env::var_os("MVM_BDD_WALL_CLOCK").is_some()
 }
 
 /// The operator-supplied `.mvmpkg` a bundle scenario installs, when

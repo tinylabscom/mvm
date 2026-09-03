@@ -1297,14 +1297,14 @@ pub fn enforce_admitted_shares(
             VmVolumeKind::DirShare => mvm_core::plan::ShareKind::DirShare,
             VmVolumeKind::Disk => mvm_core::plan::ShareKind::Disk,
         };
-        let admitted = plan.shares.iter().any(|g| {
+        let admitted = plan.shares.iter().find(|g| {
             g.host_path == v.host
                 && g.guest_path == v.guest
                 && g.kind == want_kind
                 && g.read_only == v.read_only
                 && g.encrypted == v.encrypted
         });
-        if !admitted {
+        let Some(grant) = admitted else {
             anyhow::bail!(
                 "refusing to attach volume '{}' -> '{}' ({}): it is not named in the signed \
                  ExecutionPlan's admitted shares — every host-fs grant must be admitted (claim 1).",
@@ -1312,6 +1312,34 @@ pub fn enforce_admitted_shares(
                 v.guest,
                 if v.read_only { "ro" } else { "rw" },
             );
+        };
+        // Content identity (claim 19): a grant that recorded what the shared
+        // tree hashed to at admission must still hash the same at attach
+        // time. The admitted digest is inside the signed plan, so this closes
+        // the window between admission and boot where the host directory
+        // could change under the granted path — the guest would otherwise
+        // receive bytes the plan never vouched for.
+        if let Some(expected) = &grant.content_sha256 {
+            // Canonicalize so a symlinked host dir (macOS `/tmp`) hashes
+            // the same tree admission pinned, whichever alias names it.
+            let resolved = std::fs::canonicalize(&v.host)?;
+            let actual = mvm_fs::hash::hash_source(&resolved).map_err(|e| {
+                anyhow::anyhow!(
+                    "refusing to attach volume '{}' -> '{}': cannot re-hash the granted \
+                     directory to check its admitted content identity: {e}",
+                    v.host,
+                    v.guest,
+                )
+            })?;
+            if actual != *expected {
+                anyhow::bail!(
+                    "refusing to attach volume '{}' -> '{}': the directory changed after \
+                     admission — admitted content identity {expected}, now {actual}. Re-admit \
+                     the plan against the current tree.",
+                    v.host,
+                    v.guest,
+                );
+            }
         }
     }
     Ok(())
@@ -1340,7 +1368,14 @@ pub fn enforce_sdk_sidecar_backend_compatibility(
 ) -> std::result::Result<(), SdkSidecarBackendCompatibilityError> {
     use mvm_core::plan::{sdk_host_services_in, sdk_sidecar_required};
 
-    if backend != mvm_core::vm_backend::BackendKind::Wasm || !sdk_sidecar_required(plan) {
+    // When sdk_uses_sidecar is false, the workload speaks the broker protocol
+    // directly and doesn't need the SDK sidecar regardless of backend.
+    if !plan.sdk_uses_sidecar || backend != mvm_core::vm_backend::BackendKind::Wasm {
+        return Ok(());
+    }
+
+    // Only wasm backends need the SDK sidecar for host services.
+    if !sdk_sidecar_required(plan) {
         return Ok(());
     }
 
@@ -1366,6 +1401,23 @@ pub fn enforce_sdk_sidecar_attachment(
 ) -> Result<()> {
     use mvm_core::plan::{SDK_SIDECAR_GUEST_PATH, sdk_host_services_in, sdk_sidecar_required};
     use mvm_core::vm_backend::VmVolumeKind;
+
+    // When sdk_uses_sidecar is false, the workload speaks the broker protocol
+    // directly and may not carry the SDK sidecar.
+    if !plan.sdk_uses_sidecar {
+        let attached: Vec<_> = volumes
+            .iter()
+            .filter(|v| v.guest == SDK_SIDECAR_GUEST_PATH)
+            .collect();
+        if let Some(stray) = attached.first() {
+            anyhow::bail!(
+                "refusing to attach '{}' at {SDK_SIDECAR_GUEST_PATH}: the signed ExecutionPlan \
+                 sets sdk_uses_sidecar=false, so this workload must not carry the SDK sidecar",
+                stray.host,
+            );
+        }
+        return Ok(());
+    }
 
     let attached: Vec<_> = volumes
         .iter()
@@ -2415,6 +2467,7 @@ mod tests {
             bundle_pin: None,
             deps_volume: None,
             shares: Vec::new(),
+            assets: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
             caller_commitment: None,
@@ -2924,6 +2977,7 @@ mod tests {
             kind: mvm_core::plan::ShareKind::DirShare,
             read_only: true,
             encrypted: false,
+            content_sha256: None,
         };
         let mut input = fixture_input("vm-materialized-share");
         input.shares = vec![grant];
@@ -2954,6 +3008,61 @@ mod tests {
     }
 
     #[test]
+    fn admitted_share_digest_refuses_directory_changed_after_admission() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).expect("mkdir");
+        std::fs::write(data.join("rows.csv"), b"a,b\n1,2\n").expect("write");
+
+        let digest = mvm_fs::hash::hash_source(&data).expect("hash admitted tree");
+        let grant = mvm_core::plan::HostShareGrant {
+            tag: "uvol0".into(),
+            host_path: data.to_string_lossy().into_owned(),
+            guest_path: "/data".into(),
+            kind: mvm_core::plan::ShareKind::DirShare,
+            read_only: true,
+            encrypted: false,
+            content_sha256: Some(digest.clone()),
+        };
+        let mut input = fixture_input("vm-share-digest-drift");
+        input.shares = vec![grant];
+        let plan = synthesize_plan(&input).expect("synthesize");
+
+        let volume = |host: &str| mvm_core::vm_backend::VmVolume {
+            host: host.into(),
+            guest: "/data".into(),
+            read_only: true,
+            kind: mvm_core::vm_backend::VmVolumeKind::DirShare,
+            ..Default::default()
+        };
+
+        // Unchanged tree: the admitted identity still matches.
+        enforce_admitted_shares(
+            std::slice::from_ref(&volume(&plan.shares[0].host_path)),
+            &plan,
+        )
+        .expect("unchanged tree attaches");
+
+        // A byte flips between admission and attach: refused, and the error
+        // names both identities.
+        std::fs::write(data.join("rows.csv"), b"a,b\n1,TAMPERED\n").expect("tamper");
+        let err = enforce_admitted_shares(
+            std::slice::from_ref(&volume(&plan.shares[0].host_path)),
+            &plan,
+        )
+        .expect_err("a changed tree must not attach under the admitted identity");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(&digest),
+            "error names the admitted digest: {msg}"
+        );
+        assert!(
+            msg.contains("changed after admission"),
+            "error says why: {msg}"
+        );
+    }
+
+    #[test]
     fn enforce_admitted_shares_refuses_unadmitted_or_mismatched() {
         use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
         let grant = mvm_core::plan::HostShareGrant {
@@ -2963,6 +3072,7 @@ mod tests {
             kind: mvm_core::plan::ShareKind::DirShare,
             read_only: true,
             encrypted: false,
+            content_sha256: None,
         };
         let mut input = fixture_input("vm-shares");
         input.shares = vec![grant];
@@ -3063,6 +3173,25 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn direct_protocol_binding_requires_no_sidecar_and_refuses_a_stray_one() {
+        let mut plan = plan_binding(&["host.kv.v1"]);
+        plan.sdk_uses_sidecar = false;
+
+        assert!(
+            enforce_sdk_sidecar_backend_compatibility(
+                mvm_core::vm_backend::BackendKind::Wasm,
+                &plan,
+            )
+            .is_ok()
+        );
+        assert!(enforce_sdk_sidecar_attachment(&[], &plan, LOADABLE_LIBC).is_ok());
+
+        let err = enforce_sdk_sidecar_attachment(&[sdk_sidecar_volume()], &plan, LOADABLE_LIBC)
+            .expect_err("a direct-protocol plan must refuse a stray sidecar");
+        assert!(err.to_string().contains("sdk_uses_sidecar=false"), "{err}");
     }
 
     /// A bound SDK host service with no sidecar attachment fails closed, and the

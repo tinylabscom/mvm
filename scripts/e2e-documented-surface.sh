@@ -451,6 +451,73 @@ warm_launch_artifacts() {
 }
 warm_launch_artifacts
 
+# Compose the prebuilt guest-runtime directory the `@guest_bins` scenarios need.
+#
+# Without this, `MVM_BDD_GUEST_BIN_DIR` is unset and every `@guest_bins`
+# scenario skips with `needs-guest-bin-dir` — a reason deliberately absent from
+# ALLOWED_SKIPS, so under strict skips the lane fails. The variable was set by
+# no workflow, no Justfile recipe and no script, which `guest_bin_dir_available`
+# says in as many words: "requiring it silently meant these scenarios could
+# never pass". Three live witnesses have therefore never run, including the two
+# that prove a writable block volume survives a restart and that a read-only
+# attachment refuses a guest write.
+#
+# The binaries are already on disk after the warm-up, but in *two* caches and
+# under two naming schemes, which is why this is a composition rather than a
+# path:
+#
+#   cache/oci/guest-agent/src-v2-<key>/<arch>/  — mvm-guest-agent, mvm-guest-netinit,
+#                                                 mvm-egress-client, mvm-oci-entrypoint
+#   cache/guest-agent-build/targets/<h>/<triple>/release/ — the runtime-overlay set
+#                                                 (mvm-seccomp-apply, mvm-runner, …)
+#
+# `cache/runtime-overlay-bins/` is deliberately *not* a source: it stores the
+# same binaries under their destination short names (`agent`, `netinit`), and
+# the step reads `mvm-`prefixed ones.
+#
+# Newest-wins, because the warm-up above just populated both for the current
+# source. That is a heuristic, so the result is verified by name below and the
+# run fails loudly rather than seeding a scenario from a stale checkout.
+provision_guest_bin_dir() {
+  echo "==> composing the prebuilt guest-runtime directory"
+  local stage="$E2E_HOME/cache/bdd-guest-bins"
+  rm -rf "$stage"
+  mkdir -p "$stage"
+
+  local guest_dir overlay_dir
+  guest_dir="$(ls -dt "$E2E_HOME"/cache/oci/guest-agent/src-v2-*/*/ 2>/dev/null | head -1 || true)"
+  overlay_dir="$(ls -dt "$E2E_HOME"/cache/guest-agent-build/targets/*/*/release/ 2>/dev/null | head -1 || true)"
+
+  [[ -n "$guest_dir" ]] && cp "$guest_dir"/mvm-* "$stage/" 2>/dev/null || true
+  # `-n`: the guest-agent layout wins where both carry a name, since it is the
+  # set the cache key is derived from.
+  [[ -n "$overlay_dir" ]] && cp -n "$overlay_dir"/mvm-* "$stage/" 2>/dev/null || true
+
+  # Exactly what the two seeding steps read. Named individually so a miss says
+  # which binary and not just "something was wrong".
+  local missing=()
+  local required=(
+    mvm-guest-agent mvm-guest-netinit mvm-egress-client mvm-oci-entrypoint
+    mvm-seccomp-apply mvm-runner mvm-addon-dns mvm-exit-report mvm-ping
+    mvm-forward-proxy
+  )
+  local bin
+  for bin in "${required[@]}"; do
+    [[ -f "$stage/$bin" ]] || missing+=("$bin")
+  done
+  if (( ${#missing[@]} > 0 )); then
+    echo "!!! guest-runtime staging is incomplete; @guest_bins scenarios cannot run." >&2
+    echo "    missing: ${missing[*]}" >&2
+    echo "    guest set:   ${guest_dir:-<none found>}" >&2
+    echo "    overlay set: ${overlay_dir:-<none found>}" >&2
+    exit 1
+  fi
+
+  export MVM_BDD_GUEST_BIN_DIR="$stage"
+  echo "    staged ${#required[@]} guest binaries at $stage"
+}
+provision_guest_bin_dir
+
 echo "==> host posture"
 # `doctor` exits nonzero precisely when it has something to report, so its
 # status is information rather than a gate.
@@ -494,13 +561,19 @@ SUITE_STARTED=""
 # the macOS job sets MVM_BDD_SNAPSHOT and does not skip these), and the two
 # fixtures that need material this lane does not publish.
 #
+# `needs-unenforceable-wall-clock` is the inverse of the others and is
+# tolerated for that reason: it fires on a backend that *has* the mechanism, so
+# the scenario it guards asserts a refusal with no occasion to happen. The
+# behaviour on this tier is not lost — the same flake without `--timeout` runs
+# and returns its exit code in the scenario immediately above it.
+#
 # `needs-dir-share` is set below rather than tolerated blindly: libkrun and HVF
 # serve virtio-fs directory shares and must run those scenarios, while
 # Firecracker has no virtio-fs device and cannot. Opting in means a capable
 # backend runs them and only a genuinely incapable one skips — the alternative,
 # tolerating the skip without opting in, silently dropped the witness for the
 # README's two `--mount` examples on a host that could have run it.
-ALLOWED_SKIPS="pending,needs-perf-budget-host,needs-memory-snapshot,needs-bundle-fixture,needs-tls-tunnel-client,needs-dir-share"
+ALLOWED_SKIPS="pending,needs-perf-budget-host,needs-memory-snapshot,needs-bundle-fixture,needs-tls-tunnel-client,needs-dir-share,needs-unenforceable-wall-clock"
 
 echo "==> documented examples + machine journey (cucumber, @live)"
 SUITE_STARTED=1
@@ -514,6 +587,7 @@ SUITE_LOG="$(mktemp "${TMPDIR:-/tmp}/mvm-e2e-suite.XXXXXX")"
 CARGO_BIN_EXE_mvmctl="$MVMCTL" \
 MVM_BDD_LIVE=1 \
 MVM_BDD_DIR_SHARE=1 \
+MVM_BDD_GUEST_BIN_DIR="$MVM_BDD_GUEST_BIN_DIR" \
 MVM_BDD_STRICT_SKIPS=1 \
 MVM_BDD_ALLOWED_SKIPS="$ALLOWED_SKIPS" \
 MVM_E2E_HOME="$E2E_HOME" \

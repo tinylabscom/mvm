@@ -167,6 +167,13 @@ pub struct SynthesisInput<'a> {
     /// into the signed plan + audit log (claim 1 / claim 8). Empty for
     /// the common no-volume case.
     pub shares: Vec<crate::plan::HostShareGrant>,
+    /// Caller-computed content identities for assets only the caller could
+    /// hash: declared `--asset` dataset/model/prompt files, and a resolved
+    /// policy the caller hashed (the plan pins policies by `PolicyRef` name;
+    /// a caller with the resolved bytes adds a `Policy` identity here).
+    /// Synthesis prepends the environment (image), the workload bundle, the
+    /// sealed deps volume, and every share that carries a `content_sha256`.
+    pub assets: Vec<crate::plan::AssetIdentity>,
     /// Per-destination egress redaction authored by `--redact HOST[=audit]`.
     /// Default (all-off) preserves the curated-only baseline.
     pub redaction: crate::policy::RedactionPolicy,
@@ -252,6 +259,7 @@ pub struct SynthesisInputBuilder<'a> {
     bundle_pin: Option<crate::plan::bundle::PlanArtifact>,
     deps_volume: Option<DepsVolumeBinding>,
     shares: Option<Vec<crate::plan::HostShareGrant>>,
+    assets: Option<Vec<crate::plan::AssetIdentity>>,
     redaction: Option<crate::policy::RedactionPolicy>,
     reversible_replacement: Option<crate::policy::ReversibleReplacementPolicy>,
     audit_labels: Option<AuditLabels>,
@@ -296,6 +304,7 @@ impl<'a> SynthesisInputBuilder<'a> {
             bundle_pin: None,
             deps_volume: None,
             shares: None,
+            assets: None,
             redaction: None,
             reversible_replacement: None,
             audit_labels: None,
@@ -501,6 +510,13 @@ impl<'a> SynthesisInputBuilder<'a> {
         self
     }
 
+    /// Set caller-computed asset identities (optional; defaults to none).
+    #[must_use]
+    pub fn assets(mut self, assets: Vec<crate::plan::AssetIdentity>) -> Self {
+        self.assets = Some(assets);
+        self
+    }
+
     /// Set `redaction`.
     #[must_use]
     pub fn redaction(mut self, redaction: crate::policy::RedactionPolicy) -> Self {
@@ -638,6 +654,7 @@ impl<'a> SynthesisInputBuilder<'a> {
             shares: self
                 .shares
                 .ok_or(BuilderError::missing("SynthesisInput", "shares"))?,
+            assets: self.assets.unwrap_or_default(),
             redaction: self
                 .redaction
                 .ok_or(BuilderError::missing("SynthesisInput", "redaction"))?,
@@ -815,10 +832,12 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         // deps-volume gate is skipped).
         deps_volume: input.deps_volume.clone(),
         shares: input.shares.clone(),
+        asset_identities: assemble_asset_identities(input),
         services: input.services.clone(),
         extensions: input.extensions.clone(),
         stream_edges: input.stream_edges.clone(),
         stream_retention: input.stream_retention,
+        sdk_uses_sidecar: true,
     };
 
     plan.validate_ingress()?;
@@ -827,6 +846,57 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
     // synthesis; the signature the caller applies next covers the derived id.
     plan.plan_id = crate::plan::compute_plan_id(&plan);
     Ok(plan)
+}
+
+/// Assemble the plan's content-derived asset identities from what synthesis
+/// alone knows (image, bundle, deps volume, digested shares) plus the
+/// caller-computed `assets`. Identity order is deterministic — environment
+/// first, then code, then deps, then shares, then caller assets — so the same
+/// inputs always produce the same signed bytes.
+fn assemble_asset_identities(input: &SynthesisInput<'_>) -> Vec<crate::plan::AssetIdentity> {
+    let mut out = Vec::new();
+    out.push(
+        crate::plan::AssetIdentity::new(
+            crate::plan::AssetKind::ComputeEnvironment,
+            input.image_name,
+            input.image_sha256,
+        )
+        .expect("synthesis validates image_sha256 as 64 lowercase hex above"),
+    );
+    if let Some(bundle) = &input.bundle_pin {
+        out.push(
+            crate::plan::AssetIdentity::new(
+                crate::plan::AssetKind::Agent,
+                bundle.key_id.0.as_str(),
+                bundle.bundle_sha256.clone(),
+            )
+            .expect("bundle pin hashes are validated when the artifact is built"),
+        );
+    }
+    if let Some(deps) = &input.deps_volume {
+        out.push(
+            crate::plan::AssetIdentity::new(
+                crate::plan::AssetKind::Other,
+                "deps_volume",
+                deps.volume_hash.clone(),
+            )
+            .expect("deps volume hash is validated when the binding is built"),
+        );
+    }
+    for share in &input.shares {
+        if let Some(digest) = &share.content_sha256 {
+            out.push(
+                crate::plan::AssetIdentity::new(
+                    crate::plan::AssetKind::Other,
+                    share.guest_path.clone(),
+                    digest.clone(),
+                )
+                .expect("share digests are validated when the grant is built"),
+            );
+        }
+    }
+    out.extend(input.assets.iter().cloned());
+    out
 }
 
 /// Generate a fresh 128-bit nonce from `SysRng`. `crate::plan::Nonce`
@@ -901,6 +971,74 @@ fn audit_labels_for_profile(profile: &AdmissionProfile) -> BTreeMap<String, Stri
 mod tests {
     use super::*;
 
+    const DIGEST64: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn synthesized_plan_carries_environment_identity_always() {
+        let plan = synthesize_plan(&input("vm-env-id")).expect("synthesize");
+        assert_eq!(plan.asset_identities.len(), 1, "image identity only");
+        let id = &plan.asset_identities[0];
+        assert_eq!(id.kind, crate::plan::AssetKind::ComputeEnvironment);
+        assert_eq!(id.name, "myimage");
+        assert_eq!(id.digest, plan.image.sha256);
+    }
+
+    #[test]
+    fn synthesized_plan_records_share_and_caller_asset_identities() {
+        let mut keyed = input("vm-asset-id");
+        keyed.shares = vec![crate::plan::HostShareGrant {
+            tag: "uvol0".into(),
+            host_path: "/host/data".into(),
+            guest_path: "/data".into(),
+            kind: crate::plan::ShareKind::DirShare,
+            read_only: true,
+            encrypted: false,
+            content_sha256: Some(DIGEST64.into()),
+        }];
+        keyed.assets = vec![
+            crate::plan::AssetIdentity::new(
+                crate::plan::AssetKind::Prompt,
+                "system-prompt",
+                DIGEST64,
+            )
+            .expect("valid digest"),
+        ];
+        let plan = synthesize_plan(&keyed).expect("synthesize");
+        let kinds: Vec<_> = plan
+            .asset_identities
+            .iter()
+            .map(|id| (id.kind, id.name.as_str()))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (crate::plan::AssetKind::ComputeEnvironment, "myimage"),
+                (crate::plan::AssetKind::Other, "/data"),
+                (crate::plan::AssetKind::Prompt, "system-prompt"),
+            ],
+            "deterministic order: environment, shares, caller assets"
+        );
+    }
+
+    #[test]
+    fn asset_identity_field_moves_plan_content_address() {
+        let base = synthesize_plan(&input("vm-ca")).expect("synthesize");
+        let mut keyed = input("vm-ca");
+        keyed.assets = vec![
+            crate::plan::AssetIdentity::new(crate::plan::AssetKind::Model, "m", DIGEST64)
+                .expect("valid digest"),
+        ];
+        let with_asset = synthesize_plan(&keyed).expect("synthesize");
+        assert!(
+            base.plan_id != with_asset.plan_id,
+            "an admitted asset identity is part of the signed content address"
+        );
+        // Deterministic: same inputs re-synthesize to the same identity set
+        // (nonce differs, so plan_id differs; the asset list must not).
+        let again = synthesize_plan(&keyed).expect("synthesize");
+        assert_eq!(with_asset.asset_identities, again.asset_identities);
+    }
+
     fn input(vm_name: &str) -> SynthesisInput<'_> {
         SynthesisInput {
             grants: None,
@@ -930,6 +1068,7 @@ mod tests {
             bundle_pin: None,
             deps_volume: None,
             shares: Vec::new(),
+            assets: Vec::new(),
             redaction: crate::policy::RedactionPolicy::default(),
             reversible_replacement: crate::policy::ReversibleReplacementPolicy::default(),
             caller_commitment: None,

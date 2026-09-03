@@ -1029,6 +1029,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         bundle_pin: None,
         deps_volume: None,
         shares: Vec::new(),
+        assets: Vec::new(),
         redaction: mvm_core::policy::RedactionPolicy::default(),
         network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         agent_verb_override: parent_agent_verbs.clone(),

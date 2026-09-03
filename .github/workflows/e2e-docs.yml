@@ -313,8 +313,16 @@ jobs:
         # HVF reports snapshot tier `save-restore`, so the pause/resume and
         # checkpoint scenarios can run here. The Linux lane leaves this unset:
         # Firecracker reports `unsupported` and those verbs refuse by capability.
+        #
+        # HVF also carries `WallClockControl::SupervisorTimer` — a per-VM
+        # supervisor of ours outlives the launch and can hold a deadline — so
+        # `--timeout` is admitted here rather than refused as an unenforceable
+        # grant. The Linux lane leaves this unset too: Firecracker detaches its
+        # session and is orphaned to init before the launch returns, leaving no
+        # process of ours to fire a timer.
         env:
           MVM_BDD_SNAPSHOT: "1"
+          MVM_BDD_WALL_CLOCK: "1"
         run: just e2e-docs
 
       - name: Dump VMM diagnostics on failure

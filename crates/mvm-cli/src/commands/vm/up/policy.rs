@@ -85,6 +85,7 @@ pub(super) fn shares_from_volume_cfg(
             },
             read_only: v.read_only,
             encrypted: v.encrypted,
+            content_sha256: None,
         })
         .collect()
 }

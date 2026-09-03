@@ -106,7 +106,7 @@ use super::vm::{
     checkpoint, console, cp, exec, forward, group, sandbox, session, snapshot, volume,
 };
 
-use audit::AuditAction;
+use audit::{AssetAction, AuditAction};
 use cache::CacheAction;
 use catalog::CatalogAction;
 use config::ConfigAction;
@@ -1578,6 +1578,47 @@ fn test_parse_volume_spec_dir_share() {
     }
 }
 
+/// The lock has to be *held*, not merely taken. `materialize_disk_volume`
+/// used to discard it, which released the exclusion before the VM booted —
+/// harmless while every transient mount was read-only, and not once a disk can
+/// be attached `rw`, because two runs naming one image would both write it.
+#[test]
+fn a_materialized_disk_volume_hands_back_a_lock_the_caller_can_hold() {
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("data.img");
+    let volume = mvm_core::vm_backend::VmVolume {
+        host: image.display().to_string(),
+        guest: "/data".to_string(),
+        size: "16M".to_string(),
+        read_only: false,
+        kind: mvm_core::vm_backend::VmVolumeKind::Disk,
+        ..Default::default()
+    };
+
+    let held = crate::commands::shared::materialize_disk_volume(&volume)
+        .expect("materializes")
+        .expect("a disk volume yields a lock");
+    assert_eq!(held.path(), image.as_path());
+    assert!(image.is_file(), "the backing image is created");
+}
+
+/// A directory volume has no image and so no lock — `None`, not a failure.
+#[test]
+fn a_dir_share_volume_yields_no_lock() {
+    let volume = mvm_core::vm_backend::VmVolume {
+        host: "/h/src".to_string(),
+        guest: "/work".to_string(),
+        read_only: true,
+        kind: mvm_core::vm_backend::VmVolumeKind::DirShare,
+        ..Default::default()
+    };
+    assert!(
+        crate::commands::shared::materialize_disk_volume(&volume)
+            .expect("no-op for a dir share")
+            .is_none()
+    );
+}
+
 #[test]
 fn test_parse_volume_spec_disk() {
     let spec = parse_volume_spec("/data:/data/vol:4G").unwrap();
@@ -2491,6 +2532,29 @@ fn test_audit_verify_with_tenant() {
         }) => assert_eq!(tenant, "acme"),
         _ => panic!("Expected Audit::Verify"),
     }
+}
+
+#[test]
+fn test_audit_asset_id_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "trust", "audit", "asset", "id", "/data/model.bin"])
+        .unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
+            action:
+                AuditAction::Asset {
+                    action: AssetAction::Id { path },
+                },
+        }) => assert_eq!(path, std::path::PathBuf::from("/data/model.bin")),
+        _ => panic!("Expected Audit::Asset::Id"),
+    }
+}
+
+#[test]
+fn test_audit_asset_id_rejects_missing_path() {
+    assert!(Cli::try_parse_from(["mvmctl", "trust", "audit", "asset", "id"]).is_err());
 }
 
 #[test]
