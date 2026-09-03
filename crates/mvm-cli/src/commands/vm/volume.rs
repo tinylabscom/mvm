@@ -128,9 +128,9 @@ pub(in crate::commands) enum VolumeCmd {
         /// Must be lowercase alphanumeric + hyphens, ≤32 chars.
         #[arg(long)]
         volume: String,
-        /// Absolute host directory exposed via virtio-fs. Advanced
-        /// path: omitted for managed volumes created with
-        /// `mvmctl volume create`.
+        /// Absolute host directory, snapshotted into an ext4 image at
+        /// registration and attached as a block device. A snapshot, not a live
+        /// view: re-register to refresh it. Managed volumes omit this.
         #[arg(long)]
         host: Option<String>,
         #[arg(long, help = GUEST_MOUNT_HELP)]
@@ -357,6 +357,82 @@ fn kind_label(record: &VolumeRecord) -> String {
     }
 }
 
+/// Where a `--host` snapshot image lives: one per (machine, volume), so two
+/// registrations never write the same file and removing a machine's directory
+/// takes its snapshots with it.
+fn host_snapshot_image(vm_name: &str, volume_name: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_core::config::mvm_home())
+        .join("volumes")
+        .join("host-snapshots")
+        .join(vm_name)
+        .join(format!("{volume_name}.ext4"))
+}
+
+/// Materialize `host_dir` into an ext4 image for registration.
+///
+/// The same pure-Rust writer `--mount` uses — no `mkfs`, no subprocess, and it
+/// reads host bytes rather than guest requests, so it is not a surface a guest
+/// can reach.
+fn materialize_host_snapshot(
+    vm_name: &str,
+    volume_name: &str,
+    host_dir: &Path,
+    read_only: bool,
+) -> Result<std::path::PathBuf> {
+    let output = host_snapshot_image(vm_name, volume_name);
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating snapshot dir {}", parent.display()))?;
+    }
+    let _ = read_only;
+    let input = mvm_build::rootfs::MaterializeExt4Input::builder()
+        .unpacked_root(host_dir.to_path_buf())
+        .output(output.clone())
+        .uncompressed_size_bytes(host_tree_size_bytes(host_dir))
+        .volume_label(format!("mvmvol{volume_name}"))
+        .emit_verity(false)
+        .deferred_nodes(Vec::new())
+        .build()
+        .context("assembling the host snapshot inputs")?;
+    mvm_build::rootfs::materialize_ext4_pure(&input)
+        .with_context(|| format!("materializing {} into an image", host_dir.display()))?;
+    Ok(output)
+}
+
+/// Sum of regular-file bytes under `dir`, for sizing the image.
+///
+/// Best effort, matching `--mount`'s sizing: an unreadable entry contributes
+/// nothing rather than failing the registration, because this only feeds an
+/// estimate and the writer grows the image to fit what it actually writes.
+fn host_tree_size_bytes(dir: &Path) -> u64 {
+    let mut total = 0u64;
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&next) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                pending.push(entry.path());
+            } else if meta.is_file() {
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+    total
+}
+
+/// The registered size, in MiB, rounded up so a sub-MiB image is not recorded
+/// as zero.
+fn image_size_mib(image: &Path) -> Result<u32> {
+    let bytes = std::fs::metadata(image)
+        .with_context(|| format!("stat snapshot image {}", image.display()))?
+        .len();
+    let mib = bytes.div_ceil(1024 * 1024).max(1);
+    u32::try_from(mib).with_context(|| format!("snapshot image {} is too large", image.display()))
+}
+
 fn mount(
     vm_name: &str,
     volume_name: &str,
@@ -381,7 +457,24 @@ fn mount(
             if !host.is_absolute() {
                 bail!("--host path must be absolute, got {:?}", host.display());
             }
-            service().prepare_ad_hoc_host_attachment(&request, host)?
+            // Snapshot the directory into an image and register that.
+            //
+            // A live host-directory share cannot be served — no workload
+            // backend has a virtio-fs device, so `machine start` refused one at
+            // boot and `machine run` ignored it. Registering the directory
+            // as-is recorded an attachment no launch could honour.
+            //
+            // `--mount HOST:/GUEST` already solved the same problem for a
+            // transient run by materializing the directory into an ext4 image,
+            // so this reuses that rather than inventing a second answer. The
+            // cost is the semantic the old docs claimed and never delivered:
+            // the image is a snapshot taken now, not a live view of the
+            // directory. Re-register to refresh it.
+            let host_encrypted_check = service();
+            host_encrypted_check.require_host_encryption(host)?;
+            let image = materialize_host_snapshot(vm_name, volume_name, host, !rw)?;
+            let size_mib = image_size_mib(&image)?;
+            service().prepare_ad_hoc_image_attachment(&request, &image, size_mib)?
         }
         None => service().prepare_attachment(&request)?,
     };

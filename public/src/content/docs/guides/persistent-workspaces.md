@@ -117,8 +117,14 @@ as errors rather than falling back to the local registry.
 
 ## Host-backed mounts
 
-Ad-hoc host-backed mounts are useful when an existing encrypted host directory
-is the source of truth:
+Ad-hoc host-backed mounts seed a machine from an existing encrypted host
+directory. The directory is **snapshotted into an ext4 image when you register
+it** and attached as a block device — it is not a live view, and host edits
+afterwards are not visible to the guest. Re-register the volume to refresh it.
+
+This is the same treatment `mvmctl machine run --mount HOST:/GUEST` gives a
+transient run, and for the same reason: no workload backend has a virtio-fs
+device, so a live host-directory share cannot be expressed at all.
 
 ```sh
 mvmctl machine volume mount agent-sandbox \
@@ -138,7 +144,8 @@ mvmctl machine volume mount agent-sandbox \
 ```
 
 The host directory must live on encrypted backing storage. If encryption cannot
-be verified, the command should fail closed.
+be verified, the command fails closed — the check runs against the source
+directory, not the snapshot.
 
 ## Copy instead of mount
 
