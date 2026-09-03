@@ -48,6 +48,8 @@ jobs:
   e2e-docs:
     name: Documented surface e2e
     uses: ./.github/workflows/e2e-docs.yml
+    with:
+      macos_blocks_on_unusable_host: true
 
   build:
     strategy:
