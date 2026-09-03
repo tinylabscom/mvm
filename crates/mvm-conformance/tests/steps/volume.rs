@@ -133,9 +133,7 @@ fn write_managed_volume_marker(world: &mut CliWorld, value: i64, volume_name: St
     image.sync_all().expect("sync volume marker");
 }
 
-/// Register a **host directory** volume — the `--host <dir>` arm, which is
-/// `LocalVolumeKind::Directory` rather than the `machine volume create` block
-/// image every other live scenario here uses.
+/// Register a **host directory** volume through the `--host <dir>` arm.
 ///
 /// The directory is created under the isolated home and seeded with a marker,
 /// so a guest that can read it proves the registration reached the VM and a
@@ -174,39 +172,21 @@ fn register_host_directory_volume(
     world.last_run = Some(cmd.output().expect("failed to spawn mvmctl"));
 }
 
-fn encrypted_volume_probe_path(world: &CliWorld) -> std::ffi::OsString {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
+#[when(expr = "I replace the marker in host directory volume {string} with {string}")]
+fn replace_host_directory_marker(world: &mut CliWorld, volume_name: String, contents: String) {
+    let marker = isolated_home(world)
+        .join("dir-volumes")
+        .join(volume_name)
+        .join("marker");
+    fs::write(&marker, contents)
+        .unwrap_or_else(|error| panic!("replace host directory marker {marker:?}: {error}"));
+}
 
-        let bin = isolated_home(world).join("encrypted-volume-probe-bin");
-        fs::create_dir_all(&bin).expect("create encrypted-volume probe bin");
-        for (name, body) in [
-            (
-                "diskutil",
-                "#!/bin/sh\nprintf 'Device Identifier: disk-test\\nEncrypted: Yes\\n'\n",
-            ),
-            ("findmnt", "#!/bin/sh\nprintf '/dev/mapper/mvm-test\\n'\n"),
-            ("lsblk", "#!/bin/sh\nprintf 'crypt\\n'\n"),
-        ] {
-            let path = bin.join(name);
-            fs::write(&path, body)
-                .unwrap_or_else(|error| panic!("write encrypted-volume probe {path:?}: {error}"));
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap_or_else(|error| {
-                panic!("make encrypted-volume probe executable {path:?}: {error}")
-            });
-        }
-        let mut paths = vec![bin];
-        if let Some(current) = std::env::var_os("PATH") {
-            paths.extend(std::env::split_paths(&current));
-        }
-        std::env::join_paths(paths).expect("join encrypted-volume probe PATH")
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = world;
-        std::env::var_os("PATH").unwrap_or_default()
-    }
+#[when(expr = "I remove the source for host directory volume {string}")]
+fn remove_host_directory_source(world: &mut CliWorld, volume_name: String) {
+    let source = isolated_home(world).join("dir-volumes").join(volume_name);
+    fs::remove_dir_all(&source)
+        .unwrap_or_else(|error| panic!("remove host directory source {source:?}: {error}"));
 }
 
 #[then(expr = "managed volume {string} ends with byte {int}")]

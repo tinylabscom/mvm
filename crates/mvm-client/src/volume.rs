@@ -39,8 +39,8 @@ mod test_support;
 pub use dto::{
     AccessMode, AdmittedProfile, AttachmentRecord, AttachmentRequest, AttachmentRequestBuilder,
     AttachmentSource, CreateBlockVolumeRequest, CreateBlockVolumeRequestBuilder, EncryptionState,
-    LaunchLeaseRequest, LaunchLeaseRequestBuilder, ReleaseOutcome, UnlockPolicy, VolumeRecord,
-    VolumeSourceKind,
+    HostSnapshotRecord, LaunchLeaseRequest, LaunchLeaseRequestBuilder, ReleaseOutcome,
+    UnlockPolicy, VolumeRecord, VolumeSourceKind,
 };
 pub use lease::LaunchLease;
 pub use service::{

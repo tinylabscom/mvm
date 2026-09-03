@@ -23,22 +23,64 @@ pub(crate) fn mount_volume_label(index: usize) -> String {
 pub(crate) fn materialize_mount_volumes(
     shares: &[DirShareSpec],
     vm_name: &str,
+    sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
 ) -> Result<Vec<VmVolume>> {
+    use crate::commands::vm::phase_timing::SubPhase;
+
     if shares.is_empty() {
         return Ok(Vec::new());
     }
-    let state_dir = mvm_core::config::vm_state_dir(vm_name);
-    std::fs::create_dir_all(&state_dir).with_context(|| {
-        format!(
-            "creating the VM state directory {} for --mount images",
-            state_dir.display()
-        )
-    })?;
-    shares
+    let cache = crate::mount_cache::MountImageCache::new();
+    sub.start(SubPhase::MountFingerprint);
+    let fingerprints = shares
         .iter()
         .enumerate()
         .map(|(index, share)| {
-            let image = materialize_mount_image(share, &state_dir, index)?;
+            let source = std::path::Path::new(&share.host_dir);
+            if cache.source_exceeds_limit(source) {
+                Ok(None)
+            } else {
+                cache
+                    .fingerprint(source, &mount_volume_label(index))
+                    .map(Some)
+            }
+        })
+        .collect::<Result<Vec<_>>>();
+    sub.finish(SubPhase::MountFingerprint);
+    let fingerprints = fingerprints?;
+
+    sub.start(SubPhase::MountCacheLookup);
+    // Cache misses retain their per-key lock through materialization. Acquire
+    // keys in one stable order so concurrent launches with the same mounts
+    // cannot wait on each other in opposite orders.
+    let mut indexed_fingerprints = fingerprints
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, fingerprint)| fingerprint.map(|value| (index, value)))
+        .collect::<Vec<_>>();
+    indexed_fingerprints.sort_by(|(_, left), (_, right)| left.cache_key().cmp(right.cache_key()));
+    let mut indexed_lookups = (0..shares.len()).map(|_| None).collect::<Vec<_>>();
+    for (index, fingerprint) in indexed_fingerprints {
+        indexed_lookups[index] = Some(cache.lookup(fingerprint)?);
+    }
+    let lookups = indexed_lookups;
+    sub.finish(SubPhase::MountCacheLookup);
+    let materialized = lookups
+        .iter()
+        .any(|lookup| lookup.as_ref().is_none_or(|value| value.is_miss()));
+    if materialized {
+        sub.start(SubPhase::MountMaterialize);
+    }
+    let state_dir = mvm_core::config::vm_state_dir(vm_name);
+    let volumes = shares
+        .iter()
+        .zip(lookups)
+        .enumerate()
+        .map(|(index, (share, lookup))| {
+            let image = match lookup {
+                Some(lookup) => lookup.resolve()?.path().to_path_buf(),
+                None => materialize_mount_image(share, &state_dir, index)?,
+            };
             Ok(VmVolume {
                 host: share.host_dir.clone(),
                 guest: share.guest_mount.clone(),
@@ -51,7 +93,11 @@ pub(crate) fn materialize_mount_volumes(
                 ..Default::default()
             })
         })
-        .collect()
+        .collect();
+    if materialized {
+        sub.finish(SubPhase::MountMaterialize);
+    }
+    volumes
 }
 
 /// Materialize a granted host directory into an ext4 image and return its path.
@@ -185,7 +231,12 @@ mod tests {
 
     #[test]
     fn no_mounts_create_no_state_or_volumes() {
-        assert!(materialize_mount_volumes(&[], "unused").unwrap().is_empty());
+        let mut sub = crate::commands::vm::phase_timing::LaunchSubMarks::new(true);
+        assert!(
+            materialize_mount_volumes(&[], "unused", &mut sub)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -196,10 +247,9 @@ mod tests {
             guest_mount: "/work".to_string(),
             read_only: true,
         };
-        let err = materialize_mount_image(&share, scratch.path(), 0).unwrap_err();
-        let message = format!("{err:#}");
-        assert!(message.contains("not a directory"), "{message}");
-        assert!(!scratch.path().join("mount-0.ext4").exists());
+        let mut sub = crate::commands::vm::phase_timing::LaunchSubMarks::new(true);
+        let err = materialize_mount_volumes(&[share], "missing", &mut sub).unwrap_err();
+        assert!(err.to_string().contains("does not exist"), "{err:#}");
     }
 
     /// Sizing counts the whole tree.
@@ -253,6 +303,38 @@ mod tests {
         symlink(&outside, source.join("link")).unwrap();
 
         assert_eq!(tree_size_bytes(&source), 0);
+    }
+
+    #[test]
+    fn mount_cache_miss_and_hit_produce_the_declared_timing_spans() {
+        use crate::commands::vm::phase_timing::SubPhase;
+
+        let scratch = tempfile::TempDir::new().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(scratch.path());
+        let source = scratch.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("marker"), b"content").unwrap();
+        let share = DirShareSpec {
+            host_dir: source.display().to_string(),
+            guest_mount: "/work".to_string(),
+            read_only: true,
+        };
+
+        let mut miss_marks = crate::commands::vm::phase_timing::LaunchSubMarks::new(true);
+        let miss =
+            materialize_mount_volumes(std::slice::from_ref(&share), "cache-miss", &mut miss_marks)
+                .unwrap();
+        assert!(miss_marks.recorded(SubPhase::MountFingerprint));
+        assert!(miss_marks.recorded(SubPhase::MountCacheLookup));
+        assert!(miss_marks.recorded(SubPhase::MountMaterialize));
+
+        let mut hit_marks = crate::commands::vm::phase_timing::LaunchSubMarks::new(true);
+        let hit = materialize_mount_volumes(&[share], "cache-hit", &mut hit_marks).unwrap();
+        assert!(hit_marks.recorded(SubPhase::MountFingerprint));
+        assert!(hit_marks.recorded(SubPhase::MountCacheLookup));
+        assert!(!hit_marks.recorded(SubPhase::MountMaterialize));
+        assert_eq!(miss[0].materialized_image, hit[0].materialized_image);
     }
 }
 

@@ -332,6 +332,22 @@ fn deferrable_file_len(path: &Path) -> Option<u64> {
 /// via rayon. The returned nodes are sorted by guest path so the output is
 /// deterministic regardless of filesystem read_dir order.
 pub fn collect_nodes(root: &Path, options: WalkOptions) -> Result<Vec<Node>, MaterializeError> {
+    let entries = collect_walk_entries(root, options)?;
+    let mut nodes: Vec<Node> = par_map(entries, |entry| read_walk_entry(entry, options))
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+
+    nodes.sort_by(|a, b| a.path().cmp(b.path()));
+    Ok(nodes)
+}
+
+fn collect_walk_entries(
+    root: &Path,
+    options: WalkOptions,
+) -> Result<Vec<WalkEntry>, MaterializeError> {
     let mut entries = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -385,16 +401,129 @@ pub fn collect_nodes(root: &Path, options: WalkOptions) -> Result<Vec<Node>, Mat
             });
         }
     }
+    Ok(entries)
+}
 
-    let mut nodes: Vec<Node> = par_map(entries, |entry| read_walk_entry(entry, options))
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .flatten()
-        .collect();
+/// Hash the filesystem semantics [`collect_nodes`] presents to the ext4
+/// writer.
+///
+/// Unlike [`crate::hash::hash_source`], this identity includes Unix mode bits
+/// and guest-visible extended attributes because both affect the emitted
+/// image. Timestamps, uid, and gid are excluded because the deterministic
+/// writer normalizes them. The walk shares enumeration and policy handling
+/// with [`collect_nodes`] so a cache key cannot silently accept an inode the
+/// materializer rejects.
+pub fn fingerprint_ext4_source(
+    root: &Path,
+    options: WalkOptions,
+) -> Result<String, MaterializeError> {
+    let nodes = collect_nodes(root, options)?;
+    Ok(fingerprint_ext4_nodes(&nodes))
+}
 
-    nodes.sort_by(|a, b| a.path().cmp(b.path()));
-    Ok(nodes)
+/// Hash an already-collected node set using the same identity as
+/// [`fingerprint_ext4_source`].
+///
+/// This lets a content-addressed caller compare a fresh source snapshot with
+/// its expected identity and then consume those exact nodes to build the image,
+/// closing the race inherent in hashing and materializing with separate walks.
+#[must_use]
+pub fn fingerprint_ext4_nodes(nodes: &[Node]) -> String {
+    let mut ordered = nodes.iter().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| left.path().cmp(right.path()));
+
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"mvm.ext4-source.v1\0");
+    for node in ordered {
+        let (kind, mode, payload, xattrs) = match node {
+            Node::Dir { mode, xattrs, .. } => (b'd', *mode, None, xattrs.as_slice()),
+            Node::File {
+                mode, data, xattrs, ..
+            } => (
+                b'f',
+                *mode,
+                Some(sha2::Sha256::digest(data)),
+                xattrs.as_slice(),
+            ),
+            Node::FileFromHost {
+                mode,
+                source,
+                len,
+                xattrs,
+                ..
+            } => (
+                b'f',
+                *mode,
+                Some(digest_deferred_file(source, *len)),
+                xattrs.as_slice(),
+            ),
+            Node::Symlink { target, .. } => {
+                fold_fingerprint_field(&mut hasher, node.path().as_bytes());
+                hasher.update(b"l");
+                hasher.update(0u16.to_be_bytes());
+                fold_fingerprint_field(&mut hasher, target.as_bytes());
+                hasher.update(0u64.to_be_bytes());
+                continue;
+            }
+        };
+        fold_fingerprint_field(&mut hasher, node.path().as_bytes());
+        hasher.update([kind]);
+        hasher.update(mode.to_be_bytes());
+        fold_fingerprint_field(&mut hasher, payload.as_deref().unwrap_or_default());
+        hasher.update(
+            u64::try_from(xattrs.len())
+                .unwrap_or(u64::MAX)
+                .to_be_bytes(),
+        );
+        for xattr in xattrs {
+            fold_fingerprint_field(&mut hasher, xattr.name.as_bytes());
+            fold_fingerprint_field(&mut hasher, &xattr.value);
+        }
+    }
+    hex::encode(hasher.finalize())
+}
+
+/// Hash the exact byte shape the streaming writer emits for a deferred file.
+///
+/// The writer truncates growth at the length captured by the walk and leaves
+/// a vanished or shortened tail as sparse zeroes. Mirroring that rule keeps a
+/// deferred node's content identity equal to its guest-visible bytes.
+fn digest_deferred_file(source: &Path, len: u64) -> sha2::digest::Output<sha2::Sha256> {
+    use std::io::Read;
+
+    let mut reader = std::fs::File::open(source)
+        .ok()
+        .map(std::io::BufReader::new);
+    let mut hasher = sha2::Sha256::new();
+    let mut remaining = len;
+    let mut buffer = vec![0u8; 64 * 1024];
+    while remaining > 0 {
+        let want = usize::try_from(remaining.min(buffer.len() as u64))
+            .expect("the chunk length is bounded by the in-memory buffer");
+        buffer[..want].fill(0);
+        let mut filled = 0usize;
+        while filled < want {
+            let Some(file) = reader.as_mut() else {
+                break;
+            };
+            match file.read(&mut buffer[filled..want]) {
+                Ok(0) => {
+                    reader = None;
+                }
+                Ok(read) => filled += read,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => reader = None,
+            }
+        }
+        hasher.update(&buffer[..want]);
+        remaining -= want as u64;
+    }
+    hasher.finalize()
+}
+
+fn fold_fingerprint_field(hasher: &mut sha2::Sha256, value: &[u8]) {
+    hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+    hasher.update(value);
 }
 
 /// Descriptor returned by [`materialize_ext4_pure`].
@@ -716,13 +845,26 @@ pub fn materialize_ext4_pure(
         collect_nodes(root, options.walk)?,
         options.extra_nodes.clone(),
     );
+    materialize_ext4_nodes_pure(nodes, output, &options.build)
+}
+
+/// Materialize an already-collected node set into an ext4 image.
+///
+/// Callers that content-address a mutable source can hash the nodes with
+/// [`fingerprint_ext4_nodes`] and pass the same owned values here, ensuring the
+/// emitted image cannot diverge from the identity selected for it.
+pub fn materialize_ext4_nodes_pure(
+    nodes: Vec<Node>,
+    output: &Path,
+    options: &BuildOptions,
+) -> Result<MaterializedImage, MaterializeError> {
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent).map_err(|source| MaterializeError::Write {
             path: parent.to_path_buf(),
             source,
         })?;
     }
-    let size_bytes = stream_ext4_to_file(nodes, output, &options.build)?;
+    let size_bytes = stream_ext4_to_file(nodes, output, options)?;
     Ok(MaterializedImage {
         path: output.to_path_buf(),
         size_bytes,
@@ -955,6 +1097,25 @@ mod tests {
         assert!(
             nodes.iter().any(|n| matches!(n, Node::FileFromHost { .. })),
             "the deferred walk produced no deferred files at all"
+        );
+    }
+
+    #[test]
+    fn deferred_nodes_hash_the_same_guest_bytes_as_eager_nodes() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("payload"), b"content-addressed").unwrap();
+
+        let eager = nodes_with(src.path(), FileContentPolicy::ReadDuringWalk);
+        let deferred = nodes_with(src.path(), FileContentPolicy::DeferToEmit);
+
+        assert_eq!(
+            fingerprint_ext4_nodes(&eager),
+            fingerprint_ext4_nodes(&deferred)
+        );
+        std::fs::write(src.path().join("payload"), b"changed-address!!").unwrap();
+        assert_ne!(
+            fingerprint_ext4_nodes(&eager),
+            fingerprint_ext4_nodes(&deferred)
         );
     }
 
@@ -1305,6 +1466,73 @@ mod tests {
         );
         assert_eq!(before.nodes.total, after.nodes.total);
         assert_eq!(before.nodes.files, after.nodes.files);
+    }
+
+    #[test]
+    fn ext4_source_fingerprint_tracks_bytes_and_emitted_modes_not_mtime() {
+        let src = tempfile::tempdir().unwrap();
+        let file = src.path().join("tool");
+        std::fs::write(&file, b"before").unwrap();
+        let original_mtime = std::fs::metadata(&file).unwrap().modified().unwrap();
+        let options = WalkOptions::new(UnsupportedNodePolicy::Reject);
+
+        let before = fingerprint_ext4_source(src.path(), options).unwrap();
+        std::fs::write(&file, b"after!").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
+            .unwrap();
+        let changed_bytes = fingerprint_ext4_source(src.path(), options).unwrap();
+        assert_ne!(
+            before, changed_bytes,
+            "equal mtimes must not hide new bytes"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let changed_mode = fingerprint_ext4_source(src.path(), options).unwrap();
+            assert_ne!(
+                changed_bytes, changed_mode,
+                "a mode preserved in the ext4 image is part of its source identity"
+            );
+        }
+    }
+
+    #[test]
+    fn ext4_source_fingerprint_tracks_symlink_targets() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let src = tempfile::tempdir().unwrap();
+            symlink("first", src.path().join("link")).unwrap();
+            let options = WalkOptions::new(UnsupportedNodePolicy::Reject);
+            let before = fingerprint_ext4_source(src.path(), options).unwrap();
+            std::fs::remove_file(src.path().join("link")).unwrap();
+            symlink("second", src.path().join("link")).unwrap();
+            let after = fingerprint_ext4_source(src.path(), options).unwrap();
+            assert_ne!(before, after);
+        }
+    }
+
+    #[test]
+    fn ext4_source_fingerprint_tracks_guest_visible_xattrs() {
+        let src = tempfile::tempdir().unwrap();
+        let file = src.path().join("data");
+        std::fs::write(&file, b"same bytes").unwrap();
+        if xattr::set(&file, "user.mvm.fingerprint", b"before").is_err() {
+            return;
+        }
+        let options = WalkOptions::new(UnsupportedNodePolicy::Reject);
+        let before = fingerprint_ext4_source(src.path(), options).unwrap();
+        xattr::set(&file, "user.mvm.fingerprint", b"after").unwrap();
+        let after = fingerprint_ext4_source(src.path(), options).unwrap();
+        assert_ne!(before, after);
     }
 
     #[test]

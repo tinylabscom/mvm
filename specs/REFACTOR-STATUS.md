@@ -23,6 +23,15 @@ Last updated: 2026-09-03
       gated compilation, the full workspace nextest suite, doc tests, all-targets Clippy,
       policy checks, and BDD are green. Broader surface design and merge remain.
 
+- [x] **Refresh host-directory snapshots at machine start.**
+      `specs/plans/2026-09-03-refresh-host-snapshot-at-start.md`.
+      Persistent `--host` and transient `--mount` share one verified,
+      content-addressed ext4 image cache. Start-time source fingerprints cover
+      emitted filesystem semantics, changed snapshots refresh before lease
+      acquisition, missing sources refuse, and writable consumers receive
+      private copies. Workspace tests/check, host and Linux-native Clippy,
+      gated compilation, and hermetic BDD are green. A live Firecracker
+      restart observed changed bytes even when the source mtime was preserved.
 - [x] **Cargo target-dir guard.**
       `specs/plans/2026-09-02-cargo-target-dir-guard.md`.
       Both cargo wrapper scripts reclaim a CARGO_TARGET_DIR pointing outside
@@ -1695,7 +1704,9 @@ resume` takes a `current_head` and refuses when it differs from the
         623.6 ms on identical code), retargeting Phase 3 at the Firecracker
         path. Foreground teardown is the other dominant cost, promoting
         Phase 6 ahead of Phase 3.
-  - [ ] Phase 1 — content-addressed `--mount` image cache
+  - [x] Phase 1 — content-addressed `--mount` image cache. Persistent `--host`
+        registrations use the same cache and refresh on source changes before
+        start.
   - [~] Phase 2 — artifact preparation outside the launch path. The resolution
     half landed as the warm pool's hard prerequisite (**#2333**):
     `crate::exec::resolve_launch` yields a bootable `VmStartConfig` without

@@ -114,12 +114,12 @@ pub(in crate::commands) enum VolumeCmd {
         #[arg(long)]
         remote: bool,
     },
-    /// Mount a virtio-fs volume into a VM.
+    /// Register a local block volume with a VM.
     ///
     /// Operations against provider-backed (S3 / Hetzner / R2 / GCS /
     /// Azure) volumes route through mvmd via `--remote`. v1 mvm-side
-    /// `mount` handles only local volumes (host directory exposed via
-    /// virtio-fs).
+    /// `mount` handles only local volumes. A host directory is snapshotted to
+    /// an ext4 block image rather than shared directly with the guest.
     Mount {
         /// Name of the VM
         #[arg(value_parser = clap_vm_name)]
@@ -128,9 +128,9 @@ pub(in crate::commands) enum VolumeCmd {
         /// Must be lowercase alphanumeric + hyphens, ≤32 chars.
         #[arg(long)]
         volume: String,
-        /// Absolute host directory, snapshotted into an ext4 image at
-        /// registration and attached as a block device. A snapshot, not a live
-        /// view: re-register to refresh it. Managed volumes omit this.
+        /// Absolute host directory, snapshotted into an ext4 image before each
+        /// machine start and attached as a block device. Host edits made while
+        /// the machine runs become visible after its next stop/start.
         #[arg(long)]
         host: Option<String>,
         #[arg(long, help = GUEST_MOUNT_HELP)]
@@ -357,9 +357,9 @@ fn kind_label(record: &VolumeRecord) -> String {
     }
 }
 
-/// Where a `--host` snapshot image lives: one per (machine, volume), so two
-/// registrations never write the same file and removing a machine's directory
-/// takes its snapshots with it.
+/// Where a writable `--host` snapshot image lives. The immutable base stays in
+/// the shared content-addressed cache; a guest that may write receives this
+/// private reflink/copy so it cannot poison another launch's cache object.
 fn host_snapshot_image(vm_name: &str, volume_name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_core::config::mvm_home())
         .join("volumes")
@@ -368,54 +368,8 @@ fn host_snapshot_image(vm_name: &str, volume_name: &str) -> std::path::PathBuf {
         .join(format!("{volume_name}.ext4"))
 }
 
-fn ensure_private_snapshot_parent(output: &Path) -> Result<()> {
-    let parent = output
-        .parent()
-        .with_context(|| format!("snapshot path {} has no parent", output.display()))?;
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("creating snapshot dir {}", parent.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("restricting snapshot dir {}", parent.display()))?;
-    }
-    Ok(())
-}
-
-/// Materialize `host_dir` into an ext4 image for registration.
-///
-/// The same pure-Rust writer `--mount` uses — no `mkfs`, no subprocess, and it
-/// reads host bytes rather than guest requests, so it is not a surface a guest
-/// can reach.
-fn materialize_host_snapshot(
-    vm_name: &str,
-    volume_name: &str,
-    host_dir: &Path,
-) -> Result<std::path::PathBuf> {
-    let output = host_snapshot_image(vm_name, volume_name);
-    ensure_private_snapshot_parent(&output)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-        std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .mode(0o600)
-            .open(&output)
-            .with_context(|| format!("creating private snapshot image {}", output.display()))?;
-        std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("restricting snapshot image {}", output.display()))?;
-    }
-    crate::exec::materialize_directory_snapshot(host_dir, &output, "mvmvol")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("restricting snapshot image {}", output.display()))?;
-    }
-    Ok(output)
+fn host_snapshot_volume_label(volume_name: &str) -> String {
+    format!("mvmvol{volume_name}")
 }
 
 /// The registered size, in MiB, rounded up so a sub-MiB image is not recorded
@@ -452,32 +406,24 @@ fn mount(
             if !host.is_absolute() {
                 bail!("--host path must be absolute, got {:?}", host.display());
             }
-            // Snapshot the directory into an image and register that.
-            //
-            // A live host-directory share cannot be served — no workload
-            // backend has a virtio-fs device, so `machine start` refused one at
-            // boot and `machine run` ignored it. Registering the directory
-            // as-is recorded an attachment no launch could honour.
-            //
-            // `--mount HOST:/GUEST` already solved the same problem for a
-            // transient run by materializing the directory into an ext4 image,
-            // so this reuses that rather than inventing a second answer. The
-            // cost is the semantic the old docs claimed and never delivered:
-            // the image is a snapshot taken now, not a live view of the
-            // directory. Re-register to refresh it.
+            let cache = crate::mount_cache::MountImageCache::new();
+            let fingerprint = cache.fingerprint(host, &host_snapshot_volume_label(volume_name))?;
             let host_encrypted_check = service();
-            host_encrypted_check.require_host_encryption(host)?;
-            let output = host_snapshot_image(vm_name, volume_name);
-            ensure_private_snapshot_parent(&output)?;
-            let output_parent = output
-                .parent()
-                .context("host snapshot output has no parent directory")?;
-            host_encrypted_check
-                .require_host_encryption(output_parent)
-                .context("host snapshot destination is not on encrypted backing storage")?;
-            let image = materialize_host_snapshot(vm_name, volume_name, host)?;
-            let size_mib = image_size_mib(&image)?;
-            service().prepare_ad_hoc_image_attachment(&request, &image, size_mib)?
+            host_encrypted_check.require_host_encryption(fingerprint.source())?;
+            let image = cache.lookup(fingerprint)?.resolve()?;
+            let attachment_image = if rw {
+                image.writable_copy(&host_snapshot_image(vm_name, volume_name))?
+            } else {
+                image.path().to_path_buf()
+            };
+            let size_mib = image_size_mib(&attachment_image)?;
+            service().prepare_ad_hoc_snapshot_attachment(
+                &request,
+                image.fingerprint().source(),
+                &attachment_image,
+                image.fingerprint().cache_key(),
+                size_mib,
+            )?
         }
         None => service().prepare_attachment(&request)?,
     };
@@ -559,6 +505,7 @@ pub(super) fn merge_registered_volumes_for_launch(
     vm_name: &str,
     explicit: &[mvm_runtime::image::RuntimeVolume],
 ) -> Result<PreparedLaunchVolumes> {
+    refresh_registered_host_snapshots(vm_name)?;
     // Persistent named machines are dev-accessible for their lifetime, so
     // the dev-tier access gate applies here; locked managed volumes keep
     // failing closed (the operator unlocks explicitly before launch).
@@ -570,6 +517,57 @@ pub(super) fn merge_registered_volumes_for_launch(
     service()
         .acquire_launch_lease(&request)
         .context("resolving registered local volumes for launch")
+}
+
+fn refresh_registered_host_snapshots(vm_name: &str) -> Result<()> {
+    let volume_service = service();
+    let cache = crate::mount_cache::MountImageCache::new();
+    for attachment in volume_service.list_attachments(vm_name)? {
+        let Some(snapshot) = attachment.host_snapshot else {
+            continue;
+        };
+        let fingerprint = cache
+            .fingerprint(
+                Path::new(&snapshot.source_path),
+                &host_snapshot_volume_label(&attachment.volume),
+            )
+            .with_context(|| {
+                format!(
+                    "refreshing host snapshot for volume {:?}",
+                    attachment.volume
+                )
+            })?;
+        volume_service
+            .require_host_encryption(fingerprint.source())
+            .with_context(|| {
+                format!(
+                    "rechecking host snapshot source for {:?}",
+                    attachment.volume
+                )
+            })?;
+        let unchanged = fingerprint.cache_key() == snapshot.fingerprint;
+        if !attachment.access.is_read_only()
+            && unchanged
+            && Path::new(&attachment.host_path).is_file()
+        {
+            continue;
+        }
+        let cached = cache.lookup(fingerprint)?.resolve()?;
+        let attachment_image = if attachment.access.is_read_only() {
+            cached.path().to_path_buf()
+        } else {
+            cached.writable_copy(&host_snapshot_image(vm_name, &attachment.volume))?
+        };
+        let size_mib = image_size_mib(&attachment_image)?;
+        volume_service.refresh_ad_hoc_snapshot_attachment(
+            vm_name,
+            &attachment.guest_path,
+            &attachment_image,
+            cached.fingerprint().cache_key(),
+            size_mib,
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -813,6 +811,105 @@ mod tests {
             format!("{err:#}").contains("duplicate guest mount path"),
             "got: {err:#}"
         );
+    }
+
+    fn read_snapshot_marker(image: &Path) -> String {
+        ext4_view::Ext4::load_from_path(image)
+            .unwrap()
+            .read_to_string("/marker")
+            .unwrap()
+    }
+
+    #[test]
+    fn changed_host_bytes_with_equal_mtime_refresh_before_launch() {
+        let guard = DataDirGuard::new();
+        let source = guard.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let marker = source.join("marker");
+        fs::write(&marker, b"before").unwrap();
+        let original_mtime = fs::metadata(&marker).unwrap().modified().unwrap();
+        mount(
+            "vm-1",
+            "source",
+            Some(source.to_str().unwrap()),
+            "/data/source",
+            false,
+        )
+        .unwrap();
+        let before = service().list_attachments("vm-1").unwrap().remove(0);
+        assert_eq!(read_snapshot_marker(Path::new(&before.host_path)), "before");
+
+        fs::write(&marker, b"after!").unwrap();
+        File::options()
+            .write(true)
+            .open(&marker)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
+            .unwrap();
+        refresh_registered_host_snapshots("vm-1").unwrap();
+        let after = service().list_attachments("vm-1").unwrap().remove(0);
+        assert_ne!(before.host_path, after.host_path);
+        assert_ne!(
+            before.host_snapshot.unwrap().fingerprint,
+            after.host_snapshot.unwrap().fingerprint
+        );
+        assert_eq!(read_snapshot_marker(Path::new(&after.host_path)), "after!");
+    }
+
+    #[test]
+    fn missing_host_snapshot_source_refuses_launch_and_keeps_last_image() {
+        let guard = DataDirGuard::new();
+        let source = guard.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("marker"), b"last-known").unwrap();
+        mount(
+            "vm-1",
+            "source",
+            Some(source.to_str().unwrap()),
+            "/data/source",
+            false,
+        )
+        .unwrap();
+        let registered = service().list_attachments("vm-1").unwrap().remove(0);
+        fs::remove_dir_all(&source).unwrap();
+
+        let error = match merge_registered_volumes_for_launch("vm-1", &[]) {
+            Ok(_) => panic!("a missing source must refuse before a launch lease is acquired"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("does not exist"), "{error:#}");
+        assert_eq!(
+            read_snapshot_marker(Path::new(&registered.host_path)),
+            "last-known"
+        );
+    }
+
+    #[test]
+    fn changed_host_source_replaces_a_private_writable_snapshot() {
+        let guard = DataDirGuard::new();
+        let source = guard.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("marker"), b"first").unwrap();
+        mount(
+            "vm-1",
+            "source",
+            Some(source.to_str().unwrap()),
+            "/data/source",
+            true,
+        )
+        .unwrap();
+        let before = service().list_attachments("vm-1").unwrap().remove(0);
+        assert_eq!(
+            Path::new(&before.host_path),
+            host_snapshot_image("vm-1", "source")
+        );
+        assert_eq!(read_snapshot_marker(Path::new(&before.host_path)), "first");
+
+        fs::write(source.join("marker"), b"second").unwrap();
+        refresh_registered_host_snapshots("vm-1").unwrap();
+        let after = service().list_attachments("vm-1").unwrap().remove(0);
+        assert_eq!(before.host_path, after.host_path);
+        assert_eq!(read_snapshot_marker(Path::new(&after.host_path)), "second");
     }
 
     #[test]

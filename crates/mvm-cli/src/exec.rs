@@ -354,8 +354,8 @@ pub fn shell_quote(arg: &str) -> String {
 ///   3. cds into `working_dir` (when target is LaunchPlan and it's set)
 ///   4. execs the resolved command
 ///
-/// Host directories are attached and mounted by the guest activation path. The
-/// command wrapper must not contain a second mount implementation.
+/// Host-directory snapshots are attached and mounted by the guest activation
+/// path. The command wrapper must not contain a second mount implementation.
 ///
 /// Env precedence (lowest → highest): launch-plan app.env → launch-plan
 /// entrypoint.env → CLI `--env`. The first two are merged in
@@ -1159,17 +1159,7 @@ fn mount_volumes(
     vm_name: &str,
     sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
 ) -> Result<Vec<VmVolume>> {
-    if shape.dir_shares.is_empty() {
-        return Ok(Vec::new());
-    }
-    // Named because it is the one cost this change adds, and it scales with
-    // the mounted tree: ~100ms for a 30MB one. An unnamed span here would be
-    // the same hole `attach_initramfs` sat in — a launch able to say how long
-    // it took and not where.
-    sub.start(crate::commands::vm::phase_timing::SubPhase::MountMaterialize);
-    let volumes = mounts::materialize_mount_volumes(shape.dir_shares, vm_name);
-    sub.finish(crate::commands::vm::phase_timing::SubPhase::MountMaterialize);
-    volumes
+    mounts::materialize_mount_volumes(shape.dir_shares, vm_name, sub)
 }
 
 /// Build the `VmStartConfig` for the transient boot from the resolved image +

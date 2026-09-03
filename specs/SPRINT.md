@@ -22,6 +22,20 @@
       tests, all-targets zero-warning Clippy, policy checks, and BDD are green;
       the plan's broader output-surface design and merge delivery remain.
 
+- [x] **Refresh host-directory snapshots at machine start.**
+      `specs/plans/2026-09-03-refresh-host-snapshot-at-start.md`.
+      Persistent `machine volume mount --host` and transient `--mount` now use
+      one content-addressed ext4 cache. The source identity hashes file bytes,
+      paths, modes, symlink targets, and guest-visible xattrs rather than
+      mtimes; cache images are atomically published and digest-verified before
+      attach. A persistent start refreshes a changed snapshot before taking a
+      launch lease and refuses a missing source. Read-only consumers attach the
+      immutable cache object directly; writable registrations use private
+      reflink/copies and retain guest writes until the host source changes.
+      Workspace tests/check, host and Linux-native zero-warning Clippy, gated
+      compilation, and hermetic BDD (248 passed, 1 capability skip) are green.
+      A live Firecracker witness changed source bytes while preserving mtime;
+      the restarted guest observed `dir-volume-refreshed`.
 - [ ] **Content-addressed asset identity.**
       `specs/plans/2026-09-02-content-addressed-asset-identity.md`.
       Every dataset, model, prompt, agent, policy, and compute environment a
@@ -2520,7 +2534,7 @@ Then unify + retire the old paths:
   mount-cache hit, mount-cache miss, artifact miss, and warm claim as distinct
   distributions. A first-use image pull, build, digest, or ext4 materialization
   may not be hidden inside the launch SLO.
-- [ ] **Content-addressed mount cache:** fingerprint source content and mount
+- [x] **Content-addressed mount cache:** fingerprint source content and mount
   policy, publish immutable images atomically under `MVM_HOME`, verify the
   manifest and image digest before attach, support read-only direct attach and
   writable copy-on-write, and remove obsolete internal add-directory naming.

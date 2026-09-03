@@ -74,8 +74,8 @@ A mount is a snapshot taken at boot; host edits during the run are not visible.
 `--mount` was already read-only — the CLI refuses `rw` with "transient live
 shares are read-only" — so mid-run visibility is the only property lost.
 
-**This is not yet documented in `--mount --help` or the README.** It must be
-before this ships.
+The snapshot semantics are documented in the CLI help and persistent-workspace
+guide.
 
 ## Removed
 
@@ -116,10 +116,10 @@ No-mount launches are unchanged, and the dispatch window — the number
 untouched. `admit_plan` is identical either way: admission itself did not get
 slower.
 
-A mounted launch pays the materialization **every launch**. The image is
-written under `vm_state_dir(vm_name)` and a transient VM name is unique per
-run, so there is nothing to cache against without relocating images into a
-shared content-addressed store — which is the heavy feature this work avoided.
+A mounted launch originally paid the materialization **every launch**. The
+2026-09-03 follow-up relocated immutable images into a shared,
+content-addressed cache and now records the existing fingerprint, cache-lookup,
+and miss-only materialization spans.
 
 ## Not done
 
@@ -135,7 +135,18 @@ shared content-addressed store — which is the heavy feature this work avoided.
   a writer) or vsock streaming.
 - **No `xtask check-no-virtio-fs` gate yet** — Stage D. Until it exists, nothing
   stops virtio-fs coming back.
-- **Materialization cost is unmeasured on a large tree.** The test mount was
-  tiny. A `--mount $PWD` on this repo will pay real time, and no cache exists
-  yet: the `mount_fingerprint` / `mount_cache_lookup` / `mount_materialize`
-  spans are still unproduced. Measure before deciding a cache is needed.
+- **Materialization cost remains unmeasured on a large tree.** The original
+  test mount was tiny. Cache hits now avoid rebuilding the ext4 image, but a
+  content-correct hit still pays the source tree walk and hash.
+
+## 2026-09-03 follow-up
+
+Persistent `machine volume mount --host` and transient `--mount` now share one
+verified content-addressed image cache. The cache key covers source bytes and
+guest-visible metadata, the ext4 materializer format version, and the volume
+label. A cache miss hashes the exact collected node set it emits, closing the
+mutable-tree race between identity and image creation. Read-only mounts attach
+the immutable cache image; writable persistent mounts receive a private
+reflink/copy. Registered host sources are fingerprinted again before each
+start, changed sources refresh, and missing sources refuse instead of serving
+the last snapshot.
