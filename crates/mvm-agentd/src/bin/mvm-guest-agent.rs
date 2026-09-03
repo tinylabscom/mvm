@@ -727,6 +727,19 @@ fn main() {
     let guest_signing_key = Arc::new(SigningKey::from_bytes(&guest_seed));
     boot_state.mark_vsock_bound();
 
+    // Boot beacon: report agent liveness to the host once, on a
+    // background thread with bounded retries. Fail-open by contract —
+    // a missing host broker (dev images without an audit signer, a
+    // boot-time race the retries don't cover) must never delay or
+    // fail the workload's boot.
+    let beacon_boot_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    std::thread::spawn(move || {
+        mvm_agentd::host_beacon::report_boot_beacon(beacon_boot_unix_ms);
+    });
+
     // On legacy per-rootfs boots the agent is not PID 1 and the workload
     // root is already in place, so validate the entrypoint and start the warm
     // pool now. On the universal initramfs path validation is deferred until

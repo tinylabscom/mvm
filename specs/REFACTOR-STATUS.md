@@ -13,6 +13,28 @@ Last updated: 2026-09-02
       mirrors dev-env.sh: inside-tree values honored, outside-tree values
       reclaimed loudly, MVM_DEV_ENV_KEEP_INHERITED=1 keeps them anyway. Gate
       tests and CI shellcheck green; merged via #3135.
+- [x] **Aux host-helper contract verification.**
+      `specs/plans/2026-09-02-aux-helper-contract.md`.
+      Host helpers answer a `--contract-version` probe and `mvmctl` verifies
+      the answer before spawning: a stale helper in a source checkout is
+      rebuilt in the running binary's profile, and any other stale pick is a
+      hard error naming both contract versions and the rebuild command,
+      replacing the recurring silent cross-profile fallback that surfaced as
+      an "unknown field" spawn failure. A `HvfSupervisorConfig` shape pin
+      forces the contract version to bump with the schema. Focused
+      regressions, affected crate suites, zero-warning Clippy, and Linux/BDD
+      gated compilation are green; merged via #3132.
+
+- [ ] **Supply-chain evidence carryover (WS1.1 + WS1.4 + WS2.1 + WS3.1).**
+      `specs/plans/2026-09-02-supply-chain-evidence-carryover.md` on
+      `feat/supply-chain-evidence`. Boot-liveness beacon recorded as a
+      chain-signed `lifecycle.beacon_reported` entry; local deploy store
+      gains its first read path (`mvmctl deployments ls`); sealed OCI
+      rematerializes now write a JCS+Ed25519 provenance mark into the
+      rootfs before verity hashing (`/mvm/provenance.json` + detached
+      signature) and an in-toto/SLSA v1 DSSE sidecar (`rootfs.intoto.json`)
+      beside the sealed image. Cross-repo items (mvmd registry/queries,
+      studio pages, scout verification) remain open in the plan.
 
 - [ ] **Signed caller commitment — issue #3070.**
       `specs/plans/2026-09-01-signed-caller-commitment.md`.

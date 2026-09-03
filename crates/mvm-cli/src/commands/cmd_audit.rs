@@ -284,6 +284,7 @@ impl Commands {
             // `build <sub>` delegates to the per-op verb (image/compile/validate/kernel).
             Commands::Build(a) => a.action.verb_name(),
             Commands::Deploy(_) => "deploy",
+            Commands::Deployments(_) => "deployments",
             Commands::ShellInit(_) => "shell-init",
             // `ops <sub>` delegates to the per-op verb (metrics/config/MCP).
             Commands::Ops(a) => a.action.verb_name(),

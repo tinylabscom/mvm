@@ -2983,6 +2983,7 @@ dependencies = [
  "nix 0.29.0",
  "rand 0.10.2",
  "serde",
+ "serde_jcs",
  "serde_json",
  "sha2 0.11.0",
  "tar",
