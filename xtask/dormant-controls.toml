@@ -51,8 +51,8 @@ it, one of which would have flipped it to `false` and refused the sidecar for \
 every signed plan predating the field. A dormant control whose only visible \
 knob is its default invites exactly that.
 
-Wiring it — a launch-time way to declare a workload speaks the broker protocol \
-directly — is issue #3068's work. This entry fails the moment that lands and \
+Wiring it requires a launch-time way to declare that a workload speaks the \
+broker protocol directly. This entry fails the moment that path lands and \
 `false` becomes producible, which is the signal to delete it."""
 
 [[control]]
