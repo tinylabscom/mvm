@@ -38,6 +38,7 @@ pub mod mkfs;
 pub mod verity;
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use crate::parallel::par_map;
 
@@ -193,6 +194,27 @@ pub enum Node {
         data: Vec<u8>,
         xattrs: Vec<Xattr>,
     },
+    /// A regular file whose bytes stay on the host until the emit pass reads
+    /// them.
+    ///
+    /// `File` above holds its contents, so a walked tree costs its own size in
+    /// memory before a single byte is written. That is fine for a rootfs and
+    /// not fine for `--mount`, where the tree is a user's working directory and
+    /// can be tens of gigabytes. This variant carries a path and the size the
+    /// layout was planned against; [`emit_file_blocks`] reads it in
+    /// block-sized chunks straight into the image.
+    ///
+    /// `len` is captured at walk time and is what the extent layout is built
+    /// from, so the emit pass must produce exactly that many bytes whatever the
+    /// file says later — see [`emit_file_blocks`] for what happens when a live
+    /// tree changes underneath the walk.
+    FileFromHost {
+        path: String,
+        mode: u16,
+        source: PathBuf,
+        len: u64,
+        xattrs: Vec<Xattr>,
+    },
     Symlink {
         path: String,
         target: String,
@@ -233,14 +255,19 @@ impl Node {
     /// deduplicate node lists on.
     pub fn path(&self) -> &str {
         match self {
-            Node::Dir { path, .. } | Node::File { path, .. } | Node::Symlink { path, .. } => path,
+            Node::Dir { path, .. }
+            | Node::File { path, .. }
+            | Node::FileFromHost { path, .. }
+            | Node::Symlink { path, .. } => path,
         }
     }
 
     /// The node's extended attributes (empty for symlinks).
     fn xattrs(&self) -> &[Xattr] {
         match self {
-            Node::Dir { xattrs, .. } | Node::File { xattrs, .. } => xattrs,
+            Node::Dir { xattrs, .. }
+            | Node::File { xattrs, .. }
+            | Node::FileFromHost { xattrs, .. } => xattrs,
             Node::Symlink { .. } => &[],
         }
     }
@@ -376,6 +403,17 @@ struct ChildEdge {
 }
 
 // A planned inode: its number, kind, and the data blocks assigned to it.
+/// Where a planned inode's bytes come from during the emit pass.
+///
+/// `Inline` is every caller that already holds its content — an OCI layer, a
+/// generated file, a directory block. `FromHost` is a walked host tree that was
+/// deliberately not read into memory; it costs one open and a block-sized
+/// buffer at emit time instead of the file's whole size at walk time.
+enum Content {
+    Inline(Vec<u8>),
+    FromHost { source: PathBuf, len: usize },
+}
+
 struct Planned {
     ino: u32,
     kind: Kind,
@@ -391,7 +429,7 @@ struct Planned {
     block_count: u32,
     size: u64,
     // File contents / symlink target for the emit pass.
-    data: Vec<u8>,
+    data: Content,
     symlink_target: Option<String>,
     // Directory children: (name, child_ino, child_ft). Filled after planning.
     children: Vec<(String, u32, u8)>,
@@ -633,7 +671,7 @@ where
         leaf_blocks: Vec::new(),
         block_count: 0,
         size: 0,
-        data: Vec::new(),
+        data: Content::Inline(Vec::new()),
         symlink_target: None,
         children: Vec::new(),
         links: 2,
@@ -659,7 +697,7 @@ where
             Node::Dir { mode, .. } => (
                 Kind::Dir,
                 S_IFDIR | (mode & 0o7777),
-                Vec::new(),
+                Content::Inline(Vec::new()),
                 None,
                 0u64,
                 FT_DIR,
@@ -669,18 +707,31 @@ where
                 (
                     Kind::File,
                     S_IFREG | (mode & 0o7777),
-                    data,
+                    Content::Inline(data),
                     None,
                     size,
                     FT_FILE,
                 )
             }
+            Node::FileFromHost {
+                mode, source, len, ..
+            } => (
+                Kind::File,
+                S_IFREG | (mode & 0o7777),
+                Content::FromHost {
+                    source,
+                    len: len as usize,
+                },
+                None,
+                len,
+                FT_FILE,
+            ),
             Node::Symlink { target, .. } => {
                 let size = target.len() as u64;
                 (
                     Kind::Symlink,
                     S_IFLNK | 0o777,
-                    Vec::new(),
+                    Content::Inline(Vec::new()),
                     Some(target),
                     size,
                     FT_SYMLINK,
@@ -1249,17 +1300,108 @@ fn emit_file_blocks<E, F>(emit: &mut F, img: &Image, p: &Planned) -> Result<(), 
 where
     F: FnMut(u64, &[u8]) -> Result<(), E>,
 {
+    match &p.data {
+        Content::Inline(bytes) => {
+            let mut written = 0usize;
+            for ext in &p.extents {
+                if written >= bytes.len() {
+                    break;
+                }
+                let span = ext.len as usize * BLOCK_SIZE_USIZE;
+                let end = (written + span).min(bytes.len());
+                emit(img.block_off(ext.phys) as u64, &bytes[written..end])?;
+                written += span;
+            }
+            Ok(())
+        }
+        Content::FromHost { source, len } => emit_host_file_blocks(emit, img, p, source, *len),
+    }
+}
+
+/// Stream one host file's bytes into the extents planned for it.
+///
+/// The layout is already committed by the time this runs — inode numbers,
+/// extents and the image's total size were all fixed from the size the walk
+/// stat'd. So this emits exactly `len` bytes whatever the file says now:
+///
+/// * **Short read** (the file shrank, or was truncated mid-walk): the shortfall
+///   is left as-is. Every block the layout allocated is inside the image and
+///   the emit callback leaves untouched ranges as holes, which read back as
+///   zeros — the same thing a sparse region gives. Emitting fewer bytes than
+///   planned is safe; emitting them at the wrong offset would not be, which is
+///   why the extent cursor advances by the planned span rather than by what was
+///   read.
+/// * **Long read** (the file grew): the extra is dropped. The inode's `i_size`
+///   is the planned length, so bytes past it would be unreachable through the
+///   filesystem and would corrupt whatever the allocator put in the next block.
+///
+/// Neither is silent corruption of *someone else's* data, which is the property
+/// that matters: a live tree that changes under a snapshot yields a file that
+/// is some prefix of one of its versions, and never another file's bytes.
+fn emit_host_file_blocks<E, F>(
+    emit: &mut F,
+    img: &Image,
+    p: &Planned,
+    source: &std::path::Path,
+    len: usize,
+) -> Result<(), E>
+where
+    F: FnMut(u64, &[u8]) -> Result<(), E>,
+{
+    // A file that cannot be reopened leaves its extents as holes rather than
+    // failing the build. The walk already accepted it; a tree that changes
+    // between walk and emit is the case this whole path exists to tolerate,
+    // and `VanishedNodePolicy` makes the same choice one stage earlier.
+    let Ok(file) = std::fs::File::open(source) else {
+        return Ok(());
+    };
+    let mut reader = std::io::BufReader::new(file);
+
+    let mut buf = vec![0u8; BLOCK_SIZE_USIZE];
     let mut written = 0usize;
     for ext in &p.extents {
-        if written >= p.data.len() {
+        if written >= len {
             break;
         }
         let span = ext.len as usize * BLOCK_SIZE_USIZE;
-        let end = (written + span).min(p.data.len());
-        emit(img.block_off(ext.phys) as u64, &p.data[written..end])?;
+        let mut offset_in_extent = 0usize;
+        while offset_in_extent < span && written + offset_in_extent < len {
+            let want = buf
+                .len()
+                .min(span - offset_in_extent)
+                .min(len - written - offset_in_extent);
+            let got = read_up_to(&mut reader, &mut buf[..want]);
+            if got == 0 {
+                // Short file: stop. The rest of the layout stays a hole.
+                return Ok(());
+            }
+            emit(
+                img.block_off(ext.phys) as u64 + offset_in_extent as u64,
+                &buf[..got],
+            )?;
+            offset_in_extent += got;
+        }
         written += span;
     }
     Ok(())
+}
+
+/// Fill `buf` as far as the reader allows, returning how many bytes landed.
+///
+/// `Read::read` may return short without being at EOF, and a partial block
+/// emitted as if it were a whole one would leave a gap in the middle of a
+/// file. Looping here keeps the emit offsets contiguous.
+fn read_up_to<R: std::io::Read>(reader: &mut R, buf: &mut [u8]) -> usize {
+    let mut filled = 0usize;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    filled
 }
 
 // ── path helpers ────────────────────────────────────────────────────────────

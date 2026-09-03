@@ -59,7 +59,7 @@ Feature: every README-documented CLI launch mode boots a real guest
   # binaries were present in the rootfs.
   @live @dir_share
   Scenario: an interactive mounted run preserves the image environment
-    When I launch "machine run --image rust --env NAME=ari --mount .:/work -it -- /bin/bash -c 'tty; command -v cargo; printf NAME=%s $NAME; test -f /work/README.md'" on a terminal
+    When I launch "machine run --image rust --env NAME=ari --mount ./examples/python/hello-app:/work -it -- /bin/bash -c 'tty; command -v cargo; printf NAME=%s $NAME; test -f /work/README.md'" on a terminal
     Then the launch succeeds
     And the guest console is a pseudo-terminal
     And the guest printed "/usr/local/cargo/bin/cargo"
@@ -89,11 +89,20 @@ Feature: every README-documented CLI launch mode boots a real guest
     And the guest control plane came up
 
   # The one scenario here that is *about* `--mount` rather than merely using it
-  # to deliver a file. libkrun and HVF both serve a virtio-fs share; Firecracker
-  # has no such device and refuses the volume before boot.
+  # to deliver a file. Every backend serves it: a granted directory is
+  # materialized into an ext4 image and attached as virtio-blk, so Firecracker —
+  # which has no virtio-fs device — takes it too.
+  #
+  # Mounts the directory the README's own `--mount` example names, not the
+  # repository root. `.` is what these three scenarios used to mount, which was
+  # free when a mount was a live virtio-fs share and is a full copy now that it
+  # is a snapshot: against a built checkout it exceeds the snapshotter's 2 GiB
+  # budget and every one of them fails on the tree's size rather than on
+  # anything `--mount` did. A witness for a documented example should run the
+  # documented example.
   @live @dir_share
   Scenario: --mount shares a host directory the workload can read
-    When I launch "machine run --image alpine --mount .:/work -- ls /work/README.md"
+    When I launch "machine run --image alpine --mount ./examples/python/hello-app:/work -- ls /work/README.md"
     Then the launch succeeds
     And the guest printed "/work/README.md"
     And the guest control plane came up
@@ -158,7 +167,7 @@ Feature: every README-documented CLI launch mode boots a real guest
     # went red once here on a dropped ICMP echo while the same command passed
     # immediately afterwards. The claim is "the guest reached an admitted
     # host", not "no packet was ever lost".
-    When I launch "machine run --image alpine --allow-host github.com --mount .:/work -- sh -c 'ls /work/README.md && ping -c 3 github.com >/dev/null && echo egress-ok'"
+    When I launch "machine run --image alpine --allow-host github.com --mount ./examples/python/hello-app:/work -- sh -c 'ls /work/README.md && ping -c 3 github.com >/dev/null && echo egress-ok'"
     Then the launch succeeds
     And the guest printed "/work/README.md"
     And the guest printed "egress-ok"

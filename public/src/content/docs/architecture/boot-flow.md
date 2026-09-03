@@ -42,7 +42,7 @@ When the initramfs is attached, the backend boots:
 - the universal initramfs (`initrd_path`),
 - the workload rootfs and its dm-verity sidecar,
 - the runtime overlay and its dm-verity sidecar,
-- any virtio-fs or virtio-blk volumes.
+- any virtio-blk volumes.
 
 The block layout is fixed by the workload runner (verity sidecars are
 attached only for verity-sealed boots):
@@ -54,8 +54,10 @@ attached only for verity-sealed boots):
 | `/dev/vdc`   | runtime overlay data                           |
 | `/dev/vdd`   | runtime overlay dm-verity hash tree            |
 
-A block-less virtiofs-root dev boot attaches no disks at all; the root comes
-from a virtio-fs tag instead.
+Every workload boots from a block root. The virtio-fs root was the one boot
+mode that could not be dm-verity sealed, and across this project's recorded
+launch history it was taken zero times; it has been removed, and the root
+strategy is now unconditionally block-backed ext4.
 
 **On the universal-initramfs verity path the kernel cmdline carries no roothash
 tokens**: the rootfs and runtime-overlay roothashes and device paths arrive over
@@ -98,15 +100,16 @@ message from the admitted launch config and sends it over the guest-agent
 vsock port — for every boot that attached the universal initramfs, verified
 or not. The message carries:
 
-- **Rootfs config** — one of three shapes: a dm-verity block root (`/dev/vda`
+- **Rootfs config** — one of two shapes: a dm-verity block root (`/dev/vda`
   - `/dev/vdb` + roothash, from the launch config or the `rootfs.roothash`
-    sidecar), an unverified plain-block root (`/dev/vda` only), or a virtio-fs
-    root tag (`mvmroot`).
+    sidecar), or an unverified plain-block root (`/dev/vda` only).
 - **Runtime overlay config** — `/dev/vdc`, `/dev/vdd`, and its roothash, when
   the boot carries an overlay. A rootfs-only boot sends no overlay.
-- **Volumes** — `DirShare` volumes translated to virtio-fs tags (`uvol0`,
-  `uvol1`, …) with guest mountpoints and read-only flags. `Disk` volumes are
-  already attached as block devices, so they are not part of the message.
+- **Volumes** — the guest mountpoint, read-only flag and ext4 volume label for
+  each granted directory. A granted directory is materialized into an ext4
+  image on the host and attached as virtio-blk, so the guest mounts it by
+  label rather than by a virtio-fs tag. `Disk` volumes are attached as block
+  devices directly and are not part of the message.
 - **Optional verb-grant envelope** — read from
   `<MVM_HOME>/vms/<name>/verb-grant.json` when present.
 
@@ -120,11 +123,11 @@ this verb.
 On receiving `ActivateEnvironment`, the guest:
 
 1. Mounts the root: the `root` dm-verity target from `/dev/vda` + `/dev/vdb`
-   for a sealed boot, the plain block device read-only for an unverified boot,
-   or the virtio-fs tag for a block-less dev boot — staged at `/mnt/root`.
+   for a sealed boot, or the plain block device read-only for an unverified
+   boot — staged at `/mnt/root`.
 2. Mounts the runtime overlay read-only at `/mvm/runtime` inside the new root,
    when one was sent.
-3. Mounts any virtio-fs volumes.
+3. Mounts any volumes, each by its ext4 volume label.
 4. Pivots the root filesystem to the mounted root.
 5. Drops privilege to the fixed workload UID/GID `901`.
 6. Flips the boot state to `Activated` and begins serving operational RPCs.
@@ -153,9 +156,9 @@ convergence work.
 
 ## Future tiers and backends
 
-The universal initramfs assumes a Linux guest kernel with virtio-blk /
-virtio-fs devices and a vsock channel. Tiers that don't provide those get the
-model in adapted form — or honestly not at all:
+The universal initramfs assumes a Linux guest kernel with virtio-blk devices
+and a vsock channel. Tiers that don't provide those get the model in adapted
+form — or honestly not at all:
 
 - **Wasm** (`WasmBackend`, ADR-024) — no Linux kernel and no initramfs: the
   workload is a WASI module under host `wasmtime`, so `ActivateEnvironment`
@@ -194,7 +197,7 @@ model in adapted form — or honestly not at all:
 - **WHP (Windows Hypervisor Platform)** — a future Windows-host backend. The
   guest side is unchanged: the same kernel + universal initramfs boot and the
   same `ActivateEnvironment`. The work is entirely host-side — a WHP
-  `VmmDriver`, virtio-blk/virtio-fs device model, and a vsock transport over
+  `VmmDriver`, a virtio-blk device model, and a vsock transport over
   Hyper-V sockets (`AF_HYPERV`) in place of `AF_VSOCK`. dm-verity runs in the
   guest, so verified boot is host-agnostic and a WHP backend could target the
   same Tier 2 posture as HVF/libkrun once its egress gate lands. Until then,

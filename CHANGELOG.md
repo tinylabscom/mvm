@@ -2,13 +2,9 @@
 
 All notable changes to mvm are documented in this file.
 
-## [0.18.0] — 2026-08-16
+## [0.18.0] — 2026-09-02
 
 ### Added
-- **runtime**: Roll out the readonly guest-runtime overlay as a first-class
-  release surface. Guest-executed runtime binaries are now published as a
-  version-matched artifact under `~/.cache/mvm/runtime-overlay/<version>/<arch>/`
-  and consumed read-only by admitted overlay-backed backends.
 - **mvm-cli**: Fetch + apply the signed pack revocation list (Plan 213 §I)
 - **release**: Publish + verify a signed pack revocation list
 - **mvm-build**: Runtime pack carries verity-sealed rootfs (kernel+rootfs+verity+roothash)
@@ -140,12 +136,14 @@ All notable changes to mvm are documented in this file.
 - **cli**: Forward ports from machine run
 - **web**: Redesign hero diagram into clean 3-step execution pipeline
 - **contract**: RFC 6962 consistency proofs for audit merkle trees
+- Feat/320 e2 3 substitution registry
 - **hvf**: TCP port forwarding over authenticated vsock
 - **site**: Apply 316 design review polish
 - Enforce CpuGrant::Share on HVF via in-process vCPU quota scheduler
 - **demo**: Finish Plan 320 hardening — Worker, parity tests, CI lane, landing teaser
 - **mvm-build**: Wire before_build lifecycle hook in builder VM
 - **net**: Extract shared authenticated session and rename to NetworkFlow
+- Feat/329 browser wasm backend
 - **runtime**: Remove DockerBackend and make MVM microVM-only
 - **cli**: Machine fork/restore with --as and --branch
 - **audit**: Phase 4 decision query API and causal chains
@@ -159,25 +157,74 @@ All notable changes to mvm are documented in this file.
 - **xtask**: Name new plans by slug, not by number
 - **xtask**: Claim-bearing prose must declare what backs it (Plan 306 WS1)
 - **sec**: Sign the checksum manifests that gate boot bytes
-
-### Removed
-- **networking**: Remove the public `raw_ip_stack`/`l3_vsock` mode and its L3
-  packet protocol, guest TUN agent, host forwarders, VMM hooks, packaging,
-  dependencies, and migration ratchets. Stale serialized inputs now receive a
-  migration error naming the supported loopback and typed-connector surfaces.
+- **image**: Key the OCI rootfs cache on the injected runtime, not a hand-bumped epoch
+- **337**: Own the SDK env-var names in Rust and generate both bindings
+- **337**: Own the SDK error taxonomy in Rust and generate both bindings
+- **sec**: Bind a secret to a named provider, not a typed hostname
+- **release**: Boot the staged microVM image before publishing it
+- **337**: Generate the Tier A and Tier B constructors from a declarative registry
+- **cli**: Let a source checkout opt out of building its own boot image
+- **release**: Give boot images their own release train
+- **337**: Tier F decision, close-out, and Tier C transport as a declared subset
+- **net**: Finish the one-transport cutover — WS4–WS7 and the gate that keeps it
+- **image**: Record where a boot image came from, and let it be inspected
+- **sec**: The claim set a workload presents to an identity consumer
+- **337**: Finish Tier C with sessions, and close the plan
+- **cli**: Make `--help` describe the product the docs describe
+- **cli**: `mvmctl run npm test` picks the image
+- **build**: An `image =` manifest builds instead of being refused
+- **assurance**: Admission-bound AI assurance sessions
+- **cli**: `mvmctl bench` — give the latency harness a front door
+- **assurance**: Fail-closed evidence emission and the workload probe API
+- **cli**: Agent plugin install, and `completions` becomes a verb again
+- **assurance**: Open the campaign session on the boot path
+- **broker**: Derive the tool catalog from admission, constrain arguments, and make refusals teach
+- **cli**: State the security presets once, and let doctor read them
+- **assurance**: Run a declared campaign from the client launch path
+- **assurance**: Assemble the evidence a trial is actually judged on
+- **xtask**: Refuse an outbound tool client in guest-shipped code
+- **assurance**: Let one ledger serve both audit routes
+- **checkpoint**: Enforce a forked child's declared secret bindings (#2698 A3)
+- **assurance**: Carry the admitted session on the signed registration
+- **contract**: Compile an upstream tool namespace into bindable capabilities
+- **mcp**: Route MCP through MvmClient
+- **sdk**: Add opt-in Obscura browser provider
+- Resume --boot cold-boots a parked durable session
+- Bound FlowMux transformations at the endpoint
+- **weblinux**: Add WebLinux browser backend, portable contracts, and Nix-packaged QEMU-Wasm engine
+- **capture**: Evidence-backed Linux environment capture frontend
+- **audit**: Signed evidence archives over the chain-signed audit log
+- **weblinux**: QEMU-Wasm browser smoke demo with SLIRP and allow-host plumbing
+- SCITT-compatible action state capsules with hash chaining
+- Add SCITT-compatible action state capsules with hash chaining
+- Workload service plane — peer names, host.kv.v1, runnable catalog entries
+- Complete ExecutionReceipt v1
+- **attestation**: Real TPM2 provider, packaging, and ADR-001 amendment
+- **nix**: Render mkGuest healthChecks into the guest probe drop-ins
+- **hostd**: Operationalize the audit Merkle log — root history, consistency proofs, off-host witness
+- Expose workload address API
+- **admission**: Admit externally-signed plans from pinned fleet signers
+- **hvf**: Give the guest the vCPUs it asked for, or say what it got
+- **image**: Record the guest's libc in the image sidecar
+- Record measured resource utilization in the execution receipt
+- **sdk**: Build and package a musl SDK host-services sidecar
+- **web**: Add OPFS cache store
+- **mount**: Deliver a granted directory as a block image, not virtio-fs
+- **sdk**: Select the sidecar variant from the catalogued runtime's libc
+- **xtask**: Ratchet the virtio-fs surface so it cannot grow back
+- **sdk**: Select the sidecar variant from the image's own recorded libc
+- **builder**: Move the QEMU builder onto the disk transport
+- **xtask**: Gate prose that asserts absence, and commit agent findings
+- **builder**: Carry the libkrun seeded closure on the input disk
+- **xtask**: Refuse a vCPU ceiling derived from a wire type
+- **mount**: Find a materialized mount by label rather than by slot
+- **builder**: Move the persistent HVF builder onto the disk transport
+- **xtask**: Pin the SDK cdylib closure free of host HTTP/TLS/async
+- **vmm**: Attribute a helper resolved from the other build profile
+- **fs**: Stream host file contents into the image instead of buffering them
+- **memory**: WS5-WS6 agent memory plane store and handler (+47 more)
 
 ### Changed
-- **networking**: Make authenticated FlowMux the sole production workload
-  networking path across Firecracker, HVF, and libkrun. One per-VM endpoint now
-  owns admitted TCP, UDP, controlled DNS, typed transformations, and declared
-  ingress with shared limits, identity, policy, and payload-free audit state.
-- **networking**: Stream typed HTTP transformations with bounded head, body,
-  overlap, idle, and credit limits, and execute typed connector traffic inside
-  the network endpoint instead of a second broker-owned client.
-- **runtime**: Document the runtime-overlay operational contract explicitly for
-  release verification and operator rollout: running VMs do not hot-remount,
-  stopped VMs pick up the new version on restart, and Linux rootfs-backed
-  libkrun builder use remains fail-closed.
 - Ignore transfer directory
 - Ignore local dev dir and document PR metadata rule
 - Finish Vz removal — scrub docs + drop the dead vz-drainer bridge endpoint
@@ -191,6 +238,18 @@ All notable changes to mvm are documented in this file.
 - **build**: Drop mvm-build's unused tokio dependency
 - **justfile**: Correct what test-cached actually adds over a global sccache
 - **just**: Add check-gated for the targets --all-targets cannot see
+- **just**: Add docs-publish, so publishing the site is a documented step
+- Speed up Rust development compilation
+- Add release-min profile to shrink shipped mvmctl
+- Scope the pre-commit clippy, and move stable to 1.97.1
+- **kernel**: Bump synchronized pins to 6.12.106
+- **site**: Add reproducible Wrangler deployment
+- **kernel**: Bump synchronized pins to 6.12.107
+- Ignore the generated output/ tree
+- Measure the witness-reachability gate, refuse it, fix what it found
+- **hvf**: Delete the now-dead virtio-fs share wiring
+- **vmm**: Delete the virtio-fs device and its FUSE server
+- Remove worktrees from git history
 
 ### Documentation
 - Plan HVF density memory reductions
@@ -293,14 +352,52 @@ All notable changes to mvm are documented in this file.
 - **deps**: Say which graph each duplicate-major list measures
 - Plan 338 — refresh the CLI grammar doctrine and gate the surface
 - **bench**: Publish the launch budgets, and gate the page against them
+- **plans**: Boot image lifecycle — gate it, version it, expose it
+- **claims**: Witness the wall-clock timer against the wire carrier
+- **plans**: The kernel-repo-split premise moved, and the case got weaker
+- Correct the edge-tier record and supersede the Tier-1 witness plan
+- Decide the agent tool surface and the memory plane
+- **research**: The trust model for a type-1 mvm, and the one question that gates it
+- Scope the tool plane, and record what controller-launched children must not break
+- Establish FlowMux single-path closeout
+- Document host-side eBPF egress telemetry
+- **338**: Record PR #2776 merge status and pending build verification
+- **weblinux**: Scope browser-hosted WebLinux demo plan
+- Add BrowserWasi backend documentation
+- Align markdown table columns in builder-vm.md and troubleshooting.md
+- **adr**: Reconcile the spawned-microVM and durable-messaging designs
+- Document vsock binary protocol over guest agent and FlowMux
+- Execution contract artifact identity qualification plan
+- Expand vsock protocol documentation with FlowMux details
+- Plan for .mvmev offline verifiability
+- **mvmev**: Specify canonical verification format
+- Generate /llms.txt, add markdown twins and an agent entry point
+- **claims**: Drop a claim-13 witness that tests an uncalled function
+- **security**: Correct factual claims on the security and architecture pages
+- **backends**: Warn at the libkrun capability fields that they are overwritten
+- Correct claims the docs make about the CLI, SDK, and backends
+- **stream**: Record landed fleet edge caller
+- **e2e**: Record the verified host kv volume witness
+- **status**: Drop the duplicated refactor-status entries
+- **status**: File the sidecar libc selection as landed
+- **plan**: Re-scope Stage C's persistent builder against the tree
+- Close caller commitment delivery
+- **qemu**: Record why this backend declares no vCPU ceiling
+- Stop crediting mvm-sdk with a cdylib it does not build
+- **plan**: The Stage C re-scope was overtaken by #3061
+- Plan for cutting the 0.18 release
+- Record the release-gate decisions in the 0.18 plan
+- **notes**: Record the mvm-hostd --lib tracing flake
+- Correct the virtio-fs claims the code no longer supports
+- **plan**: Design out retiring VmVolumeKind::DirShare
+- Add implementation prompt for issue plans
+- Point the helper rebuild at the recipe, and finish the crate list
 
 ### Fixed
-- **builder**: Invalidate builder images whose baked PID 1 predates the
-  three-file FlowMux identity contract, and make `MVM_EMBED_NO_CACHE` reliably
-  retrigger the embedded-helper build.
 - **hvf/oci**: Guest BROKER_PORT bridge + OCI rootfs self-heal
 - **machine**: Make `run -d -- <cmd>` detach instead of foreground-blocking
 - **machine**: Gate persistent OCI egress backends
+- Fix ext4 merge-queue determinism
 - Accept OCI manifests without digest header
 - Build source-checkout kernels and host binaries locally on cache miss
 - Harden agent reconnect restart races
@@ -425,6 +522,7 @@ All notable changes to mvm are documented in this file.
 - Retry transient busy lifecycle hooks
 - Filter HVF builder work inputs
 - **ci**: Guarantee merge queue forward progress
+- Fix HVF virtiofs shared memory discovery
 - **oci**: Normalize image repository capitalization
 - **public**: Constrain landing diagrams and space positioning heading
 - **web**: Build and deploy the wasm demo at /demo
@@ -457,6 +555,421 @@ All notable changes to mvm are documented in this file.
 - **hostd**: Accept the signed plan the launch path actually sends
 - **client**: Type the rootfs declaration instead of probing for it
 - **release**: Read the bytes the kernel execs, not just their checksum
+- **runtime**: Call the network-endpoint stub by the name it has
+- **xtask**: Stop the assertive-vocabulary check matching inside words
+- **cache**: Stop prune deleting live caches, and stop it overstating by 8x
+- **sec**: Cut mvm-hostd four ways, because two was measured to be too few
+- **xtask**: Stop the ADR gate reading the changelog as a live reference
+- **sdk**: Give host_port and dns_resolver one verdict in every language
+- **client**: Type MachineSpec.image, hoisting RootfsSource into mvm-core
+- **sec**: Count the security jobs that never finished, and let the fuzz lane finish
+- **net**: Make the FlowMux endpoint serve sessions, and refuse a builder guest with no egress
+- **sdk-ts**: Bound the machine subprocess, and name what actually failed
+- **bench**: A launch that bound no host service is not degraded
+- **bench**: Stop the runner's trace write clobbering the driver's
+- **build**: Refuse a network endpoint older than the mvmctl running it
+- **net**: Resume cancelled frame reads and send one Reset per stream
+- **net**: Make FlowMux name the stale half instead of failing silently
+- **nix**: Emit the ELF the x86_64 loader needs, and assert the format
+- **kernel**: Bind the extracted ELF to the vmlinux it came from
+- **sec**: Fold host case in the web-fetch allowlist
+- **cli**: Mark a fetched boot image as fetched, and close out the plan
+- **net**: Dial the egress port the builder actually allocated
+- **ci**: Let the orchestration gate see an out-of-line test module
+- **conformance**: Stop the SDK codegen step leaking a target dir per run
+- **nix**: Manifest the kernel the loader takes, not the first one ls returns
+- **build**: Stop the Stage 0 source copy walking into its own output
+- **release**: Give the boot gate the toolchain its own test needs
+- **jailer**: Let the confined endpoint write the audit entry it is granted
+- **release**: Give the boot image jobs their toolchain, and refuse a partial publish
+- **machine**: Remove a machine's runtime state with it, not just its spec
+- **image**: Stop `machine run --image` panicking on a fresh MVM_HOME
+- **release**: Pick the boot image by version, and refuse an incomplete one
+- **docs**: CLAUDE.md showed five commands that do not exist
+- **ci**: Attach the runtime overlay to the boot gates, which is where the agent lives
+- **ci**: Install the wasip1 target the pages demo guest needs
+- **ci**: Bound the apt step so a stalled mirror stops reading as a red PR
+- **release**: Ship every per-VM binary mvmctl spawns, from one registry
+- **stage0**: Find the Nix store by label, and refuse a disk that is not one
+- **release**: Sign boot images under the environment that admits their tags
+- **release**: Gate the CLI signing job on the environment that admits v* tags
+- **bundle**: Refuse a foreign-arch bundle at boot and at admission
+- **ci**: Repair Pages and boot-image signing deployments
+- **bench**: Declare a runtime-source policy so the guest is told where the overlay is
+- **hvf**: Say which check failed instead of "BadKernel"
+- **release**: Publish kernels on release, and tell the truth about a 404
+- **ci**: Drop the dead libcap-ng dep, and repair the mirrorlist apt actually uses
+- **nix**: Serialize runtimeLean into the sidecar the admission gate reads
+- **doctor**: Derive the builder-backend line from the platform it is given
+- **seccomp**: Restore epoll for confined roles on aarch64
+- **ci**: Give cache-warm the same env as its consumers, so the cache can restore
+- **guest**: An abandoned readiness probe is not a failed authentication
+- **guest**: A NIC-less workload guest is the design, not a bring-up failure
+- **guest**: A read-only rootfs is one fact, not six failures
+- **ci**: Verify the boot-latency manifest's signature before trusting its digests
+- **bench**: Establish the host signer key the boot path requires
+- **hooks**: Lint workflow files in pre-commit, where CI already does
+- **hostd**: Witness the fail-closed audit the mutation lane caught
+- **guest**: Read the mount table once, as the comment claims
+- **assurance**: Roll the launch back when a declared campaign cannot open
+- **guest**: Mount writable runtime tmpfs
+- **checkpoint**: Measure a fork child's grants against the tier that boots it
+- **release**: Publish the initramfs, so a sealed boot is reachable from a release
+- **guest**: Silence expected missing identity drive
+- **ci**: Bound apt setup in the BDD gate
+- **vsock**: Dial the per-VM endpoint when the guest connects, not on its first byte
+- **egress**: Stop leaking https requests in cleartext, and unblock pool-less backends
+- **update**: Fetch published images from the boot image tag, not the CLI version
+- **stage0**: Find labelled disks wherever they are attached, and attach each once
+- **xtask**: Skip nested .claude/worktrees in source policy scans
+- Enforce FlowMux limits per VM
+- **kernel**: Refresh synchronized pins to 6.12.104
+- Keep phase timing JSON-safe
+- **ci**: Compile the release bootstrap feature
+- **security**: Declare xtask license
+- **vsock**: Stop stdout over ~25 KB from desyncing the control session
+- **ci**: Use util-linux for builder hook mounts
+- **machine**: Builder VMs are not user machines
+- **test**: Resolve the provider binary at compile time so nextest can find it
+- **site**: Restore architecture header spacing
+- **site**: Strengthen architecture proof points
+- **security**: Contain arrayref registry incident
+- **site**: Clarify architecture proof points
+- **ci**: Activate the staged sealed boot image
+- **oci**: Resolve a workload's environment once, for both ways in
+- **security**: Pack mutation shards by cost, and let the watcher report a timeout
+- **mount**: Close the guest-mount shadowing hole and de-duplicate the policy
+- **guest**: Set hostname from machine name
+- **ci**: Reconcile scheduled security outcomes
+- **builder**: Preserve hook artifacts and gate TCG smoke
+- **mount**: Drop /mnt from the guest-volume allow-list
+- **audit**: Seal production transcript chains
+- **guest**: Serve ping from the process that holds the FlowMux identity
+- **runtime-overlay**: Add forward_proxy field to RuntimeOverlayGuestLayout
+- **security**: Restore scheduled policy lanes
+- **guest**: Give the forward proxy a process that can authenticate
+- **guest**: Hand FlowMux identity to the Nix egress service
+- **cli**: Emit guest console diagnostic when transient VM start fails
+- **builder**: Seal rootfs journal before export
+- **cli**: Improve error message for machine logs on stopped VM without state
+- **mvmctl**: Improve stopped VM logs errors
+- **mvmctl**: Improve error message for stopped VMs with no state dire…
+- **ci**: Restore extended witnesses
+- **kernel**: Bump Linux pins to 6.12.105
+- **builder**: Seal rootfs journal before export
+- **ci**: Restore scheduled security witnesses
+- **builder**: Keep rendered rootfs sealing self-contained
+- **builder**: Make copied rootfs writable before sealing
+- **builder**: Make copied rootfs writable before sealing
+- **builder**: Unmount the before-build subtree before sealing; close two BDD gaps
+- **pages**: Disable Determinate Nix FlakeHub login in Pages deploy
+- **cli**: Stop telling users to run commands that do not exist
+- **pages**: Build weblinux assets from the nix/ subflake
+- **nix**: Use writable /build/deps path in qemu-wasm build
+- **ci**: Repair extended platform witnesses
+- **weblinux**: Make staged demo assets writable
+- **wasm-demo**: Preserve weblinux assets when staging wasm demo
+- **http**: Bound every connect and try IPv4 first
+- **conformance**: Stop HOME isolation from hiding the Rust toolchain
+- **launch**: Build the universal initramfs on every host, refuse without one
+- **http**: Bound idle reads so a silent peer cannot park a request forever
+- **rpc**: Preserve guest policy refusals
+- **site**: Isolate the whole site so the embedded demo gets SharedArrayBuffer
+- **nix**: Fetch crates from the static CDN
+- **admission**: Pin the booting kernel into every CLI-signed plan
+- **run**: Stop reading stdin that nobody handed us
+- **sdk**: Align documented surface contracts
+- **hvf**: Stop the per-VM supervisor holding its caller's stderr
+- **hvf**: Refuse unsupported multi-vCPU launches
+- **cli**: Allow detached declared ingress
+- **ci,nix**: Unblock the site deploy — gh --jq -r, and crates.io 403ing Nix
+- **test**: Stop the stdin readiness probe leaking its pipe into subprocesses
+- **web**: Forward terminal control keys to qemu
+- **ci**: Pass release filter directly to gh jq
+- **sdk**: Say when the cached SDK sidecar predates the working tree
+- **exec**: Apply image environment to ad hoc commands
+- **ci**: Restore documented surface witnesses
+- **run**: Refuse --mount up front on a backend that cannot serve it
+- **cli**: Stop advertising /mnt as a volume mount root
+- **perf**: Share the warm launch hard ceiling
+- **audit**: Exclude root histories from chain sweeps
+- **build**: Build SDK sidecar from source in Stage 0
+- **run**: Resolve flake builds through the slot registry
+- **guest**: Seed cold-boot wall clock in PID 1
+- **ci**: Make documented surface builds executable
+- **doctor**: Report why a tool check failed to spawn
+- **hvf**: Route machine fork/restore at the backend that captured the checkpoint
+- **bdd**: Probe capabilities in the home the scenarios run against
+- **guest**: Mount devpts so an interactive console can open
+- **stream**: Deliver fleet edges through guest input
+- **admission**: Refuse wasm SDK host services explicitly
+- **security**: Repair scheduled supply-chain witnesses
+- **ci**: Restore extended platform witnesses
+- **pool**: Make image launches warm-claimable
+- **admission**: Refuse a host-services sidecar the guest cannot load
+- **guest**: Resolve a bare argv[0] against the image PATH
+- **vmm**: Stop a machine's measured CPU falling when its vCPU threads exit
+- **ci**: Repair Linux documented-surface prerequisites
+- **security**: Update wasmtime to 46.0.3
+- **hostd**: Stop a supervisor test queueing an hour for a lock it holds
+- **e2e**: Rebuild the per-VM helpers, and boot the README's python examples
+- **vmm**: Say why a supervisor died instead of naming an empty console
+- **vmm**: Confine both virtiofsd flavors
+- **cli**: Retry diff handshake peer hangups
+- **e2e**: Let the runners honour a worktree's own MVM_HOME
+- **builder**: Reset the guest staging roots instead of extracting over them
+- **sdk**: Copy the workspace, not the flake subdirectory, for sidecar builds
+- **agentd**: Two live-guest verb defects — machine diff session, machine wait entrypoint
+- **build**: Stop Stage 0 promotion from destroying the cached workload kernel
+- **flowmux**: Distinguish policy refusal from upstream failure
+- **warm**: Authenticate restored child readiness
+- **xtask**: Make the kernel-reads gate see hand-rolled cache paths
+- **release**: Publish both SDK sidecar libc variants
+- **run**: Propagate baked workload exit codes
+- **ci**: Rebuild stale guest artifacts before live witnesses
+- **e2e**: Stop forcing a fetch the contributor binary cannot perform
+- **sdk**: Finish the sidecar libc selection — compare real values, and enforce it on the run path
+- **ci**: Close residual documented-surface regressions
+- **build**: Bootstrap SDK sidecars from unembedded CLI
+- **build**: Stop a plain cargo build from un-embedding mvmctl
+- **vmm**: Declare the vCPU ceiling each VMM boots, not the wire type's
+- **build**: Stop the bootstrap helper rebuilding the payload it is running
+- Fix contributor runtime recovery paths
+- **just**: Let build-supervisors target a profile
+- **cli**: Preserve image PATH for mounted PTY runs
+- **hooks**: Stop the pre-commit hook reporting a non-member package as a clippy failure
+- **build**: The typed persistent route read back an empty export
+- **ci**: Let Extended CI's red mean a regression again
+- **ci**: Fix the two Extended CI failures that were not the product
+- **release**: Require e2e-docs to have succeeded, not merely finished
+- **xtask**: Register check-release-evidence with the gate lane
+- **core**: Enforce the 0700 mvm-home posture at the creation seam
+- **build**: Refuse a disk-transport session instead of hanging on its lock
+- **vsock**: Stop the exec stream inheriting a connect timeout
+- **doctor**: Ask diskutil about the volume, not the directory
+- **guest**: Name the missing device-mapper instead of the missing file
+- **mount**: Say what a transient run will and will not attach
+
+### Other
+- OCI materialize hygiene: multi-block ext4 dirs + builder orphan-sweep
+- Speed up default Rust builds
+- Gate persistent OCI egress to vsock backends
+- Fix web search query URL building
+- Reduce CLI dependency surface
+- Harden OCI runtime injection
+- Remove Vz backend and scrub current surface docs
+- Update gvproxy retirement planning docs
+- Slim default-path dependencies
+- Fix source-checkout machine start and Stage 0 fallbacks
+- Document deferred WSL2 and native Windows support work
+- Add plan 236 go checker
+- Add host-authority runtime roadmap
+- Fix OCI run cold-cache DX
+- Make verbosity global and rename host shares
+- Finish vsock port-handler registry production closeout
+- Slim workload kernel config and refresh budget gate
+- Refresh Plan 219 grant-delivery branch on main
+- Add HVF OCI allow-host proxy support
+- Document workload BPF invariant
+- Implement streamed ext4 rootfs materialization
+- Refactor guest vsock egress session plumbing
+- Fix libkrun vsock-only machine egress
+- Close out Plan 219 Linux verb-grant proof gaps
+- Fix Stage 0 build wedge from leftover /homeless-shelter
+- Implement Plan 237 Phase 0 cache repair harness
+- Compile native per-VM host helpers at build time, not run time
+- Restore HVF default for macOS dev
+- Plan 213: harden pack-signing custody + add reproducibility gate
+- Plan 213 SP1: versioned pack cache + lifecycle facade + mvmctl pack
+- Remove PackBackend::Vz + --builder vz (orphaned by #1620 early-merge)
+- Plan 213 SP2: prefetch the dev-shell image at install time
+- Bind restore-time verb grants to VM lineage
+- Fetch pinned workload kernels on installed builds
+- Plan 213 SP4: instant-first-use benchmark harness (ops bench first-use)
+- Remove stray sprint conflict marker
+- Fix Docker Hub OCI manifest fetch
+- Route OCI prod verity sealing through the builder VM
+- Prep 0.18.0 runtime overlay rollout surface
+- Builder DX: capture supervisor rebuild logs + honest one-time-build label (re-land of Plan 246 Phase 1 survivors)
+- Fix host HTTP egress release path
+- Plan 213 SP3 (producer + guest import): carry & import a seeded nix closure
+- Ship runtime overlay tarball transport
+- Plan 246 Phase 2: remove the `mvmctl dev` interactive command (builder VM → headless)
+- Plan 247: fix macOS-26 common commands — retire the dev-VM dependency from host shell ops
+- Fix doctor HVF reporting and quiet failures
+- Guard HVF density preflight conditions
+- Dev-removal followups: reword stale code comments + Plan 249 (larger deferred items)
+- Plan 249 WS-B PR-1: fix builder disk-transport input bloat (unblocks --flake, layer 2)
+- Remove stub embed build path
+- Add runtime-owned reversible replacement
+- Fix interactive OCI dev console on HVF
+- Document reversible replacement behavior
+- Refresh Plan 219 timeout closeout slice on current main
+- Split SDK crates and add selective SDK release workflows
+- V1 simplification restructure: crate consolidation 32→16 + no_std protocol split
+- Remove dead egress_proxy/HttpRegistry stubs + MVM_HVF_DUMP_DTB gate
+- Gate the mock VM backend behind test-support (keep it out of the prod closure)
+- Plan-126 B4/C1: ban aws-lc-rs from default closure, document completion
+- Shorten CLI help text
+- Harden guest control and data planes
+- Document broad BDD coverage expectation
+- Gate release publishing on BDD tests
+- V1 simplification: integrate plan/mvm-simplification into main
+- Stop workload guest boot-probing 9pnet/btrfs/gnss/vlan
+- Make Firecracker workloads vsock-only
+- FC vm_full fork path remapping and resume-from-snapshot
+- Verify libkrun supervisor plan envelopes
+- Enforce authenticated encrypted vsock control
+- Reduce and fence `unsafe` across the workspace
+- Add user-space SOCKS5 UDP egress
+- Reconcile backend recovery capabilities
+- Reconcile Plan 265 WS2/WS4 warm-pool work with main
+- Shrink the complete guest footprint below 50 MB
+- Reference Rust engineering best practices
+- Attach the SDK sidecar automatically from the signed plan's host-service bindings
+- Retire obsolete CLI workload binary embedding
+- Fix remaining security and reliability issues
+- Fix orphaned helper process lifecycle
+- Cache missing initramfs release artifacts
+- Establish object-store contract and live volume attachment
+- Wire authenticated remote volume lifecycle
+- Restore scheduled security witnesses
+- Shrink guest kernels to the virtual hardware floor
+- Fix machine logs on macOS
+- Harden sensitive-data enforcement on protected egress
+- Add fenced block-volume worker transfer protocol
+- Close production volume plan
+- Extract a reusable local encrypted-volume lifecycle service
+- Add sandbox dependency capture command
+- Add mvmctl watch for local workload changes
+- Verify precomputed rootfs digests before admission
+- Bind deploy records to exact boot artifacts
+- Add tiered artifact storage and warm-start plan
+- Pre-open console listeners only for dev profiles
+- Workload stream plane: live stdout/stderr, and a grant-gated stdin channel
+- Document homepage claim parity checklist
+- Stream plane follow-ups: bind fingerprints, release the carry on silence
+- Record mvmd-only production launch authority
+- Complete generated runtime SDK surface
+- Fix dynamic OCI volume mounts for transient runs
+- Improve one-command microVM developer experience
+- Redact the console fallback on read
+- Agent/oci homepage claim audit
+- Add the stream-edge primitives a fleet composes
+- Fix builder sockets for deep worktree paths
+- Simplify VMM channel specs and wire L3 vsock
+- Preserve large egress downloads under byte limits
+- Clean mvm cache with just clean
+- Gate the two defects review kept catching instead of CI
+- Connect a producer's output to a consumer's stdin
+- Add Semantica decision-provenance assessment with UOR/mvm bindings
+- Fix multi-machine nftables isolation
+- Unprivileged L3 networking: the userspace socket datapath
+- Add contributor development flake
+- Close plan 296: state what an edge guarantees, and document it
+- Implement sub-300ms resident warm launch
+- **runtime**: Trap release overflow, durable audit appends, bounded OCI reads, panic redaction
+- Prepared cold-launch measurement and the optimizations it found (Plan 299 Phase 0)
+- Define durable agent session and event contract
+- Add lifecycle density benchmark
+- Add microVM lifecycle benchmark
+- Cut 23 crates from the shipped mvmctl closure (Plan 309 Phases 0-1)
+- Instrument HVF stop teardown phases
+- Fs2 → std locking, and mvm-http: the client to replace reqwest (Plan 309)
+- Add README BDD coverage contract
+- Plan 313: egress token accounting, streaming responses, and opt-in compaction
+- Keep CLI help within 80 columns
+- Scrub guest RAM before release
+- Retire reqwest: closure 286 → 242 (Plan 309 Phase 2)
+- Perf/2280 host matrix gates
+- Workload grants: one signed declaration, per-backend enforcement (Plan 308 WS1-WS4)
+- Fix HVF vsock credit accounting for large downloads
+- Make bootstrap prepare a verified workload kernel
+- Resolve a bootable launch config without starting a VM, so the warm pool can be filled
+- Grant surfaces: make a workload grant expressible, and therefore real (Plan 308 WS6)
+- Align top-level command help descriptions
+- Fix hostd test environment isolation
+- Make the interactive guest usable as the uid it actually runs as
+- Fix Stage 0 cache reuse and ARM64 workload boot
+- Refuse a restored child whose grants exceed its parent's (Plan 308 WS5b)
+- Add event-driven lifecycle shutdown
+- Make #[instrument] produce timings, then instrument and export them (Plan 318)
+- Verify audit chains incrementally in doctor, keep the full walk for trust audit verify
+- Enforce single-line CLI help
+- Fix/308 report enforced tier
+- Redesign the marketing site and docs chrome
+- Plan single flow-aware vsock networking
+- Fix long-running console input and shutdown
+- Freeze the audit chain bytes before refactoring the writer
+- Give the claim-12 bind check a single definition
+- Close two gate evasions with one shared scanner, and correct a false CLAUDE.md claim
+- Enforce the wall-clock bound, and stop encoding it twice (Plan 308)
+- Relocate the egress-decision core into mvm-contract
+- Feat/308 ws5b gaps
+- Move the placeholder leaf down, and give the two prefixes distinct names
+- Stop resetting throttled egress streams; lift workload ceilings off the builder VM
+- Queue on a contended builder store image instead of failing the build
+- Give HVF a persistent builder, so concurrent builds have somewhere to go
+- Freeze the raw-packet networking path and ratify one flow-aware vsock path
+- Feat/308 admission budget
+- Rotate the audit log without making removed history silent
+- Give each delivery entry its own file so sessions stop colliding
+- Fix persistent machine create syntax
+- Map the E2/E3 moves-and-stays boundaries before touching the code
+- Fix the libkrun supervisor's build: the field is `plan`, not `plan_json`
+- Make the eBPF telemetry lane actually gate the merge
+- Pin AppleContainer's egress coverage as a checked invariant
+- Give the audit chain link one definition of hash_line
+- Cover the whole security claim set in the docs, not just the first seven
+- Make pruning a retired audit prefix accountable rather than impossible
+- Plan 327: a CPU quota for the HVF tier, with its Phase 0 spike measured
+- Attribute a spliced egress error to the half that produced it
+- Make builder-store durability expressible, and fail fast when it is gone
+- Repoint the vsock-only-egress gate at its real workload paths
+- Pin the FlowMux wire contract: framing, opcodes, and the state machine
+- Fix SDK sidecar host service startup
+- Share the builder that holds the store image instead of queueing for it
+- Name an unknown flag instead of shipping it to the guest
+- Bound a warm-claimed child by the host grant ceiling (Plan 308)
+- Add signed transport-neutral network limits
+- Give the store lock to the process whose life matches the VM's
+- Run-first CLI ergonomics and upstream-sandbox adoption
+- Plan 330: decision provenance layer
+- Hidden __builder-shell-job command for Linux builder-VM gates
+- Fix reset race, rate limiting, and audit pipeline
+- Decision provenance layer — Phases 1-3: PROV-O export, event enrichment, DecisionRecord store
+- Wire guest egress/DNS adapters to FlowMux reconnect client
+- Feat/316 guest flowmux adapter
+- ADR-043 — frame the client-interface conformance decision
+- Plan the SDK binding fan-out, and correct what it would cost
+- V0.18.0
+- Trigger production deployment
+- Upgrade sigstore-verify stack 0.9 → 0.11; ratchet stale rand allowlist entries
+- Add Graft repo context integration
+- Add capability-secure workflow specifications
+- Ignore local specs notes
+- Secret bindings for forked children: design + W0 diagnostic
+- Integrate product site, audit-driven truth fixes, and execution-contract repositioning
+- Declare fork child secret bindings
+- Fix FlowMux session readiness race
+- Durable agent sessions: content-addressed resume points, park state machine, and resume admission
+- Add FlowMux network performance evidence
+- Add admission-bound AI assurance extension sessions
+- Add architecture one-pager and link it from the landing nav
+- Implement declared ingress on FlowMux
+- Remove retired public L3 network surface
+- House the architecture page in the site shell, calm the type
+- Show measured launch latency against its budget on the homepage
+- Close the FlowMux evidence matrix
+- **aarch64**: Pi end-to-end fixes and reliable QEMU teardown
+- Ignore .qwen/ directory
+- Ignore .qwen/ directory
+- Add quantum-safe cryptography transition plan for mvm and mvmd
+- Build the site QEMU-WASM pack on boot-image tags
+- Add qemu-wasm-smoke-pack build/download scripts
+- Realign landing page with the MVM one-pager
+- Bind caller commitments into signed execution plans
+- Merge remote-tracking branch 'origin/main' into worktree-release-0-18-plan
 
 ### Performance
 - **verb-grant**: Base64 the cmdline envelope instead of hex
@@ -476,9 +989,23 @@ All notable changes to mvm are documented in this file.
 - **fs**: Stop copying every file's bytes into the ext4 plan
 - **build**: Reuse prebuilt musl host binaries in dev builds
 - **ci**: Resolve the test-support features once instead of five times
-
-### Re-land
-- Remove PackBackend::Vz + --builder vz (orphaned by #1620 early-merge)
+- **kernel**: Drop debug instrumentation a sealed guest has no reader for
+- **fc**: Stop narrating every boot across an emulated serial port
+- **launch**: Cut the sleep quantization out of teardown, and read the phases as a tree
+- **build**: Key mvm-cli's nested binaries by content, not by profile
+- **agent**: Stop charging every exec a 50ms poll tick to notice a child that already exited
+- **fc**: Skip sudo on the launch line when already root
+- **fc**: Remove nested readiness retry floor
+- Enforce and reduce prepared launch timing
+- **vsock**: Send sealed control frames as binary instead of JSON
+- **build**: Take the per-VM aux-helper leg off the inner loop
+- **build**: Compute the guest source fingerprint once per process
+- **kernel**: Stop hashing the workload kernel twice on every boot
+- **admission**: Stop syncing reconstructible caches
+- **launch**: Stop re-verifying the audit chain and sleeping past guest readiness
+- **build**: Take mvm-cli's build script off the inner loop
+- **audit**: Fold a cached prefix instead of re-reading the log
+- **timing**: Name the parts of the admit window
 
 ### Refactored
 - Typed PackBuilder authority, --sbom-uri, protected signing env, runtime-pack producer
@@ -526,8 +1053,24 @@ All notable changes to mvm are documented in this file.
 - Builders for every input-parameter struct
 - **deps**: Move subscriber assembly out of mvm-core and the sealed agent
 - **sec**: One host-binding predicate, and delete the dead one
+- **cli**: One argument core behind `run` and `machine run`
+- **deps**: Declare three crate edges where they are actually used
+- **flowmux**: Delete superseded L3 networking
+- **network**: Enforce the single FlowMux path
+- **cli**: Drop legacy verity initrd fallback, always use universal initramfs
+- **runtime**: Make the overlay the only guest-runtime source
+- **boot**: Drop the per-rootfs verity initramfs
+- **build**: Drop the builder-route decision seam
+- **template**: Drop name-keyed template slots
+- **backends**: Rename the *_legacy driver modules to *_process
+- Drop two dead compat fields, correct the prose on the rest
+- **sdk**: Give the in-guest host-services C ABI its own crate
+- **contract**: Move GuestLibc below the crates that need it
+- **hvf**: Delete the dev-tier virtio-fs root
+- **qemu**: Refuse virtio-fs shares and delete the virtiofsd module
 
 ### Testing
+- Test(guest)+build: verify detached-workload handler in CI; keep embedded agent fresh
 - **mvm-cli**: Lock in runtime-pack warm-standby eligibility
 - **net-tunnel**: Fuzz the raw-L3 egress gate packet parser (claim 5)
 - **bdd**: Implement the uniform vsock-egress claim scenarios
@@ -558,6 +1101,7 @@ All notable changes to mvm are documented in this file.
 - **agent**: Cover sealed profile dev-only refusals
 - **broker**: Wait for the chain lock instead of assuming abort released it
 - **agentd**: Assert eviction complexity by work done, not by a clock
+- Test all CLI help entry points at 80 columns
 - Close remaining mutation witness gaps
 - **mvm-build**: Regression test for store-image lock survival
 - **sec**: Cover surviving Security-lane mutants
@@ -567,48 +1111,33 @@ All notable changes to mvm are documented in this file.
 - **egress**: Witness the blocking vsock leg's raw tunnel bound
 - **sdk**: Make the fake-mvm double match the CLI it stands in for
 - **sec**: Kill two substitution mutants; delete an unreachable wasm guard
-
-### WS8
-- Remove dead egress_proxy/HttpRegistry stubs + MVM_HVF_DUMP_DTB gate
-- Gate the mock VM backend behind test-support (keep it out of the prod closure)
-
-### Cli
-- Hidden __builder-shell-job command for Linux builder-VM gates
-
-### Harden
-- **runtime**: Trap release overflow, durable audit appends, bounded OCI reads, panic redaction
-
-### Hostd/flowmux
-- Fix reset race, rate limiting, and audit pipeline
-
-### Kernel
-- Document workload BPF invariant
-- Stop workload guest boot-probing 9pnet/btrfs/gnss/vlan
-
-### Mvm-agentd
-- Wire guest egress/DNS adapters to FlowMux reconnect client
-
-### Mvm-runtime
-- FC vm_full fork path remapping and resume-from-snapshot
-
-### Plan
-- Run-first CLI ergonomics and upstream-sandbox adoption
-
-### Release
-- Prep 0.18.0 runtime overlay rollout surface
-
-### Research
-- Add Semantica decision-provenance assessment with UOR/mvm bindings
-
-### Scripts
-- Add plan 236 go checker
-
-### Security
-- Verify precomputed rootfs digests before admission
-
-### Specs
-- ADR-043 — frame the client-interface conformance decision
-- Plan the SDK binding fan-out, and correct what it would cost
+- **vmm**: Witness the upstream-proxy egress config
+- **ci**: Execute the Test aggregate against a synthetic scope matrix
+- **sec**: Witness the redaction gate and the fail-closed cap
+- **audit**: Witness segment selection, and name the two mutants that cannot be
+- **bdd**: Say what the suite did not attempt
+- **claim5**: Fuzz the post-auth path production actually takes
+- **docs**: Verify every documented mvmctl command against the real CLI
+- **docs**: Verify every documented example — CLI, Rust, Python, TypeScript, Nix
+- **conformance**: Give the bundle scenarios a trust anchor and a fixture recipe
+- **security**: Witness peer policy bindings
+- **conformance**: Gate the workload-kernel fixture instead of panicking on it
+- **docs**: Execute the documented surface instead of parsing it
+- Stop two local-environment faults from faking test failures
+- **nextest**: Refuse to run on a nextest too old for the build layout
+- **e2e**: Raise the warm launch ceiling to the number the path holds
+- **flowmux**: Use CONNECT-capable HTTPS clients in live witnesses
+- **docs**: Reap what the e2e run created, and refuse to share a home
+- **doctor**: Stop asserting the host has rustup
+- **vmm**: Resolve portable dev VM socket path
+- **bdd**: Gate virtio-fs directory shares, and stop handing live steps the wrong home
+- **hostd**: Wait for replacement worker identity
+- **docs**: Gate a release on every documented example running
+- **bdd**: Witness broker on default backends
+- **bdd**: Ratchet the parse tier so it cannot grow unnoticed
+- **e2e**: Rebuild the per-VM supervisors before the launch gate boots
+- **release**: Gate a release on evidence the documented surface ran
+- **e2e**: Point the --mount witnesses at the directory the README mounts
 
 ## [0.17.0] — 2026-07-08
 
