@@ -35,4 +35,4 @@ silent fallback is gone.
 - [x] Profile-mismatch warning machinery removed (subsumed by verification).
 - [x] Tests green on host; workspace clippy and gated-target checks green in
       the builder VM.
-- [x] `specs/SPRINT.md` updated; PR opened from the worktree branch.
+- [x] `specs/SPRINT.md` updated; merged via #3132 (squash `2eff78c623`).

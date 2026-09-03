@@ -13,7 +13,7 @@ Last updated: 2026-09-02
       mirrors dev-env.sh: inside-tree values honored, outside-tree values
       reclaimed loudly, MVM_DEV_ENV_KEEP_INHERITED=1 keeps them anyway. Gate
       tests and CI shellcheck green; merged via #3135.
-- [ ] **Aux host-helper contract verification.**
+- [x] **Aux host-helper contract verification.**
       `specs/plans/2026-09-02-aux-helper-contract.md`.
       Host helpers answer a `--contract-version` probe and `mvmctl` verifies
       the answer before spawning: a stale helper in a source checkout is
@@ -23,7 +23,7 @@ Last updated: 2026-09-02
       an "unknown field" spawn failure. A `HvfSupervisorConfig` shape pin
       forces the contract version to bump with the schema. Focused
       regressions, affected crate suites, zero-warning Clippy, and Linux/BDD
-      gated compilation are green; merge delivery remains.
+      gated compilation are green; merged via #3132.
 
 - [ ] **Signed caller commitment — issue #3070.**
       `specs/plans/2026-09-01-signed-caller-commitment.md`.

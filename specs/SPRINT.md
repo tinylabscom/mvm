@@ -27,7 +27,7 @@
       ledger with a BDD suite (`s33_content_addressed_assets`, 4 scenarios).
       Workspace check, host tests, gated Linux cross-check, clippy, fmt, and
       the claim/CLI lint gates are green. Merge delivery remains.
-- [ ] **Aux host-helper contract verification.**
+- [x] **Aux host-helper contract verification.**
       `specs/plans/2026-09-02-aux-helper-contract.md`.
       Host helpers now carry a compiled-in contract version and answer a
       `--contract-version` probe; `mvmctl` probes before spawn and never
@@ -39,7 +39,7 @@
       contract version to move with the schema. Focused resolver, probe, and
       spawn-path regressions, the mvm-vmm / mvm-backends / mvm-hostd /
       mvm-runtime suites, zero-warning Clippy, and Linux/BDD gated
-      compilation are green; merge delivery remains.
+      compilation are green; merged via #3132.
 
 - [ ] **Mounted PTY image environment.**
       `specs/plans/2026-09-01-mounted-pty-image-environment.md`.
