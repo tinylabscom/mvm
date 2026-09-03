@@ -36,3 +36,9 @@ silent fallback is gone.
 - [x] Tests green on host; workspace clippy and gated-target checks green in
       the builder VM.
 - [x] `specs/SPRINT.md` updated; merged via #3132 (squash `2eff78c623`).
+- [x] Follow-up: retry one transient timeout from the freshly rebuilt helper.
+      A real macOS launch showed Cargo completing the rebuild and writing a
+      current helper, while its immediate first contract probe missed the
+      ten-second deadline; the same binary answered in milliseconds afterward.
+      The retry remains restricted to this post-build timeout and a focused
+      regression covers timeout-then-answer recovery.

@@ -33,7 +33,10 @@ Last updated: 2026-09-03
       hard error naming both contract versions and the rebuild command,
       replacing the recurring silent cross-profile fallback that surfaced as
       an "unknown field" spawn failure. A `HvfSupervisorConfig` shape pin
-      forces the contract version to bump with the schema. Focused
+      forces the contract version to bump with the schema. A freshly rebuilt
+      helper gets one retry only when its first bounded probe times out,
+      covering the observed macOS first-launch transient without accepting a
+      malformed or wrong-version helper. Focused
       regressions, affected crate suites, zero-warning Clippy, and Linux/BDD
       gated compilation are green; merged via #3132.
 
