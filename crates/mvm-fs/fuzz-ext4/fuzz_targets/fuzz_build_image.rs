@@ -133,9 +133,15 @@ fn with_ancestor_dirs(nodes: Vec<Node>) -> Vec<Node> {
 }
 
 fn node_path(n: &Node) -> String {
+    // `FileFromHost` is matched but never generated here, deliberately. This
+    // target feeds the writer arbitrary *bytes*; that variant carries a host
+    // path the emit pass opens, so fuzzing it would exercise the filesystem
+    // rather than the parser and would let a generated path escape the corpus.
+    // The eager `File` variant covers the same layout arithmetic.
     match n {
-        Node::Dir { path, .. } | Node::File { path, .. } | Node::Symlink { path, .. } => {
-            path.clone()
-        }
+        Node::Dir { path, .. }
+        | Node::File { path, .. }
+        | Node::FileFromHost { path, .. }
+        | Node::Symlink { path, .. } => path.clone(),
     }
 }
