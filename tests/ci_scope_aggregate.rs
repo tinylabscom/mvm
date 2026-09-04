@@ -207,7 +207,7 @@ fn a_genuine_failure_is_still_refused_in_either_scope() {
 }
 
 #[test]
-fn aggregate_does_not_depend_on_the_aarch64_no_kvm_smoke() {
+fn aggregate_does_not_depend_on_the_no_kvm_smoke() {
     let workflow = std::fs::read_to_string(".github/workflows/ci.yml")
         .expect("failed to read .github/workflows/ci.yml");
     let test_job = workflow
@@ -216,7 +216,7 @@ fn aggregate_does_not_depend_on_the_aarch64_no_kvm_smoke() {
         .and_then(|rest| rest.split_once("\n  test-workspace:\n").map(|(job, _)| job))
         .expect("Test aggregate job must remain delimited by test-workspace");
     assert!(
-        !test_job.contains("aarch64-no-kvm-smoke"),
+        !test_job.contains("no-kvm-smoke"),
         "the Test aggregate must not depend on the no-KVM smoke; it lives in ci-full.yml"
     );
     assert!(

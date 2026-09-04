@@ -122,11 +122,20 @@ fn shell_split(args: &str) -> Vec<String> {
 }
 
 fn run_in_e2e_home(args: &str, extra_env: &[(&str, &str)]) -> LaunchRecord {
+    run_argv_in_e2e_home(&shell_split(args), extra_env)
+}
+
+/// The argv form, for a launch whose payload cannot survive a Gherkin string.
+///
+/// `run_in_e2e_home` splits a quoted step argument; a step that has to append
+/// an escape-heavy program to a documented flag list needs to skip that split
+/// without duplicating the environment this sets up.
+fn run_argv_in_e2e_home(argv: &[String], extra_env: &[(&str, &str)]) -> LaunchRecord {
     let home = e2e_home();
     let mut command: Command = mvmctl_command();
     command
         .current_dir(workspace_root())
-        .args(shell_split(args))
+        .args(argv)
         .isolated_home(&home)
         .env("MVM_PHASE_TIMING", "1");
     for (key, value) in extra_env {
@@ -522,4 +531,92 @@ mod tests {
         // a scenario assert against a command it did not mean to run.
         super::shell_split("machine run -- sh -c 'oops");
     }
+}
+
+/// What the stand-in peer service writes to anything that connects to it.
+const PEER_GREETING: &str = "hello from the peer";
+
+/// The guest-side dial, as a Python one-liner handed to the image's
+/// interpreter.
+///
+/// A workload has no NIC, so it reaches anything — peer or ordinary host —
+/// through the guest agent's SOCKS5 listener on `127.0.0.1:1080`. A SOCKS5
+/// request carries the *name*, which is what makes the peer route decidable:
+/// the host resolves `db.mvm.peer` against the signed binding rather than the
+/// guest resolving it and dialing an address. Dialing by name is therefore not
+/// an implementation detail of this test, it is the mechanism under test.
+///
+/// Kept in Rust rather than in the step text because the payload needs quotes
+/// and escapes that a Gherkin string cannot carry. The part the README
+/// structural check has to see — the `--peer` route itself — stays spelled in
+/// the step.
+const PEER_DIAL_PY: &str = concat!(
+    "import socket;",
+    "s=socket.create_connection(('127.0.0.1',1080),timeout=20);",
+    "s.sendall(b'\\x05\\x01\\x00');",
+    "assert s.recv(2)==b'\\x05\\x00','socks5 greeting refused';",
+    "n=b'db.mvm.peer';",
+    "s.sendall(b'\\x05\\x01\\x00\\x03'+bytes([len(n)])+n+(5432).to_bytes(2,'big'));",
+    "r=s.recv(4);",
+    "assert r[1]==0,'socks5 connect refused with rep=%d'%r[1];",
+    // Drain the bound-address the reply carries (IPv4: 4 addr bytes + 2 port).
+    "s.recv(6);",
+    "print(s.recv(64).decode().strip())",
+);
+
+/// A host-side TCP service standing in for the workload a peer route points at.
+///
+/// The README's example resolves `db.mvm.peer:5432` to `127.0.0.1:34567` — a
+/// *host* address — so a plain host listener is the faithful other end. What
+/// the guest has to prove is that a dial by peer name arrives here, which is
+/// the whole of the claim; standing up a second microVM would test the same
+/// route through more moving parts.
+#[given(expr = "a host TCP service on port {int} that greets its caller")]
+fn host_tcp_service(world: &mut CliWorld, port: i64) {
+    let port = u16::try_from(port).expect("peer target port fits in a u16");
+    let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap_or_else(|e| {
+        panic!(
+            "bind 127.0.0.1:{port} as the peer target: {e}\n\
+             This port is not arbitrary: it is the one the README's `--peer` \
+             example names, and the witness has to exercise the documented \
+             address rather than a stand-in. Free it (`lsof -nP -iTCP:{port}`) \
+             and re-run. This is a host conflict, not a broken peer route."
+        )
+    });
+    let accept = listener.try_clone().expect("clone the peer listener");
+    std::thread::spawn(move || {
+        for stream in accept.incoming() {
+            let Ok(mut client) = stream else { break };
+            use std::io::Write;
+            let _ = client.write_all(PEER_GREETING.as_bytes());
+            let _ = client.flush();
+        }
+    });
+    // Held by the world so the accept loop ends when the scenario does: the
+    // clone's `incoming()` errors once the original is dropped.
+    world.peer_listener = Some(listener);
+}
+
+/// Launch the documented peer invocation with a guest that actually dials the
+/// route.
+///
+/// `args` carries the `--peer` flag verbatim so the README structural check can
+/// read it; the image and the dialing payload are appended here.
+#[when(expr = "I launch {string} with a guest that dials the peer")]
+fn launch_dialing_the_peer(world: &mut CliWorld, args: String) {
+    let mut argv = shell_split(&args);
+    argv.extend(["--image", "python:3.12", "--", "python", "-c", PEER_DIAL_PY].map(str::to_string));
+    world.last_launch = Some(run_argv_in_e2e_home(&argv, &[]));
+}
+
+#[then(expr = "the guest reached the peer service")]
+fn guest_reached_the_peer_service(world: &mut CliWorld) {
+    let record = last(world);
+    assert!(
+        record.stdout.contains(PEER_GREETING),
+        "the guest did not receive the peer service's greeting.\n\
+         --- stdout ---\n{}\n--- stderr ---\n{}",
+        record.stdout,
+        record.stderr
+    );
 }

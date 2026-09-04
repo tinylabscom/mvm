@@ -275,6 +275,38 @@ pub(in crate::commands) enum Commands {
 // Entry point
 // ============================================================================
 
+/// The exact text `mvmctl <args>` would print for a help invocation, produced
+/// without running `mvmctl`.
+///
+/// This is [`run_command`]'s help arm with the process removed: the same clap
+/// tree parses the same argv, the same `DisplayHelp` error is stringified, and
+/// the same `constrain_help_output` is applied. Because clap does the argv
+/// handling, the *entry point* is still exercised — `<path> --help`,
+/// `<path> -h` and `help <path>` each dispatch the way they really do, and
+/// each can still render differently.
+///
+/// It exists for the help-width conformance scenarios, which asserted this by
+/// spawning one `mvmctl` per command path. A debug `mvmctl` is over 100 MB and
+/// the CLI has enough paths that the scenario dominated the suite's runtime and
+/// read as a hang. Rendering in-process is the same assertion in microseconds.
+///
+/// `argv` is the user's arguments *without* the binary name. Returns `None`
+/// when the invocation is not a help request — an unknown command, or a real
+/// parse error — so a caller cannot mistake an error page for help text.
+#[must_use]
+pub fn help_text_for(argv: &[String]) -> Option<String> {
+    let full = std::iter::once("mvmctl".to_string()).chain(argv.iter().cloned());
+    match cli_command().try_get_matches_from(full) {
+        // A successful parse is not a help invocation; there is no help to
+        // render and reporting one would invent output the binary never emits.
+        Ok(_) => None,
+        Err(error) if error.kind() == ErrorKind::DisplayHelp => {
+            Some(constrain_help_output(&error.to_string()))
+        }
+        Err(_) => None,
+    }
+}
+
 /// Return the Clap `Command` tree for `mvmctl`.
 ///
 /// Used by the `xtask` crate to generate man pages without duplicating the

@@ -1,10 +1,10 @@
 #!/bin/bash
 # Local aarch64 no-KVM smoke test.
 #
-# Runs the same path as the CI `aarch64-no-kvm-smoke` job inside an
-# arm64 Ubuntu container. Docker Desktop on Apple Silicon does not expose
-# /dev/kvm to containers, so the guest boots via QEMU TCG — the same
-# fallback a Raspberry Pi without /dev/kvm would take.
+# Runs the same build, seal, install, and boot lifecycle as CI's hosted
+# `no-kvm-smoke` path, but inside an arm64 Ubuntu container. Docker Desktop on
+# Apple Silicon does not expose /dev/kvm to containers, so this remains the
+# genuine aarch64 QEMU TCG witness a Raspberry Pi without /dev/kvm would take.
 #
 # This is intentionally slow on the first run (cold kernel / rootfs builds
 # under TCG). Use it for spot-checks, not rapid iteration.
@@ -58,6 +58,7 @@ echo "Building mvmctl ..."
 cargo build --release -p mvmctl --features user,embed-host-bins
 cp target/release/mvmctl /tmp/mvmctl-source-under-test
 cargo build --release -p mvmctl --features user,release-artifact-bootstrap,release-channel,embed-host-bins
+cp target/release/mvmctl /tmp/mvmctl-release-helper
 
 # The source-checkout bootstrap path would rebuild the builder VM image from
 # scratch under TCG. Hide the in-repo flake so mvmctl downloads the published
@@ -76,7 +77,7 @@ rm -rf "$MVM_HOME"
 mkdir -p "$MVM_HOME"
 
 echo "Downloading published builder VM ..."
-./target/release/mvmctl --builder qemu __builder-vm-bootstrap -v
+/tmp/mvmctl-release-helper --builder qemu __builder-vm-bootstrap -v
 
 echo "Bootstrapping source-matched launch artifacts ..."
 /tmp/mvmctl-source-under-test --builder qemu bootstrap --production -v

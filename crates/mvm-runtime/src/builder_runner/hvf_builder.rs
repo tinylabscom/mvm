@@ -18,7 +18,8 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mvm_build::builder_vm::{
-    BuilderArtifacts, BuilderJob, BuilderMounts, BuilderVm, BuilderVmError, builder_vm_cache_dir,
+    BuilderArtifacts, BuilderCapabilities, BuilderJob, BuilderMounts, BuilderVm, BuilderVmError,
+    builder_vm_cache_dir,
 };
 use mvm_build::builder_vm_runtime::{
     acquire_nix_store_image_lock, finalize_flake_job, read_job_result_with_diagnostics,
@@ -239,14 +240,51 @@ fn copy_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()
 }
 
 impl BuilderVm for HvfBuilderVm {
+    /// Neither Stage 0 nor the dependency install is wired on hvf.
+    ///
+    /// `run_build` serves ordinary build jobs against an already-bootstrapped
+    /// builder, which is why this is not simply "hvf does not work".
+    fn capabilities(&self) -> BuilderCapabilities {
+        BuilderCapabilities {
+            stage0_bootstrap: false,
+            dependency_install: false,
+        }
+    }
+
+    fn run_stage0(
+        &self,
+        _guest_root_dir: &std::path::Path,
+        _entry_path: &str,
+        _workspace_dir: &std::path::Path,
+        _artifact_out: &std::path::Path,
+        _host_bin_dir: &std::path::Path,
+    ) -> Result<(), BuilderVmError> {
+        Err(BuilderVmError::VmmUnavailable {
+            requested: "stage0-bootstrap".to_string(),
+            reason: "the hvf builder cannot bootstrap a builder VM from nothing; \
+                     select libkrun or qemu with `--builder`, which both wire \
+                     Stage 0"
+                .to_string(),
+        })
+    }
+
     fn run_build(
         &self,
         job: &BuilderJob,
         mounts: &BuilderMounts,
     ) -> Result<BuilderArtifacts, BuilderVmError> {
-        // The install pipeline isn't wired for any backend yet.
+        // Not wired on *this* backend. libkrun and qemu both serve the Install
+        // arm; the comment here used to say "isn't wired for any backend yet",
+        // which stopped being true and went unrevisited because nothing forced
+        // a second look. `capabilities()` below is the checked version of this
+        // sentence.
         if matches!(job, BuilderJob::Install { .. }) {
-            return Err(BuilderVmError::NotYetImplemented);
+            return Err(BuilderVmError::VmmUnavailable {
+                requested: "hvf-dependency-install".to_string(),
+                reason: "the hvf builder does not serve dependency installs; \
+                         select libkrun or qemu with `--builder`"
+                    .to_string(),
+            });
         }
 
         let cache = builder_vm_cache_dir();
@@ -321,7 +359,7 @@ mod tests {
     use mvm_build::libkrun_builder::BuilderShellJob;
 
     #[test]
-    fn install_jobs_are_not_yet_implemented() {
+    fn an_install_job_is_refused_by_name_and_matches_the_declared_capability() {
         let b = HvfBuilderVm::new("/img/Image".into(), "/img/rootfs.ext4".into());
         let job = BuilderJob::Install {
             spec_path: "/tmp/spec.json".into(),
@@ -333,10 +371,64 @@ mod tests {
             host_bin_dir: "/mvm-bins".into(),
             staged_user_flake: None,
         };
-        assert!(matches!(
-            b.run_build(&job, &mounts),
-            Err(BuilderVmError::NotYetImplemented)
-        ));
+        // The refusal names this backend and points at one that serves the
+        // job, rather than reporting a global "not implemented" — libkrun and
+        // qemu both wire the Install arm, so the old blanket wording sent a
+        // reader looking for a gap that was not there.
+        match b.run_build(&job, &mounts) {
+            Err(BuilderVmError::VmmUnavailable { requested, reason }) => {
+                assert_eq!(requested, "hvf-dependency-install");
+                assert!(
+                    reason.contains("hvf"),
+                    "the refusal names the backend refusing: {reason}"
+                );
+                assert!(
+                    reason.contains("libkrun") || reason.contains("qemu"),
+                    "the refusal names a backend that does serve it: {reason}"
+                );
+            }
+            other => panic!("expected a named refusal, got {other:?}"),
+        }
+        // The declared capability and the behaviour have to agree, or the
+        // matrix `doctor` renders is a decoration.
+        assert!(!b.capabilities().dependency_install);
+    }
+
+    /// The table `doctor` prints must match what this backend returns.
+    ///
+    /// `declared_capabilities` is a convenience copy so a pre-flight question
+    /// does not have to construct a backend; this is the half of its agreement
+    /// test that lives where the hvf impl does.
+    #[test]
+    fn the_declared_table_matches_this_backends_capabilities() {
+        let b = HvfBuilderVm::new("/img/Image".into(), "/img/rootfs.ext4".into());
+        assert_eq!(
+            b.capabilities(),
+            mvm_build::builder_backend_select::declared_capabilities(
+                mvm_build::builder_backend_select::BuilderBackendChoice::Hvf
+            )
+        );
+    }
+
+    /// hvf serves ordinary build jobs; the two gaps are specific, not a
+    /// blanket "hvf does not work".
+    #[test]
+    fn hvf_declares_both_builder_gaps_and_refuses_stage0_by_name() {
+        let b = HvfBuilderVm::new("/img/Image".into(), "/img/rootfs.ext4".into());
+        assert!(!b.capabilities().stage0_bootstrap);
+        match b.run_stage0(
+            std::path::Path::new("/tmp/root"),
+            "/init",
+            std::path::Path::new("/tmp/work"),
+            std::path::Path::new("/tmp/out"),
+            std::path::Path::new("/tmp/mvm-bins"),
+        ) {
+            Err(BuilderVmError::VmmUnavailable { requested, reason }) => {
+                assert_eq!(requested, "stage0-bootstrap");
+                assert!(reason.contains("hvf"), "names itself: {reason}");
+            }
+            other => panic!("expected a named Stage 0 refusal, got {other:?}"),
+        }
     }
 
     #[test]

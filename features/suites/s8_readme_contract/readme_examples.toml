@@ -107,7 +107,7 @@ witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented persis
 
 [[example]]
 command = "mvmctl bootstrap"
-exempt = "acquires the builder VM image, workload kernel, runtime overlay and initramfs — hundreds of megabytes and tens of minutes. Every live lane runs it as setup before its first scenario, so a broken bootstrap fails the whole suite at the door rather than as one assertion inside it."
+witness = "suites/s31_launch_e2e/documented_setup.feature::bootstrap succeeds and reports a ready host"
 
 [[example]]
 command = "mvmctl doctor"
@@ -116,13 +116,19 @@ reason = "doctor reports host posture and boots nothing, so a live lane has no g
 
 [[example]]
 command = "mvmctl build kernel build --which workload --source download"
-exempt = "downloads the published multi-hundred-megabyte kernel. The live lanes set MVM_KERNEL_SOURCE=download and every guest they boot uses the result, so the download path is exercised as their precondition."
+witness = "suites/s31_launch_e2e/documented_setup.feature::the documented workload kernel download resolves"
 
 [[example]]
 command = "mvmctl build kernel build --which workload --source compile"
-exempt = "compiles a Linux kernel inside the builder VM — tens of minutes, and the artifact is the same one the download arm fetches. Covered by the builder-VM image lane in Extended CI rather than per release."
-
-# ── Templates ────────────────────────────────────────────────────────────────
+exempt = """compiles a Linux kernel inside the builder VM — tens of minutes, against an \
+artifact the download arm fetches ready-made. Nothing executes this code path. Both \
+kernel lanes (`ci.yml`'s `Build kernels` and `kernel-build.yml`'s `Publish kernels`) run \
+`scripts/build-kernel-artifacts.sh`, which calls `nix build` directly and never goes \
+through `mvmctl`, so they witness the artifact and not the command. An earlier revision \
+of this entry claimed the builder-VM image lane covered it; that lane builds the \
+builder-VM image, which is a different derivation. Covering this properly needs a \
+nightly lane with a builder VM and a budget for the compile, and is tracked rather \
+than asserted."""
 
 [[example]]
 command = "mvmctl template list"
@@ -141,9 +147,8 @@ reason = "queries the template registry and prints matches; boots nothing. The s
 
 [[example]]
 command = "mvmctl generate template python ./my-python-app"
-exempt = "run by `template_registry.feature::generate template fetches a remote template and scaffolds its files`, which drives it through a bespoke step (`I generate a project from template \"demo\"`) rather than a quoted command line. The structural check reads commands out of quoted step text, so it cannot confirm the shape here and is not asked to pretend otherwise. Spelling the invocation in the step would let it be a hermetic_witness."
-
-# ── Build and deps ───────────────────────────────────────────────────────────
+hermetic_witness = "suites/s0_cli/template_registry.feature::the documented generate template invocation scaffolds a python project"
+reason = "scaffolds a project directory on the host; there is no guest to boot. Runs the documented line verbatim inside a scratch working directory, because the argument is a relative path."
 
 [[example]]
 command = "mvmctl machine build --flake ."
@@ -162,20 +167,6 @@ command = "mvmctl machine run --entrypoint --flake ./out"
 witness = "suites/s29_doc_examples/documented_build_live.feature::the documented entrypoint launch runs the compiled workload"
 
 [[example]]
-command = "mvmctl deps install --lockfile uv.lock --language python"
-exempt = "installs a Python dependency set into a sealed volume inside the builder VM, which needs a real package index. Covered by the app-deps-audit lane in security.yml against a fixture, so a release does not depend on PyPI being up."
-
-[[example]]
-command = "mvmctl deps capture-live HASH --vm dev-vm --guest-content /mvm/deps/content --guest-sbom /mvm/deps/sbom.cdx.json --guest-fetch-log /mvm/deps/fetch.log --guest-cve /mvm/deps/cve.json"
-exempt = "captures a dependency tree out of a running dev VM that a reader has already installed into by hand. There is no fixture for the guest-side state it reads, so the scenario would have to build the thing it is meant to observe."
-
-[[example]]
-command = "mvmctl deps inspect HASH"
-exempt = "reads the sealed volume that `deps install` produced, addressed by its content hash. The app-deps-audit lane exercises it against a sealed fixture volume, including the byte-flip refusal."
-
-# ── Runtime SDK ──────────────────────────────────────────────────────────────
-
-[[example]]
 command = "mvmctl run --mode plan ./script.py"
 witness = "suites/s31_launch_e2e/sdk_and_library_modes.feature::a runtime-SDK script admits as a signed plan without booting"
 
@@ -185,4 +176,4 @@ witness = "suites/s31_launch_e2e/sdk_and_library_modes.feature::a runtime-SDK sc
 
 [[example]]
 command = "mvmctl run --peer db.mvm.peer:5432=127.0.0.1:34567 -- ./my-service"
-exempt = "routes to a second workload that has to be running and reachable at the named peer address. Standing up both halves is the service-plane suite's job; s30_service_plane covers the route lifecycle, and this line documents the client half of it."
+witness = "suites/s30_service_plane/peer_cli.feature::the documented peer route carries a guest dial to the host service"

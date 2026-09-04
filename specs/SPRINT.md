@@ -10,6 +10,31 @@
 
 ## In progress
 
+- [ ] **Execute the documented README surface.**
+      `specs/plans/2026-09-03-readme-execution-coverage.md`.
+      Thirty-four of thirty-five registered examples now execute through a
+      hermetic or live witness; the sole exemption explicitly records an
+      unsupported dependency flow instead of claiming adjacent coverage.
+      Exercising the examples fixed peer-only outbound setup, builder
+      capability/fallback reporting, and enum-valued witness matching. The
+      exhaustive help checks now render the real Clap dispatch arm in-process
+      while keeping binary probes. Hermetic BDD and focused touched-crate
+      suites are green. Five hosted ARM shutdowns—three at 27–28 minutes, one at
+      14 minutes 20 seconds, and the corrected build runner after only 6 minutes
+      3 seconds—established that its undocumented lifetime is neither the job
+      timeout nor stable enough for retries or phase splitting. A subsequent
+      x86_64 TCG workload build was also terminated by the runner service after
+      7 minutes 6 seconds. KVM preparation was terminated twice as well, even
+      with live log streaming. The hosted witness now assembles and signs a
+      bounded fixture from the verified release rootfs and source-matched
+      launch artifacts, then transfers it to a fresh runner that deliberately
+      denies KVM before install and boot under QEMU TCG. Native aarch64
+      workspace coverage and the full local Apple Silicon TCG lifecycle retain
+      the architecture-specific and unaccelerated-build evidence. The same
+      broad run exposed and fixed two process-global `MVM_HOME` races in the
+      wasm endpoint-plan and broker-path witnesses; all 886 runtime library
+      tests now pass concurrently. The live hosted no-KVM run, documented-
+      surface release gate, and merge delivery remain.
 - [x] **Alternative CLI help coverage performance.**
       `specs/plans/2026-09-03-bdd-help-coverage.md`.
       The BDD contract still executes both `mvmctl <path> -h` and
@@ -426,9 +451,9 @@
 
 - [ ] **Merge-queue throughput recovery.**
       `specs/plans/2026-08-15-merge-queue-throughput.md`.
-      The `aarch64-no-kvm-smoke` job was promoted to a required merge-queue
+      The no-KVM lifecycle smoke was promoted to a required merge-queue
       gate and can take hours under QEMU TCG, serializing every merge. Moved
-      the job to `ci-full.yml` (nightly + manual dispatch) and removed it from
+      it to `ci-full.yml` (nightly + manual dispatch) and removed it from
       the `Test` aggregate so the queue can move. Structural tests assert the
       new separation. Remaining: land the change, measure post-change queue
       latency, and record the result.

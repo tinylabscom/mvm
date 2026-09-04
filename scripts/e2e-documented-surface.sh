@@ -255,7 +255,17 @@ just embed-refresh
 # helper for the complete HVF/Nix build, not resume in this payload-free parent.
 # The main suite binary is then rebuilt with the payload because later workload
 # launches consume the extracted host helpers directly.
-E2E_FEATURES="${MVM_E2E_FEATURES-}"
+# `user` by default, because it carries `manifest-verify` — and without it this
+# lane cannot exercise a documented command that fetches a published artifact.
+# `build kernel build --source download` refuses outright: "manifest-verify
+# feature is disabled in this build". Released binaries are built with `user`
+# (see MVMCTL_RELEASE_FEATURES in release.yml), so a lane without it attests the
+# documented surface using a binary less capable than the one users get.
+#
+# Deliberately *not* the full release feature set: `release-channel` flips
+# artifact acquisition from build-from-checkout to download-published, which is
+# the opposite of what a contributor-path lane must exercise.
+E2E_FEATURES="${MVM_E2E_FEATURES-user}"
 if [[ -n "$E2E_FEATURES" ]]; then
   echo "==> building unembedded mvmctl (--features $E2E_FEATURES)"
   cargo build --bin mvmctl --features "$E2E_FEATURES"
@@ -579,6 +589,29 @@ echo "==> documented examples + machine journey (cucumber, @live)"
 SUITE_STARTED=1
 echo "    deadline: ${E2E_TIMEOUT_SECS}s"
 set +e
+# Whether this host leaves a process alive to fire a workload's wall-clock
+# timer. libkrun and HVF keep a per-VM supervisor that outlives the launch;
+# Firecracker detaches its session and QEMU daemonizes, so the Linux lane must
+# not declare it.
+#
+# Undeclared, the `@unenforceable_wall_clock` scenario runs on a host that does
+# enforce it and fails. That scenario passed for years anyway, because the exit
+# code it asserts collided with a separate bug — a baked entrypoint the host
+# waited for and never dispatched, which also exited 1. Fixing that bug is what
+# exposed this, exactly as the comment above the scenario predicted.
+#
+# Exported only where it holds, rather than assigned a possibly-empty value:
+# `wall_clock_enforced()` reads the var with `is_some()`, so `MVM_BDD_WALL_CLOCK=`
+# on the Linux lane would declare the opposite of what is meant.
+#
+# Nor can it be a conditional expansion in the env-assignment prefix below.
+# Bash parses those assignments before expanding them, so `${VAR:+NAME=value}`
+# is taken as the command to run — the suite exits before a single scenario,
+# which the run-produced-no-summary guard catches but only after the boot.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  export MVM_BDD_WALL_CLOCK=1
+fi
+
 # Tee'd so the run can afterwards assert the suite actually produced a summary.
 # "no failures" is not the same as "nothing ran": the conformance binary
 # refuses to start against a stale `mvmctl`, and that refusal prints no

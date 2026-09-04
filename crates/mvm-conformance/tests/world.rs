@@ -195,6 +195,17 @@ pub struct CliWorld {
     /// An isolated `MVM_HOME` created by a `Given` step and reused by later
     /// steps that need to inspect the filesystem after a run.
     pub isolated_home: Option<tempfile::TempDir>,
+    /// A throwaway working directory a documented command runs *inside*, so an
+    /// example whose argument is a relative path (`./my-python-app`) can be
+    /// spelled in the step exactly as the README prints it. Without it such a
+    /// command writes into the repository working tree, which is banned, and
+    /// the alternative — an argv assembled in Rust — is invisible to the
+    /// structural check that reads commands out of quoted step text.
+    pub scratch_dir: Option<tempfile::TempDir>,
+    /// Host-side listener standing in for the workload a `--peer` route points
+    /// at. Held for the scenario's lifetime: the accept loop runs on a clone
+    /// and ends when this drops.
+    pub peer_listener: Option<std::net::TcpListener>,
     /// Hermetic command search path whose encryption probes report that the
     /// scenario-local mount cache is backed by encrypted storage.
     pub encrypted_volume_probe_path: Option<std::ffi::OsString>,

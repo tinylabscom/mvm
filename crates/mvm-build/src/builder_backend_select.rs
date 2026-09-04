@@ -22,11 +22,13 @@
 //! problem without aborting the build. Empty / unset env is treated
 //! the same as "no override."
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::builder_health;
-use crate::builder_vm::{BuilderArtifacts, BuilderJob, BuilderMounts, BuilderVm, BuilderVmError};
+use crate::builder_vm::{
+    BuilderArtifacts, BuilderCapabilities, BuilderJob, BuilderMounts, BuilderVm, BuilderVmError,
+};
 use crate::libkrun_builder::{
     DEFAULT_VCPUS, LibkrunBuilderVm, builder_vm_cache_dir, host_arch_tag,
 };
@@ -208,6 +210,51 @@ impl BuilderVm for WebLinuxBuilderVm {
             reason: "the web-linux builder is browser-only; run it in a WebAssembly browser environment, or select libkrun/qemu/hvf on a native host".to_string(),
         })
     }
+
+    fn run_stage0(
+        &self,
+        _guest_root_dir: &Path,
+        _entry_path: &str,
+        _workspace_dir: &Path,
+        _artifact_out: &Path,
+        _host_bin_dir: &Path,
+    ) -> Result<(), BuilderVmError> {
+        Err(BuilderVmError::VmmUnavailable {
+            requested: "stage0-bootstrap".to_string(),
+            reason: "the web-linux builder is browser-only and cannot bootstrap a \
+                     builder VM; select libkrun or qemu on a native host"
+                .to_string(),
+        })
+    }
+
+    fn capabilities(&self) -> BuilderCapabilities {
+        BuilderCapabilities::default()
+    }
+}
+
+/// What each builder backend can do, readable without constructing one.
+///
+/// Constructing a backend can do real work — the hvf builder materializes the
+/// embedded Linux host binaries — so a pre-flight question ("can this host
+/// bootstrap?") must not require it. Asking through construction made `doctor`
+/// report hvf as *unavailable* on a machine where hvf was the working default,
+/// because the answer it got back was about a missing build payload rather than
+/// about capability.
+///
+/// `declared_capabilities_match_the_backend_impls` holds this in step with the
+/// `BuilderVm::capabilities` each backend returns, so the convenience copy
+/// cannot drift from the source of truth.
+#[must_use]
+pub fn declared_capabilities(choice: BuilderBackendChoice) -> BuilderCapabilities {
+    match choice {
+        BuilderBackendChoice::Libkrun | BuilderBackendChoice::Qemu => BuilderCapabilities {
+            stage0_bootstrap: true,
+            dependency_install: true,
+        },
+        BuilderBackendChoice::Hvf | BuilderBackendChoice::WebLinux => {
+            BuilderCapabilities::default()
+        }
+    }
 }
 
 /// Construct the builder driver the selection resolves to. Returns
@@ -327,17 +374,36 @@ fn stage0_backend_choice(choice: BuilderBackendChoice) -> BuilderBackendChoice {
 // Auto-fallback between builder backends on a VMM-level failure
 // ──────────────────────────────────────────────────────────────────
 
-/// Is `e` a VMM-level failure — the builder VM/supervisor couldn't run the
-/// build at all — rather than a genuine build error a different backend would
-/// hit identically? Only these justify an auto-fallback: a real
-/// `NixBuildFailed` (the build ran and failed) or a `DegradedBuilderStore`
-/// (shared Nix store) must surface unchanged.
+/// Is `e` a VMM-level failure — this backend could not run the job at all —
+/// rather than a genuine build error a different backend would hit
+/// identically? Only these justify an auto-fallback: a real `NixBuildFailed`
+/// (the build ran and failed) or a `DegradedBuilderStore` (shared Nix store)
+/// must surface unchanged.
+///
+/// `VmmUnavailable` counts, and did not until a backend that declined an
+/// operation outright was found to dead-end the auto-detected path. On macOS
+/// the default builder is hvf, which serves ordinary build jobs but wires
+/// neither Stage 0 nor the dependency install; libkrun wires both. Because the
+/// refusal was not in this set, `deps install` stopped at "hvf does not serve
+/// dependency installs" and never tried the backend that does — a fallback
+/// declining to fall back, for a failure that is precisely what it exists for.
+///
+/// This cannot override an operator: an explicit `--builder` /
+/// `MVM_BUILDER_BACKEND` makes [`builder_attempt_order`] return a single
+/// element, so there is no next backend to move to whatever this returns.
+///
+/// [`BuilderVmError::NotYetImplemented`] is deliberately excluded.
+/// `VmmUnavailable` says *not on this host*, which another backend may well
+/// answer; `NotYetImplemented` says *nowhere yet*, and retrying it elsewhere
+/// only trades one unimplemented path for another while making the eventual
+/// error name the wrong backend.
 pub fn is_builder_vm_level_failure(e: &BuilderVmError) -> bool {
     matches!(
         e,
         BuilderVmError::SupervisorExited { .. }
             | BuilderVmError::LibkrunUnavailable(_)
             | BuilderVmError::HvfVmmFailed { .. }
+            | BuilderVmError::VmmUnavailable { .. }
     )
 }
 
@@ -573,6 +639,69 @@ pub fn linux_builder_vm_readiness() -> Result<(), BuilderVmError> {
 
 #[cfg(test)]
 mod tests {
+    /// A backend declining an operation is a reason to try the next one.
+    ///
+    /// The regression this pins: hvf declines the dependency install, libkrun
+    /// serves it, and the auto-detected macOS order is exactly
+    /// `[hvf, libkrun]` — yet the refusal was not classified as VMM-level, so
+    /// the fallback stopped on the backend that could not do the job.
+    #[test]
+    fn a_backend_declining_an_operation_is_a_vmm_level_failure() {
+        assert!(is_builder_vm_level_failure(
+            &BuilderVmError::VmmUnavailable {
+                requested: "hvf-dependency-install".to_string(),
+                reason: "the hvf builder does not serve dependency installs".to_string(),
+            }
+        ));
+    }
+
+    /// "Nowhere yet" is not a reason to try somewhere else.
+    #[test]
+    fn a_globally_unimplemented_path_does_not_trigger_the_fallback() {
+        assert!(!is_builder_vm_level_failure(
+            &BuilderVmError::NotYetImplemented
+        ));
+    }
+
+    /// An operator who names a backend gets that backend, including its
+    /// refusals. The widened predicate must not reach past an explicit choice.
+    #[test]
+    fn an_explicit_choice_has_no_next_backend_whatever_the_predicate_says() {
+        for choice in [
+            BuilderBackendChoice::Hvf,
+            BuilderBackendChoice::Libkrun,
+            BuilderBackendChoice::Qemu,
+            BuilderBackendChoice::WebLinux,
+        ] {
+            assert_eq!(
+                builder_attempt_order(choice, /* explicit */ true, false, false),
+                vec![choice],
+                "an explicit --builder must never fall back"
+            );
+        }
+    }
+
+    /// The convenience copy and the trait impls must agree, or the table
+    /// `doctor` prints is a decoration a reader would be wrong to trust.
+    ///
+    /// Covers the backends that construct without I/O. The hvf backend is
+    /// asserted the same way in `mvm-runtime`, next to its impl.
+    #[test]
+    fn declared_capabilities_match_the_backend_impls() {
+        assert_eq!(
+            LibkrunBuilderVm::default().capabilities(),
+            declared_capabilities(BuilderBackendChoice::Libkrun)
+        );
+        assert_eq!(
+            QemuBuilderVm::new().capabilities(),
+            declared_capabilities(BuilderBackendChoice::Qemu)
+        );
+        assert_eq!(
+            WebLinuxBuilderVm.capabilities(),
+            declared_capabilities(BuilderBackendChoice::WebLinux)
+        );
+    }
+
     use super::*;
     use mvm_core::util::test_env::TestEnv;
 

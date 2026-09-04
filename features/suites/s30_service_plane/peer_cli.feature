@@ -28,3 +28,19 @@ Feature: The --peer flag authors a route the runtime honours
     Given an isolated mvm home
     When I run mvmctl in the isolated mvm home with "machine run --name bdd-peer --image alpine --peer db.mvm.peer:5432=127.0.0.1:34567 --dry-run -- /bin/true"
     Then the command exits with code 0
+
+  # The documented route, end to end on a real guest.
+  #
+  # Everything above this line is hermetic: the CLI accepts the route and the
+  # gate resolves it. Neither says a guest can reach the other end, and the
+  # README example is written for a reader who wants exactly that. A workload
+  # has no NIC, so the dial goes out through the guest agent's SOCKS5 listener
+  # by *name* — which is what makes the route decidable on the host, against
+  # the signed binding, rather than resolved in the guest.
+  @live
+  Scenario: the documented peer route carries a guest dial to the host service
+    Given an artifact-warm mvm home
+    And a host TCP service on port 34567 that greets its caller
+    When I launch "run --peer db.mvm.peer:5432=127.0.0.1:34567" with a guest that dials the peer
+    Then the launch succeeds
+    And the guest reached the peer service

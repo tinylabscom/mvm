@@ -142,6 +142,55 @@ fn isolated_mvm_home(world: &mut CliWorld) {
     world.isolated_home = Some(tempfile::tempdir().expect("create isolated MVM_HOME"));
 }
 
+/// A working directory outside the repository for a command whose documented
+/// form takes a relative output path.
+///
+/// `mvmctl generate template python ./my-python-app` cannot be run from the
+/// workspace root — it would scaffold a project into the tree. Assembling the
+/// argv in Rust avoids that but hides the invocation from the README
+/// structural check, which reads commands out of quoted step text; that is
+/// exactly why the documented `generate template` line sat unexecuted behind an
+/// exemption. Running it verbatim inside a scratch directory satisfies both.
+#[given(expr = "a scratch working directory")]
+fn scratch_working_directory(world: &mut CliWorld) {
+    world.scratch_dir = Some(tempfile::tempdir().expect("create scratch working directory"));
+}
+
+#[when(expr = "I run mvmctl in the scratch directory with {string}")]
+fn run_mvmctl_in_scratch_directory(world: &mut CliWorld, args: String) {
+    let scratch = world
+        .scratch_dir
+        .as_ref()
+        .expect("`Given a scratch working directory` must run before this step");
+    let home = world
+        .isolated_home
+        .as_ref()
+        .expect("`Given an isolated mvm home` must run before this step");
+    let output = mvmctl_command()
+        .args(mvm_conformance::doc_examples::tokenize(&args))
+        .current_dir(scratch.path())
+        .isolated_home(home.path())
+        .output()
+        .expect("failed to spawn mvmctl");
+    world.last_run = Some(output);
+}
+
+#[then(expr = "the scratch directory contains file {string}")]
+fn scratch_directory_contains_file(world: &mut CliWorld, rel: String) {
+    let scratch = world
+        .scratch_dir
+        .as_ref()
+        .expect("`Given a scratch working directory` must run before this step");
+    let path = scratch.path().join(&rel);
+    assert!(
+        path.is_file(),
+        "expected {rel} under the scratch directory; it holds {:?}",
+        std::fs::read_dir(scratch.path())
+            .map(|d| d.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
+            .unwrap_or_default()
+    );
+}
+
 #[given(expr = "an isolated mvm home on encrypted backing storage")]
 fn isolated_mvm_home_on_encrypted_backing(world: &mut CliWorld) {
     isolated_mvm_home(world);
@@ -581,7 +630,7 @@ fn every_command_help_item_is_one_line_shorter_than(_world: &mut CliWorld, width
         .into_iter()
         .flat_map(|mut path| {
             path.push("--help".to_string());
-            help_invocation_violations(&path, width, true)
+            rendered_help_violations(&path, width, true)
         })
         .collect::<Vec<_>>();
 
@@ -594,37 +643,27 @@ fn every_command_help_item_is_one_line_shorter_than(_world: &mut CliWorld, width
 
 #[then(expr = "every alternative CLI help item is one line shorter than {int} columns")]
 fn every_alternative_help_entry_point_fits_within(_world: &mut CliWorld, width: i64) {
-    let paths = all_command_paths();
-    let worker_count = std::thread::available_parallelism()
-        .map_or(1, std::num::NonZeroUsize::get)
-        .min(8)
-        .min(paths.len());
-    let chunk_size = paths.len().div_ceil(worker_count);
+    for path in all_command_paths() {
+        let mut short_help_args = path.clone();
+        short_help_args.push("-h".to_string());
+        assert_rendered_help_fits(&short_help_args, width, true);
 
-    let violations = std::thread::scope(|scope| {
-        let workers = paths
-            .chunks(chunk_size)
-            .map(|paths| {
-                scope.spawn(move || {
-                    paths
-                        .iter()
-                        .flat_map(|path| alternative_help_violations(path, width))
-                        .collect::<Vec<_>>()
-                })
-            })
-            .collect::<Vec<_>>();
+        let mut help_subcommand_args = vec!["help".to_string()];
+        help_subcommand_args.extend(path);
+        assert_rendered_help_fits(&help_subcommand_args, width, true);
+    }
 
-        workers
-            .into_iter()
-            .flat_map(|worker| worker.join().expect("help-check worker must not panic"))
-            .collect::<Vec<_>>()
-    });
-
-    assert!(
-        violations.is_empty(),
-        "alternative CLI help items must each occupy one line shorter than {width} columns:\n{}",
-        violations.join("\n")
-    );
+    // Rendering is the same code the binary runs, but not the same *process*.
+    // One real invocation per entry-point form keeps that last inch honest:
+    // if `mvmctl --help` ever stopped reaching the arm this renders, every
+    // assertion above would still pass against a binary that printed nothing.
+    for probe in [
+        vec!["--help".to_string()],
+        vec!["-h".to_string()],
+        vec!["help".to_string()],
+    ] {
+        assert_help_invocation_fits(&probe, width, true);
+    }
 }
 
 fn all_command_paths() -> Vec<Vec<String>> {
@@ -634,17 +673,57 @@ fn all_command_paths() -> Vec<Vec<String>> {
     command_paths
 }
 
-fn alternative_help_violations(path: &[String], width: i64) -> Vec<String> {
-    let mut short_help_args = path.to_vec();
-    short_help_args.push("-h".to_string());
+/// The same assertions as [`assert_help_invocation_fits`], against help text
+/// rendered in-process instead of read from a spawned `mvmctl`.
+fn assert_rendered_help_fits(args: &[String], width: i64, require_single_line_items: bool) {
+    let violations = rendered_help_violations(args, width, require_single_line_items);
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
 
-    let mut help_subcommand_args = vec!["help".to_string()];
-    help_subcommand_args.extend_from_slice(path);
+/// Width violations in the help text `mvmctl <args>` would print, obtained
+/// without spawning it.
+///
+/// The spawning version below is unchanged and still used, deliberately, for a
+/// few probe invocations. What it cost as the *bulk* check was one process per
+/// command path — a debug `mvmctl` is over 100 MB, and the CLI has enough paths
+/// that this single scenario dominated the suite and read as a freeze.
+///
+/// `mvm_cli::commands::help_text_for` runs the binary's own help arm: the same
+/// clap tree parses the same argv and the same output constraint is applied, so
+/// `--help`, `-h` and `help <path>` still dispatch and render as they really
+/// do. Nothing here re-implements the formatting it is checking.
+fn rendered_help_violations(
+    args: &[String],
+    width: i64,
+    require_single_line_items: bool,
+) -> Vec<String> {
+    let invocation = format!("mvmctl {}", args.join(" "));
+    let Some(help) = mvm_cli::commands::help_text_for(args) else {
+        return vec![format!("`{invocation}` did not render help")];
+    };
+    if help.trim().is_empty() {
+        return vec![format!("`{invocation}` rendered empty help")];
+    }
 
-    [short_help_args, help_subcommand_args]
-        .into_iter()
-        .flat_map(|args| help_invocation_violations(&args, width, true))
-        .collect()
+    let mut violations = Vec::new();
+    if require_single_line_items {
+        collect_wrapped_help_items(&invocation, &help, &mut violations);
+    }
+    for (line_number, line) in help.lines().enumerate() {
+        let line_width = i64::try_from(line.chars().count()).expect("line width fits in i64");
+        if line_width >= width {
+            violations.push(format!(
+                "`{invocation}` line {} is {line_width} columns: {line}",
+                line_number + 1
+            ));
+        }
+    }
+    violations
+}
+
+fn assert_help_invocation_fits(args: &[String], width: i64, require_single_line_items: bool) {
+    let violations = help_invocation_violations(args, width, require_single_line_items);
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
 }
 
 fn help_invocation_violations(

@@ -38,6 +38,44 @@ fn help_output_compacts_each_item_onto_one_line() {
     assert!(!compacted.contains("\n          "));
 }
 
+/// `help_text_for` answers for a help invocation and refuses everything else.
+///
+/// The refusal is the part that matters. If it returned the text of a parse
+/// *error* the conformance suite would be width-checking an error page while
+/// believing it checked help, and the scenario would stay green with no help
+/// output involved at all.
+#[test]
+fn help_text_is_rendered_only_for_a_help_invocation() {
+    let argv =
+        |line: &str| -> Vec<String> { line.split_whitespace().map(str::to_string).collect() };
+
+    for form in ["--help", "-h"] {
+        let text = super::help_text_for(&argv(form))
+            .unwrap_or_else(|| panic!("`mvmctl {form}` must render help"));
+        assert!(
+            text.contains("Usage:"),
+            "`mvmctl {form}` rendered something that is not help:\n{text}"
+        );
+    }
+
+    // The three entry-point forms for one subcommand all reach help.
+    for form in ["machine --help", "machine -h", "help machine"] {
+        assert!(
+            super::help_text_for(&argv(form)).is_some(),
+            "`mvmctl {form}` must render help"
+        );
+    }
+
+    // Not help: an unknown command, and a parse error. Both produce a clap
+    // error whose text is not help output.
+    for form in ["definitely-not-a-verb", "machine run --no-such-flag"] {
+        assert!(
+            super::help_text_for(&argv(form)).is_none(),
+            "`mvmctl {form}` is not a help invocation and must not render help"
+        );
+    }
+}
+
 #[test]
 fn every_command_help_surface_stays_within_80_columns() {
     let mut violations = Vec::new();

@@ -199,9 +199,11 @@ successfully in two releases' worth of drift.
 - [ ] **Issue #3111** — `ensure_home_dir` has no callers, so claim W1.5's 0700
       invariant is enforced by nothing. This is a security-posture claim with no
       live enforcement; fix it before shipping a release whose docs assert it.
-- [ ] **Issue #3007** (Extended CI red) closes when P0-2 lands, *plus* the
-      `Aarch64 no-KVM bundle smoke (QEMU TCG)` job, which died with exit 143 on
-      a runner shutdown after the unaccelerated build overran its budget. Not a
+- [ ] **Issue #3007** (Extended CI red) closes when P0-2 lands, *plus* a green
+      hosted no-KVM QEMU TCG lifecycle. Five arm64 attempts were terminated by
+      the platform after 6–28 minutes, so the hosted witness now runs on stable
+      x86_64 with KVM deliberately denied; native aarch64 tests and the local
+      Apple Silicon lifecycle retain architecture-specific evidence. Not a
       release blocker — it is not in `release.yml`'s `needs` — but it is half of
       why #3007 stays open.
 - [ ] **Issue #3068** (SDK sidecar is a convenience, not a requirement) — not a

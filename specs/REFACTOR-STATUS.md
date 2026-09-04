@@ -1,8 +1,32 @@
 # Refactor status
 
-Last updated: 2026-09-03
+Last updated: 2026-09-04
 
 ## In progress
+
+- [ ] **Execute the documented README surface.**
+      `specs/plans/2026-09-03-readme-execution-coverage.md`.
+      The README register now executes 34 of 35 examples, retains one truthful
+      unsupported-flow exemption, and no longer lets one enum-valued CLI mode
+      witness another. Live exercise fixed peer-only outbound initialization;
+      builder backends now declare capabilities, automatic selection may fall
+      back when one declines, and missing builder payloads return a normal
+      error. Exhaustive help checks use the production Clap arm in-process with
+      binary probes retained. Five hosted ARM shutdowns proved its undocumented
+      lifetime is variable rather than governed by the job timeout: three
+      stopped at 27–28 minutes, one at 14 minutes 20 seconds, and the corrected
+      build runner after only 6 minutes 3 seconds. An x86_64 TCG workload build
+      was then terminated after 7 minutes 6 seconds too. KVM bundle preparation
+      was also terminated twice, including with live log streaming. The hosted
+      witness now assembles and signs a bounded fixture from the verified
+      release rootfs and source-matched launch artifacts, then transfers it to
+      a fresh runner that denies KVM before install and boot under QEMU TCG. Native
+      aarch64 workspace coverage and the full local Apple Silicon lifecycle
+      preserve architecture-specific and unaccelerated-build evidence. The full
+      workspace run also exposed and fixed two process-global `MVM_HOME` races
+      in the wasm endpoint-plan and broker-path witnesses; all 886 runtime
+      library tests pass concurrently. Hermetic BDD is green; the hosted no-KVM
+      run, live documented-surface evidence, and merge delivery remain.
 
 - [x] **Alternative CLI help coverage performance.**
       `specs/plans/2026-09-03-bdd-help-coverage.md`.
@@ -12,7 +36,6 @@ Last updated: 2026-09-03
       Feature-gated compilation, zero-warning Clippy, and the full hermetic BDD
       suite are green.
 
-- [ ] **Persistent host-directory snapshots.**
 - [ ] **Release-artifact authenticity and provenance.**
       `specs/plans/2026-09-03-release-artifact-authenticity-and-provenance.md`.
       WS-A registers the shipped signature chain as `MVM-SEC-20`, precisely

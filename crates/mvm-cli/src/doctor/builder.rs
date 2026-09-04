@@ -407,6 +407,63 @@ pub(super) fn boot_image_acquisition_check() -> Check {
     }
 }
 
+/// Which builder operations each backend actually serves.
+///
+/// Not every builder can do everything, and until this existed the only way to
+/// find out was to run the operation and read the failure — twenty minutes for
+/// an answer a table could give in one command. Worse, the gaps were described
+/// by shared sentences inside the code ("implemented for the libkrun backend
+/// only", "isn't wired for any backend yet") that both went stale as backends
+/// were added, because nothing forced them to be revisited.
+///
+/// Read from each backend's own `capabilities()`, so this table cannot
+/// disagree with what the backend will do.
+#[cfg(feature = "builder-vm")]
+pub(super) fn builder_capabilities_check() -> Check {
+    use mvm_build::builder_backend_select::{BuilderBackendChoice, declared_capabilities};
+
+    let rows: Vec<String> = [
+        BuilderBackendChoice::Libkrun,
+        BuilderBackendChoice::Qemu,
+        BuilderBackendChoice::Hvf,
+        BuilderBackendChoice::WebLinux,
+    ]
+    .into_iter()
+    .map(|choice| {
+        let caps = declared_capabilities(choice);
+        format!(
+            "{}: bootstrap={} deps-install={}",
+            choice.name(),
+            yes_no(caps.stage0_bootstrap),
+            yes_no(caps.dependency_install),
+        )
+    })
+    .collect();
+
+    Check {
+        name: "builder capabilities",
+        category: "platform",
+        ok: true,
+        info: rows.join("; "),
+    }
+}
+
+#[cfg(feature = "builder-vm")]
+fn yes_no(v: bool) -> &'static str {
+    if v { "yes" } else { "no" }
+}
+
+/// Stub when `builder-vm` is off, matching `builder_backend_check`.
+#[cfg(not(feature = "builder-vm"))]
+pub(super) fn builder_capabilities_check() -> Check {
+    Check {
+        name: "builder capabilities",
+        category: "platform",
+        ok: true,
+        info: "n/a (mvm-cli built without `builder-vm` feature)".to_string(),
+    }
+}
+
 /// Stub when `builder-vm` feature is off (CLI built without the
 /// builder support — e.g. dependency-light packaging).
 #[cfg(not(feature = "builder-vm"))]

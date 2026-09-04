@@ -86,6 +86,7 @@ use egress_process::{builder_egress_endpoint_was_terminated, builder_egress_supe
 // same logic without duplicating it. `INSTALL_SPEC_FILENAME` and
 // `shell_single_quote_escape` are imported only inside the test
 // module below.
+use crate::builder_vm::BuilderCapabilities;
 use crate::builder_vm_runtime::{
     acquire_nix_store_image_lock, acquire_nix_store_image_lock_named, builder_vm_timeout,
     ensure_nix_store_image_unlocked, finalize_flake_job, finalize_install_job,
@@ -1534,6 +1535,13 @@ pub(crate) fn ensure_utf8_path(p: &std::path::Path, field: &str) -> Result<(), B
 }
 
 impl BuilderVm for LibkrunBuilderVm {
+    fn capabilities(&self) -> BuilderCapabilities {
+        BuilderCapabilities {
+            stage0_bootstrap: true,
+            dependency_install: true,
+        }
+    }
+
     /// Adapt the backend-agnostic `(root_dir, entry)` Stage 0
     /// contract to libkrun's `BuilderVmImage::RootDir` and run it.
     fn run_stage0(

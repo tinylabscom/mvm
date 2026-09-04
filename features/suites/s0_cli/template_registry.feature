@@ -28,3 +28,17 @@ Feature: mvmctl template registry
     When I run mvmctl with "template search demo" against the local template registry
     Then the command exits with code 0
     And the output contains "demo"
+
+  # The documented invocation, spelled as the README prints it. The remote-demo
+  # scenario above drives `generate template` through a step that assembles its
+  # argv in Rust, which the README structural check cannot read — so the
+  # documented line sat exempt while a scenario for the same verb was green.
+  # This one runs from a scratch directory because the argument is a relative
+  # path: from the workspace root it would scaffold a project into the tree.
+  Scenario: the documented generate template invocation scaffolds a python project
+    Given an isolated mvm home
+    And a scratch working directory
+    When I run mvmctl in the scratch directory with "generate template python ./my-python-app"
+    Then the command exits with code 0
+    And the scratch directory contains file "my-python-app/flake.nix"
+    And the scratch directory contains file "my-python-app/mvm.toml"

@@ -1213,6 +1213,34 @@ impl PersistentBuilderVm {
 
 #[cfg(feature = "builder-vm")]
 impl crate::builder_vm::BuilderVm for PersistentBuilderVm {
+    /// A persistent builder is one that has already been bootstrapped, so
+    /// Stage 0 is not its job — it is the operation that would have produced
+    /// it. Dependency installs run through the same job seam every other
+    /// builder uses.
+    fn capabilities(&self) -> crate::builder_vm::BuilderCapabilities {
+        crate::builder_vm::BuilderCapabilities {
+            stage0_bootstrap: false,
+            dependency_install: true,
+        }
+    }
+
+    fn run_stage0(
+        &self,
+        _guest_root_dir: &std::path::Path,
+        _entry_path: &str,
+        _workspace_dir: &std::path::Path,
+        _artifact_out: &std::path::Path,
+        _host_bin_dir: &std::path::Path,
+    ) -> Result<(), crate::builder_vm::BuilderVmError> {
+        Err(crate::builder_vm::BuilderVmError::VmmUnavailable {
+            requested: "stage0-bootstrap".to_string(),
+            reason: "the persistent builder runs against an already-bootstrapped \
+                     builder VM; Stage 0 is what creates one, so run it through \
+                     the libkrun or qemu builder instead"
+                .to_string(),
+        })
+    }
+
     fn run_build(
         &self,
         job: &crate::builder_vm::BuilderJob,

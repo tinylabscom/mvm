@@ -2029,6 +2029,9 @@ mod tests {
         let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
         let dir = tempfile::tempdir().unwrap();
         let secret = mvm_core::plan::SecretBinding {
             name: "API_KEY".to_string(),

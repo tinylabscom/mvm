@@ -1998,6 +1998,12 @@ mod tests {
 
     #[test]
     fn start_workload_registers_the_broker_and_wires_it_into_the_spec_when_admitted() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
         let policy = NetworkPolicy::deny_all();
         let redaction = RedactionPolicy::default();
         let runner = WorkloadRunner::new(
