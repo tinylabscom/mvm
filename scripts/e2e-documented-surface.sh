@@ -589,10 +589,6 @@ echo "==> documented examples + machine journey (cucumber, @live)"
 SUITE_STARTED=1
 echo "    deadline: ${E2E_TIMEOUT_SECS}s"
 set +e
-# Tee'd so the run can afterwards assert the suite actually produced a summary.
-# "no failures" is not the same as "nothing ran": the conformance binary
-# refuses to start against a stale `mvmctl`, and that refusal prints no
-# scenarios at all — which reads as a clean run to anyone counting failures.
 # Whether this host leaves a process alive to fire a workload's wall-clock
 # timer. libkrun and HVF keep a per-VM supervisor that outlives the launch;
 # Firecracker detaches its session and QEMU daemonizes, so the Linux lane must
@@ -604,14 +600,22 @@ set +e
 # waited for and never dispatched, which also exited 1. Fixing that bug is what
 # exposed this, exactly as the comment above the scenario predicted.
 #
-# Set as a token rather than a value: `wall_clock_enforced()` reads the var with
-# `is_some()`, so passing it empty on Linux would declare the opposite of what
-# is meant.
-WALL_CLOCK_DECL=""
+# Exported only where it holds, rather than assigned a possibly-empty value:
+# `wall_clock_enforced()` reads the var with `is_some()`, so `MVM_BDD_WALL_CLOCK=`
+# on the Linux lane would declare the opposite of what is meant.
+#
+# Nor can it be a conditional expansion in the env-assignment prefix below.
+# Bash parses those assignments before expanding them, so `${VAR:+NAME=value}`
+# is taken as the command to run — the suite exits before a single scenario,
+# which the run-produced-no-summary guard catches but only after the boot.
 if [[ "$(uname -s)" == "Darwin" ]]; then
-  WALL_CLOCK_DECL=1
+  export MVM_BDD_WALL_CLOCK=1
 fi
 
+# Tee'd so the run can afterwards assert the suite actually produced a summary.
+# "no failures" is not the same as "nothing ran": the conformance binary
+# refuses to start against a stale `mvmctl`, and that refusal prints no
+# scenarios at all — which reads as a clean run to anyone counting failures.
 SUITE_LOG="$(mktemp "${TMPDIR:-/tmp}/mvm-e2e-suite.XXXXXX")"
 CARGO_BIN_EXE_mvmctl="$MVMCTL" \
 MVM_BDD_LIVE=1 \
@@ -620,7 +624,6 @@ MVM_BDD_GUEST_BIN_DIR="$MVM_BDD_GUEST_BIN_DIR" \
 MVM_BDD_STRICT_SKIPS=1 \
 MVM_BDD_ALLOWED_SKIPS="$ALLOWED_SKIPS" \
 MVM_E2E_HOME="$E2E_HOME" \
-${WALL_CLOCK_DECL:+MVM_BDD_WALL_CLOCK=1} \
   ./scripts/cargo-fast.sh test -p mvm-conformance --test conformance --features bdd \
   2>&1 | tee "$SUITE_LOG" &
 SUITE_PID=$!
