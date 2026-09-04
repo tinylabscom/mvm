@@ -4,12 +4,12 @@ Last updated: 2026-09-03
 
 ## In progress
 
-- [ ] **Persistent host-directory snapshots.**
+- [x] **Persistent host-directory snapshots.**
       `specs/plans/2026-09-02-retire-dirshare.md`.
       Ad-hoc `--host <directory>` registration now creates a private ext4
       snapshot on verified encrypted backing and registers it as a block
       volume. Focused materialization, validation, error-path, launch-lease,
-      full workspace, and BDD tests are green; merge delivery remains.
+      full workspace, and BDD tests are green; merged via #3151.
 
 - [ ] **Workload output affordance — durable writable inline disks.**
       `specs/plans/2026-09-02-workload-output-affordance.md`.
@@ -29,7 +29,9 @@ Last updated: 2026-09-03
       content-addressed ext4 image cache. Start-time source fingerprints cover
       emitted filesystem semantics, changed snapshots refresh before lease
       acquisition, missing sources refuse, and writable consumers receive
-      private copies. Workspace tests/check, host and Linux-native Clippy,
+      private copies. The unbounded block-at-a-time writer verifies each file
+      against its walked digest, and cache initialization separately verifies
+      encrypted destination backing. Workspace tests/check, host and Linux-native Clippy,
       gated compilation, and hermetic BDD are green. A live Firecracker
       restart observed changed bytes even when the source mtime was preserved.
 - [x] **Cargo target-dir guard.**
@@ -49,7 +51,10 @@ Last updated: 2026-09-03
       hard error naming both contract versions and the rebuild command,
       replacing the recurring silent cross-profile fallback that surfaced as
       an "unknown field" spawn failure. A `HvfSupervisorConfig` shape pin
-      forces the contract version to bump with the schema. Focused
+      forces the contract version to bump with the schema. A freshly rebuilt
+      helper gets one retry only when its first bounded probe times out,
+      covering the observed macOS first-launch transient without accepting a
+      malformed or wrong-version helper. Focused
       regressions, affected crate suites, zero-warning Clippy, and Linux/BDD
       gated compilation are green; merged via #3132.
 

@@ -25,7 +25,7 @@ source refuses the start instead of silently serving stale bytes.
       fingerprint, lookup, and materialization timing spans.
 - [x] Cover cache hit/miss, equal-timestamp content changes, missing sources,
       cache tampering, and writable-copy isolation with unit and BDD tests.
-- [ ] Preserve unbounded, block-at-a-time materialization while binding every
+- [x] Preserve unbounded, block-at-a-time materialization while binding every
       emitted file to the digest captured during the source walk, and refuse
       cache initialization unless its destination has encrypted backing.
 - [x] Update CLI/help documentation and the sprint/refactor rollups.

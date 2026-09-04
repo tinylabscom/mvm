@@ -1114,11 +1114,13 @@ fn bring_up_mock_vm(sandbox: &AuditSandbox, name: &str) {
     if !rootfs.exists() {
         std::fs::write(&rootfs, b"fake-rootfs").expect("write stub rootfs");
     }
+    let encrypted_volume_probe_path = sandbox.encrypted_volume_probe_path();
     let output = sandbox
         .mvmctl()
         .env("MVM_DIRECT_BOOT", "1")
         .env("MVM_KERNEL_PATH", &kernel)
         .env("MVM_ROOTFS_PATH", &rootfs)
+        .env("PATH", encrypted_volume_probe_path)
         .args([
             "machine",
             "run",

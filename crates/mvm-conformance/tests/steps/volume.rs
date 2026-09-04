@@ -290,6 +290,10 @@ fn execute_machine_shell(world: &mut CliWorld, script: String, machine: String) 
 
 #[when(expr = "I attempt a direct start of machine {string} with backend {string}")]
 fn attempt_direct_start(world: &mut CliWorld, machine: String, backend: String) {
+    let encrypted_volume_probe_path = world
+        .encrypted_volume_probe_path
+        .clone()
+        .expect("host snapshot registration must install an encrypted-volume probe PATH");
     let home = isolated_home(world);
     let fixture_dir = home.join("direct-boot-fixture");
     fs::create_dir_all(&fixture_dir).expect("create direct-boot fixture directory");
@@ -304,6 +308,7 @@ fn attempt_direct_start(world: &mut CliWorld, machine: String, backend: String) 
         .env("MVM_DIRECT_BOOT", "1")
         .env("MVM_KERNEL_PATH", &kernel)
         .env("MVM_ROOTFS_PATH", &rootfs)
+        .env("PATH", encrypted_volume_probe_path)
         .output()
         .expect("attempt direct machine start");
     world.last_run = Some(output);

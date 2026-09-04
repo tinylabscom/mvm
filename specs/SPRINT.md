@@ -32,6 +32,9 @@
       launch lease and refuses a missing source. Read-only consumers attach the
       immutable cache object directly; writable registrations use private
       reflink/copies and retain guest writes until the host source changes.
+      Materialization remains unbounded and block-at-a-time, re-verifies each
+      emitted file against its walked digest, and refuses a cache destination
+      without independently verified encrypted backing.
       Workspace tests/check, host and Linux-native zero-warning Clippy, gated
       compilation, and hermetic BDD (248 passed, 1 capability skip) are green.
       A live Firecracker witness changed source bytes while preserving mtime;
@@ -63,7 +66,9 @@
       anything else is a hard error naming both versions and the exact
       rebuild command. A shape pin on `HvfSupervisorConfig` forces the
       contract version to move with the schema. Focused resolver, probe, and
-      spawn-path regressions, the mvm-vmm / mvm-backends / mvm-hostd /
+      spawn-path regressions, including a follow-up for a freshly rebuilt
+      macOS helper whose first probe transiently times out, the mvm-vmm /
+      mvm-backends / mvm-hostd /
       mvm-runtime suites, zero-warning Clippy, and Linux/BDD gated
       compilation are green; merged via #3132.
 
@@ -3658,4 +3663,4 @@ writes the plan:
       permissions before copying source bytes.
 - [x] Cover valid snapshot materialization and launch-lease resolution, invalid
       ext4 refusal, missing-image failure, and the CLI registration workflow.
-- [ ] Merge the implementation through the queue.
+- [x] Merge the implementation through the queue (#3151).

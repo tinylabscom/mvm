@@ -235,7 +235,16 @@ fn recover_stale_helper(
     ));
     plan.run(env)?;
     let rebuilt = resolve_from(spec, lookup)?;
-    match probe_contract(&rebuilt, env.probe_timeout) {
+    let mut rebuilt_probe = probe_contract(&rebuilt, env.probe_timeout);
+    if matches!(rebuilt_probe, ProbeOutcome::TimedOut) {
+        // A freshly linked macOS executable can miss its first bounded launch
+        // deadline while the host validates it, then answer immediately on the
+        // next exec. Cargo already completed successfully, so give only this
+        // post-build timeout one retry; malformed and wrong-version answers
+        // still fail closed without retrying.
+        rebuilt_probe = probe_contract(&rebuilt, env.probe_timeout);
+    }
+    match rebuilt_probe {
         ProbeOutcome::Answered(version)
             if version == helper_contract::HOST_HELPER_CONTRACT_VERSION =>
         {
@@ -568,6 +577,31 @@ mod tests {
         "#!/bin/sh\nexit 0\n".to_string()
     }
 
+    /// A stand-in for `cargo` whose freshly rebuilt helper stalls only on its
+    /// first probe, then answers normally on the next invocation.
+    fn cargo_with_transient_first_probe(bin: &str, marker: &Path) -> String {
+        format!(
+            "#!/bin/sh\n\
+             profile=debug\n\
+             for arg in \"$@\"; do\n\
+             \x20   if [ \"$arg\" = \"--release\" ]; then profile=release; fi\n\
+             done\n\
+             mkdir -p \"target/$profile\"\n\
+             cat > \"target/$profile/{bin}\" <<'PROBE_EOF'\n\
+             #!/bin/sh\n\
+             if [ ! -f '{marker}' ]; then\n\
+             \x20   touch '{marker}'\n\
+             \x20   sleep 1\n\
+             \x20   exit 0\n\
+             fi\n\
+             printf '%s\\n' '{bin} contract-version={current}'\n\
+             PROBE_EOF\n\
+             chmod +x \"target/$profile/{bin}\"\n",
+            marker = marker.display(),
+            current = helper_contract::HOST_HELPER_CONTRACT_VERSION,
+        )
+    }
+
     /// A stand-in for `cargo` that leaves a marker file when run, so tests
     /// can assert no rebuild was attempted.
     fn marker_cargo(marker: &Path) -> String {
@@ -698,6 +732,33 @@ mod tests {
             .to_string();
         assert!(err.contains("did not produce a helper"), "{err}");
         assert!(err.contains("cargo build -p mvm-hostd --bins"), "{err}");
+    }
+
+    #[test]
+    fn verified_resolve_retries_a_transient_timeout_after_rebuild() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = scratch_checkout(tmp.path());
+        let stale = root.join("target/debug/mvm-hvf-supervisor");
+        write_exe(&stale, &answering_helper("mvm-hvf-supervisor", 0));
+
+        let marker = tmp.path().join("first-probe-started");
+        let cargo = tmp.path().join("cargo");
+        write_exe(
+            &cargo,
+            &cargo_with_transient_first_probe("mvm-hvf-supervisor", &marker),
+        );
+
+        let mut env = test_env(Some(root.clone()));
+        env.cargo = cargo;
+        env.probe_timeout = Duration::from_millis(250);
+        let lookup = Lookup {
+            override_path: None,
+            dirs: vec![root.join("target/release"), root.join("target/debug")],
+        };
+
+        let got = resolve_verified_in(&hvf_spec(), &lookup, &env).unwrap();
+        assert_eq!(got, root.join("target/debug/mvm-hvf-supervisor"));
+        assert!(marker.is_file());
     }
 
     #[test]
