@@ -47,6 +47,7 @@ const FORBIDDEN_ENTRYPOINT_OVERRIDE: &str = "-- /bin/true";
 const BINARY_ARTIFACT: &str = "no-kvm-binaries";
 const BOOTSTRAP_ARTIFACT: &str = "no-kvm-bootstrap-cache";
 const BUNDLE_ARTIFACT: &str = "no-kvm-bundle";
+const REQUIRED_PREPARE_TIMEOUT: &str = "timeout-minutes: 45";
 
 #[test]
 fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
@@ -169,6 +170,10 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
     assert!(
         prepare.contains("runs-on: ubuntu-24.04") && !prepare.contains("runs-on: ubuntu-24.04-arm"),
         "the exact hosted smoke binaries must be compiled for the x86_64 runner that executes them"
+    );
+    assert!(
+        prepare.contains(REQUIRED_PREPARE_TIMEOUT),
+        "the embedded-helper cross-build must retain its measured hosted-runner budget"
     );
     assert!(
         prepare.contains("uses: actions/upload-artifact@v7")

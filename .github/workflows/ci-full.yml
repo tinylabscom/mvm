@@ -485,7 +485,7 @@ jobs:
   no-kvm-prepare:
     name: Prepare hosted no-KVM smoke binaries
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 45
     env:
       CARGO_TERM_COLOR: always
     steps:
