@@ -942,7 +942,9 @@ mod tests {
         );
         assert!(
             build.contains("image boot update --tag boot-image/v0.1.3 --force")
-                && build.contains(".mvm-ci/cache/kernels/x86_64/workload/vmlinux")
+                && bootstrap.contains("kernel build --which workload --source compile -v")
+                && build.contains(".mvm-ci/cache/kernels/x86_64/workload/bzImage")
+                && build.contains("bzImage.sha256")
                 && build.contains("write /tmp/exit-code-entrypoint /etc/mvm/entrypoint")
                 && build.contains("veritysetup format")
                 && build.contains("bundle export \"$slot_hash\""),
