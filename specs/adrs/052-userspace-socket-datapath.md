@@ -1,8 +1,18 @@
-# ADR-037 — The userspace socket datapath
+# ADR-052 — The userspace socket datapath
 
 **Status: Superseded for production workload networking by ADR-042
 (2026-08-11).**
 **Date: 2026-08-02**
+**Renumbered 037 → 052 on 2026-09-04.** Two ADRs held 037: this one and
+ADR-037 (`mvmd` is the only production launch authority), so a citation of
+"ADR-037" named two different decisions and a reader could not tell which.
+This one moved because it is superseded and its inbound citations are
+backward-looking, while the launch-authority ADR is Accepted and cited as
+current authority. Every in-tree citation that meant this document was
+retargeted in the same change. A reference to "ADR-037" predating that date
+and discussing networking means this ADR. The number 052 was held by a
+different ADR before the v1 restructure deleted it; nothing in the tree cited
+that one.
 **Superseded by: ADR-042 (one flow-aware vsock networking path). This ADR's
 datapath forwarded raw IP packets for `l3-vsock`, which is leaving the
 production workload path along with the mode itself. Its unprivileged-

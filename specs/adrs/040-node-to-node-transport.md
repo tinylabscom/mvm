@@ -6,7 +6,7 @@ reasons named below. Nothing here should be built until its prerequisites
 land. Tracked as issue #2119.**
 **Date: 2026-08-04**
 **Complements ADR-036 (L3 TUN-over-vsock) §"Cross-node traffic", which
-described the interface and recorded it as not implemented, and ADR-037
+described the interface and recorded it as not implemented, and ADR-052
 (the userspace socket datapath), which owns the local forwarding backend
 unchanged.**
 

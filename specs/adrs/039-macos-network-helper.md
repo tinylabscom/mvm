@@ -3,7 +3,7 @@
 **Status: Rejected — 2026-08-03. mvm adds no root-capable component.**
 **Date: proposed 2026-08-02, rejected 2026-08-03. Tracked as issue #2122.**
 **Complements ADR-036 (L3 TUN-over-vsock) §"macOS (Apple Silicon)", which
-enumerated the four privileged operations, and ADR-037 (the userspace
+enumerated the four privileged operations, and ADR-052 (the userspace
 socket datapath), which deliberately avoids needing any of them.**
 
 ## Why this ADR needs a signature, not just a review
