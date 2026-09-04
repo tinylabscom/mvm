@@ -669,8 +669,7 @@ mod tests {
     /// Both directions matter. A gate that only ever skips is indistinguishable
     /// from deleting the scenario, and the reason this one exists is that the
     /// claim is expected to work again — the handshake failure is a defect, not
-    /// a property of
-    /// the tier.
+    /// a property of the tier.
     #[test]
     fn warm_claim_scenario_skips_only_where_the_claim_cannot_complete() {
         assert_eq!(

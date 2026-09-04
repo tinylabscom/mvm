@@ -82,7 +82,7 @@ Feature: Transient sandbox boot
     And the isolated mvm home does not contain directory "vms/bdd-transient-cleanup"
 
   # Gated, not deleted: the claim is rejected on this tier because the forked
-  # child never answers the post-restore identity handshake (#3039), and the
+  # child never answers the post-restore identity handshake, and the
   # launch cold-boots instead. The scenario is the only thing that exercises a
   # warm claim, so it stays and reports itself unrun rather than passing by
   # omission.
