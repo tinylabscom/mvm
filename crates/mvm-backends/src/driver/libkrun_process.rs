@@ -340,7 +340,7 @@ pub fn attach_workload_rootfs(mut krun: KrunContext, config: &VmStartConfig) -> 
 /// coordination key the guest mount manifest uses at the requested guest path.
 pub fn attach_user_volumes(mut krun: KrunContext, config: &VmStartConfig) -> Result<KrunContext> {
     for (idx, vol) in config.volumes.iter().enumerate() {
-        krun = attach_user_volume(krun, idx, vol)?;
+        krun = attach_user_volume(krun, idx, vol);
     }
     Ok(krun)
 }
@@ -349,19 +349,12 @@ fn attach_user_volume(
     krun: KrunContext,
     index: usize,
     volume: &mvm_core::vm_backend::VmVolume,
-) -> Result<KrunContext> {
-    if !volume.attaches_as_block() {
-        bail!(
-            "libkrun requires directory volume '{}' -> '{}' to have a materialized block image",
-            volume.host,
-            volume.guest
-        );
-    }
-    Ok(krun.add_disk(
+) -> KrunContext {
+    krun.add_disk(
         format!("uvol{index}"),
         volume.block_source().to_string(),
         volume.read_only,
-    ))
+    )
 }
 
 /// Assemble the per-workload [`KrunContext`]: the workload-independent base
@@ -679,7 +672,7 @@ pub(crate) fn cleanup_vsock_sockets(state_dir: &Path) {
 mod tests {
     use super::attach_user_volume;
     use libkrun_sys::KrunContext;
-    use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
+    use mvm_core::vm_backend::VmVolume;
 
     fn context() -> KrunContext {
         KrunContext::new("volume-test", "/kernel", "/rootfs")
@@ -691,13 +684,11 @@ mod tests {
             host: "/granted/source".into(),
             guest: "/data".into(),
             read_only: true,
-            kind: VmVolumeKind::DirShare,
             materialized_image: Some("/state/source.ext4".into()),
             ..VmVolume::default()
         };
 
-        let krun = attach_user_volume(context(), 2, &volume)
-            .expect("a materialized directory grant is attachable");
+        let krun = attach_user_volume(context(), 2, &volume);
         assert_eq!(krun.extra_disks.len(), 1);
         assert_eq!(krun.extra_disks[0].id, "uvol2");
         assert_eq!(krun.extra_disks[0].path, "/state/source.ext4");
@@ -706,30 +697,14 @@ mod tests {
     }
 
     #[test]
-    fn unmaterialized_directory_volume_is_refused() {
-        let volume = VmVolume {
-            host: "/granted/source".into(),
-            guest: "/data".into(),
-            kind: VmVolumeKind::DirShare,
-            ..VmVolume::default()
-        };
-
-        let error = attach_user_volume(context(), 0, &volume)
-            .expect_err("an unmaterialized directory grant must fail closed");
-        assert!(error.to_string().contains("materialized block image"));
-    }
-
-    #[test]
     fn disk_volume_attaches_its_declared_host_image() {
         let volume = VmVolume {
             host: "/images/data.ext4".into(),
             guest: "/data".into(),
-            kind: VmVolumeKind::Disk,
             ..VmVolume::default()
         };
 
-        let krun = attach_user_volume(context(), 1, &volume)
-            .expect("an ordinary disk volume is attachable");
+        let krun = attach_user_volume(context(), 1, &volume);
         assert_eq!(krun.extra_disks[0].id, "uvol1");
         assert_eq!(krun.extra_disks[0].path, "/images/data.ext4");
     }

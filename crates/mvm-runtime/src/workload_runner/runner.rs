@@ -51,9 +51,7 @@ use mvm_vmm::host::egress_shared::{decode_plan_secrets_from_state, plan_stream_r
 use mvm_vmm::host::network_endpoint_spawn::{
     EndpointTransport, SubstitutionSpawnParams, reap_network_endpoint, spawn_network_endpoint,
 };
-use mvm_vmm::host::spec_map::{
-    WorkloadSpecInputs, ensure_no_dir_share_volumes, workload_spec, workload_vsock_ports,
-};
+use mvm_vmm::host::spec_map::{WorkloadSpecInputs, workload_spec, workload_vsock_ports};
 use mvm_vmm::post_restore::PostRestoreOutcome;
 
 mod admission;
@@ -348,17 +346,6 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
     /// secret-free deny-all workload has no egress capability and therefore
     /// carries no endpoint process or guest egress channel.
     pub fn start_workload(&self, inputs: &WorkloadLaunchInputs<'_>) -> Result<Box<dyn RunningVm>> {
-        // Fail closed before any side effect (endpoint spawn) runs: a
-        // `DirShare` volume has no `VmmSpec` representation on this driver
-        // seam, so refuse it here rather than silently dropping it later in
-        // `workload_blocks`.
-        // No driver serves a live directory share any more: a `--mount` is
-        // materialized into an image before it reaches here. A volume still
-        // asking to be shared is one nothing materialized, and it must refuse
-        // rather than be dropped — a workload booting without its mount is
-        // worse than one that will not boot.
-        ensure_no_dir_share_volumes(inputs.config)?;
-
         // A caller times this call from outside and cannot see past it, yet the
         // VMM boot and every post-boot registration happen in here. Off unless
         // a measurement asked for it.
@@ -2549,19 +2536,6 @@ mod tests {
         }
     }
 
-    fn dir_share_volume(host: &str, guest: &str) -> mvm_core::vm_backend::VmVolume {
-        mvm_core::vm_backend::VmVolume {
-            materialized_image: None,
-            volume_label: None,
-            host: host.into(),
-            guest: guest.into(),
-            size: String::new(),
-            read_only: false,
-            kind: mvm_core::vm_backend::VmVolumeKind::DirShare,
-            encrypted: false,
-        }
-    }
-
     /// A `--volume` disk (claim 11's sealed app-dep disk, or any other
     /// `Disk`-kind volume) must reach a runner-booted guest both as an
     /// attached `BlockDev` and as an `mvm.uvols=` cmdline entry naming it —
@@ -2702,53 +2676,6 @@ mod tests {
         assert_eq!(
             meta.rootfs_path.as_deref(),
             Some(admitted.rootfs_path.as_str())
-        );
-    }
-
-    /// A `DirShare` volume has no `VmmSpec` representation on this driver
-    /// seam. `start_workload` must refuse it before spawning the gating
-    /// endpoint or the broker — never boot a VM missing a share the caller
-    /// asked for.
-    #[test]
-    fn start_workload_refuses_a_dir_share_volume_before_any_side_effect() {
-        let policy = NetworkPolicy::deny_all();
-        let redaction = RedactionPolicy::default();
-        let runner = WorkloadRunner::new(
-            MockDriver::default(),
-            RecordingSpawner::new("/run/ep.sock"),
-            RecordingBrokerRegistrar::new(),
-        );
-
-        let cfg = VmStartConfig {
-            volumes: vec![dir_share_volume("/host/dir", "/mnt/share")],
-            ..config("w-dirshare-refused")
-        };
-        let result = runner.start_workload(&WorkloadLaunchInputs {
-            config: &cfg,
-            tenant: "tenant-x",
-            secrets: &[],
-            redaction: &redaction,
-            network_policy: &policy,
-            cmdline: String::new(),
-        });
-        let message = match result {
-            Ok(_) => panic!("a DirShare volume must be refused"),
-            Err(e) => e.to_string(),
-        };
-        assert!(message.contains("/host/dir"), "message: {message}");
-        assert!(message.contains("/mnt/share"), "message: {message}");
-
-        assert!(
-            runner.driver.booted_specs().is_empty(),
-            "refused start must never reach the driver"
-        );
-        assert!(
-            runner.spawner.seen.lock().unwrap().is_none(),
-            "refused start must never spawn the gating endpoint"
-        );
-        assert!(
-            runner.broker.seen.lock().unwrap().is_none(),
-            "refused start must never register the broker"
         );
     }
 

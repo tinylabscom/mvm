@@ -114,14 +114,12 @@ pub struct FirecrackerConfig {
 impl FirecrackerConfig {
     /// Convert a backend-agnostic config into the legacy artifact shape.
     pub fn from_start_config(config: &VmStartConfig) -> Result<Self> {
-        validate_firecracker_start_config(config)?;
         let slot = microvm::allocate_slot(&config.name)?;
         Self::from_start_config_with_slot(config, slot)
     }
 
     /// Convert a config using a slot that has already been reserved.
     pub fn from_start_config_with_slot(config: &VmStartConfig, slot: VmSlot) -> Result<Self> {
-        validate_firecracker_start_config(config)?;
         let run_config = FlakeRunConfig {
             name: config.name.clone(),
             slot,
@@ -147,6 +145,7 @@ impl FirecrackerConfig {
                     guest: v.guest.clone(),
                     size: v.size.clone(),
                     read_only: v.read_only,
+                    materialized_image: v.materialized_image.clone(),
                     kind: v.kind,
                     encrypted: v.encrypted,
                 })
@@ -180,22 +179,6 @@ impl FirecrackerConfig {
         };
         Ok(Self { run_config })
     }
-}
-
-fn validate_firecracker_start_config(config: &VmStartConfig) -> Result<()> {
-    if let Some(v) = config
-        .volumes
-        .iter()
-        .find(|v| matches!(v.kind, mvm_core::vm_backend::VmVolumeKind::DirShare))
-    {
-        anyhow::bail!(
-            "Firecracker has no virtio-fs, so directory share '{}' -> '{}' isn't supported; \
-             use a disk-image volume instead (host:/guest:SIZE).",
-            v.host,
-            v.guest
-        );
-    }
-    Ok(())
 }
 
 /// Isolation tier of a `VmBackend`.
@@ -1075,33 +1058,33 @@ mod tests {
     }
 
     #[test]
-    fn firecracker_config_rejects_dirshare_before_claim() {
+    fn firecracker_config_carries_a_materialized_directory_as_a_block_volume() {
         let config = VmStartConfig {
             name: "standby-a".into(),
             rootfs_path: "/images/rootfs.ext4".into(),
             kernel_path: Some("/kernels/vmlinux".into()),
             volumes: vec![mvm_core::vm_backend::VmVolume {
-                materialized_image: None,
+                materialized_image: Some("/state/mount.ext4".to_string()),
                 volume_label: None,
                 host: "/host".into(),
                 guest: "/guest".into(),
                 size: String::new(),
                 read_only: true,
-                kind: mvm_core::vm_backend::VmVolumeKind::DirShare,
+                kind: mvm_core::vm_backend::VmVolumeKind::Disk,
                 encrypted: false,
             }],
             ..Default::default()
         };
 
-        let err = match FirecrackerConfig::from_start_config_with_slot(
-            &config,
-            VmSlot::new("standby-a", 7),
-        ) {
-            Ok(_) => panic!("dir shares are unsupported"),
-            Err(err) => err,
-        };
-
-        assert!(err.to_string().contains("Firecracker has no virtio-fs"));
+        let firecracker =
+            FirecrackerConfig::from_start_config_with_slot(&config, VmSlot::new("standby-a", 7))
+                .expect("materialized directory uses the block transport");
+        assert_eq!(
+            firecracker.run_config.volumes[0]
+                .materialized_image
+                .as_deref(),
+            Some("/state/mount.ext4")
+        );
     }
 
     #[test]

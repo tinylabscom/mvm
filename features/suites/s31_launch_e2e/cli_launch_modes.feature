@@ -100,7 +100,7 @@ Feature: every README-documented CLI launch mode boots a real guest
   # budget and every one of them fails on the tree's size rather than on
   # anything `--mount` did. A witness for a documented example should run the
   # documented example.
-  @live @dir_share
+  @live
   Scenario: --mount shares a host directory the workload can read
     When I launch "machine run --image alpine --mount ./examples/python/hello-app:/work -- ls /work/README.md"
     Then the launch succeeds
@@ -121,12 +121,10 @@ Feature: every README-documented CLI launch mode boots a real guest
   # a real install inside the guest, and the installed package imported back.
   #
   # The README form also mounts `$PWD` read-only and runs `/work/app.py` from
-  # it. That half is dropped here deliberately — `--mount` needs a virtio-fs
-  # directory share, which Firecracker has no device for, so keeping it would
-  # gate this behind `@dir_share` and lose the scenario on the Linux lane. The
-  # share itself is covered by its own scenario; what is unique here is that a
-  # workload can reach a package index only because two hosts were admitted,
-  # and can then run what it installed.
+  # it. That half is dropped here deliberately because the snapshot transport
+  # is covered by its own scenario; what is unique here is that a workload can
+  # reach a package index only because two hosts were admitted, and can then
+  # run what it installed.
   @live
   Scenario: the documented pip install reaches an admitted package index
     # No nested double quotes: the step tokenizer does not carry them through to

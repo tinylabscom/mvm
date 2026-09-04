@@ -116,7 +116,7 @@ pub enum WasmBackendError {
 
     #[error(
         "wasm backend cannot attach block volume '{host}' — a WASI instance has no block \
-         devices; use a directory-share volume instead"
+         devices; use `machine run --mount` with a host directory instead"
     )]
     DiskVolumeNotSupported { host: String },
 
@@ -308,14 +308,15 @@ fn reject_unsupported_start_config(
     if let Some(volume) = config
         .volumes
         .iter()
-        .find(|v| matches!(v.kind, mvm_core::vm_backend::VmVolumeKind::Disk))
+        .find(|v| v.materialized_image.is_none())
     {
         return Err(WasmBackendError::DiskVolumeNotSupported {
             host: volume.host.clone(),
         });
     }
-    // Every directory share becomes a WASI preopen verbatim, so its guest
-    // mountpoint must pass the mount-path policy before any of it starts.
+    // Every materialized directory grant becomes a WASI preopen of its
+    // original host path, so its guest mountpoint must pass the mount-path
+    // policy before any of it starts.
     for volume in &config.volumes {
         crate::wasm_activation::validate_wasm_volume_guest_path(&volume.guest)?;
     }
@@ -1743,7 +1744,7 @@ mod tests {
     }
 
     #[test]
-    fn disk_volume_fails_closed_dir_share_passes() {
+    fn disk_volume_fails_closed_materialized_directory_grant_passes() {
         let mut config = cfg("x", "/tmp/mod.wasm");
         config.volumes = vec![mvm_core::vm_backend::VmVolume {
             materialized_image: None,
@@ -1762,7 +1763,7 @@ mod tests {
             })
         );
 
-        config.volumes[0].kind = mvm_core::vm_backend::VmVolumeKind::DirShare;
+        config.volumes[0].materialized_image = Some("/state/mount.ext4".to_string());
         assert!(reject_unsupported_start_config(&config).is_ok());
     }
 
@@ -1771,13 +1772,13 @@ mod tests {
         for bad in ["mnt/relative", "/run/mvm", "/mvm/runtime"] {
             let mut config = cfg("x", "/tmp/mod.wasm");
             config.volumes = vec![mvm_core::vm_backend::VmVolume {
-                materialized_image: None,
+                materialized_image: Some("/state/mount.ext4".to_string()),
                 volume_label: None,
                 host: "/host/share".into(),
                 guest: bad.into(),
                 size: String::new(),
                 read_only: true,
-                kind: mvm_core::vm_backend::VmVolumeKind::DirShare,
+                kind: mvm_core::vm_backend::VmVolumeKind::Disk,
                 encrypted: false,
             }];
             assert!(

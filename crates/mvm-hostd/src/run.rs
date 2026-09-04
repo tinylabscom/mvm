@@ -124,9 +124,10 @@ pub fn shares_from_vm_volumes(volumes: &[VmVolume]) -> Vec<mvm_core::plan::HostS
             tag: format!("uvol{idx}"),
             host_path: v.host.clone(),
             guest_path: v.guest.clone(),
-            kind: match v.kind {
-                mvm_core::vm_backend::VmVolumeKind::Disk => mvm_core::plan::ShareKind::Disk,
-                mvm_core::vm_backend::VmVolumeKind::DirShare => mvm_core::plan::ShareKind::DirShare,
+            kind: if v.materialized_image.is_some() {
+                mvm_core::plan::ShareKind::DirShare
+            } else {
+                mvm_core::plan::ShareKind::Disk
             },
             read_only: v.read_only,
             encrypted: v.encrypted,
@@ -450,13 +451,13 @@ mod tests {
                 encrypted: false,
             },
             VmVolume {
-                materialized_image: None,
+                materialized_image: Some("/state/src.ext4".to_string()),
                 volume_label: None,
                 host: "/h/src".into(),
                 guest: "/data/src".into(),
                 size: String::new(),
                 read_only: false,
-                kind: VmVolumeKind::DirShare,
+                kind: VmVolumeKind::Disk,
                 encrypted: false,
             },
         ];

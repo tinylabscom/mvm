@@ -1,15 +1,10 @@
 //! Per-VM volume mount registry.
 //!
-//! Tracks which virtio-fs volumes are currently attached to a VM
-//! so `mvmctl volume ls` / `rm` operate on a stable list rather
-//! than guessing at host-side state. Persisted at
+//! Tracks which local block volumes are registered with a VM so `mvmctl volume
+//! ls` / `rm` operate on a stable list rather than guessing at host-side state.
+//! Persisted at
 //! `~/.mvm/instances/<vm>/volume_mounts.json` (mode 0600, atomic
 //! writes).
-//!
-//! The host-side `virtiofsd` process and Firecracker
-//! virtio-device-attach plumbing live elsewhere — this registry
-//! is the catalog the orchestrator hands to those tools and
-//! reads back from on subsequent calls.
 //!
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -20,11 +15,9 @@ use mvm_core::domain::volume::{GuestPath, VolumeName, WrappedKey};
 use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
 use serde::{Deserialize, Serialize};
 
-/// Maximum number of volume mounts per VM. Defends against
-/// `mvmctl volume mount` being looped without bound and the
-/// agent's virtio-fs tag namespace exhausting (the kernel limits
-/// per-VM devices already, but we cap earlier so callers see a
-/// clear error rather than virtio-fs's opaque ENOMEM).
+/// Maximum number of volume mounts per VM. Defends against `mvmctl volume
+/// mount` being looped without bound and caps the per-VM block-device surface
+/// before a backend-specific device limit is reached.
 pub const MAX_VOLUME_MOUNTS_PER_VM: usize = 16;
 
 /// Per-host managed local volume catalog path:
@@ -42,11 +35,7 @@ pub struct LocalVolumeEntry {
     pub volume_name: String,
     pub host_path: String,
     pub encrypted: bool,
-    /// Local artifact shape presented to the VM after unlock. Absent in a
-    /// catalog written before the field existed, and defaulted rather than
-    /// version-bumped — a new optional field is `#[serde(default)]`, not a
-    /// schema migration.
-    #[serde(default)]
+    /// Local block-image shape presented to the VM after unlock.
     pub kind: LocalVolumeKind,
     #[serde(default)]
     pub encryption: LocalVolumeEncryption,
@@ -54,12 +43,9 @@ pub struct LocalVolumeEntry {
 }
 
 /// Materialized shape of a managed local volume.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum LocalVolumeKind {
-    /// Legacy host directory exposed only by backends with directory sharing.
-    #[default]
-    Directory,
     /// Portable ext4 image attached as a virtio block device.
     BlockImage { size_mib: u32 },
 }
@@ -191,20 +177,14 @@ fn validate_local_volume_entry(entry: &LocalVolumeEntry) -> Result<()> {
     Ok(())
 }
 
-/// One attached virtio-fs volume mount.
-///
-/// `volume_name` is the logical identity (also used as the
-/// virtio-fs tag the kernel sees, so the agent's `MountVolume`
-/// validation applies). `host_path` is the absolute host-side
-/// directory exposed via virtio-fs.
+/// One attached local block-volume mount.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct VolumeMountEntry {
-    /// Logical volume identifier — used as the virtio-fs tag and
-    /// as the future foreign key into the per-host volume
-    /// catalog.
+    /// Logical volume identifier and future foreign key into the per-host
+    /// volume catalog.
     pub volume_name: String,
-    /// Absolute host-side directory exposed via virtio-fs.
+    /// Absolute host-side block-image path.
     pub host_path: String,
     /// Mount point inside the guest. Validated via
     /// `mvm_core::crypto::policy::MountPathPolicy` before reaching
@@ -212,9 +192,7 @@ pub struct VolumeMountEntry {
     pub guest_path: String,
     /// `true` when the volume is exposed read-only.
     pub read_only: bool,
-    /// Artifact shape captured when the registration is created. Legacy
-    /// persisted mounts decode as directories.
-    #[serde(default)]
+    /// Block-image shape captured when the registration is created.
     pub kind: LocalVolumeKind,
     /// RFC 3339 timestamp of attach.
     pub attached_at: String,
@@ -281,12 +259,9 @@ pub struct ResolvedVolumeAttachment {
 impl ResolvedVolumeAttachment {
     /// Convert into the single backend-agnostic VM attachment carrier.
     pub fn as_vm_volume(&self) -> VmVolume {
-        let (size, kind) = match &self.kind {
-            LocalVolumeKind::Directory => (String::new(), VmVolumeKind::DirShare),
-            LocalVolumeKind::BlockImage { size_mib } => {
-                (format!("{size_mib}M"), VmVolumeKind::Disk)
-            }
-        };
+        let LocalVolumeKind::BlockImage { size_mib } = self.kind;
+        let size = format!("{size_mib}M");
+        let kind = VmVolumeKind::Disk;
         VmVolume {
             materialized_image: None,
             volume_label: None,
@@ -472,15 +447,9 @@ fn resolve_mount_entry(
     };
     let (resolved_source, kind) = match effective_source {
         VolumeMountSource::ManagedCatalog => resolve_managed_source(entry, catalog, &volume_name)?,
-        // Honour the shape the registration recorded rather than assuming a
-        // directory. An ad-hoc registration used to be a live host-directory
-        // share and nothing else, so hardcoding `Directory` was accurate; it
-        // stopped being so once a granted directory could be materialized into
-        // an image, and the hardcode then coerced a perfectly good block image
-        // back into a share no backend can serve.
-        //
-        // Entries written before `kind` existed decode as `Directory` through
-        // its `serde(default)`, so this is the same answer for them.
+        // Honour the shape the registration recorded. Ad-hoc directory grants
+        // are snapshotted before registration, so the persisted path is a
+        // block image just like a directly supplied image.
         VolumeMountSource::AdHocHost => (ResolvedVolumeSource::AdHocHost, entry.kind.clone()),
         VolumeMountSource::Legacy => bail!("legacy volume source was not normalized"),
     };
@@ -501,11 +470,6 @@ fn resolve_mount_entry(
         )
     })?;
     match &kind {
-        LocalVolumeKind::Directory if !host_path.is_dir() => bail!(
-            "registered directory volume {:?} is not a directory: {}",
-            volume_name,
-            host_path.display()
-        ),
         LocalVolumeKind::BlockImage { .. } if !host_path.is_file() => bail!(
             "registered block volume {:?} is not a file: {}",
             volume_name,
@@ -520,7 +484,6 @@ fn resolve_mount_entry(
                 )
             })?;
         }
-        LocalVolumeKind::Directory => {}
     }
 
     Ok(ResolvedVolumeAttachment {
@@ -618,7 +581,7 @@ mod tests {
             host_path: format!("/host/{vol}"),
             guest_path: guest.to_string(),
             read_only: false,
-            kind: LocalVolumeKind::Directory,
+            kind: LocalVolumeKind::BlockImage { size_mib: 16 },
             attached_at: "2026-05-05T00:00:00Z".to_string(),
             source: VolumeMountSource::ManagedCatalog,
             host_snapshot: None,
@@ -630,7 +593,7 @@ mod tests {
             volume_name: name.to_string(),
             host_path: format!("/encrypted/{name}"),
             encrypted: true,
-            kind: LocalVolumeKind::Directory,
+            kind: LocalVolumeKind::BlockImage { size_mib: 16 },
             encryption: LocalVolumeEncryption::HostBacked,
             created_at: "2026-05-05T00:00:00Z".to_string(),
         }
@@ -641,7 +604,7 @@ mod tests {
             volume_name: name.to_string(),
             host_path: format!("/plain/{name}"),
             encrypted: true,
-            kind: LocalVolumeKind::Directory,
+            kind: LocalVolumeKind::BlockImage { size_mib: 16 },
             encryption: LocalVolumeEncryption::MvmManaged(MvmManagedVolumeEncryption {
                 state,
                 ciphertext_path: format!("/cipher/{name}.mvve"),
@@ -654,6 +617,19 @@ mod tests {
             }),
             created_at: "2026-05-05T00:00:00Z".to_string(),
         }
+    }
+
+    fn create_ext4_image(path: &Path, size_mib: u32) {
+        let mut image = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        let size_bytes = u64::from(size_mib) * 1024 * 1024;
+        image.set_len(size_bytes).unwrap();
+        mvm_fs::ext4::mkfs::format_empty_ext4(&mut image, size_bytes).unwrap();
+        image.sync_all().unwrap();
     }
 
     #[test]
@@ -785,7 +761,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            r#"{"volumes":{"work":{"volume_name":"work","host_path":"/encrypted/work","encrypted":true,"created_at":"2026-05-05T00:00:00Z"}}}"#,
+            r#"{"volumes":{"work":{"volume_name":"work","host_path":"/encrypted/work.ext4","encrypted":true,"kind":{"type":"block-image","size_mib":16},"created_at":"2026-05-05T00:00:00Z"}}}"#,
         )
         .unwrap();
         let loaded = LocalVolumeCatalog::load().unwrap();
@@ -793,7 +769,10 @@ mod tests {
             loaded.get("work").unwrap().encryption,
             LocalVolumeEncryption::HostBacked
         ));
-        assert_eq!(loaded.get("work").unwrap().kind, LocalVolumeKind::Directory);
+        assert_eq!(
+            loaded.get("work").unwrap().kind,
+            LocalVolumeKind::BlockImage { size_mib: 16 }
+        );
     }
 
     #[test]
@@ -816,7 +795,7 @@ mod tests {
     #[test]
     fn legacy_mount_entry_defaults_to_legacy_source() {
         let entry: VolumeMountEntry = serde_json::from_str(
-            r#"{"volume_name":"work","host_path":"/host/work","guest_path":"/data/work","read_only":true,"attached_at":"2026-05-05T00:00:00Z"}"#,
+            r#"{"volume_name":"work","host_path":"/host/work.ext4","guest_path":"/data/work","read_only":true,"kind":{"type":"block-image","size_mib":16},"attached_at":"2026-05-05T00:00:00Z"}"#,
         )
         .unwrap();
         assert_eq!(entry.source, VolumeMountSource::Legacy);
@@ -854,63 +833,28 @@ mod tests {
     }
 
     #[test]
-    fn managed_unlocked_mount_resolves_to_typed_vm_volume() {
-        let tmp = tempfile::tempdir().unwrap();
-        let host = tmp.path().join("plain");
-        std::fs::create_dir(&host).unwrap();
-        let mut catalog = LocalVolumeCatalog::default();
-        let mut local = make_mvm_managed_entry("work", LocalVolumeState::Unlocked);
-        local.host_path = host.display().to_string();
-        catalog.add(local).unwrap();
-        let registry = VolumeMountRegistry {
-            mounts: BTreeMap::from([(
-                "/data/work".to_string(),
-                VolumeMountEntry {
-                    volume_name: "work".to_string(),
-                    host_path: host.display().to_string(),
-                    guest_path: "/data/work".to_string(),
-                    read_only: true,
-                    kind: LocalVolumeKind::Directory,
-                    attached_at: "2026-05-05T00:00:00Z".to_string(),
-                    source: VolumeMountSource::ManagedCatalog,
-                    host_snapshot: None,
-                },
-            )]),
-        };
+    fn persisted_mount_without_a_kind_is_rejected() {
+        let err = serde_json::from_str::<VolumeMountEntry>(
+            r#"{"volume_name":"work","host_path":"/host/work.ext4","guest_path":"/data/work","read_only":true,"attached_at":"2026-05-05T00:00:00Z"}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("missing field `kind`"), "{err}");
+    }
 
-        let resolved = registry.resolve_for_launch(&catalog).unwrap();
-        assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].volume_name.as_str(), "work");
-        assert_eq!(resolved[0].guest_path.as_str(), "/data/work");
-        assert_eq!(resolved[0].host_path, host.canonicalize().unwrap());
-        assert_eq!(resolved[0].source, ResolvedVolumeSource::MvmManaged);
-        let vm_volume = resolved[0].as_vm_volume();
-        assert_eq!(
-            vm_volume.host,
-            host.canonicalize().unwrap().display().to_string()
-        );
-        assert_eq!(vm_volume.guest, "/data/work");
-        assert!(vm_volume.read_only);
-        assert!(matches!(
-            vm_volume.kind,
-            mvm_core::vm_backend::VmVolumeKind::DirShare
-        ));
-        assert!(!vm_volume.encrypted);
+    #[test]
+    fn persisted_directory_mount_kind_is_rejected() {
+        let err = serde_json::from_str::<VolumeMountEntry>(
+            r#"{"volume_name":"work","host_path":"/host/work","guest_path":"/data/work","read_only":true,"kind":{"type":"directory"},"attached_at":"2026-05-05T00:00:00Z"}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown variant"), "{err}");
     }
 
     #[test]
     fn managed_block_mount_resolves_to_portable_disk_volume() {
         let tmp = tempfile::tempdir().unwrap();
         let host = tmp.path().join("work.ext4");
-        let mut image = std::fs::OpenOptions::new()
-            .create_new(true)
-            .read(true)
-            .write(true)
-            .open(&host)
-            .unwrap();
-        image.set_len(16 * 1024 * 1024).unwrap();
-        mvm_fs::ext4::mkfs::format_empty_ext4(&mut image, 16 * 1024 * 1024).unwrap();
-        image.sync_all().unwrap();
+        create_ext4_image(&host, 16);
 
         let mut catalog = LocalVolumeCatalog::default();
         let mut local = make_mvm_managed_entry("work", LocalVolumeState::Unlocked);
@@ -978,8 +922,8 @@ mod tests {
     #[test]
     fn ad_hoc_mount_resolves_without_catalog_but_remains_distinguishable() {
         let tmp = tempfile::tempdir().unwrap();
-        let host = tmp.path().join("adhoc");
-        std::fs::create_dir(&host).unwrap();
+        let host = tmp.path().join("adhoc.ext4");
+        create_ext4_image(&host, 16);
         let mut entry = make_entry("/work/input", "input");
         entry.host_path = host.display().to_string();
         entry.source = VolumeMountSource::AdHocHost;

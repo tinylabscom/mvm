@@ -185,31 +185,13 @@ pub fn qemu_drive_args(config: &VmStartConfig) -> Vec<String> {
 }
 
 pub fn append_qemu_user_disks(drives: &mut Vec<String>, config: &VmStartConfig) {
-    drives.extend(
-        config
-            .volumes
-            .iter()
-            .filter(|volume| matches!(volume.kind, mvm_core::vm_backend::VmVolumeKind::Disk))
-            .map(|volume| {
-                let read_only = if volume.read_only { ",readonly=on" } else { "" };
-                format!("file={},if=virtio,format=raw{read_only}", volume.host)
-            }),
-    );
-}
-
-pub fn ensure_qemu_volumes_supported(config: &VmStartConfig) -> Result<()> {
-    if let Some(volume) = config
-        .volumes
-        .iter()
-        .find(|volume| matches!(volume.kind, mvm_core::vm_backend::VmVolumeKind::DirShare))
-    {
-        bail!(
-            "qemu directory-share volume '{}' -> '{}' is unsupported; use a disk-image volume",
-            volume.host,
-            volume.guest
-        );
-    }
-    Ok(())
+    drives.extend(config.volumes.iter().map(|volume| {
+        let read_only = if volume.read_only { ",readonly=on" } else { "" };
+        format!(
+            "file={},if=virtio,format=raw{read_only}",
+            volume.block_source()
+        )
+    }));
 }
 
 // ─── KVM / qemu probing ─────────────────────────────────────────────
