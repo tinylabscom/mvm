@@ -4,6 +4,21 @@ Last updated: 2026-09-03
 
 ## In progress
 
+- [x] **Alternative CLI help coverage performance.**
+      `specs/plans/2026-09-03-bdd-help-coverage.md`.
+      Both alternative help forms remain covered for the complete generated
+      command tree. At most eight scoped workers share the paths, keeping
+      subprocess concurrency bounded while eliminating the serial bottleneck.
+      Feature-gated compilation, zero-warning Clippy, and the full hermetic BDD
+      suite are green.
+
+- [ ] **Persistent host-directory snapshots.**
+      `specs/plans/2026-09-02-retire-dirshare.md`.
+      Ad-hoc `--host <directory>` registration now creates a private ext4
+      snapshot on verified encrypted backing and registers it as a block
+      volume. Focused materialization, validation, error-path, launch-lease,
+      full workspace, and BDD tests are green; merge delivery remains.
+
 - [ ] **Workload output affordance — durable writable inline disks.**
       `specs/plans/2026-09-02-workload-output-affordance.md`.
       Foreground transient runs now flush writable disks through the existing
@@ -33,7 +48,10 @@ Last updated: 2026-09-03
       hard error naming both contract versions and the rebuild command,
       replacing the recurring silent cross-profile fallback that surfaced as
       an "unknown field" spawn failure. A `HvfSupervisorConfig` shape pin
-      forces the contract version to bump with the schema. Focused
+      forces the contract version to bump with the schema. A freshly rebuilt
+      helper gets one retry only when its first bounded probe times out,
+      covering the observed macOS first-launch transient without accepting a
+      malformed or wrong-version helper. Focused
       regressions, affected crate suites, zero-warning Clippy, and Linux/BDD
       gated compilation are green; merged via #3132.
 

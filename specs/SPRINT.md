@@ -10,6 +10,15 @@
 
 ## In progress
 
+- [x] **Alternative CLI help coverage performance.**
+      `specs/plans/2026-09-03-bdd-help-coverage.md`.
+      The BDD contract still executes both `mvmctl <path> -h` and
+      `mvmctl help <path>` for every command and nested subcommand, but divides
+      the command tree across at most eight scoped workers instead of spawning
+      every process serially. The feature-gated target and zero-warning Clippy
+      are green; the complete hermetic BDD suite passed 247 of 248 scenarios
+      with the one existing backend-capability skip.
+
 - [ ] **Workload output affordance — durable writable inline disks.**
       `specs/plans/2026-09-02-workload-output-affordance.md`.
       Foreground transient runs with writable sized disks now issue the
@@ -49,7 +58,9 @@
       anything else is a hard error naming both versions and the exact
       rebuild command. A shape pin on `HvfSupervisorConfig` forces the
       contract version to move with the schema. Focused resolver, probe, and
-      spawn-path regressions, the mvm-vmm / mvm-backends / mvm-hostd /
+      spawn-path regressions, including a follow-up for a freshly rebuilt
+      macOS helper whose first probe transiently times out, the mvm-vmm /
+      mvm-backends / mvm-hostd /
       mvm-runtime suites, zero-warning Clippy, and Linux/BDD gated
       compilation are green; merged via #3132.
 
@@ -3635,11 +3646,13 @@ writes the plan:
       test into CI.
 - [x] Merge the guard through the queue (#3135).
 
-## 2026-09-02 persistent directory-volume refusal witness
+## 2026-09-03 persistent directory-volume snapshot
 
-- [x] Register a real host-directory attachment against a persistent machine
-      in the live Firecracker BDD suite.
-- [x] Prove the persistent launch consumes the registration and fails closed
-      before boot because the workload runner cannot express a live directory
-      share, rather than silently dropping the registered data.
-- [ ] Merge the witness through the queue.
+- [x] Snapshot a real `--host <directory>` attachment into a namespaced ext4
+      image at registration time and resolve it as a block volume.
+- [x] Fail closed unless both the source and snapshot destination have verified
+      encrypted backing; create the snapshot directory and image with private
+      permissions before copying source bytes.
+- [x] Cover valid snapshot materialization and launch-lease resolution, invalid
+      ext4 refusal, missing-image failure, and the CLI registration workflow.
+- [ ] Merge the implementation through the queue.

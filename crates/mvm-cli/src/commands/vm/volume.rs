@@ -128,9 +128,9 @@ pub(in crate::commands) enum VolumeCmd {
         /// Must be lowercase alphanumeric + hyphens, ≤32 chars.
         #[arg(long)]
         volume: String,
-        /// Absolute host directory exposed via virtio-fs. Advanced
-        /// path: omitted for managed volumes created with
-        /// `mvmctl volume create`.
+        /// Absolute host directory, snapshotted into an ext4 image at
+        /// registration and attached as a block device. A snapshot, not a live
+        /// view: re-register to refresh it. Managed volumes omit this.
         #[arg(long)]
         host: Option<String>,
         #[arg(long, help = GUEST_MOUNT_HELP)]
@@ -357,6 +357,77 @@ fn kind_label(record: &VolumeRecord) -> String {
     }
 }
 
+/// Where a `--host` snapshot image lives: one per (machine, volume), so two
+/// registrations never write the same file and removing a machine's directory
+/// takes its snapshots with it.
+fn host_snapshot_image(vm_name: &str, volume_name: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_core::config::mvm_home())
+        .join("volumes")
+        .join("host-snapshots")
+        .join(vm_name)
+        .join(format!("{volume_name}.ext4"))
+}
+
+fn ensure_private_snapshot_parent(output: &Path) -> Result<()> {
+    let parent = output
+        .parent()
+        .with_context(|| format!("snapshot path {} has no parent", output.display()))?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("creating snapshot dir {}", parent.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("restricting snapshot dir {}", parent.display()))?;
+    }
+    Ok(())
+}
+
+/// Materialize `host_dir` into an ext4 image for registration.
+///
+/// The same pure-Rust writer `--mount` uses — no `mkfs`, no subprocess, and it
+/// reads host bytes rather than guest requests, so it is not a surface a guest
+/// can reach.
+fn materialize_host_snapshot(
+    vm_name: &str,
+    volume_name: &str,
+    host_dir: &Path,
+) -> Result<std::path::PathBuf> {
+    let output = host_snapshot_image(vm_name, volume_name);
+    ensure_private_snapshot_parent(&output)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(&output)
+            .with_context(|| format!("creating private snapshot image {}", output.display()))?;
+        std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restricting snapshot image {}", output.display()))?;
+    }
+    crate::exec::materialize_directory_snapshot(host_dir, &output, "mvmvol")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restricting snapshot image {}", output.display()))?;
+    }
+    Ok(output)
+}
+
+/// The registered size, in MiB, rounded up so a sub-MiB image is not recorded
+/// as zero.
+fn image_size_mib(image: &Path) -> Result<u32> {
+    let bytes = std::fs::metadata(image)
+        .with_context(|| format!("stat snapshot image {}", image.display()))?
+        .len();
+    let mib = bytes.div_ceil(1024 * 1024).max(1);
+    u32::try_from(mib).with_context(|| format!("snapshot image {} is too large", image.display()))
+}
+
 fn mount(
     vm_name: &str,
     volume_name: &str,
@@ -381,7 +452,32 @@ fn mount(
             if !host.is_absolute() {
                 bail!("--host path must be absolute, got {:?}", host.display());
             }
-            service().prepare_ad_hoc_host_attachment(&request, host)?
+            // Snapshot the directory into an image and register that.
+            //
+            // A live host-directory share cannot be served — no workload
+            // backend has a virtio-fs device, so `machine start` refused one at
+            // boot and `machine run` ignored it. Registering the directory
+            // as-is recorded an attachment no launch could honour.
+            //
+            // `--mount HOST:/GUEST` already solved the same problem for a
+            // transient run by materializing the directory into an ext4 image,
+            // so this reuses that rather than inventing a second answer. The
+            // cost is the semantic the old docs claimed and never delivered:
+            // the image is a snapshot taken now, not a live view of the
+            // directory. Re-register to refresh it.
+            let host_encrypted_check = service();
+            host_encrypted_check.require_host_encryption(host)?;
+            let output = host_snapshot_image(vm_name, volume_name);
+            ensure_private_snapshot_parent(&output)?;
+            let output_parent = output
+                .parent()
+                .context("host snapshot output has no parent directory")?;
+            host_encrypted_check
+                .require_host_encryption(output_parent)
+                .context("host snapshot destination is not on encrypted backing storage")?;
+            let image = materialize_host_snapshot(vm_name, volume_name, host)?;
+            let size_mib = image_size_mib(&image)?;
+            service().prepare_ad_hoc_image_attachment(&request, &image, size_mib)?
         }
         None => service().prepare_attachment(&request)?,
     };
@@ -584,6 +680,50 @@ mod tests {
         let mut marker = [0u8; 1];
         image.read_exact(&mut marker).unwrap();
         assert_eq!(marker, [0x7a]);
+    }
+
+    #[test]
+    fn host_snapshot_helpers_materialize_a_namespaced_ext4_image() {
+        let guard = DataDirGuard::new();
+        let source = guard.path().join("source");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::write(source.join("nested/marker"), b"snapshot-visible\n").unwrap();
+
+        let image = materialize_host_snapshot("vm-1", "input", &source).unwrap();
+        assert_eq!(
+            image,
+            guard.path().join("volumes/host-snapshots/vm-1/input.ext4")
+        );
+        assert!(image_size_mib(&image).unwrap() >= 1);
+        let fs = ext4_view::Ext4::load_from_path(&image).unwrap();
+        assert!(fs.exists("/nested/marker").unwrap());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                fs::metadata(image.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            assert_eq!(
+                fs::metadata(&image).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn image_size_refuses_a_missing_snapshot() {
+        let guard = DataDirGuard::new();
+        let missing = guard.path().join("missing.ext4");
+        let error = image_size_mib(&missing).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("stat snapshot image"),
+            "got: {error:#}"
+        );
     }
 
     #[test]
