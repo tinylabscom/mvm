@@ -10,6 +10,17 @@
 
 ## In progress
 
+- [ ] **Remove virtio-fs from workload and builder execution.**
+      `specs/plans/2026-08-31-remove-virtio-fs.md`.
+      Workloads, the dev-tier root, Stage 0, and builder inputs and artifacts
+      now cross the virtualization boundary as block devices. libkrun Stage 0
+      materializes its verified seed as an ext4 root and uses the shared raw-tar
+      disk transport for the remaining payloads; QEMU, Firecracker, and
+      libkrun refuse any residual directory share before launch. The complete
+      workspace nextest suite, all-targets zero-warning Clippy, gated targets,
+      all repository policy checks, and a live macOS libkrun Stage 0 build are
+      green; merge delivery remains.
+
 - [ ] **Workload output affordance — durable writable inline disks.**
       `specs/plans/2026-09-02-workload-output-affordance.md`.
       Foreground transient runs with writable sized disks now issue the

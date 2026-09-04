@@ -1,12 +1,11 @@
 //! Stage 0 bootstrap — materializes a host directory tree from the
 //! **official Nix release tarball** (a self-contained `/nix/store` with
 //! `nix` + `bash` + `curl` + `xz` + `nss-cacert`), layered with the
-//! embedded `stage0-init` PID-1 binary. libkrun mounts that directory as
-//! the guest root over virtiofs (`krun_set_root`), boots libkrunfw's
-//! bundled kernel, and runs `/init` (set via `krun_set_exec`).
+//! embedded `stage0-init` PID-1 binary. The builder materializes that seed as
+//! an ext4 root, boots libkrunfw's bundled kernel explicitly, and runs `/init`.
 //! `stage0-init` then runs `nix build` against the in-repo
 //! `nix/images/builder-vm` flake, emitting kernel + rootfs.ext4 on the
-//! `/out` virtio-fs share.
+//! raw output transport disk.
 //!
 //! **One userland — busybox, everywhere.** The seed carries nix + a static
 //! busybox (its closure's shell) + CA certs; there is no Alpine, no `apk`,
@@ -36,15 +35,19 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
+/// Scratch payload baked into the tightly packed Stage 0 ext4 root and removed
+/// by PID 1 before it creates the small amount of mutable bootstrap state.
+pub const ROOT_RUNTIME_RESERVE_PATH: &str = "/.mvm-stage0-root-reserve";
+pub const ROOT_RUNTIME_RESERVE_BYTES: usize = 8 << 20;
+
 const ROOT_MARKER_FILE: &str = ".mvm-stage0-root";
 const ROOT_MARKER_SCHEMA_VERSION: u32 = 1;
 
 /// Copy a non-empty artifact through an explicit userspace buffer.
 ///
-/// Stage 0 copies from its ext4-backed Nix store to a virtio-fs host share.
-/// Optimized cross-filesystem copy syscalls have produced zero-byte outputs on
-/// that boundary, so bootstrap artifacts use ordinary reads and writes and
-/// reject an empty source before it can be reported as successfully emitted.
+/// Stage 0 copies from its ext4-backed Nix store to the output staging tree.
+/// Bootstrap artifacts use ordinary reads and writes and reject an empty
+/// source before it can be reported as successfully emitted.
 pub fn copy_nonempty_file(src: &Path, dst: &Path) -> Result<u64> {
     let mut input = std::io::BufReader::new(
         std::fs::File::open(src).with_context(|| format!("open {} for copy", src.display()))?,
@@ -288,8 +291,8 @@ impl VendorBlobReport {
 /// Materialize a Stage 0 guest root from the **nix tarball seed**. Lays
 /// down the official Nix release tarball's `/nix/store` + the
 /// embedded `stage0-init` binary as `/init` — no Alpine, no apk, no shell
-/// `init.sh`. The supervisor hands `dest` to libkrun via `krun_set_root`
-/// and `krun_set_exec` with `entry_path = "/init"`. `stage0_init` is the
+/// `init.sh`. The builder turns `dest` into an ext4 root and boots it with
+/// `init=/init`. `stage0_init` is the
 /// extracted host-vm binary's bytes (the caller pulls it from
 /// `mvm_cli::host_binaries`); `mvm-build` can't reach the embed table
 /// itself (mvm-cli depends on mvm-build, not the reverse).
@@ -483,8 +486,8 @@ fn extract_nix_store_tarball_pure_rust(tarball: &Path, nix_dir: &Path) -> Result
     let mut archive = tar::Archive::new(std::io::Cursor::new(tar_bytes));
     archive.set_preserve_permissions(true);
     // The macOS host doesn't carry the numeric uids/gids the tarball
-    // references; files land owned by the current user (libkrun + virtiofs
-    // remap inside the guest). xattrs aren't needed for the store.
+    // references; files land owned by the current user before ext4
+    // materialization. xattrs aren't needed for the store.
     archive.set_unpack_xattrs(false);
     archive
         .unpack(nix_dir)

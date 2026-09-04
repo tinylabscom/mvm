@@ -3,16 +3,10 @@
 //! kernel cmdline marker), carrying the official Nix release tarball's
 //! `/nix/store` + this binary as `/init` — no Alpine, no apk, no busybox.
 //!
-//! **libkrun** (macOS/aarch64): the seed root arrives over virtiofs
-//! (`krun_set_root`) on libkrunfw's bundled kernel; `/out` and `/mvm-bins`
-//! stay virtio-fs, while `/work` prefers an ext4 disk identified by volume
-//! label (`nix build` reading a large workspace tree through
-//! virtio-fs-over-FUSE exhausts libkrun's virtio-fs handle pool — "Too many
-//! open files" — so the host packs it onto a block device instead; falls
-//! back to the old `"work"` virtio-fs tag when no such disk is attached); we
-//! copy the seed `/nix/store` into a tmpfs and bind it over `/nix` (virtiofs
-//! writes fail under FUSE); outbound fetches go through the shared vsock
-//! egress proxy. Proven E2E on aarch64.
+//! **libkrun** (macOS/aarch64): the seed is an ext4 root on libkrunfw's bundled
+//! kernel. `/work`, `/mvm-bins`, the optional closure, and `/out` use the
+//! builder's raw-tar block transport; no host directory is exported to the
+//! guest. Outbound fetches go through the shared vsock egress proxy.
 //!
 //! **QEMU** (Linux/x86_64): the stock distro kernel +
 //! initramfs mount the seed as an **ext4** root (`/dev/vda`, writable — so
@@ -67,13 +61,12 @@ mod linux {
 
     /// Where nix runs from (its store paths are absolute `/nix/store/...`).
     const NIX_TARGET: &str = "/nix";
-    /// Bind of the original (virtiofs) seed `/nix` so we can still read the
-    /// seed store after mounting a fresh tmpfs over `/nix`.
+    /// Bind of the original seed `/nix` so we can still read the seed store
+    /// after mounting a fresh tmpfs over `/nix`.
     const NIX_SEED_RO: &str = "/nix-seed-ro";
-    /// Stage 0's dedicated persistent Nix-store block device. The libkrun
-    /// launcher attaches this before the virtio-fs shares, so it enumerates as
-    /// `/dev/vda`. QEMU uses `/dev/vda` as the rootfs, so this is libkrun-only.
-    const LIBKRUN_STAGE0_NIX_STORE_DEV: &str = "/dev/vda";
+    /// Stage 0's dedicated persistent Nix-store block device. libkrun attaches
+    /// it after the ext4 root, so it enumerates as `/dev/vdb`.
+    const LIBKRUN_STAGE0_NIX_STORE_DEV: &str = "/dev/vdb";
     /// QEMU attaches seed, work, output, and host binaries first, then the
     /// read-only FlowMux identity. The persistent store follows as `/dev/vdf`.
     const QEMU_STAGE0_NIX_STORE_DEV: &str = "/dev/vdf";
@@ -85,6 +78,33 @@ mod linux {
     /// build output added later.
     const STAGE0_NIX_STORE_MARKER: &str = "/nix-stage0-store/.mvm-stage0-nix-store";
     const STAGE0_NIX_STORE_MARKER_SCHEMA_VERSION: u32 = 1;
+    const STAGE0_INPUT_STAGE: &str = "/nix-stage0-store/stage0-input";
+    const STAGE0_OUTPUT_STAGE: &str = "/nix-stage0-store/stage0-output";
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct DiskTransport {
+        input_dev: String,
+        output_dev: String,
+    }
+
+    fn disk_transport_from_cmdline(cmdline: &str) -> Option<DiskTransport> {
+        let mut enabled = false;
+        let mut input = None;
+        let mut output = None;
+        for token in cmdline.split_whitespace() {
+            if let Some(value) = token.strip_prefix("mvm.builder_transport=") {
+                enabled = value == "disk";
+            } else if let Some(value) = token.strip_prefix("mvm.builder_input=") {
+                input = Some(value.to_string());
+            } else if let Some(value) = token.strip_prefix("mvm.builder_output=") {
+                output = Some(value.to_string());
+            }
+        }
+        enabled.then(|| DiskTransport {
+            input_dev: input.unwrap_or_else(|| "/dev/vdc".to_string()),
+            output_dev: output.unwrap_or_else(|| "/dev/vdd".to_string()),
+        })
+    }
 
     pub fn run() -> ExitCode {
         // libkrunfw's bundled kernel hands PID 1 a low RLIMIT_NOFILE on some
@@ -98,7 +118,11 @@ mod linux {
             // hang; the absence of /out artifacts is the failure signal.
             return power_off();
         }
-        match build_and_copy().and_then(|()| finalize_persistent_nix_store()) {
+        let build_result = build_and_copy();
+        let output_result = collect_disk_transport_output_if_requested();
+        let store_result = finalize_persistent_nix_store();
+        let result = build_result.and(output_result).and(store_result);
+        match result {
             Ok(()) => {
                 eprintln!("stage0-init: done; halting");
                 power_off()
@@ -140,8 +164,8 @@ mod linux {
     /// True when stage0-init runs under the **QEMU** builder backend
     /// (Linux) vs **libkrun**. The QEMU launcher passes `mvm.backend=qemu`
     /// on the kernel cmdline; libkrun does not. This drives the remaining
-    /// host-vs-VMM differences: share transport (ext4 block disks vs virtiofs)
-    /// and the nix store layout (writable ext4 root vs tmpfs copy).
+    /// host-vs-VMM differences: ext4 trees versus raw-tar transport disks and
+    /// the persistent Nix-store device position.
     fn is_qemu() -> bool {
         std::fs::read_to_string("/proc/cmdline")
             .map(|c| c.contains("mvm.backend=qemu"))
@@ -407,12 +431,14 @@ mod linux {
     /// Mounts the pseudo-filesystems + the host shares, then makes `/nix` a
     /// writable store.
     fn setup() -> Result<(), String> {
-        let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
-        sync_clock_from_host_epoch(&cmdline)?;
         mount_pseudofs()?;
-        // `/dev/null` insurance — some libkrun set_root boots reach
-        // userspace without it, which then masks every `2>/dev/null`
-        // downstream. `|| Ok` it: devtmpfs usually creates it.
+        release_root_runtime_reserve()?;
+        let cmdline = std::fs::read_to_string("/proc/cmdline")
+            .map_err(|e| format!("read /proc/cmdline after mounting procfs: {e}"))?;
+        sync_clock_from_host_epoch(&cmdline)?;
+        // `/dev/null` insurance for minimal Stage 0 roots; without it every
+        // downstream `2>/dev/null` failure is masked. devtmpfs usually creates
+        // it, so the manual node is a compatibility fallback.
         if !Path::new("/dev/null").exists() {
             mknod_null();
         }
@@ -423,31 +449,25 @@ mod linux {
             if qemu { "qemu" } else { "libkrun" }
         );
 
-        // Host shares. QEMU presents all three as ext4 block disks (the
+        // QEMU presents all three inputs as ext4 block disks (the
         // initramfs already loaded virtio_blk for the ext4 root, so
-        // vdb/vdc/vdd enumerate with no extra modules — no virtiofsd, no
-        // 9p); order matches the device order on the QEMU cmdline (vda=seed
-        // root, then work/out/mvm-bins). libkrun presents `/out` and
-        // `/mvm-bins` over virtio-fs by tag; `/work` prefers an ext4 disk
-        // too (`mount_libkrun_work_share`) — a large workspace read through
-        // virtio-fs-over-FUSE exhausts libkrun's virtio-fs handle pool
-        // (`nix build` fails with "Too many open files"), so the host packs
-        // it onto a block device whenever it attaches one.
+        // vdb/vdc/vdd enumerate with no extra modules); order matches the
+        // device order on the QEMU cmdline. libkrun uses one raw input tar and
+        // one raw output tar instead.
         if qemu {
             mount_shares(&[
                 ("/dev/vdb", "/work", "ext4"),
                 ("/dev/vdc", "/out", "ext4"),
                 ("/dev/vdd", "/mvm-bins", "ext4"),
             ])?;
-        } else {
-            mount_libkrun_work_share()?;
-            mount_shares(&[
-                ("out", "/out", "virtiofs"),
-                ("mvm-bins", "/mvm-bins", "virtiofs"),
-            ])?;
         }
 
         setup_nix_store(qemu)?;
+        if !qemu {
+            let transport = disk_transport_from_cmdline(&cmdline)
+                .ok_or_else(|| "libkrun Stage 0 requires mvm.builder_transport=disk".to_string())?;
+            stage_disk_transport_input(&transport)?;
+        }
         if should_enable_vsock_egress(qemu, &cmdline) {
             best_effort_raise_loopback();
             mvm_agentd::guest_net::seed_loopback_resolver()
@@ -458,6 +478,22 @@ mod linux {
         let _egress_child = start_vsock_egress_if_requested(&cmdline)?;
         configure_nix_runtime()?;
         Ok(())
+    }
+
+    fn release_root_runtime_reserve() -> Result<(), String> {
+        let path = Path::new(mvm_build::stage0::ROOT_RUNTIME_RESERVE_PATH);
+        release_root_runtime_reserve_at(path)
+    }
+
+    fn release_root_runtime_reserve_at(path: &Path) -> Result<(), String> {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!(
+                "release Stage 0 root runtime reserve {}: {error}",
+                path.display()
+            )),
+        }
     }
 
     /// Seed the RTC-less Stage 0 guest clock before starting the egress client
@@ -504,6 +540,13 @@ mod linux {
         mount_fs_idempotent("proc", "/proc", "proc")?;
         mount_fs_idempotent("sysfs", "/sys", "sysfs")?;
         mount_fs_idempotent("devtmpfs", "/dev", "devtmpfs")?;
+        let dev_fd_failures = mvm_agentd::guest_mount::link_dev_fd_family();
+        if !dev_fd_failures.is_empty() {
+            return Err(format!(
+                "create Stage 0 /dev/fd links: {}",
+                dev_fd_failures.join(", ")
+            ));
+        }
         mount_fs_idempotent("tmpfs", "/tmp", "tmpfs")?;
         mount_fs_idempotent("tmpfs", "/run", "tmpfs")?;
         let _ = std::fs::create_dir_all("/dev/shm");
@@ -514,12 +557,10 @@ mod linux {
         Ok(())
     }
 
-    /// Make `/nix` a writable, non-virtiofs store. The seed `/nix` arrives on
-    /// the libkrun virtiofs RootDir; overlayfs-over-virtiofs writes fail
-    /// (`nix build` → `creating /nix/store/.links: ECONNRESET` — a FUSE
-    /// backend error).
+    /// Make `/nix` a writable store, preserving the immutable seed in the root
+    /// disk as the source of truth for first initialization.
     ///
-    /// Fast path: mount the dedicated persistent ext4 `/dev/vda`, seed it once
+    /// Fast path: mount the dedicated persistent ext4 store device, seed it once
     /// from the verified RootDir store, then bind it over `/nix` on every later
     /// boot. If the current seed lacks `mkfs.ext4` and the disk is still blank,
     /// fall back to the old tmpfs copy so the bootstrap remains functional.
@@ -538,7 +579,7 @@ mod linux {
         }
 
         // Copy BEFORE hiding the seed: mount a tmpfs at NIX_SEED_RO, copy the
-        // seed `/nix/store` (still directly readable on the virtiofs root)
+        // seed `/nix/store` (still directly readable on the ext4 root)
         // into it, then bind it over `/nix`. nix then runs from the tmpfs.
         std::fs::create_dir_all(NIX_SEED_RO).map_err(|e| format!("create {NIX_SEED_RO}: {e}"))?;
         mount_fs("tmpfs", NIX_SEED_RO, "tmpfs")?;
@@ -686,7 +727,17 @@ mod linux {
         unsafe {
             libc::sync();
         }
-        reject_ext4_errors(Path::new("/sys/fs/ext4/vda/errors_count"))?;
+        let store_device = find_labeled_ext4_disk_among(
+            virtio_block_devices(),
+            mvm_build::rootfs::STAGE0_NIX_STORE_EXT4_LABEL,
+        )
+        .and_then(|path| path.file_name().map(|name| name.to_owned()))
+        .unwrap_or_else(|| std::ffi::OsString::from("vdb"));
+        reject_ext4_errors(
+            &Path::new("/sys/fs/ext4")
+                .join(store_device)
+                .join("errors_count"),
+        )?;
         unmount(NIX_TARGET)?;
         unmount(STAGE0_NIX_STORE_MOUNT)?;
         Ok(())
@@ -878,6 +929,18 @@ mod linux {
         }
     }
 
+    const STAGE0_NIX_CACHE_HOME: &str = "/run/nix-cache";
+
+    fn prepare_nix_cache(cache_home: &Path) -> Result<(), String> {
+        let cache = cache_home.join("nix");
+        std::fs::create_dir_all(&cache).map_err(|error| {
+            format!(
+                "create Stage 0 nix cache directory {}: {error}",
+                cache.display()
+            )
+        })
+    }
+
     /// Recursively copy `src` -> `dst` preserving symlinks + file modes
     /// (the seed has no `cp`). Iterative to avoid deep-tree recursion limits.
     /// Hardlinks degrade to copies — fine for a one-shot bootstrap store.
@@ -913,7 +976,7 @@ mod linux {
         let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
 
         // Env: HOME / MVM_WORKSPACE_PATH / MVM_HOST_BIN_DIR for the nix build.
-        std::fs::create_dir_all("/root").ok();
+        prepare_nix_cache(Path::new(STAGE0_NIX_CACHE_HOME))?;
         let nix_path = nix
             .parent()
             .map(|bindir| {
@@ -929,6 +992,7 @@ mod linux {
         // PATH = the seed nix's own bin dir (curl/xz/etc. live beside `nix`).
         unsafe {
             std::env::set_var("HOME", "/root");
+            std::env::set_var("XDG_CACHE_HOME", STAGE0_NIX_CACHE_HOME);
             std::env::set_var("MVM_WORKSPACE_PATH", "/work");
             std::env::set_var("MVM_HOST_BIN_DIR", "/mvm-bins");
             std::env::set_var("NIX_SSL_CERT_FILE", &cacert);
@@ -1013,7 +1077,7 @@ mod linux {
         let (status, stderr_log, stdout) =
             run_streaming(cmd, &mut std::io::stderr()).map_err(|e| format!("nix build: {e}"))?;
 
-        // Persist the full log to /out (a virtio-fs share) for host-side
+        // Persist the full log to /out for output-disk collection and host-side
         // post-mortem at ~/.mvm/cache/builder-vm/.../nix-stderr.log.
         let _ = std::fs::write("/out/nix-stderr.log", &stderr_log);
         if !status.success() {
@@ -1178,66 +1242,14 @@ mod linux {
         .map_err(|e| format!("mount {source} -> {target} ({fstype}): {e}"))
     }
 
-    /// Like [`mount_fs`], but read-only. The host attaches the `/work` ext4
-    /// disk read-only at the libkrun layer (`krun_add_disk`'s `read_only`
-    /// flag), and a Linux block device that reports itself read-only refuses
-    /// a plain read-write mount — so this must pass `MS_RDONLY` rather than
-    /// reusing `mount_fs`. Mirrors the existing read-only virtio-fs mounts
-    /// the steady-state builder guest already does for the same `/work`
-    /// share (`mvm-host-vm-init`'s `virtiofs_mount_flags`).
-    fn mount_fs_ro(source: &str, target: &str, fstype: &str) -> Result<(), String> {
-        use nix::mount::{MsFlags, mount};
-        mount(
-            Some(source),
-            target,
-            Some(fstype),
-            MsFlags::MS_RDONLY,
-            None::<&str>,
-        )
-        .map_err(|e| format!("mount {source} -> {target} ({fstype}) read-only: {e}"))
-    }
-
     // The ext4 label probe is shared with every other guest init through
-    // `mvm_agentd::flowmux_drive`: Stage 0 mounts `/work` by label and the
-    // identity drive by label, and a second copy of the superblock layout is
+    // `mvm_agentd::flowmux_drive`; a second copy of the superblock layout is
     // exactly the kind of duplicate that drifts.
     use mvm_agentd::flowmux_drive::{find_labeled_ext4_disk_among, virtio_block_devices};
 
-    /// Mounts `/work` for the libkrun backend. Prefers the ext4 disk
-    /// carrying [`mvm_build::rootfs::STAGE0_WORK_EXT4_LABEL`] — the host
-    /// packs the workspace onto a block device because `nix build` reading
-    /// a large tree through virtio-fs-over-FUSE exhausts libkrun's
-    /// virtio-fs handle pool ("Too many open files"). Falls back to the
-    /// `"work"` virtio-fs tag when no such disk is attached, the shape
-    /// every caller used before this disk existed.
-    fn mount_libkrun_work_share() -> Result<(), String> {
-        std::fs::create_dir_all("/work").map_err(|e| format!("create /work: {e}"))?;
-        let label = mvm_build::rootfs::STAGE0_WORK_EXT4_LABEL;
-        // Same enumeration as the store lookup, for the same reason: a fixed
-        // prefix of device letters is the positional assumption the label
-        // removes, and /work is not guaranteed to land inside it either.
-        match find_labeled_ext4_disk_among(virtio_block_devices(), label) {
-            Some(dev) => {
-                let dev = dev.to_string_lossy().into_owned();
-                mount_fs_ro(&dev, "/work", "ext4")?;
-                eprintln!("stage0-init: mounted /work from ext4 disk {dev} (label {label:?})");
-            }
-            None => {
-                mount_fs("work", "/work", "virtiofs")?;
-                eprintln!("stage0-init: mounted /work from virtiofs (no {label:?} disk attached)");
-            }
-        }
-        if !is_mountpoint("/work") {
-            return Err("/work (ext4-or-virtiofs) mount did not take".to_string());
-        }
-        Ok(())
-    }
-
     /// Create + mount each `(source, target, fstype)` share in order,
-    /// verifying the mount took. Shared by the QEMU shares (all ext4) and
-    /// the libkrun `/out` + `/mvm-bins` shares (virtio-fs); `/work` on
-    /// libkrun goes through [`mount_libkrun_work_share`] instead, since it
-    /// picks its own source/fstype/flags.
+    /// verifying the mount took. QEMU Stage 0 still uses three ext4 input and
+    /// output disks; libkrun uses the raw-tar transport below.
     fn mount_shares(shares: &[(&str, &str, &str)]) -> Result<(), String> {
         for (source, target, fstype) in shares {
             std::fs::create_dir_all(target).map_err(|e| format!("create {target}: {e}"))?;
@@ -1249,10 +1261,66 @@ mod linux {
         Ok(())
     }
 
+    fn reset_stage_dir(path: &Path) -> Result<(), String> {
+        if path.exists() {
+            clear_dir_children(path).map_err(|e| format!("clear {}: {e}", path.display()))?;
+        } else {
+            std::fs::create_dir_all(path).map_err(|e| format!("create {}: {e}", path.display()))?;
+        }
+        Ok(())
+    }
+
+    /// Extract the raw input tar onto the persistent store and bind its trees
+    /// at the paths the Stage 0 build already consumes. `/out` is a separate
+    /// writable directory whose contents are archived onto the output device
+    /// after the build.
+    fn stage_disk_transport_input(transport: &DiskTransport) -> Result<(), String> {
+        let input_stage = Path::new(STAGE0_INPUT_STAGE);
+        reset_stage_dir(input_stage)?;
+        mvm_build::builder_disk_transport::read_output_disk(
+            Path::new(&transport.input_dev),
+            input_stage,
+        )
+        .map_err(|e| format!("extract input tar from {}: {e}", transport.input_dev))?;
+        for (name, target) in [("work", "/work"), ("mvm-bins", "/mvm-bins")] {
+            let source = input_stage.join(name);
+            if !source.is_dir() {
+                return Err(format!(
+                    "Stage 0 input disk is missing required tree {}",
+                    source.display()
+                ));
+            }
+            std::fs::create_dir_all(target).map_err(|e| format!("create {target}: {e}"))?;
+            bind_mount(&source.to_string_lossy(), target)?;
+        }
+        let output_stage = Path::new(STAGE0_OUTPUT_STAGE);
+        reset_stage_dir(output_stage)?;
+        std::fs::create_dir_all("/out").map_err(|e| format!("create /out: {e}"))?;
+        bind_mount(STAGE0_OUTPUT_STAGE, "/out")?;
+        Ok(())
+    }
+
+    /// Archive `/out` onto the raw output device when this is the libkrun
+    /// disk-transport boot. The QEMU Stage 0 path retains its ext4 output disk.
+    fn collect_disk_transport_output_if_requested() -> Result<(), String> {
+        if is_qemu() {
+            return Ok(());
+        }
+        let cmdline = std::fs::read_to_string("/proc/cmdline")
+            .map_err(|e| format!("read /proc/cmdline: {e}"))?;
+        let transport = disk_transport_from_cmdline(&cmdline)
+            .ok_or_else(|| "libkrun Stage 0 requires mvm.builder_transport=disk".to_string())?;
+        mvm_build::builder_disk_transport::write_output_disk(
+            Path::new(STAGE0_OUTPUT_STAGE),
+            Path::new(&transport.output_dev),
+        )
+        .map_err(|e| format!("archive output tar onto {}: {e}", transport.output_dev))
+    }
+
     fn mount_fs_idempotent(source: &str, target: &str, fstype: &str) -> Result<(), String> {
         // The nix seed rootfs is minimal (no /tmp, /run, …) and `mount(2)`
         // needs the target dir to exist — create it first.
-        let _ = std::fs::create_dir_all(target);
+        ensure_mount_target(Path::new(target))?;
         match mount_fs(source, target, fstype) {
             Ok(()) => Ok(()),
             Err(e) if e.contains("EBUSY") => {
@@ -1261,6 +1329,11 @@ mod linux {
             }
             Err(e) => Err(e),
         }
+    }
+
+    fn ensure_mount_target(target: &Path) -> Result<(), String> {
+        std::fs::create_dir_all(target)
+            .map_err(|e| format!("create mount target {}: {e}", target.display()))
     }
 
     fn bind_mount(source: &str, target: &str) -> Result<(), String> {
@@ -1411,7 +1484,8 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::{
-            VSOCK_EGRESS_NO_PROXY, VSOCK_EGRESS_PROXY_URL, copy_artifacts_into, run_streaming,
+            STAGE0_NIX_CACHE_HOME, VSOCK_EGRESS_NO_PROXY, VSOCK_EGRESS_PROXY_URL,
+            copy_artifacts_into, disk_transport_from_cmdline, prepare_nix_cache, run_streaming,
             stage0_nix_store_device,
         };
         use std::os::unix::fs::symlink;
@@ -1419,8 +1493,65 @@ mod linux {
 
         #[test]
         fn stage0_nix_store_device_matches_backend_disk_order() {
-            assert_eq!(stage0_nix_store_device(false), "/dev/vda");
+            assert_eq!(stage0_nix_store_device(false), "/dev/vdb");
             assert_eq!(stage0_nix_store_device(true), "/dev/vdf");
+        }
+
+        #[test]
+        fn disk_transport_cmdline_defaults_to_stage0_device_slots() {
+            let transport = disk_transport_from_cmdline(
+                "console=hvc0 root=/dev/vda mvm.builder_transport=disk",
+            )
+            .expect("disk transport token is present");
+            assert_eq!(transport.input_dev, "/dev/vdc");
+            assert_eq!(transport.output_dev, "/dev/vdd");
+        }
+
+        #[test]
+        fn disk_transport_cmdline_honours_explicit_devices_and_refuses_other_modes() {
+            let transport = disk_transport_from_cmdline(
+                "mvm.builder_transport=disk mvm.builder_input=/dev/vdx mvm.builder_output=/dev/vdy",
+            )
+            .expect("explicit disk transport is present");
+            assert_eq!(transport.input_dev, "/dev/vdx");
+            assert_eq!(transport.output_dev, "/dev/vdy");
+            assert!(disk_transport_from_cmdline("mvm.builder_transport=virtiofs").is_none());
+            assert!(disk_transport_from_cmdline("console=hvc0 root=/dev/vda").is_none());
+        }
+
+        #[test]
+        fn mount_target_creation_reports_an_unusable_parent() {
+            let scratch = tempfile::TempDir::new().unwrap();
+            let parent = scratch.path().join("file");
+            std::fs::write(&parent, b"not a directory").unwrap();
+            let target = parent.join("child");
+
+            let error = super::ensure_mount_target(&target)
+                .expect_err("a file cannot contain a mount target");
+            assert!(error.contains("create mount target"));
+            assert!(error.contains(&target.display().to_string()));
+        }
+
+        #[test]
+        fn nix_cache_uses_the_runtime_tmpfs() {
+            let scratch = tempfile::TempDir::new().unwrap();
+            let cache_home = scratch.path().join("run/nix-cache");
+
+            prepare_nix_cache(&cache_home).expect("prepare nix cache");
+
+            assert_eq!(STAGE0_NIX_CACHE_HOME, "/run/nix-cache");
+            assert!(cache_home.join("nix").is_dir());
+        }
+
+        #[test]
+        fn root_runtime_reserve_release_is_idempotent() {
+            let scratch = tempfile::TempDir::new().unwrap();
+            let reserve = scratch.path().join("reserve");
+            std::fs::write(&reserve, b"space").unwrap();
+            super::release_root_runtime_reserve_at(&reserve).unwrap();
+            assert!(!reserve.exists());
+            super::release_root_runtime_reserve_at(&reserve)
+                .expect("a missing reserve is the idempotent success case");
         }
 
         #[test]
