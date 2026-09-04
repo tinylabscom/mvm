@@ -28,11 +28,11 @@ fix product defects uncovered by exercising the documented commands.
       entry-form coverage while retaining real-binary probes.
 - [x] Run the complete hermetic BDD suite and focused suites for every touched
       crate.
-- [x] Give each bounded phase of the aarch64 TCG witness a fresh runner window:
-      transfer exact source and release-helper binaries, source-built bootstrap
-      artifacts, and the sealed bundle through immutable artifacts; pin every
-      handoff and explicit QEMU builder selection with a structural regression
-      test.
+- [ ] Replace the hosted aarch64 lifecycle witness whose runner is repeatedly
+      terminated with a stable x86_64 lifecycle witness that deliberately
+      denies KVM and therefore still builds, seals, installs, and boots under
+      QEMU TCG. Retain the native aarch64 workspace lane and local Apple Silicon
+      aarch64 TCG script, and collect a successful hosted run before completion.
 - [ ] Run the documented surface end to end on Linux/Firecracker and collect
       the macOS/HVF evidence required by the release gate.
 - [ ] Merge the implementation through the queue.
@@ -61,3 +61,17 @@ fix product defects uncovered by exercising the documented commands.
   shipped `machine build --flake` surface, and its structural regression test
   pins that exact command so CI cannot silently drift back to a parser-invalid
   entry point.
+- The corrected split build entered the real workload build, then a fifth
+  hosted arm64 runner was terminated after only 6 minutes 3 seconds (4 minutes
+  29 seconds in the build). Effective lifetimes now vary from 6 to 28 minutes,
+  so no phase split or retry can make that substrate a reliable witness. The
+  hosted lifecycle therefore moves to stable x86_64 with `/dev/kvm`
+  deliberately inaccessible; native aarch64 tests and the local Apple Silicon
+  lifecycle script preserve the architecture-specific coverage without making
+  a false hosted claim.
+- The full workspace runs exposed parallel-test races in the wasm endpoint-plan
+  and workload broker-path witnesses: they read `MVM_HOME` without holding the
+  shared environment guard used by the tests mutating that variable. Both now
+  pin an isolated home for their whole assertion, including the platform-
+  specific short-socket path resolver; all 886 runtime library tests pass
+  concurrently and the complete workspace suite is green.

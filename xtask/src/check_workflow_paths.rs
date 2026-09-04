@@ -907,11 +907,14 @@ mod tests {
     }
 
     #[test]
-    fn aarch64_no_kvm_smoke_grants_runner_vhost_vsock_access() {
+    fn no_kvm_pipeline_uses_source_binaries_and_grants_vhost_vsock_access() {
         let workflow = ci_full_workflow();
-        let smoke = job_block(&workflow, "aarch64-no-kvm-smoke");
+        let prepare = job_block(&workflow, "no-kvm-prepare");
+        let bootstrap = job_block(&workflow, "no-kvm-bootstrap");
+        let build = job_block(&workflow, "no-kvm-build");
+        let smoke = job_block(&workflow, "no-kvm-smoke");
         assert!(
-            smoke.contains("MVM_BUILDER_VM_TIMEOUT_SECS: 7200"),
+            build.contains("MVM_BUILDER_VM_TIMEOUT_SECS: 7200"),
             "the no-KVM cold build must have enough time to compile under QEMU TCG"
         );
         let grant = concat!(
@@ -921,33 +924,43 @@ mod tests {
             "          sudo chown \"$USER\" /dev/vhost-vsock\n",
             "          sudo chmod 0600 /dev/vhost-vsock",
         );
-        assert!(
-            smoke.contains(grant),
-            "the hosted runner must grant its current user access to vhost-vsock"
-        );
-        assert!(
-            smoke.find(grant) < smoke.find("Build and boot the sealed exit_code workload"),
-            "vhost-vsock access must be granted before QEMU starts"
-        );
-        let source_build = smoke
+        for (job, action) in [
+            (bootstrap, "Bootstrap source-matched launch artifacts"),
+            (
+                build,
+                "Build and export the sealed exit_code workload under QEMU TCG",
+            ),
+            (smoke, "Install and boot the sealed bundle under QEMU TCG"),
+        ] {
+            assert!(
+                job.contains(grant),
+                "each hosted QEMU runner must grant its current user access to vhost-vsock"
+            );
+            assert!(
+                job.find(grant) < job.find(action),
+                "vhost-vsock access must be granted before QEMU starts"
+            );
+        }
+        let source_build = prepare
             .find("Build source mvmctl and published-builder bootstrap helper")
-            .expect("the live AArch64 gate must build source-matched mvmctl");
-        let source_copy = smoke
+            .expect("the hosted no-KVM gate must build source-matched mvmctl");
+        let source_copy = prepare
             .find("cp target/release/mvmctl /tmp/mvmctl-source-under-test")
             .expect("the source-matched mvmctl must be preserved before helper compilation");
-        let bootstrap = smoke
-            .find("Bootstrap source-matched launch artifacts")
-            .expect("the source-matched mvmctl must bootstrap its launch artifacts");
         let workload = smoke
             .find("/tmp/mvmctl-source-under-test machine run")
             .expect("the live workload must run through the source-matched mvmctl");
-        assert!(smoke.contains("MVM_EMBED_NO_CACHE: 1"));
-        assert!(smoke.contains("cargo build --release -p mvmctl --features user"));
-        assert!(smoke.contains(
+        assert!(prepare.contains("MVM_EMBED_NO_CACHE: 1"));
+        assert!(prepare.contains("cargo build --release -p mvmctl --features user"));
+        assert!(prepare.contains(
             "cargo build --release -p mvmctl --features \
              user,release-artifact-bootstrap,release-channel"
         ));
-        assert!(source_build < source_copy && source_copy < bootstrap && bootstrap < workload);
+        assert!(source_build < source_copy);
+        assert!(bootstrap.contains("needs: no-kvm-prepare"));
+        assert!(build.contains("needs: no-kvm-bootstrap"));
+        assert!(smoke.contains("needs: no-kvm-build"));
+        assert!(workload > smoke.find(grant).expect("smoke must grant vhost-vsock"));
     }
 
     #[test]

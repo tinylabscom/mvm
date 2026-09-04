@@ -1,9 +1,11 @@
-//! Regression checks for the aarch64 no-KVM smoke's binary build contract.
+//! Regression checks for the hosted no-KVM and local aarch64 smoke contracts.
 //!
-//! The smoke lives in `ci-full.yml` (nightly / manual dispatch), not in the
-//! merge queue, because a cold QEMU TCG build can take hours and blocks the
-//! queue. The contract it exercises is still worth pinning: source binary
-//! preservation, release-helper separation, and the vsock/device setup.
+//! The hosted smoke lives in `ci-full.yml` (nightly / manual dispatch), not in
+//! the merge queue, because a cold QEMU TCG build can take hours and blocks the
+//! queue. GitHub's hosted arm64 runners have an undocumented and highly
+//! variable lifetime, so the hosted lifecycle witness uses stable x86_64 while
+//! explicitly denying KVM. The local Apple Silicon script retains the genuine
+//! aarch64 no-KVM witness.
 
 use std::fs;
 
@@ -16,6 +18,7 @@ const LIBRARY_ONLY_BUILD: &str =
 const REQUIRED_VIRTIOFS_PACKAGE: &str = "virtiofsd";
 const REQUIRED_VIRTIO_ROM_PACKAGE: &str = "ipxe-qemu";
 const REQUIRED_CI_VSOCK_OWNERSHIP: &str = "sudo chown \"$USER\" /dev/vhost-vsock";
+const REQUIRED_KVM_DENIAL: &str = "sudo chmod 000 /dev/kvm";
 const REQUIRED_LOCAL_VSOCK_DEVICE: &str = "--device /dev/vhost-vsock:/dev/vhost-vsock";
 const REQUIRED_BUILDER_DOWNLOAD: &str =
     "/tmp/mvmctl-release-helper --builder qemu __builder-vm-bootstrap -v";
@@ -26,39 +29,39 @@ const REQUIRED_TCG_BUILD: &str =
 const FIRST_MACHINE_RUN: &str = "/tmp/mvmctl-source-under-test machine run";
 const REQUIRED_BAKED_ENTRYPOINT: &str = "--entrypoint";
 const FORBIDDEN_ENTRYPOINT_OVERRIDE: &str = "-- /bin/true";
-const BINARY_ARTIFACT: &str = "aarch64-no-kvm-binaries";
-const BOOTSTRAP_ARTIFACT: &str = "aarch64-no-kvm-bootstrap-cache";
-const BUNDLE_ARTIFACT: &str = "aarch64-no-kvm-bundle";
+const BINARY_ARTIFACT: &str = "no-kvm-binaries";
+const BOOTSTRAP_ARTIFACT: &str = "no-kvm-bootstrap-cache";
+const BUNDLE_ARTIFACT: &str = "no-kvm-bundle";
 
 #[test]
-fn aarch64_no_kvm_smokes_build_the_mvmctl_binary_they_execute() {
+fn no_kvm_smokes_build_the_mvmctl_binary_they_execute() {
     let ci_workflow = fs::read_to_string(".github/workflows/ci.yml").expect("read CI workflow");
     assert!(
-        !ci_workflow.contains("aarch64-no-kvm-smoke:"),
-        "the merge-queue CI workflow must not define the aarch64 no-KVM smoke job"
+        !ci_workflow.contains("no-kvm-smoke:"),
+        "the merge-queue CI workflow must not define the no-KVM smoke job"
     );
 
     let workflow =
         fs::read_to_string(".github/workflows/ci-full.yml").expect("read extended CI workflow");
     let prepare = workflow
-        .split("  aarch64-no-kvm-prepare:\n")
+        .split("  no-kvm-prepare:\n")
         .nth(1)
-        .and_then(|rest| rest.split("  aarch64-no-kvm-bootstrap:\n").next())
-        .expect("extended CI workflow must define the aarch64 no-KVM prepare job");
+        .and_then(|rest| rest.split("  no-kvm-bootstrap:\n").next())
+        .expect("extended CI workflow must define the no-KVM prepare job");
     let bootstrap_job = workflow
-        .split("  aarch64-no-kvm-bootstrap:\n")
+        .split("  no-kvm-bootstrap:\n")
         .nth(1)
-        .and_then(|rest| rest.split("  aarch64-no-kvm-build:\n").next())
-        .expect("extended CI workflow must define the aarch64 no-KVM bootstrap job");
+        .and_then(|rest| rest.split("  no-kvm-build:\n").next())
+        .expect("extended CI workflow must define the no-KVM bootstrap job");
     let build_job = workflow
-        .split("  aarch64-no-kvm-build:\n")
+        .split("  no-kvm-build:\n")
         .nth(1)
-        .and_then(|rest| rest.split("  aarch64-no-kvm-smoke:\n").next())
-        .expect("extended CI workflow must define the aarch64 no-KVM build job");
+        .and_then(|rest| rest.split("  no-kvm-smoke:\n").next())
+        .expect("extended CI workflow must define the no-KVM build job");
     let smoke_job = workflow
-        .split("  aarch64-no-kvm-smoke:\n")
+        .split("  no-kvm-smoke:\n")
         .nth(1)
-        .expect("extended CI workflow must define the aarch64 no-KVM smoke job");
+        .expect("extended CI workflow must define the no-KVM smoke job");
     let workflow_path = format!("{prepare}{bootstrap_job}{build_job}{smoke_job}");
     let script = fs::read_to_string("scripts/local-aarch64-no-kvm-smoke.sh")
         .expect("read local aarch64 no-KVM smoke script");
@@ -132,21 +135,35 @@ fn aarch64_no_kvm_smokes_build_the_mvmctl_binary_they_execute() {
             job.contains(REQUIRED_CI_VSOCK_OWNERSHIP),
             "every live job must let the unprivileged QEMU process open /dev/vhost-vsock"
         );
+        assert!(
+            job.contains(REQUIRED_KVM_DENIAL),
+            "every hosted live job must deny KVM so it actually exercises QEMU TCG"
+        );
+        assert!(
+            job.contains("runs-on: ubuntu-24.04")
+                && !job.contains("runs-on: ubuntu-24.04-arm")
+                && job.contains("qemu-system-x86"),
+            "hosted no-KVM live jobs must use the stable x86_64 runner and matching QEMU"
+        );
     }
+    assert!(
+        prepare.contains("runs-on: ubuntu-24.04") && !prepare.contains("runs-on: ubuntu-24.04-arm"),
+        "the exact hosted smoke binaries must be compiled for the x86_64 runner that executes them"
+    );
     assert!(
         prepare.contains("uses: actions/upload-artifact@v7")
             && prepare.contains(&format!("name: {BINARY_ARTIFACT}")),
         "the prepare job must publish the exact source and release-helper binaries"
     );
     assert!(
-        bootstrap_job.contains("needs: aarch64-no-kvm-prepare")
+        bootstrap_job.contains("needs: no-kvm-prepare")
             && bootstrap_job.contains(&format!("name: {BINARY_ARTIFACT}"))
             && bootstrap_job.contains("uses: actions/upload-artifact@v7")
             && bootstrap_job.contains(&format!("name: {BOOTSTRAP_ARTIFACT}")),
         "bootstrap must use exact binaries and publish reusable launch artifacts"
     );
     assert!(
-        build_job.contains("needs: aarch64-no-kvm-bootstrap")
+        build_job.contains("needs: no-kvm-bootstrap")
             && build_job.contains(&format!("name: {BINARY_ARTIFACT}"))
             && build_job.contains(&format!("name: {BOOTSTRAP_ARTIFACT}"))
             && build_job.contains(REQUIRED_TCG_BUILD)
@@ -155,11 +172,10 @@ fn aarch64_no_kvm_smokes_build_the_mvmctl_binary_they_execute() {
         "the build runner must restore bootstrap state and publish the sealed bundle"
     );
     assert!(
-        smoke_job.contains("needs: aarch64-no-kvm-build")
+        smoke_job.contains("needs: no-kvm-build")
             && smoke_job.contains(&format!("name: {BOOTSTRAP_ARTIFACT}"))
             && smoke_job.contains(&format!("name: {BUNDLE_ARTIFACT}"))
-            && smoke_job
-                .contains("bundle install /tmp/aarch64-no-kvm-bundle/exit-code-aarch64.mvmpkg")
+            && smoke_job.contains("bundle install /tmp/no-kvm-bundle/exit-code-x86_64.mvmpkg")
             && smoke_job.contains("machine run"),
         "the smoke runner must install and boot the bundle in its own runner window"
     );

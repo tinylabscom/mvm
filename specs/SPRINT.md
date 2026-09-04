@@ -19,15 +19,17 @@
       capability/fallback reporting, and enum-valued witness matching. The
       exhaustive help checks now render the real Clap dispatch arm in-process
       while keeping binary probes. Hermetic BDD and focused touched-crate
-      suites are green. Four hosted ARM shutdowns (three at 27–28 minutes and
-      one fresh runner at 14 minutes 20 seconds) established that the declared
-      job timeout is not the effective lifetime. The aarch64 TCG lane now gives
-      compilation, bootstrap, sealed bundle build/export, and installed-bundle
-      boot separate runner windows, transferring only immutable exact binaries,
-      source-built launch artifacts, and the signed bundle. The first split
-      build runner exposed and corrected an obsolete `build --flake` spelling;
-      the lane now pins the shipped `machine build --flake` parser surface. The live
-      documented-surface release gate and merge delivery remain.
+      suites are green. Five hosted ARM shutdowns—three at 27–28 minutes, one at
+      14 minutes 20 seconds, and the corrected build runner after only 6 minutes
+      3 seconds—established that its undocumented lifetime is neither the job
+      timeout nor stable enough for retries or phase splitting. The hosted
+      lifecycle witness now uses stable x86_64, deliberately denies KVM, and
+      still builds, seals, installs, and boots under QEMU TCG. Native aarch64
+      workspace coverage and the local Apple Silicon TCG lifecycle retain the
+      architecture-specific evidence. The same broad run exposed and fixed a
+      process-global `MVM_HOME` races in the wasm endpoint-plan and broker-path
+      witnesses; all 886 runtime library tests now pass concurrently. The live hosted no-KVM run,
+      documented-surface release gate, and merge delivery remain.
 - [ ] **Remove virtio-fs from workload and builder execution.**
       `specs/plans/2026-08-31-remove-virtio-fs.md`.
       Workloads, the dev-tier root, Stage 0, and builder inputs and artifacts
@@ -425,9 +427,9 @@
 
 - [ ] **Merge-queue throughput recovery.**
       `specs/plans/2026-08-15-merge-queue-throughput.md`.
-      The `aarch64-no-kvm-smoke` job was promoted to a required merge-queue
+      The no-KVM lifecycle smoke was promoted to a required merge-queue
       gate and can take hours under QEMU TCG, serializing every merge. Moved
-      the job to `ci-full.yml` (nightly + manual dispatch) and removed it from
+      it to `ci-full.yml` (nightly + manual dispatch) and removed it from
       the `Test` aggregate so the queue can move. Structural tests assert the
       new separation. Remaining: land the change, measure post-change queue
       latency, and record the result.

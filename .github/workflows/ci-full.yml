@@ -467,23 +467,23 @@ jobs:
           MVM_FC_SMOKE_ROOTFS: ${{ github.workspace }}/ci-artifacts/rootfs.ext4
         run: cargo test -p mvm-build --bin mvm-host-vm-init live_firecracker_boot_smoke -- --nocapture
 
-  # aarch64 no-KVM smoke test. GitHub's ubuntu-24.04-arm runners expose no
-  # nested KVM, so this exercises the same QEMU TCG fallback path a Raspberry
-  # Pi without /dev/kvm would take: build the workload flake through the Linux
-  # Stage 0 QEMU builder, seal it as a signed .mvmpkg, install it, and boot the
-  # installed bundle with the QEMU backend.
+  # Hosted no-KVM smoke test. This exercises the QEMU TCG fallback end to end:
+  # build the workload flake through the Linux Stage 0 QEMU builder, seal it as
+  # a signed .mvmpkg, install it, and boot the installed bundle with QEMU.
   #
   # This lane is intentionally outside the merge queue: a cold TCG build can
   # take hours, and blocking every merge behind it collapses queue throughput.
   # It runs nightly and on manual dispatch so the path stays exercised without
   # serializing PR merges.
-  # Hosted arm64 runners have repeatedly received a platform shutdown well
-  # before the declared job timeout. Keep compilation, bootstrap, build, and
-  # boot in separate runner windows so every completed phase is reusable by
-  # the next one instead of being discarded by an infrastructure shutdown.
-  aarch64-no-kvm-prepare:
-    name: Prepare aarch64 no-KVM smoke binaries
-    runs-on: ubuntu-24.04-arm
+  # GitHub's hosted arm64 runners have an undocumented lifetime that has varied
+  # from 6 to 28 minutes, terminating the TCG build with SIGTERM. Use the stable
+  # x86_64 runner and deliberately deny /dev/kvm so the claim remains a real
+  # unaccelerated lifecycle witness. Native aarch64 behavior stays covered by
+  # ci.yml's aarch64 workspace job; the local Apple Silicon script retains the
+  # genuine aarch64 no-KVM lifecycle witness.
+  no-kvm-prepare:
+    name: Prepare hosted no-KVM smoke binaries
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
       CARGO_TERM_COLOR: always
@@ -499,7 +499,7 @@ jobs:
 
       - uses: ./.github/actions/rust-cache
         with:
-          key: aarch64-no-kvm-prepare
+          key: no-kvm-prepare
 
       # The source binary is the end-to-end subject. Keep a copy before building
       # the release-channel helper, whose only job is to download the already-
@@ -515,25 +515,25 @@ jobs:
           cargo build --release -p mvmctl --features user
           cp target/release/mvmctl /tmp/mvmctl-source-under-test
           cargo build --release -p mvmctl --features user,release-artifact-bootstrap,release-channel
-          mkdir -p ci-artifacts/aarch64-no-kvm-binaries
+          mkdir -p ci-artifacts/no-kvm-binaries
           cp /tmp/mvmctl-source-under-test \
-            ci-artifacts/aarch64-no-kvm-binaries/mvmctl-source-under-test
+            ci-artifacts/no-kvm-binaries/mvmctl-source-under-test
           cp target/release/mvmctl \
-            ci-artifacts/aarch64-no-kvm-binaries/mvmctl-release-helper
+            ci-artifacts/no-kvm-binaries/mvmctl-release-helper
 
       - name: Publish exact smoke binaries
         uses: actions/upload-artifact@v7
         with:
-          name: aarch64-no-kvm-binaries
-          path: ci-artifacts/aarch64-no-kvm-binaries/
+          name: no-kvm-binaries
+          path: ci-artifacts/no-kvm-binaries/
           if-no-files-found: error
           retention-days: 1
 
-  aarch64-no-kvm-bootstrap:
-    name: Bootstrap aarch64 no-KVM launch artifacts
-    needs: aarch64-no-kvm-prepare
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 25
+  no-kvm-bootstrap:
+    name: Bootstrap hosted no-KVM launch artifacts
+    needs: no-kvm-prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     env:
       CARGO_TERM_COLOR: always
       MVM_HOME: ${{ github.workspace }}/.mvm-ci
@@ -553,22 +553,22 @@ jobs:
 
       - uses: ./.github/actions/apt-deps
         with:
-          # qemu-system-arm provides qemu-system-aarch64; ipxe-qemu provides
+          # qemu-system-x86 provides qemu-system-x86_64; ipxe-qemu provides
           # efi-virtio.rom; virtiofsd shares the checkout with the builder VM;
           # e2fsprogs provides the mkfs.ext4 and debugfs image-packing tools.
-          packages: qemu-system-arm ipxe-qemu virtiofsd e2fsprogs attr jq
+          packages: qemu-system-x86 ipxe-qemu virtiofsd e2fsprogs attr jq
 
       - name: Restore exact smoke binaries
         uses: actions/download-artifact@v8
         with:
-          name: aarch64-no-kvm-binaries
-          path: /tmp/aarch64-no-kvm-binaries
+          name: no-kvm-binaries
+          path: /tmp/no-kvm-binaries
 
       - name: Install exact smoke binaries
         run: |
-          install -m 0755 /tmp/aarch64-no-kvm-binaries/mvmctl-source-under-test \
+          install -m 0755 /tmp/no-kvm-binaries/mvmctl-source-under-test \
             /tmp/mvmctl-source-under-test
-          install -m 0755 /tmp/aarch64-no-kvm-binaries/mvmctl-release-helper \
+          install -m 0755 /tmp/no-kvm-binaries/mvmctl-release-helper \
             /tmp/mvmctl-release-helper
 
       - name: Grant QEMU access to vhost-vsock
@@ -576,6 +576,16 @@ jobs:
           test -c /dev/vhost-vsock
           sudo chown "$USER" /dev/vhost-vsock
           sudo chmod 0600 /dev/vhost-vsock
+
+      - name: Deny KVM to force QEMU TCG
+        run: |
+          if [ -e /dev/kvm ]; then
+            sudo chmod 000 /dev/kvm
+          fi
+          if [ -r /dev/kvm ] || [ -w /dev/kvm ]; then
+            echo "::error::the no-KVM witness can still access /dev/kvm" >&2
+            exit 1
+          fi
 
       - name: Use published builder VM bootstrap path
         run: mv nix/images/builder-vm nix/images/builder-vm.hidden
@@ -595,7 +605,7 @@ jobs:
       - name: Publish source-matched launch artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: aarch64-no-kvm-bootstrap-cache
+          name: no-kvm-bootstrap-cache
           path: |
             .mvm-ci/cache/initramfs/
             .mvm-ci/cache/kernels/
@@ -604,11 +614,11 @@ jobs:
           retention-days: 1
           compression-level: 0
 
-  aarch64-no-kvm-build:
-    name: Build sealed aarch64 bundle (QEMU TCG)
-    needs: aarch64-no-kvm-bootstrap
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 25
+  no-kvm-build:
+    name: Build sealed hosted bundle (QEMU TCG)
+    needs: no-kvm-bootstrap
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
     env:
       CARGO_TERM_COLOR: always
       MVM_HOME: ${{ github.workspace }}/.mvm-ci
@@ -620,25 +630,25 @@ jobs:
 
       - uses: ./.github/actions/apt-deps
         with:
-          packages: qemu-system-arm ipxe-qemu virtiofsd e2fsprogs attr jq
+          packages: qemu-system-x86 ipxe-qemu virtiofsd e2fsprogs attr jq
 
       - name: Restore exact smoke binaries
         uses: actions/download-artifact@v8
         with:
-          name: aarch64-no-kvm-binaries
-          path: /tmp/aarch64-no-kvm-binaries
+          name: no-kvm-binaries
+          path: /tmp/no-kvm-binaries
 
       - name: Install exact smoke binaries
         run: |
-          install -m 0755 /tmp/aarch64-no-kvm-binaries/mvmctl-source-under-test \
+          install -m 0755 /tmp/no-kvm-binaries/mvmctl-source-under-test \
             /tmp/mvmctl-source-under-test
-          install -m 0755 /tmp/aarch64-no-kvm-binaries/mvmctl-release-helper \
+          install -m 0755 /tmp/no-kvm-binaries/mvmctl-release-helper \
             /tmp/mvmctl-release-helper
 
       - name: Restore source-matched launch artifacts
         uses: actions/download-artifact@v8
         with:
-          name: aarch64-no-kvm-bootstrap-cache
+          name: no-kvm-bootstrap-cache
           path: .mvm-ci/cache
 
       - name: Grant QEMU access to vhost-vsock
@@ -646,6 +656,16 @@ jobs:
           test -c /dev/vhost-vsock
           sudo chown "$USER" /dev/vhost-vsock
           sudo chmod 0600 /dev/vhost-vsock
+
+      - name: Deny KVM to force QEMU TCG
+        run: |
+          if [ -e /dev/kvm ]; then
+            sudo chmod 000 /dev/kvm
+          fi
+          if [ -r /dev/kvm ] || [ -w /dev/kvm ]; then
+            echo "::error::the no-KVM witness can still access /dev/kvm" >&2
+            exit 1
+          fi
 
       - name: Use published builder VM bootstrap path
         run: mv nix/images/builder-vm nix/images/builder-vm.hidden
@@ -664,19 +684,19 @@ jobs:
           /tmp/mvmctl-source-under-test --builder qemu machine build --flake examples/exit_code \
             > /tmp/mvmctl-build.log 2>&1
           slot_hash=$(/tmp/mvmctl-source-under-test manifest ls --json 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | jq -r '.[0].slot_hash')
-          mkdir -p ci-artifacts/aarch64-no-kvm-bundle
+          mkdir -p ci-artifacts/no-kvm-bundle
           /tmp/mvmctl-source-under-test bundle export "$slot_hash" \
-            --out ci-artifacts/aarch64-no-kvm-bundle/exit-code-aarch64.mvmpkg \
+            --out ci-artifacts/no-kvm-bundle/exit-code-x86_64.mvmpkg \
             > /tmp/mvmctl-export.log 2>&1
           cp "$MVM_HOME/keys/host-signer.pub" \
-            ci-artifacts/aarch64-no-kvm-bundle/host-signer.pub
-          echo "ok: sealed aarch64 bundle built and exported under QEMU TCG"
+            ci-artifacts/no-kvm-bundle/host-signer.pub
+          echo "ok: sealed x86_64 bundle built and exported under QEMU TCG"
 
-      - name: Publish sealed aarch64 bundle
+      - name: Publish sealed no-KVM bundle
         uses: actions/upload-artifact@v7
         with:
-          name: aarch64-no-kvm-bundle
-          path: ci-artifacts/aarch64-no-kvm-bundle/
+          name: no-kvm-bundle
+          path: ci-artifacts/no-kvm-bundle/
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
@@ -701,11 +721,11 @@ jobs:
             done
           done
 
-  aarch64-no-kvm-smoke:
-    name: Aarch64 no-KVM bundle smoke (QEMU TCG)
-    needs: aarch64-no-kvm-build
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 25
+  no-kvm-smoke:
+    name: Hosted no-KVM bundle smoke (QEMU TCG)
+    needs: no-kvm-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     env:
       CARGO_TERM_COLOR: always
       MVM_HOME: ${{ github.workspace }}/.mvm-ci
@@ -716,36 +736,46 @@ jobs:
 
       - uses: ./.github/actions/apt-deps
         with:
-          packages: qemu-system-arm ipxe-qemu virtiofsd e2fsprogs attr jq
+          packages: qemu-system-x86 ipxe-qemu virtiofsd e2fsprogs attr jq
 
       - name: Restore exact smoke binary
         uses: actions/download-artifact@v8
         with:
-          name: aarch64-no-kvm-binaries
-          path: /tmp/aarch64-no-kvm-binaries
+          name: no-kvm-binaries
+          path: /tmp/no-kvm-binaries
 
       - name: Install exact smoke binary
         run: |
-          install -m 0755 /tmp/aarch64-no-kvm-binaries/mvmctl-source-under-test \
+          install -m 0755 /tmp/no-kvm-binaries/mvmctl-source-under-test \
             /tmp/mvmctl-source-under-test
 
       - name: Restore source-matched launch artifacts
         uses: actions/download-artifact@v8
         with:
-          name: aarch64-no-kvm-bootstrap-cache
+          name: no-kvm-bootstrap-cache
           path: .mvm-ci/cache
 
-      - name: Restore sealed aarch64 bundle
+      - name: Restore sealed no-KVM bundle
         uses: actions/download-artifact@v8
         with:
-          name: aarch64-no-kvm-bundle
-          path: /tmp/aarch64-no-kvm-bundle
+          name: no-kvm-bundle
+          path: /tmp/no-kvm-bundle
 
       - name: Grant QEMU access to vhost-vsock
         run: |
           test -c /dev/vhost-vsock
           sudo chown "$USER" /dev/vhost-vsock
           sudo chmod 0600 /dev/vhost-vsock
+
+      - name: Deny KVM to force QEMU TCG
+        run: |
+          if [ -e /dev/kvm ]; then
+            sudo chmod 000 /dev/kvm
+          fi
+          if [ -r /dev/kvm ] || [ -w /dev/kvm ]; then
+            echo "::error::the no-KVM witness can still access /dev/kvm" >&2
+            exit 1
+          fi
 
       - name: Install and boot the sealed bundle under QEMU TCG
         id: bundle-roundtrip
@@ -755,8 +785,8 @@ jobs:
           set -euo pipefail
           trap 'echo "::group::mvmctl bundle-run log (tail)"; tail -250 /tmp/mvmctl-bundle-run.log 2>/dev/null || echo "(no log produced)"; echo "::endgroup::"' EXIT
           /tmp/mvmctl-source-under-test trust add \
-            /tmp/aarch64-no-kvm-bundle/host-signer.pub
-          install_output=$(/tmp/mvmctl-source-under-test bundle install /tmp/aarch64-no-kvm-bundle/exit-code-aarch64.mvmpkg 2>&1 | tee /tmp/mvmctl-install.log)
+            /tmp/no-kvm-bundle/host-signer.pub
+          install_output=$(/tmp/mvmctl-source-under-test bundle install /tmp/no-kvm-bundle/exit-code-x86_64.mvmpkg 2>&1 | tee /tmp/mvmctl-install.log)
           installed_sha=$(printf '%s' "$install_output" | sed 's/\x1b\[[0-9;]*m//g' | awk '/Installed bundle / {print $3}')
           echo "installed bundle content address: $installed_sha"
           set +e
@@ -773,7 +803,7 @@ jobs:
             tail -250 /tmp/mvmctl-bundle-run.log
             exit 1
           fi
-          echo "ok: installed aarch64 bundle exited $actual under QEMU TCG"
+          echo "ok: installed x86_64 bundle exited $actual under QEMU TCG"
 
       - name: Dump diagnostics on failure
         if: failure()

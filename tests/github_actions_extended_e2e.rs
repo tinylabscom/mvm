@@ -594,7 +594,7 @@ fn the_documented_surface_creates_its_mvm_home_private() {
     );
 }
 
-/// Every long aarch64 TCG phase must print its captured log however it dies.
+/// Every long hosted TCG phase must print its captured log however it dies.
 ///
 /// The boot is redirected wholesale to a file, and the tail used to sit inside
 /// the wrong-exit-code branch, so a run killed before reaching that branch
@@ -602,7 +602,7 @@ fn the_documented_surface_creates_its_mvm_home_private() {
 /// with no way to tell what the guest had been doing. A lane that cannot say
 /// why it failed is one nobody can fix.
 #[test]
-fn the_aarch64_smoke_prints_its_boot_log_on_any_failure() {
+fn the_no_kvm_smoke_prints_its_boot_log_on_any_failure() {
     let workflow =
         fs::read_to_string(".github/workflows/ci-full.yml").expect("read extended CI workflow");
     let build_trap = workflow

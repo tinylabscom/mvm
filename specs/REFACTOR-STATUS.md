@@ -12,15 +12,18 @@ Last updated: 2026-09-04
       builder backends now declare capabilities, automatic selection may fall
       back when one declines, and missing builder payloads return a normal
       error. Exhaustive help checks use the production Clap arm in-process with
-      binary probes retained. Four hosted ARM shutdowns proved the declared job
-      timeout is not the effective lifetime: three stopped at 27–28 minutes and
-      one fresh runner stopped at 14 minutes 20 seconds after bootstrap. The TCG
-      lane now gives compilation, bootstrap, sealed bundle build/export, and
-      installed-bundle boot separate runner windows connected by immutable
-      artifacts. Its first split build runner caught an obsolete parser-invalid
-      `build --flake` invocation; the workflow and its regression test now pin
-      the shipped `machine build --flake` surface. Hermetic BDD is green; live
-      documented-surface evidence and merge delivery remain.
+      binary probes retained. Five hosted ARM shutdowns proved its undocumented
+      lifetime is variable rather than governed by the job timeout: three
+      stopped at 27–28 minutes, one at 14 minutes 20 seconds, and the corrected
+      build runner after only 6 minutes 3 seconds. The hosted lifecycle witness
+      now uses stable x86_64 and deliberately denies KVM while retaining the
+      full QEMU TCG build/seal/install/boot claim. Native aarch64 workspace
+      coverage and the local Apple Silicon lifecycle preserve architecture-
+      specific evidence. The full workspace run also exposed and fixed a
+      process-global `MVM_HOME` races in the wasm endpoint-plan and broker-path
+      witnesses; all 886 runtime library tests pass concurrently. Hermetic BDD is green; the
+      hosted no-KVM run, live documented-surface evidence, and merge delivery
+      remain.
 
 - [ ] **Release-artifact authenticity and provenance.**
       `specs/plans/2026-09-03-release-artifact-authenticity-and-provenance.md`.
