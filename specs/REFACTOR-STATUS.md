@@ -15,6 +15,14 @@ Last updated: 2026-09-03
       binary probes retained. Hermetic BDD is green; live documented-surface
       evidence and merge delivery remain.
 
+- [ ] **Release-artifact authenticity and provenance.**
+      `specs/plans/2026-09-03-release-artifact-authenticity-and-provenance.md`.
+      WS-A registers the shipped signature chain as `MVM-SEC-20`, precisely
+      distinguishing directly signed archives from raw blobs authenticated by
+      signed checksum manifests and recording the weaker self-update posture.
+      The generated conformance ledger and all 68 policy/model gates are green;
+      provenance and checksum-policy decisions remain in WS-B and WS-C.
+
 - [ ] **Persistent host-directory snapshots.**
       `specs/plans/2026-09-02-retire-dirshare.md`.
       Ad-hoc `--host <directory>` registration now creates a private ext4

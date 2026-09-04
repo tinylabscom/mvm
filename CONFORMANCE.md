@@ -114,6 +114,7 @@ The three honesty levels (R2):
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
 | `MVM-SEC-07` | `some-true` | Cargo deps are audited on every PR | `ci:cargo-deny`, `ci:cargo-audit`, `ci:reproducibility` |
+| `MVM-SEC-20` | `build` | Every published release artifact is authenticated under the release workflow's identity, directly or through a signed checksum manifest, and the build and fetch paths refuse an artifact whose required signature is missing or invalid | `ci:verify-release`, `fn:accepted_identities_are_the_versioned_release_workflow`, `fn:a_missing_bundle_refuses_and_names_the_asset`, `fn:fetch_expected_hashes_refuses_an_unsigned_manifest_before_parsing`, `fn:skip_hash_verify_does_not_waive_the_manifest_signature` |
 
 ## verified_boot
 
