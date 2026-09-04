@@ -53,13 +53,8 @@ Feature: mvmctl top-level CLI surface
     And the help output contains "--as"
     And the help output contains "--branch"
 
-  # Skipped: This test iterates over every command path and runs two help invocations
-  # per path (with -h and help <path>). With dozens of top-level commands and
-  # hundreds of subcommands, this causes hundreds of process spawns and stalls.
-  # The main help test (`every mvmctl command and subcommand help item`) already
-  # covers the same ground with one invocation per path.
-  # Scenario: every alternative CLI help entry point obeys the one-line limit
-  #   Then every alternative CLI help item is one line shorter than 80 columns
+  Scenario: every alternative CLI help entry point obeys the one-line limit
+    Then every alternative CLI help item is one line shorter than 80 columns
 
   Scenario: the MCP consumer advertises its local stdio transport
     When I run mvmctl with "ops mcp --help"
