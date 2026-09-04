@@ -673,6 +673,16 @@ fn all_command_paths() -> Vec<Vec<String>> {
     command_paths
 }
 
+/// Extract the last component of each command path (e.g., "machine" from ["machine", "run"]).
+/// This list is used to identify command names in help text.
+/// Computed once per help check pass to avoid rebuilding the CLI tree hundreds of times.
+fn command_names() -> Vec<String> {
+    all_command_paths()
+        .into_iter()
+        .filter_map(|path| path.last().cloned())
+        .collect()
+}
+
 /// The same assertions as [`assert_help_invocation_fits`], against help text
 /// rendered in-process instead of read from a spawned `mvmctl`.
 fn assert_rendered_help_fits(args: &[String], width: i64, require_single_line_items: bool) {
@@ -707,7 +717,7 @@ fn rendered_help_violations(
 
     let mut violations = Vec::new();
     if require_single_line_items {
-        collect_wrapped_help_items(&invocation, &help, &mut violations);
+        collect_wrapped_help_items(&invocation, &help, &command_names(), &mut violations);
     }
     for (line_number, line) in help.lines().enumerate() {
         let line_width = i64::try_from(line.chars().count()).expect("line width fits in i64");
@@ -752,7 +762,7 @@ fn help_invocation_violations(
 
     let mut violations = Vec::new();
     if require_single_line_items {
-        collect_wrapped_help_items(&invocation, &help, &mut violations);
+        collect_wrapped_help_items(&invocation, &help, &command_names(), &mut violations);
     }
     for (line_number, line) in help.lines().enumerate() {
         let line_width = i64::try_from(line.chars().count()).expect("line width fits in i64");
@@ -766,7 +776,15 @@ fn help_invocation_violations(
     violations
 }
 
-fn collect_wrapped_help_items(invocation: &str, help: &str, violations: &mut Vec<String>) {
+/// Helper to check if help items wrap onto multiple lines.
+/// Takes `command_names` as a parameter to avoid rebuilding the CLI tree
+/// for each help invocation (hundreds of times).
+fn collect_wrapped_help_items(
+    invocation: &str,
+    help: &str,
+    command_names: &[String],
+    violations: &mut Vec<String>,
+) {
     #[derive(Clone, Copy)]
     enum ItemSection {
         Arguments,
@@ -774,10 +792,6 @@ fn collect_wrapped_help_items(invocation: &str, help: &str, violations: &mut Vec
         Options,
     }
 
-    let command_names = all_command_paths()
-        .into_iter()
-        .filter_map(|path| path.last().cloned())
-        .collect::<Vec<_>>();
     let mut section = None;
 
     for (line_number, line) in help.lines().enumerate() {
