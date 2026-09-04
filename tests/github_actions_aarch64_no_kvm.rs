@@ -132,6 +132,19 @@ fn aarch64_no_kvm_smokes_build_the_mvmctl_binary_they_execute() {
         !job.contains(EXPECTED_SOURCE_BUILD) && !job.contains(EXPECTED_RELEASE_HELPER_BUILD),
         "the live smoke runner must not spend its short lifetime recompiling mvmctl"
     );
+    let install_rust = job
+        .find("name: Install Rust toolchain")
+        .expect("the live runner must install Rust for guest-runtime bootstrap");
+    let install_zigbuild = job
+        .find("uses: ./.github/actions/install-zigbuild")
+        .expect("the live runner must install cargo-zigbuild for guest-runtime bootstrap");
+    let bootstrap = job
+        .find("Bootstrap source-matched launch artifacts")
+        .expect("the live runner must bootstrap source-matched launch artifacts");
+    assert!(
+        install_rust < install_zigbuild && install_zigbuild < bootstrap,
+        "the live runner must install the guest cross-toolchain before bootstrap"
+    );
     assert!(
         script.contains(REQUIRED_LOCAL_VSOCK_DEVICE),
         "local smoke container must receive the host vhost-vsock device"

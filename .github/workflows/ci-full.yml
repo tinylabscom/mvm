@@ -546,6 +546,14 @@ jobs:
 
       - uses: ./.github/actions/free-disk
 
+      # Bootstrap cross-compiles the source-matched guest runtime. The host
+      # binaries arrive as artifacts, but that guest toolchain remains a live
+      # input and must be installed on this runner.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - uses: ./.github/actions/install-zigbuild
+
       - uses: ./.github/actions/apt-deps
         with:
           # qemu-system-arm provides qemu-system-aarch64; ipxe-qemu provides
