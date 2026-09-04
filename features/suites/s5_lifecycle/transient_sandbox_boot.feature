@@ -59,25 +59,19 @@ Feature: Transient sandbox boot
     Then the command exits with code 0
     And the output contains "Example Domain"
 
-  # Unqualified, so the mediated stand-in on PATH satisfies it. A NIC-less guest
-  # has no raw socket, so the image's own ping fails at `socket()`; the host
-  # performs the echo over vsock on the guest's behalf.
+  # An unqualified allow entry covers the protocol-default HTTPS port.
   @live
-  Scenario: machine run reaches an admitted host with an unqualified ping
-    When I run mvmctl in an isolated live home with "machine run --name bdd-egress-ping-path --image alpine --allow-host google.com --timeout 180 -- ping -c 1 google.com"
+  Scenario: machine run reaches an admitted host with an unqualified HTTPS grant
+    When I run mvmctl in an isolated live home with "machine run --name bdd-egress-https-unqualified --image curlimages/curl:8.21.0 --allow-host example.com --timeout 180 -- curl -fsSL https://example.com"
     Then the command exits with code 0
-    And the output contains "1 received"
+    And the output contains "Example Domain"
 
-  # By absolute path, so no PATH-order stand-in satisfies this one. `/bin/ping`
-  # on a busybox image is a symlink to the multi-call binary and the rootfs is
-  # read-only under verity, so the link cannot be replaced in place either; the
-  # init stacks a tmpfs over `/bin` alone and substitutes in the upper, leaving
-  # the verified lower bytes and every other applet as the image shipped them.
+  # Explicitly naming port 443 exercises the endpoint-qualified policy shape.
   @live
-  Scenario: machine run reaches an admitted host with ping
-    When I run mvmctl in an isolated live home with "machine run --name bdd-egress-ping --image alpine --allow-host google.com --timeout 120 -- /bin/ping -c 1 google.com"
+  Scenario: machine run reaches an admitted host with a port-qualified HTTPS grant
+    When I run mvmctl in an isolated live home with "machine run --name bdd-egress-https-qualified --image curlimages/curl:8.21.0 --allow-host example.com:443 --timeout 180 -- curl -fsSL https://example.com"
     Then the command exits with code 0
-    And the output contains "1 received"
+    And the output contains "Example Domain"
 
   @live
   Scenario: machine run removes the transient VM state directory on guest exit

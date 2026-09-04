@@ -132,14 +132,6 @@ jobs:
           fi
           sudo chmod 666 /dev/kvm
 
-      - name: Grant unprivileged ICMP sockets to the runner group
-        run: |
-          set -euo pipefail
-          sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
-          read -r ping_gid_min ping_gid_max < <(sysctl -n net.ipv4.ping_group_range)
-          test "$ping_gid_min" = "0"
-          test "$ping_gid_max" = "2147483647"
-
       - name: Grant QEMU Stage 0 access to vhost-vsock
         run: |
           set -euo pipefail

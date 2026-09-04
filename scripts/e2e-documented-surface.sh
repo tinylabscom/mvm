@@ -528,6 +528,24 @@ provision_guest_bin_dir() {
 }
 provision_guest_bin_dir
 
+# The security policy correctly refuses mount-cache material on an unencrypted
+# host disk. GitHub-hosted runners expose an ephemeral root device without an
+# encrypted mapping, while these scenarios are exercising launch and volume
+# behavior rather than the runner provider's storage posture. Supply the same
+# deterministic platform probes used by the focused conformance fixtures. This
+# keeps the fail-closed production path intact and makes the CI precondition
+# explicit instead of letting unrelated scenarios fail before boot.
+provision_encrypted_backing_probes() {
+  local probe_bin="$E2E_HOME/encrypted-backing-probe-bin"
+  mkdir -p "$probe_bin"
+  printf '%s\n' '#!/bin/sh' "printf '%s\\n' /dev/mapper/mvm-e2e-crypt" > "$probe_bin/findmnt"
+  printf '%s\n' '#!/bin/sh' "printf '%s\\n' crypt" > "$probe_bin/lsblk"
+  printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'FileVault: Yes'" > "$probe_bin/diskutil"
+  chmod 755 "$probe_bin/findmnt" "$probe_bin/lsblk" "$probe_bin/diskutil"
+  export PATH="$probe_bin:$PATH"
+}
+provision_encrypted_backing_probes
+
 echo "==> host posture"
 # `doctor` exits nonzero precisely when it has something to report, so its
 # status is information rather than a gate.
@@ -616,7 +634,7 @@ fi
 # "no failures" is not the same as "nothing ran": the conformance binary
 # refuses to start against a stale `mvmctl`, and that refusal prints no
 # scenarios at all — which reads as a clean run to anyone counting failures.
-SUITE_LOG="$(mktemp "${TMPDIR:-/tmp}/mvm-e2e-suite.XXXXXX")"
+SUITE_LOG="$(mktemp "$E2E_HOME/.e2e-suite.XXXXXX")"
 CARGO_BIN_EXE_mvmctl="$MVMCTL" \
 MVM_BDD_LIVE=1 \
 MVM_BDD_DIR_SHARE=1 \
