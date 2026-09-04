@@ -467,20 +467,19 @@ jobs:
           MVM_FC_SMOKE_ROOTFS: ${{ github.workspace }}/ci-artifacts/rootfs.ext4
         run: cargo test -p mvm-build --bin mvm-host-vm-init live_firecracker_boot_smoke -- --nocapture
 
-  # Hosted no-KVM smoke test. This exercises the QEMU TCG fallback end to end:
-  # build the workload flake through the Linux Stage 0 QEMU builder, seal it as
-  # a signed .mvmpkg, install it, and boot the installed bundle with QEMU.
+  # Hosted no-KVM smoke test. This exercises the QEMU TCG launch fallback with
+  # an installed, signed .mvmpkg produced by the same source-matched binary.
   #
   # This lane is intentionally outside the merge queue: a cold TCG build can
   # take hours, and blocking every merge behind it collapses queue throughput.
   # It runs nightly and on manual dispatch so the path stays exercised without
   # serializing PR merges.
-  # GitHub's hosted arm64 runners have an undocumented lifetime that has varied
-  # from 6 to 28 minutes, terminating the TCG build with SIGTERM. Use the stable
-  # x86_64 runner and deliberately deny /dev/kvm so the claim remains a real
-  # unaccelerated lifecycle witness. Native aarch64 behavior stays covered by
-  # ci.yml's aarch64 workspace job; the local Apple Silicon script retains the
-  # genuine aarch64 no-KVM lifecycle witness.
+  # Hosted runners have repeatedly terminated long TCG builds with SIGTERM on
+  # both architectures. Prepare the signed bundle with KVM, then hand it to a
+  # fresh runner that deliberately denies /dev/kvm before install and boot.
+  # Native aarch64 behavior stays covered by ci.yml's aarch64 workspace job;
+  # the local Apple Silicon script retains the full no-KVM build/seal/install/
+  # boot lifecycle witness.
   no-kvm-prepare:
     name: Prepare hosted no-KVM smoke binaries
     runs-on: ubuntu-24.04
@@ -615,10 +614,10 @@ jobs:
           compression-level: 0
 
   no-kvm-build:
-    name: Build sealed hosted bundle (QEMU TCG)
+    name: Prepare sealed bundle for hosted no-KVM boot (QEMU KVM)
     needs: no-kvm-bootstrap
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 90
     env:
       CARGO_TERM_COLOR: always
       MVM_HOME: ${{ github.workspace }}/.mvm-ci
@@ -657,13 +656,16 @@ jobs:
           sudo chown "$USER" /dev/vhost-vsock
           sudo chmod 0600 /dev/vhost-vsock
 
-      - name: Deny KVM to force QEMU TCG
+      - name: Require KVM for bounded bundle preparation
         run: |
-          if [ -e /dev/kvm ]; then
-            sudo chmod 000 /dev/kvm
+          set -euo pipefail
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm missing; bounded bundle preparation cannot run" >&2
+            exit 1
           fi
-          if [ -r /dev/kvm ] || [ -w /dev/kvm ]; then
-            echo "::error::the no-KVM witness can still access /dev/kvm" >&2
+          sudo chmod 666 /dev/kvm
+          if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+            echo "::error::bundle preparation cannot access /dev/kvm" >&2
             exit 1
           fi
 
@@ -673,7 +675,7 @@ jobs:
       - name: Download published builder VM
         run: /tmp/mvmctl-release-helper --builder qemu __builder-vm-bootstrap -v
 
-      - name: Build and export the sealed exit_code workload under QEMU TCG
+      - name: Build and export the sealed exit_code workload with QEMU KVM
         id: bundle-build
         env:
           MVM_KERNEL_SOURCE: auto
@@ -690,7 +692,7 @@ jobs:
             > /tmp/mvmctl-export.log 2>&1
           cp "$MVM_HOME/keys/host-signer.pub" \
             ci-artifacts/no-kvm-bundle/host-signer.pub
-          echo "ok: sealed x86_64 bundle built and exported under QEMU TCG"
+          echo "ok: sealed x86_64 bundle prepared for the no-KVM boot witness"
 
       - name: Publish sealed no-KVM bundle
         uses: actions/upload-artifact@v7

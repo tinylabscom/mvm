@@ -15,15 +15,16 @@ Last updated: 2026-09-04
       binary probes retained. Five hosted ARM shutdowns proved its undocumented
       lifetime is variable rather than governed by the job timeout: three
       stopped at 27–28 minutes, one at 14 minutes 20 seconds, and the corrected
-      build runner after only 6 minutes 3 seconds. The hosted lifecycle witness
-      now uses stable x86_64 and deliberately denies KVM while retaining the
-      full QEMU TCG build/seal/install/boot claim. Native aarch64 workspace
-      coverage and the local Apple Silicon lifecycle preserve architecture-
-      specific evidence. The full workspace run also exposed and fixed a
-      process-global `MVM_HOME` races in the wasm endpoint-plan and broker-path
-      witnesses; all 886 runtime library tests pass concurrently. Hermetic BDD is green; the
-      hosted no-KVM run, live documented-surface evidence, and merge delivery
-      remain.
+      build runner after only 6 minutes 3 seconds. An x86_64 TCG workload build
+      was then terminated after 7 minutes 6 seconds too. The hosted witness now
+      prepares and signs the bundle with QEMU/KVM, then transfers it to a fresh
+      runner that denies KVM before install and boot under QEMU TCG. Native
+      aarch64 workspace coverage and the full local Apple Silicon lifecycle
+      preserve architecture-specific and unaccelerated-build evidence. The full
+      workspace run also exposed and fixed two process-global `MVM_HOME` races
+      in the wasm endpoint-plan and broker-path witnesses; all 886 runtime
+      library tests pass concurrently. Hermetic BDD is green; the hosted no-KVM
+      run, live documented-surface evidence, and merge delivery remain.
 
 - [ ] **Release-artifact authenticity and provenance.**
       `specs/plans/2026-09-03-release-artifact-authenticity-and-provenance.md`.

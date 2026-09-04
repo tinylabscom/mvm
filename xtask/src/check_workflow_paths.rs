@@ -907,16 +907,12 @@ mod tests {
     }
 
     #[test]
-    fn no_kvm_pipeline_uses_source_binaries_and_grants_vhost_vsock_access() {
+    fn no_kvm_pipeline_builds_with_kvm_then_boots_with_tcg() {
         let workflow = ci_full_workflow();
         let prepare = job_block(&workflow, "no-kvm-prepare");
         let bootstrap = job_block(&workflow, "no-kvm-bootstrap");
         let build = job_block(&workflow, "no-kvm-build");
         let smoke = job_block(&workflow, "no-kvm-smoke");
-        assert!(
-            build.contains("MVM_BUILDER_VM_TIMEOUT_SECS: 7200"),
-            "the no-KVM cold build must have enough time to compile under QEMU TCG"
-        );
         let grant = concat!(
             "      - name: Grant QEMU access to vhost-vsock\n",
             "        run: |\n",
@@ -928,7 +924,7 @@ mod tests {
             (bootstrap, "Bootstrap source-matched launch artifacts"),
             (
                 build,
-                "Build and export the sealed exit_code workload under QEMU TCG",
+                "Build and export the sealed exit_code workload with QEMU KVM",
             ),
             (smoke, "Install and boot the sealed bundle under QEMU TCG"),
         ] {
@@ -941,6 +937,32 @@ mod tests {
                 "vhost-vsock access must be granted before QEMU starts"
             );
         }
+        let require_kvm = "Require KVM for bounded bundle preparation";
+        let deny_kvm = "Deny KVM to force QEMU TCG";
+        let require_kvm_position = build
+            .find(require_kvm)
+            .expect("bundle preparation must require KVM");
+        assert!(
+            !build.contains(deny_kvm),
+            "bundle preparation must not make the unaccelerated-boot claim"
+        );
+        let bundle_build_position = build
+            .find("Build and export the sealed exit_code workload with QEMU KVM")
+            .expect("the KVM job must build and export the sealed bundle");
+        assert!(
+            require_kvm_position < bundle_build_position,
+            "KVM access must be established before bundle preparation"
+        );
+        let deny_kvm_position = smoke
+            .find(deny_kvm)
+            .expect("the hosted boot witness must deny KVM");
+        let bundle_boot_position = smoke
+            .find("Install and boot the sealed bundle under QEMU TCG")
+            .expect("the no-KVM job must install and boot the sealed bundle");
+        assert!(
+            deny_kvm_position < bundle_boot_position,
+            "KVM must be denied before the installed bundle boots"
+        );
         let source_build = prepare
             .find("Build source mvmctl and published-builder bootstrap helper")
             .expect("the hosted no-KVM gate must build source-matched mvmctl");

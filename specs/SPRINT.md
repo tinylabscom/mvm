@@ -22,14 +22,17 @@
       suites are green. Five hosted ARM shutdowns—three at 27–28 minutes, one at
       14 minutes 20 seconds, and the corrected build runner after only 6 minutes
       3 seconds—established that its undocumented lifetime is neither the job
-      timeout nor stable enough for retries or phase splitting. The hosted
-      lifecycle witness now uses stable x86_64, deliberately denies KVM, and
-      still builds, seals, installs, and boots under QEMU TCG. Native aarch64
-      workspace coverage and the local Apple Silicon TCG lifecycle retain the
-      architecture-specific evidence. The same broad run exposed and fixed a
-      process-global `MVM_HOME` races in the wasm endpoint-plan and broker-path
-      witnesses; all 886 runtime library tests now pass concurrently. The live hosted no-KVM run,
-      documented-surface release gate, and merge delivery remain.
+      timeout nor stable enough for retries or phase splitting. A subsequent
+      x86_64 TCG workload build was also terminated by the runner service after
+      7 minutes 6 seconds. The hosted witness now prepares and signs its bundle
+      with QEMU/KVM, then transfers it to a fresh runner that deliberately
+      denies KVM before install and boot under QEMU TCG. Native aarch64
+      workspace coverage and the full local Apple Silicon TCG lifecycle retain
+      the architecture-specific and unaccelerated-build evidence. The same
+      broad run exposed and fixed two process-global `MVM_HOME` races in the
+      wasm endpoint-plan and broker-path witnesses; all 886 runtime library
+      tests now pass concurrently. The live hosted no-KVM run, documented-
+      surface release gate, and merge delivery remain.
 - [ ] **Remove virtio-fs from workload and builder execution.**
       `specs/plans/2026-08-31-remove-virtio-fs.md`.
       Workloads, the dev-tier root, Stage 0, and builder inputs and artifacts

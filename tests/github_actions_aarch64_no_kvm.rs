@@ -2,10 +2,10 @@
 //!
 //! The hosted smoke lives in `ci-full.yml` (nightly / manual dispatch), not in
 //! the merge queue, because a cold QEMU TCG build can take hours and blocks the
-//! queue. GitHub's hosted arm64 runners have an undocumented and highly
-//! variable lifetime, so the hosted lifecycle witness uses stable x86_64 while
-//! explicitly denying KVM. The local Apple Silicon script retains the genuine
-//! aarch64 no-KVM witness.
+//! queue. Hosted runners have terminated long TCG builds on both architectures,
+//! so hosted CI prepares the bundle with KVM and explicitly denies KVM for the
+//! install-and-boot witness. The local Apple Silicon script retains the full
+//! aarch64 no-KVM lifecycle witness.
 
 use std::fs;
 
@@ -19,12 +19,14 @@ const REQUIRED_VIRTIOFS_PACKAGE: &str = "virtiofsd";
 const REQUIRED_VIRTIO_ROM_PACKAGE: &str = "ipxe-qemu";
 const REQUIRED_CI_VSOCK_OWNERSHIP: &str = "sudo chown \"$USER\" /dev/vhost-vsock";
 const REQUIRED_KVM_DENIAL: &str = "sudo chmod 000 /dev/kvm";
+const REQUIRED_KVM_ACCESS: &str = "sudo chmod 666 /dev/kvm";
 const REQUIRED_LOCAL_VSOCK_DEVICE: &str = "--device /dev/vhost-vsock:/dev/vhost-vsock";
+const FORBIDDEN_LOCAL_KVM_DEVICE: &str = "--device /dev/kvm:/dev/kvm";
 const REQUIRED_BUILDER_DOWNLOAD: &str =
     "/tmp/mvmctl-release-helper --builder qemu __builder-vm-bootstrap -v";
 const REQUIRED_BOOTSTRAP: &str =
     "/tmp/mvmctl-source-under-test --builder qemu bootstrap --production -v";
-const REQUIRED_TCG_BUILD: &str =
+const REQUIRED_QEMU_BUILD: &str =
     "/tmp/mvmctl-source-under-test --builder qemu machine build --flake examples/exit_code";
 const FIRST_MACHINE_RUN: &str = "/tmp/mvmctl-source-under-test machine run";
 const REQUIRED_BAKED_ENTRYPOINT: &str = "--entrypoint";
@@ -34,7 +36,7 @@ const BOOTSTRAP_ARTIFACT: &str = "no-kvm-bootstrap-cache";
 const BUNDLE_ARTIFACT: &str = "no-kvm-bundle";
 
 #[test]
-fn no_kvm_smokes_build_the_mvmctl_binary_they_execute() {
+fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
     let ci_workflow = fs::read_to_string(".github/workflows/ci.yml").expect("read CI workflow");
     assert!(
         !ci_workflow.contains("no-kvm-smoke:"),
@@ -136,16 +138,22 @@ fn no_kvm_smokes_build_the_mvmctl_binary_they_execute() {
             "every live job must let the unprivileged QEMU process open /dev/vhost-vsock"
         );
         assert!(
-            job.contains(REQUIRED_KVM_DENIAL),
-            "every hosted live job must deny KVM so it actually exercises QEMU TCG"
-        );
-        assert!(
             job.contains("runs-on: ubuntu-24.04")
                 && !job.contains("runs-on: ubuntu-24.04-arm")
                 && job.contains("qemu-system-x86"),
             "hosted no-KVM live jobs must use the stable x86_64 runner and matching QEMU"
         );
     }
+    for job in [bootstrap_job, smoke_job] {
+        assert!(
+            job.contains(REQUIRED_KVM_DENIAL),
+            "the hosted unaccelerated stages must deny KVM before making a TCG claim"
+        );
+    }
+    assert!(
+        build_job.contains(REQUIRED_KVM_ACCESS) && !build_job.contains(REQUIRED_KVM_DENIAL),
+        "bounded hosted bundle preparation must use KVM and make no TCG-build claim"
+    );
     assert!(
         prepare.contains("runs-on: ubuntu-24.04") && !prepare.contains("runs-on: ubuntu-24.04-arm"),
         "the exact hosted smoke binaries must be compiled for the x86_64 runner that executes them"
@@ -166,10 +174,10 @@ fn no_kvm_smokes_build_the_mvmctl_binary_they_execute() {
         build_job.contains("needs: no-kvm-bootstrap")
             && build_job.contains(&format!("name: {BINARY_ARTIFACT}"))
             && build_job.contains(&format!("name: {BOOTSTRAP_ARTIFACT}"))
-            && build_job.contains(REQUIRED_TCG_BUILD)
+            && build_job.contains(REQUIRED_QEMU_BUILD)
             && build_job.contains("uses: actions/upload-artifact@v7")
             && build_job.contains(&format!("name: {BUNDLE_ARTIFACT}")),
-        "the build runner must restore bootstrap state and publish the sealed bundle"
+        "the KVM build runner must restore bootstrap state and publish the sealed bundle"
     );
     assert!(
         smoke_job.contains("needs: no-kvm-build")
@@ -201,5 +209,12 @@ fn no_kvm_smokes_build_the_mvmctl_binary_they_execute() {
     assert!(
         script.contains(REQUIRED_LOCAL_VSOCK_DEVICE),
         "local smoke container must receive the host vhost-vsock device"
+    );
+    assert!(
+        !script.contains(FORBIDDEN_LOCAL_KVM_DEVICE)
+            && script.contains("--flake examples/exit_code")
+            && script.contains("--builder qemu")
+            && script.contains("--hypervisor qemu"),
+        "the local Apple Silicon witness must retain the full unaccelerated build lifecycle"
     );
 }
