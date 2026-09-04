@@ -4,6 +4,17 @@ Last updated: 2026-09-03
 
 ## In progress
 
+- [ ] **Execute the documented README surface.**
+      `specs/plans/2026-09-03-readme-execution-coverage.md`.
+      The README register now executes 34 of 35 examples, retains one truthful
+      unsupported-flow exemption, and no longer lets one enum-valued CLI mode
+      witness another. Live exercise fixed peer-only outbound initialization;
+      builder backends now declare capabilities, automatic selection may fall
+      back when one declines, and missing builder payloads return a normal
+      error. Exhaustive help checks use the production Clap arm in-process with
+      binary probes retained. Hermetic BDD is green; live documented-surface
+      evidence and merge delivery remain.
+
 - [ ] **Persistent host-directory snapshots.**
       `specs/plans/2026-09-02-retire-dirshare.md`.
       Ad-hoc `--host <directory>` registration now creates a private ext4
@@ -40,7 +51,10 @@ Last updated: 2026-09-03
       hard error naming both contract versions and the rebuild command,
       replacing the recurring silent cross-profile fallback that surfaced as
       an "unknown field" spawn failure. A `HvfSupervisorConfig` shape pin
-      forces the contract version to bump with the schema. Focused
+      forces the contract version to bump with the schema. A freshly rebuilt
+      helper gets one retry only when its first bounded probe times out,
+      covering the observed macOS first-launch transient without accepting a
+      malformed or wrong-version helper. Focused
       regressions, affected crate suites, zero-warning Clippy, and Linux/BDD
       gated compilation are green; merged via #3132.
 

@@ -10,6 +10,18 @@
 
 ## In progress
 
+- [ ] **Execute the documented README surface.**
+      `specs/plans/2026-09-03-readme-execution-coverage.md`.
+      Thirty-four of thirty-five registered examples now execute through a
+      hermetic or live witness; the sole exemption explicitly records an
+      unsupported dependency flow instead of claiming adjacent coverage.
+      Exercising the examples fixed peer-only outbound setup, builder
+      capability/fallback reporting, and enum-valued witness matching. The
+      exhaustive help checks now render the real Clap dispatch arm in-process
+      while keeping binary probes. Hermetic BDD and focused touched-crate
+      suites are green; the live documented-surface release gate and merge
+      delivery remain.
+
 - [ ] **Workload output affordance — durable writable inline disks.**
       `specs/plans/2026-09-02-workload-output-affordance.md`.
       Foreground transient runs with writable sized disks now issue the
@@ -49,7 +61,9 @@
       anything else is a hard error naming both versions and the exact
       rebuild command. A shape pin on `HvfSupervisorConfig` forces the
       contract version to move with the schema. Focused resolver, probe, and
-      spawn-path regressions, the mvm-vmm / mvm-backends / mvm-hostd /
+      spawn-path regressions, including a follow-up for a freshly rebuilt
+      macOS helper whose first probe transiently times out, the mvm-vmm /
+      mvm-backends / mvm-hostd /
       mvm-runtime suites, zero-warning Clippy, and Linux/BDD gated
       compilation are green; merged via #3132.
 
