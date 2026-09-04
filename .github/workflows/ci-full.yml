@@ -513,7 +513,7 @@ jobs:
           # would make the live gate validate stale mvm-host-vm-init behavior.
           MVM_EMBED_NO_CACHE: 1
         run: |
-          cargo build --release -p mvmctl --features user
+          cargo build --release -p mvmctl --features user,embed-host-bins
           cp target/release/mvmctl /tmp/mvmctl-source-under-test
           cargo build --release -p mvmctl --features user,release-artifact-bootstrap,release-channel
           mkdir -p ci-artifacts/no-kvm-binaries

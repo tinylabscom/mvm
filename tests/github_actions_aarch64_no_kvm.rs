@@ -12,7 +12,8 @@ use std::fs;
 
 const EXPECTED_RELEASE_HELPER_BUILD: &str =
     "cargo build --release -p mvmctl --features user,release-artifact-bootstrap,release-channel";
-const EXPECTED_SOURCE_BUILD: &str = "cargo build --release -p mvmctl --features user";
+const EXPECTED_SOURCE_BUILD: &str =
+    "cargo build --release -p mvmctl --features user,embed-host-bins";
 const COPY_SOURCE_BINARY: &str = "cp target/release/mvmctl /tmp/mvmctl-source-under-test";
 const LIBRARY_ONLY_BUILD: &str =
     "cargo build --release -p mvm-cli --features release-artifact-bootstrap";

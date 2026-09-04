@@ -981,7 +981,9 @@ mod tests {
             .find("/tmp/mvmctl-source-under-test machine run")
             .expect("the live workload must run through the source-matched mvmctl");
         assert!(prepare.contains("MVM_EMBED_NO_CACHE: 1"));
-        assert!(prepare.contains("cargo build --release -p mvmctl --features user"));
+        assert!(
+            prepare.contains("cargo build --release -p mvmctl --features user,embed-host-bins")
+        );
         assert!(prepare.contains(
             "cargo build --release -p mvmctl --features \
              user,release-artifact-bootstrap,release-channel"
