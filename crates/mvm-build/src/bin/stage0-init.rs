@@ -1022,9 +1022,31 @@ mod linux {
             Err(e) => eprintln!("stage0-init: nix --version failed to spawn: {e}"),
         }
 
-        // Optional host-dropped build config (single-attr / kernel-only
-        // modes); absent it, build the full image.
-        let conf = read_build_conf("/out/stage0-build.conf");
+        // The host's build config: which attr to build, and in which output
+        // mode. It rides the input disk under the disk transport; the QEMU path
+        // still shares a directory and drops it in `/out`.
+        //
+        // Not optional in practice, whatever the fallbacks below suggest: the
+        // host writes one for every Stage 0 build. When the disk transport
+        // stopped carrying it, those fallbacks turned a delivery failure into a
+        // *different build* — `default`/`image` instead of the workload kernel
+        // that was asked for — which surfaced only as a missing
+        // `mvm-kernel.config` on the host five minutes later. Say so here
+        // instead, where the reason is.
+        let staged_conf = format!("{STAGE0_INPUT_STAGE}/conf/stage0-build.conf");
+        let conf_path = if Path::new(&staged_conf).exists() {
+            staged_conf
+        } else {
+            "/out/stage0-build.conf".to_string()
+        };
+        let conf = read_build_conf(&conf_path);
+        if conf.is_empty() {
+            eprintln!(
+                "stage0-init: no build config at {conf_path}; \
+                 building the default image, which is the wrong artifact for \
+                 any host that asked for something else"
+            );
+        }
         let attr = conf
             .get("MVM_STAGE0_BUILD_ATTR")
             .cloned()

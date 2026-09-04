@@ -833,6 +833,17 @@ impl LibkrunBuilderVm {
     /// Private impl behind `<Self as BuilderVm>::run_stage0`, which
     /// adapts the backend-agnostic `(root_dir, entry)` trait signature
     /// to libkrun's `BuilderVmImage`.
+    /// The trees Stage 0 must put on its input disk.
+    ///
+    /// Named rather than inlined so the set is assertable. `conf` is the one
+    /// that went missing: the host writes `stage0-build.conf` into the staging
+    /// directory, which *was* the guest's `/out` under the directory-share
+    /// transport, so dropping it there used to deliver it. With the output on a
+    /// block device it does not, and the guest fell back to building the
+    /// default image instead of whatever was asked for.
+    #[cfg(test)]
+    const STAGE0_INPUT_TREE_NAMES: &'static [&'static str] = &["work", "mvm-bins", "conf"];
+
     fn run_stage0_impl(
         &self,
         image: BuilderVmImage,
@@ -926,6 +937,19 @@ impl LibkrunBuilderVm {
         };
         let root_disk = materialize_stage0_root_disk(root_dir, &vm_state_dir)?;
         let work_staging = stage_filtered_work_input(workspace_dir)?;
+        // `stage0-build.conf` is an *input*: it names the attr to build and the
+        // output mode. The host writes it into the staging directory, which
+        // under the old directory-share transport *was* the guest's `/out`, so
+        // dropping it there delivered it. With the output on a block device
+        // that path is gone — `/out` is the output disk, and Stage 0 setup
+        // clears it — so the conf has to ride the input disk like every other
+        // input.
+        //
+        // Without it the guest fell back to its documented defaults, `default`
+        // and `image`, and quietly built the builder-VM image when the host had
+        // asked for a workload kernel. The only visible symptom was the host
+        // failing five minutes later on a missing `mvm-kernel.config`, which is
+        // emitted only in kernel mode.
         let (input_disk, output_disk) = prepare_builder_transport_disks(
             &vm_state_dir,
             &[
@@ -936,6 +960,10 @@ impl LibkrunBuilderVm {
                 InputTree {
                     name: "mvm-bins",
                     src: host_bin_dir,
+                },
+                InputTree {
+                    name: "conf",
+                    src: artifact_out,
                 },
             ],
             self.closure_nar.as_deref(),
@@ -4609,6 +4637,26 @@ impl PersistentVmHandle {
 
 #[cfg(test)]
 mod tests {
+    /// Stage 0 carries its build config as an *input*.
+    ///
+    /// Without `conf` on the input disk the guest reads no
+    /// `MVM_STAGE0_OUTPUT_MODE`, falls back to `image`, and builds the
+    /// builder-VM image while the host waits for a workload kernel. The host
+    /// then fails on a missing `mvm-kernel.config` — five minutes later, naming
+    /// a file rather than the delivery that did not happen.
+    #[test]
+    fn stage0_puts_its_build_config_on_the_input_disk() {
+        assert!(
+            LibkrunBuilderVm::STAGE0_INPUT_TREE_NAMES.contains(&"conf"),
+            "stage0-build.conf must ride the input disk; the guest cannot read \
+             the host's staging directory once the output is a block device"
+        );
+        assert!(
+            LibkrunBuilderVm::STAGE0_INPUT_TREE_NAMES.contains(&"work"),
+            "the flake source is what Stage 0 builds from"
+        );
+    }
+
     use super::*;
     use crate::builder_vm_bootstrap::{
         BUILDER_VM_BOOTSTRAP_BIN_ENV, resolve_builder_vm_bootstrap_bin,
