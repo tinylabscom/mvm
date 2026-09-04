@@ -169,11 +169,9 @@ pub struct WarmClaimMarks {
 
 /// The sub-phases a launch can time below the coarse buckets above.
 ///
-/// The three mount sub-phases have no producer on the live-share `--mount`
-/// path, which attaches a host directory over virtio-fs and materializes
-/// nothing; a content-addressed mount image is what records them. They are
-/// declared here because the prepared-cold lane gate has to be able to see
-/// mount materialization to refuse it.
+/// The mount sub-phases measure the content-addressed block-image path used by
+/// `--mount`: hashing the source tree, checking the shared cache, and (only on
+/// a miss) materializing a new ext4 image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubPhase {
     MountFingerprint,

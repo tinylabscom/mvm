@@ -61,11 +61,10 @@ host filesystem at all.
   "`--mount '{spec}'` requests rw, but transient live shares are read-only". So
   the only property a materialized image loses is *host edits becoming visible
   mid-run*, which a read-only mount consumed at boot barely has.
-- **The timing surface already has slots for the replacement.**
+- **The timing surface already had slots for the replacement.**
   `mount_fingerprint`, `mount_cache_lookup` and `mount_materialize` are declared
-  in `SubPhase`, rendered by the report, and have **no producer**. The comment
-  says they exist because "a content-addressed mount image is what records
-  them". Someone designed this and did not build it.
+  in `SubPhase` and rendered by the report. The 2026-09-03 follow-up wired them
+  to the shared content-addressed mount-image cache.
 
 ## Stages
 

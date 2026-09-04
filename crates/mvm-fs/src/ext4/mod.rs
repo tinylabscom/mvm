@@ -34,6 +34,7 @@
 //! ext4 reader (`am-fs-ext4`, a dev-only test oracle) and, in CI, by mounting
 //! it on Linux (both a single-group and a multi-group image).
 
+mod host_file;
 pub mod mkfs;
 pub mod verity;
 
@@ -102,6 +103,10 @@ pub enum Ext4Error {
     /// external xattr block is not implemented). Treated as a capacity limit so
     /// the run path falls back to the builder VM, which preserves them.
     XattrTooLarge { ino: u32 },
+    /// A deferred host file no longer matches the content digest captured
+    /// during the verified walk, so publishing the image under that identity
+    /// would poison a content-addressed cache.
+    HostFileChanged(PathBuf),
 }
 
 impl std::fmt::Display for Ext4Error {
@@ -130,6 +135,11 @@ impl std::fmt::Display for Ext4Error {
                 f,
                 "inode {ino}'s extended attributes exceed the in-inode xattr area \
                  (an external xattr block is not implemented)"
+            ),
+            Ext4Error::HostFileChanged(path) => write!(
+                f,
+                "host file {} changed while its image was being emitted",
+                path.display()
             ),
         }
     }
@@ -213,6 +223,9 @@ pub enum Node {
         mode: u16,
         source: PathBuf,
         len: u64,
+        /// Digest captured by a verified deferred walk. When present, the
+        /// emitter refuses a short, long, unreadable, or content-changed file.
+        expected_sha256: Option<[u8; 32]>,
         xattrs: Vec<Xattr>,
     },
     Symlink {
@@ -411,7 +424,11 @@ struct ChildEdge {
 /// buffer at emit time instead of the file's whole size at walk time.
 enum Content {
     Inline(Vec<u8>),
-    FromHost { source: PathBuf, len: usize },
+    FromHost {
+        source: PathBuf,
+        len: usize,
+        expected_sha256: Option<[u8; 32]>,
+    },
 }
 
 struct Planned {
@@ -714,13 +731,18 @@ where
                 )
             }
             Node::FileFromHost {
-                mode, source, len, ..
+                mode,
+                source,
+                len,
+                expected_sha256,
+                ..
             } => (
                 Kind::File,
                 S_IFREG | (mode & 0o7777),
                 Content::FromHost {
                     source,
                     len: len as usize,
+                    expected_sha256,
                 },
                 None,
                 len,
@@ -907,7 +929,7 @@ where
     img.emit_chunks(&mut emit).map_err(EmitImageError::Emit)?;
     for p in &planned {
         if p.kind == Kind::File {
-            emit_file_blocks(&mut emit, &img, p).map_err(EmitImageError::Emit)?;
+            emit_file_blocks(&mut emit, &img, p)?;
         }
     }
     Ok(img.total_bytes())
@@ -1296,7 +1318,7 @@ fn put_dirent(img: &mut Image, off: usize, ino: u32, name: &str, ft: u8, last: b
     rec_len
 }
 
-fn emit_file_blocks<E, F>(emit: &mut F, img: &Image, p: &Planned) -> Result<(), E>
+fn emit_file_blocks<E, F>(emit: &mut F, img: &Image, p: &Planned) -> Result<(), EmitImageError<E>>
 where
     F: FnMut(u64, &[u8]) -> Result<(), E>,
 {
@@ -1309,99 +1331,24 @@ where
                 }
                 let span = ext.len as usize * BLOCK_SIZE_USIZE;
                 let end = (written + span).min(bytes.len());
-                emit(img.block_off(ext.phys) as u64, &bytes[written..end])?;
+                emit(img.block_off(ext.phys) as u64, &bytes[written..end])
+                    .map_err(EmitImageError::Emit)?;
                 written += span;
             }
             Ok(())
         }
-        Content::FromHost { source, len } => emit_host_file_blocks(emit, img, p, source, *len),
+        Content::FromHost {
+            source,
+            len,
+            expected_sha256: Some(expected_sha256),
+        } => host_file::emit_verified_host_file_blocks(emit, img, p, source, *len, expected_sha256),
+        Content::FromHost {
+            source,
+            len,
+            expected_sha256: None,
+        } => host_file::emit_host_file_blocks(emit, img, p, source, *len)
+            .map_err(EmitImageError::Emit),
     }
-}
-
-/// Stream one host file's bytes into the extents planned for it.
-///
-/// The layout is already committed by the time this runs — inode numbers,
-/// extents and the image's total size were all fixed from the size the walk
-/// stat'd. So this emits exactly `len` bytes whatever the file says now:
-///
-/// * **Short read** (the file shrank, or was truncated mid-walk): the shortfall
-///   is left as-is. Every block the layout allocated is inside the image and
-///   the emit callback leaves untouched ranges as holes, which read back as
-///   zeros — the same thing a sparse region gives. Emitting fewer bytes than
-///   planned is safe; emitting them at the wrong offset would not be, which is
-///   why the extent cursor advances by the planned span rather than by what was
-///   read.
-/// * **Long read** (the file grew): the extra is dropped. The inode's `i_size`
-///   is the planned length, so bytes past it would be unreachable through the
-///   filesystem and would corrupt whatever the allocator put in the next block.
-///
-/// Neither is silent corruption of *someone else's* data, which is the property
-/// that matters: a live tree that changes under a snapshot yields a file that
-/// is some prefix of one of its versions, and never another file's bytes.
-fn emit_host_file_blocks<E, F>(
-    emit: &mut F,
-    img: &Image,
-    p: &Planned,
-    source: &std::path::Path,
-    len: usize,
-) -> Result<(), E>
-where
-    F: FnMut(u64, &[u8]) -> Result<(), E>,
-{
-    // A file that cannot be reopened leaves its extents as holes rather than
-    // failing the build. The walk already accepted it; a tree that changes
-    // between walk and emit is the case this whole path exists to tolerate,
-    // and `VanishedNodePolicy` makes the same choice one stage earlier.
-    let Ok(file) = std::fs::File::open(source) else {
-        return Ok(());
-    };
-    let mut reader = std::io::BufReader::new(file);
-
-    let mut buf = vec![0u8; BLOCK_SIZE_USIZE];
-    let mut written = 0usize;
-    for ext in &p.extents {
-        if written >= len {
-            break;
-        }
-        let span = ext.len as usize * BLOCK_SIZE_USIZE;
-        let mut offset_in_extent = 0usize;
-        while offset_in_extent < span && written + offset_in_extent < len {
-            let want = buf
-                .len()
-                .min(span - offset_in_extent)
-                .min(len - written - offset_in_extent);
-            let got = read_up_to(&mut reader, &mut buf[..want]);
-            if got == 0 {
-                // Short file: stop. The rest of the layout stays a hole.
-                return Ok(());
-            }
-            emit(
-                img.block_off(ext.phys) as u64 + offset_in_extent as u64,
-                &buf[..got],
-            )?;
-            offset_in_extent += got;
-        }
-        written += span;
-    }
-    Ok(())
-}
-
-/// Fill `buf` as far as the reader allows, returning how many bytes landed.
-///
-/// `Read::read` may return short without being at EOF, and a partial block
-/// emitted as if it were a whole one would leave a gap in the middle of a
-/// file. Looping here keeps the emit offsets contiguous.
-fn read_up_to<R: std::io::Read>(reader: &mut R, buf: &mut [u8]) -> usize {
-    let mut filled = 0usize;
-    while filled < buf.len() {
-        match reader.read(&mut buf[filled..]) {
-            Ok(0) => break,
-            Ok(n) => filled += n,
-            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => break,
-        }
-    }
-    filled
 }
 
 // ── path helpers ────────────────────────────────────────────────────────────
