@@ -143,9 +143,9 @@ Feature: every README-documented CLI launch mode boots a real guest
     # the kernel cmdline, and the guest init fails closed when no egress client
     # resolves from the runtime overlay — so this scenario goes red first if the
     # overlay is not mounted.
-    When I launch "machine run --image alpine --allow-host github.com -- ping -c 1 github.com"
+    When I launch "machine run --image curlimages/curl:8.21.0 --allow-host example.com:443 -- curl -fsSL https://example.com"
     Then the launch succeeds
-    And the guest printed "1 received"
+    And the guest printed "Example Domain"
     And the guest control plane came up
 
   # The README's headline "install a dependency at boot" example combines
@@ -159,13 +159,9 @@ Feature: every README-documented CLI launch mode boots a real guest
   # package index would trade a launch regression for an upstream outage.
   @live
   Scenario: --allow-host and --mount together on one launch
-    # Three probes, and `ping` exits 0 when any of them is answered — so the
-    # exit code is the assertion and no output parsing is needed. One packet is
-    # enough to demonstrate egress and not enough to gate a release on: this
-    # went red once here on a dropped ICMP echo while the same command passed
-    # immediately afterwards. The claim is "the guest reached an admitted
-    # host", not "no packet was ever lost".
-    When I launch "machine run --image alpine --allow-host github.com --mount ./examples/python/hello-app:/work -- sh -c 'ls /work/README.md && ping -c 3 github.com >/dev/null && echo egress-ok'"
+    # HTTPS is the witness because hosted networks may drop ICMP even when TCP
+    # egress is healthy. The exit code proves both operations completed.
+    When I launch "machine run --image curlimages/curl:8.21.0 --allow-host example.com:443 --mount ./examples/python/hello-app:/work -- sh -c 'ls /work/README.md && curl -fsSL https://example.com >/dev/null && echo egress-ok'"
     Then the launch succeeds
     And the guest printed "/work/README.md"
     And the guest printed "egress-ok"
@@ -175,7 +171,7 @@ Feature: every README-documented CLI launch mode boots a real guest
   # and `--memory` were covered without egress, and egress without sizing.
   @live
   Scenario: --cpus, --memory and --allow-host on one launch
-    When I launch "machine run --image alpine --cpus 2 --memory 512M --allow-host github.com -- sh -c 'echo cpus=$(nproc) && ping -c 3 github.com >/dev/null && echo egress-ok'"
+    When I launch "machine run --image curlimages/curl:8.21.0 --cpus 2 --memory 512M --allow-host example.com:443 -- sh -c 'echo cpus=$(nproc) && curl -fsSL https://example.com >/dev/null && echo egress-ok'"
     Then the launch succeeds
     And the guest printed "cpus=2"
     And the guest printed "egress-ok"
@@ -186,7 +182,7 @@ Feature: every README-documented CLI launch mode boots a real guest
   # log statement would only ever have reproduced for a user.
   @live
   Scenario: -vvv does not disturb a launch that admits a host
-    When I launch "machine run --image alpine -vvv --allow-host github.com -- sh -c 'ping -c 3 github.com >/dev/null && echo egress-ok'"
+    When I launch "machine run --image curlimages/curl:8.21.0 -vvv --allow-host example.com:443 -- sh -c 'curl -fsSL https://example.com >/dev/null && echo egress-ok'"
     Then the launch succeeds
     And the guest printed "egress-ok"
     And the guest control plane came up

@@ -334,19 +334,60 @@ fn linux_documented_surface_installs_virtiofsd_for_stage0_shares() {
 }
 
 #[test]
-fn linux_documented_surface_grants_unprivileged_icmp_to_the_runner_group() {
+fn linux_documented_surface_does_not_depend_on_host_icmp() {
     let workflow = extended_ci();
     let linux = job_block(&workflow, "e2e-docs-linux");
 
     assert!(
-        linux.contains("sudo sysctl -w net.ipv4.ping_group_range=\"0 2147483647\"")
-            && linux.contains(
-                "read -r ping_gid_min ping_gid_max < <(sysctl -n net.ipv4.ping_group_range)"
-            )
-            && linux.contains("test \"$ping_gid_min\" = \"0\"")
-            && linux.contains("test \"$ping_gid_max\" = \"2147483647\""),
-        "the documented ping witnesses need the runner group admitted to unprivileged ICMP sockets"
+        !linux.contains("ping_group_range"),
+        "positive documented egress witnesses use HTTPS because hosted networks may drop ICMP"
     );
+}
+
+#[test]
+fn documented_surface_installs_a_deterministic_encrypted_backing_fixture() {
+    let script = documented_surface_script();
+
+    assert!(
+        script.contains("provision_encrypted_backing_probes()")
+            && script.contains("/dev/mapper/mvm-e2e-crypt")
+            && script.contains("' crypt\"")
+            && script.contains("'FileVault: Yes'")
+            && script.contains("export PATH=\"$probe_bin:$PATH\""),
+        "live volume and mount-cache scenarios need a declared encrypted-backing fixture; the hosted runner's root disk is not one"
+    );
+}
+
+#[test]
+fn documented_surface_keeps_its_summary_log_in_the_private_e2e_home() {
+    let script = documented_surface_script();
+
+    assert!(
+        script.contains("SUITE_LOG=\"$(mktemp \"$E2E_HOME/.e2e-suite.XXXXXX\")\""),
+        "unrelated temporary-directory cleanup must not erase the suite summary before it is verified"
+    );
+}
+
+#[test]
+fn positive_live_egress_witnesses_use_https_instead_of_external_icmp() {
+    let launch = fs::read_to_string("features/suites/s31_launch_e2e/cli_launch_modes.feature")
+        .expect("read launch-mode feature");
+    let transient =
+        fs::read_to_string("features/suites/s5_lifecycle/transient_sandbox_boot.feature")
+            .expect("read transient-launch feature");
+
+    for feature in [&launch, &transient] {
+        assert!(
+            !feature.lines().any(|line| {
+                line.contains("--allow-host")
+                    && line.contains(" ping ")
+                    && !line.contains("default-deny")
+            }),
+            "a positive egress gate cannot depend on ICMP replies from the hosted runner network"
+        );
+    }
+    assert!(launch.contains("curlimages/curl:8.21.0"));
+    assert!(transient.contains("curlimages/curl:8.21.0"));
 }
 
 #[test]

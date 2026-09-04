@@ -1209,6 +1209,15 @@ mod linux {
                 .find(|p| p.is_file())
                 .ok_or_else(|| format!("no kernel in {}", out.display()))?;
             copy_deref(&kernel, &out_root.join("vmlinux"))?;
+            // x86_64's kernel package carries two intentionally different
+            // loader formats: Firecracker consumes the uncompressed ELF while
+            // QEMU's Linux boot protocol consumes bzImage. Keep the second
+            // format when a kernel-only build exposes it; renaming one format
+            // over the other makes one of those backends fail before init.
+            let bzimage = out.join("bzImage");
+            if mode == "kernel" && bzimage.is_file() {
+                copy_deref(&bzimage, &out_root.join("bzImage"))?;
+            }
         }
         if mode != "kernel" {
             let rootfs = out.join("rootfs.ext4");
@@ -1756,6 +1765,29 @@ mod linux {
             assert_eq!(
                 std::fs::read(copied.join("manifest.json")).expect("read copied manifest"),
                 std::fs::read(out.join("manifest.json")).expect("read source manifest")
+            );
+        }
+
+        #[test]
+        fn copy_artifacts_preserves_both_x86_kernel_formats() {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let out = temp.path().join("kernel-out");
+            let copied = temp.path().join("copied");
+            std::fs::create_dir_all(&out).expect("create out dir");
+            std::fs::create_dir_all(&copied).expect("create copied dir");
+            std::fs::write(out.join("vmlinux"), b"elf-kernel").expect("write ELF kernel");
+            std::fs::write(out.join("bzImage"), b"boot-protocol-kernel")
+                .expect("write bzImage kernel");
+
+            copy_artifacts_into(&out, "kernel", &copied).expect("copy kernel outputs");
+
+            assert_eq!(
+                std::fs::read(copied.join("vmlinux")).expect("read copied ELF kernel"),
+                b"elf-kernel"
+            );
+            assert_eq!(
+                std::fs::read(copied.join("bzImage")).expect("read copied bzImage kernel"),
+                b"boot-protocol-kernel"
             );
         }
 

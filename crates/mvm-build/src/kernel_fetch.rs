@@ -85,7 +85,12 @@ impl VerifiedKernel {
 
 /// The digest sidecar beside `kernel`.
 pub fn kernel_digest_sidecar(kernel: &Path) -> PathBuf {
-    kernel.with_file_name(KERNEL_DIGEST_SIDECAR)
+    let Some(file_name) = kernel.file_name() else {
+        return kernel.with_file_name(KERNEL_DIGEST_SIDECAR);
+    };
+    let mut sidecar_name = file_name.to_os_string();
+    sidecar_name.push(".sha256");
+    kernel.with_file_name(sidecar_name)
 }
 
 /// Record the digest of a kernel just produced, beside it.
@@ -479,6 +484,19 @@ mod tests {
         let from_file = compute_file_sha256(f.path()).unwrap();
         let from_mem = compute_artifact_hash(bytes);
         assert_eq!(from_file, from_mem, "file and in-memory sha256 must agree");
+    }
+
+    #[test]
+    fn digest_sidecars_are_named_for_each_kernel_format() {
+        let directory = Path::new("/cache/kernels/x86_64/workload");
+        assert_eq!(
+            kernel_digest_sidecar(&directory.join("vmlinux")),
+            directory.join("vmlinux.sha256")
+        );
+        assert_eq!(
+            kernel_digest_sidecar(&directory.join("bzImage")),
+            directory.join("bzImage.sha256")
+        );
     }
 
     /// A cached kernel is only served when its recorded digest matches its

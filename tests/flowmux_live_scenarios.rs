@@ -26,7 +26,7 @@ fn live_https_egress_uses_a_connect_capable_client() {
 
     assert_eq!(
         commands.len(),
-        7,
+        9,
         "the guarded HTTPS live-command set drifted"
     );
     for (feature, command) in commands {

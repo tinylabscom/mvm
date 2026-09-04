@@ -942,11 +942,36 @@ mod tests {
         );
         assert!(
             build.contains("image boot update --tag boot-image/v0.1.3 --force")
-                && build.contains(".mvm-ci/cache/kernels/x86_64/workload/vmlinux")
+                && bootstrap.contains("mv nix/images/builder-vm.hidden nix/images/builder-vm")
+                && bootstrap.contains("sudo chmod 0666 /dev/kvm")
+                && bootstrap.contains("sudo chmod a+r")
+                && bootstrap.contains("/boot/vmlinuz-$(uname -r)")
+                && bootstrap.contains("/boot/initrd.img-$(uname -r)")
+                && bootstrap.contains("kernel build --which workload --source compile -v")
+                && build.contains(".mvm-ci/cache/kernels/x86_64/workload/bzImage")
+                && build.contains("bzImage.sha256")
                 && build.contains("write /tmp/exit-code-entrypoint /etc/mvm/entrypoint")
                 && build.contains("veritysetup format")
                 && build.contains("bundle export \"$slot_hash\""),
             "bundle preparation must combine verified release rootfs bytes with source-matched launch artifacts and exporter"
+        );
+        let restore_source_flake = bootstrap
+            .find("mv nix/images/builder-vm.hidden nix/images/builder-vm")
+            .expect("the source builder flake must be restored after published bootstrap");
+        let source_kernel_build = bootstrap
+            .find("kernel build --which workload --source compile -v")
+            .expect("the source QEMU kernel must be built");
+        let restore_kvm = bootstrap
+            .find("sudo chmod 0666 /dev/kvm")
+            .expect("source artifact compilation must restore KVM acceleration");
+        let grant_boot_read = bootstrap
+            .find("sudo chmod a+r")
+            .expect("source artifact compilation must make the host boot inputs readable");
+        assert!(
+            restore_source_flake < restore_kvm
+                && restore_kvm < grant_boot_read
+                && grant_boot_read < source_kernel_build,
+            "the source builder flake, KVM acceleration, and readable boot inputs must be restored before source kernel compilation"
         );
         let deny_kvm_position = smoke
             .find(deny_kvm)
@@ -968,7 +993,10 @@ mod tests {
             .find("/tmp/mvmctl-source-under-test machine run")
             .expect("the live workload must run through the source-matched mvmctl");
         assert!(prepare.contains("MVM_EMBED_NO_CACHE: 1"));
-        assert!(prepare.contains("cargo build --release -p mvmctl --features user"));
+        assert!(prepare.contains("timeout-minutes: 45"));
+        assert!(
+            prepare.contains("cargo build --release -p mvmctl --features user,embed-host-bins")
+        );
         assert!(prepare.contains(
             "cargo build --release -p mvmctl --features \
              user,release-artifact-bootstrap,release-channel"

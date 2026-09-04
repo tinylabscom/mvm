@@ -12,7 +12,8 @@ use std::fs;
 
 const EXPECTED_RELEASE_HELPER_BUILD: &str =
     "cargo build --release -p mvmctl --features user,release-artifact-bootstrap,release-channel";
-const EXPECTED_SOURCE_BUILD: &str = "cargo build --release -p mvmctl --features user";
+const EXPECTED_SOURCE_BUILD: &str =
+    "cargo build --release -p mvmctl --features user,embed-host-bins";
 const COPY_SOURCE_BINARY: &str = "cp target/release/mvmctl /tmp/mvmctl-source-under-test";
 const LIBRARY_ONLY_BUILD: &str =
     "cargo build --release -p mvm-cli --features release-artifact-bootstrap";
@@ -20,6 +21,9 @@ const REQUIRED_VIRTIOFS_PACKAGE: &str = "virtiofsd";
 const REQUIRED_VIRTIO_ROM_PACKAGE: &str = "ipxe-qemu";
 const REQUIRED_CI_VSOCK_OWNERSHIP: &str = "sudo chown \"$USER\" /dev/vhost-vsock";
 const REQUIRED_KVM_DENIAL: &str = "sudo chmod 000 /dev/kvm";
+const REQUIRED_KVM_RESTORE: &str = "sudo chmod 0666 /dev/kvm";
+const REQUIRED_STAGE0_BOOT_READ: &str = "sudo chmod a+r";
+const REQUIRED_QEMU_BRIDGE_OVERRIDE: &str = "MVM_QEMU_BRIDGE_PATH: /tmp/mvmctl-source-under-test";
 const REQUIRED_LOCAL_VSOCK_DEVICE: &str = "--device /dev/vhost-vsock:/dev/vhost-vsock";
 const FORBIDDEN_LOCAL_KVM_DEVICE: &str = "--device /dev/kvm:/dev/kvm";
 const REQUIRED_BUILDER_DOWNLOAD: &str =
@@ -30,7 +34,11 @@ const REQUIRED_QEMU_BUILD: &str =
     "/tmp/mvmctl-source-under-test --builder qemu machine build --flake examples/exit_code";
 const REQUIRED_BOOT_IMAGE_UPDATE: &str =
     "/tmp/mvmctl-source-under-test image boot update --tag boot-image/v0.1.3 --force";
-const REQUIRED_SOURCE_KERNEL: &str = ".mvm-ci/cache/kernels/x86_64/workload/vmlinux";
+const REQUIRED_SOURCE_KERNEL: &str = ".mvm-ci/cache/kernels/x86_64/workload/bzImage";
+const REQUIRED_SOURCE_FLAKE_RESTORE: &str = "mv nix/images/builder-vm.hidden nix/images/builder-vm";
+const REQUIRED_SOURCE_KERNEL_BUILD: &str =
+    "/tmp/mvmctl-source-under-test kernel build --which workload --source compile -v";
+const REQUIRED_SOURCE_KERNEL_VERIFY: &str = "bzImage.sha256";
 const REQUIRED_ENTRYPOINT_PATCH: &str = "write /tmp/exit-code-entrypoint /etc/mvm/entrypoint";
 const REQUIRED_VERITY_SEAL: &str = "veritysetup format";
 const REQUIRED_BUNDLE_EXPORT: &str = "/tmp/mvmctl-source-under-test bundle export \"$slot_hash\"";
@@ -40,6 +48,7 @@ const FORBIDDEN_ENTRYPOINT_OVERRIDE: &str = "-- /bin/true";
 const BINARY_ARTIFACT: &str = "no-kvm-binaries";
 const BOOTSTRAP_ARTIFACT: &str = "no-kvm-bootstrap-cache";
 const BUNDLE_ARTIFACT: &str = "no-kvm-bundle";
+const REQUIRED_PREPARE_TIMEOUT: &str = "timeout-minutes: 45";
 
 #[test]
 fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
@@ -164,6 +173,10 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
         "the exact hosted smoke binaries must be compiled for the x86_64 runner that executes them"
     );
     assert!(
+        prepare.contains(REQUIRED_PREPARE_TIMEOUT),
+        "the embedded-helper cross-build must retain its measured hosted-runner budget"
+    );
+    assert!(
         prepare.contains("uses: actions/upload-artifact@v7")
             && prepare.contains(&format!("name: {BINARY_ARTIFACT}")),
         "the prepare job must publish the exact source and release-helper binaries"
@@ -171,9 +184,35 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
     assert!(
         bootstrap_job.contains("needs: no-kvm-prepare")
             && bootstrap_job.contains(&format!("name: {BINARY_ARTIFACT}"))
+            && bootstrap_job.contains(REQUIRED_SOURCE_FLAKE_RESTORE)
+            && bootstrap_job.contains(REQUIRED_SOURCE_KERNEL_BUILD)
             && bootstrap_job.contains("uses: actions/upload-artifact@v7")
             && bootstrap_job.contains(&format!("name: {BOOTSTRAP_ARTIFACT}")),
         "bootstrap must use exact binaries and publish reusable launch artifacts"
+    );
+    let bootstrap = bootstrap_job
+        .find("Bootstrap source-matched launch artifacts")
+        .expect("the bootstrap runner must bootstrap source-matched launch artifacts");
+    let restore_source_flake = bootstrap_job
+        .find(REQUIRED_SOURCE_FLAKE_RESTORE)
+        .expect("the bootstrap runner must restore the source flake after the download witness");
+    let source_kernel_build = bootstrap_job
+        .find(REQUIRED_SOURCE_KERNEL_BUILD)
+        .expect("the bootstrap runner must source-build the QEMU kernel");
+    let restore_kvm = bootstrap_job
+        .find(REQUIRED_KVM_RESTORE)
+        .expect("artifact compilation must restore KVM for the project builder VM");
+    let grant_boot_read = bootstrap_job
+        .find(REQUIRED_STAGE0_BOOT_READ)
+        .expect("the project builder VM must be able to read the host boot inputs");
+    assert!(bootstrap_job.contains("/boot/vmlinuz-$(uname -r)"));
+    assert!(bootstrap_job.contains("/boot/initrd.img-$(uname -r)"));
+    assert!(
+        bootstrap < restore_source_flake
+            && restore_source_flake < restore_kvm
+            && restore_kvm < grant_boot_read
+            && grant_boot_read < source_kernel_build,
+        "the source flake, KVM acceleration, and readable boot inputs must be restored after the no-KVM bootstrap proof and before source kernel compilation"
     );
     assert!(
         build_job.contains("needs: no-kvm-bootstrap")
@@ -181,6 +220,7 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
             && build_job.contains(&format!("name: {BOOTSTRAP_ARTIFACT}"))
             && build_job.contains(REQUIRED_BOOT_IMAGE_UPDATE)
             && build_job.contains(REQUIRED_SOURCE_KERNEL)
+            && build_job.contains(REQUIRED_SOURCE_KERNEL_VERIFY)
             && build_job.contains(REQUIRED_ENTRYPOINT_PATCH)
             && build_job.contains(REQUIRED_VERITY_SEAL)
             && build_job.contains(REQUIRED_BUNDLE_EXPORT)
@@ -192,9 +232,10 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
         smoke_job.contains("needs: no-kvm-build")
             && smoke_job.contains(&format!("name: {BOOTSTRAP_ARTIFACT}"))
             && smoke_job.contains(&format!("name: {BUNDLE_ARTIFACT}"))
+            && smoke_job.contains(REQUIRED_QEMU_BRIDGE_OVERRIDE)
             && smoke_job.contains("bundle install /tmp/no-kvm-bundle/exit-code-x86_64.mvmpkg")
             && smoke_job.contains("machine run"),
-        "the smoke runner must install and boot the bundle in its own runner window"
+        "the smoke runner must install and boot the bundle with the exact source binary as its QEMU bridge"
     );
     for job in [bootstrap_job, build_job, smoke_job] {
         assert!(
@@ -208,11 +249,11 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
     let install_zigbuild = bootstrap_job
         .find("uses: ./.github/actions/install-zigbuild")
         .expect("the bootstrap runner must install cargo-zigbuild");
-    let bootstrap = bootstrap_job
+    let bootstrap_toolchain = bootstrap_job
         .find("Bootstrap source-matched launch artifacts")
         .expect("the bootstrap runner must bootstrap source-matched launch artifacts");
     assert!(
-        install_rust < install_zigbuild && install_zigbuild < bootstrap,
+        install_rust < install_zigbuild && install_zigbuild < bootstrap_toolchain,
         "the live runner must install the guest cross-toolchain before bootstrap"
     );
     assert!(

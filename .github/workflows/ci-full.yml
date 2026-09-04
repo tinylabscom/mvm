@@ -485,7 +485,7 @@ jobs:
   no-kvm-prepare:
     name: Prepare hosted no-KVM smoke binaries
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 45
     env:
       CARGO_TERM_COLOR: always
     steps:
@@ -513,7 +513,7 @@ jobs:
           # would make the live gate validate stale mvm-host-vm-init behavior.
           MVM_EMBED_NO_CACHE: 1
         run: |
-          cargo build --release -p mvmctl --features user
+          cargo build --release -p mvmctl --features user,embed-host-bins
           cp target/release/mvmctl /tmp/mvmctl-source-under-test
           cargo build --release -p mvmctl --features user,release-artifact-bootstrap,release-channel
           mkdir -p ci-artifacts/no-kvm-binaries
@@ -599,6 +599,29 @@ jobs:
           MVM_KERNEL_SOURCE: auto
         run: /tmp/mvmctl-source-under-test --builder qemu bootstrap --production -v
 
+      # The published workload asset is the uncompressed ELF required by
+      # Firecracker. Build the same pinned source once so Stage 0 can retain
+      # its sibling bzImage, which QEMU's x86 Linux boot protocol requires.
+      # Restore the source flake after proving the published-builder path;
+      # source compilation deliberately refuses to run without that checkout.
+      - name: Restore source builder VM flake
+        run: mv nix/images/builder-vm.hidden nix/images/builder-vm
+
+      # Artifact compilation is not the no-KVM launch witness. Re-enable KVM
+      # for the project builder VM; the independent smoke runner below denies
+      # KVM again before it boots the resulting bundle under QEMU TCG.
+      - name: Accelerate source artifact compilation with KVM
+        run: |
+          if [ -e /dev/kvm ]; then
+            sudo chmod 0666 /dev/kvm
+          fi
+          sudo chmod a+r \
+            "/boot/vmlinuz-$(uname -r)" \
+            "/boot/initrd.img-$(uname -r)"
+
+      - name: Build source QEMU-compatible workload kernel
+        run: /tmp/mvmctl-source-under-test kernel build --which workload --source compile -v
+
       # The published builder image is cheap to re-download and dominates the
       # cache size, so only transfer source-built launch artifacts. Compression
       # is disabled because these filesystem images are already compact and the
@@ -658,7 +681,11 @@ jobs:
           revision_dir="$MVM_HOME/templates/$slot_hash/artifacts/revisions/$revision_hash"
           release_image="$MVM_HOME/cache/default-microvm/prod"
           mkdir -p "$revision_dir"
-          cp .mvm-ci/cache/kernels/x86_64/workload/vmlinux "$revision_dir/vmlinux"
+          qemu_kernel=.mvm-ci/cache/kernels/x86_64/workload/bzImage
+          expected_kernel_sha=$(tr -d '[:space:]' < .mvm-ci/cache/kernels/x86_64/workload/bzImage.sha256)
+          actual_kernel_sha=$(sha256sum "$qemu_kernel" | cut -d' ' -f1)
+          test "$actual_kernel_sha" = "$expected_kernel_sha"
+          cp "$qemu_kernel" "$revision_dir/vmlinux"
           cp "$release_image/rootfs.ext4" "$revision_dir/rootfs.ext4"
           cp "$release_image/mvm-meta.json" "$revision_dir/mvm-meta.json"
 
@@ -746,6 +773,10 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       MVM_HOME: ${{ github.workspace }}/.mvm-ci
+      # The QEMU transport re-execs mvmctl as its per-VM vsock bridge. This
+      # witness intentionally installs the exact source binary under a unique
+      # name, so point helper resolution at those same tested bytes.
+      MVM_QEMU_BRIDGE_PATH: /tmp/mvmctl-source-under-test
     steps:
       - uses: actions/checkout@v6
 
