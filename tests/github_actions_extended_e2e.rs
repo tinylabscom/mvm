@@ -594,27 +594,15 @@ fn the_documented_surface_creates_its_mvm_home_private() {
     );
 }
 
-/// Every long hosted TCG phase must print its captured log however it dies.
+/// The hosted TCG boot must print its captured log however it dies.
 ///
-/// The boot is redirected wholesale to a file, and the tail used to sit inside
-/// the wrong-exit-code branch, so a run killed before reaching that branch
-/// printed nothing at all: the job reported `exit code 143` over an empty step
-/// with no way to tell what the guest had been doing. A lane that cannot say
-/// why it failed is one nobody can fix.
+/// Bundle preparation emits directly to the job log and is bounded to verified
+/// fixture assembly. The remaining guest boot is redirected wholesale to a
+/// file, so its diagnostic tail must be armed before the run starts.
 #[test]
 fn the_no_kvm_smoke_prints_its_boot_log_on_any_failure() {
     let workflow =
         fs::read_to_string(".github/workflows/ci-full.yml").expect("read extended CI workflow");
-    let build_trap = workflow
-        .find("trap 'echo \"::group::mvmctl build log (tail)\"")
-        .expect("the build step must dump its log from an EXIT trap");
-    let build = workflow
-        .find("--builder qemu machine build --flake examples/exit_code")
-        .expect("the TCG build step must remain present");
-    assert!(
-        build_trap < build,
-        "the build log dump must be armed before the long TCG build"
-    );
     let boot_trap = workflow
         .find("trap 'echo \"::group::mvmctl bundle-run log (tail)\"")
         .expect("the installed-bundle step must dump its log from an EXIT trap");
