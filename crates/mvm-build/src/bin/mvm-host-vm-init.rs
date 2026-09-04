@@ -2312,6 +2312,7 @@ mod linux {
                         job,
                         &job_dir_relpath,
                         cold_boot_timings.take(),
+                        disk_transport.is_some(),
                     );
                     // Publish this dispatch's artifacts before the host is told
                     // the job is done: the host reads the output disk as soon as
@@ -2536,6 +2537,7 @@ mod linux {
         job: crate::builder_request::BuilderJob,
         job_dir_relpath: &str,
         cold_boot_timings: Option<BootTimings>,
+        disk_transport_active: bool,
     ) -> String {
         // Set per-job egress posture before dispatch. The install arm
         // also locks at its own entry for defense in depth, but this
@@ -2638,10 +2640,10 @@ mod linux {
                 // stages `<session.job_dir>/<job_id>/install_spec.json`
                 // and passes `/job/<job_dir_relpath>/install_spec.json`
                 // as the wire `spec_path`. The output (result.json +
-                // sealed volume sidecars) lands in `/job/<job_id>/out`
-                // so the host reads them back via the same per-
-                // dispatch out_dir convention as the Flake path.
-                let out_dir = format!("{JOB_DIR}/{job_dir_relpath}/out");
+                // sealed volume sidecars) lands in the per-dispatch share or,
+                // for raw-disk sessions, in `/out` so collection writes it to
+                // the output device before the Result frame is sent.
+                let out_dir = dispatch_install_out_dir(job_dir_relpath, disk_transport_active);
                 let job_subdir = format!("{JOB_DIR}/{job_dir_relpath}");
                 let started = Instant::now();
                 run_install_job_at(&spec_path, &job_subdir, &out_dir);
@@ -2675,6 +2677,14 @@ mod linux {
             build_ms,
         };
         response.to_json()
+    }
+
+    fn dispatch_install_out_dir(job_dir_relpath: &str, disk_transport_active: bool) -> String {
+        if disk_transport_active {
+            OUT_DIR.to_string()
+        } else {
+            format!("{JOB_DIR}/{job_dir_relpath}/out")
+        }
     }
 
     #[cfg(test)]
@@ -4263,6 +4273,15 @@ mod linux {
             clear_dir_contents(stage.to_str().expect("utf-8 path")).expect("clear");
 
             assert!(stage.is_dir());
+        }
+
+        #[test]
+        fn install_dispatch_uses_output_disk_staging_when_transport_is_active() {
+            assert_eq!(dispatch_install_out_dir("job-7", true), OUT_DIR);
+            assert_eq!(
+                dispatch_install_out_dir("job-7", false),
+                format!("{JOB_DIR}/job-7/out")
+            );
         }
 
         #[test]

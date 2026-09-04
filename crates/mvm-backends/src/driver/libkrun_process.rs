@@ -334,42 +334,34 @@ pub fn attach_workload_rootfs(mut krun: KrunContext, config: &VmStartConfig) -> 
 }
 
 /// Attach the user-supplied volumes (`--volume` / `MVM_VOLUMES`) to `krun`.
-/// A directory share is a virtio-fs device; a disk image is an extra
-/// virtio-blk device. Tag/id `uvol{idx}` is the coordination key the guest
-/// mount manifest uses to mount each at its requested guest path. Disk
-/// images are sparse-created by the CLI orchestrator before start; a RO
-/// disk image is RO at the hypervisor (krun_add_disk takes read_only).
-///
-/// libkrun's `krun_add_virtiofs` has NO host-side read-only
-/// toggle, so a "read-only" virtio-fs share would only be ro by the
-/// guest's own mount flag — a compromised guest could remount it rw.
-/// Rather than make a false ro promise, refuse it and point at the
-/// hypervisor-enforced alternatives. (HVF/Firecracker enforce ro shares
-/// natively; this restriction is libkrun-specific.)
+/// Every volume reaches the guest as virtio-blk. A directory grant keeps its
+/// original host path in the signed plan, while `materialized_image` names the
+/// ext4 transport that is safe to attach. Tag/id `uvol{idx}` is the
+/// coordination key the guest mount manifest uses at the requested guest path.
 pub fn attach_user_volumes(mut krun: KrunContext, config: &VmStartConfig) -> Result<KrunContext> {
     for (idx, vol) in config.volumes.iter().enumerate() {
-        let tag = format!("uvol{idx}");
-        krun = match vol.kind {
-            mvm_core::vm_backend::VmVolumeKind::DirShare => {
-                if vol.read_only {
-                    bail!(
-                        "libkrun cannot enforce a read-only virtio-fs share ('{}' -> '{}'): \
-                         krun_add_virtiofs has no host-side read-only toggle, so a compromised \
-                         guest could remount it read-write. Use a read-only disk image \
-                         (host:/guest:SIZE) for hypervisor-enforced read-only, share it ':rw' if \
-                         writes are intended, or run on the HVF backend.",
-                        vol.host,
-                        vol.guest
-                    );
-                }
-                krun.add_virtio_fs(tag, vol.host.clone())
-            }
-            mvm_core::vm_backend::VmVolumeKind::Disk => {
-                krun.add_disk(tag, vol.host.clone(), vol.read_only)
-            }
-        };
+        krun = attach_user_volume(krun, idx, vol)?;
     }
     Ok(krun)
+}
+
+fn attach_user_volume(
+    krun: KrunContext,
+    index: usize,
+    volume: &mvm_core::vm_backend::VmVolume,
+) -> Result<KrunContext> {
+    if !volume.attaches_as_block() {
+        bail!(
+            "libkrun requires directory volume '{}' -> '{}' to have a materialized block image",
+            volume.host,
+            volume.guest
+        );
+    }
+    Ok(krun.add_disk(
+        format!("uvol{index}"),
+        volume.block_source().to_string(),
+        volume.read_only,
+    ))
 }
 
 /// Assemble the per-workload [`KrunContext`]: the workload-independent base
@@ -680,5 +672,65 @@ pub(crate) fn cleanup_vsock_sockets(state_dir: &Path) {
     {
         let socket = mvm_core::config::vm_vsock_port_socket_at(state_dir, port);
         let _ = std::fs::remove_file(socket);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::attach_user_volume;
+    use libkrun_sys::KrunContext;
+    use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
+
+    fn context() -> KrunContext {
+        KrunContext::new("volume-test", "/kernel", "/rootfs")
+    }
+
+    #[test]
+    fn materialized_directory_volume_attaches_its_image_as_block() {
+        let volume = VmVolume {
+            host: "/granted/source".into(),
+            guest: "/data".into(),
+            read_only: true,
+            kind: VmVolumeKind::DirShare,
+            materialized_image: Some("/state/source.ext4".into()),
+            ..VmVolume::default()
+        };
+
+        let krun = attach_user_volume(context(), 2, &volume)
+            .expect("a materialized directory grant is attachable");
+        assert_eq!(krun.extra_disks.len(), 1);
+        assert_eq!(krun.extra_disks[0].id, "uvol2");
+        assert_eq!(krun.extra_disks[0].path, "/state/source.ext4");
+        assert!(krun.extra_disks[0].read_only);
+        assert!(krun.virtio_fs_mounts.is_empty());
+    }
+
+    #[test]
+    fn unmaterialized_directory_volume_is_refused() {
+        let volume = VmVolume {
+            host: "/granted/source".into(),
+            guest: "/data".into(),
+            kind: VmVolumeKind::DirShare,
+            ..VmVolume::default()
+        };
+
+        let error = attach_user_volume(context(), 0, &volume)
+            .expect_err("an unmaterialized directory grant must fail closed");
+        assert!(error.to_string().contains("materialized block image"));
+    }
+
+    #[test]
+    fn disk_volume_attaches_its_declared_host_image() {
+        let volume = VmVolume {
+            host: "/images/data.ext4".into(),
+            guest: "/data".into(),
+            kind: VmVolumeKind::Disk,
+            ..VmVolume::default()
+        };
+
+        let krun = attach_user_volume(context(), 1, &volume)
+            .expect("an ordinary disk volume is attachable");
+        assert_eq!(krun.extra_disks[0].id, "uvol1");
+        assert_eq!(krun.extra_disks[0].path, "/images/data.ext4");
     }
 }

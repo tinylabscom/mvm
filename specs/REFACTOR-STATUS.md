@@ -151,7 +151,7 @@ Last updated: 2026-09-03
       workspace tests, zero-warning Clippy, formatting, and policy gates are
       green; live Firecracker/HVF evidence and merge delivery remain.
 
-- [ ] **Remove virtio-fs — `specs/plans/2026-08-31-remove-virtio-fs.md`.**
+- [x] **Remove virtio-fs — `specs/plans/2026-08-31-remove-virtio-fs.md`.**
       Stage A: `--mount` is materialized into an ext4 image and attached as
       virtio-blk, and the directory-share capability seam is gone. Stage B: the
       dev-tier virtio-fs root is deleted end to end — the tier gate, the
@@ -176,16 +176,20 @@ Last updated: 2026-09-03
       unshared) `/job` onto a dispatch round trip, and the host rewrites the
       input disk per `Run` and reads the output disk per `Result`. Live-validated
       on macOS 26.5.2 — two `nix build` dispatches into one session, both exit 0.
-      Gate now at 41 sites across 13 files. A live persistent Firecracker BDD
+      A live persistent Firecracker BDD
       witness now pins the remaining unmaterialized-directory behavior: the
       registry is consumed, and the workload runner refuses before boot because
       it cannot express the directory grant. That settles reachability without
       pretending the managed-directory product decision is complete.
-      Remaining: libkrun's seeded closure, the guest's install arm (which writes
-      to `/job/<job_id>/out` and is refused on a disk-backed session rather than
-      silently losing its claim-11 sidecars), and deleting the now-dead share
-      plumbing. All three must land before the ratchet can become an absolute
-      rather than a ceiling.
+      The final libkrun work materializes Stage 0's `RootDir` as ext4, carries
+      Stage 0 and one-shot inputs/artifacts as raw-tar block disks, moves the
+      persistent builder and install output arm onto the same transport, and
+      replaces libkrun's share mapping with a refusal. A forced Stage 0 rebuild
+      and a real `machine build --builder libkrun` both completed on Apple
+      Silicon with `root_dir: null` and `virtio_fs_mounts: []`. The exact stale-
+      pin gate is now at its intended floor: 19 sites across 6 files (16 C-API
+      declarations, the low-level share type, and the QEMU/Firecracker refusal
+      tests).
 
 - [ ] **Warm standby image claim repair — issue #3002.**
       `specs/plans/2026-08-28-warm-standby-image-claim.md`.

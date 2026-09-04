@@ -395,9 +395,8 @@ impl PersistentBuilderSupervisor {
     /// [`HostVmResponse::Result`]. Holds the dispatch mutex for
     /// the duration (V1 = serialized).
     ///
-    /// `job_dir_relpath` is the path inside the `/job` virtio-fs
-    /// share where the host has already staged this job's
-    /// artifacts (cmd.sh / install_spec.json / etc.). The guest's
+    /// `job_dir_relpath` is the path inside `/job` where the host has already
+    /// staged this job's artifacts (cmd.sh / install_spec.json / etc.). The guest's
     /// dispatch loop resolves it as `/job/<job_dir_relpath>`.
     pub fn submit(
         &self,
@@ -762,12 +761,12 @@ pub struct SessionRecord {
     /// libkrun-managed Unix socket the supervisor connects to.
     pub dispatch_socket_path: PathBuf,
     /// Per-session job dir. Hosts stage each dispatch here before submitting
-    /// and read its artifacts back here afterwards. Reaches the guest as a
-    /// `/job` share, or — when [`SessionRecord::disk_transport`] is set — over
-    /// the transport disks, in which case the guest never sees this path.
+    /// and read its artifacts back here afterwards. Current sessions carry it
+    /// over transport disks; older records without that field retain their
+    /// share-backed compatibility behavior.
     pub job_dir: PathBuf,
     /// Set when this session exchanges jobs over raw disks rather than shares.
-    /// Absent means shares, which is what a libkrun-backed session uses.
+    /// Absent is retained only for compatibility with older session records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_transport: Option<SessionDiskTransport>,
     /// Workspace bound at `/work`. Recorded for `mvmctl
@@ -1337,29 +1336,21 @@ impl PersistentBuilderVm {
     ) -> Result<crate::builder_vm::BuilderArtifacts, crate::builder_vm::BuilderVmError> {
         use crate::builder_vm::{BuilderArtifacts, BuilderJob, BuilderVmError};
 
-        // The guest's install arm writes its result and sealed-volume sidecars
-        // into `/job/<job_id>/out`, which the disk transport does not collect —
-        // it collects `/out` and nothing else. Running anyway would report a
-        // clean dispatch and then find no `result.json`, and worse, a claim-11
-        // sealed volume would lose the SBOM and CVE sidecars its verification
-        // depends on. Refuse instead, and say which half is missing.
-        if self.session.disk_transport.is_some() {
-            return Err(BuilderVmError::VmmUnavailable {
-                requested: "persistent-builder install".to_string(),
-                reason: "the guest writes install artifacts to /job/<job_id>/out, which the \
-                         disk transport does not read back — it collects /out and nothing \
-                         else. Run the install through a one-shot builder until the guest's \
-                         install arm writes to /out."
-                    .to_string(),
-            });
-        }
-
         let job_id =
             stage_install_dispatch_job(&self.session.job_dir, host_spec_path).map_err(|e| {
                 BuilderVmError::ExtractionFailed(format!(
                     "staging persistent install dispatch job: {e}"
                 ))
             })?;
+
+        let transport = self.session.disk_transport.as_ref();
+        if let Some(t) = transport {
+            repack_dispatch_input(t, &self.session.job_dir, &job_id).map_err(|e| {
+                BuilderVmError::ExtractionFailed(format!(
+                    "packing the install dispatch input disk: {e}"
+                ))
+            })?;
+        }
 
         // The in-guest spec path the dispatch loop reads.
         // `<JOB_DIR>/<job_id>/install_spec.json` where JOB_DIR=`/job`
@@ -1384,10 +1375,17 @@ impl PersistentBuilderVm {
             )));
         }
 
-        // The guest wrote result.json + sealed-volume sidecars into
-        // <session.job_dir>/<job_id>/out/. Copy the whole dir into
-        // mounts.artifact_out so the downstream finalize_install_job
-        // reads from the canonical path the single-shot caller hands it.
+        if let Some(t) = transport {
+            read_dispatch_artifacts(t, &self.session.job_dir, &job_id).map_err(|e| {
+                BuilderVmError::ExtractionFailed(format!(
+                    "reading the install dispatch output disk: {e}"
+                ))
+            })?;
+        }
+
+        // Both transports converge on <session.job_dir>/<job_id>/out/: shares
+        // expose it directly, while read_dispatch_artifacts extracts `/out`
+        // from the raw output disk there.
         let dispatch_out_dir = artifact_dir_for(&self.session.job_dir, &job_id);
         std::fs::create_dir_all(&mounts.artifact_out).map_err(|e| {
             BuilderVmError::ExtractionFailed(format!(

@@ -1021,8 +1021,8 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
         .ok_or_else(|| anyhow::anyhow!("Cannot derive workspace root from {builder_flake_dir}"))?
         .to_path_buf();
 
-    // Materialize the guest root tree under a stable per-host location.
-    // libkrun mounts this directory as the guest root via virtiofs.
+    // Materialize the verified guest seed under a stable per-host location.
+    // The selected Stage 0 backend turns it into its block-root boot shape.
     let root_dir = mvm_build::stage0::stage0_cache_dir().join("root");
     let materialize_started = std::time::Instant::now();
     let host_bins_cache = format!("{}/host-bins", mvm_core::config::mvm_cache_dir());
@@ -1126,12 +1126,11 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
     }
 }
 
-/// Boot the Stage 0 VM with the supplied `RootDir` image, mounting
-/// `workspace_root` as `/work` and `staging_dir` as `/out`. On
+/// Boot the Stage 0 VM from the supplied host seed, carrying
+/// `workspace_root` and `staging_dir` over raw transport disks. On
 /// clean exit, write the cache-validation sidecars next to the
 /// emitted artifacts so the outer caller can promote them into the
 /// per-arch builder VM cache.
-#[cfg(feature = "builder-vm")]
 #[cfg(feature = "builder-vm")]
 fn run_stage0_root_dir(
     staging_dir: &std::path::Path,

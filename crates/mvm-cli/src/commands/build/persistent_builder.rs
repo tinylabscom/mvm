@@ -119,11 +119,11 @@ struct SessionRecord {
     dispatch_socket_path: PathBuf,
     /// Per-VM job dir. `submit` stages each call's cmd.sh under a fresh
     /// `<job_dir_relpath>` here and reads that dispatch's artifacts back here.
-    /// Reaches the guest as a `/job` share, or — when `disk_transport` is set —
-    /// over the transport disks, in which case the guest never sees this path.
+    /// Reaches the guest through the transport disks. Older session records
+    /// without `disk_transport` retain their share-backed compatibility path.
     job_dir: PathBuf,
     /// Set when this session exchanges jobs over raw disks rather than shares.
-    /// Absent means shares, which is what the libkrun backend uses.
+    /// Absent is retained only for compatibility with older session records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     disk_transport: Option<SessionDiskTransport>,
     /// Workspace bound at `/work` in the guest. Recorded for
@@ -292,10 +292,8 @@ fn as_build_record(record: &SessionRecord) -> mvm_build::persistent_builder::Ses
     }
 }
 
-/// Extract the host-vm binaries a persistent builder serves at `/mvm-bins`,
-/// and make the directory traversable by the guest's virtio-fs view of it.
-/// Shared by both backends: the payload and the mode requirement are the same
-/// whichever VMM serves the share.
+/// Extract the host-vm binaries a persistent builder receives at `/mvm-bins`,
+/// and make the tree traversable while the raw input tar is packed.
 fn ensure_persistent_host_bins() -> Result<PathBuf> {
     let host_bin_cache = PathBuf::from(mvm_core::config::mvm_cache_dir()).join("host-bins");
     let host_bin_dir = crate::host_binaries::extract::ensure_extracted(&host_bin_cache)
@@ -382,9 +380,10 @@ fn start_libkrun_persistent(workspace: PathBuf, memory_mib: u32) -> Result<Sessi
         session_id: handle.session_id().to_string(),
         dispatch_socket_path: handle.dispatch_socket_path(),
         job_dir: handle.job_dir().to_path_buf(),
-        // libkrun serves `/job` and `/out` as virtio-fs shares, so the host
-        // already sees what the guest writes and needs no transport disks.
-        disk_transport: None,
+        disk_transport: Some(SessionDiskTransport {
+            input_disk: handle.input_disk().to_path_buf(),
+            output_disk: handle.output_disk().to_path_buf(),
+        }),
         workspace_root: workspace,
         supervisor_pid: read_supervisor_pid(handle.vm_state_dir()),
         last_activity_unix_secs: Some(current_unix_secs()),

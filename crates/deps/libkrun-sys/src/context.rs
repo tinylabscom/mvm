@@ -289,14 +289,12 @@ impl KrunContext {
         }
     }
 
-    /// Construct a context that boots libkrun's bundled kernel against
-    /// a host directory mounted as the guest root via virtiofs. Used
-    /// by the Stage 0 bootstrap path — no host-built kernel or rootfs
-    /// image needed.
+    /// Construct a low-level context that boots libkrun's bundled kernel
+    /// against a host directory mounted as the guest root via virtiofs.
+    /// Production and builder callers use block roots; this remains as a
+    /// faithful wrapper around libkrun's public C API.
     ///
-    /// `entry_path` is the guest PID 1, relative to `root_dir`. For
-    /// Stage 0 this is `/init` (a shell script the kernel's binfmt
-    /// loader resolves via the embedded busybox).
+    /// `entry_path` is the guest PID 1, relative to `root_dir`.
     pub fn new_root_dir(
         name: impl Into<String>,
         root_dir: impl Into<String>,
