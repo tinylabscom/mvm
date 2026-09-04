@@ -1101,6 +1101,52 @@ mod tests {
         );
     }
 
+    /// A workflow with no `pull_request` trigger may not cancel itself.
+    ///
+    /// `cancel-in-progress` exists to keep a PR's check panel free of runs
+    /// from superseded SHAs. A workflow that pull requests never trigger has
+    /// no such panel, so the only run cancellation can reach is one already
+    /// under way — and on the schedule-plus-dispatch workflows those run for
+    /// hours. Worse, `github.ref` does not separate them: a nightly cron and
+    /// an operator dispatch both carry `refs/heads/main`, so keying the group
+    /// on the ref alone put them in the *same* group rather than different
+    /// ones. Four consecutive `Extended CI` runs cancelled each other that
+    /// way, and each reported `cancelled`, which reads as a red lane rather
+    /// than as a lane that was never allowed to finish.
+    ///
+    /// Derived from the trigger list rather than a filename allow-list, so a
+    /// new nightly workflow inherits the rule instead of having to be
+    /// remembered.
+    #[test]
+    fn a_workflow_without_pull_requests_never_cancels_a_run_in_flight() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(".github/workflows");
+        let mut checked = 0usize;
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "yml") {
+                continue;
+            }
+            let src = std::fs::read_to_string(&path).unwrap();
+            if src.contains("\n  pull_request:") {
+                continue;
+            }
+            checked += 1;
+            assert!(
+                !src.contains("cancel-in-progress: true"),
+                "{}: no pull_request trigger, so cancel-in-progress can only \
+                 kill a run already in flight",
+                path.display()
+            );
+        }
+        assert!(
+            checked >= 3,
+            "expected several non-PR workflows; found {checked} — has the \
+             trigger spelling this scans for changed?"
+        );
+    }
+
     /// No workflow in the tree may float, exception aside.
     #[test]
     fn no_workflow_floats_a_third_party_action() {

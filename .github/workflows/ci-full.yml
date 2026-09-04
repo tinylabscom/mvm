@@ -14,13 +14,21 @@ on:
     - cron: "51 4 * * *"
   workflow_dispatch:
 
-# Cancel a previous run when a new commit lands on the same branch.
-# Without this, the PR check panel accumulates stale failed runs from
-# superseded SHAs (we hit this on PRs #17 and #18). `main` runs are
-# never cancelled because the group is keyed on workflow + ref.
+# This workflow has no `pull_request` trigger, so there is no check panel to
+# keep free of superseded SHAs — the only thing cancellation could reach here
+# is a lane that has been running for hours. Keying on `ref` alone made that
+# worse rather than harmless: a scheduled run and an operator dispatch both
+# carry `refs/heads/main`, so they shared a group and killed each other. Four
+# consecutive Extended CI runs were cancelled that way, each reporting
+# `cancelled`, which reads as a red lane. The lane was not red; the
+# documented-surface e2e job had never been allowed to finish.
+#
+# Same shape as ci.yml: dispatches are keyed on their own run id so an operator
+# request never lands on top of the nightly, and the nightly is keyed on the
+# ref so only one runs at a time. Nothing in flight is cancelled.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always

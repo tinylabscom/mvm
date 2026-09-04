@@ -22,9 +22,12 @@ on:
     - cron: "20 4 * * *"
   workflow_dispatch:
 
+# Scheduled and dispatched only, so cancellation has no PR check panel to
+# tidy and can only reach a run that is already under way. Both triggers carry
+# `refs/heads/main`, so keying on the ref alone let a dispatch kill the nightly.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
