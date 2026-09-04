@@ -30,7 +30,10 @@ const REQUIRED_QEMU_BUILD: &str =
     "/tmp/mvmctl-source-under-test --builder qemu machine build --flake examples/exit_code";
 const REQUIRED_BOOT_IMAGE_UPDATE: &str =
     "/tmp/mvmctl-source-under-test image boot update --tag boot-image/v0.1.3 --force";
-const REQUIRED_SOURCE_KERNEL: &str = ".mvm-ci/cache/kernels/x86_64/workload/vmlinux";
+const REQUIRED_SOURCE_KERNEL: &str = ".mvm-ci/cache/kernels/x86_64/workload/bzImage";
+const REQUIRED_SOURCE_KERNEL_BUILD: &str =
+    "/tmp/mvmctl-source-under-test kernel build --which workload --source compile -v";
+const REQUIRED_SOURCE_KERNEL_VERIFY: &str = "bzImage.sha256";
 const REQUIRED_ENTRYPOINT_PATCH: &str = "write /tmp/exit-code-entrypoint /etc/mvm/entrypoint";
 const REQUIRED_VERITY_SEAL: &str = "veritysetup format";
 const REQUIRED_BUNDLE_EXPORT: &str = "/tmp/mvmctl-source-under-test bundle export \"$slot_hash\"";
@@ -171,6 +174,7 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
     assert!(
         bootstrap_job.contains("needs: no-kvm-prepare")
             && bootstrap_job.contains(&format!("name: {BINARY_ARTIFACT}"))
+            && bootstrap_job.contains(REQUIRED_SOURCE_KERNEL_BUILD)
             && bootstrap_job.contains("uses: actions/upload-artifact@v7")
             && bootstrap_job.contains(&format!("name: {BOOTSTRAP_ARTIFACT}")),
         "bootstrap must use exact binaries and publish reusable launch artifacts"
@@ -181,6 +185,7 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
             && build_job.contains(&format!("name: {BOOTSTRAP_ARTIFACT}"))
             && build_job.contains(REQUIRED_BOOT_IMAGE_UPDATE)
             && build_job.contains(REQUIRED_SOURCE_KERNEL)
+            && build_job.contains(REQUIRED_SOURCE_KERNEL_VERIFY)
             && build_job.contains(REQUIRED_ENTRYPOINT_PATCH)
             && build_job.contains(REQUIRED_VERITY_SEAL)
             && build_job.contains(REQUIRED_BUNDLE_EXPORT)

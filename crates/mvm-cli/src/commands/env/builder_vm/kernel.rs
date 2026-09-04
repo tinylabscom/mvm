@@ -285,6 +285,24 @@ fn publish_kernel_artifacts(
             "Stage 0 workload config must contain CONFIG_BLK_DEV_DM=y and CONFIG_DM_VERITY=y"
         );
     }
+    let staged_qemu_kernel = staging_dir.join("bzImage");
+    let qemu_kernel_bytes = if staged_qemu_kernel.is_file() {
+        let bytes = std::fs::read(&staged_qemu_kernel).with_context(|| {
+            format!(
+                "reading Stage 0 QEMU kernel {}",
+                staged_qemu_kernel.display()
+            )
+        })?;
+        if !has_linux_x86_boot_protocol_header(&bytes) {
+            anyhow::bail!(
+                "Stage 0 QEMU kernel {} has no Linux x86 boot protocol header",
+                staged_qemu_kernel.display()
+            );
+        }
+        Some(bytes)
+    } else {
+        None
+    };
 
     std::fs::create_dir_all(out_dir)
         .with_context(|| format!("creating kernel cache dir {}", out_dir.display()))?;
@@ -294,6 +312,14 @@ fn publish_kernel_artifacts(
     let dest = out_dir.join("vmlinux");
     mvm_core::util::atomic_io::atomic_write(&dest, &kernel_bytes)
         .with_context(|| format!("publishing kernel {}", dest.display()))?;
+    let qemu_dest = out_dir.join("bzImage");
+    if let Some(bytes) = &qemu_kernel_bytes {
+        mvm_core::util::atomic_io::atomic_write(&qemu_dest, bytes)
+            .with_context(|| format!("publishing QEMU kernel {}", qemu_dest.display()))?;
+    } else {
+        let _ = std::fs::remove_file(&qemu_dest);
+        let _ = std::fs::remove_file(mvm_build::kernel_fetch::kernel_digest_sidecar(&qemu_dest));
+    }
 
     // A locally built kernel has no published checksum to compare against. The
     // sidecar records the bytes Stage 0 just produced so later reads detect
@@ -302,9 +328,26 @@ fn publish_kernel_artifacts(
     if let Err(error) = mvm_build::kernel_fetch::record_kernel_digest(&dest) {
         let _ = std::fs::remove_file(&dest);
         let _ = std::fs::remove_file(&config_dest);
+        let _ = std::fs::remove_file(&qemu_dest);
+        let _ = std::fs::remove_file(mvm_build::kernel_fetch::kernel_digest_sidecar(&qemu_dest));
         return Err(error).context("recording locally built kernel digest");
     }
+    if qemu_kernel_bytes.is_some()
+        && let Err(error) = mvm_build::kernel_fetch::record_kernel_digest(&qemu_dest)
+    {
+        let _ = std::fs::remove_file(&dest);
+        let _ = std::fs::remove_file(mvm_build::kernel_fetch::kernel_digest_sidecar(&dest));
+        let _ = std::fs::remove_file(&config_dest);
+        let _ = std::fs::remove_file(&qemu_dest);
+        let _ = std::fs::remove_file(mvm_build::kernel_fetch::kernel_digest_sidecar(&qemu_dest));
+        return Err(error).context("recording locally built QEMU kernel digest");
+    }
     Ok(dest)
+}
+
+#[cfg(feature = "builder-vm")]
+fn has_linux_x86_boot_protocol_header(bytes: &[u8]) -> bool {
+    bytes.get(0x202..0x206) == Some(b"HdrS".as_slice())
 }
 
 #[cfg(all(test, feature = "builder-vm"))]
@@ -315,6 +358,12 @@ mod tests {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join("vmlinux"), kernel).unwrap();
         std::fs::write(dir.join("mvm-kernel.config"), config).unwrap();
+    }
+
+    fn bzimage_stub() -> Vec<u8> {
+        let mut bytes = vec![0_u8; 0x206];
+        bytes[0x202..0x206].copy_from_slice(b"HdrS");
+        bytes
     }
 
     #[test]
@@ -373,5 +422,51 @@ mod tests {
                 .trim(),
             expected
         );
+    }
+
+    #[test]
+    fn workload_publish_retains_verified_qemu_boot_kernel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join("staging");
+        let live = tmp.path().join("workload");
+        stage_kernel(
+            &staging,
+            b"elf-kernel",
+            "CONFIG_BLK_DEV_DM=y\nCONFIG_DM_VERITY=y\n",
+        );
+        std::fs::write(staging.join("bzImage"), bzimage_stub()).unwrap();
+
+        publish_kernel_artifacts(&staging, &live, KernelVariant::Workload).unwrap();
+
+        let qemu_kernel = live.join("bzImage");
+        assert_eq!(std::fs::read(&qemu_kernel).unwrap(), bzimage_stub());
+        let expected = mvm_fs::overlay::compute_file_sha256(&qemu_kernel).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(mvm_build::kernel_fetch::kernel_digest_sidecar(&qemu_kernel))
+                .unwrap()
+                .trim(),
+            expected
+        );
+    }
+
+    #[test]
+    fn workload_publish_rejects_malformed_qemu_boot_kernel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join("staging");
+        let live = tmp.path().join("workload");
+        stage_kernel(
+            &staging,
+            b"elf-kernel",
+            "CONFIG_BLK_DEV_DM=y\nCONFIG_DM_VERITY=y\n",
+        );
+        std::fs::write(staging.join("bzImage"), b"not-a-bzimage").unwrap();
+
+        let error = publish_kernel_artifacts(&staging, &live, KernelVariant::Workload)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("Linux x86 boot protocol header"));
+        assert!(!live.join("vmlinux").exists());
+        assert!(!live.join("bzImage").exists());
     }
 }

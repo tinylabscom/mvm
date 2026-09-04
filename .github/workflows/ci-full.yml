@@ -599,6 +599,12 @@ jobs:
           MVM_KERNEL_SOURCE: auto
         run: /tmp/mvmctl-source-under-test --builder qemu bootstrap --production -v
 
+      # The published workload asset is the uncompressed ELF required by
+      # Firecracker. Build the same pinned source once so Stage 0 can retain
+      # its sibling bzImage, which QEMU's x86 Linux boot protocol requires.
+      - name: Build source QEMU-compatible workload kernel
+        run: /tmp/mvmctl-source-under-test kernel build --which workload --source compile -v
+
       # The published builder image is cheap to re-download and dominates the
       # cache size, so only transfer source-built launch artifacts. Compression
       # is disabled because these filesystem images are already compact and the
@@ -658,7 +664,11 @@ jobs:
           revision_dir="$MVM_HOME/templates/$slot_hash/artifacts/revisions/$revision_hash"
           release_image="$MVM_HOME/cache/default-microvm/prod"
           mkdir -p "$revision_dir"
-          cp .mvm-ci/cache/kernels/x86_64/workload/vmlinux "$revision_dir/vmlinux"
+          qemu_kernel=.mvm-ci/cache/kernels/x86_64/workload/bzImage
+          expected_kernel_sha=$(tr -d '[:space:]' < .mvm-ci/cache/kernels/x86_64/workload/bzImage.sha256)
+          actual_kernel_sha=$(sha256sum "$qemu_kernel" | cut -d' ' -f1)
+          test "$actual_kernel_sha" = "$expected_kernel_sha"
+          cp "$qemu_kernel" "$revision_dir/vmlinux"
           cp "$release_image/rootfs.ext4" "$revision_dir/rootfs.ext4"
           cp "$release_image/mvm-meta.json" "$revision_dir/mvm-meta.json"
 
