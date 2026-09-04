@@ -23,6 +23,7 @@ const REQUIRED_CI_VSOCK_OWNERSHIP: &str = "sudo chown \"$USER\" /dev/vhost-vsock
 const REQUIRED_KVM_DENIAL: &str = "sudo chmod 000 /dev/kvm";
 const REQUIRED_KVM_RESTORE: &str = "sudo chmod 0666 /dev/kvm";
 const REQUIRED_STAGE0_BOOT_READ: &str = "sudo chmod a+r";
+const REQUIRED_QEMU_BRIDGE_OVERRIDE: &str = "MVM_QEMU_BRIDGE_PATH: /tmp/mvmctl-source-under-test";
 const REQUIRED_LOCAL_VSOCK_DEVICE: &str = "--device /dev/vhost-vsock:/dev/vhost-vsock";
 const FORBIDDEN_LOCAL_KVM_DEVICE: &str = "--device /dev/kvm:/dev/kvm";
 const REQUIRED_BUILDER_DOWNLOAD: &str =
@@ -231,9 +232,10 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
         smoke_job.contains("needs: no-kvm-build")
             && smoke_job.contains(&format!("name: {BOOTSTRAP_ARTIFACT}"))
             && smoke_job.contains(&format!("name: {BUNDLE_ARTIFACT}"))
+            && smoke_job.contains(REQUIRED_QEMU_BRIDGE_OVERRIDE)
             && smoke_job.contains("bundle install /tmp/no-kvm-bundle/exit-code-x86_64.mvmpkg")
             && smoke_job.contains("machine run"),
-        "the smoke runner must install and boot the bundle in its own runner window"
+        "the smoke runner must install and boot the bundle with the exact source binary as its QEMU bridge"
     );
     for job in [bootstrap_job, build_job, smoke_job] {
         assert!(

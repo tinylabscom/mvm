@@ -773,6 +773,10 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       MVM_HOME: ${{ github.workspace }}/.mvm-ci
+      # The QEMU transport re-execs mvmctl as its per-VM vsock bridge. This
+      # witness intentionally installs the exact source binary under a unique
+      # name, so point helper resolution at those same tested bytes.
+      MVM_QEMU_BRIDGE_PATH: /tmp/mvmctl-source-under-test
     steps:
       - uses: actions/checkout@v6
 
