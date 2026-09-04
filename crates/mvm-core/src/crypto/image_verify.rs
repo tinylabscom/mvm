@@ -291,7 +291,7 @@ pub fn verify_signed_payload(
 ) -> VerifyResult<()> {
     Err(VerifyError::SignatureInvalid {
         reason: "manifest-verify feature is disabled in this build; rebuild \
-                 mvmctl with default features or set MVM_SKIP_COSIGN_VERIFY=1 \
+                 mvmctl with `--features user`, or set MVM_SKIP_COSIGN_VERIFY=1 \
                  in an emergency rotation."
             .to_string(),
     })
@@ -299,11 +299,17 @@ pub fn verify_signed_payload(
 
 /// No-feature fallback: refuse to accept any manifest as signed.
 ///
-/// Builds without `manifest-verify` (e.g. `cargo install
-/// --no-default-features`) drop the heavy `sigstore` dependency tree
-/// in exchange for losing manifest verification. The fail-closed
-/// contract is preserved so a downstream caller can't accidentally
-/// accept unsigned manifests after a feature-flag flip.
+/// `manifest-verify` is off unless something turns it on — `mvm-core`'s
+/// `default` is empty — so this arm is what an ordinary `cargo build` compiles.
+/// The workspace `user` feature enables it, and released binaries carry `user`
+/// (see `MVMCTL_RELEASE_FEATURES` in `release.yml`), which is why a downloaded
+/// mvmctl verifies manifests and a locally built one does not. The fail-closed
+/// contract is preserved either way, so a caller cannot accidentally accept an
+/// unsigned manifest after a feature-flag flip.
+///
+/// The refusal used to advise rebuilding "with default features", which does
+/// nothing at all: the default set does not include this. A reader following
+/// that instruction stayed broken and had no reason to doubt the message.
 #[cfg(not(feature = "manifest-verify"))]
 pub fn verify_manifest(
     _manifest_bytes: &[u8],
@@ -313,7 +319,7 @@ pub fn verify_manifest(
 ) -> VerifyResult<SignedManifest> {
     Err(VerifyError::SignatureInvalid {
         reason: "manifest-verify feature is disabled in this build; rebuild \
-                 mvmctl with default features or set MVM_SKIP_COSIGN_VERIFY=1 \
+                 mvmctl with `--features user`, or set MVM_SKIP_COSIGN_VERIFY=1 \
                  in an emergency rotation."
             .to_string(),
     })

@@ -574,8 +574,15 @@ const PEER_DIAL_PY: &str = concat!(
 #[given(expr = "a host TCP service on port {int} that greets its caller")]
 fn host_tcp_service(world: &mut CliWorld, port: i64) {
     let port = u16::try_from(port).expect("peer target port fits in a u16");
-    let listener = std::net::TcpListener::bind(("127.0.0.1", port))
-        .unwrap_or_else(|e| panic!("bind 127.0.0.1:{port} as the peer target: {e}"));
+    let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap_or_else(|e| {
+        panic!(
+            "bind 127.0.0.1:{port} as the peer target: {e}\n\
+             This port is not arbitrary: it is the one the README's `--peer` \
+             example names, and the witness has to exercise the documented \
+             address rather than a stand-in. Free it (`lsof -nP -iTCP:{port}`) \
+             and re-run. This is a host conflict, not a broken peer route."
+        )
+    });
     let accept = listener.try_clone().expect("clone the peer listener");
     std::thread::spawn(move || {
         for stream in accept.incoming() {
