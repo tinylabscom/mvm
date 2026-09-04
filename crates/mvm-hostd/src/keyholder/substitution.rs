@@ -242,6 +242,38 @@ mod tests {
         }
     }
 
+    /// `as_map` hands back the registry's own bindings.
+    ///
+    /// Replacing the body with a leaked empty map survived every test: nothing
+    /// observed the returned map actually containing what was minted. That is
+    /// the portable half a caller resolves placeholders through, so an empty
+    /// one resolves nothing — a workload's substitutions would silently stop
+    /// happening, and the placeholder would travel onward as literal text.
+    #[test]
+    fn as_map_exposes_the_bindings_that_were_minted() {
+        let mut reg = SubstitutionRegistry::new();
+        assert!(
+            !reg.as_map().host_is_bound("api.openai.com"),
+            "nothing is bound before minting"
+        );
+
+        let placeholder = reg.mint(bearer_ref("openai", &["api.openai.com"]));
+
+        let map = reg.as_map();
+        assert!(
+            map.host_is_bound("api.openai.com"),
+            "the exposed map must carry the minted binding, not an empty default"
+        );
+        assert!(
+            !map.host_is_bound("evil.example.com"),
+            "and only that binding"
+        );
+        assert!(
+            !placeholder.as_str().is_empty(),
+            "a minted placeholder is what a caller resolves through this map"
+        );
+    }
+
     #[test]
     fn host_is_bound_matches_only_registered_allowed_hosts() {
         let mut reg = SubstitutionRegistry::new();

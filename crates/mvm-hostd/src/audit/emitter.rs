@@ -2474,6 +2474,98 @@ mod tests {
         assert_eq!(verify_audit_chain(&replica, &vk).unwrap(), 1);
     }
 
+    /// The same guard, on the other constructor.
+    ///
+    /// `with_policy` and `with_policy_and_primary_signer` each refuse
+    /// `chain_signing=false`, and only the first was covered — so deleting the
+    /// `!` from the second inverted its guard and every test still passed. A
+    /// duplicated guard needs a test per copy; one test does not cover both
+    /// merely because the lines are identical.
+    ///
+    /// What that inversion would mean: an emitter accepting a policy that
+    /// disables chain signing, for the admission path whose whole guarantee is
+    /// a chain-signed audit log.
+    #[test]
+    fn the_primary_signer_constructor_also_requires_chain_signing() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut seed);
+            SigningKey::from_bytes(&seed)
+        };
+        let primary = std::sync::Arc::new(
+            FileAuditSigner::open(key.clone(), dir.path()).expect("open the primary signer"),
+        );
+        let policy = mvm_core::policy::AuditPolicy {
+            chain_signing: false,
+            stream_destinations: Vec::new(),
+        };
+        let err =
+            match AuditEmitter::with_policy_and_primary_signer(key, dir.path(), &policy, primary) {
+                Ok(_) => panic!("chain_signing=false must be rejected here too"),
+                Err(err) => err,
+            };
+        assert!(format!("{err:#}").contains("chain_signing"));
+    }
+
+    /// A control-key decision record carries the plan it decided about.
+    ///
+    /// Both `plan_id` fields — on the scenario and on the attestation binding —
+    /// could be deleted without a single test noticing. A decision record that
+    /// does not name its plan is not attributable to anything, which is the
+    /// entire purpose of emitting it.
+    #[test]
+    fn a_control_key_decision_record_names_the_plan_it_decided_about() {
+        let plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        let key = mvm_core::mvmd_iface::ControlKey {
+            kid: "kid-under-test".to_string(),
+            role: mvm_core::mvmd_iface::ControlKeyRole::Promoter,
+            expiry_unix_secs: 0,
+        };
+
+        let record = AuditEmitter::control_key_decision_record(&plan, &key, "promote");
+
+        assert_eq!(
+            record.scenario.plan_id.as_deref(),
+            Some(plan.plan_id.0.as_str()),
+            "the decision scenario must name the plan"
+        );
+        assert_eq!(
+            record.attestation.plan_id.as_deref(),
+            Some(plan.plan_id.0.as_str()),
+            "the attestation binding must name the plan"
+        );
+    }
+
+    /// `decisions_enabled` reports the emitter's actual setting.
+    ///
+    /// Replacing it with a constant `false` survived, which means nothing
+    /// observed it returning true — and it is the branch that decides whether a
+    /// decision record is built at all. Hardwired false, every control-key
+    /// authorization would go unrecorded and every existing test would still
+    /// pass.
+    #[test]
+    fn decisions_enabled_reports_the_configured_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut seed);
+            SigningKey::from_bytes(&seed)
+        };
+        let emitter = AuditEmitter::new(key).expect("construct an emitter");
+        // The default has to be observed too, or "always true" would pass.
+        assert!(
+            !emitter.decisions_enabled(),
+            "decisions are off until asked for"
+        );
+
+        let emitter = emitter.with_decisions_dir(dir.path());
+        assert!(
+            emitter.decisions_enabled(),
+            "the accessor must report the enabled setting, not a constant"
+        );
+    }
+
     #[test]
     fn policy_requires_chain_signing() {
         let dir = tempfile::tempdir().unwrap();
