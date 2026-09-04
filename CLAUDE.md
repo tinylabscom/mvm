@@ -664,6 +664,34 @@ this row as enforced without it.
     is `Shipped` and rows 16–18 are `Preview`: the ledger numbers rows in the
     order claims were added, not by status.
 
+20. **Every published release artifact is authenticated under the release
+    workflow's identity, directly or through a signed checksum manifest, and
+    the build and fetch paths refuse an artifact whose required signature is
+    missing or invalid.** Row 20, `Shipped`. `release.yml` signs archives and
+    checksum manifests keyless through GitHub OIDC and publishes bundles
+    carrying the Fulcio certificate and Rekor inclusion proof. Raw kernels,
+    root filesystems, and metadata are covered by the signed manifests rather
+    than individual bundles. The `verify-release` job re-downloads the
+    published set, verifies the signatures against an identity regexp pinned
+    to this workflow at a tag, and checks the covered blobs against their
+    authenticated digests. The build gate refuses a missing bundle
+    (`a_missing_bundle_refuses_and_names_the_asset`) and accepts only the
+    versioned release workflow
+    (`accepted_identities_are_the_versioned_release_workflow`); the
+    fetch gate refuses an unsigned manifest before parsing it
+    (`fetch_expected_hashes_refuses_an_unsigned_manifest_before_parsing`) and
+    the hash-skip hatch does not waive the signature
+    (`skip_hash_verify_does_not_waive_the_manifest_signature`).
+
+    The three consuming paths do **not** share a posture, which is why the
+    statement names only two of them. `verify_signature` on the self-update
+    path returns `Ok` with a warning when cosign is absent, so there the
+    signature is best-effort and the SHA-256 pin is what holds. ADR-001 carries
+    the "Claim 20 limits" note; do not paraphrase this row as "every path
+    refuses an unsigned release". The claim also asserts nothing about build
+    provenance — a signature says who published an artifact, not what went
+    into it.
+
 The guest agent itself runs as uid 901 under setpriv (W4.5); the
 host-side vsock proxy socket is mode 0700 (W1.2), the proxy port
 allowlist drops anything outside the agent and forward ranges
