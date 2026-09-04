@@ -256,9 +256,9 @@ fn read_only_directory_mount(world: &mut CliWorld, guest_path: String) {
         guest: guest_path,
         size: String::new(),
         read_only: true,
-        kind: VmVolumeKind::DirShare,
+        kind: VmVolumeKind::Disk,
         encrypted: false,
-        materialized_image: None,
+        materialized_image: Some("/state/wheels.ext4".to_string()),
         volume_label: None,
     });
 }
@@ -502,12 +502,8 @@ fn launch_refused_integrity(world: &mut CliWorld) {
     );
 }
 
-/// Build the launch config this scenario's resolution implies and assemble a
-/// real sealed workload cmdline from it, so the guest-visible half of the
-/// contract is asserted, not assumed.
-fn assembled_cmdline(world: &mut CliWorld) -> String {
-    let state = tempfile::tempdir().expect("create the cmdline state dir");
-    let config = VmStartConfig {
+fn start_config(world: &mut CliWorld) -> VmStartConfig {
+    VmStartConfig {
         name: "bdd-sdk-sidecar".to_string(),
         rootfs_path: "/image/rootfs.ext4".to_string(),
         verity_path: Some("/image/rootfs.verity".to_string()),
@@ -518,7 +514,15 @@ fn assembled_cmdline(world: &mut CliWorld) -> String {
         runtime_overlay_roothash: Some("b".repeat(64)),
         volumes: attached_volumes(world),
         ..Default::default()
-    };
+    }
+}
+
+/// Build the launch config this scenario's resolution implies and assemble a
+/// real sealed workload cmdline from it, so the guest-visible half of the
+/// contract is asserted, not assumed.
+fn assembled_cmdline(world: &mut CliWorld) -> String {
+    let state = tempfile::tempdir().expect("create the cmdline state dir");
+    let config = start_config(world);
     let driver = HvfDriver::new();
     mvm_runtime::workload_runner::assemble_workload_cmdline_for_test(
         &driver as &dyn VmmDriver,
@@ -538,14 +542,12 @@ fn cmdline_names_no_sidecar(world: &mut CliWorld) {
 
 #[then(expr = "the assembled workload cmdline names the SDK sidecar device the backend attached")]
 fn cmdline_names_sidecar(world: &mut CliWorld) {
-    let volumes = attached_volumes(world);
-    assert!(!volumes.is_empty(), "no sidecar volume was resolved");
+    let config = start_config(world);
+    let expected = mvm_vmm::host::spec_map::sdk_sidecar_block_device(&config)
+        .expect("the resolved sidecar must occupy a block-device slot");
     let cmdline = assembled_cmdline(world);
-    // A sealed boot carries rootfs + verity + overlay pair, so the sidecar is
-    // the fifth block device. Asserting the exact device — rather than just the
-    // token's presence — is what proves the guest is told where to look.
     assert!(
-        cmdline.contains("mvm.sdk_dev=/dev/vde"),
+        cmdline.contains(&format!("mvm.sdk_dev={expected}")),
         "the cmdline must name the device the backend attached: {cmdline}"
     );
 }
@@ -561,7 +563,7 @@ fn user_volume_manifest_excludes_sidecar(world: &mut CliWorld, guest_path: Strin
         .expect("the ordinary directory mount must emit a user-volume manifest");
 
     assert!(
-        manifest.contains(&format!("uvol0:{user_path}:ro:fs")),
+        manifest.contains(&format!("uvol0:{user_path}:ro:blk")),
         "the ordinary mount must remain in user-volume activation: {cmdline}"
     );
     assert!(

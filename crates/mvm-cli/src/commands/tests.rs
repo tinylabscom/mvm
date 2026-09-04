@@ -635,7 +635,6 @@ fn volume_create_parses_default_root() {
                 volume::VolumeCmd::Create {
                     volume,
                     root,
-                    host_backed,
                     size,
                     remote,
                     bucket,
@@ -644,46 +643,6 @@ fn volume_create_parses_default_root() {
         })) => {
             assert_eq!(volume, "work");
             assert_eq!(root, None);
-            assert!(!host_backed);
-            assert_eq!(size, "1G");
-            assert!(!remote);
-            assert!(bucket.is_none());
-            assert!(storage_class.is_none());
-        }
-        _ => panic!("Expected volume create command"),
-    }
-}
-
-#[test]
-fn volume_create_host_backed_parses() {
-    let cli = Cli::try_parse_from([
-        "mvmctl",
-        "machine",
-        "volume",
-        "create",
-        "work",
-        "--host-backed",
-    ])
-    .unwrap();
-    let Commands::Machine(mg) = cli.command else {
-        panic!("expected machine group")
-    };
-    match mg.action {
-        machine::MachineAction::Vm(group::VmCmd::Volume(volume::Args {
-            command:
-                volume::VolumeCmd::Create {
-                    volume,
-                    root,
-                    host_backed,
-                    size,
-                    remote,
-                    bucket,
-                    storage_class,
-                },
-        })) => {
-            assert_eq!(volume, "work");
-            assert_eq!(root, None);
-            assert!(host_backed);
             assert_eq!(size, "1G");
             assert!(!remote);
             assert!(bucket.is_none());
@@ -1600,23 +1559,6 @@ fn a_materialized_disk_volume_hands_back_a_lock_the_caller_can_hold() {
         .expect("a disk volume yields a lock");
     assert_eq!(held.path(), image.as_path());
     assert!(image.is_file(), "the backing image is created");
-}
-
-/// A directory volume has no image and so no lock — `None`, not a failure.
-#[test]
-fn a_dir_share_volume_yields_no_lock() {
-    let volume = mvm_core::vm_backend::VmVolume {
-        host: "/h/src".to_string(),
-        guest: "/work".to_string(),
-        read_only: true,
-        kind: mvm_core::vm_backend::VmVolumeKind::DirShare,
-        ..Default::default()
-    };
-    assert!(
-        crate::commands::shared::materialize_disk_volume(&volume)
-            .expect("no-op for a dir share")
-            .is_none()
-    );
 }
 
 #[test]

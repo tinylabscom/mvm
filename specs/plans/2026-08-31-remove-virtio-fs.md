@@ -122,23 +122,23 @@ the legacy arm, not building the portable one.
       advertised `directory_shares` capability, the `directory_shares` field on
       `VmCapabilities`, the two-arm `ensure_dir_share_support`, and
       `workload_shares`' volume arm. 85 lines out, 10 in.
-- [x] `VmVolumeKind::DirShare` and `LocalVolumeKind::Directory` stay for now:
-      `DirShare` is what records a *directory* grant in the plan, which claim 1
-      matches against, so removing it means moving that fact somewhere else
-      first. `VirtioFsShare` also stays as the low-level supervisor/config type
-      consumed by explicit refusal tests; no workload or builder produces one.
+- [x] `VmVolumeKind::DirShare` and `LocalVolumeKind::Directory` are retired.
+      Claim 1 still records a directory grant as `ShareKind::DirShare` in the
+      signed plan; admission derives that fact from `materialized_image` while
+      the runtime transport stays disk-only. `VirtioFsShare` remains only for
+      builder-VM transport.
 
       **Designed out into its own plan:**
       `specs/plans/2026-09-02-retire-dirshare.md`. The fact lives in
       `enforce_admitted_shares`, which derives the `ShareKind` it demands from
       the runtime enum; the resolution is to derive it from
       `materialized_image` instead and keep `ShareKind::DirShare` in the signed
-      plan. The blocker is that `LocalVolumeKind::Directory` can still produce
-      an *unmaterialized* `DirShare`, so what a managed directory volume is has
-      to be settled first.
+      plan. `machine volume mount --host` now snapshots and registers a block
+      image, while old persisted directory-kind entries fail closed.
 
-**Custom volumes are unaffected.** A managed volume is already a
-`BlockImage`/`Disk` today. Nothing about `mvmctl volume` changes.
+**Managed block volumes are unaffected.** The obsolete host-backed directory
+creation arm is removed with `LocalVolumeKind::Directory`; `--host` snapshots
+the source directory into a registered block image.
 
 **Deliberately not in this stage:** content-addressing and caching of the
 materialized image. The `mount_fingerprint` / `mount_cache_lookup` /

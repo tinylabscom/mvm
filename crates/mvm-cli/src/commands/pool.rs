@@ -973,9 +973,9 @@ fn compat_for_launch(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Result<Sta
 /// child's own policy. A shared parent therefore holds nothing per-launch that
 /// could reach the next claim.
 ///
-/// `VmVolumeKind::DirShare` is included in the volume check. The current
-/// factory-parent path has no late attachment operation for a host path, so a
-/// live read-only share remains cold-path-only until the backend supplies one.
+/// Materialized directory grants are included in the volume check. The current
+/// factory-parent path has no late attachment operation for their image, so
+/// they remain cold-path-only.
 fn warm_eligible_launch(cfg: &VmStartConfig) -> bool {
     cfg.volumes.is_empty()
 }
@@ -1397,18 +1397,18 @@ mod tests {
     }
 
     #[test]
-    fn try_warm_claim_cold_with_directory_share_volume() {
+    fn try_warm_claim_cold_with_materialized_directory_volume() {
         use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
         let b = AnyBackend::from_hypervisor("libkrun");
         let mut c = eligible_cfg();
         c.volumes = vec![VmVolume {
-            materialized_image: None,
+            materialized_image: Some("/state/mount.ext4".to_string()),
             volume_label: None,
             host: "/h".into(),
             guest: "/g".into(),
             size: String::new(),
             read_only: false,
-            kind: VmVolumeKind::DirShare,
+            kind: VmVolumeKind::Disk,
             encrypted: false,
         }];
         assert_eq!(try_warm_claim(&b, &c, false).unwrap(), None);

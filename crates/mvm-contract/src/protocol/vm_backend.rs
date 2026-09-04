@@ -48,18 +48,15 @@ pub struct VmPortMapping {
 
 /// Which hypervisor device a [`VmVolume`] / `RuntimeVolume` maps to.
 ///
-/// Default is `Disk`: the legacy `RuntimeVolume` carrier (and any
-/// runtime-config file written before this field existed) means a disk
-/// image. A live directory share is the new case and is always set
-/// explicitly, so defaulting to `Disk` keeps old configs correct.
+/// The only supported transport is a block image. Directory grants retain
+/// their audited origin in [`VmVolume::materialized_image`] while reaching the
+/// guest through this same transport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VmVolumeKind {
     /// Persistent ext4 disk image attached as a virtio-blk device.
     #[default]
     Disk,
-    /// Live host-directory share over virtio-fs (two-way unless read-only).
-    DirShare,
 }
 
 /// A volume to mount in the guest, backend-agnostic.
@@ -69,20 +66,17 @@ pub struct VmVolume {
     pub host: String,
     /// Mount point inside the guest.
     pub guest: String,
-    /// Size hint (e.g. "1G"). Used as the sparse cap for a `Disk`; a
-    /// `DirShare` ignores it.
+    /// Size hint (e.g. "1G"). Used as the sparse cap for a disk image.
     pub size: String,
     /// Mark the underlying device read-only at the hypervisor level.
     pub read_only: bool,
-    /// Directory share (virtio-fs) vs disk image (virtio-blk). Backends
-    /// attach the right device per kind rather than inferring from `size`.
+    /// Runtime transport kind. Only virtio-blk disk images are supported.
     pub kind: VmVolumeKind,
-    /// `:enc` — route a `Disk` volume through in-guest encryption.
-    /// Fails closed at launch until that lands; never silently
-    /// plaintext. Always false for a `DirShare`.
+    /// `:enc` — route a disk volume through in-guest encryption.
+    /// Fails closed at launch until that lands; never silently plaintext.
     pub encrypted: bool,
-    /// For a `DirShare`, the ext4 image the granted directory was
-    /// materialized into, which is what the backend actually attaches.
+    /// The ext4 image a granted directory was materialized into, which is what
+    /// the backend actually attaches.
     ///
     /// `host` stays the directory that was *granted*, because that is the fact
     /// an admission record has to carry: a chain entry naming an image under
@@ -90,7 +84,7 @@ pub struct VmVolume {
     /// given. The grant and its transport are different things, and only the
     /// first belongs in the audit.
     ///
-    /// `None` on a `Disk`, whose `host` is already the image.
+    /// `None` when `host` is already the image.
     pub materialized_image: Option<String>,
     /// ext4 volume label written into the attached image, when the host set
     /// one, so the guest can mount by identity rather than by enumeration
@@ -104,21 +98,6 @@ pub struct VmVolume {
 }
 
 impl VmVolume {
-    /// Whether this volume reaches the guest as a virtio-blk device.
-    ///
-    /// Every volume does, now that a granted directory is delivered as an
-    /// image — but the two arrive at it differently, and three separate places
-    /// (the block list, the slot arithmetic, and the guest device mapping) have
-    /// to agree on which volumes are in that list and in what order. They agree
-    /// by calling this rather than by each matching on `kind`.
-    #[must_use]
-    pub fn attaches_as_block(&self) -> bool {
-        match self.kind {
-            VmVolumeKind::Disk => true,
-            VmVolumeKind::DirShare => self.materialized_image.is_some(),
-        }
-    }
-
     /// The host file to attach: the materialized image when there is one, the
     /// `host` path otherwise.
     #[must_use]
@@ -131,9 +110,9 @@ impl VmVolume {
 /// (`mvm-host-vm-init`) parses to mount each at its requested path.
 ///
 /// Format (one entry per volume, `;`-separated):
-/// `mvm.uvols=<tag>:<hex(guest_path)>:<ro|rw>:<fs|blk>`
-/// where `tag` is `uvol{idx}` — the virtio-fs tag / virtio-blk id the
-/// backend assigned for the volume at the same index. The guest path is
+/// `mvm.uvols=<tag>:<hex(guest_path)>:<ro|rw>:blk`
+/// where `tag` is `uvol{idx}` — the virtio-blk id the backend assigned for the
+/// volume at the same index. The guest path is
 /// hex-encoded so an arbitrary path can't collide with the cmdline's
 /// space / `:` / `;` delimiters. Returns `None` for an empty volume set
 /// so no parameter is appended.
@@ -146,13 +125,9 @@ pub fn encode_user_volumes_cmdline(volumes: &[VmVolume]) -> Option<String> {
     }
     let mut entries = Vec::with_capacity(volumes.len());
     for (idx, v) in volumes.iter().enumerate() {
-        let kind = match v.kind {
-            VmVolumeKind::DirShare => "fs",
-            VmVolumeKind::Disk => "blk",
-        };
         let mode = if v.read_only { "ro" } else { "rw" };
         let hexpath: String = v.guest.bytes().map(|b| format!("{b:02x}")).collect();
-        entries.push(format!("uvol{idx}:{hexpath}:{mode}:{kind}"));
+        entries.push(format!("uvol{idx}:{hexpath}:{mode}:blk"));
     }
     Some(format!("mvm.uvols={}", entries.join(";")))
 }
@@ -2008,7 +1983,7 @@ mod tests {
                 host: "/h/src".into(),
                 guest: "/work2".into(),
                 read_only: true,
-                kind: VmVolumeKind::DirShare,
+                materialized_image: Some("/state/mount-0.ext4".into()),
                 ..Default::default()
             },
             VmVolume {
@@ -2021,8 +1996,9 @@ mod tests {
         // "/work2" = 2f776f726b32, "/data" = 2f64617461
         assert_eq!(
             encode_user_volumes_cmdline(&vols).unwrap(),
-            "mvm.uvols=uvol0:2f776f726b32:ro:fs;uvol1:2f64617461:rw:blk"
+            "mvm.uvols=uvol0:2f776f726b32:ro:blk;uvol1:2f64617461:rw:blk"
         );
+        assert_eq!(vols[0].block_source(), "/state/mount-0.ext4");
         // No spaces — must be a single cmdline token.
         assert!(!encode_user_volumes_cmdline(&vols).unwrap().contains(' '));
     }

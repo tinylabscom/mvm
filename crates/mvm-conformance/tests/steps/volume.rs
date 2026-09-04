@@ -133,7 +133,8 @@ fn write_managed_volume_marker(world: &mut CliWorld, value: i64, volume_name: St
     image.sync_all().expect("sync volume marker");
 }
 
-/// Register a **host directory** volume through the `--host <dir>` arm.
+/// Register a **host directory** volume through the `--host <dir>` arm, which
+/// snapshots it into the same block-image shape every live scenario here uses.
 ///
 /// The directory is created under the isolated home and seeded with a marker,
 /// so a guest that can read it proves the registration reached the VM and a

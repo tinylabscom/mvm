@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
+use mvm_core::vm_backend::VmVolume;
 
 use crate::commands::DirShareSpec;
 
@@ -73,7 +73,6 @@ pub(crate) fn materialize_mount_volumes(
                 host: share.host_dir.clone(),
                 guest: share.guest_mount.clone(),
                 read_only: share.read_only,
-                kind: VmVolumeKind::DirShare,
                 materialized_image: Some(image.path().display().to_string()),
                 // Same authority the image was written with, so the guest
                 // mounts the label that is actually on the bytes.
