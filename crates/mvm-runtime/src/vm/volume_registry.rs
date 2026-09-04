@@ -201,6 +201,10 @@ pub struct VolumeMountEntry {
     /// resolved through the catalog when a matching managed volume exists.
     #[serde(default)]
     pub source: VolumeMountSource,
+    /// Present only for an ad-hoc directory materialized into a block image.
+    /// Older registrations decode without it and retain their old behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_snapshot: Option<HostSnapshotSource>,
 }
 
 /// Persistent origin of a registered local volume path.
@@ -215,6 +219,18 @@ pub enum VolumeMountSource {
     /// The path is operator-supplied and host encryption must be rechecked by
     /// the CLI immediately before launch.
     AdHocHost,
+}
+
+/// The live host directory behind an ad-hoc snapshot image.
+///
+/// The image path in [`VolumeMountEntry::host_path`] is the artifact attached
+/// to the guest. This record retains the source identity needed to decide at
+/// the next start whether that artifact must be refreshed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostSnapshotSource {
+    pub source_path: String,
+    pub fingerprint: String,
 }
 
 /// Security-relevant source classification after launch-time resolution.
@@ -293,6 +309,9 @@ impl VolumeMountRegistry {
             std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         let parsed: Self =
             serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
+        for entry in parsed.mounts.values() {
+            validate_host_snapshot_source(entry)?;
+        }
         Ok(parsed)
     }
 
@@ -369,6 +388,43 @@ impl VolumeMountRegistry {
             .map(|entry| resolve_mount_entry(entry, catalog))
             .collect()
     }
+}
+
+fn validate_host_snapshot_source(entry: &VolumeMountEntry) -> Result<()> {
+    let Some(snapshot) = &entry.host_snapshot else {
+        return Ok(());
+    };
+    if entry.source != VolumeMountSource::AdHocHost {
+        bail!(
+            "host snapshot volume {:?} must have an ad-hoc host source",
+            entry.volume_name
+        );
+    }
+    if !matches!(entry.kind, LocalVolumeKind::BlockImage { .. }) {
+        bail!(
+            "host snapshot volume {:?} must be backed by a block image",
+            entry.volume_name
+        );
+    }
+    if !Path::new(&snapshot.source_path).is_absolute() {
+        bail!(
+            "host snapshot source for volume {:?} must be absolute: {}",
+            entry.volume_name,
+            snapshot.source_path
+        );
+    }
+    if snapshot.fingerprint.len() != 64
+        || !snapshot
+            .fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        bail!(
+            "host snapshot fingerprint for volume {:?} must be 64 hexadecimal characters",
+            entry.volume_name
+        );
+    }
+    Ok(())
 }
 
 fn resolve_mount_entry(
@@ -528,6 +584,7 @@ mod tests {
             kind: LocalVolumeKind::BlockImage { size_mib: 16 },
             attached_at: "2026-05-05T00:00:00Z".to_string(),
             source: VolumeMountSource::ManagedCatalog,
+            host_snapshot: None,
         }
     }
 
@@ -742,6 +799,37 @@ mod tests {
         )
         .unwrap();
         assert_eq!(entry.source, VolumeMountSource::Legacy);
+        assert_eq!(entry.host_snapshot, None);
+    }
+
+    #[test]
+    fn host_snapshot_source_roundtrips_and_rejects_a_relative_path() {
+        let _guard = DataDirGuard::new();
+        let mut entry = make_entry("/data/work", "work");
+        entry.host_path = "/cache/work.ext4".to_string();
+        entry.kind = LocalVolumeKind::BlockImage { size_mib: 64 };
+        entry.source = VolumeMountSource::AdHocHost;
+        entry.host_snapshot = Some(HostSnapshotSource {
+            source_path: "/host/work".to_string(),
+            fingerprint: "a".repeat(64),
+        });
+        let registry = VolumeMountRegistry {
+            mounts: BTreeMap::from([(entry.guest_path.clone(), entry.clone())]),
+        };
+        registry.save("snapshot-schema").unwrap();
+        assert_eq!(
+            VolumeMountRegistry::load("snapshot-schema").unwrap(),
+            registry
+        );
+
+        let path = VolumeMountRegistry::path_for("snapshot-schema");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["mounts"]["/data/work"]["host_snapshot"]["source_path"] =
+            serde_json::Value::String("relative".to_string());
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let error = VolumeMountRegistry::load("snapshot-schema").unwrap_err();
+        assert!(format!("{error:#}").contains("must be absolute"));
     }
 
     #[test]

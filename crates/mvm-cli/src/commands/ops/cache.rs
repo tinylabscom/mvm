@@ -50,8 +50,9 @@ pub(in crate::commands) enum CacheAction {
         orphan_dirs: bool,
         /// Reclaim regenerable caches too — the Stage 0 vendored blobs
         /// (`stage0/`), the prebuilt default microVM image (`default-microvm/`),
-        /// and pulled OCI layers (`oci/`). These cost a re-fetch or rebuild the
-        /// next time they're needed, so they're opt-in. Implies `--orphan-dirs`.
+        /// pulled OCI layers (`oci/`), and content-addressed mount images
+        /// (`mount-images/`). These cost a re-fetch or rebuild the next time
+        /// they're needed, so they're opt-in. Implies `--orphan-dirs`.
         #[arg(long)]
         deep: bool,
     },
@@ -728,6 +729,10 @@ const REGENERABLE_CACHE_ENTRIES: &[(&str, &str)] = &[
         "prebuilt default microVM image (rebuilt on next default-image use)",
     ),
     ("oci", "pulled OCI layers (re-pulled on next image pull)"),
+    (
+        "mount-images",
+        "content-addressed mount images (rebuilt on next mount use)",
+    ),
 ];
 
 /// A reclaimable cache entry: its path and real on-disk footprint.
@@ -1427,6 +1432,7 @@ mod tests {
             "audit-verify",
             "builder-health",
             "local-run",
+            "mount-images",
         ] {
             assert!(
                 !RETIRED_CACHE_ENTRIES.contains(&live),

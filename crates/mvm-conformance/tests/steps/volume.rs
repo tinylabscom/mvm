@@ -16,7 +16,7 @@ use mvm_runtime::vm::volume_registry::LocalVolumeCatalog;
 
 use crate::world::CliWorld;
 
-use super::cli::{mvmctl_command, workspace_root};
+use super::cli::{install_encrypted_backing_probes, mvmctl_command, workspace_root};
 use mvm_conformance::IsolatedHome;
 
 fn isolated_home(world: &CliWorld) -> &Path {
@@ -155,6 +155,10 @@ fn register_host_directory_volume(
         .expect("seed the host directory marker");
 
     let home = isolated_home(world).to_path_buf();
+    // The scenario exercises snapshot registration, not the host's disk
+    // encryption configuration. Keep the real CLI and its fail-closed probe,
+    // but make the platform command results deterministic for this subprocess.
+    let command_path = install_encrypted_backing_probes(&home);
     let mut cmd = mvmctl_command();
     cmd.args([
         "machine",
@@ -169,43 +173,26 @@ fn register_host_directory_volume(
         &guest_path,
     ])
     .isolated_home(&home)
-    .env("PATH", encrypted_volume_probe_path(world));
+    .env("PATH", &command_path);
+    world.encrypted_volume_probe_path = Some(command_path);
     world.last_run = Some(cmd.output().expect("failed to spawn mvmctl"));
 }
 
-fn encrypted_volume_probe_path(world: &CliWorld) -> std::ffi::OsString {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
+#[when(expr = "I replace the marker in host directory volume {string} with {string}")]
+fn replace_host_directory_marker(world: &mut CliWorld, volume_name: String, contents: String) {
+    let marker = isolated_home(world)
+        .join("dir-volumes")
+        .join(volume_name)
+        .join("marker");
+    fs::write(&marker, contents)
+        .unwrap_or_else(|error| panic!("replace host directory marker {marker:?}: {error}"));
+}
 
-        let bin = isolated_home(world).join("encrypted-volume-probe-bin");
-        fs::create_dir_all(&bin).expect("create encrypted-volume probe bin");
-        for (name, body) in [
-            (
-                "diskutil",
-                "#!/bin/sh\nprintf 'Device Identifier: disk-test\\nEncrypted: Yes\\n'\n",
-            ),
-            ("findmnt", "#!/bin/sh\nprintf '/dev/mapper/mvm-test\\n'\n"),
-            ("lsblk", "#!/bin/sh\nprintf 'crypt\\n'\n"),
-        ] {
-            let path = bin.join(name);
-            fs::write(&path, body)
-                .unwrap_or_else(|error| panic!("write encrypted-volume probe {path:?}: {error}"));
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap_or_else(|error| {
-                panic!("make encrypted-volume probe executable {path:?}: {error}")
-            });
-        }
-        let mut paths = vec![bin];
-        if let Some(current) = std::env::var_os("PATH") {
-            paths.extend(std::env::split_paths(&current));
-        }
-        std::env::join_paths(paths).expect("join encrypted-volume probe PATH")
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = world;
-        std::env::var_os("PATH").unwrap_or_default()
-    }
+#[when(expr = "I remove the source for host directory volume {string}")]
+fn remove_host_directory_source(world: &mut CliWorld, volume_name: String) {
+    let source = isolated_home(world).join("dir-volumes").join(volume_name);
+    fs::remove_dir_all(&source)
+        .unwrap_or_else(|error| panic!("remove host directory source {source:?}: {error}"));
 }
 
 #[then(expr = "managed volume {string} ends with byte {int}")]
@@ -277,6 +264,10 @@ fn execute_machine_shell(world: &mut CliWorld, script: String, machine: String) 
 
 #[when(expr = "I attempt a direct start of machine {string} with backend {string}")]
 fn attempt_direct_start(world: &mut CliWorld, machine: String, backend: String) {
+    let encrypted_volume_probe_path = world
+        .encrypted_volume_probe_path
+        .clone()
+        .expect("host snapshot registration must install an encrypted-volume probe PATH");
     let home = isolated_home(world);
     let fixture_dir = home.join("direct-boot-fixture");
     fs::create_dir_all(&fixture_dir).expect("create direct-boot fixture directory");
@@ -291,6 +282,7 @@ fn attempt_direct_start(world: &mut CliWorld, machine: String, backend: String) 
         .env("MVM_DIRECT_BOOT", "1")
         .env("MVM_KERNEL_PATH", &kernel)
         .env("MVM_ROOTFS_PATH", &rootfs)
+        .env("PATH", encrypted_volume_probe_path)
         .output()
         .expect("attempt direct machine start");
     world.last_run = Some(output);

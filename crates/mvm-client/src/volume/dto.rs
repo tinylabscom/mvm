@@ -302,6 +302,14 @@ pub enum AttachmentSource {
     AdHocHost,
 }
 
+/// Source identity retained for an ad-hoc host directory snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostSnapshotRecord {
+    pub source_path: String,
+    pub fingerprint: String,
+}
+
 /// One registered attachment, described without any key material.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -318,6 +326,10 @@ pub struct AttachmentRecord {
     pub host_path: String,
     /// Origin of the host path.
     pub source: AttachmentSource,
+    /// Present when `host_path` is a materialized image refreshed from a host
+    /// directory at machine start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_snapshot: Option<HostSnapshotRecord>,
     /// RFC 3339 registration timestamp.
     pub attached_at: String,
 }
@@ -540,6 +552,37 @@ mod tests {
             .insert("wrapped_key".to_string(), serde_json::json!("smuggled"));
         let err = serde_json::from_value::<VolumeRecord>(value).unwrap_err();
         assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn attachment_record_roundtrips_host_snapshot_and_defaults_it_for_legacy_json() {
+        let record = AttachmentRecord {
+            owner: "vm-1".to_string(),
+            volume: "work".to_string(),
+            guest_path: "/data/work".to_string(),
+            access: AccessMode::ReadOnly,
+            host_path: "/cache/work.ext4".to_string(),
+            source: AttachmentSource::AdHocHost,
+            host_snapshot: Some(HostSnapshotRecord {
+                source_path: "/host/work".to_string(),
+                fingerprint: "a".repeat(64),
+            }),
+            attached_at: "2026-09-03T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AttachmentRecord>(&json).unwrap(),
+            record
+        );
+
+        let mut legacy = serde_json::to_value(&record).unwrap();
+        legacy.as_object_mut().unwrap().remove("host_snapshot");
+        assert_eq!(
+            serde_json::from_value::<AttachmentRecord>(legacy)
+                .unwrap()
+                .host_snapshot,
+            None
+        );
     }
 
     #[test]
