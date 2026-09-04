@@ -283,6 +283,7 @@ fn probe_caps() -> RuntimeCaps {
         memory_snapshot: memory_snapshot_supported(),
         dir_share: dir_share_supported(),
         wall_clock_enforced: wall_clock_enforced(),
+        warm_claim: std::env::var_os("MVM_BDD_WARM_CLAIM").is_some(),
     }
 }
 

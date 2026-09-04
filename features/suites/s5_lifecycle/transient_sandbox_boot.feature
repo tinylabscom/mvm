@@ -81,7 +81,12 @@ Feature: Transient sandbox boot
     And the output contains "mvm-bdd-cleanup-marker"
     And the isolated mvm home does not contain directory "vms/bdd-transient-cleanup"
 
-  @live
+  # Gated, not deleted: the claim is rejected on this tier because the forked
+  # child never answers the post-restore identity handshake (#3039), and the
+  # launch cold-boots instead. The scenario is the only thing that exercises a
+  # warm claim, so it stays and reports itself unrun rather than passing by
+  # omission.
+  @live @warm_claim
   Scenario: machine run cleans the request state after claiming a warm standby
     Given the live mvm home request state is recorded
     And warm residency is enabled

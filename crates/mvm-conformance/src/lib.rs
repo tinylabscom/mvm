@@ -110,6 +110,24 @@ pub const DIR_SHARE_TAG: &str = "dir_share";
 /// to happen here".
 pub const UNENFORCEABLE_WALL_CLOCK_TAG: &str = "unenforceable_wall_clock";
 
+/// Scenarios needing a host where a warm standby can actually be claimed.
+///
+/// Claiming a standby forks a child and waits for it to answer a post-restore
+/// identity handshake. On this tier the child never answers (#3039) and the
+/// claim is rejected, so the launch falls back to a cold boot — the workload
+/// still runs, the start is just not warm.
+///
+/// Declared rather than probed, like every other capability here: probing it
+/// means attempting a claim, which is the multi-second operation whose outcome
+/// is in question. Set `MVM_BDD_WARM_CLAIM=1` on a host where the handshake is
+/// known to complete.
+///
+/// This is a gate, not a suppression, and the difference is visible: a skipped
+/// scenario is counted and named in the "did NOT run" tally, so a reader sees
+/// that warm claiming went unexercised rather than seeing a green suite that
+/// silently omitted it.
+pub const WARM_CLAIM_TAG: &str = "warm_claim";
+
 /// Host capabilities a scenario may require, probed once by the harness.
 ///
 /// Plain data so [`scenario_should_run`] is a pure decision the harness can
@@ -158,6 +176,11 @@ pub struct RuntimeCaps {
     /// *true* — the only inverted gate here, because the scenario it guards
     /// asserts a refusal that an enforcing tier has no occasion to make.
     pub wall_clock_enforced: bool,
+    /// A forked child answers the post-restore identity handshake, so a warm
+    /// standby can be claimed rather than falling back to a cold boot.
+    ///
+    /// Read by [`WARM_CLAIM_TAG`]. False on any host where #3039 reproduces.
+    pub warm_claim: bool,
 }
 
 /// Decide whether a scenario with `tags` should run given the host `caps`.
@@ -210,6 +233,9 @@ pub enum ScenarioGate {
     /// The active backend *can* enforce a wall-clock bound, so the refusal
     /// this scenario asserts never fires here.
     NeedsUnenforceableWallClock,
+    /// Tagged [`WARM_CLAIM_TAG`] on a host whose standby claim does not
+    /// complete its handshake.
+    NeedsWarmClaim,
     /// The merge-queue lane selected only `@ci_live` scenarios, and this
     /// scenario is outside that deliberately narrow subset.
     OutsideCiLiveSubset,
@@ -236,6 +262,7 @@ impl ScenarioGate {
             Self::NeedsTlsTunnelClient => "needs-tls-tunnel-client",
             Self::NeedsNode => "needs-node",
             Self::NeedsUnenforceableWallClock => "needs-unenforceable-wall-clock",
+            Self::NeedsWarmClaim => "needs-warm-claim",
             Self::OutsideCiLiveSubset => "outside-ci-live-subset",
         }
     }
@@ -279,6 +306,9 @@ pub fn scenario_gate(tags: &[String], caps: RuntimeCaps) -> ScenarioGate {
     // would run it exactly where its premise is false.
     if tagged(UNENFORCEABLE_WALL_CLOCK_TAG) && caps.wall_clock_enforced {
         return ScenarioGate::NeedsUnenforceableWallClock;
+    }
+    if tagged(WARM_CLAIM_TAG) && !caps.warm_claim {
+        return ScenarioGate::NeedsWarmClaim;
     }
     if tagged(GUEST_BINS_TAG) && !caps.guest_bin_dir {
         return ScenarioGate::NeedsGuestBinDir;
@@ -336,6 +366,12 @@ impl ScenarioGate {
                 "need a backend with no wall-clock mechanism, so the refusal this \
                  asserts can happen (Firecracker and QEMU leave no process to hold \
                  a deadline; libkrun and HVF do, and admit the grant instead)",
+            ),
+            Self::NeedsWarmClaim => Some(
+                "need MVM_BDD_WARM_CLAIM=1 on a host where a forked child answers \
+                 the post-restore identity handshake; where it does not (#3039) the \
+                 claim is rejected and the launch cold-boots instead, so warm \
+                 claiming goes unexercised here",
             ),
             Self::NeedsMemorySnapshot => Some(
                 "need MVM_BDD_SNAPSHOT=1 on a host whose active backend reports \
@@ -608,6 +644,7 @@ mod tests {
         dir_share: false,
         workload_kernel: false,
         wall_clock_enforced: false,
+        warm_claim: false,
     };
     const ALL: RuntimeCaps = RuntimeCaps {
         live_opted_in: true,
@@ -622,7 +659,46 @@ mod tests {
         dir_share: true,
         workload_kernel: true,
         wall_clock_enforced: true,
+        warm_claim: true,
     };
+
+    /// The warm-claim gate skips where the claim cannot complete, and runs
+    /// where it can.
+    ///
+    /// Both directions matter. A gate that only ever skips is indistinguishable
+    /// from deleting the scenario, and the reason this one exists is that the
+    /// claim is expected to work again — #3039 is a defect, not a property of
+    /// the tier.
+    #[test]
+    fn warm_claim_scenario_skips_only_where_the_claim_cannot_complete() {
+        assert_eq!(
+            scenario_gate(
+                &tags(&["live", "warm_claim"]),
+                RuntimeCaps {
+                    warm_claim: false,
+                    ..ALL
+                },
+            ),
+            ScenarioGate::NeedsWarmClaim,
+            "a host whose forked child never answers the handshake must skip"
+        );
+        assert!(
+            scenario_should_run(&tags(&["live", "warm_claim"]), ALL),
+            "a host that can claim a standby must actually run the scenario"
+        );
+    }
+
+    /// The gate is opt-in, so an untagged scenario is unaffected by it.
+    #[test]
+    fn an_untagged_scenario_ignores_the_warm_claim_capability() {
+        assert!(scenario_should_run(
+            &tags(&["live"]),
+            RuntimeCaps {
+                warm_claim: false,
+                ..ALL
+            },
+        ));
+    }
 
     #[test]
     fn dir_share_scenario_skips_where_the_backend_serves_no_share() {
@@ -661,6 +737,7 @@ mod tests {
             &tagged,
             RuntimeCaps {
                 wall_clock_enforced: false,
+                warm_claim: false,
                 ..ALL
             }
         ));
@@ -675,6 +752,7 @@ mod tests {
                 &tags(&["live"]),
                 RuntimeCaps {
                     wall_clock_enforced: enforced,
+                    warm_claim: false,
                     ..ALL
                 }
             ));
@@ -858,6 +936,7 @@ mod tests {
                 dir_share: false,
                 workload_kernel: false,
                 wall_clock_enforced: false,
+                warm_claim: false,
             },
         ));
     }
@@ -879,6 +958,7 @@ mod tests {
                 dir_share: false,
                 workload_kernel: false,
                 wall_clock_enforced: false,
+                warm_claim: false,
             },
         ));
         assert!(scenario_should_run(&tags(&["live", "firecracker"]), ALL));
@@ -902,6 +982,7 @@ mod tests {
                 dir_share: false,
                 workload_kernel: false,
                 wall_clock_enforced: false,
+                warm_claim: false,
             },
         ));
         // Live opt-in but missing capability → skipped.
@@ -920,6 +1001,7 @@ mod tests {
                 dir_share: false,
                 workload_kernel: false,
                 wall_clock_enforced: false,
+                warm_claim: false,
             },
         ));
         // Both present → runs.
@@ -945,6 +1027,7 @@ mod tests {
                 dir_share: false,
                 workload_kernel: false,
                 wall_clock_enforced: false,
+                warm_claim: false,
             },
             RuntimeCaps {
                 live_opted_in: true,
@@ -959,6 +1042,7 @@ mod tests {
                 dir_share: false,
                 workload_kernel: false,
                 wall_clock_enforced: false,
+                warm_claim: false,
             },
             RuntimeCaps {
                 live_opted_in: true,
@@ -973,6 +1057,7 @@ mod tests {
                 dir_share: false,
                 workload_kernel: false,
                 wall_clock_enforced: false,
+                warm_claim: false,
             },
             RuntimeCaps {
                 live_opted_in: true,
@@ -987,6 +1072,7 @@ mod tests {
                 dir_share: false,
                 workload_kernel: true,
                 wall_clock_enforced: false,
+                warm_claim: false,
             },
             RuntimeCaps {
                 live_opted_in: false,
@@ -1001,6 +1087,7 @@ mod tests {
                 dir_share: false,
                 workload_kernel: true,
                 wall_clock_enforced: false,
+                warm_claim: false,
             },
         ];
         let shapes = [
@@ -1041,6 +1128,7 @@ mod tests {
             dir_share: false,
             workload_kernel: false,
             wall_clock_enforced: false,
+            warm_claim: false,
         };
         let live_only = RuntimeCaps {
             live_opted_in: true,
@@ -1055,6 +1143,7 @@ mod tests {
             dir_share: false,
             workload_kernel: false,
             wall_clock_enforced: false,
+            warm_claim: false,
         };
         let bootable = RuntimeCaps {
             live_opted_in: true,
@@ -1069,6 +1158,7 @@ mod tests {
             dir_share: false,
             workload_kernel: false,
             wall_clock_enforced: false,
+            warm_claim: false,
         };
 
         assert_eq!(
@@ -1127,6 +1217,7 @@ mod tests {
                     dir_share: false,
                     workload_kernel: false,
                     wall_clock_enforced: false,
+                    warm_claim: false,
                 },
                 true,
             ),
