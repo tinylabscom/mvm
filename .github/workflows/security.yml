@@ -25,13 +25,18 @@ on:
     - cron: "17 4 * * *"
   workflow_dispatch:
 
-# Cancel a previous run when a new commit lands on the same branch.
-# Same rationale as ci.yml — keep the PR check panel free of stale
-# failed runs from superseded SHAs. `main` pushes and the nightly
-# cron are never cancelled (different ref → different group).
+# There is no `pull_request` trigger here, so there is no check panel to keep
+# free of superseded SHAs. The claim that the nightly cron was never cancelled
+# because of a different ref was wrong: a scheduled run and an operator
+# dispatch both carry `refs/heads/main` and so shared a group. The mutation
+# shards run for over two hours, and cancelling one leaves nine numbered claims
+# with a green ledger entry and no evidence behind it.
+#
+# Tag pushes already sit in their own group by ref. Dispatches now get their
+# own by run id, and the nightly keeps the ref, so no run cancels another.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read

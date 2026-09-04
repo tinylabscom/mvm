@@ -262,6 +262,18 @@ Last updated: 2026-09-04
       signed-audit regression now verifies authenticated labels exactly; live
       CI witnesses and merge delivery remain.
 
+- [ ] **Nightly lanes stop cancelling themselves — issue #3007.**
+      `specs/plans/2026-09-04-nightly-lanes-stop-cancelling-themselves.md`.
+      `Extended CI`, `Security` and `Miri` have no `pull_request` trigger, so
+      `cancel-in-progress` could only reach a run already in flight, and keying
+      the group on `github.ref` grouped the nightly cron *with* operator
+      dispatches instead of apart from them. Four consecutive Extended CI runs
+      cancelled each other, each reporting `cancelled`, which read as a red
+      lane. ci.yml's group expression is reused, and a derived structural test
+      fails any non-PR workflow that sets `cancel-in-progress: true`. The
+      workflow-structure suite and `check-workflow-paths` are green. One
+      uninterrupted run and merge delivery remain.
+
 - [ ] **Linux 6.12.107 synchronized kernel pin — issue #2971.**
       `specs/plans/2026-08-28-kernel-6-12-107.md`.
       Both kernel consumers use the kernel.org-verified archive and SRI hash;
