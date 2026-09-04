@@ -774,17 +774,23 @@ Every new module, type, or function needs test coverage:
 Never write scratch, temporary, or intermediate files anywhere inside the repo working tree — not the root, not a subdirectory, not a hidden dotfile, not a gitignored path. This covers **every** kind of agent-created scratch (analysis lists, command output, intermediate JSON/TSV, logs, ad-hoc scripts, `git merge-file` inputs), not just screenshots/binaries. Write them under `/tmp/` instead. See AGENTS.md §"Screenshots & Temporary Files" for the full rule.
 
 `.agent-memory/notes/` is the one exception, and it is not an exception to the
-rule so much as a different thing: those are committed findings, reviewed in a
-PR like any other file. Scratch is what you produce while working; a note is
-what you learned.
+rule so much as a different thing: scratch is what you produce while working, a
+note is what you learned. It is gitignored, so writing one does not put anything
+in the repository.
 
-## Committed findings (`.agent-memory/`)
+## Local findings (`.agent-memory/`)
+
+**These notes are local to your checkout.** `.agent-memory/` is gitignored and
+untracked; it was committed until 2026-09-03 and was deliberately made
+local-only again. Nothing here is reviewed, shared, or carried to another clone,
+and a note you write is a note only you will read.
 
 One finding per file under `.agent-memory/notes/<slug>.md`, with `title`,
 `date` and `tags` frontmatter. `just recall <terms>` searches them, `just
 notes` lists them, `just remember <slug>` scaffolds one. `xtask
 check-agent-notes` holds the shape and refuses a `[[link]]` to a note that does
-not exist.
+not exist — run it yourself; it is not in `check-all`, because in CI the
+directory does not exist and the gate has nothing to check.
 
 **Recall before you investigate.** A measurement already in there is one you do
 not have to pay for twice.
@@ -794,11 +800,12 @@ you learn something is *false*. The falsifications are the notes that earn
 their keep: `teardown-scales-with-guest-ram` records the obvious fix, the A/B
 that refuted it, and why it could not have worked, which is the difference
 between a day spent and a paragraph read. Say what not to retry, and say why.
-Commit the note with the change it explains.
 
-Machine-specific context — host names, fleet layout, ssh targets, local paths —
-does not go here. It belongs in your own agent memory; in the repository it
-just confuses contributors.
+Because the notes are local, anything another contributor needs to know has to
+go somewhere tracked — a `specs/` doc, an ADR, a comment, or the PR body. A note
+is where you keep a measurement for your own next session, not how you tell
+anyone else. Machine-specific context — host names, fleet layout, ssh targets,
+local paths — is exactly what it is for.
 
 These notes are observations, not authority. `specs/adrs/` owns decisions and
 the claims ledger owns what is enforced; where a note disagrees with one of
