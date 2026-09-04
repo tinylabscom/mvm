@@ -36,10 +36,10 @@ Almost all of it already existed, and most of what was left was deletion.
 
 ## The audit decision
 
-`plan_admission` maps `VmVolumeKind::DirShare` → `ShareKind::DirShare`, and the
-chain records the host path under claim 1. Had `--mount` simply become a `Disk`,
-the chain would record an ext4 image under `~/.mvm` and lose the fact that a
-host *directory* was granted.
+`plan_admission` now maps `materialized_image: Some(_)` →
+`ShareKind::DirShare`, and the chain records the host path under claim 1. Had
+`--mount` simply become an undifferentiated disk, the chain would record an
+ext4 image under `~/.mvm` and lose the fact that a host *directory* was granted.
 
 So `VmVolume.host` stays the granted directory and a new
 `VmVolume.materialized_image` carries what is actually attached. The grant and
@@ -49,10 +49,10 @@ record.
 ## One predicate, three callers
 
 The block list, the slot arithmetic and the guest device mapping all have to
-agree on which volumes are attached and in what order. They previously each
-matched on `kind`. They now all call `VmVolume::attaches_as_block`, because
-drift between them means a guest mounts a real device holding someone else's
-data and nothing errors.
+agree on which volumes are attached and in what order. All runtime volumes are
+now block images; the shared mapping derives each guest node from that one
+ordered list. Drift between them would mean a guest mounts a real device
+holding someone else's data and nothing errors.
 
 `a_materialized_grant_resolves_to_the_block_node_the_vmm_created` is the test
 for exactly that.
@@ -74,8 +74,8 @@ A mount is a snapshot taken at boot; host edits during the run are not visible.
 `--mount` was already read-only — the CLI refuses `rw` with "transient live
 shares are read-only" — so mid-run visibility is the only property lost.
 
-**This is not yet documented in `--mount --help` or the README.** It must be
-before this ships.
+The snapshot semantics are documented in the CLI help and persistent-workspace
+guide.
 
 ## Removed
 
@@ -116,16 +116,23 @@ No-mount launches are unchanged, and the dispatch window — the number
 untouched. `admit_plan` is identical either way: admission itself did not get
 slower.
 
-A mounted launch pays the materialization **every launch**. The image is
-written under `vm_state_dir(vm_name)` and a transient VM name is unique per
-run, so there is nothing to cache against without relocating images into a
-shared content-addressed store — which is the heavy feature this work avoided.
+A mounted launch originally paid the materialization **every launch**. The
+2026-09-03 follow-up relocated immutable images into a shared,
+content-addressed cache and now records the existing fingerprint, cache-lookup,
+and miss-only materialization spans.
+
+The cache does not impose a source-size ceiling or retain the tree in memory.
+It streams each regular file to capture its digest, then streams it into the
+staged image and verifies the emitted bytes against that digest. A short, long,
+unreadable, or changed file refuses publication. The cache root is private and
+must itself live on encrypted backing storage before any snapshot bytes are
+written.
 
 ## Not done
 
-- **`VmVolumeKind::DirShare` stays.** It is what records a *directory* grant in
-  the signed plan, which `enforce_admitted_shares` matches against for claim 1.
-  Removing it means moving that fact somewhere else first.
+- **Subsequently completed:** `VmVolumeKind::DirShare` was retired after claim
+  1's derivation moved to `materialized_image`. `ShareKind::DirShare` remains in
+  the signed plan and still records the directory grant.
 - **`virtiofsd --sandbox none` is untouched.** It is on the QEMU path, which does
   not run on the macOS dev host, and landing a blind change to a sandbox flag is
   how it got there.
@@ -135,7 +142,20 @@ shared content-addressed store — which is the heavy feature this work avoided.
   a writer) or vsock streaming.
 - **No `xtask check-no-virtio-fs` gate yet** — Stage D. Until it exists, nothing
   stops virtio-fs coming back.
-- **Materialization cost is unmeasured on a large tree.** The test mount was
-  tiny. A `--mount $PWD` on this repo will pay real time, and no cache exists
-  yet: the `mount_fingerprint` / `mount_cache_lookup` / `mount_materialize`
-  spans are still unproduced. Measure before deciding a cache is needed.
+- **Materialization cost remains unmeasured on a large tree.** The original
+  test mount was tiny. Cache hits now avoid rebuilding the ext4 image, but a
+  content-correct hit still pays the source tree walk and hash.
+
+## 2026-09-03 follow-up
+
+Persistent `machine volume mount --host` and transient `--mount` now share one
+verified content-addressed image cache. The cache key covers source bytes and
+guest-visible metadata, the ext4 materializer format version, and the volume
+label. A cache miss hashes the exact collected node set and verifies each file
+again while streaming it into the staged image, closing the mutable-tree race
+between identity and image creation without buffering the tree. Read-only
+mounts attach the immutable cache image; writable persistent mounts receive a
+private reflink/copy. Registered host sources are fingerprinted again before
+each start, changed sources refresh, and missing sources refuse instead of
+serving the last snapshot. Source and cache destinations must both have
+encrypted backing.

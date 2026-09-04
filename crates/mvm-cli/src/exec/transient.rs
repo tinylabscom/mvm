@@ -164,7 +164,7 @@ pub(super) fn install_ctrlc_teardown(
 pub(super) fn has_writable_disk(volumes: &[VmVolume]) -> bool {
     volumes
         .iter()
-        .any(|volume| volume.kind == mvm_core::vm_backend::VmVolumeKind::Disk && !volume.read_only)
+        .any(|volume| volume.materialized_image.is_none() && !volume.read_only)
 }
 
 /// Ask the authenticated guest agent to flush every filesystem before the VMM
@@ -343,9 +343,9 @@ pub(super) fn restore_via_snapshot(
 mod tests {
     use super::*;
 
-    fn volume(kind: mvm_core::vm_backend::VmVolumeKind, read_only: bool) -> VmVolume {
+    fn volume(materialized_image: Option<&str>, read_only: bool) -> VmVolume {
         VmVolume {
-            kind,
+            materialized_image: materialized_image.map(str::to_string),
             read_only,
             ..Default::default()
         }
@@ -353,9 +353,9 @@ mod tests {
 
     #[test]
     fn only_a_writable_disk_requires_a_pre_teardown_flush() {
-        let writable_disk = volume(mvm_core::vm_backend::VmVolumeKind::Disk, false);
-        let read_only_disk = volume(mvm_core::vm_backend::VmVolumeKind::Disk, true);
-        let directory = volume(mvm_core::vm_backend::VmVolumeKind::DirShare, false);
+        let writable_disk = volume(None, false);
+        let read_only_disk = volume(None, true);
+        let directory = volume(Some("/state/mount.ext4"), false);
 
         assert!(has_writable_disk(&[writable_disk]));
         assert!(!has_writable_disk(&[read_only_disk]));

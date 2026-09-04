@@ -1075,6 +1075,23 @@ fn run_rw_volume_requires_dev_profile() {
 }
 
 #[test]
+fn persistent_directory_volume_refuses_with_the_snapshot_registration_path() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let volume = format!("{}:/work:ro", dir.path().display());
+    let err = build_machine_volume_cfg(&[volume])
+        .expect_err("a persistent machine cannot carry a live directory share");
+    let message = err.to_string();
+    assert!(
+        message.contains("live host-directory share can't be expressed"),
+        "message: {message}"
+    );
+    assert!(
+        message.contains("machine volume mount"),
+        "message: {message}"
+    );
+}
+
+#[test]
 fn persistent_spec_reconnects_without_image_and_errors_when_absent() {
     // No `--image`: reconnect to the existing spec verbatim.
     let reconnect = parse_run(&["run", "--name", "web"]).expect("parse");

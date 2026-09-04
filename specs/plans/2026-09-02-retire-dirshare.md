@@ -3,10 +3,9 @@
 Backing: shipped-source
 Validation: check-sprint-append
 
-**Status: IN PROGRESS.** The registration-time snapshot prerequisite is
-implemented; moving the signed-plan discriminator and deleting the obsolete
-runtime variants remain. This is separated from mechanical cleanup because it
-moves a fact the security model matches against.
+**Status: COMPLETE.** The registration-time snapshot prerequisite and runtime
+variant retirement are implemented. This was separated from mechanical cleanup
+because it moves a fact the security model matches against.
 
 ## What `DirShare` is now
 
@@ -62,14 +61,14 @@ materialized into"; its doc already explains that `host` stays the directory
 that was granted "because that is the fact an admission record has to carry".
 The information is present. Only the derivation reads the wrong field.
 
-## What blocks it today
+## Resolved prerequisite
 
-**Unmaterialized `DirShare` is still producible.** `LocalVolume::as_vm_volume`
-maps `LocalVolumeKind::Directory` to `VmVolumeKind::DirShare` with
-`materialized_image: None`, and that kind is reachable: `register_attachment`
-constructs it for `VolumeSourceKind::ManagedDirectory` /
-`AdHocHostDirectory`. Under the derivation above those volumes would resolve to
-`ShareKind::Disk` and stop matching their own plans.
+The apparent blocker was an unmaterialized `DirShare` from the local-volume
+registry. Live measurement established that it never reached a guest, and
+#3151 removed the last producer: `machine volume mount --host` snapshots the
+directory into an ext4 image and registers `LocalVolumeKind::BlockImage`.
+Persistent machine-spec directory entries remain an explicit refusal before a
+runtime volume is built.
 
 So the first question is not about `VmVolumeKind` at all:
 
@@ -162,15 +161,31 @@ inference was confident and wrong, and only the live run separated the two.
 ## Ordered work
 - [x] Materialize ad-hoc `--host <directory>` registrations into private,
       encrypted-destination ext4 snapshots and resolve them as block volumes.
-- [ ] Move the `want_kind` derivation off `VmVolumeKind` and onto
+- [x] Move the `want_kind` derivation off `VmVolumeKind` and onto
       `materialized_image`, with a test that a plan recording `ShareKind::DirShare`
       still admits a materialized mount, and that a `Disk` plan does not admit
       one.
-- [ ] Only then delete `VmVolumeKind::DirShare` and `LocalVolumeKind::Directory`.
-- [ ] Live-validate `mvmctl machine run --mount` end to end. The claim-1 check
+- [x] Only then delete `VmVolumeKind::DirShare` and `LocalVolumeKind::Directory`.
+- [x] Live-validate `mvmctl machine run --mount` end to end. The claim-1 check
       is the boot path; a unit test that constructs both sides agrees with
       itself by construction, which is the failure mode this repo has hit
       repeatedly.
+
+## Verification
+
+- `cargo fmt --all -- --check`
+- `cargo check --workspace`
+- `cargo test --workspace`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `just check-gated` (x86_64 Linux all-target and BDD compilation)
+- `just bdd` (65 features, 249 scenarios: 248 passed and one capability skip)
+- Live Firecracker `mvmctl machine run --mount` against immutable Alpine
+  `sha256:e7a1a92a5bfeee40966aea60f0796b0e7917cc35591542701834f03a68fa3d18`.
+  The signed plan admitted the directory grant, the assembled cmdline carried
+  `mvm.uvols=uvol0:2f776f726b:ro:blk`, the guest read the materialized mount at
+  `/work`, and printed `dirshare-retirement-live-ok`. The project builder VM
+  cannot expose nested KVM, so the owner-approved Lima KVM test provider was
+  used strictly for this live Firecracker witness and stopped afterwards.
 
 ## Fixed while scoping: the encryption probe could never succeed
 
@@ -191,7 +206,7 @@ Fixed in this change: resolve the path to its containing volume's device with
 modes separately. Registration now succeeds, which is what made the live test
 above possible at all.
 
-## Found while scoping, not part of this work
+## Found while scoping and removed here
 
 `validate_firecracker_start_config` (`mvm-runtime/src/backend.rs:185`) refuses
 **any** volume whose kind is `DirShare`, with:
@@ -203,9 +218,9 @@ That message describes the world before Stage A. A materialized `--mount` *is* a
 disk-image volume and Firecracker can serve it, but the check matches on `kind`
 alone and would refuse it.
 
-It is **not a live bug**: its only callers are `FirecrackerConfig::from_start_config`
-and `…_with_slot`, and `FirecrackerConfig` has no consumer outside its own
-module beyond a `pub use` in `lib.rs`. The wrapper's own doc calls it legacy.
-Recorded because it is a landmine for whoever revives it, and because it is
-evidence for this plan: a `DirShare` that is really a block device already
-misleads one reader in the tree.
+It was **not a live bug**: its only callers were
+`FirecrackerConfig::from_start_config` and `…_with_slot`, and
+`FirecrackerConfig` has no consumer outside its own module beyond a `pub use`
+in `lib.rs`. Retiring the runtime variant also removes this obsolete validator,
+so the legacy wrapper now carries materialized directory images as block
+volumes if it is inspected.

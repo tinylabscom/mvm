@@ -4,10 +4,9 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
 use mvm_agentd::vsock::dev_console_data_ports;
 use mvm_core::config::vm_hvf_vsock_port_socket_at;
-use mvm_core::vm_backend::{VmStartConfig, VmVolumeKind};
+use mvm_core::vm_backend::VmStartConfig;
 use mvm_net::channel::GuestService;
 
 use crate::driver::spec::{
@@ -23,9 +22,7 @@ use crate::driver::spec::{
 /// or other `--volume` disk image) lands at the next free slot, in `volumes`
 /// order — the same order `encode_user_volumes_cmdline` walks to number its
 /// `uvol{idx}` tokens, so the Nth appended volume block matches the Nth
-/// `mvm.uvols=` entry. A `DirShare` volume has no block-device representation
-/// and is skipped here; callers must refuse it before reaching this function
-/// (see `ensure_no_dir_share_volumes`) rather than relying on this silent skip.
+/// `mvm.uvols=` entry. Every volume has a block-device representation.
 ///
 /// The rootfs/verity/overlay devices are read-only: a workload rootfs is
 /// sealed, and the verity sidecars are integrity data the guest only reads.
@@ -66,7 +63,7 @@ pub fn workload_blocks(config: &VmStartConfig) -> Vec<BlockDev> {
         blocks.push(ro(overlay_verity, blocks.len() as u8));
     }
 
-    for volume in config.volumes.iter().filter(|v| v.attaches_as_block()) {
+    for volume in &config.volumes {
         let slot = blocks.len() as u8;
         blocks.push(BlockDev {
             source: volume.block_source().to_string().into(),
@@ -84,31 +81,20 @@ pub fn workload_blocks(config: &VmStartConfig) -> Vec<BlockDev> {
 
 /// Resolve the guest block device for each configured volume.
 ///
-/// The returned entries preserve `config.volumes` order. Directory shares have
-/// no block device and therefore produce `None`; disk volumes resolve to the
-/// exact `/dev/vd*` node present in [`workload_blocks`]. Keeping this mapping
-/// here makes callers use the same slot calculation as the VMM and the guest
-/// activation path.
+/// The returned entries preserve `config.volumes` order. Every user volume is
+/// a block image and resolves to the exact `/dev/vd*` node present in
+/// [`workload_blocks`]. Keeping this mapping here makes callers use the same
+/// slot calculation as the VMM and the guest activation path.
 pub fn workload_volume_devices(config: &VmStartConfig) -> Vec<Option<String>> {
     let blocks = workload_blocks(config);
-    let disk_count = config
-        .volumes
-        .iter()
-        .filter(|volume| volume.attaches_as_block())
-        .count();
+    let disk_count = config.volumes.len();
     let first_user_block = blocks.len().saturating_sub(disk_count);
     let mut block_devices = blocks[first_user_block..].iter().map(BlockDev::device_node);
 
     config
         .volumes
         .iter()
-        .map(|volume| {
-            if volume.attaches_as_block() {
-                block_devices.next()
-            } else {
-                None
-            }
-        })
+        .map(|_| block_devices.next())
         .collect()
 }
 
@@ -117,8 +103,7 @@ pub fn workload_volume_devices(config: &VmStartConfig) -> Vec<Option<String>> {
 /// The sidecar is physically a disk, but it is not a user volume: the guest
 /// mounts it through the dedicated `mvm.sdk_dev` contract at `/mvm/sdk`.
 pub fn is_sdk_sidecar_volume(volume: &mvm_core::vm_backend::VmVolume) -> bool {
-    volume.guest == mvm_core::plan::SDK_SIDECAR_GUEST_PATH
-        && matches!(volume.kind, VmVolumeKind::Disk)
+    volume.guest == mvm_core::plan::SDK_SIDECAR_GUEST_PATH && volume.materialized_image.is_none()
 }
 
 /// The guest device node the SDK sidecar lands on for this launch config, or
@@ -135,31 +120,6 @@ pub fn sdk_sidecar_block_device(config: &VmStartConfig) -> Option<String> {
         .get(sidecar_index)
         .cloned()
         .flatten()
-}
-
-/// Refuse a `DirShare` volume before a `VmmSpec` is assembled: the runner's
-/// `VmmSpec` has no virtio-fs device, so a directory share can't be expressed
-/// on this path (unlike a `Disk` volume, which becomes a `BlockDev`). Fails
-/// closed with the offending volume named, rather than letting
-/// `workload_blocks` silently drop it. `VmmSpec.shares` (virtio-fs) is a
-/// deferred follow-up; the dev-tier `virtiofs_root` flat share is a separate,
-/// unrelated field and out of scope here.
-pub fn ensure_no_dir_share_volumes(config: &VmStartConfig) -> Result<()> {
-    if let Some(v) = config
-        .volumes
-        .iter()
-        .find(|v| matches!(v.kind, VmVolumeKind::DirShare) && !v.attaches_as_block())
-    {
-        bail!(
-            "directory-share volume '{}' -> '{}' cannot be attached: the WorkloadRunner has no \
-             virtio-fs device yet, so a live host-directory share can't be expressed. Use a \
-             disk-image volume instead (host:/guest:SIZE), or run this workload on a backend \
-             with virtio-fs support.",
-            v.host,
-            v.guest
-        );
-    }
-    Ok(())
 }
 
 /// The host-side unix sockets a workload's standing vsock channels bind to.
@@ -377,7 +337,7 @@ pub fn workload_spec(inputs: &WorkloadSpecInputs) -> VmmSpec {
 mod tests {
     use super::*;
     use mvm_agentd::vsock::{EGRESS_PORT, GUEST_AGENT_PORT, WORKLOAD_EXIT_PORT};
-    use mvm_core::vm_backend::VmVolume;
+    use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
     use std::path::PathBuf;
 
     fn base() -> VmStartConfig {
@@ -388,13 +348,13 @@ mod tests {
         }
     }
 
-    fn granted_dir(host: &str, guest: &str, image: Option<&str>) -> VmVolume {
+    fn granted_dir(host: &str, guest: &str, image: &str) -> VmVolume {
         VmVolume {
             host: host.into(),
             guest: guest.into(),
             read_only: true,
-            kind: VmVolumeKind::DirShare,
-            materialized_image: image.map(str::to_string),
+            kind: VmVolumeKind::Disk,
+            materialized_image: Some(image.to_string()),
             volume_label: None,
             ..Default::default()
         }
@@ -413,17 +373,9 @@ mod tests {
     fn a_materialized_grant_is_attached_as_a_block_device_and_not_as_a_share() {
         // The point of the whole change: no virtio-fs device is asked for.
         let cfg = VmStartConfig {
-            volumes: vec![granted_dir(
-                "/home/me/src",
-                "/work",
-                Some("/state/mount-0.ext4"),
-            )],
+            volumes: vec![granted_dir("/home/me/src", "/work", "/state/mount-0.ext4")],
             ..base()
         };
-        assert!(
-            ensure_no_dir_share_volumes(&cfg).is_ok(),
-            "a materialized grant is not a directory share"
-        );
         let blocks = workload_blocks(&cfg);
         assert!(
             blocks
@@ -446,7 +398,7 @@ mod tests {
         // someone else's data, which no error surfaces.
         let cfg = VmStartConfig {
             volumes: vec![
-                granted_dir("/src", "/work", Some("/state/mount-0.ext4")),
+                granted_dir("/src", "/work", "/state/mount-0.ext4"),
                 disk("/state/data.ext4", "/data"),
             ],
             ..base()
@@ -471,23 +423,6 @@ mod tests {
         };
         assert_eq!(devices[0], node_of("/state/mount-0.ext4"));
         assert_eq!(devices[1], node_of("/state/data.ext4"));
-    }
-
-    #[test]
-    fn an_unmaterialized_grant_is_still_refused_rather_than_silently_dropped() {
-        // Nothing produces one now, but the refusal is what makes that true
-        // rather than assumed: a share with no image has no way to reach the
-        // guest, and dropping it would boot a workload without its mount.
-        let cfg = VmStartConfig {
-            volumes: vec![granted_dir("/src", "/work", None)],
-            ..base()
-        };
-        assert!(ensure_no_dir_share_volumes(&cfg).is_err());
-        assert!(
-            workload_blocks(&cfg)
-                .iter()
-                .all(|b| b.source.as_path() != Path::new("/src"))
-        );
     }
 
     #[test]
@@ -542,38 +477,46 @@ mod tests {
         blocks.iter().map(BlockDev::device_node).collect()
     }
 
-    /// Neither kind of directory volume produces a share any more — including
-    /// the read-write one, which used to be refused by a separate check rather
-    /// than being unrepresentable.
+    /// Neither access mode turns a materialized directory grant back into a
+    /// live share.
     #[test]
-    fn no_directory_volume_produces_a_share_whatever_its_mode() {
+    fn materialized_directory_grants_are_blocks_whatever_their_mode() {
         let cfg = VmStartConfig {
             volumes: vec![
                 VmVolume {
-                    materialized_image: None,
+                    materialized_image: Some("/state/rw.ext4".to_string()),
                     volume_label: None,
                     host: "/host/rw".into(),
                     guest: "/guest/rw".into(),
                     size: String::new(),
                     read_only: false,
-                    kind: VmVolumeKind::DirShare,
+                    kind: VmVolumeKind::Disk,
                     encrypted: false,
                 },
                 VmVolume {
-                    materialized_image: None,
+                    materialized_image: Some("/state/ro.ext4".to_string()),
                     volume_label: None,
                     host: "/host/ro".into(),
                     guest: "/guest/ro".into(),
                     size: String::new(),
                     read_only: true,
-                    kind: VmVolumeKind::DirShare,
+                    kind: VmVolumeKind::Disk,
                     encrypted: false,
                 },
             ],
             ..base()
         };
-        // An unmaterialized grant refuses rather than being silently dropped.
-        assert!(ensure_no_dir_share_volumes(&cfg).is_err());
+        let blocks = workload_blocks(&cfg);
+        assert!(
+            blocks
+                .iter()
+                .any(|block| block.source == Path::new("/state/rw.ext4"))
+        );
+        assert!(
+            blocks
+                .iter()
+                .any(|block| block.source == Path::new("/state/ro.ext4"))
+        );
     }
 
     #[test]
@@ -650,19 +593,6 @@ mod tests {
         }
     }
 
-    fn dir_share_volume(host: &str, guest: &str) -> mvm_core::vm_backend::VmVolume {
-        mvm_core::vm_backend::VmVolume {
-            materialized_image: None,
-            volume_label: None,
-            host: host.into(),
-            guest: guest.into(),
-            size: String::new(),
-            read_only: false,
-            kind: VmVolumeKind::DirShare,
-            encrypted: false,
-        }
-    }
-
     #[test]
     fn a_disk_volume_lands_at_slot_4_after_the_full_base_stack() {
         let cfg = VmStartConfig {
@@ -693,14 +623,18 @@ mod tests {
             runtime_overlay_roothash: Some("ab".repeat(32)),
             volumes: vec![
                 disk_volume("/vol/first.img", "/first", true),
-                dir_share_volume("/host/share", "/share"),
+                granted_dir("/host/share", "/share", "/state/share.ext4"),
                 disk_volume("/vol/second.img", "/second", false),
             ],
             ..base()
         };
         assert_eq!(
             workload_volume_devices(&cfg),
-            vec![Some("/dev/vde".into()), None, Some("/dev/vdf".into())]
+            vec![
+                Some("/dev/vde".into()),
+                Some("/dev/vdf".into()),
+                Some("/dev/vdg".into())
+            ]
         );
     }
 
@@ -778,15 +712,15 @@ mod tests {
         assert_eq!(sdk_sidecar_block_device(&cfg).as_deref(), Some("/dev/vdb"));
     }
 
-    /// A directory share at the sidecar mount point is not a sidecar
-    /// attachment; the admission gate already refuses it, and this resolver
-    /// must not paper over it by naming a block device that was never attached.
+    /// A materialized directory grant at the sidecar mount point is not the
+    /// reserved SDK sidecar attachment.
     #[test]
-    fn a_dir_share_at_the_sidecar_path_resolves_no_device() {
+    fn a_materialized_directory_at_the_sidecar_path_is_not_the_sidecar() {
         let cfg = VmStartConfig {
-            volumes: vec![dir_share_volume(
+            volumes: vec![granted_dir(
                 "/cache/sdk",
                 mvm_core::plan::SDK_SIDECAR_GUEST_PATH,
+                "/state/sdk-shaped-mount.ext4",
             )],
             ..base()
         };
@@ -830,19 +764,6 @@ mod tests {
         assert_eq!(blocks[1].source, PathBuf::from("/vol/data.img"));
     }
 
-    #[test]
-    fn a_dir_share_volume_is_skipped_by_workload_blocks() {
-        // workload_blocks itself has no Result to refuse through; the fail-closed
-        // guard lives in `ensure_no_dir_share_volumes`, which callers must run
-        // first. This only proves the low-level mapper never fabricates a bogus
-        // block device for a share it can't express.
-        let cfg = VmStartConfig {
-            volumes: vec![dir_share_volume("/host/dir", "/data")],
-            ..base()
-        };
-        assert_eq!(nodes(&workload_blocks(&cfg)), vec!["/dev/vda"]);
-    }
-
     /// The inverse of what this used to assert, and the property that matters
     /// now: a user volume never becomes a virtio-fs share. A granted directory
     /// is materialized into an image and attached as virtio-blk, so the only
@@ -852,7 +773,7 @@ mod tests {
         let cfg = VmStartConfig {
             volumes: vec![
                 disk_volume("/vol/data.img", "/data", true),
-                dir_share_volume("/host/dir", "/mnt/share"),
+                granted_dir("/host/dir", "/mnt/share", "/state/share.ext4"),
             ],
             ..base()
         };
@@ -862,31 +783,6 @@ mod tests {
             "no volume may produce a virtio-fs share: {:?}",
             spec.shares
         );
-    }
-
-    #[test]
-    fn ensure_no_dir_share_volumes_accepts_disk_only_configs() {
-        let cfg = VmStartConfig {
-            volumes: vec![disk_volume("/vol/data.img", "/data", true)],
-            ..base()
-        };
-        assert!(ensure_no_dir_share_volumes(&cfg).is_ok());
-    }
-
-    #[test]
-    fn ensure_no_dir_share_volumes_refuses_and_names_the_volume() {
-        let cfg = VmStartConfig {
-            volumes: vec![
-                disk_volume("/vol/data.img", "/data", true),
-                dir_share_volume("/host/dir", "/mnt/share"),
-            ],
-            ..base()
-        };
-        let err = ensure_no_dir_share_volumes(&cfg)
-            .expect_err("a DirShare volume must be refused, not silently dropped");
-        let message = err.to_string();
-        assert!(message.contains("/host/dir"), "message: {message}");
-        assert!(message.contains("/mnt/share"), "message: {message}");
     }
 
     #[test]

@@ -3,6 +3,8 @@
 //! a running microVM call through `mvm-client` instead as those suites land.
 
 use std::collections::HashSet;
+use std::ffi::OsString;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -126,6 +128,7 @@ fn run_mvmctl_in_isolated_home(world: &mut CliWorld, args: String) {
     let mut cmd = mvmctl_command();
     cmd.args(mvm_conformance::doc_examples::tokenize(&args))
         .isolated_home(home.path());
+    apply_encrypted_volume_probe_path(world, &mut cmd);
     if world.kernel_reacquisition_must_fail {
         cmd.env("MVM_KERNEL_SOURCE", "download")
             .env("MVM_UPDATE_DOWNLOAD_URL", "http://127.0.0.1:9");
@@ -137,6 +140,48 @@ fn run_mvmctl_in_isolated_home(world: &mut CliWorld, args: String) {
 #[given(expr = "an isolated mvm home")]
 fn isolated_mvm_home(world: &mut CliWorld) {
     world.isolated_home = Some(tempfile::tempdir().expect("create isolated MVM_HOME"));
+}
+
+#[given(expr = "an isolated mvm home on encrypted backing storage")]
+fn isolated_mvm_home_on_encrypted_backing(world: &mut CliWorld) {
+    isolated_mvm_home(world);
+    let home = world
+        .isolated_home
+        .as_ref()
+        .expect("isolated MVM_HOME was just created");
+    world.encrypted_volume_probe_path = Some(install_encrypted_backing_probes(home.path()));
+}
+
+/// Install deterministic platform probes for a subprocess scenario whose
+/// encrypted-backing precondition is part of the declared fixture.
+pub(super) fn install_encrypted_backing_probes(home: &Path) -> OsString {
+    let probe_bin = home.join("encrypted-backing-probe-bin");
+    fs::create_dir_all(&probe_bin)
+        .unwrap_or_else(|error| panic!("create encryption probe bin {probe_bin:?}: {error}"));
+    for (name, body) in [
+        (
+            "findmnt",
+            "#!/bin/sh\nprintf '%s\\n' /dev/mapper/mvm-bdd-crypt\n",
+        ),
+        ("lsblk", "#!/bin/sh\nprintf '%s\\n' crypt\n"),
+        ("diskutil", "#!/bin/sh\nprintf '%s\\n' 'FileVault: Yes'\n"),
+    ] {
+        let probe = probe_bin.join(name);
+        fs::write(&probe, body)
+            .unwrap_or_else(|error| panic!("write encryption probe {probe:?}: {error}"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).unwrap_or_else(
+                |error| panic!("make encryption probe executable {probe:?}: {error}"),
+            );
+        }
+    }
+    let mut command_path = vec![probe_bin];
+    if let Some(path) = std::env::var_os("PATH") {
+        command_path.extend(std::env::split_paths(&path));
+    }
+    std::env::join_paths(command_path).expect("join hermetic encryption probe PATH")
 }
 
 #[given(expr = "an isolated mvm home with a cached non-verity workload kernel")]
@@ -261,12 +306,19 @@ pub(crate) fn run_mvmctl_isolated_live_home(world: &mut CliWorld, args: String) 
         .current_dir(workspace_root())
         .args(mvm_conformance::doc_examples::tokenize(&args))
         .isolated_home(&home);
+    apply_encrypted_volume_probe_path(world, &mut command);
     if world.warm_residency {
         command.env("MVM_RESIDENCY", "warm");
     }
     let output = command.output().expect("failed to spawn mvmctl");
     world.last_live_home = Some(home);
     world.last_run = Some(output);
+}
+
+fn apply_encrypted_volume_probe_path(world: &CliWorld, command: &mut Command) {
+    if let Some(path) = &world.encrypted_volume_probe_path {
+        command.env("PATH", path);
+    }
 }
 
 /// Install the operator-supplied `.mvmpkg` into an isolated home and remember

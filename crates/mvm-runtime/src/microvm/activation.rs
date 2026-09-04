@@ -324,30 +324,16 @@ fn build_volume_configs(config: &VmStartConfig) -> Result<Vec<VolumeConfig>> {
         .filter(|(volume, _)| !mvm_vmm::host::spec_map::is_sdk_sidecar_volume(volume))
         .enumerate()
         .map(|(idx, (volume, device))| {
-            // A granted directory that was materialized into an image reaches
-            // the guest as a block device like any other. The guest is told
-            // what it actually has, not what the operator asked for.
-            let (kind, device) = if volume.attaches_as_block() {
-                (VolumeConfigKind::Block, device)
-            } else {
-                (VolumeConfigKind::VirtioFs, None)
-            };
-            if volume.attaches_as_block() && device.is_none() {
+            if device.is_none() {
                 bail!("missing VMM block device for user volume uvol{idx}");
             }
             Ok(VolumeConfig {
                 tag: format!("uvol{idx}"),
                 mountpoint: volume.guest.clone(),
                 read_only: volume.read_only,
-                kind,
+                kind: VolumeConfigKind::Block,
                 device,
-                // Only a block volume can be found by label; a virtio-fs share
-                // is addressed by tag and has no filesystem the guest reads a
-                // label from.
-                label: volume
-                    .attaches_as_block()
-                    .then(|| volume.volume_label.clone())
-                    .flatten(),
+                label: volume.volume_label.clone(),
             })
         })
         .collect()
@@ -592,14 +578,19 @@ mod tests {
     }
 
     #[test]
-    fn build_env_maps_directory_and_block_volumes() {
+    fn build_env_maps_materialized_directory_and_direct_disk_as_blocks() {
         let (_env, _dir) = test_env();
         let config = VmStartConfig {
             name: "test-vm".into(),
             roothash: Some(VALID_HASH.into()),
             runtime_overlay_roothash: Some(VALID_HASH.into()),
             volumes: vec![
-                VmVolumeKind::DirShare.into_volume("/host/share", "/guest/share", false),
+                mvm_core::protocol::vm_backend::VmVolume {
+                    host: "/host/share".into(),
+                    guest: "/guest/share".into(),
+                    materialized_image: Some("/state/share.ext4".into()),
+                    ..Default::default()
+                },
                 VmVolumeKind::Disk.into_volume("/host/disk", "/guest/disk", true),
             ],
             ..base_config()
@@ -612,9 +603,9 @@ mod tests {
         assert!(!env.volumes[0].read_only);
         assert!(matches!(
             env.volumes[0].kind,
-            mvm_agentd::vsock::VolumeConfigKind::VirtioFs
+            mvm_agentd::vsock::VolumeConfigKind::Block
         ));
-        assert_eq!(env.volumes[0].device, None);
+        assert_eq!(env.volumes[0].device.as_deref(), Some("/dev/vdb"));
         assert_eq!(env.volumes[1].tag, "uvol1");
         assert_eq!(env.volumes[1].mountpoint, "/guest/disk");
         assert!(env.volumes[1].read_only);
@@ -622,7 +613,7 @@ mod tests {
             env.volumes[1].kind,
             mvm_agentd::vsock::VolumeConfigKind::Block
         ));
-        assert_eq!(env.volumes[1].device.as_deref(), Some("/dev/vdb"));
+        assert_eq!(env.volumes[1].device.as_deref(), Some("/dev/vdc"));
     }
 
     #[test]

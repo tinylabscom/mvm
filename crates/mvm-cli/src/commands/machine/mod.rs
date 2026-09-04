@@ -1523,6 +1523,19 @@ fn build_machine_volume_cfg(
     let mut volume_cfg = Vec::with_capacity(volume_specs.len());
     for volume in volume_specs {
         let spec = super::shared::parse_volume_spec(volume)?;
+        if let super::shared::VolumeSpec::DirShare {
+            host_dir,
+            guest_mount,
+            ..
+        } = &spec
+        {
+            bail!(
+                "persistent machine volume '{host_dir}' -> '{guest_mount}' cannot be attached: \
+                 a live host-directory share can't be expressed. Snapshot and register it with \
+                 `mvmctl machine volume mount <machine> --volume <name> --host {host_dir} \
+                 --guest {guest_mount}` before starting the machine."
+            );
+        }
         let vmv = super::shared::vm_volume_from_spec_validated(&spec)
             .with_context(|| format!("volume {volume:?}"))?;
         super::shared::materialize_disk_volume(&vmv)

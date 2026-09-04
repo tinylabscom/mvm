@@ -3,19 +3,14 @@
 Backing: shipped-source
 Validation: check-sprint-append
 
-**Status: IN PROGRESS — Stages A, B and D landed, and Stage C has taken every
-backend it can reach without live hardware. Both builders are on the disk
-transport, the host-side `virtiofsd` daemon is deleted (and with it the
-`--sandbox none` flag this plan opened on), QEMU now *refuses* a spec carrying
-shares rather than ignoring one, and the HVF backend can no longer express a
-share at all. `check-no-virtio-fs` is down from 46 sites across 14 files to 38
-across 10.
-
-Four items remain, and none is a tidy-up. The largest is that **libkrun's
-Stage 0 still boots a virtio-fs root** — the plan's headline is not yet true of
-that path. The others: the libkrun persistent builder's shares, the guest's
-install arm, and the HVF VirtioFs device with its 1,108-line FuseServer and fuzz
-target. Two of the four need live hardware to validate.
+**Status: COMPLETE.** Workloads, the dev-tier root, Stage 0, and every builder
+transport are block-backed. The host-side `virtiofsd` daemon, HVF device and
+FuseServer are deleted; QEMU, Firecracker, and libkrun refuse a requested
+directory share before boot. libkrun Stage 0 materializes its verified
+`RootDir` seed as `root.ext4`, boots that disk with `root_dir: null`, and carries
+the source tree and artifacts through the shared raw-tar disk transport.
+`check-no-virtio-fs` is pinned at the intended end state: **19 sites across 6
+files**.
 
 The end state is **FFI-only rows, not zero**: 16 of the remaining sites declare
 libkrun's C API, which exports `krun_add_virtiofs` whether or not we call it,
@@ -66,11 +61,10 @@ host filesystem at all.
   "`--mount '{spec}'` requests rw, but transient live shares are read-only". So
   the only property a materialized image loses is *host edits becoming visible
   mid-run*, which a read-only mount consumed at boot barely has.
-- **The timing surface already has slots for the replacement.**
+- **The timing surface already had slots for the replacement.**
   `mount_fingerprint`, `mount_cache_lookup` and `mount_materialize` are declared
-  in `SubPhase`, rendered by the report, and have **no producer**. The comment
-  says they exist because "a content-addressed mount image is what records
-  them". Someone designed this and did not build it.
+  in `SubPhase` and rendered by the report. The 2026-09-03 follow-up wired them
+  to the shared content-addressed mount-image cache.
 
 ## Stages
 
@@ -128,23 +122,23 @@ the legacy arm, not building the portable one.
       advertised `directory_shares` capability, the `directory_shares` field on
       `VmCapabilities`, the two-arm `ensure_dir_share_support`, and
       `workload_shares`' volume arm. 85 lines out, 10 in.
-- [ ] `VmVolumeKind::DirShare` and `LocalVolumeKind::Directory` stay for now:
-      `DirShare` is what records a *directory* grant in the plan, which claim 1
-      matches against, so removing it means moving that fact somewhere else
-      first. `VirtioFsShare` also stays — its only remaining producers are the
-      dev-tier root (Stage B) and the builder VM (Stage C).
+- [x] `VmVolumeKind::DirShare` and `LocalVolumeKind::Directory` are retired.
+      Claim 1 still records a directory grant as `ShareKind::DirShare` in the
+      signed plan; admission derives that fact from `materialized_image` while
+      the runtime transport stays disk-only. `VirtioFsShare` remains only for
+      builder-VM transport.
 
       **Designed out into its own plan:**
       `specs/plans/2026-09-02-retire-dirshare.md`. The fact lives in
       `enforce_admitted_shares`, which derives the `ShareKind` it demands from
       the runtime enum; the resolution is to derive it from
       `materialized_image` instead and keep `ShareKind::DirShare` in the signed
-      plan. The blocker is that `LocalVolumeKind::Directory` can still produce
-      an *unmaterialized* `DirShare`, so what a managed directory volume is has
-      to be settled first.
+      plan. `machine volume mount --host` now snapshots and registers a block
+      image, while old persisted directory-kind entries fail closed.
 
-**Custom volumes are unaffected.** A managed volume is already a
-`BlockImage`/`Disk` today. Nothing about `mvmctl volume` changes.
+**Managed block volumes are unaffected.** The obsolete host-backed directory
+creation arm is removed with `LocalVolumeKind::Directory`; `--host` snapshots
+the source directory into a registered block image.
 
 **Deliberately not in this stage:** content-addressing and caching of the
 materialized image. The `mount_fingerprint` / `mount_cache_lookup` /
@@ -199,7 +193,8 @@ Largest, least security value: the builder runs our own Nix builds, and my
 memory note already separates dev-builder from prod tiers. It is in scope
 because the goal is *nowhere*, not *nowhere that matters*.
 
-Remaining shares are `work`, `out`, `job`, `mvm-bins` and the closure seed.
+The former shares were `work`, `out`, `job`, `mvm-bins`, the closure seed, and
+Stage 0's root. They now all cross the boundary as block devices.
 
 **`out` is already solved, and this plan was wrong about it.** The decision it
 said to make — ext4 reader vs vsock stream — was moot before it was written.
@@ -225,9 +220,12 @@ order and asks for no shares). What is left is narrower than "the builder VM":
       verified against the supervisor config a live `--builder libkrun` run
       wrote, not just its exit status.
 
-      `run_stage0_impl` keeps its share deliberately: Stage 0 boots a virtio-fs
-      *root* and has no transport disks, so it predates this seam rather than
-      lagging it.
+      The follow-up completed the remaining Stage 0 seam:
+      `run_stage0_impl` materializes the verified `RootDir` seed with the pure
+      ext4 writer and boots it as vda, then attaches the Nix store, input,
+      output, and identity disks. The guest extracts and emits the raw-tar
+      transport in-process because the minimal seed's BusyBox has no `tar`
+      applet. No Stage 0 context calls `krun_set_root` or carries a share.
 
       **The live run could not exercise the closure-carrying arm.** No builder
       pack on the dev host emits a `nix-closure.nar`, so
@@ -533,16 +531,14 @@ Five coordinated changes, host and guest:
       the transport and drops both `stage_closure_seed_dir` and
       `qemu_shares_with_closure_seed`.
 
-      **The premise above was wrong, and the wrong part matters more than the
-      question.** libkrun does not pass `None` because it has no closure:
-      `builder_backend_select.rs` gives every libkrun builder
-      `with_closure_nar(closure_nar_for_host_arch())`.
-      `prepare_builder_transport_disks` hardcoded `None` because the closure was
-      **left on virtio-fs** — the one-shot transport paths still call
-      `closure_seed_share` and `add_virtio_fs(CLOSURE_SEED_TAG, …)` alongside
-      their transport disks. The helper now takes a real `closure_nar` and
-      libkrun's two sites pass `None` explicitly, with a comment saying why.
-      See the corrected checkbox at the top of this stage.
+      **The premise above was wrong, and the wrong part mattered more than the
+      question.** libkrun did not lack a closure:
+      `builder_backend_select.rs` gives each one-shot libkrun builder
+      `with_closure_nar(closure_nar_for_host_arch())`. The intermediate
+      implementation left that closure on virtio-fs; the final one passes it to
+      `prepare_builder_transport_disks` at both one-shot sites and at Stage 0.
+      The persistent builder has no separate closure input and passes `None`.
+      No caller stages a wrapper directory or attaches a closure share.
 
 - [x] The QEMU **workload** driver's share arm is a different matter and *is*
       free: workload specs carry `shares: Vec::new()` unconditionally since
@@ -567,15 +563,15 @@ Five coordinated changes, host and guest:
       seeded closure and the remaining dead plumbing below. With the persistent
       HVF builder also on the disk transport, it went from 54 sites across 15
       files to **41 across 13**.
-- [ ] The **libkrun** persistent builder still serves `work`/`mvm-bins`/`job`/
-      `out` as shares (`libkrun_builder.rs`). Its VMM has virtio-fs, so nothing
-      forced the move; the session record already carries the two-state
-      distinction (`disk_transport: Option<…>`), so flipping it is a matter of
-      packing disks in `LibkrunPersistentHostVm::start` and recording them.
-- [ ] The guest's **install** arm writes to `/job/<job_id>/out`, which the disk
-      transport does not collect. Point it at `/out` like the flake arm, then
-      drop the refusal in `PersistentBuilderVm::run_install_dispatch`. Needs a
-      guest change and therefore an image rebuild.
+- [x] The **libkrun** persistent builder now uses the same fixed-capacity input
+      and output disks as HVF. `LibkrunPersistentHostVm::start` packs the boot
+      inputs, exposes both disk paths through the session handle, and each
+      dispatch repacks input and reads output without changing the capacity the
+      running guest observed.
+- [x] The guest's **install** arm selects `/out` for disk transport, so install
+      artifacts and claim-11 sidecars return on the output disk. The host-side
+      refusal is gone; share-backed compatibility sessions retain their
+      `/job/<job_id>/out` path.
 - [x] Now-dead HVF share **wiring**: `HvfVirtioFsShare` and its config field,
       the `hvf.rs` mapper, the supervisor's pass-through, the restore path's
       copy, and `kernel_boot.rs`'s FDT nodes + device construction. The HVF
@@ -609,6 +605,21 @@ Five coordinated changes, host and guest:
       guards against the parser failing to resolve targets rather than
       mandating a count.
 
+**Final libkrun live evidence (macOS 26.5.2, arm64).** A helper rebuilt with
+`--features embed-host-bins` was pinned through
+`MVM_BUILDER_VM_BOOTSTRAP_BIN`, and the detached-process environment carried a
+full `PATH` including `/usr/sbin`. A forced source Stage 0 bootstrap completed,
+then this public command exited 0 and produced the sleeper rootfs:
+
+    mvmctl machine build --builder libkrun --no-persistent-builder --force examples/sleeper
+
+The forced Stage 0 supervisor config recorded `root_dir: null`,
+`rootfs_path: .../root.ext4`, input/output block disks, and
+`virtio_fs_mounts: []`. The public builder config independently recorded
+`root_dir: null`, its cached `rootfs.ext4`, the store/input/output/runtime
+disks, and the same empty mount list. This is the required live witness that no
+CI lane can provide.
+
 ### Stage D — the gate
 
 Landed **before** Stage C rather than after, as a ratchet. Waiting for the
@@ -640,7 +651,9 @@ exactly as long as it took to finish — and the finishing is the slow part.
       growth, and a *removed* one fails as a stale pin, so the table can only
       shrink and cannot drift into a ceiling nobody maintains. Four rows from
       the first draft turned out to be comment-only and were dropped — the gate
-      caught them itself.
+      caught them itself. Every migration lowered the pin in the same change;
+      the final pin is **19 sites across 6 files**: 16 libkrun C-API declaration
+      sites, the `VirtioFsShare` type, and the QEMU/Firecracker refusal tests.
 - [x] Added to `check-all`, which runs on every PR (`ci.yml`). Four tests ship
       with it, including one asserting the pattern still matches every real
       attach form: a gate that cannot fail is decoration.
@@ -655,10 +668,12 @@ exactly as long as it took to finish — and the finishing is the slow part.
   on the *dispatch window* (`backend_start + vsock_wait`), and the mount spans
   are parented to `drives`, which is outside it. A launch with no `--mount` is
   unchanged, and a custom volume is already a block image.
-- **Stage C is smaller than "weeks"** — that estimate assumed `out` needed a
-  new mechanism, and it does not (see Stage C). What is left is one transport
-  swap on the persistent builder. The cost is not code volume; it is that no CI
-  lane can witness it.
+- **Stage C was smaller than "weeks"** — that estimate assumed `out` needed a
+  new mechanism, and it did not (see Stage C). The material code cost was the
+  Stage 0 root materialization, persistent-builder parity, and the install
+  output arm. The validation cost was larger: hosted CI cannot boot libkrun, so
+  a cold Stage 0 bootstrap and a real `machine build --builder libkrun` were
+  required on Apple Silicon.
 - **The QEMU workload driver may simply lose directory shares** rather than gain
   images — it is opt-in dev/test and `auto_select` never picks it, so it is the
   one place where deleting the feature outright is defensible.

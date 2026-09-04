@@ -18,6 +18,16 @@
       every process serially. The feature-gated target and zero-warning Clippy
       are green; the complete hermetic BDD suite passed 247 of 248 scenarios
       with the one existing backend-capability skip.
+- [ ] **Remove virtio-fs from workload and builder execution.**
+      `specs/plans/2026-08-31-remove-virtio-fs.md`.
+      Workloads, the dev-tier root, Stage 0, and builder inputs and artifacts
+      now cross the virtualization boundary as block devices. libkrun Stage 0
+      materializes its verified seed as an ext4 root and uses the shared raw-tar
+      disk transport for the remaining payloads; QEMU, Firecracker, and
+      libkrun refuse any residual directory share before launch. The complete
+      workspace nextest suite, all-targets zero-warning Clippy, gated targets,
+      all repository policy checks, and a live macOS libkrun Stage 0 build are
+      green; merge delivery remains.
 
 - [ ] **Workload output affordance — durable writable inline disks.**
       `specs/plans/2026-09-02-workload-output-affordance.md`.
@@ -31,6 +41,36 @@
       tests, all-targets zero-warning Clippy, policy checks, and BDD are green;
       the plan's broader output-surface design and merge delivery remain.
 
+- [ ] **Retire runtime directory-share volume variants.**
+      `specs/plans/2026-09-02-retire-dirshare.md`.
+      Runtime volumes are disk-only, while signed plans retain
+      `ShareKind::DirShare` as the audited directory-grant fact and admission
+      derives it from `materialized_image`. Managed `--host` attachments are
+      registered as block images; obsolete persisted directory-kind records
+      fail closed. Workspace tests, check, formatting, zero-warning Clippy,
+      Linux/BDD gated compilation, the 248-scenario BDD suite, and a live
+      Firecracker `machine run --mount` boot witness are green; merge delivery
+      remains.
+
+- [x] **Refresh host-directory snapshots at machine start.**
+      `specs/plans/2026-09-03-refresh-host-snapshot-at-start.md`.
+      Persistent `machine volume mount --host` and transient `--mount` now use
+      one content-addressed ext4 cache. The source identity hashes file bytes,
+      paths, modes, symlink targets, and guest-visible xattrs rather than
+      mtimes; cache images are atomically published and digest-verified before
+      attach. A persistent start refreshes a changed snapshot before taking a
+      launch lease and refuses a missing source. Read-only consumers attach the
+      immutable cache object directly; writable registrations use private
+      reflink/copies and retain guest writes until the host source changes.
+      Materialization remains unbounded and block-at-a-time, re-verifies each
+      emitted file against its walked digest, and refuses a cache destination
+      without independently verified encrypted backing. The live README BDD
+      fixture declares that prerequisite through deterministic platform probes;
+      production continues to inspect the real backing device and fail closed.
+      Workspace tests/check, host and Linux-native zero-warning Clippy, gated
+      compilation, and hermetic BDD (250 passed, 1 capability skip) are green.
+      A live Firecracker witness changed source bytes while preserving mtime;
+      the restarted guest observed `dir-volume-refreshed`.
 - [ ] **Content-addressed asset identity.**
       `specs/plans/2026-09-02-content-addressed-asset-identity.md`.
       Every dataset, model, prompt, agent, policy, and compute environment a
@@ -2255,13 +2295,13 @@ Then unify + retire the old paths:
 
 - [ ] **Sub-second launch**, verified: a timed `mvmctl up` → PTY shell → `mvmctl down` e2e on Mac (HVF) and Linux (libkrun + FC), asserting sub-second boot + clean teardown.
 - [~] **Warm start / warm pool** (pre-warmed standby VMs), **snapshot / fork / restore** (bake once, fork many via CoW, fast restore), **streaming exec**, **`expose_tcp`** (host↔guest port forward), **live host-directory mount** — the fast-local-runtime capabilities, exposed through `mvm-client` + the SDK.
-      The transient `machine run --mount HOST:/GUEST:ro` path now uses a live
-      read-only virtio-fs share on HVF instead of materializing an ext4 image;
+      The transient `machine run --mount HOST:/GUEST:ro` path materializes a
+      read-only ext4 snapshot and attaches it as virtio-blk on every backend;
       warm-start remains separately gated on a backend standby-pool capability.
       Phase timing now labels every launch `launch_mode=cold|warm` and reports
       `pool_wait_ms`, `claim_ms`, `warm_window_ms`, and `warm_slo=ok|over|na`;
-      directory-share claims remain fail-closed until a
-      backend can late-bind the host path after warm-child materialization.
+      materialized mount claims remain cold-path-only until a backend can
+      late-bind the image after warm-child materialization.
       Plan 298 now breaks the implementation into eight owned issues: #2192
       defines the resident claim service and now has the typed warm/cold
       contract, service-owned lease registry, lease-origin reporting, and
@@ -2531,7 +2571,7 @@ Then unify + retire the old paths:
   mount-cache hit, mount-cache miss, artifact miss, and warm claim as distinct
   distributions. A first-use image pull, build, digest, or ext4 materialization
   may not be hidden inside the launch SLO.
-- [ ] **Content-addressed mount cache:** fingerprint source content and mount
+- [x] **Content-addressed mount cache:** fingerprint source content and mount
   policy, publish immutable images atomically under `MVM_HOME`, verify the
   manifest and image digest before attach, support read-only direct attach and
   writable copy-on-write, and remove obsolete internal add-directory naming.
@@ -3655,4 +3695,4 @@ writes the plan:
       permissions before copying source bytes.
 - [x] Cover valid snapshot materialization and launch-lease resolution, invalid
       ext4 refusal, missing-image failure, and the CLI registration workflow.
-- [ ] Merge the implementation through the queue.
+- [x] Merge the implementation through the queue (#3151).

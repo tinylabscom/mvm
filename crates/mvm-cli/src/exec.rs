@@ -42,7 +42,6 @@ pub(crate) use backend_select::{
     select_exec_backend, validate_image_egress_backend, validate_image_egress_backend_name,
 };
 use guest_run::{emit_guest_console_diagnostic, run_in_guest, run_wasm_module};
-pub(crate) use mounts::materialize_directory_snapshot;
 use session::wait_for_agent_timed;
 pub use session::{
     AdmitInputs, SessionAdmit, SessionAuditSubstrate, SessionVm, boot_session_vm,
@@ -354,8 +353,8 @@ pub fn shell_quote(arg: &str) -> String {
 ///   3. cds into `working_dir` (when target is LaunchPlan and it's set)
 ///   4. execs the resolved command
 ///
-/// Host directories are attached and mounted by the guest activation path. The
-/// command wrapper must not contain a second mount implementation.
+/// Host-directory snapshots are attached and mounted by the guest activation
+/// path. The command wrapper must not contain a second mount implementation.
 ///
 /// Env precedence (lowest → highest): launch-plan app.env → launch-plan
 /// entrypoint.env → CLI `--env`. The first two are merged in
@@ -1156,20 +1155,10 @@ fn resolve_boot_strategy(
 /// an ext4 image first.
 fn mount_volumes(
     shape: &LaunchShape<'_>,
-    vm_name: &str,
+    _vm_name: &str,
     sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
 ) -> Result<Vec<VmVolume>> {
-    if shape.dir_shares.is_empty() {
-        return Ok(Vec::new());
-    }
-    // Named because it is the one cost this change adds, and it scales with
-    // the mounted tree: ~100ms for a 30MB one. An unnamed span here would be
-    // the same hole `attach_initramfs` sat in — a launch able to say how long
-    // it took and not where.
-    sub.start(crate::commands::vm::phase_timing::SubPhase::MountMaterialize);
-    let volumes = mounts::materialize_mount_volumes(shape.dir_shares, vm_name);
-    sub.finish(crate::commands::vm::phase_timing::SubPhase::MountMaterialize);
-    volumes
+    mounts::materialize_mount_volumes(shape.dir_shares, sub)
 }
 
 /// Build the `VmStartConfig` for the transient boot from the resolved image +

@@ -664,6 +664,42 @@ this row as enforced without it.
     is `Shipped` and rows 16–18 are `Preview`: the ledger numbers rows in the
     order claims were added, not by status.
 
+20. **Every published release artifact is authenticated under the release
+    workflow's identity, directly or through a signed checksum manifest, and
+    the build and fetch paths refuse an artifact whose required signature is
+    missing or invalid.** Row 20, `Shipped`. `release.yml` signs archives and
+    checksum manifests keyless through GitHub OIDC and publishes bundles
+    carrying the Fulcio certificate and Rekor inclusion proof. Raw kernels,
+    root filesystems, and metadata are covered by the signed manifests rather
+    than individual bundles. The `verify-release` job re-downloads the
+    published set, verifies the signatures against an identity regexp pinned
+    to this workflow at a tag, and checks the covered blobs against their
+    authenticated digests. The build gate refuses a missing bundle
+    (`a_missing_bundle_refuses_and_names_the_asset`) and accepts only the
+    versioned release workflow
+    (`accepted_identities_are_the_versioned_release_workflow`); the
+    fetch gate refuses an unsigned manifest before parsing it
+    (`fetch_expected_hashes_refuses_an_unsigned_manifest_before_parsing`) and
+    the hash-skip hatch does not waive the signature
+    (`skip_hash_verify_does_not_waive_the_manifest_signature`).
+
+    The three consuming paths do **not** share a posture, which is why the
+    statement names only two of them. `verify_signature` on the self-update
+    path returns `Ok` with a warning when cosign is absent, so there the
+    signature is best-effort and the SHA-256 pin is what holds. ADR-001 carries
+    the "Claim 20 limits" note; do not paraphrase this row as "every path
+    refuses an unsigned release".
+
+    The release job also attests build provenance for the binary tarballs
+    (`actions/attest-build-provenance`, verifiable with `gh attestation
+    verify`), which witnesses this claim because the attestation is signed
+    under the same workflow identity. It is SLSA Build **L2**: the attestation
+    is produced by the same workflow that produces the artifact, so a
+    compromised release job forges both. Provenance adds the commit and build
+    inputs in a machine-readable predicate; it is not evidence the build was
+    uncorrupted, and `ci:reproducibility` under claim 7 remains the control
+    that speaks to that.
+
 The guest agent itself runs as uid 901 under setpriv (W4.5); the
 host-side vsock proxy socket is mode 0700 (W1.2), the proxy port
 allowlist drops anything outside the agent and forward ranges
@@ -738,17 +774,23 @@ Every new module, type, or function needs test coverage:
 Never write scratch, temporary, or intermediate files anywhere inside the repo working tree — not the root, not a subdirectory, not a hidden dotfile, not a gitignored path. This covers **every** kind of agent-created scratch (analysis lists, command output, intermediate JSON/TSV, logs, ad-hoc scripts, `git merge-file` inputs), not just screenshots/binaries. Write them under `/tmp/` instead. See AGENTS.md §"Screenshots & Temporary Files" for the full rule.
 
 `.agent-memory/notes/` is the one exception, and it is not an exception to the
-rule so much as a different thing: those are committed findings, reviewed in a
-PR like any other file. Scratch is what you produce while working; a note is
-what you learned.
+rule so much as a different thing: scratch is what you produce while working, a
+note is what you learned. It is gitignored, so writing one does not put anything
+in the repository.
 
-## Committed findings (`.agent-memory/`)
+## Local findings (`.agent-memory/`)
+
+**These notes are local to your checkout.** `.agent-memory/` is gitignored and
+untracked; it was committed until 2026-09-03 and was deliberately made
+local-only again. Nothing here is reviewed, shared, or carried to another clone,
+and a note you write is a note only you will read.
 
 One finding per file under `.agent-memory/notes/<slug>.md`, with `title`,
 `date` and `tags` frontmatter. `just recall <terms>` searches them, `just
 notes` lists them, `just remember <slug>` scaffolds one. `xtask
 check-agent-notes` holds the shape and refuses a `[[link]]` to a note that does
-not exist.
+not exist — run it yourself; it is not in `check-all`, because in CI the
+directory does not exist and the gate has nothing to check.
 
 **Recall before you investigate.** A measurement already in there is one you do
 not have to pay for twice.
@@ -758,11 +800,12 @@ you learn something is *false*. The falsifications are the notes that earn
 their keep: `teardown-scales-with-guest-ram` records the obvious fix, the A/B
 that refuted it, and why it could not have worked, which is the difference
 between a day spent and a paragraph read. Say what not to retry, and say why.
-Commit the note with the change it explains.
 
-Machine-specific context — host names, fleet layout, ssh targets, local paths —
-does not go here. It belongs in your own agent memory; in the repository it
-just confuses contributors.
+Because the notes are local, anything another contributor needs to know has to
+go somewhere tracked — a `specs/` doc, an ADR, a comment, or the PR body. A note
+is where you keep a measurement for your own next session, not how you tell
+anyone else. Machine-specific context — host names, fleet layout, ssh targets,
+local paths — is exactly what it is for.
 
 These notes are observations, not authority. `specs/adrs/` owns decisions and
 the claims ledger owns what is enforced; where a note disagrees with one of

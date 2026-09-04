@@ -19,8 +19,9 @@ on:
 
 permissions:
   contents: write
-  id-token: write   # Required for cosign keyless signing via OIDC
-  actions: write    # Required to dispatch publish-crates workflow
+  id-token: write        # Required for cosign keyless signing via OIDC
+  actions: write         # Required to dispatch publish-crates workflow
+  attestations: write    # Required to record build provenance for the release binaries
 
 env:
   CARGO_TERM_COLOR: always
@@ -540,6 +541,28 @@ jobs:
               "${blob}"
             echo "Signed: ${blob}"
           done
+
+      # Build provenance for the binary tarballs, recorded in the GitHub
+      # attestation store and verifiable with `gh attestation verify`.
+      #
+      # This is SLSA Build L2, not L3. The attestation is produced by the same
+      # workflow that produces the artifact, so a compromised release job forges
+      # both. What it adds over the cosign signature is the commit and the build
+      # inputs in a machine-readable predicate a downstream policy engine can
+      # consume; it is not evidence that the build itself was uncorrupted. The
+      # reproducibility double-build is the control that speaks to that, because
+      # an independent rebuild landing on the same bytes needs no trust in this
+      # builder at all.
+      #
+      # Subjects are the tarballs only, matching the direct-signature set. The
+      # kernels, root filesystems and metadata carry no per-file signature and
+      # are anchored by digest inside the signed checksum manifests; attesting
+      # them individually here would assert a per-file guarantee the pipeline
+      # does not otherwise make.
+      - name: Attest build provenance for the release tarballs (release-provenance)
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: artifacts/*.tar.gz
 
       # Consume what we are about to publish, before publishing it.
       #

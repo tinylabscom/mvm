@@ -64,13 +64,12 @@ so it takes effect for an image once that image is rebuilt. An image carrying an
 older agent ignores the unknown field via `#[serde(default)]` and mounts by node
 exactly as before — it does not fail.
 
-## Not done: retiring `DirShare`
+## Follow-up: retiring `DirShare`
 
-The sibling box (`VmVolumeKind::DirShare` / `LocalVolumeKind::Directory`) stays
-open. `DirShare` is what records a *directory* grant in the plan, which claim 1
-matches against, so removing it means relocating a claim-bearing fact through
-the admission path. That is a security-model change, not cleanup, and does not
-belong bundled with a mount-resolution fix.
+The sibling work subsequently retired `VmVolumeKind::DirShare` and
+`LocalVolumeKind::Directory`. Claim 1 still records a directory grant as
+`ShareKind::DirShare`; admission now derives that plan fact from
+`materialized_image`, not from the runtime transport enum.
 
 ## Verification
 

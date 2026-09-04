@@ -3,7 +3,7 @@
 Backing: shipped-source
 Validation: check-sprint-append
 
-**Status: NOT STARTED — design only.**
+**Status: IN PROGRESS — WS-A and WS-B COMPLETE; WS-C remains.**
 
 Follows the `SECURITY.md` correction. That change deleted three advertised
 supply-chain controls that no workflow produces. This plan is the other half of
@@ -16,9 +16,10 @@ checksums. None is produced by any workflow, and they were removed.
 
 Meanwhile the ledger has **no row for release-artifact authenticity at all**.
 Claim 6 covers the checksum on a fetched dev image; claim 7 covers dependency
-auditing. Nothing claims that a published release artifact is signed, or that
-the signature is checked against this workflow's identity before the bytes are
-used — even though that is implemented, tested, and enforced in CI today.
+auditing. Nothing claims that a published release artifact is authenticated,
+either by a direct signature or a signed checksum manifest, or that the
+signature is checked against this workflow's identity before the bytes are used
+— even though that is implemented, tested, and enforced in CI today.
 
 So the same file overclaimed three controls and under-claimed a real one. The
 second error is the more expensive: an unclaimed control has no gate, so it can
@@ -28,7 +29,7 @@ be deleted without anything going red.
 
 Verified on `ecb0da691e`.
 
-- **Signing.** `release.yml` signs every release blob keyless via GitHub OIDC — the `mvmctl` tarballs, boot-image artefacts, checksum manifests, and `sbom.cdx.json` — each with a `--new-bundle-format` bundle carrying the Fulcio certificate and the Rekor inclusion proof.
+- **Signing and coverage.** `release.yml` directly signs archives, checksum manifests, and `sbom.cdx.json` keyless via GitHub OIDC. Raw kernels, root filesystems, and metadata are authenticated by their digests in the signed manifests rather than by individual bundles. Every signature uses `--new-bundle-format` and carries the Fulcio certificate and Rekor inclusion proof.
 - **Post-publish verification in CI.** The `verify-release` job downloads the published assets and runs `nix/packaging/release/verify-release-assets.sh` with the identity regexp pinned to `release.yml@refs/tags/*`.
 - **Build-side enforcement, fail-closed.** `crates/mvm-build/src/release_signature.rs` refuses a missing or malformed bundle and names the asset.
 - **Fetch-side enforcement.** `crates/mvm-cli/src/commands/env/artifact_verify.rs` refuses an unsigned manifest before parsing it, and the hash-skip escape hatch does not waive the manifest signature.
@@ -51,13 +52,12 @@ Any claim wording has to carry that split, in the shape claim 13 and the
 
 No new product code. The witnesses exist.
 
-- [ ] Add `MVM-SEC-20` to `model/claims.toml` — `level = "build"`, `witness_kinds = ["fn", "ci"]`, `suite = "supply_chain"`
-- [ ] Statement, carrying the split rather than hiding it: *every published release artifact is signed under the release workflow's OIDC identity, and the build and fetch paths refuse an unsigned or mis-signed artifact; the self-update path warns and falls back to the SHA-256 pin when cosign is absent*
-- [ ] Witnesses — these resolve under the gate's rules today:
+- [x] Add `MVM-SEC-20` to `model/claims.toml` — `level = "build"`, `witness_kinds = ["fn", "ci"]`, `suite = "supply_chain"`
+- [x] State the direct-signature and signed-manifest coverage precisely, while carrying the build/fetch refusal and self-update limit rather than hiding it.
+- [x] Cite the witnesses that resolve and execute under the gate's rules today:
   - `ci:verify-release`
   - `fn:accepted_identities_are_the_versioned_release_workflow`
   - `fn:a_missing_bundle_refuses_and_names_the_asset`
-  - `fn:a_malformed_bundle_is_refused`
   - `fn:fetch_expected_hashes_refuses_an_unsigned_manifest_before_parsing`
   - `fn:skip_hash_verify_does_not_waive_the_manifest_signature`
 
@@ -79,13 +79,16 @@ the gate's own comments argues that root tests are unsuitable witnesses. Widenin
 it to cover the workspace's root `tests/` is a small change, and it would make
 the strongest evidence for claim 20 citable.
 
-- [ ] Decide: widen `resolve_fn_needles` to include root `tests/`, or accept a claim witnessed only from `crates/` plus the CI lane
+- [x] Decide: accept a claim witnessed from `crates/` plus the CI lane for
+      WS-A. Do not cite `a_malformed_bundle_is_refused` until a CI test lane
+      actually executes its `manifest-verify` feature; text-search resolution
+      alone is not evidence that the test runs.
 
 Land the claim either way; do not block WS-A on the gate change.
-- [ ] Add a `@MVM-SEC-20 @build` scenario to `features/suites/s19_supply_chain/supply_chain.feature`
-- [ ] Add ledger row 20 to ADR-001 with the same witnesses and a limits note naming the self-update fallback
-- [ ] Regenerate `CONFORMANCE.md` (`check-conformance --write`)
-- [ ] Add claim 20 to `CLAUDE.md` §"Security model"
+- [x] Add a `@MVM-SEC-20 @build` scenario to `features/suites/s19_supply_chain/supply_chain.feature`
+- [x] Add ledger row 20 to ADR-001 with the same witnesses and a limits note naming the self-update fallback
+- [x] Regenerate `CONFORMANCE.md` (`check-conformance --write`)
+- [x] Add claim 20 to `CLAUDE.md` §"Security model"
 
 Cost: one afternoon, no product change. Value: the control stops being deletable
 in silence.
@@ -99,12 +102,20 @@ package carries provenance today and the binaries most people install do not.**
 No workflow uses `actions/attest-build-provenance`, and no workflow requests the
 `attestations` permission.
 
-- [ ] Decide whether to adopt (recommendation: yes, narrowly — to close the npm-vs-binaries asymmetry)
-- [ ] Add `attestations: write` to `release.yml` permissions — `id-token: write` is already there
-- [ ] Attest the published binary artefacts with `actions/attest-build-provenance`
-- [ ] Add a structural test in `tests/release_assets.rs` asserting every published binary artefact is attested, so the lane cannot silently drop one — note this lands in the same root-level file the claim gate cannot cite, so it is only usable as a witness if the WS-A scoping decision goes the widening way
-- [ ] Extend claim 20's witnesses rather than opening claim 21 — this is more evidence for the same property, not a new property
-- [ ] State the level honestly wherever it is described
+- [x] Adopted, narrowly, to close the npm-vs-binaries asymmetry
+- [x] Added `attestations: write` to `release.yml` permissions
+- [x] Attested the release tarballs with `actions/attest-build-provenance@v4`, placed after signing and before `gh release create`
+- [x] Added `the_release_attests_build_provenance_for_the_signed_tarballs` to `tests/release_assets.rs` — it pins the subject set to the directly-signed tarballs, asserts the permission, and asserts the ordering against publish. Falsified both ways before landing: mutating the subject glob and deleting the permission each turn it red.
+- [x] Extended claim 20's witnesses rather than opening claim 21
+- [x] Stated the level honestly in ADR-001, `CLAUDE.md`, `model/claims.toml`, and the workflow comment
+
+**The witness is the CI anchor, not the test.** The structural test lives in
+root-level `tests/release_assets.rs`, which `resolve_fn_needles` still cannot
+cite. Rather than widen the gate, the attesting step carries a parenthesised
+token in its `name:` — `(release-provenance)` — which `ci_anchors` resolves, so
+the witness is `ci:release-provenance` and the test remains an uncited
+regression guard. That keeps the WS-A scoping decision intact and needs no gate
+change.
 
 **What it buys, stated plainly.** Keyless cosign already binds each artifact to
 this repo, this workflow file, and a tag ref through the certificate identity.

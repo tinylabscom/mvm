@@ -9,9 +9,9 @@
 //!
 //! No workload tier reaches it any more, and no builder *spec* constructs a
 //! share: both the one-shot and the persistent builder exchange jobs and
-//! artifacts over raw transport disks. What is left is the backend plumbing
-//! that would map a share if one existed, and the libkrun C FFI, each pinned
-//! below with the reason it survives and what would retire it. This check does
+//! artifacts over raw transport disks. What is left is the libkrun C FFI, the
+//! backend-neutral share type, and refusal tests, each pinned below with the
+//! reason it survives and what would retire it. This check does
 //! not assert the surface is gone — it asserts nothing has been *added* to it,
 //! and that entries disappear from the table as the code disappears.
 //!
@@ -64,36 +64,17 @@ const PINNED: &[(&str, usize, &str)] = &[
         7,
         "the safe `add_virtio_fs` wrapper over the C symbol above, plus its tests",
     ),
-    // ── the seam every backend maps its shares through ───────────────────────
+    // ── backend-neutral type and explicit refusal witnesses ─────────────────
     (
         "crates/mvm-vmm/src/driver/spec.rs",
         1,
         "the VirtioFsShare type itself; empty for every workload spec",
     ),
     (
-        "crates/mvm-backends/src/driver/libkrun.rs",
-        6,
-        "one mapper plus tests asserting a workload spec carries no shares",
-    ),
-    (
-        "crates/mvm-backends/src/driver/libkrun_process.rs",
-        1,
-        "the out-of-process libkrun driver's share mapper, same seam as above",
-    ),
-    (
         "crates/mvm-backends/src/driver/qemu.rs",
         1,
         "a test: QEMU must keep *refusing* a share, the same witness \
          Firecracker carries. No wiring left to retire",
-    ),
-    // ── builder VM: our own trusted build engine ────────────────────────────
-    (
-        "crates/mvm-build/src/libkrun_builder.rs",
-        11,
-        "the libkrun builder's work/out/job/mvm-bins shares on the Stage 0 \
-         RootDir path, which boots a virtio-fs root and so predates the disk \
-         transport entirely. The one-shot transport paths carry nothing over \
-         virtio-fs now that the seeded closure rides the input disk",
     ),
     (
         "crates/mvm-backends/src/driver/fc.rs",

@@ -324,7 +324,7 @@ impl VmStartParams<'_> {
                 .volumes
                 .iter()
                 .map(|v| mvm_core::vm_backend::VmVolume {
-                    materialized_image: None,
+                    materialized_image: v.materialized_image.clone(),
                     volume_label: None,
                     host: v.host.clone(),
                     guest: v.guest.clone(),
