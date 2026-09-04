@@ -944,6 +944,9 @@ mod tests {
             build.contains("image boot update --tag boot-image/v0.1.3 --force")
                 && bootstrap.contains("mv nix/images/builder-vm.hidden nix/images/builder-vm")
                 && bootstrap.contains("sudo chmod 0666 /dev/kvm")
+                && bootstrap.contains("sudo chmod a+r")
+                && bootstrap.contains("/boot/vmlinuz-$(uname -r)")
+                && bootstrap.contains("/boot/initrd.img-$(uname -r)")
                 && bootstrap.contains("kernel build --which workload --source compile -v")
                 && build.contains(".mvm-ci/cache/kernels/x86_64/workload/bzImage")
                 && build.contains("bzImage.sha256")
@@ -961,9 +964,14 @@ mod tests {
         let restore_kvm = bootstrap
             .find("sudo chmod 0666 /dev/kvm")
             .expect("source artifact compilation must restore KVM acceleration");
+        let grant_boot_read = bootstrap
+            .find("sudo chmod a+r")
+            .expect("source artifact compilation must make the host boot inputs readable");
         assert!(
-            restore_source_flake < restore_kvm && restore_kvm < source_kernel_build,
-            "the source builder flake and KVM acceleration must be restored before source kernel compilation"
+            restore_source_flake < restore_kvm
+                && restore_kvm < grant_boot_read
+                && grant_boot_read < source_kernel_build,
+            "the source builder flake, KVM acceleration, and readable boot inputs must be restored before source kernel compilation"
         );
         let deny_kvm_position = smoke
             .find(deny_kvm)

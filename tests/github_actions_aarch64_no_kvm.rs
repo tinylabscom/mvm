@@ -22,6 +22,7 @@ const REQUIRED_VIRTIO_ROM_PACKAGE: &str = "ipxe-qemu";
 const REQUIRED_CI_VSOCK_OWNERSHIP: &str = "sudo chown \"$USER\" /dev/vhost-vsock";
 const REQUIRED_KVM_DENIAL: &str = "sudo chmod 000 /dev/kvm";
 const REQUIRED_KVM_RESTORE: &str = "sudo chmod 0666 /dev/kvm";
+const REQUIRED_STAGE0_BOOT_READ: &str = "sudo chmod a+r";
 const REQUIRED_LOCAL_VSOCK_DEVICE: &str = "--device /dev/vhost-vsock:/dev/vhost-vsock";
 const FORBIDDEN_LOCAL_KVM_DEVICE: &str = "--device /dev/kvm:/dev/kvm";
 const REQUIRED_BUILDER_DOWNLOAD: &str =
@@ -195,11 +196,17 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
     let restore_kvm = bootstrap_job
         .find(REQUIRED_KVM_RESTORE)
         .expect("artifact compilation must restore KVM for the project builder VM");
+    let grant_boot_read = bootstrap_job
+        .find(REQUIRED_STAGE0_BOOT_READ)
+        .expect("the project builder VM must be able to read the host boot inputs");
+    assert!(bootstrap_job.contains("/boot/vmlinuz-$(uname -r)"));
+    assert!(bootstrap_job.contains("/boot/initrd.img-$(uname -r)"));
     assert!(
         bootstrap < restore_source_flake
             && restore_source_flake < restore_kvm
-            && restore_kvm < source_kernel_build,
-        "the source flake and KVM acceleration must be restored after the no-KVM bootstrap proof and before source kernel compilation"
+            && restore_kvm < grant_boot_read
+            && grant_boot_read < source_kernel_build,
+        "the source flake, KVM acceleration, and readable boot inputs must be restored after the no-KVM bootstrap proof and before source kernel compilation"
     );
     assert!(
         build_job.contains("needs: no-kvm-bootstrap")
