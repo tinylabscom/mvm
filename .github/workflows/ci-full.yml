@@ -628,7 +628,7 @@ jobs:
 
       - uses: ./.github/actions/apt-deps
         with:
-          packages: e2fsprogs jq
+          packages: cryptsetup-bin e2fsprogs jq
 
       - name: Restore exact smoke binaries
         uses: actions/download-artifact@v8
@@ -675,6 +675,24 @@ jobs:
               | .sealed = true' \
             "$revision_dir/mvm-meta.json" > "$revision_dir/mvm-meta.json.next"
           mv "$revision_dir/mvm-meta.json.next" "$revision_dir/mvm-meta.json"
+
+          : > "$revision_dir/rootfs.verity"
+          veritysetup_out=$(
+            veritysetup format \
+              --data-block-size=4096 \
+              --hash-block-size=4096 \
+              --salt=0000000000000000000000000000000000000000000000000000000000000000 \
+              --uuid=00000000-0000-0000-0000-000000000003 \
+              --hash=sha256 \
+              "$revision_dir/rootfs.ext4" \
+              "$revision_dir/rootfs.verity"
+          )
+          roothash=$(printf '%s\n' "$veritysetup_out" \
+            | sed -n 's/^Root hash:[[:space:]]*//p' \
+            | tr 'A-F' 'a-f' \
+            | head -n1)
+          test "${#roothash}" -eq 64
+          printf '%s\n' "$roothash" > "$revision_dir/rootfs.roothash"
 
           mkdir -p "$MVM_HOME/templates/$slot_hash"
           jq -n \

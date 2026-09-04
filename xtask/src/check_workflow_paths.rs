@@ -944,6 +944,7 @@ mod tests {
             build.contains("image boot update --tag boot-image/v0.1.3 --force")
                 && build.contains(".mvm-ci/cache/kernels/x86_64/workload/vmlinux")
                 && build.contains("write /tmp/exit-code-entrypoint /etc/mvm/entrypoint")
+                && build.contains("veritysetup format")
                 && build.contains("bundle export \"$slot_hash\""),
             "bundle preparation must combine verified release rootfs bytes with source-matched launch artifacts and exporter"
         );

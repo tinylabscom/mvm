@@ -32,6 +32,7 @@ const REQUIRED_BOOT_IMAGE_UPDATE: &str =
     "/tmp/mvmctl-source-under-test image boot update --tag boot-image/v0.1.3 --force";
 const REQUIRED_SOURCE_KERNEL: &str = ".mvm-ci/cache/kernels/x86_64/workload/vmlinux";
 const REQUIRED_ENTRYPOINT_PATCH: &str = "write /tmp/exit-code-entrypoint /etc/mvm/entrypoint";
+const REQUIRED_VERITY_SEAL: &str = "veritysetup format";
 const REQUIRED_BUNDLE_EXPORT: &str = "/tmp/mvmctl-source-under-test bundle export \"$slot_hash\"";
 const FIRST_MACHINE_RUN: &str = "/tmp/mvmctl-source-under-test machine run";
 const REQUIRED_BAKED_ENTRYPOINT: &str = "--entrypoint";
@@ -181,6 +182,7 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
             && build_job.contains(REQUIRED_BOOT_IMAGE_UPDATE)
             && build_job.contains(REQUIRED_SOURCE_KERNEL)
             && build_job.contains(REQUIRED_ENTRYPOINT_PATCH)
+            && build_job.contains(REQUIRED_VERITY_SEAL)
             && build_job.contains(REQUIRED_BUNDLE_EXPORT)
             && build_job.contains("uses: actions/upload-artifact@v7")
             && build_job.contains(&format!("name: {BUNDLE_ARTIFACT}")),
