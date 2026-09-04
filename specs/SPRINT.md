@@ -10,6 +10,14 @@
 
 ## In progress
 
+- [x] **Alternative CLI help coverage performance.**
+      `specs/plans/2026-09-03-bdd-help-coverage.md`.
+      The BDD contract still executes both `mvmctl <path> -h` and
+      `mvmctl help <path>` for every command and nested subcommand, but divides
+      the command tree across at most eight scoped workers instead of spawning
+      every process serially. The feature-gated target and zero-warning Clippy
+      are green; the complete hermetic BDD suite passed 247 of 248 scenarios
+      with the one existing backend-capability skip.
 - [ ] **Remove virtio-fs from workload and builder execution.**
       `specs/plans/2026-08-31-remove-virtio-fs.md`.
       Workloads, the dev-tier root, Stage 0, and builder inputs and artifacts

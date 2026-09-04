@@ -594,15 +594,37 @@ fn every_command_help_item_is_one_line_shorter_than(_world: &mut CliWorld, width
 
 #[then(expr = "every alternative CLI help item is one line shorter than {int} columns")]
 fn every_alternative_help_entry_point_fits_within(_world: &mut CliWorld, width: i64) {
-    for path in all_command_paths() {
-        let mut short_help_args = path.clone();
-        short_help_args.push("-h".to_string());
-        assert_help_invocation_fits(&short_help_args, width, true);
+    let paths = all_command_paths();
+    let worker_count = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(8)
+        .min(paths.len());
+    let chunk_size = paths.len().div_ceil(worker_count);
 
-        let mut help_subcommand_args = vec!["help".to_string()];
-        help_subcommand_args.extend(path);
-        assert_help_invocation_fits(&help_subcommand_args, width, true);
-    }
+    let violations = std::thread::scope(|scope| {
+        let workers = paths
+            .chunks(chunk_size)
+            .map(|paths| {
+                scope.spawn(move || {
+                    paths
+                        .iter()
+                        .flat_map(|path| alternative_help_violations(path, width))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>();
+
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().expect("help-check worker must not panic"))
+            .collect::<Vec<_>>()
+    });
+
+    assert!(
+        violations.is_empty(),
+        "alternative CLI help items must each occupy one line shorter than {width} columns:\n{}",
+        violations.join("\n")
+    );
 }
 
 fn all_command_paths() -> Vec<Vec<String>> {
@@ -612,9 +634,17 @@ fn all_command_paths() -> Vec<Vec<String>> {
     command_paths
 }
 
-fn assert_help_invocation_fits(args: &[String], width: i64, require_single_line_items: bool) {
-    let violations = help_invocation_violations(args, width, require_single_line_items);
-    assert!(violations.is_empty(), "{}", violations.join("\n"));
+fn alternative_help_violations(path: &[String], width: i64) -> Vec<String> {
+    let mut short_help_args = path.to_vec();
+    short_help_args.push("-h".to_string());
+
+    let mut help_subcommand_args = vec!["help".to_string()];
+    help_subcommand_args.extend_from_slice(path);
+
+    [short_help_args, help_subcommand_args]
+        .into_iter()
+        .flat_map(|args| help_invocation_violations(&args, width, true))
+        .collect()
 }
 
 fn help_invocation_violations(

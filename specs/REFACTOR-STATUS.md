@@ -4,6 +4,15 @@ Last updated: 2026-09-03
 
 ## In progress
 
+- [x] **Alternative CLI help coverage performance.**
+      `specs/plans/2026-09-03-bdd-help-coverage.md`.
+      Both alternative help forms remain covered for the complete generated
+      command tree. At most eight scoped workers share the paths, keeping
+      subprocess concurrency bounded while eliminating the serial bottleneck.
+      Feature-gated compilation, zero-warning Clippy, and the full hermetic BDD
+      suite are green.
+
+- [ ] **Persistent host-directory snapshots.**
 - [ ] **Release-artifact authenticity and provenance.**
       `specs/plans/2026-09-03-release-artifact-authenticity-and-provenance.md`.
       WS-A registers the shipped signature chain as `MVM-SEC-20`, precisely
