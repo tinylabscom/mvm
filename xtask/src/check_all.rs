@@ -106,7 +106,6 @@ pub const GATES: &[Gate] = &[
         crate::check_witness_citations::run,
     ),
     ("check-asserted-absence", crate::check_asserted_absence::run),
-    ("check-agent-notes", crate::check_agent_notes::run),
     ("check-dormant-controls", crate::check_dormant_controls::run),
     ("check-conformance", conformance_read_only),
     ("check-deferrals", crate::check_deferrals::run),
@@ -280,6 +279,12 @@ mod tests {
     /// which is exactly what had happened to three of the entries above.
     const NOT_IN_LINT_LANE: &[(&str, &str)] = &[
         ("check-all", "this driver"),
+        (
+            "check-agent-notes",
+            "validates `.agent-memory/notes/`, which is gitignored and local to \
+             a checkout; in CI the directory does not exist and the gate has \
+             nothing to check. Run it yourself when you write a note",
+        ),
         (
             "check-binary-size",
             "needs a release binary; runs in release.yml",
