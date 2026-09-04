@@ -199,6 +199,47 @@ fn every_signed_release_blob_uses_the_one_bundle_format() {
     );
 }
 
+/// Build provenance must cover the artifacts the release signs directly, and be
+/// recorded before the release is published.
+///
+/// The signature and the attestation answer different questions — who published
+/// this, versus what went into it — but they have to cover the same subject set.
+/// If the signing loop grows a tarball the attest step never sees, a downstream
+/// consumer that requires provenance starts rejecting an artifact this pipeline
+/// considers fully released, and nothing here would say so.
+#[test]
+fn the_release_attests_build_provenance_for_the_signed_tarballs() {
+    let workflow = release_workflow();
+
+    assert!(
+        workflow.contains("attestations: write"),
+        "the release workflow must grant `attestations: write`; \
+         actions/attest-build-provenance records nothing without it"
+    );
+
+    let attest = workflow
+        .find("actions/attest-build-provenance")
+        .expect("the release job must attest build provenance");
+
+    let step: String = workflow[attest..]
+        .lines()
+        .take(4)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        step.contains("subject-path: artifacts/*.tar.gz"),
+        "provenance must cover the same tarballs the signing loop signs directly, found:\n{step}"
+    );
+
+    let publish = workflow
+        .find("gh release create")
+        .expect("the release job must publish the tag");
+    assert!(
+        attest < publish,
+        "provenance must be attested before `gh release create`, not after"
+    );
+}
+
 /// The release must consume its own artifacts through the production download
 /// ladder *before* publishing them.
 ///

@@ -3,7 +3,7 @@
 Backing: shipped-source
 Validation: check-sprint-append
 
-**Status: IN PROGRESS — WS-A COMPLETE; WS-B and WS-C remain.**
+**Status: IN PROGRESS — WS-A and WS-B COMPLETE; WS-C remains.**
 
 Follows the `SECURITY.md` correction. That change deleted three advertised
 supply-chain controls that no workflow produces. This plan is the other half of
@@ -102,12 +102,20 @@ package carries provenance today and the binaries most people install do not.**
 No workflow uses `actions/attest-build-provenance`, and no workflow requests the
 `attestations` permission.
 
-- [ ] Decide whether to adopt (recommendation: yes, narrowly — to close the npm-vs-binaries asymmetry)
-- [ ] Add `attestations: write` to `release.yml` permissions — `id-token: write` is already there
-- [ ] Attest the published binary artefacts with `actions/attest-build-provenance`
-- [ ] Add a structural test in `tests/release_assets.rs` asserting every published binary artefact is attested, so the lane cannot silently drop one — note this lands in the same root-level file the claim gate cannot cite, so it is only usable as a witness if the WS-A scoping decision goes the widening way
-- [ ] Extend claim 20's witnesses rather than opening claim 21 — this is more evidence for the same property, not a new property
-- [ ] State the level honestly wherever it is described
+- [x] Adopted, narrowly, to close the npm-vs-binaries asymmetry
+- [x] Added `attestations: write` to `release.yml` permissions
+- [x] Attested the release tarballs with `actions/attest-build-provenance@v4`, placed after signing and before `gh release create`
+- [x] Added `the_release_attests_build_provenance_for_the_signed_tarballs` to `tests/release_assets.rs` — it pins the subject set to the directly-signed tarballs, asserts the permission, and asserts the ordering against publish. Falsified both ways before landing: mutating the subject glob and deleting the permission each turn it red.
+- [x] Extended claim 20's witnesses rather than opening claim 21
+- [x] Stated the level honestly in ADR-001, `CLAUDE.md`, `model/claims.toml`, and the workflow comment
+
+**The witness is the CI anchor, not the test.** The structural test lives in
+root-level `tests/release_assets.rs`, which `resolve_fn_needles` still cannot
+cite. Rather than widen the gate, the attesting step carries a parenthesised
+token in its `name:` — `(release-provenance)` — which `ci_anchors` resolves, so
+the witness is `ci:release-provenance` and the test remains an uncited
+regression guard. That keeps the WS-A scoping decision intact and needs no gate
+change.
 
 **What it buys, stated plainly.** Keyless cosign already binds each artifact to
 this repo, this workflow file, and a tag ref through the certificate identity.
