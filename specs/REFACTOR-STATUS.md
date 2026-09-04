@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-09-03
+Last updated: 2026-09-04
 
 ## In progress
 
@@ -12,10 +12,13 @@ Last updated: 2026-09-03
       builder backends now declare capabilities, automatic selection may fall
       back when one declines, and missing builder payloads return a normal
       error. Exhaustive help checks use the production Clap arm in-process with
-      binary probes retained. After three hosted aarch64 runners shut down at
-      27–28 minutes, exact smoke binaries now cross from a bounded preparation
-      job into a fresh live TCG runner window. Hermetic BDD is green; live
-      documented-surface evidence and merge delivery remain.
+      binary probes retained. Four hosted ARM shutdowns proved the declared job
+      timeout is not the effective lifetime: three stopped at 27–28 minutes and
+      one fresh runner stopped at 14 minutes 20 seconds after bootstrap. The TCG
+      lane now gives compilation, bootstrap, sealed bundle build/export, and
+      installed-bundle boot separate runner windows connected by immutable
+      artifacts. Hermetic BDD is green; live documented-surface evidence and
+      merge delivery remain.
 
 - [ ] **Release-artifact authenticity and provenance.**
       `specs/plans/2026-09-03-release-artifact-authenticity-and-provenance.md`.

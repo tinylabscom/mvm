@@ -594,7 +594,7 @@ fn the_documented_surface_creates_its_mvm_home_private() {
     );
 }
 
-/// The aarch64 smoke must print its captured log however it dies.
+/// Every long aarch64 TCG phase must print its captured log however it dies.
 ///
 /// The boot is redirected wholesale to a file, and the tail used to sit inside
 /// the wrong-exit-code branch, so a run killed before reaching that branch
@@ -605,15 +605,24 @@ fn the_documented_surface_creates_its_mvm_home_private() {
 fn the_aarch64_smoke_prints_its_boot_log_on_any_failure() {
     let workflow =
         fs::read_to_string(".github/workflows/ci-full.yml").expect("read extended CI workflow");
-    let trap = workflow
-        .find("trap 'echo \"::group::mvmctl first-boot log (tail)\"")
-        .expect("the first-boot step must dump its log from an EXIT trap");
-    let branch = workflow
-        .find("expected guest exit code 7 from first boot")
-        .expect("the first-boot step must still assert the exit code");
+    let build_trap = workflow
+        .find("trap 'echo \"::group::mvmctl build log (tail)\"")
+        .expect("the build step must dump its log from an EXIT trap");
+    let build = workflow
+        .find("--builder qemu build --flake examples/exit_code")
+        .expect("the TCG build step must remain present");
     assert!(
-        trap < branch,
-        "the log dump must be armed before the run, or a death that skips the \
-         exit-code branch still prints nothing"
+        build_trap < build,
+        "the build log dump must be armed before the long TCG build"
+    );
+    let boot_trap = workflow
+        .find("trap 'echo \"::group::mvmctl bundle-run log (tail)\"")
+        .expect("the installed-bundle step must dump its log from an EXIT trap");
+    let boot = workflow
+        .find("--manifest \"$installed_sha\"")
+        .expect("the installed-bundle boot must remain present");
+    assert!(
+        boot_trap < boot,
+        "the boot log dump must be armed before the installed-bundle run"
     );
 }

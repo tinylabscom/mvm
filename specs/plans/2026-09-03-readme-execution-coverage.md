@@ -28,9 +28,11 @@ fix product defects uncovered by exercising the documented commands.
       entry-form coverage while retaining real-binary probes.
 - [x] Run the complete hermetic BDD suite and focused suites for every touched
       crate.
-- [x] Give the aarch64 TCG witness a fresh runner window by building and
-      transferring its exact source and release-helper binaries in a bounded
-      preparation job; pin the handoff with a structural regression test.
+- [x] Give each bounded phase of the aarch64 TCG witness a fresh runner window:
+      transfer exact source and release-helper binaries, source-built bootstrap
+      artifacts, and the sealed bundle through immutable artifacts; pin every
+      handoff and explicit QEMU builder selection with a structural regression
+      test.
 - [ ] Run the documented surface end to end on Linux/Firecracker and collect
       the macOS/HVF evidence required by the release gate.
 - [ ] Merge the implementation through the queue.
@@ -47,6 +49,10 @@ fix product defects uncovered by exercising the documented commands.
   when automatic selection chose a backend that truthfully declines the
   requested operation.
 - Three aarch64 hosted jobs were terminated by the runner service after
-  27–28 minutes despite a 300-minute job timeout. Compilation and live TCG
-  execution therefore occupy separate jobs connected by immutable binaries;
-  the live job neither rebuilds nor substitutes the subject under test.
+  27–28 minutes despite a 300-minute job timeout. After binary compilation was
+  split out, a fourth fresh runner was terminated after 14 minutes 20 seconds:
+  source-matched bootstrap had completed, but left only 5 minutes 15 seconds
+  for the workload build. Compilation, bootstrap, sealed bundle build/export,
+  and installed-bundle boot therefore occupy separate jobs connected by
+  immutable artifacts. No live phase rebuilds or substitutes the exact source
+  binary under test.

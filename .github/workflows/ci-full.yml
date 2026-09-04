@@ -477,10 +477,10 @@ jobs:
   # take hours, and blocking every merge behind it collapses queue throughput.
   # It runs nightly and on manual dispatch so the path stays exercised without
   # serializing PR merges.
-  # Hosted arm64 runners have repeatedly received a platform shutdown at
-  # roughly 28 minutes even though the job timeout is longer. Compile the two
-  # exact binaries in a separate runner window so the live job spends its
-  # bounded lifetime on the QEMU path the lane exists to witness.
+  # Hosted arm64 runners have repeatedly received a platform shutdown well
+  # before the declared job timeout. Keep compilation, bootstrap, build, and
+  # boot in separate runner windows so every completed phase is reusable by
+  # the next one instead of being discarded by an infrastructure shutdown.
   aarch64-no-kvm-prepare:
     name: Prepare aarch64 no-KVM smoke binaries
     runs-on: ubuntu-24.04-arm
@@ -529,17 +529,14 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  aarch64-no-kvm-smoke:
-    name: Aarch64 no-KVM bundle smoke (QEMU TCG)
+  aarch64-no-kvm-bootstrap:
+    name: Bootstrap aarch64 no-KVM launch artifacts
     needs: aarch64-no-kvm-prepare
     runs-on: ubuntu-24.04-arm
-    # Cold paths may compile the workload kernel inside Stage 0 under TCG.
-    timeout-minutes: 300
+    timeout-minutes: 25
     env:
       CARGO_TERM_COLOR: always
       MVM_HOME: ${{ github.workspace }}/.mvm-ci
-      # A cold no-KVM build compiles the workload under TCG and can exceed
-      # the normal 30-minute builder deadline while still making progress.
       MVM_BUILDER_VM_TIMEOUT_SECS: 7200
     steps:
       - uses: actions/checkout@v6
@@ -591,47 +588,175 @@ jobs:
           MVM_KERNEL_SOURCE: auto
         run: /tmp/mvmctl-source-under-test --builder qemu bootstrap --production -v
 
-      - name: Build and boot the sealed exit_code workload under QEMU TCG
-        id: first-boot
+      # The published builder image is cheap to re-download and dominates the
+      # cache size, so only transfer source-built launch artifacts. Compression
+      # is disabled because these filesystem images are already compact and the
+      # hosted runner's remaining lifetime is deliberately kept short.
+      - name: Publish source-matched launch artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: aarch64-no-kvm-bootstrap-cache
+          path: |
+            .mvm-ci/cache/initramfs/
+            .mvm-ci/cache/kernels/
+            .mvm-ci/cache/runtime-overlay/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  aarch64-no-kvm-build:
+    name: Build sealed aarch64 bundle (QEMU TCG)
+    needs: aarch64-no-kvm-bootstrap
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 25
+    env:
+      CARGO_TERM_COLOR: always
+      MVM_HOME: ${{ github.workspace }}/.mvm-ci
+      MVM_BUILDER_VM_TIMEOUT_SECS: 7200
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/free-disk
+
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: qemu-system-arm ipxe-qemu virtiofsd e2fsprogs attr jq
+
+      - name: Restore exact smoke binaries
+        uses: actions/download-artifact@v8
+        with:
+          name: aarch64-no-kvm-binaries
+          path: /tmp/aarch64-no-kvm-binaries
+
+      - name: Install exact smoke binaries
+        run: |
+          install -m 0755 /tmp/aarch64-no-kvm-binaries/mvmctl-source-under-test \
+            /tmp/mvmctl-source-under-test
+          install -m 0755 /tmp/aarch64-no-kvm-binaries/mvmctl-release-helper \
+            /tmp/mvmctl-release-helper
+
+      - name: Restore source-matched launch artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: aarch64-no-kvm-bootstrap-cache
+          path: .mvm-ci/cache
+
+      - name: Grant QEMU access to vhost-vsock
+        run: |
+          test -c /dev/vhost-vsock
+          sudo chown "$USER" /dev/vhost-vsock
+          sudo chmod 0600 /dev/vhost-vsock
+
+      - name: Use published builder VM bootstrap path
+        run: mv nix/images/builder-vm nix/images/builder-vm.hidden
+
+      - name: Download published builder VM
+        run: /tmp/mvmctl-release-helper --builder qemu __builder-vm-bootstrap -v
+
+      - name: Build and export the sealed exit_code workload under QEMU TCG
+        id: bundle-build
         env:
           MVM_KERNEL_SOURCE: auto
         run: |
           set -euo pipefail
           mkdir -p "$MVM_HOME"
-          # Print the captured log on *any* death, not only on a wrong exit
-          # code. The tail used to live inside the `-ne 7` branch, so a run
-          # killed before that branch — which is exactly what happened when
-          # this step was SIGTERMed five minutes in — emitted nothing at all:
-          # the whole boot is redirected to the file, and the file was never
-          # read. The job reported `exit code 143` over an empty step and there
-          # was nothing to diagnose it with.
-          trap 'echo "::group::mvmctl first-boot log (tail)"; tail -250 /tmp/mvmctl-first-boot.log 2>/dev/null || echo "(no log produced)"; echo "::endgroup::"' EXIT
-          set +e
-          /tmp/mvmctl-source-under-test machine run \
-            --flake examples/exit_code \
-            --builder qemu \
-            --hypervisor qemu \
-            --entrypoint \
-            -v \
-            > /tmp/mvmctl-first-boot.log 2>&1
-          actual=$?
-          set -e
-          if [ "$actual" -ne 7 ]; then
-            echo "::error::expected guest exit code 7 from first boot, got $actual"
-            exit 1
-          fi
-          echo "ok: sealed aarch64 workload built and exited $actual under QEMU TCG"
+          trap 'echo "::group::mvmctl build log (tail)"; tail -250 /tmp/mvmctl-build.log 2>/dev/null || echo "(no log produced)"; echo "::endgroup::"' EXIT
+          /tmp/mvmctl-source-under-test --builder qemu build --flake examples/exit_code \
+            > /tmp/mvmctl-build.log 2>&1
+          slot_hash=$(/tmp/mvmctl-source-under-test manifest ls --json 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | jq -r '.[0].slot_hash')
+          mkdir -p ci-artifacts/aarch64-no-kvm-bundle
+          /tmp/mvmctl-source-under-test bundle export "$slot_hash" \
+            --out ci-artifacts/aarch64-no-kvm-bundle/exit-code-aarch64.mvmpkg \
+            > /tmp/mvmctl-export.log 2>&1
+          cp "$MVM_HOME/keys/host-signer.pub" \
+            ci-artifacts/aarch64-no-kvm-bundle/host-signer.pub
+          echo "ok: sealed aarch64 bundle built and exported under QEMU TCG"
 
-      - name: Export, install, and re-run the bundle
+      - name: Publish sealed aarch64 bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: aarch64-no-kvm-bundle
+          path: ci-artifacts/aarch64-no-kvm-bundle/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          for log in /tmp/mvmctl-build.log /tmp/mvmctl-export.log; do
+            if [ -f "$log" ]; then
+              echo "===== $log ====="
+              tail -250 "$log" || true
+            fi
+          done
+          echo "===== Builder VM state dirs ====="
+          for d in "$MVM_HOME"/cache/builder-vm/vms/*/; do
+            echo "--- $d ---"
+            ls -la "$d" || true
+            for f in console.log qemu.log; do
+              if [ -s "$d$f" ]; then
+                echo "--- $f ---"; tail -100 "$d$f" || true
+              fi
+            done
+          done
+
+  aarch64-no-kvm-smoke:
+    name: Aarch64 no-KVM bundle smoke (QEMU TCG)
+    needs: aarch64-no-kvm-build
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 25
+    env:
+      CARGO_TERM_COLOR: always
+      MVM_HOME: ${{ github.workspace }}/.mvm-ci
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/free-disk
+
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: qemu-system-arm ipxe-qemu virtiofsd e2fsprogs attr jq
+
+      - name: Restore exact smoke binary
+        uses: actions/download-artifact@v8
+        with:
+          name: aarch64-no-kvm-binaries
+          path: /tmp/aarch64-no-kvm-binaries
+
+      - name: Install exact smoke binary
+        run: |
+          install -m 0755 /tmp/aarch64-no-kvm-binaries/mvmctl-source-under-test \
+            /tmp/mvmctl-source-under-test
+
+      - name: Restore source-matched launch artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: aarch64-no-kvm-bootstrap-cache
+          path: .mvm-ci/cache
+
+      - name: Restore sealed aarch64 bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: aarch64-no-kvm-bundle
+          path: /tmp/aarch64-no-kvm-bundle
+
+      - name: Grant QEMU access to vhost-vsock
+        run: |
+          test -c /dev/vhost-vsock
+          sudo chown "$USER" /dev/vhost-vsock
+          sudo chmod 0600 /dev/vhost-vsock
+
+      - name: Install and boot the sealed bundle under QEMU TCG
         id: bundle-roundtrip
+        env:
+          MVM_KERNEL_SOURCE: auto
         run: |
           set -euo pipefail
-          slot_hash=$(/tmp/mvmctl-source-under-test manifest ls --json 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | jq -r '.[0].slot_hash')
-          /tmp/mvmctl-source-under-test bundle export "$slot_hash" \
-            --out /tmp/exit-code-aarch64.mvmpkg \
-            > /tmp/mvmctl-export.log 2>&1
-          /tmp/mvmctl-source-under-test trust add "$MVM_HOME/keys/host-signer.pub"
-          install_output=$(/tmp/mvmctl-source-under-test bundle install /tmp/exit-code-aarch64.mvmpkg 2>&1 | tee /tmp/mvmctl-install.log)
+          trap 'echo "::group::mvmctl bundle-run log (tail)"; tail -250 /tmp/mvmctl-bundle-run.log 2>/dev/null || echo "(no log produced)"; echo "::endgroup::"' EXIT
+          /tmp/mvmctl-source-under-test trust add \
+            /tmp/aarch64-no-kvm-bundle/host-signer.pub
+          install_output=$(/tmp/mvmctl-source-under-test bundle install /tmp/aarch64-no-kvm-bundle/exit-code-aarch64.mvmpkg 2>&1 | tee /tmp/mvmctl-install.log)
           installed_sha=$(printf '%s' "$install_output" | sed 's/\x1b\[[0-9;]*m//g' | awk '/Installed bundle / {print $3}')
           echo "installed bundle content address: $installed_sha"
           set +e
@@ -653,8 +778,7 @@ jobs:
       - name: Dump diagnostics on failure
         if: failure()
         run: |
-          for log in /tmp/mvmctl-first-boot.log /tmp/mvmctl-export.log \
-                     /tmp/mvmctl-install.log /tmp/mvmctl-bundle-run.log; do
+          for log in /tmp/mvmctl-install.log /tmp/mvmctl-bundle-run.log; do
             if [ -f "$log" ]; then
               echo "===== $log ====="
               tail -250 "$log" || true
