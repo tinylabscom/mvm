@@ -607,6 +607,15 @@ jobs:
       - name: Restore source builder VM flake
         run: mv nix/images/builder-vm.hidden nix/images/builder-vm
 
+      # Artifact compilation is not the no-KVM launch witness. Re-enable KVM
+      # for the project builder VM; the independent smoke runner below denies
+      # KVM again before it boots the resulting bundle under QEMU TCG.
+      - name: Accelerate source artifact compilation with KVM
+        run: |
+          if [ -e /dev/kvm ]; then
+            sudo chmod 0666 /dev/kvm
+          fi
+
       - name: Build source QEMU-compatible workload kernel
         run: /tmp/mvmctl-source-under-test kernel build --which workload --source compile -v
 

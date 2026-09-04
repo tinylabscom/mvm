@@ -21,6 +21,7 @@ const REQUIRED_VIRTIOFS_PACKAGE: &str = "virtiofsd";
 const REQUIRED_VIRTIO_ROM_PACKAGE: &str = "ipxe-qemu";
 const REQUIRED_CI_VSOCK_OWNERSHIP: &str = "sudo chown \"$USER\" /dev/vhost-vsock";
 const REQUIRED_KVM_DENIAL: &str = "sudo chmod 000 /dev/kvm";
+const REQUIRED_KVM_RESTORE: &str = "sudo chmod 0666 /dev/kvm";
 const REQUIRED_LOCAL_VSOCK_DEVICE: &str = "--device /dev/vhost-vsock:/dev/vhost-vsock";
 const FORBIDDEN_LOCAL_KVM_DEVICE: &str = "--device /dev/kvm:/dev/kvm";
 const REQUIRED_BUILDER_DOWNLOAD: &str =
@@ -191,9 +192,14 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
     let source_kernel_build = bootstrap_job
         .find(REQUIRED_SOURCE_KERNEL_BUILD)
         .expect("the bootstrap runner must source-build the QEMU kernel");
+    let restore_kvm = bootstrap_job
+        .find(REQUIRED_KVM_RESTORE)
+        .expect("artifact compilation must restore KVM for the project builder VM");
     assert!(
-        bootstrap < restore_source_flake && restore_source_flake < source_kernel_build,
-        "the source flake must stay hidden through published bootstrap, then be restored before source kernel compilation"
+        bootstrap < restore_source_flake
+            && restore_source_flake < restore_kvm
+            && restore_kvm < source_kernel_build,
+        "the source flake and KVM acceleration must be restored after the no-KVM bootstrap proof and before source kernel compilation"
     );
     assert!(
         build_job.contains("needs: no-kvm-bootstrap")

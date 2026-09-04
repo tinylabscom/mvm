@@ -943,6 +943,7 @@ mod tests {
         assert!(
             build.contains("image boot update --tag boot-image/v0.1.3 --force")
                 && bootstrap.contains("mv nix/images/builder-vm.hidden nix/images/builder-vm")
+                && bootstrap.contains("sudo chmod 0666 /dev/kvm")
                 && bootstrap.contains("kernel build --which workload --source compile -v")
                 && build.contains(".mvm-ci/cache/kernels/x86_64/workload/bzImage")
                 && build.contains("bzImage.sha256")
@@ -957,9 +958,12 @@ mod tests {
         let source_kernel_build = bootstrap
             .find("kernel build --which workload --source compile -v")
             .expect("the source QEMU kernel must be built");
+        let restore_kvm = bootstrap
+            .find("sudo chmod 0666 /dev/kvm")
+            .expect("source artifact compilation must restore KVM acceleration");
         assert!(
-            restore_source_flake < source_kernel_build,
-            "the source builder flake must be restored before source kernel compilation"
+            restore_source_flake < restore_kvm && restore_kvm < source_kernel_build,
+            "the source builder flake and KVM acceleration must be restored before source kernel compilation"
         );
         let deny_kvm_position = smoke
             .find(deny_kvm)
