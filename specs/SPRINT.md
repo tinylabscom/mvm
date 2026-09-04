@@ -265,6 +265,14 @@
       workflow-structure suite and `check-workflow-paths` are green. One
       uninterrupted run and merge delivery remain.
 
+- [ ] **Linux 6.12.108 synchronized kernel pin — issue #3147.**
+      `specs/plans/2026-09-04-kernel-6-12-108.md`.
+      The custom workload/builder kernel and libkrunfw firmware build now use
+      the same kernel.org-verified Linux 6.12.108 archive and SRI hash, with the
+      digest confirmed against the clearsigned manifest and by hashing the
+      downloaded archive. The structural synchronization suite and repository
+      policy gates are green. Linux Nix builds and merge delivery remain.
+
 - [ ] **Linux 6.12.107 synchronized kernel pin — issue #2971.**
       `specs/plans/2026-08-28-kernel-6-12-107.md`.
       The custom workload/builder kernel and libkrunfw firmware build now use
