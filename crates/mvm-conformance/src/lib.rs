@@ -113,7 +113,7 @@ pub const UNENFORCEABLE_WALL_CLOCK_TAG: &str = "unenforceable_wall_clock";
 /// Scenarios needing a host where a warm standby can actually be claimed.
 ///
 /// Claiming a standby forks a child and waits for it to answer a post-restore
-/// identity handshake. On this tier the child never answers (#3039) and the
+/// identity handshake. On this tier the child never answers it and the
 /// claim is rejected, so the launch falls back to a cold boot — the workload
 /// still runs, the start is just not warm.
 ///
@@ -179,7 +179,8 @@ pub struct RuntimeCaps {
     /// A forked child answers the post-restore identity handshake, so a warm
     /// standby can be claimed rather than falling back to a cold boot.
     ///
-    /// Read by [`WARM_CLAIM_TAG`]. False on any host where #3039 reproduces.
+    /// Read by [`WARM_CLAIM_TAG`]. False on any host whose forked child does not
+    /// answer the handshake.
     pub warm_claim: bool,
 }
 
@@ -667,7 +668,8 @@ mod tests {
     ///
     /// Both directions matter. A gate that only ever skips is indistinguishable
     /// from deleting the scenario, and the reason this one exists is that the
-    /// claim is expected to work again — #3039 is a defect, not a property of
+    /// claim is expected to work again — the handshake failure is a defect, not
+    /// a property of
     /// the tier.
     #[test]
     fn warm_claim_scenario_skips_only_where_the_claim_cannot_complete() {
