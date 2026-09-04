@@ -20,6 +20,10 @@
 
 use std::process::ExitCode;
 
+#[cfg(target_os = "linux")]
+#[path = "stage0-init/build_config.rs"]
+mod build_config;
+
 fn main() -> ExitCode {
     #[cfg(target_os = "linux")]
     {
@@ -1033,18 +1037,17 @@ mod linux {
         // that was asked for — which surfaced only as a missing
         // `mvm-kernel.config` on the host five minutes later. Say so here
         // instead, where the reason is.
-        let staged_conf = format!("{STAGE0_INPUT_STAGE}/conf/stage0-build.conf");
-        let conf_path = if Path::new(&staged_conf).exists() {
-            staged_conf
-        } else {
-            "/out/stage0-build.conf".to_string()
-        };
-        let conf = read_build_conf(&conf_path);
+        let conf_path = crate::build_config::locate(
+            Path::new(STAGE0_INPUT_STAGE),
+            Path::new("/out/stage0-build.conf"),
+        );
+        let conf = crate::build_config::read(&conf_path);
         if conf.is_empty() {
             eprintln!(
-                "stage0-init: no build config at {conf_path}; \
+                "stage0-init: no build config at {}; \
                  building the default image, which is the wrong artifact for \
-                 any host that asked for something else"
+                 any host that asked for something else",
+                conf_path.display()
             );
         }
         let attr = conf
@@ -1468,27 +1471,6 @@ mod linux {
         }
         let bytes = nul_terminated_c_chars(&uts.machine);
         Ok(String::from_utf8_lossy(&bytes).into_owned())
-    }
-
-    /// Minimal `KEY=VALUE` / `KEY="VALUE"` reader for the optional
-    /// host-dropped build conf — the host writes a small fixed set of plain
-    /// `MVM_STAGE0_*` assignments after validating every value as a token.
-    fn read_build_conf(path: &str) -> std::collections::HashMap<String, String> {
-        let mut map = std::collections::HashMap::new();
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return map;
-        };
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if let Some((k, v)) = line.split_once('=') {
-                let v = v.trim().trim_matches('"').trim_matches('\'');
-                map.insert(k.trim().to_string(), v.to_string());
-            }
-        }
-        map
     }
 
     fn copy_deref(src: &Path, dst: &Path) -> Result<(), String> {

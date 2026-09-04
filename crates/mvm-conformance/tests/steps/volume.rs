@@ -278,7 +278,7 @@ fn attempt_direct_start(world: &mut CliWorld, machine: String, backend: String) 
     let encrypted_volume_probe_path = world
         .encrypted_volume_probe_path
         .clone()
-        .unwrap_or_else(|| super::cli::install_encrypted_backing_probes(&home));
+        .unwrap_or_else(|| super::cli::install_encrypted_backing_probes(home));
     let fixture_dir = home.join("direct-boot-fixture");
     fs::create_dir_all(&fixture_dir).expect("create direct-boot fixture directory");
     let kernel = fixture_dir.join("vmlinux");
