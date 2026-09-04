@@ -28,6 +28,8 @@ const REQUIRED_BOOTSTRAP: &str =
     "/tmp/mvmctl-source-under-test --builder qemu bootstrap --production -v";
 const REQUIRED_QEMU_BUILD: &str =
     "/tmp/mvmctl-source-under-test --builder qemu machine build --flake examples/exit_code";
+const REQUIRED_STREAMED_BUILD_LOG: &str = "2>&1 | tee /tmp/mvmctl-build.log";
+const FORBIDDEN_SILENT_BUILD_LOG: &str = "> /tmp/mvmctl-build.log 2>&1";
 const FIRST_MACHINE_RUN: &str = "/tmp/mvmctl-source-under-test machine run";
 const REQUIRED_BAKED_ENTRYPOINT: &str = "--entrypoint";
 const FORBIDDEN_ENTRYPOINT_OVERRIDE: &str = "-- /bin/true";
@@ -153,6 +155,11 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
     assert!(
         build_job.contains(REQUIRED_KVM_ACCESS) && !build_job.contains(REQUIRED_KVM_DENIAL),
         "bounded hosted bundle preparation must use KVM and make no TCG-build claim"
+    );
+    assert!(
+        build_job.contains(REQUIRED_STREAMED_BUILD_LOG)
+            && !build_job.contains(FORBIDDEN_SILENT_BUILD_LOG),
+        "the hosted workload build must stream progress while retaining its diagnostic log"
     );
     assert!(
         prepare.contains("runs-on: ubuntu-24.04") && !prepare.contains("runs-on: ubuntu-24.04-arm"),

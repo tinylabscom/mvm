@@ -953,6 +953,11 @@ mod tests {
             require_kvm_position < bundle_build_position,
             "KVM access must be established before bundle preparation"
         );
+        assert!(
+            build.contains("2>&1 | tee /tmp/mvmctl-build.log")
+                && !build.contains("> /tmp/mvmctl-build.log 2>&1"),
+            "the hosted workload build must stream progress instead of leaving the runner silent"
+        );
         let deny_kvm_position = smoke
             .find(deny_kvm)
             .expect("the hosted boot witness must deny KVM");
