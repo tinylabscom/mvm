@@ -65,11 +65,12 @@ in-process rootfs materialization as a decision.
 entirely (`xtask/src/check_adr_coverage.rs:119–123`) so that ADRs referring to
 themselves do not inflate the reference count.
 
-### 4. Duplicate ADR number `037`
+### 4. Duplicate ADR number `037` — resolved 2026-09-04
 
-`037-mvmd-only-production-launch.md` and `037-userspace-socket-datapath.md`.
-Same failure mode `check-plan-names` exists to stop for plans; ADRs have no
-equivalent gate.
+`037-mvmd-only-production-launch.md` and what was then
+`037-userspace-socket-datapath.md`. Same failure mode `check-plan-names` exists
+to stop for plans; ADRs have no equivalent gate. The datapath ADR is now
+ADR-052 — see WS-E.
 
 ### 5. `specs/claims/` ghosts, including two in a public file
 
@@ -136,7 +137,10 @@ Needs a decision before it can be executed — see Open questions.
 
 ### WS-E — Rename one duplicate ADR-037
 
-- [ ] Pick the one to renumber and update its inbound references
+- [x] Renumbered the **superseded** side: `037-userspace-socket-datapath.md` is now `052-userspace-socket-datapath.md`. ADR-037 stays with `mvmd-only-production-launch`, which is `Accepted` and cited as current authority; renumbering a superseded document churns only backward-looking references.
+- [x] Retargeted all 23 inbound citations that meant the datapath, classified line by line rather than by blanket replace. 15 that meant the launch-authority ADR were left alone. Two ambiguous ones — ADR-046's `Complements:` list and this plan's own `ADR-037/040/041 cross-repo ownership` line — were resolved to the launch-authority ADR: ADR-040 and ADR-041 are cross-node trust boundaries, and ADR-042 already covers the networking path, so listing the datapath there would be redundant.
+- [x] `052` was verified free: sweeping every ADR number from 052 to 120, the only ones cited anywhere in the tree were 106, 107 (the dangling pair WS-B still owns) and 110 (which exists). A different ADR held 052 before the v1 restructure deleted it, which both files now record. Note the number cannot be named here in citation form without the coverage gate reading it as a reference — that gate caught exactly that mistake in an earlier draft of this line.
+- [x] Updated `check_declared_backing.rs`'s `PENDING` entry, which named the old path and would have failed the gate on a rename alone.
 
 ## Why nothing caught this, and the minimum to stop it recurring
 
@@ -170,4 +174,4 @@ Three structural blind spots:
 
 1. **What happens to the two deleted decisions?** They scope claim 3: dm-verity witnesses the claim on block+ext4 backends, and virtiofs-root is a dev tier with a weaker contract that does not witness it. That scoping is load-bearing for a `Shipped` claim and currently rests on two citations that resolve to nothing. Restoring the content as a new ADR in the 0xx range is the safer option; inlining it into ADR-001 is cheaper but grows a file that is already 1,080 lines. Needs a call.
 2. **Is the 052–111 citation sweep bounded?** Item 3 was found by grepping two specific numbers. The full inbound-reference set for the deleted range has not been enumerated; WS-B's third box may be larger than it looks.
-3. **Which ADR-037 keeps the number?** Both are live documents.
+3. ~~**Which ADR-037 keeps the number?**~~ Resolved in WS-E: the live `Accepted` launch-authority ADR keeps 037; the superseded datapath ADR became 052. They were not both live — that was the wrong premise.

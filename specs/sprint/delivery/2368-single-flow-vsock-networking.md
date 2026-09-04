@@ -10,7 +10,7 @@ only for a typed flow whose signed plan requires it. A plan requiring
 transformation refuses an opaque shape rather than downgrading.
 
 Phase 0 is complete: ADR-042 ratifies the invariant, supersedes ADR-036 and
-ADR-037 for production workload networking, corrects the networking refactor
+ADR-052 for production workload networking, corrects the networking refactor
 record, and freezes expansion of the retired L3 path. The temporary
 `check-l3-expansion-freeze` ratchet fails on new production references outside
 its shrinking allowlist. Synthesis, supervisor admission, and CLI preflight all

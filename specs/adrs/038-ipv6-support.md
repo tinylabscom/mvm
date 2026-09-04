@@ -30,7 +30,7 @@ network spec is leased a unique-local `/126` at the same index as its
 gateway requires `ipv6_flows` of whichever forwarding backend was selected.
 A plan that does not ask for IPv6 is unchanged in every byte. See §"Host
 allocation: a unique-local /126 per machine, on request".
-**Complements ADR-036 (L3 TUN-over-vsock) and ADR-037 (the userspace
+**Complements ADR-036 (L3 TUN-over-vsock) and ADR-052 (the userspace
 socket datapath). Supersedes nothing; it removes IPv6 from ADR-036's
 deferred set and gives it a design.**
 

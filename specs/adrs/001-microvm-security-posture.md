@@ -462,7 +462,7 @@ does not construct a FlowMux client. Synthetic negative fixtures prove a
 second path or socket owner fails CI, while a projection test proves all flow
 classes share the same admitted object graph.
 
-**The retired `l3-vsock` path.** ADR-036 and ADR-037 historically supplied an
+**The retired `l3-vsock` path.** ADR-036 and ADR-052 historically supplied an
 opt-in raw-packet compatibility mode. ADR-042 superseded them, and the public
 mode, guest TUN and agent, packet protocol, policy branch, host forwarders,
 VMM hooks, dependencies, packaging, and temporary migration ratchets are now

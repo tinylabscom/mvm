@@ -12,7 +12,7 @@ FlowMux; the userspace L3 datapath and smoltcp dependency no longer ship.
 
 **Tech Stack:** Rust, smoltcp (new dependency), mio (existing workspace dependency, new `mvm-hostd` edge), `std::os::unix` sockets.
 
-**ADR:** [037](../adrs/037-userspace-socket-datapath.md). Read it first — this plan is the sequencing.
+**ADR:** [037](../adrs/052-userspace-socket-datapath.md). Read it first — this plan is the sequencing.
 
 ## Global Constraints
 
@@ -1666,12 +1666,12 @@ existing prose were false rather than merely stale:
   but has nothing behind it, so every host-driven step waits for the drive
   loop's tick), `declared_ingress: true` advertised with no listening
   socket serving it, and `poll_inbound`'s unbudgeted drain. They are in
-  the guide as user-visible costs and in ADR-037 §"Known defects in what
+  the guide as user-visible costs and in ADR-052 §"Known defects in what
   shipped" as engineering record.
 - ADR-036 described `MacosUserspaceGateway` in the present tense. Every
   reference is corrected; the type is deleted.
 
-**ADR-037's memory ceiling was wrong and is re-derived.** It claimed
+**ADR-052's memory ceiling was wrong and is re-derived.** It claimed
 `1024 × 32 KiB = 32 MiB`, wrong in three independent ways: the cap is 256,
 a flow costs 176,768 bytes rather than its 32,768 bytes of ring buffers
 (each flow owns its own smoltcp device and its two packet queues), and UDP
@@ -1869,7 +1869,7 @@ cannot meet — not a flow count, a measured shortfall.
 Not scope reductions — things that are wrong, recorded so the close-out is
 not read as "finished". Three were listed at close-out; two of those closed,
 two more were found while closing them, and those two are now closed as well.
-One remains. ADR-037 §"Known defects in what shipped" carries the original
+One remains. ADR-052 §"Known defects in what shipped" carries the original
 three with the mechanism.
 
 - [x] **Register host sockets on the datapath's poll set.** Done. Every
@@ -1950,7 +1950,7 @@ three with the mechanism.
       **Still open: TCP.** A declared stream mapping is admitted and binds
       nothing on this backend; serving one needs a listener whose accepted
       connections are originated toward the guest. It is skipped at open
-      rather than refused, opens no socket, and is recorded in ADR-037
+      rather than refused, opens no socket, and is recorded in ADR-052
       §"Known defects in what shipped" as the remaining over-claim.
 - [x] **Give `Gateway::poll_inbound` a per-pass budget.** Done, mirroring
       the guest-facing drain rather than inventing a second mechanism:

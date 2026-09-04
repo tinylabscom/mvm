@@ -2,8 +2,8 @@
 
 **Status: Accepted**
 **Date: 2026-08-11**
-**Supersedes: ADR-036 (L3 TUN-over-vsock) and ADR-037
-(`037-userspace-socket-datapath.md`) for the production workload networking
+**Supersedes: ADR-036 (L3 TUN-over-vsock) and ADR-052
+(`052-userspace-socket-datapath.md`) for the production workload networking
 path. Their measurements, threat analysis, and historical rationale stand;
 their implementations stop being a supported production transport.
 Complements ADR-003 (hypervisor egress policy), ADR-014 (signed/audited
@@ -20,7 +20,7 @@ the guest, is the party that opens sockets.
 
 ADR-036 then added `l3-vsock`, an opt-in compatibility mode that gives the
 guest a real IP stack on a `mvm0` TUN and tunnels raw IPv4/IPv6 packets to a
-host forwarder. ADR-037 added a second, unprivileged forwarding backend for
+host forwarder. ADR-052 added a second, unprivileged forwarding backend for
 it. Both shipped. The tree therefore carries **two** production workload
 networking paths with different policy code, different resource accounting,
 different audit shapes, and different security properties — and

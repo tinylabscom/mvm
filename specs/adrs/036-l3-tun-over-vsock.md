@@ -336,7 +336,7 @@ application TCP, UDP, and host-terminated DNS. It does not cover raw
 sockets, arbitrary IP protocols, arbitrary ICMP, or multicast, and it does
 not claim to.
 
-**Status: superseded in part by [ADR-037](037-userspace-socket-datapath.md),
+**Status: superseded in part by [ADR-052](052-userspace-socket-datapath.md),
 which designs the translator and widens it from a macOS-only backend to a
 platform-neutral unprivileged one.** What shipped with *this* ADR was a
 placeholder, `MacosUserspaceGateway` — a capability declaration plus a
@@ -357,7 +357,7 @@ declaration claims are not yet true of the datapath behind it: declared
 ingress is advertised with no listening socket serving it, and the
 readiness descriptor it exposes has nothing registered on it, so
 host-originated traffic moves on the drive loop's 50 ms tick rather than on
-the event that made it ready. Both are recorded in ADR-037 §"Known defects
+the event that made it ready. Both are recorded in ADR-052 §"Known defects
 in what shipped".
 
 The later full-packet backend would need privileged operations mvm has no
@@ -894,7 +894,7 @@ only against measurements like these, not against intuition.
   kernel.
 - macOS gains no L3 support in this change, and says so explicitly
   rather than degrading. (Since closed: the userspace socket datapath of
-  ADR-037 now serves macOS, within the limits §macOS states.)
+  ADR-052 now serves macOS, within the limits §macOS states.)
 
 ## Future work
 

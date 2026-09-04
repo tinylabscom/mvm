@@ -2,6 +2,11 @@
 
 **Status: Accepted**
 **Date: 2026-08-04**
+**Note on the number.** Until 2026-09-04 two ADRs held 037: this one and the
+userspace socket datapath, now [ADR-052](052-userspace-socket-datapath.md).
+This one kept the number because it is `Accepted` and cited as current
+authority. A citation of "ADR-037" that predates that date and discusses
+networking means ADR-052; one that discusses launch authority means this ADR.
 
 ## Context
 

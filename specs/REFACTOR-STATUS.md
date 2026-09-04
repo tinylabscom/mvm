@@ -1902,11 +1902,11 @@ resume` takes a `current_head` and refuses when it differs from the
   - [x] Validate load/attach on a live Linux host (PR #2221)
 
 - [~] Plan 287 — Userspace socket datapath
-  (`specs/plans/287-userspace-socket-datapath.md`, ADR-037)
+  (`specs/plans/287-userspace-socket-datapath.md`, ADR-052)
   Tracked end to end under epic #2111, which also carries plan 285's
   deferred set. Every workstream below has its own issue; the epic
   records the ordering and the two gates that are not preference.
-  **Frozen by plan 316 Phase 0.** ADR-037 is superseded for production
+  **Frozen by plan 316 Phase 0.** ADR-052 is superseded for production
   workload networking: this datapath forwarded raw IP packets for
   `l3-vsock`, which no longer boots. No feature work lands on its runtime
   path; deletion is plan 316 Phase 7 (#2376).
@@ -1938,10 +1938,10 @@ resume` takes a `current_head` and refuses when it differs from the
         closes it out in the docs: the guide's platform matrix now splits
         by forwarding backend rather than by platform, ADR-036's
         present-tense `MacosUserspaceGateway` prose is corrected, and
-        ADR-037's memory ceiling is re-derived from `limits.rs` — its
+        ADR-052's memory ceiling is re-derived from `limits.rs` — its
         `1024 × 32 KiB = 32 MiB` was wrong three ways over, against a real
         46,500,608 bytes (44.35 MiB). **Three defects were shipped and
-        recorded rather than hidden**, in ADR-037 §"Known defects in what
+        recorded rather than hidden**, in ADR-052 §"Known defects in what
         shipped" and in plan 287's own deferred set; **two are now
         closed**. Every host socket the datapath opens is registered on the
         set behind `readiness_fd`, so a resolved connect and an arriving
@@ -2049,7 +2049,7 @@ resume` takes a `current_head` and refuses when it differs from the
         offered and what the host leased, and `Config::decode` refuses a
         frame where the bit and the assignment disagree. A leased pair sets
         `required_capabilities.ipv6_flows`, so a backend without it refuses
-        at open with a shortfall naming it — closing ADR-037's fourth known
+        at open with a shortfall naming it — closing ADR-052's fourth known
         defect. A plan that does not ask is unchanged in every byte.
         **Both backends now carry the family.** The packet backend's v6
         half is the host-side mirror of the guest's: an `AF_INET6`

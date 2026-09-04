@@ -266,7 +266,7 @@ Read ADR-036 first; this plan is the sequencing and the checkbox ledger.
       guest, which that backend does not build. The packet backend serves
       both.
 - [x] **macOS userspace socket gateway.** Delivered by
-      `specs/plans/287-userspace-socket-datapath.md` (ADR-037), and widened
+      `specs/plans/287-userspace-socket-datapath.md` (ADR-052), and widened
       on the way: `UserspaceSocketDatapath` is platform-neutral, so it also
       serves a Linux host that holds no `CAP_NET_ADMIN`. The
       `MacosUserspaceGateway` placeholder — declaration plus refusal — is
@@ -274,7 +274,7 @@ Read ADR-036 first; this plan is the sequencing and the checkbox ledger.
       at admission on it, and two gaps are open rather than closed:
       declared ingress is advertised with nothing listening behind it, and
       the readiness descriptor has nothing registered on it, so every
-      host-driven step waits for a 50 ms tick. Both are recorded in ADR-037
+      host-driven step waits for a 50 ms tick. Both are recorded in ADR-052
       §"Known defects in what shipped".
 - [ ] **macOS `utun` + PF datapath.** The later full-packet backend.
       Requires a privileged host helper mvm does not have. ADR-036 §macOS

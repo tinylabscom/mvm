@@ -179,7 +179,7 @@ the admitted launch state, never from guest bytes.
 - [x] Add an accepted ADR that records the L4-with-selective-L7 decision, the
       impossibility of arbitrary guest TLS plus host replacement without TLS
       interception, and the rejection of a host MITM CA as the universal path.
-- [x] Mark ADR-036 and ADR-037 superseded for production workload networking;
+- [x] Mark ADR-036 and ADR-052 superseded for production workload networking;
       retain their measurements and historical rationale without describing
       either implementation as live.
 - [x] Reconcile `specs/refactor/03-networking.md`, ADR-001's backend matrix and
@@ -199,7 +199,7 @@ the admitted launch state, never from guest bytes.
       ensures the migration never operates three live production paths.
 
 **Landed as.** ADR-042 (`specs/adrs/042-single-flow-vsock-networking.md`);
-superseded-for-production markers on ADR-036 and ADR-037; a rewritten
+superseded-for-production markers on ADR-036 and ADR-052; a rewritten
 `specs/refactor/03-networking.md`; a qualified tier matrix and claim-10 section
 in ADR-001; `xtask check-l3-expansion-freeze`
 (`xtask/src/check_l3_expansion_freeze.rs`, wired into the CI Lint job) with a
