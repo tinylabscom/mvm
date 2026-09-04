@@ -62,6 +62,13 @@
       }
     },
     {
+      "path": "crates/mvm-build/src/release_signature.rs",
+      "package": "mvm-build",
+      "claims": [
+        20
+      ]
+    },
+    {
       "path": "crates/mvm-build/src/runtime_overlay.rs",
       "package": "mvm-build",
       "claims": [
@@ -69,6 +76,13 @@
       ],
       "features": [
         "pure-mkfs"
+      ]
+    },
+    {
+      "path": "crates/mvm-cli/src/commands/env/artifact_verify.rs",
+      "package": "mvm-cli",
+      "claims": [
+        20
       ]
     },
     {
