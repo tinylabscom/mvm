@@ -661,7 +661,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$MVM_HOME"
           trap 'echo "::group::mvmctl build log (tail)"; tail -250 /tmp/mvmctl-build.log 2>/dev/null || echo "(no log produced)"; echo "::endgroup::"' EXIT
-          /tmp/mvmctl-source-under-test --builder qemu build --flake examples/exit_code \
+          /tmp/mvmctl-source-under-test --builder qemu machine build --flake examples/exit_code \
             > /tmp/mvmctl-build.log 2>&1
           slot_hash=$(/tmp/mvmctl-source-under-test manifest ls --json 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | jq -r '.[0].slot_hash')
           mkdir -p ci-artifacts/aarch64-no-kvm-bundle

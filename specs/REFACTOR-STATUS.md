@@ -17,8 +17,10 @@ Last updated: 2026-09-04
       one fresh runner stopped at 14 minutes 20 seconds after bootstrap. The TCG
       lane now gives compilation, bootstrap, sealed bundle build/export, and
       installed-bundle boot separate runner windows connected by immutable
-      artifacts. Hermetic BDD is green; live documented-surface evidence and
-      merge delivery remain.
+      artifacts. Its first split build runner caught an obsolete parser-invalid
+      `build --flake` invocation; the workflow and its regression test now pin
+      the shipped `machine build --flake` surface. Hermetic BDD is green; live
+      documented-surface evidence and merge delivery remain.
 
 - [ ] **Release-artifact authenticity and provenance.**
       `specs/plans/2026-09-03-release-artifact-authenticity-and-provenance.md`.

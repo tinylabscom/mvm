@@ -24,7 +24,9 @@
       job timeout is not the effective lifetime. The aarch64 TCG lane now gives
       compilation, bootstrap, sealed bundle build/export, and installed-bundle
       boot separate runner windows, transferring only immutable exact binaries,
-      source-built launch artifacts, and the signed bundle. The live
+      source-built launch artifacts, and the signed bundle. The first split
+      build runner exposed and corrected an obsolete `build --flake` spelling;
+      the lane now pins the shipped `machine build --flake` parser surface. The live
       documented-surface release gate and merge delivery remain.
 
 - [ ] **Workload output affordance — durable writable inline disks.**

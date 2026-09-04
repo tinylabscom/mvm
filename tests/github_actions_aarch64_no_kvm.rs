@@ -22,7 +22,7 @@ const REQUIRED_BUILDER_DOWNLOAD: &str =
 const REQUIRED_BOOTSTRAP: &str =
     "/tmp/mvmctl-source-under-test --builder qemu bootstrap --production -v";
 const REQUIRED_TCG_BUILD: &str =
-    "/tmp/mvmctl-source-under-test --builder qemu build --flake examples/exit_code";
+    "/tmp/mvmctl-source-under-test --builder qemu machine build --flake examples/exit_code";
 const FIRST_MACHINE_RUN: &str = "/tmp/mvmctl-source-under-test machine run";
 const REQUIRED_BAKED_ENTRYPOINT: &str = "--entrypoint";
 const FORBIDDEN_ENTRYPOINT_OVERRIDE: &str = "-- /bin/true";

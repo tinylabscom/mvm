@@ -609,7 +609,7 @@ fn the_aarch64_smoke_prints_its_boot_log_on_any_failure() {
         .find("trap 'echo \"::group::mvmctl build log (tail)\"")
         .expect("the build step must dump its log from an EXIT trap");
     let build = workflow
-        .find("--builder qemu build --flake examples/exit_code")
+        .find("--builder qemu machine build --flake examples/exit_code")
         .expect("the TCG build step must remain present");
     assert!(
         build_trap < build,

@@ -56,3 +56,8 @@ fix product defects uncovered by exercising the documented commands.
   and installed-bundle boot therefore occupy separate jobs connected by
   immutable artifacts. No live phase rebuilds or substitutes the exact source
   binary under test.
+- The first split build job then proved the handoff and failed immediately on
+  the obsolete top-level `build --flake` spelling. The lane now invokes the
+  shipped `machine build --flake` surface, and its structural regression test
+  pins that exact command so CI cannot silently drift back to a parser-invalid
+  entry point.
