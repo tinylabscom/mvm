@@ -968,6 +968,13 @@ mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
 
+    #[test]
+    fn local_volume_encryption_requirement_fails_closed_for_an_unknown_path() {
+        let missing = std::path::Path::new("/definitely/missing/mvm-encryption-probe");
+        let error = require_local_volume_host_path_encrypted(missing).unwrap_err();
+        assert!(error.to_string().contains("encrypted backing storage"));
+    }
+
     struct EnvGuard {
         _env: TestEnv,
         _tmp_root: Option<tempfile::TempDir>,

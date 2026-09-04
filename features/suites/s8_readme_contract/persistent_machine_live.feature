@@ -6,7 +6,7 @@ Feature: README persistent machine lifecycle works end to end
 
   @live @firecracker @ci_live
   Scenario: the documented persistent machine path operates a real guest
-    Given an isolated mvm home
+    Given an isolated mvm home on encrypted backing storage
     When I run mvmctl in the isolated mvm home with "machine create bdd-readme-web --image nginx --cpus 2 --memory 512M"
     Then the command exits with code 0
     When I run mvmctl in an isolated live home with "machine start bdd-readme-web"

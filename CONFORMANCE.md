@@ -83,7 +83,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-01` | `build` | No host-fs access from a guest beyond explicit shares | `fn:seccomp_allows_listed_denies_unlisted`, `fn:validated_conversion_enforces_mount_allow_list`, `fn:bare_mnt_is_refused_because_it_shadows_the_config_drive`, `fn:dir_share_two_part_defaults_ro`, `fn:relay_config_maps_dir_shares_with_dax_and_read_only`, `fn:enforce_admitted_shares_refuses_unadmitted_or_mismatched`, `ci:seccomp-functional` |
+| `MVM-SEC-01` | `build` | No host-fs access from a guest beyond explicit shares | `fn:seccomp_allows_listed_denies_unlisted`, `fn:validated_conversion_enforces_mount_allow_list`, `fn:bare_mnt_is_refused_because_it_shadows_the_config_drive`, `fn:dir_share_two_part_defaults_ro`, `fn:libkrun_refuses_any_virtio_fs_share_before_mapping`, `fn:enforce_admitted_shares_refuses_unadmitted_or_mismatched`, `ci:seccomp-functional` |
 
 ## oci_provenance
 
@@ -114,7 +114,7 @@ The three honesty levels (R2):
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
 | `MVM-SEC-07` | `some-true` | Cargo deps are audited on every PR | `ci:cargo-deny`, `ci:cargo-audit`, `ci:reproducibility` |
-| `MVM-SEC-20` | `build` | Every published release artifact is authenticated under the release workflow's identity, directly or through a signed checksum manifest, and the build and fetch paths refuse an artifact whose required signature is missing or invalid | `ci:verify-release`, `fn:accepted_identities_are_the_versioned_release_workflow`, `fn:a_missing_bundle_refuses_and_names_the_asset`, `fn:fetch_expected_hashes_refuses_an_unsigned_manifest_before_parsing`, `fn:skip_hash_verify_does_not_waive_the_manifest_signature` |
+| `MVM-SEC-20` | `build` | Every published release artifact is authenticated under the release workflow's identity, directly or through a signed checksum manifest, and the build and fetch paths refuse an artifact whose required signature is missing or invalid | `ci:verify-release`, `ci:release-provenance`, `fn:accepted_identities_are_the_versioned_release_workflow`, `fn:a_missing_bundle_refuses_and_names_the_asset`, `fn:fetch_expected_hashes_refuses_an_unsigned_manifest_before_parsing`, `fn:skip_hash_verify_does_not_waive_the_manifest_signature` |
 
 ## verified_boot
 

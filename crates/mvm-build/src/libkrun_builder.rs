@@ -27,8 +27,8 @@
 //! 6. Stage `<job_dir>/cmd.sh` with the shell-escaped flake_ref +
 //!    attr_path, plus the canonical `nix build` invocation.
 //! 7. Build a `KrunContext`: kernel + rootfs + cmdline + per-VM
-//!    vsock dir + virtio-blk (Nix store) + virtio-fs (work / out /
-//!    job).
+//!    vsock dir + virtio-blk devices for the Nix store and raw-tar
+//!    input/output transport.
 //! 8. Spawn `mvm-libkrun-supervisor`, pipe the `SupervisorConfig`
 //!    JSON to stdin, **wait** for it to exit (unlike
 //!    `LibkrunBackend::start` which returns after the PID file
@@ -88,11 +88,11 @@ use egress_process::{builder_egress_endpoint_was_terminated, builder_egress_supe
 // module below.
 use crate::builder_vm::BuilderCapabilities;
 use crate::builder_vm_runtime::{
-    CLOSURE_SEED_TAG, acquire_nix_store_image_lock, acquire_nix_store_image_lock_named,
-    builder_vm_timeout, ensure_nix_store_image_unlocked, finalize_flake_job, finalize_install_job,
-    read_job_result_with_diagnostics, shell_job_exit_error, stage_closure_seed_dir,
-    stage_filtered_work_input, stage_job_dir, stage_persistent_job_dir, stage_shell_job_dir,
-    supervisor_exit_error, verbose_from_env,
+    acquire_nix_store_image_lock, acquire_nix_store_image_lock_named, builder_vm_timeout,
+    ensure_nix_store_image_unlocked, finalize_flake_job, finalize_install_job,
+    read_job_result_with_diagnostics, shell_job_exit_error, stage_filtered_work_input,
+    stage_job_dir, stage_persistent_job_dir, stage_shell_job_dir, supervisor_exit_error,
+    verbose_from_env,
 };
 
 /// Default vCPU count for the builder VM. Nix builds are
@@ -125,14 +125,14 @@ pub const DEFAULT_NIX_STORE_MIB: u32 = 65536;
 /// Re-exported here next to [`DEFAULT_NIX_STORE_MIB`] for discoverability.
 pub use crate::builder_vm_runtime::{DEFAULT_BUILDER_STORE_GC_GIB, builder_store_gc_cap_kib};
 
-/// Where the workspace gets mounted inside the builder VM
-/// (read-only virtio-fs).
+/// Where the workspace is staged inside the builder VM from the read-only
+/// input transport disk.
 /// Explicit path URL prevents Nix from treating the mounted checkout as a
 /// Git flake and reaching for host-side worktree metadata that is not mounted.
 pub const GUEST_WORK_DIR: &str = "path:/work";
 
-/// Where artifacts get extracted inside the builder VM (read-write
-/// virtio-fs).
+/// Where artifacts are collected before being archived onto the writable
+/// output transport disk.
 pub const GUEST_OUT_DIR: &str = "/out";
 
 /// Where the persistent Nix store lives inside the builder VM. The
@@ -142,12 +142,11 @@ pub const GUEST_NIX_DIR: &str = "/nix";
 
 /// Where the per-build job spec lives inside the builder VM. The
 /// host stages `cmd.sh`, `env`, and the eventual `result` file
-/// under this path (read-write virtio-fs).
+/// under this path through the input transport disk.
 pub const GUEST_JOB_DIR: &str = "/job";
 const BUILDER_INPUT_DEVICE: &str = "/dev/vdc";
 const BUILDER_OUTPUT_DEVICE: &str = "/dev/vdd";
 const BUILDER_RUNTIME_DEVICE: &str = "/dev/vde";
-const BUILDER_VIRTIOFS_RUNTIME_DEVICE: &str = "/dev/vdc";
 const BUILDER_VSOCK_EGRESS_TOKEN: &str = "mvm.vsock_egress=1";
 const BUILDER_SUBST_PID_FILE: &str = "substitution.pid";
 const BUILDER_SUBST_STDERR_LOG_FILE: &str = "substitution.stderr.log";
@@ -221,12 +220,6 @@ fn builder_vsock_egress_cmdline(base_cmdline: &str) -> String {
     append_cmdline_token(base_cmdline, BUILDER_VSOCK_EGRESS_TOKEN)
 }
 
-fn apply_builder_vsock_egress(krun: KrunContext) -> KrunContext {
-    krun.with_cmdline(BUILDER_VSOCK_EGRESS_TOKEN)
-        .with_vsock_direct()
-        .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT)
-}
-
 fn builder_boot_contract_cmdline(base_cmdline: &str) -> String {
     let cmdline = append_cmdline_token(base_cmdline, "rootwait");
     let cmdline = append_cmdline_token(&cmdline, "panic=-1");
@@ -249,12 +242,6 @@ fn builder_disk_transport_cmdline(base_cmdline: &str) -> String {
 
 fn builder_runtime_overlay_cmdline(base_cmdline: &str, runtime_device: &str) -> String {
     let cmdline = builder_disk_transport_cmdline(base_cmdline);
-    append_cmdline_token(&cmdline, &format!("mvm.runtime_data={runtime_device}"))
-}
-
-fn builder_virtiofs_runtime_overlay_cmdline(base_cmdline: &str, runtime_device: &str) -> String {
-    let cmdline = builder_boot_contract_cmdline(base_cmdline);
-    let cmdline = builder_vsock_egress_cmdline(&cmdline);
     append_cmdline_token(&cmdline, &format!("mvm.runtime_data={runtime_device}"))
 }
 
@@ -628,8 +615,7 @@ fn kill_pid(pid: libc::pid_t, sig: libc::c_int) {
 /// `closure_nar` is the resolved builder image's optional seeded Nix store
 /// closure: a single file that rides the same input disk at
 /// `closure-seed/<CLOSURE_FILE>`. The guest imports that fixed path and does
-/// not care which transport populated it, so a caller still attaching the
-/// closure as a virtio-fs share passes `None` here instead.
+/// not care which builder backend populated it.
 pub(crate) fn prepare_builder_transport_disks(
     vm_state_dir: &Path,
     input_trees: &[InputTree<'_>],
@@ -702,30 +688,11 @@ pub(crate) fn builder_runtime_overlay_attachment<'a>(
     }
 }
 
-pub(crate) fn builder_virtiofs_runtime_overlay_attachment<'a>(
-    image: &'a BuilderVmImage,
-    runtime_overlay: Option<&'a Path>,
-) -> Option<BuilderRuntimeOverlayAttachment<'a>> {
-    match (image, runtime_overlay) {
-        (BuilderVmImage::Rootfs { cmdline, .. }, Some(runtime_overlay)) => {
-            Some(BuilderRuntimeOverlayAttachment {
-                cmdline: builder_virtiofs_runtime_overlay_cmdline(
-                    cmdline,
-                    BUILDER_VIRTIOFS_RUNTIME_DEVICE,
-                ),
-                disk_path: runtime_overlay,
-                read_only: true,
-            })
-        }
-        _ => None,
-    }
-}
-
 /// Libkrun-backed builder VM driver.
 ///
 /// Configuration only — `run_build` consumes it to spin a per-job
 /// VM, runs `nix build` inside, extracts the artifacts via the
-/// `/out` virtio-fs mount, and tears the VM down. No persistent
+/// raw output transport disk, and tears the VM down. No persistent
 /// state on the struct; the `/nix`-store image lives on the host
 /// filesystem and survives across invocations.
 #[derive(Debug, Clone)]
@@ -748,8 +715,8 @@ pub struct LibkrunBuilderVm {
     pub image_override: Option<BuilderVmImage>,
     /// Optional seeded Nix store closure NAR, resolved alongside the
     /// builder image when it carries one. `None` (the common case today)
-    /// attaches no closure-seed share, so every boot behaves exactly as
-    /// before this field existed. See [`LibkrunBuilderVm::with_closure_nar`].
+    /// omits the `closure-seed` input-tree entry. See
+    /// [`LibkrunBuilderVm::with_closure_nar`].
     pub closure_nar: Option<PathBuf>,
     /// Stream the guest `console.log` to stderr as the build runs.
     /// Set by the CLI from `--verbose`. Default false (heartbeat only).
@@ -826,27 +793,13 @@ impl LibkrunBuilderVm {
         self
     }
 
-    /// Attach a seeded Nix store closure NAR resolved from the builder
-    /// image cache, mirroring `HvfBuilderVm::with_closure_nar`. Every boot
-    /// after this call (Stage 0, a shell job, or a flake build) stages the
-    /// NAR into a dedicated share dir under the VM's state dir and attaches
-    /// it read-only at the `closure-seed` virtio-fs tag; omitting this call
-    /// (the default) attaches nothing, so a builder image without a
-    /// closure boots exactly as before this seam existed.
+    /// Attach a seeded Nix store closure NAR resolved from the builder image
+    /// cache. Every builder boot after this call carries the NAR on its raw
+    /// input transport disk under `closure-seed/`; omitting it leaves that tar
+    /// entry absent.
     pub fn with_closure_nar(mut self, closure_nar: Option<PathBuf>) -> Self {
         self.closure_nar = closure_nar;
         self
-    }
-
-    /// Stage `self.closure_nar` under `vm_state_dir` and return the tag +
-    /// staged share dir for the caller to `add_virtio_fs` with, or `None`
-    /// when no closure was attached — the shared no-op path every
-    /// `run_build`-shaped method takes.
-    fn closure_seed_share(&self, vm_state_dir: &Path) -> Result<Option<PathBuf>, BuilderVmError> {
-        self.closure_nar
-            .as_deref()
-            .map(|nar| stage_closure_seed_dir(nar, vm_state_dir))
-            .transpose()
     }
 
     /// Stream guest console output to stderr during the build (`--verbose`).
@@ -855,14 +808,13 @@ impl LibkrunBuilderVm {
         self
     }
 
-    /// libkrun-side Stage 0 boot. Drives a self-contained `RootDir`
-    /// guest — no `/job/cmd.sh` staging, no `/job/result` parsing. The
-    /// guest's `/init` reads `/work` and writes the steady-state builder
-    /// VM artifacts to `/out`, then powers off cleanly.
+    /// libkrun-side Stage 0 boot. `RootDir` is the verified seed's host-side
+    /// representation only: before launch it becomes an ext4 root disk, while
+    /// `/work`, `/mvm-bins`, the optional closure, and `/out` cross on the same
+    /// raw-tar transport disks as every other builder.
     ///
     /// Attaches a dedicated persistent `nix-store-stage0-<arch>.img` as
-    /// the guest's first virtio-blk device (`/dev/vda` — Stage 0 has no
-    /// block rootfs, its root is virtio-fs via `krun_set_root`). The
+    /// `/dev/vdb`, after the root disk and before the transport pair. The
     /// guest mounts it at `/nix` (formatting on first boot), so the slim
     /// kernel + Rust host binaries are built once and reused across
     /// bootstrap runs instead of recompiled into a throwaway tmpfs every
@@ -870,13 +822,9 @@ impl LibkrunBuilderVm {
     /// tmpfs existed (APFS case-insensitivity breaks Nix substitution) —
     /// the disk keeps that property and adds persistence.
     ///
-    /// The workspace source travels as a second virtio-blk device rather
-    /// than a virtio-fs share (see [`pack_stage0_work_disk`]): `nix build`
-    /// reading a large workspace tree through virtio-fs-over-FUSE exhausts
-    /// libkrun's virtio-fs handle pool (`nix build` fails with "Too many
-    /// open files"). `stage0-init` identifies the disk by its ext4 volume
-    /// label rather than by enumeration order, and falls back to the old
-    /// `"work"` virtio-fs tag when no such disk is attached.
+    /// The workspace is filtered before it is archived, so build outputs and
+    /// VCS metadata never consume transport capacity or persistent guest
+    /// storage.
     ///
     /// On success the caller still validates that the expected artifacts
     /// (`vmlinux`, `rootfs.ext4`) landed in `artifact_out`; this only
@@ -965,48 +913,76 @@ impl LibkrunBuilderVm {
             );
         }
 
-        // Pack the workspace onto an ext4 disk instead of exporting it over
-        // virtio-fs: `nix build` opening every file in a large workspace tree
-        // through virtio-fs-over-FUSE exhausts libkrun's virtio-fs handle
-        // pool (EMFILE, "Too many open files"), which reliably fails the
-        // Stage 0 build. `stage0-init` mounts it by ext4 volume label.
-        let work_disk = pack_stage0_work_disk(workspace_dir, &vm_state_dir)?;
+        let (root_dir, entry_path) = match &image {
+            BuilderVmImage::RootDir {
+                root_dir,
+                entry_path,
+            } => (root_dir, entry_path),
+            BuilderVmImage::Rootfs { .. } => {
+                return Err(BuilderVmError::ExtractionFailed(
+                    "Stage 0 requires a RootDir seed".to_string(),
+                ));
+            }
+        };
+        let root_disk = materialize_stage0_root_disk(root_dir, &vm_state_dir)?;
+        let work_staging = stage_filtered_work_input(workspace_dir)?;
+        let (input_disk, output_disk) = prepare_builder_transport_disks(
+            &vm_state_dir,
+            &[
+                InputTree {
+                    name: "work",
+                    src: work_staging.path(),
+                },
+                InputTree {
+                    name: "mvm-bins",
+                    src: host_bin_dir,
+                },
+            ],
+            self.closure_nar.as_deref(),
+            OUTPUT_DISK_BYTES,
+        )?;
+        drop(work_staging);
 
-        let mut krun = krun_context_for_image(&vm_name, &image)?
-            .with_resources(self.vcpus, self.memory_mib)
-            .with_console_output(path_to_str(&console_log, "console_log")?)
-            .with_vsock_socket_dir(path_to_str(&socket_dir, "vm_socket_dir")?)
-            // Persistent /nix store disk — the first block device attached
-            // to a RootDir guest, so it enumerates as /dev/vda. `stage0-init`
-            // mounts and reuses it when it is ext4, formats it when the seed
-            // carries mkfs.ext4, and otherwise falls back to the tmpfs seed
-            // copy.
-            .add_disk(
-                "nix-store",
-                path_to_str(nix_store_lock.path(), "nix_store_img")?,
-                false,
-            )
-            // Read-only: `stage0-init` invokes `nix build --no-write-lock-file`
-            // against a flake that already carries a committed lock, so
-            // nothing ever writes back into the workspace tree.
-            .add_disk("work", path_to_str(&work_disk, "work_disk")?, true)
-            .add_virtio_fs("out", path_to_str(artifact_out, "artifact_out")?)
-            // /mvm-bins inside the guest — stage0-init sets MVM_HOST_BIN_DIR
-            // to it so the flake picks up the pre-built host-vm binaries.
-            .add_virtio_fs("mvm-bins", path_to_str(host_bin_dir, "host_bin_dir")?);
-        if let Some(share_dir) = self.closure_seed_share(&vm_state_dir)? {
-            krun = krun.add_virtio_fs(
-                CLOSURE_SEED_TAG,
-                path_to_str(&share_dir, "closure_seed_dir")?,
-            );
-        }
+        // The supervisor owns the libkrun FFI and extracts libkrunfw's bundled
+        // kernel when this stable cache path is absent. Stage 0 therefore keeps
+        // its chicken-and-egg escape without using `krun_set_root`.
+        let bundled_kernel = PathBuf::from(mvm_core::config::mvm_cache_dir())
+            .join("libkrunfw")
+            .join("vmlinux");
+        let base_cmdline =
+            format!("console=hvc0 root=/dev/vda rw rootfstype=ext4 init={entry_path}");
+        let cmdline = crate::builder_cmdline::checked_builder_cmdline(
+            builder_disk_transport_cmdline(&base_cmdline),
+        )
+        .map_err(BuilderVmError::NixBuildFailed)?;
+
+        let mut krun = KrunContext::new(
+            &vm_name,
+            path_to_str(&bundled_kernel, "bundled_kernel")?,
+            path_to_str(&root_disk, "stage0_root_disk")?,
+        )
+        .with_kernel_format(KernelFormat::Raw)
+        .with_cmdline(cmdline)
+        .with_resources(self.vcpus, self.memory_mib)
+        .with_console_output(path_to_str(&console_log, "console_log")?)
+        .with_vsock_socket_dir(path_to_str(&socket_dir, "vm_socket_dir")?)
+        // vda is the root disk supplied above; this store is vdb.
+        .add_disk(
+            "nix-store",
+            path_to_str(nix_store_lock.path(), "nix_store_img")?,
+            false,
+        )
+        .add_disk("input", path_to_str(&input_disk, "input_disk")?, true)
+        .add_disk("output", path_to_str(&output_disk, "output_disk")?, false);
         let (identity_material, identity_drive) = stage_builder_flowmux_identity(&vm_state_dir)?;
         krun = krun.add_disk(
             "mvm-identity",
             path_to_str(&identity_drive, "identity_drive")?,
             true,
         );
-        krun = apply_builder_vsock_egress(krun);
+        krun = krun
+            .with_vsock_direct()
+            .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT);
         let _egress_endpoint =
             BuilderVsockEgressEndpoint::spawn(&vm_state_dir, identity_material.spawn_config())?;
 
@@ -1035,19 +1011,29 @@ impl LibkrunBuilderVm {
             bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
         };
 
-        let exit_code =
-            match spawn_supervisor_and_wait(&supervisor_path, &cfg, &vm_state_dir, self.verbose) {
-                Ok(code) => code,
-                Err(BuilderVmError::GuestHalted { .. })
-                    if stage0_guest_halt_completed_successfully(&console_log, artifact_out) =>
-                {
-                    0
-                }
-                Err(error) => {
-                    invalidate_stage0_store_after_ext4_error(&console_log, nix_store_lock.path())?;
-                    return Err(error);
-                }
-            };
+        let supervisor_result =
+            spawn_supervisor_and_wait(&supervisor_path, &cfg, &vm_state_dir, self.verbose);
+        let output_result = read_output_disk(&output_disk, artifact_out).map_err(|e| {
+            BuilderVmError::ExtractionFailed(format!(
+                "extract Stage 0 output disk {} into {}: {e}",
+                output_disk.display(),
+                artifact_out.display()
+            ))
+        });
+        let exit_code = match supervisor_result {
+            Ok(code) => code,
+            Err(BuilderVmError::GuestHalted { .. })
+                if output_result.is_ok()
+                    && stage0_guest_halt_completed_successfully(&console_log, artifact_out) =>
+            {
+                0
+            }
+            Err(error) => {
+                invalidate_stage0_store_after_ext4_error(&console_log, nix_store_lock.path())?;
+                return Err(error);
+            }
+        };
+        output_result?;
         if exit_code != 0 {
             invalidate_stage0_store_after_ext4_error(&console_log, nix_store_lock.path())?;
             return Err(BuilderVmError::NixBuildFailed(format!(
@@ -1098,16 +1084,12 @@ impl LibkrunBuilderVm {
         let job_id = unique_job_id();
         let job_dir = builder_vm_cache_dir().join("jobs").join(&job_id);
         stage_shell_job_dir(&job_dir, &job.script)?;
-        // Tell the operator up-front where the build's stderr will
-        // land. `/job` is a virtio-fs share into the VM; the guest's
-        // cmd.sh redirects `nix build` stderr into <job_dir>/nix-
-        // stderr.log, which is this exact path on the host. A
-        // contributor watching a long build can `tail -f` it without
-        // waiting for the failure-path formatter (finalize_flake_job)
-        // to surface the same path.
+        // Tell the operator up-front where the build's stderr is extracted
+        // after the output disk returns. The guest's cmd.sh redirects there,
+        // and failure diagnostics surface the same path.
         tracing::info!(
             job_dir = %job_dir.display(),
-            "builder VM job dir staged (nix-stderr.log streams here as the build runs)"
+            "builder VM job dir staged (nix-stderr.log is extracted here after the VM exits)"
         );
 
         let vm_name = format!("mvm-builder-vm-{job_id}");
@@ -1445,34 +1427,53 @@ impl LibkrunBuilderVm {
     }
 }
 
-/// Pack `workspace_dir` into a read-only ext4 disk for the Stage 0 `/work`
-/// mount, carrying [`crate::rootfs::STAGE0_WORK_EXT4_LABEL`] so
-/// `stage0-init` can find it by content instead of by device-enumeration
-/// order. Stages a filtered copy first (dropping `target/`, `.git/`, …
-/// — [`crate::qemu_builder::WORK_TREE_EXCLUDE_DIRS`], the same list the
-/// QEMU Stage 0 path drops) so the pure writer never packs a multi-gigabyte
-/// `target/` for nothing, then discards the filtered copy once it's on
-/// disk. The image itself is left under `vm_state_dir` for the same
-/// existing reaper that already prunes stale Stage 0 VM state (console
-/// logs, sockets, …).
-fn pack_stage0_work_disk(
-    workspace_dir: &std::path::Path,
+/// Materialize the verified Stage 0 seed as the root ext4 disk libkrun boots.
+/// `RootDir` remains the cache/source representation because Stage 0 creates
+/// it before any guest-built kernel or rootfs exists; it is never handed to the
+/// VMM as a host directory.
+fn materialize_stage0_root_disk(
+    root_dir: &std::path::Path,
     vm_state_dir: &std::path::Path,
 ) -> Result<PathBuf, BuilderVmError> {
-    let staged = vm_state_dir.join("work-src");
-    crate::qemu_builder::copy_tree_filtered(
-        workspace_dir,
-        &staged,
-        crate::qemu_builder::WORK_TREE_EXCLUDE_DIRS,
-    )?;
-    let image_path = vm_state_dir.join("work.ext4");
-    let input = crate::rootfs::MaterializeExt4Input::new(staged.clone(), image_path.clone(), 0)
-        .with_volume_label(crate::rootfs::STAGE0_WORK_EXT4_LABEL);
-    let result = crate::rootfs::materialize_ext4_pure(&input)
-        .map_err(|e| BuilderVmError::ExtractionFailed(format!("packing /work ext4 disk: {e}")));
-    let _ = std::fs::remove_dir_all(&staged);
-    result?;
+    let image_path = vm_state_dir.join("root.ext4");
+    let input =
+        crate::rootfs::MaterializeExt4Input::new(root_dir.to_path_buf(), image_path.clone(), 0)
+            .with_deferred_nodes(stage0_root_mount_nodes());
+    crate::rootfs::materialize_ext4_pure(&input).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!(
+            "materializing Stage 0 root disk from {}: {e}",
+            root_dir.display()
+        ))
+    })?;
     Ok(image_path)
+}
+
+fn stage0_root_mount_nodes() -> Vec<mvm_fs::ext4::Node> {
+    let mut nodes = [
+        "/bin",
+        "/dev",
+        "/etc",
+        "/nix-seed-ro",
+        "/nix-stage0-store",
+        "/proc",
+        "/run",
+        "/sys",
+        "/tmp",
+    ]
+    .into_iter()
+    .map(|path| mvm_fs::ext4::Node::Dir {
+        path: path.to_string(),
+        mode: 0o755,
+        xattrs: Vec::new(),
+    })
+    .collect::<Vec<_>>();
+    nodes.push(mvm_fs::ext4::Node::File {
+        path: crate::stage0::ROOT_RUNTIME_RESERVE_PATH.to_string(),
+        mode: 0o600,
+        data: vec![0; crate::stage0::ROOT_RUNTIME_RESERVE_BYTES],
+        xattrs: Vec::new(),
+    });
+    nodes
 }
 
 #[cfg(test)]
@@ -1484,9 +1485,8 @@ struct BuilderShellKrunContextParams<'a> {
     console_log: &'a Path,
     vm_state_dir: &'a Path,
     nix_store_img: &'a Path,
-    work_dir: &'a Path,
-    artifact_out: &'a Path,
-    job_dir: &'a Path,
+    input_disk: &'a Path,
+    output_disk: &'a Path,
     extra_disks: &'a [BuilderExtraDisk],
 }
 
@@ -1504,9 +1504,13 @@ fn builder_shell_krun_context(
             path_to_str(params.nix_store_img, "nix_store_img")?,
             false,
         )
-        .add_virtio_fs("work", path_to_str(params.work_dir, "work_dir")?)
-        .add_virtio_fs("out", path_to_str(params.artifact_out, "artifact_out")?)
-        .add_virtio_fs("job", path_to_str(params.job_dir, "job_dir")?)
+        .add_disk("input", path_to_str(params.input_disk, "input_disk")?, true)
+        .add_disk(
+            "output",
+            path_to_str(params.output_disk, "output_disk")?,
+            false,
+        )
+        .with_cmdline(builder_disk_transport_cmdline("console=hvc0 root=/dev/vda"))
         .add_vsock_port(mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT);
 
     for disk in params.extra_disks {
@@ -1619,15 +1623,13 @@ impl BuilderVm for LibkrunBuilderVm {
         // identical block in `LibkrunBuilderVm::run_build`.
         tracing::info!(
             job_dir = %job_dir.display(),
-            "builder VM job dir staged (nix-stderr.log streams here as the build runs)"
+            "builder VM job dir staged (nix-stderr.log is extracted here after the VM exits)"
         );
 
-        // 7. Build the `KrunContext` libkrun consumes. Three
-        //    virtio-fs shares (work / out / job), one virtio-blk
-        //    (Nix store), and the canonical cmdline pinned at the
-        //    flake output. The mount layout is identical for
-        //    flake + install jobs — the guest decides what to do
-        //    with each share based on the staged job files.
+        // 7. Build the `KrunContext` libkrun consumes: root, persistent Nix
+        //    store, raw input/output transport disks, and the canonical
+        //    cmdline pinned at the flake output. Flake and install jobs share
+        //    the same transport layout.
         let vm_name = format!("mvm-builder-vm-{job_id}");
         let vm_state_dir = builder_vm_cache_dir().join("vms").join(&vm_name);
         std::fs::create_dir_all(&vm_state_dir).map_err(|e| {
@@ -1905,6 +1907,14 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
         extra_disks: &[BuilderVmDisk],
         timeout: Duration,
     ) -> Result<BuilderVmExitInfo, BuilderVmError> {
+        if !mounts.is_empty() {
+            return Err(BuilderVmError::VmmUnavailable {
+                requested: "libkrun builder directory share".to_string(),
+                reason: "libkrun builders accept block disks only; pack host trees with the \
+                         builder disk transport"
+                    .to_string(),
+            });
+        }
         // Same refusal posture as run_build's step 2: a missing
         // shared library is the most-common failure mode and an
         // early surface keeps the supervisor spawn from producing
@@ -1929,7 +1939,7 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
         // KrunContext construction — same shape as run_build's
         // step 7, but parameterised on the trait's hypervisor-
         // agnostic config. Builds top-down (resources first, then
-        // disks, then mounts, then vsock ports, then networking)
+        // disks, then vsock ports, then networking)
         // because libkrun's builder methods consume `self` by value.
         let mut krun = krun_context_for_image(&config.name, &self.image)?
             .with_resources(config.vcpus, config.memory_mib)
@@ -1940,17 +1950,6 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
                 disk.id.clone(),
                 path_to_str(&disk.host_path, "extra_disk_path")?,
                 disk.read_only,
-            );
-        }
-        for mount in mounts {
-            // libkrun's add_virtio_fs takes only (tag, host_path) —
-            // every share is RW from the guest's perspective. The
-            // `BuilderVmMount::read_only` flag is currently ignored
-            // on this backend; a hypervisor with native virtio-fs
-            // read-only support can honour it instead.
-            krun = krun.add_virtio_fs(
-                mount.tag.clone(),
-                path_to_str(&mount.host_path, "mount_host_path")?,
             );
         }
         for port in &config.vsock_ports {
@@ -2073,9 +2072,8 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
 ///
 /// - **Rootfs**: kernel + rootfs.ext4 + cmdline. The steady-state
 ///   builder VM path produced by the builder-vm flake.
-/// - **RootDir**: host directory + guest entrypoint. The Stage 0
-///   bootstrap path. libkrun's bundled kernel boots transparently;
-///   no host-built kernel involved.
+/// - **RootDir**: verified host seed directory + guest entrypoint. The Stage 0
+///   bootstrap path materializes it into an ext4 root before launch.
 #[derive(Debug, Clone)]
 pub enum BuilderVmImage {
     /// Steady-state builder VM image.
@@ -2084,8 +2082,8 @@ pub enum BuilderVmImage {
         rootfs_path: PathBuf,
         cmdline: String,
     },
-    /// Host directory libkrun mounts as the guest root via virtiofs.
-    /// `entry_path` is the guest PID 1 (relative to `root_dir`).
+    /// Host-side Stage 0 seed. `entry_path` is the guest PID 1 path preserved
+    /// when this directory is materialized as an ext4 root.
     RootDir {
         root_dir: PathBuf,
         entry_path: String,
@@ -2103,10 +2101,8 @@ impl BuilderVmImage {
         }
     }
 
-    /// Image that hands a host directory to libkrun as the guest
-    /// root via `krun_set_root`. libkrun's bundled kernel boots
-    /// transparently. `entry_path` is the guest PID 1, relative to
-    /// `root_dir`.
+    /// Stage 0 host seed. The libkrun boot path converts it to an ext4 image
+    /// and supplies an explicit kernel before entering the guest.
     pub fn new_root_dir(root_dir: PathBuf, entry_path: impl Into<String>) -> Self {
         Self::RootDir {
             root_dir,
@@ -2115,10 +2111,9 @@ impl BuilderVmImage {
     }
 }
 
-/// Build the right `KrunContext` flavor for a [`BuilderVmImage`],
-/// pre-populated with the variant's kernel cmdline (where applicable).
-/// `RootDir` images carry no cmdline — libkrun handles `set_root`
-/// mode without one.
+/// Build a steady-state disk-root `KrunContext` for a [`BuilderVmImage`].
+/// Stage 0 consumes `RootDir` through its dedicated materialization path and
+/// is rejected here so no generic builder launch can revive a directory root.
 /// The alignment KVM's `KVM_SET_USER_MEMORY_REGION` enforces: the **host** page
 /// size. 4 KiB on x86_64 and 4K-page aarch64, but 16 KiB / 64 KiB aarch64 hosts
 /// exist (RHEL/CentOS 64K-page kernels), where a kernel aligned only to 4 KiB
@@ -2284,14 +2279,10 @@ fn krun_context_for_image(
             )
             .with_kernel_format(kernel_format))
         }
-        BuilderVmImage::RootDir {
-            root_dir,
-            entry_path,
-        } => Ok(KrunContext::new_root_dir(
-            vm_name,
-            path_to_str(root_dir, "root_dir")?,
-            entry_path.as_str(),
-        )),
+        BuilderVmImage::RootDir { .. } => Err(BuilderVmError::VmmUnavailable {
+            requested: "libkrun RootDir builder image".to_string(),
+            reason: "RootDir is a Stage 0 seed representation and must be materialized as an ext4 root before launch".to_string(),
+        }),
     }
 }
 
@@ -3413,9 +3404,9 @@ fn spawn_supervisor_in_background(
         .stdin(Stdio::piped())
         .stdout(Stdio::from(stdout_log))
         .stderr(Stdio::from(stderr_log));
-    // libkrun dlopens `libkrunfw.5.dylib` by short name when its
-    // bundled-kernel path runs (e.g. `krun_set_root` mode without
-    // an explicit `set_kernel`). macOS dyld's default search list
+    // libkrun dlopens `libkrunfw.5.dylib` by short name when its bundled-kernel
+    // fallback runs (for example, before the cached extraction path exists).
+    // macOS dyld's default search list
     // does not include /opt/homebrew/lib where Homebrew installs
     // libkrunfw, so the dlopen fails with "Couldn't find or load"
     // and the supervisor exits rc -2. Adding the Homebrew prefix
@@ -4252,12 +4243,9 @@ pub struct LibkrunPersistentHostVm {
     memory_mib: u32,
     nix_store_mib: u32,
     image_override: Option<BuilderVmImage>,
-    /// Host directory bound at `/work` in the guest. Bound at VM
-    /// start, not per-dispatch.
+    /// Host directory snapshotted into the input transport disk at VM start.
     workspace_root: PathBuf,
-    /// Extracted host binaries bound at `/mvm-bins` so a builder-image
-    /// rebuild can bake the current init and resident daemons into its
-    /// rootfs.
+    /// Extracted host binaries packed at `/mvm-bins` on the input transport.
     host_bin_dir: Option<PathBuf>,
 }
 
@@ -4377,6 +4365,31 @@ impl LibkrunPersistentHostVm {
             )));
         }
 
+        // Boot-time inputs are immutable for the session. The guest re-reads
+        // only `job` after each in-place host repack; `work` and `mvm-bins`
+        // stay bind-mounted from this first extraction.
+        let work_staging = stage_filtered_work_input(&self.workspace_root)?;
+        let (input_disk, output_disk) = prepare_builder_transport_disks(
+            &vm_state_dir,
+            &[
+                InputTree {
+                    name: "job",
+                    src: &job_dir,
+                },
+                InputTree {
+                    name: "work",
+                    src: work_staging.path(),
+                },
+                InputTree {
+                    name: "mvm-bins",
+                    src: host_bin_dir,
+                },
+            ],
+            None,
+            OUTPUT_DISK_BYTES,
+        )?;
+        drop(work_staging);
+
         let mut krun = krun_context_for_image(&vm_name, &image)?
             .with_resources(self.vcpus, self.memory_mib)
             .with_console_output(path_to_str(&console_log, "console_log")?)
@@ -4386,16 +4399,8 @@ impl LibkrunPersistentHostVm {
                 path_to_str(nix_store.path(), "nix_store_img")?,
                 false,
             )
-            // Left on virtio-fs deliberately, unlike Stage 0's `/work`
-            // (`pack_stage0_work_disk`): this is the long-lived persistent
-            // VM, so `/work` has to keep reflecting live host edits across
-            // the session — a packed ext4 snapshot would need repacking on
-            // every change. Revisit if a large workspace ever hits the same
-            // virtio-fs handle exhaustion here.
-            .add_virtio_fs("work", path_to_str(&self.workspace_root, "workspace_root")?)
-            .add_virtio_fs("out", path_to_str(&job_dir, "job_dir")?)
-            .add_virtio_fs("job", path_to_str(&job_dir, "job_dir")?)
-            .add_virtio_fs("mvm-bins", path_to_str(host_bin_dir, "host_bin_dir")?)
+            .add_disk("input", path_to_str(&input_disk, "input_disk")?, true)
+            .add_disk("output", path_to_str(&output_disk, "output_disk")?, false)
             .add_vsock_port(mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT)
             // The workload-vsock nesting hop. The in-host-VM forwarder
             // listens here; the outer host reaches a workload's
@@ -4411,7 +4416,7 @@ impl LibkrunPersistentHostVm {
             krun = krun.add_vsock_port(mvm_agentd::vsock::GUEST_AGENT_PORT);
         }
         if let Some(attachment) =
-            builder_virtiofs_runtime_overlay_attachment(&image, runtime_overlay.as_deref())
+            builder_runtime_overlay_attachment(&image, runtime_overlay.as_deref())
         {
             krun = krun.with_cmdline(attachment.cmdline).add_disk(
                 "runtime-overlay",
@@ -4490,6 +4495,8 @@ impl LibkrunPersistentHostVm {
         Ok(PersistentVmHandle {
             vm_state_dir,
             job_dir,
+            input_disk,
+            output_disk,
             session_id,
             supervisor: Some(child),
             egress_endpoint,
@@ -4507,6 +4514,8 @@ impl LibkrunPersistentHostVm {
 pub struct PersistentVmHandle {
     vm_state_dir: PathBuf,
     job_dir: PathBuf,
+    input_disk: PathBuf,
+    output_disk: PathBuf,
     session_id: String,
     /// `None` after [`Self::wait_for_shutdown`] consumes it.
     supervisor: Option<std::process::Child>,
@@ -4540,6 +4549,16 @@ impl PersistentVmHandle {
     /// matching `HostVmRequest::Run`.
     pub fn job_dir(&self) -> &Path {
         &self.job_dir
+    }
+
+    /// Raw input transport disk rewritten before each dispatch.
+    pub fn input_disk(&self) -> &Path {
+        &self.input_disk
+    }
+
+    /// Raw output transport disk read after each dispatch.
+    pub fn output_disk(&self) -> &Path {
+        &self.output_disk
     }
 
     /// Opaque session identifier — useful for logging /
@@ -4780,12 +4799,63 @@ mod tests {
     }
 
     #[test]
-    fn builder_vsock_egress_switches_stage0_launches_to_vsock_direct() {
-        let ctx = apply_builder_vsock_egress(KrunContext::new(
-            "stage0-test",
-            "/k/vmlinux",
-            "/r/rootfs.ext4",
-        ));
+    fn generic_krun_context_refuses_a_root_dir_seed() {
+        let image = BuilderVmImage::new_root_dir(PathBuf::from("/seed"), "/init");
+        let error = krun_context_for_image("builder-test", &image)
+            .expect_err("a RootDir seed must go through Stage 0 materialization");
+        assert!(error.to_string().contains("materialized as an ext4 root"));
+    }
+
+    #[test]
+    fn stage0_root_seed_materializes_as_ext4() {
+        use std::io::{Read as _, Seek as _, SeekFrom};
+
+        let scratch = TempDir::new().unwrap();
+        let seed = scratch.path().join("seed");
+        let state = scratch.path().join("state");
+        std::fs::create_dir_all(&seed).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(seed.join("init"), b"stage0").unwrap();
+
+        let image = materialize_stage0_root_disk(&seed, &state).unwrap();
+        assert_eq!(image, state.join("root.ext4"));
+        let mut file = std::fs::File::open(image).unwrap();
+        file.seek(SeekFrom::Start(EXT4_SUPERBLOCK_MAGIC_OFFSET))
+            .unwrap();
+        let mut magic = [0_u8; 2];
+        file.read_exact(&mut magic).unwrap();
+        assert_eq!(u16::from_le_bytes(magic), EXT4_SUPERBLOCK_MAGIC);
+    }
+
+    #[test]
+    fn stage0_root_adds_every_pid1_mountpoint_to_the_image() {
+        let paths: Vec<_> = stage0_root_mount_nodes()
+            .into_iter()
+            .map(|node| node.path().to_string())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "/bin",
+                "/dev",
+                "/etc",
+                "/nix-seed-ro",
+                "/nix-stage0-store",
+                "/proc",
+                "/run",
+                "/sys",
+                "/tmp",
+                crate::stage0::ROOT_RUNTIME_RESERVE_PATH,
+            ]
+        );
+    }
+
+    #[test]
+    fn builder_vsock_egress_context_uses_direct_transport() {
+        let ctx = KrunContext::new("stage0-test", "/k/vmlinux", "/r/rootfs.ext4")
+            .with_cmdline(BUILDER_VSOCK_EGRESS_TOKEN)
+            .with_vsock_direct()
+            .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT);
         assert_eq!(
             ctx.kernel_cmdline.as_deref(),
             Some(BUILDER_VSOCK_EGRESS_TOKEN)
@@ -5331,9 +5401,8 @@ mod tests {
     }
 
     /// The seeded closure reaches the guest at `/closure-seed/<CLOSURE_FILE>`
-    /// whether it arrived as a virtio-fs share or on the input disk — the guest
-    /// imports a fixed path and does not care which transport populated it.
-    /// This pins the disk arm, which is what the one-shot builders now use.
+    /// on the input disk. The guest imports that fixed path independent of the
+    /// selected builder backend.
     ///
     /// The source file is deliberately named something else: `pack_input_disk`
     /// renames to `CLOSURE_FILE` on the way in, and a differently-named source
@@ -5363,14 +5432,14 @@ mod tests {
         read_output_disk(&input_disk, &dest).unwrap();
         assert_eq!(
             std::fs::read(
-                dest.join(CLOSURE_SEED_TAG)
+                dest.join("closure-seed")
                     .join(crate::builder_pack::CLOSURE_FILE)
             )
             .unwrap(),
             b"closure-bytes"
         );
         // And nothing was staged as a share directory for it.
-        assert!(!vm_state_dir.path().join(CLOSURE_SEED_TAG).exists());
+        assert!(!vm_state_dir.path().join("closure-seed").exists());
     }
 
     #[test]
@@ -6149,38 +6218,6 @@ mod tests {
         assert_eq!(vm.closure_nar, Some(PathBuf::from("/nar")));
     }
 
-    #[test]
-    fn closure_seed_share_is_none_when_no_closure_attached() {
-        let vm_state_dir = tempfile::TempDir::new().unwrap();
-        let vm = LibkrunBuilderVm::default();
-        assert_eq!(
-            vm.closure_seed_share(vm_state_dir.path()).unwrap(),
-            None,
-            "no closure_nar attached means no share directory is staged"
-        );
-        // No stray closure-seed dir left behind either.
-        assert!(!vm_state_dir.path().join("closure-seed").exists());
-    }
-
-    #[test]
-    fn closure_seed_share_stages_the_nar_when_attached() {
-        let arch_dir = tempfile::TempDir::new().unwrap();
-        let nar = arch_dir.path().join("nix-closure.nar");
-        std::fs::write(&nar, b"closure-bytes").unwrap();
-        let vm_state_dir = tempfile::TempDir::new().unwrap();
-
-        let vm = LibkrunBuilderVm::default().with_closure_nar(Some(nar));
-        let share_dir = vm
-            .closure_seed_share(vm_state_dir.path())
-            .unwrap()
-            .expect("closure attached must stage a share dir");
-        assert_eq!(share_dir, vm_state_dir.path().join(CLOSURE_SEED_TAG));
-        assert_eq!(
-            std::fs::read(share_dir.join("nix-closure.nar")).unwrap(),
-            b"closure-bytes"
-        );
-    }
-
     // ---------------------------------------------------------------
     // kernel-panic detector.
     //
@@ -6899,25 +6936,6 @@ mod tests {
     }
 
     #[test]
-    fn builder_virtiofs_runtime_overlay_uses_virtiofs_disk_layout() {
-        let image = BuilderVmImage::new(
-            PathBuf::from("/img/Image"),
-            PathBuf::from("/img/rootfs.ext4"),
-            "console=hvc0 root=/dev/vda".to_string(),
-        );
-        let overlay = Path::new("/cache/runtime-overlay.ext4");
-        let attachment = builder_virtiofs_runtime_overlay_attachment(&image, Some(overlay))
-            .expect("virtio-fs rootfs builders attach the runtime overlay");
-
-        assert_eq!(attachment.disk_path, overlay);
-        assert!(attachment.read_only);
-        assert!(attachment.cmdline.contains("mvm.runtime_data=/dev/vdc"));
-        assert!(!attachment.cmdline.contains("mvm.builder_transport=disk"));
-        assert!(!attachment.cmdline.contains("mvm.builder_input="));
-        assert!(!attachment.cmdline.contains("mvm.builder_output="));
-    }
-
-    #[test]
     fn builder_runtime_overlay_or_bail_fails_closed_for_lean_rootfs_when_unavailable() {
         let image = BuilderVmImage::new(
             PathBuf::from("/img/Image"),
@@ -7062,6 +7080,38 @@ mod tests {
     }
 
     #[test]
+    fn generic_libkrun_builder_refuses_directory_mounts_before_launch() {
+        let backend = LibkrunBuilderBackend::with_supervisor_and_image(
+            PathBuf::from("/missing/supervisor"),
+            BuilderVmImage::Rootfs {
+                kernel_path: PathBuf::from("/missing/kernel"),
+                rootfs_path: PathBuf::from("/missing/rootfs"),
+                cmdline: String::new(),
+            },
+        );
+        let config = BuilderVmRunConfig {
+            name: "mount-refusal".into(),
+            kernel_path: PathBuf::from("/missing/kernel"),
+            kernel_cmdline: String::new(),
+            initrd_path: None,
+            vcpus: 1,
+            memory_mib: 128,
+            vsock_ports: Vec::new(),
+            vm_state_dir: PathBuf::from("/missing/state"),
+        };
+        let mount = BuilderVmMount {
+            tag: "work".into(),
+            host_path: PathBuf::from("/workspace"),
+            read_only: true,
+        };
+
+        let error = backend
+            .run_attached_with_mounts(&config, &[mount], &[], Duration::from_secs(1))
+            .expect_err("directory mounts must fail before any supervisor I/O");
+        assert!(error.to_string().contains("accept block disks only"));
+    }
+
+    #[test]
     fn supervisor_logs_live_under_vm_state_dir() {
         let dir = PathBuf::from("/tmp/state/builder-foo");
         assert_eq!(
@@ -7138,9 +7188,8 @@ mod tests {
             console_log: &temp.path().join("console.log"),
             vm_state_dir: temp.path(),
             nix_store_img: &temp.path().join("nix-store.img"),
-            work_dir: temp.path(),
-            artifact_out: temp.path(),
-            job_dir: temp.path(),
+            input_disk: &temp.path().join("input.img"),
+            output_disk: &temp.path().join("output.img"),
             extra_disks: &[BuilderExtraDisk {
                 id: "extra".to_string(),
                 path: extra_disk,

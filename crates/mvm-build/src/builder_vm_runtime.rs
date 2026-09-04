@@ -178,48 +178,6 @@ pub fn builder_store_gc_cap_kib() -> u64 {
 /// paths need.
 pub const INSTALL_SPEC_FILENAME: &str = "install_spec.json";
 
-/// virtio-fs tag the libkrun and QEMU builders attach an optional seeded Nix
-/// store closure NAR under. `mvm-host-vm-init`'s fixed-share mount table
-/// mounts this tag read-only at `/closure-seed`, matching the disk-transport
-/// `closure-seed/` tar entry the hvf VMM uses for the same NAR — the guest
-/// import logic (`import_seeded_closure`) doesn't care which transport
-/// populated the mount point.
-pub const CLOSURE_SEED_TAG: &str = "closure-seed";
-
-/// Stage `closure_nar` into its own share directory under `parent_dir` so it
-/// can be attached as a read-only virtio-fs share without exposing
-/// `parent_dir`'s other contents. This matters because the source lives in
-/// the resolved builder image's per-arch cache dir alongside `vmlinux` /
-/// `rootfs.ext4` — sharing that whole directory would leak the kernel/rootfs
-/// into the guest through an unrelated mount. Returns the staged directory
-/// (containing exactly one file, named after `closure_nar`'s own file name)
-/// for the caller to pass to `add_virtio_fs(CLOSURE_SEED_TAG, ...)`.
-pub fn stage_closure_seed_dir(
-    closure_nar: &Path,
-    parent_dir: &Path,
-) -> Result<PathBuf, BuilderVmError> {
-    let share_dir = parent_dir.join(CLOSURE_SEED_TAG);
-    std::fs::create_dir_all(&share_dir).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "creating closure-seed share dir {}: {e}",
-            share_dir.display()
-        ))
-    })?;
-    // The guest mounts this share at `/closure-seed` and imports a fixed file
-    // name (`CLOSURE_FILE`), so stage the NAR under that name regardless of what
-    // the source path is called — a mismatched name would make the guest import
-    // a silent no-op.
-    let dest = share_dir.join(crate::builder_pack::CLOSURE_FILE);
-    std::fs::copy(closure_nar, &dest).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "staging closure NAR {} -> {}: {e}",
-            closure_nar.display(),
-            dest.display()
-        ))
-    })?;
-    Ok(share_dir)
-}
-
 /// Hypervisor-agnostic orchestration helper. Holds a reference to
 /// a [`VmBackendForBuilder`] so the actual supervisor spawn /
 /// console-log path / per-VM state directory are routed through
@@ -2220,50 +2178,5 @@ mod tests {
         // Zero → also falls back (zero would GC the just-built closure).
         env.set(MVM_BUILDER_STORE_GC_GIB_ENV, "0");
         assert_eq!(builder_store_gc_cap_kib(), 25_165_824);
-    }
-
-    #[test]
-    fn stage_closure_seed_dir_copies_only_the_nar_under_its_own_share_dir() {
-        let arch_dir = tempfile::TempDir::new().unwrap();
-        // The source lives alongside sibling image files the share must never
-        // expose — the real arch cache dir holds vmlinux/rootfs.ext4 too.
-        std::fs::write(arch_dir.path().join("vmlinux"), b"kernel-bytes").unwrap();
-        let nar = arch_dir.path().join("nix-closure.nar");
-        std::fs::write(&nar, b"nar-bytes").unwrap();
-
-        let vm_state_dir = tempfile::TempDir::new().unwrap();
-        let share_dir = stage_closure_seed_dir(&nar, vm_state_dir.path()).expect("stage");
-
-        assert_eq!(share_dir, vm_state_dir.path().join(CLOSURE_SEED_TAG));
-        let entries: Vec<_> = std::fs::read_dir(&share_dir)
-            .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .collect();
-        assert_eq!(entries, vec![std::ffi::OsString::from("nix-closure.nar")]);
-        assert_eq!(
-            std::fs::read(share_dir.join("nix-closure.nar")).unwrap(),
-            b"nar-bytes"
-        );
-    }
-
-    #[test]
-    fn stage_closure_seed_dir_uses_the_fixed_closure_file_name() {
-        // A source named something other than CLOSURE_FILE must still stage
-        // under CLOSURE_FILE — the guest imports that fixed name.
-        let src = tempfile::TempDir::new().unwrap();
-        let nar = src.path().join("some-other-name.nar");
-        std::fs::write(&nar, b"nar-bytes").unwrap();
-
-        let vm_state_dir = tempfile::TempDir::new().unwrap();
-        let share_dir = stage_closure_seed_dir(&nar, vm_state_dir.path()).expect("stage");
-
-        let entries: Vec<_> = std::fs::read_dir(&share_dir)
-            .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .collect();
-        assert_eq!(
-            entries,
-            vec![std::ffi::OsString::from(crate::builder_pack::CLOSURE_FILE)]
-        );
     }
 }

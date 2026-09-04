@@ -118,13 +118,17 @@ as errors rather than falling back to the local registry.
 ## Host-backed mounts
 
 Ad-hoc host-backed mounts seed a machine from an existing encrypted host
-directory. The directory is **snapshotted into an ext4 image when you register
-it** and attached as a block device — it is not a live view, and host edits
-afterwards are not visible to the guest. Re-register the volume to refresh it.
+directory. The directory is **snapshotted into a content-addressed ext4 image**
+and attached as a block device; it is not a live view. `machine start` hashes
+the source tree and refreshes the registered snapshot when its contents or
+guest-visible metadata changed. Host edits made while the machine is running
+therefore become visible after the next stop/start. If the source directory is
+missing at start, the launch refuses instead of silently using stale bytes.
 
 This is the same treatment `mvmctl machine run --mount HOST:/GUEST` gives a
-transient run, and for the same reason: no workload backend has a virtio-fs
-device, so a live host-directory share cannot be expressed at all.
+transient run. Both paths share the same verified mount-image cache, and for
+the same reason: no workload backend has a virtio-fs device, so a live
+host-directory share cannot be expressed at all.
 
 ```sh
 mvmctl machine volume mount agent-sandbox \
@@ -143,9 +147,12 @@ mvmctl machine volume mount agent-sandbox \
   --rw
 ```
 
-Both the host directory and mvm's local snapshot destination must live on
-encrypted backing storage. If either check cannot verify encryption, the
-command fails closed before source bytes are written.
+The host directory must live on encrypted backing storage. If encryption cannot
+be verified, the command fails closed — the check runs against the source
+directory and independently against the private mount-image cache before any
+snapshot bytes are written. Files are streamed into the cache rather than held
+as a whole tree in memory, and a file that changes while its snapshot is being
+built refuses the launch instead of publishing mismatched bytes.
 
 ## Copy instead of mount
 

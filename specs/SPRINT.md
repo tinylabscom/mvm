@@ -28,6 +28,16 @@
       build runner exposed and corrected an obsolete `build --flake` spelling;
       the lane now pins the shipped `machine build --flake` parser surface. The live
       documented-surface release gate and merge delivery remain.
+- [ ] **Remove virtio-fs from workload and builder execution.**
+      `specs/plans/2026-08-31-remove-virtio-fs.md`.
+      Workloads, the dev-tier root, Stage 0, and builder inputs and artifacts
+      now cross the virtualization boundary as block devices. libkrun Stage 0
+      materializes its verified seed as an ext4 root and uses the shared raw-tar
+      disk transport for the remaining payloads; QEMU, Firecracker, and
+      libkrun refuse any residual directory share before launch. The complete
+      workspace nextest suite, all-targets zero-warning Clippy, gated targets,
+      all repository policy checks, and a live macOS libkrun Stage 0 build are
+      green; merge delivery remains.
 
 - [ ] **Workload output affordance — durable writable inline disks.**
       `specs/plans/2026-09-02-workload-output-affordance.md`.
@@ -41,6 +51,25 @@
       tests, all-targets zero-warning Clippy, policy checks, and BDD are green;
       the plan's broader output-surface design and merge delivery remain.
 
+- [x] **Refresh host-directory snapshots at machine start.**
+      `specs/plans/2026-09-03-refresh-host-snapshot-at-start.md`.
+      Persistent `machine volume mount --host` and transient `--mount` now use
+      one content-addressed ext4 cache. The source identity hashes file bytes,
+      paths, modes, symlink targets, and guest-visible xattrs rather than
+      mtimes; cache images are atomically published and digest-verified before
+      attach. A persistent start refreshes a changed snapshot before taking a
+      launch lease and refuses a missing source. Read-only consumers attach the
+      immutable cache object directly; writable registrations use private
+      reflink/copies and retain guest writes until the host source changes.
+      Materialization remains unbounded and block-at-a-time, re-verifies each
+      emitted file against its walked digest, and refuses a cache destination
+      without independently verified encrypted backing. The live README BDD
+      fixture declares that prerequisite through deterministic platform probes;
+      production continues to inspect the real backing device and fail closed.
+      Workspace tests/check, host and Linux-native zero-warning Clippy, gated
+      compilation, and hermetic BDD (250 passed, 1 capability skip) are green.
+      A live Firecracker witness changed source bytes while preserving mtime;
+      the restarted guest observed `dir-volume-refreshed`.
 - [ ] **Content-addressed asset identity.**
       `specs/plans/2026-09-02-content-addressed-asset-identity.md`.
       Every dataset, model, prompt, agent, policy, and compute environment a
@@ -2541,7 +2570,7 @@ Then unify + retire the old paths:
   mount-cache hit, mount-cache miss, artifact miss, and warm claim as distinct
   distributions. A first-use image pull, build, digest, or ext4 materialization
   may not be hidden inside the launch SLO.
-- [ ] **Content-addressed mount cache:** fingerprint source content and mount
+- [x] **Content-addressed mount cache:** fingerprint source content and mount
   policy, publish immutable images atomically under `MVM_HOME`, verify the
   manifest and image digest before attach, support read-only direct attach and
   writable copy-on-write, and remove obsolete internal add-directory naming.
@@ -3665,4 +3694,4 @@ writes the plan:
       permissions before copying source bytes.
 - [x] Cover valid snapshot materialization and launch-lease resolution, invalid
       ext4 refusal, missing-image failure, and the CLI registration workflow.
-- [ ] Merge the implementation through the queue.
+- [x] Merge the implementation through the queue (#3151).

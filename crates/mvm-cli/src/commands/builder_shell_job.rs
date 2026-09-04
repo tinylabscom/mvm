@@ -28,11 +28,11 @@ pub struct Args {
     /// Path to the shell script to stage as `/job/cmd.sh` inside the builder VM.
     #[arg(long, value_name = "PATH")]
     pub script: PathBuf,
-    /// Host directory bound read-only at `/work` inside the builder VM.
+    /// Host directory staged read-only at `/work` inside the builder VM.
     /// Defaults to the current working directory.
     #[arg(long, value_name = "DIR")]
     pub work_dir: Option<PathBuf>,
-    /// Host directory bound read-write at `/out` inside the builder VM.
+    /// Host directory that receives the builder VM's `/out` artifacts.
     /// Defaults to a fresh temporary directory.
     #[arg(long, value_name = "DIR")]
     pub artifact_out: Option<PathBuf>,

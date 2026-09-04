@@ -688,9 +688,17 @@ this row as enforced without it.
     path returns `Ok` with a warning when cosign is absent, so there the
     signature is best-effort and the SHA-256 pin is what holds. ADR-001 carries
     the "Claim 20 limits" note; do not paraphrase this row as "every path
-    refuses an unsigned release". The claim also asserts nothing about build
-    provenance — a signature says who published an artifact, not what went
-    into it.
+    refuses an unsigned release".
+
+    The release job also attests build provenance for the binary tarballs
+    (`actions/attest-build-provenance`, verifiable with `gh attestation
+    verify`), which witnesses this claim because the attestation is signed
+    under the same workflow identity. It is SLSA Build **L2**: the attestation
+    is produced by the same workflow that produces the artifact, so a
+    compromised release job forges both. Provenance adds the commit and build
+    inputs in a machine-readable predicate; it is not evidence the build was
+    uncorrupted, and `ci:reproducibility` under claim 7 remains the control
+    that speaks to that.
 
 The guest agent itself runs as uid 901 under setpriv (W4.5); the
 host-side vsock proxy socket is mode 0700 (W1.2), the proxy port

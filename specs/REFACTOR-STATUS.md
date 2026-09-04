@@ -30,12 +30,12 @@ Last updated: 2026-09-04
       The generated conformance ledger and all 68 policy/model gates are green;
       provenance and checksum-policy decisions remain in WS-B and WS-C.
 
-- [ ] **Persistent host-directory snapshots.**
+- [x] **Persistent host-directory snapshots.**
       `specs/plans/2026-09-02-retire-dirshare.md`.
       Ad-hoc `--host <directory>` registration now creates a private ext4
       snapshot on verified encrypted backing and registers it as a block
       volume. Focused materialization, validation, error-path, launch-lease,
-      full workspace, and BDD tests are green; merge delivery remains.
+      full workspace, and BDD tests are green; merged via #3151.
 
 - [ ] **Workload output affordance — durable writable inline disks.**
       `specs/plans/2026-09-02-workload-output-affordance.md`.
@@ -49,6 +49,19 @@ Last updated: 2026-09-04
       gated compilation, the full workspace nextest suite, doc tests, all-targets Clippy,
       policy checks, and BDD are green. Broader surface design and merge remain.
 
+- [x] **Refresh host-directory snapshots at machine start.**
+      `specs/plans/2026-09-03-refresh-host-snapshot-at-start.md`.
+      Persistent `--host` and transient `--mount` share one verified,
+      content-addressed ext4 image cache. Start-time source fingerprints cover
+      emitted filesystem semantics, changed snapshots refresh before lease
+      acquisition, missing sources refuse, and writable consumers receive
+      private copies. The unbounded block-at-a-time writer verifies each file
+      against its walked digest, and cache initialization separately verifies
+      encrypted destination backing. The live README BDD fixture declares its
+      encrypted-backing prerequisite without bypassing production probes.
+      Workspace tests/check, host and Linux-native Clippy,
+      gated compilation, and hermetic BDD are green. A live Firecracker
+      restart observed changed bytes even when the source mtime was preserved.
 - [x] **Cargo target-dir guard.**
       `specs/plans/2026-09-02-cargo-target-dir-guard.md`.
       Both cargo wrapper scripts reclaim a CARGO_TARGET_DIR pointing outside
@@ -177,7 +190,7 @@ Last updated: 2026-09-04
       workspace tests, zero-warning Clippy, formatting, and policy gates are
       green; live Firecracker/HVF evidence and merge delivery remain.
 
-- [ ] **Remove virtio-fs — `specs/plans/2026-08-31-remove-virtio-fs.md`.**
+- [x] **Remove virtio-fs — `specs/plans/2026-08-31-remove-virtio-fs.md`.**
       Stage A: `--mount` is materialized into an ext4 image and attached as
       virtio-blk, and the directory-share capability seam is gone. Stage B: the
       dev-tier virtio-fs root is deleted end to end — the tier gate, the
@@ -202,16 +215,20 @@ Last updated: 2026-09-04
       unshared) `/job` onto a dispatch round trip, and the host rewrites the
       input disk per `Run` and reads the output disk per `Result`. Live-validated
       on macOS 26.5.2 — two `nix build` dispatches into one session, both exit 0.
-      Gate now at 41 sites across 13 files. A live persistent Firecracker BDD
+      A live persistent Firecracker BDD
       witness now pins the remaining unmaterialized-directory behavior: the
       registry is consumed, and the workload runner refuses before boot because
       it cannot express the directory grant. That settles reachability without
       pretending the managed-directory product decision is complete.
-      Remaining: libkrun's seeded closure, the guest's install arm (which writes
-      to `/job/<job_id>/out` and is refused on a disk-backed session rather than
-      silently losing its claim-11 sidecars), and deleting the now-dead share
-      plumbing. All three must land before the ratchet can become an absolute
-      rather than a ceiling.
+      The final libkrun work materializes Stage 0's `RootDir` as ext4, carries
+      Stage 0 and one-shot inputs/artifacts as raw-tar block disks, moves the
+      persistent builder and install output arm onto the same transport, and
+      replaces libkrun's share mapping with a refusal. A forced Stage 0 rebuild
+      and a real `machine build --builder libkrun` both completed on Apple
+      Silicon with `root_dir: null` and `virtio_fs_mounts: []`. The exact stale-
+      pin gate is now at its intended floor: 19 sites across 6 files (16 C-API
+      declarations, the low-level share type, and the QEMU/Firecracker refusal
+      tests).
 
 - [ ] **Warm standby image claim repair — issue #3002.**
       `specs/plans/2026-08-28-warm-standby-image-claim.md`.
@@ -1724,7 +1741,9 @@ resume` takes a `current_head` and refuses when it differs from the
         623.6 ms on identical code), retargeting Phase 3 at the Firecracker
         path. Foreground teardown is the other dominant cost, promoting
         Phase 6 ahead of Phase 3.
-  - [ ] Phase 1 — content-addressed `--mount` image cache
+  - [x] Phase 1 — content-addressed `--mount` image cache. Persistent `--host`
+        registrations use the same cache and refresh on source changes before
+        start.
   - [~] Phase 2 — artifact preparation outside the launch path. The resolution
     half landed as the warm pool's hard prerequisite (**#2333**):
     `crate::exec::resolve_launch` yields a bootable `VmStartConfig` without

@@ -869,13 +869,10 @@ pub struct BuilderVmRunConfig {
     pub vm_state_dir: PathBuf,
 }
 
-/// virtio-fs share to attach for the builder run. Maps onto
-/// `libkrun_add_virtiofs` (libkrun) or the equivalent share-attach call
-/// on the hypervisor in use (HVF, QEMU).
-///
-/// Builder mode is the *only* path that attaches virtio-fs shares
-/// today; workload microVMs default to zero shares and refuse
-/// unauthorised shares.
+/// Legacy directory-mount request for a builder run. Current builders exchange
+/// directory trees through the raw-tar disk transport and refuse this shape;
+/// the type remains while the generic trait still carries the compatibility
+/// parameter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuilderVmMount {
     /// Symbolic mount tag the guest uses in `mount -t virtiofs <tag>
@@ -942,9 +939,9 @@ pub struct BuilderVmExitInfo {
 /// - `LibkrunBuilderBackend` — `mvm-build/src/libkrun_builder.rs`,
 ///   wraps `spawn_supervisor_and_wait` + `wait_with_panic_detector`.
 pub trait VmBackendForBuilder: Send + Sync {
-    /// Spawn the supervisor for a builder run, attach the given
-    /// virtio-fs shares + extra virtio-blk disks, and block until
-    /// the guest exits. Returns the exit info — exit code plus
+    /// Spawn the supervisor for a builder run, attach the given disks, and
+    /// block until the guest exits. `mounts` is a compatibility seam that
+    /// block-only backends refuse. Returns the exit info — exit code plus
     /// optional panic line captured by the host-side console-log
     /// watcher.
     ///

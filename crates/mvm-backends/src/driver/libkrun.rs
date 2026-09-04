@@ -24,11 +24,6 @@ use mvm_net::channel::GuestService;
 use mvm_vmm::driver::spec::{BlockDev, KernelImage, VmmSpec, VsockDirection};
 use mvm_vmm::driver::traits::{DuplexStream, RunningVm, VmmDriver};
 
-/// DAX window size exported to libkrun for any virtio-fs share that
-/// requests DAX. 256 MiB matches the HVF DAX window and is large enough
-/// for typical workload roots without overcommitting guest address space.
-const VIRTIO_FS_DAX_SHM_SIZE: u64 = 256 * 1024 * 1024;
-
 /// The most vCPUs libkrun will boot a guest on.
 ///
 /// A limit of the VMM, not of the wire format. This was `u8::MAX` on the
@@ -98,6 +93,7 @@ fn attach_block(krun: KrunContext, block: &BlockDev) -> KrunContext {
 /// runner above this driver, so `relay` never sets an admission field — the
 /// supervisor takes its legacy run path and enforces nothing here.
 fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<SupervisorConfig> {
+    ensure_no_virtio_fs_shares(spec.shares.len())?;
     let kernel_path = match &spec.kernel {
         KernelImage::Path(p) => p.to_string_lossy().into_owned(),
         KernelImage::Bundled => {
@@ -170,25 +166,6 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
         }
     }
 
-    // Attach every virtio-fs share declared by the spec. DAX is enabled when
-    // the share requests it; read-only shares use libkrun's v3 API so the
-    // host-side export is enforced read-only rather than merely guest-mount ro.
-    for share in &spec.shares {
-        let shm_size = if share.dax {
-            Some(VIRTIO_FS_DAX_SHM_SIZE)
-        } else if share.read_only {
-            Some(0)
-        } else {
-            None
-        };
-        krun = krun.add_virtio_fs_full(
-            &share.tag,
-            share.host_path.to_string_lossy(),
-            shm_size,
-            share.read_only,
-        );
-    }
-
     // Wire every standing vsock port by direction: the host dials the guest's
     // listeners (agent + dev-console data ports), and the guest dials the
     // host-bound listeners (egress + exit + broker). libkrun derives
@@ -238,6 +215,14 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
         egress_relay_socket: spec.host_socket_for_service(GuestService::NetworkFlow),
         exclusive_image_lock: None,
     })
+}
+
+fn ensure_no_virtio_fs_shares(share_count: usize) -> Result<()> {
+    if share_count == 0 {
+        Ok(())
+    } else {
+        bail!("libkrun does not support virtio-fs shares; attach a block image instead")
+    }
 }
 
 /// Return the kernel path and format produced by the real libkrun relay
@@ -631,7 +616,7 @@ mod tests {
     use super::*;
     use mvm_agentd::vsock::{BROKER_PORT, EGRESS_PORT, WORKLOAD_EXIT_PORT};
     use mvm_core::vm_backend::SnapshotCapability;
-    use mvm_vmm::driver::spec::{ConsoleCapture, VirtioFsShare, VsockPort};
+    use mvm_vmm::driver::spec::{ConsoleCapture, VsockPort};
 
     fn host_dials(service: GuestService, uds: &str) -> VsockPort {
         VsockPort {
@@ -954,105 +939,15 @@ mod tests {
     }
 
     #[test]
-    fn relay_config_maps_a_share_without_letting_it_steer_the_root() {
-        let mut spec = spec_with(KernelImage::Path("/img/Image".into()), vec![], vec![]);
-        spec.shares.push(VirtioFsShare {
-            tag: "mvmroot".into(),
-            host_path: "/host/root".into(),
-            read_only: true,
-            dax: true,
-        });
-        let cfg = relay(&spec);
-        // No block rootfs; the root is supplied by the virtiofs share.
-        assert_eq!(cfg.krun.rootfs_path, None);
-        assert_eq!(cfg.krun.initramfs_path, None);
-        assert_eq!(cfg.krun.extra_disks.len(), 0);
-        assert_eq!(cfg.krun.virtio_fs_mounts.len(), 1);
-        let root = &cfg.krun.virtio_fs_mounts[0];
-        assert_eq!(root.tag, "mvmroot");
-        assert_eq!(root.host_path, "/host/root");
-        assert!(root.read_only);
-        assert_eq!(root.shm_size, Some(VIRTIO_FS_DAX_SHM_SIZE));
-        // A share no longer steers the root. It is still mapped — the builder
-        // VM depends on that — but the default cmdline names no virtiofs root,
-        // so a spec carrying only a share boots the console-only base.
-        let cmdline = cfg.krun.kernel_cmdline.as_deref().expect("cmdline");
+    fn libkrun_refuses_any_virtio_fs_share_before_mapping() {
+        ensure_no_virtio_fs_shares(0).expect("an empty share list is valid");
+        let error = ensure_no_virtio_fs_shares(1).expect_err("a share must be refused");
         assert!(
-            !cmdline.contains("virtiofs") && !cmdline.contains("root=mvmroot"),
-            "no default cmdline may boot a virtiofs root: {cmdline}"
+            error
+                .to_string()
+                .contains("does not support virtio-fs shares"),
+            "unexpected refusal: {error}"
         );
-    }
-
-    #[test]
-    fn relay_config_boots_the_block_rootfs_even_when_a_share_is_attached() {
-        let mut spec = spec_with(
-            KernelImage::Path("/img/Image".into()),
-            vec![],
-            vec![BlockDev {
-                source: "/img/data.img".into(),
-                read_only: false,
-                ephemeral: false,
-                slot: 0,
-            }],
-        );
-        spec.shares.push(VirtioFsShare {
-            tag: "mvmroot".into(),
-            host_path: "/host/root".into(),
-            read_only: true,
-            dax: true,
-        });
-        let cfg = relay(&spec);
-        // A share used to suppress the block rootfs so the guest booted from
-        // virtiofs. It no longer does: the first block is the rootfs whatever
-        // shares are attached, and the share is mounted alongside it.
-        assert_eq!(cfg.krun.rootfs_path.as_deref(), Some("/img/data.img"));
-        assert_eq!(cfg.krun.extra_disks.len(), 0);
-        assert_eq!(cfg.krun.virtio_fs_mounts.len(), 1);
-    }
-
-    #[test]
-    fn relay_config_maps_dir_shares_with_dax_and_read_only() {
-        let mut spec = spec_with(KernelImage::Path("/img/Image".into()), vec![], vec![]);
-        spec.shares.push(VirtioFsShare {
-            tag: "uvol0".into(),
-            host_path: "/host/rw".into(),
-            read_only: false,
-            dax: true,
-        });
-        spec.shares.push(VirtioFsShare {
-            tag: "uvol1".into(),
-            host_path: "/host/ro".into(),
-            read_only: true,
-            dax: true,
-        });
-        spec.shares.push(VirtioFsShare {
-            tag: "uvol2".into(),
-            host_path: "/host/legacy".into(),
-            read_only: false,
-            dax: false,
-        });
-        let cfg = relay(&spec);
-        let mounts: std::collections::HashMap<&str, &libkrun_sys::KrunVirtioFs> = cfg
-            .krun
-            .virtio_fs_mounts
-            .iter()
-            .map(|m| (m.tag.as_str(), m))
-            .collect();
-        assert_eq!(mounts.len(), 3);
-        let rw = mounts["uvol0"];
-        assert_eq!(rw.host_path, "/host/rw");
-        assert!(!rw.read_only);
-        assert_eq!(rw.shm_size, Some(VIRTIO_FS_DAX_SHM_SIZE));
-
-        let ro = mounts["uvol1"];
-        assert_eq!(ro.host_path, "/host/ro");
-        assert!(ro.read_only);
-        assert_eq!(ro.shm_size, Some(VIRTIO_FS_DAX_SHM_SIZE));
-
-        let legacy = mounts["uvol2"];
-        assert_eq!(legacy.host_path, "/host/legacy");
-        assert!(!legacy.read_only);
-        assert_eq!(legacy.shm_size, None);
     }
 
     #[test]

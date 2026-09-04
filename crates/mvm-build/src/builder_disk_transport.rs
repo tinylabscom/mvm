@@ -185,6 +185,29 @@ pub fn read_output_disk(disk_image: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Stream `source` as a raw tar archive onto an already-sized output disk.
+///
+/// This is the guest-side inverse of [`read_output_disk`]. It deliberately
+/// leaves the device length unchanged: the VMM fixed that capacity when it
+/// attached the disk, and tar's end marker makes any bytes after this archive
+/// unreachable to the reader.
+pub fn write_output_disk(source: &Path, disk_image: &Path) -> Result<()> {
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(disk_image)
+        .with_context(|| format!("open output disk {}", disk_image.display()))?;
+    {
+        let mut archive = tar::Builder::new(&file);
+        archive
+            .append_dir_all(".", source)
+            .with_context(|| format!("archive output tree from {}", source.display()))?;
+        archive.finish().context("finish output tar")?;
+    }
+    file.sync_data()
+        .with_context(|| format!("flush output disk {}", disk_image.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,6 +271,28 @@ mod tests {
         assert_eq!(
             fs::read_to_string(dest.join("work/sub/dep.txt")).unwrap(),
             "dep"
+        );
+    }
+
+    #[test]
+    fn output_writer_round_trips_without_changing_attached_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let image = dir.path().join("output.img");
+        let extracted = dir.path().join("extracted");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::write(source.join("result"), b"ok\n").unwrap();
+        fs::write(source.join("nested/artifact"), b"bytes").unwrap();
+        create_output_disk(&image, 1 << 20).unwrap();
+        let capacity = fs::metadata(&image).unwrap().len();
+
+        write_output_disk(&source, &image).unwrap();
+        assert_eq!(fs::metadata(&image).unwrap().len(), capacity);
+        read_output_disk(&image, &extracted).unwrap();
+        assert_eq!(fs::read(extracted.join("result")).unwrap(), b"ok\n");
+        assert_eq!(
+            fs::read(extracted.join("nested/artifact")).unwrap(),
+            b"bytes"
         );
     }
 

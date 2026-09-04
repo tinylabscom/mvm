@@ -719,7 +719,7 @@ pub fn hex_decode(input: &str) -> Option<Vec<u8>> {
         return None;
     }
     let mut out = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.chunks_exact(2) {
+    for pair in bytes.as_chunks::<2>().0 {
         let hi = hex_val(pair[0])?;
         let lo = hex_val(pair[1])?;
         out.push((hi << 4) | lo);

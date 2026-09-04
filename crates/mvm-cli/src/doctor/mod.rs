@@ -26,6 +26,7 @@ mod tests;
 // stay `pub(crate)` on their definitions in `security_checks` (crate-wide
 // reachable) but have no caller outside that module today, so they are not
 // re-exported here — doing so would trip the unused-import lint.
+#[cfg(not(test))]
 pub(crate) use security_checks::require_local_volume_host_path_encrypted;
 pub use toolchain::{ZigbuildProbe, probe_zigbuild};
 

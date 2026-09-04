@@ -14,10 +14,10 @@ parameter; this uses it.
 
 ## What stays
 
-`run_stage0_impl` keeps its closure-seed share, deliberately. Stage 0 boots a
-virtio-fs *root* (`krun_set_root`) and has no transport disks at all, so it
-predates this seam rather than lagging it. `closure_seed_share` and its two unit
-tests stay for that one caller.
+This was true when this delivery landed, but the follow-up completed the seam.
+`run_stage0_impl` now materializes its `RootDir` seed into `root.ext4`, passes
+the optional closure NAR through the raw-tar input disk, and attaches no
+virtio-fs share. `closure_seed_share` and its staging tests are deleted.
 
 ## Live validation
 

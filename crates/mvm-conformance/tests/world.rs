@@ -206,6 +206,9 @@ pub struct CliWorld {
     /// at. Held for the scenario's lifetime: the accept loop runs on a clone
     /// and ends when this drops.
     pub peer_listener: Option<std::net::TcpListener>,
+    /// Hermetic command search path whose encryption probes report that the
+    /// scenario-local mount cache is backed by encrypted storage.
+    pub encrypted_volume_probe_path: Option<std::ffi::OsString>,
     /// Tempdir holding the file/directory trees the asset-identity
     /// scenarios hash; held so it outlives the scenario.
     pub asset_fixture_dir: Option<tempfile::TempDir>,
