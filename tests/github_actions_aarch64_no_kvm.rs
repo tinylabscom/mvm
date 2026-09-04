@@ -15,15 +15,16 @@ const LIBRARY_ONLY_BUILD: &str =
     "cargo build --release -p mvm-cli --features release-artifact-bootstrap";
 const REQUIRED_VIRTIOFS_PACKAGE: &str = "virtiofsd";
 const REQUIRED_VIRTIO_ROM_PACKAGE: &str = "ipxe-qemu";
-const REQUIRED_CI_VSOCK_OWNERSHIP: &str = "sudo chown \"$(id -u):$(id -g)\" /dev/vhost-vsock";
+const REQUIRED_CI_VSOCK_OWNERSHIP: &str = "sudo chown \"$USER\" /dev/vhost-vsock";
 const REQUIRED_LOCAL_VSOCK_DEVICE: &str = "--device /dev/vhost-vsock:/dev/vhost-vsock";
 const REQUIRED_BUILDER_DOWNLOAD: &str =
-    "./target/release/mvmctl --builder qemu __builder-vm-bootstrap -v";
+    "/tmp/mvmctl-release-helper --builder qemu __builder-vm-bootstrap -v";
 const REQUIRED_BOOTSTRAP: &str =
     "/tmp/mvmctl-source-under-test --builder qemu bootstrap --production -v";
 const FIRST_MACHINE_RUN: &str = "/tmp/mvmctl-source-under-test machine run";
 const REQUIRED_BAKED_ENTRYPOINT: &str = "--entrypoint";
 const FORBIDDEN_ENTRYPOINT_OVERRIDE: &str = "-- /bin/true";
+const BINARY_ARTIFACT: &str = "aarch64-no-kvm-binaries";
 
 #[test]
 fn aarch64_no_kvm_smokes_build_the_mvmctl_binary_they_execute() {
@@ -35,15 +36,21 @@ fn aarch64_no_kvm_smokes_build_the_mvmctl_binary_they_execute() {
 
     let workflow =
         fs::read_to_string(".github/workflows/ci-full.yml").expect("read extended CI workflow");
+    let prepare = workflow
+        .split("  aarch64-no-kvm-prepare:\n")
+        .nth(1)
+        .and_then(|rest| rest.split("  aarch64-no-kvm-smoke:\n").next())
+        .expect("extended CI workflow must define the aarch64 no-KVM prepare job");
     let job = workflow
         .split("  aarch64-no-kvm-smoke:\n")
         .nth(1)
         .expect("extended CI workflow must define the aarch64 no-KVM smoke job");
+    let workflow_path = format!("{prepare}{job}");
     let script = fs::read_to_string("scripts/local-aarch64-no-kvm-smoke.sh")
         .expect("read local aarch64 no-KVM smoke script");
 
     for (source, contents) in [
-        ("extended CI workflow", job),
+        ("extended CI workflow", workflow_path.as_str()),
         ("local smoke script", script.as_str()),
     ] {
         assert!(
@@ -109,6 +116,21 @@ fn aarch64_no_kvm_smokes_build_the_mvmctl_binary_they_execute() {
     assert!(
         job.contains(REQUIRED_CI_VSOCK_OWNERSHIP),
         "extended CI workflow must let the unprivileged QEMU process open /dev/vhost-vsock"
+    );
+    assert!(
+        prepare.contains("uses: actions/upload-artifact@v7")
+            && prepare.contains(&format!("name: {BINARY_ARTIFACT}")),
+        "the prepare job must publish the exact source and release-helper binaries"
+    );
+    assert!(
+        job.contains("needs: aarch64-no-kvm-prepare")
+            && job.contains("uses: actions/download-artifact@v8")
+            && job.contains(&format!("name: {BINARY_ARTIFACT}")),
+        "the live smoke must start in a fresh runner window from the prepared binaries"
+    );
+    assert!(
+        !job.contains(EXPECTED_SOURCE_BUILD) && !job.contains(EXPECTED_RELEASE_HELPER_BUILD),
+        "the live smoke runner must not spend its short lifetime recompiling mvmctl"
     );
     assert!(
         script.contains(REQUIRED_LOCAL_VSOCK_DEVICE),

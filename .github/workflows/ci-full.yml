@@ -477,17 +477,16 @@ jobs:
   # take hours, and blocking every merge behind it collapses queue throughput.
   # It runs nightly and on manual dispatch so the path stays exercised without
   # serializing PR merges.
-  aarch64-no-kvm-smoke:
-    name: Aarch64 no-KVM bundle smoke (QEMU TCG)
+  # Hosted arm64 runners have repeatedly received a platform shutdown at
+  # roughly 28 minutes even though the job timeout is longer. Compile the two
+  # exact binaries in a separate runner window so the live job spends its
+  # bounded lifetime on the QEMU path the lane exists to witness.
+  aarch64-no-kvm-prepare:
+    name: Prepare aarch64 no-KVM smoke binaries
     runs-on: ubuntu-24.04-arm
-    # Cold paths may compile the workload kernel inside Stage 0 under TCG.
-    timeout-minutes: 300
+    timeout-minutes: 25
     env:
       CARGO_TERM_COLOR: always
-      MVM_HOME: ${{ github.workspace }}/.mvm-ci
-      # A cold no-KVM build compiles the workload under TCG and can exceed
-      # the normal 30-minute builder deadline while still making progress.
-      MVM_BUILDER_VM_TIMEOUT_SECS: 7200
     steps:
       - uses: actions/checkout@v6
 
@@ -498,28 +497,9 @@ jobs:
 
       - uses: ./.github/actions/install-zigbuild
 
-      - uses: ./.github/actions/apt-deps
-        with:
-          # qemu-system-arm provides qemu-system-aarch64; ipxe-qemu provides
-          # efi-virtio.rom; virtiofsd shares the checkout with the builder VM;
-          # e2fsprogs provides the mkfs.ext4 and debugfs image-packing tools.
-          packages: qemu-system-arm ipxe-qemu virtiofsd e2fsprogs attr jq
-
-      - name: Allow unprivileged QEMU to use host vsock
-        run: |
-          test -c /dev/vhost-vsock
-          sudo chown "$(id -u):$(id -g)" /dev/vhost-vsock
-          test -r /dev/vhost-vsock && test -w /dev/vhost-vsock
-
       - uses: ./.github/actions/rust-cache
         with:
-          key: aarch64-no-kvm-smoke
-
-      - name: Grant QEMU access to vhost-vsock
-        run: |
-          test -c /dev/vhost-vsock
-          sudo chown "$USER" /dev/vhost-vsock
-          sudo chmod 0600 /dev/vhost-vsock
+          key: aarch64-no-kvm-prepare
 
       # The source binary is the end-to-end subject. Keep a copy before building
       # the release-channel helper, whose only job is to download the already-
@@ -535,12 +515,68 @@ jobs:
           cargo build --release -p mvmctl --features user
           cp target/release/mvmctl /tmp/mvmctl-source-under-test
           cargo build --release -p mvmctl --features user,release-artifact-bootstrap,release-channel
+          mkdir -p ci-artifacts/aarch64-no-kvm-binaries
+          cp /tmp/mvmctl-source-under-test \
+            ci-artifacts/aarch64-no-kvm-binaries/mvmctl-source-under-test
+          cp target/release/mvmctl \
+            ci-artifacts/aarch64-no-kvm-binaries/mvmctl-release-helper
+
+      - name: Publish exact smoke binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: aarch64-no-kvm-binaries
+          path: ci-artifacts/aarch64-no-kvm-binaries/
+          if-no-files-found: error
+          retention-days: 1
+
+  aarch64-no-kvm-smoke:
+    name: Aarch64 no-KVM bundle smoke (QEMU TCG)
+    needs: aarch64-no-kvm-prepare
+    runs-on: ubuntu-24.04-arm
+    # Cold paths may compile the workload kernel inside Stage 0 under TCG.
+    timeout-minutes: 300
+    env:
+      CARGO_TERM_COLOR: always
+      MVM_HOME: ${{ github.workspace }}/.mvm-ci
+      # A cold no-KVM build compiles the workload under TCG and can exceed
+      # the normal 30-minute builder deadline while still making progress.
+      MVM_BUILDER_VM_TIMEOUT_SECS: 7200
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/free-disk
+
+      - uses: ./.github/actions/apt-deps
+        with:
+          # qemu-system-arm provides qemu-system-aarch64; ipxe-qemu provides
+          # efi-virtio.rom; virtiofsd shares the checkout with the builder VM;
+          # e2fsprogs provides the mkfs.ext4 and debugfs image-packing tools.
+          packages: qemu-system-arm ipxe-qemu virtiofsd e2fsprogs attr jq
+
+      - name: Restore exact smoke binaries
+        uses: actions/download-artifact@v8
+        with:
+          name: aarch64-no-kvm-binaries
+          path: /tmp/aarch64-no-kvm-binaries
+
+      - name: Install exact smoke binaries
+        run: |
+          install -m 0755 /tmp/aarch64-no-kvm-binaries/mvmctl-source-under-test \
+            /tmp/mvmctl-source-under-test
+          install -m 0755 /tmp/aarch64-no-kvm-binaries/mvmctl-release-helper \
+            /tmp/mvmctl-release-helper
+
+      - name: Grant QEMU access to vhost-vsock
+        run: |
+          test -c /dev/vhost-vsock
+          sudo chown "$USER" /dev/vhost-vsock
+          sudo chmod 0600 /dev/vhost-vsock
 
       - name: Use published builder VM bootstrap path
         run: mv nix/images/builder-vm nix/images/builder-vm.hidden
 
       - name: Download published builder VM
-        run: ./target/release/mvmctl --builder qemu __builder-vm-bootstrap -v
+        run: /tmp/mvmctl-release-helper --builder qemu __builder-vm-bootstrap -v
 
       - name: Bootstrap source-matched launch artifacts
         env:

@@ -58,6 +58,7 @@ echo "Building mvmctl ..."
 cargo build --release -p mvmctl --features user,embed-host-bins
 cp target/release/mvmctl /tmp/mvmctl-source-under-test
 cargo build --release -p mvmctl --features user,release-artifact-bootstrap,release-channel,embed-host-bins
+cp target/release/mvmctl /tmp/mvmctl-release-helper
 
 # The source-checkout bootstrap path would rebuild the builder VM image from
 # scratch under TCG. Hide the in-repo flake so mvmctl downloads the published
@@ -76,7 +77,7 @@ rm -rf "$MVM_HOME"
 mkdir -p "$MVM_HOME"
 
 echo "Downloading published builder VM ..."
-./target/release/mvmctl --builder qemu __builder-vm-bootstrap -v
+/tmp/mvmctl-release-helper --builder qemu __builder-vm-bootstrap -v
 
 echo "Bootstrapping source-matched launch artifacts ..."
 /tmp/mvmctl-source-under-test --builder qemu bootstrap --production -v

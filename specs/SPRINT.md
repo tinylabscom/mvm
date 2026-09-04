@@ -19,8 +19,10 @@
       capability/fallback reporting, and enum-valued witness matching. The
       exhaustive help checks now render the real Clap dispatch arm in-process
       while keeping binary probes. Hermetic BDD and focused touched-crate
-      suites are green; the live documented-surface release gate and merge
-      delivery remain.
+      suites are green. The aarch64 TCG lane now transfers exact binaries from
+      a bounded preparation job so live execution receives a fresh runner
+      window after three repeatable 27–28 minute infrastructure shutdowns; the
+      live documented-surface release gate and merge delivery remain.
 
 - [ ] **Workload output affordance — durable writable inline disks.**
       `specs/plans/2026-09-02-workload-output-affordance.md`.
