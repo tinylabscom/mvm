@@ -353,9 +353,54 @@ fn emit_schema(workspace: &Path, art: &StubArtifact) -> Result<Vec<u8>> {
     run_emit(workspace, art.label, art.emit_args)
 }
 
-/// Run a `cargo run` emitter and capture its stdout, failing loudly on a
-/// nonzero exit. Shared by both descriptor kinds.
+/// The `--bin` name in a `cargo run` argument list, if it names one.
+fn emitter_bin_name<'a>(args: &[&'a str]) -> Option<&'a str> {
+    let idx = args.iter().position(|a| *a == "--bin")?;
+    args.get(idx + 1).copied()
+}
+
+/// An already-built emitter binary, when one exists for this target dir.
+///
+/// `cargo run` takes cargo's package lock, which is global to the machine.
+/// This runs from inside a BDD scenario, so a suite that shells out here
+/// serialises against every other cargo process on the host — including ones in
+/// unrelated worktrees. Three concurrent suites once sat behind that lock long
+/// enough to read as a hang: the blocked process showed 4m30s elapsed against
+/// 0.01s of CPU.
+///
+/// Executing a prebuilt binary takes no lock at all. `just bdd` builds these
+/// alongside `mvmctl` and `xtask` for exactly that reason; the `cargo run`
+/// fallback below keeps a direct `cargo run -p xtask -- gen-stubs` working for
+/// anyone who has not.
+fn prebuilt_emitter(workspace: &Path, bin: &str) -> Option<std::path::PathBuf> {
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| workspace.join("target"));
+    let path = target.join("debug").join(bin);
+    path.is_file().then_some(path)
+}
+
+/// Run an emitter and capture its stdout, failing loudly on a nonzero exit.
+/// Shared by both descriptor kinds.
 fn run_emit(workspace: &Path, label: &str, args: &[&str]) -> Result<Vec<u8>> {
+    if let Some(bin) = emitter_bin_name(args)
+        && let Some(path) = prebuilt_emitter(workspace, bin)
+    {
+        let output = Command::new(&path)
+            .current_dir(workspace)
+            .output()
+            .with_context(|| format!("spawning {}", path.display()))?;
+        if !output.status.success() {
+            bail!(
+                "schema emit for {} exited {}: {}",
+                label,
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return Ok(output.stdout);
+    }
+
     let output = Command::new("cargo")
         .args(args)
         .current_dir(workspace)
