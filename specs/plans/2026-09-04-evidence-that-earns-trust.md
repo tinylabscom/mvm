@@ -1,5 +1,8 @@
 # Evidence that earns trust
 
+Backing: shipped-source
+Validation: check-sprint-append
+
 **Status: OPEN** — written 2026-09-04, after the 0.18 release candidate work.
 
 ## Why this exists
