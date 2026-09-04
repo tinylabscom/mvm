@@ -602,6 +602,11 @@ jobs:
       # The published workload asset is the uncompressed ELF required by
       # Firecracker. Build the same pinned source once so Stage 0 can retain
       # its sibling bzImage, which QEMU's x86 Linux boot protocol requires.
+      # Restore the source flake after proving the published-builder path;
+      # source compilation deliberately refuses to run without that checkout.
+      - name: Restore source builder VM flake
+        run: mv nix/images/builder-vm.hidden nix/images/builder-vm
+
       - name: Build source QEMU-compatible workload kernel
         run: /tmp/mvmctl-source-under-test kernel build --which workload --source compile -v
 

@@ -31,6 +31,7 @@ const REQUIRED_QEMU_BUILD: &str =
 const REQUIRED_BOOT_IMAGE_UPDATE: &str =
     "/tmp/mvmctl-source-under-test image boot update --tag boot-image/v0.1.3 --force";
 const REQUIRED_SOURCE_KERNEL: &str = ".mvm-ci/cache/kernels/x86_64/workload/bzImage";
+const REQUIRED_SOURCE_FLAKE_RESTORE: &str = "mv nix/images/builder-vm.hidden nix/images/builder-vm";
 const REQUIRED_SOURCE_KERNEL_BUILD: &str =
     "/tmp/mvmctl-source-under-test kernel build --which workload --source compile -v";
 const REQUIRED_SOURCE_KERNEL_VERIFY: &str = "bzImage.sha256";
@@ -174,10 +175,24 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
     assert!(
         bootstrap_job.contains("needs: no-kvm-prepare")
             && bootstrap_job.contains(&format!("name: {BINARY_ARTIFACT}"))
+            && bootstrap_job.contains(REQUIRED_SOURCE_FLAKE_RESTORE)
             && bootstrap_job.contains(REQUIRED_SOURCE_KERNEL_BUILD)
             && bootstrap_job.contains("uses: actions/upload-artifact@v7")
             && bootstrap_job.contains(&format!("name: {BOOTSTRAP_ARTIFACT}")),
         "bootstrap must use exact binaries and publish reusable launch artifacts"
+    );
+    let bootstrap = bootstrap_job
+        .find("Bootstrap source-matched launch artifacts")
+        .expect("the bootstrap runner must bootstrap source-matched launch artifacts");
+    let restore_source_flake = bootstrap_job
+        .find(REQUIRED_SOURCE_FLAKE_RESTORE)
+        .expect("the bootstrap runner must restore the source flake after the download witness");
+    let source_kernel_build = bootstrap_job
+        .find(REQUIRED_SOURCE_KERNEL_BUILD)
+        .expect("the bootstrap runner must source-build the QEMU kernel");
+    assert!(
+        bootstrap < restore_source_flake && restore_source_flake < source_kernel_build,
+        "the source flake must stay hidden through published bootstrap, then be restored before source kernel compilation"
     );
     assert!(
         build_job.contains("needs: no-kvm-bootstrap")
@@ -213,11 +228,11 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
     let install_zigbuild = bootstrap_job
         .find("uses: ./.github/actions/install-zigbuild")
         .expect("the bootstrap runner must install cargo-zigbuild");
-    let bootstrap = bootstrap_job
+    let bootstrap_toolchain = bootstrap_job
         .find("Bootstrap source-matched launch artifacts")
         .expect("the bootstrap runner must bootstrap source-matched launch artifacts");
     assert!(
-        install_rust < install_zigbuild && install_zigbuild < bootstrap,
+        install_rust < install_zigbuild && install_zigbuild < bootstrap_toolchain,
         "the live runner must install the guest cross-toolchain before bootstrap"
     );
     assert!(

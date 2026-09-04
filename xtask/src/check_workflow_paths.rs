@@ -942,6 +942,7 @@ mod tests {
         );
         assert!(
             build.contains("image boot update --tag boot-image/v0.1.3 --force")
+                && bootstrap.contains("mv nix/images/builder-vm.hidden nix/images/builder-vm")
                 && bootstrap.contains("kernel build --which workload --source compile -v")
                 && build.contains(".mvm-ci/cache/kernels/x86_64/workload/bzImage")
                 && build.contains("bzImage.sha256")
@@ -949,6 +950,16 @@ mod tests {
                 && build.contains("veritysetup format")
                 && build.contains("bundle export \"$slot_hash\""),
             "bundle preparation must combine verified release rootfs bytes with source-matched launch artifacts and exporter"
+        );
+        let restore_source_flake = bootstrap
+            .find("mv nix/images/builder-vm.hidden nix/images/builder-vm")
+            .expect("the source builder flake must be restored after published bootstrap");
+        let source_kernel_build = bootstrap
+            .find("kernel build --which workload --source compile -v")
+            .expect("the source QEMU kernel must be built");
+        assert!(
+            restore_source_flake < source_kernel_build,
+            "the source builder flake must be restored before source kernel compilation"
         );
         let deny_kvm_position = smoke
             .find(deny_kvm)
