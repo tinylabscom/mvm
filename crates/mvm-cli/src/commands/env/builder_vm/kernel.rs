@@ -438,14 +438,25 @@ mod tests {
 
         publish_kernel_artifacts(&staging, &live, KernelVariant::Workload).unwrap();
 
+        let firecracker_kernel = live.join("vmlinux");
         let qemu_kernel = live.join("bzImage");
         assert_eq!(std::fs::read(&qemu_kernel).unwrap(), bzimage_stub());
-        let expected = mvm_fs::overlay::compute_file_sha256(&qemu_kernel).unwrap();
+        let firecracker_sidecar =
+            mvm_build::kernel_fetch::kernel_digest_sidecar(&firecracker_kernel);
+        let qemu_sidecar = mvm_build::kernel_fetch::kernel_digest_sidecar(&qemu_kernel);
+        assert_ne!(firecracker_sidecar, qemu_sidecar);
+        let expected_qemu = mvm_fs::overlay::compute_file_sha256(&qemu_kernel).unwrap();
         assert_eq!(
-            std::fs::read_to_string(mvm_build::kernel_fetch::kernel_digest_sidecar(&qemu_kernel))
+            std::fs::read_to_string(&qemu_sidecar).unwrap().trim(),
+            expected_qemu
+        );
+        let expected_firecracker =
+            mvm_fs::overlay::compute_file_sha256(&firecracker_kernel).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&firecracker_sidecar)
                 .unwrap()
                 .trim(),
-            expected
+            expected_firecracker
         );
     }
 
