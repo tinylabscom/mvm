@@ -28,6 +28,8 @@ source refuses the start instead of silently serving stale bytes.
 - [x] Preserve unbounded, block-at-a-time materialization while binding every
       emitted file to the digest captured during the source walk, and refuse
       cache initialization unless its destination has encrypted backing.
+- [x] Declare encrypted backing explicitly in the live README BDD fixture so
+      hosted runners exercise the cache without weakening production probes.
 - [x] Update CLI/help documentation and the sprint/refactor rollups.
 - [x] Run workspace test/check, zero-warning Clippy, gated checks, `just bdd`,
       and live Firecracker validation of edit → stop → restart → changed guest

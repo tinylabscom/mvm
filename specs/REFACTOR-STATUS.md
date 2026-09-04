@@ -39,7 +39,9 @@ Last updated: 2026-09-03
       acquisition, missing sources refuse, and writable consumers receive
       private copies. The unbounded block-at-a-time writer verifies each file
       against its walked digest, and cache initialization separately verifies
-      encrypted destination backing. Workspace tests/check, host and Linux-native Clippy,
+      encrypted destination backing. The live README BDD fixture declares its
+      encrypted-backing prerequisite without bypassing production probes.
+      Workspace tests/check, host and Linux-native Clippy,
       gated compilation, and hermetic BDD are green. A live Firecracker
       restart observed changed bytes even when the source mtime was preserved.
 - [x] **Cargo target-dir guard.**

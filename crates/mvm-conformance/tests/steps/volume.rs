@@ -16,7 +16,7 @@ use mvm_runtime::vm::volume_registry::LocalVolumeCatalog;
 
 use crate::world::CliWorld;
 
-use super::cli::{mvmctl_command, workspace_root};
+use super::cli::{install_encrypted_backing_probes, mvmctl_command, workspace_root};
 use mvm_conformance::IsolatedHome;
 
 fn isolated_home(world: &CliWorld) -> &Path {
@@ -157,34 +157,7 @@ fn register_host_directory_volume(
     // The scenario exercises snapshot registration, not the host's disk
     // encryption configuration. Keep the real CLI and its fail-closed probe,
     // but make the platform command results deterministic for this subprocess.
-    let probe_bin = home.join("encrypted-backing-probe-bin");
-    fs::create_dir_all(&probe_bin)
-        .unwrap_or_else(|error| panic!("create encryption probe bin {probe_bin:?}: {error}"));
-    for (name, body) in [
-        (
-            "findmnt",
-            "#!/bin/sh\nprintf '%s\\n' /dev/mapper/mvm-bdd-crypt\n",
-        ),
-        ("lsblk", "#!/bin/sh\nprintf '%s\\n' crypt\n"),
-        ("diskutil", "#!/bin/sh\nprintf '%s\\n' 'FileVault: Yes'\n"),
-    ] {
-        let probe = probe_bin.join(name);
-        fs::write(&probe, body)
-            .unwrap_or_else(|error| panic!("write encryption probe {probe:?}: {error}"));
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).unwrap_or_else(
-                |error| panic!("make encryption probe executable {probe:?}: {error}"),
-            );
-        }
-    }
-    let mut command_path = vec![probe_bin];
-    if let Some(path) = std::env::var_os("PATH") {
-        command_path.extend(std::env::split_paths(&path));
-    }
-    let command_path =
-        std::env::join_paths(command_path).expect("join hermetic encryption probe PATH");
+    let command_path = install_encrypted_backing_probes(&home);
     let mut cmd = mvmctl_command();
     cmd.args([
         "machine",

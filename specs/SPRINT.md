@@ -34,9 +34,11 @@
       reflink/copies and retain guest writes until the host source changes.
       Materialization remains unbounded and block-at-a-time, re-verifies each
       emitted file against its walked digest, and refuses a cache destination
-      without independently verified encrypted backing.
+      without independently verified encrypted backing. The live README BDD
+      fixture declares that prerequisite through deterministic platform probes;
+      production continues to inspect the real backing device and fail closed.
       Workspace tests/check, host and Linux-native zero-warning Clippy, gated
-      compilation, and hermetic BDD (248 passed, 1 capability skip) are green.
+      compilation, and hermetic BDD (250 passed, 1 capability skip) are green.
       A live Firecracker witness changed source bytes while preserving mtime;
       the restarted guest observed `dir-volume-refreshed`.
 - [ ] **Content-addressed asset identity.**
