@@ -177,4 +177,3 @@ witness = "suites/s31_launch_e2e/sdk_and_library_modes.feature::a runtime-SDK sc
 [[example]]
 command = "mvmctl run --peer db.mvm.peer:5432=127.0.0.1:34567 -- ./my-service"
 witness = "suites/s30_service_plane/peer_cli.feature::the documented peer route carries a guest dial to the host service"
-
