@@ -148,8 +148,8 @@ pub struct UncoveredClaim {
 
 /// Why a claim's `fn:` witnesses yield nothing mutable.
 const WHY_NO_FN_WITNESS: &str = "no fn: witness — witnessed by CI lanes only, nothing to mutate";
-const WHY_ONLY_INTEGRATION_TESTS: &str =
-    "every fn: witness lives in crates/*/tests/, which cargo-mutants does not mutate";
+const WHY_ONLY_INTEGRATION_TESTS: &str = "every fn: witness lives in test-only code (crates/*/tests/, or a #![cfg(test)] \
+     module file), which cargo-mutants does not mutate";
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Baseline {
@@ -346,6 +346,10 @@ pub fn resolve_surface(workspace: &Path) -> Result<Surface> {
     // integration test can be reported as uncovered rather than
     // silently vanishing.
     let mut hits: BTreeMap<String, BTreeSet<u32>> = BTreeMap::new();
+    // Files that resolved but hold nothing cargo-mutants would mutate, kept
+    // apart from the ones that do so the uncovered-claim accounting can tell
+    // "no witness resolved here" from "a witness resolved into test code".
+    let mut unmutatable: BTreeSet<String> = BTreeSet::new();
     let crates = workspace.join("crates");
     claims_ledger::for_each_file(&crates, Some("rs"), &mut |path, content| {
         for (name, claims) in &wanted {
@@ -353,6 +357,9 @@ pub fn resolve_surface(workspace: &Path) -> Result<Surface> {
                 let Some(rel) = workspace_relative(workspace, path) else {
                     continue;
                 };
+                if is_test_only_module(content) {
+                    unmutatable.insert(rel.clone());
+                }
                 hits.entry(rel).or_default().extend(claims.iter().copied());
             }
         }
@@ -360,7 +367,7 @@ pub fn resolve_surface(workspace: &Path) -> Result<Surface> {
 
     let mut files: Vec<SurfaceFile> = hits
         .iter()
-        .filter(|(path, _)| !is_integration_test(path))
+        .filter(|(path, _)| !is_integration_test(path) && !unmutatable.contains(*path))
         .filter_map(|(path, claims)| {
             Some(SurfaceFile {
                 path: path.clone(),
@@ -414,6 +421,33 @@ pub fn package_for(rel_path: &str) -> Option<String> {
 /// True for `crates/<pkg>/tests/...`, which cargo-mutants never mutates.
 pub fn is_integration_test(rel_path: &str) -> bool {
     rel_path.split('/').nth(2) == Some("tests")
+}
+
+/// True for a module file that is compiled only under `cfg(test)`.
+///
+/// Resolution maps a `fn:` witness to the file declaring it and assumes that
+/// file is the enforcement code the witness guards — which holds because this
+/// repo keeps `#[cfg(test)] mod tests` inline, beside the implementation. It
+/// does not hold when the tests are a *separate* module file: there the
+/// resolved file is the tests themselves, and the code they guard is
+/// elsewhere.
+///
+/// The cost of not noticing is not a weak measurement, it is a dead shard.
+/// cargo-mutants does not mutate test code, so such a file yields zero mutants
+/// and cargo-mutants writes no `outcomes.json` at all — the gate then died
+/// reading a missing path under a temp directory, taking the whole package's
+/// run with it and reporting nothing about the files that did have mutants.
+/// `crates/mvm-cli/src/commands/tests.rs` is the case in point: 165 KB behind
+/// `#![cfg(test)]`, reached because `commands/mod.rs` declares `mod tests;`.
+///
+/// Matched on the inner attribute rather than the filename, because it is the
+/// attribute and not the name that decides whether anything compiles outside
+/// test.
+fn is_test_only_module(content: &str) -> bool {
+    content
+        .lines()
+        .map(str::trim)
+        .any(|line| line == "#![cfg(test)]")
 }
 
 fn workspace_relative(workspace: &Path, path: &Path) -> Option<String> {
@@ -2037,6 +2071,82 @@ jobs:
         assert_eq!(surface.uncovered.len(), 1);
         assert_eq!(surface.uncovered[0].number, 2);
         assert_eq!(surface.uncovered[0].why, WHY_ONLY_INTEGRATION_TESTS);
+    }
+
+    /// A `#![cfg(test)]` module file stays off the surface, and a claim that
+    /// has other witnesses keeps its coverage.
+    ///
+    /// Resolution assumes the file declaring a witness is the enforcement code
+    /// the witness guards. A separate tests module breaks that assumption, and
+    /// the failure is not a weak measurement but a dead shard: cargo-mutants
+    /// mutates no test code, so it writes no `outcomes.json`, and the gate used
+    /// to die reading that missing path — losing every other file in the same
+    /// package's run along with it.
+    #[test]
+    fn a_test_only_module_file_is_not_mutation_surface() {
+        let tmp = ledger_tree(
+            "\
+| 1 | one | fn:enforces_it, fn:also_checked_in_the_tests_module | auth | Shipped |
+",
+        );
+        let demo = tmp.path().join("crates").join("demo").join("src");
+        std::fs::create_dir_all(&demo).unwrap();
+        std::fs::write(demo.join("lib.rs"), "fn enforces_it() {}\n").unwrap();
+        std::fs::write(
+            demo.join("tests.rs"),
+            "#![cfg(test)]\nfn also_checked_in_the_tests_module() {}\n",
+        )
+        .unwrap();
+
+        let surface = resolve_surface(tmp.path()).unwrap();
+        let paths: Vec<&str> = surface.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["crates/demo/src/lib.rs"],
+            "the tests module has nothing cargo-mutants would mutate"
+        );
+        assert!(
+            surface.uncovered.is_empty(),
+            "claim 1 still resolves to enforcement code, so it is not uncovered"
+        );
+    }
+
+    /// A claim witnessed *only* from a tests module has no surface at all, and
+    /// says which kind of test-only code it landed in.
+    #[test]
+    fn a_claim_witnessed_only_from_a_tests_module_is_reported_as_uncovered() {
+        let tmp = ledger_tree(
+            "\
+| 1 | one | fn:enforces_it | auth | Shipped |
+| 2 | two | fn:only_in_the_tests_module | auth | Shipped |
+",
+        );
+        let demo = tmp.path().join("crates").join("demo").join("src");
+        std::fs::create_dir_all(&demo).unwrap();
+        std::fs::write(demo.join("lib.rs"), "fn enforces_it() {}\n").unwrap();
+        std::fs::write(
+            demo.join("tests.rs"),
+            "#![cfg(test)]\nfn only_in_the_tests_module() {}\n",
+        )
+        .unwrap();
+
+        let surface = resolve_surface(tmp.path()).unwrap();
+        assert_eq!(surface.uncovered.len(), 1);
+        assert_eq!(surface.uncovered[0].number, 2);
+        assert_eq!(surface.uncovered[0].why, WHY_ONLY_INTEGRATION_TESTS);
+    }
+
+    /// Only the inner attribute counts. A file with ordinary `#[cfg(test)] mod
+    /// tests` beside its implementation is exactly the shape resolution is
+    /// built around, and dropping it would silently delete real surface.
+    #[test]
+    fn an_inline_test_module_does_not_make_the_file_test_only() {
+        assert!(is_test_only_module("#![cfg(test)]\nfn a() {}\n"));
+        assert!(is_test_only_module("//! docs\n\n  #![cfg(test)]\n"));
+        assert!(!is_test_only_module(
+            "fn enforce() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {}\n}\n"
+        ));
+        assert!(!is_test_only_module("fn enforce() {}\n"));
     }
 
     fn uncovered(number: u32) -> UncoveredClaim {

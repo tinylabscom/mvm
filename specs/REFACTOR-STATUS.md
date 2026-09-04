@@ -274,11 +274,25 @@ Last updated: 2026-09-04
       workflow-structure suite and `check-workflow-paths` are green. One
       uninterrupted run and merge delivery remain.
 
-- [ ] **Linux 6.12.108 synchronized kernel pin — issue #3147.**
+- [x] **Linux 6.12.108 synchronized kernel pin — issue #3147.**
       `specs/plans/2026-09-04-kernel-6-12-108.md`.
       Both kernel consumers use the kernel.org-verified archive and SRI hash;
-      the structural synchronization test moves with them. Linux Nix builds and
-      merge delivery remain.
+      the structural synchronization test moves with them. Both architecture
+      kernel builds and the full merge-group matrix passed, PR #3177 landed,
+      and the issue closed.
+
+- [ ] **Claim witnesses that bite — issues #3148, #3149.**
+      `specs/plans/2026-09-04-claim-witnesses-that-bite.md`.
+      `security.yml`'s three mutation shards were red. The mvm-cli shard was
+      not reporting survivors at all — it died reading an `outcomes.json`
+      cargo-mutants never wrote for a `#![cfg(test)]` module file that
+      resolution had put on the surface. Resolution now keeps such files off
+      it. Eight claim-20 survivors in `artifact_verify.rs` and twelve of the
+      twenty in `plan/types.rs` are closed by witnesses verified against the
+      reported mutation; the twentieth is proven equivalent and recorded with
+      its proof. Nothing was resolved with `--write-baseline --run`. The
+      focused suites, the surface pin and `check-mutation-witnesses` are green.
+      The nightly confirmation and merge delivery remain.
 
 - [ ] **Linux 6.12.107 synchronized kernel pin — issue #2971.**
       `specs/plans/2026-08-28-kernel-6-12-107.md`.

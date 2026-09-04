@@ -2156,3 +2156,146 @@ mod asset_identity_tests {
         }
     }
 }
+
+/// Small total functions on the plan's own vocabulary: the hex decoder, the
+/// nonce view, the two mode predicates, and the seccomp-tier parser.
+///
+/// Each is a handful of lines with no branching worth the name, which is
+/// exactly why none of them was covered — they read as too obvious to test.
+/// They are not: every one of them is consumed by something that decides
+/// policy, and each was replaceable by a constant, or by the wrong constant,
+/// without a single witness noticing.
+#[cfg(test)]
+mod plan_vocabulary_tests {
+    use super::*;
+    use core::str::FromStr as _;
+
+    /// The hex decoder produces the bytes the digest actually names.
+    ///
+    /// `caller_commitment_nibble` subtracts the ASCII base; adding it instead
+    /// survived. A commitment that decodes to the wrong bytes still parses,
+    /// still round-trips through `Display`, and still compares equal to
+    /// itself — so nothing short of pinning a known value against its known
+    /// bytes can tell the difference. The digit and letter halves are checked
+    /// separately because they are separate arms with separate bases.
+    #[test]
+    fn caller_commitment_hex_decodes_to_the_bytes_it_names() {
+        let digits = "0123456789".to_string() + &"ab".repeat(27);
+        let parsed = CallerCommitment::from_hex(&digits).expect("valid lowercase hex");
+        assert_eq!(
+            parsed.as_bytes()[..5],
+            [0x01, 0x23, 0x45, 0x67, 0x89],
+            "the digit arm must subtract b'0'"
+        );
+
+        let letters = "abcdef".to_string() + &"00".repeat(29);
+        let parsed = CallerCommitment::from_hex(&letters).expect("valid lowercase hex");
+        assert_eq!(
+            parsed.as_bytes()[..3],
+            [0xab, 0xcd, 0xef],
+            "the letter arm must subtract b'a' and add ten"
+        );
+
+        // High and low nibbles are not interchangeable: a decoder that
+        // swapped them would satisfy every assertion above that used a
+        // repeated pair.
+        let asymmetric = "10".to_string() + &"00".repeat(31);
+        assert_eq!(
+            CallerCommitment::from_hex(&asymmetric)
+                .expect("valid lowercase hex")
+                .as_bytes()[0],
+            0x10,
+        );
+    }
+
+    /// `as_hex` is a view of the parsed value, not a fresh string.
+    ///
+    /// Replacing it with `""` or a literal survived. The nonce is the plan's
+    /// replay key: the admission store remembers what it has seen by this
+    /// exact string, so a constant here collapses every plan onto one nonce
+    /// and either rejects the second boot or accepts an unlimited replay,
+    /// depending on which side of the store you stand.
+    #[test]
+    fn nonce_as_hex_returns_the_value_it_was_parsed_from() {
+        let value = "0123456789abcdef0123456789abcdef";
+        let nonce = Nonce::from_hex(value).expect("32 lowercase hex characters");
+        assert_eq!(nonce.as_hex(), value);
+
+        let other = Nonce::from_hex("fedcba9876543210fedcba9876543210").expect("valid nonce");
+        assert_ne!(
+            nonce.as_hex(),
+            other.as_hex(),
+            "two distinct nonces must not share a rendering"
+        );
+    }
+
+    /// `persists` distinguishes the two retention modes.
+    ///
+    /// It answers "is a durable transcript written", which is what decides
+    /// whether a reader attaching after the workload ends finds a recording.
+    /// Both constant replacements survived, and either one makes the mode
+    /// selection have no effect at all.
+    #[test]
+    fn only_the_persist_retention_mode_keeps_a_transcript() {
+        assert!(StreamRetention::Persist.persists());
+        assert!(!StreamRetention::Ephemeral.persists());
+        assert!(
+            StreamRetention::default().persists(),
+            "the default must keep a transcript, since it is what an \
+             unspecified plan gets"
+        );
+    }
+
+    /// `is_prod` distinguishes the two policy variants.
+    ///
+    /// It gates the production-strict requirements — no dev RCE primitives,
+    /// no plain-HTTP egress, verity-required rootfs. Replacing it with `true`
+    /// applies those to dev; replacing it with `false` lifts them from prod,
+    /// which is the direction that matters. Neither was detected.
+    #[test]
+    fn only_the_prod_variant_carries_production_strict_policy() {
+        assert!(Variant::Prod.is_prod());
+        assert!(!Variant::Dev.is_prod());
+    }
+
+    /// Every seccomp tier parses from its own spelling, and only its own.
+    ///
+    /// Each of the five match arms could be deleted without a witness
+    /// noticing. A deleted arm does not silently downgrade — the tier fails
+    /// to parse, so a plan naming it is refused — but a plan that legitimately
+    /// asks for `essential` being rejected as unspellable is a failure the
+    /// error message would not explain, and the arm set is the wire contract
+    /// either way.
+    ///
+    /// Round-tripped through `Display` so the parser and the renderer cannot
+    /// drift apart, and paired with a rejection so the test cannot pass by
+    /// accepting everything.
+    #[test]
+    fn every_seccomp_tier_parses_from_its_own_spelling() {
+        for (spelling, tier) in [
+            ("essential", PlanSeccompTier::Essential),
+            ("minimal", PlanSeccompTier::Minimal),
+            ("standard", PlanSeccompTier::Standard),
+            ("network", PlanSeccompTier::Network),
+            ("unrestricted", PlanSeccompTier::Unrestricted),
+        ] {
+            assert_eq!(
+                PlanSeccompTier::from_str(spelling),
+                Ok(tier),
+                "'{spelling}' must parse to its own tier"
+            );
+            assert_eq!(
+                alloc::format!("{tier}"),
+                spelling,
+                "the rendering must be the spelling the parser accepts"
+            );
+        }
+
+        assert!(
+            PlanSeccompTier::from_str("Standard").is_err(),
+            "the spellings are exact; a near miss must be refused rather \
+             than resolved to a neighbouring tier"
+        );
+        assert!(PlanSeccompTier::from_str("").is_err());
+    }
+}

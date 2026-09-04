@@ -107,13 +107,6 @@
       ]
     },
     {
-      "path": "crates/mvm-cli/src/commands/tests.rs",
-      "package": "mvm-cli",
-      "claims": [
-        19
-      ]
-    },
-    {
       "path": "crates/mvm-cli/src/commands/vm/console.rs",
       "package": "mvm-cli",
       "claims": [
@@ -364,7 +357,7 @@
     },
     {
       "number": 16,
-      "why": "every fn: witness lives in crates/*/tests/, which cargo-mutants does not mutate"
+      "why": "every fn: witness lives in test-only code (crates/*/tests/, or a #![cfg(test)] module file), which cargo-mutants does not mutate"
     }
   ],
   "accepted_misses": [
@@ -952,6 +945,11 @@
       "file": "crates/mvm-cli/src/commands/shared/resolve.rs",
       "mutant": "replace || with && in resolve_manifest_arg",
       "reason": "the discriminating input is a bare relative name that exists as a file or directory in the process's current directory. A test cannot create one without writing into the repo working tree or mutating process-global CWD shared by parallel tests under the documented cargo test fallback."
+    },
+    {
+      "file": "crates/mvm-contract/src/plan/types.rs",
+      "mutant": "replace | with ^ in CallerCommitment::from_hex",
+      "reason": "equivalent mutant — no test can kill it. `caller_commitment_nibble` returns a value in 0..=15, so `high << 4` occupies bits 4-7 and `low` occupies bits 0-3. The bit sets are disjoint, which makes `|` and `^` the same function over every input the expression can receive; checked exhaustively over all 256 nibble pairs, and the whole 1007-test mvm-contract suite passes with the mutation applied. Accepted rather than scoped out, because the surrounding decoder is claim surface and is witnessed by caller_commitment_hex_decodes_to_the_bytes_it_names."
     },
     {
       "file": "crates/mvm-contract/src/policy/network_policy.rs",
