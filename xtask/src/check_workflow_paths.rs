@@ -907,7 +907,7 @@ mod tests {
     }
 
     #[test]
-    fn no_kvm_pipeline_builds_with_kvm_then_boots_with_tcg() {
+    fn no_kvm_pipeline_prepares_a_bounded_bundle_then_boots_with_tcg() {
         let workflow = ci_full_workflow();
         let prepare = job_block(&workflow, "no-kvm-prepare");
         let bootstrap = job_block(&workflow, "no-kvm-bootstrap");
@@ -922,10 +922,6 @@ mod tests {
         );
         for (job, action) in [
             (bootstrap, "Bootstrap source-matched launch artifacts"),
-            (
-                build,
-                "Build and export the sealed exit_code workload with QEMU KVM",
-            ),
             (smoke, "Install and boot the sealed bundle under QEMU TCG"),
         ] {
             assert!(
@@ -937,26 +933,19 @@ mod tests {
                 "vhost-vsock access must be granted before QEMU starts"
             );
         }
-        let require_kvm = "Require KVM for bounded bundle preparation";
         let deny_kvm = "Deny KVM to force QEMU TCG";
-        let require_kvm_position = build
-            .find(require_kvm)
-            .expect("bundle preparation must require KVM");
         assert!(
-            !build.contains(deny_kvm),
-            "bundle preparation must not make the unaccelerated-boot claim"
-        );
-        let bundle_build_position = build
-            .find("Build and export the sealed exit_code workload with QEMU KVM")
-            .expect("the KVM job must build and export the sealed bundle");
-        assert!(
-            require_kvm_position < bundle_build_position,
-            "KVM access must be established before bundle preparation"
+            !build.contains("/dev/vhost-vsock")
+                && !build.contains("/dev/kvm")
+                && !build.contains("machine build --flake examples/exit_code"),
+            "bounded bundle preparation must not boot a builder VM"
         );
         assert!(
-            build.contains("2>&1 | tee /tmp/mvmctl-build.log")
-                && !build.contains("> /tmp/mvmctl-build.log 2>&1"),
-            "the hosted workload build must stream progress instead of leaving the runner silent"
+            build.contains("image boot update --tag boot-image/v0.1.3 --force")
+                && build.contains(".mvm-ci/cache/kernels/x86_64/workload/vmlinux")
+                && build.contains("write /tmp/exit-code-entrypoint /etc/mvm/entrypoint")
+                && build.contains("bundle export \"$slot_hash\""),
+            "bundle preparation must combine verified release rootfs bytes with source-matched launch artifacts and exporter"
         );
         let deny_kvm_position = smoke
             .find(deny_kvm)

@@ -29,11 +29,13 @@ fix product defects uncovered by exercising the documented commands.
 - [x] Run the complete hermetic BDD suite and focused suites for every touched
       crate.
 - [ ] Replace the hosted aarch64 lifecycle witness whose runner is repeatedly
-      terminated with a staged x86_64 witness: prepare the sealed bundle with
-      QEMU/KVM, then transfer it to a fresh runner that deliberately denies KVM
-      and installs and boots it under QEMU TCG. Retain the native aarch64
-      workspace lane and the full local Apple Silicon aarch64 TCG lifecycle
-      script, and collect a successful hosted run before completion.
+      terminated with a staged x86_64 witness: assemble a bounded signed
+      fixture from the signature-verified release rootfs and source-matched
+      kernel/runtime artifacts, then transfer it to a fresh runner that
+      deliberately denies KVM and installs and boots it under QEMU TCG. Retain
+      the native aarch64 workspace lane and the full local Apple Silicon
+      aarch64 TCG lifecycle script, and collect a successful hosted run before
+      completion.
 - [ ] Run the documented surface end to end on Linux/Firecracker and collect
       the macOS/HVF evidence required by the release gate.
 - [ ] Merge the implementation through the queue.
@@ -72,11 +74,17 @@ fix product defects uncovered by exercising the documented commands.
   a false hosted claim.
 - The first x86_64 replacement proved source-matched bootstrap on a stable
   hosted runner, but its unaccelerated workload build was also terminated by
-  the runner service after 7 minutes 6 seconds. Hosted CI therefore makes the
-  shorter claim it can sustain: QEMU/KVM prepares and signs the bundle, and a
-  fresh runner denies KVM before installing and booting that exact bundle with
-  QEMU TCG. The committed Apple Silicon script remains the full unaccelerated
-  build, seal, install, and boot lifecycle witness.
+  the runner service after 7 minutes 6 seconds. Moving bundle preparation to
+  QEMU/KVM did not make the build reliable: that runner was terminated after
+  5 minutes 6 seconds, and a retry with the build log streamed live was still
+  terminated after 6 minutes 56 seconds (4 minutes 17 seconds in the build).
+  Hosted CI therefore makes the shorter claim it can sustain: the exact source
+  binary fetches and verifies the pinned release rootfs, pairs it with the
+  source-matched workload kernel and runtime overlay, injects the one-shot
+  exit-code fixture, and signs/exports the bundle. A fresh runner denies KVM
+  before installing and booting that exact bundle with QEMU TCG. The committed
+  Apple Silicon script remains the full unaccelerated build, seal, install,
+  and boot lifecycle witness.
 - The full workspace runs exposed parallel-test races in the wasm endpoint-plan
   and workload broker-path witnesses: they read `MVM_HOME` without holding the
   shared environment guard used by the tests mutating that variable. Both now

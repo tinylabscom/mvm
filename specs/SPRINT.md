@@ -24,8 +24,10 @@
       3 seconds—established that its undocumented lifetime is neither the job
       timeout nor stable enough for retries or phase splitting. A subsequent
       x86_64 TCG workload build was also terminated by the runner service after
-      7 minutes 6 seconds. The hosted witness now prepares and signs its bundle
-      with QEMU/KVM, then transfers it to a fresh runner that deliberately
+      7 minutes 6 seconds. KVM preparation was terminated twice as well, even
+      with live log streaming. The hosted witness now assembles and signs a
+      bounded fixture from the verified release rootfs and source-matched
+      launch artifacts, then transfers it to a fresh runner that deliberately
       denies KVM before install and boot under QEMU TCG. Native aarch64
       workspace coverage and the full local Apple Silicon TCG lifecycle retain
       the architecture-specific and unaccelerated-build evidence. The same

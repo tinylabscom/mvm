@@ -16,9 +16,11 @@ Last updated: 2026-09-04
       lifetime is variable rather than governed by the job timeout: three
       stopped at 27–28 minutes, one at 14 minutes 20 seconds, and the corrected
       build runner after only 6 minutes 3 seconds. An x86_64 TCG workload build
-      was then terminated after 7 minutes 6 seconds too. The hosted witness now
-      prepares and signs the bundle with QEMU/KVM, then transfers it to a fresh
-      runner that denies KVM before install and boot under QEMU TCG. Native
+      was then terminated after 7 minutes 6 seconds too. KVM bundle preparation
+      was also terminated twice, including with live log streaming. The hosted
+      witness now assembles and signs a bounded fixture from the verified
+      release rootfs and source-matched launch artifacts, then transfers it to
+      a fresh runner that denies KVM before install and boot under QEMU TCG. Native
       aarch64 workspace coverage and the full local Apple Silicon lifecycle
       preserve architecture-specific and unaccelerated-build evidence. The full
       workspace run also exposed and fixed two process-global `MVM_HOME` races

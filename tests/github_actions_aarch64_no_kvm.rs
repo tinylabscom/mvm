@@ -2,10 +2,11 @@
 //!
 //! The hosted smoke lives in `ci-full.yml` (nightly / manual dispatch), not in
 //! the merge queue, because a cold QEMU TCG build can take hours and blocks the
-//! queue. Hosted runners have terminated long TCG builds on both architectures,
-//! so hosted CI prepares the bundle with KVM and explicitly denies KVM for the
-//! install-and-boot witness. The local Apple Silicon script retains the full
-//! aarch64 no-KVM lifecycle witness.
+//! queue. Hosted runners have terminated long workload builds under both TCG
+//! and KVM, so hosted CI assembles a bounded signed fixture from a verified
+//! release rootfs and source-matched launch artifacts, then explicitly denies
+//! KVM for the install-and-boot witness. The local Apple Silicon script retains
+//! the full aarch64 no-KVM lifecycle witness.
 
 use std::fs;
 
@@ -19,7 +20,6 @@ const REQUIRED_VIRTIOFS_PACKAGE: &str = "virtiofsd";
 const REQUIRED_VIRTIO_ROM_PACKAGE: &str = "ipxe-qemu";
 const REQUIRED_CI_VSOCK_OWNERSHIP: &str = "sudo chown \"$USER\" /dev/vhost-vsock";
 const REQUIRED_KVM_DENIAL: &str = "sudo chmod 000 /dev/kvm";
-const REQUIRED_KVM_ACCESS: &str = "sudo chmod 666 /dev/kvm";
 const REQUIRED_LOCAL_VSOCK_DEVICE: &str = "--device /dev/vhost-vsock:/dev/vhost-vsock";
 const FORBIDDEN_LOCAL_KVM_DEVICE: &str = "--device /dev/kvm:/dev/kvm";
 const REQUIRED_BUILDER_DOWNLOAD: &str =
@@ -28,8 +28,11 @@ const REQUIRED_BOOTSTRAP: &str =
     "/tmp/mvmctl-source-under-test --builder qemu bootstrap --production -v";
 const REQUIRED_QEMU_BUILD: &str =
     "/tmp/mvmctl-source-under-test --builder qemu machine build --flake examples/exit_code";
-const REQUIRED_STREAMED_BUILD_LOG: &str = "2>&1 | tee /tmp/mvmctl-build.log";
-const FORBIDDEN_SILENT_BUILD_LOG: &str = "> /tmp/mvmctl-build.log 2>&1";
+const REQUIRED_BOOT_IMAGE_UPDATE: &str =
+    "/tmp/mvmctl-source-under-test image boot update --tag boot-image/v0.1.3 --force";
+const REQUIRED_SOURCE_KERNEL: &str = ".mvm-ci/cache/kernels/x86_64/workload/vmlinux";
+const REQUIRED_ENTRYPOINT_PATCH: &str = "write /tmp/exit-code-entrypoint /etc/mvm/entrypoint";
+const REQUIRED_BUNDLE_EXPORT: &str = "/tmp/mvmctl-source-under-test bundle export \"$slot_hash\"";
 const FIRST_MACHINE_RUN: &str = "/tmp/mvmctl-source-under-test machine run";
 const REQUIRED_BAKED_ENTRYPOINT: &str = "--entrypoint";
 const FORBIDDEN_ENTRYPOINT_OVERRIDE: &str = "-- /bin/true";
@@ -134,7 +137,7 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
         );
     }
 
-    for job in [bootstrap_job, build_job, smoke_job] {
+    for job in [bootstrap_job, smoke_job] {
         assert!(
             job.contains(REQUIRED_CI_VSOCK_OWNERSHIP),
             "every live job must let the unprivileged QEMU process open /dev/vhost-vsock"
@@ -152,15 +155,9 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
             "the hosted unaccelerated stages must deny KVM before making a TCG claim"
         );
     }
-    assert!(
-        build_job.contains(REQUIRED_KVM_ACCESS) && !build_job.contains(REQUIRED_KVM_DENIAL),
-        "bounded hosted bundle preparation must use KVM and make no TCG-build claim"
-    );
-    assert!(
-        build_job.contains(REQUIRED_STREAMED_BUILD_LOG)
-            && !build_job.contains(FORBIDDEN_SILENT_BUILD_LOG),
-        "the hosted workload build must stream progress while retaining its diagnostic log"
-    );
+    assert!(!build_job.contains(REQUIRED_CI_VSOCK_OWNERSHIP));
+    assert!(!build_job.contains(REQUIRED_KVM_DENIAL));
+    assert!(!build_job.contains(REQUIRED_QEMU_BUILD));
     assert!(
         prepare.contains("runs-on: ubuntu-24.04") && !prepare.contains("runs-on: ubuntu-24.04-arm"),
         "the exact hosted smoke binaries must be compiled for the x86_64 runner that executes them"
@@ -181,10 +178,13 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
         build_job.contains("needs: no-kvm-bootstrap")
             && build_job.contains(&format!("name: {BINARY_ARTIFACT}"))
             && build_job.contains(&format!("name: {BOOTSTRAP_ARTIFACT}"))
-            && build_job.contains(REQUIRED_QEMU_BUILD)
+            && build_job.contains(REQUIRED_BOOT_IMAGE_UPDATE)
+            && build_job.contains(REQUIRED_SOURCE_KERNEL)
+            && build_job.contains(REQUIRED_ENTRYPOINT_PATCH)
+            && build_job.contains(REQUIRED_BUNDLE_EXPORT)
             && build_job.contains("uses: actions/upload-artifact@v7")
             && build_job.contains(&format!("name: {BUNDLE_ARTIFACT}")),
-        "the KVM build runner must restore bootstrap state and publish the sealed bundle"
+        "the bounded fixture runner must use verified boot-image bytes, source launch artifacts, and the source bundle exporter"
     );
     assert!(
         smoke_job.contains("needs: no-kvm-build")
