@@ -1103,6 +1103,24 @@ fn run_mutants_for_file(
     // Both report files exist and are empty when the baseline failed, so
     // their presence proves nothing. The counts do.
     let outcomes_path = out_dir.join("mutants.out").join("outcomes.json");
+    if !outcomes_path.exists() {
+        // A partial run: cargo-mutants left the report files but no outcomes.
+        // Say which surface file and what it exited with, because the bare
+        // read error names only a path under a temp directory and reads as a
+        // missing file rather than as a run that did not finish. That cost a
+        // maintainer a search for absent tests when the coverage was fine and
+        // the harness was not.
+        bail!(
+            "cargo mutants wrote no outcomes for {} (exit {:?}); {} is missing \
+             while the report files are present, so the run did not complete. \
+             This is a harness failure, not a witness gap — check whether the \
+             surface file has anything mutable in it before looking for \
+             missing tests.",
+            file.path,
+            status.code(),
+            outcomes_path.display(),
+        );
+    }
     let outcomes = std::fs::read_to_string(&outcomes_path)
         .with_context(|| format!("reading {}", outcomes_path.display()))?;
     ensure_mutants_actually_ran(&outcomes, &file.path)?;

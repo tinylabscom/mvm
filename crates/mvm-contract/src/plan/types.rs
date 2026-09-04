@@ -1797,6 +1797,109 @@ mod ingress_mapping_tests {
         assert!(serde_json::from_value::<IngressMapping>(json).is_err());
     }
 
+    /// Exactly `max_listeners` mappings are admitted; one more is not.
+    ///
+    /// The cap is `count > max`, and nothing exercised the boundary — replacing
+    /// it with `>=` survived, which is a signed plan carrying its full declared
+    /// listener set being refused as if it had exceeded it. A cap needs the
+    /// value at the cap tested, not only a value well past it.
+    #[test]
+    fn the_listener_cap_admits_exactly_its_limit_and_refuses_one_more() {
+        let at_cap: Vec<IngressMapping> = (0..3)
+            .map(|n| {
+                let mut m = opaque_tcp();
+                m.mapping_id = n + 1;
+                m.host_port = 8443 + n;
+                m
+            })
+            .collect();
+        assert_eq!(
+            validate_ingress_mappings(&at_cap, 3),
+            Ok(()),
+            "a set exactly at the cap must be admitted"
+        );
+
+        let mut over_cap = at_cap.clone();
+        let mut extra = opaque_tcp();
+        extra.mapping_id = 4;
+        extra.host_port = 8446;
+        over_cap.push(extra);
+        assert_eq!(
+            validate_ingress_mappings(&over_cap, 3),
+            Err(IngressMappingsError::TooMany { count: 4, max: 3 }),
+            "one past the cap must be refused, and say by how much"
+        );
+    }
+
+    /// The wire spellings are the wire contract.
+    ///
+    /// `as_str` returning `""` — or anything else — survived on both
+    /// `NetworkMode` and `StreamRetention`. These strings are what a serialized
+    /// plan and an audit entry agree on, so a silent change to either is a
+    /// silent change to the format, and asserting them is the only thing that
+    /// makes "kept identical to the serde representation" true rather than
+    /// aspirational.
+    #[test]
+    fn the_wire_spellings_are_pinned() {
+        assert_eq!(NetworkMode::None.as_str(), "none");
+        assert_eq!(NetworkMode::HostVsockProxy.as_str(), "host_vsock_proxy");
+        assert_eq!(StreamRetention::Persist.as_str(), "persist");
+        assert_eq!(StreamRetention::Ephemeral.as_str(), "ephemeral");
+
+        // And they really are the serde representation, which is the claim the
+        // doc comments make.
+        for mode in [NetworkMode::None, NetworkMode::HostVsockProxy] {
+            let json = serde_json::to_string(&mode).unwrap();
+            assert_eq!(json, format!("\"{}\"", mode.as_str()));
+        }
+        for retention in [StreamRetention::Persist, StreamRetention::Ephemeral] {
+            let json = serde_json::to_string(&retention).unwrap();
+            assert_eq!(json, format!("\"{}\"", retention.as_str()));
+        }
+    }
+
+    /// Every accepted `NetworkMode` spelling deserializes to its variant.
+    ///
+    /// Deleting the `host_vsock_proxy` arm survived: nothing read that spelling
+    /// off the wire, so a plan naming the only mode that carries traffic would
+    /// have been refused as an unknown variant.
+    #[test]
+    fn every_network_mode_spelling_round_trips_from_the_wire() {
+        assert_eq!(
+            serde_json::from_str::<NetworkMode>("\"none\"").unwrap(),
+            NetworkMode::None
+        );
+        assert_eq!(
+            serde_json::from_str::<NetworkMode>("\"host_vsock_proxy\"").unwrap(),
+            NetworkMode::HostVsockProxy
+        );
+        // The retired spelling is refused with its own explanation rather than
+        // as a generic unknown variant.
+        let err = serde_json::from_str::<NetworkMode>("\"l3_vsock\"").unwrap_err();
+        assert!(
+            err.to_string().contains("retired"),
+            "the retired mode should say so: {err}"
+        );
+    }
+
+    /// `is_default` distinguishes the default from anything else.
+    ///
+    /// Replacing it with `true` survived, so nothing observed it saying "no".
+    /// It gates whether limits are written to the wire at all, so a constant
+    /// `true` silently drops a workload's declared ceilings.
+    #[test]
+    fn is_default_is_false_once_a_ceiling_is_set() {
+        assert!(NetworkLimits::default().is_default());
+        let limits = NetworkLimits {
+            max_ingress_listeners: NetworkLimits::default().max_ingress_listeners + 1,
+            ..Default::default()
+        };
+        assert!(
+            !limits.is_default(),
+            "a changed ceiling must not report as the default"
+        );
+    }
+
     #[test]
     fn mapping_set_refuses_duplicate_id_and_bind() {
         let first = opaque_tcp();

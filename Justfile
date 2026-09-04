@@ -292,6 +292,15 @@ test-cargo:
 bdd:
     ./scripts/cargo-fast.sh build --bin mvmctl
     ./scripts/cargo-fast.sh build -p xtask
+    # The schema emitters `check-stubs` runs, built here rather than through
+    # `cargo run` from inside a scenario. `cargo run` takes cargo's package
+    # lock, which is global to the machine, so a suite that shells out mid-run
+    # serialises against every other cargo process on the host — including ones
+    # in unrelated worktrees. That is what made concurrent suites look hung.
+    ./scripts/cargo-fast.sh build -p mvm-sdk --features schema --bin emit_workload_schema --bin emit_runtime_schema
+    ./scripts/cargo-fast.sh build -p mvm-agentd --features schema --bin emit_protocol_schema
+    ./scripts/cargo-fast.sh build -p mvm-core --features schema --bin emit_broker_schema
+    ./scripts/cargo-fast.sh build -p mvm-sdk --bin emit_sdk_env --bin emit_sdk_errors --bin emit_sdk_ctors
     just sdk-install-typescript
     just sdk-build-typescript
     CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" ./scripts/cargo-fast.sh test -p mvm-conformance --test conformance --features bdd

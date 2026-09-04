@@ -20,6 +20,10 @@
 
 use std::process::ExitCode;
 
+#[cfg(target_os = "linux")]
+#[path = "stage0-init/build_config.rs"]
+mod build_config;
+
 fn main() -> ExitCode {
     #[cfg(target_os = "linux")]
     {
@@ -1022,9 +1026,30 @@ mod linux {
             Err(e) => eprintln!("stage0-init: nix --version failed to spawn: {e}"),
         }
 
-        // Optional host-dropped build config (single-attr / kernel-only
-        // modes); absent it, build the full image.
-        let conf = read_build_conf("/out/stage0-build.conf");
+        // The host's build config: which attr to build, and in which output
+        // mode. It rides the input disk under the disk transport; the QEMU path
+        // still shares a directory and drops it in `/out`.
+        //
+        // Not optional in practice, whatever the fallbacks below suggest: the
+        // host writes one for every Stage 0 build. When the disk transport
+        // stopped carrying it, those fallbacks turned a delivery failure into a
+        // *different build* — `default`/`image` instead of the workload kernel
+        // that was asked for — which surfaced only as a missing
+        // `mvm-kernel.config` on the host five minutes later. Say so here
+        // instead, where the reason is.
+        let conf_path = crate::build_config::locate(
+            Path::new(STAGE0_INPUT_STAGE),
+            Path::new("/out/stage0-build.conf"),
+        );
+        let conf = crate::build_config::read(&conf_path);
+        if conf.is_empty() {
+            eprintln!(
+                "stage0-init: no build config at {}; \
+                 building the default image, which is the wrong artifact for \
+                 any host that asked for something else",
+                conf_path.display()
+            );
+        }
         let attr = conf
             .get("MVM_STAGE0_BUILD_ATTR")
             .cloned()
@@ -1446,27 +1471,6 @@ mod linux {
         }
         let bytes = nul_terminated_c_chars(&uts.machine);
         Ok(String::from_utf8_lossy(&bytes).into_owned())
-    }
-
-    /// Minimal `KEY=VALUE` / `KEY="VALUE"` reader for the optional
-    /// host-dropped build conf — the host writes a small fixed set of plain
-    /// `MVM_STAGE0_*` assignments after validating every value as a token.
-    fn read_build_conf(path: &str) -> std::collections::HashMap<String, String> {
-        let mut map = std::collections::HashMap::new();
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return map;
-        };
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if let Some((k, v)) = line.split_once('=') {
-                let v = v.trim().trim_matches('"').trim_matches('\'');
-                map.insert(k.trim().to_string(), v.to_string());
-            }
-        }
-        map
     }
 
     fn copy_deref(src: &Path, dst: &Path) -> Result<(), String> {

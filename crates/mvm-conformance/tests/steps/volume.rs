@@ -264,11 +264,21 @@ fn execute_machine_shell(world: &mut CliWorld, script: String, machine: String) 
 
 #[when(expr = "I attempt a direct start of machine {string} with backend {string}")]
 fn attempt_direct_start(world: &mut CliWorld, machine: String, backend: String) {
+    let home = isolated_home(world);
+    // Scenarios that register a host directory install these probes as a side
+    // effect of registering. One that mounts a *managed* volume has no host
+    // directory to register, and still needs deterministic encryption probes on
+    // the PATH of the start it is about to attempt — so install them here
+    // rather than requiring a step whose subject is something else entirely.
+    //
+    // Requiring the earlier step is what broke `a failed persistent start
+    // releases its volume attachment lease`: it mounts a managed volume, never
+    // registers a host directory, and so panicked before reaching the start
+    // whose lease behaviour it exists to check.
     let encrypted_volume_probe_path = world
         .encrypted_volume_probe_path
         .clone()
-        .expect("host snapshot registration must install an encrypted-volume probe PATH");
-    let home = isolated_home(world);
+        .unwrap_or_else(|| super::cli::install_encrypted_backing_probes(home));
     let fixture_dir = home.join("direct-boot-fixture");
     fs::create_dir_all(&fixture_dir).expect("create direct-boot fixture directory");
     let kernel = fixture_dir.join("vmlinux");

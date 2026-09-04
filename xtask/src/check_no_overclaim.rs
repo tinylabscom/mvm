@@ -415,7 +415,14 @@ fn visit_inner(
         if path.is_dir() {
             if matches!(
                 name.as_str(),
-                "target" | ".git" | ".worktrees" | "node_modules" | "result" | ".direnv" | ".cargo"
+                "target"
+                    | ".git"
+                    | ".worktrees"
+                    | ".claude/worktrees"
+                    | "node_modules"
+                    | "result"
+                    | ".direnv"
+                    | ".cargo"
             ) || name.starts_with("result-")
             {
                 continue;
