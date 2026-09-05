@@ -102,6 +102,12 @@ pairs, and the full 1007-test suite passes with the mutation applied.
 - [x] Record the one equivalent mutant with a proof rather than a re-pin.
 - [x] Verify every new witness by applying the reported mutation and confirming
       it fails.
+- [x] Close the survivors the dead shard was hiding. Stopping the crash let the
+      mvm-cli shard reach `commands/vm/up/admission.rs`, which sorts after
+      `commands/tests.rs` and had never run; the mvm-contract shard surfaced
+      `NetworkPolicy::admits_outbound`, added by #3170 after the run this plan
+      was written from. Six more mutants, all killed, all verified by applying
+      the mutation.
 - [ ] Confirm on the first uninterrupted nightly that all three shards are green.
 - [ ] Close #3148 and #3149 through their linkage.
 

@@ -21,3 +21,22 @@
 - [ ] Merge the linked pull request through the queue.
 
 Owning plan: `specs/plans/2026-09-04-claim-witnesses-that-bite.md`.
+
+## Follow-up: the survivors the dead shard was hiding
+
+The first fix stopped the mvm-cli shard dying, which let it reach files it had
+never run. Two more shards' worth of survivors came out from behind it.
+
+- [x] Closed the four claim-10 survivors in `NetworkPolicy::admits_outbound`.
+      #3170 added the function — the "egress rules *or* a peer route" question
+      every site deciding whether to build the outbound path must ask — and it
+      shipped without a witness. Replacing it with `true` or `false`, narrowing
+      the `||`, and dropping the `!` all survived.
+- [x] Closed the two claim-19 survivors in `admit_plan_for_boot_with_ingress`,
+      where admission pins a directory share's content digest. `==` to `!=`
+      hashes disks and skips directory shares; `&&` to `||` overwrites a
+      caller-supplied pin with a snapshot of the tree. The existing witness
+      tests the enforcement side in mvm-hostd and is handed a plan that already
+      carries a digest, so it cannot see either.
+- [x] Verified all six by applying the reported mutation and confirming failure.
+- [ ] Confirm the shards green on the next nightly.

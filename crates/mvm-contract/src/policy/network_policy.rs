@@ -769,6 +769,57 @@ mod tests {
         );
     }
 
+    /// `admits_outbound` is the disjunction, and each side alone is enough.
+    ///
+    /// This is the question every site deciding whether to *build* the outbound
+    /// machinery has to ask — the per-VM endpoint, the identity drive, the
+    /// guest's own dialer. `allows_egress` answers only the host allow-list, and
+    /// asking the narrow question at those sites booted guests whose documented
+    /// `--peer` route had nothing to dial through.
+    ///
+    /// The peer-only row is the one that carries the difference: it is deny-all
+    /// for ordinary egress and must still admit outbound. Without it, narrowing
+    /// the `||` back to `&&` — or dropping the `!` — reads as a no-op, and both
+    /// survived. So did replacing the whole function with a constant, which is
+    /// claim 10's default-deny posture either refusing every peer route or
+    /// building the outbound path for a policy that admits nothing.
+    #[test]
+    fn admits_outbound_is_egress_or_a_peer_route() {
+        let peer = crate::peer::PeerBinding {
+            name: crate::peer::PeerName::parse("db.mvm.peer").expect("valid peer name"),
+            port: 5432,
+            host_addr: "127.0.0.1".into(),
+            host_port: 34567,
+        };
+
+        // Neither side: the deny-all default admits nothing outbound.
+        assert!(!NetworkPolicy::deny_all().admits_outbound());
+        assert!(!NetworkPolicy::allow_list(vec![]).admits_outbound());
+
+        // Egress alone.
+        assert!(NetworkPolicy::unrestricted().admits_outbound());
+        assert!(NetworkPolicy::allow_list(vec![HostPort::new("a.com", 443)]).admits_outbound());
+
+        // A peer route alone, over a policy that is deny-all for ordinary
+        // egress. This is the case the function was added for.
+        let peer_only = NetworkPolicy::deny_all().with_peers(vec![peer.clone()]);
+        assert!(
+            !peer_only.allows_egress(),
+            "a peer-only policy must stay deny-all for ordinary egress"
+        );
+        assert!(
+            peer_only.admits_outbound(),
+            "a peer route must still build the outbound path"
+        );
+
+        // Both sides.
+        assert!(
+            NetworkPolicy::allow_list(vec![HostPort::new("a.com", 443)])
+                .with_peers(vec![peer])
+                .admits_outbound()
+        );
+    }
+
     #[test]
     fn allows_egress_covers_every_shape() {
         assert!(!NetworkPolicy::deny_all().allows_egress());
