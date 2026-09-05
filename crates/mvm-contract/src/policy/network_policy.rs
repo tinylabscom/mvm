@@ -729,6 +729,55 @@ pub fn unmap_v4_mapped(ip: IpAddr) -> IpAddr {
 
 #[cfg(test)]
 mod tests {
+    /// `admits_outbound` answers for each way a policy can reach off-box, and
+    /// only those ways.
+    ///
+    /// Four mutants survived here: the function replaced by `true`, by `false`,
+    /// its `||` swapped for `&&`, and its `!` deleted. Nothing observed it
+    /// directly — the `--peer` fix that introduced it tested its *effects*
+    /// through `effective_vsock_egress` and never the predicate itself, which
+    /// is the difference between "the behaviour happens to be right" and "the
+    /// function is pinned".
+    ///
+    /// It decides whether a workload gets an outbound path built at all. Stuck
+    /// `true`, every deny-all workload gets an endpoint and a guest dialer it
+    /// should not have. Stuck `false`, no workload can reach anything.
+    #[test]
+    fn admits_outbound_covers_each_route_off_box_and_nothing_else() {
+        let peer = crate::peer::PeerBinding {
+            name: crate::peer::PeerName::parse("db.mvm.peer").expect("valid peer name"),
+            port: 5432,
+            host_addr: "127.0.0.1".parse().expect("loopback literal"),
+            host_port: 34567,
+        };
+
+        // Neither route: the default posture reaches nothing. Kills `-> true`.
+        assert!(
+            !NetworkPolicy::deny_all().admits_outbound(),
+            "deny-all with no peers reaches nothing"
+        );
+
+        // Egress only. Kills `-> false`.
+        assert!(
+            NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)])
+                .admits_outbound(),
+            "an admitted host is a route off-box"
+        );
+
+        // Peer only — deny-all for ordinary egress. Kills `-> false`, `||`->`&&`
+        // (the left side is false here, so `&&` would answer false), and the
+        // deleted `!` (which would read "peers is empty" and answer false).
+        let peer_only = NetworkPolicy::deny_all().with_peers(vec![peer]);
+        assert!(
+            !peer_only.allows_egress(),
+            "fixture must exercise the peer route, not an allow-list"
+        );
+        assert!(
+            peer_only.admits_outbound(),
+            "a peer binding is a route off-box even under deny-all egress"
+        );
+    }
+
     use alloc::vec;
 
     use super::*;
