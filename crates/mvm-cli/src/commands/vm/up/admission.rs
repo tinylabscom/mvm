@@ -2522,6 +2522,140 @@ allow_hosts = ["localhost:8443"]
         path
     }
 
+    /// Admission pins a directory share's content digest, and only where one
+    /// is missing and the grant really is a directory.
+    ///
+    /// The pin is what makes claim 19's post-admission drift refusal possible:
+    /// enforcement re-hashes at attach time and compares. If admission records
+    /// no digest, there is nothing to compare against and the refusal cannot
+    /// fire — it reports present and never bites, which is worse than no
+    /// refusal because it is believed.
+    ///
+    /// Two mutants survived here and this covers both. Flipping `==` to `!=`
+    /// hashes disks and skips directory shares, so exactly the grants the claim
+    /// is about lose their pin. Relaxing `&&` to `||` re-hashes a share that
+    /// already carries a digest, overwriting a caller-supplied identity with
+    /// whatever the tree happens to be at admission — which turns a pin into a
+    /// snapshot and admits the drift it exists to refuse.
+    ///
+    /// The existing witness, `admitted_share_digest_refuses_directory_changed_after_admission`,
+    /// tests the enforcement side in mvm-hostd. It cannot see this: it is
+    /// handed a plan that already carries a digest.
+    #[test]
+    fn admission_pins_a_directory_shares_digest_and_leaves_other_grants_alone() {
+        let _env = mvm_core::util::test_env::TestEnv::new();
+        let shared = tempfile::tempdir().unwrap();
+        std::fs::write(shared.path().join("payload.txt"), b"admitted bytes").unwrap();
+        let canonical = std::fs::canonicalize(shared.path()).unwrap();
+        let expected = mvm_fs::hash::hash_source(&canonical).expect("the tree hashes");
+
+        let disk_dir = tempfile::tempdir().unwrap();
+        let disk = disk_dir.path().join("data.img");
+        std::fs::write(&disk, b"disk bytes").unwrap();
+
+        const ALREADY_PINNED: &str =
+            "1111111111111111111111111111111111111111111111111111111111111111";
+
+        let share = |tag: &str, host: &std::path::Path, guest: &str, kind, digest: Option<&str>| {
+            mvm_core::plan::HostShareGrant {
+                tag: tag.to_string(),
+                host_path: host.display().to_string(),
+                guest_path: guest.to_string(),
+                kind,
+                read_only: false,
+                encrypted: false,
+                content_sha256: digest.map(str::to_string),
+            }
+        };
+
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path());
+        let ledger = InMemoryNonceLedger::new();
+        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            network_mode: mvm_contract::plan::NetworkMode::default(),
+            tenant: "local",
+            vm_name: "vm-shares",
+            backend_name: "firecracker",
+            rootfs_path: &rootfs,
+            kernel_path: None,
+            precomputed_image_sha256: None,
+            boot_artifact_identity: None,
+            cpus: 1,
+            mem_mib: 512,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
+            secrets: Vec::new(),
+            caller_commitment: None,
+            no_supervisor: false,
+            ledger: &ledger,
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: vec![
+                share(
+                    "uvol0",
+                    shared.path(),
+                    "/work",
+                    mvm_core::plan::ShareKind::DirShare,
+                    None,
+                ),
+                share(
+                    "uvol1",
+                    shared.path(),
+                    "/pinned",
+                    mvm_core::plan::ShareKind::DirShare,
+                    Some(ALREADY_PINNED),
+                ),
+                share(
+                    "uvol2",
+                    &disk,
+                    "/data",
+                    mvm_core::plan::ShareKind::Disk,
+                    None,
+                ),
+            ],
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            restrict_agent_verbs: false,
+            services: Vec::new(),
+            grants: None,
+            backend_kind: Some(mvm_contract::protocol::vm_backend::BackendKind::Firecracker),
+            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
+            assets: Vec::new(),
+        })
+        .expect("admission")
+        .expect("Some when admission ran");
+
+        let shares = &ctx.admitted.plan().shares;
+        let by_tag = |tag: &str| {
+            shares
+                .iter()
+                .find(|s| s.tag == tag)
+                .unwrap_or_else(|| panic!("the signed plan carries {tag}"))
+        };
+
+        assert_eq!(
+            by_tag("uvol0").content_sha256.as_deref(),
+            Some(expected.as_str()),
+            "an unpinned directory share must be hashed at admission, or drift              enforcement has nothing to compare against"
+        );
+        assert_eq!(
+            by_tag("uvol1").content_sha256.as_deref(),
+            Some(ALREADY_PINNED),
+            "a share that already carries a digest must keep it — re-hashing              would replace a pin with a snapshot of the tree at admission"
+        );
+        assert_eq!(
+            by_tag("uvol2").content_sha256,
+            None,
+            "a disk is not a directory tree and must not be hashed as one"
+        );
+    }
+
     #[test]
     fn a_manifest_grant_reaches_the_signed_plan() {
         let _env = mvm_core::util::test_env::TestEnv::new();
