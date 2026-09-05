@@ -601,7 +601,28 @@ SUITE_STARTED=""
 # backend runs them and only a genuinely incapable one skips — the alternative,
 # tolerating the skip without opting in, silently dropped the witness for the
 # README's two `--mount` examples on a host that could have run it.
-ALLOWED_SKIPS="pending,needs-perf-budget-host,needs-memory-snapshot,needs-bundle-fixture,needs-tls-tunnel-client,needs-dir-share,needs-unenforceable-wall-clock"
+#
+# `needs-warm-claim` joins the tolerated set for the same reason as
+# `needs-unenforceable-wall-clock`: it is a property of the host, not a
+# capability this lane is supposed to provide. A forked child that never answers
+# the post-restore identity handshake cannot be made to answer by configuring
+# the lane differently, and the launch still runs — it cold-boots instead of
+# claiming a standby. The skip stays counted and its reason names the tracking
+# issue, so the coverage that was not taken is visible rather than absent.
+ALLOWED_SKIPS="pending,needs-perf-budget-host,needs-memory-snapshot,needs-bundle-fixture,needs-tls-tunnel-client,needs-dir-share,needs-unenforceable-wall-clock,needs-warm-claim"
+
+# `needs-firecracker` is deliberately intolerable above, and stays that way on
+# the lane that runs Firecracker. On macOS there is no `/dev/kvm` and no
+# Firecracker to put on PATH, so the skip is a property of the tier rather than
+# a lane that failed to boot what it claims to — the distinction the rest of
+# this allow-list is built on.
+#
+# Tolerating it per-platform rather than globally keeps the Linux lane strict:
+# a Firecracker skip there still means the backend under test did not run, and
+# still fails.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  ALLOWED_SKIPS="$ALLOWED_SKIPS,needs-firecracker"
+fi
 
 echo "==> documented examples + machine journey (cucumber, @live)"
 SUITE_STARTED=1
