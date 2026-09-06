@@ -822,6 +822,153 @@ fn verify_signature(version: &str, archive_name: &str, archive_path: &Path) -> R
     Ok(())
 }
 
+/// A released CLI version, ordered by semantic-version precedence.
+///
+/// [`BootImageVersion`] deliberately drops a pre-release suffix, because the
+/// image line has never carried one and dropping it keeps that ordering total.
+/// Doing the same here would make `0.18.0-rc.1` compare *equal* to `0.18.0`,
+/// which is the single comparison this type exists to get right.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReleaseVersion {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    /// Dot-separated pre-release identifiers; empty for a normal release.
+    pre: Vec<String>,
+}
+
+impl Ord for ReleaseVersion {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.major, self.minor, self.patch)
+            .cmp(&(other.major, other.minor, other.patch))
+            .then_with(|| compare_prerelease(&self.pre, &other.pre))
+    }
+}
+
+impl PartialOrd for ReleaseVersion {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl ReleaseVersion {
+    /// Parse `X.Y.Z` or `X.Y.Z-<pre>`, with or without a leading `v`.
+    ///
+    /// Build metadata (`+...`) is stripped: semver excludes it from precedence,
+    /// so two versions differing only there are the same release.
+    ///
+    /// Anything else returns `None`. A version that cannot be ordered is one
+    /// this must not claim to have ordered — the caller falls back to the
+    /// equality test rather than acting on a guess.
+    pub(crate) fn parse(raw: &str) -> Option<Self> {
+        let raw = raw.trim();
+        let raw = raw.strip_prefix('v').unwrap_or(raw);
+        let raw = raw.split('+').next()?;
+        // `None` (no hyphen) and `Some("")` (`0.18.0-`) are different: the
+        // first is a normal release, the second is malformed. Collapsing them
+        // to an empty string made `0.18.0-` parse as `0.18.0`.
+        let (core, pre) = match raw.split_once('-') {
+            Some((core, pre)) => (core, Some(pre)),
+            None => (raw, None),
+        };
+
+        let mut parts = core.split('.');
+        let mut next = || parts.next()?.parse::<u64>().ok();
+        let major = next()?;
+        let minor = next()?;
+        let patch = next()?;
+        if parts.next().is_some() {
+            return None;
+        }
+
+        let pre: Vec<String> = match pre {
+            None => Vec::new(),
+            Some(pre) => pre.split('.').map(str::to_string).collect(),
+        };
+        // `1.0.0-` and `1.0.0-rc..1` are malformed, not a pre-release of
+        // anything: an empty identifier has no precedence against a real one.
+        if pre.iter().any(|id| id.is_empty()) {
+            return None;
+        }
+
+        Some(Self {
+            major,
+            minor,
+            patch,
+            pre,
+        })
+    }
+}
+
+/// Semver §11: a pre-release version has lower precedence than the normal
+/// version it precedes, and two pre-releases compare identifier by identifier.
+fn compare_prerelease(a: &[String], b: &[String]) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a.is_empty(), b.is_empty()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => {
+            for (x, y) in a.iter().zip(b.iter()) {
+                let ord = compare_identifier(x, y);
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+            // Every shared identifier is equal, so the longer set wins:
+            // `rc.1.1` outranks `rc.1`.
+            a.len().cmp(&b.len())
+        }
+    }
+}
+
+/// Numeric identifiers compare numerically and rank below alphanumeric ones;
+/// alphanumeric identifiers compare in ASCII order.
+fn compare_identifier(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a.parse::<u64>(), b.parse::<u64>()) {
+        (Ok(x), Ok(y)) => x.cmp(&y),
+        (Ok(_), Err(_)) => Ordering::Less,
+        (Err(_), Ok(_)) => Ordering::Greater,
+        (Err(_), Err(_)) => a.cmp(b),
+    }
+}
+
+/// What `update` should do about the release it found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpdateAction {
+    /// The running binary is already the resolved release.
+    UpToDate,
+    /// Install the resolved release over the running one.
+    Install,
+    /// The resolved release is older than the running one. Refused, because a
+    /// user who ran `update` asked to move forward and would not be told
+    /// otherwise: the old code called this "New version available" and
+    /// installed it.
+    RefuseDowngrade,
+}
+
+/// Decide without performing any I/O, so every branch is testable.
+///
+/// `--force` overrides both refusals — reinstalling the same version and
+/// deliberately moving back to an older one are both things a user can mean.
+pub(crate) fn decide_update(latest: &str, current: &str, force: bool) -> UpdateAction {
+    use std::cmp::Ordering;
+
+    let ordered = ReleaseVersion::parse(latest)
+        .zip(ReleaseVersion::parse(current))
+        .map(|(latest, running)| latest.cmp(&running));
+
+    match ordered {
+        Some(Ordering::Less) if !force => UpdateAction::RefuseDowngrade,
+        Some(Ordering::Equal) if !force => UpdateAction::UpToDate,
+        // Unparseable on either side: fall back to the equality test this used
+        // before there was an ordering at all. Not a guess, just no worse.
+        None if latest == current && !force => UpdateAction::UpToDate,
+        _ => UpdateAction::Install,
+    }
+}
+
 /// Main entry point: check for updates and optionally install.
 /// Tag prefix for the boot-image release line. Images version on their own
 /// counter, so `v0.18.0` (binaries) and `boot-image/v0.1.0` (images) name
@@ -923,15 +1070,36 @@ pub fn update(check_only: bool, force: bool, skip_verify: bool) -> Result<()> {
     let latest_version = strip_v_prefix(&latest_tag);
     sp.finish_and_clear();
 
-    if latest_version == current && !force {
-        ui::success(&format!("Already up to date ({}).", current));
-        return Ok(());
+    match decide_update(latest_version, current, force) {
+        UpdateAction::UpToDate => {
+            ui::success(&format!("Already up to date ({}).", current));
+            return Ok(());
+        }
+        UpdateAction::RefuseDowngrade => {
+            ui::warn(&format!(
+                "The latest release is {}, which is older than the running {}.",
+                latest_version, current
+            ));
+            ui::info("Not downgrading. Re-run with --force to install it anyway.");
+            return Ok(());
+        }
+        UpdateAction::Install => {}
     }
 
     if latest_version == current {
         ui::info(&format!(
             "Already at {} but --force specified, reinstalling.",
             current
+        ));
+    } else if ReleaseVersion::parse(latest_version)
+        .zip(ReleaseVersion::parse(current))
+        .is_some_and(|(latest, running)| latest < running)
+    {
+        // Reachable only under --force. Announcing a downgrade as a "new
+        // version" is what this whole change is about.
+        ui::info(&format!(
+            "Installing {} over the newer {} (--force).",
+            latest_version, current
         ));
     } else {
         ui::info(&format!(
@@ -972,6 +1140,116 @@ pub fn update(check_only: bool, force: bool, skip_verify: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::{ReleaseVersion, UpdateAction, decide_update};
+
+    fn v(raw: &str) -> ReleaseVersion {
+        ReleaseVersion::parse(raw).unwrap_or_else(|| panic!("{raw} should parse"))
+    }
+
+    /// The comparison that was missing. `update` tested string equality, so any
+    /// resolved release that was not byte-identical to the running one was
+    /// installed — forward or not.
+    #[test]
+    fn a_prerelease_ranks_below_the_release_it_precedes() {
+        assert!(v("0.18.0-rc.1") < v("0.18.0"));
+        assert!(v("0.18.0") > v("0.18.0-rc.1"));
+        // ...and still above everything before it, which is the half a
+        // suffix-dropping parse would get right by accident.
+        assert!(v("0.18.0-rc.1") > v("0.17.0"));
+    }
+
+    #[test]
+    fn prerelease_identifiers_compare_by_semver_rules() {
+        // Numeric identifiers compare numerically, not as strings: the string
+        // ordering would put rc.10 before rc.9.
+        assert!(v("0.18.0-rc.2") < v("0.18.0-rc.10"));
+        // Numeric identifiers rank below alphanumeric ones.
+        assert!(v("0.18.0-1") < v("0.18.0-alpha"));
+        // Alphanumeric identifiers compare in ASCII order.
+        assert!(v("0.18.0-alpha") < v("0.18.0-beta"));
+        // A longer set wins when every shared identifier is equal.
+        assert!(v("0.18.0-rc.1") < v("0.18.0-rc.1.1"));
+    }
+
+    #[test]
+    fn the_release_triple_still_dominates_the_suffix() {
+        assert!(
+            v("0.9.0") < v("0.10.0"),
+            "string ordering would invert this"
+        );
+        assert!(v("0.18.1-rc.1") > v("0.18.0"));
+        assert_eq!(v("0.18.0"), v("0.18.0"));
+    }
+
+    #[test]
+    fn parse_accepts_the_shapes_a_tag_actually_takes_and_rejects_the_rest() {
+        assert_eq!(v("v0.18.0"), v("0.18.0"), "a leading v is the tag form");
+        // Build metadata is excluded from precedence by semver, so two
+        // versions differing only there are the same release.
+        assert_eq!(v("0.18.0+deadbeef"), v("0.18.0"));
+
+        for bad in ["", "0.18", "0.18.0.1", "not-a-version", "0.x.0", "0.18.0-"] {
+            assert!(
+                ReleaseVersion::parse(bad).is_none(),
+                "{bad:?} is not orderable and must not parse"
+            );
+        }
+    }
+
+    /// The bug, stated as the behaviour: an rc user's latest is the stable
+    /// release, because the rc is published as a prerelease and deliberately is
+    /// not latest. Installing it walks them backwards.
+    #[test]
+    fn an_rc_is_not_walked_back_to_stable_by_a_plain_update() {
+        assert_eq!(
+            decide_update("0.17.0", "0.18.0-rc.1", false),
+            UpdateAction::RefuseDowngrade
+        );
+        // Deliberately moving back is something a user can mean.
+        assert_eq!(
+            decide_update("0.17.0", "0.18.0-rc.1", true),
+            UpdateAction::Install
+        );
+    }
+
+    #[test]
+    fn moving_forward_and_standing_still_are_unchanged() {
+        assert_eq!(
+            decide_update("0.18.0", "0.17.0", false),
+            UpdateAction::Install
+        );
+        assert_eq!(
+            decide_update("0.18.0", "0.18.0-rc.1", false),
+            UpdateAction::Install,
+            "the rc's own final release is a real upgrade"
+        );
+        assert_eq!(
+            decide_update("0.18.0", "0.18.0", false),
+            UpdateAction::UpToDate
+        );
+        assert_eq!(
+            decide_update("0.18.0", "0.18.0", true),
+            UpdateAction::Install,
+            "--force reinstalls the same version"
+        );
+    }
+
+    /// A version neither side can order must not become a silent downgrade.
+    /// The equality test is what this did before an ordering existed, and
+    /// falling back to it is no worse than it ever was.
+    #[test]
+    fn an_unorderable_version_falls_back_to_the_equality_test() {
+        assert_eq!(
+            decide_update("nightly", "nightly", false),
+            UpdateAction::UpToDate
+        );
+        assert_eq!(
+            decide_update("nightly", "0.18.0", false),
+            UpdateAction::Install,
+            "unparseable is not evidence of a downgrade, so it must not refuse"
+        );
+    }
+
     /// The image counter and the CLI counter are different numbers, and the
     /// fetch URL has to follow the image one.
     #[test]
