@@ -4,10 +4,12 @@ Last updated: 2026-09-06
 
 ## In progress
 
-- [ ] **Public CVE evidence corpus.**
+- [x] **Public CVE evidence corpus.**
       `specs/plans/2026-09-06-public-cve-corpus.md`.
-      Promote the generated assurance bundle through the existing public MVM
-      site while preserving its checksum and non-certifying claim boundary.
+      The generated assurance bundle is live at
+      <https://runmvm.com/security/cve-corpus/> with its checksums and
+      non-certifying claim boundary intact; merged via #3192 and deployed by
+      run #34061894511.
 
 - [ ] **Execute the documented README surface.**
       `specs/plans/2026-09-03-readme-execution-coverage.md`.

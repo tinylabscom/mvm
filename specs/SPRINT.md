@@ -10,11 +10,12 @@
 
 ## In progress
 
-- [ ] **Publish the reviewed CVE evidence corpus.**
+- [x] **Publish the reviewed CVE evidence corpus.**
       `specs/plans/2026-09-06-public-cve-corpus.md`.
-      The existing public Cloudflare Pages site will carry the generated static
-      bundle unchanged, with a discoverable guide, checksum verification, and
-      the current non-certifying tier stated explicitly.
+      The generated bundle is live at
+      <https://runmvm.com/security/cve-corpus/> with checksum verification, a
+      discoverable guide, and the non-certifying tier stated explicitly;
+      merged via #3192 and deployed by run #34061894511.
 
 - [ ] **Execute the documented README surface.**
       `specs/plans/2026-09-03-readme-execution-coverage.md`.
