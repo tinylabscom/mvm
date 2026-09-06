@@ -118,7 +118,7 @@
       # the two in lock-step or `mvmctl up` admission fails.
       # `xtask check-runtime-overlay-version` (a CI gate)
       # asserts this match so the pin can't silently go stale.
-      overlayVersion = "0.18.0";
+      overlayVersion = "0.18.0-rc.1";
 
       # mvm-agentd binaries — agent + seccomp shim + verity-init.
       # the universal initramfs agent is PID 1; it lives in the

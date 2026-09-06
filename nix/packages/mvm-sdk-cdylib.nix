@@ -68,7 +68,7 @@ in
 
 pkgs.rustPlatform.buildRustPackage ({
   pname = "mvm-sdk-cdylib" + lib.optionalString isMusl "-musl";
-  version = "0.18.0";
+  version = "0.18.0-rc.1";
 
   src = mvmSrc;
 
