@@ -17,6 +17,8 @@
 use std::fs;
 use std::path::Path;
 
+use sha2::{Digest, Sha256};
+
 /// How the release workflow spells the arch inside a `run:` block…
 const SHELL_ARCH_TOKEN: &str = "${ARCH}";
 /// …and inside a step's `with:` block.
@@ -47,6 +49,48 @@ fn pages_workflow() -> String {
     let path = Path::new(".github/workflows/pages.yml");
     fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+}
+
+fn verify_checksum_manifest(directory: &Path) {
+    let manifest_path = directory.join("SHA256SUMS");
+    let manifest = fs::read_to_string(&manifest_path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", manifest_path.display()));
+    for line in manifest.lines() {
+        let (expected, name) = line.split_once("  ").unwrap_or_else(|| {
+            panic!(
+                "malformed checksum line in {}: {line}",
+                manifest_path.display()
+            )
+        });
+        let artifact_path = directory.join(name);
+        let bytes = fs::read(&artifact_path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", artifact_path.display()));
+        assert_eq!(
+            hex::encode(Sha256::digest(bytes)),
+            expected,
+            "{} does not match its published checksum",
+            artifact_path.display()
+        );
+    }
+}
+
+#[test]
+fn public_cve_corpus_is_integrity_checked_and_non_certifying() {
+    let root = Path::new("public/public/security/cve-corpus");
+    verify_checksum_manifest(root);
+
+    for cve in ["CVE-2021-21315", "CVE-2025-55182"] {
+        let directory = root.join(cve);
+        verify_checksum_manifest(&directory);
+        let page = fs::read_to_string(directory.join("index.html")).expect("read CVE page");
+        assert!(page.contains("Tier 2 was not attempted"));
+        assert!(page.contains("Containment is not proven"));
+    }
+
+    let guide = fs::read_to_string("public/src/content/docs/security/cve-demonstrations.md")
+        .expect("read CVE demonstration guide");
+    assert!(guide.contains("/security/cve-corpus/"));
+    assert!(guide.contains("non-certifying"));
 }
 
 fn assert_publishes(workflow: &str, asset: &str) {

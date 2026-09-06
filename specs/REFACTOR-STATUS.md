@@ -1,8 +1,13 @@
 # Refactor status
 
-Last updated: 2026-09-04
+Last updated: 2026-09-06
 
 ## In progress
+
+- [ ] **Public CVE evidence corpus.**
+      `specs/plans/2026-09-06-public-cve-corpus.md`.
+      Promote the generated assurance bundle through the existing public MVM
+      site while preserving its checksum and non-certifying claim boundary.
 
 - [ ] **Execute the documented README surface.**
       `specs/plans/2026-09-03-readme-execution-coverage.md`.

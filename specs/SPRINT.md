@@ -10,6 +10,12 @@
 
 ## In progress
 
+- [ ] **Publish the reviewed CVE evidence corpus.**
+      `specs/plans/2026-09-06-public-cve-corpus.md`.
+      The existing public Cloudflare Pages site will carry the generated static
+      bundle unchanged, with a discoverable guide, checksum verification, and
+      the current non-certifying tier stated explicitly.
+
 - [ ] **Execute the documented README surface.**
       `specs/plans/2026-09-03-readme-execution-coverage.md`.
       Thirty-four of thirty-five registered examples now execute through a
