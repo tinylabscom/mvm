@@ -268,6 +268,18 @@ pub(crate) fn satisfies_mvm_version(req: &str) -> bool {
 }
 
 fn parse_version_triple(s: &str) -> Option<(u64, u64, u64)> {
+    // Drop a pre-release or build suffix before splitting. `0.18.0-rc.1`
+    // otherwise splits to ["0", "18", "0-rc", "1"], fails to parse, and the
+    // caller's `_ => true` fallback then satisfies *every* requirement — a
+    // pre-release build would accept a template demanding a version that does
+    // not exist yet.
+    //
+    // Dropping it makes a pre-release count as the version it precedes, which
+    // is what a minimum-version gate should say: `0.18.0-rc.1` carries
+    // `0.18.0`'s template surface. Deliberately not `update::ReleaseVersion`,
+    // which orders an rc *below* its own release because it answers a
+    // different question — whether to move a user onto it.
+    let s = s.split(['-', '+']).next().unwrap_or(s);
     let mut parts = s.split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next().unwrap_or("0").parse().ok()?;
@@ -346,6 +358,25 @@ mod tests {
         assert!(satisfies_mvm_version(""));
         assert!(satisfies_mvm_version(">=0.1.0"));
         assert!(!satisfies_mvm_version(">=999.0.0"));
+    }
+
+    /// A pre-release build must still enforce the bound.
+    ///
+    /// `0.18.0-rc.1` split on `.` yields ["0", "18", "0-rc", "1"], so the patch
+    /// component did not parse and the whole triple came back `None`. With the
+    /// current version unreadable, `satisfies_mvm_version`'s fallback declared
+    /// every requirement satisfied — the `>=999.0.0` case above passed on a
+    /// release build and silently inverted on the first release candidate.
+    #[test]
+    fn a_prerelease_build_parses_to_the_release_it_precedes() {
+        assert_eq!(parse_version_triple("0.18.0-rc.1"), Some((0, 18, 0)));
+        assert_eq!(parse_version_triple("0.18.0+deadbeef"), Some((0, 18, 0)));
+        assert_eq!(parse_version_triple("0.18.0"), Some((0, 18, 0)));
+        assert_eq!(
+            parse_version_triple("0.18.0-rc.1"),
+            parse_version_triple("0.18.0"),
+            "a minimum-version gate reads an rc as the version it precedes"
+        );
     }
 
     #[test]
