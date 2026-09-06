@@ -955,6 +955,19 @@ mod tests {
                 && build.contains("bundle export \"$slot_hash\""),
             "bundle preparation must combine verified release rootfs bytes with source-matched launch artifacts and exporter"
         );
+        // `/etc/mvm/entrypoint` is a marker, not a command line. The agent
+        // takes the marker file itself as the program only when it starts
+        // with `#!` and is mode 0755 root:root, and `debugfs write` creates
+        // 0644. The fixture originally wrote a command line at 0644, which
+        // satisfies neither, so the guest refused the entrypoint at boot and
+        // the lane exited 1 where it asserts 7 — every night, undetected,
+        // because the only thing checking was a guest three jobs downstream.
+        // This lane runs nightly; this assertion runs on every pull request.
+        assert!(
+            build.contains("'#!/bin/sh'") && build.contains("sif /etc/mvm/entrypoint mode 0100755"),
+            "the exit-code fixture must bake a shebang marker at mode 0755 — \
+             the only shape the guest agent's sealed-marker policy accepts"
+        );
         let restore_source_flake = bootstrap
             .find("mv nix/images/builder-vm.hidden nix/images/builder-vm")
             .expect("the source builder flake must be restored after published bootstrap");

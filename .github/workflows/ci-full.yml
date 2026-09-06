@@ -697,12 +697,51 @@ jobs:
           cp "$release_image/rootfs.ext4" "$revision_dir/rootfs.ext4"
           cp "$release_image/mvm-meta.json" "$revision_dir/mvm-meta.json"
 
-          printf '%s\n' "/bin/busybox sh -c 'exit 7'" > /tmp/exit-code-entrypoint
+          # `/etc/mvm/entrypoint` is a marker, not a command line. The guest
+          # agent reads it once at boot and resolves it as an absolute path to
+          # a wrapper under `/usr/lib/mvm/wrappers/`; the only other shape it
+          # accepts is the marker file *itself* being the program, which it
+          # takes when the file starts with `#!` and carries mode 0755
+          # root:root on the rootfs. A command line satisfies neither, so the
+          # agent canonicalized `/bin/busybox sh -c 'exit 7'` as a path,
+          # refused the entrypoint at boot, and the run exited 1 where this
+          # lane asserts 7. `debugfs write` compounded it by creating the
+          # file 0644 — even a correct path would have been refused on mode.
+          #
+          # mkGuest bakes the shipped marker as a shebang script at 0755, so
+          # this fixture writes the same shape rather than a third one. The
+          # `exec` keeps `entrypointArgv` below an honest statement of what
+          # PID 1 runs, which admission reads.
+          printf '%s\n' \
+            '#!/bin/sh' \
+            '# Bounded non-zero exit for the hosted no-KVM witness.' \
+            "exec /bin/busybox sh -c 'exit 7'" \
+            > /tmp/exit-code-entrypoint
           debugfs -w -R "rm /etc/mvm/entrypoint" "$revision_dir/rootfs.ext4"
           debugfs -w -R "write /tmp/exit-code-entrypoint /etc/mvm/entrypoint" \
             "$revision_dir/rootfs.ext4"
-          test "$(debugfs -R 'cat /etc/mvm/entrypoint' "$revision_dir/rootfs.ext4" 2>/dev/null)" \
-            = "/bin/busybox sh -c 'exit 7'"
+          debugfs -w -R "sif /etc/mvm/entrypoint mode 0100755" \
+            "$revision_dir/rootfs.ext4"
+
+          # Assert the marker the agent will accept, here rather than at boot.
+          # The defect above cost a whole nightly cycle per attempt because the
+          # only thing that noticed was a guest three jobs downstream.
+          marker_stat=$(debugfs -R "stat /etc/mvm/entrypoint" \
+            "$revision_dir/rootfs.ext4" 2>/dev/null)
+          case "$marker_stat" in
+            *"Mode:  0755"*) ;;
+            *) echo "::error::entrypoint marker is not mode 0755: $marker_stat" >&2; exit 1 ;;
+          esac
+          case "$marker_stat" in
+            *"User:     0   Group:     0"*) ;;
+            *) echo "::error::entrypoint marker is not root:root: $marker_stat" >&2; exit 1 ;;
+          esac
+          marker_body=$(debugfs -R "cat /etc/mvm/entrypoint" \
+            "$revision_dir/rootfs.ext4" 2>/dev/null)
+          case "$marker_body" in
+            "#!/bin/sh"*"exit 7"*) ;;
+            *) echo "::error::entrypoint marker is not the exit-7 shebang script" >&2; exit 1 ;;
+          esac
           jq '.name = "ci-exit-code-7"
               | .entrypointKind = "command"
               | .entrypointArgv = ["/bin/busybox", "sh", "-c", "exit 7"]
