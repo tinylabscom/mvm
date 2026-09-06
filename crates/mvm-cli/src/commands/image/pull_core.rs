@@ -365,12 +365,19 @@ fn pull_image_ref(
     let rootfs_path = format!("rootfs/{manifest_hex}-{runtime_tag}/rootfs.ext4");
     let rootfs_abs = cache_root.join(&rootfs_path);
     super::cache::write_deferred_nodes(cache_root, &manifest.digest, &deferred_nodes)?;
+    // The config blob written above is the image's own declaration of `Env`,
+    // `WorkingDir` and `Entrypoint`/`Cmd`. Materializing without it discards
+    // all three: the guest then falls back to `workload_env::DEFAULT_PATH`, so
+    // an image's own tools are off `PATH` even though the binaries are in the
+    // rootfs. The cache-hit path beside this one has always passed it; this
+    // one computed `config_path` forty lines earlier and dropped it.
+    let entrypoint = oci_entrypoint_from_cache_path(cache_root, config_path.as_deref())?;
     inject_runtime_and_materialize(super::materialize::MaterializeCall {
         cache_root,
         unpacked_root: &unpacked_root,
         rootfs_abs: &rootfs_abs,
         image_label: &image_ref.canonical(),
-        entrypoint: None,
+        entrypoint: entrypoint.as_ref(),
         sealed: false,
         deferred_nodes,
         evidence: None,

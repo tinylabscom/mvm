@@ -146,6 +146,20 @@ Last updated: 2026-09-04
       reads preserve retryable I/O sources. Focused regressions are green;
       broad validation and merge delivery remain.
 
+- [ ] **Linux e2e lane's real failures — issue #3007.**
+      `specs/plans/2026-09-05-linux-e2e-regressions.md`.
+      With the lane finally allowed to finish, three scenario failures were
+      real. The OCI fresh-pull path passed `entrypoint: None`, so every image
+      lost its declared `Env`/`WorkingDir`/`Entrypoint` and fell back to
+      `DEFAULT_PATH`. The mount-image cache was constructed on entry, and
+      constructing it runs the encrypted-backing check, so `machine run -d` was
+      refused on any host without dm-crypt even with no volumes at all. The SDK
+      fixture pinned an `arm64/v8` manifest digest, which ENOEXEC'd on x86_64.
+      All three fixed and verified on real KVM hardware; the SDK error types now
+      render the stderr that made the CI log undiagnosable. #3039 is the third
+      lane failure and stays separately tracked. One Extended CI run and merge
+      delivery remain.
+
 - [ ] **Warm claim authenticated readiness — issue #3039.**
       `specs/plans/2026-08-31-warm-claim-authenticated-readiness.md`.
       A restored child advances only after an authenticated Ping proves its

@@ -66,6 +66,21 @@ Feature: every README-documented CLI launch mode boots a real guest
     And the guest printed "NAME=ari"
     And the guest control plane came up
 
+  # The mounted-PTY scenario above was written for a routing bug and kept
+  # failing for a different one underneath it: the OCI pull path materialized
+  # every rootfs with `entrypoint: None`, so the image's declared `Env`,
+  # `WorkingDir` and `Entrypoint` were discarded and the guest fell back to
+  # `workload_env::DEFAULT_PATH`. Nothing about that needs a mount or a
+  # terminal, and stating it on the plain path is what says so: if this passes
+  # and the mounted-PTY one fails, the routing really is the problem; while
+  # both failed, the mount and the PTY were a red herring.
+  @live
+  Scenario: an image's declared environment reaches a plain run
+    When I launch "machine run --image rust -- /bin/bash -c 'command -v cargo'"
+    Then the launch succeeds
+    And the guest printed "/usr/local/cargo/bin/cargo"
+    And the guest control plane came up
+
   # The same defect stated as the mount it actually is, on the non-interactive
   # path so it runs on a host with no terminal to give — a CI runner, or this
   # suite under `just bdd`. devtmpfs supplies /dev/ptmx and the image supplies

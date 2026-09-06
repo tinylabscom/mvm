@@ -1135,3 +1135,42 @@ def test_connect_refuses_second_session(tmp_path: Path) -> None:
 def test_connect_rejects_empty_id() -> None:
     with pytest.raises(ValueError, match="non-empty machine id"):
         mvm.Sandbox.connect("")
+
+
+# ── error rendering ──────────────────────────────────────────────────
+
+
+def test_live_error_renders_the_stderr_that_says_why() -> None:
+    """The captured stderr is the only place the refusing verb explains itself.
+
+    Storing it on the exception and rendering only the summary line is the
+    same as not capturing it: the failure surfaces as "failed with exit code
+    1" and the diagnosis has to be re-run by hand outside the SDK. A live
+    documented-surface failure was undiagnosable from its CI log for exactly
+    this reason.
+    """
+    error = mvm.SandboxLiveError(
+        "`mvmctl machine proc start` failed with exit code 1",
+        argv=["mvmctl", "machine", "proc", "start", "--", "uname", "-s"],
+        exit_code=1,
+        stderr="Error: the guest refused the request\n",
+    )
+
+    rendered = str(error)
+    assert "failed with exit code 1" in rendered
+    assert "the guest refused the request" in rendered, (
+        "the reason the verb refused must be in the rendered message, not "
+        "only reachable through the .stderr attribute"
+    )
+    assert "mvmctl machine proc start -- uname -s" in rendered
+
+    # The structured attributes stay available and unchanged.
+    assert error.exit_code == 1
+    assert error.stderr == "Error: the guest refused the request\n"
+    assert error.argv[0] == "mvmctl"
+
+
+def test_live_error_without_detail_renders_only_its_message() -> None:
+    """No argv and no stderr must not grow blank sections."""
+    assert str(mvm.SandboxLiveError("plain refusal")) == "plain refusal"
+    assert str(mvm.SandboxLiveError("plain refusal", stderr="   \n")) == "plain refusal"

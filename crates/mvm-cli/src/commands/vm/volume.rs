@@ -531,8 +531,46 @@ fn refresh_registered_host_snapshots_with_service(
     volume_service: &LocalVolumeService,
     vm_name: &str,
 ) -> Result<()> {
-    let cache = crate::mount_cache::MountImageCache::new()?;
-    for attachment in volume_service.list_attachments(vm_name)? {
+    refresh_registered_host_snapshots_using(
+        volume_service,
+        vm_name,
+        crate::mount_cache::MountImageCache::new,
+    )
+}
+
+/// The cache constructor is a parameter so a test can observe *whether* it
+/// runs.
+///
+/// It has to be: `MountImageCache::new` is `#[cfg(test)]`-stubbed to skip the
+/// encrypted-backing verification, so under test the eager construction this
+/// function used to do was indistinguishable from the lazy one. The check that
+/// failed in production did not exist in the build that tested it, which is
+/// how a launch-blocking refusal reached a live lane unnoticed.
+fn refresh_registered_host_snapshots_using(
+    volume_service: &LocalVolumeService,
+    vm_name: &str,
+    open_cache: impl FnOnce() -> Result<crate::mount_cache::MountImageCache>,
+) -> Result<()> {
+    // Nothing to refresh means nothing to build. Constructing the cache
+    // verifies that its directory sits on encrypted backing storage, and that
+    // check is about where a *mounted host directory's* bytes come to rest.
+    // Running it before looking at the attachments charged it to every launch:
+    // a named machine with no registered volumes and no `--mount` at all was
+    // refused on any host without a dm-crypt/LUKS mapping, for a cache it was
+    // never going to write to.
+    //
+    // The enforcement is unchanged where it applies. One attachment carrying a
+    // host snapshot is enough to construct the cache, and `require_host_encryption`
+    // below still guards each snapshot's source directory separately.
+    let attachments = volume_service.list_attachments(vm_name)?;
+    if !attachments
+        .iter()
+        .any(|attachment| attachment.host_snapshot.is_some())
+    {
+        return Ok(());
+    }
+    let cache = open_cache()?;
+    for attachment in attachments {
         let Some(snapshot) = attachment.host_snapshot else {
             continue;
         };
@@ -800,6 +838,65 @@ mod tests {
 
     fn accepting_host_encryption_service() -> LocalVolumeService {
         LocalVolumeService::with_host_encryption_probe(probe_from_fn(|_| Ok(())))
+    }
+
+    /// A launch with nothing mounted never opens the mount-image cache.
+    ///
+    /// Opening it verifies that its directory sits on encrypted backing
+    /// storage. Doing that on entry charged the check to every launch: a named
+    /// machine with no registered volumes and no `--mount` was refused on any
+    /// host without a dm-crypt/LUKS mapping, for a cache it would never write
+    /// to. That is what stopped `mvmctl machine run -d` on an ordinary disk,
+    /// and it took down the SDK live lane, which mounts nothing at all.
+    ///
+    /// The constructor is injected because `MountImageCache::new` is
+    /// `#[cfg(test)]`-stubbed to skip the very verification that failed, so
+    /// calling the real one here would prove nothing either way.
+    #[test]
+    fn a_launch_with_no_host_snapshots_never_opens_the_mount_cache() {
+        let _guard = DataDirGuard::new();
+        let volume_service = accepting_host_encryption_service();
+
+        refresh_registered_host_snapshots_using(&volume_service, "vm-no-mounts", || {
+            panic!("the mount-image cache must not be opened for a launch with no host snapshots")
+        })
+        .expect("a launch that mounts nothing must not be refused");
+    }
+
+    /// The converse, so the laziness cannot be "never opens it".
+    ///
+    /// One attachment carrying a host snapshot is enough: the cache is opened,
+    /// and the encrypted-backing verification it performs still applies
+    /// wherever a host directory's bytes actually come to rest.
+    #[test]
+    fn a_launch_with_a_host_snapshot_opens_the_mount_cache() {
+        let guard = DataDirGuard::new();
+        let volume_service = accepting_host_encryption_service();
+        let source = guard.path().join("mounted");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("marker"), b"bytes").unwrap();
+        mount_with_service(
+            &volume_service,
+            "vm-mounted",
+            "mounted",
+            Some(source.to_str().unwrap()),
+            "/data/mounted",
+            false,
+        )
+        .unwrap();
+
+        let opened = std::cell::Cell::new(false);
+        refresh_registered_host_snapshots_using(&volume_service, "vm-mounted", || {
+            opened.set(true);
+            crate::mount_cache::MountImageCache::new()
+        })
+        .expect("refresh succeeds");
+
+        assert!(
+            opened.get(),
+            "a registered host snapshot must still open the cache, or the \
+             encrypted-backing verification stops applying where it matters"
+        );
     }
 
     #[test]
