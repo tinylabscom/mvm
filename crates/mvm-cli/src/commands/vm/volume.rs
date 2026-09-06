@@ -531,10 +531,23 @@ fn refresh_registered_host_snapshots_with_service(
     volume_service: &LocalVolumeService,
     vm_name: &str,
 ) -> Result<()> {
-    let cache = crate::mount_cache::MountImageCache::new()?;
+    // Built on first need, not up front. `MountImageCache::new` can fail on a
+    // host without the encryption support it wants, and constructing it before
+    // the loop made that failure the answer for *every* launch — including the
+    // overwhelmingly common one with no registered host snapshot to refresh,
+    // where the cache is never touched.
+    //
+    // A machine that registers no host directory has nothing here to do, and
+    // should not be refused for lacking a capability that work would have
+    // needed.
+    let mut cache: Option<crate::mount_cache::MountImageCache> = None;
     for attachment in volume_service.list_attachments(vm_name)? {
         let Some(snapshot) = attachment.host_snapshot else {
             continue;
+        };
+        let cache = match cache {
+            Some(ref c) => c,
+            None => cache.insert(crate::mount_cache::MountImageCache::new()?),
         };
         let fingerprint = cache
             .fingerprint(

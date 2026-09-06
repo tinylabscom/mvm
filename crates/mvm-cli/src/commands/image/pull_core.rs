@@ -365,12 +365,21 @@ fn pull_image_ref(
     let rootfs_path = format!("rootfs/{manifest_hex}-{runtime_tag}/rootfs.ext4");
     let rootfs_abs = cache_root.join(&rootfs_path);
     super::cache::write_deferred_nodes(cache_root, &manifest.digest, &deferred_nodes)?;
+    // The image's own runtime config — argv, working dir, and the `Env` that
+    // carries its `PATH`. Passing `None` here discarded all three, so a guest
+    // booted from a freshly pulled image could not resolve a binary the image
+    // puts on its own PATH: `command -v cargo` finds nothing in `rust`, and the
+    // documented interactive-mount example fails on exactly that.
+    //
+    // The already-cached path a few lines above resolves it this way; only this
+    // arm did not, which is why the failure needed a cold pull to reproduce.
+    let image_runtime_config = oci_entrypoint_from_cache_path(cache_root, config_path.as_deref())?;
     inject_runtime_and_materialize(super::materialize::MaterializeCall {
         cache_root,
         unpacked_root: &unpacked_root,
         rootfs_abs: &rootfs_abs,
         image_label: &image_ref.canonical(),
-        entrypoint: None,
+        entrypoint: image_runtime_config.as_ref(),
         sealed: false,
         deferred_nodes,
         evidence: None,
