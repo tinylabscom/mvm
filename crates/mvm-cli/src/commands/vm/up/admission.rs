@@ -2039,6 +2039,79 @@ mod admit_plan_tests {
         .expect("the input grant token is a valid service id")
     }
 
+    /// Admission content-hashes directory shares, and only those.
+    ///
+    /// Two mutants survived on the guard: `==` swapped for `!=`, and `&&` for
+    /// `||`. Both change *which* grants get a content identity written into the
+    /// signed plan. A `Disk` share hashed here carries a digest that
+    /// enforcement re-checks against a tree the grant never described; a
+    /// `DirShare` skipped here reaches enforcement with nothing to re-check,
+    /// which is the pinning that refuses a directory edited after admission.
+    ///
+    /// The discriminating fixture is a non-`DirShare` grant with no digest:
+    /// under either mutant it acquires one, and under the real guard it does
+    /// not.
+    #[test]
+    fn admission_hashes_directory_shares_and_leaves_disk_shares_alone() {
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let share_dir = tempfile::tempdir().unwrap();
+        std::fs::write(share_dir.path().join("payload"), b"shared bytes").unwrap();
+        let disk_image = rootfs_dir.path().join("vol.img");
+        std::fs::write(&disk_image, b"disk bytes").unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"share-digest-payload");
+        let ledger = InMemoryNonceLedger::new();
+
+        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            shares: vec![
+                mvm_core::plan::HostShareGrant {
+                    tag: "dirvol".into(),
+                    host_path: share_dir.path().to_string_lossy().into_owned(),
+                    guest_path: "/data".into(),
+                    kind: mvm_core::plan::ShareKind::DirShare,
+                    read_only: true,
+                    encrypted: false,
+                    content_sha256: None,
+                },
+                mvm_core::plan::HostShareGrant {
+                    tag: "diskvol".into(),
+                    host_path: disk_image.to_string_lossy().into_owned(),
+                    guest_path: "/disk".into(),
+                    kind: mvm_core::plan::ShareKind::Disk,
+                    read_only: true,
+                    encrypted: false,
+                    content_sha256: None,
+                },
+            ],
+            ..pinning_params(&rootfs, &ledger)
+        })
+        .expect("admission with a directory and a disk share")
+        .expect("Some when admission ran");
+
+        let shares = &ctx.admitted.plan().shares;
+        let dir = shares
+            .iter()
+            .find(|g| g.tag == "dirvol")
+            .expect("the directory share survives admission");
+        let disk = shares
+            .iter()
+            .find(|g| g.tag == "diskvol")
+            .expect("the disk share survives admission");
+
+        assert!(
+            dir.content_sha256.is_some(),
+            "a directory share must carry the content identity enforcement re-checks"
+        );
+        assert!(
+            disk.content_sha256.is_none(),
+            "a disk share must not be hashed here; a digest it never described is \
+             one enforcement would re-check against the wrong thing"
+        );
+    }
+
     #[test]
     fn a_non_shell_entrypoint_with_the_grant_is_admitted_under_prod() {
         let keys_dir = tempfile::tempdir().unwrap();
