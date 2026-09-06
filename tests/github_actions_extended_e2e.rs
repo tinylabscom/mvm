@@ -242,6 +242,46 @@ fn documented_surface_script() -> String {
     fs::read_to_string("scripts/e2e-documented-surface.sh").expect("read documented-surface runner")
 }
 
+/// The builder's store-image flock must lose to the suite deadline.
+///
+/// `DEFAULT_LOCK_WAIT` is an hour and the suite's deadline defaulted to the
+/// same hour. A contended builder therefore consumed the entire run: the
+/// waiter could not lose the race, so the suite was killed at the instant the
+/// lock wait would have expired, and the contention error was never raised.
+/// The scenario was reported as having hung, naming no cause — a live run
+/// spent an hour proving nothing.
+///
+/// Asserting the derivation rather than a literal, because the failure was the
+/// two values being *equal*: pinning a number here would go stale the moment
+/// either default moved, which is exactly how the tie arose.
+#[test]
+fn the_builder_lock_wait_cannot_outlast_the_suite_deadline() {
+    let script = documented_surface_script();
+
+    assert!(
+        script.contains("export MVM_BUILDER_LOCK_WAIT_SECS="),
+        "the runner must bound the builder store lock wait, or a contended \
+         builder consumes the whole suite budget and reports nothing"
+    );
+    assert!(
+        script.contains("$(( E2E_TIMEOUT_SECS / 4 ))"),
+        "the lock wait must be derived from the suite deadline, so raising \
+         MVM_E2E_TIMEOUT_SECS cannot silently restore the tie that caused the hang"
+    );
+
+    let wait = script
+        .find("export MVM_BUILDER_LOCK_WAIT_SECS=")
+        .expect("checked above");
+    let deadline = script
+        .find("E2E_TIMEOUT_SECS=\"${MVM_E2E_TIMEOUT_SECS:-")
+        .expect("the runner must define its own deadline");
+    assert!(
+        deadline < wait,
+        "the deadline must be defined before the lock wait derives from it, \
+         or the arithmetic reads an empty value and the wait becomes zero"
+    );
+}
+
 fn justfile() -> String {
     fs::read_to_string("Justfile").expect("read Justfile")
 }

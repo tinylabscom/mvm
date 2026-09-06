@@ -564,6 +564,22 @@ MVM_HOME="$E2E_HOME" "$MVMCTL" doctor || true
 # `timeout(1)`, which is absent from a stock macOS and from the macOS runners.
 E2E_TIMEOUT_SECS="${MVM_E2E_TIMEOUT_SECS:-3600}"
 
+# The builder's store-image flock waits `DEFAULT_LOCK_WAIT` — one hour — and
+# this suite's deadline defaulted to the same hour. Those two being equal is
+# what turned a contended builder into a hang: the waiter could never lose the
+# race, so the suite was killed at the instant the lock wait would have expired
+# and the contention error never got to be raised. A run then reported a
+# scenario that "hung" with no indication that another builder held the store.
+#
+# Derived from the deadline rather than pinned, so raising `MVM_E2E_TIMEOUT_SECS`
+# cannot silently recreate the tie. A quarter of the budget is still generous —
+# the holder is normally a cold `nix build` — while leaving the suite three
+# quarters of its time to report the failure and run the remaining scenarios.
+#
+# An explicit override still wins: a caller who has already thought about this
+# is not second-guessed.
+export MVM_BUILDER_LOCK_WAIT_SECS="${MVM_BUILDER_LOCK_WAIT_SECS:-$(( E2E_TIMEOUT_SECS / 4 ))}"
+
 # A run that dies before the suite starts must not look like a pass. This has
 # happened twice: a stray token from a bad edit, and a `(( ... )) && echo` that
 # returns 1 under `set -e`. Both ended the script early, and both left an exit
