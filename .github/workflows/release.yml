@@ -722,8 +722,20 @@ jobs:
             sbom.cdx.json.bundle
           )
           RELEASE_NOTES_PREFIX="$(cat nix/packaging/release/runtime-overlay-operational-note.md)"
+          # A semver prerelease tag (`v0.18.0-rc.1`) must not become GitHub's
+          # "Latest" release. `mvmctl update` resolves
+          # `/repos/<repo>/releases/latest` to decide what to upgrade to, so
+          # publishing a release candidate as latest would pull every stable
+          # user onto it on their next update — without them asking for a
+          # prerelease and without a way to tell they had been moved onto one.
+          prerelease=()
+          if [[ "${TAG_NAME#v}" == *-* ]]; then
+            prerelease=(--prerelease)
+            echo "::notice::${TAG_NAME} carries a prerelease segment — publishing it as a prerelease, not as latest"
+          fi
           gh release create "${TAG_NAME}" \
             --title "${TAG_NAME}" \
+            "${prerelease[@]}" \
             --generate-notes \
             --notes "${RELEASE_NOTES_PREFIX}" \
             "${assets[@]}"

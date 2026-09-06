@@ -857,6 +857,48 @@ fn the_boot_image_tag_composes_the_url_the_workflow_uploads_to() {
     }
 }
 
+/// A release candidate must not be published as GitHub's "Latest" release.
+///
+/// `mvmctl update` resolves `/repos/<repo>/releases/latest` to decide what
+/// version to move a user to. `gh release create` marks a release latest unless
+/// told otherwise, so without an explicit `--prerelease` a `v0.18.0-rc.1` tag
+/// silently becomes the upgrade target for every stable installation — the one
+/// class of user who did not opt into a prerelease.
+///
+/// The guard is asserted rather than a bare flag, because always passing
+/// `--prerelease` would break every stable release instead.
+#[test]
+fn a_prerelease_tag_is_not_published_as_the_latest_release() {
+    let workflow = release_workflow();
+
+    assert!(
+        workflow.contains("prerelease=(--prerelease)"),
+        "release.yml must be able to publish a release as a prerelease, or an \
+         rc tag becomes the upgrade target for every stable install"
+    );
+    assert!(
+        workflow.contains(r#"if [[ "${TAG_NAME#v}" == *-* ]]; then"#),
+        "the prerelease flag must be gated on the tag carrying a semver \
+         prerelease segment, so a stable tag still publishes as latest"
+    );
+
+    let create = workflow
+        .find("gh release create \"${TAG_NAME}\"")
+        .expect("release.yml must create the release under the pushed tag");
+    let guard = workflow
+        .find("prerelease=(--prerelease)")
+        .expect("checked above");
+    assert!(
+        guard < create,
+        "the prerelease decision must be made before the release is created"
+    );
+    assert!(
+        workflow[create..].contains(r#""${prerelease[@]}""#),
+        "`gh release create` must expand the prerelease array, or deciding it \
+         changes nothing about what gets published"
+    );
+}
+
 #[test]
 fn the_ci_boot_witness_pins_the_compiled_boot_image_tag() {
     let tag = mvmctl::core::config::DEFAULT_BOOT_IMAGE_TAG;
