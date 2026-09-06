@@ -105,9 +105,25 @@ export class SandboxLiveError extends Error {
     message: string,
     opts: { argv?: string[]; exitCode?: number | null; stderr?: string } = {},
   ) {
-    super(message);
+    // The captured stderr is the only place the refusing verb says *why*.
+    // Storing it on the error and rendering only the summary line was the
+    // same as not capturing it: a failing `mvmctl` shell surfaced as "failed
+    // with exit code 1" and nothing else, and the diagnosis had to be re-run
+    // by hand outside the SDK. Folded into the message so every reporter --
+    // `console.error`, an uncaught rejection, a test runner -- shows it,
+    // rather than only the ones that know to read `.stderr`.
+    const argv = opts.argv ?? [];
+    const stderr = (opts.stderr ?? "").trim();
+    const parts = [message];
+    if (argv.length > 0) {
+      parts.push(`command: ${argv.join(" ")}`);
+    }
+    if (stderr.length > 0) {
+      parts.push(`stderr:\n${stderr}`);
+    }
+    super(parts.join("\n"));
     this.name = "SandboxLiveError";
-    this.argv = opts.argv ?? [];
+    this.argv = argv;
     this.exitCode = opts.exitCode ?? null;
     this.stderr = opts.stderr ?? "";
   }

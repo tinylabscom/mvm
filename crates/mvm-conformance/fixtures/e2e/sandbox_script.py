@@ -16,6 +16,15 @@ this one has to actually execute on both the plan and the live path:
   A digest is content-addressed, so this does not rot with the upstream
   `alpine:latest` tag.
 
+  The pin is the multi-arch *index* digest, not a platform manifest's. Both are
+  immutable and both satisfy claim 14, and the difference is invisible until
+  the host's architecture stops matching whoever wrote the pin: this fixture
+  used to name alpine's `arm64/v8` manifest, so the guest was handed aarch64
+  binaries on an x86_64 host and `uname` failed to exec with `ENOEXEC`. It
+  passed on Apple Silicon and could not pass on the Linux/Firecracker lane,
+  which is the only lane that boots a guest. Pin an index; let the registry
+  client pick the platform.
+
 `files.write` is back. It was removed when the whole guest-RPC `fs`/`proc` verb
 family answered "Unexpected response to ... verb" against a running HVF guest
 (#2887); that turned out to be a grant refusal misreported as a protocol
@@ -27,9 +36,12 @@ without declaring a share.
 
 import mvm
 
+# alpine:3.22's multi-arch index. Carries linux/amd64 and linux/arm64 (among
+# others), so this resolves to the host's own architecture everywhere the suite
+# runs.
 ALPINE = (
     "docker.io/library/alpine"
-    "@sha256:e7a1a92a5bfeee40966aea60f0796b0e7917cc35591542701834f03a68fa3d18"
+    "@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce"
 )
 
 with mvm.Sandbox.create(image=ALPINE) as sb:

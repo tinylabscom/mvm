@@ -1074,3 +1074,38 @@ describe("BrowserSandbox", () => {
     expect(() => new mvm.BrowserSandbox("safari")).toThrow(/unknown browser/);
   });
 });
+
+describe("SandboxLiveError rendering", () => {
+  // The captured stderr is the only place the refusing verb explains itself.
+  // Storing it on the error and rendering only the summary line is the same as
+  // not capturing it: a live documented-surface failure was undiagnosable from
+  // its CI log for exactly this reason.
+  it("renders the stderr that says why", () => {
+    const error = new mvm.SandboxLiveError(
+      "`mvmctl machine proc start` failed with exit code 1",
+      {
+        argv: ["mvmctl", "machine", "proc", "start", "--", "uname", "-s"],
+        exitCode: 1,
+        stderr: "Error: the guest refused the request\n",
+      },
+    );
+
+    expect(error.message).toContain("failed with exit code 1");
+    expect(error.message).toContain("the guest refused the request");
+    expect(error.message).toContain("mvmctl machine proc start -- uname -s");
+
+    // The structured attributes stay available and unchanged.
+    expect(error.exitCode).toBe(1);
+    expect(error.stderr).toBe("Error: the guest refused the request\n");
+    expect(error.argv[0]).toBe("mvmctl");
+  });
+
+  it("renders only its message when there is no detail", () => {
+    expect(new mvm.SandboxLiveError("plain refusal").message).toBe(
+      "plain refusal",
+    );
+    expect(
+      new mvm.SandboxLiveError("plain refusal", { stderr: "   \n" }).message,
+    ).toBe("plain refusal");
+  });
+});

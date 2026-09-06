@@ -64,6 +64,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import subprocess
 import sys
 import threading
@@ -216,6 +217,21 @@ class SandboxLiveError(RuntimeError):
         self.argv = list(argv) if argv else []
         self.exit_code = exit_code
         self.stderr = stderr or ""
+
+    def __str__(self) -> str:
+        # The captured stderr is the only place the refusing verb says *why*.
+        # Storing it on the exception and rendering only the summary line was
+        # the same as not capturing it: a failing `mvmctl` shell surfaced as
+        # "failed with exit code 1" and nothing else, and the diagnosis had to
+        # be re-run by hand outside the SDK. The docstring above promised this
+        # and the type did not deliver it.
+        parts = [super().__str__()]
+        if self.argv:
+            parts.append("command: " + shlex.join(self.argv))
+        detail = self.stderr.strip()
+        if detail:
+            parts.append("stderr:\n" + detail)
+        return "\n".join(parts)
 
 
 class SandboxDevOnly(SandboxLiveError):
