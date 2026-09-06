@@ -768,7 +768,7 @@ claims), each backed by a named test or workflow gate. In summary:
     in the signed plan.
 16. **Every workload asset and pinned host share is content-identified in the
     signed plan, and share drift after admission fails closed** — `--asset
-    KIND:HOST_PATH` hashes the asset into the signed plan, and a directory
+KIND:HOST_PATH` hashes the asset into the signed plan, and a directory
     share whose contents change after admission is refused at attach time.
 17. **Every published release artifact is authenticated under the release
     workflow's identity** — archives and checksum manifests carry keyless
@@ -931,6 +931,118 @@ live-KVM smokes) needs real `/dev/kvm`; cloud-init scaffolding for a throwaway
 KVM box lives in [`nix/ops/hetzner/`](nix/ops/hetzner/), and the
 [contributor guide](public/src/content/docs/contributing/development.md) has the
 details.
+
+### Release workflows
+
+This project maintains **two separate release trains** that version and publish
+independently:
+
+| Release train   | Tag pattern          | What it releases                                 | Workflow file                              | Key command                    |
+| --------------- | -------------------- | ------------------------------------------------ | ------------------------------------------ | ------------------------------ |
+| **CLI release** | `v*` (e.g. `v1.2.3`) | `mvmctl` binary, initramfs, crates.io packages   | `.github/workflows/release.yml`            | `just release <version>`       |
+| **Boot image**  | `boot-image/v*`      | Rootfs, builder VM, runtime overlay, SDK sidecar | `.github/workflows/release-boot-image.yml` | `just release-image <version>` |
+
+**Why two trains?** The CLI and boot image have independent lifecycles:
+
+- A kernel or rootfs security fix can ship via `boot-image/v1.2.4` without a
+  CLI version bump.
+- A CLI bug fix doesn't need to rebuild unchanged images.
+
+#### CLI release (`v*`)
+
+The **CLI release train** packages the `mvmctl` binary, the initramfs, and
+publishes Rust crates to crates.io. It runs on `v*` tags and produces:
+
+- `mvmctl-{target}.tar.gz` (macOS Apple Silicon, Linux x86_64/aarch64)
+- `initramfs-{arch}.tar.gz` (universal initramfs)
+- `checksums-sha256.txt` (combined checksums)
+- SBOM (`sbom.cdx`)
+
+**Release steps:**
+
+```bash
+# Option 1: Automatic version bump (based on conventional commits)
+just release-auto
+
+# Option 2: Explicit version
+just release 1.2.3
+
+# The above commands:
+# 1. Run formatting, clippy, and all tests
+# 2. Bump version in Cargo.toml and internal path-deps
+# 3. Update Nix flake versions (runtime-overlay, mvmctl.nix, mvm-sdk-cdylib.nix)
+# 4. Generate changelog with git-cliff
+# 5. Commit and open a PR on branch release/v<version>
+
+# After the PR merges to main, tag and publish:
+just release-tag 1.2.3
+# This pushes the v1.2.3 tag, triggering the release.yml workflow
+```
+
+The workflow runs on tag push and:
+
+1. Builds `mvmctl` for all targets (cross-compiling Linux binaries)
+2. Builds per-VM host binaries (supervisors, agent, signer, broker)
+3. Builds the universal initramfs for both arches
+4. Runs BDD and e2e-docs tests (all documented examples must pass)
+5. Packages binaries, generates checksums, signs with cosign (keyless OIDC)
+6. Creates a GitHub release with all artifacts
+
+**Critical gate:** A CLI release **must** include boot-image assets. If no
+`boot-image/v*` release exists (or it's incomplete), the publish fails with an
+error. This prevents fresh installs from 404ing on first boot.
+
+#### Boot image release (`boot-image/v*`)
+
+The **boot image release train** produces all artifacts needed to boot a
+microVM:
+
+- `builder-vm-*` (builder VM vmlinux, rootfs, SBOM, pack manifest)
+- `runtime-overlay-{arch}.tar.gz` (read-only overlay for agent/seccomp/SDK)
+- `sdk-sidecar-{arch}-{libc}.tar.gz` (SDK server runtime, per libc)
+- `default-microvm-*` (default prod image: vmlinux, verity-sealed rootfs)
+
+**Release steps:**
+
+```bash
+# Build and publish a boot image release
+just release-image 1.2.3
+# This creates and pushes the boot-image/v1.2.3 tag
+
+# Or use the Just alias (add to your shell):
+alias release-image='git tag boot-image/v && git push origin boot-image/v'
+```
+
+The workflow runs on `boot-image/v*` tags and:
+
+1. Builds the builder VM image (cross-compiles host-vm binaries)
+2. Builds the runtime overlay image
+3. Builds SDK sidecar images (4 variants: x86_64/aarch64 × glibc/musl)
+4. Builds the default microVM (prod variant, sealed + verity)
+5. Generates checksums and SBOMs
+6. Signs all artifacts with cosign (keyless OIDC)
+7. Creates a GitHub release under `boot-image/v*`
+
+**Key differences from CLI release:**
+
+- Uses protected environment `boot-image-signing` (restricted to `boot-image/v*` refs)
+- No `--features embed-host-bins` (no CLI binary to embed)
+- Builds Nix images (`nix/images/builder-vm`, `nix/images/runtime-overlay`, etc.)
+- Produces raw kernel/initramfs/rootfs blobs, not packaged binaries
+
+#### Verifying a release
+
+```bash
+# Verify the latest release's signatures
+mvmctl update check          # Check for CLI updates
+mvmctl trust audit verify    # Verify all downloaded artifacts
+
+# Check which boot image a binary would download
+mvmctl doctor                # Reports boot image resolution
+```
+
+For more details, see the [release workflow files](.github/workflows/release.yml) and [
+boot image workflow file](.github/workflows/release-boot-image.yml).
 
 ### Repository layout
 
