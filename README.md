@@ -768,7 +768,7 @@ claims), each backed by a named test or workflow gate. In summary:
     in the signed plan.
 16. **Every workload asset and pinned host share is content-identified in the
     signed plan, and share drift after admission fails closed** — `--asset
-KIND:HOST_PATH` hashes the asset into the signed plan, and a directory
+    KIND:HOST_PATH` hashes the asset into the signed plan, and a directory
     share whose contents change after admission is refused at attach time.
 17. **Every published release artifact is authenticated under the release
     workflow's identity** — archives and checksum manifests carry keyless
@@ -958,26 +958,12 @@ publishes Rust crates to crates.io. It runs on `v*` tags and produces:
 - `checksums-sha256.txt` (combined checksums)
 - SBOM (`sbom.cdx`)
 
-**Release steps:**
-
-```bash
-# Option 1: Automatic version bump (based on conventional commits)
-just release-auto
-
-# Option 2: Explicit version
-just release 1.2.3
-
-# The above commands:
-# 1. Run formatting, clippy, and all tests
-# 2. Bump version in Cargo.toml and internal path-deps
-# 3. Update Nix flake versions (runtime-overlay, mvmctl.nix, mvm-sdk-cdylib.nix)
-# 4. Generate changelog with git-cliff
-# 5. Commit and open a PR on branch release/v<version>
-
-# After the PR merges to main, tag and publish:
-just release-tag 1.2.3
-# This pushes the v1.2.3 tag, triggering the release.yml workflow
-```
+To prepare the next version from conventional commits, run `just release-auto`.
+To choose the version explicitly, run `just release 1.2.3`. Both commands run
+the local release gates, update the workspace and Nix package versions, prepend
+the generated changelog, and open a `release/v<version>` pull request. After
+that pull request merges, run `just release-tag 1.2.3`; it tags the merged
+`origin/main` commit and triggers the CLI workflow.
 
 The workflow runs on tag push and:
 
@@ -1002,16 +988,10 @@ microVM:
 - `sdk-sidecar-{arch}-{libc}.tar.gz` (SDK server runtime, per libc)
 - `default-microvm-*` (default prod image: vmlinux, verity-sealed rootfs)
 
-**Release steps:**
-
-```bash
-# Build and publish a boot image release
-just release-image 1.2.3
-# This creates and pushes the boot-image/v1.2.3 tag
-
-# Or use the Just alias (add to your shell):
-alias release-image='git tag boot-image/v && git push origin boot-image/v'
-```
+To publish a boot image release, run `just release-image 1.2.3`. The command
+refreshes `origin/main`, refuses to reuse an existing tag, and tags the merged
+main commit as `boot-image/v1.2.3`. Pushing that tag triggers the boot-image
+workflow.
 
 The workflow runs on `boot-image/v*` tags and:
 
@@ -1032,17 +1012,13 @@ The workflow runs on `boot-image/v*` tags and:
 
 #### Verifying a release
 
-```bash
-# Verify the latest release's signatures
-mvmctl update check          # Check for CLI updates
-mvmctl trust audit verify    # Verify all downloaded artifacts
+Run `mvmctl image boot check` to compare the locally recorded boot-image tag
+with the latest published image release. Run `mvmctl trust audit verify` to
+verify the local audit chain, and `mvmctl doctor` to inspect the host and boot
+image acquisition posture.
 
-# Check which boot image a binary would download
-mvmctl doctor                # Reports boot image resolution
-```
-
-For more details, see the [release workflow files](.github/workflows/release.yml) and [
-boot image workflow file](.github/workflows/release-boot-image.yml).
+For more details, see the [CLI release workflow](.github/workflows/release.yml)
+and [boot image release workflow](.github/workflows/release-boot-image.yml).
 
 ### Repository layout
 

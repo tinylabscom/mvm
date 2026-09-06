@@ -39,6 +39,10 @@ fn boot_image_workflow() -> String {
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
 }
 
+fn justfile() -> String {
+    fs::read_to_string("Justfile").expect("Justfile must be readable")
+}
+
 fn ci_workflow() -> String {
     let path = Path::new(".github/workflows/ci.yml");
     fs::read_to_string(path)
@@ -627,6 +631,51 @@ fn the_two_release_trains_cannot_fire_each_other() {
     assert!(
         !cli_tag.starts_with(&prefix("boot-image/v*")),
         "{cli_tag} must not match the boot image train's pattern"
+    );
+}
+
+/// Publishing an image tag from a topic branch would disclose code that has
+/// not passed the repository's merge gates. Keep the image release helper on
+/// the same merged-main boundary as the CLI release helper.
+#[test]
+fn boot_image_release_recipe_tags_the_fetched_main_commit() {
+    let justfile = justfile();
+    let recipe = justfile
+        .split("release-image VERSION:")
+        .nth(1)
+        .expect("Justfile must define release-image")
+        .split("\n# ── Documentation")
+        .next()
+        .expect("release-image recipe must end before documentation recipes");
+
+    assert!(
+        recipe.contains("git fetch origin main"),
+        "release-image must refresh origin/main before choosing the release commit"
+    );
+    assert!(
+        recipe.contains("git tag \"$TAG\" origin/main"),
+        "release-image must tag merged origin/main, never the caller's current HEAD"
+    );
+    assert!(
+        !recipe.contains("git tag \"$TAG\"\n"),
+        "release-image must not implicitly tag the caller's current HEAD"
+    );
+}
+
+#[test]
+fn boot_image_release_recipe_refuses_an_existing_tag() {
+    let justfile = justfile();
+    let recipe = justfile
+        .split("release-image VERSION:")
+        .nth(1)
+        .expect("Justfile must define release-image")
+        .split("\n# ── Documentation")
+        .next()
+        .expect("release-image recipe must end before documentation recipes");
+
+    assert!(
+        recipe.contains("git rev-parse --verify \"refs/tags/$TAG\""),
+        "release-image must refuse a tag that already exists after fetching tags"
     );
 }
 

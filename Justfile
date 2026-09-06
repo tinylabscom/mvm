@@ -770,14 +770,14 @@ release-image VERSION:
     set -euo pipefail
     V="{{ VERSION }}"
     TAG="boot-image/v$V"
-    # Check if tag already exists
-    if git rev-parse "$TAG" >/dev/null 2>&1; then
-        echo "Tag $TAG already exists."
+    git fetch origin main --tags
+    if git rev-parse --verify "refs/tags/$TAG" >/dev/null 2>&1; then
+        echo "ERROR: tag $TAG already exists." >&2
         exit 1
     fi
-    git tag "$TAG"
+    git tag "$TAG" origin/main
     git push origin "$TAG"
-    echo "Created and pushed tag $TAG — the boot-image release pipeline will build + publish."
+    echo "==> Pushed tag $TAG from origin/main — the boot-image release pipeline will build + publish."
 
 # ── Documentation ────────────────────────────────────────────────────────
 
