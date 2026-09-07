@@ -1,4 +1,16 @@
 [toolchain]
 channel = "nightly-2026-08-25"
 components = ["clippy", "rustfmt", "rust-src", "rustc-codegen-cranelift"]
-targets = ["aarch64-unknown-linux-musl", "wasm32-wasip1", "x86_64-unknown-linux-musl"]
+# `aarch64-unknown-linux-gnu` is the release matrix's only true
+# cross-compile: every other published target is its runner's native
+# triple, so their std comes with the toolchain. This one does not, and
+# `dtolnay/rust-toolchain` installing it does not help — that installs it
+# for the action's own toolchain, while this file overrides which
+# toolchain cargo actually uses. The result was `can't find crate for
+# core` at release time, on the one target nothing else builds.
+targets = [
+    "aarch64-unknown-linux-gnu",
+    "aarch64-unknown-linux-musl",
+    "wasm32-wasip1",
+    "x86_64-unknown-linux-musl",
+]

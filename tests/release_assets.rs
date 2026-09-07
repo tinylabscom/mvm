@@ -122,6 +122,84 @@ fn the_release_prep_refreshes_the_detached_fuzz_lockfiles() {
     );
 }
 
+/// Every cross-compiled release target must have its std installed by the
+/// toolchain this repo actually pins.
+///
+/// `release.yml` passes `targets:` to `dtolnay/rust-toolchain`, which installs
+/// them for *the action's* toolchain. `rust-toolchain.toml` then overrides
+/// which toolchain cargo uses, and the override does not inherit those targets.
+/// A target listed only in the workflow therefore has no `core`/`std` at build
+/// time, and the build fails with E0463.
+///
+/// It failed exactly once and only in the worst place: no PR lane builds
+/// `aarch64-unknown-linux-gnu`, so the first evidence was a tagged release
+/// pipeline going red. That is what this test replaces.
+///
+/// A target that is its runner's native triple is exempt — its std ships with
+/// the toolchain, and listing every host triple here would make each
+/// contributor install std for platforms they never build.
+#[test]
+fn every_cross_compiled_release_target_is_pinned_by_the_toolchain_file() {
+    let workflow = release_workflow();
+    let toolchain_file =
+        fs::read_to_string("rust-toolchain.toml").expect("rust-toolchain.toml must be readable");
+
+    // Only the `targets = [...]` array counts. Searching the whole file would
+    // match the comment above that array, which names the very target it
+    // explains — the first draft of this test passed with the target removed,
+    // for exactly that reason.
+    let targets_start = toolchain_file
+        .find("targets = [")
+        .expect("rust-toolchain.toml must declare a targets array");
+    let targets_len = toolchain_file[targets_start..]
+        .find(']')
+        .expect("the targets array must be closed");
+    let toolchain = &toolchain_file[targets_start..targets_start + targets_len];
+
+    // Runner image -> the triple its rustc is native to.
+    let native = [
+        ("macos-latest", "aarch64-apple-darwin"),
+        ("ubuntu-latest", "x86_64-unknown-linux-gnu"),
+        ("ubuntu-24.04-arm", "aarch64-unknown-linux-gnu"),
+    ];
+
+    // The build matrix entries, as `- target: X` followed by `os: Y`.
+    let mut pairs = Vec::new();
+    let lines: Vec<&str> = workflow.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        let Some(target) = line.trim().strip_prefix("- target: ") else {
+            continue;
+        };
+        let os = lines[i + 1..]
+            .iter()
+            .take(6)
+            .find_map(|l| l.trim().strip_prefix("os: "))
+            .unwrap_or_else(|| panic!("matrix entry {target} names no runner"));
+        pairs.push((target.trim().to_string(), os.trim().to_string()));
+    }
+
+    assert!(
+        !pairs.is_empty(),
+        "no build matrix entries found — the parse broke, and a test that \
+         checks nothing passes forever"
+    );
+
+    for (target, os) in &pairs {
+        let is_native = native
+            .iter()
+            .any(|(runner, triple)| runner == os && triple == target);
+        if is_native {
+            continue;
+        }
+        assert!(
+            toolchain.contains(target),
+            "{target} is cross-compiled on {os} but rust-toolchain.toml does not \
+             pin it, so the pinned toolchain has no std for it and the release \
+             build fails with `can't find crate for core`"
+        );
+    }
+}
+
 fn ci_workflow() -> String {
     let path = Path::new(".github/workflows/ci.yml");
     fs::read_to_string(path)
