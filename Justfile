@@ -700,6 +700,22 @@ _release-prep VERSION:
     sed -i.bak -E "s/(^[[:space:]]*version = \")[0-9][^\"]*(\")/\1$V\2/" nix/packages/mvmctl.nix nix/packages/mvm-sdk-cdylib.nix
     rm nix/packages/*.bak
     git add nix/images/runtime-overlay/flake.nix nix/packages/mvmctl.nix nix/packages/mvm-sdk-cdylib.nix
+    # The cargo-fuzz crates are separate workspaces with their own lockfiles,
+    # each pinning the internal `mvm-*` crates by version. A bump leaves every
+    # one of them naming the old version, and ci.yml's "cargo-fuzz crates still
+    # compile" step runs `cargo check --locked` per manifest — a lock that would
+    # have to change is the failure.
+    #
+    # Invisible on the PR: that step sits behind a change-detector and
+    # `check-all` cannot see detached lockfiles at all. v0.18.0-rc.1 was evicted
+    # from the merge queue three times before anyone looked at a merge-group log.
+    #
+    # `cargo metadata` re-resolves and rewrites each lock without compiling.
+    for manifest in crates/*/fuzz*/Cargo.toml crates/deps/*/fuzz*/Cargo.toml; do
+        [ -f "$manifest" ] || continue
+        cargo metadata --manifest-path "$manifest" --format-version 1 >/dev/null
+        git add "$(dirname "$manifest")/Cargo.lock"
+    done
     git-cliff --tag "v$V" --unreleased --prepend CHANGELOG.md
     # Fail closed if git-cliff did not add the new section (silently shipped
     # v0.15.2/v0.16.0/v0.16.1 with no changelog entry — never again).
@@ -708,6 +724,16 @@ _release-prep VERSION:
         exit 1
     fi
     git add Cargo.toml Cargo.lock CHANGELOG.md
+    # Gate the commit on the bumped tree. `just release` runs the workspace
+    # suite before calling this recipe, which green-lights the tree as it was
+    # *before* the version changed — so the tree actually being pushed was never
+    # run. That is how a pre-release-unaware version parser reached CI on
+    # v0.18.0-rc.1: no published version had ever carried a `-rc.1` suffix, so
+    # the defect was unreachable until the bump, and the bump was never tested.
+    #
+    # A gate that runs before a mutation cannot witness the mutation.
+    echo "==> re-running the workspace suite against the bumped tree"
+    cargo nextest run --workspace
     git commit -m "release: v$V"
     git push -u origin "$BRANCH"
     gh pr create --base main --head "$BRANCH" --title "release: v$V" \
