@@ -43,6 +43,85 @@ fn justfile() -> String {
     fs::read_to_string("Justfile").expect("Justfile must be readable")
 }
 
+/// The release prep must test the tree it pushes, not the tree before it.
+///
+/// `just release` runs the workspace suite and *then* calls `_release-prep`,
+/// which is where the version actually changes. So the suite green-lights the
+/// pre-bump tree while the bumped tree — the one that becomes the release — was
+/// never run.
+///
+/// That is not hypothetical: a version parser that could not read a
+/// pre-release suffix reached CI on v0.18.0-rc.1 because no published version
+/// had ever carried one, making the defect unreachable until the bump.
+#[test]
+fn the_release_prep_runs_the_suite_after_the_version_is_bumped() {
+    let justfile = justfile();
+    let prep = justfile
+        .find("_release-prep VERSION:")
+        .expect("the shared release prep recipe must exist");
+    let body = &justfile[prep..];
+
+    let bump = body
+        .find("version = \\\"$V\\\"")
+        .expect("_release-prep must rewrite the workspace version");
+    let suite = body
+        .find("cargo nextest run --workspace")
+        .expect("_release-prep must run the workspace suite against the bumped tree");
+    let commit = body
+        .find(r#"git commit -m "release: v$V""#)
+        .expect("_release-prep must commit the bump");
+
+    assert!(
+        bump < suite,
+        "the suite must run after the version is rewritten, or it witnesses the \
+         tree as it was before the release"
+    );
+    assert!(
+        suite < commit,
+        "the suite must gate the commit, or a failing bumped tree is still pushed"
+    );
+}
+
+/// A version bump invalidates every detached fuzz lockfile, so the bump has to
+/// fix them.
+///
+/// The cargo-fuzz crates are separate workspaces pinning the internal `mvm-*`
+/// crates by version, and `ci.yml` checks them with `cargo check --locked`. The
+/// step sits behind a change-detector and `check-all` cannot see detached
+/// lockfiles, so nothing on the PR evaluates them — v0.18.0-rc.1 was 13-green
+/// on its PR and was evicted from the merge queue three times.
+#[test]
+fn the_release_prep_refreshes_the_detached_fuzz_lockfiles() {
+    let justfile = justfile();
+    let prep = justfile
+        .find("_release-prep VERSION:")
+        .expect("the shared release prep recipe must exist");
+    let body = &justfile[prep..];
+
+    assert!(
+        body.contains("crates/*/fuzz*/Cargo.toml"),
+        "_release-prep must walk the fuzz manifests, or their locks keep naming \
+         the previous version and the merge queue rejects the release"
+    );
+    assert!(
+        body.contains("crates/deps/*/fuzz*/Cargo.toml"),
+        "the fuzz crate under crates/deps must be refreshed too — ci.yml globs \
+         both paths, so covering one leaves the gate red"
+    );
+
+    let refresh = body
+        .find("cargo metadata --manifest-path")
+        .expect("_release-prep must re-resolve each fuzz lock");
+    let commit = body
+        .find(r#"git commit -m "release: v$V""#)
+        .expect("_release-prep must commit the bump");
+    assert!(
+        refresh < commit,
+        "the locks must be refreshed before the commit, or the release PR \
+         carries the stale ones"
+    );
+}
+
 fn ci_workflow() -> String {
     let path = Path::new(".github/workflows/ci.yml");
     fs::read_to_string(path)
