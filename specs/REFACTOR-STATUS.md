@@ -1,8 +1,15 @@
 # Refactor status
 
-Last updated: 2026-09-06
+Last updated: 2026-09-07
 
 ## In progress
+
+- [ ] **Shared website shell.**
+      `specs/plans/2026-09-07-shared-site-shell.md`.
+      Homepage, blog, and pricing share one responsive header; Blog is present
+      in the shared navigation; the page reveal is removed; and CI regressions
+      cover the shared shell. Website-source merges to `main` automatically
+      publish through the existing Pages workflow. PR review remains.
 
 - [x] **Public CVE evidence corpus.**
       `specs/plans/2026-09-06-public-cve-corpus.md`.

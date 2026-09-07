@@ -1,16 +1,40 @@
 ---
-// Serve the pricing page (brought over from the retired mvm-static-site)
-// at /pricing/, same pattern as demo.astro. Its
-// stylesheet is the static site's theme.css (served from /theme.css),
-// which was itself ported from this site's design tokens, so the page
-// matches the docs look in both light and dark.
-//
-// `?raw` import, not fs.readFileSync: the compiled page runs from
-// dist/chunks/ in the production build, so __dirname-relative paths that
-// work in dev break at build time. Vite inlines the file at bundle time.
-import html from "../assets/pricing.html?raw";
-
-return new Response(html, {
-  headers: { "Content-Type": "text/html" },
-});
+import "../../tailwind.css";
+import "../styles/custom.css";
+import PricingContent from "../components/PricingContent.astro";
+import Header from "../overrides/Header.astro";
 ---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="generator" content={Astro.generator} />
+    <title>MVM — Pricing</title>
+    <script is:inline>
+      try {
+        const storedTheme = localStorage.getItem("starlight-theme");
+        const theme = storedTheme === "light" || storedTheme === "dark"
+          ? storedTheme
+          : window.matchMedia("(prefers-color-scheme: light)").matches
+            ? "light"
+            : "dark";
+        document.documentElement.dataset.theme = theme;
+      } catch {
+        document.documentElement.dataset.theme = "dark";
+      }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/theme.css" />
+  </head>
+  <body>
+    <Header forceLanding standalone />
+    <PricingContent />
+  </body>
+</html>

@@ -821,11 +821,9 @@ docs-build: demo-assets
 
 # Publish the docs site to Cloudflare Pages (dispatches pages.yml on main)
 docs-publish:
-    # `pages.yml` runs automatically when a release is published or a `v*`
-    # tag is pushed; this recipe exists for operator-triggered docs publishes.
-    # The old `push: branches:[main] paths:[public/**]` trigger was dropped in
-    # the CI cost reduction — so a docs-only change reaches the site only when
-    # someone asks for it or a release/tag fires.
+    # `pages.yml` runs automatically when website source lands on main, a
+    # release is published, or a `v*` tag is pushed. This recipe remains the
+    # operator-triggered publish/retry path.
     #
     # `--ref main`, never the current branch: Pages serves what is on main, and
     # dispatching from a branch would publish something nobody has merged.

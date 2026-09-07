@@ -1,14 +1,19 @@
 name: Deploy site to Cloudflare Pages
 
-# Deploys happen when a GitHub Release is published or a version tag is
-# pushed, with manual dispatch available for operator-triggered docs
-# publishes. The previous `push: branches: [main] paths: [public/**]`
-# trigger was dropped in the ecosystem-wide CI cost reduction (no
-# push-to-branch triggers anywhere).
+# Deploy after website source lands on main. Releases, version tags, and manual
+# dispatch remain supported so release publishing and operator retries keep the
+# same deployment path.
 on:
   release:
     types: [published]
   push:
+    branches:
+      - main
+    paths:
+      - "public/**"
+      - "web/mvm-demo/**"
+      - "web/mvm-demo-guest/**"
+      - ".github/workflows/pages.yml"
     tags:
       - "v*"
   workflow_dispatch:

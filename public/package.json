@@ -16,8 +16,9 @@
     "check:samples": "node scripts/check-sample-provenance.mjs",
     "check:perf": "node scripts/check-perf-provenance.mjs",
     "check:headers": "node scripts/check-isolation-headers.mjs",
+    "check:shell": "node --test tests/site-shell.test.mjs",
     "check:deploy-assets": "node scripts/check-weblinux-deploy-assets.mjs dist",
-    "check": "pnpm check:tokens && pnpm check:samples && pnpm check:perf && pnpm check:headers && pnpm build"
+    "check": "pnpm check:tokens && pnpm check:samples && pnpm check:perf && pnpm check:headers && pnpm check:shell && pnpm build"
   },
   "dependencies": {
     "@astrojs/react": "^4.4.2",

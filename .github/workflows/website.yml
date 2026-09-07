@@ -16,6 +16,8 @@ on:
     paths:
       - "public/**"
       - "web/mvm-demo/**"
+      - "web/mvm-demo-guest/**"
+      - ".github/workflows/pages.yml"
       - ".github/workflows/website.yml"
   merge_group:
     types: [checks_requested]
@@ -82,6 +84,10 @@ jobs:
       - name: Check cross-origin isolation headers
         working-directory: public
         run: pnpm check:headers
+
+      - name: Check shared site shell
+        working-directory: public
+        run: pnpm check:shell
 
       - name: Build
         working-directory: public
