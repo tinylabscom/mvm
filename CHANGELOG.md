@@ -2,7 +2,7 @@
 
 All notable changes to mvm are documented in this file.
 
-## [0.18.0] — 2026-09-02
+## [0.18.0-rc.1] — 2026-09-06
 
 ### Added
 - **mvm-cli**: Fetch + apply the signed pack revocation list (Plan 213 §I)
@@ -221,8 +221,13 @@ All notable changes to mvm are documented in this file.
 - **builder**: Move the persistent HVF builder onto the disk transport
 - **xtask**: Pin the SDK cdylib closure free of host HTTP/TLS/async
 - **vmm**: Attribute a helper resolved from the other build profile
-- **fs**: Stream host file contents into the image instead of buffering them
 - **memory**: WS5-WS6 agent memory plane store and handler (+47 more)
+- **contract**: Content-addressed asset identity in the signed plan
+- **contract**: Make SDK sidecar delivery explicit
+- **evidence**: Boot beacon, deployments inventory, verity-sealed provenance mark + in-toto sidecar
+- **volume**: Snapshot a --host directory into an image instead of refusing it
+- **claims**: Claim release-artifact authenticity as MVM-SEC-20
+- **release**: Attest build provenance for the release tarballs
 
 ### Changed
 - Ignore transfer directory
@@ -250,6 +255,9 @@ All notable changes to mvm are documented in this file.
 - **hvf**: Delete the now-dead virtio-fs share wiring
 - **vmm**: Delete the virtio-fs device and its FUSE server
 - Remove worktrees from git history
+- Stop tracking .agent-memory/
+- **agent-memory**: Follow the untracking through the docs and the gate
+- **kernel**: Bump synchronized pins to 6.12.108
 
 ### Documentation
 - Plan HVF density memory reductions
@@ -385,13 +393,21 @@ All notable changes to mvm are documented in this file.
 - **qemu**: Record why this backend declares no vCPU ceiling
 - Stop crediting mvm-sdk with a cdylib it does not build
 - **plan**: The Stage C re-scope was overtaken by #3061
-- Plan for cutting the 0.18 release
-- Record the release-gate decisions in the 0.18 plan
-- **notes**: Record the mvm-hostd --lib tracing flake
-- Correct the virtio-fs claims the code no longer supports
 - **plan**: Design out retiring VmVolumeKind::DirShare
 - Add implementation prompt for issue plans
 - Point the helper rebuild at the recipe, and finish the crate list
+- Document every workspace crate
+- **plan**: Close the two DirShare boxes that are already answered
+- **specs**: Close the cargo target-dir guard merge boxes
+- Cover every Cargo crate README
+- **plan**: Close the DirShare question by measurement
+- **specs**: Close the aux-helper contract merge boxes
+- **plans**: Plan the ADR-001 ledger drift repair
+- **security**: Correct SECURITY.md, the ADR-001 claim numbering, and two CLAUDE.md facts
+- Keep the main checkout on synchronized main
+- **plans**: Claim release-artifact authenticity, then decide on provenance
+- **adr**: Deduplicate ADR-037 by renumbering the superseded datapath to 052
+- **security**: Publish CVE evidence corpus
 
 ### Fixed
 - **hvf/oci**: Guest BROKER_PORT bridge + OCI rootfs self-heal
@@ -741,14 +757,32 @@ All notable changes to mvm are documented in this file.
 - **build**: The typed persistent route read back an empty export
 - **ci**: Let Extended CI's red mean a regression again
 - **ci**: Fix the two Extended CI failures that were not the product
-- **release**: Require e2e-docs to have succeeded, not merely finished
-- **xtask**: Register check-release-evidence with the gate lane
 - **core**: Enforce the 0700 mvm-home posture at the creation seam
 - **build**: Refuse a disk-transport session instead of hanging on its lock
 - **vsock**: Stop the exec stream inheriting a connect timeout
 - **doctor**: Ask diskutil about the volume, not the directory
 - **guest**: Name the missing device-mapper instead of the missing file
 - **mount**: Say what a transient run will and will not attach
+- **mount**: Hold a disk volume's lock for the VM's lifetime, and flush on exit
+- **scripts**: Reclaim CARGO_TARGET_DIR inherited from another source tree
+- **template**: Boot a workload guest on the workload kernel, on x86_64 too
+- **just**: Strip supervisor binaries on macOS again
+- **cli**: Run the image's baked entrypoint instead of waiting for it
+- **e2e**: Provision the guest-runtime directory the @guest_bins lane needs
+- **vmm**: Verify the host-helper contract before spawn
+- **release**: Make the documented-surface gate actually gate a release
+- **contract**: Pin the sdk_uses_sidecar default, and declare it dormant
+- **runtime**: Flush writable OCI disks before teardown
+- **vmm**: Retry a rebuilt helper probe timeout
+- Execute every README example, and fix the three defects that found
+- **ci**: Stop the nightly lanes from cancelling themselves
+- **stage0**: Carry the build config on the input disk, and two live-lane preconditions
+- **claims**: Make the red mutation shards green on their merits
+- **claims**: Close the survivors the dead mvm-cli shard was hiding
+- **e2e**: The three real failures the Linux lane was hiding
+- **ci**: Write an entrypoint marker the guest agent can accept
+- A contended builder ate the whole e2e suite, and an rc would have published as latest
+- **update**: Order releases instead of comparing them as strings
 
 ### Other
 - OCI materialize hygiene: multi-block ext4 dirs + builder orphan-sweep
@@ -969,7 +1003,8 @@ All notable changes to mvm are documented in this file.
 - Add qemu-wasm-smoke-pack build/download scripts
 - Realign landing page with the MVM one-pager
 - Bind caller commitments into signed execution plans
-- Merge remote-tracking branch 'origin/main' into worktree-release-0-18-plan
+- Move libkrun Stage 0 to block transport
+- Refresh host directory snapshots at machine start
 
 ### Performance
 - **verb-grant**: Base64 the cmdline envelope instead of hex
@@ -1006,6 +1041,7 @@ All notable changes to mvm are documented in this file.
 - **build**: Take mvm-cli's build script off the inner loop
 - **audit**: Fold a cached prefix instead of re-reading the log
 - **timing**: Name the parts of the admit window
+- Cache command_names to fix hanging CLI help tests
 
 ### Refactored
 - Typed PackBuilder authority, --sbom-uri, protected signing env, runtime-pack producer
@@ -1068,6 +1104,7 @@ All notable changes to mvm are documented in this file.
 - **contract**: Move GuestLibc below the crates that need it
 - **hvf**: Delete the dev-tier virtio-fs root
 - **qemu**: Refuse virtio-fs shares and delete the virtiofsd module
+- **volume**: Retire runtime directory shares
 
 ### Testing
 - Test(guest)+build: verify detached-workload handler in CI; keep embedded agent fresh
@@ -1136,8 +1173,10 @@ All notable changes to mvm are documented in this file.
 - **bdd**: Witness broker on default backends
 - **bdd**: Ratchet the parse tier so it cannot grow unnoticed
 - **e2e**: Rebuild the per-VM supervisors before the launch gate boots
-- **release**: Gate a release on evidence the documented surface ran
-- **e2e**: Point the --mount witnesses at the directory the README mounts
+- **volume**: Pin persistent directory-share refusal
+- **bdd**: Parallelize alternative CLI help coverage
+- Make hosted live witnesses deterministic
+- **claims**: Close the last claim-witness survivors so the security lane can go green
 
 ## [0.17.0] — 2026-07-08
 
