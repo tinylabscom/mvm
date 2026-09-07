@@ -639,7 +639,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-agentd"
-version = "0.18.0"
+version = "0.18.0-rc.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -662,7 +662,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-contract"
-version = "0.18.0"
+version = "0.18.0-rc.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -678,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-core"
-version = "0.18.0"
+version = "0.18.0-rc.1"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -712,7 +712,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-host-services"
-version = "0.18.0"
+version = "0.18.0-rc.1"
 dependencies = [
  "mvm-agentd",
  "mvm-core",
@@ -722,7 +722,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-sdk"
-version = "0.18.0"
+version = "0.18.0-rc.1"
 dependencies = [
  "base64",
  "blake3",
