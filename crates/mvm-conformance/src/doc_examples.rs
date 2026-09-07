@@ -72,8 +72,7 @@ pub struct CodeBlock {
     pub line: usize,
     /// The fence's language token, lowercased; empty for a bare ``` fence.
     pub language: String,
-    /// Comma-separated fence attributes after the language (`rust,ignore`),
-    /// following rustdoc's convention.
+    /// Fence attributes after the language (`rust ignore` or `rust,ignore`).
     pub attributes: Vec<String>,
     /// The block body, newline-joined, without the fences.
     pub body: String,
@@ -210,8 +209,8 @@ fn is_placeholder(token: &str) -> bool {
 
 /// Split a documentation file into its fenced code blocks.
 ///
-/// Info strings beyond the language (```nix "mkGuest") are ignored: only the
-/// first whitespace-delimited token is the language.
+/// The first info-string token is the language. Later whitespace- or
+/// comma-separated tokens are retained as attributes.
 pub fn code_blocks(file: &str, contents: &str) -> Vec<CodeBlock> {
     let mut blocks = Vec::new();
     let mut open: Option<CodeBlock> = None;
@@ -231,23 +230,15 @@ pub fn code_blocks(file: &str, contents: &str) -> Vec<CodeBlock> {
             }
             None => {
                 if let Some(info) = trimmed.strip_prefix("```") {
+                    let mut tokens = info.split_whitespace();
+                    let first = tokens.next().unwrap_or_default();
+                    let mut parts = first.split(',');
                     open = Some(CodeBlock {
                         file: file.to_string(),
                         line: index + 1,
-                        language: info
-                            .split_whitespace()
-                            .next()
-                            .unwrap_or_default()
-                            .split(',')
-                            .next()
-                            .unwrap_or_default()
-                            .to_ascii_lowercase(),
-                        attributes: info
-                            .split_whitespace()
-                            .next()
-                            .unwrap_or_default()
-                            .split(',')
-                            .skip(1)
+                        language: parts.next().unwrap_or_default().to_ascii_lowercase(),
+                        attributes: parts
+                            .chain(tokens.flat_map(|token| token.split(',')))
                             .map(|attribute| attribute.trim().to_ascii_lowercase())
                             .filter(|attribute| !attribute.is_empty())
                             .collect(),
@@ -1267,6 +1258,18 @@ mod tests {
     fn code_blocks_ignore_the_info_string_beyond_the_language() {
         let blocks = code_blocks("doc.md", "```nix \"mkGuest\"\n{}\n```\n");
         assert_eq!(blocks[0].language, "nix");
+    }
+
+    #[test]
+    fn code_blocks_accept_whitespace_separated_fence_attributes() {
+        let blocks = code_blocks(
+            "doc.md",
+            "```rust ignore\n// illustrative: incomplete type sketch\n```\n",
+        );
+
+        assert_eq!(blocks[0].language, "rust");
+        assert!(blocks[0].is_ignored());
+        assert_eq!(blocks[0].ignore_reason(), Some("incomplete type sketch"));
     }
 
     #[test]

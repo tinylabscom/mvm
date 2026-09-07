@@ -7,7 +7,7 @@
 //! directly above the offending function.
 //!
 //! Blocks that cannot compile as written (IR shape sketches carrying `…`) opt
-//! out with ```rust,ignore and must state why; the `bdd` suite checks that the
+//! out with ```rust ignore and must state why; the `bdd` suite checks that the
 //! reason is there.
 
 include!(concat!(env!("OUT_DIR"), "/doc_rust_examples.rs"));

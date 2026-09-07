@@ -12,6 +12,12 @@
  *  internal color names through our tokens.
  */
 :root {
+  /* Public pages share the landing page's 72rem content column and one
+     responsive outer gutter. Docs keep using Starlight's independent
+     --sl-content-* sizing below. */
+  --site-content-width: 72rem;
+  --site-gutter: 1.5rem;
+
   --sl-color-accent-low: var(--color-accent-low);
   --sl-color-accent: var(--color-accent);
   --sl-color-accent-high: var(--color-accent-high);
@@ -64,6 +70,12 @@
      gutter (Section.tsx's `px-6`), so both page families share one
      margin rhythm at narrow widths. */
   --sl-content-pad-x: 1.5rem;
+}
+
+@media (min-width: 640px) {
+  :root {
+    --site-gutter: 2rem;
+  }
 }
 
 /*  Tell the browser the supported schemes so native form controls,
@@ -598,8 +610,11 @@ nav[aria-label="Main"] ul ul li {
 }
 
 .blog-shell {
-  width: min(100% - 2rem, 72rem);
+  box-sizing: border-box;
+  width: 100%;
+  max-width: calc(var(--site-content-width) + (2 * var(--site-gutter)));
   margin-inline: auto;
+  padding-inline: var(--site-gutter);
 }
 
 .blog-brand,
