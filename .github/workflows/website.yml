@@ -83,6 +83,10 @@ jobs:
         working-directory: public
         run: pnpm check:headers
 
+      - name: Check shared site shell
+        working-directory: public
+        run: pnpm check:shell
+
       - name: Build
         working-directory: public
         run: pnpm build

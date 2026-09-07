@@ -4,28 +4,28 @@
 // On all other pages, render the default Starlight Header.
 import Default from "@astrojs/starlight/components/Header.astro";
 
-const route = Astro.locals.starlightRoute;
-const isSplash = route?.entry?.data?.template === "splash";
+interface Props {
+  forceLanding?: boolean;
+  standalone?: boolean;
+}
+
+const { forceLanding = false, standalone = false } = Astro.props;
+const isSplash =
+  forceLanding || Astro.locals.starlightRoute?.entry?.data?.template === "splash";
 
 const base = import.meta.env.BASE_URL;
 const b = base.endsWith("/") ? base : `${base}/`;
 const navLinks = [
   { label: "Docs", href: `${b}getting-started/installation/` },
   { label: "Architecture", href: `${b}architecture/` },
+  { label: "Blog", href: `${b}blog/` },
   { label: "Pricing", href: `${b}pricing/` },
   { label: "Request access", href: `${b}#request-access` },
 ];
 ---
 
-{/* Runs before paint so html.js is present the instant the reveal CSS below
-    is evaluated — the reveal-hidden state only exists under that class, so
-    this must not be a module script (deferred) or land after this point. */}
-<script is:inline>
-  document.documentElement.classList.add("js");
-</script>
-
 {isSplash ? (
-  <header class="landing-header">
+  <header class:list={["landing-header", { "landing-header--standalone": standalone }]}>
     <div class="landing-header-inner">
       <a href={b} class="landing-logo">
         <span class="landing-logo-text">mvm</span>
@@ -169,6 +169,11 @@ const navLinks = [
     border-bottom: 1px solid var(--sl-color-hairline);
     background: var(--sl-color-bg);
     backdrop-filter: blur(12px);
+  }
+
+  .landing-header--standalone {
+    width: 100%;
+    margin-inline: 0;
   }
 
   @media (min-width: 640px) {
@@ -345,6 +350,11 @@ const navLinks = [
     border-top: 1px solid var(--sl-color-hairline-light);
   }
 
+  .landing-header--standalone .landing-mobile-nav {
+    width: calc(100% + 3rem);
+    margin-inline: -1.5rem;
+  }
+
   .landing-mobile-nav.is-open {
     display: flex;
   }
@@ -352,6 +362,11 @@ const navLinks = [
   @media (min-width: 640px) {
     .landing-mobile-nav {
       padding-inline: 2rem;
+    }
+
+    .landing-header--standalone .landing-mobile-nav {
+      width: calc(100% + 4rem);
+      margin-inline: -2rem;
     }
   }
 

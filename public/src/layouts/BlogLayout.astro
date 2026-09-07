@@ -2,6 +2,7 @@
 import "../../tailwind.css";
 import "../styles/custom.css";
 import MermaidRenderer from "../components/MermaidRenderer.astro";
+import Header from "../overrides/Header.astro";
 
 interface Props {
   title: string;
@@ -19,17 +20,22 @@ const { title, description } = Astro.props;
     <meta name="generator" content={Astro.generator} />
     <title>{title} | mvm</title>
     {description && <meta name="description" content={description} />}
+    <script is:inline>
+      try {
+        const storedTheme = localStorage.getItem("starlight-theme");
+        const theme = storedTheme === "light" || storedTheme === "dark"
+          ? storedTheme
+          : window.matchMedia("(prefers-color-scheme: light)").matches
+            ? "light"
+            : "dark";
+        document.documentElement.dataset.theme = theme;
+      } catch {
+        document.documentElement.dataset.theme = "dark";
+      }
+    </script>
   </head>
   <body class="blog-page">
-    <header class="blog-shell blog-header">
-      <a class="blog-brand" href="/">mvm</a>
-      <nav class="blog-nav" aria-label="Primary">
-        <a href="/blog/">Blog</a>
-        <a href="/getting-started/installation/">Docs</a>
-        <a href="https://this-week-in-microvms.com">This Week in MicroVMs</a>
-        <a href="https://github.com/tinylabscom/mvm">GitHub</a>
-      </nav>
-    </header>
+    <Header forceLanding standalone />
     <main class="blog-shell">
       <slot />
     </main>

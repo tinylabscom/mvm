@@ -1,24 +1,4 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MVM — Pricing</title>
-<script>
-  // Apply the stored theme before first paint to avoid a flash. No stored
-  // value → auto (the CSS prefers-color-scheme fallback decides).
-  (function () {
-    try {
-      var t = localStorage.getItem('starlight-theme');
-      if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
-    } catch (e) {}
-  })();
-</script>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/theme.css">
-<style>
+<style is:global>
   /* ── Page intro ── */
   .intro { position: relative; overflow: hidden; border-bottom: 1px solid var(--color-edge); }
   .intro .site-bloom.b1 {
@@ -187,29 +167,6 @@
     .intro-inner { padding: 2.75rem 1.5rem 2.25rem; }
   }
 </style>
-</head>
-<body>
-
-<header class="hdr">
-  <div class="hdr-row">
-    <a class="brand" href="/">
-      <span class="name">mvm</span>
-      <span class="rev">REV-2026.04</span>
-    </a>
-    <div class="hdr-actions">
-      <a class="hdr-link active" href="/pricing/">Pricing</a>
-      <button class="theme-toggle" type="button" aria-label="Toggle color theme" title="Toggle color theme">
-        <svg class="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>
-        </svg>
-        <svg class="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M20.99 12.79A9 9 0 1 1 11.21 3.01 7 7 0 0 0 20.99 12.79Z"/>
-        </svg>
-      </button>
-      <button class="btn-hdr" data-open-form>Request access →</button>
-    </div>
-  </div>
-</header>
 
 <section class="intro">
   <div class="site-bloom b1" aria-hidden="true"></div>
@@ -419,22 +376,6 @@
 </div>
 
 <script>
-  // Theme toggle — explicit light/dark stored in localStorage; no stored
-  // value means auto (OS preference).
-  (function () {
-    var toggle = document.querySelector('.theme-toggle');
-    function effectiveTheme() {
-      var t = document.documentElement.dataset.theme;
-      if (t === 'light' || t === 'dark') return t;
-      return matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
-    }
-    toggle.addEventListener('click', function () {
-      var next = effectiveTheme() === 'light' ? 'dark' : 'light';
-      document.documentElement.dataset.theme = next;
-      try { localStorage.setItem('starlight-theme', next); } catch (e) {}
-    });
-  })();
-
   // FAQ accordion (one open at a time)
   document.querySelectorAll('.faq-item').forEach(item => {
     item.querySelector('button').addEventListener('click', () => {
@@ -453,6 +394,3 @@
   modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && !modal.hidden) closeModal(); });
 </script>
-
-</body>
-</html>

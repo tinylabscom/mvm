@@ -602,22 +602,7 @@ nav[aria-label="Main"] ul ul li {
   margin-inline: auto;
 }
 
-.blog-header {
-  position: sticky;
-  top: 0;
-  z-index: 20;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  padding-block: 1.25rem;
-  border-bottom: 1px solid var(--color-border);
-  background: color-mix(in srgb, var(--color-page) 92%, transparent);
-  backdrop-filter: blur(14px);
-}
-
 .blog-brand,
-.blog-nav a,
 .blog-footer a,
 .blog-list-item a,
 .blog-featured a,
@@ -630,18 +615,6 @@ nav[aria-label="Main"] ul ul li {
   font-weight: 700;
 }
 
-.blog-nav {
-  align-items: center;
-  display: flex;
-  gap: 1rem;
-  font-size: 0.92rem;
-}
-
-.blog-nav a {
-  color: var(--color-muted);
-}
-
-.blog-nav a:hover,
 .blog-footer a:hover,
 .blog-back-link:hover,
 .blog-list-item a:hover h2,
@@ -1094,43 +1067,6 @@ nav[aria-label="Main"] ul ul li {
 @media (prefers-reduced-motion: reduce) {
   .site-glow-card__sheen {
     display: none;
-  }
-}
-
-/* Default to visible: if scripting or the observer fails, the page still
-   reads. The hidden state is only applied once JS has taken over. */
-.site-reveal {
-  opacity: 1;
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  html.js .site-reveal {
-    opacity: 0;
-    transform: translateY(0.75rem);
-    transition: opacity 600ms ease, transform 600ms ease;
-  }
-  html.js .site-reveal.is-shown {
-    opacity: 1;
-    transform: none;
-  }
-
-  /* Failsafe: if React never hydrates (a thrown error, a slow/failed
-     chunk load), .is-shown never gets added and content would stay at
-     opacity: 0 forever. Landing's mount effect adds .hydrated to <html>
-     the moment the island is alive, so this only fires when that never
-     happened — not on a fixed timer, which would fire on every page
-     regardless of scroll position and permanently defeat the reveal for
-     anything below the fold. Scoped to :not(.hydrated) so a successful
-     mount removes the selector entirely and the IntersectionObserver
-     reveal above runs untouched at any scroll depth. */
-  html.js:not(.hydrated) .site-reveal {
-    animation: site-reveal-failsafe 0s linear 4s forwards;
-  }
-  @keyframes site-reveal-failsafe {
-    to {
-      opacity: 1;
-      transform: none;
-    }
   }
 }
 
