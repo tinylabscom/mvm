@@ -1,0 +1,19 @@
+{
+  "lane": "macos-hvf",
+  "commit": "2025b830f01da8a8dfe6f14ca7b970e2084f6d86",
+  "material_digest": "4ba4755a1a8535ec38b2f9359343556e087ebb86a94c487ec14b37bcfaa6c294",
+  "recorded_at": "2026-09-07T06:09:13Z",
+  "host": {
+    "os": "Darwin",
+    "os_version": "26.5.2",
+    "arch": "arm64"
+  },
+  "suite": {
+    "features": 75,
+    "scenarios_total": 308,
+    "scenarios_passed": 307,
+    "scenarios_skipped": 1,
+    "steps_total": 1232,
+    "steps_passed": 1231
+  }
+}
