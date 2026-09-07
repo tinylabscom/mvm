@@ -26,3 +26,5 @@ which remains private under its own release review.
 - [x] Add CI-wired regressions for navigation, shared-shell reuse, and immediate
       homepage rendering.
 - [x] Run the complete website check and production static build.
+- [x] Deploy website source changes automatically after they merge to `main`,
+      while preserving release, tag, and manual deployment triggers.

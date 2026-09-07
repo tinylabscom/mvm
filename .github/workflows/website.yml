@@ -16,6 +16,8 @@ on:
     paths:
       - "public/**"
       - "web/mvm-demo/**"
+      - "web/mvm-demo-guest/**"
+      - ".github/workflows/pages.yml"
       - ".github/workflows/website.yml"
   merge_group:
     types: [checks_requested]

@@ -134,6 +134,12 @@ fn pages_workflow() -> String {
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
 }
 
+fn website_workflow() -> String {
+    let path = Path::new(".github/workflows/website.yml");
+    fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+}
+
 fn verify_checksum_manifest(directory: &Path) {
     let manifest_path = directory.join("SHA256SUMS");
     let manifest = fs::read_to_string(&manifest_path)
@@ -813,6 +819,37 @@ fn pages_workflow_installs_every_wasm_target_used_by_the_demo() {
         workflow.contains("targets: wasm32-unknown-unknown, wasm32-wasip1"),
         "pages.yml must install both the browser and guest WASM targets"
     );
+}
+
+#[test]
+fn pages_deploys_website_updates_merged_to_main() {
+    let workflow = pages_workflow();
+    assert!(
+        workflow.contains("  push:\n    branches:\n      - main\n"),
+        "pages.yml must deploy website changes after they merge to main"
+    );
+    for path in [
+        "public/**",
+        "web/mvm-demo/**",
+        "web/mvm-demo-guest/**",
+        ".github/workflows/pages.yml",
+    ] {
+        assert!(
+            workflow.contains(&format!("      - \"{path}\"")),
+            "pages.yml must deploy main-branch updates to {path}"
+        );
+    }
+}
+
+#[test]
+fn website_validation_covers_demo_guest_and_deploy_workflow_changes() {
+    let workflow = website_workflow();
+    for path in ["web/mvm-demo-guest/**", ".github/workflows/pages.yml"] {
+        assert!(
+            workflow.contains(&format!("      - \"{path}\"")),
+            "website.yml must validate pull requests that update {path}"
+        );
+    }
 }
 
 #[test]

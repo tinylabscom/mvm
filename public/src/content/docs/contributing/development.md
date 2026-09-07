@@ -388,7 +388,7 @@ with `MVM_HOME`; `rm -rf ~/.mvm` removes every trace):
 | `ci.yml` | Push to main/feat/*, PRs | check, fmt, clippy, test (macOS + Linux), audit |
 | `release.yml` | Tags matching `v*` | Builds 3 platform binaries (`aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`), creates GitHub Release |
 | `publish-crates.yml` | Release published | Publishes to crates.io in dependency order |
-| `pages.yml` | Release, version tag, or manual dispatch | Deploys docs to Cloudflare Pages |
+| `pages.yml` | Website change merged to main, release, version tag, or manual dispatch | Deploys docs to Cloudflare Pages |
 
 ### Website deployment
 
@@ -403,6 +403,10 @@ pnpm --dir public deploy
 `pnpm --dir public deploy` builds the Astro site and publishes it to the
 production branch of the existing `mvm` Pages project. Use
 `pnpm --dir public deploy:preview` for a preview deployment.
+
+Website changes under `public/`, `web/mvm-demo/`, or `web/mvm-demo-guest/`
+also deploy automatically after they merge to `main`. Pull requests build and
+validate the site without publishing it.
 
 Do not use `npx wrangler deploy` for this site. That is the Workers deployment
 command; this repository hosts the website as a Pages project and uses

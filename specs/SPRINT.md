@@ -15,8 +15,10 @@
       The homepage navigation now links to Blog; the blog and pricing routes
       render the same responsive header component as the homepage; and homepage
       sections render immediately without the previous reveal effect. Focused
-      regressions are wired into website CI. The deny-all article is explicitly
-      excluded from this UI-only delivery branch.
+      regressions are wired into website CI, and website-source merges to
+      `main` now publish automatically through the existing Pages workflow.
+      The deny-all article is explicitly excluded from this UI-only delivery
+      branch.
 
 - [x] **Publish the reviewed CVE evidence corpus.**
       `specs/plans/2026-09-06-public-cve-corpus.md`.
