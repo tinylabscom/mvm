@@ -1,10 +1,14 @@
-# Cloudflare Pages domain setup for gomicrovm.com
+# Cloudflare Workers domain setup for gomicrovm.com
 
-This note records how the public site (`public/`, Astro) is hosted on Cloudflare Pages and how the custom domain `gomicrovm.com` is wired up from the iwantmyname registrar.
+This note records how the public site (`public/`, Astro) is hosted with
+Cloudflare Workers Static Assets and how the custom domain `gomicrovm.com` is
+wired up from the iwantmyname registrar.
 
 ## Current state
 
-- The site is deployed by `.github/workflows/pages.yml` to Cloudflare Pages project `mvm`.
+- `.github/workflows/workers.yml` deploys the site as the `mvm` Worker.
+- The existing `mvm` Pages project remains the rollback target until the Worker
+  and production hostname pass the live checks.
 - The workflow triggers on:
   - GitHub Release `published`
   - Push of a `v*` tag
@@ -12,8 +16,8 @@ This note records how the public site (`public/`, Astro) is hosted on Cloudflare
 - A manual dispatch can be triggered from the repo with:
 
 ```bash
-just pages-deploy
-# or the older alias
+just workers-deploy
+# or the generic alias
 just docs-publish
 ```
 
@@ -21,7 +25,9 @@ just docs-publish
 
 The workflow reads two repository secrets:
 
-- `CLOUDFLARE_API_TOKEN` — Cloudflare API token with `Cloudflare Pages:Edit` and `Zone:Read` permissions for the account/zone.
+- `CLOUDFLARE_API_TOKEN` — account-scoped Cloudflare API token created from the
+  **Edit Cloudflare Workers** template. Add zone-scoped **Workers Routes:Edit**
+  only when CI, rather than an operator, will attach routes or domains.
 - `CLOUDFLARE_ACCOUNT_ID` — Cloudflare account ID.
 
 Set them with the GitHub CLI:
@@ -31,30 +37,32 @@ gh secret set CLOUDFLARE_API_TOKEN --repo tinylabscom/mvm
 gh secret set CLOUDFLARE_ACCOUNT_ID --repo tinylabscom/mvm --body "<account-id>"
 ```
 
-## Cloudflare Pages project
+## Cloudflare Worker
 
 Project name: `mvm`
 
-Create it through the Cloudflare dashboard (Pages & Workers → Create a project → Upload assets), or with Wrangler once authenticated:
+The first authenticated deployment creates the Worker if it does not exist:
 
 ```bash
-npx wrangler pages project create mvm --production-branch=main
+pnpm --dir public deploy
 ```
 
 The workflow deploys with:
 
 ```bash
-wrangler pages deploy public/dist --project-name=mvm --branch=main
+wrangler deploy
 ```
 
-The workflow verifies that its configured account can list deployments for the
-existing `mvm` project before starting the expensive site build. It does not
-create projects during deployment; a missing or wrong-account project fails
-the preflight.
+The workflow runs `wrangler whoami` before the expensive site build so a missing
+or invalid credential fails early. `wrangler deploy` creates or updates `mvm`
+from the checked-in configuration; no mutable local Wrangler project state is
+used.
 
 ## Custom domain setup
 
-Cloudflare Pages custom domains work best when Cloudflare is also the authoritative DNS provider for the zone. The registrar (iwantmyname) can keep the registration; only the nameservers need to point at Cloudflare.
+Worker custom domains require Cloudflare to be the authoritative DNS provider
+for the zone. The registrar (iwantmyname) can keep the registration; only the
+nameservers need to point at Cloudflare.
 
 ### 1. Add the zone to Cloudflare
 
@@ -75,16 +83,28 @@ In the Cloudflare dashboard:
 4. Replace the current nameservers with the two Cloudflare nameservers from step 1.
 5. Save. DNS propagation usually takes a few minutes to a few hours.
 
-### 3. Add the custom domain in Pages
+### 3. Verify the Worker before moving production
 
-1. In Cloudflare dashboard, go to **Pages** → `mvm` project → **Custom domains**.
-2. Click **Set up a custom domain**.
-3. Enter `gomicrovm.com` and confirm.
-4. Cloudflare will automatically add the required CNAME/A/AAAA records to the `gomicrovm.com` zone because it is authoritative.
+1. Deploy `mvm` and open its generated `workers.dev` URL.
+2. Run `just docs-check-live-headers https://<deployment-host>`.
+3. Open `/demo/weblinux/` and confirm the browser demo boots.
+4. Check representative documentation routes and the custom 404 response.
 
-If you prefer to keep iwantmyname as the authoritative DNS provider (not recommended for Pages), add a CNAME record for `gomicrovm.com` pointing at `mvm.pages.dev`. Note that CNAME at the zone apex is not valid per RFC and may not be supported by iwantmyname; use Cloudflare nameservers for the root domain instead.
+### 4. Move the custom domain
 
-### 4. Verify
+1. Inventory every custom domain on the old `mvm` Pages project; migrate all
+   production hostnames rather than assuming the visible primary hostname is
+   the only one.
+2. In Cloudflare dashboard, open **Workers & Pages** → `mvm` Worker →
+   **Settings** → **Domains & Routes**.
+3. Add `gomicrovm.com` and each other production hostname as custom domains.
+   Remove a hostname from the Pages project if
+   Cloudflare reports that it is already assigned.
+4. Confirm Cloudflare created the required DNS records and certificates.
+5. Do not delete the Pages project yet; its `pages.dev` hostname remains a
+   rollback endpoint.
+
+### 5. Verify and retire the old projects
 
 Once DNS propagates:
 
@@ -98,7 +118,11 @@ Look for:
 - `report-to` / `nel` headers from Cloudflare
 - `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` on `/demo/weblinux/*` paths (from `public/public/_headers`)
 
-Also verify the demo works in a browser: open `https://gomicrovm.com/demo/weblinux/` and confirm `SharedArrayBuffer` is available (no console error).
+Also verify the demo works in a browser: open
+`https://gomicrovm.com/demo/weblinux/` and confirm `SharedArrayBuffer` is
+available. After the production hostname is stable, delete the old `mvm` Pages
+project and the unused `runmvm` Worker only after confirming neither owns a
+custom domain, route, binding, secret, or scheduled trigger.
 
 ## Email setup
 
@@ -168,12 +192,14 @@ If you also need to send email:
 ## Triggering a deployment
 
 - Automatic: publish a GitHub Release or push a `v*` tag.
-- Manual: `just pages-deploy` from the repo root.
-- Watch the run: `gh run watch $(gh run list --workflow=pages.yml --limit 1 --json databaseId --jq '.[0].databaseId')`
+- Manual: `just workers-deploy` from the repo root.
+- Watch the run: `gh run watch $(gh run list --workflow=workers.yml --limit 1 --json databaseId --jq '.[0].databaseId')`
 
 ## Troubleshooting
 
-- **Deployment fails with "Could not find the project"**: the workflow now tries to create the `mvm` project automatically. If this still fails, make sure the API token has `Cloudflare Pages:Edit` permission for the account.
+- **Deployment authentication fails**: replace the repository token with an
+  account-scoped token created from **Edit Cloudflare Workers** and verify the
+  account ID matches that token.
 - **Secrets missing**: ensure `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are set at the repository level, not just environment level.
 - **Custom domain shows "Invalid"**: confirm the zone is active on Cloudflare and the nameservers at iwantmyname match exactly.
 - **SharedArrayBuffer still missing**:
@@ -183,7 +209,9 @@ If you also need to send email:
     ```
     You should see `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`.
   - If the headers are missing, the build did not include `public/dist/_headers`. The workflow now fails fast if that file is missing.
-  - Make sure you are testing the deployed Cloudflare Pages URL, not a local `demo.mvm.local` dev server (Astro dev does not send COOP/COEP headers; use the production URL or the local `web/weblinux-demo/serve.py` helper).
+  - Make sure you are testing the deployed Worker URL, not a local
+    `demo.mvm.local` dev server. Astro dev does not send COOP/COEP headers; use
+    the production URL or the local `web/weblinux-demo/serve.py` helper.
 - **Email not arriving**:
   - In Cloudflare Email Routing, verify the destination address (e.g., `gomicrovm@ari.io`). An unverified destination causes Cloudflare to silently drop messages.
   - Check the zone overview: the zone status must be **Active** (not **Pending**) for Email Routing to work.

@@ -1,4 +1,4 @@
-// Parser for the Cloudflare Pages `_headers` file that carries the deployed
+// Parser for the Cloudflare Workers Static Assets `_headers` file that carries the deployed
 // site's response headers.
 //
 // It is shared rather than duplicated because two consumers need to agree on

@@ -819,18 +819,21 @@ docs-dev: demo-assets
 docs-build: demo-assets
     cd public && pnpm build
 
-# Publish the docs site to Cloudflare Pages (dispatches pages.yml on main)
+# Publish the docs site to Cloudflare Workers (dispatches workers.yml on main)
 docs-publish:
-    # `pages.yml` runs automatically when website source lands on main, a
+    # `workers.yml` runs automatically when website source lands on main, a
     # release is published, or a `v*` tag is pushed. This recipe remains the
     # operator-triggered publish/retry path.
     #
-    # `--ref main`, never the current branch: Pages serves what is on main, and
+    # `--ref main`, never the current branch: production serves what is on main, and
     # dispatching from a branch would publish something nobody has merged.
-    gh workflow run pages.yml --ref main
-    @echo "Dispatched pages.yml on main. Watch it with: gh run watch \$(gh run list --workflow=pages.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
+    gh workflow run workers.yml --ref main
+    @echo "Dispatched workers.yml on main. Watch it with: gh run watch \$(gh run list --workflow=workers.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
 
-# Alias for `docs-publish` using the Cloudflare Pages deployment name.
+# Alias for `docs-publish` using the Cloudflare Workers deployment name.
+workers-deploy: docs-publish
+
+# Backward-compatible alias retained for operators with the old Pages command.
 pages-deploy: docs-publish
 
 # Check the live site sends the cross-origin isolation headers the demo needs
@@ -850,7 +853,7 @@ weblinux-demo-build:
     ./web/weblinux-demo/build.sh
 
 # Stage the browser WASM demo unless every generated asset class is present.
-# WebLinux is staged separately from its verified release pack by pages.yml.
+# WebLinux is staged separately from its verified release pack by workers.yml.
 demo-assets:
     test -s public/public/demo/demo.js \
       && test -s public/public/demo/worker.js \

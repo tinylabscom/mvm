@@ -6,8 +6,8 @@
 # embedding the demo has to be isolated too, not just the demo document.
 #
 # This checks the wire, not the repo, because the repo has been right while the
-# wire was wrong: `public/public/_headers` is a Cloudflare Pages file that
-# GitHub Pages silently ignores, so a correct config served by the wrong host —
+# wire was wrong: `public/public/_headers` is a Cloudflare static-assets file
+# that GitHub Pages silently ignores, so a correct config served by the wrong host —
 # or by the right host behind DNS that still points at the old one — produces
 # exactly the shipped-and-broken state, with nothing in the tree to show for
 # it. `pnpm check:headers` gates the config; this gates the deployment.
@@ -90,7 +90,7 @@ check_url() {
   # rather than leaving someone to re-read a `_headers` file that is correct.
   if printf '%s\n' "$headers" | grep -qi '^x-github-request-id:'; then
     echo "     ...served by GitHub Pages, which cannot set these headers at all." >&2
-    echo "     The site must be served by Cloudflare Pages (.github/workflows/pages.yml)." >&2
+    echo "     The site must be served by Cloudflare Workers (.github/workflows/workers.yml)." >&2
   fi
   return 1
 }

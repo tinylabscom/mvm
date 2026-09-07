@@ -12,6 +12,44 @@ export const requiredWebLinuxDeployAssets = Object.freeze([
   "demo/weblinux/pack/rootfs.bin",
 ]);
 
+export const workerStaticAssetLimits = Object.freeze({
+  maxFileCount: 20_000,
+  maxFileSizeBytes: 25 * 1024 * 1024,
+});
+
+function filesBelow(directory) {
+  return fs.readdirSync(directory, { recursive: true, withFileTypes: true }).filter((entry) =>
+    entry.isFile(),
+  );
+}
+
+export function assertWorkerStaticAssetLimits(
+  buildDirectory,
+  limits = workerStaticAssetLimits,
+) {
+  const files = filesBelow(buildDirectory);
+  if (files.length > limits.maxFileCount) {
+    throw new Error(
+      `Worker static assets contain ${files.length} files; limit is ${limits.maxFileCount}`,
+    );
+  }
+
+  const oversized = files.flatMap((entry) => {
+    const assetPath = path.join(entry.parentPath, entry.name);
+    const size = fs.statSync(assetPath).size;
+    return size > limits.maxFileSizeBytes
+      ? [`${path.relative(buildDirectory, assetPath)} (${size} bytes)`]
+      : [];
+  });
+  if (oversized.length > 0) {
+    throw new Error(
+      `Worker static assets exceed the ${limits.maxFileSizeBytes}-byte per-file limit:\n${oversized
+        .map((asset) => `- ${asset}`)
+        .join("\n")}`,
+    );
+  }
+}
+
 export function assertWebLinuxDeployAssets(buildDirectory) {
   const missing = requiredWebLinuxDeployAssets.filter((relativePath) => {
     try {
@@ -34,7 +72,8 @@ if (invokedPath === fileURLToPath(import.meta.url)) {
   const buildDirectory = path.resolve(process.argv[2] ?? "dist");
   try {
     assertWebLinuxDeployAssets(buildDirectory);
-    console.log(`WebLinux deployment bundle is complete: ${buildDirectory}`);
+    assertWorkerStaticAssetLimits(buildDirectory);
+    console.log(`Worker deployment assets are complete and within limits: ${buildDirectory}`);
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

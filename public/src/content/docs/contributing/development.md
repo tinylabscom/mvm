@@ -388,7 +388,7 @@ with `MVM_HOME`; `rm -rf ~/.mvm` removes every trace):
 | `ci.yml` | Push to main/feat/*, PRs | check, fmt, clippy, test (macOS + Linux), audit |
 | `release.yml` | Tags matching `v*` | Builds 3 platform binaries (`aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`), creates GitHub Release |
 | `publish-crates.yml` | Release published | Publishes to crates.io in dependency order |
-| `pages.yml` | Website change merged to main, release, version tag, or manual dispatch | Deploys docs to Cloudflare Pages |
+| `workers.yml` | Website change merged to main, release, version tag, or manual dispatch | Deploys docs to Cloudflare Workers Static Assets |
 
 ### Website deployment
 
@@ -400,17 +400,18 @@ pnpm --dir public check
 pnpm --dir public deploy
 ```
 
-`pnpm --dir public deploy` builds the Astro site and publishes it to the
-production branch of the existing `mvm` Pages project. Use
-`pnpm --dir public deploy:preview` for a preview deployment.
+`pnpm --dir public deploy` builds the Astro site and publishes it to the `mvm`
+Worker with Static Assets. Use `pnpm --dir public deploy:preview` to upload a
+previewable Worker version without changing production traffic.
 
 Website changes under `public/`, `web/mvm-demo/`, or `web/mvm-demo-guest/`
 also deploy automatically after they merge to `main`. Pull requests build and
 validate the site without publishing it.
 
-Do not use `npx wrangler deploy` for this site. That is the Workers deployment
-command; this repository hosts the website as a Pages project and uses
-`wrangler pages deploy` through the scripts above.
+The checked-in `public/wrangler.toml` is the deployment contract. It keeps
+static assets on Cloudflare's asset-serving path by default; do not add a
+Worker entry point or `assets.run_worker_first` unless every request genuinely
+needs code execution.
 
 ## Release Process
 

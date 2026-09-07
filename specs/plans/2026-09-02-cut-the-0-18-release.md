@@ -151,12 +151,12 @@ merged after that is unrecorded.
 
 ### P1-2 — Docs on the website
 
-`pages.yml` deploys on `push: tags: v*` and on `release: published`, so the
+`workers.yml` deploys on `push: tags: v*` and on `release: published`, so the
 site redeploys from the tag automatically. It last ran (successfully, by
 dispatch) on 2026-08-27 and has **never been exercised by a tag push** —
 that trigger path is unproven.
 
-- [ ] Dispatch `pages.yml` manually from `main` before the tag and confirm a
+- [ ] Dispatch `workers.yml` manually from `main` before the tag and confirm a
       clean deploy, so the tag-push path is not the first time it runs.
 - [ ] Re-run the doc gates on the release commit in a clean checkout (not a
       worktree parent) so `check-no-overclaim` reports honestly.
@@ -226,7 +226,7 @@ Run in order; each step's evidence is named so nothing is claimed unproven.
        Commit only that file; it is deliberately non-material, so committing
        it does not invalidate itself.
 4. [ ] CHANGELOG regenerated and merged (P1-1).
-5. [ ] `pages.yml` dispatched green from `main` (P1-2).
+5. [ ] `workers.yml` dispatched green from `main` (P1-2).
 6. [ ] `publish-sdk.yml` dry-run green (P1-3).
 7. [ ] `release.yml` `workflow_dispatch` with `dry_run: true` — builds,
        packages, host-bin bundling and the Linux cross-build on the real
@@ -239,7 +239,7 @@ Run in order; each step's evidence is named so nothing is claimed unproven.
         the one that proves the published asset set is complete and signed;
         a release is not done until it is green.
 11. [ ] Confirm the downstream `release: published` consumers fired:
-        `update-homebrew-tap.yml`, `publish-sdk.yml`, `pages.yml`.
+        `update-homebrew-tap.yml`, `publish-sdk.yml`, `workers.yml`.
 12. [ ] Install from the published artifact on a clean machine and run the
         README quick-start end to end. A downloaded binary carries the embedded
         host binaries; a contributor build does not, and only this step proves
