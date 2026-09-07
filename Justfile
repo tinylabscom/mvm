@@ -760,6 +760,25 @@ tag:
     git tag v{{ version }}
     @echo "Tagged v{{ version }}"
 
+# Release the boot image train (`boot-image/v*`)
+# This creates and pushes a tag for the boot image release, which triggers
+# the release-boot-image.yml workflow to build and publish all microVM assets.
+# Usage: just release-image <version>
+#   version: The version tag (e.g., 1.2.3) - creates boot-image/v1.2.3
+release-image VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    V="{{ VERSION }}"
+    TAG="boot-image/v$V"
+    git fetch origin main --tags
+    if git rev-parse --verify "refs/tags/$TAG" >/dev/null 2>&1; then
+        echo "ERROR: tag $TAG already exists." >&2
+        exit 1
+    fi
+    git tag "$TAG" origin/main
+    git push origin "$TAG"
+    echo "==> Pushed tag $TAG from origin/main — the boot-image release pipeline will build + publish."
+
 # ── Documentation ────────────────────────────────────────────────────────
 
 # Install docs site dependencies

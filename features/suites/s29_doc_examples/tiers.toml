@@ -119,6 +119,11 @@ tier = "parse"
 reason = "needs an OCI image already pulled into the cache"
 
 [[command]]
+path = "image boot check"
+tier = "parse"
+reason = "queries the GitHub releases API, so its result depends on live network and release state; the comparison logic is covered with local unit tests"
+
+[[command]]
 path = "init"
 tier = "exec"
 
