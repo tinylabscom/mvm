@@ -1,5 +1,8 @@
 # Shared website shell
 
+Backing: shipped-source
+Validation: check-sprint-append
+
 **Status: IMPLEMENTATION COMPLETE — PR REVIEW PENDING**
 **Last updated: 2026-09-07**
 **Branch:** `fix/shared-site-shell`
@@ -23,4 +26,3 @@ which remains private under its own release review.
 - [x] Add CI-wired regressions for navigation, shared-shell reuse, and immediate
       homepage rendering.
 - [x] Run the complete website check and production static build.
-
