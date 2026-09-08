@@ -29,8 +29,14 @@
       real-flock failure witness passes repeatedly, the persistent-owner
       contract remains covered, and the complete workspace suite, Linux/gated
       compilation, zero-warning Clippy, formatting, and all 67 policy gates are
-      green. The historical Nix build-hook EOF remains a distinct, currently
-      non-reproducing initiating failure; it no longer strands this lock.
+      green. PR #3219 merged as `136bb8041f` after all 16 protected-main gates
+      passed, and #3190 is closed. The historical Nix build-hook EOF remains a
+      distinct, currently non-reproducing initiating failure; it no longer
+      strands this lock. The unpublished #3039 work has been inventoried and
+      preserved without editing or pushing, but public work remains blocked on
+      the recorded owner and patent-counsel release decision. #3011 is blocked
+      on provisioning and hardening its physical Apple Silicon runner; the
+      repository runner inventory currently contains zero self-hosted runners.
 
 - [x] **Linux 6.12.109 synchronized kernel pin — issue #3213.**
       `specs/plans/2026-09-08-kernel-6-12-109.md`.

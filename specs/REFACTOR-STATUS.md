@@ -20,7 +20,12 @@ Last updated: 2026-09-08
       supervisor setup error paths. Full workspace, Linux/gated, Clippy,
       formatting, and all 67 repository policy gates are green; the historical
       Nix hook EOF is separated as an initiating failure that no longer strands
-      the store lock.
+      the store lock. PR #3219 merged as `136bb8041f` after all 16 protected-main
+      gates passed, and #3190 is closed. Existing unpublished #3039 work is
+      inventoried and preserved, but the required owner and patent-counsel
+      release decision is not yet recorded. #3011 remains blocked on a hardened
+      physical Apple Silicon runner; the repository currently has zero
+      self-hosted runners.
 
 - [x] **Linux 6.12.109 synchronized kernel pin — issue #3213.**
       `specs/plans/2026-09-08-kernel-6-12-109.md`.
