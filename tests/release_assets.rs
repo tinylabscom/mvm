@@ -43,6 +43,84 @@ fn justfile() -> String {
     fs::read_to_string("Justfile").expect("Justfile must be readable")
 }
 
+/// The published asset list must not name the same file twice.
+///
+/// `artifacts/*.tar.gz` matches every tarball, including the runtime-overlay,
+/// initramfs and sdk-sidecar ones the list also names explicitly. Passing a
+/// duplicate to `gh release create` makes GitHub accept the first upload and
+/// reject the second with `ReleaseAsset.name already exists` — HTTP 422,
+/// arriving *after* the release has been created, so the run goes red having
+/// published a half-populated release.
+///
+/// This is checked as an overlap between the glob patterns rather than as the
+/// presence of the `sort -u` that fixes it, so removing the overlap a different
+/// way keeps the test honest, and re-introducing an overlapping catch-all
+/// without deduplicating fails it.
+#[test]
+fn the_release_asset_list_cannot_upload_one_file_twice() {
+    let workflow = release_workflow();
+
+    let start = workflow
+        .find("assets=(")
+        .expect("the publish step must build an assets array");
+    let len = workflow[start..]
+        .find("\n          )")
+        .expect("the assets array must be closed");
+    let body = &workflow[start..start + len];
+
+    let patterns: Vec<&str> = body
+        .lines()
+        .skip(1)
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    assert!(
+        patterns.len() > 5,
+        "parsed {} asset patterns — the parse broke, and a test that checks \
+         nothing passes forever",
+        patterns.len()
+    );
+
+    // A catch-all `dir/*.suffix` subsumes any `dir/prefix-*.suffix` beside it:
+    // both expand over the same directory and end in the same suffix.
+    let mut overlaps = Vec::new();
+    for broad in &patterns {
+        let Some((dir, suffix)) = broad.split_once("/*") else {
+            continue;
+        };
+        for narrow in &patterns {
+            if narrow == broad {
+                continue;
+            }
+            if narrow.starts_with(&format!("{dir}/")) && narrow.ends_with(suffix) {
+                overlaps.push(format!("{broad} also matches {narrow}"));
+            }
+        }
+    }
+
+    if !overlaps.is_empty() {
+        assert!(
+            workflow.contains(r#"mapfile -t assets < <(printf '%s\n' "${assets[@]}" | sort -u)"#),
+            "the asset list has overlapping globs and is not deduplicated, so \
+             `gh release create` uploads a file twice and GitHub refuses the \
+             second with a 422 after creating the release:\n  {}",
+            overlaps.join("\n  ")
+        );
+
+        let dedupe = workflow.find("| sort -u)").expect("checked above");
+        // The invocation, not the phrase: `gh release create` also appears in
+        // the comment above the array, which precedes the dedupe and would make
+        // this ordering check fail against correct code.
+        let create = workflow
+            .find("gh release create \"${TAG_NAME}\"")
+            .expect("the publish step must create the release under the pushed tag");
+        assert!(
+            dedupe < create,
+            "the list must be deduplicated before the release is created"
+        );
+    }
+}
+
 /// The release prep must test the tree it pushes, not the tree before it.
 ///
 /// `just release` runs the workspace suite and *then* calls `_release-prep`,
