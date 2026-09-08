@@ -19,7 +19,7 @@ same change; a new defect gets a new issue and an explicit dependency here.
 | Issue | Current fact | Completion witness |
 | --- | --- | --- |
 | [#3207](https://github.com/tinylabscom/mvm/issues/3207) | The installed CLI fetches `DEFAULT_BOOT_IMAGE_TAG`, while the CLI release gate validates the highest published boot-image tag. | The release gate validates and attaches the exact tag the built CLI fetches, with a structural regression that fails if the two diverge. |
-| [#3190](https://github.com/tinylabscom/mvm/issues/3190) | A failed builder run has been observed leaving the steady-state store lock unavailable for the full wait budget; the surviving owner is not yet proven. | A deterministic failure reproducer identifies the owner, the corrected failure path releases/reaps it, and the next builder acquires the same store promptly. |
+| [#3190](https://github.com/tinylabscom/mvm/issues/3190) | The documented-surface timeout killed `tee` while leaving its `cargo`/conformance/`mvmctl` process tree alive. | The bounded runner owns and reaps the complete process group; repeated real-lock regressions pass and PR #3219 closed the issue. |
 | [#3039](https://github.com/tinylabscom/mvm/issues/3039) | Explicit warm claims now fail loudly, but the restored child still does not complete the authenticated post-restore identity handshake on HVF or Firecracker. | The existing live warm-claim BDD scenario passes on both backends without weakening authentication or the explicit-residency failure policy. |
 | [#3011](https://github.com/tinylabscom/mvm/issues/3011) | The repository has zero self-hosted runners; hosted macOS cannot provide Apple Silicon plus non-nested HVF. | A hardened Apple Silicon runner executes the live macOS documented-surface job; the recorded-evidence fallback skips automatically. |
 
@@ -48,7 +48,7 @@ availability must not be represented as warm-claim coverage.
       record with contributors, dates, alternatives, and relevant private
       commits, then record owner and patent-counsel release clearance. Do not
       link the public repository inward to that record.
-- [ ] Preserve and inventory any existing unpublished local #3039 work before
+- [x] Preserve and inventory any existing unpublished local #3039 work before
       rebasing or editing it. Never discard, overwrite, or push it as part of
       plan setup.
 - [ ] Write the failing unit, structural, integration, or BDD regression before
@@ -167,7 +167,7 @@ readiness setup succeeds; wait errors terminate and reap before returning.
       witness because the defect was outside the VM.
 - [x] Run affected crate tests, full workspace tests/check, Linux gated checks,
       and zero-warning Clippy.
-- [ ] Merge the issue-linked PR and close #3190.
+- [x] Merge the issue-linked PR and close #3190.
 
 The real-flock regression first demonstrated that killing the saved `tee` PID
 left its descendant and lock alive. It now passes repeatedly with the bounded
@@ -177,6 +177,8 @@ additional parallel repetitions), 26 lock tests, the persistent-holder and
 feature-gated child-cleanup suites, `cargo test --workspace`, workspace check,
 zero-warning Clippy, `just check-gated`, all 67 `xtask check-all` policy gates,
 formatting, and shell/Python syntax checks.
+PR #3219 merged as `136bb8041f`; issue #3190 closed automatically after all 16
+protected-main merge-group jobs passed.
 
 ## Workstream 3 — #3039: authenticated warm-child activation
 
@@ -184,6 +186,11 @@ This workstream starts only after the global disclosure gate is satisfied. The
 previous fix remains valuable: an explicit warm request refuses on a failed
 claim instead of silently cold-booting. Preserve that policy while repairing
 the handshake itself.
+
+A read-only preservation inventory completed on 2026-09-08. Existing
+unpublished local work remains unchanged and unpushed. The required owner and
+patent-counsel release decision is not yet recorded, so no public implementation
+or publication work may begin.
 
 ### Diagnose both backends
 
@@ -225,6 +232,11 @@ the handshake itself.
       merged but did not complete the reopened issue.
 
 ## Workstream 4 — #3011: self-hosted Apple Silicon e2e
+
+The repository runner inventory returned zero self-hosted runners on
+2026-09-08. Workflow cutover is therefore blocked on provisioning, hardening,
+registering, and burning in the physical Apple Silicon host; pointing the job at
+an unprovisioned label would not provide the required live witness.
 
 ### Provision and harden
 
