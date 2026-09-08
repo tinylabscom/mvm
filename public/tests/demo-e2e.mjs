@@ -22,7 +22,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 // The deployed site's response headers come from a `_headers` file that
-// Cloudflare Pages reads at the site root. This harness serves that same file
+// Cloudflare Workers reads at the site root. This harness serves that same file
 // instead of stamping COOP/COEP on every response: a hard-coded blanket policy
 // passes under a config that would not isolate the real site, which is how the
 // landing page's embedded demo shipped without SharedArrayBuffer.

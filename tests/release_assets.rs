@@ -206,8 +206,8 @@ fn ci_workflow() -> String {
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
 }
 
-fn pages_workflow() -> String {
-    let path = Path::new(".github/workflows/pages.yml");
+fn website_deploy_workflow() -> String {
+    let path = Path::new(".github/workflows/workers.yml");
     fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
 }
@@ -891,30 +891,30 @@ fn the_moved_jobs_keep_the_boot_image_signing_environment() {
 }
 
 #[test]
-fn pages_workflow_installs_every_wasm_target_used_by_the_demo() {
-    let workflow = pages_workflow();
+fn workers_workflow_installs_every_wasm_target_used_by_the_demo() {
+    let workflow = website_deploy_workflow();
     assert!(
         workflow.contains("targets: wasm32-unknown-unknown, wasm32-wasip1"),
-        "pages.yml must install both the browser and guest WASM targets"
+        "workers.yml must install both the browser and guest WASM targets"
     );
 }
 
 #[test]
-fn pages_deploys_website_updates_merged_to_main() {
-    let workflow = pages_workflow();
+fn workers_deploys_website_updates_merged_to_main() {
+    let workflow = website_deploy_workflow();
     assert!(
         workflow.contains("  push:\n    branches:\n      - main\n"),
-        "pages.yml must deploy website changes after they merge to main"
+        "workers.yml must deploy website changes after they merge to main"
     );
     for path in [
         "public/**",
         "web/mvm-demo/**",
         "web/mvm-demo-guest/**",
-        ".github/workflows/pages.yml",
+        ".github/workflows/workers.yml",
     ] {
         assert!(
             workflow.contains(&format!("      - \"{path}\"")),
-            "pages.yml must deploy main-branch updates to {path}"
+            "workers.yml must deploy main-branch updates to {path}"
         );
     }
 }
@@ -922,7 +922,7 @@ fn pages_deploys_website_updates_merged_to_main() {
 #[test]
 fn website_validation_covers_demo_guest_and_deploy_workflow_changes() {
     let workflow = website_workflow();
-    for path in ["web/mvm-demo-guest/**", ".github/workflows/pages.yml"] {
+    for path in ["web/mvm-demo-guest/**", ".github/workflows/workers.yml"] {
         assert!(
             workflow.contains(&format!("      - \"{path}\"")),
             "website.yml must validate pull requests that update {path}"
@@ -933,7 +933,7 @@ fn website_validation_covers_demo_guest_and_deploy_workflow_changes() {
 #[test]
 fn release_lookups_pass_the_filter_directly_to_gh_jq() {
     for (name, workflow) in [
-        ("pages.yml", pages_workflow()),
+        ("workers.yml", website_deploy_workflow()),
         ("release.yml", release_workflow()),
     ] {
         assert!(
@@ -948,8 +948,8 @@ fn release_lookups_pass_the_filter_directly_to_gh_jq() {
 }
 
 #[test]
-fn pages_deployment_uses_the_checked_in_wrangler_config() {
-    let workflow = pages_workflow();
+fn workers_deployment_uses_the_checked_in_wrangler_config() {
+    let workflow = website_deploy_workflow();
     let account_job = job_block(&workflow, "cloudflare-account");
     let package = fs::read_to_string("public/package.json").expect("read site package manifest");
     let config = fs::read_to_string("public/wrangler.toml").expect("read Wrangler config");
@@ -958,53 +958,56 @@ fn pages_deployment_uses_the_checked_in_wrangler_config() {
         workflow.contains("cloudflare-account:")
             && account_job.contains("runs-on: ubuntu-latest")
             && workflow.contains("needs: cloudflare-account")
-            && workflow.contains("command: pages deployment list --project-name=mvm")
-            && !workflow.contains("pages project create"),
-        "the Pages workflow must verify the configured account and project before building"
+            && account_job.contains("command: whoami"),
+        "the Workers workflow must verify its Cloudflare credentials before building"
     );
     assert!(
         workflow.contains("uses: pnpm/action-setup@v6"),
-        "the Pages workflow must use the Node 24-compatible pnpm setup action"
+        "the Workers workflow must use the Node 24-compatible pnpm setup action"
     );
     assert!(
         workflow.contains("workingDirectory: public")
-            && workflow.contains("command: pages deploy --branch=main"),
-        "the Pages action must deploy from public/ so Wrangler reads the checked-in config"
+            && workflow.contains("command: deploy")
+            && !workflow.contains("command: pages "),
+        "the Workers action must deploy from public/ so Wrangler reads the checked-in config"
     );
     assert!(
-        config.contains("name = \"mvm\"") && config.contains("pages_build_output_dir = \"./dist\""),
-        "Wrangler must target the existing mvm project and Astro output"
+        config.contains("name = \"mvm\"")
+            && config.contains("[assets]")
+            && config.contains("directory = \"./dist\"")
+            && config.contains("not_found_handling = \"404-page\"")
+            && !config.contains("pages_build_output_dir"),
+        "Wrangler must deploy the Astro output as mvm Worker static assets"
     );
-    // Wrangler refuses a Pages config carrying `account_id` outright --
-    // "Configuration file for Pages projects does not support account_id" --
-    // so the deploy fails after a successful build, at the last step. The
-    // account is supplied by the workflow from `secrets.CLOUDFLARE_ACCOUNT_ID`,
-    // which is where it belongs: it is deployment identity, not site config,
-    // and checking it in pins one account into a file every fork inherits.
     assert!(
         !config.contains("account_id"),
-        "a Pages wrangler config must not carry account_id; the workflow passes \
-         accountId from secrets"
+        "deployment identity must come from the workflow secret, not site config"
     );
     assert!(
         package.contains("\"wrangler\": \"^4.127.0\"")
             && package.contains("\"check:deploy-assets\":")
             && package.contains(
-                "\"deploy\": \"pnpm build && pnpm check:deploy-assets && wrangler pages deploy --branch=main\""
+                "\"deploy\": \"pnpm build && pnpm check:deploy-assets && wrangler deploy\""
+            )
+            && package.contains(
+                "\"deploy:preview\": \"pnpm build && pnpm check:deploy-assets && wrangler versions upload\""
+            )
+            && package.contains(
+                "\"preview:cloudflare\": \"pnpm build && pnpm check:deploy-assets && wrangler dev\""
             ),
-        "the site must pin Wrangler and validate assets in its production deploy command"
+        "the site must pin Wrangler and validate assets in its Worker deploy and preview commands"
     );
 }
 
 #[test]
-fn pages_deployment_refuses_an_incomplete_weblinux_bundle() {
-    let workflow = pages_workflow();
+fn workers_deployment_refuses_an_incomplete_weblinux_bundle() {
+    let workflow = website_deploy_workflow();
     let validator = fs::read_to_string("public/scripts/check-weblinux-deploy-assets.mjs")
         .expect("read WebLinux deployment validator");
 
     assert!(
         workflow.contains("node public/scripts/check-weblinux-deploy-assets.mjs public/dist"),
-        "Pages must run the shared WebLinux bundle validator before publishing"
+        "Workers must run the shared WebLinux bundle validator before publishing"
     );
 
     for asset in [
@@ -1025,7 +1028,7 @@ fn pages_deployment_refuses_an_incomplete_weblinux_bundle() {
 #[test]
 fn qemu_wasm_site_pack_is_built_once_on_the_boot_image_train() {
     let boot_image = boot_image_workflow();
-    let pages = pages_workflow();
+    let workers = website_deploy_workflow();
     let publish_needs = job_block(&boot_image, "publish-boot-image")
         .lines()
         .find(|line| line.trim_start().starts_with("needs:"))
@@ -1053,38 +1056,38 @@ fn qemu_wasm_site_pack_is_built_once_on_the_boot_image_train() {
             "the boot-image release must publish {asset} for site deployments"
         );
         assert!(
-            pages.contains(asset),
-            "pages.yml must download and verify {asset} instead of rebuilding QEMU"
+            workers.contains(asset),
+            "workers.yml must download and verify {asset} instead of rebuilding QEMU"
         );
     }
     assert!(
-        !pages.contains("nix build ./nix#qemu-wasm-smoke-pack"),
+        !workers.contains("nix build ./nix#qemu-wasm-smoke-pack"),
         "site deployment must not rebuild the tagged QEMU-WASM pack"
     );
     assert!(
-        !pages.contains("nix-installer-action"),
+        !workers.contains("nix-installer-action"),
         "site deployment no longer needs Nix once the QEMU-WASM pack is released"
     );
     assert!(
-        pages.contains("cosign verify-blob")
-            && pages.contains("release-boot-image.yml@refs/tags/boot-image/v.*")
-            && pages.contains("sha256sum -c qemu-wasm-smoke-pack.tar.gz.sha256"),
+        workers.contains("cosign verify-blob")
+            && workers.contains("release-boot-image.yml@refs/tags/boot-image/v.*")
+            && workers.contains("sha256sum -c qemu-wasm-smoke-pack.tar.gz.sha256"),
         "site deployment must verify the tag-built pack's release identity"
     );
     assert!(
-        pages.contains("gh release view \"${CANDIDATE}\"")
-            && pages.contains("HAS_SITE_PACK")
-            && pages.contains("| sort_by(.v) | reverse | .[].tag"),
+        workers.contains("gh release view \"${CANDIDATE}\"")
+            && workers.contains("HAS_SITE_PACK")
+            && workers.contains("| sort_by(.v) | reverse | .[].tag"),
         "site deployment must select the newest semantic release that actually carries the pack"
     );
     assert!(
-        pages.contains("./web/weblinux-demo/build.sh qemu-wasm-smoke-pack"),
+        workers.contains("./web/weblinux-demo/build.sh qemu-wasm-smoke-pack"),
         "site deployment must stage the verified pack with the current demo shell"
     );
 }
 
 #[test]
-fn weblinux_qemu_module_is_staged_below_the_pages_file_limit() {
+fn weblinux_qemu_module_is_staged_below_the_cloudflare_asset_file_limit() {
     let build =
         fs::read_to_string("web/weblinux-demo/build.sh").expect("read WebLinux build script");
     let worker = fs::read_to_string("web/weblinux-demo/worker.js").expect("read WebLinux worker");

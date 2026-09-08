@@ -3,6 +3,8 @@
 Backing: shipped-source
 Validation: check-sprint-append
 
+**Status: SUPERSEDED by `2026-09-07-cloudflare-workers-static-assets.md`**
+
 ## Goal
 
 Make the documentation site reproducibly deployable to the existing Cloudflare
@@ -30,8 +32,9 @@ production hostname from GitHub Pages to that deployment.
       module, kernel, and root filesystem are all present and non-empty.
 - [x] Use the same complete-bundle validator for local Wrangler commands and
       GitHub Actions, with positive and negative regression coverage.
-- [ ] Attach `gomicrovm.com` to the `mvm` Pages project and verify the production
-      hostname serves those headers instead of GitHub Pages.
+- [x] Descope attaching `gomicrovm.com` to Pages in favor of the Worker Static
+      Assets migration, which retains the Pages URL as a rollback target until
+      the Worker production cutover is verified.
 
 ## Security invariants
 

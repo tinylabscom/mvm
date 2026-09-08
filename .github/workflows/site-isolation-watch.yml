@@ -5,8 +5,8 @@ name: Site isolation watch
 #
 # Every other gate here reasons about the tree. This one exists because the
 # tree was right and the site was still broken: `public/public/_headers` is a
-# Cloudflare Pages file, GitHub Pages ignores it silently, and the deploy was
-# moved to Cloudflare Pages behind one-time setup (a Pages project, two
+# Cloudflare static-assets file, GitHub Pages ignores it silently, and the deploy was
+# moved to Cloudflare behind one-time setup (a Worker, two
 # secrets, a DNS change) that a merged PR cannot perform. The demo has been
 # failing with "SharedArrayBuffer is not defined" ever since, with a correct
 # config in the tree and a green Website lane.
@@ -88,9 +88,9 @@ jobs:
             printf 'page, which embeds the demo in an iframe, has to send the headers too, '
             printf 'not just the demo document.\n\n'
             printf 'The headers are declared in `public/public/_headers`, which only '
-            printf 'Cloudflare Pages reads. If the report above says GitHub Pages served '
+            printf 'Cloudflare Workers reads. If the report above says GitHub Pages served '
             printf 'the response, the config is fine and the deployment is not: finish the '
-            printf 'cutover in `.github/workflows/pages.yml` (Pages project, '
+            printf 'cutover in `.github/workflows/workers.yml` (Worker, '
             printf '`CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`, DNS).\n'
           } > body.md
 

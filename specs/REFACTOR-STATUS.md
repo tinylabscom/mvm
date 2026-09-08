@@ -433,13 +433,13 @@ Last updated: 2026-09-07
       instead of ARM-only libkrun or Linux-host QEMU Stage 0. Focused tests and
       Clippy are green; the live rerun and merge delivery remain.
 
-- [ ] **Cloudflare Pages cutover.**
-      `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.
-      The existing Pages project and account now have a checked-in Wrangler configuration,
-      reproducible local/CI deployment commands, an account/project preflight,
-      a shared and tested complete-WebLinux-bundle gate, and a verified
-      deployment.
-      The production hostname still needs to be attached to the project.
+- [ ] **Cloudflare Workers Static Assets migration.**
+      `specs/plans/2026-09-07-cloudflare-workers-static-assets.md` supersedes
+      `specs/plans/2026-08-27-cloudflare-pages-cutover.md`. The assets-only
+      Worker config, local/CI deployment commands, credential preflight, static
+      asset limit checks, WebLinux bundle gate, and header verification are in
+      place. The first Worker deployment, production-domain move, rollback
+      window, and old-project cleanup remain.
 
 - [ ] **Cold-boot guest wall clock — issue #2956.**
       `specs/plans/2026-08-27-cold-boot-wall-clock.md`.
@@ -544,7 +544,7 @@ Last updated: 2026-09-07
 - [x] **Site QEMU-WASM release artifact** —
       `specs/plans/2026-08-26-site-qemu-wasm-release-artifact.md`.
       The browser QEMU pack now builds on the `boot-image/v*` release cadence;
-      Cloudflare Pages consumes the signed, checksummed release artifact while
+      Cloudflare deployment consumes the signed, checksummed release artifact while
       retaining the current revision's demo shell. Its oversized WASM module is
       staged as an explicitly decompressed gzip payload so it fits Cloudflare's
       per-file limit. GitHub CLI receives the semantic-version filter directly

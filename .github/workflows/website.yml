@@ -17,7 +17,7 @@ on:
       - "public/**"
       - "web/mvm-demo/**"
       - "web/mvm-demo-guest/**"
-      - ".github/workflows/pages.yml"
+      - ".github/workflows/workers.yml"
       - ".github/workflows/website.yml"
   merge_group:
     types: [checks_requested]

@@ -441,15 +441,19 @@
       doctest, workspace Clippy, formatting, and repository policy gates are
       green. The live rerun and merge delivery remain.
 
-- [ ] **Cloudflare Pages cutover.**
-      `specs/plans/2026-08-27-cloudflare-pages-cutover.md`.
-      Wrangler is pinned locally, the existing `mvm` Pages project and account
-      are checked in, CI verifies the selected account before building, local
-      scripts deploy through that configuration, local and CI uploads share a
-      tested complete-WebLinux-bundle gate, and a production-branch deployment
-      is live with the required COOP/COEP headers.
-      Remaining: attach `gomicrovm.com` to the Pages project; the hostname still
-      resolves to GitHub Pages and cannot serve those headers.
+- [ ] **Cloudflare Workers Static Assets migration.**
+      `specs/plans/2026-09-07-cloudflare-workers-static-assets.md` supersedes the
+      completed repository work in
+      `specs/plans/2026-08-27-cloudflare-pages-cutover.md`. The site now has an
+      assets-only Worker configuration, Worker production/version-preview/local
+      commands, an account-authentication preflight, portable asset-limit gates,
+      and the existing complete-WebLinux-bundle and live COOP/COEP checks.
+      Five focused Node tests and all 40 release-asset workflow contract tests
+      pass, along with the workspace compile, Clippy, and policy gates.
+      Remaining: confirm the CI token has Workers Scripts edit permission,
+      verify the first `workers.dev` deployment, inventory and move the current
+      production domains, and retire the old Pages project plus unused `runmvm`
+      Worker after a rollback window.
 
 - [ ] **Cold-boot guest wall clock — issue #2956.**
       `specs/plans/2026-08-27-cold-boot-wall-clock.md`.
@@ -479,12 +483,12 @@
 
 - [x] **Site QEMU-WASM release artifact.**
       `specs/plans/2026-08-26-site-qemu-wasm-release-artifact.md`.
-      Move the expensive browser QEMU pack build from every Cloudflare Pages
-      deployment to the `boot-image/v*` release train. Pages downloads the
+      Move the expensive browser QEMU pack build from every Cloudflare site
+      deployment to the `boot-image/v*` release train. The deployment downloads the
       latest semantic-versioned pack and verifies its keyless release identity
       and checksum before staging the current demo shell. The staged QEMU WASM
-      is explicitly gzip-compressed below Cloudflare Pages' per-file limit and
-      decompressed by the browser worker. The Pages and CLI release lookups now
+      is explicitly gzip-compressed below Cloudflare's per-file limit and
+      decompressed by the browser worker. The site and CLI release lookups now
       pass their semantic-version filter directly to GitHub CLI's `--jq`
       option; a 28-test workflow contract suite prevents the invalid standalone
       jq `-r` flag from returning. Actionlint and Clippy are green.

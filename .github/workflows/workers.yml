@@ -1,4 +1,4 @@
-name: Deploy site to Cloudflare Pages
+name: Deploy site to Cloudflare Workers
 
 # Deploy after website source lands on main. Releases, version tags, and manual
 # dispatch remain supported so release publishing and operator retries keep the
@@ -13,7 +13,7 @@ on:
       - "public/**"
       - "web/mvm-demo/**"
       - "web/mvm-demo-guest/**"
-      - ".github/workflows/pages.yml"
+      - ".github/workflows/workers.yml"
     tags:
       - "v*"
   workflow_dispatch:
@@ -30,18 +30,18 @@ jobs:
   cloudflare-account:
     runs-on: ubuntu-latest
     steps:
-      - name: Verify Cloudflare account and Pages project
+      - name: Verify Cloudflare account credentials
         uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           wranglerVersion: "4.127.0"
-          command: pages deployment list --project-name=mvm
+          command: whoami
 
   deploy:
     needs: cloudflare-account
     environment:
-      name: cloudflare-pages
+      name: cloudflare-workers
       url: ${{ steps.deployment.outputs.deployment-url }}
     runs-on: ubuntu-latest
     steps:
@@ -156,19 +156,19 @@ jobs:
       - name: Verify cross-origin isolation headers are staged
         run: |
           if [ ! -f public/dist/_headers ]; then
-            echo "ERROR: public/dist/_headers is missing; Cloudflare Pages will not send COOP/COEP headers." >&2
+            echo "ERROR: public/dist/_headers is missing; Cloudflare Workers will not send COOP/COEP headers." >&2
             exit 1
           fi
           echo "OK: public/dist/_headers present"
 
-      - name: Deploy to Cloudflare Pages
+      - name: Deploy to Cloudflare Workers
         id: deployment
         uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: public
-          command: pages deploy --branch=main
+          command: deploy
           gitHubToken: ${{ secrets.GITHUB_TOKEN }}
 
       # `_headers` is inert unless the host reads it, so the only proof that
