@@ -1,8 +1,14 @@
 # Refactor status
 
-Last updated: 2026-09-07
+Last updated: 2026-09-08
 
 ## In progress
+
+- [ ] **Linux 6.12.109 synchronized kernel pin — issue #3213.**
+      `specs/plans/2026-09-08-kernel-6-12-109.md`.
+      Both kernel consumers use the kernel.org-verified archive and SRI hash;
+      structural coverage, the workspace suite, check, and zero-warning Clippy
+      are green. Builder-VM and merge validation remain.
 
 - [ ] **Shared website shell.**
       `specs/plans/2026-09-07-shared-site-shell.md`.
