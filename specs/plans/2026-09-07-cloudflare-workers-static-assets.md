@@ -26,13 +26,14 @@ putting static requests through unnecessary Worker code.
 
 ## Production rollout
 
-- [ ] Confirm `CLOUDFLARE_API_TOKEN` is account-scoped and has **Workers Scripts:
-      Edit** permission before merging the deployment change.
-- [ ] Deploy `mvm` from `main`, verify its `workers.dev` URL, representative
+- [x] Confirm `CLOUDFLARE_API_TOKEN` is account-scoped and has **Workers Scripts:
+      Edit** permission before the first automated Worker deployment.
+- [x] Deploy `mvm` from `main`, verify its `workers.dev` URL, representative
       documentation routes, the custom 404 page, and the browser WebLinux demo.
-- [ ] Inventory every custom domain on the old Pages project, attach each
-      production hostname (including `gomicrovm.com`) to the `mvm` Worker, and
-      verify traffic, TLS, and COOP/COEP headers on `/` and `/demo/weblinux/`.
+- [x] Inventory every custom domain on the old Pages project, attach each
+      production hostname to the `mvm` Worker, and verify traffic, TLS, and
+      COOP/COEP headers on `/` and `/demo/weblinux/`. The inventory found
+      `runmvm.com` as the sole custom hostname on the Pages project.
 - [ ] After a rollback window, remove the old `mvm` Pages project and delete the
       unused `runmvm` Worker only after confirming it has no domains, routes,
       bindings, secrets, or triggers.
@@ -48,3 +49,13 @@ putting static requests through unnecessary Worker code.
   `assets.run_worker_first` requires an explicit use case and review.
 - Production cutover retains the Pages endpoint as a rollback target until the
   Worker has passed the live header and browser-demo checks.
+
+## Rollout evidence
+
+- The account-owned `mvm-deploy` token has Workers Scripts write access, and the
+  post-merge workflow authenticated with it successfully.
+- The `mvm` Worker serves both its `workers.dev` hostname and `runmvm.com`; the
+  homepage, documentation, custom 404, and complete WebLinux asset set passed
+  live checks, including the required COOP/COEP headers.
+- The detached `mvm-8a8.pages.dev` project and the unused `runmvm` Worker remain
+  available through the rollback window and are not production traffic targets.
