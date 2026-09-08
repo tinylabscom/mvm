@@ -721,6 +721,20 @@ jobs:
             sbom.cdx.json
             sbom.cdx.json.bundle
           )
+          # `artifacts/*.tar.gz` and `artifacts/*.tar.gz.bundle` already match
+          # the runtime-overlay, initramfs and sdk-sidecar tarballs that the
+          # entries above name explicitly, so each of those files is listed
+          # twice. GitHub accepts the first upload and rejects the second with
+          # `ReleaseAsset.name already exists` — a 422 that arrives *after*
+          # `gh release create` has already created the release, so the run goes
+          # red having published a partially populated release.
+          #
+          # Deduplicated rather than un-overlapped: the explicit entries record
+          # what a release is required to carry and the catch-alls cover what it
+          # may also carry, and both are worth keeping. Sorting is incidental —
+          # upload order does not matter.
+          mapfile -t assets < <(printf '%s\n' "${assets[@]}" | sort -u)
+
           RELEASE_NOTES_PREFIX="$(cat nix/packaging/release/runtime-overlay-operational-note.md)"
           # A semver prerelease tag (`v0.18.0-rc.1`) must not become GitHub's
           # "Latest" release. `mvmctl update` resolves
