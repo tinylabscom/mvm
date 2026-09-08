@@ -453,10 +453,11 @@
       and the existing complete-WebLinux-bundle and live COOP/COEP checks.
       Five focused Node tests and all 40 release-asset workflow contract tests
       pass, along with the workspace compile, Clippy, and policy gates.
-      Remaining: confirm the CI token has Workers Scripts edit permission,
-      verify the first `workers.dev` deployment, inventory and move the current
-      production domains, and retire the old Pages project plus unused `runmvm`
-      Worker after a rollback window.
+      Production now serves from the `mvm` Worker at both its `workers.dev`
+      hostname and `runmvm.com`; the account-scoped CI token has Workers Scripts
+      edit permission, and live route, 404, WebLinux bundle, TLS, and COOP/COEP
+      checks pass. Remaining: after the rollback window, audit and retire the old
+      Pages project plus the unused `runmvm` Worker.
 
 - [ ] **Cold-boot guest wall clock — issue #2956.**
       `specs/plans/2026-08-27-cold-boot-wall-clock.md`.

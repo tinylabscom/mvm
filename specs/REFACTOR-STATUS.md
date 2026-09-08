@@ -440,8 +440,10 @@ Last updated: 2026-09-07
       `specs/plans/2026-08-27-cloudflare-pages-cutover.md`. The assets-only
       Worker config, local/CI deployment commands, credential preflight, static
       asset limit checks, WebLinux bundle gate, and header verification are in
-      place. The first Worker deployment, production-domain move, rollback
-      window, and old-project cleanup remain.
+      place. The `mvm` Worker is deployed, `runmvm.com` is attached and verified,
+      and the CI token has Workers Scripts edit permission. The rollback window
+      and audited cleanup of the old Pages project and unused `runmvm` Worker
+      remain.
 
 - [ ] **Cold-boot guest wall clock — issue #2956.**
       `specs/plans/2026-08-27-cold-boot-wall-clock.md`.
