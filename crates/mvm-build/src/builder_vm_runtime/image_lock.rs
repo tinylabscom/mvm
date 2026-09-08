@@ -943,6 +943,43 @@ mod tests {
     }
 
     #[test]
+    fn one_shot_store_lock_is_not_inherited_by_spawned_helpers() {
+        use std::process::{Command, Stdio};
+
+        let scratch = tempfile::TempDir::new().unwrap();
+        let cache = scratch.path().join("builder-vm");
+        let guard = acquire_nix_store_image_lock(&cache, "aarch64", 64)
+            .expect("the one-shot builder must acquire its store");
+
+        // A normal helper spawn must not inherit the sidecar descriptor. Rust's
+        // file opens request close-on-exec; this pins that property so an
+        // outliving supervisor cannot silently become the lock owner.
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the long-lived child fixture");
+        assert!(
+            child.try_wait().expect("probe child fixture").is_none(),
+            "the helper witness must still be alive"
+        );
+
+        drop(guard);
+        let reacquired = acquire_nix_store_image_lock_named_within(
+            &cache,
+            "nix-store-aarch64.img",
+            64,
+            LockWait::none(),
+        );
+
+        child.kill().expect("terminate child fixture");
+        child.wait().expect("reap child fixture");
+        reacquired.expect("the spawned helper must not inherit the one-shot lock");
+    }
+
+    #[test]
     fn a_free_store_image_does_not_read_as_contended() {
         let scratch = tempfile::TempDir::new().unwrap();
         let cache = scratch.path().join("builder-vm");

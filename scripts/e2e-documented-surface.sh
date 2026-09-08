@@ -679,34 +679,20 @@ MVM_BDD_GUEST_BIN_DIR="$MVM_BDD_GUEST_BIN_DIR" \
 MVM_BDD_STRICT_SKIPS=1 \
 MVM_BDD_ALLOWED_SKIPS="$ALLOWED_SKIPS" \
 MVM_E2E_HOME="$E2E_HOME" \
-  ./scripts/cargo-fast.sh test -p mvm-conformance --test conformance --features bdd \
-  2>&1 | tee "$SUITE_LOG" &
-SUITE_PID=$!
-
-waited=0
-while kill -0 "$SUITE_PID" 2>/dev/null; do
-  if (( waited >= E2E_TIMEOUT_SECS )); then
-    echo
-    echo "!!! TIMEOUT after ${E2E_TIMEOUT_SECS}s — killing the suite."
-    echo "!!! A live scenario hung instead of failing. The last scenario printed"
-    echo "!!! above is where it stopped; raise MVM_E2E_TIMEOUT_SECS if it needs longer."
-    kill -TERM "$SUITE_PID" 2>/dev/null || true
-    sleep 5
-    kill -KILL "$SUITE_PID" 2>/dev/null || true
-    # Leave no guest behind holding a vsock socket or a vCPU thread.
-    pkill -f "mvm-hvf-supervisor" 2>/dev/null || true
-    pkill -f "mvm-libkrun-supervisor" 2>/dev/null || true
-    SUITE_STATUS=124
-    break
-  fi
-  sleep 5
-  waited=$((waited + 5))
-done
-if [[ -z "${SUITE_STATUS:-}" ]]; then
-  wait "$SUITE_PID"
-  SUITE_STATUS=$?
-fi
+  python3 scripts/run-bounded-command.py \
+    --timeout "$E2E_TIMEOUT_SECS" \
+    --grace 5 \
+    --log "$SUITE_LOG" \
+    -- ./scripts/cargo-fast.sh test -p mvm-conformance --test conformance --features bdd
+SUITE_STATUS=$?
 set -e
+
+if (( SUITE_STATUS == 124 )); then
+  echo
+  echo "!!! TIMEOUT after ${E2E_TIMEOUT_SECS}s — terminated the suite process tree."
+  echo "!!! A live scenario hung instead of failing. The last scenario printed"
+  echo "!!! above is where it stopped; raise MVM_E2E_TIMEOUT_SECS if it needs longer."
+fi
 
 echo
 echo "==> done. Read the 'did NOT run' tally above, not just the pass count:"

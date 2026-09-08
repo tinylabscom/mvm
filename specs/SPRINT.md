@@ -18,9 +18,19 @@
       e2e). The plan separates them into issue-linked delivery PRs, puts release
       correctness first, requires owner/counsel release clearance before public
       #3039 work, and names live backend and runner-security acceptance evidence.
-      #3207 implementation is complete and awaiting its issue-linked merge: the
-      CLI and release gate now share `boot-image/v0.1.5`, whose published
-      24-asset architecture/libc matrix passed the non-publishing live witness.
+      #3207 merged via #3218 and is closed: the CLI and release gate share
+      `boot-image/v0.1.5`, whose published 24-asset architecture/libc matrix
+      passed the non-publishing live witness. For #3190, the lock descriptor was
+      proven close-on-exec; the actual survivor was the documented-surface
+      runner tree because its timeout killed `tee` rather than the backgrounded
+      `cargo`/conformance/`mvmctl` process group. A bounded process-group runner
+      now streams the same log while terminating and reaping the complete tree,
+      and supervisor setup error paths retain RAII ownership until handoff. The
+      real-flock failure witness passes repeatedly, the persistent-owner
+      contract remains covered, and the complete workspace suite, Linux/gated
+      compilation, zero-warning Clippy, formatting, and all 67 policy gates are
+      green. The historical Nix build-hook EOF remains a distinct, currently
+      non-reproducing initiating failure; it no longer strands this lock.
 
 - [x] **Linux 6.12.109 synchronized kernel pin — issue #3213.**
       `specs/plans/2026-09-08-kernel-6-12-109.md`.

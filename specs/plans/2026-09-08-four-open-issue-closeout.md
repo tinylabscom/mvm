@@ -96,7 +96,7 @@ availability must not be represented as warm-claim coverage.
 - [x] Exercise a release dry-run or equivalent non-publishing workflow witness
       and record that the tag validated by the gate equals the fresh-install
       download tag.
-- [ ] Merge the issue-linked PR and close #3207.
+- [x] Merge the issue-linked PR and close #3207.
 
 The implementation advances the compiled default to the complete published
 `boot-image/v0.1.5` line and makes `xtask release-boot-image tag` the workflow's
@@ -106,43 +106,77 @@ regression first failed against the former highest-release lookup, then the
 focused suites, workspace check, workflow lint, and non-publishing live query
 passed. The live query resolved the compiled and published tags to the same
 `boot-image/v0.1.5` release with all 24 required assets present and nonempty.
+PR #3218 merged as `d4c75a6acf`; issue #3207 closed automatically.
 
 ## Workstream 2 — #3190: failed-builder lock lifetime
 
+### Investigation result
+
+The sidecar descriptor was not inherited. A spawned-helper regression proves
+that the `File` opened by the one-shot caller is close-on-exec and that the
+caller can drop its guard and immediately reacquire while the helper remains
+alive. The surviving owner was the one-shot `mvmctl` process itself: the
+documented-surface deadline backgrounded `cargo | tee`, saved `$!` (the `tee`
+PID), and killed only that pipeline member. The conformance runner, its
+`mvmctl` children, and their builder supervisors remained alive. Killing the
+supervisors during cleanup then let the still-running waiter acquire the store
+and boot after the suite had already ended, matching the recorded timestamps.
+
+The correction gives the suite command a private process group and applies its
+monotonic deadline to that whole owned tree. TERM is followed by a bounded
+grace period and KILL fallback, and output continues to stream to both the job
+log and the retained suite log. Separately, newly spawned supervisor and egress
+children now remain behind an RAII guard until fallible configuration and
+readiness setup succeeds; wait errors terminate and reap before returning.
+
 ### Prove ownership before changing it
 
-- [ ] Build a deterministic regression with an isolated `MVM_HOME` and short
+- [x] Build a deterministic regression with an isolated `MVM_HOME` and short
       lock budget that forces the builder failure after the store lock is
       acquired, then immediately attempts a second acquisition.
-- [ ] Record the process tree and lock owner at each transition without logging
+- [x] Record the process tree and lock owner at each transition without logging
       job contents, credentials, or unrelated host paths. Distinguish the
       one-shot caller, hypervisor supervisor, endpoint sidecars, and persistent
       builder session.
-- [ ] Audit every spawn on the failing route for descriptor inheritance and
+- [x] Audit every spawn on the failing route for descriptor inheritance and
       every error return for child reaping. Treat an inherited descriptor as a
       hypothesis until the reproducer identifies the surviving owner.
-- [ ] Separately reproduce or rule out the builder-side `unexpected EOF reading
-      a line` under bounded cold-fetch pressure so lock cleanup is not confused
-      with the initiating failure.
+- [x] Separate the builder-side `unexpected EOF reading a line` from lock
+      cleanup. The retained run does not identify why the build hook exited and
+      the failure has not reproduced deterministically, but the real-flock
+      regression proves that it cannot retain this lock after its process tree
+      is reaped. Treat a future hook EOF as a distinct builder failure with its
+      own fresh diagnostics rather than guessing at it here.
 
 ### Correct the matched ownership boundary
 
-- [ ] Make the process whose lifetime legitimately covers the writable store
+- [x] Make the process whose lifetime legitimately covers the writable store
       the only lock owner. On every failed one-shot build, terminate and reap
       owned descendants before returning, or prevent accidental descriptor
       inheritance if that is what the evidence proves.
-- [ ] Preserve the deliberate persistent-builder contract: a healthy adopted
+- [x] Preserve the deliberate persistent-builder contract: a healthy adopted
       session may hold the lock for its VM lifetime, and a competing one-shot
       route must still refuse rather than corrupt the image.
-- [ ] Add positive, error-path, and repeated-run tests proving the lock remains
+- [x] Add positive, error-path, and repeated-run tests proving the lock remains
       held while an authorized writer is live and becomes reacquirable promptly
       after failure or teardown.
-- [ ] In the builder VM, inject the reproduced failure and show that a second
-      build using the same store starts well inside the configured lock budget.
-      Verify no orphan supervisor or endpoint remains.
-- [ ] Run affected crate tests, full workspace tests/check, Linux gated checks,
+- [x] At the proven host ownership boundary, inject the reproduced timed-out
+      process tree while a descendant holds a real advisory lock, then show a
+      second owner acquires immediately after teardown. Repeat the timeout and
+      verify no descendant remains. A builder-VM injection is not the matching
+      witness because the defect was outside the VM.
+- [x] Run affected crate tests, full workspace tests/check, Linux gated checks,
       and zero-warning Clippy.
 - [ ] Merge the issue-linked PR and close #3190.
+
+The real-flock regression first demonstrated that killing the saved `tee` PID
+left its descendant and lock alive. It now passes repeatedly with the bounded
+runner, including the normal-exit case where a descendant keeps stdout open.
+Post-rebase verification passed 34 documented-surface structural tests (three
+additional parallel repetitions), 26 lock tests, the persistent-holder and
+feature-gated child-cleanup suites, `cargo test --workspace`, workspace check,
+zero-warning Clippy, `just check-gated`, all 67 `xtask check-all` policy gates,
+formatting, and shell/Python syntax checks.
 
 ## Workstream 3 — #3039: authenticated warm-child activation
 

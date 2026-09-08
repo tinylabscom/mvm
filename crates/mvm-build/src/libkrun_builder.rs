@@ -95,6 +95,47 @@ use crate::builder_vm_runtime::{
     verbose_from_env,
 };
 
+fn terminate_and_reap(child: &mut Child) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Own a newly spawned child until all fallible setup is complete.
+///
+/// `std::process::Child` does not terminate on drop. Without this guard, an
+/// error while piping configuration or recording readiness can return an
+/// unowned supervisor that still has a live VM or output pipe behind it.
+struct PendingChild(Option<Child>);
+
+impl PendingChild {
+    fn new(child: Child) -> Self {
+        Self(Some(child))
+    }
+
+    fn child_mut(&mut self) -> &mut Child {
+        self.0
+            .as_mut()
+            .expect("a pending child remains owned until setup succeeds")
+    }
+
+    fn into_child(mut self) -> Child {
+        self.0
+            .take()
+            .expect("a pending child can only be transferred once")
+    }
+}
+
+impl Drop for PendingChild {
+    fn drop(&mut self) {
+        if let Some(child) = &mut self.0 {
+            terminate_and_reap(child);
+        }
+    }
+}
+
 /// Default vCPU count for the builder VM. Nix builds are
 /// embarrassingly parallel at the derivation level; 4 cores is the
 /// sweet spot on M-series Macs without saturating the host.
@@ -366,7 +407,7 @@ impl BuilderVsockEgressEndpoint {
                 ))
             })?;
         let mut endpoint_command = builder_egress_supervisor_command(&mvmctl_path, &endpoint_path);
-        let mut child = endpoint_command
+        let child = endpoint_command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(stderr_log))
@@ -377,8 +418,10 @@ impl BuilderVsockEgressEndpoint {
                     endpoint_path.display()
                 ))
             })?;
+        let mut child = PendingChild::new(child);
 
         child
+            .child_mut()
             .stdin
             .take()
             .ok_or_else(|| {
@@ -393,7 +436,7 @@ impl BuilderVsockEgressEndpoint {
                 ))
             })?;
 
-        let stdout = child.stdout.take().ok_or_else(|| {
+        let stdout = child.child_mut().stdout.take().ok_or_else(|| {
             BuilderVmError::ExtractionFailed(
                 "builder egress endpoint stdout was not piped".to_string(),
             )
@@ -404,7 +447,7 @@ impl BuilderVsockEgressEndpoint {
         // a dead one.
         read_handshake_line(
             stdout,
-            child.id(),
+            child.child_mut().id(),
             handshake_timeout(),
             &HandshakeContext {
                 endpoint: &endpoint_path,
@@ -414,10 +457,11 @@ impl BuilderVsockEgressEndpoint {
         .map_err(|e| BuilderVmError::ExtractionFailed(format!("{e:#}")))?;
 
         let pid_file = state_dir.join(BUILDER_SUBST_PID_FILE);
-        std::fs::write(&pid_file, child.id().to_string()).map_err(|e| {
+        std::fs::write(&pid_file, child.child_mut().id().to_string()).map_err(|e| {
             BuilderVmError::ExtractionFailed(format!("write {}: {e}", pid_file.display()))
         })?;
 
+        let mut child = child.into_child();
         let child_pid = child.id();
         std::thread::spawn(move || match child.wait() {
             Ok(status) if builder_egress_endpoint_was_terminated(&status) => {
@@ -3453,10 +3497,12 @@ fn spawn_supervisor_in_background(
         }
         command.env("DYLD_FALLBACK_LIBRARY_PATH", fallback);
     }
-    let mut child = command.spawn().map_err(|e| {
+    let child = command.spawn().map_err(|e| {
         BuilderVmError::LibkrunUnavailable(format!("spawn {}: {e}", supervisor_path.display()))
     })?;
+    let mut child = PendingChild::new(child);
     child
+        .child_mut()
         .stdin
         .take()
         .ok_or_else(|| {
@@ -3471,7 +3517,7 @@ fn spawn_supervisor_in_background(
                 "writing SupervisorConfig to supervisor stdin: {e}"
             ))
         })?;
-    Ok(child)
+    Ok(child.into_child())
 }
 
 fn wait_for_vsock_socket(
@@ -3493,17 +3539,23 @@ fn wait_for_path(
 ) -> Result<(), BuilderVmError> {
     let deadline = Instant::now() + timeout;
     while !path.exists() {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|e| BuilderVmError::ExtractionFailed(format!("poll supervisor child: {e}")))?
-        {
-            return Err(BuilderVmError::NixBuildFailed(format!(
-                "supervisor exited before {label} became ready at {} (status: {status})",
-                path.display()
-            )));
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Err(BuilderVmError::NixBuildFailed(format!(
+                    "supervisor exited before {label} became ready at {} (status: {status})",
+                    path.display()
+                )));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                terminate_and_reap(child);
+                return Err(BuilderVmError::ExtractionFailed(format!(
+                    "poll supervisor child: {error}"
+                )));
+            }
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
+            terminate_and_reap(child);
             return Err(BuilderVmError::NixBuildFailed(format!(
                 "supervisor did not make {label} ready at {} within {:?}; killed",
                 path.display(),
@@ -3921,7 +3973,10 @@ fn wait_with_panic_detector_until(
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
             Ok(None) => {}
-            Err(e) => break Err(e),
+            Err(e) => {
+                terminate_and_reap(child);
+                break Err(e);
+            }
         }
         if terminal
             .lock()
@@ -3939,8 +3994,7 @@ fn wait_with_panic_detector_until(
             }
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_and_reap(child);
             stop.store(true, Ordering::SeqCst);
             if let Some(watcher) = watcher {
                 let _ = watcher.join();
@@ -6244,6 +6298,32 @@ mod tests {
         assert!(id.contains('-'), "id missing separator: {id}");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn pending_child_drop_terminates_the_untransferred_process() {
+        let child = Command::new("sh")
+            .args(["-c", "sleep 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn pending child fixture");
+        let pid = child.id().to_string();
+        let pending = PendingChild::new(child);
+
+        drop(pending);
+
+        let still_alive = Command::new("kill")
+            .args(["-0", &pid])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("probe pending child pid")
+            .success();
+        assert!(!still_alive, "the untransferred child {pid} survived drop");
+    }
+
     #[test]
     fn with_resources_overrides() {
         let vm = LibkrunBuilderVm::default().with_resources(2, 2048);
@@ -6747,6 +6827,13 @@ mod tests {
             elapsed < Duration::from_secs(5),
             "panic detector did not kill the child promptly: {elapsed:?}"
         );
+        assert!(
+            child
+                .try_wait()
+                .expect("probe reaped panic child")
+                .is_some(),
+            "the panic path returned before reaping its supervisor"
+        );
     }
 
     #[cfg(unix)]
@@ -6796,6 +6883,13 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(5),
             "halt detector did not kill the child promptly: {elapsed:?}"
+        );
+        assert!(
+            child
+                .try_wait()
+                .expect("probe reaped halted child")
+                .is_some(),
+            "the failure path returned before reaping its supervisor"
         );
     }
 
