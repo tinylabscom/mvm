@@ -4,11 +4,20 @@ Last updated: 2026-09-08
 
 ## In progress
 
-- [ ] **Linux 6.12.109 synchronized kernel pin — issue #3213.**
+- [ ] **Four-open-issue closeout.**
+      `specs/plans/2026-09-08-four-open-issue-closeout.md`.
+      Four independent workstreams cover the shipped boot-tag contract,
+      failed-builder store-lock ownership, authenticated warm-child activation,
+      and hardened Apple Silicon documented-surface CI. Each has a failing
+      regression, a live or operational witness, and an issue-closing PR; #3039
+      cannot be publicly disclosed before the recorded clearance gate.
+
+- [x] **Linux 6.12.109 synchronized kernel pin — issue #3213.**
       `specs/plans/2026-09-08-kernel-6-12-109.md`.
       Both kernel consumers use the kernel.org-verified archive and SRI hash;
-      structural coverage, the workspace suite, check, and zero-warning Clippy
-      are green. Builder-VM and merge validation remain.
+      structural coverage, both architecture builds, Nix evaluation, live
+      tree-built boot, the workspace suite, check, and zero-warning Clippy are
+      green. Merged via #3214; issue #3213 is closed.
 
 - [ ] **Shared website shell.**
       `specs/plans/2026-09-07-shared-site-shell.md`.

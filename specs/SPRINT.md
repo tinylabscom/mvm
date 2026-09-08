@@ -10,12 +10,22 @@
 
 ## In progress
 
-- [ ] **Linux 6.12.109 synchronized kernel pin — issue #3213.**
+- [ ] **Close the four remaining open issues.**
+      `specs/plans/2026-09-08-four-open-issue-closeout.md`.
+      The verified baseline is #3207 (release/default boot-tag drift), #3190
+      (failed-builder store-lock lifetime), #3039 (authenticated warm-child
+      activation), and #3011 (self-hosted Apple Silicon documented-surface
+      e2e). The plan separates them into issue-linked delivery PRs, puts release
+      correctness first, requires owner/counsel release clearance before public
+      #3039 work, and names live backend and runner-security acceptance evidence.
+
+- [x] **Linux 6.12.109 synchronized kernel pin — issue #3213.**
       `specs/plans/2026-09-08-kernel-6-12-109.md`.
       The custom workload/builder kernel and libkrunfw firmware build use the
       same kernel.org-verified Linux 6.12.109 archive and SRI hash. The
-      structural synchronization suite, full workspace tests/check, and
-      zero-warning Clippy are green; builder-VM and merge validation remain.
+      structural synchronization suite, both native kernel builds, Nix
+      evaluation, live tree-built guest boot, workspace tests/check, and
+      zero-warning Clippy are green; merged via #3214 and issue #3213 closed.
 
 - [ ] **Shared website shell.**
       `specs/plans/2026-09-07-shared-site-shell.md`.
