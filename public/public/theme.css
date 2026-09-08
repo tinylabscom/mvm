@@ -127,8 +127,12 @@ h1, h2, h3, h4 {
 }
 a { color: inherit; }
 
-.container { max-width: 72rem; margin: 0 auto; padding: 0 1.5rem; }
-@media (min-width: 640px) { .container { padding: 0 2rem; } }
+.container {
+  width: 100%;
+  max-width: calc(var(--site-content-width) + (2 * var(--site-gutter)));
+  margin: 0 auto;
+  padding-inline: var(--site-gutter);
+}
 
 /* Eyebrow — small mono caps, same treatment as the docs sidebar group
    labels and homepage eyebrows. */

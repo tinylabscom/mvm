@@ -8,7 +8,7 @@
 //! included by `tests/doc_rust_examples.rs`, so `cargo check -p mvm-conformance
 //! --tests` type-checks it against the real workspace crates. A block that
 //! cannot compile as written — an IR shape sketch with `…` in it — opts out
-//! with ```rust,ignore and must say why on its first line.
+//! with ```rust ignore and must say why on its first line.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -117,10 +117,14 @@ fn rust_blocks(contents: &str) -> Vec<RustBlock> {
             continue;
         }
         if let Some(info) = trimmed.strip_prefix("```") {
-            let token = info.split_whitespace().next().unwrap_or_default();
-            let mut parts = token.split(',');
+            let mut tokens = info.split_whitespace();
+            let first = tokens.next().unwrap_or_default();
+            let mut parts = first.split(',');
             if parts.next().map(str::to_ascii_lowercase).as_deref() == Some("rust") {
-                let ignored = parts.any(|a| a == "ignore" || a == "no_compile");
+                let ignored = parts
+                    .chain(tokens.flat_map(|token| token.split(',')))
+                    .map(str::to_ascii_lowercase)
+                    .any(|attribute| attribute == "ignore" || attribute == "no_compile");
                 open = Some((index + 1, ignored));
                 body.clear();
             }

@@ -7,9 +7,11 @@
   }
   .intro-inner {
     position: relative;
-    max-width: 72rem; margin: 0 auto; padding: 4rem 1.5rem 3.2rem;
+    box-sizing: border-box;
+    width: 100%;
+    max-width: calc(var(--site-content-width) + (2 * var(--site-gutter)));
+    margin: 0 auto; padding: 4rem var(--site-gutter) 3.2rem;
   }
-  @media (min-width: 640px) { .intro-inner { padding-inline: 2rem; } }
   .intro .kicker { margin-bottom: 1.5rem; }
   .intro h1 {
     font-weight: 600;
@@ -164,7 +166,7 @@
     .enterprise { grid-template-columns: 1fr; }
     .practice-list li { grid-template-columns: 1fr; gap: 0.35rem; }
     .billing-note { grid-template-columns: 1fr; }
-    .intro-inner { padding: 2.75rem 1.5rem 2.25rem; }
+    .intro-inner { padding-block: 2.75rem 2.25rem; }
   }
 </style>
 

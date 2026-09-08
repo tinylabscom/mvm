@@ -165,7 +165,7 @@ const navLinks = [
     width: calc(100% + (2 * var(--sl-nav-pad-x)));
     margin-inline: calc(-1 * var(--sl-nav-pad-x));
     /* Same gutter scale as Section.tsx (px-6 sm:px-8). */
-    padding-inline: 1.5rem;
+    padding-inline: var(--site-gutter);
     border-bottom: 1px solid var(--sl-color-hairline);
     background: var(--sl-color-bg);
     backdrop-filter: blur(12px);
@@ -176,19 +176,13 @@ const navLinks = [
     margin-inline: 0;
   }
 
-  @media (min-width: 640px) {
-    .landing-header {
-      padding-inline: 2rem;
-    }
-  }
-
   .landing-header-inner {
     display: flex;
     align-items: center;
     justify-content: space-between;
     /* Same max-width as Section.tsx's inner div (max-w-6xl); the gutter
        itself is carried by .landing-header's padding above. */
-    max-width: 72rem;
+    max-width: var(--site-content-width);
     margin-inline: auto;
     padding-block: 1rem;
   }
@@ -346,13 +340,13 @@ const navLinks = [
        its own copy of the trick to line up with it. */
     width: calc(100% + (2 * var(--sl-nav-pad-x)));
     margin-inline: calc(-1 * var(--sl-nav-pad-x));
-    padding: 0 1.5rem 1rem;
+    padding: 0 var(--site-gutter) 1rem;
     border-top: 1px solid var(--sl-color-hairline-light);
   }
 
   .landing-header--standalone .landing-mobile-nav {
-    width: calc(100% + 3rem);
-    margin-inline: -1.5rem;
+    width: calc(100% + (2 * var(--site-gutter)));
+    margin-inline: calc(-1 * var(--site-gutter));
   }
 
   .landing-mobile-nav.is-open {
@@ -361,12 +355,7 @@ const navLinks = [
 
   @media (min-width: 640px) {
     .landing-mobile-nav {
-      padding-inline: 2rem;
-    }
-
-    .landing-header--standalone .landing-mobile-nav {
-      width: calc(100% + 4rem);
-      margin-inline: -2rem;
+      padding-inline: var(--site-gutter);
     }
   }
 

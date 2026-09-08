@@ -17,8 +17,11 @@
       sections render immediately without the previous reveal effect. Focused
       regressions are wired into website CI, and website-source merges to
       `main` now publish automatically through the existing Pages workflow.
-      The deny-all article is explicitly excluded from this UI-only delivery
-      branch.
+      The homepage, blog, architecture, and pricing routes now share the same
+      responsive 72rem content gutter, and `docs-dev` clears only stale Astro
+      content data before startup while retaining warning-free Rust example
+      metadata. The deny-all article is explicitly excluded from this UI-only
+      delivery branch.
 
 - [x] **Publish the reviewed CVE evidence corpus.**
       `specs/plans/2026-09-06-public-cve-corpus.md`.

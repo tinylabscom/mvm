@@ -8,7 +8,9 @@ Last updated: 2026-09-07
       `specs/plans/2026-09-07-shared-site-shell.md`.
       Homepage, blog, and pricing share one responsive header; Blog is present
       in the shared navigation; the page reveal is removed; and CI regressions
-      cover the shared shell. Website-source merges to `main` automatically
+      cover the shared shell. All non-doc routes also share one responsive
+      content gutter, and docs development starts without stale content IDs or
+      invalid Rust fence labels. Website-source merges to `main` automatically
       publish through the existing Pages workflow. PR review remains.
 
 - [x] **Public CVE evidence corpus.**

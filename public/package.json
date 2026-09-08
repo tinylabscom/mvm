@@ -4,7 +4,7 @@
   "version": "0.0.1",
   "packageManager": "pnpm@10.33.2",
   "scripts": {
-    "dev": "astro dev",
+    "dev": "node scripts/clear-content-cache.mjs && astro dev",
     "start": "astro dev",
     "build": "astro build",
     "deploy": "pnpm build && pnpm check:deploy-assets && wrangler deploy",
@@ -16,7 +16,7 @@
     "check:samples": "node scripts/check-sample-provenance.mjs",
     "check:perf": "node scripts/check-perf-provenance.mjs",
     "check:headers": "node scripts/check-isolation-headers.mjs",
-    "check:shell": "node --test tests/site-shell.test.mjs",
+    "check:shell": "node --test tests/site-shell.test.mjs tests/clear-content-cache.test.mjs",
     "check:deploy-assets": "node scripts/check-weblinux-deploy-assets.mjs dist",
     "check": "pnpm check:tokens && pnpm check:samples && pnpm check:perf && pnpm check:headers && pnpm check:shell && pnpm build"
   },
