@@ -10,6 +10,13 @@
 
 ## In progress
 
+- [ ] **Linux 6.12.109 synchronized kernel pin — issue #3213.**
+      `specs/plans/2026-09-08-kernel-6-12-109.md`.
+      The custom workload/builder kernel and libkrunfw firmware build use the
+      same kernel.org-verified Linux 6.12.109 archive and SRI hash. The
+      structural synchronization suite, full workspace tests/check, and
+      zero-warning Clippy are green; builder-VM and merge validation remain.
+
 - [ ] **Shared website shell.**
       `specs/plans/2026-09-07-shared-site-shell.md`.
       The homepage navigation now links to Blog; the blog and pricing routes
