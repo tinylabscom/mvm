@@ -1,6 +1,10 @@
 //! Regression checks for the scheduled documented-surface witnesses.
 
 use std::fs;
+#[cfg(unix)]
+use std::process::Command;
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 
 /// The workflow that defines the documented-surface jobs.
 ///
@@ -279,6 +283,105 @@ fn the_builder_lock_wait_cannot_outlast_the_suite_deadline() {
         deadline < wait,
         "the deadline must be defined before the lock wait derives from it, \
          or the arithmetic reads an empty value and the wait becomes zero"
+    );
+}
+
+#[test]
+fn the_suite_timeout_owns_the_entire_conformance_process_tree() {
+    let script = documented_surface_script();
+
+    assert!(
+        script.contains("scripts/run-bounded-command.py"),
+        "the suite deadline must be enforced by the process-group runner; \
+         killing `$!` from a background pipeline only kills tee and leaves \
+         cargo, conformance, mvmctl, and the builder alive"
+    );
+    assert!(
+        !script.contains("while kill -0 \"$SUITE_PID\""),
+        "the polling timeout watches the pipeline's last PID rather than the \
+         owned conformance process tree"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_bounded_runner_terminates_descendants_that_hold_file_locks() {
+    let scratch = tempfile::tempdir().expect("create process-tree fixture");
+    let lock_path = scratch.path().join("store.lock");
+    let ready_path = scratch.path().join("holder.ready");
+    let log_path = scratch.path().join("runner.log");
+    let holder = concat!(
+        "import fcntl, os, time; ",
+        "f = open(os.environ[\"LOCK_PATH\"], \"w\"); ",
+        "fcntl.flock(f, fcntl.LOCK_EX); ",
+        "open(os.environ[\"READY_PATH\"], \"w\").close(); ",
+        "time.sleep(30)"
+    );
+    let shell = format!("python3 -c '{holder}' & wait");
+
+    for attempt in 1..=2 {
+        let _ = fs::remove_file(&ready_path);
+        let started = Instant::now();
+        let status = Command::new("python3")
+            .args([
+                "scripts/run-bounded-command.py",
+                "--timeout",
+                "1",
+                "--grace",
+                "1",
+                "--log",
+            ])
+            .arg(&log_path)
+            .args(["--", "sh", "-c", &shell])
+            .env("LOCK_PATH", &lock_path)
+            .env("READY_PATH", &ready_path)
+            .status()
+            .expect("run bounded command helper");
+
+        assert_eq!(status.code(), Some(124), "attempt {attempt} must time out");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "attempt {attempt} did not terminate its process tree promptly"
+        );
+        assert!(
+            ready_path.is_file(),
+            "attempt {attempt}'s descendant never acquired the lock"
+        );
+
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .expect("open fixture lock after timeout");
+        lock.try_lock().unwrap_or_else(|error| {
+            panic!("attempt {attempt}'s descendant still holds the lock: {error}")
+        });
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_bounded_runner_streams_output_and_preserves_exit_status() {
+    let scratch = tempfile::tempdir().expect("create successful command fixture");
+    let log_path = scratch.path().join("runner.log");
+    let started = Instant::now();
+    let status = Command::new("python3")
+        .args(["scripts/run-bounded-command.py", "--timeout", "5", "--log"])
+        .arg(&log_path)
+        .args(["--", "sh", "-c", "sleep 30 & echo bounded-marker; exit 7"])
+        .status()
+        .expect("run bounded command success path");
+
+    assert_eq!(status.code(), Some(7));
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "an outliving descendant kept the output pipe open"
+    );
+    assert_eq!(
+        fs::read_to_string(log_path).expect("read bounded command log"),
+        "bounded-marker\n"
     );
 }
 

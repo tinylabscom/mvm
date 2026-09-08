@@ -10,10 +10,17 @@ Last updated: 2026-09-08
       failed-builder store-lock ownership, authenticated warm-child activation,
       and hardened Apple Silicon documented-surface CI. Each has a failing
       regression, a live or operational witness, and an issue-closing PR; #3039
-      cannot be publicly disclosed before the recorded clearance gate.
-      The #3207 implementation is complete and awaiting merge: the compiled
-      default and release gate share published `boot-image/v0.1.5`, and its
-      complete 24-asset matrix passed the non-publishing live witness.
+      cannot be publicly disclosed before the recorded clearance gate. #3207
+      merged via #3218 and is closed; the compiled default and release gate
+      share published `boot-image/v0.1.5`, whose complete 24-asset matrix passed
+      the non-publishing live witness. The #3190 audit ruled out inherited lock
+      descriptors and identified the suite timeout's `cargo | tee` process tree
+      as the survivor; the replacement owns, bounds, terminates, and reaps the
+      whole tree, with repeated lock-reacquisition coverage and guarded
+      supervisor setup error paths. Full workspace, Linux/gated, Clippy,
+      formatting, and all 67 repository policy gates are green; the historical
+      Nix hook EOF is separated as an initiating failure that no longer strands
+      the store lock.
 
 - [x] **Linux 6.12.109 synchronized kernel pin — issue #3213.**
       `specs/plans/2026-09-08-kernel-6-12-109.md`.
