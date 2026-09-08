@@ -1,8 +1,8 @@
 {
   "lane": "macos-hvf",
-  "commit": "032d719429e0a177c3bfc67c8421b6af551487cb",
-  "material_digest": "ebbdfc40c1dc2edd9e067a9f21a76d61e3c27420f151e25aa7c9507562836ee8",
-  "recorded_at": "2026-09-08T04:12:47Z",
+  "commit": "02266fbda9f43174ac1e7f9823e3d7ed3c1c5e6a",
+  "material_digest": "aa4c1e345ce0a19d5ace64524a98b60728a357e9ab1dee6ded5699bc79a21fa3",
+  "recorded_at": "2026-09-08T05:02:08Z",
   "host": {
     "os": "Darwin",
     "os_version": "26.5.2",
