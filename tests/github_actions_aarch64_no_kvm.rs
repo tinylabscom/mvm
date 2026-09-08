@@ -32,8 +32,6 @@ const REQUIRED_BOOTSTRAP: &str =
     "/tmp/mvmctl-source-under-test --builder qemu bootstrap --production -v";
 const REQUIRED_QEMU_BUILD: &str =
     "/tmp/mvmctl-source-under-test --builder qemu machine build --flake examples/exit_code";
-const REQUIRED_BOOT_IMAGE_UPDATE: &str =
-    "/tmp/mvmctl-source-under-test image boot update --tag boot-image/v0.1.3 --force";
 const REQUIRED_SOURCE_KERNEL: &str = ".mvm-ci/cache/kernels/x86_64/workload/bzImage";
 const REQUIRED_SOURCE_FLAKE_RESTORE: &str = "mv nix/images/builder-vm.hidden nix/images/builder-vm";
 const REQUIRED_SOURCE_KERNEL_BUILD: &str =
@@ -218,7 +216,10 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
         build_job.contains("needs: no-kvm-bootstrap")
             && build_job.contains(&format!("name: {BINARY_ARTIFACT}"))
             && build_job.contains(&format!("name: {BOOTSTRAP_ARTIFACT}"))
-            && build_job.contains(REQUIRED_BOOT_IMAGE_UPDATE)
+            && build_job.contains(&format!(
+                "/tmp/mvmctl-source-under-test image boot update --tag {} --force",
+                mvmctl::core::config::DEFAULT_BOOT_IMAGE_TAG
+            ))
             && build_job.contains(REQUIRED_SOURCE_KERNEL)
             && build_job.contains(REQUIRED_SOURCE_KERNEL_VERIFY)
             && build_job.contains(REQUIRED_ENTRYPOINT_PATCH)

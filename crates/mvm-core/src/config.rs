@@ -20,7 +20,7 @@ pub const FC_VERSION_DEFAULT: &str = match option_env!("MVM_FC_VERSION") {
 /// validate a different image from the one users receive.
 pub const DEFAULT_BOOT_IMAGE_TAG: &str = match option_env!("MVM_BOOT_IMAGE_TAG") {
     Some(t) => t,
-    None => "boot-image/v0.1.3",
+    None => "boot-image/v0.1.5",
 };
 
 /// Host CPU architecture for arch-tagged downloads (the Firecracker release

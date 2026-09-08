@@ -390,7 +390,7 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      # Dual-publish: attach the newest boot image train's assets to this CLI
+      # Dual-publish: attach the CLI's compiled boot image train assets to this CLI
       # release too. It re-uploads bytes, never rebuilds them — the images are
       # built exactly once, by release-boot-image.yml.
       #
@@ -416,27 +416,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # Highest version, not most recently created. `gh release list`
-          # orders by creation date, so `.[0]` picks whichever release was cut
-          # last — and the two disagree the moment one is re-cut out of order.
-          # That is not hypothetical: v0.1.1 published, then v0.1.0 was re-cut
-          # after a fix landed, leaving the newer release at the lower version.
-          # Sorting by parsed semver makes which image a CLI release ships a
-          # property of the version, not of the order someone happened to push.
-          # The strict N.N.N match also drops anything that is not a plain
-          # release tag rather than trying to order it.
-          # No `-r`: `gh --jq` already prints a string result raw, and gh has no
-          # such flag. Passing one consumes `--jq`'s value, demoting the real
-          # expression to a positional argument, and gh rejects the whole
-          # invocation with `unknown command "<the entire jq program>"`.
-          BOOT_TAG="$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 100 \
-            --json tagName --jq '
-              [ .[].tagName
-                | select(test("^boot-image/v[0-9]+\\.[0-9]+\\.[0-9]+$"))
-                | {tag: ., v: (ltrimstr("boot-image/v") | split(".") | map(tonumber))} ]
-              | sort_by(.v) | last | .tag // empty')"
+          # Read the same Rust constant embedded in the released mvmctl. An
+          # independently selected newest tag can be complete while the image
+          # users actually fetch is missing or incomplete.
+          BOOT_TAG="$(cargo run --quiet --package xtask -- release-boot-image tag)"
           if [ -z "${BOOT_TAG}" ]; then
-            echo "::error::no boot-image/v* release exists, so this release would ship with no boot image assets and every fresh install would 404 on first boot. Publish a boot-image/v* tag first, then re-run this release." >&2
+            echo "::error::the compiled default boot image tag is empty; refusing to publish" >&2
+            exit 1
+          fi
+          if ! gh release view "${BOOT_TAG}" --repo "${GITHUB_REPOSITORY}" --json tagName > /dev/null; then
+            echo "::error::the CLI embeds ${BOOT_TAG}, but no release with that tag exists. Publish that boot image release or intentionally advance the compiled default before retrying." >&2
             exit 1
           fi
           echo "Attaching boot image assets from ${BOOT_TAG}"
@@ -451,31 +440,8 @@ jobs:
           # means download_builder_vm_image 404s for everyone. The consumer-path
           # check further down covers only runtime-overlay and sdk-sidecar, and
           # skips whatever is absent, so nothing else in this job would notice.
-          missing=()
-          for arch in aarch64 x86_64; do
-            for f in \
-              "default-microvm-vmlinux-${arch}" \
-              "default-microvm-rootfs-${arch}.ext4" \
-              "default-microvm-meta-${arch}.json" \
-              "default-microvm-${arch}-checksums-sha256.txt" \
-              "builder-vm-vmlinux-${arch}" \
-              "builder-vm-rootfs-${arch}.ext4" \
-              "builder-vm-${arch}-checksums-sha256.txt" \
-              "runtime-overlay-${arch}.tar.gz"; do
-              [ -s "artifacts/${f}" ] || missing+=("${f}")
-            done
-            for libc in glibc musl; do
-              for f in \
-                "sdk-sidecar-${arch}-${libc}.tar.gz" \
-                "sdk-sidecar-${arch}-${libc}.tar.gz.sha256"; do
-                [ -s "artifacts/${f}" ] || missing+=("${f}")
-              done
-            done
-          done
-          if [ ${#missing[@]} -gt 0 ]; then
-            echo "::error::${BOOT_TAG} is incomplete — refusing to ship a CLI release whose boot image would 404 on first boot. Missing: ${missing[*]}" >&2
-            exit 1
-          fi
+          cargo run --quiet --package xtask -- \
+            release-boot-image validate "${BOOT_TAG}" artifacts
           # Drop the bundles this job re-mints. The signing step below writes
           # its bundle with create-new semantics, so leaving the boot image
           # train's copy in place would fail that step outright rather than be
