@@ -18,6 +18,9 @@
       e2e). The plan separates them into issue-linked delivery PRs, puts release
       correctness first, requires owner/counsel release clearance before public
       #3039 work, and names live backend and runner-security acceptance evidence.
+      #3207 implementation is complete and awaiting its issue-linked merge: the
+      CLI and release gate now share `boot-image/v0.1.5`, whose published
+      24-asset architecture/libc matrix passed the non-publishing live witness.
 
 - [x] **Linux 6.12.109 synchronized kernel pin — issue #3213.**
       `specs/plans/2026-09-08-kernel-6-12-109.md`.

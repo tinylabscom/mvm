@@ -1010,10 +1010,20 @@ fn website_validation_covers_demo_guest_and_deploy_workflow_changes() {
 
 #[test]
 fn release_lookups_pass_the_filter_directly_to_gh_jq() {
-    for (name, workflow) in [
+    let workflows = [
         ("workers.yml", website_deploy_workflow()),
         ("release.yml", release_workflow()),
-    ] {
+    ];
+    let release_list_lookups = workflows
+        .iter()
+        .filter(|(_, workflow)| workflow.contains("gh release list"))
+        .collect::<Vec<_>>();
+    assert!(
+        !release_list_lookups.is_empty(),
+        "the fixture must include at least one release-list lookup"
+    );
+
+    for (name, workflow) in release_list_lookups {
         assert!(
             workflow.contains("--json tagName --jq '"),
             "{name} must pass its semantic-version filter directly to gh --jq"
@@ -1273,6 +1283,67 @@ fn the_ci_boot_witness_pins_the_compiled_boot_image_tag() {
     assert!(
         ci_workflow().contains(&format!("IMAGE_TAG: {tag}")),
         "the merge-queue boot witness must validate the compiled default boot image tag {tag}"
+    );
+}
+
+/// The CLI release must validate the same boot-image tag embedded in the CLI.
+///
+/// Selecting an independently discovered release can produce a green gate for
+/// bytes that a fresh installation never requests. The release job therefore
+/// asks the Rust workspace for the compiled default and must not choose a tag
+/// by publication order or version sorting.
+#[test]
+fn the_cli_release_validates_the_compiled_boot_image_tag() {
+    let workflow = release_workflow();
+    let step = workflow
+        .split("- name: Attach the boot image release assets to this release")
+        .nth(1)
+        .expect("release.yml must attach boot image assets")
+        .split("\n      - name:")
+        .next()
+        .expect("the boot-image attachment step must have a body");
+
+    assert!(
+        step.contains(
+            "BOOT_TAG=\"$(cargo run --quiet --package xtask -- release-boot-image tag)\""
+        ),
+        "the release gate must obtain BOOT_TAG from the compiled Rust default:\n{step}"
+    );
+    assert!(
+        !step.contains("gh release list") && !step.contains("sort_by(.v)"),
+        "the release gate must not independently select a highest published tag:\n{step}"
+    );
+    assert!(
+        step.contains("release-boot-image validate \"${BOOT_TAG}\" artifacts"),
+        "the release gate must validate the downloaded matrix against that exact tag:\n{step}"
+    );
+}
+
+#[test]
+fn the_cli_release_refuses_a_missing_compiled_boot_image_release() {
+    let workflow = release_workflow();
+    let step = workflow
+        .split("- name: Attach the boot image release assets to this release")
+        .nth(1)
+        .expect("release.yml must attach boot image assets")
+        .split("\n      - name:")
+        .next()
+        .expect("the boot-image attachment step must have a body");
+    let existence_check = step
+        .find("gh release view \"${BOOT_TAG}\"")
+        .expect("the compiled boot image release must be checked explicitly");
+    let download = step
+        .find("gh release download \"${BOOT_TAG}\"")
+        .expect("the compiled boot image release must be downloaded");
+
+    assert!(
+        existence_check < download,
+        "the matching release must exist before any asset download starts:\n{step}"
+    );
+    assert!(
+        step[existence_check..download].contains("exit 1")
+            && step[existence_check..download].contains("the CLI embeds ${BOOT_TAG}"),
+        "a missing compiled-tag release must fail with an actionable error:\n{step}"
     );
 }
 

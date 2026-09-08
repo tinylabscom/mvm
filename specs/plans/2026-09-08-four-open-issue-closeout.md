@@ -71,32 +71,41 @@ availability must not be represented as warm-claim coverage.
 
 ### Reproduce and decide
 
-- [ ] Add a failing structural test that reads the compiled
+- [x] Add a failing structural test that reads the compiled
       `DEFAULT_BOOT_IMAGE_TAG` and the release workflow's selected tag and
       demonstrates the current mismatch.
-- [ ] Make the consumer contract authoritative: the release gate must validate
+- [x] Make the consumer contract authoritative: the release gate must validate
       and attach the exact boot-image tag the built CLI will request. Remove the
       independent "highest published tag" decision from the CLI release path.
-- [ ] Keep the boot-image publishing train independent; no CLI release may
+- [x] Keep the boot-image publishing train independent; no CLI release may
       silently advance the default to an image release that does not exist.
 
 ### Implement and verify
 
-- [ ] Expose or consume the default tag through one machine-readable path that
+- [x] Expose or consume the default tag through one machine-readable path that
       both the release test and workflow can verify without duplicating a second
       version literal.
-- [ ] Validate the complete current asset matrix for that exact tag before any
+- [x] Validate the complete current asset matrix for that exact tag before any
       CLI release is created, including both architectures and both SDK libc
       variants.
-- [ ] Extend `tests/release_assets.rs` with positive coverage and negative
+- [x] Extend `tests/release_assets.rs` with positive coverage and negative
       fixtures for a divergent tag, a missing release, and an incomplete asset
       set.
-- [ ] Run the focused release-asset suite, workflow lint, repository policy
+- [x] Run the focused release-asset suite, workflow lint, repository policy
       gates, workspace tests/check, and zero-warning Clippy.
-- [ ] Exercise a release dry-run or equivalent non-publishing workflow witness
+- [x] Exercise a release dry-run or equivalent non-publishing workflow witness
       and record that the tag validated by the gate equals the fresh-install
       download tag.
 - [ ] Merge the issue-linked PR and close #3207.
+
+The implementation advances the compiled default to the complete published
+`boot-image/v0.1.5` line and makes `xtask release-boot-image tag` the workflow's
+machine-readable source. The validator refuses a divergent tag and any empty or
+missing member of the 24-asset architecture/libc matrix. The structural
+regression first failed against the former highest-release lookup, then the
+focused suites, workspace check, workflow lint, and non-publishing live query
+passed. The live query resolved the compiled and published tags to the same
+`boot-image/v0.1.5` release with all 24 required assets present and nonempty.
 
 ## Workstream 2 — #3190: failed-builder lock lifetime
 

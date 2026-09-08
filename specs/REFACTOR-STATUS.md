@@ -11,6 +11,9 @@ Last updated: 2026-09-08
       and hardened Apple Silicon documented-surface CI. Each has a failing
       regression, a live or operational witness, and an issue-closing PR; #3039
       cannot be publicly disclosed before the recorded clearance gate.
+      The #3207 implementation is complete and awaiting merge: the compiled
+      default and release gate share published `boot-image/v0.1.5`, and its
+      complete 24-asset matrix passed the non-publishing live witness.
 
 - [x] **Linux 6.12.109 synchronized kernel pin — issue #3213.**
       `specs/plans/2026-09-08-kernel-6-12-109.md`.
