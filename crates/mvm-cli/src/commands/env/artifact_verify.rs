@@ -231,10 +231,18 @@ pub(crate) fn verify_artifact_hash(
 /// already-complete file curl handles it gracefully. Corruption is
 /// still caught downstream by the SHA-256 gate (`verify_artifact_hash`),
 /// which deletes on mismatch so the next run restarts clean.
+/// Transient transport failures are retried three times with a short fixed
+/// delay. HTTP failures remain visible through `-f`, and no downloaded bytes
+/// are trusted until the existing signature and digest gates accept them.
 pub(super) fn curl_download_args(dest: &str, url: &str) -> Vec<String> {
     vec![
         "-fSL".to_string(),
         "--progress-bar".to_string(),
+        "--retry".to_string(),
+        "3".to_string(),
+        "--retry-delay".to_string(),
+        "2".to_string(),
+        "--retry-all-errors".to_string(),
         "-C".to_string(),
         "-".to_string(),
         "-o".to_string(),
@@ -298,6 +306,18 @@ mod tests {
             "expected `-C -`: {args:?}"
         );
         assert!(args.contains(&"-fSL".to_string()));
+        assert!(
+            args.windows(2).any(|w| w == ["--retry", "3"]),
+            "expected three bounded retries: {args:?}"
+        );
+        assert!(
+            args.windows(2).any(|w| w == ["--retry-delay", "2"]),
+            "expected a fixed retry delay: {args:?}"
+        );
+        assert!(
+            args.contains(&"--retry-all-errors".to_string()),
+            "connection resets must be retried: {args:?}"
+        );
         assert_eq!(args.last().unwrap(), "https://example/x");
     }
 

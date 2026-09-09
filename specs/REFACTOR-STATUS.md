@@ -1,8 +1,16 @@
 # Refactor status
 
-Last updated: 2026-09-08
+Last updated: 2026-09-09
 
 ## In progress
+
+- [ ] **Scheduled CI stability.**
+      `specs/plans/2026-09-09-scheduled-ci-stability.md`.
+      Issues #3222 and #3223 identify independent transient failures in the
+      Extended and Security schedules; #3224 is the resulting stale-claim
+      alarm. The work preserves fail-closed artifact verification and
+      single-writer locking while making both witnesses robust, then requires
+      fresh successful scheduled-lane evidence before closeout.
 
 - [ ] **Four-open-issue closeout.**
       `specs/plans/2026-09-08-four-open-issue-closeout.md`.
