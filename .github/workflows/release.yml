@@ -767,6 +767,51 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
+      # The `release` job ends by dispatching `kernel-build.yml` and does not
+      # wait for it, so the workload kernels and their signed per-arch checksum
+      # manifests land on the release minutes after this job becomes eligible.
+      # Downloading immediately captured the release mid-publish, and the
+      # verifier then reported those assets missing — a red gate on a release
+      # that was fine, every single time, which is the failure mode that trains
+      # people to ignore a gate.
+      #
+      # Waiting for the assets rather than for the run: this job cares that the
+      # bytes are on the release, and polling the release says that directly.
+      # Reading it from a fire-and-forget dispatch would mean guessing which run
+      # id the dispatch produced.
+      #
+      # Bounded, and a timeout is a failure: assets that never arrive are the
+      # incomplete release this gate exists to catch, and must not be waited on
+      # forever or quietly skipped.
+      - name: Wait for the asynchronously published kernel assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          required=(
+            vmlinux-aarch64-workload
+            vmlinux-x86_64-workload
+            kernel-aarch64-checksums-sha256.txt
+            kernel-x86_64-checksums-sha256.txt
+          )
+          for _ in $(seq 1 40); do
+            present=$(gh release view "${TAG_NAME}" --repo "${GITHUB_REPOSITORY}" \
+              --json assets --jq '.assets[].name' 2>/dev/null || true)
+            missing=()
+            for name in "${required[@]}"; do
+              printf '%s\n' "${present}" | grep -qx "${name}" || missing+=("${name}")
+            done
+            if [ ${#missing[@]} -eq 0 ]; then
+              echo "kernel assets present on ${TAG_NAME}"
+              exit 0
+            fi
+            echo "waiting for ${#missing[@]} kernel asset(s): ${missing[*]}"
+            sleep 30
+          done
+          echo "::error::${TAG_NAME} never received: ${missing[*]} — kernel-build.yml did not publish them within 20 minutes, so the release is incomplete." >&2
+          exit 1
+
       - name: Download published release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

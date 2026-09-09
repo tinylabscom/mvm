@@ -43,6 +43,64 @@ fn justfile() -> String {
     fs::read_to_string("Justfile").expect("Justfile must be readable")
 }
 
+/// The post-publish verifier must not race the assets the publish job triggers.
+///
+/// `release` ends by dispatching `kernel-build.yml` and does not wait for it, so
+/// the workload kernels and their signed per-arch checksum manifests land on the
+/// release minutes after `verify-release` becomes eligible. Downloading straight
+/// away captured the release mid-publish and reported those assets missing —
+/// v0.18.0-rc.1 published a complete, signed release and its own gate called it
+/// broken.
+///
+/// A gate that fails on every correct release is worse than no gate: it teaches
+/// people to skip reading it, and then it cannot report the incomplete release
+/// it exists to catch.
+///
+/// Asserted as an ordering — the wait must come before the download — because a
+/// wait that runs after the assets have been fetched changes nothing.
+#[test]
+fn the_release_verifier_waits_for_the_kernel_assets_it_triggers() {
+    let workflow = release_workflow();
+
+    let dispatch = workflow
+        .find("gh workflow run kernel-build.yml")
+        .expect("the release job must trigger the kernel build");
+    let wait = workflow
+        .find("Wait for the asynchronously published kernel assets")
+        .expect(
+            "verify-release must wait for the kernel assets, or it verifies a \
+             release that is still being published",
+        );
+    let download = workflow
+        .find("gh release download \"${TAG_NAME}\"")
+        .expect("verify-release must download the published assets");
+
+    assert!(
+        dispatch < wait,
+        "the wait only makes sense after the dispatch it is waiting on"
+    );
+    assert!(
+        wait < download,
+        "the wait must precede the download, or the verifier still captures the \
+         release mid-publish"
+    );
+
+    // Every asset the verifier requires of the kernel train must be waited for.
+    // Waiting for a subset leaves exactly the same race for the rest.
+    for asset in [
+        "vmlinux-aarch64-workload",
+        "vmlinux-x86_64-workload",
+        "kernel-aarch64-checksums-sha256.txt",
+        "kernel-x86_64-checksums-sha256.txt",
+    ] {
+        assert!(
+            workflow[wait..download].contains(asset),
+            "{asset} is verified but not waited for, so it can still be missing \
+             when the verifier looks"
+        );
+    }
+}
+
 /// The published asset list must not name the same file twice.
 ///
 /// `artifacts/*.tar.gz` matches every tarball, including the runtime-overlay,
