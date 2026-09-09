@@ -971,12 +971,24 @@ mod tests {
             &cache,
             "nix-store-aarch64.img",
             64,
-            LockWait::none(),
+            // Distinguish a transient release from real inheritance: the
+            // bounded wait stays far below the deliberately outliving
+            // helper's lifetime, so a helper that owns the descriptor still
+            // makes this witness fail.
+            LockWait::of(Duration::from_secs(5)),
         );
+        let helper_still_alive = child
+            .try_wait()
+            .expect("probe helper after lock reacquisition")
+            .is_none();
 
         child.kill().expect("terminate child fixture");
         child.wait().expect("reap child fixture");
         reacquired.expect("the spawned helper must not inherit the one-shot lock");
+        assert!(
+            helper_still_alive,
+            "the lock must be reacquired before the helper exits"
+        );
     }
 
     #[test]

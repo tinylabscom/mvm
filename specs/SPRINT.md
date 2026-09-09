@@ -10,6 +10,15 @@
 
 ## In progress
 
+- [ ] **Scheduled CI stability — issues #3222, #3223, and #3224.**
+      `specs/plans/2026-09-09-scheduled-ci-stability.md`.
+      Harden release-asset downloads against transient connection failures,
+      make the close-on-exec lock witness tolerate unrelated concurrent
+      pre-exec windows without allowing an outliving helper to retain the
+      lock. The focused regressions, 871-test mutation baseline, full executable
+      workspace suite, compile/Clippy/format gates, and 67 policy gates are
+      green; merge and fresh Extended/Security evidence remain before closeout.
+
 - [ ] **Close the four remaining open issues.**
       `specs/plans/2026-09-08-four-open-issue-closeout.md`.
       The verified baseline is #3207 (release/default boot-tag drift), #3190
