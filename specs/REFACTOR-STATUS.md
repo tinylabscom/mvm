@@ -9,8 +9,10 @@ Last updated: 2026-09-09
       Issues #3222 and #3223 identify independent transient failures in the
       Extended and Security schedules; #3224 is the resulting stale-claim
       alarm. The work preserves fail-closed artifact verification and
-      single-writer locking while making both witnesses robust, then requires
-      fresh successful scheduled-lane evidence before closeout.
+      single-writer locking while making both witnesses robust. PR #3225 is
+      merged; post-merge Extended and Security runs are green, and #3222/#3223
+      are closed. A fresh successful scheduled Security run and the subsequent
+      claim-freshness reconciliation remain before #3224 closeout.
 
 - [ ] **Four-open-issue closeout.**
       `specs/plans/2026-09-08-four-open-issue-closeout.md`.
