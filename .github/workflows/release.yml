@@ -358,7 +358,7 @@ jobs:
     # Dry-run guard: a `workflow_dispatch` with dry_run=true builds + packages
     # (the `build` job) but never reaches this publish job — only a tag push or
     # an explicit dry_run=false dispatch publishes.
-    if: ${{ !cancelled() && needs.bdd.result == 'success' && needs.e2e-docs.result == 'success' && needs.build.result == 'success' && needs.initramfs-image.result == 'success' && (github.event_name == 'push' || github.event.inputs.dry_run == 'false') }}
+    if: ${{ !cancelled() && needs.bdd.result == 'success' && needs.e2e-docs.result == 'success' && needs.build.result == 'success' && needs.initramfs-image.result == 'success' }}
     # This job mints the one keyless identity every installed mvmctl trusts:
     # `release.yml@refs/tags/v{version}`, the sole entry in
     # RELEASE_IDENTITY_TEMPLATES. The environment's policy admits `v*` tags and
@@ -464,6 +464,7 @@ jobs:
           cat checksums-sha256.txt
 
       - name: Sign release tarballs, checksum manifests, and SBOM
+        if: ${{ github.event_name == 'push' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -526,6 +527,7 @@ jobs:
       # them individually here would assert a per-file guarantee the pipeline
       # does not otherwise make.
       - name: Attest build provenance for the release tarballs (release-provenance)
+        if: ${{ github.event_name == 'push' }}
         uses: actions/attest-build-provenance@v4
         with:
           subject-path: artifacts/*.tar.gz
@@ -545,6 +547,7 @@ jobs:
       # are best-effort and the release gates only on the binary build); a
       # PRESENT artifact that cannot be consumed fails the release here.
       - name: Verify the published artifacts survive the consumer path
+        if: ${{ github.event_name == 'push' }}
         shell: bash
         env:
           TAG_NAME: ${{ github.ref_name }}
@@ -612,6 +615,7 @@ jobs:
       # the Fulcio short-lived cert, and the Rekor inclusion proof —
       # mvm-security::image_verify consumes exactly this format.
       - name: Sign image manifests (plan 36)
+        if: ${{ github.event_name == 'push' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -642,6 +646,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ github.ref_name }}
+          # A tag push is the only real publish. Everything else — a manual
+          # dispatch, dry_run either way — is a rehearsal, and rehearses against
+          # a draft.
+          DRY_RUN: ${{ github.event_name != 'push' }}
         run: |
           set -euo pipefail
           # nullglob: image globs that matched nothing (their job failed)
@@ -713,18 +721,58 @@ jobs:
             prerelease=(--prerelease)
             echo "::notice::${TAG_NAME} carries a prerelease segment — publishing it as a prerelease, not as latest"
           fi
-          gh release create "${TAG_NAME}" \
-            --title "${TAG_NAME}" \
+          # A dry run publishes to a throwaway draft under a scratch tag and
+          # deletes it in the next step. This is the same `gh release create`
+          # with the same asset list, deliberately: the defects worth catching
+          # here are properties of that list and of GitHub's reaction to it — a
+          # duplicate asset name is a 422 from the upload endpoint, not
+          # something a local check can produce. A separate mock publish would
+          # be free to drift from this one, and the drift is exactly the class
+          # of bug it would be built to find.
+          #
+          # A draft is not listed as a release and is not resolved by
+          # `/releases/latest`, so it is invisible to `mvmctl update` for the
+          # seconds it exists.
+          publish_tag="${TAG_NAME}"
+          draft=()
+          if [ "${DRY_RUN}" = "true" ]; then
+            publish_tag="dry-run-${GITHUB_RUN_ID}"
+            draft=(--draft)
+            prerelease=()
+            echo "::notice::dry run — publishing ${publish_tag} as a draft, then deleting it"
+          fi
+          gh release create "${publish_tag}" \
+            --title "${publish_tag}" \
+            "${draft[@]}" \
             "${prerelease[@]}" \
             --generate-notes \
             --notes "${RELEASE_NOTES_PREFIX}" \
             "${assets[@]}"
+
+      # Always, even if the publish failed: `gh release create` can create the
+      # release and then fail uploading an asset, which is how the duplicate
+      # name surfaced. Leaving that draft behind would accumulate one per dry
+      # run and leave the next one reasoning about a tag it did not create.
+      - name: Delete the dry-run draft release
+        if: ${{ always() && github.event_name != 'push' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          tag="dry-run-${GITHUB_RUN_ID}"
+          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release delete "${tag}" --repo "${GITHUB_REPOSITORY}" --yes --cleanup-tag
+            echo "deleted dry-run draft ${tag}"
+          else
+            echo "no dry-run draft ${tag} to delete"
+          fi
 
       # The "release: published" event fired by `gh release create` runs under
       # GITHUB_TOKEN, which by design does not trigger downstream workflows.
       # workflow_dispatch is exempt from that rule, so chain publish-crates
       # explicitly here. This keeps crates.io in sync with GitHub releases.
       - name: Trigger crates.io publish workflow
+        if: ${{ github.event_name == 'push' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ github.ref_name }}
@@ -743,6 +791,7 @@ jobs:
       # explicitly rather than relying on an event that demonstrably does not
       # arrive.
       - name: Trigger kernel build + publish workflow
+        if: ${{ github.event_name == 'push' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ github.ref_name }}
@@ -759,7 +808,11 @@ jobs:
   # match their recorded hash fails here, surfacing it instead of shipping silently.
   verify-release:
     needs: [release]
-    if: ${{ needs.release.result == 'success' }}
+    # Tag pushes only. A dry run publishes a draft and deletes it, so there is
+    # no release left to download, and the signatures this asserts are minted
+    # under a `refs/tags/*` identity a dispatch cannot produce. Running it there
+    # would fail for reasons that say nothing about the release.
+    if: ${{ github.event_name == 'push' && needs.release.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
