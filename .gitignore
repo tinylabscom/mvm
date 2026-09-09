@@ -81,6 +81,13 @@ __pycache__/
 **/fuzz/target/
 **/fuzz-*/target/
 
+# Ad-hoc cargo target directories. `CARGO_TARGET_DIR=target-warn cargo clippy`
+# and friends write build output beside `target/`, and the root-anchored
+# `/target` rule at the top of this file matches only that exact name — so a
+# `git add -A` after one of those runs stages the whole build tree.
+/target-*/
+/shared-target/
+
 .ruff_cache
 .venv/
 
