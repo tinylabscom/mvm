@@ -471,13 +471,6 @@ jobs:
         with:
           packages: lld
 
-      # The only lane in this workflow that needs the pinned zig. Eight other
-      # jobs installed it because `mvm-cli`'s build script used to cross-compile
-      # the embedded Linux binaries on every build; that is now behind
-      # `embed-host-bins`, which only the step below turns on. If a second lane
-      # ever enables that feature, it needs this too.
-      - uses: ./.github/actions/install-zigbuild
-
       - uses: ./.github/actions/rust-cache
 
       - name: Clippy (mvm-client tracing-bridge)
@@ -515,22 +508,6 @@ jobs:
           cargo nextest run -p mvm-agentd --features addons
           cargo check -p mvm-agentd --features addons --bins
 
-      # `embed-host-bins` is off by default, so the entire cross-compile leg of
-      # `mvm-cli/build.rs` — and every test that inspects the embedded payload —
-      # is absent from every other lane in this workflow. Only the tag-push
-      # release build turns it on, and a break there is invisible until a
-      # release is already being cut. This lane is the one place a pull request
-      # proves the leg still compiles and still produces the manifest's set.
-      #
-      # `--bins` matters: the payload is `include_bytes!`d into the binary, so a
-      # lib-only check would not link it and would not catch a bad path.
-      - name: embed-host-bins feature (cross-compiled payload)
-        run: |
-          cargo nextest run -p mvm-cli --features embed-host-bins \
-            --test embedded_binaries --test host_binaries_extract \
-            --test host_binaries_manifest --test dispatch_host_bin_dir
-          cargo check -p mvmctl --features embed-host-bins --bins
-
       # End-user release builds enable an acquisition policy that contributor
       # builds deliberately omit: checkout proximity must never select a local
       # compiler. Compile the CLI and execute the policy boundary tests on every
@@ -552,6 +529,34 @@ jobs:
       - name: In-process pure-mkfs materialize tests
         run: cargo test -p mvm-build --features pure-mkfs --lib rootfs::tests::pure
 
+  # Split out of `lint-features`, which was 35 minutes and the critical path for
+  # every code-touching pull request; this step alone was 19 of them. Nothing
+  # here shares a cargo fingerprint with the steps it used to sit beside — a
+  # different feature resolution rebuilds its own graph either way — so moving
+  # it to its own runner costs one checkout and recovers the rest in parallel.
+  lint-features-test-support:
+    name: Lint feature coverage (test-support)
+    needs: [scope]
+    if: needs.scope.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: lld
+
+      - uses: ./.github/actions/rust-cache
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
       - name: test-support feature tests (mock backend)
         # One invocation, not one per package. Cargo resolves features per
         # invocation, so selecting a different package each time produced
@@ -567,10 +572,63 @@ jobs:
           cargo nextest run -p mvmctl --features test-support --test audit_emissions_live
           cargo check -p mvm-cli --features test-support --example verification_loop
 
+  # Also split out of `lint-features`, and the only lane in this workflow that
+  # needs the pinned zig: `embed-host-bins` is what turns on `mvm-cli`'s
+  # cross-compile of the embedded Linux binaries. Keeping it on its own job is
+  # what lets every other lane skip the zig install.
+  lint-features-embed:
+    name: Lint feature coverage (embed-host-bins)
+    needs: [scope]
+    if: needs.scope.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: lld
+
+      - uses: ./.github/actions/install-zigbuild
+
+      - uses: ./.github/actions/rust-cache
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      # `embed-host-bins` is off by default, so the entire cross-compile leg of
+      # `mvm-cli/build.rs` — and every test that inspects the embedded payload —
+      # is absent from every other lane in this workflow. Only the tag-push
+      # release build turns it on, and a break there is invisible until a
+      # release is already being cut. This lane is the one place a pull request
+      # proves the leg still compiles and still produces the manifest's set.
+      #
+      # `--bins` matters: the payload is `include_bytes!`d into the binary, so a
+      # lib-only check would not link it and would not catch a bad path.
+      - name: embed-host-bins feature (cross-compiled payload)
+        run: |
+          cargo nextest run -p mvm-cli --features embed-host-bins \
+            --test embedded_binaries --test host_binaries_extract \
+            --test host_binaries_manifest --test dispatch_host_bin_dir
+          cargo check -p mvmctl --features embed-host-bins --bins
+
   lint:
     name: Lint (fmt + clippy + policy)
     if: ${{ always() }}
-    needs: [scope, lint-core, lint-policy, lint-features]
+    needs:
+      [
+        scope,
+        lint-core,
+        lint-policy,
+        lint-features,
+        lint-features-test-support,
+        lint-features-embed,
+      ]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -581,6 +639,8 @@ jobs:
           CORE_RESULT: ${{ needs.lint-core.result }}
           POLICY_RESULT: ${{ needs.lint-policy.result }}
           FEATURES_RESULT: ${{ needs.lint-features.result }}
+          FEATURES_SUPPORT_RESULT: ${{ needs.lint-features-test-support.result }}
+          FEATURES_EMBED_RESULT: ${{ needs.lint-features-embed.result }}
         run: |
           set -euo pipefail
           if [ "$SCOPE_RESULT" != success ] || [ "$POLICY_RESULT" != success ]; then
@@ -592,7 +652,8 @@ jobs:
             false) required=skipped ;;
             *) echo "Invalid code scope: $SCOPE_CODE"; exit 1 ;;
           esac
-          for result in "$CORE_RESULT" "$FEATURES_RESULT"; do
+          for result in "$CORE_RESULT" "$FEATURES_RESULT" \
+            "$FEATURES_SUPPORT_RESULT" "$FEATURES_EMBED_RESULT"; do
             if [ "$result" != "$required" ]; then
               echo "A lint lane did not match scope $SCOPE_CODE: $result"
               exit 1

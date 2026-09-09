@@ -667,7 +667,35 @@ mod tests {
         let workflow = ci_workflow();
         let lint = job_block(&workflow, "lint");
         assert!(lint.contains("name: Lint (fmt + clippy + policy)"));
-        assert!(lint.contains("needs: [scope, lint-core, lint-policy, lint-features]"));
+        // A lane that runs but is not in the aggregate's `needs` cannot fail
+        // the merge, so pin every lane by name.
+        for lane in [
+            "scope,",
+            "lint-core,",
+            "lint-policy,",
+            "lint-features,",
+            "lint-features-test-support,",
+            "lint-features-embed,",
+        ] {
+            assert!(
+                lint.contains(lane),
+                "Lint aggregate must depend on {lane:?}"
+            );
+        }
+        // ...and each has to be read back in the loop that compares results
+        // against the scope decision. A lane in `needs` but not in the loop is
+        // gated on nothing but its own scheduling.
+        for expected in [
+            "\"$CORE_RESULT\"",
+            "\"$FEATURES_RESULT\"",
+            "\"$FEATURES_SUPPORT_RESULT\"",
+            "\"$FEATURES_EMBED_RESULT\"",
+        ] {
+            assert!(
+                lint.contains(expected),
+                "Lint aggregate must compare {expected} against the scope decision"
+            );
+        }
 
         for unexpected in [
             "cargo nextest run --workspace --features test-support",
@@ -699,7 +727,11 @@ mod tests {
                 .any(|(name, _)| *name == "check-conformance"),
             "check-conformance must still be one of the gates the lane runs"
         );
-        let lint_features = job_block(&workflow, "lint-features");
+        // The test-support subtree is its own job. At 19 minutes inside a
+        // 35-minute `lint-features` it was the critical path for every
+        // code-touching pull request, and nothing beside it shared a cargo
+        // fingerprint to lose by moving it out.
+        let lint_features = job_block(&workflow, "lint-features-test-support");
         // One invocation covering the whole test-support subtree. Selecting a
         // package at a time made cargo resolve features once per package and
         // rebuild most of the same graph each time; the packages are listed
@@ -832,6 +864,8 @@ mod tests {
         for job in [
             "lint-core",
             "lint-features",
+            "lint-features-test-support",
+            "lint-features-embed",
             "test-workspace",
             "test-release-witness",
             "test-linux",

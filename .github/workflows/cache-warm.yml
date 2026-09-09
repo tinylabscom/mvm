@@ -11,8 +11,17 @@ name: Warm the Rust build cache
 # ephemeral, so main is the only place a cache useful to it can come from.
 #
 # It costs one build per merge and saves several per validation cycle: the
-# workspace is compiled by lint-core, lint-features, test-workspace, test-linux
+# workspace is compiled by lint-core, lint-features,
+# lint-features-test-support, lint-features-embed, test-workspace, test-linux
 # and test-ebpf-telemetry, each from cold today.
+#
+# Note what this entry does *not* cover. It is built with default features, so
+# the three lint-features lanes restore its dependency artifacts and then
+# rebuild every workspace crate whose feature resolution differs — which is why
+# the test-support lane still costs ~19 minutes warm. Warming the non-default
+# feature sets too would need its own `key:` per set, and the repo cache is
+# capped at 10 GB with LRU eviction, so an extra entry of this size risks
+# evicting the one every lane depends on. Measure before adding one.
 
 on:
   push:
