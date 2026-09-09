@@ -101,6 +101,78 @@ fn the_release_verifier_waits_for_the_kernel_assets_it_triggers() {
     }
 }
 
+/// The publish path must be reachable without pushing a tag.
+///
+/// Every release defect found while cutting v0.18.0-rc.1 lived in the publish
+/// job, and the publish job used to be unreachable except by a tag push: the
+/// dry run stopped after `build`. So each attempt surfaced exactly one defect,
+/// at roughly two and a half hours per discovery, four times over — a missing
+/// cross-compile target, an incomplete boot image, a transient 403, and a
+/// duplicate asset name that 422'd *after* the release had been created.
+///
+/// A dry run reaches `gh release create` against a throwaway draft, so those
+/// same failures surface in minutes. The draft is deleted afterwards, and
+/// `always()` on the cleanup matters: a create that succeeds and then fails
+/// uploading leaves a draft behind, which is exactly the case that produced the
+/// 422.
+///
+/// What a dry run cannot prove is asserted here too, by requiring the signing
+/// and downstream-trigger steps to stay tag-only: their keyless identity pins
+/// `refs/tags/*`, which a dispatch cannot mint. Pretending otherwise would make
+/// a green dry run mean more than it does.
+#[test]
+fn a_dry_run_reaches_the_publish_step_without_a_tag() {
+    let workflow = release_workflow();
+
+    let create = workflow
+        .find("gh release create \"${publish_tag}\"")
+        .expect("the publish step must create the release under a computed tag");
+
+    assert!(
+        workflow.contains("publish_tag=\"dry-run-${GITHUB_RUN_ID}\""),
+        "a dry run must publish under a scratch tag, never the real one"
+    );
+    assert!(
+        workflow.contains("draft=(--draft)"),
+        "a dry run must publish a draft — a draft is not listed and is not \
+         resolved by /releases/latest, so `mvmctl update` cannot see it"
+    );
+
+    let cleanup = workflow
+        .find("name: Delete the dry-run draft release")
+        .expect("a dry run must delete the draft it created");
+    assert!(
+        create < cleanup,
+        "the draft must be deleted after it is created, not before"
+    );
+    assert!(
+        workflow[cleanup..].starts_with("name: Delete the dry-run draft release")
+            && workflow[cleanup..cleanup + 400].contains("always()"),
+        "cleanup must run even when the publish failed, or a create that fails \
+         part-way through its uploads leaves the draft behind"
+    );
+
+    // A dry run runs from a branch, so anything minting or verifying a keyless
+    // signature pinned to `refs/tags/*` has to stay on the tag path.
+    for step in [
+        "Sign release tarballs, checksum manifests, and SBOM",
+        "Attest build provenance for the release tarballs (release-provenance)",
+        "Sign image manifests (plan 36)",
+        "Trigger crates.io publish workflow",
+        "Trigger kernel build + publish workflow",
+    ] {
+        let at = workflow
+            .find(step)
+            .unwrap_or_else(|| panic!("{step} must exist"));
+        let window = &workflow[at..(at + 300).min(workflow.len())];
+        assert!(
+            window.contains("github.event_name == 'push'"),
+            "{step} must be gated to tag pushes: a dry run cannot mint a \
+             refs/tags identity, and must not publish or trigger anything real"
+        );
+    }
+}
+
 /// The published asset list must not name the same file twice.
 ///
 /// `artifacts/*.tar.gz` matches every tarball, including the runtime-overlay,
@@ -170,8 +242,8 @@ fn the_release_asset_list_cannot_upload_one_file_twice() {
         // the comment above the array, which precedes the dedupe and would make
         // this ordering check fail against correct code.
         let create = workflow
-            .find("gh release create \"${TAG_NAME}\"")
-            .expect("the publish step must create the release under the pushed tag");
+            .find("gh release create \"${publish_tag}\"")
+            .expect("the publish step must create the release under a computed tag");
         assert!(
             dedupe < create,
             "the list must be deduplicated before the release is created"
@@ -1318,9 +1390,16 @@ fn a_prerelease_tag_is_not_published_as_the_latest_release() {
          prerelease segment, so a stable tag still publishes as latest"
     );
 
+    // `publish_tag` defaults to `TAG_NAME` and differs only on a dry run, so a
+    // real tag push still publishes under the pushed tag — asserted just below.
     let create = workflow
-        .find("gh release create \"${TAG_NAME}\"")
-        .expect("release.yml must create the release under the pushed tag");
+        .find("gh release create \"${publish_tag}\"")
+        .expect("release.yml must create the release under a computed tag");
+    assert!(
+        workflow.contains("publish_tag=\"${TAG_NAME}\""),
+        "the computed tag must default to the pushed tag, or a real release \
+         publishes under something other than the tag that triggered it"
+    );
     let guard = workflow
         .find("prerelease=(--prerelease)")
         .expect("checked above");
