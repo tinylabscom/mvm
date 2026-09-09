@@ -550,6 +550,15 @@ jobs:
         with:
           packages: lld
 
+      # Not optional, despite `embed-host-bins` being the feature that names
+      # zig. `pool_warm_and_the_run_path_resolve_the_same_compat_key` resolves a
+      # launch, which builds the universal initramfs through `cargo zigbuild`.
+      # Without zig on PATH that build fails, resolution falls back to whatever
+      # initramfs the cache already holds, and the test dies on a version
+      # mismatch rather than on the missing command — so the real cause appears
+      # only in the step's stderr.
+      - uses: ./.github/actions/install-zigbuild
+
       - uses: ./.github/actions/rust-cache
 
       - name: Install cargo-nextest
@@ -572,10 +581,16 @@ jobs:
           cargo nextest run -p mvmctl --features test-support --test audit_emissions_live
           cargo check -p mvm-cli --features test-support --example verification_loop
 
-  # Also split out of `lint-features`, and the only lane in this workflow that
-  # needs the pinned zig: `embed-host-bins` is what turns on `mvm-cli`'s
-  # cross-compile of the embedded Linux binaries. Keeping it on its own job is
-  # what lets every other lane skip the zig install.
+  # Also split out of `lint-features`. `embed-host-bins` is what turns on
+  # `mvm-cli`'s cross-compile of the embedded Linux binaries, so this lane needs
+  # the pinned zig.
+  #
+  # It is not the only one. The comment this replaces claimed it was, and the
+  # split falsified that within one run: the test-support lane also shells out
+  # to `cargo zigbuild`, from a launch-resolution test that builds the universal
+  # initramfs. What the split does establish — because this run is the
+  # experiment — is that the remaining `lint-features` lane needs no zig at all,
+  # so that install is now paid on two lanes instead of every one.
   lint-features-embed:
     name: Lint feature coverage (embed-host-bins)
     needs: [scope]
