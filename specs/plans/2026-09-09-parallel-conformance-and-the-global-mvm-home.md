@@ -1,5 +1,8 @@
 # Parallel conformance, and the global `MVM_HOME` that prevents it
 
+Backing: preview
+Validation: none
+
 Scoped while cutting `v0.18.0-rc.1`, where the documented-surface suite ran five
 times at ~35 minutes each. Not started: the scoping showed it is larger than it
 looks, and the reason is worth writing down before anyone tries it.
