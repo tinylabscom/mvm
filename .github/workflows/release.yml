@@ -453,6 +453,82 @@ jobs:
                 artifacts/default-microvm-*-checksums-sha256.txt.bundle
           ls -la artifacts/
 
+      # The attested builder pack has to be minted here, and only here.
+      #
+      # An installed mvmctl verifies it against
+      # `RELEASE_IDENTITY_TEMPLATES` — `release.yml@refs/tags/v{version}`,
+      # reconstructed from its own version. `release-boot-image.yml` used to
+      # carry this step, where that identity is unmintable: that workflow only
+      # runs on `boot-image/v*`, so its guard (`refs/tags/v*`) could never be
+      # satisfied and the step exited 0 having produced nothing, on every run
+      # since it was written. `release.yml` globbed for the result, `nullglob`
+      # dropped the unmatched pattern, and the CLI's fetch fell back to the
+      # unattested checksum download with a warning. Nothing failed, so nothing
+      # was noticed until `verify-release` ran for the first time since v0.17.0.
+      #
+      # Moving it does not merely fix the guard. A pack signed under a
+      # `boot-image/*` identity could not have been verified even if produced:
+      # `release_trust` keeps the two identity lists separate precisely so a
+      # signature over a boot image cannot validate a CLI artifact.
+      #
+      # Tag pushes only: the whole point is the `refs/tags/v*` SAN, which a
+      # dispatch cannot mint. A dry run therefore does not exercise this, and
+      # publishes without the pack — the same fail-open the CLI already handles.
+      - name: Produce and keyless-sign the attested builder pack
+        if: ${{ github.event_name == 'push' }}
+        env:
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          IDENTITY="https://github.com/${REPOSITORY}/.github/workflows/release.yml@${REF}"
+          REVOCATION_CHANNEL="https://github.com/${REPOSITORY}/releases/download/revocations/builder-vm-revocations.json"
+
+          for arch in aarch64 x86_64; do
+            kernel="artifacts/builder-vm-vmlinux-${arch}"
+            rootfs="artifacts/builder-vm-rootfs-${arch}.ext4"
+            sbom="artifacts/builder-vm-${arch}.sbom.txt"
+
+            # Same complete-or-absent contract the image assets already follow:
+            # an image job that did not run leaves these absent on purpose, and
+            # a release without the pack is degraded rather than wrong. A
+            # partial set is neither, so it fails.
+            present=0
+            for f in "$kernel" "$rootfs" "$sbom"; do
+              [ -f "$f" ] && present=$((present + 1))
+            done
+            if [ "$present" -eq 0 ]; then
+              echo "::notice::no builder image for ${arch}; skipping its attested pack"
+              continue
+            fi
+            if [ "$present" -ne 3 ]; then
+              echo "::error::builder image for ${arch} is partial (${present}/3 inputs) — refusing to mint a pack over an incomplete image" >&2
+              exit 1
+            fi
+
+            SBOM_URI="https://github.com/${REPOSITORY}/releases/download/${TAG_NAME}/builder-vm-${arch}.sbom.txt"
+            cargo run --release -p mvm-build --example mvm-builder-pack-tool -- \
+              --vmlinux "$kernel" --rootfs "$rootfs" \
+              --arch "$arch" --channel stable --keyless \
+              --identity "$IDENTITY" \
+              --out-dir artifacts \
+              --sbom "$sbom" \
+              --sbom-uri "$SBOM_URI" \
+              --revocation-channel "$REVOCATION_CHANNEL"
+            mv artifacts/manifest.json "artifacts/builder-vm-${arch}.pack-manifest.json"
+
+            # --new-bundle-format: the Sigstore bundle carrying
+            # verificationMaterial that the installed binary's Rust verifier
+            # parses. The legacy --bundle format is not accepted by that stack.
+            cosign sign-blob \
+              --yes \
+              --new-bundle-format \
+              --bundle "artifacts/builder-vm-${arch}.pack-manifest.json.bundle" \
+              "artifacts/builder-vm-${arch}.pack-manifest.json"
+            echo "minted attested builder pack for ${arch}"
+          done
+
       - name: Generate combined checksum file
         shell: bash
         run: |

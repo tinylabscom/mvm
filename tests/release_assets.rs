@@ -43,6 +43,69 @@ fn justfile() -> String {
     fs::read_to_string("Justfile").expect("Justfile must be readable")
 }
 
+/// The attested builder pack must be minted by the workflow whose identity
+/// verifies it.
+///
+/// An installed mvmctl checks the pack against
+/// `release.yml@refs/tags/v{version}`, reconstructed from its own version
+/// (`release_trust::RELEASE_IDENTITY_TEMPLATES`). `release-boot-image.yml`
+/// cannot mint that: it only runs on `boot-image/v*`. It carried this step
+/// anyway, behind a `refs/tags/v*` guard that could never be satisfied there —
+/// so it exited 0 having produced nothing, on every run since it was written,
+/// while reporting success.
+///
+/// The absence was invisible from both ends: `release.yml` globbed for the
+/// result and `nullglob` dropped the unmatched pattern, and the CLI's fetch
+/// falls back to the unattested checksum download with a warning. Attestation
+/// for the builder pack had therefore never worked in any release.
+///
+/// Fixing the guard would not have sufficed. `release_trust` keeps the CLI and
+/// boot-image identity lists deliberately separate so a signature over a boot
+/// image cannot validate a CLI artifact, so a pack signed under a
+/// `boot-image/*` identity would have been unverifiable even if produced.
+#[test]
+fn the_attested_builder_pack_is_minted_where_its_identity_is_verifiable() {
+    let release = release_workflow();
+    let boot_image = boot_image_workflow();
+
+    assert!(
+        release.contains("mvm-builder-pack-tool"),
+        "release.yml must mint the builder pack: it is the only workflow that \
+         runs at refs/tags/v* and so the only one whose identity an installed \
+         mvmctl can reconstruct"
+    );
+    assert!(
+        !boot_image.contains("builder-vm-${ARCH}.pack-manifest.json"),
+        "release-boot-image.yml must not claim to produce the builder pack — it \
+         cannot mint the identity that verifies it, so the step could only ever \
+         report success while emitting nothing"
+    );
+
+    // The pack must exist before the release that publishes it is created.
+    let mint = release
+        .find("mvm-builder-pack-tool")
+        .expect("checked above");
+    let create = release
+        .find("gh release create \"${publish_tag}\"")
+        .expect("release.yml must create the release");
+    assert!(
+        mint < create,
+        "the pack must be minted before the release is created, or the asset \
+         glob silently matches nothing and the release ships without it"
+    );
+
+    // Signing requires the tag ref, so this cannot run on a dispatch. Asserting
+    // it keeps a dry run honest about what it did not prove.
+    let step = release
+        .find("name: Produce and keyless-sign the attested builder pack")
+        .expect("the minting step must be named");
+    assert!(
+        release[step..mint].contains("github.event_name == 'push'"),
+        "pack minting must be gated to tag pushes: the SAN it signs under is \
+         the tag ref, which a dispatch cannot produce"
+    );
+}
+
 /// The post-publish verifier must not race the assets the publish job triggers.
 ///
 /// `release` ends by dispatching `kernel-build.yml` and does not wait for it, so
@@ -1063,11 +1126,24 @@ fn boot_image_release_recipe_refuses_an_existing_tag() {
 /// policy admits `v*` and nothing else — GitHub tag globs anchor at the start
 /// and do not cross `/`. Every gated job was refused one second in, with no
 /// steps run and nothing in the log to read.
+/// Jobs in the boot image train that cosign-sign a pack manifest in-job.
+///
+/// A named set rather than an inline literal: it has shrunk to one entry and
+/// may grow again, and the point of the assertion is which jobs are in it.
+const PACK_SIGNING_JOBS: &[&str] = &["default-microvm"];
+
 #[test]
 fn the_moved_jobs_keep_the_boot_image_signing_environment() {
     let boot_image = boot_image_workflow();
-    // The two jobs that cosign-sign a pack manifest inside the job itself.
-    for job in ["builder-vm-image", "default-microvm"] {
+    // The jobs that cosign-sign a pack manifest inside the job itself.
+    //
+    // `builder-vm-image` was here until its attested pack moved to
+    // `release.yml`, which is the only workflow whose identity an installed
+    // mvmctl can reconstruct for that pack. It signs nothing now — the
+    // checksum manifests it produces are signed by the publish job — so it is
+    // moved out rather than the assertion being weakened, which is what the
+    // failure message asked for.
+    for job in PACK_SIGNING_JOBS {
         let block = job_block(&boot_image, job);
         assert!(
             block.contains("cosign sign-blob"),
