@@ -67,7 +67,8 @@ struct Verdict {
     scope_result: &'static str,
     code: &'static str,
     lanes: &'static str,
-    bdd_scope: &'static str,
+    /// Kept separate from `lanes` even though it now shares their scope, so
+    /// "the BDD lane skipped while in scope" stays expressible on its own.
     bdd: &'static str,
     kernel_scope: &'static str,
     kernel: &'static str,
@@ -80,7 +81,6 @@ impl Verdict {
             scope_result: "success",
             code: "true",
             lanes: "success",
-            bdd_scope: "true",
             bdd: "success",
             kernel_scope: "true",
             kernel: "success",
@@ -94,7 +94,6 @@ impl Verdict {
             scope_result: "success",
             code: "false",
             lanes: "skipped",
-            bdd_scope: "false",
             bdd: "skipped",
             kernel_scope: "false",
             kernel: "success",
@@ -115,7 +114,6 @@ impl Verdict {
             .env("LINUX_RESULT", self.lanes)
             .env("RELEASE_WITNESS_RESULT", self.lanes)
             .env("EBPF_RESULT", self.lanes)
-            .env("SCOPE_BDD", self.bdd_scope)
             .env("BDD_RESULT", self.bdd)
             .env("KERNEL_SCOPE", self.kernel_scope)
             .env("KERNEL_RESULT", self.kernel)
@@ -157,7 +155,18 @@ fn a_fully_in_scope_green_run_is_admitted() {
 /// real failure that has to keep being caught, in whichever scope it can occur.
 #[test]
 fn a_genuine_failure_is_still_refused_in_either_scope() {
-    let cases: [(&str, Verdict); 6] = [
+    let cases: [(&str, Verdict); 7] = [
+        (
+            // New with the suite moving onto the `code` scope: BDD is matched
+            // by the same arithmetic as every other lane, so a run on a
+            // docs-only PR is as wrong as a skip on a code one. Under the old
+            // `bdd`-keyed branch this combination was legal.
+            "a bdd lane that ran while out of scope",
+            Verdict {
+                bdd: "success",
+                ..Verdict::out_of_scope()
+            },
+        ),
         (
             "a failing kernel build, in scope",
             Verdict {

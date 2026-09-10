@@ -36,7 +36,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.validate.outputs.code }}
-      bdd: ${{ steps.validate.outputs.bdd }}
       nix: ${{ steps.validate.outputs.nix }}
       architecture: ${{ steps.validate.outputs.architecture }}
       kernel: ${{ steps.validate.outputs.kernel }}
@@ -125,26 +124,10 @@ jobs:
             echo "kernel=false" >> "$GITHUB_OUTPUT"
           fi
 
-          # The Gherkin scenarios drive the real `mvmctl` binary and the built
-          # language SDKs, so the drift they catch lives in four places: the SDK
-          # sources, the CLI surface those SDKs shell to, the scenarios and
-          # their fixtures, and the golden argv corpus binding the two.
-          #
-          # Deliberately narrower than the full suite's reach: scenarios over
-          # egress, snapshots and verified boot are driven by crates outside
-          # this filter and remain covered only by the release-tag `bdd` lane.
-          # Widening that is a separate call about PR latency, not an oversight.
-          if grep -zE '^(crates/mvm-sdk/|crates/mvm-cli/|crates/mvm-conformance/|features/|tests/machine-fixtures/|\.github/workflows/(ci|bdd)\.yml$|[Jj]ustfile$)' "$CHANGED_FILE" >/dev/null; then
-            echo "bdd=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "bdd=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Validate classification
         id: validate
         env:
           CODE: ${{ steps.decide.outputs.code }}
-          BDD: ${{ steps.decide.outputs.bdd }}
           NIX: ${{ steps.decide.outputs.nix }}
           ARCHITECTURE: ${{ steps.decide.outputs.architecture }}
           KERNEL: ${{ steps.decide.outputs.kernel }}
@@ -158,7 +141,6 @@ jobs:
             esac
           }
           validate code "$CODE"
-          validate bdd "$BDD"
           validate nix "$NIX"
           validate architecture "$ARCHITECTURE"
           validate kernel "$KERNEL"
@@ -678,10 +660,16 @@ jobs:
   # The Gherkin scenarios previously ran only from release-tag workflows, so a
   # PR could break a scenario and merge green. Same reusable workflow the
   # release path calls, gated on the narrower `bdd` scope.
+  # The single owner of the Gherkin suite, and gated on `code` rather than the
+  # narrower `bdd` scope because it inherited `ci-linux-coverage.sh`'s trigger
+  # along with its `just bdd`. `bdd` is a strict subset of `code` — `crates/`
+  # contains `crates/mvm-cli/`, `tests/` contains `tests/machine-fixtures/`, and
+  # both cover `features/` and the Justfile — so this widening admits exactly
+  # the runs the Linux lane was already covering and no others.
   bdd-conformance:
     name: BDD conformance
     needs: [scope]
-    if: needs.scope.outputs.bdd == 'true'
+    if: needs.scope.outputs.code == 'true'
     uses: ./.github/workflows/bdd.yml
 
   test:
@@ -700,7 +688,6 @@ jobs:
           LINUX_RESULT: ${{ needs.test-linux.result }}
           RELEASE_WITNESS_RESULT: ${{ needs.test-release-witness.result }}
           EBPF_RESULT: ${{ needs.test-ebpf-telemetry.result }}
-          SCOPE_BDD: ${{ needs.scope.outputs.bdd }}
           BDD_RESULT: ${{ needs.bdd-conformance.result }}
           KERNEL_SCOPE: ${{ needs.scope.outputs.kernel }}
           KERNEL_RESULT: ${{ needs.kernel.result }}
@@ -715,23 +702,16 @@ jobs:
             false) required=skipped ;;
             *) echo "Invalid code scope: $SCOPE_CODE"; exit 1 ;;
           esac
-          for result in "$WORKSPACE_RESULT" "$WORKSPACE_AARCH64_RESULT" "$LINUX_RESULT" "$RELEASE_WITNESS_RESULT" "$EBPF_RESULT"; do
+          # BDD joins this loop rather than being matched separately: it became
+          # the single owner of the Gherkin suite and took on the `code` scope
+          # with it, so it now shares the arithmetic instead of keying off the
+          # narrower `bdd` output.
+          for result in "$WORKSPACE_RESULT" "$WORKSPACE_AARCH64_RESULT" "$LINUX_RESULT" "$RELEASE_WITNESS_RESULT" "$EBPF_RESULT" "$BDD_RESULT"; do
             if [ "$result" != "$required" ]; then
               echo "A test lane did not match scope $SCOPE_CODE: $result"
               exit 1
             fi
           done
-          # The BDD and kernel lanes key off their own narrower scopes, so they
-          # are matched separately rather than folded into the loop above.
-          case "$SCOPE_BDD" in
-            true) bdd_required=success ;;
-            false) bdd_required=skipped ;;
-            *) echo "Invalid bdd scope: $SCOPE_BDD"; exit 1 ;;
-          esac
-          if [ "$BDD_RESULT" != "$bdd_required" ]; then
-            echo "BDD conformance did not match scope $SCOPE_BDD: $BDD_RESULT"
-            exit 1
-          fi
           # The kernel job carries no job-level `if:` — a skipped matrix job
           # cannot expand its arch, so it would report a single check still
           # carrying the un-expanded matrix placeholder in its name, matching
@@ -914,16 +894,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v8.2.0
-        with:
-          version: "0.12.5"
-
-      - name: Set up Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: "22"
-
+      # No uv, Node or `just` here. All three existed for the `just bdd` this
+      # lane no longer runs — the suite builds the TypeScript SDK, which is what
+      # needed Node and uv. What is left is the wasm/no_std targets, the browser
+      # demo (wasm-pack plus a system python3) and the ext4 oracle, none of which
+      # touch them.
       - uses: ./.github/actions/free-disk
 
       - name: Install Rust toolchain
@@ -941,11 +916,6 @@ jobs:
         run: |
           rustup toolchain install 1.97.1 --profile minimal \
             --target wasm32-unknown-unknown,wasm32-wasip1,riscv32imac-unknown-none-elf
-
-      - name: Install just
-        uses: taiki-e/install-action@v2
-        with:
-          tool: just
 
       - name: Run Linux, no_std, filesystem, and conformance coverage
         run: bash scripts/ci-linux-coverage.sh
