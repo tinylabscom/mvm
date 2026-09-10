@@ -94,12 +94,15 @@ export function ExecutionContract() {
           className="flex flex-wrap gap-x-6 gap-y-2"
           style={{ marginTop: "2rem" }}
         >
+          {/* The how-it-works link is hidden with its page — see
+              pages/_how-it-works.astro.
           <a
             href={`${base}how-it-works/`}
             className="text-sm text-accent underline underline-offset-2 hover:text-accent/80"
           >
             Under the hood: microVMs, performance, backends
           </a>
+          */}
           <a
             href={`${base}security/ci-claims/`}
             className="text-sm text-accent underline underline-offset-2 hover:text-accent/80"
