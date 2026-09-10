@@ -154,63 +154,26 @@ jobs:
       # consumer silently fails open on. This wakes up when the consumer side
       # learns to reconstruct this identity. The same applies to the runtime
       # pack in the default-microvm job below.
-      - name: Produce and keyless-sign attested builder pack manifest
-        # The pack is an accelerator, never a hard dependency. A Fulcio/Rekor/OIDC
-        # hiccup must not block the plain vmlinux/rootfs publish below, so a
-        # signing failure here is tolerated: the job continues, no pack ships, and
-        # installed binaries fall back to the plain checksum download.
-        continue-on-error: true
-        env:
-          ARCH: ${{ matrix.arch }}
-          REPOSITORY: ${{ github.repository }}
-          REF: ${{ github.ref }}
-        run: |
-          set -euo pipefail
-          # On a tag push, REF is refs/tags/vX.Y.Z — exactly the SAN cosign
-          # embeds in the certificate and exactly what a released mvmctl
-          # (version X.Y.Z) reconstructs when verifying the pack. Skip pack
-          # production unless the ref is a version tag whose version equals the
-          # crate version; anything else yields an identity no installed binary
-          # can reconstruct, so it would silently fail-open to the plain download.
-          # Skipping keeps that outcome explicit and still ships the plain image.
-          if [[ "${REF}" != refs/tags/v* ]]; then
-            echo "::notice::${REF} is not a version tag; skipping attested builder pack."
-            exit 0
-          fi
-          TAG_VERSION="${REF#refs/tags/v}"
-          CRATE_VERSION="$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name=="mvm-cli") | .version')"
-          if [[ "${TAG_VERSION}" != "${CRATE_VERSION}" ]]; then
-            echo "::warning::tag ${REF} does not match crate version v${CRATE_VERSION}; installed binaries could not verify this pack — skipping attested builder pack."
-            exit 0
-          fi
-          IDENTITY="https://github.com/${REPOSITORY}/.github/workflows/release.yml@${REF}"
-          REVOCATION_CHANNEL="https://github.com/${REPOSITORY}/releases/download/revocations/builder-vm-revocations.json"
-          # The published location of the SBOM this release ships, so the
-          # manifest's SBOM reference points at a real download instead of a
-          # path that only exists on the runner that built it.
-          SBOM_URI="https://github.com/${REPOSITORY}/releases/download/${REF#refs/tags/}/builder-vm-${ARCH}.sbom.txt"
-          cargo run --release -p mvm-build --example mvm-builder-pack-tool -- \
-            --vmlinux "$STORE_PATH/vmlinux" --rootfs "$STORE_PATH/rootfs.ext4" \
-            --arch "$ARCH" --channel stable --keyless \
-            --identity "$IDENTITY" \
-            --out-dir staging \
-            --sbom "staging/builder-vm-${ARCH}.sbom.txt" \
-            --sbom-uri "$SBOM_URI" \
-            --revocation-channel "$REVOCATION_CHANNEL"
-          mv staging/manifest.json "staging/builder-vm-${ARCH}.pack-manifest.json"
-
-          # Keyless OIDC sign — no secret key needed. --new-bundle-format emits
-          # the Sigstore bundle (with verificationMaterial) that the installed
-          # binary's Rust verifier parses; the legacy --bundle format is not
-          # accepted by that stack. The bundle carries the signature, the
-          # short-lived cert, and the transparency-log inclusion proof.
-          cosign sign-blob \
-            --yes \
-            --new-bundle-format \
-            --bundle "staging/builder-vm-${ARCH}.pack-manifest.json.bundle" \
-            "staging/builder-vm-${ARCH}.pack-manifest.json"
-
+      # The attested builder pack is minted in `release.yml`, not here.
+      #
+      # A step lived here that could never run: it guarded on `refs/tags/v*`,
+      # and this workflow only triggers on `boot-image/v*`, so it exited 0
+      # having produced nothing on every run since it was written while
+      # reporting success. `verify-release` reported the resulting absence for
+      # the first time on v0.18.0-rc.1.
+      #
+      # Fixing the guard would not have been enough. An installed mvmctl
+      # verifies the builder pack against `release.yml@refs/tags/v{version}`,
+      # an identity only that workflow can mint — `release_trust` keeps the two
+      # identity lists apart so a signature over a boot image cannot validate a
+      # CLI artifact. So the pack has to be produced where the identity is, and
+      # `release.yml` already downloads this image's kernel, rootfs and SBOM
+      # before it publishes.
+      #
+      # The runtime pack below is in the same position but is not moved: it
+      # additionally needs `rootfs.verity` and `rootfs.roothash`, which are not
+      # published as release assets, and nothing fetches it. Left as-is rather
+      # than moved half-way or deleted.
       - name: Generate builder VM checksums
         env:
           ARCH: ${{ matrix.arch }}
@@ -224,11 +187,16 @@ jobs:
           FILES=("builder-vm-vmlinux-${ARCH}" "builder-vm-rootfs-${ARCH}.ext4")
           [ -f "builder-vm-${ARCH}.cmdline.txt" ]   && FILES+=("builder-vm-${ARCH}.cmdline.txt")
           [ -f "builder-vm-${ARCH}.manifest.json" ] && FILES+=("builder-vm-${ARCH}.manifest.json")
-          # The attested pack is optional (signing may be skipped or fail); only
-          # checksum its files when they are actually present.
-          if [ -f "builder-vm-${ARCH}.pack-manifest.json.bundle" ]; then
-            FILES+=("builder-vm-${ARCH}.pack-manifest.json" "builder-vm-${ARCH}.pack-manifest.json.bundle" "builder-vm-${ARCH}.sbom.txt")
-          fi
+          # The SBOM is produced unconditionally by the step above and shipped
+          # on the release, so it is checksummed unconditionally.
+          #
+          # It used to be added only inside a test for the attested pack's
+          # bundle, and that pack was never produced here — the guard could not
+          # be satisfied in this workflow — so the SBOM has never been listed in
+          # this manifest. The pack files themselves are gone from this list
+          # because they are now minted in `release.yml`, under the only
+          # identity that can verify them.
+          [ -f "builder-vm-${ARCH}.sbom.txt" ] && FILES+=("builder-vm-${ARCH}.sbom.txt")
           sha256sum "${FILES[@]}" > "builder-vm-${ARCH}-checksums-sha256.txt"
 
       - name: Upload builder VM image artifacts
@@ -240,8 +208,6 @@ jobs:
             staging/builder-vm-rootfs-${{ matrix.arch }}.ext4
             staging/builder-vm-${{ matrix.arch }}.cmdline.txt
             staging/builder-vm-${{ matrix.arch }}.manifest.json
-            staging/builder-vm-${{ matrix.arch }}.pack-manifest.json
-            staging/builder-vm-${{ matrix.arch }}.pack-manifest.json.bundle
             staging/builder-vm-${{ matrix.arch }}.sbom.txt
             staging/builder-vm-${{ matrix.arch }}-checksums-sha256.txt
 
@@ -913,8 +879,6 @@ jobs:
             artifacts/builder-vm-rootfs-*
             artifacts/builder-vm-*.cmdline.txt
             artifacts/builder-vm-*.manifest.json
-            artifacts/builder-vm-*.pack-manifest.json
-            artifacts/builder-vm-*.pack-manifest.json.bundle
             artifacts/builder-vm-*.sbom.txt
             artifacts/builder-vm-*-checksums-sha256.txt
             artifacts/builder-vm-*-checksums-sha256.txt.bundle
