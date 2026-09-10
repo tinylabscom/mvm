@@ -9,7 +9,7 @@
 
 use anyhow::{Context, Result, bail};
 use nextest_metadata::ListCommand as NextestList;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
 /// Parsed nextest override entry.
@@ -40,10 +40,25 @@ pub fn run(workspace: &Path) -> Result<()> {
         return Ok(());
     }
 
+    let listings = unique_filters(&overrides)
+        .into_iter()
+        .map(|filter| {
+            let result =
+                list_matching_tests(workspace, filter).map_err(|error| format!("{error:#}"));
+            (filter.to_string(), result)
+        })
+        .collect::<BTreeMap<_, _>>();
+
     let mut failures = Vec::new();
     for ov in &overrides {
         if let Some(failure) = check_override(ov, &workspace_members, |filter| {
-            list_matching_tests(workspace, filter)
+            match listings
+                .get(filter)
+                .expect("every extracted override filter must have a cached listing")
+            {
+                Ok(count) => Ok(*count),
+                Err(error) => bail!(error.clone()),
+            }
         }) {
             failures.push(failure);
         } else {
@@ -66,6 +81,15 @@ pub fn run(workspace: &Path) -> Result<()> {
             failures.len()
         );
     }
+}
+
+fn unique_filters(overrides: &[OverrideFilter]) -> Vec<&str> {
+    overrides
+        .iter()
+        .map(|override_filter| override_filter.filter.as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn check_override(
@@ -252,6 +276,35 @@ test-group = "serial"
         .unwrap();
 
         assert!(extract_overrides(&config).is_err());
+    }
+
+    #[test]
+    fn duplicate_profile_filters_are_listed_once() {
+        let overrides = vec![
+            OverrideFilter {
+                profile: "default".to_string(),
+                filter: "package(mvm-core) and test(/foo/)".to_string(),
+                test_group: "serial".to_string(),
+            },
+            OverrideFilter {
+                profile: "ci".to_string(),
+                filter: "package(mvm-core) and test(/foo/)".to_string(),
+                test_group: "serial".to_string(),
+            },
+            OverrideFilter {
+                profile: "ci".to_string(),
+                filter: "package(mvm-hostd) and binary(bar)".to_string(),
+                test_group: "serial".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            unique_filters(&overrides),
+            vec![
+                "package(mvm-core) and test(/foo/)",
+                "package(mvm-hostd) and binary(bar)",
+            ]
+        );
     }
 
     #[test]
