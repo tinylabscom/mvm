@@ -10,6 +10,15 @@
 
 ## In progress
 
+- [ ] **CI queue consolidation.**
+      `specs/plans/2026-09-10-ci-queue-consolidation.md`.
+      Preserve cumulative merge-group validation while reducing runner fan-out
+      and the measured Rust critical path. Work covers merge-group scope,
+      required aggregate ownership, trusted feature-cache warming, duplicate
+      nextest listings, and non-required queue jobs. Implementation and all
+      configured CI tests are green; live PR/queue timing and the post-merge
+      required-context reduction remain.
+
 - [ ] **Scheduled CI stability — issues #3222, #3223, and #3224.**
       `specs/plans/2026-09-09-scheduled-ci-stability.md`.
       Harden release-asset downloads against transient connection failures,

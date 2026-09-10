@@ -64,6 +64,7 @@ fn aggregate_script() -> String {
 
 /// One `needs.*.result` / scope combination fed to the aggregate.
 struct Verdict {
+    event_name: &'static str,
     scope_result: &'static str,
     code: &'static str,
     lanes: &'static str,
@@ -72,18 +73,23 @@ struct Verdict {
     bdd: &'static str,
     kernel_scope: &'static str,
     kernel: &'static str,
+    boot: &'static str,
+    nix: &'static str,
 }
 
 impl Verdict {
     /// An everything-in-scope, everything-green run.
     fn in_scope() -> Self {
         Self {
+            event_name: "pull_request",
             scope_result: "success",
             code: "true",
             lanes: "success",
             bdd: "success",
             kernel_scope: "true",
             kernel: "success",
+            boot: "skipped",
+            nix: "skipped",
         }
     }
 
@@ -91,12 +97,36 @@ impl Verdict {
     /// job-level `if:`, so it still runs and still reports `success`.
     fn out_of_scope() -> Self {
         Self {
+            event_name: "pull_request",
             scope_result: "success",
             code: "false",
             lanes: "skipped",
             bdd: "skipped",
             kernel_scope: "false",
             kernel: "success",
+            boot: "skipped",
+            nix: "skipped",
+        }
+    }
+
+    /// The cumulative merge-group head runs every queue job for an in-scope
+    /// code and Nix change.
+    fn queue_in_scope() -> Self {
+        Self {
+            event_name: "merge_group",
+            boot: "success",
+            nix: "success",
+            ..Self::in_scope()
+        }
+    }
+
+    /// A docs-only merge group still executes the Nix job so its stable check
+    /// name reports success, while all scoped steps and the boot ceiling skip.
+    fn queue_out_of_scope() -> Self {
+        Self {
+            event_name: "merge_group",
+            nix: "success",
+            ..Self::out_of_scope()
         }
     }
 
@@ -104,6 +134,7 @@ impl Verdict {
     fn accepts(&self) -> bool {
         let mut child = Command::new("bash")
             .arg("-s")
+            .env("EVENT_NAME", self.event_name)
             .env("SCOPE_RESULT", self.scope_result)
             .env("SCOPE_CODE", self.code)
             .env("WORKSPACE_RESULT", self.lanes)
@@ -117,6 +148,8 @@ impl Verdict {
             .env("BDD_RESULT", self.bdd)
             .env("KERNEL_SCOPE", self.kernel_scope)
             .env("KERNEL_RESULT", self.kernel)
+            .env("BOOT_RESULT", self.boot)
+            .env("NIX_RESULT", self.nix)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -149,13 +182,15 @@ fn a_fully_out_of_scope_run_is_admitted() {
 #[test]
 fn a_fully_in_scope_green_run_is_admitted() {
     assert!(Verdict::in_scope().accepts());
+    assert!(Verdict::queue_in_scope().accepts());
+    assert!(Verdict::queue_out_of_scope().accepts());
 }
 
 /// The gate must not have been widened into a rubber stamp. Each of these is a
 /// real failure that has to keep being caught, in whichever scope it can occur.
 #[test]
 fn a_genuine_failure_is_still_refused_in_either_scope() {
-    let cases: [(&str, Verdict); 7] = [
+    let cases: [(&str, Verdict); 11] = [
         (
             // New with the suite moving onto the `code` scope: BDD is matched
             // by the same arithmetic as every other lane, so a run on a
@@ -207,6 +242,34 @@ fn a_genuine_failure_is_still_refused_in_either_scope() {
             Verdict {
                 scope_result: "failure",
                 ..Verdict::in_scope()
+            },
+        ),
+        (
+            "a failing published-image boot ceiling",
+            Verdict {
+                boot: "failure",
+                ..Verdict::queue_in_scope()
+            },
+        ),
+        (
+            "a published-image boot that ran while out of scope",
+            Verdict {
+                boot: "success",
+                ..Verdict::queue_out_of_scope()
+            },
+        ),
+        (
+            "a failing Nix and tree-built guest witness",
+            Verdict {
+                nix: "failure",
+                ..Verdict::queue_in_scope()
+            },
+        ),
+        (
+            "a Nix witness that skipped in the queue",
+            Verdict {
+                nix: "skipped",
+                ..Verdict::queue_in_scope()
             },
         ),
     ];

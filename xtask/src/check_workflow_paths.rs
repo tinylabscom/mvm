@@ -770,7 +770,8 @@ mod tests {
         assert!(test.contains("name: Test"));
         assert!(test.contains(
             "needs: [scope, test-workspace, test-workspace-aarch64, test-linux, \
-             test-release-witness, test-ebpf-telemetry, bdd-conformance, kernel]"
+             test-release-witness, test-ebpf-telemetry, bdd-conformance, \
+             boot-latency, kernel, nix-flake-check]"
         ));
 
         // Every lane the aggregate names must also be read back in the loop that
@@ -788,6 +789,8 @@ mod tests {
             "\"$EBPF_RESULT\"",
             "\"$BDD_RESULT\"",
             "\"$KERNEL_RESULT\"",
+            "\"$BOOT_RESULT\"",
+            "\"$NIX_RESULT\"",
         ] {
             assert!(
                 test.contains(expected),
@@ -875,14 +878,16 @@ mod tests {
 
     #[test]
     fn merge_group_ci_skips_rust_work_for_non_code_diffs_without_losing_gates() {
-        let workflow = ci_workflow();
-        let scope = job_block(&workflow, "scope");
+        let ci = ci_workflow();
+        let scope = job_block(&ci, "scope");
         for expected in [
-            "MG_BASE: ${{ github.event.merge_group.base_sha }}",
+            "MG_BASE_REF: ${{ github.event.merge_group.base_ref }}",
             "MG_HEAD: ${{ github.event.merge_group.head_sha }}",
             "PR_BASE: ${{ github.event.pull_request.base.sha }}",
             "PR_HEAD: ${{ github.event.pull_request.head.sha }}",
             "git diff --name-only -z",
+            "git merge-base",
+            "origin/$TARGET_BRANCH",
             "grep -zE",
             "could not diff $BASE..$HEAD — running every lane to stay safe",
             "invalid or missing ${name} scope",
@@ -907,7 +912,7 @@ mod tests {
             "test-linux",
             "test-ebpf-telemetry",
         ] {
-            let block = job_block(&workflow, job);
+            let block = job_block(&ci, job);
             assert!(
                 block.contains("needs: [scope]"),
                 "{job} must depend on CI scope"
@@ -922,30 +927,42 @@ mod tests {
         // but not which version of that crate is installed, so an upstream
         // release retroactively changes this lane. Now that the lane gates the
         // merge, an unpinned install lets a publish elsewhere block the queue.
-        let ebpf = job_block(&workflow, "test-ebpf-telemetry");
+        let ebpf = job_block(&ci, "test-ebpf-telemetry");
         assert!(
             ebpf.contains("cargo +nightly install --locked --version ")
                 && ebpf.contains("bpf-linker"),
             "eBPF lane must install a pinned bpf-linker version"
         );
 
-        let policy = job_block(&workflow, "lint-policy");
+        let policy = job_block(&ci, "lint-policy");
         assert!(policy.contains("needs: [scope]"));
         assert!(!policy.contains("needs.scope.outputs.code == 'true'"));
         assert!(policy.contains("needs.scope.outputs.architecture == 'true'"));
 
-        let nix = job_block(&workflow, "nix-flake-check");
+        let nix = job_block(&ci, "nix-flake-check");
         assert!(nix.contains("needs: [scope]"));
         assert!(nix.contains("needs.scope.outputs.nix == 'true'"));
+        assert!(nix.contains("Boot the tree-built image"));
+        assert!(nix.contains("MVM_RUNTIME_BOOT_READY: guest-agent"));
+        assert!(
+            !ci.contains("\n  guest-image-boot:\n"),
+            "the tree-built guest witness must reuse the required Nix runner"
+        );
 
-        let kernel = job_block(&workflow, "kernel");
+        let website = workflow("website.yml");
+        assert!(
+            !website.contains("merge_group:"),
+            "the non-required Website workflow must not consume every merge-group runner slot"
+        );
+
+        let kernel = job_block(&ci, "kernel");
         assert!(kernel.contains("needs: [scope]"));
         assert!(kernel.contains("if: needs.scope.outputs.kernel == 'true'"));
         assert!(kernel.contains("name: Build kernels (${{ matrix.arch }})"));
         assert!(kernel.contains("needs.scope.outputs.kernel == 'true'"));
 
         for aggregate in ["lint", "test"] {
-            let block = job_block(&workflow, aggregate);
+            let block = job_block(&ci, aggregate);
             assert!(block.contains("needs.scope.result"));
             assert!(block.contains("SCOPE_CODE: ${{ needs.scope.outputs.code }}"));
             assert!(
@@ -1410,8 +1427,12 @@ mod tests {
         assert!(warm.contains("DeterminateSystems/magic-nix-cache-action@v14"));
         assert!(warm.contains("Build Nix outputs to populate the binary cache"));
         assert!(warm.contains("save: \"true\""));
+        assert!(warm.contains("key: test-support"));
+        assert!(warm.contains("Warm test-support feature tests"));
 
         let ci = ci_workflow();
+        let support = job_block(&ci, "lint-features-test-support");
+        assert!(support.contains("key: test-support"));
         let nix = job_block(&ci, "nix-flake-check");
         assert!(nix.contains("DeterminateSystems/magic-nix-cache-action@v14"));
         assert!(nix.contains("use-flakehub: false"));

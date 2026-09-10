@@ -19,9 +19,6 @@ on:
       - "web/mvm-demo-guest/**"
       - ".github/workflows/workers.yml"
       - ".github/workflows/website.yml"
-  merge_group:
-    types: [checks_requested]
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

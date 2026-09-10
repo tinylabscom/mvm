@@ -15,13 +15,10 @@ name: Warm the Rust build cache
 # lint-features-test-support, lint-features-embed, test-workspace, test-linux
 # and test-ebpf-telemetry, each from cold today.
 #
-# Note what this entry does *not* cover. It is built with default features, so
-# the three lint-features lanes restore its dependency artifacts and then
-# rebuild every workspace crate whose feature resolution differs — which is why
-# the test-support lane still costs ~19 minutes warm. Warming the non-default
-# feature sets too would need its own `key:` per set, and the repo cache is
-# capped at 10 GB with LRU eviction, so an extra entry of this size risks
-# evicting the one every lane depends on. Measure before adding one.
+# The test-support graph differs enough to rebuild almost every workspace crate
+# after restoring the default entry, so it has a dedicated trusted-main key.
+# Keeping it separate prevents its feature fingerprints from diluting the entry
+# restored by every other Rust lane.
 
 on:
   push:
@@ -131,3 +128,36 @@ jobs:
       # genuine breakage is caught by the lanes that gate.
       - name: Build the workspace to populate the cache
         run: ./scripts/cargo-stable.sh clippy --workspace --all-targets -- -D warnings
+
+  warm-test-support:
+    name: Warm test-support
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/free-disk
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: lld
+
+      - uses: ./.github/actions/install-zigbuild
+
+      - uses: ./.github/actions/rust-cache
+        with:
+          key: test-support
+          save: "true"
+
+      - name: Warm test-support feature tests
+        run: |
+          cargo test --no-run --features test-support --lib \
+            -p mvm-backends -p mvm-runtime -p mvm-client -p mvm-cli -p mvm-vmm \
+            -p mvm-fs
+          cargo test --no-run -p mvmctl --features test-support \
+            --test audit_emissions_live
+          cargo check -p mvm-cli --features test-support \
+            --example verification_loop
