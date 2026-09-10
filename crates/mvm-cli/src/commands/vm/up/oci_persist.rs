@@ -283,7 +283,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
     // authoritative RPC gates as well.
     start_config.dev_console = preopen_console_for_profile(profile);
     attach_runtime_overlay_if_cached(&mut start_config, backend_name)?;
-    attach_universal_initramfs_if_cached(&mut start_config)?;
+    attach_universal_initramfs_if_cached(&mut start_config, backend_name)?;
     emit_runtime_source_status(&start_config);
     if let Some(ctx) = admission.as_ref() {
         thread_tenant_id(&mut start_config, &ctx.admitted);

@@ -284,10 +284,47 @@ pub(crate) fn universal_initramfs_available() -> bool {
     mvm_build::initramfs::resolve_or_seed_from_default_cache(&cache_root, version, arch).is_ok()
 }
 
+/// Backends that boot a kernel, and so have something to mount an initramfs
+/// with.
+///
+/// The same allow-list shape `attach_runtime_overlay_if_cached_version` uses to
+/// gate its own build arm, and for the same reason: resolving falls through to
+/// a `cargo zigbuild` of the guest agent on a cold cache. The overlay has been
+/// gated since it was written; this leg was not, so every launch resolution
+/// under a backend that never starts a guest cross-compiled one anyway. Four
+/// mock-backed audit tests spent eight minutes each doing exactly that, because
+/// a test sandbox isolates `MVM_HOME` *and* `HOME` — which makes its cache cold
+/// and the seed-from-default-cache fallback empty, every time.
+///
+/// Spelled out rather than derived from a `BackendDescriptor` field, because
+/// neither existing field means this. `bundled_kernel` is "brings its own
+/// kernel, so there is no on-disk path to hash" and is true for libkrun alone.
+/// `tier` is an isolation statement — Tier 3 happens to hold exactly the three
+/// backends excluded here, but it holds them because they are test-only or
+/// browser-tier, not because they boot no kernel, and a Tier 3 backend that did
+/// boot one would quietly lose its initramfs.
+///
+/// An allow-list rather than a deny-list of the three, because the two fail in
+/// opposite directions. A new *booting* backend missing from this list boots
+/// without an initramfs and cannot mount its runtime overlay, which the launch
+/// path already fails closed on — loudly. A new *non-booting* backend missing
+/// from a deny-list would silently cross-compile a guest agent it never runs,
+/// which is this bug again, undetected.
+const KERNEL_BOOTING_HYPERVISORS: [&str; 5] =
+    ["firecracker", "hvf", "qemu", "libkrun", "apple-container"];
+
 #[tracing::instrument(skip_all)]
 pub(crate) fn attach_universal_initramfs_if_cached(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
+    hypervisor: &str,
 ) -> Result<()> {
+    // `wasm` runs a WASI module directly and `mock` records calls without
+    // starting a guest. Neither can mount an initramfs, so attaching one is
+    // meaningless and resolving one is pure cost.
+    if !KERNEL_BOOTING_HYPERVISORS.contains(&hypervisor) {
+        tracing::debug!(hypervisor, "backend boots no kernel; skipping initramfs");
+        return Ok(());
+    }
     attach_universal_initramfs_with_resolver(start_config, |env, cache_root, version, arch| {
         mvm_build::initramfs::resolve_or_build_local_initramfs(env, cache_root, version, arch)
     })
@@ -1698,7 +1735,7 @@ mod universal_initramfs_attach_tests {
             kernel_path: Some("/dummy/vmlinux".to_string()),
             ..Default::default()
         };
-        attach_universal_initramfs_if_cached(&mut sc).unwrap();
+        attach_universal_initramfs_if_cached(&mut sc, "firecracker").unwrap();
 
         assert!(
             sc.initrd_path.is_some(),
@@ -1711,6 +1748,54 @@ mod universal_initramfs_attach_tests {
                 .contains("initramfs.cpio.gz"),
             "attached path should point at the cpio.gz image"
         );
+    }
+
+    /// A backend that never boots a kernel must not reach the resolver at all.
+    ///
+    /// Asserting only that `initrd_path` stays `None` would pass for the
+    /// expensive reason too — a cold cache leaves it unset after doing the work.
+    /// The cost is the resolve, so the resolver itself is what has to stay
+    /// untouched. `seed_warm_universal_initramfs` makes the difference
+    /// observable: a resolver that ran would find the warm artifact and attach
+    /// it.
+    #[test]
+    fn a_backend_that_boots_no_kernel_never_resolves_an_initramfs() {
+        for hypervisor in ["mock", "wasm"] {
+            let mut env = TestEnv::new();
+            let dir = tempfile::tempdir().unwrap();
+            env.isolate_mvm_home(dir.path());
+            seed_warm_universal_initramfs(dir.path());
+
+            let mut sc = VmStartConfig {
+                kernel_path: Some("/dummy/vmlinux".to_string()),
+                ..Default::default()
+            };
+            attach_universal_initramfs_if_cached(&mut sc, hypervisor).unwrap();
+
+            assert!(
+                sc.initrd_path.is_none(),
+                "{hypervisor} boots no kernel, so nothing should have resolved \
+                 an initramfs — a warm cache was available and was still not read"
+            );
+        }
+    }
+
+    /// Every name the allow-list admits has to be a backend that exists, or the
+    /// gate silently stops covering one. The reverse — a booting backend
+    /// missing from the list — surfaces as a guest that cannot mount its
+    /// runtime overlay, which the launch path already fails closed on.
+    #[test]
+    fn the_kernel_booting_allow_list_names_only_real_backends() {
+        let known: Vec<String> = mvm_runtime::catalog::descriptors()
+            .iter()
+            .map(|d| d.instantiate_dyn().name().to_string())
+            .collect();
+        for name in KERNEL_BOOTING_HYPERVISORS {
+            assert!(
+                known.iter().any(|k| k == name),
+                "{name} is in the kernel-booting allow-list but is not a backend; known: {known:?}"
+            );
+        }
     }
 
     #[test]
