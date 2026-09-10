@@ -855,6 +855,55 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             .driver
             .spawn_standby_parent(&StandbyParentSpawn { spec, boot: &boot })?;
 
+        // Activate before capturing, exactly as `start_workload` does after its
+        // own boot.
+        //
+        // A guest booted under the universal initramfs runs its agent as PID 1
+        // in `Awaiting`, where the activation gate accepts `ActivateEnvironment`
+        // and refuses every other verb with `NotActivated`. That agent *serves*
+        // — it answers the readiness probe — so a capture that waits only for
+        // reachability captures a parent that is reachable and unactivated, and
+        // every child forked from it inherits that state. The claim's
+        // `PostRestore` is then refused, the standby is marked dead, and the run
+        // silently cold-boots (#3039).
+        //
+        // Activating the parent is safe to share across its children:
+        // `build_activation_environment` describes block devices and verity —
+        // `data_dev`, `hash_dev`, `roothash` — not identity or secrets, and a
+        // parent and its children share a rootfs by construction. It carries no
+        // plan and no grant either way; `factory_parent_config` drops those on
+        // purpose, and that is unchanged here.
+        if crate::microvm::booted_with_universal_initramfs(&parent_config) {
+            // A driver with no host-side vsock transport runs hypervisor-free:
+            // no guest is listening, so there is nothing to activate. Resolving
+            // the transport first separates that from a real activation
+            // failure, which stays fatal — capturing an unactivated parent is
+            // the whole defect.
+            //
+            // A real driver whose transport is genuinely missing is not hidden
+            // by this. The claim's own post-restore call resolves the same
+            // transport and fails there instead.
+            match mvm_vmm::vsock_transport::for_vm(&spec.id) {
+                Ok(_) => {
+                    crate::microvm::activate_workload_by_name(&spec.id, &parent_config).map_err(
+                        |e| {
+                            StandbyError::SpawnFailed(format!(
+                                "activate standby parent '{}' before capture: {e:#}",
+                                spec.id
+                            ))
+                        },
+                    )?;
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        standby = %spec.id,
+                        error = %e,
+                        "no host-side vsock transport; skipping parent activation"
+                    );
+                }
+            }
+        }
+
         let control = self.driver.vm_full_control(&spec.id).ok_or_else(|| {
             StandbyError::SpawnFailed(format!(
                 "backend cannot capture a warm parent's memory for standby '{}'",

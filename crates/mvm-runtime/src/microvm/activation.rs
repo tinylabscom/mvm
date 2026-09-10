@@ -47,6 +47,38 @@ const ACTIVATION_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_
 /// `ActivateEnvironmentError` or an unexpected response) is returned
 /// immediately, never retried.
 pub fn activate_workload(vm: &dyn RunningVm, config: &VmStartConfig) -> Result<()> {
+    activate_with(config, &|| {
+        vm.vsock_connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
+            .context("connect to guest agent for activation")
+    })
+}
+
+/// Activate a guest addressed by VM name rather than by a live `RunningVm`.
+///
+/// The standby factory parent is spawned through the driver's standby path,
+/// which hands back a `StandbyHandle` and no `RunningVm` — but activation only
+/// ever needed a vsock connection to the agent, and `vsock_transport::for_vm`
+/// resolves one from the name exactly as the post-restore signal does.
+///
+/// Shares [`activate_workload`]'s retry loop rather than restating it: the
+/// distinction between "the agent is not listening yet" and "the agent rejected
+/// this" is the whole substance of that loop, and a second copy would be free to
+/// drift from it.
+pub fn activate_workload_by_name(vm_name: &str, config: &VmStartConfig) -> Result<()> {
+    activate_with(config, &|| {
+        mvm_vmm::vsock_transport::for_vm(vm_name)
+            .with_context(|| format!("resolving vsock transport for {vm_name}"))?
+            .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
+            .with_context(|| format!("connect to guest agent on {vm_name} for activation"))
+    })
+}
+
+/// The shared body: build the environment, then retry connect+handshake until
+/// the agent answers or the deadline passes.
+fn activate_with<S>(config: &VmStartConfig, connect: &dyn Fn() -> Result<S>) -> Result<()>
+where
+    S: std::io::Read + std::io::Write + Send,
+{
     let env = build_activation_environment(config)?;
     let started = std::time::Instant::now();
     let deadline = started + ACTIVATION_READY_TIMEOUT;
@@ -54,7 +86,7 @@ pub fn activate_workload(vm: &dyn RunningVm, config: &VmStartConfig) -> Result<(
     loop {
         attempt = attempt.saturating_add(1);
         let attempt_started = std::time::Instant::now();
-        match activate_once(vm, &env) {
+        match activate_once(connect, &env) {
             Ok(()) => {
                 // Attempt count and the split between waiting and working are
                 // what distinguish "the guest was slow" from "the schedule
@@ -80,10 +112,11 @@ pub fn activate_workload(vm: &dyn RunningVm, config: &VmStartConfig) -> Result<(
 }
 
 /// One connect + handshake + `ActivateEnvironment` round-trip.
-fn activate_once(vm: &dyn RunningVm, env: &ActivateEnvironment) -> Result<()> {
-    let mut stream = vm
-        .vsock_connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
-        .context("connect to guest agent for activation")?;
+fn activate_once<S>(connect: &dyn Fn() -> Result<S>, env: &ActivateEnvironment) -> Result<()>
+where
+    S: std::io::Read + std::io::Write + Send,
+{
+    let mut stream = connect()?;
     activate_over_stream(&mut stream, env)
 }
 
