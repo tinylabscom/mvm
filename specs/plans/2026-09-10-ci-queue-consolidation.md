@@ -1,5 +1,8 @@
 # CI queue consolidation
 
+Backing: shipped-source
+Validation: check-sprint-append
+
 **Status:** Implementation complete; live queue validation pending
 
 ## Goal
