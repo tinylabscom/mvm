@@ -565,7 +565,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         let child_rootfs_dir = if resident_handoff {
             std::fs::create_dir_all(&child_dir).map_err(|e| {
                 StandbyError::ClaimFailed(format!(
-                    "create resident HVF child state {}: {e}",
+                    "create resident HVF child state {}: {e:#}",
                     child_dir.display()
                 ))
             })?;
@@ -577,7 +577,9 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 if is_trusted_snapshot_id(parent.snapshot_id.as_deref().unwrap_or_default()) {
                     let backend = mvm_fs::trusted_snapshot::platform_backend(ctx.snapshots.root())
                         .map_err(|e| {
-                            StandbyError::ClaimFailed(format!("open trusted snapshot backend: {e}"))
+                            StandbyError::ClaimFailed(format!(
+                                "open trusted snapshot backend: {e:#}"
+                            ))
                         })?;
                     materialize_child_from_trusted_parent(
                         ctx.checkpoints,
@@ -595,8 +597,9 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                         &child_dir,
                     )
                 };
-            materialize
-                .map_err(|e| StandbyError::ClaimFailed(format!("materialize child rootfs: {e}")))?;
+            materialize.map_err(|e| {
+                StandbyError::ClaimFailed(format!("materialize child rootfs: {e:#}"))
+            })?;
             claim_phase!("child_materialized");
             child_dir.clone()
         };
@@ -614,10 +617,10 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // of the captured snapshot, so it exists only beside the image.
         guards
             .admit_overlay_contract(std::path::Path::new(&claim.rootfs_path))
-            .map_err(|e| StandbyError::ClaimFailed(format!("overlay contract: {e}")))?;
+            .map_err(|e| StandbyError::ClaimFailed(format!("overlay contract: {e:#}")))?;
 
         let grant_envelope = issue_child_grant(&plan, &child_cfg, ctx.grant_issuer)
-            .map_err(|e| StandbyError::ClaimFailed(format!("issue child verb grant: {e}")))?;
+            .map_err(|e| StandbyError::ClaimFailed(format!("issue child verb grant: {e:#}")))?;
 
         let secrets =
             mvm_core::plan::secrets_from_signed_json(&claim.plan_json).unwrap_or_default();
@@ -625,7 +628,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             mvm_core::plan::redaction_from_signed_json(&claim.plan_json).unwrap_or_default();
         let network_limits = plan
             .effective_network_limits()
-            .map_err(|e| StandbyError::ClaimFailed(format!("network limits: {e}")))?;
+            .map_err(|e| StandbyError::ClaimFailed(format!("network limits: {e:#}")))?;
         let ingress = plan.ingress.clone();
         if let Some(file) = claim_debug.as_mut() {
             let _ = writeln!(
@@ -654,7 +657,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                     identity: FlowMuxIdentitySource::InheritFrom(&parent_state_dir),
                 },
             )
-            .map_err(|e| StandbyError::ClaimFailed(format!("spawn child endpoint: {e}")))?;
+            .map_err(|e| StandbyError::ClaimFailed(format!("spawn child endpoint: {e:#}")))?;
         claim_phase!("endpoint_ready");
 
         // The child's host channel set, resolved under its own state dir and
@@ -683,7 +686,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 capability_bindings: &child_capabilities,
                 service_proxies: &child_cfg.service_proxies,
             })
-            .map_err(|e| StandbyError::ClaimFailed(format!("register child broker: {e}")))?;
+            .map_err(|e| StandbyError::ClaimFailed(format!("register child broker: {e:#}")))?;
         claim_phase!("broker_registered");
 
         // (6b) Mint a fresh VMGenID bound to the child's content-address and fork
@@ -777,7 +780,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             .map_err(|e| {
                 StandbyError::ClaimFailed(format!(
                     "forked child '{child_vm_name}' never answered the post-restore identity \
-                     handshake: {e}"
+                     handshake: {e:#}"
                 ))
             })?;
         require_fresh_child_identity(child_vm_name, &outcome)
@@ -830,7 +833,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         )
         .map_err(|e| {
             StandbyError::SpawnFailed(format!(
-                "recording standby parent '{}' runtime metadata: {e}",
+                "recording standby parent '{}' runtime metadata: {e:#}",
                 spec.id
             ))
         })?;
@@ -860,7 +863,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         })?;
         let retain_parent = control.retain_paused_after_capture();
         let snapshots = FsSnapshotStore::new(mvm_core::config::snapshots_dir())
-            .map_err(|e| StandbyError::SpawnFailed(format!("open snapshot store: {e}")))?;
+            .map_err(|e| StandbyError::SpawnFailed(format!("open snapshot store: {e:#}")))?;
 
         let capture_params = CaptureVmFullParams {
             id: CheckpointId::new(format!("standby-{}", spec.id)),
@@ -870,7 +873,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             // Firecracker keeps no supervisor-config blob; its presence is
             // what marks a checkpoint as originating from a backend that does.
             supervisor_config_src: control.supervisor_config_path().map_err(|e| {
-                StandbyError::SpawnFailed(format!("resolve standby supervisor config: {e}"))
+                StandbyError::SpawnFailed(format!("resolve standby supervisor config: {e:#}"))
             })?,
             tag: None,
             created_unix: mvm_core::time::now_unix_secs(),
@@ -896,7 +899,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         {
             Some(
                 mvm_fs::trusted_snapshot::platform_backend(snapshots.root()).map_err(|e| {
-                    StandbyError::SpawnFailed(format!("open trusted snapshot backend: {e}"))
+                    StandbyError::SpawnFailed(format!("open trusted snapshot backend: {e:#}"))
                 })?,
             )
         } else {
@@ -929,7 +932,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         }
 
         let meta = captured
-            .map_err(|e| StandbyError::SpawnFailed(format!("capture standby parent: {e}")))?;
+            .map_err(|e| StandbyError::SpawnFailed(format!("capture standby parent: {e:#}")))?;
 
         // Saved-state backends have no live process after capture and use pid=0
         // as their persisted sentinel. A retained HVF parent keeps its real pid
@@ -969,9 +972,9 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         })?;
         let checkpoint_id = CheckpointId::new(checkpoint.to_string());
         let _registry_lock = acquire_registry_lock(ctx.registry_path)
-            .map_err(|e| StandbyError::SpawnFailed(format!("acquire VM name registry: {e}")))?;
+            .map_err(|e| StandbyError::SpawnFailed(format!("acquire VM name registry: {e:#}")))?;
         let registry = VmNameRegistry::load(ctx.registry_path)
-            .map_err(|e| StandbyError::SpawnFailed(format!("load VM name registry: {e}")))?;
+            .map_err(|e| StandbyError::SpawnFailed(format!("load VM name registry: {e:#}")))?;
         let (child_name, child_dir) = (0..MAX_CHILD_NAME_ATTEMPTS)
             .map(|_| generate_vm_name())
             .find_map(|name| {
@@ -985,7 +988,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         let materialized = if is_trusted_snapshot_id(checkpoint) {
             let backend = mvm_fs::trusted_snapshot::platform_backend(ctx.snapshots.root())
                 .map_err(|e| {
-                    StandbyError::SpawnFailed(format!("open trusted snapshot backend: {e}"))
+                    StandbyError::SpawnFailed(format!("open trusted snapshot backend: {e:#}"))
                 })?;
             materialize_child_from_trusted_parent(
                 ctx.checkpoints,
@@ -1166,17 +1169,17 @@ fn reserve_and_verify_parent(
 ) -> std::result::Result<CheckpointMeta, StandbyError> {
     {
         let _lock = acquire_registry_lock(ctx.registry_path)
-            .map_err(|e| StandbyError::ClaimFailed(format!("acquire registry lock: {e}")))?;
+            .map_err(|e| StandbyError::ClaimFailed(format!("acquire registry lock: {e:#}")))?;
         let current = ctx
             .pool
             .load(&handle.id)
-            .map_err(|e| StandbyError::ClaimFailed(format!("load standby {}: {e}", handle.id)))?;
+            .map_err(|e| StandbyError::ClaimFailed(format!("load standby {}: {e:#}", handle.id)))?;
         if !current.state.is_claimable() {
             // Not yet reserved (no `mark_claimed`), so nothing to release.
             return Err(refuse(ClaimRefusal::ParentNotClaimable));
         }
         ctx.pool.mark_claimed(&handle.id).map_err(|e| {
-            StandbyError::ClaimFailed(format!("reserve standby {}: {e}", handle.id))
+            StandbyError::ClaimFailed(format!("reserve standby {}: {e:#}", handle.id))
         })?;
     }
 
@@ -1197,7 +1200,7 @@ fn reserve_and_verify_parent(
         .read_meta(ctx.parent_checkpoint)
         .map_err(|e| {
             quarantine(StandbyError::ClaimFailed(format!(
-                "read parent checkpoint: {e}"
+                "read parent checkpoint: {e:#}"
             )))
         })?;
     if resident_handoff
@@ -1213,12 +1216,12 @@ fn reserve_and_verify_parent(
         let backend =
             mvm_fs::trusted_snapshot::platform_backend(ctx.snapshots.root()).map_err(|e| {
                 quarantine(StandbyError::ClaimFailed(format!(
-                    "open trusted snapshot backend: {e}"
+                    "open trusted snapshot backend: {e:#}"
                 )))
             })?;
         let identity = mvm_core::crypto::snapshot_sign::host_snapshot_identity().map_err(|e| {
             quarantine(StandbyError::ClaimFailed(format!(
-                "load trusted snapshot signer: {e}"
+                "load trusted snapshot signer: {e:#}"
             )))
         })?;
         let manifest_digest = mvm_core::checkpoint::content_manifest_digest(&parent.content);
@@ -1393,9 +1396,9 @@ const MAX_CHILD_NAME_ATTEMPTS: usize = 8;
 /// rather than a race.
 fn fresh_child_id(ctx: &ClaimContext<'_>) -> std::result::Result<VmId, StandbyError> {
     let _lock = acquire_registry_lock(ctx.registry_path)
-        .map_err(|e| StandbyError::ClaimFailed(format!("acquire registry lock: {e}")))?;
+        .map_err(|e| StandbyError::ClaimFailed(format!("acquire registry lock: {e:#}")))?;
     let registry = VmNameRegistry::load(ctx.registry_path)
-        .map_err(|e| StandbyError::ClaimFailed(format!("load vm registry: {e}")))?;
+        .map_err(|e| StandbyError::ClaimFailed(format!("load vm registry: {e:#}")))?;
     for _ in 0..MAX_CHILD_NAME_ATTEMPTS {
         let name = generate_vm_name();
         if registry.lookup(&name).is_none() {
@@ -1416,9 +1419,9 @@ fn verify_preloaded_child_name_is_available(
     child_name: &str,
 ) -> std::result::Result<(), StandbyError> {
     let _lock = acquire_registry_lock(ctx.registry_path)
-        .map_err(|e| StandbyError::ClaimFailed(format!("acquire registry lock: {e}")))?;
+        .map_err(|e| StandbyError::ClaimFailed(format!("acquire registry lock: {e:#}")))?;
     let registry = VmNameRegistry::load(ctx.registry_path)
-        .map_err(|e| StandbyError::ClaimFailed(format!("load vm registry: {e}")))?;
+        .map_err(|e| StandbyError::ClaimFailed(format!("load vm registry: {e:#}")))?;
     if registry.lookup(child_name).is_some() {
         return Err(StandbyError::ClaimFailed(format!(
             "preloaded child name '{child_name}' is already registered"
@@ -1449,7 +1452,7 @@ fn child_start_config(claim: &StandbyClaim, child: &VmId, rootfs_dir: &Path) -> 
 /// the same host-side overlay admission gate a cold workload boot performs.
 fn resident_parent_rootfs_dir(parent_vm_name: &str) -> std::result::Result<PathBuf, StandbyError> {
     let metadata = crate::base::runtime_meta::read(parent_vm_name)
-        .map_err(|e| StandbyError::ClaimFailed(format!("read resident parent metadata: {e}")))?
+        .map_err(|e| StandbyError::ClaimFailed(format!("read resident parent metadata: {e:#}")))?
         .ok_or_else(|| {
             StandbyError::ClaimFailed(format!(
                 "resident parent '{parent_vm_name}' has no runtime metadata"
