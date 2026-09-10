@@ -4,6 +4,7 @@ import { Eyebrow } from "./primitives/Eyebrow";
 import { Reveal } from "./primitives/Reveal";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../ui/tabs";
 import { CodeBlock } from "../ui/code-block";
+import { InstallTabs } from "./InstallTabs";
 import { SAMPLES } from "./samples";
 
 // The run leg of the Define/Build/Run walk — same flake the Build tab
@@ -97,6 +98,11 @@ export function Quickstart() {
             >
               Read the full quickstart guide
             </a>
+            <div style={{ marginTop: "2.5rem" }}>
+              {/* The install affordance — moved here from the hero so the
+                  landing page's story runs before the install command. */}
+              <InstallTabs />
+            </div>
           </Reveal>
         </div>
 

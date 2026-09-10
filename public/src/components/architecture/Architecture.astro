@@ -16,12 +16,18 @@ import { Footer } from "../landing/Footer";
     <h1>A secure execution layer for the code you can't fully trust</h1>
     <p class="lede">MVM runs any workload — an AI agent, a customer's code, a build job — inside a <strong>sealed, immutable, hardware-isolated microVM</strong>, on the laptop and in the fleet, with the security posture <strong>enforced by CI, not promised in a slide</strong>.</p>
 
+    {/* The proof stat strip is hidden for now, not deleted — restore by
+        uncommenting. An Astro expression comment, not an HTML one, so it
+        is stripped from the built page rather than shipped inside it.
+        (Keep the claim counts in sync with ADR-001's ledger if this
+        comes back.)
     <div class="proof">
       <div><b>18</b><span>security claims — 15 enforced, 3 preview</span></div>
       <div><b>4</b><span>runtime backends, one CLI</span></div>
       <div><b>3</b><span>workload sources, one signed contract</span></div>
       <div><b>0</b><span>guest NICs, SSH daemons, container fallbacks</span></div>
     </div>
+    */}
   </header>
 
   <!-- ============ VIEW 1: THE STACK ============ -->
@@ -58,36 +64,36 @@ import { Footer } from "../landing/Footer";
         <text transform="rotate(-90 38 285)" x="38" y="285" text-anchor="middle" class="sv-sec" style="letter-spacing:0.08em; font-size:10px;">CHAIN-SIGNED AUDIT LOG</text>
 
         <!-- L1: developer surface -->
-        <a href="#note-surface" aria-label="Jump to: Developer surface">
+        <g class="hotspot" tabindex="0" role="button" aria-expanded="false" data-note="note-surface" aria-label="Developer surface — details">
           <rect x="84" y="40" width="492" height="58" rx="4" class="box"/>
           <text x="100" y="64" class="sv-title">1 · Developer surface</text>
           <text x="100" y="84" class="sv-body">mvmctl CLI · language SDKs — code in, workload spec out</text>
-        </a>
+        </g>
 
         <!-- arrow down -->
         <line x1="330" y1="98" x2="330" y2="118" stroke="currentColor" stroke-width="1.25" marker-end="url(#arr)"/>
 
         <!-- L2: admission (accent) -->
-        <a href="#note-admission" aria-label="Jump to: Signed admission">
+        <g class="hotspot" tabindex="0" role="button" aria-expanded="false" data-note="note-admission" aria-label="Signed admission — details">
           <rect x="84" y="120" width="492" height="66" rx="4" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
           <text x="100" y="145" class="sv-title">2 · Signed admission</text>
           <text x="100" y="165" class="sv-body">Every run becomes a signed ExecutionPlan — verified, policy-checked,</text>
           <text x="100" y="180" class="sv-body">replay-proof — before anything boots</text>
-        </a>
+        </g>
 
         <line x1="330" y1="186" x2="330" y2="206" stroke="currentColor" stroke-width="1.25" marker-end="url(#arr)"/>
 
         <!-- L3: runtime -->
-        <a href="#note-runtime" aria-label="Jump to: Runtime orchestration">
+        <g class="hotspot" tabindex="0" role="button" aria-expanded="false" data-note="note-runtime" aria-label="Runtime orchestration — details">
           <rect x="84" y="208" width="492" height="58" rx="4" class="box"/>
           <text x="100" y="232" class="sv-title">3 · Runtime orchestration</text>
           <text x="100" y="252" class="sv-body">VM lifecycle · templates · checkpoints · one funnel every workload boots through</text>
-        </a>
+        </g>
 
         <line x1="330" y1="266" x2="330" y2="286" stroke="currentColor" stroke-width="1.25" marker-end="url(#arr)"/>
 
         <!-- L4: backend seam -->
-        <a href="#note-backends" aria-label="Jump to: Backend seam">
+        <g class="hotspot" tabindex="0" role="button" aria-expanded="false" data-note="note-backends" aria-label="Backend seam — details">
           <rect x="84" y="288" width="492" height="104" rx="4" class="box"/>
           <text x="100" y="312" class="sv-title">4 · Backend seam — one interface, interchangeable engines</text>
           <rect x="100" y="326" width="106" height="50" rx="3" class="box-soft"/>
@@ -102,7 +108,7 @@ import { Footer } from "../landing/Footer";
           <rect x="454" y="326" width="106" height="50" rx="3" class="box-soft" stroke-dasharray="4 3"/>
           <text x="507" y="347" text-anchor="middle" class="sv-body" style="font-weight:600; fill:currentColor;">Wasm</text>
           <text x="507" y="364" text-anchor="middle" class="sv-body">lightweight tier</text>
-        </a>
+        </g>
 
         <!-- L5: host OS -->
         <rect x="84" y="412" width="492" height="44" rx="4" class="box-soft"/>
@@ -111,7 +117,7 @@ import { Footer } from "../landing/Footer";
         <line x1="330" y1="392" x2="330" y2="412" stroke="currentColor" stroke-width="1.25" marker-end="url(#arr)"/>
 
         <!-- Guest: sealed microVM -->
-        <a href="#note-guest" aria-label="Jump to: The sealed guest">
+        <g class="hotspot" tabindex="0" role="button" aria-expanded="false" data-note="note-guest" aria-label="The sealed guest — details">
           <rect x="660" y="60" width="262" height="270" rx="6" fill="var(--guest-soft)" stroke="var(--guest)" stroke-width="1.5"/>
           <text x="676" y="88" class="sv-title">Sealed microVM</text>
           <rect x="676" y="104" width="230" height="46" rx="3" class="box"/>
@@ -125,18 +131,18 @@ import { Footer } from "../landing/Footer";
           <text x="676" y="268" class="sv-guest">✕ no raw secrets in memory</text>
           <text x="676" y="288" class="sv-guest">✓ immutable, tamper-proof rootfs</text>
           <text x="676" y="308" class="sv-guest">✓ CPU / memory / wall-clock bounded</text>
-        </a>
+        </g>
 
         <!-- vsock link -->
         <line x1="576" y1="340" x2="656" y2="340" stroke="var(--steel)" stroke-width="2" marker-end="url(#arr-steel)" marker-start="url(#arr-steel)"/>
         <text x="616" y="330" text-anchor="middle" class="sv-flow">vsock only</text>
 
         <!-- egress path -->
-        <a href="#note-guest" aria-label="Jump to: The sealed guest — egress gate">
+        <g class="hotspot" tabindex="0" role="button" aria-expanded="false" data-note="note-guest" aria-label="Egress gate — details">
           <rect x="660" y="400" width="262" height="56" rx="4" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
           <text x="676" y="423" class="sv-title" style="font-size:13px;">Egress gate · default-deny</text>
           <text x="676" y="441" class="sv-body" style="font-size:10.5px;">host opens every connection, signs secrets in</text>
-        </a>
+        </g>
         <path d="M 791 330 L 791 396" stroke="var(--accent)" stroke-width="1.5" fill="none" marker-end="url(#arr-sec)"/>
         <text x="800" y="368" class="sv-sec">outbound request</text>
         <text x="800" y="382" class="sv-sec">over vsock</text>
@@ -145,13 +151,19 @@ import { Footer } from "../landing/Footer";
         <text x="791" y="522" text-anchor="middle" class="sv-body" style="font-weight:600; fill:currentColor;">Internet / approved endpoints</text>
       </svg>
       </div>
-      <figcaption>Fig. 1 — The MVM stack today. The guest boots with no network device; its only channel is vsock to the host, so authorization, secret substitution, and audit all happen at one enforced chokepoint. <span class="hint">Click a layer to jump to its explanation.</span></figcaption>
+      <figcaption>Fig. 1 — The MVM stack today. The guest boots with no network device; its only channel is vsock to the host, so authorization, secret substitution, and audit all happen at one enforced chokepoint. <span class="hint">Hover or tap a layer for its explanation.</span></figcaption>
+      <div class="stack-pop" role="tooltip" hidden></div>
     </figure>
 
+    {/* The per-layer explanations. No longer rendered as a visible
+        list — each entry is the content of the hover popover on its
+        diagram layer (see the stack-pop script below), so this
+        container is hidden but stays in the DOM as the source. */}
+    <div class="stack-notes-src" hidden>
     <ol class="notes">
       <li id="note-surface"><span class="tick">1</span><div>
         <h3>Developer surface</h3>
-        <p>One CLI (<strong>mvmctl</strong>) and language SDKs. A developer points MVM at code, a flake, or an OCI image and gets a running microVM — same commands on a MacBook and a Linux server. No Docker anywhere in the path.</p>
+        <p>One CLI (<strong>mvmctl</strong>) and language SDKs. A developer points MVM at code, a Nix flake (a reproducible build recipe), or an OCI image and gets a running microVM — same commands on a MacBook and a Linux server. No Docker anywhere in the path.</p>
       </div></li>
       <li class="sec" id="note-admission"><span class="tick">2</span><div>
         <h3>Signed admission — the security plane starts here</h3>
@@ -170,6 +182,7 @@ import { Footer } from "../landing/Footer";
         <p>The workload runs in a hardware-isolated VM booted from an <strong>immutable, cryptographically verified image</strong> — flip a single block on disk and it refuses to boot, so there is no drift and no snowflake state; a new run is always a fresh, identical VM. No network card, no SSH, resource ceilings enforced at admission. Secrets never enter the guest — the host substitutes short-lived signed credentials into outbound requests at the egress gate, so a fully compromised workload still can't exfiltrate a raw key.</p>
       </div></li>
     </ol>
+    </div>
 
     <div class="pull">
       <p>The differentiator isn't any one layer — it's that <strong>every security claim is wired to an automated check</strong>. Fifteen numbered claims (plus three in preview) each point to a specific test or CI gate that proves it still holds; delete that test and the build fails.</p>
@@ -180,137 +193,123 @@ import { Footer } from "../landing/Footer";
   <!-- ============ VIEW 2: THE COMPANY ============ -->
   <section id="company">
     <p class="kicker">View 2 · Zoom out</p>
-    <h2>Where MVM sits inside a company</h2>
-    <p>MVM slots in as the <strong>execution layer</strong> between the systems a company trusts and the code it doesn't. Work arrives from developers, CI, and AI agents; trusted systems plug into the host side; only policy-admitted traffic ever leaves.</p>
+    <h2>One layer. Five tools replaced.</h2>
+    <p>Enterprise AI runtimes today stitch sandboxing, secrets, audit, and policy together from separate point tools. MVM consolidates them into <strong>one runtime layer</strong> that sits between the agent and everything sensitive &mdash; and every other layer of the stack stays exactly where it is.</p>
 
     <figure>
       <div class="fig-scroll">
-      <svg viewBox="0 0 960 540" role="img" aria-label="MVM as the execution layer inside a company: developers, CI, and AI agent platforms submit work as signed plans; the image registry and secrets manager connect on the trusted host side; sealed microVMs run inside; audit events flow to compliance systems and only policy-admitted egress reaches external services.">
-        <defs>
-          <marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-            <path d="M0,0 L10,5 L0,10 z" fill="var(--steel)"/>
-          </marker>
-          <marker id="arr2-sec" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-            <path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/>
-          </marker>
-        </defs>
+      <svg viewBox="0 0 960 536" role="img" aria-label="The same enterprise AI stack before and after MVM. Both columns show AI apps, agent framework, and model gateway on top and tools, data, and cloud below, unchanged. In the middle, the execution layer changes: today it is six stitched point tools — E2B or Modal, a Docker sandbox, a Vault SDK, Lakera or DLP, custom audit, a secret broker; with MVM it is one runtime layer providing isolation, secret brokering, audit, and policy. A strip below notes deployment: one binary, no daemon, no Kubernetes, same commands from laptop to fleet.">
 
-        <!-- Sources (left) -->
-        <a href="#note-wedge" aria-label="Jump to: The wedge — where work comes from">
-          <text x="118" y="78" text-anchor="middle" class="sv-label">WHERE WORK COMES FROM</text>
-          <rect x="40" y="94" width="156" height="52" rx="4" class="box"/>
-          <text x="118" y="115" text-anchor="middle" class="sv-body" style="font-weight:600; fill:currentColor;">Developers</text>
-          <text x="118" y="132" text-anchor="middle" class="sv-body">laptops · mvmctl · SDKs</text>
-          <rect x="40" y="162" width="156" height="52" rx="4" class="box"/>
-          <text x="118" y="183" text-anchor="middle" class="sv-body" style="font-weight:600; fill:currentColor;">CI / CD</text>
-          <text x="118" y="200" text-anchor="middle" class="sv-body">build &amp; test jobs</text>
-          <rect x="40" y="230" width="156" height="52" rx="4" class="box"/>
-          <text x="118" y="251" text-anchor="middle" class="sv-body" style="font-weight:600; fill:currentColor;">AI agent platforms</text>
-          <text x="118" y="268" text-anchor="middle" class="sv-body">autonomous code, sandboxed</text>
-        </a>
+        <!-- column labels -->
+        <text x="40" y="34" class="sv-label">TODAY &mdash; MULTIPLE POINT TOOLS</text>
+        <text x="490" y="34" class="sv-sec" style="letter-spacing:0.08em; font-size:10.5px;">WITH MVM &mdash; ONE RUNTIME LAYER</text>
 
-        <!-- arrows in -->
-        <line x1="196" y1="120" x2="286" y2="168" stroke="var(--steel)" stroke-width="1.5" marker-end="url(#arr2)"/>
-        <line x1="196" y1="188" x2="286" y2="192" stroke="var(--steel)" stroke-width="1.5" marker-end="url(#arr2)"/>
-        <line x1="196" y1="256" x2="286" y2="216" stroke="var(--steel)" stroke-width="1.5" marker-end="url(#arr2)"/>
-        <text x="241" y="152" text-anchor="middle" class="sv-flow">signed plans</text>
+        <!-- unchanged layers, identical in both columns -->
+        <g>
+          <rect x="40" y="48" width="430" height="34" rx="4" class="box-soft"/>
+          <text x="54" y="70" class="sv-body">AI apps · copilots · custom UX</text>
+        </g>
+        <g>
+          <rect x="490" y="48" width="430" height="34" rx="4" class="box-soft"/>
+          <text x="504" y="70" class="sv-body">AI apps · copilots · custom UX</text>
+        </g>
+        <g>
+          <rect x="40" y="90" width="430" height="34" rx="4" class="box-soft"/>
+          <text x="54" y="112" class="sv-body">Agent framework · LangChain · LlamaIndex · MCP</text>
+        </g>
+        <g>
+          <rect x="490" y="90" width="430" height="34" rx="4" class="box-soft"/>
+          <text x="504" y="112" class="sv-body">Agent framework · LangChain · LlamaIndex · MCP</text>
+        </g>
+        <g>
+          <rect x="40" y="132" width="430" height="34" rx="4" class="box-soft"/>
+          <text x="54" y="154" class="sv-body">Model gateway · LiteLLM · Bedrock · direct providers</text>
+        </g>
+        <g>
+          <rect x="490" y="132" width="430" height="34" rx="4" class="box-soft"/>
+          <text x="504" y="154" class="sv-body">Model gateway · LiteLLM · Bedrock · direct providers</text>
+        </g>
+        <g>
+          <rect x="40" y="308" width="430" height="34" rx="4" class="box-soft"/>
+          <text x="54" y="330" class="sv-body">Tools · MCP servers · RAG · vector DB</text>
+        </g>
+        <g>
+          <rect x="490" y="308" width="430" height="34" rx="4" class="box-soft"/>
+          <text x="504" y="330" class="sv-body">Tools · MCP servers · RAG · vector DB</text>
+        </g>
+        <g>
+          <rect x="40" y="350" width="430" height="34" rx="4" class="box-soft"/>
+          <text x="54" y="372" class="sv-body">Data · CRM · DB · files · systems of record</text>
+        </g>
+        <g>
+          <rect x="490" y="350" width="430" height="34" rx="4" class="box-soft"/>
+          <text x="504" y="372" class="sv-body">Data · CRM · DB · files · systems of record</text>
+        </g>
+        <g>
+          <rect x="40" y="392" width="430" height="34" rx="4" class="box-soft"/>
+          <text x="54" y="414" class="sv-body">Cloud · AWS · GCP · Azure · K8s</text>
+        </g>
+        <g>
+          <rect x="490" y="392" width="430" height="34" rx="4" class="box-soft"/>
+          <text x="504" y="414" class="sv-body">Cloud · AWS · GCP · Azure · K8s</text>
+        </g>
 
-        <!-- Trusted inputs (top) -->
-        <a href="#note-plugs" aria-label="Jump to: Plugs into what exists">
-          <text x="475" y="40" text-anchor="middle" class="sv-label">TRUSTED COMPANY SYSTEMS</text>
-          <rect x="316" y="54" width="150" height="46" rx="4" class="box"/>
-          <text x="391" y="73" text-anchor="middle" class="sv-body" style="font-weight:600; fill:currentColor;">Image registry</text>
-          <text x="391" y="90" text-anchor="middle" class="sv-body">digest-pinned OCI</text>
-          <rect x="484" y="54" width="150" height="46" rx="4" class="box"/>
-          <text x="559" y="73" text-anchor="middle" class="sv-body" style="font-weight:600; fill:currentColor;">Secrets manager</text>
-          <text x="559" y="90" text-anchor="middle" class="sv-body">keys stay host-side</text>
-        </a>
-        <line x1="391" y1="100" x2="391" y2="140" stroke="var(--steel)" stroke-width="1.5" marker-end="url(#arr2)"/>
-        <text x="399" y="126" class="sv-flow">verified pulls</text>
-        <line x1="559" y1="100" x2="559" y2="140" stroke="var(--accent)" stroke-width="1.5" marker-end="url(#arr2-sec)"/>
-        <text x="567" y="126" class="sv-sec">brokered, never raw</text>
+        <!-- left execution band: the stitched point tools -->
+        <g class="hotspot" tabindex="0" role="button" aria-expanded="false" data-note="note-today" aria-label="Today's stitched execution layer — details">
+          <rect x="40" y="174" width="430" height="122" rx="4" class="box"/>
+          <text x="52" y="196" class="sv-label" style="font-size:10px;">EXECUTION · STITCHED TOGETHER</text>
+          <rect x="52" y="208" width="126" height="34" rx="3" class="box"/>
+          <text x="115" y="230" text-anchor="middle" class="sv-body">E2B / Modal</text>
+          <rect x="188" y="208" width="126" height="34" rx="3" class="box"/>
+          <text x="251" y="230" text-anchor="middle" class="sv-body">Docker sandbox</text>
+          <rect x="324" y="208" width="126" height="34" rx="3" class="box"/>
+          <text x="387" y="230" text-anchor="middle" class="sv-body">Vault SDK</text>
+          <rect x="52" y="250" width="126" height="34" rx="3" class="box"/>
+          <text x="115" y="272" text-anchor="middle" class="sv-body">Lakera / DLP</text>
+          <rect x="188" y="250" width="126" height="34" rx="3" class="box"/>
+          <text x="251" y="272" text-anchor="middle" class="sv-body">Custom audit</text>
+          <rect x="324" y="250" width="126" height="34" rx="3" class="box"/>
+          <text x="387" y="272" text-anchor="middle" class="sv-body">Secret broker</text>
+        </g>
 
-        <!-- MVM core -->
-        <rect x="290" y="144" width="380" height="266" rx="6" fill="var(--steel-soft)" stroke="var(--steel)" stroke-width="1.5"/>
-        <text x="310" y="174" class="sv-title" style="font-size:16px;">MVM · execution layer</text>
-        <text x="310" y="193" class="sv-body">admission → policy → sealed microVMs</text>
+        <!-- right execution band: MVM -->
+        <g class="hotspot" tabindex="0" role="button" aria-expanded="false" data-note="note-mvm" aria-label="MVM, the one runtime layer — details">
+          <rect x="490" y="174" width="430" height="122" rx="4" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+          <text x="506" y="204" class="sv-title" style="font-size:17px;">MVM</text>
+          <text x="506" y="230" class="sv-body" style="font-weight:600; fill:currentColor;">Isolation · Secret brokering · Audit · Policy</text>
+          <text x="506" y="252" class="sv-body">One runtime. Hardware-enforced boundary. Signed audit chain.</text>
+        </g>
 
-        <rect x="310" y="210" width="106" height="62" rx="3" class="box"/>
-        <rect x="426" y="210" width="106" height="62" rx="3" class="box"/>
-        <rect x="542" y="210" width="106" height="62" rx="3" class="box"/>
-        <rect x="310" y="282" width="106" height="62" rx="3" class="box"/>
-        <rect x="426" y="282" width="106" height="62" rx="3" class="box"/>
-        <rect x="542" y="282" width="106" height="62" rx="3" class="box-soft" stroke-dasharray="4 3"/>
-        <text x="363" y="238" text-anchor="middle" class="sv-body" style="font-weight:600; fill:currentColor;">agent run</text>
-        <text x="363" y="255" text-anchor="middle" class="sv-guest">sealed VM</text>
-        <text x="479" y="238" text-anchor="middle" class="sv-body" style="font-weight:600; fill:currentColor;">customer job</text>
-        <text x="479" y="255" text-anchor="middle" class="sv-guest">sealed VM</text>
-        <text x="595" y="238" text-anchor="middle" class="sv-body" style="font-weight:600; fill:currentColor;">build</text>
-        <text x="595" y="255" text-anchor="middle" class="sv-guest">sealed VM</text>
-        <text x="363" y="310" text-anchor="middle" class="sv-body" style="font-weight:600; fill:currentColor;">eval suite</text>
-        <text x="363" y="327" text-anchor="middle" class="sv-guest">sealed VM</text>
-        <text x="479" y="310" text-anchor="middle" class="sv-body" style="font-weight:600; fill:currentColor;">untrusted PR</text>
-        <text x="479" y="327" text-anchor="middle" class="sv-guest">sealed VM</text>
-        <text x="595" y="314" text-anchor="middle" class="sv-body">…per-workload,</text>
-        <text x="595" y="330" text-anchor="middle" class="sv-body">hardware-isolated</text>
-
-        <text x="480" y="380" text-anchor="middle" class="sv-body">One VM = one workload · no shared kernel</text>
-        <text x="480" y="396" text-anchor="middle" class="sv-body">admission-bounded resources</text>
-
-        <!-- substrate -->
-        <a href="#note-fleet" aria-label="Jump to: Laptop to fleet is one product">
-          <rect x="290" y="428" width="380" height="46" rx="4" class="box-soft"/>
-          <text x="480" y="447" text-anchor="middle" class="sv-body" style="font-weight:600; fill:currentColor;">Runs on what the company already owns</text>
-          <text x="480" y="464" text-anchor="middle" class="sv-body">developer Macs · CI runners · Linux servers (fleet via mvmd)</text>
-        </a>
-        <line x1="480" y1="410" x2="480" y2="428" stroke="currentColor" stroke-width="1" stroke-dasharray="2 3"/>
-
-        <!-- Outputs (right) -->
-        <text x="836" y="128" text-anchor="middle" class="sv-label">WHAT COMES OUT</text>
-        <a href="#note-plugs" aria-label="Jump to: Plugs into what exists — audit and compliance">
-          <rect x="758" y="144" width="162" height="60" rx="4" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
-          <text x="839" y="167" text-anchor="middle" class="sv-body" style="font-weight:600; fill:currentColor;">Audit &amp; compliance</text>
-          <text x="839" y="184" text-anchor="middle" class="sv-body">SIEM · tamper-evident</text>
-          <text x="839" y="198" text-anchor="middle" class="sv-body">chain-signed trail</text>
-        </a>
-        <line x1="670" y1="182" x2="754" y2="176" stroke="var(--accent)" stroke-width="1.5" marker-end="url(#arr2-sec)"/>
-        <text x="712" y="166" text-anchor="middle" class="sv-sec">every event</text>
-
-        <rect x="758" y="256" width="162" height="60" rx="4" class="box"/>
-        <text x="839" y="279" text-anchor="middle" class="sv-body" style="font-weight:600; fill:currentColor;">External services</text>
-        <text x="839" y="296" text-anchor="middle" class="sv-body">APIs · model providers</text>
-        <text x="839" y="310" text-anchor="middle" class="sv-body">package registries</text>
-        <line x1="670" y1="286" x2="754" y2="286" stroke="var(--accent)" stroke-width="1.5" marker-end="url(#arr2-sec)"/>
-        <text x="712" y="276" text-anchor="middle" class="sv-sec">default-deny</text>
-        <text x="712" y="302" text-anchor="middle" class="sv-sec" style="font-size:10px;">policy-admitted only</text>
-
-        <rect x="758" y="368" width="162" height="60" rx="4" class="box"/>
-        <text x="839" y="391" text-anchor="middle" class="sv-body" style="font-weight:600; fill:currentColor;">Results &amp; artifacts</text>
-        <text x="839" y="408" text-anchor="middle" class="sv-body">outputs, checkpoints,</text>
-        <text x="839" y="422" text-anchor="middle" class="sv-body">reusable templates</text>
-        <line x1="670" y1="392" x2="754" y2="396" stroke="var(--steel)" stroke-width="1.5" marker-end="url(#arr2)"/>
+        <!-- deployment strip -->
+        <g>
+          <rect x="40" y="452" width="880" height="64" rx="4" class="box-soft"/>
+          <text x="52" y="474" class="sv-label" style="font-size:10px;">DEPLOYMENT · ONE BINARY, ANY HOST</text>
+          <text x="52" y="494" class="sv-body">curl install → mvmctl run · no daemon, no Kubernetes · boots the OCI images you already build</text>
+          <text x="52" y="510" class="sv-body">same commands and artifacts: developer Mac → CI runner → Linux fleet (mvmd)</text>
+        </g>
       </svg>
       </div>
-      <figcaption>Fig. 2 — MVM as company infrastructure. Trusted systems (registry, secrets) attach on the host side of the boundary; untrusted code runs inside it; the only outbound paths are the audited egress gate and the results themselves. <span class="hint">Click a group to jump to its explanation.</span></figcaption>
+      <figcaption>Fig. 2 &mdash; The same stack before and after MVM. Only the execution layer changes; every other layer stays where it is. <span class="hint">Hover or tap either execution box for its explanation.</span></figcaption>
+      <div class="stack-pop" role="tooltip" hidden></div>
     </figure>
 
+    {/* The per-band explanations — hidden, each entry is the content of
+        the hover popover on its diagram band (same mechanism as View 1). */}
+    <div class="stack-notes-src" hidden>
     <ol class="notes">
-      <li id="note-wedge"><span class="tick">A</span><div>
-        <h3>The wedge: AI agents made this urgent</h3>
-        <p>Companies are handing autonomous agents the ability to write and execute code. Containers share the host kernel; a microVM doesn't. MVM gives each agent run a disposable hardware boundary <strong>with an audit trail</strong> — the thing a CISO asks for before agents touch production-adjacent systems.</p>
+      <li id="note-today"><span class="tick">A</span><div>
+        <h3>Today: point tools, stitched</h3>
+        <p>A sandbox from one vendor, a secrets SDK from another, DLP filtering, a hand-rolled audit pipeline, and a custom broker wiring them together. Every seam is an integration your team builds and maintains &mdash; and a gap nobody can fully audit, because the sandbox shares a kernel and the logs don&rsquo;t vouch for each other.</p>
       </div></li>
-      <li id="note-plugs"><span class="tick">B</span><div>
-        <h3>Plugs into what exists</h3>
-        <p>MVM doesn't replace the registry, the secrets manager, or the SIEM — it <strong>connects them on the trusted side of the boundary</strong>. Images are digest-pinned and signature-verified on pull; secrets are brokered per-request; audit events are ready for compliance tooling.</p>
-      </div></li>
-      <li id="note-fleet"><span class="tick">C</span><div>
-        <h3>Laptop to fleet is one product</h3>
-        <p>The same CLI and the same artifacts run on a developer's Mac and on Linux servers. The companion <strong>mvmd</strong> project extends this into multi-tenant fleet orchestration — pools, tenants, coordinators — which is the expansion path from single-developer tool to platform contract.</p>
+      <li class="sec" id="note-mvm"><span class="tick">B</span><div>
+        <h3>With MVM: one runtime layer</h3>
+        <p>Isolation, secret brokering, egress policy, and a signed audit chain ship as <strong>one runtime with one contract</strong>. This is the layer for teams running code they didn&rsquo;t write &mdash; agent platforms, code interpreters, multi-tenant SaaS. Swap the sandbox call for MVM and the other tools come with it.</p>
       </div></li>
     </ol>
+    </div>
 
     <div class="pull">
-      <p><strong>The one-sentence version:</strong> MVM is the layer where a company runs code it can't fully trust — AI agents, customer workloads, third-party dependencies — with hardware isolation, immutable execution, cryptographic admission, and a tamper-evident audit trail, from a single laptop to a fleet.</p>
+      <p><strong>The one-sentence version:</strong> MVM is the layer where a company runs code it can&rsquo;t fully trust &mdash; AI agents, customer workloads, third-party dependencies &mdash; with hardware isolation, immutable execution, cryptographic admission, and a tamper-evident audit trail, from a single laptop to a fleet.</p>
     </div>
   </section>
 
@@ -318,6 +317,102 @@ import { Footer } from "../landing/Footer";
 </div>
 
 <Footer />
+
+
+<script>
+  // Hover popovers for both architecture diagrams (Views 1 and 2). Each
+  // .hotspot <g> names a
+  // hidden note (data-note -> li id inside .stack-notes-src); hovering,
+  // focusing, or tapping the layer shows that note in the .stack-pop card,
+  // positioned next to the layer within the figure. Escape, blur, or a
+  // tap outside closes it.
+  function initDiagramPopovers(sectionId) {
+    const section = document.getElementById(sectionId);
+    if (!section) return;
+    const fig = section.querySelector("figure");
+    const pop = section.querySelector(".stack-pop");
+    if (!fig || !pop) return;
+    const hotspots = Array.from(section.querySelectorAll(".hotspot"));
+    let hideTimer;
+
+    function position(h) {
+      const fr = fig.getBoundingClientRect();
+      const hr = h.getBoundingClientRect();
+      const pw = pop.offsetWidth;
+      const ph = pop.offsetHeight;
+      let left = hr.left - fr.left + hr.width / 2 - pw / 2;
+      left = Math.max(8, Math.min(left, fr.width - pw - 8));
+      let top = hr.bottom - fr.top + 10;
+      if (top + ph > fr.height - 4) top = hr.top - fr.top - ph - 10;
+      if (top < 4) top = 4;
+      pop.style.left = `${left}px`;
+      pop.style.top = `${top}px`;
+    }
+
+    function show(h) {
+      clearTimeout(hideTimer);
+      const src = document.getElementById(h.dataset.note ?? "");
+      if (!src) return;
+      const body = src.querySelector("div");
+      if (!body) return;
+      // Paragraphs only — the layer's title is already on the diagram
+      // box itself, so the note's h3 stays out of the popover.
+      pop.innerHTML = Array.from(body.querySelectorAll("p"))
+        .map((el) => el.outerHTML)
+        .join("");
+      pop.hidden = false;
+      position(h);
+      hotspots.forEach((x) => x.setAttribute("aria-expanded", String(x === h)));
+    }
+
+    function hide() {
+      pop.hidden = true;
+      hotspots.forEach((x) => x.setAttribute("aria-expanded", "false"));
+    }
+
+    function scheduleHide() {
+      clearTimeout(hideTimer);
+      hideTimer = window.setTimeout(hide, 140);
+    }
+
+    for (const h of hotspots) {
+      h.addEventListener("mouseenter", () => show(h));
+      h.addEventListener("mouseleave", scheduleHide);
+      h.addEventListener("focus", () => show(h));
+      h.addEventListener("blur", scheduleHide);
+      h.addEventListener("click", (e) => {
+        e.preventDefault();
+        show(h);
+      });
+      h.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          pop.hidden ? show(h) : hide();
+        }
+      });
+    }
+    pop.addEventListener("mouseenter", () => clearTimeout(hideTimer));
+    pop.addEventListener("mouseleave", scheduleHide);
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") hide();
+    });
+    document.addEventListener("pointerdown", (e) => {
+      const t = e.target instanceof Element ? e.target : null;
+      if (!pop.hidden && t && !pop.contains(t) && !t.closest(".hotspot")) hide();
+    });
+  }
+
+  function initAllDiagramPopovers() {
+    initDiagramPopovers("stack");
+    initDiagramPopovers("company");
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initAllDiagramPopovers, { once: true });
+  } else {
+    initAllDiagramPopovers();
+  }
+</script>
 
 <style>
   /*  The diagrams below are written against short local names (--accent,
@@ -469,6 +564,38 @@ import { Footer } from "../landing/Footer";
     max-width: 74ch;
   }
   .arch figcaption .hint { color: var(--steel); font-weight: 600; }
+
+  /* Stack-diagram hover popovers (View 1). The figure is the positioning
+     context; .fig-scroll clips horizontally, so the card lives outside it
+     as a sibling and is placed absolutely over the figure. */
+  .arch #stack figure,
+  .arch #company figure { position: relative; }
+  .arch .hotspot { cursor: pointer; }
+  .arch .hotspot:focus { outline: none; }
+  .arch .hotspot:hover > rect:first-of-type,
+  .arch .hotspot:focus-visible > rect:first-of-type {
+    stroke: var(--accent);
+    stroke-width: 2.5;
+  }
+  .arch .stack-pop {
+    position: absolute;
+    z-index: 30;
+    width: min(30rem, calc(100% - 1rem));
+    padding: 1rem 1.15rem;
+    background: var(--surface);
+    /* Accent border — matches the highlight the hovered layer gets, and
+       separates the card from the diagram underneath it. */
+    border: 1.5px solid var(--accent);
+    border-radius: 8px;
+    box-shadow: 0 10px 28px color-mix(in oklab, var(--ink) 14%, transparent);
+  }
+  .arch .stack-pop p {
+    margin: 0;
+    font-size: 0.9rem;
+    line-height: 1.55;
+    color: var(--muted);
+  }
+  .arch .stack-pop strong { color: var(--ink); }
 
   /* Clickable diagram regions. */
   .arch svg a { cursor: pointer; }

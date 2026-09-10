@@ -29,13 +29,26 @@ export function CTABanner() {
               ai may never be fully predictable.{" "}
               <span className="text-accent-2">its boundaries should be.</span>
             </h2>
+            {/* The pitch script's vision beat: the controls move upstream,
+                to the moment a prompt is written. Sits between the closing
+                line and the "that's mvm" ask so the page ends where the
+                pitch ends. */}
+            <p
+              className="text-base leading-relaxed text-body"
+              style={{ marginTop: "1.5rem" }}
+            >
+              The controls are moving upstream &mdash; to the moment a
+              prompt is written &mdash; so intent becomes a signed,
+              constrained execution plan that can orchestrate only the
+              tools and workloads it&rsquo;s allowed to use.
+            </p>
             {/* No max-width cap: the sentence should sit on one line at
                 desktop sizes; it still wraps naturally on narrow screens.
                 Inline margins, not mt-*: Starlight's unlayered stylesheet
                 beats layered utilities on this page (see Positioning.tsx). */}
             <p
               className="text-base leading-relaxed text-body"
-              style={{ marginTop: "1.5rem" }}
+              style={{ marginTop: "1rem" }}
             >
               That&rsquo;s mvm. One install command. No daemon, no SSH, and no
               network until policy admits it.

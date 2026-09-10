@@ -2,54 +2,38 @@ import { Section } from "./primitives/Section";
 import { Eyebrow } from "./primitives/Eyebrow";
 import { Reveal } from "./primitives/Reveal";
 
-// The composition argument: isolation alone is table stakes (every serious
-// runtime has a microVM now), so this section makes the case that what a
-// security team actually approves is the six-layer contract around the
-// box. Each layer is backed by numbered CI-enforced claim(s) — noted in a
-// comment per layer, not rendered (the claim numbers were dropped from
-// the cards as jargon; /security/ci-claims/ mirrors the machine-checked
-// ADR-001 ledger and is linked below the grid). Do not add a layer here
-// without a shipped claim to cite.
+// The composition argument: isolation alone is table stakes (every
+// serious runtime has a microVM now), so this section makes the case that
+// what a security team actually approves is the contract around the box —
+// told the way the pitch script tells it, as three moves in order:
+// declare → sign → prove. This collapsed from six parallel layer cards
+// (pitch-script reshape): each step absorbs two or three of the old
+// layers, and the CI-enforced claim(s) backing each step are noted in a
+// comment per step, not rendered (/security/ci-claims/ mirrors the
+// machine-checked ADR-001 ledger and is linked below the grid). Do not
+// add a step here without a shipped claim to cite.
 const LAYERS: Array<{
   num: string;
   title: string;
   body: string;
 }> = [
-  // claim 8
+  // claims 10, 12, 13 (granted authority) + claim 10 (no bypass path)
   {
     num: "01",
-    title: "Signed admission",
-    body: "Nothing boots without a signed, audited ExecutionPlan — validity window, nonce, chain-signed lifecycle.",
+    title: "Declare",
+    body: "Say what's allowed before anything runs — what's in the box, what it can reach, what it can do. Everything else is blocked by default.",
   },
-  // claims 9, 14
+  // claims 8, 9, 14 (signed admission, pinned artifact) + 3, 15 (sealed)
   {
     num: "02",
-    title: "Pinned artifact",
-    body: "What runs is pinned to its exact hash — checked at download and again right before boot, so nothing can be swapped in between.",
+    title: "Sign",
+    body: "Your declaration is signed and the code is locked to it. What runs is exactly what you approved — proof, not hope.",
   },
-  // claims 10, 12, 13
+  // claims 8, 14 (verifiable record)
   {
     num: "03",
-    title: "Granted authority",
-    body: "Network access, host services, and credentials must each be spelled out in the signed plan — deny-all by default, raw secrets never in the guest.",
-  },
-  // claim 10
-  {
-    num: "04",
-    title: "No bypass path",
-    body: "The guest has no network device. Every byte exits over one vsock channel the host can refuse.",
-  },
-  // claims 3, 15
-  {
-    num: "05",
-    title: "Sealed, immutable production behavior",
-    body: "The filesystem is cryptographically sealed — tamper with it and it won't boot. No shell, no terminal, no debug commands: the program you approved is the only thing that can run.",
-  },
-  // claims 8, 14
-  {
-    num: "06",
-    title: "Verifiable record",
-    body: "Every admission and policy decision lands in a chain-signed audit log. Tampering breaks the chain.",
+    title: "Prove",
+    body: "Every run leaves a signed record of what happened and what was allowed — tamper with it and it shows. Evidence you can hand to an auditor.",
   },
 ];
 
@@ -76,17 +60,16 @@ export function ExecutionContract() {
         <p className="max-w-2xl text-base leading-relaxed text-body">
           Before anything runs, you declare what&rsquo;s allowed &mdash;
           what&rsquo;s in the box, what it can reach, what it can do &mdash;
-          and sign it. What runs is what you approved: proof, not hope. Six
-          layers, enforced and witnessed.
+          and sign it. What runs is what you approved: proof, not hope. Three
+          moves, enforced and witnessed.
         </p>
       </Reveal>
 
-      {/* Two columns of three: the layers read top-to-bottom as a chain,
-          left column first. Inline margin, not mt-*: Starlight's unlayered
-          stylesheet beats layered utilities on this page (see
-          Positioning.tsx). */}
+      {/* One row of three: the steps read left-to-right as a sequence.
+          Inline margin, not mt-*: Starlight's unlayered stylesheet beats
+          layered utilities on this page (see Positioning.tsx). */}
       <div
-        className="grid gap-x-8 gap-y-6 sm:grid-cols-2"
+        className="grid gap-x-6 gap-y-6 sm:grid-cols-3"
         style={{ marginTop: "3rem" }}
       >
         {LAYERS.map((layer, i) => (
@@ -112,10 +95,10 @@ export function ExecutionContract() {
           style={{ marginTop: "2rem" }}
         >
           <a
-            href={`${base}security/security-review/`}
+            href={`${base}how-it-works/`}
             className="text-sm text-accent underline underline-offset-2 hover:text-accent/80"
           >
-            How this answers a security review
+            Under the hood: microVMs, performance, backends
           </a>
           <a
             href={`${base}security/ci-claims/`}

@@ -1,64 +1,12 @@
-import { useState } from "react";
 import { Button } from "../ui/button";
 import { Bloom } from "./primitives/Bloom";
 import { Reveal } from "./primitives/Reveal";
 import { HeroStackDiagram } from "./HeroStackDiagram";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "../ui/tabs";
 
-const ONE_LINER =
-  "curl -fsSL https://raw.githubusercontent.com/tinylabscom/mvm/main/install.sh | sh";
-
-// Splits on "/" and inserts a <wbr> right after each one, so the browser's
-// only wrap opportunities inside the URL are slash boundaries — never mid
-// path-segment. Default (unmodified) overflow-wrap only breaks at existing
-// break characters, so once the wrap points are placed deliberately, no
-// segment ever splits mid-token the way the un-broken command used to
-// under the mono face (which sets ~20% wider than the sans it was tuned
-// for). Space stays a break point via normal browser behaviour.
-function withSlashBreaks(command: string) {
-  const parts = command.split("/");
-  return parts.map((part, i) => (
-    <span key={i}>
-      {part}
-      {i < parts.length - 1 && (
-        <>
-          /<wbr />
-        </>
-      )}
-    </span>
-  ));
-}
-
-function InstallRow({ command }: { command: string }) {
-  const [copied, setCopied] = useState(false);
-
-  function copy() {
-    navigator.clipboard.writeText(command);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  }
-
-  return (
-    <button
-      type="button"
-      className="group flex w-full flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-edge/50 bg-raised/80 px-5 py-3.5 text-left backdrop-blur transition-all hover:border-accent/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-page"
-      onClick={copy}
-      aria-label="Copy install command"
-    >
-      <span className="text-accent/60 text-sm">$</span>
-      {/* The command shares the line with the $ at every width; long
-          commands wrap inside the code element (at slash boundaries) rather
-          than dropping to their own row. */}
-      <code className="min-w-0 flex-1 text-sm leading-relaxed break-normal font-mono text-emphasis/90">
-        {withSlashBreaks(command)}
-      </code>
-      <span className="ml-auto shrink-0 self-center rounded border border-edge/50 px-2 py-0.5 text-[11px] text-label transition-colors group-hover:border-accent/30 group-hover:text-accent">
-        {copied ? "Copied!" : "Copy"}
-      </span>
-    </button>
-  );
-}
-
+// The install affordance (one-liner + platform tabs) moved to
+// InstallTabs.tsx, rendered inside Quickstart — the hero keeps the
+// claim and the diagram, and the story runs before the install
+// command (pitch-script reshape).
 export function Hero() {
   const rawBase = import.meta.env.BASE_URL;
   const base = rawBase.endsWith("/") ? rawBase : `${rawBase}/`;
@@ -129,6 +77,14 @@ export function Hero() {
               {/* The what-MVM-does callout — this sentence is the pitch, so
                   it gets an accent rule and emphasized key phrases instead
                   of reading as body copy. */}
+              <p
+                className="text-base leading-relaxed text-body"
+                style={{ marginTop: "1rem" }}
+              >
+                mvm puts the agent in a box: any workload &mdash; an agent, a
+                customer&rsquo;s code, a build job &mdash; runs inside a
+                sealed, immutable, hardware-isolated microVM.
+              </p>
               {/* Runs-anywhere facts as badge chips, in the same mono idiom
                   as the credibility row above. */}
               <div className="mt-4 flex flex-wrap gap-2 font-mono text-[11px] lowercase">
@@ -145,39 +101,6 @@ export function Hero() {
               </div>
             </Reveal>
 
-            {/* Platform-specific install — the single install affordance in
-                the hero. */}
-            <Reveal delay={240}>
-              <Tabs defaultValue="unix" className="max-w-lg">
-                <TabsList>
-                  <TabsTrigger value="unix">macOS / Linux</TabsTrigger>
-                  <TabsTrigger value="windows">Windows (WSL2)</TabsTrigger>
-                </TabsList>
-
-                <TabsContent value="unix">
-                  <p className="mb-4 text-sm leading-relaxed text-body">
-                    macOS 13+ (libkrun on 13&ndash;25, HVF on 26+) or Linux with{" "}
-                    <code className="font-mono text-emphasis/90">/dev/kvm</code>.
-                  </p>
-                  <InstallRow command={ONE_LINER} />
-                </TabsContent>
-
-                <TabsContent value="windows">
-                  <p className="mb-4 text-sm leading-relaxed text-body">
-                    Native Windows isn&apos;t a supported microVM host. Run mvm inside
-                    a WSL2 distro with nested KVM and libkrun &mdash; then follow the{" "}
-                    <a
-                      href={`${base}install/windows/`}
-                      className="text-accent underline underline-offset-2 hover:text-accent/80"
-                    >
-                      WSL2 install guide
-                    </a>
-                    .
-                  </p>
-                </TabsContent>
-              </Tabs>
-            </Reveal>
-
             <Reveal delay={320} className="flex flex-wrap items-center gap-4">
               <a href={`${base}getting-started/quickstart/`}>
                 <Button size="lg">Get Started</Button>
@@ -189,18 +112,6 @@ export function Hero() {
               </a>
             </Reveal>
 
-            {/* Tertiary text link — the third action the reference reserves
-                for a lower-commitment path than the button pair. Ours
-                points at the CLI reference rather than anything invented. */}
-            <Reveal delay={360}>
-              <a
-                href={`${base}reference/cli-commands/`}
-                className="inline-flex items-center gap-1.5 text-sm text-label underline underline-offset-4 hover:text-accent"
-              >
-                Browse the CLI reference
-                <span aria-hidden="true">&rarr;</span>
-              </a>
-            </Reveal>
           </div>
 
           {/* The boundary diagram — the hero's visual anchor. This is the

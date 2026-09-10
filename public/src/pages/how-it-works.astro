@@ -1,0 +1,18 @@
+---
+// The evidence page, rendered inside the Starlight shell — same mechanism
+// as architecture.astro: `template: "splash"` + `hero: {}` select the
+// landing chrome and skip Starlight's PageTitle, and the Hero override
+// (src/overrides/Hero.astro) keys on this route's slug to supply the
+// body (HowItWorks.tsx).
+import StarlightPage from "@astrojs/starlight/components/StarlightPage.astro";
+---
+
+<StarlightPage
+  frontmatter={{
+    title: "How it works",
+    description:
+      "The mechanism behind mvm's execution contract — why a microVM and not a container, measured boot performance, deployment tiers, and the backends underneath.",
+    template: "splash",
+    hero: {},
+  }}
+/>

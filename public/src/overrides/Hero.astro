@@ -10,6 +10,7 @@
 import Default from "@astrojs/starlight/components/Hero.astro";
 import { Landing } from "../components/landing/Landing";
 import Architecture from "../components/architecture/Architecture.astro";
+import { HowItWorks } from "../components/landing/HowItWorks";
 
 const route = Astro.locals.starlightRoute;
 const isSplash = route?.entry?.data?.template === "splash";
@@ -20,4 +21,5 @@ const splashSlug = isSplash ? route?.entry?.slug : undefined;
 
 {splashSlug === "" && <Landing client:load />}
 {splashSlug === "architecture" && <Architecture />}
+{splashSlug === "how-it-works" && <HowItWorks client:load />}
 {!isSplash && <Default />}
