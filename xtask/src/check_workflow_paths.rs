@@ -776,10 +776,11 @@ mod tests {
         // Every lane the aggregate names must also be read back in the loop that
         // compares results against the scope decision. A lane in `needs` but not
         // in the loop is gated on nothing but its own scheduling.
-        // `bdd-conformance` and `kernel` key off their own narrower scopes, so
-        // they are matched against `$SCOPE_BDD` / `$KERNEL_SCOPE` outside the
-        // loop rather than folded into it — but they still have to be read back
-        // somewhere, which is what this pins.
+        // `kernel` is the only lane still keying off its own narrower scope, so
+        // it is matched against `$KERNEL_SCOPE` outside the loop rather than
+        // folded into it — but it still has to be read back somewhere, which is
+        // what this pins. `bdd-conformance` joined the loop when it took the
+        // Gherkin suite, and the `code` scope, off the Linux lane.
         for expected in [
             "\"$WORKSPACE_RESULT\"",
             "\"$LINUX_RESULT\"",
@@ -828,13 +829,48 @@ mod tests {
         for expected in [
             "cargo +1.97.1 build -p mvm-contract --target wasm32-unknown-unknown",
             "cargo test -p mvm-conformance --test meta",
-            "just bdd",
         ] {
             assert!(
                 linux_coverage.contains(expected),
                 "Linux coverage script must contain {expected:?}"
             );
         }
+
+        // One owner for the Gherkin suite. It ran here *and* in
+        // `bdd-conformance`, so every pull request touching `crates/mvm-cli/`
+        // paid for 252 scenarios twice — about 16 of this lane's 20 minutes.
+        // Pin both halves: gone from here, still present there.
+        // Executable lines only. A `#` line naming the suite is the comment
+        // explaining why it left, and a gate that cannot tell prose from a
+        // command forces that explanation to be written around it.
+        let linux_commands = linux_coverage
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !linux_commands.contains("just bdd"),
+            "the Gherkin suite belongs to bdd-conformance; running it here too \
+             is the duplicate that made this the slowest lane in the workflow"
+        );
+        let bdd_workflow = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join(".github/workflows/bdd.yml"),
+        )
+        .expect("BDD workflow must be readable");
+        assert!(
+            bdd_workflow.contains("just bdd"),
+            "bdd-conformance must still run the Gherkin suite"
+        );
+        // ...and it has to be reachable on every run the Linux lane covers,
+        // which is what taking the suite from that lane made it responsible
+        // for. `bdd` is a strict subset of `code`, so this is the wider gate.
+        assert!(
+            job_block(&workflow, "bdd-conformance")
+                .contains("if: needs.scope.outputs.code == 'true'"),
+            "bdd-conformance must carry the code scope it inherited with the suite"
+        );
     }
 
     #[test]
