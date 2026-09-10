@@ -10,14 +10,16 @@
 
 ## In progress
 
-- [ ] **CI queue consolidation.**
+- [x] **CI queue consolidation.**
       `specs/plans/2026-09-10-ci-queue-consolidation.md`.
       Preserve cumulative merge-group validation while reducing runner fan-out
       and the measured Rust critical path. Work covers merge-group scope,
       required aggregate ownership, trusted feature-cache warming, duplicate
-      nextest listings, and non-required queue jobs. Implementation and all
-      configured CI tests are green; live PR/queue timing and the post-merge
-      required-context reduction remain.
+      nextest listings, and non-required queue jobs. PR #3236 is merged; its
+      exact-head queue run is green, Website no longer runs in the queue, and
+      branch protection requires only the `Lint` and `Test` aggregates. Live
+      timing rejected serial Nix/guest reuse, so the two witnesses remain
+      parallel while both feed `Test`.
 
 - [ ] **Scheduled CI stability — issues #3222, #3223, and #3224.**
       `specs/plans/2026-09-09-scheduled-ci-stability.md`.

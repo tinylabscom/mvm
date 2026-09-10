@@ -697,7 +697,7 @@ jobs:
   test:
     name: Test
     if: ${{ always() }}
-    needs: [scope, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, boot-latency, kernel, nix-flake-check]
+    needs: [scope, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, boot-latency, guest-image-boot, kernel, nix-flake-check]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -715,6 +715,7 @@ jobs:
           KERNEL_SCOPE: ${{ needs.scope.outputs.kernel }}
           KERNEL_RESULT: ${{ needs.kernel.result }}
           BOOT_RESULT: ${{ needs.boot-latency.result }}
+          GUEST_IMAGE_RESULT: ${{ needs.guest-image-boot.result }}
           NIX_RESULT: ${{ needs.nix-flake-check.result }}
         run: |
           set -euo pipefail
@@ -758,6 +759,10 @@ jobs:
           esac
           if [ "$NIX_RESULT" != "$nix_required" ]; then
             echo "Nix validation did not match event $EVENT_NAME: $NIX_RESULT"
+            exit 1
+          fi
+          if [ "$GUEST_IMAGE_RESULT" != "$nix_required" ]; then
+            echo "Tree-built guest validation did not match event $EVENT_NAME: $GUEST_IMAGE_RESULT"
             exit 1
           fi
           case "$EVENT_NAME:$SCOPE_CODE" in
@@ -1294,19 +1299,138 @@ jobs:
             staging/kernel-metrics-${{ matrix.arch }}.json
             staging/workload-config-${{ matrix.arch }}
 
-  nix-flake-check:
-    name: Nix flake check (Linux eval)
-    # Nix eval/build and the tree-built guest witness share one queue runner so
-    # the boot reuses the exact images and Nix store this job already produced.
+  guest-image-boot:
+    name: Guest image boots (tree-built)
+    # Keep this witness parallel with Nix evaluation. A live queue measurement
+    # showed that serializing it behind the Nix footprint work extended the
+    # protected critical path by about seven minutes even though both jobs
+    # build overlapping store paths. `Test` owns both results, so parallelism
+    # does not weaken the merge gate.
     needs: [scope]
     if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
 
       - uses: ./.github/actions/free-disk
         if: needs.scope.outputs.nix == 'true'
+
+      - name: Install Nix
+        if: needs.scope.outputs.nix == 'true'
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - name: Install Rust toolchain
+        if: needs.scope.outputs.nix == 'true'
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - uses: ./.github/actions/apt-deps
+        if: needs.scope.outputs.nix == 'true'
+        with:
+          packages: lld
+
+      - name: Build the guest image from this tree
+        if: needs.scope.outputs.nix == 'true'
+        run: |
+          set -euo pipefail
+          nix build "./nix/images/default-tenant#packages.x86_64-linux.default" \
+            --impure --no-link --print-out-paths > /tmp/store-path.txt
+          STORE_PATH=$(head -1 /tmp/store-path.txt)
+          mkdir -p staging
+          # Resolve each artifact through its Nix store symlink.
+          cp -L "$STORE_PATH/vmlinux"       staging/vmlinux
+          cp -L "$STORE_PATH/rootfs.ext4"   staging/rootfs.ext4
+          cp -L "$STORE_PATH/mvm-meta.json" staging/mvm-meta.json
+
+      - name: Assert the tree-built rootfs has an exec'able /init
+        if: needs.scope.outputs.nix == 'true'
+        run: |
+          set -euo pipefail
+          command -v debugfs >/dev/null 2>&1 \
+            || { sudo apt-get update && sudo apt-get install -y e2fsprogs; }
+          bash nix/packaging/release/assert-init-shebang.sh \
+            staging/rootfs.ext4 "tree-built x86_64"
+          bash nix/packaging/release/assert-kernel-format.sh \
+            staging/vmlinux x86_64 "tree-built x86_64 kernel"
+
+      - name: Build the runtime overlay
+        if: needs.scope.outputs.nix == 'true'
+        run: |
+          set -euo pipefail
+          OVERLAY_PATH=$(nix build "./nix/images/runtime-overlay#packages.x86_64-linux.default" \
+            --no-link --print-out-paths | head -1)
+          mkdir -p overlay-staging
+          cp -L "$OVERLAY_PATH/overlay.ext4"     overlay-staging/overlay.ext4
+          cp -L "$OVERLAY_PATH/overlay.verity"   overlay-staging/overlay.verity
+          cp -L "$OVERLAY_PATH/overlay.roothash" overlay-staging/overlay.roothash
+          echo "MVM_RUNTIME_BOOT_OVERLAY_ROOTHASH=$(tr -d '[:space:]' < overlay-staging/overlay.roothash)" \
+            >> "$GITHUB_ENV"
+
+      - name: Install firecracker
+        if: needs.scope.outputs.nix == 'true'
+        env:
+          # Tracks `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT`.
+          FC_VERSION: v1.14.1
+        run: |
+          set -euo pipefail
+          curl -fL -o firecracker.tgz \
+            "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-x86_64.tgz"
+          tar -xzf firecracker.tgz
+          sudo install -m 0755 "release-${FC_VERSION}-x86_64/firecracker-${FC_VERSION}-x86_64" /usr/bin/firecracker
+          /usr/bin/firecracker --version
+
+      - name: Grant /dev/kvm access for the job
+        if: needs.scope.outputs.nix == 'true'
+        run: |
+          set -euo pipefail
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm missing on this runner — the boot gate cannot run." >&2
+            exit 1
+          fi
+          sudo chmod 666 /dev/kvm
+
+      - name: Boot the tree-built image
+        if: needs.scope.outputs.nix == 'true'
+        # This is a reach-userspace witness, not a latency assertion. The loose
+        # budget and single run keep shared-runner variance out of the result.
+        env:
+          MVM_RUNTIME_BOOT_BENCH: "1"
+          MVM_RUNTIME_BOOT_BACKEND: firecracker
+          MVM_RUNTIME_BOOT_KERNEL: staging/vmlinux
+          MVM_RUNTIME_BOOT_ROOTFS: staging/rootfs.ext4
+          MVM_RUNTIME_BOOT_OVERLAY: overlay-staging/overlay.ext4
+          MVM_RUNTIME_BOOT_OVERLAY_VERITY: overlay-staging/overlay.verity
+          MVM_RUNTIME_BOOT_READY: guest-agent
+          MVM_RUNTIME_BOOT_RUNS: "1"
+          MVM_RUNTIME_BOOT_CONCURRENT: "1"
+          MVM_RUNTIME_BOOT_BUDGET_MS: "60000"
+        run: |
+          set -euo pipefail
+          test -f staging/mvm-meta.json
+          cargo test --test runtime_boot_bench \
+            prebuilt_runtime_image_boots_within_budget -- --exact --nocapture
+
+      - name: Guest console on failure
+        if: ${{ failure() && needs.scope.outputs.nix == 'true' }}
+        run: |
+          for d in "$HOME"/.mvm/vms/*/; do
+            echo "===== $d ====="
+            ls -la "$d" || true
+            if [ -f "$d/console.log" ]; then
+              cat "$d/console.log"
+            fi
+          done
+
+  nix-flake-check:
+    name: Nix flake check (Linux eval)
+    # Nix eval/build is heavy; run it in the merge queue and on manual dispatch,
+    # not on every PR update. The live guest witness remains parallel because
+    # serial reuse made the measured protected path slower.
+    needs: [scope]
+    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
 
       - name: Install Nix
         if: needs.scope.outputs.nix == 'true'
@@ -1322,12 +1446,7 @@ jobs:
 
       - name: Install Rust toolchain
         if: needs.scope.outputs.nix == 'true'
-        uses: dtolnay/rust-toolchain@1.97.1
-
-      - uses: ./.github/actions/apt-deps
-        if: needs.scope.outputs.nix == 'true'
-        with:
-          packages: lld
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Eval-check every flake
         if: needs.scope.outputs.nix == 'true'
@@ -1434,84 +1553,3 @@ jobs:
             --closure-paths "$image_path/rootfs-closure-paths" \
             --sdk-sidecar "$sidecar_path/sdk.ext4" \
             --json
-
-      - name: Stage the tree-built image for boot
-        if: needs.scope.outputs.nix == 'true'
-        run: |
-          set -euo pipefail
-          image_path=$(head -1 /tmp/default-tenant-path.txt)
-          overlay_path=$(head -1 /tmp/runtime-overlay-path.txt)
-          mkdir -p staging overlay-staging
-          # Resolve the store symlinks so the boot witness owns ordinary files.
-          cp -L "$image_path/vmlinux" staging/vmlinux
-          cp -L "$image_path/rootfs.ext4" staging/rootfs.ext4
-          cp -L "$image_path/mvm-meta.json" staging/mvm-meta.json
-          cp -L "$overlay_path/overlay.ext4" overlay-staging/overlay.ext4
-          cp -L "$overlay_path/overlay.verity" overlay-staging/overlay.verity
-          cp -L "$overlay_path/overlay.roothash" overlay-staging/overlay.roothash
-          echo "MVM_RUNTIME_BOOT_OVERLAY_ROOTHASH=$(tr -d '[:space:]' < overlay-staging/overlay.roothash)" \
-            >> "$GITHUB_ENV"
-
-      - name: Assert the tree-built rootfs has an exec'able /init
-        if: needs.scope.outputs.nix == 'true'
-        run: |
-          set -euo pipefail
-          command -v debugfs >/dev/null 2>&1 \
-            || { sudo apt-get update && sudo apt-get install -y e2fsprogs; }
-          bash nix/packaging/release/assert-init-shebang.sh \
-            staging/rootfs.ext4 "tree-built x86_64"
-          bash nix/packaging/release/assert-kernel-format.sh \
-            staging/vmlinux x86_64 "tree-built x86_64 kernel"
-
-      - name: Install firecracker
-        if: needs.scope.outputs.nix == 'true'
-        env:
-          # Tracks `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT`.
-          FC_VERSION: v1.14.1
-        run: |
-          set -euo pipefail
-          curl -fL -o firecracker.tgz \
-            "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-x86_64.tgz"
-          tar -xzf firecracker.tgz
-          sudo install -m 0755 "release-${FC_VERSION}-x86_64/firecracker-${FC_VERSION}-x86_64" /usr/bin/firecracker
-          /usr/bin/firecracker --version
-
-      - name: Grant /dev/kvm access for the job
-        if: needs.scope.outputs.nix == 'true'
-        run: |
-          set -euo pipefail
-          if [ ! -e /dev/kvm ]; then
-            echo "::error::/dev/kvm missing on this runner — the boot gate cannot run." >&2
-            exit 1
-          fi
-          sudo chmod 666 /dev/kvm
-
-      - name: Boot the tree-built image
-        if: needs.scope.outputs.nix == 'true'
-        env:
-          MVM_RUNTIME_BOOT_BENCH: "1"
-          MVM_RUNTIME_BOOT_BACKEND: firecracker
-          MVM_RUNTIME_BOOT_KERNEL: staging/vmlinux
-          MVM_RUNTIME_BOOT_ROOTFS: staging/rootfs.ext4
-          MVM_RUNTIME_BOOT_OVERLAY: overlay-staging/overlay.ext4
-          MVM_RUNTIME_BOOT_OVERLAY_VERITY: overlay-staging/overlay.verity
-          MVM_RUNTIME_BOOT_READY: guest-agent
-          MVM_RUNTIME_BOOT_RUNS: "1"
-          MVM_RUNTIME_BOOT_CONCURRENT: "1"
-          MVM_RUNTIME_BOOT_BUDGET_MS: "60000"
-        run: |
-          set -euo pipefail
-          test -f staging/mvm-meta.json
-          cargo test --test runtime_boot_bench \
-            prebuilt_runtime_image_boots_within_budget -- --exact --nocapture
-
-      - name: Guest console on failure
-        if: ${{ failure() && needs.scope.outputs.nix == 'true' }}
-        run: |
-          for d in "$HOME"/.mvm/vms/*/; do
-            echo "===== $d ====="
-            ls -la "$d" || true
-            if [ -f "$d/console.log" ]; then
-              cat "$d/console.log"
-            fi
-          done

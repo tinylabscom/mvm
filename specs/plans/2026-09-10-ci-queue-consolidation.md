@@ -3,7 +3,7 @@
 Backing: shipped-source
 Validation: check-sprint-append
 
-**Status:** Implementation complete; live queue validation pending
+**Status:** COMPLETE
 
 ## Goal
 
@@ -31,8 +31,8 @@ path scoping or non-required witness jobs weaken exact merge-group validation.
 - [x] Classify a merge-group head against the target branch rather than only
       the preceding queue entry, with a fail-closed fallback.
 - [x] Make the required `Test` aggregate own Nix evaluation, tree-built guest
-      boot, and the published-image boot ceiling; combine overlapping Nix and
-      guest-image work on one runner.
+      boot, and the published-image boot ceiling. Keep Nix and the tree-built
+      guest witness parallel after live timing proved serialization slower.
 - [x] Stop the non-required Website workflow from consuming a runner on every
       merge-group event; retain its pull-request path gate.
 - [x] Warm the `test-support` feature graph from trusted `main` and restore it
@@ -41,10 +41,10 @@ path scoping or non-required witness jobs weaken exact merge-group validation.
       `cargo nextest list`.
 - [x] Run workflow structure tests, actionlint, xtask tests, workspace tests,
       workspace check, formatting, and zero-warning Clippy.
-- [ ] Record the first live pull-request and merge-group timings, then decide
+- [x] Record the first live pull-request and merge-group timings, then decide
       whether combining additional short lanes improves the 20-runner capacity
       boundary without lengthening the critical path.
-- [ ] After the workflow lands, reduce classic branch protection to the stable
+- [x] After the workflow lands, reduce classic branch protection to the stable
       `Lint (fmt + clippy + policy)` and `Test` aggregate contexts.
 
 ## Safety invariants
@@ -70,3 +70,20 @@ path scoping or non-required witness jobs weaken exact merge-group validation.
   harness-concurrency artifacts after the test bodies passed; each failed
   target passed immediately in isolation. The configured nextest groups are
   the authoritative CI execution and completed cleanly.
+- Pull-request run `34470355947` completed in 23m58s. All substantive jobs
+  started immediately after scope classification; `Test` was green after
+  20m11s, while the cold `test-support` lane set the full-run tail at 22m49s.
+- Merge-group run `34472528030` completed in 29m12s and classified the exact
+  queue head against `main`. Website did not run, and `Test` did not publish
+  until Nix, both boot witnesses, both kernels, and the complete test matrix
+  were green.
+- The first folded Nix/guest run made Nix the 28m49s critical path. The prior
+  parallel run completed Nix in 21m48s and the tree-built guest in 22m28s, so
+  the final layout restores those jobs to parallel execution while retaining
+  both as explicit `Test` dependencies. Runner capacity was not the limiter:
+  every queue worker began within five seconds of scope completion.
+- Classic branch protection now requires exactly `Lint (fmt + clippy + policy)`
+  and `Test`, down from six direct contexts.
+- Main cache-warm run `34475187048` populated the dedicated `test-support`
+  cache successfully in 9m43s; the next pull request is the first live restore
+  measurement.

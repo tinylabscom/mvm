@@ -771,7 +771,7 @@ mod tests {
         assert!(test.contains(
             "needs: [scope, test-workspace, test-workspace-aarch64, test-linux, \
              test-release-witness, test-ebpf-telemetry, bdd-conformance, \
-             boot-latency, kernel, nix-flake-check]"
+             boot-latency, guest-image-boot, kernel, nix-flake-check]"
         ));
 
         // Every lane the aggregate names must also be read back in the loop that
@@ -790,6 +790,7 @@ mod tests {
             "\"$BDD_RESULT\"",
             "\"$KERNEL_RESULT\"",
             "\"$BOOT_RESULT\"",
+            "\"$GUEST_IMAGE_RESULT\"",
             "\"$NIX_RESULT\"",
         ] {
             assert!(
@@ -942,12 +943,13 @@ mod tests {
         let nix = job_block(&ci, "nix-flake-check");
         assert!(nix.contains("needs: [scope]"));
         assert!(nix.contains("needs.scope.outputs.nix == 'true'"));
-        assert!(nix.contains("Boot the tree-built image"));
-        assert!(nix.contains("MVM_RUNTIME_BOOT_READY: guest-agent"));
-        assert!(
-            !ci.contains("\n  guest-image-boot:\n"),
-            "the tree-built guest witness must reuse the required Nix runner"
-        );
+        assert!(!nix.contains("Boot the tree-built image"));
+
+        let guest = job_block(&ci, "guest-image-boot");
+        assert!(guest.contains("needs: [scope]"));
+        assert!(guest.contains("needs.scope.outputs.nix == 'true'"));
+        assert!(guest.contains("Boot the tree-built image"));
+        assert!(guest.contains("MVM_RUNTIME_BOOT_READY: guest-agent"));
 
         let website = workflow("website.yml");
         assert!(
