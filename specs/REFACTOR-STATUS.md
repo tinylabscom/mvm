@@ -4,13 +4,15 @@ Last updated: 2026-09-10
 
 ## In progress
 
-- [ ] **CI queue consolidation.**
+- [x] **CI queue consolidation.**
       `specs/plans/2026-09-10-ci-queue-consolidation.md`.
       Correct cumulative `HEADGREEN` scope, make every queue witness honestly
       required or remove its queue fan-out, warm the measured feature-test
       critical path from trusted main, and remove duplicate nextest listings.
-      Implementation and configured CI validation are green; live timing and
-      the post-merge required-context reduction remain.
+      PR #3236 and its exact-head queue run are green; Website no longer runs
+      in the queue, branch protection now requires only `Lint` and `Test`, and
+      measured critical-path evidence keeps Nix and tree-built guest boot
+      parallel while the aggregate owns both verdicts.
 
 - [ ] **Scheduled CI stability.**
       `specs/plans/2026-09-09-scheduled-ci-stability.md`.

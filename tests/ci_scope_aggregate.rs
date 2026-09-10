@@ -75,6 +75,7 @@ struct Verdict {
     kernel: &'static str,
     boot: &'static str,
     nix: &'static str,
+    guest_image: &'static str,
 }
 
 impl Verdict {
@@ -90,6 +91,7 @@ impl Verdict {
             kernel: "success",
             boot: "skipped",
             nix: "skipped",
+            guest_image: "skipped",
         }
     }
 
@@ -106,6 +108,7 @@ impl Verdict {
             kernel: "success",
             boot: "skipped",
             nix: "skipped",
+            guest_image: "skipped",
         }
     }
 
@@ -116,6 +119,7 @@ impl Verdict {
             event_name: "merge_group",
             boot: "success",
             nix: "success",
+            guest_image: "success",
             ..Self::in_scope()
         }
     }
@@ -126,6 +130,7 @@ impl Verdict {
         Self {
             event_name: "merge_group",
             nix: "success",
+            guest_image: "success",
             ..Self::out_of_scope()
         }
     }
@@ -150,6 +155,7 @@ impl Verdict {
             .env("KERNEL_RESULT", self.kernel)
             .env("BOOT_RESULT", self.boot)
             .env("NIX_RESULT", self.nix)
+            .env("GUEST_IMAGE_RESULT", self.guest_image)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -190,7 +196,7 @@ fn a_fully_in_scope_green_run_is_admitted() {
 /// real failure that has to keep being caught, in whichever scope it can occur.
 #[test]
 fn a_genuine_failure_is_still_refused_in_either_scope() {
-    let cases: [(&str, Verdict); 11] = [
+    let cases: [(&str, Verdict); 13] = [
         (
             // New with the suite moving onto the `code` scope: BDD is matched
             // by the same arithmetic as every other lane, so a run on a
@@ -259,7 +265,7 @@ fn a_genuine_failure_is_still_refused_in_either_scope() {
             },
         ),
         (
-            "a failing Nix and tree-built guest witness",
+            "a failing Nix witness",
             Verdict {
                 nix: "failure",
                 ..Verdict::queue_in_scope()
@@ -269,6 +275,20 @@ fn a_genuine_failure_is_still_refused_in_either_scope() {
             "a Nix witness that skipped in the queue",
             Verdict {
                 nix: "skipped",
+                ..Verdict::queue_in_scope()
+            },
+        ),
+        (
+            "a failing tree-built guest witness",
+            Verdict {
+                guest_image: "failure",
+                ..Verdict::queue_in_scope()
+            },
+        ),
+        (
+            "a tree-built guest witness that skipped in the queue",
+            Verdict {
+                guest_image: "skipped",
                 ..Verdict::queue_in_scope()
             },
         ),
