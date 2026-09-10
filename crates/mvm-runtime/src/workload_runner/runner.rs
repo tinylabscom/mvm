@@ -855,6 +855,26 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             .driver
             .spawn_standby_parent(&StandbyParentSpawn { spec, boot: &boot })?;
 
+        // The universal initramfs waits in a fail-closed pre-activation state.
+        // Capturing it there would make every restored child refuse PostRestore
+        // and fall back to a cold boot. The parent shares only its rootfs device
+        // and verity environment; factory_parent_config has already removed all
+        // workload identity, secrets, plan, and grant authority.
+        if crate::microvm::booted_with_universal_initramfs(&parent_config) {
+            let parent = self.driver.attach(&VmId(spec.id.clone())).map_err(|e| {
+                StandbyError::SpawnFailed(format!(
+                    "attach standby parent '{}' for activation: {e:#}",
+                    spec.id
+                ))
+            })?;
+            crate::microvm::activate_workload(parent.as_ref(), &parent_config).map_err(|e| {
+                StandbyError::SpawnFailed(format!(
+                    "activate standby parent '{}' before capture: {e:#}",
+                    spec.id
+                ))
+            })?;
+        }
+
         let control = self.driver.vm_full_control(&spec.id).ok_or_else(|| {
             StandbyError::SpawnFailed(format!(
                 "backend cannot capture a warm parent's memory for standby '{}'",
@@ -3161,6 +3181,7 @@ mod tests {
         let store = CheckpointStore::at(home.path().join("checkpoints"));
         let driver = MockDriver::default().with_vm_full_rootfs(Path::new(&rootfs));
         let guest = spawn_activation_guest(driver.clone(), "shape-parity");
+        let parent_guest = spawn_activation_guest(driver.clone(), "standby-parity");
         let runner = WorkloadRunner::new(
             driver,
             RecordingSpawner::new("/run/ep.sock"),
@@ -3183,6 +3204,7 @@ mod tests {
                 &spec,
             )
             .expect("warm parent spawns for that launch");
+        parent_guest.join().expect("parent guest thread");
 
         let booted = runner.driver.booted_specs();
         assert_eq!(booted.len(), 2, "one workload boot, then one parent boot");
