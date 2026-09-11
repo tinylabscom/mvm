@@ -244,7 +244,9 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-25
 
       # Policy checks invoke xtask, and the stub/parity checks invoke the
       # pinned Python and TypeScript generators. They are independent of the
@@ -787,7 +789,9 @@ jobs:
       - uses: ./.github/actions/free-disk
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-25
 
       - uses: ./.github/actions/apt-deps
         with:
@@ -858,7 +862,9 @@ jobs:
       - uses: ./.github/actions/free-disk
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-25
 
       - uses: ./.github/actions/apt-deps
         with:
@@ -901,7 +907,9 @@ jobs:
       - uses: ./.github/actions/free-disk
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-25
 
       - uses: ./.github/actions/apt-deps
         with:
@@ -950,8 +958,9 @@ jobs:
       - uses: ./.github/actions/free-disk
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-08-25
           targets: wasm32-wasip1
 
       - uses: ./.github/actions/apt-deps
@@ -982,6 +991,17 @@ jobs:
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # The one lane that must keep a floating nightly, and not by oversight.
+      # `crates/mvm-hostd/ebpf/rust-toolchain.toml` pins `channel = "nightly"`,
+      # and both the bpf-linker install below and `just build-ebpf` say
+      # `cargo +nightly` — they resolve the toolchain *by that name*. Installing
+      # a dated nightly instead leaves `+nightly` pointing at whatever rustup
+      # auto-installs, which carries no `rust-src`, and the build dies asking
+      # for it. Nothing is lost by staying floating here: this lane takes its
+      # own `key: ebpf` cache entry and never reads the shared workspace one, so
+      # it is not part of the toolchain/cache-key alignment the rest of this
+      # file just gained. `check-fast-cargo.sh` allows exactly this one and ties
+      # the exemption to the `cargo +nightly` that causes it.
       - name: Install nightly Rust toolchain for eBPF build
         uses: dtolnay/rust-toolchain@nightly
         with:

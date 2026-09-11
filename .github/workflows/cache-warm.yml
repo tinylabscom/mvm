@@ -161,3 +161,57 @@ jobs:
             --test audit_emissions_live
           cargo check -p mvm-cli --features test-support \
             --example verification_loop
+
+  # The other half of the nightly-fast / stable-lint split, and until now the
+  # missing one. `warm` above runs its clippy through `cargo-stable.sh`, which
+  # forces `RUSTUP_TOOLCHAIN=1.97.1` *and* `CARGO_TARGET_DIR=target/stable-1.97.1`
+  # — so the entry it writes holds stable lint artifacts under a different target
+  # root, keyed to a toolchain only the four lint lanes use.
+  #
+  # `Swatinem/rust-cache` folds the resolved rustc version into its key, so the
+  # test lanes were computing a key nothing had ever written and restoring
+  # nothing at all: `Test workspace` logged "No cache found." and compiled the
+  # workspace from cold on every run, 17 of its 21 minutes, while its tests took
+  # three and a half. This job writes the entry they actually look for.
+  #
+  # `--no-run` because the artifacts are the point; running the suite here would
+  # duplicate the lanes that gate.
+  warm-nightly:
+    name: Warm nightly fast path
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/free-disk
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-25
+
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: attr cryptsetup-bin lld
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      # No `key:` — this shares `workspace` with the stable warm job above and
+      # with every consuming lane. rust-cache separates the two by the toolchain
+      # hash it already folds into the key, so one shared-key serves both halves
+      # of the split without either overwriting the other.
+      - uses: ./.github/actions/rust-cache
+        with:
+          save: "true"
+
+      # The same two resolutions `test-workspace` builds under. They differ:
+      # `--all-targets` alone selects the root package and `--workspace
+      # --all-targets` unifies features across every member, so warming one does
+      # not warm the other.
+      - name: Warm the nightly workspace build
+        run: |
+          cargo build --all-targets
+          cargo nextest run --workspace --all-targets --no-run
