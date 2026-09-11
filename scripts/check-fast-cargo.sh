@@ -68,12 +68,24 @@ require_text .github/workflows/bdd.yml 'components: rustc-codegen-cranelift'
 # name — and it silently cost every one of them its build cache, because
 # `Swatinem/rust-cache` folds the resolved rustc version into its key and no
 # writer ever produced the key a rotating nightly asks for.
-for workflow in .github/workflows/ci.yml .github/workflows/cache-warm.yml; do
-  if grep -Fq 'rust-toolchain@nightly' "${workflow}"; then
-    echo "check-fast-cargo: ${workflow} floats a nightly toolchain; pin ${toolchain}" >&2
-    exit 1
-  fi
-done
+if grep -Fq 'rust-toolchain@nightly' .github/workflows/cache-warm.yml; then
+  echo "check-fast-cargo: cache-warm.yml floats a nightly toolchain; pin ${toolchain}" >&2
+  exit 1
+fi
+# ci.yml keeps exactly one, and only for as long as its cause exists. The eBPF
+# lane's sub-build resolves its toolchain by the literal name `nightly` — from
+# `crates/mvm-hostd/ebpf/rust-toolchain.toml` and two `cargo +nightly`
+# invocations — so a dated pin there leaves `+nightly` on a rustup-auto-installed
+# toolchain with no `rust-src`, and `just build-ebpf` fails asking for it.
+# Tying the count to the `cargo +nightly` that forces it means removing the
+# hardcoding forces removing the exemption, rather than leaving a hole behind.
+floating_nightly="$(grep -Fc 'rust-toolchain@nightly' .github/workflows/ci.yml || true)"
+if [[ "${floating_nightly}" -ne 1 ]]; then
+  echo "check-fast-cargo: ci.yml has ${floating_nightly} floating nightly installs; only the eBPF lane may float, and it must" >&2
+  exit 1
+fi
+require_text .github/workflows/ci.yml 'cargo +nightly install --locked --version 0.10.4 bpf-linker'
+require_text crates/mvm-hostd/ebpf/rust-toolchain.toml 'channel = "nightly"'
 require_text .github/workflows/ci.yml "toolchain: ${toolchain}"
 # The warm job that writes the entry those lanes restore has to be on the same
 # toolchain as the lanes, or it writes a key nobody reads.
