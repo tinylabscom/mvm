@@ -1439,7 +1439,10 @@ pub fn resolve_launch(
 
     let t_initramfs = std::time::Instant::now();
     sub.start(SubPhase::AttachInitramfs);
-    crate::commands::vm::up::attach_universal_initramfs_if_cached(&mut start_config)?;
+    crate::commands::vm::up::attach_universal_initramfs_if_cached(
+        &mut start_config,
+        backend.name(),
+    )?;
     sub.finish(SubPhase::AttachInitramfs);
     tracing::debug!(
         ms = t_initramfs.elapsed().as_secs_f64() * 1000.0,

@@ -1061,7 +1061,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         &effective_hypervisor,
         parent_meta.runtime_overlay_version.as_deref(),
     )?;
-    super::up::attach_universal_initramfs_if_cached(&mut start_config)?;
+    super::up::attach_universal_initramfs_if_cached(&mut start_config, &effective_hypervisor)?;
 
     populate_fork_rootfs_verity(&mut start_config, p.instance_rootfs)?;
 
