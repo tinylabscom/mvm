@@ -61,6 +61,24 @@ require_text crates/mvm-build/src/guest_agent_build.rs 'pinned_rust_toolchain(&s
 require_text crates/mvm-build/src/guest_agent_build.rs '.env_remove("CARGO_ENCODED_RUSTFLAGS")'
 require_text .github/workflows/bdd.yml "toolchain: ${toolchain}"
 require_text .github/workflows/bdd.yml 'components: rustc-codegen-cranelift'
+
+# bdd.yml was pinned here; ci.yml's six nightly lanes were not, and a floating
+# `@nightly` resolves to a different compiler every day. That is a correctness
+# gap on its own — those lanes ran a toolchain rust-toolchain.toml does not
+# name — and it silently cost every one of them its build cache, because
+# `Swatinem/rust-cache` folds the resolved rustc version into its key and no
+# writer ever produced the key a rotating nightly asks for.
+for workflow in .github/workflows/ci.yml .github/workflows/cache-warm.yml; do
+  if grep -Fq 'rust-toolchain@nightly' "${workflow}"; then
+    echo "check-fast-cargo: ${workflow} floats a nightly toolchain; pin ${toolchain}" >&2
+    exit 1
+  fi
+done
+require_text .github/workflows/ci.yml "toolchain: ${toolchain}"
+# The warm job that writes the entry those lanes restore has to be on the same
+# toolchain as the lanes, or it writes a key nobody reads.
+require_text .github/workflows/cache-warm.yml "toolchain: ${toolchain}"
+require_text .github/workflows/cache-warm.yml 'cargo nextest run --workspace --all-targets --no-run'
 require_text Justfile 'CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl"'
 require_text crates/mvm-conformance/tests/conformance.rs 'var_os("CARGO_BIN_EXE_mvmctl")'
 
