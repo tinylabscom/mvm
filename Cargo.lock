@@ -3334,6 +3334,10 @@ name = "mvm-observability"
 version = "0.18.0-rc.1"
 dependencies = [
  "mvm-core",
+ "mvm-http",
+ "percent-encoding",
+ "rand 0.10.2",
+ "serde",
  "serde_json",
  "tracing",
  "tracing-subscriber",

@@ -13,7 +13,9 @@
 //! the `tracing` facade and never install a subscriber.
 
 pub mod logging;
+pub mod otlp;
 pub mod span_timing_layer;
 
-pub use logging::{DEFAULT_FILTER, LogFormat, init, init_with_filter};
+pub use logging::{DEFAULT_FILTER, LogFormat, ObservabilityGuard, init, init_with_filter};
+pub use otlp::OtlpLayer;
 pub use span_timing_layer::SpanTimingLayer;
