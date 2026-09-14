@@ -27,7 +27,8 @@ pub fn filter_for_verbosity(verbosity: u8) -> &'static str {
 /// exported even at the default quiet filter.
 ///
 /// Hold the returned guard until the command finishes; dropping it flushes
-/// spans still queued for export.
+/// spans still queued for export. A command that ends early instead goes
+/// through `mvm_observability::exit`, which flushes the same export.
 pub fn init(format: LogFormat, verbosity: u8) -> ObservabilityGuard {
     mvm_observability::init_with_filter(format, filter_for_verbosity(verbosity))
 }

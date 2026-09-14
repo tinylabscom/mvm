@@ -110,7 +110,7 @@ pub(in crate::commands) fn run_wait(_cli: &Cli, args: WaitArgs, _cfg: &MvmConfig
                     // EX_DATAERR (65). Distinct from timeout (75)
                     // and from a generic CLI failure (1) so wrapper
                     // scripts can branch on the kind.
-                    std::process::exit(65);
+                    mvm_observability::exit(65);
                 }
                 WaitOutcome::Pending => {
                     // Fall through to sleep + poll.
@@ -131,7 +131,7 @@ pub(in crate::commands) fn run_wait(_cli: &Cli, args: WaitArgs, _cfg: &MvmConfig
                 target_label(args.target),
                 args.timeout
             ));
-            std::process::exit(75);
+            mvm_observability::exit(75);
         }
         std::thread::sleep(interval);
     }

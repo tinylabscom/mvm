@@ -399,7 +399,7 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
             session_id: None,
         })?;
         if exit_code != 0 {
-            std::process::exit(exit_code);
+            mvm_observability::exit(exit_code);
         }
         return Ok(());
     }
@@ -602,7 +602,7 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
     match dispatch_result {
         Ok(exit_code) => {
             if exit_code != 0 {
-                std::process::exit(exit_code);
+                mvm_observability::exit(exit_code);
             }
             Ok(())
         }

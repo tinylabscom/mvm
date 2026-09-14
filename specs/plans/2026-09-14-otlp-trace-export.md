@@ -54,6 +54,8 @@ logs signal in this change, and an encoder we maintain.
   retry loop. The first failure is reported once on stderr, not per batch.
 - **Flush on exit.** Initialization returns a guard; dropping it closes the
   queue and waits a bounded time for the export thread to send what is queued.
+  The export itself is held process-wide, so a path that calls
+  `mvm_observability::exit` instead of returning flushes it the same way.
 - **Configuration** uses the standard variables, so existing collector setups
   apply unchanged: `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (used as-is) or
   `OTEL_EXPORTER_OTLP_ENDPOINT` (`/v1/traces` appended),
@@ -82,6 +84,11 @@ logs signal in this change, and an encoder we maintain.
 - [x] Integration test: a local HTTP listener receives a well-formed export.
 - [x] Wire into `mvmctl`'s subscriber assembly and hold the guard for the
       process lifetime.
+- [x] Flush on early exit: hold the export guard process-wide, route every
+      `mvm-cli` exit through `mvm_observability::exit` (Ctrl-C through
+      `exit_after_interrupt`, bounded to 1 s), deny `clippy::exit` in
+      `mvm-cli`, and witness it with a re-exec test whose child exits through
+      the helper.
 - [x] Documentation: how to point `mvmctl` at a collector.
 - [x] `check-closure-budget` passes on both targets with no budget change.
 

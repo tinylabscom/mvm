@@ -317,13 +317,15 @@ batch is dropped, not retried, and only the first failure is reported. As the
 command returns, queued spans are flushed, waiting at most the export timeout,
 so an unreachable collector can add up to that timeout to the command's exit.
 Lower `OTEL_EXPORTER_OTLP_TIMEOUT` if that matters more than the last spans.
-A verb that ends by calling `std::process::exit` skips that flush.
+The same flush runs when a command ends early, such as one that exits with a
+guest's exit code: `mvmctl` leaves through a helper that flushes first, bounded
+by the same timeout. After Ctrl-C the wait is capped at about one second, so an
+interrupted command returns the prompt promptly and keeps only the spans that
+could be sent in that time.
 
 Exported spans carry the fields `tracing` records on them, the same data the
 logs carry at the matching level. A trace is a diagnostic view: the
 chain-signed audit log remains the record of what ran.
-Commands that end by exiting with a guest's exit code, or that are interrupted
-with Ctrl-C, skip that flush and lose spans still queued.
 
 Only the host-side `mvmctl` process exports. Nothing is exported from inside a
 microVM, and the per-VM supervisors and host daemons do not export yet. A trace

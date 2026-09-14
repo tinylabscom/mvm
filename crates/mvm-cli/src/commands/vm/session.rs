@@ -753,7 +753,7 @@ fn cmd_attach(args: AttachArgs) -> Result<()> {
     }
 
     if exit_code != 0 {
-        std::process::exit(exit_code);
+        mvm_observability::exit(exit_code);
     }
     Ok(())
 }
@@ -878,7 +878,7 @@ fn dispatch_run_code(
     }
 
     if exit_code != 0 {
-        std::process::exit(exit_code);
+        mvm_observability::exit(exit_code);
     }
     Ok(())
 }
@@ -932,7 +932,7 @@ fn run_in_session(
     }
 
     if output.exit_code != 0 {
-        std::process::exit(output.exit_code);
+        mvm_observability::exit(output.exit_code);
     }
     Ok(())
 }

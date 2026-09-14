@@ -157,7 +157,10 @@ fn run_linux(args: Args) -> Result<()> {
             })() {
                 eprintln!("mvmctl seccomp-audit (child): {e:#}");
             }
-            std::process::exit(126);
+            // A fork child leaves with `_exit` so it runs none of the parent's
+            // teardown: no atexit handlers, no flush of the parent's trace export.
+            // SAFETY: `_exit` takes no pointers and does not return.
+            unsafe { libc::_exit(126) }
         }
         nix::unistd::ForkResult::Parent { child } => child,
     };
@@ -299,14 +302,14 @@ fn run_linux(args: Args) -> Result<()> {
     }
 
     if args.fail_on_missing && !report.missing_syscalls.is_empty() {
-        std::process::exit(1);
+        mvm_observability::exit(1);
     }
 
     // Propagate the child's exit code so the audit is transparent to scripts.
     if let Some(code) = main_exit_code
         && code != 0
     {
-        std::process::exit(code);
+        mvm_observability::exit(code);
     }
 
     Ok(())

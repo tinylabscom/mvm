@@ -146,13 +146,13 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         match terminal {
             mvm_agentd::vsock::ExecEvent::Exit { code } => {
                 if code != 0 {
-                    std::process::exit(code);
+                    mvm_observability::exit(code);
                 }
                 Ok(())
             }
             mvm_agentd::vsock::ExecEvent::TimedOut => {
                 eprintln!("{}", crate::exec::timeout_exit_message(None));
-                std::process::exit(crate::exec::EXEC_TIMEOUT_EXIT_CODE);
+                mvm_observability::exit(crate::exec::EXEC_TIMEOUT_EXIT_CODE);
             }
             other => anyhow::bail!("unexpected terminal exec event: {other:?}"),
         }
@@ -204,7 +204,7 @@ pub(crate) fn console_pty_command(
 ) -> Result<()> {
     let exit_code = run_pty_command_for_exit(name, command, env)?;
     if exit_code != 0 {
-        std::process::exit(exit_code);
+        mvm_observability::exit(exit_code);
     }
     Ok(())
 }
@@ -216,7 +216,7 @@ pub(in crate::commands) fn console_interactive_with_env_and_argv(
 ) -> Result<()> {
     let exit_code = console_pty_with_argv(name, env, argv)?;
     if exit_code != 0 {
-        std::process::exit(exit_code);
+        mvm_observability::exit(exit_code);
     }
     Ok(())
 }

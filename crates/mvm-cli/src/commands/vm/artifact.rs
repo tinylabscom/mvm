@@ -381,7 +381,7 @@ fn run_verify(args: VerifyArgs) -> Result<()> {
         }
         Err(e) => {
             crate::ui::warn(&format!("{}: verify failed: {e}", args.path.display()));
-            std::process::exit(65);
+            mvm_observability::exit(65);
         }
     }
 }
@@ -407,7 +407,7 @@ fn run_extract(args: ExtractArgs) -> Result<()> {
         }
         Err(e) => {
             crate::ui::warn(&format!("{}: extract failed: {e}", args.path.display()));
-            std::process::exit(65);
+            mvm_observability::exit(65);
         }
     }
 }
@@ -533,7 +533,7 @@ fn run_model_validate(args: ModelValidateArgs) -> Result<()> {
         Ok(())
     } else {
         crate::ui::warn("validation failed");
-        std::process::exit(1);
+        mvm_observability::exit(1);
     }
 }
 

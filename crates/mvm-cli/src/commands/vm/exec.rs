@@ -850,7 +850,7 @@ pub(in crate::commands) fn run_secure_with_source(
             );
         }
         if output.exit_code != 0 {
-            std::process::exit(output.exit_code);
+            mvm_observability::exit(output.exit_code);
         }
         return Ok(());
     }
@@ -1074,7 +1074,7 @@ fn run_run_args(
         }
     };
     if exit_code != 0 {
-        std::process::exit(exit_code);
+        mvm_observability::exit(exit_code);
     }
     Ok(())
 }

@@ -32,6 +32,21 @@ OTLP endpoint is configured.
   the export timeout, and reports the dropped-span count if nonzero.
 - **Wiring.** `init` / `init_with_filter` now return `ObservabilityGuard`;
   `mvmctl`'s `run_command` holds it for the command's lifetime.
+- **Early exits flush too.** The `ExportGuard` is held process-wide in an
+  `ExportSlot` rather than in the `ObservabilityGuard`, so a path that ends
+  without unwinding can still reach it. `mvm_observability::exit(code)` flushes
+  it, bounded by the export timeout, and then exits;
+  `exit_after_interrupt(code)` caps the wait at `INTERRUPT_FLUSH_BOUND` (1 s)
+  for Ctrl-C. Whichever of the guard's drop and an exit helper runs first
+  flushes, and the other finds the slot empty. All 28 `std::process::exit`
+  calls in `mvm-cli` now go through `exit`, the Ctrl-C handler through
+  `exit_after_interrupt`, and the `seccomp-audit` fork child through
+  `libc::_exit` so it never touches the parent's export thread.
+  `#![deny(clippy::exit)]` on `mvm-cli` stops a new direct exit from landing.
+  Witness: `tests/otlp_exit.rs` re-runs its own test binary as a child that
+  emits a span and calls `exit(7)`; the parent asserts exit code 7 and that a
+  local collector received the span, and a second case asserts that with no
+  collector configured the helper exits at once.
 - **Docs.** "Exporting traces to a collector" in
   `public/src/content/docs/contributing/development.md`.
 
@@ -53,9 +68,10 @@ No budget changed.
 
 ## Not covered
 
-- **`std::process::exit` paths.** Verbs that exit with a guest's exit code
-  (`exec`, `invoke`, and similar) and the Ctrl-C handler skip the guard's flush;
-  spans still queued at that moment are lost. Documented, not worked around.
+- **Exits outside `mvm-cli`.** A dependency that calls `std::process::exit`
+  itself (the host-helper contract probe answers before logging starts, so
+  nothing is queued there) is not covered by the lint. An exit after Ctrl-C
+  keeps only what can be sent within one second.
 - **Other host processes.** The `mvm-hostd` binaries (`mvm-network-endpoint`,
   `mvm-broker`, the signers) install their own subscribers, and the per-VM
   supervisors neither export nor receive trace context from `mvmctl`, so a boot
