@@ -1,8 +1,13 @@
 # OTLP trace export for host-side processes
 
-Tracking issue: #3242. Parent item: `specs/plans/2026-08-18-secure-message-fabric.md`
-("Add optional asynchronous authenticated OTLP export"). ADR-046 governs the
-posture: OTLP is an analysis projection and never the proof of record.
+Backing: shipped-source
+Validation: check-closure-budget
+
+Tracking issue: #3242. The secure message fabric design, which is still a
+proposal, lists "optional asynchronous authenticated OTLP export" among its
+items; this plan delivers that export on its own and does not depend on the
+rest of that design. Its posture carries over: a trace is an analysis
+projection, never the proof of record.
 
 ## Problem
 
