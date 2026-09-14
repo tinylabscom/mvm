@@ -19,6 +19,7 @@ pub mod blocking;
 mod client;
 mod conn;
 mod error;
+mod host;
 pub mod parse;
 pub mod proxy;
 pub mod resolve;
@@ -26,6 +27,7 @@ mod response;
 
 pub use client::{Client, ClientBuilder, RequestBuilder, TlsVersion};
 pub use error::{Error, Result};
+pub use host::is_loopback_host;
 pub use proxy::{NoProxy, Proxy, ProxyConfig, ProxyError, ProxyKind};
 pub use resolve::{PinnedResolver, Resolve, SystemResolver};
 pub use response::Response;

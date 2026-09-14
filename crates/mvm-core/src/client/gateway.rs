@@ -42,26 +42,13 @@ pub struct GatewayConfig {
 pub fn endpoint_guard(url: &Url) -> Result<()> {
     match url.scheme() {
         "https" => Ok(()),
-        "http" if is_loopback(url) => Ok(()),
+        "http" if mvm_http::is_loopback_host(url) => Ok(()),
         "http" => Err(MvmError::Backend {
             reason: format!("refusing cleartext http to non-loopback host: {url}"),
         }),
         other => Err(MvmError::Backend {
             reason: format!("unsupported url scheme: {other}"),
         }),
-    }
-}
-
-fn is_loopback(url: &Url) -> bool {
-    match url.host_str() {
-        Some("localhost") => true,
-        Some(h) => h
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .parse::<std::net::IpAddr>()
-            .map(|ip| ip.is_loopback())
-            .unwrap_or(false),
-        None => false,
     }
 }
 

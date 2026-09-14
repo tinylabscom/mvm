@@ -13,11 +13,17 @@ description = "Tracing subscriber assembly for mvm host-side binaries"
 # `mvm-core` keeps it off the sealed guest agent and off the embedded musl
 # host binaries, which emit through the `tracing` facade and never install a
 # subscriber.
+#
+# The OTLP trace exporter encodes OTLP/HTTP JSON itself and sends it with
+# `mvm-http`, rather than using the OpenTelemetry SDK and exporter crates: those
+# bring the hyper/tower/prost stack this workspace removed from `mvmctl`. Every
+# dependency below is already in `mvmctl`'s shipped closure.
 [dependencies]
 mvm-core = { workspace = true }
+mvm-http = { workspace = true }
+percent-encoding = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 tracing.workspace = true
 tracing-subscriber.workspace = true
-
-[dev-dependencies]
-# The span-timing report is serde-round-tripped in tests only.
-serde_json.workspace = true

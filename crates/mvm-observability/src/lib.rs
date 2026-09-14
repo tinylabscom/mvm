@@ -12,8 +12,12 @@
 //! sealed guest agent and the embedded musl host binaries, which emit through
 //! the `tracing` facade and never install a subscriber.
 
+mod exit;
 pub mod logging;
+pub mod otlp;
 pub mod span_timing_layer;
 
-pub use logging::{DEFAULT_FILTER, LogFormat, init, init_with_filter};
+pub use exit::{INTERRUPT_FLUSH_BOUND, exit, exit_after_interrupt};
+pub use logging::{DEFAULT_FILTER, LogFormat, ObservabilityGuard, init, init_with_filter};
+pub use otlp::OtlpLayer;
 pub use span_timing_layer::SpanTimingLayer;

@@ -1,8 +1,19 @@
 # Refactor status
 
-Last updated: 2026-09-10
+Last updated: 2026-09-14
 
 ## In progress
+
+- [ ] **OTLP trace export for host-side processes.**
+      `specs/plans/2026-09-14-otlp-trace-export.md`. Issue #3242.
+      `mvm-observability` gains an opt-in OTLP/HTTP JSON trace exporter,
+      encoded in-tree and sent with `mvm-http`, so no OpenTelemetry crate
+      enters `mvmctl`'s closure (`check-closure-budget` unchanged on both
+      targets). Configuration, encoder, layer, bounded export thread with
+      flush guard, local-listener integration tests, `mvmctl` wiring and
+      contributor docs are done. Open: follow-ups converging the
+      `mvm-hostd` binaries and per-VM supervisors, mvmd reuse, and
+      logs/metrics signals.
 
 - [x] **CI queue consolidation.**
       `specs/plans/2026-09-10-ci-queue-consolidation.md`.

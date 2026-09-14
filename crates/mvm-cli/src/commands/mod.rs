@@ -344,7 +344,7 @@ fn run_command() -> Result<()> {
         Err(error) => {
             let exit_code = error.exit_code();
             eprint!("{}", constrain_help_output(&error.to_string()));
-            std::process::exit(exit_code);
+            mvm_observability::exit(exit_code);
         }
     };
     apply_startup_env(&cli);
@@ -352,7 +352,10 @@ fn run_command() -> Result<()> {
     register_inhouse_builder();
     register_builder_session_starter();
     register_stream_plane();
-    configure_runtime_logging(&cli);
+    // Bound for the rest of the command so queued trace spans are flushed as
+    // it returns. A verb that ends early goes through `mvm_observability::exit`,
+    // which flushes the same export first.
+    let _observability = configure_runtime_logging(&cli);
 
     if let Some(result) = cli.command.try_run_early() {
         return result;
@@ -634,7 +637,7 @@ fn register_stream_plane() {
     mvm_hostd::stream::install_host_console_streamer();
 }
 
-fn configure_runtime_logging(cli: &Cli) {
+fn configure_runtime_logging(cli: &Cli) -> logging::ObservabilityGuard {
     let verbose = cli.verbose > 0 || std::env::var_os("RUST_LOG").is_some();
     mvm_runtime::ui::set_verbose(verbose);
     if cli.verbose > 0 {
@@ -655,7 +658,7 @@ fn configure_runtime_logging(cli: &Cli) {
         }
         None => LogFormat::Human,
     };
-    logging::init(log_format, cli.verbose);
+    logging::init(log_format, cli.verbose)
 }
 
 fn install_signal_handler() {
@@ -674,7 +677,7 @@ fn install_signal_handler() {
                 }
             }
         }
-        std::process::exit(130);
+        mvm_observability::exit_after_interrupt(130);
     }) {
         tracing::warn!("failed to install signal handler: {e}");
     }

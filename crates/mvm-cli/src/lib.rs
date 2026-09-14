@@ -1,6 +1,11 @@
 // mvm-cli: Clap commands, UI, bootstrap
 // Depends on mvm-core, mvm, mvm-build
 
+// `std::process::exit` runs no destructors, so spans still queued for trace
+// export would be lost. End early through `mvm_observability::exit`, which
+// flushes them first.
+#![deny(clippy::exit)]
+
 pub mod bench;
 pub mod bootstrap;
 pub mod commands;

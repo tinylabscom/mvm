@@ -1,0 +1,547 @@
+//! The export queue, the thread that drains it, and the guard that flushes it.
+//!
+//! The instrumented side only ever calls `try_send` on a bounded channel, so a
+//! slow or unreachable collector costs dropped spans, never a stalled thread.
+
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use mvm_http::blocking::Client;
+use mvm_http::{HeaderValue, Url, header};
+
+use super::config::OtlpConfig;
+use super::encode::{ResourceInfo, encode_batch};
+use super::record::SpanRecord;
+
+/// Spans held while the export thread is busy. Beyond this they are dropped.
+const QUEUE_CAPACITY: usize = 2048;
+/// Spans per request. Bounds the body size a collector has to accept.
+const MAX_BATCH: usize = 512;
+/// How long a partial batch waits for company before it is sent anyway.
+const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+/// Collector responses carry nothing the exporter reads.
+const MAX_RESPONSE_BYTES: u64 = 64 * 1024;
+
+/// What crosses the queue.
+pub(crate) enum Message {
+    Span(Box<SpanRecord>),
+    /// Wakes a thread idle in `recv_timeout` so shutdown need not wait out the
+    /// flush interval.
+    Shutdown,
+}
+
+/// The sending half, held by the layer. Cloning shares the drop counter.
+#[derive(Clone)]
+pub(crate) struct SpanQueue {
+    tx: SyncSender<Message>,
+    dropped: Arc<AtomicU64>,
+}
+
+impl SpanQueue {
+    /// Offer a span without waiting. A full or closed queue drops it and
+    /// counts the loss.
+    pub(crate) fn offer(&self, span: SpanRecord) {
+        if let Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) =
+            self.tx.try_send(Message::Span(Box::new(span)))
+        {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+}
+
+/// A bounded queue and its receiving half.
+pub(crate) fn span_queue(capacity: usize) -> (SpanQueue, Receiver<Message>) {
+    let (tx, rx) = std::sync::mpsc::sync_channel(capacity);
+    (
+        SpanQueue {
+            tx,
+            dropped: Arc::new(AtomicU64::new(0)),
+        },
+        rx,
+    )
+}
+
+/// Flushes queued spans when dropped.
+///
+/// Dropping signals the export thread to send what is queued and waits for it
+/// at most the configured request timeout, so an unreachable collector delays
+/// process exit by a bounded amount rather than indefinitely.
+///
+/// `std::process::exit` does not run destructors. A process that holds the
+/// guard in [`ExportSlot`] instead can still flush on that path, which is what
+/// [`crate::exit`] does.
+#[must_use = "dropping the guard immediately stops export"]
+pub struct ExportGuard {
+    queue: SpanQueue,
+    shutdown: Arc<AtomicBool>,
+    done: Receiver<()>,
+    wait: Duration,
+    finished: bool,
+}
+
+impl std::fmt::Debug for ExportGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExportGuard")
+            .field("wait", &self.wait)
+            .field("finished", &self.finished)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ExportGuard {
+    /// Stop the export thread and wait for it to send what is queued, for at
+    /// most `bound` or the configured timeout, whichever is shorter.
+    ///
+    /// Only the first call does anything; it returns whether this call was
+    /// that one. The thread is gone after it, so a later call would have
+    /// nothing to wait for and would repeat the dropped-span report.
+    pub fn flush_within(&mut self, bound: Duration) -> bool {
+        if std::mem::replace(&mut self.finished, true) {
+            return false;
+        }
+        self.shutdown.store(true, Ordering::SeqCst);
+        // A full queue means the thread is busy draining and will see the flag
+        // at its next receive; the wake-up is only for an idle thread.
+        let _ = self.queue.tx.try_send(Message::Shutdown);
+        let _ = self.done.recv_timeout(bound.min(self.wait));
+        if let Some(line) = dropped_report(self.queue.dropped()) {
+            eprintln!("{line}");
+        }
+        true
+    }
+}
+
+impl Drop for ExportGuard {
+    fn drop(&mut self) {
+        self.flush_within(self.wait);
+    }
+}
+
+fn dropped_report(dropped: u64) -> Option<String> {
+    (dropped > 0)
+        .then(|| format!("otlp: {dropped} span(s) dropped because the export queue was full"))
+}
+
+/// A place for the process's one [`ExportGuard`] that any code path can reach.
+///
+/// The guard cannot live only in a stack frame: `std::process::exit` runs no
+/// destructors, so a frame-owned guard is never flushed on that path. Keeping
+/// it here lets an early exit take it out and flush it first.
+#[derive(Debug, Default)]
+pub struct ExportSlot {
+    guard: Mutex<Option<ExportGuard>>,
+}
+
+impl ExportSlot {
+    pub const fn new() -> Self {
+        Self {
+            guard: Mutex::new(None),
+        }
+    }
+
+    /// Hold `guard`. A guard already held is flushed as it is replaced.
+    pub fn install(&self, guard: ExportGuard) {
+        let previous = self.lock().replace(guard);
+        drop(previous);
+    }
+
+    /// Whether a guard is held and not yet flushed.
+    pub fn is_installed(&self) -> bool {
+        self.lock().is_some()
+    }
+
+    /// Take the guard out and flush it, waiting at most `bound` or its
+    /// configured timeout. Returns whether there was a guard to flush.
+    ///
+    /// The lock is released before the wait, so a second caller — an
+    /// interrupt arriving while the program is already flushing — finds the
+    /// slot empty and returns at once rather than queueing behind it.
+    pub fn flush_within(&self, bound: Duration) -> bool {
+        let Some(mut guard) = self.lock().take() else {
+            return false;
+        };
+        guard.flush_within(bound)
+    }
+
+    /// A panic elsewhere while holding the lock must not stop the exit path
+    /// from flushing, and the guarded value is a plain `Option` that no
+    /// operation leaves half-written.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<ExportGuard>> {
+        self.guard.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Where a finished batch goes.
+pub(crate) trait BatchSink: Send + 'static {
+    fn send(&mut self, body: Vec<u8>) -> Result<(), String>;
+}
+
+/// POSTs batches to the collector.
+struct HttpSink {
+    client: Client,
+    endpoint: Url,
+}
+
+impl HttpSink {
+    fn new(config: &OtlpConfig) -> Result<Self, String> {
+        let mut headers = config.headers().clone();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        let client = Client::builder()
+            .timeout(config.timeout())
+            .connect_timeout(config.timeout())
+            .max_response_bytes(MAX_RESPONSE_BYTES)
+            .default_headers(headers)
+            .build()
+            .map_err(|e| e.to_string())?;
+        Ok(Self {
+            client,
+            endpoint: config.endpoint().clone(),
+        })
+    }
+}
+
+impl BatchSink for HttpSink {
+    fn send(&mut self, body: Vec<u8>) -> Result<(), String> {
+        let response = self
+            .client
+            .post(self.endpoint.as_str())
+            .body(body)
+            .send()
+            .map_err(|e| e.to_string())?;
+        let status = response.status();
+        if status.is_success() {
+            Ok(())
+        } else {
+            Err(format!("collector answered {status}"))
+        }
+    }
+}
+
+/// Start exporting to the configured collector.
+///
+/// Returns the queue the layer offers spans to and the guard that flushes it.
+pub(crate) fn start(config: &OtlpConfig) -> std::io::Result<(SpanQueue, ExportGuard)> {
+    let sink = HttpSink::new(config).map_err(std::io::Error::other)?;
+    let worker = Worker {
+        sink,
+        resource: ResourceInfo::current(config.service_name()),
+        endpoint: endpoint_for_report(config.endpoint()),
+    };
+    start_with_sink(worker, QUEUE_CAPACITY, config.timeout())
+}
+
+/// The endpoint as a failure report may print it: without the query or
+/// fragment, where collectors that take a key in the URL put it. Configuration
+/// already refuses a username or password in the endpoint.
+fn endpoint_for_report(endpoint: &Url) -> String {
+    let mut shown = endpoint.clone();
+    shown.set_query(None);
+    shown.set_fragment(None);
+    shown.to_string()
+}
+
+/// Everything the export thread owns.
+pub(crate) struct Worker<K> {
+    pub(crate) sink: K,
+    pub(crate) resource: ResourceInfo,
+    /// For the failure report only; never carries header values.
+    pub(crate) endpoint: String,
+}
+
+pub(crate) fn start_with_sink<K: BatchSink>(
+    worker: Worker<K>,
+    capacity: usize,
+    wait: Duration,
+) -> std::io::Result<(SpanQueue, ExportGuard)> {
+    let (queue, rx) = span_queue(capacity);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let (done_tx, done) = std::sync::mpsc::channel();
+    let thread_shutdown = Arc::clone(&shutdown);
+    thread::Builder::new()
+        .name("mvm-otlp-export".into())
+        .spawn(move || {
+            worker.run(&rx, &thread_shutdown);
+            let _ = done_tx.send(());
+        })?;
+    let guard = ExportGuard {
+        queue: queue.clone(),
+        shutdown,
+        done,
+        wait,
+        finished: false,
+    };
+    Ok((queue, guard))
+}
+
+impl<K: BatchSink> Worker<K> {
+    fn run(mut self, rx: &Receiver<Message>, shutdown: &AtomicBool) {
+        let mut reporter = FailureReporter::default();
+        let mut batch = Vec::with_capacity(MAX_BATCH);
+        let mut deadline: Option<Instant> = None;
+        loop {
+            let wait = deadline.map_or(FLUSH_INTERVAL, |d| {
+                d.saturating_duration_since(Instant::now())
+            });
+            match rx.recv_timeout(wait) {
+                Ok(Message::Span(span)) => {
+                    deadline.get_or_insert_with(|| Instant::now() + FLUSH_INTERVAL);
+                    batch.push(*span);
+                    if batch.len() >= MAX_BATCH {
+                        self.flush(&mut batch, &mut reporter);
+                        deadline = None;
+                    }
+                }
+                Ok(Message::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => {
+                    self.flush(&mut batch, &mut reporter);
+                    deadline = None;
+                }
+            }
+            if shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+        }
+        self.drain(rx, &mut batch, &mut reporter);
+    }
+
+    /// Send what is already queued, without waiting for more. Bounded by the
+    /// queue capacity so producers that keep emitting cannot hold it open.
+    fn drain(
+        &mut self,
+        rx: &Receiver<Message>,
+        batch: &mut Vec<SpanRecord>,
+        reporter: &mut FailureReporter,
+    ) {
+        let spans = rx.try_iter().take(QUEUE_CAPACITY).filter_map(|m| match m {
+            Message::Span(span) => Some(*span),
+            Message::Shutdown => None,
+        });
+        for span in spans {
+            batch.push(span);
+            if batch.len() >= MAX_BATCH {
+                self.flush(batch, reporter);
+            }
+        }
+        self.flush(batch, reporter);
+    }
+
+    fn flush(&mut self, batch: &mut Vec<SpanRecord>, reporter: &mut FailureReporter) {
+        if batch.is_empty() {
+            return;
+        }
+        let body = encode_batch(&self.resource, batch);
+        let count = batch.len();
+        batch.clear();
+        if let Err(error) = self.sink.send(body) {
+            reporter.report(&self.endpoint, count, &error);
+        }
+    }
+}
+
+/// Reports the first failed export and stays silent after: a collector that is
+/// down stays down for many batches, and a line per batch would bury the
+/// command's own output.
+#[derive(Default)]
+struct FailureReporter {
+    reported: bool,
+}
+
+impl FailureReporter {
+    fn report(&mut self, endpoint: &str, spans: usize, error: &str) {
+        if let Some(line) = self.first_failure_line(endpoint, spans, error) {
+            eprintln!("{line}");
+        }
+    }
+
+    fn first_failure_line(&mut self, endpoint: &str, spans: usize, error: &str) -> Option<String> {
+        if std::mem::replace(&mut self.reported, true) {
+            return None;
+        }
+        Some(format!(
+            "otlp: export to {endpoint} failed, {spans} span(s) dropped: {error} \
+             (further failures are not reported)"
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::SystemTime;
+
+    fn span(id: u64) -> SpanRecord {
+        SpanRecord {
+            trace_id: 1,
+            span_id: id,
+            parent_span_id: None,
+            name: format!("span-{id}"),
+            start: SystemTime::UNIX_EPOCH,
+            end: SystemTime::UNIX_EPOCH,
+            attributes: Vec::new(),
+            events: Vec::new(),
+            error: false,
+        }
+    }
+
+    /// Records the span count of each body it receives.
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<usize>>>);
+
+    impl BatchSink for Capture {
+        fn send(&mut self, body: Vec<u8>) -> Result<(), String> {
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let spans = value["resourceSpans"][0]["scopeSpans"][0]["spans"]
+                .as_array()
+                .unwrap()
+                .len();
+            self.0.lock().unwrap().push(spans);
+            Ok(())
+        }
+    }
+
+    fn worker(sink: Capture) -> Worker<Capture> {
+        Worker {
+            sink,
+            resource: ResourceInfo::current("test"),
+            endpoint: "https://collector.example.com/v1/traces".into(),
+        }
+    }
+
+    #[test]
+    fn a_full_queue_drops_the_span_and_counts_it_without_blocking() {
+        let (queue, _rx) = span_queue(1);
+        let started = Instant::now();
+        queue.offer(span(1));
+        queue.offer(span(2));
+        queue.offer(span(3));
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert_eq!(queue.dropped(), 2);
+    }
+
+    #[test]
+    fn dropping_the_guard_flushes_queued_spans_in_bounded_batches() {
+        let sink = Capture::default();
+        let (queue, guard) =
+            start_with_sink(worker(sink.clone()), 4096, Duration::from_secs(5)).unwrap();
+        for id in 1..=(MAX_BATCH as u64 + 10) {
+            queue.offer(span(id));
+        }
+        drop(guard);
+        let batches = sink.0.lock().unwrap().clone();
+        assert_eq!(batches.iter().sum::<usize>(), MAX_BATCH + 10);
+        assert!(batches.iter().all(|&n| n <= MAX_BATCH), "{batches:?}");
+        assert_eq!(queue.dropped(), 0);
+    }
+
+    /// Holds every batch until `delay` has passed, like a collector that is
+    /// slow to answer.
+    struct Slow(Duration);
+
+    impl BatchSink for Slow {
+        fn send(&mut self, _body: Vec<u8>) -> Result<(), String> {
+            thread::sleep(self.0);
+            Ok(())
+        }
+    }
+
+    fn installed_slot(sink: Capture, spans: u64) -> ExportSlot {
+        let (queue, guard) = start_with_sink(worker(sink), 4096, Duration::from_secs(5)).unwrap();
+        (1..=spans).for_each(|id| queue.offer(span(id)));
+        let slot = ExportSlot::new();
+        slot.install(guard);
+        slot
+    }
+
+    #[test]
+    fn flushing_the_slot_delivers_the_spans_its_guard_had_queued() {
+        let sink = Capture::default();
+        let slot = installed_slot(sink.clone(), 3);
+        assert!(slot.flush_within(Duration::from_secs(5)));
+        assert_eq!(sink.0.lock().unwrap().iter().sum::<usize>(), 3);
+        assert!(!slot.is_installed());
+    }
+
+    #[test]
+    fn a_second_flush_of_the_slot_does_nothing() {
+        let sink = Capture::default();
+        let slot = installed_slot(sink.clone(), 2);
+        assert!(slot.flush_within(Duration::from_secs(5)));
+        assert!(!slot.flush_within(Duration::from_secs(5)));
+        assert_eq!(sink.0.lock().unwrap().iter().sum::<usize>(), 2);
+    }
+
+    #[test]
+    fn flushing_an_empty_slot_returns_at_once() {
+        let slot = ExportSlot::new();
+        let started = Instant::now();
+        assert!(!slot.flush_within(Duration::from_secs(30)));
+        assert!(started.elapsed() < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn a_slot_flush_waits_no_longer_than_its_bound_for_a_slow_collector() {
+        let worker = Worker {
+            sink: Slow(Duration::from_secs(10)),
+            resource: ResourceInfo::current("test"),
+            endpoint: "https://collector.example.com/v1/traces".into(),
+        };
+        let (queue, guard) = start_with_sink(worker, 16, Duration::from_secs(30)).unwrap();
+        queue.offer(span(1));
+        let slot = ExportSlot::new();
+        slot.install(guard);
+        let bound = Duration::from_millis(300);
+        let started = Instant::now();
+        assert!(slot.flush_within(bound));
+        let waited = started.elapsed();
+        assert!(
+            waited < bound + Duration::from_millis(700),
+            "flush ignored its bound: {waited:?}"
+        );
+    }
+
+    #[test]
+    fn a_guard_flushed_explicitly_does_not_flush_again_when_dropped() {
+        let sink = Capture::default();
+        let (queue, mut guard) =
+            start_with_sink(worker(sink.clone()), 4096, Duration::from_secs(5)).unwrap();
+        queue.offer(span(1));
+        assert!(guard.flush_within(Duration::from_secs(5)));
+        assert!(!guard.flush_within(Duration::from_secs(5)));
+        drop(guard);
+        assert_eq!(*sink.0.lock().unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn the_dropped_span_report_names_the_count_and_is_silent_at_zero() {
+        assert!(dropped_report(0).is_none());
+        assert!(dropped_report(4).unwrap().contains("4 span(s) dropped"));
+    }
+
+    #[test]
+    fn a_failure_report_never_prints_the_endpoint_query() {
+        let url = Url::parse("https://c.example.com/v1/traces?api_key=s3cret#frag").unwrap();
+        assert_eq!(endpoint_for_report(&url), "https://c.example.com/v1/traces");
+    }
+
+    #[test]
+    fn only_the_first_export_failure_is_reported() {
+        let mut reporter = FailureReporter::default();
+        let first = reporter
+            .first_failure_line("https://c.example.com/v1/traces", 3, "refused")
+            .unwrap();
+        assert!(first.contains("https://c.example.com/v1/traces"));
+        assert!(first.contains("3 span(s)"));
+        assert!(first.contains("refused"));
+        assert!(reporter.first_failure_line("x", 1, "again").is_none());
+    }
+}

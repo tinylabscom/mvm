@@ -277,6 +277,60 @@ time, so a run with more iterations does not read as a regression, and reports
 call-count changes separately — a function called twice as often is a different
 defect from one that got slower.
 
+### Exporting traces to a collector
+
+`mvmctl` can send its spans to any OpenTelemetry collector over OTLP/HTTP with
+JSON encoding. Export is off unless an endpoint is set, and it reads the
+standard OpenTelemetry variables, so an existing collector setup applies as is:
+
+```bash
+# Local collector listening on the default OTLP/HTTP port.
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 mvmctl <command>
+
+# Hosted collector with an API key; header values are percent-encoded.
+OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp.example.com \
+OTEL_EXPORTER_OTLP_HEADERS='authorization=Bearer%20<token>' \
+mvmctl <command>
+```
+
+| Variable | Meaning | Default |
+| --- | --- | --- |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Full traces URL, used exactly as given | unset |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Base URL; `/v1/traces` is appended | unset |
+| `OTEL_EXPORTER_OTLP_HEADERS` | `name=value` pairs, comma-separated | none |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | Per-request timeout in milliseconds | `10000` |
+| `OTEL_SERVICE_NAME` | `service.name` resource attribute | the executable name |
+| `MVM_OTLP_FILTER` | Which spans are exported, as a `tracing` filter | `info` |
+
+`https://` endpoints are accepted anywhere. `http://` is accepted only for a
+loopback host (`localhost`, `127.0.0.0/8`, `::1`), so span contents and any
+credential in the headers never cross a network unencrypted; any other
+`http://` endpoint, or a malformed header, prints one line on stderr and leaves
+export off without affecting the command. An endpoint that embeds a username or
+password is refused the same way: put credentials in
+`OTEL_EXPORTER_OTLP_HEADERS`, whose values are never printed.
+
+Like span timing, export has its own filter and is independent of `-v`. Spans
+are sent in batches from a background thread through a bounded queue: a slow or
+unreachable collector costs dropped spans while the command runs. A failed
+batch is dropped, not retried, and only the first failure is reported. As the
+command returns, queued spans are flushed, waiting at most the export timeout,
+so an unreachable collector can add up to that timeout to the command's exit.
+Lower `OTEL_EXPORTER_OTLP_TIMEOUT` if that matters more than the last spans.
+The same flush runs when a command ends early, such as one that exits with a
+guest's exit code: `mvmctl` leaves through a helper that flushes first, bounded
+by the same timeout. After Ctrl-C the wait is capped at about one second, so an
+interrupted command returns the prompt promptly and keeps only the spans that
+could be sent in that time.
+
+Exported spans carry the fields `tracing` records on them, the same data the
+logs carry at the matching level. A trace is a diagnostic view: the
+chain-signed audit log remains the record of what ran.
+
+Only the host-side `mvmctl` process exports. Nothing is exported from inside a
+microVM, and the per-VM supervisors and host daemons do not export yet. A trace
+is an analysis aid; the chain-signed audit log remains the record of what ran.
+
 ## Linting and Formatting
 
 ```bash

@@ -171,7 +171,7 @@ pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result
         Ok(verified) => verified,
         Err(e) => {
             crate::ui::warn(&format!("{}: {e}", args.path.display()));
-            std::process::exit(65);
+            mvm_observability::exit(65);
         }
     };
     let manifest = &verified.manifest;
