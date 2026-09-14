@@ -277,6 +277,49 @@ time, so a run with more iterations does not read as a regression, and reports
 call-count changes separately — a function called twice as often is a different
 defect from one that got slower.
 
+### Exporting traces to a collector
+
+`mvmctl` can send its spans to any OpenTelemetry collector over OTLP/HTTP with
+JSON encoding. Export is off unless an endpoint is set, and it reads the
+standard OpenTelemetry variables, so an existing collector setup applies as is:
+
+```bash
+# Local collector listening on the default OTLP/HTTP port.
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 mvmctl <command>
+
+# Hosted collector with an API key; header values are percent-encoded.
+OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp.example.com \
+OTEL_EXPORTER_OTLP_HEADERS='authorization=Bearer%20<token>' \
+mvmctl <command>
+```
+
+| Variable | Meaning | Default |
+| --- | --- | --- |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Full traces URL, used exactly as given | unset |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Base URL; `/v1/traces` is appended | unset |
+| `OTEL_EXPORTER_OTLP_HEADERS` | `name=value` pairs, comma-separated | none |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | Per-request timeout in milliseconds | `10000` |
+| `OTEL_SERVICE_NAME` | `service.name` resource attribute | the executable name |
+| `MVM_OTLP_FILTER` | Which spans are exported, as a `tracing` filter | `info` |
+
+`https://` endpoints are accepted anywhere. `http://` is accepted only for a
+loopback host (`localhost`, `127.0.0.0/8`, `::1`), so span contents and any
+credential in the headers never cross a network unencrypted; any other
+`http://` endpoint, or a malformed header, prints one line on stderr and leaves
+export off without affecting the command.
+
+Like span timing, export has its own filter and is independent of `-v`. Spans
+are sent in batches from a background thread through a bounded queue: a slow or
+unreachable collector costs dropped spans, never a slower command. A failed
+batch is dropped, not retried, and only the first failure is reported. As the
+command returns, queued spans are flushed, waiting at most the export timeout.
+Commands that end by exiting with a guest's exit code, or that are interrupted
+with Ctrl-C, skip that flush and lose spans still queued.
+
+Only the host-side `mvmctl` process exports. Nothing is exported from inside a
+microVM, and the per-VM supervisors and host daemons do not export yet. A trace
+is an analysis aid; the chain-signed audit log remains the record of what ran.
+
 ## Linting and Formatting
 
 ```bash

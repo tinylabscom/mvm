@@ -71,19 +71,19 @@ logs signal in this change, and an encoder we maintain.
 
 ## Work
 
-- [ ] Configuration: env parsing into a validated config, endpoint rules,
+- [x] Configuration: env parsing into a validated config, endpoint rules,
       header parsing, redacted `Debug`; unit tests for each rule.
-- [ ] Encoder: finished span records to OTLP/HTTP JSON; tests pin the wire shape
+- [x] Encoder: finished span records to OTLP/HTTP JSON; tests pin the wire shape
       (hex ids, string nanos, parent linkage, events, attributes, status).
-- [ ] Layer: span ids, trace inheritance, attributes, events, close; tests with
+- [x] Layer: span ids, trace inheritance, attributes, events, close; tests with
       a capturing sink.
-- [ ] Export thread: batching, bounded queue with drop counter, timeout, flush
+- [x] Export thread: batching, bounded queue with drop counter, timeout, flush
       guard; tests for overflow and for a listener that never answers.
-- [ ] Integration test: a local HTTP listener receives a well-formed export.
-- [ ] Wire into `mvmctl`'s subscriber assembly and hold the guard for the
+- [x] Integration test: a local HTTP listener receives a well-formed export.
+- [x] Wire into `mvmctl`'s subscriber assembly and hold the guard for the
       process lifetime.
-- [ ] Documentation: how to point `mvmctl` at a collector.
-- [ ] `check-closure-budget` passes on both targets with no budget change.
+- [x] Documentation: how to point `mvmctl` at a collector.
+- [x] `check-closure-budget` passes on both targets with no budget change.
 
 ## Follow-ups
 
