@@ -147,6 +147,17 @@ pub(crate) struct VsockHandlerRegistry {
     host_initiated: Vec<Box<dyn HostInitiatedHandler>>,
 }
 
+/// The next host port each host-initiated bridge will assign.
+///
+/// Carried across every rebind and through a device snapshot, because host
+/// ports are how the guest names its connections and a restored guest may still
+/// hold one the host has long since closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HostPortCursor {
+    pub(crate) agent: u32,
+    pub(crate) host_dial: u32,
+}
+
 impl VsockHandlerRegistry {
     pub(crate) fn new() -> Self {
         let mut guest_ports: BTreeMap<u32, Box<dyn GuestPortHandler>> = BTreeMap::new();
@@ -319,8 +330,48 @@ impl VsockHandlerRegistry {
         }
     }
 
+    /// Drop every host binding, keeping only where host port numbering had got
+    /// to.
+    ///
+    /// The rest of the registry is disposable; the numbering is not. It is the
+    /// guest's identity for each host-initiated connection, and the guest can
+    /// outlive the host's record of one — a session closed just before a pause
+    /// has its `OP_RST` discarded with the paused I/O, so the guest, and every
+    /// snapshot of it, still holds that port open. A registry that restarted at
+    /// the first port would hand it straight back out, and the guest resets any
+    /// request that arrives on a port it believes is connected.
     pub(crate) fn clear_host_bindings(&mut self) {
+        let cursor = self.host_port_cursor();
         *self = Self::new();
+        self.continue_host_ports(cursor);
+    }
+
+    /// Where each host-initiated bridge will number its next connection.
+    pub(crate) fn host_port_cursor(&mut self) -> HostPortCursor {
+        HostPortCursor {
+            agent: self
+                .host_handler_mut::<AgentVsockHandler>()
+                .expect("agent handler present")
+                .bridge
+                .next_host_port(),
+            host_dial: self
+                .host_handler_mut::<HostDialVsockHandler>()
+                .expect("console handler present")
+                .bridge
+                .next_host_port(),
+        }
+    }
+
+    /// Resume numbering from `cursor`. Never moves a bridge backwards.
+    pub(crate) fn continue_host_ports(&mut self, cursor: HostPortCursor) {
+        self.host_handler_mut::<AgentVsockHandler>()
+            .expect("agent handler present")
+            .bridge
+            .continue_host_ports_from(cursor.agent);
+        self.host_handler_mut::<HostDialVsockHandler>()
+            .expect("console handler present")
+            .bridge
+            .continue_host_ports_from(cursor.host_dial);
     }
 
     pub(crate) fn poll_fds(&self) -> Vec<RawFd> {

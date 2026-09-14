@@ -32,7 +32,7 @@ const READ_CHUNK: usize = 16 * 1024;
 /// First host-assigned vsock port. Host-initiated streams take ports from here up
 /// so they never collide with the guest's well-known listener ports (5251/5252/
 /// 5253) or each other.
-const FIRST_HOST_PORT: u32 = 1 << 20;
+pub(crate) const FIRST_HOST_PORT: u32 = 1 << 20;
 
 struct AgentConn {
     stream: UnixStream,
@@ -69,6 +69,20 @@ impl AgentBridge {
             active: None,
             host_closed: Vec::new(),
         }
+    }
+
+    /// The host port this bridge will assign next.
+    pub(crate) fn next_host_port(&self) -> u32 {
+        self.next_port
+    }
+
+    /// Continue assigning host ports from `next`, and never backwards.
+    ///
+    /// A port is the guest's name for a connection, and a guest can still hold
+    /// one the host has already let go of. Replacing a bridge must not restart
+    /// its numbering.
+    pub(crate) fn continue_host_ports_from(&mut self, next: u32) {
+        self.next_port = self.next_port.max(next);
     }
 
     /// Drain the conn ids the host closed since the last call. The device sends
