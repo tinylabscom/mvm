@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::Duration;
 
 use tracing::Subscriber;
 use tracing_subscriber::EnvFilter;
@@ -8,6 +9,7 @@ use tracing_subscriber::registry::LookupSpan;
 
 use mvm_core::observability::span_timing;
 
+use crate::exit::EXPORT;
 use crate::otlp;
 use crate::span_timing_layer::SpanTimingLayer;
 
@@ -53,12 +55,23 @@ fn log_filter(fallback: &str) -> EnvFilter {
 /// Today that is the OTLP export thread, when one is configured: dropping the
 /// guard flushes queued spans, waiting at most the configured export timeout.
 /// Bind it in `main` (or the function that returns to it) so the flush runs
-/// as the program ends. `std::process::exit` skips destructors, so a path that
-/// exits that way loses any spans still queued.
+/// as the program ends. The export itself is held process-wide rather than in
+/// the guard, so a path that ends early through [`crate::exit`] flushes it
+/// too; whichever runs first flushes and the other finds nothing left.
 #[must_use = "dropping the guard immediately stops trace export"]
 #[derive(Debug, Default)]
 pub struct ObservabilityGuard {
-    _otlp: Option<otlp::ExportGuard>,
+    exporting: bool,
+}
+
+impl Drop for ObservabilityGuard {
+    fn drop(&mut self) {
+        // A guard that installed no export must not flush one installed by
+        // someone else.
+        if self.exporting {
+            EXPORT.flush_within(Duration::MAX);
+        }
+    }
 }
 
 /// Initialize the global tracing subscriber.
@@ -95,7 +108,11 @@ pub fn init_with_filter(format: LogFormat, fallback_filter: &str) -> Observabili
         .with(otlp_layer)
         .init();
 
-    ObservabilityGuard { _otlp: otlp_guard }
+    let exporting = otlp_guard.is_some();
+    if let Some(guard) = otlp_guard {
+        EXPORT.install(guard);
+    }
+    ObservabilityGuard { exporting }
 }
 
 /// The default `service.name`: the running executable's file name, so each

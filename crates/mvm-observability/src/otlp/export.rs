@@ -3,9 +3,9 @@
 //! The instrumented side only ever calls `try_send` on a bounded channel, so a
 //! slow or unreachable collector costs dropped spans, never a stalled thread.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -74,35 +74,107 @@ pub(crate) fn span_queue(capacity: usize) -> (SpanQueue, Receiver<Message>) {
 /// at most the configured request timeout, so an unreachable collector delays
 /// process exit by a bounded amount rather than indefinitely.
 ///
-/// `std::process::exit` does not run destructors: a path that exits that way
-/// skips the flush, and spans still queued at that moment are lost.
+/// `std::process::exit` does not run destructors. A process that holds the
+/// guard in [`ExportSlot`] instead can still flush on that path, which is what
+/// [`crate::exit`] does.
 #[must_use = "dropping the guard immediately stops export"]
 pub struct ExportGuard {
     queue: SpanQueue,
     shutdown: Arc<AtomicBool>,
     done: Receiver<()>,
     wait: Duration,
+    finished: bool,
 }
 
 impl std::fmt::Debug for ExportGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExportGuard")
             .field("wait", &self.wait)
+            .field("finished", &self.finished)
             .finish_non_exhaustive()
+    }
+}
+
+impl ExportGuard {
+    /// Stop the export thread and wait for it to send what is queued, for at
+    /// most `bound` or the configured timeout, whichever is shorter.
+    ///
+    /// Only the first call does anything; it returns whether this call was
+    /// that one. The thread is gone after it, so a later call would have
+    /// nothing to wait for and would repeat the dropped-span report.
+    pub fn flush_within(&mut self, bound: Duration) -> bool {
+        if std::mem::replace(&mut self.finished, true) {
+            return false;
+        }
+        self.shutdown.store(true, Ordering::SeqCst);
+        // A full queue means the thread is busy draining and will see the flag
+        // at its next receive; the wake-up is only for an idle thread.
+        let _ = self.queue.tx.try_send(Message::Shutdown);
+        let _ = self.done.recv_timeout(bound.min(self.wait));
+        if let Some(line) = dropped_report(self.queue.dropped()) {
+            eprintln!("{line}");
+        }
+        true
     }
 }
 
 impl Drop for ExportGuard {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::SeqCst);
-        // A full queue means the thread is busy draining and will see the flag
-        // at its next receive; the wake-up is only for an idle thread.
-        let _ = self.queue.tx.try_send(Message::Shutdown);
-        let _ = self.done.recv_timeout(self.wait);
-        let dropped = self.queue.dropped();
-        if dropped > 0 {
-            eprintln!("otlp: {dropped} span(s) dropped because the export queue was full");
+        self.flush_within(self.wait);
+    }
+}
+
+fn dropped_report(dropped: u64) -> Option<String> {
+    (dropped > 0)
+        .then(|| format!("otlp: {dropped} span(s) dropped because the export queue was full"))
+}
+
+/// A place for the process's one [`ExportGuard`] that any code path can reach.
+///
+/// The guard cannot live only in a stack frame: `std::process::exit` runs no
+/// destructors, so a frame-owned guard is never flushed on that path. Keeping
+/// it here lets an early exit take it out and flush it first.
+#[derive(Debug, Default)]
+pub struct ExportSlot {
+    guard: Mutex<Option<ExportGuard>>,
+}
+
+impl ExportSlot {
+    pub const fn new() -> Self {
+        Self {
+            guard: Mutex::new(None),
         }
+    }
+
+    /// Hold `guard`. A guard already held is flushed as it is replaced.
+    pub fn install(&self, guard: ExportGuard) {
+        let previous = self.lock().replace(guard);
+        drop(previous);
+    }
+
+    /// Whether a guard is held and not yet flushed.
+    pub fn is_installed(&self) -> bool {
+        self.lock().is_some()
+    }
+
+    /// Take the guard out and flush it, waiting at most `bound` or its
+    /// configured timeout. Returns whether there was a guard to flush.
+    ///
+    /// The lock is released before the wait, so a second caller — an
+    /// interrupt arriving while the program is already flushing — finds the
+    /// slot empty and returns at once rather than queueing behind it.
+    pub fn flush_within(&self, bound: Duration) -> bool {
+        let Some(mut guard) = self.lock().take() else {
+            return false;
+        };
+        guard.flush_within(bound)
+    }
+
+    /// A panic elsewhere while holding the lock must not stop the exit path
+    /// from flushing, and the guarded value is a plain `Option` that no
+    /// operation leaves half-written.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<ExportGuard>> {
+        self.guard.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -206,6 +278,7 @@ pub(crate) fn start_with_sink<K: BatchSink>(
         shutdown,
         done,
         wait,
+        finished: false,
     };
     Ok((queue, guard))
 }
@@ -304,7 +377,6 @@ impl FailureReporter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use std::time::SystemTime;
 
     fn span(id: u64) -> SpanRecord {
@@ -369,6 +441,90 @@ mod tests {
         assert_eq!(batches.iter().sum::<usize>(), MAX_BATCH + 10);
         assert!(batches.iter().all(|&n| n <= MAX_BATCH), "{batches:?}");
         assert_eq!(queue.dropped(), 0);
+    }
+
+    /// Holds every batch until `delay` has passed, like a collector that is
+    /// slow to answer.
+    struct Slow(Duration);
+
+    impl BatchSink for Slow {
+        fn send(&mut self, _body: Vec<u8>) -> Result<(), String> {
+            thread::sleep(self.0);
+            Ok(())
+        }
+    }
+
+    fn installed_slot(sink: Capture, spans: u64) -> ExportSlot {
+        let (queue, guard) = start_with_sink(worker(sink), 4096, Duration::from_secs(5)).unwrap();
+        (1..=spans).for_each(|id| queue.offer(span(id)));
+        let slot = ExportSlot::new();
+        slot.install(guard);
+        slot
+    }
+
+    #[test]
+    fn flushing_the_slot_delivers_the_spans_its_guard_had_queued() {
+        let sink = Capture::default();
+        let slot = installed_slot(sink.clone(), 3);
+        assert!(slot.flush_within(Duration::from_secs(5)));
+        assert_eq!(sink.0.lock().unwrap().iter().sum::<usize>(), 3);
+        assert!(!slot.is_installed());
+    }
+
+    #[test]
+    fn a_second_flush_of_the_slot_does_nothing() {
+        let sink = Capture::default();
+        let slot = installed_slot(sink.clone(), 2);
+        assert!(slot.flush_within(Duration::from_secs(5)));
+        assert!(!slot.flush_within(Duration::from_secs(5)));
+        assert_eq!(sink.0.lock().unwrap().iter().sum::<usize>(), 2);
+    }
+
+    #[test]
+    fn flushing_an_empty_slot_returns_at_once() {
+        let slot = ExportSlot::new();
+        let started = Instant::now();
+        assert!(!slot.flush_within(Duration::from_secs(30)));
+        assert!(started.elapsed() < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn a_slot_flush_waits_no_longer_than_its_bound_for_a_slow_collector() {
+        let worker = Worker {
+            sink: Slow(Duration::from_secs(10)),
+            resource: ResourceInfo::current("test"),
+            endpoint: "https://collector.example.com/v1/traces".into(),
+        };
+        let (queue, guard) = start_with_sink(worker, 16, Duration::from_secs(30)).unwrap();
+        queue.offer(span(1));
+        let slot = ExportSlot::new();
+        slot.install(guard);
+        let bound = Duration::from_millis(300);
+        let started = Instant::now();
+        assert!(slot.flush_within(bound));
+        let waited = started.elapsed();
+        assert!(
+            waited < bound + Duration::from_millis(700),
+            "flush ignored its bound: {waited:?}"
+        );
+    }
+
+    #[test]
+    fn a_guard_flushed_explicitly_does_not_flush_again_when_dropped() {
+        let sink = Capture::default();
+        let (queue, mut guard) =
+            start_with_sink(worker(sink.clone()), 4096, Duration::from_secs(5)).unwrap();
+        queue.offer(span(1));
+        assert!(guard.flush_within(Duration::from_secs(5)));
+        assert!(!guard.flush_within(Duration::from_secs(5)));
+        drop(guard);
+        assert_eq!(*sink.0.lock().unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn the_dropped_span_report_names_the_count_and_is_silent_at_zero() {
+        assert!(dropped_report(0).is_none());
+        assert!(dropped_report(4).unwrap().contains("4 span(s) dropped"));
     }
 
     #[test]

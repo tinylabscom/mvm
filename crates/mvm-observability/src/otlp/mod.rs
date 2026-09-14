@@ -16,7 +16,7 @@ mod layer;
 mod record;
 
 pub use config::{ConfigError, OtlpConfig};
-pub use export::ExportGuard;
+pub use export::{ExportGuard, ExportSlot};
 pub use layer::OtlpLayer;
 
 /// Start the export thread for `config` and return the layer that feeds it
