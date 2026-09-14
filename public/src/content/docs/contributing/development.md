@@ -306,13 +306,22 @@ mvmctl <command>
 loopback host (`localhost`, `127.0.0.0/8`, `::1`), so span contents and any
 credential in the headers never cross a network unencrypted; any other
 `http://` endpoint, or a malformed header, prints one line on stderr and leaves
-export off without affecting the command.
+export off without affecting the command. An endpoint that embeds a username or
+password is refused the same way: put credentials in
+`OTEL_EXPORTER_OTLP_HEADERS`, whose values are never printed.
 
 Like span timing, export has its own filter and is independent of `-v`. Spans
 are sent in batches from a background thread through a bounded queue: a slow or
-unreachable collector costs dropped spans, never a slower command. A failed
+unreachable collector costs dropped spans while the command runs. A failed
 batch is dropped, not retried, and only the first failure is reported. As the
-command returns, queued spans are flushed, waiting at most the export timeout.
+command returns, queued spans are flushed, waiting at most the export timeout,
+so an unreachable collector can add up to that timeout to the command's exit.
+Lower `OTEL_EXPORTER_OTLP_TIMEOUT` if that matters more than the last spans.
+A verb that ends by calling `std::process::exit` skips that flush.
+
+Exported spans carry the fields `tracing` records on them, the same data the
+logs carry at the matching level. A trace is a diagnostic view: the
+chain-signed audit log remains the record of what ran.
 Commands that end by exiting with a guest's exit code, or that are interrupted
 with Ctrl-C, skip that flush and lose spans still queued.
 

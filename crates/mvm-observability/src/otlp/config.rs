@@ -27,15 +27,22 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_millis(10_000);
 const TRACES_PATH: &str = "v1/traces";
 
 /// Why the environment could not produce an exporter.
+///
+/// No variant carries the endpoint as written. An endpoint can embed a
+/// credential, and these errors are printed to stderr.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
     /// The endpoint is not an absolute URL.
-    InvalidEndpoint { endpoint: String, reason: String },
+    InvalidEndpoint { reason: String },
+    /// The endpoint carries a username or password. It would be echoed by
+    /// every message that names the endpoint; credentials belong in
+    /// the headers variable, which is never printed.
+    CredentialsInEndpoint,
     /// `http://` to a host that is not loopback would carry span contents and
     /// any credential headers across a network in the clear.
-    CleartextToRemoteHost { endpoint: String },
+    CleartextToRemoteHost { host: String },
     /// Only `http` and `https` are OTLP/HTTP transports.
-    UnsupportedScheme { endpoint: String },
+    UnsupportedScheme { scheme: String },
     /// A header entry is malformed or not a legal HTTP header. Names the entry
     /// by header name only; a value can be a credential.
     InvalidHeader { name: String, reason: &'static str },
@@ -44,16 +51,19 @@ pub enum ConfigError {
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidEndpoint { endpoint, reason } => {
-                write!(f, "invalid OTLP endpoint '{endpoint}': {reason}")
-            }
-            Self::CleartextToRemoteHost { endpoint } => write!(
+            Self::InvalidEndpoint { reason } => write!(f, "invalid OTLP endpoint: {reason}"),
+            Self::CredentialsInEndpoint => write!(
                 f,
-                "refusing cleartext OTLP export to non-loopback endpoint '{endpoint}'; use https://"
+                "refusing an OTLP endpoint that embeds a username or password; \
+                 pass credentials through {ENV_HEADERS}"
             ),
-            Self::UnsupportedScheme { endpoint } => write!(
+            Self::CleartextToRemoteHost { host } => write!(
                 f,
-                "unsupported OTLP endpoint scheme in '{endpoint}'; use https:// or loopback http://"
+                "refusing cleartext OTLP export to non-loopback host '{host}'; use https://"
+            ),
+            Self::UnsupportedScheme { scheme } => write!(
+                f,
+                "unsupported OTLP endpoint scheme '{scheme}'; use https:// or loopback http://"
             ),
             Self::InvalidHeader { name, reason } => {
                 write!(f, "invalid {ENV_HEADERS} entry '{name}': {reason}")
@@ -167,17 +177,21 @@ fn join_traces_path(base: &str) -> String {
 
 fn parse_endpoint(raw: &str) -> Result<Url, ConfigError> {
     let url = Url::parse(raw).map_err(|e| ConfigError::InvalidEndpoint {
-        endpoint: raw.to_string(),
         reason: e.to_string(),
     })?;
+    // Checked before the scheme so that no later error, and no log line that
+    // names the endpoint, can carry the credential.
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(ConfigError::CredentialsInEndpoint);
+    }
     match url.scheme() {
         "https" => Ok(url),
         "http" if mvm_http::is_loopback_host(&url) => Ok(url),
         "http" => Err(ConfigError::CleartextToRemoteHost {
-            endpoint: raw.to_string(),
+            host: url.host_str().unwrap_or_default().to_string(),
         }),
-        _ => Err(ConfigError::UnsupportedScheme {
-            endpoint: raw.to_string(),
+        scheme => Err(ConfigError::UnsupportedScheme {
+            scheme: scheme.to_string(),
         }),
     }
 }
@@ -294,6 +308,28 @@ mod tests {
         let err = config(&[(ENV_ENDPOINT, "http://collector.example.com:4318")]).unwrap_err();
         assert!(matches!(err, ConfigError::CleartextToRemoteHost { .. }));
         assert!(err.to_string().contains("https://"));
+    }
+
+    #[test]
+    fn an_endpoint_carrying_credentials_is_refused_without_echoing_them() {
+        for endpoint in [
+            "https://user:s3cret-token@collector.example.com",
+            "https://s3cret-token@collector.example.com",
+            "http://user:s3cret-token@collector.example.com",
+            "grpc://user:s3cret-token@localhost:4317",
+        ] {
+            let err = config(&[(ENV_ENDPOINT, endpoint)]).unwrap_err();
+            assert_eq!(err, ConfigError::CredentialsInEndpoint, "{endpoint}");
+            assert!(!err.to_string().contains("s3cret-token"), "{err}");
+        }
+    }
+
+    #[test]
+    fn endpoint_errors_do_not_repeat_the_endpoint_as_written() {
+        let err = config(&[(ENV_ENDPOINT, "http://collector.example.com:4318/p?k=v")]).unwrap_err();
+        assert!(!err.to_string().contains("k=v"), "{err}");
+        let err = config(&[(ENV_ENDPOINT, "not a url k=v")]).unwrap_err();
+        assert!(!err.to_string().contains("k=v"), "{err}");
     }
 
     #[test]

@@ -163,9 +163,19 @@ pub(crate) fn start(config: &OtlpConfig) -> std::io::Result<(SpanQueue, ExportGu
     let worker = Worker {
         sink,
         resource: ResourceInfo::current(config.service_name()),
-        endpoint: config.endpoint().to_string(),
+        endpoint: endpoint_for_report(config.endpoint()),
     };
     start_with_sink(worker, QUEUE_CAPACITY, config.timeout())
+}
+
+/// The endpoint as a failure report may print it: without the query or
+/// fragment, where collectors that take a key in the URL put it. Configuration
+/// already refuses a username or password in the endpoint.
+fn endpoint_for_report(endpoint: &Url) -> String {
+    let mut shown = endpoint.clone();
+    shown.set_query(None);
+    shown.set_fragment(None);
+    shown.to_string()
 }
 
 /// Everything the export thread owns.
@@ -359,6 +369,12 @@ mod tests {
         assert_eq!(batches.iter().sum::<usize>(), MAX_BATCH + 10);
         assert!(batches.iter().all(|&n| n <= MAX_BATCH), "{batches:?}");
         assert_eq!(queue.dropped(), 0);
+    }
+
+    #[test]
+    fn a_failure_report_never_prints_the_endpoint_query() {
+        let url = Url::parse("https://c.example.com/v1/traces?api_key=s3cret#frag").unwrap();
+        assert_eq!(endpoint_for_report(&url), "https://c.example.com/v1/traces");
     }
 
     #[test]
