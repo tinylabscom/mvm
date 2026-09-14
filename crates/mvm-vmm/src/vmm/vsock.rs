@@ -21,7 +21,9 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use super::device_state::{
     DeviceKind, DeviceStateError, SnapshotDeviceState, StateReader, StateWriter,
 };
-use super::vsock_handlers::{VsockHandlerContext, VsockHandlerRegistry, VsockLifecycleState};
+use super::vsock_handlers::{
+    HostPortCursor, VsockHandlerContext, VsockHandlerRegistry, VsockLifecycleState,
+};
 #[cfg(test)]
 use super::vsock_transport::{
     GUEST_CID, HOST_BUF_ALLOC, HOST_CID, OP_SHUTDOWN, TYPE_STREAM, VIRTIO_ID_VSOCK, VIRTIO_MAGIC,
@@ -353,6 +355,11 @@ pub struct VirtioVsock {
     handoff_verify_key: Option<VerifyingKey>,
     handoff_stop: Option<&'static AtomicBool>,
     handoff_used: bool,
+    /// Whether host I/O is parked for a pause. The device is shared by every
+    /// vCPU of an SMP machine and each one that parks calls the snapshot hooks,
+    /// so this is what makes the transition happen once per pause rather than
+    /// once per vCPU.
+    snapshot_parked: bool,
 }
 
 impl VirtioVsock {
@@ -374,6 +381,7 @@ impl VirtioVsock {
             handoff_verify_key: None,
             handoff_stop: None,
             handoff_used: false,
+            snapshot_parked: false,
         }
     }
 
@@ -637,7 +645,14 @@ impl VirtioVsock {
     /// so the parent keeps its binding configuration in memory for
     /// [`Self::resume_after_snapshot`]. A restored child starts with a newly
     /// constructed handler registry and binds fresh authorized channels.
+    ///
+    /// Once per pause: every vCPU that parks calls this, and only the first has
+    /// anything to stop.
     pub fn prepare_snapshot(&mut self) {
+        if self.snapshot_parked {
+            return;
+        }
+        self.snapshot_parked = true;
         let queue = self.lock().transport.queues[0];
         handoff_debug(&format!(
             "prepare_snapshot before ready={} size={} pending={}",
@@ -657,7 +672,19 @@ impl VirtioVsock {
     }
 
     /// Restart the live parent's host-I/O owner after a snapshot pause.
+    ///
+    /// Once per pause, and that is load-bearing rather than tidy. Every vCPU
+    /// leaving the hold calls this, but the first one to leave runs guest code
+    /// straight away — so by the time a second vCPU gets here the guest agent
+    /// may already be serving a host connection. Rebinding then runs
+    /// `shutdown`, which cancels every live stream. That is how a warm claim's
+    /// post-restore session died with `Broken pipe` on the host while the guest
+    /// logged a peer that hung up mid-handshake, and only on machines with more
+    /// than one vCPU, and only when the second vCPU lost the race.
     pub fn resume_after_snapshot(&mut self) {
+        if !std::mem::take(&mut self.snapshot_parked) {
+            return;
+        }
         if let Some(irq_line) = self.irq_line.clone()
             && let Err(error) = self.restore_host_runtime(irq_line)
         {
@@ -903,8 +930,9 @@ impl SnapshotDeviceState for VirtioVsock {
                 field: "host_io_active",
             });
         }
-        let shared = self.lock();
+        let mut shared = self.lock();
         shared.reject_snapshot_if_live()?;
+        let cursor = shared.handlers.host_port_cursor();
         let mut writer = StateWriter::new(1);
         writer.u32(shared.transport.device_features_sel);
         writer.u32(shared.transport.status);
@@ -913,6 +941,11 @@ impl SnapshotDeviceState for VirtioVsock {
         for queue in shared.transport.queues {
             write_queue_state(&mut writer, queue);
         }
+        // Host port numbering is guest-visible state: the resumed guest may
+        // still hold connections under ports the parent handed out, so a
+        // restored device must carry on past them rather than start again.
+        writer.u32(cursor.agent);
+        writer.u32(cursor.host_dial);
         Ok(writer.finish())
     }
 
@@ -944,7 +977,24 @@ impl SnapshotDeviceState for VirtioVsock {
             queue.last_avail = reader.u16(kind, "last_avail")?;
             queue.next_used = reader.u16(kind, "next_used")?;
         }
+        let cursor = HostPortCursor {
+            agent: reader.u32(kind, "agent_host_port_cursor")?,
+            host_dial: reader.u32(kind, "host_dial_port_cursor")?,
+        };
         reader.finish()?;
+
+        if cursor.agent < super::agent_bridge::FIRST_HOST_PORT {
+            return Err(DeviceStateError::InvalidValue {
+                kind,
+                field: "agent_host_port_cursor",
+            });
+        }
+        if cursor.host_dial < super::host_dial_bridge::FIRST_HOST_DIAL_PORT {
+            return Err(DeviceStateError::InvalidValue {
+                kind,
+                field: "host_dial_port_cursor",
+            });
+        }
 
         if device_features_sel > 1 {
             return Err(DeviceStateError::InvalidValue {
@@ -980,6 +1030,7 @@ impl SnapshotDeviceState for VirtioVsock {
         shared.transport.queue_sel = queue_sel;
         shared.transport.queues = queues;
         shared.transport.interrupt_status = interrupt_status;
+        shared.handlers.continue_host_ports(cursor);
         Ok(())
     }
 }
@@ -1076,6 +1127,209 @@ mod tests {
 
     impl IrqLine for TestIrqLine {
         fn signal(&self, _spi: u32) {}
+    }
+
+    /// Wait for the device to pick up a host connection and return the host
+    /// port it assigned, read off the `OP_REQUEST` it queued for the guest.
+    fn next_queued_request_port(device: &VirtioVsock) -> u32 {
+        let started = std::time::Instant::now();
+        loop {
+            if let Some(port) = device
+                .lock()
+                .transport
+                .pending_rx
+                .iter()
+                .find(|(hdr, _)| hdr.op == OP_REQUEST)
+                .map(|(hdr, _)| hdr.src_port)
+            {
+                return port;
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(2),
+                "the device never picked up the host connection"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// A rebind must not hand out a host port a guest may still hold.
+    ///
+    /// Host ports are the guest's connection identity. A guest restored from a
+    /// snapshot can still believe a port is connected: the parent's last
+    /// session closes just before capture, its `OP_RST` is still queued when
+    /// the pause cancels host I/O, and the guest is frozen holding the socket.
+    /// Reissuing that port gets the new connection reset by the guest kernel on
+    /// sight. Starting every rebind back at the first host port is what made a
+    /// warm claim's post-restore session collide with the parent's activation
+    /// session, one claim in a few, depending only on which connection drew the
+    /// stale number.
+    #[test]
+    fn a_rebind_never_reissues_a_host_port() {
+        let dir = tempfile::Builder::new()
+            .prefix("vsk")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let agent_socket = dir.path().join("agent.sock");
+        let bindings = VsockHostBindings {
+            agent_socket: Some(agent_socket.clone()),
+            ..VsockHostBindings::default()
+        };
+        let mut device = virtio_dev();
+        if device
+            .rebind_host_channels(&bindings, Arc::new(TestIrqLine))
+            .is_err()
+        {
+            return;
+        }
+        let _first_client = std::os::unix::net::UnixStream::connect(&agent_socket).unwrap();
+        let first = next_queued_request_port(&device);
+
+        device
+            .rebind_host_channels(&bindings, Arc::new(TestIrqLine))
+            .unwrap();
+        let _second_client = std::os::unix::net::UnixStream::connect(&agent_socket).unwrap();
+        let second = next_queued_request_port(&device);
+
+        assert!(
+            second > first,
+            "a rebind reissued host port {second} after {first} had already been handed out"
+        );
+        device.shutdown();
+    }
+
+    /// A child restored into a new process gets a newly constructed device, so
+    /// the rebind guarantee above only reaches it if the numbering travels in
+    /// the snapshot. The guest it resumes holds whatever the parent held.
+    #[test]
+    fn a_restored_device_continues_host_port_numbering_from_its_snapshot() {
+        let dir = tempfile::Builder::new()
+            .prefix("vsk")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let agent_socket = dir.path().join("agent.sock");
+        let mut source = virtio_dev();
+        if source
+            .rebind_host_channels(
+                &VsockHostBindings {
+                    agent_socket: Some(agent_socket.clone()),
+                    ..VsockHostBindings::default()
+                },
+                Arc::new(TestIrqLine),
+            )
+            .is_err()
+        {
+            return;
+        }
+        let _client = std::os::unix::net::UnixStream::connect(&agent_socket).unwrap();
+        let handed_out = next_queued_request_port(&source);
+
+        source.prepare_snapshot();
+        let bytes = source.snapshot_state().unwrap();
+
+        let mut restored = virtio_dev();
+        restored.restore_state(&bytes).unwrap();
+        let cursor = restored.lock().handlers.host_port_cursor();
+        assert!(
+            cursor.agent > handed_out,
+            "a restored device would reissue host port {} after the parent had handed out \
+             {handed_out}",
+            cursor.agent
+        );
+    }
+
+    /// A snapshot is read back through `restore_state`, so a cursor that points
+    /// into another bridge's range, or below the first host port, is refused
+    /// rather than trusted.
+    #[test]
+    fn a_snapshot_with_a_host_port_cursor_out_of_range_is_refused() {
+        let mut source = virtio_dev();
+        source.prepare_snapshot();
+        let mut bytes = source.snapshot_state().unwrap();
+        // The cursor is the last eight bytes: agent then host-dial, both u32 LE.
+        let agent_at = bytes.len() - 8;
+        bytes[agent_at..agent_at + 4].copy_from_slice(&7u32.to_le_bytes());
+        let error = virtio_dev().restore_state(&bytes).unwrap_err();
+        assert!(matches!(
+            error,
+            DeviceStateError::InvalidValue {
+                kind: DeviceKind::VirtioVsock,
+                field: "agent_host_port_cursor"
+            }
+        ));
+    }
+
+    /// Every vCPU of an SMP machine runs its own copy of the run loop, and each
+    /// one that parks for a pause calls `prepare_snapshot` and then
+    /// `resume_after_snapshot` on the one shared device. The second vCPU to
+    /// leave the hold must not tear down what the first already brought back:
+    /// by then the guest is running, and the host may be mid-handshake with it.
+    ///
+    /// Checked on the connection rather than on `io.is_some()`, because a
+    /// second rebind also leaves I/O running — it just drops every live stream
+    /// on the way. That was the warm-claim failure: the host's post-restore
+    /// session died with `Broken pipe` while the guest logged a peer that hung
+    /// up mid-handshake.
+    #[test]
+    fn a_second_vcpu_leaving_the_pause_hold_keeps_the_first_ones_connections() {
+        // Short root: macOS caps a socket path at 104 bytes, and the default
+        // temp dir alone eats most of that.
+        let dir = tempfile::Builder::new()
+            .prefix("vsk")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let agent_socket = dir.path().join("agent.sock");
+        let mut device = virtio_dev();
+        device.irq_line = Some(Arc::new(TestIrqLine));
+        if device.set_agent_socket(&agent_socket).is_err() {
+            return;
+        }
+        device.start_io(Arc::new(TestIrqLine));
+
+        // Two vCPUs park.
+        device.prepare_snapshot();
+        device.prepare_snapshot();
+
+        // The first leaves the hold, restoring host I/O; the host connects.
+        device.resume_after_snapshot();
+        let mut client = std::os::unix::net::UnixStream::connect(&agent_socket).unwrap();
+        // Set while the stream is healthy. macOS refuses `setsockopt` with
+        // EINVAL on a socket whose connection has already been torn down, which
+        // would report the bug as an unexplained unwrap.
+        client
+            .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+            .unwrap();
+        let accepted = std::time::Instant::now();
+        while device.queued_host_packets() == 0
+            && accepted.elapsed() < std::time::Duration::from_secs(2)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            device.queued_host_packets() > 0,
+            "the device never picked up the host connection, so the rest of this \
+             test would pass without exercising anything"
+        );
+
+        // The second leaves the hold.
+        device.resume_after_snapshot();
+
+        let mut byte = [0u8; 1];
+        match std::io::Read::read(&mut client, &mut byte) {
+            Ok(0) => panic!("the second vCPU's resume closed a connection the first one served"),
+            Ok(_) => {}
+            Err(error) => assert!(
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ),
+                "the second vCPU's resume broke a live connection: {error}"
+            ),
+        }
+        assert!(
+            device.queued_host_packets() > 0,
+            "the second vCPU's resume discarded the pending connection request"
+        );
+        device.shutdown();
     }
 
     #[test]

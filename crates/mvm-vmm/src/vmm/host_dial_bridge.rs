@@ -59,7 +59,7 @@ const READ_CHUNK: usize = 16 * 1024;
 /// guest's well-known listener ports and the agent bridge's host-port space so a
 /// console conn id can never collide with an agent conn id (they share the device's
 /// single `handle_packet` reply-routing keyspace).
-const FIRST_HOST_DIAL_PORT: u32 = 2 << 20;
+pub(crate) const FIRST_HOST_DIAL_PORT: u32 = 2 << 20;
 
 /// One open host console connection: the accepted host socket, the guest console
 /// port it is dialed on, and whether the guest has accepted the stream yet.
@@ -111,6 +111,17 @@ impl HostDialBridge {
             host_closed: Vec::new(),
             long_lived: HashSet::new(),
         }
+    }
+
+    /// The host port this bridge will assign next.
+    pub(crate) fn next_host_port(&self) -> u32 {
+        self.next_port
+    }
+
+    /// Continue assigning host ports from `next`, and never backwards — the
+    /// same guarantee, and the same reason, as the agent bridge's.
+    pub(crate) fn continue_host_ports_from(&mut self, next: u32) {
+        self.next_port = self.next_port.max(next);
     }
 
     /// Mark guest ports whose connections must not be evicted for being idle.

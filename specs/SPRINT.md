@@ -287,7 +287,13 @@
       cold-booting; host-default warm residency remains best-effort. Focused
       positive, silent-peer, and launch-policy regressions, workspace tests,
       zero-warning Clippy, Linux/BDD gated compilation, and policy checks are
-      green. Merge delivery remains.
+      green. The remaining intermittent `Broken pipe` in the child's
+      post-restore session was two vsock device defects: every vCPU rebound
+      the device on resume, and rebinds restarted host port numbering so a
+      claim reissued the port the frozen guest still held from the parent's
+      activation session. Both fixed; 20/20 live HVF warm claims succeed
+      (`specs/sprint/delivery/3039-warm-child-vsock-host-port-reuse.md`).
+      Merge delivery remains.
 
 - [ ] **Published musl SDK sidecar — issue #3045.**
       `specs/plans/2026-08-31-publish-musl-sdk-sidecar.md`.
