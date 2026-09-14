@@ -3,7 +3,7 @@
 //! The subscriber assembly itself lives in `mvm_observability::logging`;
 //! this module only maps the CLI's `-v` count onto a filter.
 
-pub use mvm_observability::LogFormat;
+pub use mvm_observability::{LogFormat, ObservabilityGuard};
 
 /// The default tracing filter for a `-v` count when `RUST_LOG` is unset.
 /// 0 = quiet (errors only); each `-v` widens it.
@@ -22,10 +22,14 @@ pub fn filter_for_verbosity(verbosity: u8) -> &'static str {
 /// `-v` → `mvm=info,warn`, `-vv` → `debug`, `-vvv` → `trace`.
 /// `RUST_LOG=<filter>` overrides verbosity entirely.
 ///
-/// Span profiling is independent of verbosity: when `MVM_SPAN_TIMINGS` is set,
-/// spans are measured even at the default quiet filter.
-pub fn init(format: LogFormat, verbosity: u8) {
-    mvm_observability::init_with_filter(format, filter_for_verbosity(verbosity));
+/// Span profiling and trace export are independent of verbosity: when
+/// `MVM_SPAN_TIMINGS` or an OTLP endpoint is set, spans are measured or
+/// exported even at the default quiet filter.
+///
+/// Hold the returned guard until the command finishes; dropping it flushes
+/// spans still queued for export.
+pub fn init(format: LogFormat, verbosity: u8) -> ObservabilityGuard {
+    mvm_observability::init_with_filter(format, filter_for_verbosity(verbosity))
 }
 
 #[cfg(test)]
