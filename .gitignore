@@ -108,3 +108,7 @@ output/
 
 # Local agent memory — findings stay on the author's machine, not in the repo.
 .agent-memory/
+
+# Local scratch documentation — drafts and machine-specific runbooks that stay
+# on the author's machine rather than in the repo.
+/docs/
