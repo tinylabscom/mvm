@@ -1,0 +1,277 @@
+---
+title: Agent sandbox
+description: How an agent in a microVM calls a model API without holding the API key — the placeholder the guest receives, the host-side substitution and destination check, the egress policy around it, what the audit chain records, and the limits of each.
+---
+
+An agent that calls a model API needs a credential, and an agent that runs
+generated code should not be trusted with one. mvm resolves that by keeping the
+credential on the host. The guest holds a random placeholder, and the host
+substitutes the real value into outbound requests to the destinations the
+secret is bound to.
+
+This page describes what that mechanism does, how to reach it, and where it
+stops. For the image side, see
+[Running an LLM agent inside a microVM](/guides/nix-flakes/#running-an-llm-agent-inside-a-microvm).
+
+## What the guest receives
+
+For each secret the workload declares, the guest gets one environment variable
+whose value is an opaque token: `mvm-secret-` followed by 48 hex characters,
+minted from the OS random source when the VM boots. Two secrets never share a
+token, and the token says nothing about the value it stands for.
+
+Alongside the placeholders, the entrypoint gets:
+
+- `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, `https_proxy` set to
+  `http://127.0.0.1:18080`, the in-guest forward proxy.
+
+No CA bundle variables are set: this path provisions no per-VM egress CA,
+because the guest never terminates or is handed TLS for the destination. The
+entrypoint is launched with an otherwise empty environment. The real secret
+value is never written to the rootfs, the kernel command line, a drive, or the
+guest's environment.
+
+## What the host does
+
+Every workload VM gets its own `mvm-network-endpoint` process on the host; it
+carries all of the guest's egress. Declaring secrets adds a placeholder
+registry to that process, and it is the only process that reads a secret value
+in the clear.
+
+1. **At boot**, the endpoint reads the secret bindings from the signed
+   execution plan, looks up each one's destination list and auth type in the
+   local binding store, mints the placeholders, and hands them back to be
+   injected into the entrypoint's environment. A secret with no binding fails
+   the boot rather than handing the guest a placeholder nothing can resolve.
+2. **Per request**, the in-guest proxy relays the request to the endpoint over
+   the VM's authenticated vsock channel. The endpoint checks the destination
+   against the VM's network policy, then, for each request header carrying a
+   placeholder, checks the destination host in the request URL against that
+   secret's bound hosts. The value is resolved only after both checks pass.
+3. **The endpoint originates the request itself**, including the TLS
+   connection to the destination, validated against the host's system roots.
+   The guest never holds a TLS session with the model provider.
+4. **When the upstream response completes**, the endpoint appends a
+   `secret.substituted` entry for each secret it substituted into that request
+   to the host's chain-signed audit log.
+
+The entry is written after the exchange finishes, not when the credential is
+sent. If the forward fails after the request has gone out (an upstream reset,
+a timeout, a response over the size cap), the destination may already have
+received the real key, while the guest gets a refusal and the log has no
+`secret.substituted` entry for that request. Some of those failures are
+recorded instead as `secret.redacted` carrying the failure reason; some leave
+no entry.
+
+A placeholder that the endpoint did not mint, or a request to a host the
+secret is not bound to, is refused before any value is read, and the guest gets
+a `502` with the reason in the body.
+
+Substitution looks only at request **headers**. Put the placeholder where the
+client sends its credential header, not in a request body.
+
+## Setting it up
+
+Three pieces: the host secret and its binding, the declaration in Workload IR,
+and the run.
+
+**1. Store the secret and bind it.** `mvmctl secret set` stores the value and
+records where it may be sent and how it authenticates:
+
+```sh
+mvmctl secret set anthropic --provider anthropic
+```
+
+`mvmctl secret providers` lists the built-in catalog; the `anthropic` entry
+binds to `api.anthropic.com`. For a destination not in the catalog, name it
+directly:
+
+```sh
+mvmctl secret set my-api --host api.example.com --type bearer
+```
+
+With no `--value` or `--value-file`, the command prompts on a terminal or reads
+a pipe, so the value does not land in shell history or the process table. The
+binding recorded here is the one the host enforces.
+
+**2. Declare the secret in Workload IR.** The host reads secret declarations
+from a Workload IR file. There are two ways to produce one:
+
+- From an SDK function workload: declare the variable with
+  `mvm.secret("anthropic", type="bearer", hosts=["api.anthropic.com"], var="ANTHROPIC_API_KEY")`
+  in the app's `env` and run `mvmctl build compile app.py --out ./out`. That
+  writes the flake and `./out/workload.json`, and strips the secret
+  declaration out of the image.
+- For a hand-written flake: write `workload.json` yourself. The
+  [Nix flakes guide](/guides/nix-flakes/#running-an-llm-agent-inside-a-microvm)
+  has a complete example.
+
+`mvm.toml` has no secret declaration.
+
+**3. Run the entrypoint with the IR and an egress allowance.** A compiled
+function workload reads its call arguments from stdin as a JSON
+`[args, kwargs]` array; plain text is a decode error in the guest. With no
+stdin, the call gets `[[], {}]`.
+
+```sh
+echo '[["Summarize this repository."], {}]' | mvmctl machine run --flake ./out --entrypoint \
+  --from-workload-ir ./out/workload.json \
+  --allow-host api.anthropic.com \
+  --timeout 120
+```
+
+`--timeout` bounds the whole call, boot excluded, and defaults to 30 seconds.
+A call that outlives it exits with status 124.
+
+## Which runs receive the placeholder
+
+Only one invocation shape puts secrets into the signed plan and the
+placeholders into the workload's environment:
+
+```sh
+mvmctl machine run --flake PATH --entrypoint --from-workload-ir PATH
+```
+
+`--manifest PATH` works in place of `--flake PATH`.
+
+Everything else runs **without** placeholders and without the proxy variables:
+
+| Invocation | Placeholder injected |
+| --- | --- |
+| `machine run --entrypoint --from-workload-ir PATH` | Yes |
+| `machine run --entrypoint` without `--from-workload-ir` | No: the plan carries no secrets |
+| `machine run --flake PATH` or `--manifest PATH` with no `--entrypoint` | No |
+| `machine run --image REF -- argv` | No |
+| `machine exec` into a running machine | No |
+| PID 1 of any image | No: the boot-time injection path is not wired |
+| `machine run --entrypoint --attach --name NAME` | Only when `NAME` is the generated `invoke-…` name of a machine booted with secrets |
+| `machine session attach SESSION_ID` | Yes, if the session was booted with secrets |
+
+You cannot choose the name of a machine that has secrets. A machine started
+with `machine run --name NAME -d` and no `--entrypoint --from-workload-ir` was
+admitted without secrets, so attaching to it by name injects no placeholder. A
+secret-bearing entrypoint run that is kept alive (for example with `-d`)
+ignores `--name`: its VM gets a generated `invoke-…` name, and `--attach` can
+reach it only by that name. Prefer the session id that run prints on stderr as
+`Session kept alive: <id>`:
+
+```sh
+echo '[["Next question."], {}]' | mvmctl machine session attach <id> --stdin - --timeout 120
+```
+
+Both forms reuse the placeholders minted at boot and admit nothing new.
+`--stdin -` is required to send piped input: without `--stdin`,
+`machine session attach` ignores its stdin and calls the entrypoint with
+`[[], {}]`.
+
+The entrypoint itself must be a per-call entrypoint: an image whose PID 1
+idles and whose `/etc/mvm/entrypoint` is a wrapper the guest agent runs on each
+call. Function workloads from `mvmctl build compile` have that shape. Command
+workloads from `mvmctl build compile`, and plain mkGuest `entrypoint.command`
+images, do not: their program is PID 1, which never receives a placeholder.
+
+## What the agent's HTTP client must do
+
+The in-guest proxy is deliberately small. A client that works through it:
+
+- **Sends absolute-form requests**, with the full URL as the request target:
+  `POST https://api.anthropic.com/v1/messages HTTP/1.1`. The proxy does not
+  accept `CONNECT`. Most HTTP libraries tunnel `https://` URLs through a proxy
+  with `CONNECT` by default, and those requests fail with a `502`. Check what
+  your agent's client does before assuming `HTTPS_PROXY` is enough.
+- **Expects every proxied request to go this way.** `HTTPS_PROXY` applies to
+  all of the process's HTTPS traffic, not only the requests carrying a
+  placeholder. Any other destination you admit with `--allow-host` and reach
+  through a proxy-aware client hits the same `CONNECT` refusal. Node's built-in
+  `fetch` does not read `HTTPS_PROXY` by default and connects directly, which
+  has no route out of the guest.
+- **Puts the placeholder in a header** where the credential goes, such as
+  `x-api-key: $ANTHROPIC_API_KEY` or `Authorization: Bearer $API_KEY`.
+- **Fits in one request per connection.** The proxy answers with
+  `connection: close`.
+- **Gets a response started within 30 seconds, and never stalls for 30.** On
+  the host, the upstream response head must arrive within 30 seconds of the
+  request being sent. After that, each side of the relay gives up after 30
+  seconds with no data read. A request and a response are each capped at
+  16 MiB. The whole entrypoint call is separately bounded by
+  `machine run --timeout`, which defaults to 30 seconds.
+- **Does not need incremental streaming.** The response reaches the guest in
+  one piece after the upstream response completes. A server-sent-event stream
+  arrives all at once at the end.
+
+## Egress
+
+Egress is denied by default. A bound secret does not open a destination; the
+network policy has to admit it too, and the endpoint refuses a request the
+policy does not admit before it looks at any placeholder.
+
+| Flag | Policy |
+| --- | --- |
+| (none) | Deny all outbound traffic |
+| `--allow-host HOST[:PORT]` | Allow only the listed destinations; the port defaults to 443. Repeatable |
+| `--net` | The `dev` preset: package registries, `github.com`, `api.github.com`, `api.openai.com`, `api.anthropic.com` |
+
+For an agent, prefer `--allow-host` with exactly the model API host. The
+network policy also defines a narrower `agent` preset (the two model APIs plus
+GitHub), but no `machine run` flag selects it today.
+
+Every microVM backend boots the workload with a vsock device and no network
+interface, so the endpoint is the only way out of the guest. The same endpoint
+enforces the same policy on each backend.
+
+## Token budget
+
+None on this path. The endpoint can meter model API traffic against a token
+budget, but `machine run --entrypoint` builds its network policy from
+`--allow-host` and `--net` only, and neither attaches a budget. Bound spend at
+the provider, for example with a key that has a usage limit.
+
+## What the audit chain records
+
+Admission and substitution entries go to the chain-signed log for the `local`
+tenant, `~/.mvm/audit/local.jsonl`, signed with the host key at
+`~/.mvm/keys/host-signer.ed25519`:
+
+| Event | When | Labels |
+| --- | --- | --- |
+| `plan.admitted` | The signed plan, including its secret bindings, was admitted | plan identity |
+| `plan.launched` / `plan.failed` | The VM started, or failed to | plan identity |
+| `secret.substituted` | A request carrying a substituted secret completed, including its upstream response. Not written when the forward fails in flight, even if the key was already sent | `name`, `destination`, `auth_type` |
+| `secret.redacted` | Secret-shaped or PII content was masked out of an outbound request, or a request failed or was refused fail-closed | `destination`, rule categories or reason |
+| `secret.placeholder_dropped` | A placeholder was found where it may not travel and was dropped | `destination` |
+
+No entry carries a secret value, a request body, or a header value.
+
+Read and verify the chain:
+
+```sh
+mvmctl trust audit tail --chain
+mvmctl trust audit verify
+```
+
+`verify` exits nonzero if a signature or chain link does not check out,
+including across rotated segments. It cannot detect entries removed from the
+end of the log.
+
+## What this does not protect against
+
+- **Use of the credential through the placeholder.** A compromised agent can
+  send any request it likes to a bound host, and the host will attach the real
+  key. Substitution keeps the key from being copied out of the VM; it does not
+  limit what the key is used for at the provider. Bind the narrowest key you
+  can.
+- **Data the agent sends to allowed hosts.** Anything the agent can read, it
+  can put in a request to an admitted destination.
+- **Credentials that are not HTTP headers.** A database password or a TLS
+  client key cannot be substituted. If you give one to a guest, the guest holds
+  the real value.
+- **A malicious host.** The host holds the secret store, the signing key, and
+  the hypervisor.
+
+## Related pages
+
+- [Secrets and credentials](/guides/secrets-and-credentials/)
+- [Network egress policy](/guides/network-egress-policy/)
+- [Audit and receipts](/guides/audit-and-receipts/)
+- [Agent tool contract](/guides/agent-tool-contract/)
+- [Workload input](/guides/workload-input/)

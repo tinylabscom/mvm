@@ -61,7 +61,7 @@ Validation rules:
 ## Current CLI-backed implementation
 
 Today the broadest shipped lifecycle surface is the CLI. A tool runner can use
-the CLI while preserving the same contract the SDK target should expose.
+it to implement the contract above directly.
 
 ```sh
 mvmctl machine build --flake ./agent-tool
@@ -82,9 +82,36 @@ mvmctl run --timeout 20 -- python -c 'print("bounded tool call")'
 Keep the sandbox name, command exit status, receipt path, and audit/run IDs with
 the agent trace when those values are available.
 
-## Runtime SDK target
+## What the SDKs ship today
 
-The SDK target should make the same contract easier to write without hiding
+The Python and TypeScript SDKs have a `Sandbox` handle. In live mode
+(`MVM_SDK_MODE=live`) each call runs an `mvmctl` command against a real
+microVM:
+
+| Operation | Python | TypeScript |
+| --- | --- | --- |
+| Boot (`mvmctl machine run`) | `Sandbox.create(template, *, image=..., ...)` | `Sandbox.create(source, options)`, synchronous |
+| Run one command | `sandbox.exec(*argv)` returns `exit_code`, `stdout`, `stderr` | `sandbox.exec(argv, options)` returns `exitCode`, `stdout`, `stderr` |
+| Start a process | `sandbox.commands.start(argv)` | `sandbox.commands.start(argv, options)` |
+| Guest files | `sandbox.files.write`, `read`, `list`, `stat`, `mkdir`, `remove`, `move` | `sandbox.files.write`, `read`, `list`, `stat`, `mkdir`, `remove`, `move` |
+| Stop the machine | leave the `with` block, or `kill()` | leave the `using` scope (`[Symbol.dispose]`), or `kill()` |
+
+`exec`, `commands.start`, and every `files` operation use development-only
+guest verbs: against a production template the SDK refuses them with
+`SandboxDevOnly` before making the call. `exec` takes no output-size cap, and
+its result carries no audit identifier. For model API credentials inside the
+guest, see [Agent sandbox](/guides/agent-sandbox/).
+
+## Planned SDK shape (not shipped)
+
+:::caution[Not implemented]
+The code below is a design target, not a working API. The `Sandbox` handle in
+either SDK has no `commands.run`, and nothing on it accepts
+`max_output_bytes` or returns `audit_id`. Use the CLI flow above or the shipped calls listed in the previous
+section.
+:::
+
+The intent is to make the same contract easier to write without hiding
 security decisions:
 
 <Tabs syncKey="runtime-language">
@@ -155,8 +182,8 @@ async function runAgentTool(request: Record<string, unknown>) {
 </Tabs>
 
 Check [Operations cookbook](/sdk/operations-cookbook/) and
-[Lifecycle matrix](/sdk/lifecycle-matrix/) before treating a helper as shipped
-in a language SDK.
+[Lifecycle matrix](/sdk/lifecycle-matrix/) for the per-language status of each
+helper.
 
 ## Network policy
 
