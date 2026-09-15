@@ -1,8 +1,15 @@
 # Refactor status
 
-Last updated: 2026-09-14
+Last updated: 2026-09-15
 
 ## In progress
+
+- [ ] **GitHub Actions issue reconciliation.**
+      `specs/plans/2026-09-15-github-actions-issue-reconciliation.md`.
+      Issues #3248, #3249, and #3250 cover a Linux 6.12.110 pin refresh, a
+      rustls advisory plus two HVF handoff-response mutation survivors, and
+      the downstream stale claim evidence. The implementation is locally
+      verified; PR CI and post-merge scheduled evidence remain.
 
 - [ ] **OTLP trace export for host-side processes.**
       `specs/plans/2026-09-14-otlp-trace-export.md`. Issue #3242.

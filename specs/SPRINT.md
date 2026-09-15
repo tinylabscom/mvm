@@ -10,6 +10,14 @@
 
 ## In progress
 
+- [ ] **GitHub Actions issue reconciliation — issues #3248, #3249, and #3250.**
+      `specs/plans/2026-09-15-github-actions-issue-reconciliation.md`.
+      Update the vulnerable rustls lockfile entry, close both newly surviving
+      HVF handoff-response mutants, and move the synchronized guest-kernel pins
+      to the verified Linux 6.12.110 archive. Completion requires a green
+      current-main Security run and claim-freshness reconciliation, not just a
+      locally green patch.
+
 - [x] **CI queue consolidation.**
       `specs/plans/2026-09-10-ci-queue-consolidation.md`.
       Preserve cumulative merge-group validation while reducing runner fan-out
