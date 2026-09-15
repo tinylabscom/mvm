@@ -20,26 +20,7 @@ use mvm_conformance::IsolatedHome;
 /// the conformance suite uses, plus the target directory on `PATH` so helper
 /// binaries built alongside `mvmctl` are visible during live boots.
 pub(crate) fn mvmctl_command() -> Command {
-    let cargo_path = std::env::var_os("CARGO_BIN_EXE_mvmctl")
-        .map(PathBuf::from)
-        .or_else(|| {
-            let mut dir = std::env::current_exe().ok()?;
-            dir.pop();
-            if dir.ends_with("deps") {
-                dir.pop();
-            }
-            Some(dir.join("mvmctl"))
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "mvmctl binary path unavailable — run `cargo build --bin mvmctl` before `just bdd`"
-            )
-        });
-    let bin_path = if cargo_path.is_absolute() {
-        cargo_path
-    } else {
-        workspace_root().join(cargo_path)
-    };
+    let bin_path = mvmctl_path();
     let mut cmd = Command::new(&bin_path);
     if let Some(bin_dir) = bin_path.parent() {
         let mut path = bin_dir.as_os_str().to_os_string();
@@ -51,6 +32,17 @@ pub(crate) fn mvmctl_command() -> Command {
     }
 
     cmd
+}
+
+/// The `mvmctl` binary the suite drives — one resolution shared by the
+/// freshness check and every step, so the binary checked is the binary run.
+pub(crate) fn mvmctl_path() -> PathBuf {
+    let test_binary = std::env::current_exe().expect("locate the conformance test binary");
+    mvm_conformance::resolve_mvmctl_path(
+        std::env::var_os("CARGO_BIN_EXE_mvmctl").map(PathBuf::from),
+        &test_binary,
+        &workspace_root(),
+    )
 }
 
 /// The repository root, resolved from this crate's manifest directory.
