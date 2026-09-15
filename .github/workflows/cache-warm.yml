@@ -10,10 +10,11 @@ name: Warm the Rust build cache
 # warm target directory. The queue is the throughput bottleneck and its refs are
 # ephemeral, so main is the only place a cache useful to it can come from.
 #
-# It costs one build per merge and saves several per validation cycle: the
-# workspace is compiled by lint-core, lint-features,
-# lint-features-test-support, lint-features-embed, test-workspace, test-linux
-# and test-ebpf-telemetry, each from cold today.
+# It costs one build per merge and saves several per validation cycle. Its
+# entries are keyed to the stable 1.97.1 toolchain, so they serve the lanes that
+# build on it — lint-core and the three lint-features lanes. The nightly test
+# lanes key to a different toolchain and restore nothing from here, on purpose;
+# the note at the end of this file says why.
 #
 # The test-support graph differs enough to rebuild almost every workspace crate
 # after restoring the default entry, so it has a dedicated trusted-main key.
@@ -162,56 +163,21 @@ jobs:
           cargo check -p mvm-cli --features test-support \
             --example verification_loop
 
-  # The other half of the nightly-fast / stable-lint split, and until now the
-  # missing one. `warm` above runs its clippy through `cargo-stable.sh`, which
-  # forces `RUSTUP_TOOLCHAIN=1.97.1` *and* `CARGO_TARGET_DIR=target/stable-1.97.1`
-  # — so the entry it writes holds stable lint artifacts under a different target
-  # root, keyed to a toolchain only the four lint lanes use.
+  # There is deliberately no warm job for the nightly test lanes, and one was
+  # tried. Those lanes run a toolchain this workflow does not write for, so they
+  # restore nothing — which looked like the reason `Test workspace` was slow.
+  # It was not. A `warm-nightly` job wrote the entry they look for, and across
+  # ten lane-runs the hits halved what they compiled (Test workspace ~495 → ~270
+  # crates, Test Linux ~820 → ~518) and saved no wall clock: medians moved by
+  # ten to thirty seconds, inside run-to-run noise.
   #
-  # `Swatinem/rust-cache` folds the resolved rustc version into its key, so the
-  # test lanes were computing a key nothing had ever written and restoring
-  # nothing at all: `Test workspace` logged "No cache found." and compiled the
-  # workspace from cold on every run, 17 of its 21 minutes, while its tests took
-  # three and a half. This job writes the entry they actually look for.
+  # Two reasons. What a hit skips is the dependency graph — many small crates
+  # that compile quickly. What it cannot skip is the large workspace crates,
+  # which any change low in the graph invalidates, plus linking and running the
+  # tests; that is where those lanes spend their time. And the entry was 2.9 GB,
+  # so unpacking it cost 60–116 s per lane, about what the skipped compilation
+  # had saved. Two lockfile generations of it held ~5.8 GB of a 10 GB repository
+  # cache that was already over its cap.
   #
-  # `--no-run` because the artifacts are the point; running the suite here would
-  # duplicate the lanes that gate.
-  warm-nightly:
-    name: Warm nightly fast path
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: ./.github/actions/free-disk
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly-2026-08-25
-
-      - uses: ./.github/actions/apt-deps
-        with:
-          packages: attr cryptsetup-bin lld
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: nextest
-
-      # No `key:` — this shares `workspace` with the stable warm job above and
-      # with every consuming lane. rust-cache separates the two by the toolchain
-      # hash it already folds into the key, so one shared-key serves both halves
-      # of the split without either overwriting the other.
-      - uses: ./.github/actions/rust-cache
-        with:
-          save: "true"
-
-      # The same two resolutions `test-workspace` builds under. They differ:
-      # `--all-targets` alone selects the root package and `--workspace
-      # --all-targets` unifies features across every member, so warming one does
-      # not warm the other.
-      - name: Warm the nightly workspace build
-        run: |
-          cargo build --all-targets
-          cargo nextest run --workspace --all-targets --no-run
+  # Before adding one again, measure a lane's wall clock with and without it
+  # over several runs. A lower compile count on its own is not a saving.

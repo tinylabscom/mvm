@@ -819,11 +819,13 @@ jobs:
       - name: Run tests
         run: cargo nextest run --workspace --all-targets
 
-      - name: Run universal agent handler tests
-        # DevOnly handlers are runtime-gated, so the default build now
-        # compiles and exercises them for every artifact tier.
-        run: cargo nextest run -p mvm-agentd --all-targets
-
+      # No separate `-p mvm-agentd --all-targets` run. It was a strict subset of
+      # the workspace run above — every test it ran, that run already ran, plus 21
+      # more `flowmux` tests feature unification enables there — and nothing in
+      # mvm-agentd is gated on a feature being *off*, so no test runs only under
+      # per-package resolution. It cost ~41 recompiled crates and a second pass
+      # over the same suite. The addons run below is different: `addons` is not
+      # enabled by unification, and it runs 61 tests nothing else does.
       - name: Run addon/egress helper tests
         # The async loopback helper bins (mvm-addon-dns, mvm-addon-vsock-bridge,
         # mvm-egress-client) and their shared vsock session helper live behind
