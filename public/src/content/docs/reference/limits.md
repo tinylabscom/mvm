@@ -28,7 +28,8 @@ Commit the manifest values once the sizing is intentional.
 | Backend | Best for | Important limit |
 | --- | --- | --- |
 | Firecracker on Linux/KVM | Strongest local microVM isolation. | Requires `/dev/kvm` and Linux host support. |
-| HVF / libkrun | macOS development and supported non-Linux paths. | Feature parity differs by macOS version and backend. |
+| HVF | Supported Apple Silicon macOS builder and workload path. | Requires macOS 26+; standard builds and releases do not require libkrun. |
+| libkrun | Explicit integration development only. | Optional and excluded from standard release artifacts. |
 | QEMU (TCG) | Linux dev/test without `/dev/kvm` (`--hypervisor qemu`). | Tier 2 dev/test; larger TCB, partial verified boot — not for production. |
 
 Always verify the active posture with:

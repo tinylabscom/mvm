@@ -1073,9 +1073,8 @@ mod tests {
         let mut env = TestEnv::new();
         env.remove(MVM_BUILDER_BACKEND_ENV);
 
-        // No override → the resolved backend (macOS 26+ Apple Silicon → HVF,
-        // everywhere else → libkrun). On an HVF Mac, forcing libkrun looked for an
-        // `aarch64` builder image that is never built there.
+        // No override → the resolved dependency-free backend (supported Apple
+        // Silicon macOS → HVF, everywhere else → QEMU).
         assert_eq!(
             ext4_materializer_choice(),
             crate::builder_backend_select::auto_detect_default()

@@ -19,7 +19,6 @@ mvmctl auto-selects the best backend for your platform:
 ```
 Linux (KVM):       mvmctl machine run  -->  Firecracker microVM (direct)
 macOS 26+ (AS):    mvmctl machine run  -->  HVF microVM (Hypervisor.framework, vsock-only)
-macOS 13-25 (AS):  mvmctl machine run  -->  libkrun microVM
 ```
 
 | Layer | Access | Has your project files? |
@@ -31,7 +30,7 @@ macOS 13-25 (AS):  mvmctl machine run  -->  libkrun microVM
 MicroVMs are **headless workloads** with no SSH access -- they communicate via vsock only. The builder VM is headless too -- it auto-bootstraps the first time you run `mvmctl machine build` or `mvmctl machine run --flake ...`; `mvmctl bootstrap` pre-fetches its image ahead of time and `mvmctl doctor` reports the resolved builder backend.
 
 :::note
-On Linux with `/dev/kvm`, workloads boot straight on Firecracker; a `--flake` build still routes `nix build` through the headless builder VM. On macOS Apple Silicon, workloads run on the HVF backend (macOS 26+) or libkrun (macOS 13–25). There is no Docker or container runtime path.
+On Linux with `/dev/kvm`, workloads boot straight on Firecracker; a `--flake` build still routes `nix build` through the headless builder VM. On macOS 26+ Apple Silicon, workloads run on the native HVF backend with no third-party VMM dependency. There is no Docker or container runtime path.
 :::
 
 ## Scaffold a project

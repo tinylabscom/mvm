@@ -55,7 +55,7 @@ make_rootfs() {
 
 bins_for() {
   case "$1" in
-    *apple-darwin) echo "mvmctl mvm-hvf-supervisor mvm-libkrun-supervisor mvm-network-endpoint" ;;
+    *apple-darwin) echo "mvmctl mvm-hvf-supervisor mvm-network-endpoint" ;;
     *)             echo "mvmctl mvm-network-endpoint" ;;
   esac
 }

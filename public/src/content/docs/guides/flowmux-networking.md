@@ -137,9 +137,9 @@ material host-side, bounds streams, datagrams, DNS state, connector work, and
 ingress peers, and emits the canonical audit result. Declared ingress uses the
 same endpoint and delivers only to a signed guest-loopback target.
 
-The same contract applies across Firecracker, HVF, and libkrun: no production
-backend attaches a routable workload NIC, and none may substitute a second
-networking implementation.
+The same contract applies across the standard Firecracker and HVF backends and
+the optional libkrun integration: no production backend attaches a routable
+workload NIC, and none may substitute a second networking implementation.
 
 ## Data path
 

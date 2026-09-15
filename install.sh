@@ -134,11 +134,11 @@ $SUDO install -m 0755 "$SRC/mvmctl" "$INSTALL_DIR/mvmctl"
 # Per-VM host processes mvmctl spawns at runtime (one process per guest VM).
 # They must sit NEXT TO mvmctl so the backend's adjacent-to-exe resolver finds
 # them — installing only mvmctl strands them. copy-if-exists: the bundled set
-# differs by platform (macOS ships the supervisors + endpoint; Linux ships
-# only the endpoint).
-# The substitution endpoint needs no VM entitlement. The supervisors are
+# differs by platform (macOS ships the HVF supervisor + endpoint; Linux ships
+# only the endpoint). Optional libkrun payloads are deliberately ignored.
+# The substitution endpoint needs no VM entitlement. The supervisor is
 # signed below before the install is reported successful.
-for hostbin in mvm-hvf-supervisor mvm-libkrun-supervisor mvm-network-endpoint; do
+for hostbin in mvm-hvf-supervisor mvm-network-endpoint; do
   if [ -f "$SRC/$hostbin" ]; then
     $SUDO install -m 0755 "$SRC/$hostbin" "$INSTALL_DIR/$hostbin"
     say "Installed: $INSTALL_DIR/$hostbin"
@@ -170,9 +170,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
     }
 
     sign_target "$INSTALL_DIR/mvmctl" "$INSTALL_DIR/assets/mvmctl.entitlements"
-    for hostbin in mvm-hvf-supervisor mvm-libkrun-supervisor; do
-      sign_target "$INSTALL_DIR/$hostbin" "$INSTALL_DIR/assets/mvm-supervisor.entitlements"
-    done
+    sign_target "$INSTALL_DIR/mvm-hvf-supervisor" "$INSTALL_DIR/assets/mvm-supervisor.entitlements"
   fi
 fi
 

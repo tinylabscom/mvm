@@ -6,25 +6,30 @@ description: Getting started as a contributor to mvm.
 ## Prerequisites
 
 - **Rust 1.85+** (Edition 2024) — install via [rustup](https://rustup.rs)
-- **macOS Apple Silicon or Linux** — macOS for development via HVF (26+) or libkrun (pre-26); Linux for native `/dev/kvm`. Intel Macs are not a supported local microVM host.
+- **macOS 26+ Apple Silicon or Linux** — macOS development uses native HVF; Linux uses native `/dev/kvm`. Intel Macs and older macOS releases are not supported local microVM hosts.
 - **`zig` + `cargo-zigbuild`** — source-checkout contributors only; needed when a source build has to produce Linux helper binaries on demand, or when building a release artifact with `release-artifact-bootstrap`. End-users running a downloaded `mvmctl` don't need them.
 - **Nix** — not needed on the host. Nix evaluation and `nix build` run inside the builder VM.
 
 ### Do I need to install libkrun?
 
-It depends on your machine. The builder VM (the headless Linux guest that runs
-`nix build` inside `mvmctl machine build` / `mvmctl machine run`) auto-selects
-its host VMM:
+No. Standard source builds, release artifacts, builder selection, and workload
+selection do not install, link, or auto-select libkrun:
 
 | Host | libkrun (`slp/krun/*`) needed? |
 |---|---|
-| macOS 26+ Apple Silicon | **No** — auto-detect picks the **HVF** builder (Hypervisor.framework, ships with the OS, no Homebrew deps); mvm transparently retries with libkrun if HVF fails to create its VM (the ADR-007 builder auto-fallback). |
-| macOS 13–25 Apple Silicon | **Yes** — `brew install slp/krun/libkrun slp/krun/libkrunfw`. |
+| macOS 26+ Apple Silicon | **No** — auto-detect picks the native **HVF** builder (Hypervisor.framework, ships with the OS, no Homebrew deps). |
+| macOS 13–25 Apple Silicon | Unsupported by the standard local runtime; update macOS or use a Linux KVM host. |
 | Linux + `/dev/kvm` | **No** — auto-detect picks the **QEMU** builder, so libkrun is not part of the default builder path on native Linux hosts. |
 
-`mvmctl doctor` reports the resolved choice on the `builder backend`
-line (`<backend> — <source> — <availability>`) and emits install hints
-for anything missing — run it first and follow what it says.
+The libkrun Cargo features remain only for explicit integration development and
+CI coverage. `mvmctl doctor` reports the resolved standard backend on the
+`builder backend` line (`<backend> — <source> — <availability>`).
+
+The contributor-only `--source compile` kernel path still uses the explicit
+libkrun integration for its Stage 0 build. That path is not used by ordinary
+source compilation or downloaded releases; end users consume the published
+kernel artifacts. Contributors exercising that integration must install its
+development prerequisites explicitly.
 
 ### Getting started
 
@@ -140,13 +145,11 @@ just run -- --kernel-source download bootstrap
 
 Notes:
 
-- **Host-arch only for `--source compile`.** Stage 0 boots a host-arch
-  VM under libkrun, so it builds your host's arch (aarch64 *or* x86_64).
+- **Host-arch only for `--source compile`.** Stage 0 builds your host's
+  architecture (aarch64 *or* x86_64).
   The other arch is published by the `kernel-build` GitHub workflow,
   which builds both on native runners — fetch it with `--source
   download` once a release ships it.
-- On macOS the compile arm needs the libkrun trio (`slp/krun/*`), since
-  Stage 0 is libkrun-backed even on HVF-default hosts.
 - Editing `base.nix` or a variant delta? Just re-run the command — a
   custom config always compiles locally; downloads only ever return the
   kernel that shipped with that exact `mvmctl` release.
@@ -350,7 +353,7 @@ just lint         # Both format check + clippy
 
 ### Multi-Backend
 
-mvmctl's supported local microVM hosts are native Linux with `/dev/kvm` and macOS Apple Silicon. Firecracker is the Linux baseline; HVF and libkrun-backed components cover Apple Silicon macOS. WSL2 nested KVM and a Hyper-V managed Linux builder are future backend work.
+mvmctl's supported local microVM hosts are native Linux with `/dev/kvm` and Apple Silicon running macOS 26+. Firecracker is the Linux workload baseline and native HVF covers supported Macs without libkrun. WSL2 nested KVM and a Hyper-V managed Linux builder are future backend work.
 
 ### Host vs. VM
 

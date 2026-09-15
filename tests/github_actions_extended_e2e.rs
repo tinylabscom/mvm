@@ -439,6 +439,21 @@ fn macos_documented_surface_uses_the_published_workload_kernel() {
 }
 
 #[test]
+fn local_launch_gate_uses_the_published_workload_kernel() {
+    let script = fs::read_to_string("scripts/e2e-launch-modes.sh")
+        .expect("read the local launch-gate script");
+
+    assert!(
+        script.contains("cargo build --bin mvmctl --features user,embed-host-bins"),
+        "`just e2e-launch` must build the manifest verifier through the standard linker before it downloads a published workload kernel"
+    );
+    assert!(
+        script.contains("export MVM_KERNEL_SOURCE=download"),
+        "`just e2e-launch` must not route a cold source checkout through the optional libkrun Stage 0 backend"
+    );
+}
+
+#[test]
 fn linux_documented_surface_makes_the_stage0_boot_files_readable() {
     let workflow = extended_ci();
     let linux = job_block(&workflow, "e2e-docs-linux");
@@ -589,7 +604,7 @@ fn intel_hvf_witness_uses_hvf_for_steady_state_builder_jobs() {
 }
 
 #[test]
-fn root_manifest_enables_libkrun_only_on_apple_silicon() {
+fn root_manifest_keeps_libkrun_opt_in_on_macos() {
     let manifest = root_manifest();
 
     let arm64 = manifest
@@ -600,9 +615,17 @@ fn root_manifest_enables_libkrun_only_on_apple_silicon() {
         .1
         .split_once("\n[")
         .map_or_else(|| manifest.as_str(), |(section, _)| section);
+    let arm64_cli = arm64
+        .lines()
+        .find(|line| line.trim_start().starts_with("mvm-cli ="))
+        .expect("Apple Silicon mvm-cli dependency");
     assert!(
-        arm64.contains("features = [\"builder-vm\", \"libkrun-sys\"]"),
-        "Apple Silicon keeps the libkrun-backed builder path"
+        arm64_cli.contains("features = [\"builder-vm\"]"),
+        "Apple Silicon keeps builder orchestration for the native HVF path"
+    );
+    assert!(
+        !arm64_cli.contains("libkrun-sys"),
+        "Apple Silicon HVF builds must not require optional libkrun headers"
     );
 
     let intel = manifest
@@ -613,13 +636,56 @@ fn root_manifest_enables_libkrun_only_on_apple_silicon() {
         .1
         .split_once("\n[")
         .map_or_else(|| manifest.as_str(), |(section, _)| section);
+    let intel_cli = intel
+        .lines()
+        .find(|line| line.trim_start().starts_with("mvm-cli ="))
+        .expect("Intel macOS mvm-cli dependency");
     assert!(
-        intel.contains("features = [\"builder-vm\"]"),
+        intel_cli.contains("features = [\"builder-vm\"]"),
         "Intel HVF keeps builder orchestration without linking libkrun"
     );
     assert!(
-        !intel.contains("libkrun-sys"),
+        !intel_cli.contains("libkrun-sys"),
         "Intel HVF must not enable the ARM-only libkrun dependency"
+    );
+
+    let features = manifest
+        .split_once("\n[features]\n")
+        .expect("root feature section")
+        .1
+        .split_once("\n[")
+        .map_or_else(|| manifest.as_str(), |(section, _)| section);
+    assert!(
+        features.contains("libkrun-sys = [\"mvm-cli/libkrun-sys\"]"),
+        "older macOS libkrun builds retain an explicit root feature"
+    );
+}
+
+#[test]
+fn macos_release_build_is_libkrun_free() {
+    let workflow =
+        fs::read_to_string(".github/workflows/release.yml").expect("read release workflow");
+    let build = job_block(&workflow, "build");
+
+    assert!(
+        !build.contains("uses: ./.github/actions/install-libkrun"),
+        "standard macOS release builds must not install libkrun"
+    );
+    assert!(
+        !build.contains("libkrun-sys"),
+        "released mvmctl binaries and helpers must not link optional libkrun FFI"
+    );
+    assert!(
+        !build.contains("--bin mvm-libkrun-supervisor"),
+        "standard macOS release artifacts must not build the libkrun supervisor"
+    );
+    assert!(
+        !build.contains("mvm-hvf-supervisor mvm-libkrun-supervisor"),
+        "standard macOS release artifacts must not package the libkrun supervisor"
+    );
+    assert!(
+        build.contains("--features \"${MVMCTL_RELEASE_FEATURES}\""),
+        "the release build must use the platform-neutral feature set directly"
     );
 }
 
@@ -726,11 +792,8 @@ fn documented_surface_revalidates_the_source_matched_initramfs() {
 }
 
 #[test]
-fn supervisor_build_requires_a_detected_libkrun_header() {
+fn standard_supervisor_build_never_enables_libkrun() {
     let just = justfile();
-    // Anchored on the newline so this finds the recipe header at column 0 and
-    // not the `build-supervisors:` prefix the skip message inside the body
-    // prints, nor the parameter list the header carries.
     let recipe = just
         .split_once("\nbuild-supervisors")
         .expect("build-supervisors recipe")
@@ -742,16 +805,20 @@ fn supervisor_build_requires_a_detected_libkrun_header() {
         recipe.contains("build -p mvm-hostd --bins"),
         "portable helper binaries must still build on every host"
     );
-    let header_gate = recipe
-        .find("if [[ -f \"$header\" ]]")
-        .expect("the optional libkrun helper must require a detected header");
-    let libkrun_build = recipe
-        .find("--bin mvm-libkrun-supervisor --features libkrun-sys")
-        .expect("the optional libkrun helper build must remain present");
-
     assert!(
-        libkrun_build > header_gate,
-        "the libkrun-sys helper must only build after a real header is found"
+        !recipe.contains("libkrun"),
+        "standard helper builds must not probe for or enable libkrun"
+    );
+
+    let optional = just
+        .split_once("\nbuild-libkrun-supervisor")
+        .expect("explicit libkrun integration recipe")
+        .1
+        .split_once("\n# ")
+        .map_or_else(|| just.as_str(), |(recipe, _)| recipe);
+    assert!(
+        optional.contains("--bin mvm-libkrun-supervisor --features libkrun-sys"),
+        "the optional integration must remain explicitly buildable"
     );
 }
 

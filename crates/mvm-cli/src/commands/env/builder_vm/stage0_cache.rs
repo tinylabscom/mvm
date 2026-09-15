@@ -997,8 +997,8 @@ pub(super) fn builder_vm_artifact_names(arch: &str) -> BuilderVmArtifactNames {
 
 /// Backend attempt order for the dev-image / default-microvm builds. Delegates
 /// to the shared [`mvm_build::builder_backend_select::builder_attempt_order`]
-/// (one policy: auto HVF→libkrun on macOS, auto libkrun stays libkrun-only,
-/// explicit override stays single-backend) so this CLI loop and the
+/// (one policy: automatic and explicit choices stay single-backend) so this
+/// CLI loop and the
 /// `mvm-build` build paths can't drift. The live platform supplies
 /// `is_linux_native`, and the per-host builder-health cache stays advisory only
 /// now that qemu is explicit dev/test-only rather than an automatic fallback.

@@ -35,7 +35,6 @@ of lifecycle or security policy.
 
 ```
 macOS 26+ (Apple Silicon)  →  in-house HVF VMM (Hypervisor.framework, zero extra deps)
-macOS 13–25                →  libkrun (Homebrew)
 Linux + /dev/kvm           →  Firecracker
 ```
 
@@ -86,10 +85,10 @@ npm install @runmvm/mvm         # TypeScript
 ```
 
 Host prerequisites: **macOS 26+ Apple Silicon** needs nothing (the in-house HVF
-backend and builder are dependency-free); **macOS 13–25** needs the libkrun
-runtime (`brew install slp/krun/libkrun slp/krun/libkrunfw`); **Linux** needs
-`/dev/kvm` (Firecracker is managed for you). `mvmctl doctor` diagnoses your host
-and prints exact install hints for anything missing.
+backend and builder are dependency-free); **Linux** needs `/dev/kvm`
+(Firecracker is managed for you). Standard source builds and release artifacts
+do not install, link, or require libkrun. `mvmctl doctor` diagnoses your host and
+prints exact install hints for anything missing.
 
 ## Quick start
 
@@ -601,7 +600,7 @@ Host (macOS / Linux)
   mvmctl / SDK ──► signed ExecutionPlan ──► admission (validity window, nonce, audit)
                                               │
                                   VM backend (auto-selected)
-                     Firecracker (KVM) · in-house HVF · libkrun · QEMU (dev/test)
+              Firecracker (KVM) · in-house HVF · libkrun (opt-in dev) · QEMU (dev/test)
                                               │
 Guest (its own Linux kernel)
   /init (universal initramfs) ──► mvm-guest-agent on vsock :5252

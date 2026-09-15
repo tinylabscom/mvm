@@ -427,25 +427,10 @@ anyhow.workspace = true
 objc2-foundation = { version = "0.3", features = ["NSRunLoop", "NSDate", "NSAutoreleasePool"] }
 
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
-# Enable mvm-cli's `libkrun-sys` feature on Apple Silicon so the
-# `mvmctl` binary's `extract_bundled_kernel()` path is wired by
-# default (libkrun is the macOS hypervisor backend; libkrunfw ships
-# alongside via the same Homebrew tap). Intel macOS uses the native
-# HVF backend instead: the libkrunfw Homebrew formula is arm64-only,
-# and that path neither loads nor links libkrun. Linux CI / runtimes use
-# Firecracker, which doesn't need libkrun headers — the target-gated
-# dep keeps `cargo build` on Ubuntu working without `apt install
-# libkrun-dev` (which doesn't ship a libkrun-dev package today).
-# Cargo features can't be cfg-gated, but target-specific dep entries
-# can; Cargo unions the features across all matching target entries.
-#
-# `builder-vm` must be repeated here because the base entry at line 272
-# sets `default-features = false`, which strips mvm-cli's `default =
-# ["builder-vm"]`. Without it, `extract_libkrunfw_kernel()` resolves to
-# the `#[cfg(all(feature = "builder-vm", not(feature = "libkrun-sys")))]`
-# bail-stub and Stage 0 falls back to the ur-seed kernel (known to
-# kernel-oops; see comment at apple_container.rs:~2870).
-mvm-cli = { workspace = true, default-features = false, features = ["builder-vm", "libkrun-sys"] }
+# Apple Silicon uses the in-house HVF backend by default on macOS 26+.
+# Keep builder orchestration available without linking optional libkrun FFI;
+# the standard source and release builds never enable the native bindings.
+mvm-cli = { workspace = true, default-features = false, features = ["builder-vm"] }
 
 [target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
 # Intel uses HVF directly. Retain builder orchestration while leaving the
@@ -494,7 +479,7 @@ mvm-hostd = { workspace = true, default-features = false }
 # contributor-bootstrap) are GONE — inlined below. `dev` is the host+user union
 # (a contributor laptop is both). The only other root features are internal
 # knobs that cannot be unconditional and are NOT consumer-facing product
-# surfaces: the libkrun C-lib link (absent on a macOS-26 HVF host), the
+# surfaces: the optional libkrun C-lib test integration, the
 # release-only prebuilt download, the optional S3 template-registry backend, and
 # `hostd-transport` (a lean library knob a downstream daemon flips through the
 # facade to compile mvm-core's gated hostd IPC transport without pulling all of
@@ -512,8 +497,8 @@ default = [
 
 # `host` — everything the host machine runs to boot/manage/secure/build
 # sandboxes. Platform-neutral: backends auto-detect at runtime (the `VmBackend`
-# trait); a libkrun host adds `libkrun-sys`/`libkrun-live`, the macOS-26 HVF host
-# needs neither. Superset of `default` plus the full host networking + hostd IPC.
+# trait); the standard product paths never enable libkrun. Superset of `default`
+# plus the full host networking + hostd IPC.
 host = [
     "mvm-build/builder-vm",
     "mvm-cli/builder-vm",
@@ -545,8 +530,8 @@ dev = [
     "mvm-cli/contributor-bootstrap",
 ]
 
-# Platform: link the libkrun C VMM. Absent on a macOS-26 HVF host; a libkrun
-# host opts in. Cannot be unconditional (no libkrun to link against on HVF).
+# Optional integration test/development path for the libkrun C VMM. Standard
+# source builds and release artifacts never enable these features.
 libkrun-sys = ["mvm-cli/libkrun-sys"]
 libkrun-live = ["mvm-cli/libkrun-live"]
 

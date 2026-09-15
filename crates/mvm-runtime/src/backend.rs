@@ -46,15 +46,15 @@ pub(crate) fn hvf_runner() -> HvfRunner {
 }
 
 /// libkrun driven through the same unified workload-runner role — libkrun's
-/// sole production launch path (both `--hypervisor libkrun` and `auto_select`).
+/// explicit integration launch path (`--hypervisor libkrun`).
 /// Egress routes to the per-VM gating endpoint over vsock only; the legacy
 /// direct `LibkrunBackend` shim has been deleted, so this runner is the only
 /// libkrun workload launch path.
 type LibkrunRunner = WorkloadRunner<LibkrunDriver, RealNetworkEndpointSpawner, RealBrokerRegistrar>;
 
 /// Construct libkrun's workload runner. The runner is not const-constructible,
-/// so this helper is the one construction site the enum variant, `auto_select`,
-/// the descriptor catalog, and the capability selector all call.
+/// so this helper is the one construction site the enum variant, descriptor
+/// catalog, and capability selector all call.
 pub(crate) fn libkrun_runner() -> LibkrunRunner {
     WorkloadRunner::new(
         LibkrunDriver::new(),
@@ -193,7 +193,8 @@ impl FirecrackerConfig {
 /// production posture: KVM-only, minimal device surface, audited
 /// codebase, the full security claim set holds against this tier.
 ///
-/// **Tier 2** — libkrun. Fast, well-engineered, but its host/guest
+/// **Tier 2** — HVF, libkrun, and other local development backends. libkrun is
+/// an explicit integration path, never a standard-build auto-selection. Its host/guest
 /// boundary is **not equivalent to Firecracker + jailer + seccomp**.
 /// Best for local dev on macOS Apple Silicon (HVF) and builder VMs.
 /// Prod selection must require explicit operator acknowledgement.
@@ -218,7 +219,7 @@ impl BackendTier {
     }
 }
 
-/// The three host capabilities the auto-detect ladder branches on,
+/// The two host capabilities the auto-detect ladder branches on,
 /// resolved once so the ladder itself can be a pure function of them.
 ///
 /// Probing and deciding are separated because the decision is the part
@@ -233,8 +234,6 @@ struct HostTiers {
     native_runner: bool,
     /// macOS 26+ Apple Silicon, where HVF is the auto-detect default.
     hvf_default: bool,
-    /// libkrun is installed.
-    libkrun: bool,
 }
 
 impl HostTiers {
@@ -243,7 +242,6 @@ impl HostTiers {
         Self {
             native_runner: plat.supports_native_runner(),
             hvf_default: plat.is_hvf_default_tier(),
-            libkrun: plat.has_libkrun(),
         }
     }
 }
@@ -268,10 +266,6 @@ fn select_kind(tiers: HostTiers) -> catalog::BackendKind {
     if tiers.hvf_default {
         return BackendKind::Hvf;
     }
-    // 3. libkrun installed → the libkrun workload runner (vsock-only egress).
-    if tiers.libkrun {
-        return BackendKind::Libkrun;
-    }
     // Final default. Reachable when no tier is available; start() then
     // fails with the production-path error message rather than silently
     // picking a backend the caller didn't ask for.
@@ -291,8 +285,8 @@ pub enum AnyBackend {
     /// transparent `:80/:443` terminator.
     Firecracker(FcRunner),
     /// libkrun (Linux KVM / macOS Apple Silicon HVF), driven through the unified
-    /// `WorkloadRunner` over the driver seam — libkrun's sole production path,
-    /// selected by `--hypervisor libkrun` and `auto_select`. Egress routes to
+    /// `WorkloadRunner` over the driver seam — an optional development path,
+    /// selected explicitly by `--hypervisor libkrun`. Egress routes to
     /// the per-VM gating endpoint over vsock only (claim-10 + claims 12/13 at
     /// the endpoint); no transparent `:80/:443` terminator.
     Libkrun(LibkrunRunner),
@@ -412,7 +406,9 @@ impl AnyBackend {
     /// Priority:
     /// 1. **Firecracker** (if native Linux `/dev/kvm` is available — production Tier 1)
     /// 2. HVF VMM (macOS 26+ Apple Silicon — vsock-only egress, no guest-NIC helper path)
-    /// 3. raw libkrun
+    ///
+    /// libkrun remains an explicit development selection and is never part of
+    /// this automatic ladder.
     ///
     /// If none of the above match, the function returns Firecracker as
     /// the default — `start()` will then surface the host-side
@@ -1340,11 +1336,9 @@ mod tests {
         let backend = AnyBackend::auto_select();
         let name = backend.name();
         assert!(
-            // The full set of legitimate auto_select returns is:
-            //   firecracker (KVM), hvf (macOS 26+ hvf VMM, via the HVF workload
-            //   runner whose name() delegates to the hvf driver), libkrun
-            //   (macOS 13-25 / Linux non-KVM fallback).
-            matches!(name, "firecracker" | "hvf" | "libkrun"),
+            // The full set of legitimate auto_select returns is Firecracker
+            // (Linux/KVM) or HVF (supported Apple Silicon macOS).
+            matches!(name, "firecracker" | "hvf"),
             "auto_select returned unexpected backend: {name}"
         );
     }
@@ -1352,7 +1346,7 @@ mod tests {
     /// `auto_select` must never return the wasm portability tier — it is
     /// opt-in only (explicit `--hypervisor wasm` / `MVM_BACKEND=wasm`), never
     /// a platform-ladder fallback. `auto_select`'s implementation has exactly
-    /// three return sites (Firecracker/Hvf/Libkrun) and none of them
+    /// two return sites (Firecracker/Hvf) and neither
     /// construct `Self::Wasm`, so this holds on every platform the ladder
     /// can resolve to, not just the host running this test.
     #[test]
@@ -1372,13 +1366,10 @@ mod tests {
         let mut all = Vec::new();
         for native_runner in [false, true] {
             for hvf_default in [false, true] {
-                for libkrun in [false, true] {
-                    all.push(HostTiers {
-                        native_runner,
-                        hvf_default,
-                        libkrun,
-                    });
-                }
+                all.push(HostTiers {
+                    native_runner,
+                    hvf_default,
+                });
             }
         }
         all
@@ -1397,10 +1388,7 @@ mod tests {
         for tiers in every_host_tier() {
             let kind = select_kind(tiers);
             assert!(
-                matches!(
-                    kind,
-                    BackendKind::Firecracker | BackendKind::Hvf | BackendKind::Libkrun
-                ),
+                matches!(kind, BackendKind::Firecracker | BackendKind::Hvf),
                 "auto-detect on {tiers:?} yielded the opt-in backend {kind:?}"
             );
         }
@@ -1410,26 +1398,19 @@ mod tests {
     /// test above passes for any permutation of the three production
     /// backends, including one that would pick libkrun over KVM.
     #[test]
-    fn the_ladder_prefers_kvm_then_hvf_then_libkrun() {
+    fn the_ladder_never_auto_selects_optional_libkrun() {
         use mvm_core::vm_backend::BackendKind;
-        let tiers = |native_runner, hvf_default, libkrun| HostTiers {
+        let tiers = |native_runner, hvf_default| HostTiers {
             native_runner,
             hvf_default,
-            libkrun,
         };
-        // Native KVM wins even when every other tier is also present.
+        // Native KVM wins when both supported tiers are present.
+        assert_eq!(select_kind(tiers(true, true)), BackendKind::Firecracker);
+        assert_eq!(select_kind(tiers(false, true)), BackendKind::Hvf);
         assert_eq!(
-            select_kind(tiers(true, true, true)),
-            BackendKind::Firecracker
-        );
-        // HVF outranks libkrun on the macOS 26+ tier where both exist.
-        assert_eq!(select_kind(tiers(false, true, true)), BackendKind::Hvf);
-        assert_eq!(select_kind(tiers(false, false, true)), BackendKind::Libkrun);
-        // Nothing available: Firecracker, so start() fails pointing at the
-        // production path rather than at a backend nobody selected.
-        assert_eq!(
-            select_kind(tiers(false, false, false)),
-            BackendKind::Firecracker
+            select_kind(tiers(false, false)),
+            BackendKind::Firecracker,
+            "optional libkrun is never part of automatic runtime selection"
         );
     }
 

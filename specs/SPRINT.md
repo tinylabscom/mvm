@@ -60,8 +60,16 @@
       2026-09-14 and is closed: #3235 preserved the claim path's error chains,
       #3238 activated the standby parent before capture, and #3241 fixed the
       two vsock device defects behind the child's post-restore `Broken pipe`.
-      #3011 is blocked
-      on provisioning and hardening its physical Apple Silicon runner; the
+      The #3011 source-build blocker is resolved: standard macOS 26+ Apple
+      Silicon source builds and release artifacts use the dependency-free HVF
+      path; libkrun remains only as an explicit development integration and
+      older macOS releases are unsupported. The local `just e2e-launch` gate
+      now owns its published workload-kernel selection, preventing a cold
+      source checkout from silently entering optional libkrun Stage 0 during
+      burn-in. It builds the `user` manifest verifier through the standard
+      macOS linker, so that download remains authenticated without the insecure
+      verification escape hatch. The physical runner still
+      needs to be provisioned, hardened, registered, and burned in; the
       repository runner inventory currently contains zero self-hosted runners.
 
 - [x] **Linux 6.12.109 synchronized kernel pin — issue #3213.**

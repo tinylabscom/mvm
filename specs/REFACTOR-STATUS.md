@@ -54,9 +54,15 @@ Last updated: 2026-09-14
       the store lock. PR #3219 merged as `136bb8041f` after all 16 protected-main
       gates passed, and #3190 is closed. Existing unpublished #3039 work is
       inventoried and preserved, but the required owner and patent-counsel
-      release decision is not yet recorded. #3011 remains blocked on a hardened
-      physical Apple Silicon runner; the repository currently has zero
-      self-hosted runners.
+      release decision is not yet recorded. The #3011 source-build blocker is
+      resolved: standard macOS 26+ Apple Silicon source builds and release
+      artifacts use dependency-free HVF; libkrun remains only as an explicit
+      development integration and older macOS releases are unsupported. A
+      cold local `just e2e-launch` now fetches the verified workload kernel
+      instead of silently entering optional libkrun Stage 0, and its standard
+      linker build includes the manifest verifier needed to authenticate that
+      fetch. A hardened physical runner is still required;
+      the repository currently has zero self-hosted runners.
 
 - [x] **Linux 6.12.109 synchronized kernel pin — issue #3213.**
       `specs/plans/2026-09-08-kernel-6-12-109.md`.

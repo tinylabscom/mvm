@@ -464,13 +464,13 @@ fn dev_build_via_builder_vm_uncached(
     // (`--builder` / `MVM_BUILDER_BACKEND` / auto-detect) instead of
     // hardcoding libkrun, so `mvmctl build` routes a steady-state build through
     // the chosen VMM (QEMU on `MVM_BUILDER_BACKEND=qemu`). Linux-native hosts
-    // now auto-detect qemu by default; macOS 26 Apple Silicon auto-detects the
-    // hvf builder; other hosts stay on libkrun.
+    // now auto-detect qemu by default; Apple Silicon macOS auto-detects the
+    // hvf builder and the backend availability check enforces its OS floor.
     //
-    // Auto-fallback: macOS auto-detect may retry hvf on the shared libkrun
-    // builder path, but Linux auto libkrun now stays libkrun-only even on a
-    // VMM-level failure. A genuine build error surfaces unchanged, and an
-    // explicit `--builder`/`MVM_BUILDER_BACKEND` stays single-backend.
+    // Automatic choices stay single-backend: an HVF failure surfaces without
+    // acquiring libkrun, and Linux libkrun never degrades to qemu. A genuine
+    // build error surfaces unchanged, and an explicit
+    // `--builder`/`MVM_BUILDER_BACKEND` also stays single-backend.
     use crate::builder_backend_select as bbs;
     let selected = bbs::resolve_choice();
     let explicit = bbs::resolve_env_override().is_some();

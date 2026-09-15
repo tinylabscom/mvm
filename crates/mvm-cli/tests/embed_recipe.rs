@@ -30,7 +30,10 @@ fn embed_recipe_exposes_the_pinned_rust_sysroot_to_macos_llvm_tools() {
 /// what this guard exists to catch a second time.
 #[test]
 fn build_supervisors_recipe_exposes_the_pinned_rust_sysroot_too() {
-    let recipe = recipe_body("build-supervisors *ARGS:", "\nembed *ARGS:");
+    let recipe = recipe_body(
+        "build-supervisors *ARGS:",
+        "\nbuild-libkrun-supervisor *ARGS:",
+    );
     assert!(recipe.contains("scripts/macos-objcopy-env.sh"), "{recipe}");
     assert!(
         recipe.contains("build -p mvm-hostd --bins {{ARGS}}"),

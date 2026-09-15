@@ -118,10 +118,11 @@ pub mod guest_net;
 pub mod qemu_builder;
 
 /// Builder-runtime selection. `MVM_BUILDER_BACKEND` picks among the
-/// available builder backends; the platform default is hvf on macOS 26+
-/// Apple Silicon, qemu on Linux native, and libkrun elsewhere. The caller
-/// receives a `Box<dyn BuilderVm>` so the dispatch site doesn't depend on
-/// which concrete driver the env-var resolved to.
+/// available builder backends; the platform default is hvf on supported
+/// Apple Silicon macOS and qemu elsewhere. libkrun remains an explicit
+/// contributor-only override. The caller receives a `Box<dyn BuilderVm>` so
+/// the dispatch site doesn't depend on which concrete driver the env-var
+/// resolved to.
 #[cfg(feature = "builder-vm")]
 pub mod builder_backend_select;
 /// Per-host builder-VM health cache (skip a libkrun backend that can't create

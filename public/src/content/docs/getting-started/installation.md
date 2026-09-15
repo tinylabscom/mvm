@@ -115,12 +115,9 @@ Cached build artifacts are refreshed separately with `mvmctl pack update <KIND>`
 
 ## Prerequisites
 
-- **macOS Apple Silicon** or **Linux with `/dev/kvm`** (x86_64 or aarch64)
-- [Homebrew](https://brew.sh/) — only on macOS 13–25, where libkrun is the
-  default backend and comes from the third-party tap
-  (`brew install slp/krun/libkrun slp/krun/libkrunfw`). macOS 26+ Apple Silicon
-  defaults to HVF and needs no Homebrew at all. mvmctl does not install
-  Homebrew for you.
+- **macOS 26+ on Apple Silicon** or **Linux with `/dev/kvm`** (x86_64 or aarch64)
+- No Homebrew VMM package is required on macOS; the native HVF path ships with
+  the operating system.
 
 ### Backend Auto-Detection
 
@@ -129,8 +126,7 @@ mvmctl automatically detects your platform at startup and selects the best VM ba
 | Platform | Backend | What happens |
 |----------|---------|-------------|
 | **Linux with `/dev/kvm`** | Firecracker | Runs directly on KVM. Smallest attack surface, fastest cold boot. |
-| **macOS 26+ Apple Silicon** | HVF | Hypervisor.framework, bundled with the OS; vsock-only. libkrun is the fallback. |
-| **macOS 13–25 Apple Silicon** | libkrun | In-process VMM via the Homebrew `slp/krun` trio. |
+| **macOS 26+ Apple Silicon** | HVF | Hypervisor.framework, bundled with the OS; vsock-only and no third-party VMM dependency. |
 
 There is no Docker or container backend on the runtime path. A `qemu`
 (microvm.nix) backend exists for local dev/test only and is never auto-selected.
@@ -145,7 +141,7 @@ After installation, run host setup:
 mvmctl bootstrap
 ```
 
-This walks through platform detection, dependency installation (Firecracker on Linux; the `slp/krun` Homebrew trio for libkrun on macOS 13–25, nothing extra for the HVF backend on macOS 26+), default network setup, and XDG directory creation. Rerunning it is safe: it verifies warm artifacts and only
+This walks through platform detection, dependency installation (Firecracker on Linux; nothing extra for the native HVF backend on macOS), default network setup, and XDG directory creation. Rerunning it is safe: it verifies warm artifacts and only
 rebuilds or downloads what is missing.
 
 Running `mvmctl bootstrap` -- or simply your first `mvmctl machine build` / `mvmctl machine run --flake ...` -- also handles setup automatically: mvm detects your platform, selects the backend, and stages the builder microVM image on first use.
@@ -155,7 +151,6 @@ You can force a specific backend with `--hypervisor`:
 ```bash
 mvmctl machine run --flake . --hypervisor firecracker  # Linux KVM
 mvmctl machine run --flake . --hypervisor hvf          # macOS 26+ Apple Silicon (default)
-mvmctl machine run --flake . --hypervisor libkrun      # macOS 13–25 Apple Silicon
 mvmctl machine run --flake . --hypervisor qemu         # microvm.nix — dev/test only
 ```
 

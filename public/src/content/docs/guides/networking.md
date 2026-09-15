@@ -27,7 +27,8 @@ Per-VM mvm-network-endpoint
 Internet or an admitted host-owned ingress listener
 ```
 
-Firecracker, HVF, and libkrun production workloads do not expose a guest NIC.
+Firecracker and HVF production workloads do not expose a guest NIC. The
+optional libkrun integration follows the same no-guest-NIC contract.
 Proxy-aware TCP applications use the injected loopback SOCKS5 listener; UDP
 applications use SOCKS5 `UDP ASSOCIATE`. The host resolves names, applies the
 signed allow/deny policy separately for TCP and UDP, and opens the external
@@ -152,7 +153,8 @@ image-backed machine — `mvmctl` now selects only backends that can keep the
 guest **NIC-less** and proxy outbound traffic over the host-vsock egress
 endpoint. The injected guest runtime starts `mvm-egress-client` and the runtime
 sets standard proxy env vars to its loopback SOCKS listener automatically.
-That contract is provided by Firecracker, HVF, and libkrun. If no available
+That contract is provided by Firecracker and HVF, and by the optional libkrun
+integration when explicitly enabled. If no available
 backend can provide it, the start is refused up front instead of silently
 degrading to a guest NIC. This enables tools such as `curl` and `wget` through
 the loopback adapters. General raw ICMP remains unsupported; the injected

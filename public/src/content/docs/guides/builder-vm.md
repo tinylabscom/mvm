@@ -5,7 +5,7 @@ description: How mvm builds Linux microVM images from the host without requiring
 
 The short version: **you run `mvmctl machine build` from the host, and mvm runs Nix inside the builder VM.** You do not need to enter an interactive dev shell to build a template or runtime image.
 
-The host process is the control plane. The builder VM is the Linux execution boundary for Nix evaluation, Nix builds, and image assembly. The runtime backend is separate: after the image is built, mvm boots the prebuilt kernel and rootfs with the selected microVM backend, such as Firecracker on Linux, or HVF and libkrun on macOS.
+The host process is the control plane. The builder VM is the Linux execution boundary for Nix evaluation, Nix builds, and image assembly. The runtime backend is separate: after the image is built, mvm boots the prebuilt kernel and rootfs with the selected microVM backend, such as Firecracker on Linux or native HVF on supported Apple Silicon macOS hosts. libkrun is an optional development integration, not a standard macOS dependency.
 
 ```text
 macOS or Linux host
@@ -35,7 +35,7 @@ runtime microVM
 | Nix flake evaluation                      | Builder VM                  | The target is a Linux image, and the build environment must be Linux.                                |
 | `nix build`                               | Builder VM                  | Keeps host Nix optional and avoids macOS/Linux platform mismatch.                                    |
 | Rootfs and kernel artifact extraction     | Builder VM, then host cache | The builder produces artifacts; the host stores and reuses them.                                     |
-| Runtime boot                              | Runtime backend             | Uses an already-built image. This is Firecracker, HVF, libkrun, or another backend. |
+| Runtime boot                              | Runtime backend             | Uses an already-built image. Standard paths use Firecracker or HVF; libkrun remains an explicit development integration. |
 | Runtime guest agent traffic               | Runtime microVM             | Uses the runtime VM's guest communication path, normally vsock where supported.                      |
 
 This separation is deliberate. A build can take seconds or minutes because it may fetch and compile Nix closures. A runtime boot benchmark should normally measure only the already-built image booting, not the build phase.
