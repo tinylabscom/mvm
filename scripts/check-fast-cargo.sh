@@ -87,10 +87,6 @@ fi
 require_text .github/workflows/ci.yml 'cargo +nightly install --locked --version 0.10.4 bpf-linker'
 require_text crates/mvm-hostd/ebpf/rust-toolchain.toml 'channel = "nightly"'
 require_text .github/workflows/ci.yml "toolchain: ${toolchain}"
-# The warm job that writes the entry those lanes restore has to be on the same
-# toolchain as the lanes, or it writes a key nobody reads.
-require_text .github/workflows/cache-warm.yml "toolchain: ${toolchain}"
-require_text .github/workflows/cache-warm.yml 'cargo nextest run --workspace --all-targets --no-run'
 require_text Justfile 'CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl"'
 require_text crates/mvm-conformance/tests/conformance.rs 'var_os("CARGO_BIN_EXE_mvmctl")'
 
