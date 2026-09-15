@@ -3,7 +3,7 @@
 Backing: preview
 Validation: none — this is a proposed design; no code implements it and no test exercises it.
 
-**Issues:** epic [#3275](https://github.com/tinylabscom/mvm/issues/3275); [#3257](https://github.com/tinylabscom/mvm/issues/3257), [#3258](https://github.com/tinylabscom/mvm/issues/3258), [#3259](https://github.com/tinylabscom/mvm/issues/3259), [#3260](https://github.com/tinylabscom/mvm/issues/3260), [#3261](https://github.com/tinylabscom/mvm/issues/3261), [#3262](https://github.com/tinylabscom/mvm/issues/3262), [#3263](https://github.com/tinylabscom/mvm/issues/3263), [#3264](https://github.com/tinylabscom/mvm/issues/3264)
+**Issues:** epic [#3275](https://github.com/tinylabscom/mvm/issues/3275); [#3257](https://github.com/tinylabscom/mvm/issues/3257), [#3258](https://github.com/tinylabscom/mvm/issues/3258), [#3259](https://github.com/tinylabscom/mvm/issues/3259), [#3260](https://github.com/tinylabscom/mvm/issues/3260), [#3261](https://github.com/tinylabscom/mvm/issues/3261), [#3262](https://github.com/tinylabscom/mvm/issues/3262), [#3263](https://github.com/tinylabscom/mvm/issues/3263), [#3264](https://github.com/tinylabscom/mvm/issues/3264); found during WS0: [#3283](https://github.com/tinylabscom/mvm/issues/3283), [#3284](https://github.com/tinylabscom/mvm/issues/3284), [#3285](https://github.com/tinylabscom/mvm/issues/3285), [#3286](https://github.com/tinylabscom/mvm/issues/3286), [#3287](https://github.com/tinylabscom/mvm/issues/3287), [#3288](https://github.com/tinylabscom/mvm/issues/3288)
 
 ## Outcome
 
@@ -34,21 +34,32 @@ invariant. This plan closes both halves.
 | G10 | `agent-session resume --boot` is the only agent path that starts a hypervisor, and has no tests | `crates/mvm-cli/src/commands/agent_session.rs` | WS4 |
 | G11 | Plan checkboxes are inverted: the CLI workstream is ticked over unticked store/transition workstreams | `specs/plans/2026-08-18-durable-agent-sessions.md` | WS4 |
 | G12 | `guides/agent-tool-contract.mdx` presents an unshipped surface under a heading a skimming reader takes as shipped | `public/src/content/docs/guides/agent-tool-contract.mdx:93-160` | WS0 |
+| G13 | **An off-the-shelf HTTPS client cannot use substitution.** The substituting guest proxy refuses `CONNECT`; the TLS terminator and per-VM egress CA exist but the workload runner never enables them. No shipped agent CLI can reach its model API with the key substituted | `crates/mvm-agentd/src/forward_proxy.rs:62-66,135`; `crates/mvm-runtime/src/workload_runner/runner/spawner.rs:107-110` | WS-S |
+| G14 | Secrets reach a workload only through `machine run --entrypoint --from-workload-ir`; transient, persistent and session paths hardcode an empty list, and PID 1 never gets a placeholder | `crates/mvm-cli/src/exec.rs:724`, `commands/vm/up/oci_persist.rs:223`, `exec/session.rs:1036` | WS-S |
+| G15 | A kept-alive entrypoint machine ignores `--name` (`invoke-<nanos>`), so no named machine can carry secrets | `crates/mvm-cli/src/exec/session.rs:103`, `commands/vm/invoke.rs:512` | WS-S |
+| G16 | `secret.substituted` is written only when the upstream response completes; a forward that fails after the credential was sent leaves no substitution entry | `crates/mvm-hostd/src/supervisor/network_endpoint_proxy.rs:1944-1963,2524-2540` | WS-S |
+| G17 | The `agent` network preset and the AI token budget cannot be turned on from any dispatched flag | `crates/mvm-cli/src/commands/shared/resolve.rs:192-202`; `network_policy.rs:376-420` (`ai: None`) | WS-S |
+| G18 | Two guest egress entry points with different capabilities: a `CONNECT`/SOCKS relay on 1080 that cannot substitute, and a forward proxy on 18080 that cannot `CONNECT` | `crates/mvm-agentd/src/forward_proxy.rs`; `commands/vm/invoke.rs:1339-1350` | WS-S |
 
 ## What already works and is not rebuilt here
 
 - `NetworkPreset::Agent` allow-lists the model API hosts
   (`crates/mvm-contract/src/policy/network_policy.rs`).
-- The token budget is enforced at the per-VM endpoint
-  (`crates/mvm-hostd/src/supervisor/network_endpoint_proxy.rs`).
-- Credential substitution end to end: placeholder mint
-  (`crates/mvm-core/src/keyholder/substitution.rs`), endpoint handshake writing
+- An AI token-budget policy type exists at the per-VM endpoint
+  (`crates/mvm-hostd/src/supervisor/network_endpoint_proxy.rs`), though no
+  user can configure it today (G17).
+- Credential substitution for absolute-form HTTP requests: placeholder mint
+  (`crates/mvm-core/src/keyholder/substitution.rs`), host bindings from
+  `mvmctl secret set` enforced at admission
+  (`crates/mvm-hostd/src/keyholder/admission.rs`), endpoint handshake writing
   `substitution-env.json`
   (`crates/mvm-vmm/src/host/network_endpoint_spawn.rs`), invoke-time injection
-  of the placeholder plus proxy and CA bundle
-  (`crates/mvm-cli/src/commands/vm/invoke.rs`), SNI-bound TLS termination and
-  swap (`crates/mvm-hostd/src/supervisor/terminator/tls.rs`), and the
-  `secret.substituted` chain-signed entry.
+  of the placeholder and proxy variables
+  (`crates/mvm-cli/src/commands/vm/invoke.rs`), header substitution after the
+  claim-10 gate, and the `secret.substituted` chain-signed entry.
+- An SNI-bound TLS terminator (`crates/mvm-hostd/src/supervisor/terminator/tls.rs`)
+  exists but is **not wired** on any workload path (G13). Earlier revisions of
+  this plan listed it as working; it is not.
 - The stream plane: `InputGate`'s single-writer lease, TTL, ordering, the
   refusal ladder, and the refuse-when-unauditable rule
   (`crates/mvm-hostd/src/stream/{plane.rs,input_gate.rs,journal.rs,redact.rs}`).
@@ -76,13 +87,51 @@ Issues: [#3257](https://github.com/tinylabscom/mvm/issues/3257), [#3258](https:/
       `crates/mvm-contract/src/policy/network_policy.rs:111` resolves, or delete
       the reference. Do not leave a doc comment pointing at an absent path.
 - [ ] Write `public/src/content/docs/guides/agent-sandbox.md`: what the guest
-      receives (a placeholder), what the host does (terminate TLS, substitute,
-      audit), what egress is allowed, and what the audit chain records. This is
-      the page the product claim rests on.
+      receives (a placeholder), what the host does (substitute after the egress
+      gate, audit), what egress is allowed, what the audit chain records, and —
+      plainly — every limit a user will hit today (G13–G17). This is the page
+      the product claim rests on, so it states what ships, not what WS-S will
+      make true.
 - [ ] Correct the framing in `public/src/content/docs/guides/agent-tool-contract.mdx:93-160`
       so an unshipped surface is not presented as shipped.
 - [ ] Add the example to `just e2e-docs` so the documented commands are
       executed, not just written.
+
+## WS-S — Make substitution work for a real agent
+
+Issues: [#3283](https://github.com/tinylabscom/mvm/issues/3283),
+[#3284](https://github.com/tinylabscom/mvm/issues/3284),
+[#3285](https://github.com/tinylabscom/mvm/issues/3285),
+[#3286](https://github.com/tinylabscom/mvm/issues/3286),
+[#3287](https://github.com/tinylabscom/mvm/issues/3287),
+[#3288](https://github.com/tinylabscom/mvm/issues/3288).
+
+Found while documenting WS0. Without this workstream the example in WS0 can
+only use a hand-written client, which is not "an agent boots in the sandbox".
+It therefore comes before the example and before WS1.
+
+- [ ] Wire the SNI terminator and a per-VM egress CA onto the workload runner
+      path; inject the CA bundle into the guest env; terminate, substitute,
+      re-encrypt and audit a `CONNECT` to a host with a bound secret; stream
+      responses rather than buffering them. Refuse a `CONNECT` to a bound host
+      that cannot be terminated, so a placeholder never leaves unsubstituted.
+- [ ] Collapse the two guest egress entry points into one that handles
+      `CONNECT`, SOCKS5 and absolute-form and hands every flow to the same
+      host endpoint.
+- [ ] One secret-resolution step shared by every admission path (transient,
+      persistent, session, entrypoint). Decide PID 1: wire the boot-time
+      `mvm.secret_env` token or delete its guest-side parser.
+- [ ] Honor `--name` on the kept-alive entrypoint path, and print the machine
+      name.
+- [ ] Audit the substitution when the credential is written upstream, and the
+      outcome separately, so an in-flight failure still leaves an entry.
+- [ ] Expose the agent network preset and the token budget on `machine run` and
+      in the Workload IR, or delete them; delete `up::Args`' unreachable
+      network fields.
+- [ ] Witnesses: `unmodified_https_client_gets_substituted_credential`,
+      `connect_to_bound_host_is_never_relayed_opaquely`,
+      `substitution_is_audited_when_upstream_fails_after_send`,
+      `every_admission_path_resolves_secrets_identically`.
 
 ## WS1 — `DriveGrant`: one grant, no new transport
 

@@ -508,8 +508,8 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     ADR-001 row: `substitute` — and only that one. The row also named
     `encode_secret_env_cmdline_round_trips_pairs_as_single_token` until it
     turned out to round-trip an encoder nothing calls: `mvm.secret_env` is
-    built by no backend and parsed by no guest, so the test witnessed an
-    encoding rather than a containment. The shipped mechanism injects
+    built by no backend (the guest-side parser in `nix/lib/mk-guest.nix` is
+    never fed), so the test witnessed an encoding rather than a containment. The shipped mechanism injects
     placeholders on the invoke path from the endpoint-minted env file. The
     cmdline token remains in tree as designed-but-unwired. Note the shape
     of that failure, because `check-claim-catalog` cannot catch it: the
