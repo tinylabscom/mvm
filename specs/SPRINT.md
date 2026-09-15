@@ -10,6 +10,12 @@
 
 ## In progress
 
+- [ ] **Claim-witness mutation coverage — issue #3250.**
+      `specs/plans/2026-09-15-claim-witness-mutation-coverage.md`.
+      Add the two EOF-boundary regressions missing from the scheduled
+      `mvm-backends` mutation shard, then require the authoritative Linux
+      ratchet and a fresh scheduled Security witness before closeout.
+
 - [x] **CI queue consolidation.**
       `specs/plans/2026-09-10-ci-queue-consolidation.md`.
       Preserve cumulative merge-group validation while reducing runner fan-out
@@ -68,8 +74,16 @@
       source checkout from silently entering optional libkrun Stage 0 during
       burn-in. It builds the `user` manifest verifier through the standard
       macOS linker, so that download remains authenticated without the insecure
-      verification escape hatch. The physical runner still
-      needs to be provisioned, hardened, registered, and burned in; the
+      verification escape hatch. The gate now excludes the builder/setup
+      feature it does not own, while the opted-in launch-budget scenario creates
+      its matching standby immediately before the warm claim. The separate
+      macOS documented-surface lane explicitly fetches the signed builder image
+      instead of attempting unsupported HVF Stage 0 preparation. Physical-M1
+      burn-in then exposed macOS errno 57 while `machine reconfigure` replaced
+      the HVF supervisor on the same agent socket path; activation now treats
+      that transport-only socket-rebind state as retryable within the existing
+      deadline while authenticated rejection remains fatal. The physical runner
+      still needs to be provisioned, hardened, registered, and burned in; the
       repository runner inventory currently contains zero self-hosted runners.
 
 - [x] **Linux 6.12.109 synchronized kernel pin — issue #3213.**

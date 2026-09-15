@@ -35,6 +35,7 @@ Feature: the launch budget stays observable on every run
   # with rotational storage measures the disk rather than the launch path.
   @live @perf_budget
   Scenario: a warm-residency launch meets the documented start budget
+    Given an Alpine warm parent is ready
     When I launch "machine run --image alpine -- true" with env "MVM_RESIDENCY" set to "warm"
     Then the launch succeeds
     And the guest control plane came up

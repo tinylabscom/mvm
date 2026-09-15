@@ -511,6 +511,124 @@ pub fn live_home_precedence<'a>(
     scenario_home.or(warm_home)
 }
 
+/// The `mvmctl` every CLI scenario drives.
+///
+/// An explicit `CARGO_BIN_EXE_mvmctl` wins — the `just` recipes set it — and a
+/// relative one is read from the workspace root, the directory the recipes
+/// name it from. Otherwise the binary is found beside the test binary.
+pub fn resolve_mvmctl_path(
+    explicit: Option<std::path::PathBuf>,
+    test_binary: &std::path::Path,
+    workspace_root: &std::path::Path,
+) -> std::path::PathBuf {
+    match explicit {
+        Some(binary) if binary.is_absolute() => binary,
+        Some(binary) => workspace_root.join(binary),
+        None => mvmctl_beside_test_binary(test_binary),
+    }
+}
+
+/// Where `mvmctl` sits relative to the running test binary.
+///
+/// `mvmctl` is another package's binary, so cargo never exports
+/// `CARGO_BIN_EXE_mvmctl` to this crate's tests; the runner has to infer the
+/// profile directory from its own path. Cargo has put test binaries in two
+/// places: `target/<profile>/deps/`, and — on the pinned nightly —
+/// `target/<profile>/build/<pkg>/<hash>/out/`. Popping one directory and
+/// expecting `deps` handled only the first, so a plain `cargo test` looked for
+/// `mvmctl` inside the `out/` directory and refused to run with "no mvmctl
+/// binary", even though one was built right beside `deps/`.
+///
+/// The nearest `deps` or `build` ancestor names the profile directory. A test
+/// binary under neither falls back to its own directory.
+pub fn mvmctl_beside_test_binary(test_binary: &std::path::Path) -> std::path::PathBuf {
+    let dir = test_binary.parent().unwrap_or(test_binary);
+    let profile_dir = dir
+        .ancestors()
+        .find(|ancestor| {
+            ancestor
+                .file_name()
+                .is_some_and(|name| name == "deps" || name == "build")
+        })
+        .and_then(std::path::Path::parent)
+        .unwrap_or(dir);
+    profile_dir.join("mvmctl")
+}
+
+#[cfg(test)]
+mod mvmctl_location {
+    use super::{mvmctl_beside_test_binary, resolve_mvmctl_path};
+    use std::path::{Path, PathBuf};
+
+    const TEST_BINARY: &str = "/w/target/debug/build/mvm-conformance/f633cde2/out/conformance";
+
+    #[test]
+    fn an_explicit_absolute_binary_is_used_as_given() {
+        assert_eq!(
+            resolve_mvmctl_path(
+                Some(PathBuf::from("/tmp/mvmctl")),
+                Path::new(TEST_BINARY),
+                Path::new("/workspace")
+            ),
+            Path::new("/tmp/mvmctl")
+        );
+    }
+
+    #[test]
+    fn an_explicit_relative_binary_is_read_from_the_workspace_root() {
+        assert_eq!(
+            resolve_mvmctl_path(
+                Some(PathBuf::from("target/debug/mvmctl")),
+                Path::new(TEST_BINARY),
+                Path::new("/workspace")
+            ),
+            Path::new("/workspace/target/debug/mvmctl")
+        );
+    }
+
+    #[test]
+    fn without_an_explicit_binary_the_one_beside_the_test_binary_is_used() {
+        assert_eq!(
+            resolve_mvmctl_path(None, Path::new(TEST_BINARY), Path::new("/workspace")),
+            Path::new("/w/target/debug/mvmctl")
+        );
+    }
+
+    #[test]
+    fn a_test_binary_in_deps_finds_mvmctl_in_the_profile_dir() {
+        assert_eq!(
+            mvmctl_beside_test_binary(Path::new("/w/target/debug/deps/conformance-abc")),
+            Path::new("/w/target/debug/mvmctl")
+        );
+    }
+
+    #[test]
+    fn a_test_binary_in_a_build_script_out_dir_finds_mvmctl_in_the_profile_dir() {
+        assert_eq!(
+            mvmctl_beside_test_binary(Path::new(
+                "/w/target/debug/build/mvm-conformance/f633cde2/out/conformance-f633cde2"
+            )),
+            Path::new("/w/target/debug/mvmctl")
+        );
+    }
+
+    #[test]
+    fn the_nearest_marker_wins_over_a_build_directory_higher_up() {
+        assert_eq!(
+            mvmctl_beside_test_binary(Path::new("/src/build/w/target/release/deps/conformance")),
+            Path::new("/src/build/w/target/release/mvmctl")
+        );
+    }
+
+    #[test]
+    fn a_test_binary_under_neither_marker_looks_beside_itself() {
+        assert_eq!(
+            mvmctl_beside_test_binary(Path::new("/opt/bin/conformance")),
+            Path::new("/opt/bin/mvmctl")
+        );
+    }
+}
+
 #[cfg(test)]
 mod live_home {
     use super::live_home_precedence;

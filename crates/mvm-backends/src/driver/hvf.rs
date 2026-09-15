@@ -1080,6 +1080,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_peer_that_closes_before_replying_is_an_error() {
+        let (peer, mut stream) = std::os::unix::net::UnixStream::pair().expect("unix pair");
+        drop(peer);
+
+        let error = read_handoff_response(&mut stream)
+            .expect_err("an empty reply must not be accepted as a refusal reason");
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn a_short_unterminated_refusal_keeps_the_available_reason() {
+        let (mut peer, mut stream) = std::os::unix::net::UnixStream::pair().expect("unix pair");
+        let writer = std::thread::spawn(move || {
+            peer.write_all(b"ERR parent stopped")
+                .expect("write unterminated handoff refusal");
+        });
+
+        let response = read_handoff_response(&mut stream).expect("read available refusal reason");
+        writer.join().expect("join handoff writer");
+        assert_eq!(response, b"ERR parent stopped");
+    }
+
     /// Whatever the parent sends, the host stops at a bound rather than reading
     /// an unterminated reply forever.
     #[test]

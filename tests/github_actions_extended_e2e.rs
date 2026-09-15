@@ -436,6 +436,10 @@ fn macos_documented_surface_uses_the_published_workload_kernel() {
         macos.contains("MVM_KERNEL_SOURCE: download"),
         "the macOS witness must not source-build its workload kernel through the builder image it is bootstrapping"
     );
+    assert!(
+        macos.contains("MVM_BOOT_IMAGE: fetch"),
+        "the macOS source checkout must explicitly fetch its published builder image instead of entering unsupported HVF Stage 0 preparation"
+    );
 }
 
 #[test]
@@ -450,6 +454,45 @@ fn local_launch_gate_uses_the_published_workload_kernel() {
     assert!(
         script.contains("export MVM_KERNEL_SOURCE=download"),
         "`just e2e-launch` must not route a cold source checkout through the optional libkrun Stage 0 backend"
+    );
+}
+
+#[test]
+fn local_launch_gate_runs_only_launch_features() {
+    let script = fs::read_to_string("scripts/e2e-launch-modes.sh")
+        .expect("read the local launch-gate script");
+
+    assert!(
+        script.contains(
+            "s31_launch_e2e/{cli_launch_modes,launch_budget,sdk_and_library_modes}.feature"
+        ),
+        "`just e2e-launch` must name its three launch feature files explicitly"
+    );
+    assert!(
+        !script.contains("s31_launch_e2e/*.feature"),
+        "the broad suite glob also selects documented_setup.feature and makes the launch gate prepare a builder VM"
+    );
+}
+
+#[test]
+fn perf_budget_scenario_prepares_its_parent_immediately_before_launch() {
+    let feature = fs::read_to_string("features/suites/s31_launch_e2e/launch_budget.feature")
+        .expect("read launch-budget feature");
+    let warm_scenario = feature
+        .split_once("Scenario: a warm-residency launch meets the documented start budget")
+        .expect("warm launch-budget scenario")
+        .1;
+    let steps = fs::read_to_string("crates/mvm-conformance/tests/steps/launch_e2e.rs")
+        .expect("read launch e2e steps");
+
+    assert!(
+        warm_scenario.contains("Given an Alpine warm parent is ready"),
+        "the performance scenario must create its expiring standby immediately before it claims it"
+    );
+    assert!(
+        steps.contains("given(expr = \"an Alpine warm parent is ready\")")
+            && steps.contains("pool warm 1 --image alpine"),
+        "the scenario prerequisite must warm the same Alpine/default-size shape the launch claims"
     );
 }
 

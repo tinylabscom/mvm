@@ -88,7 +88,7 @@ require_text .github/workflows/ci.yml 'cargo +nightly install --locked --version
 require_text crates/mvm-hostd/ebpf/rust-toolchain.toml 'channel = "nightly"'
 require_text .github/workflows/ci.yml "toolchain: ${toolchain}"
 require_text Justfile 'CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl"'
-require_text crates/mvm-conformance/tests/conformance.rs 'var_os("CARGO_BIN_EXE_mvmctl")'
+require_text crates/mvm-conformance/tests/steps/cli.rs 'var_os("CARGO_BIN_EXE_mvmctl")'
 
 if grep -Eq 'codegen-backend|threads=8' .cargo/config.toml; then
   echo "check-fast-cargo: nightly settings leaked into stable-compatible .cargo/config.toml" >&2

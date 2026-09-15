@@ -28,6 +28,11 @@ Last updated: 2026-09-15
       signature verification to close the claim 20 limits note, installer and
       distro compat lanes, and Nix version-from-manifest.
 
+- [ ] **Claim-witness mutation coverage — issue #3250.**
+      `specs/plans/2026-09-15-claim-witness-mutation-coverage.md`.
+      Cover empty EOF and short unterminated handoff replies so the scheduled
+      mutation claim regains live evidence.
+
 - [ ] **OTLP trace export for host-side processes.**
       `specs/plans/2026-09-14-otlp-trace-export.md`. Issue #3242.
       `mvm-observability` gains an opt-in OTLP/HTTP JSON trace exporter,
@@ -85,8 +90,15 @@ Last updated: 2026-09-15
       cold local `just e2e-launch` now fetches the verified workload kernel
       instead of silently entering optional libkrun Stage 0, and its standard
       linker build includes the manifest verifier needed to authenticate that
-      fetch. A hardened physical runner is still required;
-      the repository currently has zero self-hosted runners.
+      fetch. The launch gate now runs only its three owned features, and the
+      warm-budget scenario creates its matching Alpine standby immediately
+      before the claim. The macOS documented-surface witness explicitly fetches
+      its signed builder image rather than entering unsupported HVF Stage 0.
+      Physical-M1 burn-in exposed macOS errno 57 during the `machine
+      reconfigure` supervisor/socket replacement; activation now retries that
+      transport-only rebind state within its existing deadline while
+      authenticated rejection remains fatal. A hardened physical runner is
+      still required; the repository currently has zero self-hosted runners.
 
 - [x] **Linux 6.12.109 synchronized kernel pin — issue #3213.**
       `specs/plans/2026-09-08-kernel-6-12-109.md`.

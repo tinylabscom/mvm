@@ -271,6 +271,10 @@ jobs:
       # witness deliberately fetches. Use the separately published, verified
       # workload kernel so the live lane never falls back into that cycle.
       MVM_KERNEL_SOURCE: download
+      # A source checkout otherwise defaults to building the builder image.
+      # HVF can run the published image but cannot prepare it through Stage 0,
+      # so make the signed release-artifact path explicit on this lane.
+      MVM_BOOT_IMAGE: fetch
       # Intel cannot install ARM-only libkrun. The fetched builder image is
       # self-contained, so source artifact jobs run inside it under HVF.
       MVM_BUILDER_BACKEND: hvf
