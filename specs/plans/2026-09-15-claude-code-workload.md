@@ -165,11 +165,12 @@ catalog's own header note).
       (node:22-alpine is musl; Claude Code documents musl support). Records:
       does the CONNECT tunnel carry the API traffic, does the `standard`
       seccomp/profile tier admit Node + the agent, what breaks.
-- [ ] `nix why-depends` on git↔openssh against the `nixos-25.11` pin; pick
-      the git mitigation.
-- [ ] Resolve packaging option 1 vs 2 vs 3 (does `pkgs.claude-code` exist in
+- [x] git↔openssh against the `nixos-25.11` pin (settled by source
+      inspection at the locked rev — host nix absent); pick the git
+      mitigation. See findings below.
+- [x] Resolve packaging option 1 vs 2 vs 3 (does `pkgs.claude-code` exist in
       the pin, and does the npm package's platform-binary layout survive
-      `importNpmLock`).
+      `importNpmLock`). See findings below.
 - [ ] Interactive smoke on a hand-built flake: TUI under `machine console`
       (raw mode, resize, colors), Ctrl-C forwarded as a byte, idle-reaper
       interplay — verify a long "thinking" pause under an attached console
@@ -177,6 +178,42 @@ catalog's own header note).
       (`crates/mvm-hostd/src/supervisor/reaper.rs`, `touch_activity`).
 - [ ] Findings recorded as `.agent-memory/notes/` entries plus a short
       findings section appended to this plan.
+
+#### W0 findings, research half (2026-09-15)
+
+Environment: the flake pins `nixos-25.11`, locked rev `8fd9daa3db09`
+(2026-05-06). Detail lives in `.agent-memory/notes/` (local); the
+load-bearing conclusions:
+
+- **Git needs no mitigation.** At the pin, git's derivation takes
+  `withSsh ? false` and only `gitFull` turns it on — `pkgs.git` and
+  `gitMinimal` carry no openssh runtime reference, so the closure ban is
+  not in play. Use `gitMinimal` (also drops perl/manual/pcre2). curl's
+  `scpSupport` puts `libssh2` in the closure, and that matches neither ban
+  arm: the closure regex anchors right after the store hash
+  (`-(openssh|dropbear|ssh|...)(-|$)`) so `-libssh2-` does not match, and
+  the eval-time "ssh" substring check reads declared package labels, not
+  the closure.
+- **Packaging verdict: option 2, the fixed-output native binary,
+  `linux-arm64-musl`.** `downloads.claude.ai/claude-code-releases/` serves
+  `{latest|stable}` → version, `{version}/manifest.json` → first-party
+  SHA-256 + size per platform, `{version}/{platform}/claude` → the binary;
+  live-verified for 2.1.273. The musl artifact is a dynamically linked
+  aarch64 ELF whose only need is musl's own loader
+  (`/lib/ld-musl-aarch64.so.1`, supplied by `pkgs.musl` or patchelf) — no
+  glibc, no nodejs in the image closure. Pin version + checksum in-repo.
+- **Option 1 exists but is stale**: `pkgs.claude-code` at the pin packages
+  2.1.81 (2026-03-20) against a `latest` of 2.1.273 (2026-09-15), is
+  unfree (the consuming flake's pkgs import needs `allowUnfree` — guest
+  `packages` come from the user flake's own pkgs, so the switch goes
+  there), and drags nodejs into the closure. `pkgs.claude-code-bin` at the
+  pin fetches the **glibc** arm64 artifact, same stale version. Acceptable
+  fallback, not the default.
+- **Option 3 (`importNpmLock`) is the fragile path**: the current npm
+  package is a thin installer — empty deps, a `postinstall` that runs
+  `install.cjs`, per-platform binaries as libc-filtered
+  `optionalDependencies` — exactly the shape npm-lock-based Nix builds
+  handle worst. Avoid.
 
 ### W1 — the example flake
 
