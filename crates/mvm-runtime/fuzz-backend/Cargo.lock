@@ -983,7 +983,7 @@ dependencies = [
 
 [[package]]
 name = "libkrun-sys"
-version = "0.18.0-rc.1"
+version = "0.18.0-rc.2"
 dependencies = [
  "libc",
  "mvm-core",
@@ -1065,7 +1065,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-agentd"
-version = "0.18.0-rc.1"
+version = "0.18.0-rc.2"
 dependencies = [
  "anyhow",
  "base64",
@@ -1088,7 +1088,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-backends"
-version = "0.18.0-rc.1"
+version = "0.18.0-rc.2"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
@@ -1110,7 +1110,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-build"
-version = "0.18.0-rc.1"
+version = "0.18.0-rc.2"
 dependencies = [
  "anyhow",
  "base64",
@@ -1145,7 +1145,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-contract"
-version = "0.18.0-rc.1"
+version = "0.18.0-rc.2"
 dependencies = [
  "anyhow",
  "base64",
@@ -1162,7 +1162,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-core"
-version = "0.18.0-rc.1"
+version = "0.18.0-rc.2"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -1197,7 +1197,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-fs"
-version = "0.18.0-rc.1"
+version = "0.18.0-rc.2"
 dependencies = [
  "async-trait",
  "ed25519-dalek",
@@ -1222,7 +1222,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-host-services"
-version = "0.18.0-rc.1"
+version = "0.18.0-rc.2"
 dependencies = [
  "mvm-agentd",
  "mvm-core",
@@ -1232,7 +1232,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-http"
-version = "0.18.0-rc.1"
+version = "0.18.0-rc.2"
 dependencies = [
  "base64",
  "bytes",
@@ -1251,7 +1251,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-net"
-version = "0.18.0-rc.1"
+version = "0.18.0-rc.2"
 dependencies = [
  "mvm-contract",
  "mvm-core",
@@ -1259,7 +1259,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-runtime"
-version = "0.18.0-rc.1"
+version = "0.18.0-rc.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1308,7 +1308,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-sdk"
-version = "0.18.0-rc.1"
+version = "0.18.0-rc.2"
 dependencies = [
  "base64",
  "blake3",
@@ -1335,7 +1335,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-vmm"
-version = "0.18.0-rc.1"
+version = "0.18.0-rc.2"
 dependencies = [
  "anyhow",
  "base64",
@@ -1615,9 +1615,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.43"
+version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "once_cell",
  "ring",

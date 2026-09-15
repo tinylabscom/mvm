@@ -2,6 +2,47 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.18.0-rc.2] — 2026-09-15
+
+### Added
+- **release**: Let a dry run reach the publish step
+- **observability**: Export traces over OTLP/HTTP JSON without new dependencies
+
+### Changed
+- Drop the committed build directory from the tree
+
+### Documentation
+- Record scheduled CI evidence status
+- **plan**: Scope parallel conformance and the global MVM_HOME
+- **blog**: Read the July 2026 agent intrusion against the claim register
+
+### Fixed
+- Fix scheduled CI transient failures
+- **release**: Stop the post-publish verifier racing its own trigger
+- **release**: Mint the attested builder pack where its identity is verifiable
+- **warm**: Stop the standby path discarding its own error chains
+- **warm**: Activate the standby parent before capturing it
+- **vmm**: Stop a warm claim's guest resetting its own post-restore session
+- **hvf**: Tell the claiming host why a parent refused a live handoff
+- **hostd**: Anchor a warm-claimed child's transcript in the audit chain
+
+### Other
+- Remove libkrun from standard builds and releases
+- Reshape the story around the pitch script
+- Fix M1 launch gate prerequisites
+
+### Performance
+- **ci**: Split the feature lane off the pull-request critical path
+- **ci**: Give the Gherkin suite a single owner
+- **ci**: Consolidate merge queue validation
+- **ci**: Keep queue witnesses parallel
+- **cli**: Stop backends that boot no kernel resolving an initramfs
+- **ci**: Warm the nightly fast path, and pin the lanes that use it
+- **ci**: Drop the nightly warm cache that saved nothing, and a duplicate test run
+
+### Testing
+- Restore HVF handoff mutation coverage
+
 ## [0.18.0-rc.1] — 2026-09-06
 
 ### Added
