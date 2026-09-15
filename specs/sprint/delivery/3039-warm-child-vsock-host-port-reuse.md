@@ -83,7 +83,11 @@ still reproduced the failure.
 ## Not resolved
 
 One run, with only the vCPU fix in place, failed differently:
-`HVF parent rejected live handoff: ERR`. Its cause was not captured —
-`fail_handoff` writes the reason only to the debug trace — and it did not recur
-in the twenty runs after both fixes. It is recorded here rather than claimed
-fixed.
+`HVF parent rejected live handoff: ERR`. Its cause was not captured: the parent
+replied with a bare `ERR` and recorded the reason only in the debug trace, and
+the host read exactly three bytes of the reply. It did not recur in the twenty
+runs after both fixes, so it is recorded here rather than claimed fixed.
+
+The next occurrence will say why. The parent now replies `ERR <reason>` on one
+bounded line and the host reads through the newline, so the claim error carries
+the refusal — witnessed end to end by `a_refused_handoff_tells_the_host_why`.

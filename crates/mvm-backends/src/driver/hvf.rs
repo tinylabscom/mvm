@@ -22,7 +22,7 @@ use mvm_core::vm_backend::{
 };
 use mvm_net::channel::GuestService;
 use mvm_vmm::host::hvf_supervisor::{HostDialSocket, HvfDisk, HvfSupervisorConfig};
-use mvm_vmm::hvf_handoff::HvfHandoffRequest;
+use mvm_vmm::hvf_handoff::{HANDOFF_ACCEPTED, HANDOFF_RESPONSE_MAX_BYTES, HvfHandoffRequest};
 
 use crate::driver::hvf_process::{
     self as hvf_backend, PID_FILE_NAME, PID_FILE_TIMEOUT, resolve_supervisor_path,
@@ -623,7 +623,7 @@ impl VmmDriver for HvfDriver {
             .map_err(|e| StandbyError::ClaimFailed(format!("send HVF handoff request: {e}")))?;
         let response = read_handoff_response(&mut stream)
             .map_err(|e| StandbyError::ClaimFailed(format!("read HVF handoff response: {e}")))?;
-        if &response != b"OK\n" {
+        if response != HANDOFF_ACCEPTED {
             return Err(StandbyError::ClaimFailed(format!(
                 "HVF parent rejected live handoff: {}",
                 String::from_utf8_lossy(&response).trim()
@@ -666,20 +666,28 @@ impl VmmDriver for HvfDriver {
     }
 }
 
-fn read_handoff_response(stream: &mut std::os::unix::net::UnixStream) -> std::io::Result<[u8; 3]> {
+/// Read the parent's one-line handoff reply: `OK`, or `ERR <reason>`.
+///
+/// Reads through the newline rather than a fixed length. A fixed three bytes
+/// fit `OK\n` and truncated every refusal to `ERR`, which left a failed claim
+/// with no account of what the parent had refused.
+fn read_handoff_response(stream: &mut std::os::unix::net::UnixStream) -> std::io::Result<Vec<u8>> {
     stream.set_nonblocking(true)?;
     let deadline = Instant::now() + std::time::Duration::from_secs(2);
-    let mut response = [0_u8; 3];
-    let mut received = 0;
-    while received < response.len() {
-        match stream.read(&mut response[received..]) {
-            Ok(0) => {
+    let mut response = Vec::new();
+    let mut byte = [0_u8; 1];
+    while response.len() < HANDOFF_RESPONSE_MAX_BYTES && response.last() != Some(&b'\n') {
+        match stream.read(&mut byte) {
+            Ok(0) if response.is_empty() => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
                     "HVF handoff peer closed before its response was complete",
                 ));
             }
-            Ok(count) => received += count,
+            // A reply cut off by the peer closing is still the parent's account
+            // of the refusal; the caller only admits an exact `OK`.
+            Ok(0) => break,
+            Ok(_) => response.push(byte[0]),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 if Instant::now() >= deadline {
                     return Err(std::io::Error::new(
@@ -1046,7 +1054,44 @@ mod tests {
 
         let response = read_handoff_response(&mut stream).expect("read handoff response");
         writer.join().expect("join handoff writer");
-        assert_eq!(&response, b"OK\n");
+        assert_eq!(String::from_utf8_lossy(&response).trim_end(), "OK");
+    }
+
+    /// A refusal carries the parent's reason, and the host keeps all of it.
+    ///
+    /// The reader used to take exactly three bytes — enough for `OK\n`, and
+    /// exactly enough to cut any explanation off at `ERR`. A claim then failed
+    /// with `HVF parent rejected live handoff: ERR` and nothing else, on a path
+    /// where the parent is a paused process you cannot attach to and the reply
+    /// is the only account of what it refused.
+    #[test]
+    fn a_refused_handoff_reports_the_parents_whole_reason() {
+        let (mut peer, mut stream) = std::os::unix::net::UnixStream::pair().expect("unix pair");
+        let writer = std::thread::spawn(move || {
+            peer.write_all(b"ERR handoff signature rejected\n")
+                .expect("write handoff refusal");
+        });
+
+        let response = read_handoff_response(&mut stream).expect("read handoff refusal");
+        writer.join().expect("join handoff writer");
+        assert_eq!(
+            String::from_utf8_lossy(&response).trim_end(),
+            "ERR handoff signature rejected"
+        );
+    }
+
+    /// Whatever the parent sends, the host stops at a bound rather than reading
+    /// an unterminated reply forever.
+    #[test]
+    fn an_unterminated_handoff_reply_is_bounded() {
+        let (mut peer, mut stream) = std::os::unix::net::UnixStream::pair().expect("unix pair");
+        let writer = std::thread::spawn(move || {
+            let _ = peer.write_all(&vec![b'x'; 4 * HANDOFF_RESPONSE_MAX_BYTES]);
+        });
+
+        let response = read_handoff_response(&mut stream).expect("read bounded reply");
+        writer.join().expect("join handoff writer");
+        assert_eq!(response.len(), HANDOFF_RESPONSE_MAX_BYTES);
     }
 
     fn egress_port(uds: &str) -> VsockPort {

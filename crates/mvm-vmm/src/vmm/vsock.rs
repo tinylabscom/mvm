@@ -752,12 +752,12 @@ impl VirtioVsock {
         let result = self.accept_handoff(&mut stream);
         match result {
             Ok(()) => {
-                let _ = stream.write_all(b"OK\n");
+                let _ = stream.write_all(crate::hvf_handoff::HANDOFF_ACCEPTED);
                 self.handoff_used = true;
                 true
             }
             Err(error) => {
-                let _ = stream.write_all(b"ERR\n");
+                let _ = stream.write_all(&crate::hvf_handoff::refusal_line(&error.to_string()));
                 self.fail_handoff(Some(&mut stream), error);
                 false
             }
@@ -2388,6 +2388,54 @@ mod tests {
         let _client = std::os::unix::net::UnixStream::connect(agent_socket).unwrap();
         device.shutdown();
         assert!(device.io.is_none());
+    }
+
+    /// The refusal a claiming host reads back names what the parent refused.
+    ///
+    /// Driven through the real handoff socket and `poll`, not the line encoder,
+    /// because the encoder being right says nothing about whether the refusal
+    /// path calls it. It used to write a bare `ERR`.
+    #[test]
+    fn a_refused_handoff_tells_the_host_why() {
+        let dir = tempfile::Builder::new()
+            .prefix("vsk")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let socket = dir.path().join("hvf-handoff.sock");
+        let verify_key = hex::encode(
+            ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
+        let stop: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
+        let mut device = virtio_dev();
+        if device
+            .set_handoff_control(Some(&socket), Some(dir.path()), Some(&verify_key), stop)
+            .is_err()
+        {
+            return;
+        }
+
+        let client_socket = socket.clone();
+        let host = std::thread::spawn(move || {
+            let mut stream = std::os::unix::net::UnixStream::connect(client_socket).unwrap();
+            stream.write_all(b"not a handoff request\n").unwrap();
+            let mut reply = String::new();
+            BufReader::new(stream).read_line(&mut reply).unwrap();
+            reply
+        });
+
+        let started = std::time::Instant::now();
+        while !stop.load(Ordering::Relaxed) {
+            device.poll();
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "the parent never answered the handoff attempt"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert_eq!(host.join().unwrap(), "ERR invalid handoff request\n");
     }
 
     #[test]

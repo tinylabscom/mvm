@@ -56,9 +56,11 @@
       green. PR #3219 merged as `136bb8041f` after all 16 protected-main gates
       passed, and #3190 is closed. The historical Nix build-hook EOF remains a
       distinct, currently non-reproducing initiating failure; it no longer
-      strands this lock. The unpublished #3039 work has been inventoried and
-      preserved without editing or pushing, but public work remains blocked on
-      the recorded owner and patent-counsel release decision. #3011 is blocked
+      strands this lock. #3039 was released for public work by the owner on
+      2026-09-14 and is closed: #3235 preserved the claim path's error chains,
+      #3238 activated the standby parent before capture, and #3241 fixed the
+      two vsock device defects behind the child's post-restore `Broken pipe`.
+      #3011 is blocked
       on provisioning and hardening its physical Apple Silicon runner; the
       repository runner inventory currently contains zero self-hosted runners.
 
@@ -279,7 +281,7 @@
       lane failure and stays separately tracked. One Extended CI run and merge
       delivery remain.
 
-- [ ] **Warm claim authenticated readiness — issue #3039.**
+- [x] **Warm claim authenticated readiness — issue #3039.**
       `specs/plans/2026-08-31-warm-claim-authenticated-readiness.md`.
       Post-restore readiness now requires the existing authenticated guest-agent
       Ping instead of a bare socket connection, with bounded per-probe I/O.
@@ -293,7 +295,9 @@
       claim reissued the port the frozen guest still held from the parent's
       activation session. Both fixed; 20/20 live HVF warm claims succeed
       (`specs/sprint/delivery/3039-warm-child-vsock-host-port-reuse.md`).
-      Merge delivery remains.
+      Merged via #3241 as `25f183aa9e`; #3039 is closed. A refused live handoff
+      now returns the parent's reason to the claiming host instead of a bare
+      `ERR`. A live warm claim on Linux KVM has not been exercised end to end.
 
 - [ ] **Published musl SDK sidecar — issue #3045.**
       `specs/plans/2026-08-31-publish-musl-sdk-sidecar.md`.
