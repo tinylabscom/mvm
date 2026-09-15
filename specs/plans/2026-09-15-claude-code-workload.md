@@ -160,11 +160,12 @@ catalog's own header note).
 
 ### W0 — spike and de-risk (no shipped artifacts)
 
-- [ ] Zero-authoring smoke: `mvmctl run --runtime node --allow-host
+- [x] Zero-authoring smoke: `mvmctl run --runtime node --allow-host
       api.anthropic.com:443 -- npx @anthropic-ai/claude-code --bare -p "…"`
       (node:22-alpine is musl; Claude Code documents musl support). Records:
       does the CONNECT tunnel carry the API traffic, does the `standard`
-      seccomp/profile tier admit Node + the agent, what breaks.
+      seccomp/profile tier admit Node + the agent, what breaks. All ran on
+      real HVF VMs — see findings below.
 - [x] git↔openssh against the `nixos-25.11` pin (settled by source
       inspection at the locked rev — host nix absent); pick the git
       mitigation. See findings below.
@@ -176,8 +177,9 @@ catalog's own header note).
       interplay — verify a long "thinking" pause under an attached console
       does not trip `MVM_TIMEOUT`/`--ttl` teardown
       (`crates/mvm-hostd/src/supervisor/reaper.rs`, `touch_activity`).
-- [ ] Findings recorded as `.agent-memory/notes/` entries plus a short
-      findings section appended to this plan.
+- [x] Findings recorded as `.agent-memory/notes/` entries plus a short
+      findings section appended to this plan (interactive-console smoke
+      still open above — it needs a human terminal).
 
 #### W0 findings, research half (2026-09-15)
 
@@ -214,6 +216,46 @@ load-bearing conclusions:
   `install.cjs`, per-platform binaries as libc-filtered
   `optionalDependencies` — exactly the shape npm-lock-based Nix builds
   handle worst. Avoid.
+
+#### W0 findings, smoke half (2026-09-15)
+
+All on real HVF VMs on macOS 26 Apple Silicon, `--runtime node`
+(node:22-alpine, v22.23.2). Detail in
+`.agent-memory/notes/node-runtime-anthropic-egress-smoke.md` (local).
+
+- **Allowlisted connectivity holds, with one required env var.** Node's
+  fetch (undici) ignores the injected `HTTPS_PROXY` by default and dials
+  direct (`ENETUNREACH` — vsock-only guest, no route). With
+  `NODE_USE_ENV_PROXY=1` (honored by node ≥22.18) the same fetch returns
+  STATUS 401 `authentication_error: x-api-key header is required` from
+  `api.anthropic.com` — DNS, CONNECT tunnel, and TLS all carried through
+  the egress gate. The example flake must bake `NODE_USE_ENV_PROXY=1`
+  alongside the telemetry-disable vars.
+- **Default-deny surfaces as policy, immediately.** A non-allowlisted
+  fetch gets `403 Forbidden` from the proxy with no timeout. Undici
+  renders it opaquely as `Request was cancelled` — a UX caveat for the
+  README, not a blocker.
+- **The zero-authoring npx lane works end to end.** With
+  `registry.npmjs.org:443` added, `npx -y @anthropic-ai/claude-code@latest
+  --version` prints `2.1.273 (Claude Code)` in 27s including boot and the
+  ~221 MB musl platform package (npm honors the injected proxy natively;
+  the install needed no `downloads.claude.ai`). `--bare -p "say hi"` exits
+  1 with `Not logged in` — the expected no-credential refusal, no hang.
+  Used `--memory 2G`: the npx cache lives on tmpfs and the default 512M
+  is plausibly too small (floor unprobed). The two-host allow-list is
+  sufficient for this lane.
+- **No `standard`-tier seccomp refusals** were hit by node, npm, or the
+  Bun-compiled Claude Code binary; no `--profile dev` delta to report.
+- **W5-relevant**: `NODE_EXTRA_CA_CERTS` is unset on this path — no
+  per-VM egress CA was provisioned because no substitution service was
+  assembled. The terminator option's guest-trust half is therefore only
+  present when secrets are actually bound.
+- Transient runs self-cleaned (no stray VM state, supervisors, or
+  endpoints). Host setup friction worth knowing: a rebuilt `mvmctl` needs
+  `mvmctl env sign` before HVF boots it, and `just toolchain-embed`'s
+  `rustup target add` step can fail under mise-managed rustup (manual
+  re-run worked). Cold first run ~6m (Stage 0 + supervisor build); warm
+  runs ~1s.
 
 ### W1 — the example flake
 
