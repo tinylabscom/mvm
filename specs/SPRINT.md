@@ -16,6 +16,12 @@
       `mvm-backends` mutation shard, then require the authoritative Linux
       ratchet and a fresh scheduled Security witness before closeout.
 
+- [ ] **Security lane supply-chain repair — issue #3249.**
+      `specs/plans/2026-09-15-security-lane-supply-chain.md`.
+      Upgrade rustls to the fixed compatible release set, preserve dependency
+      policy, and merge after #3250 restores the mutation witness from the same
+      failed Security run.
+
 - [x] **CI queue consolidation.**
       `specs/plans/2026-09-10-ci-queue-consolidation.md`.
       Preserve cumulative merge-group validation while reducing runner fan-out

@@ -9,6 +9,11 @@ Last updated: 2026-09-15
       Cover empty EOF and short unterminated handoff replies so the scheduled
       mutation claim regains live evidence.
 
+- [ ] **Security lane supply-chain repair — issue #3249.**
+      `specs/plans/2026-09-15-security-lane-supply-chain.md`.
+      Resolve RUSTSEC-2026-0285 through the patched rustls release set and
+      require the complete Security witness before closeout.
+
 - [ ] **OTLP trace export for host-side processes.**
       `specs/plans/2026-09-14-otlp-trace-export.md`. Issue #3242.
       `mvm-observability` gains an opt-in OTLP/HTTP JSON trace exporter,
