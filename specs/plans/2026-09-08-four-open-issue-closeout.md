@@ -250,7 +250,12 @@ an unprovisioned label would not provide the required live witness.
       local launch gate also selects the published, verified workload kernel
       itself and builds the manifest verifier through the standard macOS linker,
       so a cold source checkout neither falls into optional libkrun Stage 0 nor
-      needs an authentication bypass before the first HVF guest boots.
+      needs an authentication bypass before the first HVF guest boots. The gate
+      selects only its three launch feature files, leaving builder bootstrap to
+      the documented-surface lane, and the warm-budget scenario prepares its
+      exact Alpine standby immediately before claiming it. The macOS
+      documented-surface witness explicitly fetches its signed builder image so
+      a source checkout does not enter unsupported HVF Stage 0 preparation.
 - [ ] Provision a dedicated Apple Silicon Mac with non-nested HVF, current
       macOS, encrypted storage, a least-privilege runner account, and no
       unrelated developer credentials or data.

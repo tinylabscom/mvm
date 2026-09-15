@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-09-14
+Last updated: 2026-09-15
 
 ## In progress
 
@@ -61,7 +61,11 @@ Last updated: 2026-09-14
       cold local `just e2e-launch` now fetches the verified workload kernel
       instead of silently entering optional libkrun Stage 0, and its standard
       linker build includes the manifest verifier needed to authenticate that
-      fetch. A hardened physical runner is still required;
+      fetch. The launch gate now runs only its three owned features, and the
+      warm-budget scenario creates its matching Alpine standby immediately
+      before the claim. The macOS documented-surface witness explicitly fetches
+      its signed builder image rather than entering unsupported HVF Stage 0. A
+      hardened physical runner is still required;
       the repository currently has zero self-hosted runners.
 
 - [x] **Linux 6.12.109 synchronized kernel pin — issue #3213.**
