@@ -59,8 +59,9 @@ Last updated: 2026-09-14
       artifacts use dependency-free HVF; libkrun remains only as an explicit
       development integration and older macOS releases are unsupported. A
       cold local `just e2e-launch` now fetches the verified workload kernel
-      instead of silently entering optional libkrun Stage 0. A hardened
-      physical runner is still required;
+      instead of silently entering optional libkrun Stage 0, and its standard
+      linker build includes the manifest verifier needed to authenticate that
+      fetch. A hardened physical runner is still required;
       the repository currently has zero self-hosted runners.
 
 - [x] **Linux 6.12.109 synchronized kernel pin — issue #3213.**

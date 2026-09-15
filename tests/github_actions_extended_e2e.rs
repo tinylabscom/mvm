@@ -444,6 +444,10 @@ fn local_launch_gate_uses_the_published_workload_kernel() {
         .expect("read the local launch-gate script");
 
     assert!(
+        script.contains("cargo build --bin mvmctl --features user,embed-host-bins"),
+        "`just e2e-launch` must build the manifest verifier through the standard linker before it downloads a published workload kernel"
+    );
+    assert!(
         script.contains("export MVM_KERNEL_SOURCE=download"),
         "`just e2e-launch` must not route a cold source checkout through the optional libkrun Stage 0 backend"
     );

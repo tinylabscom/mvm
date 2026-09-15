@@ -248,8 +248,9 @@ an unprovisioned label would not provide the required live witness.
       `e2e-launch` compile command, workspace tests/check, zero-warning Clippy,
       workflow lint, and all 67 repository policy gates pass on macOS. The
       local launch gate also selects the published, verified workload kernel
-      itself, so a cold source checkout cannot fall into the optional libkrun
-      Stage 0 path before the first HVF guest boots.
+      itself and builds the manifest verifier through the standard macOS linker,
+      so a cold source checkout neither falls into optional libkrun Stage 0 nor
+      needs an authentication bypass before the first HVF guest boots.
 - [ ] Provision a dedicated Apple Silicon Mac with non-nested HVF, current
       macOS, encrypted storage, a least-privilege runner account, and no
       unrelated developer credentials or data.

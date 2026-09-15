@@ -164,7 +164,13 @@ echo "    home:  $E2E_HOME"
 #   directory
 # The staleness this gate actually hits is the supervisor, handled below.
 echo "==> building mvmctl + host helpers"
-./scripts/cargo-fast.sh build --bin mvmctl --features embed-host-bins
+# The workload-kernel download below is admitted only after its checksum
+# manifest's Sigstore bundle verifies. `user` carries that verifier; omitting it
+# turns a secure download into a fail-closed runtime error and must never be
+# papered over with MVM_SKIP_COSIGN_VERIFY. Use standard cargo for this build:
+# the nightly fast-codegen wrapper leaves the verifier's native aws-lc symbols
+# unresolved on macOS.
+cargo build --bin mvmctl --features user,embed-host-bins
 ./scripts/cargo-fast.sh build -p xtask
 
 # Build the library-seam test targets here too, not when phase 2 reaches them.

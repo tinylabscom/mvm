@@ -66,7 +66,9 @@
       older macOS releases are unsupported. The local `just e2e-launch` gate
       now owns its published workload-kernel selection, preventing a cold
       source checkout from silently entering optional libkrun Stage 0 during
-      burn-in. The physical runner still
+      burn-in. It builds the `user` manifest verifier through the standard
+      macOS linker, so that download remains authenticated without the insecure
+      verification escape hatch. The physical runner still
       needs to be provisioned, hardened, registered, and burned in; the
       repository runner inventory currently contains zero self-hosted runners.
 
