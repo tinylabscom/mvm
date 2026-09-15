@@ -247,7 +247,7 @@ MVM_HOME="$E2E_HOME" "$MVMCTL" doctor || true
 # 3. The CLI + SDK launch modes, as cucumber scenarios.
 #
 # `MVM_BDD_LIVE=1` opts into scenarios that boot a real microVM. No
-# `MVM_BDD_CI_LIVE_ONLY` here: that selector narrows to the merge-queue subset,
+# `MVM_BDD_ONLY_TAG` here: that selector narrows to one tag's subset,
 # which is the narrowing that hid this class of failure.
 # ---------------------------------------------------------------------------
 # Scoped to the launch suite with `-i`, deliberately. Unscoped, this ran the

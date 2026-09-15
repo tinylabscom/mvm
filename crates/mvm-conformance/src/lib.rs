@@ -19,9 +19,10 @@ pub const PENDING_TAG: &str = "wip";
 /// network; opt in with `MVM_BDD_LIVE=1` (skipped in the default hermetic lane).
 pub const LIVE_TAG: &str = "live";
 
-/// Cucumber tag for the narrow real-microVM lifecycle selected by the merge
-/// queue. Selection stays inside [`scenario_gate_for_ci`] so it cannot replace
-/// or bypass the live and Firecracker capability checks.
+/// Cucumber tag for the narrow real-microVM lifecycle the merge queue selects
+/// with `MVM_BDD_ONLY_TAG=ci_live`. Selection stays inside
+/// [`scenario_gate_for_selection`] so it cannot replace or bypass the live and
+/// Firecracker capability checks.
 pub const CI_LIVE_TAG: &str = "ci_live";
 
 /// Cucumber tag for a scenario that boots a real Firecracker microVM. Being a
@@ -237,9 +238,9 @@ pub enum ScenarioGate {
     /// Tagged [`WARM_CLAIM_TAG`] on a host whose standby claim does not
     /// complete its handshake.
     NeedsWarmClaim,
-    /// The merge-queue lane selected only `@ci_live` scenarios, and this
-    /// scenario is outside that deliberately narrow subset.
-    OutsideCiLiveSubset,
+    /// The lane selected one tag with `MVM_BDD_ONLY_TAG`, and this scenario
+    /// does not carry it.
+    OutsideSelectedTag,
 }
 
 impl ScenarioGate {
@@ -264,7 +265,7 @@ impl ScenarioGate {
             Self::NeedsNode => "needs-node",
             Self::NeedsUnenforceableWallClock => "needs-unenforceable-wall-clock",
             Self::NeedsWarmClaim => "needs-warm-claim",
-            Self::OutsideCiLiveSubset => "outside-ci-live-subset",
+            Self::OutsideSelectedTag => "outside-selected-tag",
         }
     }
 }
@@ -326,17 +327,22 @@ pub fn scenario_gate(tags: &[String], caps: RuntimeCaps) -> ScenarioGate {
     ScenarioGate::Run
 }
 
-/// Apply the merge-queue subset selection without replacing the capability
-/// checks. Cucumber's command-line tag filter replaces the programmatic
-/// filter; keeping the selection here makes a missing live opt-in or KVM
-/// capability continue to fail closed.
-pub fn scenario_gate_for_ci(
+/// Narrow a run to the scenarios carrying `only_tag` without replacing the
+/// capability checks.
+///
+/// Cucumber's command-line tag filter *replaces* the programmatic filter, so
+/// `--tags @warm_claim` runs that scenario even where its opt-in or `/dev/kvm`
+/// is missing — and a lane asserting it ran can then never see it skipped.
+/// Selecting here keeps a missing live opt-in or KVM capability failing closed.
+pub fn scenario_gate_for_selection(
     tags: &[String],
     caps: RuntimeCaps,
-    ci_live_only: bool,
+    only_tag: Option<&str>,
 ) -> ScenarioGate {
-    if ci_live_only && !tags.iter().any(|tag| tag == CI_LIVE_TAG) {
-        return ScenarioGate::OutsideCiLiveSubset;
+    if let Some(only) = only_tag
+        && !tags.iter().any(|tag| tag == only)
+    {
+        return ScenarioGate::OutsideSelectedTag;
     }
     scenario_gate(tags, caps)
 }
@@ -397,7 +403,7 @@ impl ScenarioGate {
                  that tunnels TLS via CONNECT or SOCKS5 (BusyBox wget ignores \
                  ALL_PROXY and sends the absolute-URI form the proxy refuses)",
             ),
-            Self::OutsideCiLiveSubset => Some("outside the merge-queue @ci_live subset"),
+            Self::OutsideSelectedTag => Some("outside the tag selected by MVM_BDD_ONLY_TAG"),
         }
     }
 }
@@ -1189,7 +1195,7 @@ mod tests {
             ScenarioGate::NeedsLiveOptIn,
             ScenarioGate::NeedsFirecracker,
             ScenarioGate::NeedsBundleFixture,
-            ScenarioGate::OutsideCiLiveSubset,
+            ScenarioGate::OutsideSelectedTag,
         ] {
             assert!(g.reason().is_some(), "{g:?} must say why");
         }
@@ -1199,11 +1205,11 @@ mod tests {
     fn ci_subset_selection_preserves_live_and_firecracker_gates() {
         let selected = tags(&[LIVE_TAG, FIRECRACKER_TAG, CI_LIVE_TAG]);
         assert_eq!(
-            scenario_gate_for_ci(&selected, NONE, true),
+            scenario_gate_for_selection(&selected, NONE, Some(CI_LIVE_TAG)),
             ScenarioGate::NeedsLiveOptIn
         );
         assert_eq!(
-            scenario_gate_for_ci(
+            scenario_gate_for_selection(
                 &selected,
                 RuntimeCaps {
                     live_opted_in: true,
@@ -1220,21 +1226,44 @@ mod tests {
                     wall_clock_enforced: false,
                     warm_claim: false,
                 },
-                true,
+                Some(CI_LIVE_TAG),
             ),
             ScenarioGate::NeedsFirecracker
         );
         assert_eq!(
-            scenario_gate_for_ci(&selected, ALL, true),
+            scenario_gate_for_selection(&selected, ALL, Some(CI_LIVE_TAG)),
             ScenarioGate::Run
         );
         assert_eq!(
-            scenario_gate_for_ci(&tags(&[LIVE_TAG]), ALL, true),
-            ScenarioGate::OutsideCiLiveSubset
+            scenario_gate_for_selection(&tags(&[LIVE_TAG]), ALL, Some(CI_LIVE_TAG)),
+            ScenarioGate::OutsideSelectedTag
         );
         assert_eq!(
-            scenario_gate_for_ci(&tags(&[]), NONE, false),
+            scenario_gate_for_selection(&tags(&[]), NONE, None),
             ScenarioGate::Run
+        );
+    }
+
+    #[test]
+    fn selecting_the_warm_claim_tag_still_requires_its_opt_in() {
+        // The failure this exists for: `--tags @warm_claim` ran the claim with
+        // no opt-in, so a lane checking that it ran could never see a skip.
+        let warm = tags(&[LIVE_TAG, WARM_CLAIM_TAG]);
+        let no_opt_in = RuntimeCaps {
+            warm_claim: false,
+            ..ALL
+        };
+        assert_eq!(
+            scenario_gate_for_selection(&warm, no_opt_in, Some(WARM_CLAIM_TAG)),
+            ScenarioGate::NeedsWarmClaim
+        );
+        assert_eq!(
+            scenario_gate_for_selection(&warm, ALL, Some(WARM_CLAIM_TAG)),
+            ScenarioGate::Run
+        );
+        assert_eq!(
+            scenario_gate_for_selection(&tags(&[LIVE_TAG]), ALL, Some(WARM_CLAIM_TAG)),
+            ScenarioGate::OutsideSelectedTag
         );
     }
 }

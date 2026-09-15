@@ -389,7 +389,7 @@ bdd-live-ci:
     # mvmctl refuses at bootstrap. The hermetic `just bdd` lane skips those
     # scenarios and so deliberately does not pay the cross-compile.
     cargo build --bin mvmctl --features user,embed-host-bins
-    CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" MVM_BDD_LIVE=1 MVM_BDD_CI_LIVE_ONLY=1 cargo test -p mvm-conformance --test conformance --features bdd
+    CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" MVM_BDD_LIVE=1 MVM_BDD_ONLY_TAG=ci_live cargo test -p mvm-conformance --test conformance --features bdd
 
 # Nightly KVM witness for the one scenario that runs a warm claim end to end:
 # warm a parent, claim it, and require the child's run to be anchored in the
@@ -403,7 +403,7 @@ bdd-live-warm-claim:
     cargo build --bin mvmctl --features user,embed-host-bins
     log="$(mktemp)"
     CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" MVM_BDD_LIVE=1 MVM_BDD_WARM_CLAIM=1 \
-      cargo test -p mvm-conformance --test conformance --features bdd -- --tags @warm_claim 2>&1 | tee "$log"
+      MVM_BDD_ONLY_TAG=warm_claim cargo test -p mvm-conformance --test conformance --features bdd 2>&1 | tee "$log"
     if ! grep -q '1 scenario (1 passed)' "$log"; then
       echo "the warm-claim scenario did not run and pass exactly once" >&2
       exit 1
