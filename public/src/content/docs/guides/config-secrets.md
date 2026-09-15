@@ -35,21 +35,37 @@ entrypoint starts.
 
 ## Host directory shares
 
-Separately from the drives above, `--mount host_dir:/guest/path[:MODE]` shares
-a host directory into the guest. `--volume` remains accepted as a
+Separately from the drives above, `--mount host_dir:/guest/path[:ro]` shares
+a host directory into a **transient** run. `--volume` remains accepted as a
 compatibility alias, but `-v` is global verbosity. The guest path must be
-under `/data` or `/work`, `MODE` is `ro` (default) or `rw`, and `:rw` requires
-a persistent machine under `--profile dev`:
+under `/data` or `/work`. Directory shares are read-only snapshots: the
+directory is materialized into a throwaway image at boot, so a `:rw` request
+is refused — a write would land in the discarded snapshot, never in the host
+directory.
 
 ```bash
 mkdir -p /tmp/my-config
 echo '{"gateway": {"port": 8080}}' > /tmp/my-config/app.json
 
-mvmctl machine run --manifest my-app --name app -d \
+mvmctl run --manifest my-app \
     --mount /tmp/my-config:/data/config:ro
 ```
 
-The third field is the mode, not a size.
+A persistent machine (`--name` plus `-d`) refuses directory shares outright —
+a live host-directory share can't be expressed. Register a snapshot-backed
+volume instead, or attach a sized disk image:
+
+```bash
+# Snapshotted into an ext4 image before each machine start; host edits
+# become visible after the machine's next stop/start.
+mvmctl machine volume mount app --volume config \
+    --host /tmp/my-config --guest /data/config
+
+# Durable read-write disk image. The third field is a size, which is what
+# distinguishes a disk spec from a directory share's `:ro` mode field.
+mvmctl machine run --manifest my-app --name app -d --profile dev \
+    --mount app-data.img:/data/state:4G:rw
+```
 
 ## Library API
 

@@ -87,7 +87,9 @@ remote template second.
   (`~/.claude`) persisted by pointing `CLAUDE_CONFIG_DIR` at a directory on
   the same volume, because guest `$HOME` is tmpfs and vanishes on stop
   (`crates/mvm-agentd/src/guest_mount.rs`).
-- Network: `--allow-host api.anthropic.com:443` only. The image sets
+- Network: `--allow-host api.anthropic.com:443` plus
+  `platform.claude.com:443` (the interactive mode's startup key check —
+  W0 finding). The image sets
   `DISABLE_AUTOUPDATER=1`, `DISABLE_TELEMETRY=1`,
   `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` so nothing wants the
   endpoints we refuse, instead of widening the allow-list. Optional wider
@@ -160,23 +162,116 @@ catalog's own header note).
 
 ### W0 — spike and de-risk (no shipped artifacts)
 
-- [ ] Zero-authoring smoke: `mvmctl run --runtime node --allow-host
+- [x] Zero-authoring smoke: `mvmctl run --runtime node --allow-host
       api.anthropic.com:443 -- npx @anthropic-ai/claude-code --bare -p "…"`
       (node:22-alpine is musl; Claude Code documents musl support). Records:
       does the CONNECT tunnel carry the API traffic, does the `standard`
-      seccomp/profile tier admit Node + the agent, what breaks.
-- [ ] `nix why-depends` on git↔openssh against the `nixos-25.11` pin; pick
-      the git mitigation.
-- [ ] Resolve packaging option 1 vs 2 vs 3 (does `pkgs.claude-code` exist in
+      seccomp/profile tier admit Node + the agent, what breaks. All ran on
+      real HVF VMs — see findings below.
+- [x] git↔openssh against the `nixos-25.11` pin (settled by source
+      inspection at the locked rev — host nix absent); pick the git
+      mitigation. See findings below.
+- [x] Resolve packaging option 1 vs 2 vs 3 (does `pkgs.claude-code` exist in
       the pin, and does the npm package's platform-binary layout survive
-      `importNpmLock`).
-- [ ] Interactive smoke on a hand-built flake: TUI under `machine console`
-      (raw mode, resize, colors), Ctrl-C forwarded as a byte, idle-reaper
-      interplay — verify a long "thinking" pause under an attached console
-      does not trip `MVM_TIMEOUT`/`--ttl` teardown
+      `importNpmLock`). See findings below.
+- [x] Interactive smoke: TUI (raw mode, resize, colors), Ctrl-C forwarded
+      as a byte, a real API turn — passed by hand on 2026-09-15 via
+      `machine run -it` on the npx lane (see findings). Still open, folded
+      into the W2 live scenario: the same checks under `machine console`
+      on a persistent machine, and idle-reaper interplay — a long
+      "thinking" pause under an attached console must not trip
+      `MVM_TIMEOUT`/`--ttl` teardown
       (`crates/mvm-hostd/src/supervisor/reaper.rs`, `touch_activity`).
-- [ ] Findings recorded as `.agent-memory/notes/` entries plus a short
-      findings section appended to this plan.
+- [x] Findings recorded as `.agent-memory/notes/` entries plus a short
+      findings section appended to this plan (interactive-console smoke
+      still open above — it needs a human terminal).
+
+#### W0 findings, research half (2026-09-15)
+
+Environment: the flake pins `nixos-25.11`, locked rev `8fd9daa3db09`
+(2026-05-06). Detail lives in `.agent-memory/notes/` (local); the
+load-bearing conclusions:
+
+- **Git needs no mitigation.** At the pin, git's derivation takes
+  `withSsh ? false` and only `gitFull` turns it on — `pkgs.git` and
+  `gitMinimal` carry no openssh runtime reference, so the closure ban is
+  not in play. Use `gitMinimal` (also drops perl/manual/pcre2). curl's
+  `scpSupport` puts `libssh2` in the closure, and that matches neither ban
+  arm: the closure regex anchors right after the store hash
+  (`-(openssh|dropbear|ssh|...)(-|$)`) so `-libssh2-` does not match, and
+  the eval-time "ssh" substring check reads declared package labels, not
+  the closure.
+- **Packaging verdict: option 2, the fixed-output native binary,
+  `linux-arm64-musl`.** `downloads.claude.ai/claude-code-releases/` serves
+  `{latest|stable}` → version, `{version}/manifest.json` → first-party
+  SHA-256 + size per platform, `{version}/{platform}/claude` → the binary;
+  live-verified for 2.1.273. The musl artifact is a dynamically linked
+  aarch64 ELF whose only need is musl's own loader
+  (`/lib/ld-musl-aarch64.so.1`, supplied by `pkgs.musl` or patchelf) — no
+  glibc, no nodejs in the image closure. Pin version + checksum in-repo.
+- **Option 1 exists but is stale**: `pkgs.claude-code` at the pin packages
+  2.1.81 (2026-03-20) against a `latest` of 2.1.273 (2026-09-15), is
+  unfree (the consuming flake's pkgs import needs `allowUnfree` — guest
+  `packages` come from the user flake's own pkgs, so the switch goes
+  there), and drags nodejs into the closure. `pkgs.claude-code-bin` at the
+  pin fetches the **glibc** arm64 artifact, same stale version. Acceptable
+  fallback, not the default.
+- **Option 3 (`importNpmLock`) is the fragile path**: the current npm
+  package is a thin installer — empty deps, a `postinstall` that runs
+  `install.cjs`, per-platform binaries as libc-filtered
+  `optionalDependencies` — exactly the shape npm-lock-based Nix builds
+  handle worst. Avoid.
+
+#### W0 findings, smoke half (2026-09-15)
+
+All on real HVF VMs on macOS 26 Apple Silicon, `--runtime node`
+(node:22-alpine, v22.23.2). Detail in
+`.agent-memory/notes/node-runtime-anthropic-egress-smoke.md` (local).
+
+- **Allowlisted connectivity holds, with one required env var.** Node's
+  fetch (undici) ignores the injected `HTTPS_PROXY` by default and dials
+  direct (`ENETUNREACH` — vsock-only guest, no route). With
+  `NODE_USE_ENV_PROXY=1` (honored by node ≥22.18) the same fetch returns
+  STATUS 401 `authentication_error: x-api-key header is required` from
+  `api.anthropic.com` — DNS, CONNECT tunnel, and TLS all carried through
+  the egress gate. The example flake must bake `NODE_USE_ENV_PROXY=1`
+  alongside the telemetry-disable vars.
+- **Default-deny surfaces as policy, immediately.** A non-allowlisted
+  fetch gets `403 Forbidden` from the proxy with no timeout. Undici
+  renders it opaquely as `Request was cancelled` — a UX caveat for the
+  README, not a blocker.
+- **The zero-authoring npx lane works end to end.** With
+  `registry.npmjs.org:443` added, `npx -y @anthropic-ai/claude-code@latest
+  --version` prints `2.1.273 (Claude Code)` in 27s including boot and the
+  ~221 MB musl platform package (npm honors the injected proxy natively;
+  the install needed no `downloads.claude.ai`). `--bare -p "say hi"` exits
+  1 with `Not logged in` — the expected no-credential refusal, no hang.
+  Used `--memory 2G`: the npx cache lives on tmpfs and the default 512M
+  is plausibly too small (floor unprobed). The two-host allow-list is
+  sufficient for this lane.
+- **No `standard`-tier seccomp refusals** were hit by node, npm, or the
+  Bun-compiled Claude Code binary; no `--profile dev` delta to report.
+- **W5-relevant**: `NODE_EXTRA_CA_CERTS` is unset on this path — no
+  per-VM egress CA was provisioned because no substitution service was
+  assembled. The terminator option's guest-trust half is therefore only
+  present when secrets are actually bound.
+- **Interactive TUI: passed by hand** (2026-09-15, `machine run -it`,
+  npx lane, real API key). Rendering, resize reflow, Ctrl-C-as-keystroke,
+  and a live API turn all behaved. One more endpoint surfaced: the
+  interactive mode checks the key against the Console at startup, and the
+  refused host renders in-UI as "Unable to connect to Anthropic services
+  … Status 403" — so the interactive lane's minimum allow-list is
+  **three** hosts (`api.anthropic.com:443`, `platform.claude.com:443`,
+  plus `registry.npmjs.org:443` for the npx lane only), with
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` baked in so optional
+  traffic never hits the deny wall. The headless `--bare -p` lane was not
+  observed needing the Console host; verify before widening Lane B.
+- Transient runs self-cleaned (no stray VM state, supervisors, or
+  endpoints). Host setup friction worth knowing: a rebuilt `mvmctl` needs
+  `mvmctl env sign` before HVF boots it, and `just toolchain-embed`'s
+  `rustup target add` step can fail under mise-managed rustup (manual
+  re-run worked). Cold first run ~6m (Stage 0 + supervisor build); warm
+  runs ~1s.
 
 ### W1 — the example flake
 
@@ -211,12 +306,14 @@ Per AGENTS.md, no workstream is done without tests. The mounted-PTY plan
 
 ### W3 — doc repairs this work uncovered
 
-- [ ] `public/src/content/docs/guides/nix-flakes.md` LLM-agent section: the
+- [x] `public/src/content/docs/guides/nix-flakes.md` LLM-agent section: the
       `--mount "$PWD:/work:rw"` recipe cannot work (directory `:rw` is
-      refused); rewrite onto the sized-volume recipe.
-- [ ] `public/src/content/docs/guides/config-secrets.md`: the persistent
+      refused); rewritten onto a registered secrets volume + sized
+      workspace disk.
+- [x] `public/src/content/docs/guides/config-secrets.md`: the persistent
       `--mount …:ro` directory example hits the same persistent-machine
-      bail; align with what runs.
+      bail; rewritten onto a transient run plus the two working
+      persistent shapes.
 - [ ] `crates/mvm-contract/src/policy/network_policy.rs` `agent_rules()` doc
       comment cites `nix/images/examples/llm-agent/`, which does not exist;
       point it at `examples/claude-code/` once W1 lands (keeping the
