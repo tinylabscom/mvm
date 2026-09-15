@@ -5,8 +5,8 @@ Last updated: 2026-09-15
 ## In progress
 
 - [ ] **Agent sandbox drive plane.**
-      `specs/plans/2026-09-15-agent-sandbox-drive-plane.md`. Planned, not
-      started. Makes the AI-agent claim end-to-end: correct the published
+      `specs/plans/2026-09-15-agent-sandbox-drive-plane.md`. Epic #3275.
+      Planned, not started. Makes the AI-agent claim end-to-end: correct the published
       recipe that mounts a raw API key into a guest, ship an agent example on
       the substitution path, add a grant-gated `DriveGrant` + `DriveOpen` /
       `DriveFile` over the existing stream plane, and retire the SDKs' argv
@@ -14,8 +14,8 @@ Last updated: 2026-09-15
       crate. Also resolves `host.secrets.v1` having no registered handler.
 
 - [ ] **Workload display plane.**
-      `specs/plans/2026-09-15-workload-display-plane.md`. Planned, not
-      started. View-only frames over vsock first (no host→guest path, so
+      `specs/plans/2026-09-15-workload-display-plane.md`. Epic #3276.
+      Planned, not started. View-only frames over vsock first (no host→guest path, so
       claim 15 is untouched), a host-side OAuth broker second, and
       grant-gated attended input last. Software rendering only — Firecracker
       has no display device and the workload kernel force-disables
@@ -23,7 +23,7 @@ Last updated: 2026-09-15
 
 - [ ] **Install lifecycle and packaging polish.**
       `specs/plans/2026-09-15-install-lifecycle-and-packaging-polish.md`.
-      Planned, not started. Monitored install URL, baked version instead of an
+      Epic #3277. Planned, not started. Monitored install URL, baked version instead of an
       API call, atomic upgrade with rollback, a real uninstaller, in-process
       signature verification to close the claim 20 limits note, installer and
       distro compat lanes, and Nix version-from-manifest.

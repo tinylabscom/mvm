@@ -3,6 +3,8 @@
 Backing: preview
 Validation: none — this is a proposed design; no code implements it and no test exercises it.
 
+**Issues:** epic [#3276](https://github.com/tinylabscom/mvm/issues/3276); [#3265](https://github.com/tinylabscom/mvm/issues/3265), [#3266](https://github.com/tinylabscom/mvm/issues/3266), [#3267](https://github.com/tinylabscom/mvm/issues/3267)
+
 ## Outcome
 
 Two things a sandbox for AI agents needs and mvm cannot do today: watch what the
@@ -97,6 +99,8 @@ redaction outright: `redact.rs` is line-oriented and cannot redact a JPEG.
 
 ## P0 — `display.view`, with no input path in the tree
 
+Issue: [#3265](https://github.com/tinylabscom/mvm/issues/3265).
+
 - [ ] Add a display vsock port constant to `crates/mvm-agentd/src/vsock/mod.rs`
       and its entry in the host proxy allow-list.
 - [ ] Guest-side CDP screencast bridge in `crates/mvm-agentd`, speaking a fixed
@@ -118,6 +122,8 @@ evaluated on its own.
 
 ## P1 — Host-side OAuth broker
 
+Issue: [#3266](https://github.com/tinylabscom/mvm/issues/3266).
+
 - [ ] Complete consent in a **host** browser; store the resulting token in the
       supervisor; inject it per request through the existing substitution
       endpoint (`crates/mvm-hostd/src/supervisor/`,
@@ -131,6 +137,8 @@ This strengthens the story instead of weakening it, and covers any site with an
 API behind the login — which is most of them.
 
 ## P2 — `display.input`, attended tier only
+
+Issue: [#3267](https://github.com/tinylabscom/mvm/issues/3267).
 
 - [ ] Two separate grants, not one: `display.view` (frames guest→host) and
       `display.input` (events host→guest), as distinct `VerbGrant` verbs and

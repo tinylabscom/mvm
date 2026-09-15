@@ -3,6 +3,8 @@
 Backing: preview
 Validation: none — this is a proposed design; no code implements it and no test exercises it.
 
+**Issues:** epic [#3275](https://github.com/tinylabscom/mvm/issues/3275); [#3257](https://github.com/tinylabscom/mvm/issues/3257), [#3258](https://github.com/tinylabscom/mvm/issues/3258), [#3259](https://github.com/tinylabscom/mvm/issues/3259), [#3260](https://github.com/tinylabscom/mvm/issues/3260), [#3261](https://github.com/tinylabscom/mvm/issues/3261), [#3262](https://github.com/tinylabscom/mvm/issues/3262), [#3263](https://github.com/tinylabscom/mvm/issues/3263), [#3264](https://github.com/tinylabscom/mvm/issues/3264)
+
 ## Outcome
 
 `mvm` ships a working, tested, documented path for booting an AI coding agent
@@ -59,6 +61,8 @@ them; it does not build a second transport.
 
 ## WS0 — Make the published story true
 
+Issues: [#3257](https://github.com/tinylabscom/mvm/issues/3257), [#3258](https://github.com/tinylabscom/mvm/issues/3258), [#3259](https://github.com/tinylabscom/mvm/issues/3259).
+
 - [ ] Rewrite `public/src/content/docs/guides/nix-flakes.md:277-330` onto the
       substitution path: `mvm.secret(...)` bound to the model host, an agent
       network preset, and a placeholder in the guest env. Delete the
@@ -81,6 +85,8 @@ them; it does not build a second transport.
       executed, not just written.
 
 ## WS1 — `DriveGrant`: one grant, no new transport
+
+Issue: [#3260](https://github.com/tinylabscom/mvm/issues/3260).
 
 - [ ] Add `DriveGrant { workspace_roots, program_id, max_bytes_in, max_bytes_out, ttl }`
       to the signed plan's grants (`crates/mvm-contract/src/ir/`,
@@ -108,6 +114,13 @@ them; it does not build a second transport.
 
 ## WS2 — Delete the argv transport
 
+Issue: [#3261](https://github.com/tinylabscom/mvm/issues/3261).
+
+**The SDK does not shell out to `mvmctl`. Not per call, not through a
+long-lived helper process, not as a fallback.** Spawning the CLI from a
+library is the design being removed, and no transitional form of it is
+acceptable in the replacement.
+
 The SDKs shelling `mvmctl` is not a bug someone introduced; `specs/adrs/027-cli-surface-consolidation.md:167-174`
 records it as deliberate and names the blocker — `mvm-sdk` sits below the
 runtime, so linking the local backend would form a cycle — and states that
@@ -126,6 +139,9 @@ So the fix is not "make `mvm-sdk` link `mvm-client`". It is to stop treating
 - [ ] Carry an ABI major/minor and a `mvm_hostlib_abi_is_compatible` entry point
       the bindings must call before use, so a mismatched pair fails loudly
       instead of reading a moved struct.
+- [ ] The bindings load the library in-process. No transport in the rewrite
+      may spawn a process — not `mvmctl`, and not a helper daemon standing in
+      for it.
 - [ ] Rewrite `_LiveTransport` (`crates/mvm-sdk/sdks/python/mvm/_sandbox.py:728`)
       and its TypeScript twin (`sdks/typescript/src/_sandbox.ts:613`) onto that
       ABI. Streaming becomes possible; the one-process-per-call cost goes away.
@@ -140,6 +156,8 @@ So the fix is not "make `mvm-sdk` link `mvm-client`". It is to stop treating
 
 ## WS3 — Typed drive tools over MCP
 
+Issue: [#3262](https://github.com/tinylabscom/mvm/issues/3262).
+
 - [ ] Extend `crates/mvm-mcp/src/lib.rs` with `mvm.drive.{open,write,events}` and
       `mvm.drive.files.{read,write,list}` over the same ABI.
 - [ ] Gate advertisement on the grant: a tool the plan does not grant is not
@@ -153,6 +171,8 @@ So the fix is not "make `mvm-sdk` link `mvm-client`". It is to stop treating
       `mcp_unclassified_tool_is_denied`.
 
 ## WS4 — Close the loose ends the claim rests on
+
+Issues: [#3263](https://github.com/tinylabscom/mvm/issues/3263), [#3264](https://github.com/tinylabscom/mvm/issues/3264).
 
 - [ ] Decide `host.secrets.v1`: either implement the handler and register it in
       `crates/mvm-hostd/src/broker/handlers/mod.rs`, or move claim 13's prose in

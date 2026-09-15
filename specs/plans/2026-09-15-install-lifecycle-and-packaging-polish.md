@@ -3,6 +3,8 @@
 Backing: preview
 Validation: none — this is a proposed design; no code implements it and no test exercises it.
 
+**Issues:** epic [#3277](https://github.com/tinylabscom/mvm/issues/3277); [#3268](https://github.com/tinylabscom/mvm/issues/3268), [#3269](https://github.com/tinylabscom/mvm/issues/3269), [#3270](https://github.com/tinylabscom/mvm/issues/3270), [#3271](https://github.com/tinylabscom/mvm/issues/3271), [#3272](https://github.com/tinylabscom/mvm/issues/3272), [#3273](https://github.com/tinylabscom/mvm/issues/3273), [#3274](https://github.com/tinylabscom/mvm/issues/3274)
+
 ## Outcome
 
 Installing, upgrading and removing `mvmctl` are all first-class, tested, and
@@ -36,6 +38,8 @@ releases and across distros.
 
 ## WS1 — A URL worth publishing
 
+Issue: [#3268](https://github.com/tinylabscom/mvm/issues/3268).
+
 - [ ] Serve `install.sh` from the docs site at a stable vanity path, and point
       every install page at it.
 - [ ] Add a scheduled workflow that curls the published URL and asserts HTTP
@@ -45,6 +49,8 @@ releases and across distros.
 - [ ] Keep the raw GitHub path working, undocumented, as a fallback.
 
 ## WS2 — Resolve the version without an API call
+
+Issue: [#3269](https://github.com/tinylabscom/mvm/issues/3269).
 
 - [ ] Bake a default version sentinel into `install.sh`, updated by a
       post-publish step in `.github/workflows/release.yml`.
@@ -56,6 +62,8 @@ releases and across distros.
 
 ## WS3 — Atomic upgrade and rollback
 
+Issue: [#3270](https://github.com/tinylabscom/mvm/issues/3270).
+
 - [ ] Install into a versioned directory and swap a `current` symlink
       atomically, so `mvmctl` and its adjacent `mvm-hvf-supervisor` /
       `mvm-network-endpoint` / `assets/` are never observed half-swapped.
@@ -66,6 +74,8 @@ releases and across distros.
 
 ## WS4 — An uninstaller
 
+Issue: [#3271](https://github.com/tinylabscom/mvm/issues/3271).
+
 - [ ] `uninstall.sh` (and `mvmctl uninstall` calling the same logic) that stops
       running supervisors, validates the daemon PID and aborts rather than
       signal an ambiguous process, removes the versioned install dirs and
@@ -75,6 +85,8 @@ releases and across distros.
       exactly the install set.
 
 ## WS5 — Verify the signature without a host `cosign`
+
+Issue: [#3272](https://github.com/tinylabscom/mvm/issues/3272).
 
 - [ ] Verify the Sigstore bundle in-process in Rust for `mvmctl update`
       (`crates/mvm-cli/src/update.rs`), so the self-update path stops being
@@ -90,6 +102,8 @@ releases and across distros.
 
 ## WS6 — Compat CI
 
+Issue: [#3273](https://github.com/tinylabscom/mvm/issues/3273).
+
 - [ ] A workflow running the *current* installer against the last N *published*
       releases, on a macOS and a Linux runner.
 - [ ] A workflow running the released Linux binary in debian, ubuntu, rocky and
@@ -101,6 +115,8 @@ releases and across distros.
       `doctor` until a self-hosted Apple Silicon runner exists (#3011).
 
 ## WS7 — Nix hygiene
+
+Issue: [#3274](https://github.com/tinylabscom/mvm/issues/3274).
 
 - [ ] Read the version via `importTOML` from `Cargo.toml` in
       `nix/packages/mvmctl.nix` instead of the hardcoded `0.18.0-rc.1`.
