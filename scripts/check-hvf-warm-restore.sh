@@ -5,9 +5,10 @@ set -euo pipefail
 #
 # This deliberately runs on the macOS host. A Linux builder cannot provide
 # Hypervisor.framework, and a successful cold boot is not evidence of restore.
-# The first invocation populates the compatible standby through the normal
-# launch/replenish path; every measured invocation after that must be a real
-# warm claim.
+# Every launch here sets MVM_RESIDENCY=warm, which makes the claim required: an
+# empty pool is refused, not cold-booted. No launch spawns a parent of its own
+# and a claim consumes the one it takes, so a parent is warmed with `pool warm`
+# before each launch, outside the measured window.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -32,9 +33,10 @@ Live Apple Silicon HVF warm-restore acceptance matrix.
 Required host:
   macOS on Apple Silicon with Hypervisor.framework available.
 
-The first run is a warm-pool bootstrap through the normal launch path. It may
-be cold; it is not included in the measured matrix. Every following run must
-report launch_mode=warm and warm_slo=ok.
+A parent is warmed with \`pool warm\` before every launch and is not timed. The
+first claim is a bootstrap that pays first-run acquisition and is not included
+in the measured matrix. Every following claim must report launch_mode=warm and
+warm_slo=ok.
 
 Useful overrides:
   MVM_HVF_WARM_OUT_DIR=/tmp/path       evidence directory
@@ -50,7 +52,8 @@ Useful overrides:
   MVM_HVF_WARM_PROFILE=release         cargo profile and binary directory
 
 Artifacts:
-  summary.txt, bootstrap.stderr, claim-<n>.stderr, timings.csv, sorted-ms.txt
+  summary.txt, bootstrap-warm.log, bootstrap.stderr, warm-<n>.log,
+  claim-<n>.stderr, timings.csv, sorted-ms.txt
 USAGE
 }
 
@@ -155,7 +158,17 @@ run_launch() {
     2>"${stderr_path}"
 }
 
+warm_parent() {
+  local log_path="$1"
+  "${ENV_PREFIX[@]}" "${MVMCTL_BIN}" pool warm 1 --image "${IMAGE_REF}" \
+    >"${log_path}" 2>&1
+}
+
 echo "==> bootstrap compatible HVF standby"
+if ! warm_parent "${OUT_DIR}/bootstrap-warm.log"; then
+  echo "warming the bootstrap standby failed; see ${OUT_DIR}/bootstrap-warm.log" >&2
+  exit 68
+fi
 if ! run_launch "${OUT_DIR}/bootstrap.stderr"; then
   echo "HVF warm bootstrap failed; see ${OUT_DIR}/bootstrap.stderr" >&2
   if rg -q "standby pool|standby-pool|Unsupported|capability" "${OUT_DIR}/bootstrap.stderr"; then
@@ -182,6 +195,10 @@ printf 'iteration,launch_mode,warm_window_ms,warm_slo\n' >"${TIMINGS}"
 
 for iteration in $(seq 1 "${RUNS}"); do
   stderr_path="${OUT_DIR}/claim-${iteration}.stderr"
+  if ! warm_parent "${OUT_DIR}/warm-${iteration}.log"; then
+    echo "warming the standby for claim ${iteration} failed; see ${OUT_DIR}/warm-${iteration}.log" >&2
+    exit 68
+  fi
   if ! run_launch "${stderr_path}" 1; then
     echo "claim ${iteration} failed; see ${stderr_path}" >&2
     exit 70
