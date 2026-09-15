@@ -439,6 +439,17 @@ fn macos_documented_surface_uses_the_published_workload_kernel() {
 }
 
 #[test]
+fn local_launch_gate_uses_the_published_workload_kernel() {
+    let script = fs::read_to_string("scripts/e2e-launch-modes.sh")
+        .expect("read the local launch-gate script");
+
+    assert!(
+        script.contains("export MVM_KERNEL_SOURCE=download"),
+        "`just e2e-launch` must not route a cold source checkout through the optional libkrun Stage 0 backend"
+    );
+}
+
+#[test]
 fn linux_documented_surface_makes_the_stage0_boot_files_readable() {
     let workflow = extended_ci();
     let linux = job_block(&workflow, "e2e-docs-linux");

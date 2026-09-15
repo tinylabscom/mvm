@@ -63,7 +63,10 @@
       The #3011 source-build blocker is resolved: standard macOS 26+ Apple
       Silicon source builds and release artifacts use the dependency-free HVF
       path; libkrun remains only as an explicit development integration and
-      older macOS releases are unsupported. The physical runner still
+      older macOS releases are unsupported. The local `just e2e-launch` gate
+      now owns its published workload-kernel selection, preventing a cold
+      source checkout from silently entering optional libkrun Stage 0 during
+      burn-in. The physical runner still
       needs to be provisioned, hardened, registered, and burned in; the
       repository runner inventory currently contains zero self-hosted runners.
 

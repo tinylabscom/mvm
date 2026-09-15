@@ -58,7 +58,9 @@ Last updated: 2026-09-14
       resolved: standard macOS 26+ Apple Silicon source builds and release
       artifacts use dependency-free HVF; libkrun remains only as an explicit
       development integration and older macOS releases are unsupported. A
-      hardened physical runner is still required;
+      cold local `just e2e-launch` now fetches the verified workload kernel
+      instead of silently entering optional libkrun Stage 0. A hardened
+      physical runner is still required;
       the repository currently has zero self-hosted runners.
 
 - [x] **Linux 6.12.109 synchronized kernel pin — issue #3213.**

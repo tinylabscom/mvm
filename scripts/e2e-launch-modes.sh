@@ -52,7 +52,8 @@ E2E_HOME="${MVM_E2E_HOME:-${MVM_HOME:-$HOME/.mvm}}"
 # A per-run value satisfies both: the value always differs from last run, so the
 # build script re-runs, and it is non-empty, so the rebuild is forced. Costs a
 # cross-compile per gate run, which is the price of measuring the tree.
-export MVM_EMBED_NO_CACHE="e2e-$(date +%s)"
+MVM_EMBED_NO_CACHE="e2e-$(date +%s)"
+export MVM_EMBED_NO_CACHE
 
 # The builder VM's wall-clock cap, raised from its 30-minute default.
 #
@@ -66,6 +67,16 @@ export MVM_EMBED_NO_CACHE="e2e-$(date +%s)"
 #
 # Respects an operator override so a bisect can still set it lower.
 export MVM_BUILDER_VM_TIMEOUT_SECS="${MVM_BUILDER_VM_TIMEOUT_SECS:-7200}"
+
+# This gate exercises workload launch, not kernel construction. A contributor
+# binary normally compiles a missing workload kernel from the checkout; that
+# source-build path needs a Stage 0 builder and can select the optional libkrun
+# integration on macOS. The live suite must have the same dependency-free
+# contract as the documented `just e2e-launch` command, so acquire the
+# published, checksum-verified workload kernel explicitly. Kernel developers
+# can exercise the source producer separately with
+# `MVM_KERNEL_SOURCE=compile mvmctl kernel build --which workload`.
+export MVM_KERNEL_SOURCE=download
 
 # Skips this lane will not tolerate.
 #
@@ -192,12 +203,11 @@ just build-supervisors
 # initramfs. Acquiring them inside a scenario would put minutes on each one, and
 # a scenario that times out reads as a launch failure rather than a cold cache.
 #
-# Budget honestly: on a source checkout with a cold `~/.mvm` this is not a warm
-# up, it is a build. `bootstrap` compiles the per-VM supervisors and then runs a
-# Nix build inside the builder VM, which is tens of minutes and silent for most
-# of it. A change touching `mvm-agentd` also re-fingerprints the guest binaries,
-# so the runtime overlay and initramfs rebuild on the next boot even when the
-# cache was warm before. Subsequent runs against an unchanged tree are fast.
+# The workload kernel is fetched from its verified release asset so this lane
+# never enters the optional Stage 0/libkrun source-build path. A change touching
+# `mvm-agentd` still re-fingerprints the guest binaries, so the runtime overlay
+# and initramfs rebuild on the next boot even when the cache was warm before.
+# Subsequent runs against an unchanged tree are fast.
 # ---------------------------------------------------------------------------
 # macOS kills an unentitled Hypervisor.framework binary with SIGKILL, and the
 # only symptom is "hvf supervisor exited before writing its PID file (status:
