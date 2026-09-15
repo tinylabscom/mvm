@@ -189,6 +189,21 @@ fn artifact_warm_home(world: &mut CliWorld) {
     world.e2e_home = Some(home);
 }
 
+/// Prepare the exact standby shape the warm-budget launch will claim.
+///
+/// Standbys expire and a successful claim consumes one, so this belongs in the
+/// scenario immediately before the launch. A suite-level warm-up can disappear
+/// while earlier features run or be consumed by an earlier invocation.
+#[given(expr = "an Alpine warm parent is ready")]
+fn alpine_warm_parent_is_ready(_world: &mut CliWorld) {
+    let result = run_in_e2e_home("pool warm 1 --image alpine", &[]);
+    assert_eq!(
+        result.exit_code, 0,
+        "failed to prepare the Alpine warm parent\nstdout:\n{}\nstderr:\n{}",
+        result.stdout, result.stderr
+    );
+}
+
 /// Remove a named machine left behind by an earlier run, ignoring the common
 /// case where there is nothing to remove.
 ///

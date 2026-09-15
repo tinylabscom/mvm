@@ -107,18 +107,18 @@ ALLOWED_SKIPS="needs-perf-budget-host,needs-dir-share"
 # Floor on scenarios that must actually execute. See the assertion after the
 # cucumber run for why a count, not just an exit status.
 #
-# EXECUTED, not authored. 26 scenarios are authored across the three feature
+# EXECUTED, not authored. 28 scenarios are authored across the three feature
 # files. Two are capability-gated — the launch-budget threshold on
 # `MVM_BDD_PERF_BUDGET`, and the `--mount` share on `@dir_share`, which
 # Firecracker cannot serve. So the least-capable host this lane is expected to
-# pass on executes 24, and that is the floor. A floor set from the authored
+# pass on executes 26, and that is the floor. A floor set from the authored
 # count fails everywhere a gated scenario is legitimately skipped.
 #
 # Raise this with every scenario added. It was 17 against an authored count of
 # 17, so it had the same defect and had simply never been reached: `pipefail`
 # fails the cucumber pipeline the moment any scenario fails, and the floor is
 # only checked after a fully green run.
-MIN_SCENARIOS=24
+MIN_SCENARIOS=26
 SCENARIO_LOG="$(mktemp -t mvm-e2e-scenarios)"
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 MVMCTL="$TARGET_DIR/debug/mvmctl"
@@ -264,6 +264,11 @@ MVM_HOME="$E2E_HOME" "$MVMCTL" doctor || true
 # and cucumber reports "0 features / 0 scenarios" and exits 0. That is a green
 # gate that ran nothing, which is worse than a red one: it is the precise shape
 # of the failure this whole suite exists to prevent. Hence the floor below.
+#
+# Name the three launch features rather than matching the whole directory.
+# `documented_setup.feature` owns bootstrap and builder-host preparation; it is
+# exercised by `just e2e-docs`, while this gate deliberately warms only workload
+# launch artifacts above.
 echo "==> CLI + SDK launch modes (cucumber, @live)"
 CARGO_BIN_EXE_mvmctl="$MVMCTL" \
 MVM_BDD_LIVE=1 \
@@ -272,7 +277,7 @@ MVM_BDD_STRICT_SKIPS=1 \
 MVM_BDD_ALLOWED_SKIPS="$ALLOWED_SKIPS" \
 MVM_E2E_HOME="$E2E_HOME" \
   ./scripts/cargo-fast.sh test -p mvm-conformance --test conformance --features bdd \
-  -- -i "$REPO/features/suites/s31_launch_e2e/*.feature" -c 1 \
+  -- -i "$REPO/features/suites/s31_launch_e2e/{cli_launch_modes,launch_budget,sdk_and_library_modes}.feature" -c 1 \
   2>&1 | tee "$SCENARIO_LOG"
 
 # Exit status alone cannot tell "everything passed" from "nothing ran". Assert a
