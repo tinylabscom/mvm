@@ -102,6 +102,7 @@ fn is_retryable_activation_error(err: &anyhow::Error) -> bool {
                     | std::io::ErrorKind::ConnectionRefused
                     | std::io::ErrorKind::ConnectionReset
                     | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::NotConnected
                     | std::io::ErrorKind::NotFound
                     | std::io::ErrorKind::AddrNotAvailable
                     | std::io::ErrorKind::Interrupted
@@ -427,6 +428,16 @@ mod tests {
     fn activation_retries_a_typed_session_peer_hangup() {
         let error = anyhow::Error::new(SessionError::Io(std::io::Error::from(
             std::io::ErrorKind::ConnectionReset,
+        )))
+        .context("host session handshake failed");
+
+        assert!(is_retryable_activation_error(&error));
+    }
+
+    #[test]
+    fn activation_retries_macos_not_connected_during_socket_rebind() {
+        let error = anyhow::Error::new(SessionError::Io(std::io::Error::from(
+            std::io::ErrorKind::NotConnected,
         )))
         .context("host session handshake failed");
 
