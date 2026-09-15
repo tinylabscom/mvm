@@ -91,6 +91,10 @@ runtime (`brew install slp/krun/libkrun slp/krun/libkrunfw`); **Linux** needs
 `/dev/kvm` (Firecracker is managed for you). `mvmctl doctor` diagnoses your host
 and prints exact install hints for anything missing.
 
+A source build on macOS 13–25 must also enable the native bindings with
+`cargo build --release --features libkrun-sys`. Pre-built macOS releases include
+that compatibility feature; macOS 26+ source builds should leave it disabled.
+
 ## Quick start
 
 ### Transient machines

@@ -99,11 +99,10 @@ jobs:
       # fails at "cargo zigbuild failed for mvm-host-vm-init".
       - uses: ./.github/actions/install-zigbuild
 
-      # macOS mvmctl links libkrun directly (Plan 87 W5): build.rs runs
-      # bindgen against libkrun.h and emits `-lkrun`, and the runtime
-      # kernel-extraction path needs libkrunfw. Both ship via the slp/krun
-      # Homebrew tap. Without them the build panics in libkrun-sys/build.rs
-      # ("libkrun.h was not found"). Linux uses Firecracker — no libkrun.
+      # Released macOS binaries retain compatibility with macOS 13–25 by
+      # explicitly enabling libkrun below. That feature runs bindgen against
+      # libkrun.h and links libkrun; ordinary macOS 26+ source builds use the
+      # dependency-free HVF path and do not enable it. Linux uses Firecracker.
       #
       # `brew trust` is required since Homebrew began refusing to auto-load
       # formulae from third-party ("untrusted") taps: installing
@@ -136,7 +135,13 @@ jobs:
           # Use vendored OpenSSL for cross-compilation to avoid linking issues
           OPENSSL_STATIC: 1
           OPENSSL_VENDORED: 1
-        run: cargo build --profile release-min --target "${TARGET}" --features "${MVMCTL_RELEASE_FEATURES}"
+        shell: bash
+        run: |
+          FEATURES="${MVMCTL_RELEASE_FEATURES}"
+          if [[ "${TARGET}" == *apple-darwin ]]; then
+            FEATURES="${FEATURES},libkrun-sys"
+          fi
+          cargo build --profile release-min --target "${TARGET}" --features "${FEATURES}"
 
       # The per-VM host processes mvmctl spawns at runtime (one process per
       # guest). They are SEPARATE bin targets in `mvm-hostd` — the root

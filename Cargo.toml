@@ -427,25 +427,10 @@ anyhow.workspace = true
 objc2-foundation = { version = "0.3", features = ["NSRunLoop", "NSDate", "NSAutoreleasePool"] }
 
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
-# Enable mvm-cli's `libkrun-sys` feature on Apple Silicon so the
-# `mvmctl` binary's `extract_bundled_kernel()` path is wired by
-# default (libkrun is the macOS hypervisor backend; libkrunfw ships
-# alongside via the same Homebrew tap). Intel macOS uses the native
-# HVF backend instead: the libkrunfw Homebrew formula is arm64-only,
-# and that path neither loads nor links libkrun. Linux CI / runtimes use
-# Firecracker, which doesn't need libkrun headers — the target-gated
-# dep keeps `cargo build` on Ubuntu working without `apt install
-# libkrun-dev` (which doesn't ship a libkrun-dev package today).
-# Cargo features can't be cfg-gated, but target-specific dep entries
-# can; Cargo unions the features across all matching target entries.
-#
-# `builder-vm` must be repeated here because the base entry at line 272
-# sets `default-features = false`, which strips mvm-cli's `default =
-# ["builder-vm"]`. Without it, `extract_libkrunfw_kernel()` resolves to
-# the `#[cfg(all(feature = "builder-vm", not(feature = "libkrun-sys")))]`
-# bail-stub and Stage 0 falls back to the ur-seed kernel (known to
-# kernel-oops; see comment at apple_container.rs:~2870).
-mvm-cli = { workspace = true, default-features = false, features = ["builder-vm", "libkrun-sys"] }
+# Apple Silicon uses the in-house HVF backend by default on macOS 26+.
+# Keep builder orchestration available without linking optional libkrun FFI;
+# macOS 13–25 source builds opt in through the root `libkrun-sys` feature.
+mvm-cli = { workspace = true, default-features = false, features = ["builder-vm"] }
 
 [target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
 # Intel uses HVF directly. Retain builder orchestration while leaving the

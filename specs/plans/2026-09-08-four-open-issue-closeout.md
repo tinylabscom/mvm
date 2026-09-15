@@ -240,6 +240,12 @@ an unprovisioned label would not provide the required live witness.
 
 ### Provision and harden
 
+- [x] Keep macOS 26+ Apple Silicon source builds on the dependency-free HVF
+      path: do not enable `libkrun-sys` through the target dependency, retain
+      explicit libkrun compatibility for macOS release builds and macOS 13–25
+      source builds, and cover both sides with a regression test. The exact
+      `e2e-launch` compile command, workspace tests/check, zero-warning Clippy,
+      workflow lint, and all 67 repository policy gates pass on macOS.
 - [ ] Provision a dedicated Apple Silicon Mac with non-nested HVF, current
       macOS, encrypted storage, a least-privilege runner account, and no
       unrelated developer credentials or data.

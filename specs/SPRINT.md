@@ -60,8 +60,11 @@
       2026-09-14 and is closed: #3235 preserved the claim path's error chains,
       #3238 activated the standby parent before capture, and #3241 fixed the
       two vsock device defects behind the child's post-restore `Broken pipe`.
-      #3011 is blocked
-      on provisioning and hardening its physical Apple Silicon runner; the
+      The #3011 source-build blocker is resolved: macOS 26+ Apple Silicon
+      builds use the dependency-free HVF path, while old-macOS source
+      compatibility and macOS
+      release artifacts opt into libkrun explicitly. The physical runner still
+      needs to be provisioned, hardened, registered, and burned in; the
       repository runner inventory currently contains zero self-hosted runners.
 
 - [x] **Linux 6.12.109 synchronized kernel pin — issue #3213.**

@@ -589,7 +589,7 @@ fn intel_hvf_witness_uses_hvf_for_steady_state_builder_jobs() {
 }
 
 #[test]
-fn root_manifest_enables_libkrun_only_on_apple_silicon() {
+fn root_manifest_keeps_libkrun_opt_in_on_macos() {
     let manifest = root_manifest();
 
     let arm64 = manifest
@@ -600,9 +600,17 @@ fn root_manifest_enables_libkrun_only_on_apple_silicon() {
         .1
         .split_once("\n[")
         .map_or_else(|| manifest.as_str(), |(section, _)| section);
+    let arm64_cli = arm64
+        .lines()
+        .find(|line| line.trim_start().starts_with("mvm-cli ="))
+        .expect("Apple Silicon mvm-cli dependency");
     assert!(
-        arm64.contains("features = [\"builder-vm\", \"libkrun-sys\"]"),
-        "Apple Silicon keeps the libkrun-backed builder path"
+        arm64_cli.contains("features = [\"builder-vm\"]"),
+        "Apple Silicon keeps builder orchestration for the native HVF path"
+    );
+    assert!(
+        !arm64_cli.contains("libkrun-sys"),
+        "Apple Silicon HVF builds must not require optional libkrun headers"
     );
 
     let intel = manifest
@@ -613,13 +621,48 @@ fn root_manifest_enables_libkrun_only_on_apple_silicon() {
         .1
         .split_once("\n[")
         .map_or_else(|| manifest.as_str(), |(section, _)| section);
+    let intel_cli = intel
+        .lines()
+        .find(|line| line.trim_start().starts_with("mvm-cli ="))
+        .expect("Intel macOS mvm-cli dependency");
     assert!(
-        intel.contains("features = [\"builder-vm\"]"),
+        intel_cli.contains("features = [\"builder-vm\"]"),
         "Intel HVF keeps builder orchestration without linking libkrun"
     );
     assert!(
-        !intel.contains("libkrun-sys"),
+        !intel_cli.contains("libkrun-sys"),
         "Intel HVF must not enable the ARM-only libkrun dependency"
+    );
+
+    let features = manifest
+        .split_once("\n[features]\n")
+        .expect("root feature section")
+        .1
+        .split_once("\n[")
+        .map_or_else(|| manifest.as_str(), |(section, _)| section);
+    assert!(
+        features.contains("libkrun-sys = [\"mvm-cli/libkrun-sys\"]"),
+        "older macOS libkrun builds retain an explicit root feature"
+    );
+}
+
+#[test]
+fn macos_release_build_explicitly_enables_libkrun() {
+    let workflow =
+        fs::read_to_string(".github/workflows/release.yml").expect("read release workflow");
+    let build = job_block(&workflow, "build");
+
+    assert!(
+        build.contains("if [[ \"${TARGET}\" == *apple-darwin ]]; then"),
+        "the release build must distinguish macOS from Linux targets"
+    );
+    assert!(
+        build.contains("FEATURES=\"${FEATURES},libkrun-sys\""),
+        "released macOS binaries must retain compatibility with libkrun hosts"
+    );
+    assert!(
+        build.contains("--features \"${FEATURES}\""),
+        "the release build must pass its target-specific feature set to Cargo"
     );
 }
 
