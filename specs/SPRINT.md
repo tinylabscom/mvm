@@ -78,10 +78,13 @@
       feature it does not own, while the opted-in launch-budget scenario creates
       its matching standby immediately before the warm claim. The separate
       macOS documented-surface lane explicitly fetches the signed builder image
-      instead of attempting unsupported HVF Stage 0 preparation. The physical
-      runner still needs to be provisioned, hardened, registered, and burned
-      in; the repository runner inventory currently contains zero self-hosted
-      runners.
+      instead of attempting unsupported HVF Stage 0 preparation. Physical-M1
+      burn-in then exposed macOS errno 57 while `machine reconfigure` replaced
+      the HVF supervisor on the same agent socket path; activation now treats
+      that transport-only socket-rebind state as retryable within the existing
+      deadline while authenticated rejection remains fatal. The physical runner
+      still needs to be provisioned, hardened, registered, and burned in; the
+      repository runner inventory currently contains zero self-hosted runners.
 
 - [x] **Linux 6.12.109 synchronized kernel pin — issue #3213.**
       `specs/plans/2026-09-08-kernel-6-12-109.md`.

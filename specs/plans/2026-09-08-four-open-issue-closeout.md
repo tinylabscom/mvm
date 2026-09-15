@@ -256,6 +256,12 @@ an unprovisioned label would not provide the required live witness.
       exact Alpine standby immediately before claiming it. The macOS
       documented-surface witness explicitly fetches its signed builder image so
       a source checkout does not enter unsupported HVF Stage 0 preparation.
+      Physical-M1 burn-in then exposed a transient macOS `ENOTCONN` (errno 57)
+      while `machine reconfigure` replaced the HVF supervisor on the same agent
+      socket path. Activation now retries that transport-only socket-rebind
+      state within its existing bounded deadline; authenticated guest rejection
+      remains immediately fatal, and the existing live reconfigure scenario is
+      the end-to-end witness.
 - [ ] Provision a dedicated Apple Silicon Mac with non-nested HVF, current
       macOS, encrypted storage, a least-privilege runner account, and no
       unrelated developer credentials or data.
