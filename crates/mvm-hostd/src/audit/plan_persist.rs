@@ -108,7 +108,13 @@ pub fn read_plan_at(path: &Path) -> Result<ExecutionPlan> {
     let mut bytes = Vec::with_capacity(meta.len() as usize);
     f.read_to_end(&mut bytes)
         .with_context(|| format!("reading {}", path.display()))?;
-    let plan: ExecutionPlan = serde_json::from_slice(&bytes)
+    // Both on-disk shapes are valid here: the bare plan this module writes, and
+    // the signed envelope a warm claim stashes for the child. The decoder that
+    // accepts both already exists; parsing only the bare shape is what left a
+    // claimed child's plan-bound readers unable to find its plan.
+    let json =
+        std::str::from_utf8(&bytes).with_context(|| format!("{} is not UTF-8", path.display()))?;
+    let plan = mvm_core::plan::plan_from_admitted_json(json)
         .with_context(|| format!("parsing ExecutionPlan from {}", path.display()))?;
     Ok(plan)
 }
@@ -138,6 +144,31 @@ mod tests {
 
         let read = read_plan_at(&path).expect("read");
         assert_eq!(read, plan, "roundtrip equality");
+    }
+
+    /// A warm-claimed child's `plan.json` is the signed envelope, not the bare
+    /// plan: the claim path stashes the admitted JSON verbatim so it can mint
+    /// the child's verb grant, and nothing on that path rewrites it. Reading
+    /// only the bare shape made every plan-bound reader fail on a claimed
+    /// child — its sealed transcript went unanchored in the audit chain with
+    /// `unknown field \`payload\``, while a cold boot of the same image
+    /// anchored fine.
+    #[test]
+    fn read_plan_accepts_the_signed_envelope_a_warm_claim_leaves() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plan = fixture_plan();
+        let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let envelope = mvm_core::plan::sign_plan(&plan, &key, "host:test");
+        let path = dir.path().join("plan.json");
+        std::fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let read = read_plan_at(&path).expect("a signed envelope is a valid plan.json");
+        // Signing assigns the content-addressed plan id, so compare against the
+        // plan the envelope carries — the one admission actually signed.
+        let signed: ExecutionPlan = serde_json::from_slice(&envelope.0.payload).unwrap();
+        assert_eq!(read, signed);
+        assert!(read.plan_id.0.starts_with("sha256:"));
     }
 
     #[test]

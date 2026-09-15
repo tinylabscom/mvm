@@ -1486,6 +1486,53 @@ mod tests {
         );
     }
 
+    /// A warm-claimed child's transcript is anchored the same as a cold boot's.
+    ///
+    /// The child's `plan.json` is written by the claim path's own writer, not
+    /// hand-built: it stashes the signed envelope verbatim to mint the child's
+    /// verb grant, and that envelope is what the seal path finds. Reading only
+    /// the bare plan shape made this path warn `no admitted plan for this
+    /// workload` and skip the anchor — live on Firecracker, every warm claim
+    /// left its output unbound to the run while a cold boot of the same image
+    /// anchored.
+    #[test]
+    fn a_warm_claimed_childs_transcript_is_anchored_from_its_signed_plan() {
+        let (_env, _tmp) = isolated_home();
+        let vm = "plane-anchored-warm-child";
+        let keys = mvm_core::config::mvm_keys_dir();
+        let signer = host_keypair::load_or_init_at(&keys).expect("mint a host signer");
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("local")
+            .build();
+        let envelope = mvm_core::plan::sign_plan(&plan, &signer.signing, "host:test");
+        let config = mvm_core::vm_backend::VmStartConfig {
+            name: vm.to_string(),
+            plan_json: Some(serde_json::to_string(&envelope).expect("serialize envelope")),
+            ..Default::default()
+        };
+        crate::plan_admission::stash_plan_and_mint_verb_grant(&config)
+            .expect("the claim path stashes the child's plan");
+
+        let console = console_log_for(vm);
+        let plane = StreamPlane::new();
+        plane.attach(&capture(vm, &console)).expect("attach");
+        std::fs::write(&console, b"claimed child ran\n").expect("write console");
+        std::thread::sleep(ACCEPT_SETTLE);
+        plane.release(vm);
+
+        let manifest = manifest_of(vm).expect("the capture sealed");
+        let anchors = transcript_anchors("local");
+        assert_eq!(
+            anchors.len(),
+            1,
+            "a warm-claimed child's sealed transcript must be anchored in the audit chain"
+        );
+        assert_eq!(
+            anchors[0]["labels"][crate::supervisor::audit::LABEL_TRANSCRIPT_ROOT],
+            manifest.sealed_root_hex
+        );
+    }
+
     #[test]
     fn an_adopted_seal_anchors_itself_as_an_incomplete_record() {
         // A rebuilt seal is a floor, not a full account. Anchoring it as
