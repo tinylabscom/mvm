@@ -4,6 +4,11 @@ Last updated: 2026-09-15
 
 ## In progress
 
+- [ ] **Claim-witness mutation coverage — issue #3250.**
+      `specs/plans/2026-09-15-claim-witness-mutation-coverage.md`.
+      Cover empty EOF and short unterminated handoff replies so the scheduled
+      mutation claim regains live evidence.
+
 - [ ] **OTLP trace export for host-side processes.**
       `specs/plans/2026-09-14-otlp-trace-export.md`. Issue #3242.
       `mvm-observability` gains an opt-in OTLP/HTTP JSON trace exporter,

@@ -10,6 +10,12 @@
 
 ## In progress
 
+- [ ] **Claim-witness mutation coverage — issue #3250.**
+      `specs/plans/2026-09-15-claim-witness-mutation-coverage.md`.
+      Add the two EOF-boundary regressions missing from the scheduled
+      `mvm-backends` mutation shard, then require the authoritative Linux
+      ratchet and a fresh scheduled Security witness before closeout.
+
 - [x] **CI queue consolidation.**
       `specs/plans/2026-09-10-ci-queue-consolidation.md`.
       Preserve cumulative merge-group validation while reducing runner fan-out
