@@ -248,13 +248,10 @@ fn check_network_flow_channels(workspace: &Path) -> Result<()> {
 /// gated — the copy gets a new caller, the caller drifts, and nothing says so.
 const PEER_BRANCH_OWNER: &str = "crates/mvm-vmm/src/vsock_egress_bridge/egress_gate.rs";
 
-/// The connect sites that route a guest target through the gate. Both must go
-/// through `decide_target`; neither may call `decide_peer` or re-derive the
+/// The connect sites that route a guest target through the gate. Each must go
+/// through `decide_target`; none may call `decide_peer` or re-derive the
 /// branch itself.
-const PEER_BRANCH_CALLERS: &[&str] = &[
-    "crates/mvm-hostd/src/supervisor/flowmux.rs",
-    "crates/mvm-hostd/src/supervisor/flowmux/session.rs",
-];
+const PEER_BRANCH_CALLERS: &[&str] = &["crates/mvm-hostd/src/supervisor/flowmux.rs"];
 
 /// Deliberate non-callers: production code that sees a target but must not
 /// resolve a peer through it. The substitution proxy refuses peer destinations
@@ -341,10 +338,7 @@ const FLOW_AUDIT_LABEL_KEYS: &[&str] = &[
 ];
 
 /// Files whose connect paths emit flow audit entries.
-const FLOW_AUDIT_SITES: &[&str] = &[
-    "crates/mvm-hostd/src/supervisor/flowmux.rs",
-    "crates/mvm-hostd/src/supervisor/flowmux/session.rs",
-];
+const FLOW_AUDIT_SITES: &[&str] = &["crates/mvm-hostd/src/supervisor/flowmux.rs"];
 
 fn check_flow_audit_labels(workspace: &Path) -> Result<()> {
     // Matches the `("key".to_string(), ..)` label entries the audit maps are
