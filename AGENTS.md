@@ -69,7 +69,14 @@ The only `git` commands that should ever target `main` directly are read-only (`
 
 After any pull request merge, immediately sync the local main checkout before doing anything else: `git fetch origin` followed by `git pull --ff-only origin main`. Do not leave local `main` behind the merged PR state.
 
-PR titles and bodies must never include the assistant/tool branding. Keep PR metadata focused on the code change itself.
+### No assistant or tool attribution in pull requests
+
+Pull requests must never identify an AI assistant, coding agent, model, or tool as
+a contributor. In particular, never mention Claude Code, Codex, or Kimi in PR
+titles, bodies, contributor lists, acknowledgements, commit trailers, generated-by
+notices, or similar metadata. Do not add `Co-authored-by` or other attribution
+trailers for an assistant or tool. Keep all PR metadata focused on the code change
+and credit only the human contributors responsible for the work.
 
 ### Creating the worktree
 
