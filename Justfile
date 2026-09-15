@@ -391,6 +391,24 @@ bdd-live-ci:
     cargo build --bin mvmctl --features user,embed-host-bins
     CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" MVM_BDD_LIVE=1 MVM_BDD_CI_LIVE_ONLY=1 cargo test -p mvm-conformance --test conformance --features bdd
 
+# Nightly KVM witness for the one scenario that runs a warm claim end to end:
+# warm a parent, claim it, and require the child's run to be anchored in the
+# audit chain. Kept out of the merge queue because it acquires its image from a
+# fresh home, which would add minutes to every merge. The run must report
+# exactly that scenario passing, so a tag or gate change that quietly skips it
+# fails this recipe instead of passing it.
+bdd-live-warm-claim:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --bin mvmctl --features user,embed-host-bins
+    log="$(mktemp)"
+    CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" MVM_BDD_LIVE=1 MVM_BDD_WARM_CLAIM=1 \
+      cargo test -p mvm-conformance --test conformance --features bdd -- --tags @warm_claim 2>&1 | tee "$log"
+    if ! grep -q '1 scenario (1 passed)' "$log"; then
+      echo "the warm-claim scenario did not run and pass exactly once" >&2
+      exit 1
+    fi
+
 # Build the per-VM host helper bins into `target/<profile>/`, where
 # `aux_bin::resolve` looks for them. Reach for this after `cargo run -p mvm-cli`,
 # which builds no sibling `[[bin]]`s; `just build` runs it for you.
