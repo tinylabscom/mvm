@@ -211,12 +211,14 @@ Per AGENTS.md, no workstream is done without tests. The mounted-PTY plan
 
 ### W3 — doc repairs this work uncovered
 
-- [ ] `public/src/content/docs/guides/nix-flakes.md` LLM-agent section: the
+- [x] `public/src/content/docs/guides/nix-flakes.md` LLM-agent section: the
       `--mount "$PWD:/work:rw"` recipe cannot work (directory `:rw` is
-      refused); rewrite onto the sized-volume recipe.
-- [ ] `public/src/content/docs/guides/config-secrets.md`: the persistent
+      refused); rewritten onto a registered secrets volume + sized
+      workspace disk.
+- [x] `public/src/content/docs/guides/config-secrets.md`: the persistent
       `--mount …:ro` directory example hits the same persistent-machine
-      bail; align with what runs.
+      bail; rewritten onto a transient run plus the two working
+      persistent shapes.
 - [ ] `crates/mvm-contract/src/policy/network_policy.rs` `agent_rules()` doc
       comment cites `nix/images/examples/llm-agent/`, which does not exist;
       point it at `examples/claude-code/` once W1 lands (keeping the

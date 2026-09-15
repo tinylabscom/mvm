@@ -314,16 +314,25 @@ chmod 0400 ~/.mvm/config/secrets/anthropic
 
 cd my-claude-code-vm
 mvmctl machine build
+
+# A persistent machine cannot attach a live host-directory share, so
+# register the credentials directory as a snapshot-backed volume …
+mvmctl machine volume mount agent --volume secrets \
+  --host "$HOME/.mvm/config/secrets" --guest /data/secrets
+
+# … and give the agent a durable read-write disk image as its workspace
+# (`HOST:/GUEST:SIZE:rw`). Move files in and out with `mvmctl machine cp`.
 mvmctl machine run --manifest . --profile dev --name agent -d \
-  --mount "$PWD:/work:rw" \
-  --mount "$HOME/.mvm/config/secrets:/data/secrets:ro"
+  --mount "$PWD/workspace.img:/work:4G:rw"
 ```
 
 A guest mount path must sit under `/data` or `/work` — those are the only two
 allow-roots. `/mnt/*` is refused outright so a share cannot shadow the
-runtime's own config and secrets drives. A `:rw` share additionally needs a
-**persistent** machine (`--name` plus `-d`) and `--profile dev`; a transient
-run's shares are read-only under every profile.
+runtime's own config and secrets drives. Live host-directory shares exist
+only for **transient** runs, and only read-only (the directory is snapshotted
+into a throwaway image at boot). A persistent machine takes snapshot-backed
+registered volumes (`machine volume mount`, re-snapshotted at each start) and
+sized disk images; `:rw` on a disk needs `--profile dev`.
 
 Inside the guest, your workload can read the file you mounted under
 `/data/secrets`. If you do not want the guest to ever see the raw
