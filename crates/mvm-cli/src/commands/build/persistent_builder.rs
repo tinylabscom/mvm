@@ -43,7 +43,9 @@ use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand};
 use serde::{Deserialize, Serialize};
 
-use mvm_build::builder_backend_select::{BuilderBackendChoice, resolve_env_override};
+use mvm_build::builder_backend_select::{
+    BuilderBackendChoice, auto_detect_default, resolve_env_override,
+};
 use mvm_build::builder_protocol::HostVmResponseRead;
 use mvm_build::builder_vm::BuilderJob;
 use mvm_build::libkrun_builder::{
@@ -200,21 +202,26 @@ enum PersistentBackend {
 
 /// Resolve the explicit backend selection (`--builder`, folded into
 /// `MVM_BUILDER_BACKEND` at startup, or the env var directly) to the persistent
-/// host VM to spawn. An unset selection keeps libkrun — the verb's default,
-/// independent of the platform auto-detect. QEMU has no persistent host VM, so
-/// it fails closed with guidance.
+/// host VM to spawn. An unset selection uses the platform default, so a
+/// supported Mac stays on native HVF rather than silently requiring libkrun.
+/// QEMU has no persistent host VM, so it fails closed with guidance.
 fn persistent_backend(explicit: Option<BuilderBackendChoice>) -> Result<PersistentBackend> {
-    match explicit {
-        None | Some(BuilderBackendChoice::Libkrun) => Ok(PersistentBackend::Libkrun),
-        Some(BuilderBackendChoice::Hvf) => Ok(PersistentBackend::Hvf),
-        Some(BuilderBackendChoice::Qemu) => bail!(
+    persistent_backend_for(explicit.unwrap_or_else(auto_detect_default))
+}
+
+fn persistent_backend_for(choice: BuilderBackendChoice) -> Result<PersistentBackend> {
+    match choice {
+        BuilderBackendChoice::Libkrun => Ok(PersistentBackend::Libkrun),
+        BuilderBackendChoice::Hvf => Ok(PersistentBackend::Hvf),
+        BuilderBackendChoice::Qemu => bail!(
             "`mvmctl persistent-builder start` has no QEMU persistent builder \
-             (QEMU is a one-shot dev/test backend). Use `--builder libkrun` \
-             (or omit `--builder` for libkrun)."
+             (QEMU is a one-shot builder). On supported Apple Silicon macOS, \
+             use the automatic HVF selection; libkrun remains an explicit \
+             contributor integration."
         ),
-        Some(BuilderBackendChoice::WebLinux) => bail!(
+        BuilderBackendChoice::WebLinux => bail!(
             "`mvmctl persistent-builder start` has no WebLinux persistent builder \
-             (WebLinux is browser-only). Use `--builder libkrun` or `--builder hvf`."
+             (WebLinux is browser-only). Use the native HVF path on a supported Mac."
         ),
     }
 }
@@ -862,31 +869,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn persistent_backend_unset_and_libkrun_select_libkrun() {
-        // No explicit selection → libkrun default, regardless of platform auto-detect.
+    fn persistent_backend_keeps_libkrun_explicit_only() {
         assert_eq!(
-            persistent_backend(None).unwrap(),
-            PersistentBackend::Libkrun
-        );
-        assert_eq!(
-            persistent_backend(Some(BuilderBackendChoice::Libkrun)).unwrap(),
+            persistent_backend_for(BuilderBackendChoice::Libkrun).unwrap(),
             PersistentBackend::Libkrun
         );
     }
 
     #[test]
-    fn persistent_backend_selects_hvf_when_asked_for_it() {
-        // hvf is the macOS 26+ auto-detect default, so refusing it here left
-        // the whole persistent-builder path unreachable on that tier.
+    fn persistent_backend_uses_hvf_for_the_standard_macos_choice() {
         assert_eq!(
-            persistent_backend(Some(BuilderBackendChoice::Hvf)).unwrap(),
+            persistent_backend_for(BuilderBackendChoice::Hvf).unwrap(),
             PersistentBackend::Hvf
         );
     }
 
     #[test]
     fn persistent_backend_rejects_qemu_with_guidance() {
-        let err = persistent_backend(Some(BuilderBackendChoice::Qemu)).unwrap_err();
+        let err = persistent_backend_for(BuilderBackendChoice::Qemu).unwrap_err();
         let msg = format!("{err}");
         // Names QEMU's absence and points at the supported backend.
         assert!(msg.contains("QEMU"), "{msg}");

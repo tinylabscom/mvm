@@ -209,11 +209,8 @@ pub(super) fn network_backend_check(_plat: Platform) -> Check {
     }
 }
 
-/// libkrun availability. Probes the host for the
-/// libkrun shared library at the standard install paths. `ok: true`
-/// regardless of presence (libkrun is optional); the `info` field
-/// surfaces the install hint when missing so users see exactly what
-/// to run.
+/// Optional libkrun development-integration status. Standard builds and
+/// releases never require it, so absence is reported without an install hint.
 pub(super) fn libkrun_check(plat: Platform) -> Check {
     if plat.is_windows() {
         return Check {
@@ -228,14 +225,14 @@ pub(super) fn libkrun_check(plat: Platform) -> Check {
             name: "libkrun",
             category: "platform",
             ok: true,
-            info: "available".to_string(),
+            info: "optional development integration present".to_string(),
         }
     } else {
         Check {
             name: "libkrun",
             category: "platform",
             ok: true, // Optional; not a failure.
-            info: format!("not available ({})", libkrun_sys::install_hint()),
+            info: "not used by standard builds or releases".to_string(),
         }
     }
 }

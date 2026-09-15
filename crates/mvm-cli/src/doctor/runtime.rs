@@ -27,8 +27,8 @@ pub(super) fn runtime_backend_check(plat: platform::Platform) -> Check {
         Platform::Wsl2 => "WSL2 — a workload runtime needs nested /dev/kvm; without it \
              only `qemu` (dev/test only, no claim-10) runs"
             .to_string(),
-        Platform::MacOS => "macOS — `hvf` (macOS 26+ Apple Silicon) or `libkrun` (macOS 13-25) \
-             workload backends, selectable via `--hypervisor`"
+        Platform::MacOS => "macOS — native `hvf` on macOS 26+ Apple Silicon; \
+             standard builds and releases do not require libkrun"
             .to_string(),
         Platform::Windows => "Windows — no local microVM workload path yet".to_string(),
     };
@@ -46,13 +46,13 @@ mod tests {
     use mvm_core::platform::Platform;
 
     #[test]
-    fn runtime_backend_check_macos_reports_hvf_and_libkrun() {
+    fn runtime_backend_check_macos_reports_native_hvf_without_libkrun() {
         let c = runtime_backend_check(Platform::MacOS);
         assert!(c.ok);
         assert!(c.info.contains("`hvf`"), "got: {}", c.info);
         assert!(
-            c.info.contains("`libkrun`"),
-            "expected libkrun fallback in macOS summary; got: {}",
+            !c.info.contains("`libkrun`"),
+            "standard macOS runtime must not advertise libkrun; got: {}",
             c.info
         );
     }

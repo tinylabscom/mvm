@@ -36,7 +36,12 @@ pub fn run(workspace: &Path) -> Result<()> {
 
     let mut problems = Vec::new();
 
-    for (name, _scope) in &registry {
+    let released: Vec<_> = registry
+        .iter()
+        .filter(|(_, scope)| included_in_standard_release(scope))
+        .collect();
+
+    for (name, _scope) in &released {
         if !built.contains(name) {
             problems.push(format!(
                 "release.yml never builds `{name}` (no `--bin {name}`)"
@@ -49,7 +54,7 @@ pub fn run(workspace: &Path) -> Result<()> {
         }
     }
 
-    let known: BTreeSet<&str> = registry.iter().map(|(n, _)| n.as_str()).collect();
+    let known: BTreeSet<&str> = released.iter().map(|(n, _)| n.as_str()).collect();
     for name in &packaged {
         if !known.contains(name.as_str()) {
             problems.push(format!(
@@ -69,10 +74,14 @@ pub fn run(workspace: &Path) -> Result<()> {
     }
 
     eprintln!(
-        "check-per-vm-host-binaries-sync: {} registry entries built and packaged by release.yml",
-        registry.len()
+        "check-per-vm-host-binaries-sync: {} standard-release registry entries built and packaged by release.yml",
+        released.len()
     );
     Ok(())
+}
+
+fn included_in_standard_release(scope: &str) -> bool {
+    scope != "RequiresLibkrun"
 }
 
 /// `(name, scope)` for every `PER_VM_HOST_BINARIES` entry.
@@ -194,6 +203,13 @@ pub const PER_VM_HOST_BINARIES: &[PerVmBinary] = &[
                 ("mvm-hvf-supervisor".to_string(), "MacOsAarch64".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn standard_release_excludes_optional_libkrun_binaries() {
+        assert!(included_in_standard_release("Always"));
+        assert!(included_in_standard_release("MacOsAarch64"));
+        assert!(!included_in_standard_release("RequiresLibkrun"));
     }
 
     #[test]

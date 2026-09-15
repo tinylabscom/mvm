@@ -30,17 +30,9 @@ mod builder_backend_attempt_order_tests {
     }
 
     #[test]
-    fn auto_hvf_keeps_only_the_shared_libkrun_handoff() {
+    fn auto_hvf_is_a_single_backend_path() {
         let order = builder_backend_attempt_order(BuilderBackendChoice::Hvf, false);
-        assert!(
-            order == vec![BuilderBackendChoice::Hvf, BuilderBackendChoice::Libkrun]
-                || order == vec![BuilderBackendChoice::Hvf],
-            "expected hvf auto path to stay on the shared hvf/libkrun policy, got {order:?}"
-        );
-        assert!(
-            !order.contains(&BuilderBackendChoice::Qemu),
-            "qemu must stay explicit-only, got {order:?}"
-        );
+        assert_eq!(order, vec![BuilderBackendChoice::Hvf]);
     }
 
     #[test]

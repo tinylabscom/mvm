@@ -191,7 +191,7 @@ can hide a slow launch. A backend that cannot meet it is not release-ready.
 |---|---|---|---|
 | Firecracker (Linux/KVM) | < 200 ms | ≤ 30 ms | Hard prepared-cold requirement; every measured dispatch must pass. |
 | HVF (macOS 26+, Apple Silicon) | < 200 ms | ≤ 60 ms | In-house Hypervisor.framework VMM; macOS default. |
-| libkrun (macOS 13-25, Linux/KVM) | < 200 ms | ≤ 30 ms | Third-party in-process VMM; needs the `slp/krun/*` Homebrew trio on macOS. |
+| libkrun (explicit development integration) | < 200 ms | ≤ 30 ms | Optional third-party VMM; excluded from standard builds and release artifacts. |
 | QEMU (Linux dev/test) | — | — | Opt-in dev/test substrate; no snapshot support. |
 
 The artifact expectation is surfaced on every `mkGuest` derivation as
@@ -224,7 +224,7 @@ nix flake check --no-build
 mvm runs Nix builds inside the project builder VM and copies the finished kernel/rootfs artifacts back to the host cache. You don't need host-side Nix, and you don't need to enter a dev shell before building.
 
 - **Linux**: the builder VM provides the Linux build boundary and cache policy. Firecracker is the default runtime backend when `/dev/kvm` is available.
-- **macOS**: the host `mvmctl machine build` command orchestrates a Linux builder VM. The resulting runtime image boots on the HVF backend by default on macOS 26+ (Hypervisor.framework, vsock-only), or libkrun on macOS 13–25.
+- **macOS**: the host `mvmctl machine build` command orchestrates a Linux builder VM. On supported Apple Silicon hosts running macOS 26+, both the builder and resulting runtime use native HVF (Hypervisor.framework, vsock-only) without libkrun. Older macOS releases are not supported by the standard local runtime.
 - **Windows**: Tauri-only (the `mvm-studio` desktop app packages a WSL2-backed builder + runtime). See [ADR-009](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/009-cross-platform-strategy.md).
 
 ## Rootless workloads

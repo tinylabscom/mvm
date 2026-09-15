@@ -647,22 +647,30 @@ fn root_manifest_keeps_libkrun_opt_in_on_macos() {
 }
 
 #[test]
-fn macos_release_build_explicitly_enables_libkrun() {
+fn macos_release_build_is_libkrun_free() {
     let workflow =
         fs::read_to_string(".github/workflows/release.yml").expect("read release workflow");
     let build = job_block(&workflow, "build");
 
     assert!(
-        build.contains("if [[ \"${TARGET}\" == *apple-darwin ]]; then"),
-        "the release build must distinguish macOS from Linux targets"
+        !build.contains("uses: ./.github/actions/install-libkrun"),
+        "standard macOS release builds must not install libkrun"
     );
     assert!(
-        build.contains("FEATURES=\"${FEATURES},libkrun-sys\""),
-        "released macOS binaries must retain compatibility with libkrun hosts"
+        !build.contains("libkrun-sys"),
+        "released mvmctl binaries and helpers must not link optional libkrun FFI"
     );
     assert!(
-        build.contains("--features \"${FEATURES}\""),
-        "the release build must pass its target-specific feature set to Cargo"
+        !build.contains("--bin mvm-libkrun-supervisor"),
+        "standard macOS release artifacts must not build the libkrun supervisor"
+    );
+    assert!(
+        !build.contains("mvm-hvf-supervisor mvm-libkrun-supervisor"),
+        "standard macOS release artifacts must not package the libkrun supervisor"
+    );
+    assert!(
+        build.contains("--features \"${MVMCTL_RELEASE_FEATURES}\""),
+        "the release build must use the platform-neutral feature set directly"
     );
 }
 
@@ -769,11 +777,8 @@ fn documented_surface_revalidates_the_source_matched_initramfs() {
 }
 
 #[test]
-fn supervisor_build_requires_a_detected_libkrun_header() {
+fn standard_supervisor_build_never_enables_libkrun() {
     let just = justfile();
-    // Anchored on the newline so this finds the recipe header at column 0 and
-    // not the `build-supervisors:` prefix the skip message inside the body
-    // prints, nor the parameter list the header carries.
     let recipe = just
         .split_once("\nbuild-supervisors")
         .expect("build-supervisors recipe")
@@ -785,16 +790,20 @@ fn supervisor_build_requires_a_detected_libkrun_header() {
         recipe.contains("build -p mvm-hostd --bins"),
         "portable helper binaries must still build on every host"
     );
-    let header_gate = recipe
-        .find("if [[ -f \"$header\" ]]")
-        .expect("the optional libkrun helper must require a detected header");
-    let libkrun_build = recipe
-        .find("--bin mvm-libkrun-supervisor --features libkrun-sys")
-        .expect("the optional libkrun helper build must remain present");
-
     assert!(
-        libkrun_build > header_gate,
-        "the libkrun-sys helper must only build after a real header is found"
+        !recipe.contains("libkrun"),
+        "standard helper builds must not probe for or enable libkrun"
+    );
+
+    let optional = just
+        .split_once("\nbuild-libkrun-supervisor")
+        .expect("explicit libkrun integration recipe")
+        .1
+        .split_once("\n# ")
+        .map_or_else(|| just.as_str(), |(recipe, _)| recipe);
+    assert!(
+        optional.contains("--bin mvm-libkrun-supervisor --features libkrun-sys"),
+        "the optional integration must remain explicitly buildable"
     );
 }
 

@@ -845,7 +845,7 @@ pub(in crate::commands) struct MachineStartArgs {
     #[arg(skip)]
     pub quiet: bool,
     /// Workload VMM backend. Defaults to the host's best supported backend
-    /// (Linux+KVM → firecracker; macOS 26+ → hvf; macOS 13-25 → libkrun). On a
+    /// (Linux+KVM → firecracker; macOS 26+ Apple Silicon → hvf). On a
     /// Linux+KVM host, `--hypervisor libkrun` opts into the libkrun runtime instead
     /// of the firecracker default — both require `/dev/kvm` and enforce claim-10
     /// egress (qemu is a no-`/dev/kvm` dev/test fallback only). `MVM_HYPERVISOR` is
@@ -888,7 +888,7 @@ pub(in crate::commands) struct MachineStartCmd {
     #[arg(long)]
     pub dry_run: bool,
     /// Workload VMM backend. Defaults to the host's best supported backend
-    /// (Linux+KVM → firecracker; macOS 26+ → hvf; macOS 13-25 → libkrun). On a
+    /// (Linux+KVM → firecracker; macOS 26+ Apple Silicon → hvf). On a
     /// Linux+KVM host, `--hypervisor libkrun` opts into the libkrun runtime instead
     /// of the firecracker default — both require `/dev/kvm` and enforce claim-10
     /// egress (qemu is a no-`/dev/kvm` dev/test fallback only). `MVM_HYPERVISOR` is

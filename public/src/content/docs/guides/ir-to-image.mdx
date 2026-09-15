@@ -292,7 +292,7 @@ The orchestrator picks a builder mode (`host` | `vsock` | `auto`) and dispatches
 3. **Runs `nix build`.** With `--override-input mvm git+file://...?dir=nix` so the builder VM consumes the in-tree `nix/lib` you're editing, not a pinned release.
 4. **Extracts artifacts.** Copies `rootfs.ext4`, `vmlinux`, and `mvm-meta.json` back to the host artifact dir.
 
-The host never runs `nix` itself. The builder VM runs on libkrun (macOS 13-25), HVF (macOS 26+) or QEMU/libkrun (Linux); the contract is unchanged.
+The host never runs `nix` itself. The standard builder VM runs on native HVF on supported Apple Silicon macOS hosts and QEMU on native Linux. The optional libkrun integration is not installed, linked, or selected by the standard macOS path; the build contract is otherwise unchanged.
 
 ### Caching and reuse
 

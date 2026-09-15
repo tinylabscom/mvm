@@ -156,7 +156,7 @@ Let's unpack what's new here:
 | ARM Linux (Raspberry Pi, Graviton) | `"aarch64-linux"` |
 | Intel/AMD Mac or Linux | `"x86_64-linux"` |
 
-The OS is always `linux` — even when building on macOS — because the VM image runs Linux inside the microVM, whichever backend boots it (Firecracker on Linux/KVM, HVF or libkrun on Apple Silicon). You're cross-compiling for the guest, not building for your host.
+The OS is always `linux` — even when building on macOS — because the VM image runs Linux inside the microVM, whichever standard backend boots it (Firecracker on Linux/KVM or native HVF on supported Apple Silicon macOS hosts). You're cross-compiling for the guest, not building for your host.
 
 When you see `${system}` later in the flake (e.g., `packages.${system}.default` or `mvm.lib.${system}.mkGuest`), Nix substitutes the string at evaluation time. It's just dynamic attribute access — `packages.${system}.default` becomes `packages.aarch64-linux.default`.
 :::

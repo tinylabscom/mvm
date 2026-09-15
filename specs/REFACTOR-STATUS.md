@@ -55,9 +55,10 @@ Last updated: 2026-09-14
       gates passed, and #3190 is closed. Existing unpublished #3039 work is
       inventoried and preserved, but the required owner and patent-counsel
       release decision is not yet recorded. The #3011 source-build blocker is
-      resolved: macOS 26+ Apple Silicon defaults to dependency-free HVF, with
-      libkrun enabled explicitly only for old-macOS source compatibility and
-      macOS release artifacts. A hardened physical runner is still required;
+      resolved: standard macOS 26+ Apple Silicon source builds and release
+      artifacts use dependency-free HVF; libkrun remains only as an explicit
+      development integration and older macOS releases are unsupported. A
+      hardened physical runner is still required;
       the repository currently has zero self-hosted runners.
 
 - [x] **Linux 6.12.109 synchronized kernel pin — issue #3213.**

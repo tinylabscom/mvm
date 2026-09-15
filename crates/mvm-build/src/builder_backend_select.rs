@@ -14,8 +14,7 @@
 //! 2. **Env var** `MVM_BUILDER_BACKEND` — `libkrun` / `hvf` /
 //!    `qemu`, case-insensitive, surrounding whitespace trimmed.
 //! 3. **Auto-detect** by host platform when neither override is set:
-//!    macOS 26+ Apple Silicon → HVF builder; Linux native →
-//!    QEMU builder; everywhere else → libkrun.
+//!    Apple Silicon macOS → HVF builder; every other host → QEMU builder.
 //!
 //! An unrecognised env value (typo, removed backend) falls through to
 //! auto-detect with a `tracing::warn!` so the operator sees the
@@ -115,33 +114,30 @@ impl BuilderBackendChoice {
 }
 
 /// Pure auto-detect from the platform and a single boolean:
-/// "is this host macOS 26+ on Apple Silicon?" Lifted out so unit tests are
+/// "is this host macOS on Apple Silicon?" Lifted out so unit tests are
 /// fully hermetic — they don't have to spoof the live OS version or the
 /// compile-time `cfg!(target_arch)` macro.
 ///
 /// Decision:
-/// - macOS 26+ Apple Silicon → HVF builder
-/// - Linux native → QEMU builder
-/// - everything else → libkrun
+/// - Apple Silicon macOS → HVF builder (the backend reports the macOS 26 floor)
+/// - every other host → QEMU builder (availability determines whether the
+///   unsupported/dev host can actually run it)
 pub fn auto_detect_default_for(
-    plat: Platform,
-    is_macos_26_apple_silicon: bool,
+    _plat: Platform,
+    is_macos_apple_silicon: bool,
 ) -> BuilderBackendChoice {
-    if is_macos_26_apple_silicon {
+    if is_macos_apple_silicon {
         BuilderBackendChoice::Hvf
-    } else if matches!(plat, Platform::LinuxNative) {
-        BuilderBackendChoice::Qemu
     } else {
-        BuilderBackendChoice::Libkrun
+        BuilderBackendChoice::Qemu
     }
 }
 
 /// Auto-detect using the live runtime platform + compile-time arch.
-/// `is_hvf_default_tier()` already enforces `Platform::MacOS` +
-/// `is_macos_26_or_later()`; the arch check completes the "Apple
-/// Silicon" half of the predicate.
+/// The architecture check keeps unsupported Intel hosts out of the native HVF
+/// path. Runtime availability reports the macOS 26 minimum on older systems.
 pub fn auto_detect_default() -> BuilderBackendChoice {
-    let is_target = current().is_hvf_default_tier() && cfg!(target_arch = "aarch64");
+    let is_target = matches!(current(), Platform::MacOS) && cfg!(target_arch = "aarch64");
     auto_detect_default_for(current(), is_target)
 }
 
@@ -419,7 +415,8 @@ fn is_linux_native_host() -> bool {
 ///
 /// - An **explicit** choice (CLI flag / `MVM_BUILDER_BACKEND`) is honoured with
 ///   no fallback — the operator asked for that backend specifically.
-/// - Auto-detected **hvf** falls back to **libkrun** on macOS.
+/// - Auto-detected **hvf** stays on HVF; an HVF failure never creates a hidden
+///   dependency on optional libkrun packages.
 /// - Auto-detected **libkrun on Linux** no longer falls back to **qemu**.
 ///   The qemu builder uses user-mode networking (`-netdev user`) and is not a
 ///   valid substitute for the production vsock-only builder/runtime story.
@@ -435,7 +432,6 @@ pub fn builder_attempt_order(
         return vec![selected];
     }
     match selected {
-        BuilderBackendChoice::Hvf => vec![BuilderBackendChoice::Hvf, BuilderBackendChoice::Libkrun],
         BuilderBackendChoice::Libkrun if is_linux_native && libkrun_unhealthy => {
             vec![BuilderBackendChoice::Libkrun]
         }
@@ -641,10 +637,10 @@ pub fn linux_builder_vm_readiness() -> Result<(), BuilderVmError> {
 mod tests {
     /// A backend declining an operation is a reason to try the next one.
     ///
-    /// The regression this pins: hvf declines the dependency install, libkrun
-    /// serves it, and the auto-detected macOS order is exactly
-    /// `[hvf, libkrun]` — yet the refusal was not classified as VMM-level, so
-    /// the fallback stopped on the backend that could not do the job.
+    /// A backend refusal remains distinguishable from a guest build failure.
+    /// The shared runner uses that classification for explicit integrations
+    /// that define more than one attempt; standard HVF selection remains a
+    /// single-backend path.
     #[test]
     fn a_backend_declining_an_operation_is_a_vmm_level_failure() {
         assert!(is_builder_vm_level_failure(
@@ -719,7 +715,7 @@ mod tests {
     // ── Auto-detect (pure, hermetic — no env / OS / arch sensitivity) ──
 
     #[test]
-    fn auto_detect_default_for_macos_26_apple_silicon_picks_hvf() {
+    fn auto_detect_default_for_apple_silicon_macos_picks_hvf() {
         assert_eq!(
             auto_detect_default_for(Platform::MacOS, true),
             BuilderBackendChoice::Hvf
@@ -735,21 +731,21 @@ mod tests {
     }
 
     #[test]
-    fn auto_detect_default_for_non_linux_non_hvf_hosts_picks_libkrun() {
-        // macOS Intel, macOS 13-25 Apple Silicon, Windows, WSL2 — they all
-        // collapse into the same "not macOS 26 + AS, not Linux native" bucket,
-        // which means libkrun.
+    fn auto_detect_default_never_selects_optional_libkrun() {
+        // Supported Apple Silicon Macs pass `true` regardless of OS version,
+        // select HVF, and let the HVF availability check enforce its OS floor.
+        // Other hosts stay on the dependency-free QEMU builder path.
         assert_eq!(
             auto_detect_default_for(Platform::MacOS, false),
-            BuilderBackendChoice::Libkrun
+            BuilderBackendChoice::Qemu
         );
         assert_eq!(
             auto_detect_default_for(Platform::Wsl2, false),
-            BuilderBackendChoice::Libkrun
+            BuilderBackendChoice::Qemu
         );
         assert_eq!(
             auto_detect_default_for(Platform::LinuxNoKvm, false),
-            BuilderBackendChoice::Libkrun
+            BuilderBackendChoice::Qemu
         );
     }
 
@@ -953,7 +949,7 @@ mod tests {
             builder_attempt_order(Libkrun, true, true, false),
             vec![Libkrun]
         );
-        // libkrun off-Linux (e.g. macOS 13-25) → no qemu fallback.
+        // libkrun off-Linux → no qemu fallback.
         assert_eq!(
             builder_attempt_order(Libkrun, false, false, false),
             vec![Libkrun]
@@ -984,18 +980,12 @@ mod tests {
     }
 
     #[test]
-    fn attempt_order_preserves_hvf_to_libkrun_and_explicit_qemu() {
+    fn attempt_order_keeps_hvf_and_qemu_single_backend() {
         use BuilderBackendChoice::*;
-        // macOS auto-detect: hvf → libkrun (the libkrun marker never reorders
-        // this macOS path).
-        assert_eq!(
-            builder_attempt_order(Hvf, false, false, false),
-            vec![Hvf, Libkrun]
-        );
-        assert_eq!(
-            builder_attempt_order(Hvf, false, false, true),
-            vec![Hvf, Libkrun]
-        );
+        // macOS auto-detect stays on HVF even when the optional libkrun
+        // integration has been marked unhealthy.
+        assert_eq!(builder_attempt_order(Hvf, false, false, false), vec![Hvf]);
+        assert_eq!(builder_attempt_order(Hvf, false, false, true), vec![Hvf]);
         assert_eq!(builder_attempt_order(Hvf, true, false, false), vec![Hvf]);
         // Explicit qemu is a single attempt.
         assert_eq!(builder_attempt_order(Qemu, false, true, false), vec![Qemu]);
@@ -1237,24 +1227,18 @@ mod tests {
     // ── Hvf attempt order ─────────────────────────────────────
 
     #[test]
-    fn attempt_order_hvf_auto_falls_back_to_libkrun() {
+    fn attempt_order_hvf_auto_never_falls_back_to_libkrun() {
         use BuilderBackendChoice::*;
-        assert_eq!(
-            builder_attempt_order(Hvf, false, false, false),
-            vec![Hvf, Libkrun]
-        );
-        assert_eq!(
-            builder_attempt_order(Hvf, false, true, false),
-            vec![Hvf, Libkrun]
-        );
+        assert_eq!(builder_attempt_order(Hvf, false, false, false), vec![Hvf]);
+        assert_eq!(builder_attempt_order(Hvf, false, true, false), vec![Hvf]);
         // Explicit → single attempt, no fallback.
         assert_eq!(builder_attempt_order(Hvf, true, false, false), vec![Hvf]);
     }
 
     #[test]
-    fn hvf_boot_failure_is_vmm_level_so_fallback_fires() {
+    fn hvf_boot_failure_remains_a_vmm_level_error() {
         // The variant HvfBuilderVm::run_build returns for a boot/power-off
-        // failure must be classified VMM-level so the auto path retries libkrun.
+        // failure remains distinguishable from a guest build failure.
         assert!(is_builder_vm_level_failure(&BuilderVmError::HvfVmmFailed {
             detail: "boot failed".into(),
         }));
@@ -1270,36 +1254,29 @@ mod tests {
             .expect("registered ctor constructs a builder");
     }
 
-    // ── Fallback safety: hvf fails → libkrun succeeds ─────────
+    // ── HVF failures never acquire a hidden libkrun dependency ─────────
 
     #[test]
-    fn auto_hvf_failure_falls_back_to_libkrun_and_succeeds() {
+    fn auto_hvf_failure_surfaces_without_a_libkrun_retry() {
         use std::cell::RefCell;
         let scratch = tempfile::TempDir::new().unwrap();
         let mut env = TestEnv::new();
         env.set("MVM_HOME", scratch.path().join(".cache"));
         let calls = RefCell::new(Vec::new());
-        // Drive the order directly (host-agnostic): hvf fails VMM-level, libkrun ok.
+        // Drive the order directly (host-agnostic): an HVF failure must surface
+        // without trying the optional libkrun integration.
         let order = builder_attempt_order(BuilderBackendChoice::Hvf, false, false, false);
-        assert_eq!(
-            order,
-            vec![BuilderBackendChoice::Hvf, BuilderBackendChoice::Libkrun]
-        );
-        let result = run_with_builder_fallback(BuilderBackendChoice::Hvf, false, |c| {
-            calls.borrow_mut().push(c);
-            match c {
-                BuilderBackendChoice::Libkrun => Ok(()),
-                _ => Err(BuilderVmError::SupervisorExited {
+        assert_eq!(order, vec![BuilderBackendChoice::Hvf]);
+        let result: Result<(), _> =
+            run_with_builder_fallback(BuilderBackendChoice::Hvf, false, |c| {
+                calls.borrow_mut().push(c);
+                Err(BuilderVmError::SupervisorExited {
                     exit_code: 1,
                     vm_state_dir: "/x".into(),
-                }),
-            }
-        });
-        assert!(result.is_ok());
-        assert_eq!(
-            *calls.borrow(),
-            vec![BuilderBackendChoice::Hvf, BuilderBackendChoice::Libkrun]
-        );
+                })
+            });
+        assert!(result.is_err());
+        assert_eq!(*calls.borrow(), vec![BuilderBackendChoice::Hvf]);
     }
 
     #[test]

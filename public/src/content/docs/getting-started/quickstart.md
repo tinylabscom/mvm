@@ -65,10 +65,8 @@ your platform:
 - **Linux with `/dev/kvm`:** auto-selects the QEMU builder backend;
   your built workloads boot on Firecracker.
 - **macOS 26+ Apple Silicon:** auto-selects the HVF builder backend
-  (Hypervisor.framework, vsock-only, no Homebrew deps), with an
-  automatic fallback to libkrun if HVF fails to create its VM.
-- **macOS 13–25 Apple Silicon:** auto-selects the libkrun builder
-  backend (the in-process VMM from the `slp/krun` Homebrew trio).
+  (Hypervisor.framework, vsock-only, no Homebrew or libkrun dependency).
+  HVF errors surface directly rather than activating a hidden fallback.
 
 mvm targets Apple Silicon on macOS and `/dev/kvm` on Linux. There is no Docker
 or container runtime path; a host without a supported microVM backend surfaces a

@@ -69,8 +69,9 @@ fn closure_nar_path(arch_dir: &Path) -> Option<PathBuf> {
 ///   call, cache hit or miss.
 ///
 /// On cache hit the existing kernel/rootfs pair is returned without rebaking.
-/// On any VMM-level failure returns `BuilderVmError::HvfVmmFailed` so the
-/// builder auto-detect fallback can retry libkrun.
+/// On any VMM-level failure returns `BuilderVmError::HvfVmmFailed`; the
+/// standard builder path reports that failure without acquiring an optional
+/// libkrun dependency.
 pub fn resolve_hvf_builder_image() -> Result<(PathBuf, PathBuf, Option<PathBuf>), BuilderVmError> {
     let arch = std::env::consts::ARCH;
     let arch_dir = builder_vm_cache_dir().join(arch);

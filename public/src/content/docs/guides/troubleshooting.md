@@ -406,13 +406,13 @@ mvmctl machine run --flake . --hypervisor qemu    # dev/test, no /dev/kvm
 mvmctl doctor   # check available backends
 ```
 
-### macOS: first-run codesigning for `hvf` and `libkrun`
+### macOS: codesigning the native HVF supervisor
 
-The macOS backends — `hvf` (the default) and `libkrun` — need ad-hoc codesigning before the macOS kernel will let the binary touch the hypervisor APIs:
+The standard macOS backend is native `hvf`. Its per-VM supervisor needs ad-hoc codesigning before the macOS kernel will let it use Hypervisor.framework:
 
-- `com.apple.security.hypervisor` — required by direct `Hypervisor.framework` callers (the `hvf` and `libkrun` backends).
+- `com.apple.security.hypervisor` — required by the `mvm-hvf-supervisor` process that directly calls Hypervisor.framework.
 
-On the **first** run of either backend, `mvmctl` ad-hoc signs itself with the entitlement and re-spawns the current invocation. The same signed binary covers both backends, so swapping `--hypervisor` between `hvf` and `libkrun` does not re-sign.
+The release installer signs the supervisor during installation. Standard builds and releases neither install nor link libkrun; its backend is available only to contributors who explicitly enable and provision that integration.
 
 What you'll see on the first run:
 
@@ -422,7 +422,7 @@ INFO Signing binary with hypervisor entitlement...
 …starts the VM…
 ```
 
-On macOS 14+ the ad-hoc signature is accepted by Gatekeeper without an extra prompt. If you had previously installed `mvmctl` from a Homebrew bottle signed against a different entitlement set, the re-spawn will trigger once on the next run after upgrade to lift the binary to the hypervisor entitlement; subsequent runs are silent.
+On macOS 14+ the ad-hoc signature is accepted by Gatekeeper without an extra prompt.
 
 To pre-sign in CI (skip the re-spawn entirely), set `MVM_SIGNED=1` once the binary on disk already carries the hypervisor entitlement — the wrapper trusts the env var and skips the codesign probe.
 

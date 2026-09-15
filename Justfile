@@ -40,11 +40,8 @@ toolchain-embed:
 
 # Build all crates (debug), including the per-VM host helpers `mvmctl` spawns.
 #
-# The helpers need their own step because `mvm-libkrun-supervisor` sits behind
-# `required-features`, which `--workspace` does not enable. Without it a
-# contributor on a libkrun host gets a `mvmctl` that cannot start a VM, which is
-
-# not what "build all crates" should mean.
+# The native per-VM helpers are separate bin targets. The optional libkrun
+# integration has its own explicit recipe and is never part of `just build`.
 build: build-supervisors
     ./scripts/cargo-fast.sh build --workspace
 
@@ -398,11 +395,6 @@ bdd-live-ci:
 # `aux_bin::resolve` looks for them. Reach for this after `cargo run -p mvm-cli`,
 # which builds no sibling `[[bin]]`s; `just build` runs it for you.
 #
-# `mvm-libkrun-supervisor` needs its own invocation because it carries
-# `required-features = ["libkrun-sys"]`, which a plain `--bins` does not enable,
-# and that feature makes `libkrun-sys`'s build script demand a real `libkrun.h`.
-# So it is probed for, on the same three paths that build script checks.
-#
 # Bare, this writes the debug helpers. Pass `--release` if the mvmctl you invoke
 # is the release one: `aux_bin::resolve` searches `target/release` before
 # `target/debug` and takes the first hit, so a release mvmctl with no release
@@ -419,18 +411,16 @@ build-supervisors *ARGS:
     # same rust-objcopy repair; without it every supervisor ships unstripped.
     source "{{justfile_directory()}}/scripts/macos-objcopy-env.sh" "{{justfile_directory()}}"
     ./scripts/cargo-fast.sh build -p mvm-hostd --bins {{ARGS}}
-    header="${MVM_LIBKRUN_HEADER:-}"
-    if [[ -z "$header" ]]; then
-      for candidate in /opt/homebrew/include/libkrun.h /usr/local/include/libkrun.h /usr/include/libkrun.h; do
-        [[ -f "$candidate" ]] && header="$candidate" && break
-      done
-    fi
-    if [[ -f "$header" ]]; then
-      ./scripts/cargo-fast.sh build -p mvm-hostd --bin mvm-libkrun-supervisor --features libkrun-sys {{ARGS}}
-    else
-      echo "build-supervisors: no libkrun.h — skipping mvm-libkrun-supervisor."
-      echo "  Install it (brew install slp/krun/libkrun) if you need the libkrun backend."
-    fi
+
+# Explicit contributor-only libkrun integration. This is intentionally absent
+# from `build` and `build-supervisors` so standard builds never probe for
+# libkrun.h or enable native libkrun linkage.
+build-libkrun-supervisor *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{justfile_directory()}}/scripts/macos-objcopy-env.sh" "{{justfile_directory()}}"
+    ./scripts/cargo-fast.sh build -p mvm-hostd \
+      --bin mvm-libkrun-supervisor --features libkrun-sys {{ARGS}}
 
 # Build an mvmctl that carries the Linux host binaries the builder VM needs,
 # plus the native per-VM helpers it spawns beside the resulting executable.

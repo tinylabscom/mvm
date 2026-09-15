@@ -119,7 +119,8 @@ and it already audits every launch.
 | Host | Architecture | Backend | Status |
 |---|---|---|---|
 | Linux with \`/dev/kvm\` | x86_64, aarch64 | Firecracker | Supported; strongest local target |
-| macOS Apple Silicon | aarch64 | HVF on macOS 26+, libkrun on 13–25 | Supported |
+| macOS 26+ Apple Silicon | aarch64 | Native HVF | Supported; no Homebrew VMM dependency |
+| macOS 13–25 Apple Silicon | aarch64 | none | Not supported; update macOS or use Linux/KVM |
 | Linux without \`/dev/kvm\` | x86_64, aarch64 | QEMU (TCG) | Dev/test only, never auto-selected |
 | WSL2 with nested KVM | x86_64, aarch64 | none auto-selected | Experimental; \`doctor\` reports unsupported, only the dev/test QEMU tier runs |
 | Windows, native | any | none | Not supported; use WSL2 |

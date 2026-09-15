@@ -277,14 +277,13 @@ pub(super) fn builder_transport_check(_plat: Platform) -> Check {
 ///
 /// `mvm_build::builder_backend_select` enforces priority
 /// `--builder` flag > `MVM_BUILDER_BACKEND` env > platform default
-/// (macOS 26+ Apple Silicon → hvf; Linux native → qemu; everywhere else →
+/// (Apple Silicon macOS → hvf; Linux native → qemu; everywhere else →
 /// libkrun). The
 /// flag is folded into the env at startup (`commands::run`), so by
 /// the time doctor runs every override is observable via env.
 ///
-/// The check is informational — it never fails. A missing libkrun
-/// prereq is reported by the platform-level `libkrun_check` already in
-/// the report; this check is about the *selection*, not the availability.
+/// The check is informational — it never fails. libkrun appears only when an
+/// explicit development override selects it.
 #[cfg(feature = "builder-vm")]
 pub(super) fn builder_backend_check(plat: Platform) -> Check {
     use mvm_build::builder_backend_select::{
@@ -301,7 +300,7 @@ pub(super) fn builder_backend_check(plat: Platform) -> Check {
     // function untestable for any platform other than the one running it.
     let auto = auto_detect_default_for(
         plat,
-        plat.is_hvf_default_tier() && cfg!(target_arch = "aarch64"),
+        matches!(plat, Platform::MacOS) && cfg!(target_arch = "aarch64"),
     );
     let resolved = env_override.unwrap_or(auto);
 

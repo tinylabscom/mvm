@@ -383,7 +383,11 @@ fn install_sh_codesigns_all_macos_vm_targets() {
         "HVF supervisor was not codesigned: {log}"
     );
     assert!(
-        log.contains("mvm-libkrun-supervisor"),
-        "libkrun supervisor was not codesigned: {log}"
+        !log.contains("mvm-libkrun-supervisor"),
+        "the standard installer must ignore optional libkrun payloads: {log}"
+    );
+    assert!(
+        !install_dir.join("mvm-libkrun-supervisor").exists(),
+        "the standard installer must not install the optional libkrun supervisor"
     );
 }

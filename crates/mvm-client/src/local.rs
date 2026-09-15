@@ -68,6 +68,15 @@ pub fn default_vcpus() -> u32 {
     2
 }
 
+/// Name of the workload backend selected by the canonical host ladder.
+///
+/// Keeps callers on the client facade instead of coupling them to the runtime
+/// backend enum merely to resolve the standard platform default.
+#[must_use]
+pub fn auto_selected_backend_name() -> String {
+    AnyBackend::auto_select().name().to_string()
+}
+
 impl LocalBackend {
     pub fn new() -> Self {
         Self {
@@ -1007,6 +1016,14 @@ mod tests {
     use super::*;
     #[cfg(feature = "test-support")]
     use mvm_core::util::test_env::TestEnv;
+
+    #[test]
+    fn auto_selected_backend_name_exposes_only_standard_backends() {
+        assert!(
+            matches!(auto_selected_backend_name().as_str(), "firecracker" | "hvf"),
+            "automatic selection must never expose an opt-in backend"
+        );
+    }
 
     // Only the mock-driven `LocalBackend` tests below need an isolated
     // `MVM_HOME` (they boot/list/stop machines against real on-disk state);

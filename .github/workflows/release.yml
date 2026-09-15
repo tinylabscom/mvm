@@ -63,14 +63,13 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             os: macos-latest
-          # x86_64-apple-darwin (Intel mac) is DEFERRED. The macOS mvmctl
-          # links libkrun (Plan 87 W5), so an x86_64 binary must build on a
-          # native Intel runner — but GitHub's macos-13 Intel runners are
+          # x86_64-apple-darwin (Intel mac) is DEFERRED. GitHub's macos-13
+          # Intel runners are
           # unavailable to this org (jobs sit queued for hours, never
           # starting), which blocked the whole release. Apple Silicon is the
-          # product baseline (macOS 26+); restore this when an Intel runner
-          # is available (hosted capacity or self-hosted) or via a libkrun
-          # cross-link. install.sh / the Homebrew on_intel arm still point at
+          # product baseline (macOS 26+); restore this only when the native HVF
+          # path supports Intel and an Intel runner is available. install.sh /
+          # the Homebrew on_intel arm still point at
           # the (currently absent) asset.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
@@ -99,20 +98,6 @@ jobs:
       # fails at "cargo zigbuild failed for mvm-host-vm-init".
       - uses: ./.github/actions/install-zigbuild
 
-      # Released macOS binaries retain compatibility with macOS 13–25 by
-      # explicitly enabling libkrun below. That feature runs bindgen against
-      # libkrun.h and links libkrun; ordinary macOS 26+ source builds use the
-      # dependency-free HVF path and do not enable it. Linux uses Firecracker.
-      #
-      # `brew trust` is required since Homebrew began refusing to auto-load
-      # formulae from third-party ("untrusted") taps: installing
-      # `slp/krun/libkrun` pulls a transitive formula (`virglrenderer`) from the
-      # same tap, and without trust the install fails with "Refusing to load
-      # formula ... from untrusted tap slp/krun". Tap + trust before installing.
-      - name: Install libkrun (macOS backend FFI)
-        if: runner.os == 'macOS'
-        uses: ./.github/actions/install-libkrun
-
       - name: Install cross-compilation tools (Linux aarch64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
@@ -135,13 +120,7 @@ jobs:
           # Use vendored OpenSSL for cross-compilation to avoid linking issues
           OPENSSL_STATIC: 1
           OPENSSL_VENDORED: 1
-        shell: bash
-        run: |
-          FEATURES="${MVMCTL_RELEASE_FEATURES}"
-          if [[ "${TARGET}" == *apple-darwin ]]; then
-            FEATURES="${FEATURES},libkrun-sys"
-          fi
-          cargo build --profile release-min --target "${TARGET}" --features "${FEATURES}"
+        run: cargo build --profile release-min --target "${TARGET}" --features "${MVMCTL_RELEASE_FEATURES}"
 
       # The per-VM host processes mvmctl spawns at runtime (one process per
       # guest). They are SEPARATE bin targets in `mvm-hostd` — the root
@@ -156,11 +135,8 @@ jobs:
       # `xtask check-per-vm-host-binaries-sync` fails the build if the two
       # drift. Add a binary there, not here.
       #
-      # macOS additionally gets the two supervisors. mvm-libkrun-supervisor is
-      # macOS-only INTENTIONALLY — it has `required-features = ["libkrun-sys"]`
-      # and the released Linux mvmctl deliberately does not link libkrun (see
-      # the rationale in the top-level Cargo.toml): Linux workloads use
-      # Firecracker, so the supervisor is neither buildable nor needed there.
+      # Apple Silicon macOS additionally gets the native HVF supervisor. The
+      # optional libkrun integration is not part of standard release artifacts.
       - name: Build per-VM host binaries
         env:
           TARGET: ${{ matrix.target }}
@@ -171,8 +147,6 @@ jobs:
           if [[ "${TARGET}" == *apple-darwin ]]; then
             cargo build --release --target "${TARGET}" -p mvm-hostd \
               --bin mvm-hvf-supervisor
-            cargo build --release --target "${TARGET}" -p mvm-hostd \
-              --bin mvm-libkrun-supervisor --features libkrun-sys
           fi
           # Ships on every target — see the note above.
           cargo build --release --target "${TARGET}" -p mvm-hostd \
@@ -240,7 +214,7 @@ jobs:
           # surface much later as a spawn failure on a user's machine.
           REQUIRED_HOSTBINS="mvm-host-agent mvm-signer-helper mvm-network-endpoint mvm-broker mvm-audit-signer"
           if [[ "${TARGET}" == *apple-darwin ]]; then
-            REQUIRED_HOSTBINS="${REQUIRED_HOSTBINS} mvm-hvf-supervisor mvm-libkrun-supervisor"
+            REQUIRED_HOSTBINS="${REQUIRED_HOSTBINS} mvm-hvf-supervisor"
           fi
           for hostbin in ${REQUIRED_HOSTBINS}; do
             src="target/${TARGET}/release/${hostbin}"
