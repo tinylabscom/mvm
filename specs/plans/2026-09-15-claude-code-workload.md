@@ -87,7 +87,9 @@ remote template second.
   (`~/.claude`) persisted by pointing `CLAUDE_CONFIG_DIR` at a directory on
   the same volume, because guest `$HOME` is tmpfs and vanishes on stop
   (`crates/mvm-agentd/src/guest_mount.rs`).
-- Network: `--allow-host api.anthropic.com:443` only. The image sets
+- Network: `--allow-host api.anthropic.com:443` plus
+  `platform.claude.com:443` (the interactive mode's startup key check —
+  W0 finding). The image sets
   `DISABLE_AUTOUPDATER=1`, `DISABLE_TELEMETRY=1`,
   `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` so nothing wants the
   endpoints we refuse, instead of widening the allow-list. Optional wider
@@ -172,10 +174,13 @@ catalog's own header note).
 - [x] Resolve packaging option 1 vs 2 vs 3 (does `pkgs.claude-code` exist in
       the pin, and does the npm package's platform-binary layout survive
       `importNpmLock`). See findings below.
-- [ ] Interactive smoke on a hand-built flake: TUI under `machine console`
-      (raw mode, resize, colors), Ctrl-C forwarded as a byte, idle-reaper
-      interplay — verify a long "thinking" pause under an attached console
-      does not trip `MVM_TIMEOUT`/`--ttl` teardown
+- [x] Interactive smoke: TUI (raw mode, resize, colors), Ctrl-C forwarded
+      as a byte, a real API turn — passed by hand on 2026-09-15 via
+      `machine run -it` on the npx lane (see findings). Still open, folded
+      into the W2 live scenario: the same checks under `machine console`
+      on a persistent machine, and idle-reaper interplay — a long
+      "thinking" pause under an attached console must not trip
+      `MVM_TIMEOUT`/`--ttl` teardown
       (`crates/mvm-hostd/src/supervisor/reaper.rs`, `touch_activity`).
 - [x] Findings recorded as `.agent-memory/notes/` entries plus a short
       findings section appended to this plan (interactive-console smoke
@@ -250,6 +255,17 @@ All on real HVF VMs on macOS 26 Apple Silicon, `--runtime node`
   per-VM egress CA was provisioned because no substitution service was
   assembled. The terminator option's guest-trust half is therefore only
   present when secrets are actually bound.
+- **Interactive TUI: passed by hand** (2026-09-15, `machine run -it`,
+  npx lane, real API key). Rendering, resize reflow, Ctrl-C-as-keystroke,
+  and a live API turn all behaved. One more endpoint surfaced: the
+  interactive mode checks the key against the Console at startup, and the
+  refused host renders in-UI as "Unable to connect to Anthropic services
+  … Status 403" — so the interactive lane's minimum allow-list is
+  **three** hosts (`api.anthropic.com:443`, `platform.claude.com:443`,
+  plus `registry.npmjs.org:443` for the npx lane only), with
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` baked in so optional
+  traffic never hits the deny wall. The headless `--bare -p` lane was not
+  observed needing the Console host; verify before widening Lane B.
 - Transient runs self-cleaned (no stray VM state, supervisors, or
   endpoints). Host setup friction worth knowing: a rebuilt `mvmctl` needs
   `mvmctl env sign` before HVF boots it, and `just toolchain-embed`'s
