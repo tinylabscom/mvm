@@ -170,9 +170,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
     }
 
     sign_target "$INSTALL_DIR/mvmctl" "$INSTALL_DIR/assets/mvmctl.entitlements"
-    for hostbin in mvm-hvf-supervisor; do
-      sign_target "$INSTALL_DIR/$hostbin" "$INSTALL_DIR/assets/mvm-supervisor.entitlements"
-    done
+    sign_target "$INSTALL_DIR/mvm-hvf-supervisor" "$INSTALL_DIR/assets/mvm-supervisor.entitlements"
   fi
 fi
 

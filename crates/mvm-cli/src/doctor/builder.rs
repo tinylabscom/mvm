@@ -277,10 +277,9 @@ pub(super) fn builder_transport_check(_plat: Platform) -> Check {
 ///
 /// `mvm_build::builder_backend_select` enforces priority
 /// `--builder` flag > `MVM_BUILDER_BACKEND` env > platform default
-/// (Apple Silicon macOS → hvf; Linux native → qemu; everywhere else →
-/// libkrun). The
-/// flag is folded into the env at startup (`commands::run`), so by
-/// the time doctor runs every override is observable via env.
+/// (Apple Silicon macOS → hvf; all other native hosts → qemu). The flag is
+/// folded into the env at startup (`commands::run`), so by the time doctor
+/// runs every override is observable via env.
 ///
 /// The check is informational — it never fails. libkrun appears only when an
 /// explicit development override selects it.
@@ -798,37 +797,31 @@ mod tests {
         assert!(c.info.contains("qemu"), "got {:?}", c.info);
     }
 
-    /// The report line must derive entirely from the platform it is handed.
-    ///
-    /// This pins the fix for a real inconsistency: the check used to resolve
-    /// the backend from a second, independent probe of the live host
-    /// (`auto_detect_default()`) while deriving the availability half from the
-    /// `plat` argument, so on a host whose real platform differed from `plat`
-    /// the two halves of one line described different machines.
-    ///
-    /// It is also the assertion that fails on *any* host if that regresses:
-    /// a Linux box with `/dev/kvm` re-probes to qemu, one without re-probes to
-    /// libkrun, so whichever machine runs this, one of the two cases below
-    /// contradicts the live probe.
-    #[cfg(all(target_os = "linux", feature = "builder-vm"))]
+    /// The report follows the supplied platform policy without introducing an
+    /// automatic libkrun dependency. On aarch64, the macOS fixture also keeps
+    /// this check distinct from the live platform on Linux CI.
+    #[cfg(feature = "builder-vm")]
     #[test]
-    fn builder_backend_check_derives_the_backend_from_the_platform_it_is_given() {
+    fn builder_backend_check_uses_platform_policy_without_libkrun_default() {
         let mut env = TestEnv::new();
         env.remove("MVM_BUILDER_BACKEND");
 
-        let native = builder_backend_check(Platform::LinuxNative);
-        assert!(
-            native.info.starts_with("qemu — "),
-            "LinuxNative must resolve qemu regardless of the running host; got: {}",
-            native.info
-        );
-
         let no_kvm = builder_backend_check(Platform::LinuxNoKvm);
         assert!(
-            no_kvm.info.starts_with("libkrun — "),
-            "LinuxNoKvm must resolve libkrun regardless of the running host; got: {}",
+            no_kvm.info.starts_with("qemu — "),
+            "LinuxNoKvm must resolve qemu regardless of the running host; got: {}",
             no_kvm.info
         );
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            let macos = builder_backend_check(Platform::MacOS);
+            assert!(
+                macos.info.starts_with("hvf — "),
+                "macOS on aarch64 must resolve HVF regardless of the running host; got: {}",
+                macos.info
+            );
+        }
     }
 
     #[cfg(all(target_os = "linux", feature = "builder-vm"))]

@@ -84,12 +84,12 @@ const LIBKRUN_STAGE0_MEMORY_MIB: u32 = 24 * 1024;
 /// drift.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuilderBackendChoice {
-    /// libkrun-backed builder VM. Default when the env var is unset
-    /// or holds a value we don't recognise.
+    /// Optional libkrun-backed builder VM. Selected only by an explicit
+    /// `MVM_BUILDER_BACKEND=libkrun` / `--builder libkrun` override.
     Libkrun,
-    /// QEMU-backed builder VM (Linux dev/builder substrate). Opt-in via
-    /// `MVM_BUILDER_BACKEND=qemu` / `--builder qemu`;
-    /// auto-detect never picks it (the default-flip is evidence-gated).
+    /// Dependency-free QEMU-backed builder VM. This is the automatic choice
+    /// on native hosts that do not qualify for the Apple Silicon HVF path,
+    /// and can also be selected explicitly.
     Qemu,
     /// HVF builder VM (the destination macOS backend). The
     /// auto-detected default on macOS-26 Apple Silicon; opt-in elsewhere via
