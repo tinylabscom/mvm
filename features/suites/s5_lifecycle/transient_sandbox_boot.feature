@@ -81,18 +81,27 @@ Feature: Transient sandbox boot
     And the output contains "mvm-bdd-cleanup-marker"
     And the isolated mvm home does not contain directory "vms/bdd-transient-cleanup"
 
-  # Gated, not deleted: the claim is rejected on this tier because the forked
-  # child never answers the post-restore identity handshake, and the
-  # launch cold-boots instead. The scenario is the only thing that exercises a
-  # warm claim, so it stays and reports itself unrun rather than passing by
-  # omission.
+  # Opt-in (`MVM_BDD_WARM_CLAIM`), and the only scenario that exercises a warm
+  # claim end to end. It was gated while a forked child could not answer the
+  # post-restore identity handshake; that is fixed on HVF and Firecracker, and
+  # the gate now only keeps a slow live claim out of runs that did not ask for
+  # one.
   @live @warm_claim
   Scenario: machine run cleans the request state after claiming a warm standby
     Given the live mvm home request state is recorded
     And warm residency is enabled
     When I run mvmctl in an isolated live home with "pool warm 1 --image alpine"
     Then the command exits with code 0
-    When I run mvmctl in an isolated live home with "machine run --image alpine --timeout 120 -- /bin/echo mvm-bdd-warm-claim"
+    # `--verbose` because the claim notice is opt-in `[mvm]` chatter, printed to
+    # stderr. Without both, this scenario could not pass on any host even when
+    # the claim succeeded.
+    When I run mvmctl in an isolated live home with "--verbose machine run --image alpine --timeout 120 -- /bin/echo mvm-bdd-warm-claim"
     Then the command exits with code 0
-    And the output contains "Claimed a warm standby ("
+    And the output contains "mvm-bdd-warm-claim"
+    And the error output contains "Claimed a warm standby ("
+    # A claimed child's run must be bound into the audit chain like a cold
+    # boot's. Checked on both streams so a change in where logs go cannot turn
+    # this into a check of nothing.
+    And the output does not contain "sealed transcript is not anchored"
+    And the error output does not contain "sealed transcript is not anchored"
     And the live mvm home has no new transient request state directories

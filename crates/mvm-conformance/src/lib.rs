@@ -176,11 +176,11 @@ pub struct RuntimeCaps {
     /// *true* — the only inverted gate here, because the scenario it guards
     /// asserts a refusal that an enforcing tier has no occasion to make.
     pub wall_clock_enforced: bool,
-    /// A forked child answers the post-restore identity handshake, so a warm
-    /// standby can be claimed rather than falling back to a cold boot.
+    /// The run asked for a live warm claim (`MVM_BDD_WARM_CLAIM`).
     ///
-    /// Read by [`WARM_CLAIM_TAG`]. False on any host whose forked child does not
-    /// answer the handshake.
+    /// Read by [`WARM_CLAIM_TAG`]. An opt-in rather than a probe: a claim warms
+    /// and then consumes a standby, which is slow, so it stays out of runs that
+    /// did not request it.
     pub warm_claim: bool,
 }
 
