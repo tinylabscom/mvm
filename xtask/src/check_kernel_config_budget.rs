@@ -55,8 +55,11 @@ use std::path::Path;
 /// ARM64 then rose by 15 when the shared workload kernel gained the 8250 and
 /// device-tree serial support required by Firecracker while retaining the
 /// PL011 and HVC consoles used by the other supported backends. Its resolved
-/// config measures 959 built-ins. The x86_64 config is unchanged at 917.
-const BUDGET_AARCH64: usize = 959;
+/// config measured 959 built-ins. Linux 6.12.110 replaces GENERIC_PTDUMP with
+/// ARCH_HAS_PTDUMP and adds MHP_DEFAULT_ONLINE_TYPE_OFFLINE, the explicit
+/// default for the already-enabled memory-hotplug family. The replacement is
+/// count-neutral and the new default raises aarch64 to 960; x86_64 remains 917.
+const BUDGET_AARCH64: usize = 960;
 const BUDGET_X86_64: usize = 917;
 
 /// Resolve the budget for a config path by the arch in its name. Unknown →
@@ -165,7 +168,7 @@ mod tests {
 
     #[test]
     fn architecture_budgets_are_pinned_to_resolved_counts() {
-        assert_eq!(BUDGET_AARCH64, 959);
+        assert_eq!(BUDGET_AARCH64, 960);
         assert_eq!(BUDGET_X86_64, 917);
     }
 }

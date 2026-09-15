@@ -40,16 +40,21 @@ const CRATES_IO_API: &str = "https://crates.io/api/v1/crates";
 fn load_kernel_pins() -> (String, String) {
     let manifest = std::env::var("CARGO_MANIFEST_DIR")
         .expect("CARGO_MANIFEST_DIR is set by cargo for integration tests");
-    let data_path = Path::new(&manifest).join("xtask").join("data").join("kernel-pins.json");
+    let data_path = Path::new(&manifest)
+        .join("xtask")
+        .join("data")
+        .join("kernel-pins.json");
     let content = fs::read_to_string(&data_path)
         .unwrap_or_else(|e| panic!("kernel-pins.json must be present: {e}"));
 
     let json: serde_json::Value = serde_json::from_str(&content)
         .unwrap_or_else(|e| panic!("kernel-pins.json must be valid JSON: {e}"));
 
-    let version = json["kernel_version"].as_str()
+    let version = json["kernel_version"]
+        .as_str()
         .unwrap_or_else(|| panic!("kernel-pins.json must have kernel_version string"));
-    let hash = json["kernel_hash"].as_str()
+    let hash = json["kernel_hash"]
+        .as_str()
         .unwrap_or_else(|| panic!("kernel-pins.json must have kernel_hash string"));
 
     (version.to_string(), hash.to_string())
