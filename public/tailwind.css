@@ -29,6 +29,11 @@
 @theme {
   /* ── Base palette (dark, default) ─────────────────────────────── */
   --color-page: #010409;
+  /* The blog hero SVGs draw on their own fixed dark canvas (their bg
+     gradient starts at #0d1117). This token letterboxes them without a
+     visible seam, and deliberately does NOT flip in light mode — the
+     images stay dark there too. */
+  --color-blog-hero-canvas: #0d1117;
   --color-surface: #0d1117;
   --color-surface-2: #161b22;
   --color-border: #30363d;

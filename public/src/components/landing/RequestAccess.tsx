@@ -25,11 +25,14 @@ export function RequestAccess() {
             run the workload. isolate the tenant. enforce the policy. audit the
             execution.
           </h2>
+          {/* The design-partners line is hidden for now, not deleted —
+              restore by uncommenting.
           <p className="max-w-xl text-base leading-relaxed text-body">
             Working with a small group of design partners building agent
             platforms, code interpreters, secure workflow runners, multi-tenant
             SaaS, and edge AI workloads.
           </p>
+          */}
         </Reveal>
 
         <Reveal delay={80}>

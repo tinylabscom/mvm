@@ -16,12 +16,12 @@ const CONTROLS = [
   {
     label: "everything on the record",
     title: "Logging and traceability underneath it all",
-    body: "Admission, launch, and every policy decision land in a chain-signed audit log. Tampering breaks the chain.",
+    body: "Every action is written to a signed log — what started, what ran, what was allowed. Tamper with it and it shows.",
   },
   {
     label: "proof on demand",
     title: "Evidence you can hand to compliance",
-    body: "What ran, and what it was allowed to do — a verifiable record, not a claim. Check it with mvmctl trust audit verify.",
+    body: "What ran, and what it was allowed to do — a verifiable record, not a claim.",
   },
 ];
 
