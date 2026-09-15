@@ -110,28 +110,113 @@ Found while documenting WS0. Without this workstream the example in WS0 can
 only use a hand-written client, which is not "an agent boots in the sandbox".
 It therefore comes before the example and before WS1.
 
-- [ ] Wire the SNI terminator and a per-VM egress CA onto the workload runner
-      path; inject the CA bundle into the guest env; terminate, substitute,
-      re-encrypt and audit a `CONNECT` to a host with a bound secret; stream
-      responses rather than buffering them. Refuse a `CONNECT` to a bound host
-      that cannot be terminated, so a placeholder never leaves unsubstituted.
-- [ ] Collapse the two guest egress entry points into one that handles
-      `CONNECT`, SOCKS5 and absolute-form and hands every flow to the same
-      host endpoint.
-- [ ] One secret-resolution step shared by every admission path (transient,
-      persistent, session, entrypoint). Decide PID 1: wire the boot-time
-      `mvm.secret_env` token or delete its guest-side parser.
-- [ ] Honor `--name` on the kept-alive entrypoint path, and print the machine
-      name.
-- [ ] Audit the substitution when the credential is written upstream, and the
-      outcome separately, so an in-flight failure still leaves an entry.
-- [ ] Expose the agent network preset and the token budget on `machine run` and
-      in the Workload IR, or delete them; delete `up::Args`' unreachable
-      network fields.
-- [ ] Witnesses: `unmodified_https_client_gets_substituted_credential`,
+### Why the terminator is unwired
+
+It was not a decision. The terminator was built against a topology that no
+longer exists: its live glue is driven by a TCP listener recovering the
+original destination from `SO_ORIGINAL_DST` or a proxy preamble
+(`crates/mvm-hostd/src/supervisor/network_endpoint_proxy.rs:68`), which needed
+an nftables redirect off a guest NIC. The vsock-only cutover deleted the NIC
+and the redirect, and `terminator_listen` has been `None` at every call site
+since.
+
+The TLS half is sound and witnessed
+(`crates/mvm-hostd/src/supervisor/terminator/tls.rs` —
+`bound_sni_terminates_substitutes_and_reoriginates`,
+`unbound_sni_is_spliced_without_termination`, and two fail-closed tests), and
+it is generic over `Read + Write`, so it does not care that the transport
+changed. The *flow* half around it (`handle_https_terminator`) is a parallel
+pipeline missing four controls the main one has: it never consults the egress
+gate, never meters the AI budget, never runs reversible replacement, and
+buffers whole responses. Reuse the TLS half; delete the flow half rather than
+re-point it.
+
+### The shape of the fix
+
+Host-only. The guest needs no new code, no new opcode and no new port: the host
+**already** refuses an opaque flow to a bound host
+(`opaque_refusal_reason`, called from `handle_open_tcp` in
+`crates/mvm-hostd/src/supervisor/flowmux.rs:605`), so "a `CONNECT` to a bound
+host is never relayed opaquely" is already true — it just fails instead of
+working. This work turns that refusal into a terminated flow that runs through
+`SubstitutionService::process_body_stream`, which is where the claim-10 gate,
+the claim-12 bind check, redaction, AI metering and streaming already live.
+
+Because the decision moves into the host, whether a request gets substituted
+stops depending on which proxy the workload happened to pick — which is what
+retires the second guest proxy (#3288).
+
+### Decisions taken
+
+- **The per-VM CA is self-signed, not an intermediate under a host root.** The
+  existing minting produces an intermediate, which forces every guest client to
+  support partial-chain verification; rustls does, but older OpenSSL builds do
+  not, and the whole point is that an unmodified client works. A per-VM
+  self-signed root keeps the per-VM scope and the name constraints while
+  removing the compatibility question.
+- **The key is persisted 0600 in the VM state dir**, mirroring the FlowMux
+  identity, so a warm-claimed child can terminate under the identity it
+  inherited rather than refusing.
+- **Cleartext `:80` to a bound host is terminated too.** Symmetric with TLS, and
+  it removes the last reason to keep the absolute-form proxy.
+- **The `CONNECT`-capable guest client survives; the forward proxy on 18080 is
+  deleted.** It cannot stream — it collects the whole body and writes a
+  `content-length`, so a streamed model response arrives at once at the end.
+- **Termination binds to the flow, not the port**: any port whose first bytes
+  are a ClientHello, provided the host is bound. An unbound host is spliced
+  untouched — mediating all guest egress was rejected in ADR-023 and stays
+  rejected.
+
+### Ordered tasks
+
+- [ ] T0. Delete `crates/mvm-hostd/src/supervisor/flowmux/session.rs`, which no
+      `mod` declares and the compiler never sees, and repoint the
+      `check_single_network_path` entries that name it. A gate asserting things
+      about an uncompiled file is worse than no gate.
+- [ ] T1. `terminable(host, port) -> Option<TerminationMode>` beside
+      `opaque_refusal_reason`, with the bound-but-no-intermediate case returning
+      `None` so the flow stays refused.
+- [ ] T2. Generalize `TcpStreamHandle.upstream` to a `FlowSocket` so a flow can
+      be backed by a socket pair as well as a TCP stream. The one real refactor.
+- [ ] T3. `terminator/flow.rs`: terminate, read the request, hand it to
+      `process_body_stream`, write the response back chunked, loop for
+      keep-alive. Refuse when the decrypted `Host` disagrees with the `CONNECT`
+      authority.
+- [ ] T4. Hook `handle_open_tcp`: gate first, then terminate, refuse or relay.
+- [ ] T5. Mint, persist and configure the per-VM CA at the endpoint spawner,
+      honouring warm-claim inheritance.
+- [ ] T6. Deliver the certificate to the guest on the per-boot identity drive
+      and repoint the CA-detection path that keys off a file nothing writes.
+- [ ] T7. Point the proxy environment at the one surviving guest proxy.
+- [ ] T8. Delete the absolute-form forward proxy and its guest binary (#3288).
+- [ ] T9. Audit the substitution when the credential is written, with the
+      outcome recorded separately (#3286).
+- [ ] T10. One secret-resolution step shared by every admission path (#3284),
+      and decide PID 1: wire the boot-time token or delete its guest parser.
+- [ ] T11. Honor `--name` on the kept-alive entrypoint path (#3285).
+- [ ] T12. Expose the agent preset and the token budget, or delete them, and
+      delete the unreachable network fields on the undispatched verb (#3287).
+- [ ] T13. Witnesses in `crates/mvm-hostd/tests/connect_substitution_witness.rs`,
+      modelled on the wasm egress witness (real gate, registry and recorder;
+      only the forwarder is a test double, because the production one refuses
+      loopback): `unmodified_https_client_gets_substituted_credential`,
       `connect_to_bound_host_is_never_relayed_opaquely`,
+      `connect_to_bound_host_without_an_intermediate_is_refused`,
+      `terminated_connect_is_refused_when_policy_denies_the_destination`,
+      `decrypted_host_header_must_match_the_connect_authority`,
+      `terminated_connect_streams_events_before_completion`,
       `substitution_is_audited_when_upstream_fails_after_send`,
-      `every_admission_path_resolves_secrets_identically`.
+      `a_warm_claimed_child_inherits_its_parents_egress_intermediate`,
+      `the_guest_trust_bundle_contains_the_intermediate_and_no_key`. Add them to
+      the ADR-001 rows for claims 12, 13 and 16 in the same change.
+- [ ] T14. Correct ADR-001's claim-10 row, which still describes nftables, TAP
+      and gateway enforcement plus an acknowledgement hatch that does not exist.
+
+### Residual risk to record, not to hide
+
+The gate resolves the destination for the flow, and the forwarder resolves it
+again through the SSRF-guarded resolver — a small rebinding window. Either pass
+the admitted addresses into the forward leg or record the gap explicitly.
 
 ## WS1 — `DriveGrant`: one grant, no new transport
 
