@@ -8,7 +8,7 @@ import react from "@astrojs/react";
 import { sidebar } from "./src/sidebar.ts";
 
 export default defineConfig({
-  site: "https://gomicrovm.com",
+  site: "https://runmvm.com",
   base: "/",
   vite: {
     plugins: [tailwindcss()],

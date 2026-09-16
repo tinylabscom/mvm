@@ -26,11 +26,12 @@ Last updated: 2026-09-16
 - [ ] **Install lifecycle and packaging polish.**
       `specs/plans/2026-09-15-install-lifecycle-and-packaging-polish.md`.
       Epic #3277. Execution started. The stable install URL and its daily live
-      monitor and API-free normal install path are complete; remaining work
+      monitor, production-host deploy check, and API-free normal install path
+      are complete; remaining work
       adds atomic upgrade with rollback, a real uninstaller, in-process
       signature verification to close the claim 20 limits note, installer and
       distro compat lanes, and Nix version-from-manifest.
-  - [x] WS1 — publish and monitor `https://gomicrovm.com/install.sh` (#3268)
+  - [x] WS1 — publish and monitor `https://runmvm.com/install.sh` (#3268, #3331)
   - [x] WS2 — bake the stable version; API only on confirmed 404 (#3269)
   - [ ] WS3–WS7 — atomic lifecycle, verification, compat, and Nix hygiene
         (#3270–#3274)

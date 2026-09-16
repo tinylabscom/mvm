@@ -6,7 +6,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "../ui/tabs";
 // pitch-script reshape; it now renders inside Quickstart so the landing
 // page's story runs before the install command does.
 const ONE_LINER =
-  "curl -fsSL https://raw.githubusercontent.com/tinylabscom/mvm/main/install.sh | sh";
+  "curl -fsSL https://runmvm.com/install.sh | sh";
 
 // Splits on "/" and inserts a <wbr> right after each one, so the browser's
 // only wrap opportunities inside the URL are slash boundaries — never mid
