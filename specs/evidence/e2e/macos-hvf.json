@@ -1,19 +1,19 @@
 {
   "lane": "macos-hvf",
-  "commit": "31b2a4a94c0e0dec00e7305166e0903e5a5ab472",
-  "material_digest": "f5749d1de9b2d9ade50faa47e030b2581dd09516830543fafdfc4065397972a5",
-  "recorded_at": "2026-09-09T01:42:39Z",
+  "commit": "c8e3c98a1cbdeda3a6705ff1b3f3b9a1f2b72c48",
+  "material_digest": "6fed544eebc09ed8c4bb0a7aa6f48dcf22c720a7f428685b48f2c6e42df86670",
+  "recorded_at": "2026-09-16T00:29:55Z",
   "host": {
     "os": "Darwin",
-    "os_version": "26.5.2",
+    "os_version": "26.6.2",
     "arch": "arm64"
   },
   "suite": {
-    "features": 75,
-    "scenarios_total": 308,
-    "scenarios_passed": 307,
-    "scenarios_skipped": 1,
-    "steps_total": 1232,
-    "steps_passed": 1231
+    "features": 3,
+    "scenarios_total": 27,
+    "scenarios_passed": 27,
+    "scenarios_skipped": 0,
+    "steps_total": 152,
+    "steps_passed": 152
   }
 }
