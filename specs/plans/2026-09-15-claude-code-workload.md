@@ -275,19 +275,37 @@ All on real HVF VMs on macOS 26 Apple Silicon, `--runtime node`
 
 ### W1 — the example flake
 
-- [ ] `examples/claude-code/` with one flake, two profiles (interactive
+- [x] `examples/claude-code/` with one flake, two profiles (interactive
       shell entrypoint; headless `--bare -p` command entrypoint), the
       obscura-style `${ALL_PROXY:?...}` fail-loud guard, the
-      telemetry-disable env baked in, and `mvm.toml` carrying
-      `[network] allow_hosts = ["api.anthropic.com:443"]` +
-      `[network.ai] metering = true`.
-- [ ] README covering: launch both lanes, workspace-volume recipe
-      (`--mount workspace.img:/data/work:8G:rw`), key-file mount, state
-      persistence via `CLAUDE_CONFIG_DIR`, getting results out
-      (`machine cp`), and the honest secrets posture (guest holds the key;
-      link ADR-023 for the destination state).
-- [ ] Whatever gate covers examples today covers this one (build the flake
-      in the doc-example lane if eligible; at minimum eval-check it).
+      telemetry-disable env baked in, and `mvm.toml` carrying the
+      three-host allow-list + `[network.ai] metering = true`. Both
+      profiles built through the builder VM on 2026-09-15; the sidecars
+      came out to spec (interactive: accessible shell tier; headless:
+      `sealed: true`, `accessible: false`, recorded `claude --bare -p`
+      argv).
+- [x] README covering: launch both lanes, workspace-volume recipe,
+      key-file mount, state persistence via `CLAUDE_CONFIG_DIR`, getting
+      results out (`machine cp`), and the honest secrets posture (guest
+      holds the key; the plan's W5 is the destination state).
+- [x] Whatever gate covers examples today covers this one: `examples/`
+      markdown is inside the s29 doc-example corpus, so every README
+      command is parse-gated against the real clap tree and recorded in
+      `docs_coverage.toml`; the mkGuest-attribute scenario checks the
+      flake's call. (Image builds stay local/live-lane; the hermetic suite
+      does not build flakes.)
+
+#### W1 findings (2026-09-15)
+
+- A non-default flake profile is addressed as `packages.<system>.
+  tenant-<name>` (`mvm_build::pipeline::dev_build`); only `default` is
+  bare. The example's headless output is `tenant-headless`, selected as
+  `--profile headless` / `--flake-profile headless`.
+- The doc-example coverage ledger
+  (`features/suites/s29_doc_examples/docs_coverage.toml`) is regenerated,
+  not hand-edited: any doc change that adds an `mvmctl` command needs
+  `MVM_UPDATE_DOCS_COVERAGE=1` through the conformance suite in the same
+  change.
 
 ### W2 — runnable end-to-end tests
 
