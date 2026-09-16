@@ -70,6 +70,46 @@ pub(super) fn bundle_pin_from_archive(
 /// config. The `uvol{idx}` tag matches the id the backend assigns when
 /// it attaches each volume (same `VmStartConfig.volumes` order), so the
 /// admitted grants line up 1:1 with what actually gets attached.
+/// The complete host-fs grant list for a boot: one grant per volume the launch
+/// config will attach, with the SDK sidecar's own grant substituted for the
+/// derived one when a sidecar is attached.
+///
+/// The sidecar is attached as an ordinary volume, so deriving grants from the
+/// volume list alone would describe it correctly but tag it `uvol{idx}` like
+/// any user share. Its real grant is tagged `sdk-sidecar` precisely so an audit
+/// reader can tell a host-resolved sidecar from a user-requested one, and that
+/// distinction is worth keeping: the substitution below lets the authoritative
+/// grant win rather than the derived duplicate.
+///
+/// Matching is on the tuple `enforce_admitted_shares` matches on, so a grant
+/// that replaces another admits exactly the attachment it replaced.
+pub(crate) fn admitted_shares_for_boot(
+    volumes: &[mvm_core::vm_backend::VmVolume],
+    sdk_sidecar: Option<&super::SdkSidecarAttachment>,
+) -> Vec<mvm_core::plan::HostShareGrant> {
+    let mut shares = mvm_hostd::run::shares_from_vm_volumes(volumes);
+    let Some(grant) = sdk_sidecar.map(|a| a.grant.clone()) else {
+        return shares;
+    };
+    match shares.iter().position(|g| same_attachment(g, &grant)) {
+        Some(idx) => shares[idx] = grant,
+        None => shares.push(grant),
+    }
+    shares
+}
+
+/// Whether two grants name the same attachment, on exactly the tuple
+/// `mvm_hostd::plan_admission::enforce_admitted_shares` matches on. Keeping the
+/// comparison here and named means a change to what identifies an attachment
+/// has one place to be wrong rather than several.
+fn same_attachment(a: &mvm_core::plan::HostShareGrant, b: &mvm_core::plan::HostShareGrant) -> bool {
+    a.host_path == b.host_path
+        && a.guest_path == b.guest_path
+        && a.kind == b.kind
+        && a.read_only == b.read_only
+        && a.encrypted == b.encrypted
+}
+
 pub(super) fn shares_from_volume_cfg(
     vols: &[image::RuntimeVolume],
 ) -> Vec<mvm_core::plan::HostShareGrant> {
@@ -340,5 +380,122 @@ mod bundle_pin_tests {
         let resolver = InMemoryBundleResolver::new(bytes.clone());
         let out = mvm_core::plan::BundleResolver::resolve(&resolver, "anything").unwrap();
         assert_eq!(out, bytes);
+    }
+}
+
+#[cfg(test)]
+mod admitted_share_tests {
+    use super::*;
+    use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
+
+    fn disk_volume(host: &str, guest: &str, read_only: bool) -> VmVolume {
+        VmVolume {
+            host: host.to_string(),
+            guest: guest.to_string(),
+            size: "1G".to_string(),
+            read_only,
+            kind: VmVolumeKind::Disk,
+            encrypted: false,
+            materialized_image: None,
+            volume_label: None,
+        }
+    }
+
+    fn sidecar_for(host: &str, guest: &str) -> mvm_runtime::sdk_sidecar::SdkSidecarAttachment {
+        mvm_runtime::sdk_sidecar::SdkSidecarAttachment {
+            grant: mvm_core::plan::HostShareGrant {
+                tag: mvm_runtime::sdk_sidecar::SDK_SIDECAR_SHARE_TAG.to_string(),
+                host_path: host.to_string(),
+                guest_path: guest.to_string(),
+                kind: mvm_core::plan::ShareKind::Disk,
+                read_only: true,
+                encrypted: false,
+                content_sha256: None,
+            },
+            volume: disk_volume(host, guest, true),
+            image_sha256: "0".repeat(64),
+            version: "0.0.0".to_string(),
+        }
+    }
+
+    /// The claim-1 property: a volume the launch config will attach is named by
+    /// the plan that admits the boot. `enforce_admitted_shares` refuses any
+    /// attachment it cannot find a grant for, so a volume missing from this
+    /// list is a host directory reaching a guest under a plan that never
+    /// admitted it.
+    #[test]
+    fn every_attached_volume_becomes_an_admitted_grant() {
+        let vols = [
+            disk_volume("/host/data", "/work/data", false),
+            disk_volume("/host/ro", "/work/ro", true),
+        ];
+        let shares = admitted_shares_for_boot(&vols, None);
+        assert_eq!(shares.len(), 2, "both volumes must be admitted: {shares:?}");
+        for v in &vols {
+            assert!(
+                shares.iter().any(|g| g.host_path == v.host
+                    && g.guest_path == v.guest
+                    && g.read_only == v.read_only),
+                "volume {} -> {} has no grant",
+                v.host,
+                v.guest,
+            );
+        }
+    }
+
+    /// The sidecar is attached as an ordinary volume, so a grant for it is
+    /// derived too. The attachment's own grant has to win: it carries the
+    /// `sdk-sidecar` tag that tells an audit reader this share was resolved by
+    /// the host rather than requested by the caller.
+    #[test]
+    fn the_sidecar_grant_replaces_its_derived_duplicate() {
+        let attachment = sidecar_for("/cache/sidecar.img", "/opt/mvm/sdk");
+        let vols = [
+            disk_volume("/host/data", "/work/data", false),
+            attachment.volume.clone(),
+        ];
+        let shares = admitted_shares_for_boot(&vols, Some(&attachment));
+
+        assert_eq!(shares.len(), 2, "the sidecar must not be granted twice");
+        let sidecar = shares
+            .iter()
+            .find(|g| g.guest_path == "/opt/mvm/sdk")
+            .expect("the sidecar volume must still be admitted");
+        assert_eq!(
+            sidecar.tag,
+            mvm_runtime::sdk_sidecar::SDK_SIDECAR_SHARE_TAG,
+            "the derived uvol tag displaced the authoritative sidecar tag",
+        );
+    }
+
+    /// A sidecar the volume list does not carry is still admitted, rather than
+    /// being dropped for having nothing to replace.
+    #[test]
+    fn a_sidecar_absent_from_the_volume_list_is_still_granted() {
+        let attachment = sidecar_for("/cache/sidecar.img", "/opt/mvm/sdk");
+        let shares = admitted_shares_for_boot(&[], Some(&attachment));
+        assert_eq!(shares.len(), 1);
+        assert_eq!(
+            shares[0].tag,
+            mvm_runtime::sdk_sidecar::SDK_SIDECAR_SHARE_TAG
+        );
+    }
+
+    #[test]
+    fn no_volumes_and_no_sidecar_grants_nothing() {
+        assert!(admitted_shares_for_boot(&[], None).is_empty());
+    }
+
+    /// Read-only and encrypted are part of what identifies an attachment, so a
+    /// grant that differs on either does not admit it. Two volumes over the
+    /// same paths with different postures must each get their own grant.
+    #[test]
+    fn a_grant_does_not_admit_an_attachment_with_a_different_posture() {
+        let rw = disk_volume("/host/data", "/work/data", false);
+        let ro = disk_volume("/host/data", "/work/data", true);
+        let shares = admitted_shares_for_boot(&[rw, ro], None);
+        assert_eq!(shares.len(), 2);
+        assert!(shares.iter().any(|g| !g.read_only));
+        assert!(shares.iter().any(|g| g.read_only));
     }
 }

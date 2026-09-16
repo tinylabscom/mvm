@@ -159,6 +159,12 @@ struct EntrypointAdmissionParams<'a> {
     /// Whether this call asked for a host→guest stdin stream. The only thing
     /// that puts the input-plane grant on the signed plan.
     stream_stdin: bool,
+    /// Every volume this boot will attach, admitted as host-fs grants.
+    ///
+    /// Empty for every session VM today — the session launch config attaches
+    /// none — but it is threaded rather than assumed so that attaching one
+    /// later admits it instead of slipping past the plan.
+    volumes: &'a [mvm_core::vm_backend::VmVolume],
 }
 
 impl<'a> EntrypointAdmissionParams<'a> {
@@ -181,6 +187,7 @@ impl<'a> EntrypointAdmissionParams<'a> {
             keep_alive_dev: false,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             stream_stdin: false,
+            volumes: &[],
         }
     }
 }
@@ -198,11 +205,17 @@ struct EntrypointAdmissionParamsBuilder<'a> {
     keep_alive_dev: bool,
     network_policy: mvm_core::network_policy::NetworkPolicy,
     stream_stdin: bool,
+    volumes: &'a [mvm_core::vm_backend::VmVolume],
 }
 
 impl<'a> EntrypointAdmissionParamsBuilder<'a> {
     fn cpus(mut self, cpus: u32) -> Self {
         self.cpus = cpus;
+        self
+    }
+
+    fn volumes(mut self, volumes: &'a [mvm_core::vm_backend::VmVolume]) -> Self {
+        self.volumes = volumes;
         self
     }
 
@@ -263,6 +276,7 @@ impl<'a> EntrypointAdmissionParamsBuilder<'a> {
             keep_alive_dev: self.keep_alive_dev,
             network_policy: self.network_policy,
             stream_stdin: self.stream_stdin,
+            volumes: self.volumes,
         }
     }
 }
@@ -303,7 +317,7 @@ fn admit_entrypoint_boot(
         policy_dir: None,
         bundle_pin: None,
         deps_volume: None,
-        shares: vec![],
+        shares: mvm_hostd::run::shares_from_vm_volumes(params.volumes),
         assets: Vec::new(),
         redaction: mvm_core::policy::RedactionPolicy::default(),
         network_policy: params.network_policy.clone(),
@@ -478,6 +492,7 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
             vm_name,
             sdk_sidecar: _,
             assets: _,
+            volumes,
         } = inputs;
         let admitted = admit_entrypoint_boot(
             EntrypointAdmissionParams::builder(rootfs, kernel, vm_name, &admit_backend)
@@ -489,6 +504,7 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
                 .keep_alive_dev(keep_alive_dev)
                 .network_policy(admit_network_policy.clone())
                 .stream_stdin(stream_stdin)
+                .volumes(volumes)
                 .build(),
         )?;
         let Some(admitted) = admitted else {

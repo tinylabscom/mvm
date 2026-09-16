@@ -75,6 +75,14 @@ pub struct AdmitInputs<'a> {
     /// Declared `--asset` bindings forwarded to admission for content
     /// identity hashing.
     pub assets: &'a [crate::commands::shared::AssetSpec],
+    /// Every volume this boot will attach, as the launch config already
+    /// resolved them.
+    ///
+    /// Admission turns these into the plan's host-fs grants, so the signed
+    /// plan names the same shares the backend is about to mount. Without it a
+    /// `--mount` reaches the guest under a plan that never admitted it, and
+    /// `enforce_admitted_shares` has nothing to check it against (claim 1).
+    pub volumes: &'a [mvm_core::vm_backend::VmVolume],
 }
 
 pub fn boot_session_vm(
@@ -158,6 +166,7 @@ pub fn boot_session_vm(
             // `invoke` declares no standalone assets; its function payload is
             // admitted as the workload itself.
             assets: &[],
+            volumes: &start_config.volumes,
         })?
     {
         start_config.tenant_id = Some(sub.tenant_id);

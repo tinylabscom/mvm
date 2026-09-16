@@ -15,7 +15,12 @@ mod kernel;
 // `pub(crate)` so the crate-root boot-policy facade can re-export the
 // effective-initrd decision; nothing else in the module is `pub`.
 pub(crate) mod oci_persist;
-mod policy;
+// `pub(crate)` so the transient and session boot paths can name
+// `policy::admitted_shares_for_boot` directly. Deliberately not re-exported
+// from here: a `use` line counts as a caller to `check-dormant-controls`, so
+// re-exporting would let the real call site be deleted with the gate still
+// green.
+pub(crate) mod policy;
 mod runtime_source;
 
 pub(super) use admission::{

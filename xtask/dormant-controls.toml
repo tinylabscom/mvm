@@ -64,3 +64,16 @@ The seam that calls `VmBackend::apply_grants` from the CLI's own boot. The \
 backend read-back and the audit entry both existed already; the missing link \
 was this one, and the whole defect was that nothing outside the supervisor's \
 launch path — which no `mvmctl` invocation reaches — ever asked."""
+
+[[control]]
+symbol = "admitted_shares_for_boot"
+file = "crates/mvm-cli/src/commands/vm/up/policy.rs"
+dormant = false
+why = """
+Builds the host-fs grants the signed plan admits, from the volume list the \
+launch config will actually attach. The transient run path built them from the \
+SDK sidecar alone, so `mvmctl run --mount` handed a host directory to a guest \
+under a plan that never named it and `enforce_admitted_shares` had nothing to \
+check the attachment against (claim 1). The function being correct is not the \
+control — being called from the admit closure is. Its unit tests pass whether \
+or not anything calls it, which is the failure this file exists to catch."""
