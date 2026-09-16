@@ -54,14 +54,25 @@ host with `initramfs-tools`.
 release tarball Stage 0 already fetches (`NIX_SEED_AARCH64` /
 `NIX_SEED_X86_64`): a hash-pinned published artifact that is fetched and
 verified even on a contributor checkout, because it is a *means of building*
-rather than the artifact under construction. The artifact already exists —
-`release.yml` publishes `builder-vm-vmlinux-<arch>`, covered by the signed
-checksum manifests under claim 20, reachable through
-`update::download_kernel(arch, "builder", dest)`.
+rather than the artifact under construction. It is pinned the same way, too:
+`mvm_build::stage0_kernel` carries a source-pinned URL and SHA-256 per arch
+(`BOOTSTRAP_KERNEL_AARCH64` / `BOOTSTRAP_KERNEL_X86_64`) for the
+`builder-vm-vmlinux-<arch>` assets of `boot-image/v0.1.5`, copied out of that
+release's checksum manifests after their cosign signatures verified against the
+boot-image release workflow's identity.
+
+The first shape fetched through `update::download_kernel` instead, holding the
+bytes to the signed manifest at run time. That needs the `manifest-verify`
+feature, which an ordinary `just embed` build does not carry, so the first live
+run refused before booting anything: every contributor HVF bootstrap was
+broken. A source pin needs no feature and no run-time trust decision. The
+transport is still injected from `mvm-cli` and is still curl, because the pinned
+URL is a GitHub release asset that redirects and `mvm-http` follows no
+redirects.
 
 This narrows rather than widens the trust surface: the bootstrap kernel stops
 coming from a third-party Homebrew dylib and starts coming from our own
-signature-gated release. It is a documented, narrowly scoped exception to the
+release, held to a digest reviewed in source. It is a documented, narrowly scoped exception to the
 source-checkout-never-fetches rule, and it does not extend to the builder image
 or the workload kernel, which keep the local-build invariant unchanged.
 
@@ -137,15 +148,18 @@ appends the token unconditionally, fixes it for every backend.
 
 ## Validation
 
-Host-side only. `cargo nextest run --workspace` is green and the four-driver
-boot-contract test covers hvf, fc, qemu and mock, but **no live hvf Stage 0 boot
-has run**. This Mac is the tier that would exercise it; a real bootstrap takes a
-published `builder-vm-vmlinux-<arch>` asset to fetch, so the first live run needs
-either a release that carries one or a hand-seeded cache entry. Until that
-happens, treat W3 as wired-and-typechecked rather than proven.
+**HVF is live-proven.** On macOS 26.6.2 arm64, a plain `just embed` build (no
+`user` feature, libkrun installed but never touched) ran
+`mvmctl __builder-vm-bootstrap` against a cold `MVM_HOME` and exited 0 after
+about 11 minutes. The guest's console shows every leg the unit tests cannot:
+`wall clock set from host epoch` (the clock-seed fix), the Nix store found by
+label, substituter traffic through the host egress endpoint, and
+`stage0-init: done; halting`. The cache then held a 760 MiB `rootfs.ext4`, a
+`vmlinux`, `manifest.json`, `cmdline.txt` and provenance.
 
-The libkrun Stage 0 body is untouched and still the fallback, so a failure in the
-new path costs a `--builder libkrun` rather than a broken bootstrap.
+Firecracker is not live-proven: this host has no KVM. The libkrun Stage 0 body is
+untouched and reachable by name, but it is no longer a fallback — nothing lowers
+onto it.
 
 ## Follow-ups
 

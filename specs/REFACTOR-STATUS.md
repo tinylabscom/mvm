@@ -60,8 +60,10 @@ Last updated: 2026-09-16
       and digest-verified as a seed instead of extracted from libkrunfw's
       dylib. Firecracker is now a real builder choice, auto-detected on
       Linux-with-KVM, and `Stage0Vm<D>`/`DriverBuilderVm<D>` are generic over
-      the driver, so a future Windows backend inherits both. W1–W6 landed;
-      **no live boot on any backend yet**, and Firecracker bootstraps but has
+      the driver, so a future Windows backend inherits both. W1–W6 landed.
+      **HVF Stage 0 is live-proven** on a plain `just embed` build, after its
+      bootstrap kernel moved to a source pin; Firecracker is not (no KVM host
+      in that run), and it bootstraps but has
       no builder-image resolver, so steady-state builds on it refuse by name.
 
 - [x] **Claim-witness mutation coverage — issue #3250.**
