@@ -351,10 +351,19 @@ Per AGENTS.md, no workstream is done without tests. The mounted-PTY plan
   `idle_elapsed_prefers_last_active_then_registered_at`,
   `touch_activity_refreshes_last_active_for_registered_vm`). The live
   scenario asserts the remaining wiring: a real console attach on the
-  workbench machine refreshes the registry stamp. Caveat worth carrying to
-  any future resident reaper: `touch_activity` fires once at attach, not
-  during a quiet attached session, so a long "thinking" pause would still
-  age past an idle timeout under a consumer that arms one.
+  workbench machine refreshes the registry stamp. The caveat this finding
+  originally carried — `touch_activity` fired once at attach, so a quiet
+  attached session would still age past an idle timeout under a consumer
+  that arms one — is now closed: an interactive PTY session holds an
+  `ActivityHeartbeat` that re-stamps `last_active` every 60s for the
+  session's lifetime and stops when the client drops (or dies — liveness
+  is bound to the attached process, so a crashed client cannot leave a
+  machine reading as active forever). Witnesses:
+  `heartbeat_beats_repeatedly_until_dropped_then_stops` and
+  `heartbeat_drop_returns_without_waiting_out_the_interval`. The
+  one-shot `--command` leg keeps only the attach-time stamp; a
+  long-running one-shot exec aging past an idle window remains open and
+  is a deliberate non-goal until a consumer exists.
 - **The console leg is the one-shot form** (`machine console <name>
   --command`), which shares the accessible gate, transport pick, and
   activity touch with the PTY loop; the interactive PTY loop itself blocks
