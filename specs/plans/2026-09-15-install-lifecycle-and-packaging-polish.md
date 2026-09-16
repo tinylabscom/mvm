@@ -67,24 +67,39 @@ Issue: [#3269](https://github.com/tinylabscom/mvm/issues/3269).
 
 Issue: [#3270](https://github.com/tinylabscom/mvm/issues/3270).
 
-- [ ] Install into a versioned directory and swap a `current` symlink
+- [x] Install into a versioned directory and swap a `current` symlink
       atomically, so `mvmctl` and its adjacent `mvm-hvf-supervisor` /
       `mvm-network-endpoint` / `assets/` are never observed half-swapped.
-- [ ] Roll back to the previous version on any post-extract failure, including
-      a codesign failure.
-- [ ] Leave the Homebrew path alone; it owns its own cellar.
-- [ ] Test a mid-upgrade failure and assert the previous set still runs.
+      Layout: `<lib>/<n>-<version>/` holds the whole release, `<lib>/current`
+      names one, and every `PATH` entry is a link through `current`, so the
+      rename of `current` is the entire swap. Both places hold the full set
+      because `current_exe` resolves links on Linux and not on macOS.
+- [x] Install every host binary the release carries, not a hand-kept list
+      (#3342). Only the optional libkrun supervisor older releases bundled is
+      left out.
+- [x] Roll back to the previous version on any post-extract failure, including
+      a codesign failure. `mvmctl bootstrap` stays outside the atomic step: it
+      prepares state under `~/.mvm`, not the release, and a network failure is
+      no reason to discard verified binaries.
+- [x] Leave the Homebrew path alone; it owns its own cellar.
+- [x] Test a mid-upgrade failure and assert the previous set still runs.
 
 ## WS4 — An uninstaller
 
 Issue: [#3271](https://github.com/tinylabscom/mvm/issues/3271).
 
-- [ ] `uninstall.sh` (and `mvmctl uninstall` calling the same logic) that stops
+- [x] `uninstall.sh` (and `mvmctl uninstall` calling the same logic) that stops
       running supervisors, validates the daemon PID and aborts rather than
       signal an ambiguous process, removes the versioned install dirs and
-      symlink, and prompts before touching `~/.mvm`.
-- [ ] Every path through `mvm-core::config` helpers. Never inline `$HOME`.
-- [ ] Test: uninstall with a running machine refuses; with none, it removes
+      symlink, and prompts before touching `~/.mvm`. Shipped as
+      `mvmctl env uninstall`, which runs the embedded script. It **refuses**
+      while a machine is running rather than stopping supervisors — stopping a
+      user's machines is not the uninstaller's call — and stops only the
+      per-tenant host-agent daemons, each confirmed by executable first.
+- [x] Every path through `mvm-core::config` helpers. Never inline `$HOME`.
+      The Rust side does; the script mirrors `mvm_home` for the one path it
+      needs (the state directory) and asks the installed `mvmctl` for the rest.
+- [x] Test: uninstall with a running machine refuses; with none, it removes
       exactly the install set.
 
 ## WS5 — Verify the signature without a host `cosign`

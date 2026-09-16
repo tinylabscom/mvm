@@ -37,10 +37,11 @@ talking to its real backend:
 - **Network-bound verbs** (self-update) redirect via an env-var override
   (`MVM_UPDATE_API_URL`) to a loopback HTTP fixture instead of the real
   GitHub releases API.
-- **System-destructive verbs** (`uninstall`) redirect via a path-prefix
-  override (`MVM_UNINSTALL_PATH_PREFIX`), so the positive path runs
-  end-to-end against a sandboxed prefix instead of `/var/lib/mvm` and
-  `/usr/local/bin/mvmctl`, with no `sudo` prompt.
+- **System-destructive verbs** (`uninstall`) take their targets from the
+  same environment the installer reads (`MVM_INSTALL_DIR`,
+  `MVM_INSTALL_LIB_DIR`, `MVM_HOME`), so the positive path runs end-to-end
+  against a temporary install instead of the developer's own, with no `sudo`
+  prompt.
 
 Every live test drives the real, compiled `mvmctl` binary as a
 subprocess (`assert_cmd`), with `HOME` / `MVM_DATA_DIR` / `MVM_STATE_DIR`

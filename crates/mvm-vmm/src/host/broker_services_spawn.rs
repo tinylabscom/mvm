@@ -218,7 +218,7 @@ fn spawn_audit_signer_with_timeout(
 /// the current exe → workspace `target/{release,debug}`. Mirrors
 /// `network_endpoint_spawn::resolve_network_endpoint_path`; shared by the
 /// audit-signer + broker spawns so the lookup can't drift.
-pub(crate) fn resolve_subprocess_bin(bin: &str, env_var: &str) -> Result<PathBuf> {
+pub fn resolve_subprocess_bin(bin: &str, env_var: &str) -> Result<PathBuf> {
     if let Some(p) = std::env::var_os(env_var).map(PathBuf::from) {
         if p.is_file() {
             return Ok(p);

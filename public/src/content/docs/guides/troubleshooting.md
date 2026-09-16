@@ -25,12 +25,10 @@ mvmctl cache repair
 
 This clears `~/.mvm/cache/builder-vm/` so the next `mvmctl bootstrap`/`mvmctl machine build` cold-rebuilds it. Use it for a dangling-store error such as `error: path '/nix/store/…-source/flake.nix' does not exist`.
 
-Or for a full reset:
-
-```bash
-mvmctl env uninstall
-mvmctl bootstrap
-```
+For a full reset of the state directory, use the `env cleanup` tiers in the
+[CLI reference](/reference/cli-commands/) — `--nuclear --keep-identity` clears
+everything but the host's signing identity — and bootstrap again. Uninstalling
+is not a reset: `env uninstall` removes `mvmctl` itself.
 
 ### "builder VM ... is already attached by another builder VM process"
 

@@ -94,6 +94,10 @@ const SANDBOX_SUB: &[(&str, AuditPosture)] = &[("gc", AuditPosture::Emits("Sandb
 const ENV_SUB: &[(&str, AuditPosture)] = &[
     ("bootstrap", AuditPosture::InteractiveOrControl),
     ("cleanup", AuditPosture::Emits("SlotPrune")),
+    // Written once the uninstall has removed the install and a state directory
+    // remains to hold the entry. A successful `--purge`, a run with no state
+    // directory, a `--dry-run` and a refused uninstall write none — by design,
+    // not by omission.
     ("uninstall", AuditPosture::Emits("Uninstall")),
     ("update", AuditPosture::Emits("UpdateInstall")),
     ("sign", AuditPosture::ReadOnly),

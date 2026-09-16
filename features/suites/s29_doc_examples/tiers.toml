@@ -102,12 +102,14 @@ exit_reports_host_state = true
 [[command]]
 path = "env cleanup"
 tier = "exec"
-env = { MVM_UNINSTALL_PATH_PREFIX = "sandbox" }
 
 [[command]]
 path = "env uninstall"
 tier = "exec"
-env = { MVM_UNINSTALL_PATH_PREFIX = "sandbox" }
+env = { MVM_INSTALL_DIR = "sandbox/bin", MVM_INSTALL_LIB_DIR = "sandbox/lib/mvm" }
+# The scratch install dir holds no install, and an uninstall that finds nothing
+# to remove exits nonzero on purpose.
+exit_reports_host_state = true
 
 [[command]]
 path = "generate template"

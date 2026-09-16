@@ -377,11 +377,24 @@ fn first_running_vm() -> Option<String> {
 /// auto-detect default on macOS 26+. It also treats a zombie as dead,
 /// which a bare `kill(pid, 0)` does not.
 fn first_running_vm_at(vms_root: &Path) -> Option<String> {
-    std::fs::read_dir(vms_root)
-        .ok()?
+    running_vms_at(vms_root).into_iter().next()
+}
+
+/// Every VM under `vms_root` whose state directory has a live supervisor,
+/// sorted by name. Shares [`first_running_vm_at`]'s probe, so a caller that
+/// must list every running machine cannot disagree with the cleanup guard
+/// about which ones are running.
+pub(in crate::commands) fn running_vms_at(vms_root: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(vms_root) else {
+        return Vec::new();
+    };
+    let mut running: Vec<String> = entries
         .flatten()
-        .find(|entry| state_dir_has_live_process(&entry.path()))
+        .filter(|entry| state_dir_has_live_process(&entry.path()))
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    running.sort();
+    running
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -828,6 +841,22 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("libkrun.pid"), dead_pid().to_string()).unwrap();
         assert_eq!(first_running_vm_at(vms.path()), None);
+    }
+
+    #[test]
+    fn running_vms_lists_every_live_machine_in_name_order() {
+        let vms = tempdir().unwrap();
+        for (name, pid) in [
+            ("web", std::process::id()),
+            ("api", std::process::id()),
+            ("stopped", dead_pid()),
+        ] {
+            let dir = vms.path().join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("hvf.pid"), pid.to_string()).unwrap();
+        }
+        assert_eq!(running_vms_at(vms.path()), vec!["api", "web"]);
+        assert_eq!(first_running_vm_at(vms.path()).as_deref(), Some("api"));
     }
 
     #[test]
