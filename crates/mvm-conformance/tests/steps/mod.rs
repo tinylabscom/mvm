@@ -6,6 +6,7 @@ mod agent_session;
 mod apple_container;
 mod asset_identity;
 mod claim;
+mod claude_code;
 pub(crate) mod cli;
 mod cold_launch;
 mod doc_examples;

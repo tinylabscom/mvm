@@ -2459,6 +2459,83 @@ mod admit_plan_tests {
 
         assert!(!ctx.admitted.plan_id().0.is_empty());
     }
+
+    /// The claude-code example's headless lane, end to end at this tier: a
+    /// *sealed* sidecar recording the baked `claude --bare -p` argv, resolved
+    /// through the same sidecar reader the launch path uses, admits the
+    /// `--entrypoint --stdin -` route under the sealed-production posture.
+    ///
+    /// The existing input-grant tests hand-build their `ResolvedEntrypoint`,
+    /// so none of them would notice the sidecar→resolver→gate chain breaking
+    /// — a sidecar the resolver stops reading turns every sealed stdin boot
+    /// into a fail-closed refusal, and that regression only shows up when the
+    /// entrypoint comes from the sidecar as it does here.
+    ///
+    /// A known limit, on purpose: the recorded argv names the wrapper script
+    /// `claude`, which *is* a shell script inside the ext4 the host never
+    /// opens. Classification sees the argv basename only — the sidecar
+    /// resolver always returns `shebang: None` — so this admits on "argv is
+    /// not shell-shaped", exactly as claim 17's limits note says.
+    #[test]
+    fn a_sealed_sidecar_recording_the_headless_agent_argv_admits_the_stdin_route() {
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"claude-headless-payload");
+        mvm_build::builder_vm::GuestSidecar::for_oci_run("claude-code-headless", true, true)
+            .with_entrypoint_argv(vec![
+                "/nix/store/zzzz-claude-code-wrapper/bin/claude".to_string(),
+                "--bare".to_string(),
+                "-p".to_string(),
+            ])
+            .write_to_dir(rootfs_dir.path())
+            .expect("write the sealed headless sidecar");
+        let ledger = InMemoryNonceLedger::new();
+
+        let entrypoint = crate::commands::vm::entrypoint_resolve::resolve_for_rootfs(&rootfs);
+        assert!(
+            matches!(entrypoint, ResolvedEntrypoint::Known { .. }),
+            "the sealed sidecar's recorded argv must resolve: {entrypoint:?}"
+        );
+
+        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            network_mode: mvm_contract::plan::NetworkMode::default(),
+            boot_artifact_identity: None,
+            tenant: "local",
+            vm_name: "vm-claude-headless",
+            backend_name: "firecracker",
+            rootfs_path: &rootfs,
+            kernel_path: None,
+            precomputed_image_sha256: None,
+            cpus: 1,
+            mem_mib: 128,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
+            secrets: Vec::new(),
+            caller_commitment: None,
+            no_supervisor: false,
+            ledger: &ledger,
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            assets: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            restrict_agent_verbs: true,
+            services: vec![stream_grant_service()],
+            grants: None,
+            backend_kind: None,
+            entrypoint,
+        })
+        .expect("a sealed sidecar recording a non-shell agent argv must admit the stdin route")
+        .expect("Some when admission ran");
+
+        assert!(!ctx.admitted.plan_id().0.is_empty());
+    }
 }
 
 #[cfg(test)]

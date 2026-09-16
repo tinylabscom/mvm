@@ -258,6 +258,12 @@ pub struct CliWorld {
     /// Home selected by the most recent live CLI step. This is the shared
     /// artifact-warm home when the live runner provides one.
     pub last_live_home: Option<PathBuf>,
+    /// Machine the claude-code workbench console-attach step targeted.
+    pub workbench_machine: Option<String>,
+    /// The workbench machine's name-registry `last_active` stamp as it stood
+    /// immediately before the console attach, so the refresh is observable.
+    /// Outer `None`: no attach step ran. Inner `None`: no stamp existed yet.
+    pub workbench_last_active_before: Option<Option<String>>,
     /// Transient request directories present before a live warm-claim journey.
     /// The final assertion compares against this baseline so unrelated stale
     /// state in a shared runner home cannot hide or falsely fail the cleanup.

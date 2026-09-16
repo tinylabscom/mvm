@@ -278,7 +278,7 @@ fn warm_residency_enabled(world: &mut CliWorld) {
     world.warm_residency = true;
 }
 
-fn selected_live_home(world: &mut CliWorld) -> PathBuf {
+pub(crate) fn selected_live_home(world: &mut CliWorld) -> PathBuf {
     let warm_home = std::env::var_os("MVM_E2E_HOME").map(PathBuf::from);
     if warm_home.is_none() && world.isolated_home.is_none() {
         world.isolated_home = Some(tempfile::tempdir().expect("create isolated MVM_HOME"));

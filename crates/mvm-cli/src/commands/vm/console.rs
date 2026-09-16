@@ -806,6 +806,45 @@ mod accessible_gate_tests {
         });
     }
 
+    /// The claude-code example's headless lane at this gate: a sealed
+    /// sidecar (accessible = false) with a recorded `claude --bare -p` argv,
+    /// carried into the runtime meta through `from_sidecar` — the same
+    /// derivation every backend start path uses — refuses the console verb.
+    ///
+    /// `console_refused_on_sealed_image` hand-writes the meta and the
+    /// `from_sidecar` tests never reach this gate, so neither would notice
+    /// the sidecar-to-gate chain breaking; this test is that chain, on the
+    /// exact artifact shape the example builds.
+    #[test]
+    fn console_refused_on_a_sealed_sidecar_derived_meta() {
+        with_home(|_| {
+            let image_dir = tempfile::tempdir().expect("image dir");
+            mvm_build::builder_vm::GuestSidecar::for_oci_run("claude-code-headless", true, true)
+                .with_entrypoint_argv(vec![
+                    "/nix/store/zzzz-claude-code-wrapper/bin/claude".to_string(),
+                    "--bare".to_string(),
+                    "-p".to_string(),
+                ])
+                .write_to_dir(image_dir.path())
+                .expect("write the sealed headless sidecar");
+
+            let meta = mvm_runtime::vm::runtime_meta::from_sidecar(
+                mvm_core::vm_backend::StartMode::Detached,
+                image_dir.path(),
+            )
+            .expect("derive runtime meta from the sealed sidecar");
+            assert!(
+                !meta.accessible,
+                "a sealed sidecar must derive inaccessible runtime meta"
+            );
+            let name = "claude-headless";
+            write_meta(name, &meta).expect("write");
+
+            let err = enforce_accessible_gate(name, false).expect_err("must refuse");
+            assert!(err.to_string().contains("sealed image"), "msg: {err}");
+        });
+    }
+
     #[test]
     fn gate_force_does_not_bypass_sealed_refusal() {
         with_home(|_| {

@@ -312,15 +312,65 @@ All on real HVF VMs on macOS 26 Apple Silicon, `--runtime node`
 Per AGENTS.md, no workstream is done without tests. The mounted-PTY plan
 (`specs/plans/2026-09-01-mounted-pty-image-environment.md`) is the model:
 
-- [ ] A live BDD scenario (opt-in lane, like the Rust-image PTY scenario):
+- [x] A live BDD scenario (opt-in lane, like the Rust-image PTY scenario):
       boot the example, attach the console, run a command that touches the
       workspace volume, assert egress to a non-allow-listed host is refused
       as policy (not unreachable), assert `api.anthropic.com:443` is
       admitted at the gate (stub upstream; no real API call in CI).
-- [ ] A non-live test for the headless lane: sealed-profile admission of the
+      Landed as `features/suites/s34_claude_code/claude_code_workbench.feature`
+      (steps in `crates/mvm-conformance/tests/steps/claude_code.rs`);
+      see the W2 findings for what the console/reaper half became.
+- [x] A non-live test for the headless lane: sealed-profile admission of the
       command entrypoint with `--stdin`, and refusal of the console on the
       sealed variant (rides the existing claim-15 witnesses; add coverage
       only where this example's shape isn't already covered).
+      `a_sealed_sidecar_recording_the_headless_agent_argv_admits_the_stdin_route`
+      (`crates/mvm-cli/src/commands/vm/up/admission.rs`) and
+      `console_refused_on_a_sealed_sidecar_derived_meta`
+      (`crates/mvm-cli/src/commands/vm/console.rs`).
+
+#### W2 findings (2026-09-15)
+
+- **Egress assertions ride raw `CONNECT` against the guest's loopback
+  proxy** (`bash` `/dev/tcp`, no curl in the image closure). The FlowMux
+  egress proxy answers a policy-refused target `403 Forbidden` and an
+  admitted-but-unreachable upstream `502 Bad Gateway`
+  (`crates/mvm-agentd/src/flowmux_egress.rs`), so the two failure shapes
+  are distinguishable on the first response line — `403` is the refusal
+  shape asserted, `200 Connection established` is admitted-at-the-gate
+  with the upstream connect completed and no API byte sent. No credential
+  is involved anywhere in the scenario.
+- **The idle-reaper interplay cannot be a live assertion.** The reaper
+  (`crates/mvm-hostd/src/supervisor/reaper.rs`) is an unconsumed primitive
+  in local `mvmctl` — nothing outside tests constructs one, so no process
+  exists whose (non-)teardown a live scenario could observe. What the code
+  does support: a console attach calls `touch_activity`, which stamps
+  `last_active` on the name-registry entry — the exact input
+  `idle_elapsed` prefers — and the "recent activity is not idle" half is
+  already unit-covered (`sweep_does_not_sleep_when_not_yet_idle`,
+  `idle_elapsed_prefers_last_active_then_registered_at`,
+  `touch_activity_refreshes_last_active_for_registered_vm`). The live
+  scenario asserts the remaining wiring: a real console attach on the
+  workbench machine refreshes the registry stamp. Caveat worth carrying to
+  any future resident reaper: `touch_activity` fires once at attach, not
+  during a quiet attached session, so a long "thinking" pause would still
+  age past an idle timeout under a consumer that arms one.
+- **The console leg is the one-shot form** (`machine console <name>
+  --command`), which shares the accessible gate, transport pick, and
+  activity touch with the PTY loop; the interactive PTY loop itself blocks
+  on a terminal and stays hand-validated (W0) plus covered by the
+  `machine run -it` PTY scenarios in s31.
+- **The sidecar→gate chain had no witness.** The input-grant tests
+  hand-build `ResolvedEntrypoint` and the claim-15 tests hand-write
+  `VmRuntimeMeta`, so a break in `GuestSidecar` → `resolve_for_rootfs` /
+  `from_sidecar` → gate was invisible to all of them. The two new tests
+  run the example's exact artifact shape (sealed sidecar, recorded
+  `claude --bare -p` argv) through those chains. Known limit, restated
+  from claim 17's ledger row: the recorded argv names the `claude`
+  wrapper, which is a shell script inside an ext4 the host never opens;
+  classification sees only the argv basename (`shebang` is always `None`
+  from the sidecar resolver), so admission rests on "argv is not
+  shell-shaped", not on what the wrapper execs.
 
 ### W3 — doc repairs this work uncovered
 
