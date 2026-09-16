@@ -181,6 +181,62 @@ fn touch_activity(name: &str) {
     mvm_client::touch_activity(name);
 }
 
+/// Re-stamps `last_active` for as long as an interactive session is attached.
+///
+/// The attach-time `touch_activity` fires once, so a quiet attached session —
+/// a long-thinking agent, a paused shell — ages past any idle timeout a
+/// reaper consumer arms, and would be torn down under the user. Re-stamping
+/// on a timer binds "active" to the attached client actually running: if
+/// mvmctl dies without closing, the stamps stop and idleness accrues
+/// honestly, which is why this is a heartbeat and not an attached flag.
+struct ActivityHeartbeat {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ActivityHeartbeat {
+    /// Comfortably inside any plausible idle timeout (the smallest configured
+    /// anywhere today is minutes), while keeping the registry write rate
+    /// negligible.
+    const INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+    fn spawn(name: &str) -> Self {
+        let vm = name.to_string();
+        Self::spawn_with(Self::INTERVAL, move || mvm_client::touch_activity(&vm))
+    }
+
+    /// Interval and action injected so the timing contract is testable: the
+    /// beat repeats until drop, and drop returns without waiting out a full
+    /// interval.
+    fn spawn_with(interval: std::time::Duration, beat: impl Fn() + Send + 'static) -> Self {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_signal = std::sync::Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            loop {
+                std::thread::park_timeout(interval);
+                if stop_signal.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+                beat();
+            }
+        });
+        Self {
+            stop,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for ActivityHeartbeat {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            handle.thread().unpark();
+            let _ = handle.join();
+        }
+    }
+}
+
 /// Open an interactive PTY console to a running VM.
 ///
 /// Supports Firecracker (via UDS vsock), libkrun (via per-port Unix
@@ -291,6 +347,10 @@ fn console_pty_with_argv(name: &str, env: Vec<(String, String)>, argv: Vec<Strin
     // Set up SIGWINCH handler to forward terminal resizes
     let resize_sender = setup_sigwinch_handler(transport.clone(), session_id);
 
+    // A quiet attached session must keep reading as active for the whole
+    // relay, not just at attach; see ActivityHeartbeat.
+    let heartbeat = ActivityHeartbeat::spawn(name);
+
     // Enter raw terminal mode and suppress the Ctrl-C handler so that Ctrl+C
     // is forwarded as a raw byte (\x03) to the guest shell instead of killing
     // mvmctl. The guard restores both pieces of process state on every return.
@@ -300,6 +360,7 @@ fn console_pty_with_argv(name: &str, env: Vec<(String, String)>, argv: Vec<Strin
     // Restore terminal and clean up
     drop(raw_terminal);
     drop(resize_sender);
+    drop(heartbeat);
 
     mvm_core::audit_emit!(ConsoleSessionEnd, vm: name, "session_id={session_id}");
 
@@ -760,6 +821,53 @@ mod accessible_gate_tests {
     }
 
     #[test]
+    fn heartbeat_beats_repeatedly_until_dropped_then_stops() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let beats = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&beats);
+        let heartbeat =
+            ActivityHeartbeat::spawn_with(std::time::Duration::from_millis(5), move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+            });
+
+        // A session spanning several intervals keeps stamping — the property
+        // the one-shot attach touch lacked.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while beats.load(Ordering::SeqCst) < 3 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            beats.load(Ordering::SeqCst) >= 3,
+            "heartbeat must fire repeatedly while the session is attached"
+        );
+
+        // Drop joins the thread, so no beat can land afterwards.
+        drop(heartbeat);
+        let after_drop = beats.load(Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert_eq!(
+            beats.load(Ordering::SeqCst),
+            after_drop,
+            "a dropped heartbeat must stop stamping"
+        );
+    }
+
+    #[test]
+    fn heartbeat_drop_returns_without_waiting_out_the_interval() {
+        // Session teardown must not hang for a minute: drop unparks the
+        // timer thread instead of waiting out INTERVAL.
+        let heartbeat = ActivityHeartbeat::spawn_with(std::time::Duration::from_secs(600), || {});
+        let started = std::time::Instant::now();
+        drop(heartbeat);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "drop must interrupt the parked interval promptly"
+        );
+    }
+
+    #[test]
     fn gate_refuses_when_sealed() {
         with_home(|_| {
             let name = "sealed-vm";
@@ -801,6 +909,45 @@ mod accessible_gate_tests {
                 },
             )
             .expect("write");
+            let err = enforce_accessible_gate(name, false).expect_err("must refuse");
+            assert!(err.to_string().contains("sealed image"), "msg: {err}");
+        });
+    }
+
+    /// The claude-code example's headless lane at this gate: a sealed
+    /// sidecar (accessible = false) with a recorded `claude --bare -p` argv,
+    /// carried into the runtime meta through `from_sidecar` — the same
+    /// derivation every backend start path uses — refuses the console verb.
+    ///
+    /// `console_refused_on_sealed_image` hand-writes the meta and the
+    /// `from_sidecar` tests never reach this gate, so neither would notice
+    /// the sidecar-to-gate chain breaking; this test is that chain, on the
+    /// exact artifact shape the example builds.
+    #[test]
+    fn console_refused_on_a_sealed_sidecar_derived_meta() {
+        with_home(|_| {
+            let image_dir = tempfile::tempdir().expect("image dir");
+            mvm_build::builder_vm::GuestSidecar::for_oci_run("claude-code-headless", true, true)
+                .with_entrypoint_argv(vec![
+                    "/nix/store/zzzz-claude-code-wrapper/bin/claude".to_string(),
+                    "--bare".to_string(),
+                    "-p".to_string(),
+                ])
+                .write_to_dir(image_dir.path())
+                .expect("write the sealed headless sidecar");
+
+            let meta = mvm_runtime::vm::runtime_meta::from_sidecar(
+                mvm_core::vm_backend::StartMode::Detached,
+                image_dir.path(),
+            )
+            .expect("derive runtime meta from the sealed sidecar");
+            assert!(
+                !meta.accessible,
+                "a sealed sidecar must derive inaccessible runtime meta"
+            );
+            let name = "claude-headless";
+            write_meta(name, &meta).expect("write");
+
             let err = enforce_accessible_gate(name, false).expect_err("must refuse");
             assert!(err.to_string().contains("sealed image"), "msg: {err}");
         });
