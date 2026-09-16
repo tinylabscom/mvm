@@ -18,7 +18,8 @@ cost one of those, the item records the trade instead of taking it.
 re-rolls) · #3309 (ADR parity, twelve findings) · #3310 (permissive test
 doubles) · #3311 (`specs/` cleanup) · #3313 (miscalibrated size gate) ·
 #3314 (`mvm-core` split) · #3315 (naming + the real section-D work) · #3316 (**claims 11 and 13** — a
-dead control and an ambiguous witness) · #3317 (no citation gate on ADRs). Pre-existing and folded in: #3257–#3264,
+dead control and an ambiguous witness) · #3317 (no citation gate on ADRs) ·
+#3318 (ADR-001 internal defects). Pre-existing and folded in: #3257–#3264,
 #3265–#3277 (the two design-plan epics), #3283–#3288, #3297, #3300–#3302.
 
 ## How to use this plan
@@ -99,7 +100,24 @@ opposite one, `drop_page_cache`).
       witness name that resolves to nothing; nine more citations name deleted
       crates. All mechanically catchable by extending
       `check-witness-citations` to ADRs. #3317.
-- [ ] **A2.4** ADR-001:150 describes the `stages.rs` scan chain as the live
+- [ ] **A2.4** ADR-001 is internally wrong in three places. Claim 1's
+      Enforcement cell (`:141`) names `setpriv --bounding-set=-all`, a flag the
+      sealed guest's `mvm-setpriv` does not implement and actively rejects
+      (`crates/mvm-agentd/tests/mvm_setpriv.rs:64`) — the real drop is
+      `PR_CAPBSET_DROP` in the agent
+      (`crates/mvm-agentd/src/guest_mount.rs:895`), and the flag is correct
+      only for the builder VM. Claim 3's row (`:754`) and its backend-scoping
+      section (`:889-893`) cite **ADR-106** and **ADR-107**, neither of which
+      exists — and ADR-107 is the sole stated authority for why virtiofs-root
+      does not witness claim 3. And `CLAUDE.md`'s "no ADR above 051" is false;
+      052 and 110 exist and are cited by six other ADRs. #3318.
+- [ ] **A2.5** Two `Accepted` ADRs describe subsystems with zero bytes:
+      ADR-041 (`mvm_hostd::nodectl`) and ADR-049 §2 (`WebLinuxBackend` is a
+      unit struct whose every method returns `unavailable()`). Eleven
+      duplicate/overlapping ADR pairs, of which the **045↔046↔051** cluster and
+      a five-ADR networking cluster are the real consolidation candidates.
+      Folded into #3311 and #3317.
+- [ ] **A2.6** ADR-001:150 describes the `stages.rs` scan chain as the live
       libkrun egress mechanism, contradicting the same ADR at :441-448
       ("enforced at **one** seam"). The scan chain is dead (§A4). Fix the prose
       as part of #3297, not separately — the two must move together.
@@ -243,7 +261,13 @@ family already in the lockfile covers the job.
 
 ### B2. The SDKs must never shell out to `mvmctl`
 
-- [ ] **B2.1** Tracked in #3261 against the design in
+- [ ] **B2.1** Note before starting: `crates/mvm-sdk/src/facade.rs:398`
+      already carries `impl MvmClient for SubprocessBackend` — the convergence
+      ADR-027 calls "not yet done" — with **zero non-test callers**. It is not
+      the fix: it implements the target trait *over the argv transport*, so the
+      process-per-call and the second entrypoint both survive. Decide whether
+      it is a stepping stone or a distraction, and delete it if the latter,
+      before it gets cited as progress. Tracked in #3261 against the design in
       `specs/plans/2026-09-15-agent-sandbox-drive-plane.md` WS2. The cycle
       ADR-027 cites is real (`mvm-client` → `mvm-hostd` → `mvm-sdk`), so the fix
       is a new top-of-graph crate exposing one versioned C ABI — **not** a new
