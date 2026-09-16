@@ -1,0 +1,15 @@
+# Claude Code has no guest NIC; its API traffic rides mvm's admitted proxy.
+# The allow-list is the interactive lane's measured minimum:
+# api.anthropic.com is the API itself, platform.claude.com is the
+# interactive mode's startup key check. The headless profile has not been
+# observed needing the second host.
+flake = "."
+profile = "default"
+cpus = 2
+mem = "2G"
+
+[network]
+allow_hosts = ["api.anthropic.com:443", "platform.claude.com:443"]
+
+[network.ai]
+metering = true
