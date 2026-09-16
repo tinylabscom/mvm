@@ -41,7 +41,7 @@ recorded below.
 - Zero open PRs.
 - The three prerequisites are unmerged local worktrees: `feat/vsock-control-conformance`,
   `feat/firecracker-vsock-only-final`, `feat/hvf-converge-vsock`.
-- `specs/plans/268-backend-shim-removal.md` is untracked in the main checkout alongside
+- `268-backend-shim-removal` is untracked in the main checkout alongside
   a modified `specs/SPRINT.md`. It stays a separate future workstream.
 - `269` is free locally; confirm against open PRs and worktrees before claiming it.
 
@@ -50,7 +50,7 @@ recorded below.
 Paste the block below into a fresh session.
 
 ```text
-Write the universal-initramfs plan for mvm as specs/plans/269-universal-initramfs-vsock-activated-boot.md.
+Write the universal-initramfs plan for mvm as `269-universal-initramfs-vsock-activated-boot`.
 
 The design work is already done — do not re-derive it. Two prior sessions feed this:
 
@@ -128,7 +128,7 @@ CURRENT STATE (verified 2026-07-28):
 - Zero open PRs. The three prerequisites are unmerged local worktrees:
   feat/vsock-control-conformance, feat/firecracker-vsock-only-final,
   feat/hvf-converge-vsock. Sequence the plan behind them; say so explicitly.
-- specs/plans/268-backend-shim-removal.md is UNTRACKED in the main checkout, alongside
+- `268-backend-shim-removal` is UNTRACKED in the main checkout, alongside
   a modified specs/SPRINT.md. It stays a separate future workstream — reference it,
   don't absorb it.
 - 269 is free locally; confirm against open PRs and worktrees before claiming it.
@@ -141,7 +141,7 @@ CONVENTIONS:
   docs may use them.
 - No Co-Authored-By trailer, no AI-tool attribution.
 
-Start by reading the archived transcript and specs/plans/268-backend-shim-removal.md,
+Start by reading the archived transcript and `268-backend-shim-removal`,
 then confirm the task breakdown with me before writing the full plan.
 ```
 

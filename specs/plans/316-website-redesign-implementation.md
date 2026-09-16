@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Design spec:** `specs/plans/316-website-redesign.md` — read it first.
+**Design spec:** `316-website-redesign` — read it first.
 
 **Goal:** Rebuild the mvm homepage on a small shared primitives layer with
 scroll-driven motion, a scroll-synced code walkthrough, and an SDK/CLI tab
@@ -1444,7 +1444,7 @@ trigger must show a visible focus ring against both schemes.
 
 - [ ] **Step 6: Update the plan docs**
 
-Tick the verification checklist in `specs/plans/316-website-redesign.md`,
+Tick the verification checklist in `316-website-redesign`,
 mark it `Status: COMPLETE`, and add a line to `specs/REFACTOR-STATUS.md` with
 today's date. Project rule: the plan doc, the sprint spec, and the rollup move
 in the same change as the work.
@@ -1452,7 +1452,7 @@ in the same change as the work.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add specs/plans/316-website-redesign.md specs/REFACTOR-STATUS.md
+git add `316-website-redesign` specs/REFACTOR-STATUS.md
 git commit -m "docs(plan 316): mark the website redesign complete"
 ```
 

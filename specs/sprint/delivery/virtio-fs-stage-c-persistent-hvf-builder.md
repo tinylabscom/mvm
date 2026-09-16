@@ -1,6 +1,6 @@
 # Stage C — the persistent HVF builder moves off virtio-fs
 
-Plan: `specs/plans/2026-08-31-remove-virtio-fs.md`, Stage C.
+Plan: `2026-08-31-remove-virtio-fs`, Stage C.
 Follows the guest half (PR #3056), which was inert until this flip.
 
 ## What landed

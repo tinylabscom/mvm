@@ -3,7 +3,7 @@
 `specs/plans/2026-08-18-durable-agent-sessions.md` WS6 and WS7, delivered
 together because the chain entry belongs in the same code path the CLI drives —
 doing them apart would have touched park and resume twice. Implementation plan:
-`specs/plans/2026-08-19-session-cli-and-audit.md`.
+`2026-08-19-session-cli-and-audit`.
 
 Everything before this branch was library: a record type, a store, park and
 resume transitions, and `resume_session`. None of it was reachable from a

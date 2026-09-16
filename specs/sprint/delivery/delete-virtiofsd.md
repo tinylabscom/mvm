@@ -1,7 +1,7 @@
 # Delete virtiofsd
 
 The host-side `virtiofsd` spawn/supervise module is gone, and with it the
-`--sandbox none` flag that started `specs/plans/2026-08-31-remove-virtio-fs.md`.
+`--sandbox none` flag that started `2026-08-31-remove-virtio-fs`.
 
 Two consumers had to go first. The QEMU *builder* moved to the disk transport in
 the previous change. The QEMU *workload* driver is this one.
@@ -44,7 +44,7 @@ absolute is still two pieces of work away.
 
 ## Superseded
 
-`specs/plans/2026-08-31-virtiofsd-sandbox-parity.md` hardens the confinement of
+`2026-08-31-virtiofsd-sandbox-parity` hardens the confinement of
 a daemon this repo no longer spawns. It is marked SUPERSEDED in place —
 implementing it now would mean re-adding the deleted file. The concern it
 addressed is resolved by removal instead of by configuration. The two Stopgap

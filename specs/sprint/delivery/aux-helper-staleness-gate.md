@@ -6,7 +6,7 @@ unconditionally. That residual had grown to **17.8s of a 20.9s rebuild (85%)**
 after a one-line `mvm-core` edit — the `mvm-cli(build)` progress line everyone
 sits watching.
 
-Closed by `specs/plans/2026-08-26-aux-helper-staleness-gate.md`:
+Closed by `2026-08-26-aux-helper-staleness-gate`:
 
 - `crates/mvm-cli/build.rs` reuses a previous aux build on a content-key miss
   under the dev profile and marks it `<bin>.mvm-stale`.

@@ -1,6 +1,6 @@
 # One argument core behind `run` and `machine run`
 
-**Plan:** `specs/plans/329-run-first-cli-and-upstream-adoption.md`, Phase 1.
+**Plan:** `329-run-first-cli-and-upstream-adoption`, Phase 1.
 
 ## What was wrong
 

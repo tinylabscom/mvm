@@ -1,6 +1,6 @@
 # `mvmctl completions` — and two bullets that should not be ticked
 
-**Plan:** `specs/plans/329-run-first-cli-and-upstream-adoption.md` Phase 8.
+**Plan:** `329-run-first-cli-and-upstream-adoption` Phase 8.
 
 ## The verb
 

@@ -259,7 +259,7 @@ cheapest and most rigorous, not the one where it is hardest.
 
 - [~] **WS4 (CPU + prod gate done; admission budget NOT built) — Linux CPU quota, wall clock, admission budget.**
       **Redesigned after the WS4.0 spike** — see
-      `specs/plans/308-cgroup-delegation-findings.md`. Writing a cgroup leaf
+      `specs/benchmarks/308-cgroup-delegation-findings.md`. Writing a cgroup leaf
       directly does not work unprivileged, and not for the reason this plan
       first assumed: the `cpu` controller *is* delegated and `cpu.max` *is*
       writable, but cgroup v2 **migration** additionally requires write access

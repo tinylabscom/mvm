@@ -1,6 +1,6 @@
 # `mvm-cli(build)` no longer runs on the inner loop
 
-Plan: `specs/plans/2026-08-28-embedded-host-binaries-are-opt-in.md`
+Plan: `2026-08-28-embedded-host-binaries-are-opt-in`
 
 Deleting the aux-helper leg took a build-script key miss from 60.37s to 0.13s
 but did not stop the script running — the musl cross-compile was still

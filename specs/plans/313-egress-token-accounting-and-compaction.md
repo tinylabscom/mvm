@@ -194,7 +194,7 @@ is also tracked as its own defect and may land first.
 
 > Non-streaming token accounting, per-VM budget enforcement, and the
 > user-facing `[network.ai]` policy are being implemented in
-> `specs/plans/2026-08-21-ai-egress-metering-and-budget.md`. This phase keeps
+> `2026-08-21-ai-egress-metering-and-budget`. This phase keeps
 > the streaming-specific accounting work (SSE framing and trailing-usage
 > extraction once Plan 313 Phase 1 lands).
 

@@ -245,7 +245,7 @@ Scored 0–5 against mvm's requirements, weighted by how much mvm actually needs
 
 ### 4.1 Notes per candidate
 
-**Optimize Nix in place.** Cheapest, and §3.4 says do some of it regardless. But it cannot deliver the attestation story: a Nix store path is *derivation*-addressed, not *content*-addressed, and CA-derivations remain experimental. It also cannot make OCI-derived rootfs and Nix-derived rootfs share one identity — and mvm already ships both (claim 14 / `specs/claims/claim-10-oci-image-provenance.md`). **Necessary, not sufficient.**
+**Optimize Nix in place.** Cheapest, and §3.4 says do some of it regardless. But it cannot deliver the attestation story: a Nix store path is *derivation*-addressed, not *content*-addressed, and CA-derivations remain experimental. It also cannot make OCI-derived rootfs and Nix-derived rootfs share one identity — and mvm already ships both (claim 14, row 14 of the ledger table in `specs/adrs/001-microvm-security-posture.md`). **Necessary, not sufficient.**
 
 **Hybrid (recommended).** Wins because ~70% of it is already built and hardened in this repository. The remaining work is a typed action digest, a proper output manifest, and rewiring one cache. It preserves both existing backends, preserves the security posture, and leaves a clean seam for `mvmd`.
 

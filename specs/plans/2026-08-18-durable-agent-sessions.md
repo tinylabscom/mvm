@@ -94,12 +94,12 @@ audit-chain head                (not built)
 retention class + expiry        (not built)
 ```
 
-`specs/plans/2026-08-18-durable-session-park.md` Task 3 landed the first seven
+`2026-08-18-durable-session-park` Task 3 landed the first seven
 fields on `AgentSessionRecord`, plus `park()` / `resume()` transitions and a
-store-level generation fence (`specs/plans/2026-08-18-durable-session-substrate.md`
+store-level generation fence (`2026-08-18-durable-session-substrate`
 landed `parent_checkpoint` earlier). The approval field is narrower than this
 section originally sketched: `approval_head` carries the `ApprovalHead` digest
-alone, not a paired signature. `specs/plans/2026-08-18-session-approval-head.md`
+alone, not a paired signature. `2026-08-18-session-approval-head`
 closed part of that gap: `ApprovalLedger::head()`
 (`crates/mvm-contract/src/policy/approval.rs`) content-addresses the ledger's
 decision state — every record's approval id, its capability, and its terminal
@@ -207,7 +207,7 @@ speed, never resumability — the journal remains the durable record.
 `sweep_untagged_checkpoints` reached from `mvmctl cache prune`. What is
 missing is teaching it about sessions: it must not reap a checkpoint that any
 live or hibernated session names as its parent.
-(Delivered by `specs/plans/2026-08-18-session-retention.md`: the sweep now
+(Delivered by `2026-08-18-session-retention`: the sweep now
 consults `mvm_runtime::agent_session::pinned_checkpoints` and a manual
 `mvmctl vm checkpoint rm` refuses the same way. Retention classes, expiry,
 and a scheduler that calls `demote` remain undelivered — see that plan's
@@ -237,16 +237,16 @@ comparison. `ApprovalLedger::from_history`
 which is correct for recovery and too expensive for the resume path. Resume
 needs a signed ledger head cached in the hibernation record.
 
-`specs/plans/2026-08-18-session-approval-head.md` landed the digest half of
+`2026-08-18-session-approval-head` landed the digest half of
 step 2: `AgentSessionStore::resume` takes a `current_head` parameter and
 refuses when it differs from the `approval_head` recorded at park, comparing
 `ApprovalLedger::head()`'s SHA-256 output for equality — a digest comparison,
 not the signature check this sketch names.
 
-`specs/plans/2026-08-18-resume-session-orchestrator.md` landed
+`2026-08-18-resume-session-orchestrator` landed
 `resume_session` (`crates/mvm-hostd/src/session_resume.rs`), which covers
 step 4 (fresh `ExecutionPlan` synthesis) and step 5 (admission).
-`specs/plans/2026-08-19-resume-boot.md` lands the cold-tier half of step 6:
+`2026-08-19-resume-boot` lands the cold-tier half of step 6:
 `mvmctl agent-session resume --boot` drives `resume_and_boot`, which refuses
 `Parked` and `Resident` tiers by name, transitions the record, and then boots
 a fresh VM from the resume point's rootfs through the shared
@@ -392,7 +392,7 @@ Numbering was reconciled before these documents landed on main (PR #2691):
 - [ ] **WS1 — Session store.** `mvm-runtime/src/agent_session/` mirroring
       `checkpoint/`, over a new `mvm_core::config::agent_sessions_dir()`.
       Record and store landed
-      (`specs/plans/2026-08-18-durable-session-substrate.md`); journal
+      (`2026-08-18-durable-session-substrate`); journal
       persistence and approval-ledger head caching have not.
 - [ ] **WS2 — `SessionBinding` on `CheckpointMeta`.** Field, digest coverage,
       digest tests.
@@ -400,7 +400,7 @@ Numbering was reconciled before these documents landed on main (PR #2691):
       the existing guest verbs, hibernation record commit ordering.
       `ParkReason`, `select_tier`, the record's `park()`/`resume()`
       transitions, and crash-safe record commit landed
-      (`specs/plans/2026-08-18-durable-session-park.md`). The quiesce
+      (`2026-08-18-durable-session-park`). The quiesce
       sequence has not: `GuestRequest::SleepPrep`, `CheckpointIntegrations`,
       and `Wake` are defined in the agent protocol and have host-facing
       convenience functions in `mvm-agentd/src/vsock/api.rs`, but none of
@@ -415,11 +415,11 @@ Numbering was reconciled before these documents landed on main (PR #2691):
       verification, fresh-plan synthesis, tier selection, `PostRestore`
       fabric re-registration.
       The ledger-head half of verification landed
-      (`specs/plans/2026-08-18-session-approval-head.md`):
+      (`2026-08-18-session-approval-head`):
       `ApprovalLedger::head()` content-addresses the ledger's decision state
       and `AgentSessionStore::resume` refuses when its caller-supplied
       `current_head` differs from the `approval_head` `ParkInput` committed
-      at park. `specs/plans/2026-08-18-resume-session-orchestrator.md` then
+      at park. `2026-08-18-resume-session-orchestrator` then
       landed `resume_session` (`crates/mvm-hostd/src/session_resume.rs`, 12
       tests): load, refuse anything but `Hibernated`, resolve the resume
       point, `verify_content` it, build a `SynthesisInput` naming the session
@@ -444,7 +444,7 @@ Numbering was reconciled before these documents landed on main (PR #2691):
       `PostRestore`, credential minting — still do not. A session parked with
       `approval_head: None` resumes with no ledger fence at all.
 - [ ] **WS5 — Retention ladder + GC.** Partially delivered by
-      `specs/plans/2026-08-18-session-retention.md`: the existing
+      `2026-08-18-session-retention`: the existing
       `checkpoints_dir()` sweep (`mvmctl cache prune`) now refuses to reap a
       checkpoint any live or hibernated session names as its parent, a manual
       `mvmctl vm checkpoint rm` carries the same refusal, and
@@ -460,7 +460,7 @@ Numbering was reconciled before these documents landed on main (PR #2691):
 - [x] **WS6 — CLI.** Delivered as `mvmctl agent-session
       {open,ls,show,park,resume}`
       (`crates/mvm-cli/src/commands/agent_session.rs`,
-      `specs/plans/2026-08-19-session-cli-and-audit.md`). Named
+      `2026-08-19-session-cli-and-audit`). Named
       `agent-session`, not `session`: `mvmctl machine session` already means
       machine-session residency — a warm VM held across `invoke` calls — over
       a different store.

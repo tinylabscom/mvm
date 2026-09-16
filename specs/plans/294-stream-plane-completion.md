@@ -10,7 +10,7 @@ Tracking issue: tinylabscom/mvm#2152 (closed). PR: tinylabscom/mvm#2139 (merged)
 This is the state-of-the-world doc for the workload stream plane. The design
 lives in `specs/plans/295-workload-stream-plane.md`, the follow-ups in
 `specs/plans/293-stream-plane-followups.md`, and the fleet slice in
-`specs/plans/296-fleet-stream-fan-out.md`. This doc says what is done, what is
+`296-fleet-stream-fan-out`. This doc says what is done, what is
 left, and the two traps that will otherwise cost a session.
 
 ## Plan numbers: resolved
@@ -210,7 +210,7 @@ they are the most deferrable items here. WS2 is not — it is an open gap.
 
 ## Also queued
 
-- [ ] **`specs/plans/296-fleet-stream-fan-out.md`** — VM-to-VM fan-out,
+- [ ] **`296-fleet-stream-fan-out`** — VM-to-VM fan-out,
       unstarted. All seven design decisions (E1–E7) are settled in that
       document: redaction is a property of the edge, defaulting to redacted; an
       opt-out edge gives the consumer raw bytes while the transcript stays
@@ -224,7 +224,7 @@ they are the most deferrable items here. WS2 is not — it is an open gap.
 
 ## Next task: plan 296 WS3–WS6
 
-`specs/plans/296-fleet-stream-fan-out.md` is the one substantive piece of the
+`296-fleet-stream-fan-out` is the one substantive piece of the
 stream plane still unbuilt, and it is deliberately parked rather than
 forgotten.
 
