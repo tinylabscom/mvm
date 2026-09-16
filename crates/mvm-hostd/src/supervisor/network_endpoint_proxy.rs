@@ -4206,6 +4206,86 @@ mod server_tests {
         );
     }
 
+    /// The gate keys on the URL scheme's default port, with no scheme
+    /// upgrade: an absolute-form `http://` request to a destination whose
+    /// policy admits only `:443` is refused as `host:80`, even though the
+    /// secret binding allows the host. Steering a client onto the typed
+    /// path with a plain-`http` base URL therefore fails closed under a
+    /// `:443`-only allow-list rather than silently downgrading.
+    #[tokio::test]
+    async fn an_http_scheme_request_gates_on_port_80_not_the_bound_443() {
+        let (service, ph, forwarder, _dir) = service_with("sk-live-zzz", &["93.184.216.34"]);
+        let service = Arc::new(
+            Arc::try_unwrap(service)
+                .ok()
+                .expect("fresh service Arc")
+                .with_egress_gate(gate_admitting(&[("93.184.216.34", 443)])),
+        );
+        let wire = WireRequest {
+            method: "POST".into(),
+            url: "http://93.184.216.34/v1".into(),
+            headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+            body_b64: B64.encode(b"{}"),
+        };
+        let resp = service.process(wire).await;
+        match resp {
+            WireResponse::Refused { message } => assert!(
+                message.contains("claim-10"),
+                "expected claim-10 refusal, got: {message}"
+            ),
+            WireResponse::Ok { .. } => {
+                panic!("an http-scheme request must not satisfy a 443-only policy")
+            }
+        }
+        assert!(
+            forwarder.seen.lock().unwrap().is_none(),
+            "the refused request must never reach the forward leg"
+        );
+    }
+
+    /// The forward leg receives the URL scheme verbatim: an `http://`
+    /// request that passes the gate is forwarded as plaintext `http`, not
+    /// upgraded to TLS. There is no https-upstream-from-http-request
+    /// mechanism on the typed path today.
+    #[tokio::test]
+    async fn the_forward_leg_receives_the_url_scheme_verbatim() {
+        let (service, ph, forwarder, _dir) = service_with("sk-live-zzz", &["93.184.216.34"]);
+        let wire = WireRequest {
+            method: "POST".into(),
+            url: "http://93.184.216.34/v1".into(),
+            headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+            body_b64: B64.encode(b"{}"),
+        };
+        let resp = service.process(wire).await;
+        assert!(matches!(resp, WireResponse::Ok { .. }), "{resp:?}");
+        let seen = forwarder.seen.lock().unwrap();
+        let forwarded = seen.as_ref().expect("forward leg reached");
+        assert!(
+            forwarded.url.starts_with("http://"),
+            "the scheme travels unchanged to the forward leg: {}",
+            forwarded.url
+        );
+    }
+
+    /// The gate key derivation itself: the scheme's default port fills in
+    /// when the URL names none, and an explicit port wins.
+    #[test]
+    fn url_host_port_uses_the_scheme_default_port() {
+        assert_eq!(
+            url_host_port("http://api.anthropic.com/v1").as_deref(),
+            Some("api.anthropic.com:80")
+        );
+        assert_eq!(
+            url_host_port("https://api.anthropic.com/v1").as_deref(),
+            Some("api.anthropic.com:443")
+        );
+        assert_eq!(
+            url_host_port("http://api.anthropic.com:8443/v1").as_deref(),
+            Some("api.anthropic.com:8443")
+        );
+        assert_eq!(url_host_port("not a url"), None);
+    }
+
     /// A deny-all gate refuses even a destination the secret binding would allow —
     /// the gate is the outer claim-10 fence, applied before substitution/forward.
     #[tokio::test]

@@ -387,6 +387,12 @@ Work:
       Verify substitution replaces the placeholder in the header position
       Claude Code sends (`x-api-key` / `Authorization`), not only in
       catalog-templated positions.
+      **Blocked on a missing mechanism — see "Typed-path scheme truth"
+      in the findings below.** The steering env itself is deliberately
+      not wired until the typed flow can carry an https upstream for an
+      http-scheme request; wiring it today would either fail closed at
+      the claim-10 gate (`:443`-only policy, request keyed `host:80`) or
+      forward the substituted credential as plaintext `http` to port 80.
 - [ ] Streaming: Claude Code consumes SSE responses. The AI meter parses
       Anthropic `message_delta` events on this path
       (`crates/mvm-hostd/src/supervisor/ai_meter.rs`), which points to the
@@ -453,6 +459,28 @@ The `--secret` surface, as landed:
   refuses while a machine still names the secret.
 - **Not yet wired here**: `machine create` (spec-authoring verb) does not
   take `--secret`; `machine run` is the surface this workstream needed.
+
+**Typed-path scheme truth** (read from the code 2026-09-15, pinned by
+tests): the flowmux typed HTTP flow performs **no scheme upgrade**.
+`url_host_port` keys the claim-10 gate on the URL scheme's default port
+(`http://api.anthropic.com/…` → `api.anthropic.com:80` —
+`url_host_port_uses_the_scheme_default_port`), so under the workload's
+`api.anthropic.com:443` allow-list an http-scheme steering URL is refused
+at the gate before any forward
+(`an_http_scheme_request_gates_on_port_80_not_the_bound_443`); and the
+`HardenedForwarder` sends the URL verbatim, so admitting `:80` instead
+would put the substituted credential on plaintext port-80 HTTP
+(`the_forward_leg_receives_the_url_scheme_verbatim`). Absolute-form
+`https://` targets DO carry TLS upstream — but a stock proxy-env client
+(Claude Code's Node fetch included) issues `CONNECT` for https URLs, which
+is the opaque relay, not the typed flow; only mvm's own SDK thin client
+writes absolute-form https into the forward proxy today. What is missing,
+precisely: a scheme-upgrade rule on the typed path — the endpoint
+rewriting an `http://H/…` request to `https://H:443/…` (gate key included)
+for a destination whose binding/policy admits `H:443` — or the W5
+fallback bullet's CONNECT-side terminator. One of the two must land
+before `ANTHROPIC_BASE_URL` steering can work; the choice is the
+fallback bullet's decision point.
 
 ## Acceptance
 
