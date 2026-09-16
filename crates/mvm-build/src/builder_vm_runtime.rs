@@ -345,6 +345,7 @@ const WORKSPACE_SNAPSHOT_SKIP: &[&str] = &[
     "dist",
     ".astro",
     "dev-prebuilt",
+    ".mvm-ci",
     ".mvm-test",
     "graphify-out",
     ".ur-seed-result",
@@ -1359,6 +1360,20 @@ mod tests {
     use mvm_core::util::test_env::TestEnv;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
+
+    #[test]
+    fn filtered_work_input_excludes_mutable_mvm_state() {
+        let source = tempfile::TempDir::new().unwrap();
+        std::fs::write(source.path().join("Cargo.toml"), b"[workspace]\n").unwrap();
+        let mvm_cache = source.path().join(".mvm-ci/cache");
+        std::fs::create_dir_all(&mvm_cache).unwrap();
+        std::fs::write(mvm_cache.join("transient-artifact"), b"mutable").unwrap();
+
+        let staged = stage_filtered_work_input(source.path()).unwrap();
+
+        assert!(staged.path().join("Cargo.toml").is_file());
+        assert!(!staged.path().join(".mvm-ci").exists());
+    }
 
     #[test]
     fn drain_appended_forwards_only_freshly_written_bytes() {
