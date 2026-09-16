@@ -17,6 +17,7 @@ use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::vm_backend::VmStatus;
 
+use super::halt_watch::ConsoleHaltWatch;
 use super::spec::{BuilderSpecInputs, Stage0SpecInputs, builder_spec, stage0_spec};
 use crate::driver::{VmmDriver, VmmSpec};
 use crate::network_endpoint_spawn::{
@@ -238,11 +239,20 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
         // A builder is run-to-completion: the guest powers off after the job, and
         // `status()` flips to Stopped/Failed when the supervisor drops its PID
         // file. (Unlike a workload, it reports no exit code over vsock — its result
-        // is the output tar's `result` sidecar.)
+        // is the output tar's `result` sidecar.) A guest whose kernel cannot power
+        // off halts instead, and not every VMM exits on a halt, so the console is
+        // watched for that too.
         let deadline = Instant::now() + BUILD_WAIT_TIMEOUT;
+        let mut halt_watch = ConsoleHaltWatch::new(spec.console.log_path.clone());
         let mut stopped = false;
         while Instant::now() < deadline {
             if !matches!(vm.status()?, VmStatus::Running) {
+                stopped = true;
+                break;
+            }
+            if halt_watch.guest_halted() {
+                tracing::info!(vm = %transport.name, "builder guest halted; stopping its VMM");
+                vm.kill().context("stopping a halted builder VM")?;
                 stopped = true;
                 break;
             }

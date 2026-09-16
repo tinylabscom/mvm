@@ -5,6 +5,7 @@
 //! `runner` owns the disk prep + VM lifecycle.
 
 pub mod driver_builder;
+mod halt_watch;
 pub mod hvf_persistent;
 pub mod inject;
 pub mod runner;

@@ -129,7 +129,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[ignore = "live: needs Linux + /dev/kvm and a bootstrapped builder image"]
     fn live_firecracker_builder_runs_a_shell_job() {
-        use mvm_build::builder_vm::{BuilderShellJob, BuilderVm};
+        use mvm_build::builder_vm::BuilderShellJob;
 
         let image = resolve_fc_builder_image().expect("run `mvmctl bootstrap` first");
         let tmp = tempfile::tempdir().expect("tempdir");
