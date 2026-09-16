@@ -42,7 +42,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
-use mvm_contract::ir::host_is_bound;
+use mvm_contract::ir::{host_is_bound, host_pattern_is_single_label_wildcard};
 use mvm_core::crypto::secret_store::{self, SecretStore};
 use mvm_hostd::keyholder::{BindingStore, FileBindingStore};
 use serde::Serialize;
@@ -449,7 +449,7 @@ impl SecretService {
 }
 
 /// Structural validation for an egress binding: at least one non-empty
-/// destination, and the SigV4 scope present exactly when the auth type is
+/// destination, no wildcard over a single DNS label, and the SigV4 scope present exactly when the auth type is
 /// SigV4 (present otherwise it would be silently ignored; absent for SigV4
 /// the signer could not name the credential scope).
 pub fn validate_binding_meta(
@@ -467,6 +467,17 @@ pub fn validate_binding_meta(
     }
     if meta.allowed_hosts.iter().any(|h| h.trim().is_empty()) {
         return Err(invalid("destination allow-list contains an empty host"));
+    }
+    if let Some(pattern) = meta
+        .allowed_hosts
+        .iter()
+        .find(|h| host_pattern_is_single_label_wildcard(h))
+    {
+        return Err(invalid(&format!(
+            "destination `{pattern}` is a wildcard over a single DNS label, which \
+             would bind the secret to a whole top-level domain; name the domain \
+             (e.g. `*.example.com`) instead"
+        )));
     }
     match (meta.auth_type, &meta.sigv4) {
         (AuthType::Sigv4, None) => Err(invalid("sigv4 auth type requires sigv4 scope params")),
@@ -707,6 +718,39 @@ mod tests {
             .bind("local", "k", bearer_binding(&[]))
             .unwrap_err();
         assert!(matches!(err, SecretServiceError::InvalidBinding { .. }));
+    }
+
+    #[test]
+    fn a_single_label_wildcard_binding_is_refused_when_stored() {
+        let f = fixture();
+        f.service
+            .put("local", "k", SecretValueInput::new("v".into()))
+            .unwrap();
+        for pattern in ["*", "*.com", "*.io"] {
+            let err = f
+                .service
+                .bind("local", "k", bearer_binding(&["api.example.com", pattern]))
+                .unwrap_err();
+            assert!(
+                matches!(err, SecretServiceError::InvalidBinding { .. }),
+                "got: {err}"
+            );
+            assert!(
+                err.to_string().contains(&format!("`{pattern}`")),
+                "the refusal names the pattern: {err}"
+            );
+            assert!(
+                f.service
+                    .metadata("local", "k")
+                    .unwrap()
+                    .is_some_and(|m| m.binding.is_none()),
+                "nothing is recorded for a refused binding"
+            );
+        }
+        // A wildcard naming a domain, not a top-level one, is still accepted.
+        f.service
+            .bind("local", "k", bearer_binding(&["*.example.com"]))
+            .unwrap();
     }
 
     #[test]
