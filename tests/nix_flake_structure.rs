@@ -330,8 +330,10 @@ fn host_mvmctl_package_is_source_only() {
 /// half of this test proves the path it walks exists and is a string.
 #[test]
 fn workspace_versioned_packages_read_the_version_from_the_manifest() {
-    const READ_VERSION: &str =
+    const READ_VERSION_DIRECTLY: &str =
         "workspaceVersion = (lib.importTOML (mvmSrc + \"/Cargo.toml\")).workspace.package.version;";
+    const READ_VERSION_BY_DEFAULT: &str =
+        "workspaceVersion ? (lib.importTOML (mvmSrc + \"/Cargo.toml\")).workspace.package.version,";
 
     let manifest_path = repo_dir().join("Cargo.toml");
     let manifest: toml::Value = toml::from_str(
@@ -349,12 +351,15 @@ fn workspace_versioned_packages_read_the_version_from_the_manifest() {
         "Cargo.toml must carry workspace.package.version as a string; the nix packages read it"
     );
 
-    for recipe in ["mvmctl.nix", "mvm-sdk-cdylib.nix"] {
+    for (recipe, version_read) in [
+        ("mvmctl.nix", READ_VERSION_DIRECTLY),
+        ("mvm-sdk-cdylib.nix", READ_VERSION_BY_DEFAULT),
+    ] {
         let path = nix_dir().join("packages").join(recipe);
         let content =
             fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
         assert!(
-            content.contains(READ_VERSION) && content.contains("version = workspaceVersion;"),
+            content.contains(version_read) && content.contains("version = workspaceVersion;"),
             "{recipe} must take its version from the workspace manifest"
         );
         let literal = content
@@ -366,6 +371,15 @@ fn workspace_versioned_packages_read_the_version_from_the_manifest() {
             "{recipe} must not hardcode a version literal: {literal:?}"
         );
     }
+
+    let runtime_overlay = fs::read_to_string("nix/images/runtime-overlay/flake.nix")
+        .expect("read runtime-overlay flake");
+    assert!(
+        runtime_overlay.contains(
+            "(nixpkgs.lib.importTOML (workspaceRoot + \"/Cargo.toml\")).workspace.package.version;"
+        ) && runtime_overlay.contains("inherit pkgs libc workspaceVersion;"),
+        "the runtime-overlay flake must pass manifest metadata from its stable workspace root"
+    );
 }
 
 #[test]

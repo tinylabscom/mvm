@@ -101,6 +101,12 @@
         in
         if envPath != "" then /. + envPath else ../../..;
 
+      # Read evaluation-time metadata from the stable workspace root before
+      # filtering it into a source store path. The filtered path is for build
+      # inputs; it may be collected between parallel flake evaluations.
+      workspaceVersion =
+        (nixpkgs.lib.importTOML (workspaceRoot + "/Cargo.toml")).workspace.package.version;
+
       # Filter list lives at nix/lib/workspace-filter.nix so the three
       # flakes that ingest the host workspace (this one, builder/,
       # builder-vm/) stay aligned with .gitignore in one place.
@@ -223,7 +229,7 @@
           pkgs = import nixpkgs { inherit system; };
         in
         import (workspaceRoot + "/nix/packages/mvm-sdk-cdylib.nix") {
-          inherit pkgs libc;
+          inherit pkgs libc workspaceVersion;
           lib = pkgs.lib;
           mvmSrc = workspace;
         };
