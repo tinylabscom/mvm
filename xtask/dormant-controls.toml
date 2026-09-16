@@ -5,10 +5,11 @@
 # constructs, a scan whose bound set is always empty. Each of those shipped
 # correct and tested, and each was caught only by review.
 #
-# Name the symbol by a string that identifies it uniquely — usually the
-# re-exported alias rather than a bare `validate`, which every module has. The
-# gate refuses an entry that matches implausibly widely, because a symbol that
-# matches everything reports reachable no matter what.
+# Name the symbol by a string that identifies it uniquely — a re-exported alias
+# is fine when production code actually calls through that alias, while the
+# import declaration itself never counts. Avoid a bare `validate`, which every
+# module has. The gate refuses an entry that matches implausibly widely, because
+# a symbol that matches everything reports reachable no matter what.
 #
 # `dormant = false` is the normal case: the control has a production caller and
 # the gate fails if it loses one. `dormant = true` says so out loud, with a

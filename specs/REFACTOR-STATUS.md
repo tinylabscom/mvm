@@ -4,6 +4,12 @@ Last updated: 2026-09-16
 
 ## In progress
 
+- [x] **Dormant-control caller gate repair.**
+      `specs/plans/2026-09-15-the-big-cleanup.md` A0.1, issue #3334.
+      Exclude import and re-export declarations from production-caller
+      evidence before expanding the liveness gate to the wider claim ledger.
+      Landed with focused regression coverage and full workspace validation.
+
 - [ ] **Agent sandbox drive plane.**
       `specs/plans/2026-09-15-agent-sandbox-drive-plane.md`. Epic #3275.
       Planned, not started. Makes the AI-agent claim end-to-end: correct the published

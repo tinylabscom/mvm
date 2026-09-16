@@ -36,6 +36,8 @@
 use anyhow::{Context, Result, bail};
 use std::path::Path;
 
+use crate::rust_source::blank_comments_and_strings;
+
 /// Where the declaration lives.
 const MANIFEST: &str = "xtask/dormant-controls.toml";
 
@@ -206,16 +208,80 @@ fn strip_test_modules(src: &str) -> String {
     out
 }
 
-/// Drop `pub use` lines.
+/// Drop `use` items, including restricted and multiline re-exports.
 ///
-/// A re-export moves a name, it does not call it. Counting one as a caller
-/// made every symbol its own module re-exported look reachable, which is the
-/// opposite of what this gate is for.
-fn strip_reexports(src: &str) -> String {
-    src.lines()
-        .filter(|l| !l.trim_start().starts_with("pub use") && !l.trim_start().starts_with("use "))
-        .collect::<Vec<_>>()
-        .join("\n")
+/// An import moves a name into scope; it does not call it. Counting one as a
+/// caller makes a control look reachable after its last real use disappears.
+fn strip_use_items(src: &str) -> String {
+    let mut out = Vec::new();
+    let mut inside_use = false;
+
+    for line in src.lines() {
+        let syntax = blank_comments_and_strings(line);
+        if inside_use {
+            if let Some(suffix) = suffix_after_semicolon(line, &syntax) {
+                inside_use = false;
+                if !suffix.trim().is_empty() {
+                    out.push(suffix.to_string());
+                }
+            }
+            continue;
+        }
+
+        if is_use_item_start(syntax.trim_start()) {
+            if let Some(suffix) = suffix_after_semicolon(line, &syntax) {
+                if !suffix.trim().is_empty() {
+                    out.push(suffix.to_string());
+                }
+            } else {
+                inside_use = true;
+            }
+            continue;
+        }
+
+        out.push(line.to_string());
+    }
+
+    out.join("\n")
+}
+
+fn is_use_item_start(line: &str) -> bool {
+    if starts_keyword(line, "use") {
+        return true;
+    }
+
+    let Some(after_pub) = line.strip_prefix("pub") else {
+        return false;
+    };
+    let after_visibility = if after_pub.starts_with(char::is_whitespace) {
+        after_pub.trim_start()
+    } else if let Some(restricted) = after_pub.strip_prefix('(') {
+        let Some((_, rest)) = restricted.split_once(')') else {
+            return false;
+        };
+        rest.trim_start()
+    } else {
+        return false;
+    };
+
+    starts_keyword(after_visibility, "use")
+}
+
+fn starts_keyword(text: &str, keyword: &str) -> bool {
+    text.strip_prefix(keyword).is_some_and(|rest| {
+        rest.chars()
+            .next()
+            .is_some_and(|ch| !ch.is_alphanumeric() && ch != '_')
+    })
+}
+
+fn suffix_after_semicolon<'a>(source: &'a str, syntax: &str) -> Option<&'a str> {
+    let semicolon = syntax.chars().position(|ch| ch == ';')?;
+    let suffix_start = source
+        .char_indices()
+        .nth(semicolon + 1)
+        .map_or(source.len(), |(index, _)| index);
+    Some(&source[suffix_start..])
 }
 
 /// Files that mention `symbol` outside `defining_file`, with test modules and
@@ -233,7 +299,7 @@ fn callers(root: &Path, symbol: &str, defining_file: &str) -> Result<Vec<String>
         if !src.contains(symbol) {
             continue;
         }
-        if strip_reexports(&strip_test_modules(&src)).contains(symbol) {
+        if strip_use_items(&strip_test_modules(&src)).contains(symbol) {
             hits.push(
                 path.strip_prefix(root)
                     .unwrap_or(&path)
@@ -422,9 +488,46 @@ after_the_module();
     #[test]
     fn a_reexport_is_not_a_caller() {
         let src = "pub use crate::stream::edge_connector::EdgeConnector;\nfn f() { other(); }\n";
-        let stripped = strip_reexports(src);
+        let stripped = strip_use_items(src);
         assert!(!stripped.contains("EdgeConnector"), "{stripped}");
         assert!(stripped.contains("other"), "real code survives: {stripped}");
+    }
+
+    #[test]
+    fn a_restricted_reexport_is_not_a_caller() {
+        for visibility in ["pub(crate)", "pub(super)", "pub(in crate::stream)"] {
+            let src = format!(
+                "{visibility} use crate::stream::edge_connector::EdgeConnector;\n\
+                 fn f() {{ other(); }}\n"
+            );
+            let stripped = strip_use_items(&src);
+            assert!(
+                !stripped.contains("EdgeConnector"),
+                "{visibility} re-export survived: {stripped}"
+            );
+            assert!(stripped.contains("other"), "real code survives: {stripped}");
+        }
+    }
+
+    #[test]
+    fn a_multiline_reexport_tree_is_not_a_caller() {
+        let src = r#"
+pub(crate) use policy::{
+    admitted_shares_for_boot,
+    shares_from_vm_volumes,
+};
+fn f() { admitted_shares_for_boot(); }
+"#;
+        let stripped = strip_use_items(src);
+        assert_eq!(
+            stripped.matches("admitted_shares_for_boot").count(),
+            1,
+            "only the real call should survive: {stripped}"
+        );
+        assert!(
+            !stripped.contains("shares_from_vm_volumes"),
+            "the import-only symbol must not read as reachable: {stripped}"
+        );
     }
 
     /// An `use` import is likewise not a call — the call is the line below it,
@@ -432,7 +535,12 @@ after_the_module();
     #[test]
     fn a_plain_import_is_not_a_caller_but_the_call_is() {
         let src = "use crate::a::TheControl;\nfn f() { TheControl::go(); }\n";
-        let stripped = strip_reexports(src);
+        let stripped = strip_use_items(src);
+        assert_eq!(
+            stripped.matches("TheControl").count(),
+            1,
+            "the import itself must be removed: {stripped}"
+        );
         assert!(stripped.contains("TheControl::go"), "{stripped}");
     }
 
