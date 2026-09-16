@@ -49,6 +49,10 @@ fn the_live_warm_claim_runs_with_mount_namespace_privilege() {
         "the live warm-claim process must have mount-namespace privilege, not only /dev/kvm access"
     );
     assert!(
+        job.contains("env \"PATH=$PATH\""),
+        "the privileged recipe must restore the provisioned runner PATH for cargo and rustc"
+    );
+    assert!(
         job.contains("\"$HOME/.cargo/bin/just\" bdd-live-warm-claim"),
         "the privileged step must use the runner's absolute just path because sudo replaces PATH"
     );
