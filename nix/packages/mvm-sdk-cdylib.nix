@@ -64,11 +64,14 @@ let
   # alias, and a linker path that does not exist fails loudly, whereas an
   # unset linker fails silently by falling back to the host cc.
   muslLinker = "${pkgs.pkgsMusl.stdenv.cc}/bin/gcc";
+
+  # The workspace manifest is the only place the release version is written.
+  workspaceVersion = (lib.importTOML (mvmSrc + "/Cargo.toml")).workspace.package.version;
 in
 
 pkgs.rustPlatform.buildRustPackage ({
   pname = "mvm-sdk-cdylib" + lib.optionalString isMusl "-musl";
-  version = "0.18.0-rc.2";
+  version = workspaceVersion;
 
   src = mvmSrc;
 

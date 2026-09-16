@@ -70,12 +70,12 @@ let
       language registry. Available: ${builtins.concatStringsSep ", " (builtins.attrNames languages)}.
       Hint: add a `${language}` row to
       `nix/lib/factories/languages/registry.nix`, then add the bare name
-      to `crates/mvm-ir/data/supported_languages.txt` so the IR validator
+      to `crates/mvm-contract/data/supported_languages.txt` so the IR validator
       accepts it. (No new .nix file — the registry is data-driven.)
     '');
 
   # Per-workload runtime config. Mirrors the IR field set on
-  # `Entrypoint::Function` (see `crates/mvm-ir/src/workload.rs`) plus
+  # `Entrypoint::Function` (see `crates/mvm-contract/src/ir/workload.rs`) plus
   # the resolved source path. Baked into the rootfs at build time —
   # nothing here is decided at call time.
   #

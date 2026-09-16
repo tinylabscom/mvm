@@ -4,11 +4,11 @@ One-shot privilege grants. Each script names a specific host change
 and requires explicit user invocation — nothing here runs from
 `mvmctl`, `nix develop`, or `shellHook`.
 
-Currently empty. The W7 plan flags `/dev/kvm` accessibility as the
-canonical example: when a Linux host's `/dev/kvm` exists but isn't
-readable by the current user, the host dev shell prints a warning
-pointing here. The fix script (`kvm-access.sh`) is intentionally
-*not* auto-generated — strict reading of the
+Currently empty. `/dev/kvm` access is the canonical case: on a Linux
+host where `/dev/kvm` exists but is not readable by the current user,
+Firecracker cannot open it until that user is granted access. The fix
+script (`kvm-access.sh`) is intentionally *not* shipped — strict
+reading of the
 [`mvm-nix-best-practices` guide](../../../specs/references/mvm-nix-best-practices.md)
 says the user runs it themselves so they see the `usermod -a -G kvm`
 or `chmod` change before it lands.
@@ -33,5 +33,4 @@ sudo usermod -a -G kvm "$USER"
 echo "Added $USER to the kvm group. Log out and back in (or run 'newgrp kvm')."
 ```
 
-Add the actual script when a contributor needs it; the W7 plan does
-not require shipping it now.
+Add the actual script here when a contributor needs it.

@@ -323,6 +323,51 @@ fn host_mvmctl_package_is_source_only() {
     }
 }
 
+/// The packages that ship the workspace's own release version read it from
+/// `Cargo.toml` rather than restating it, so a version bump cannot leave a
+/// package naming the previous release. The expression reads the same
+/// `mvmSrc` their vendored dependencies read `Cargo.lock` from; the manifest
+/// half of this test proves the path it walks exists and is a string.
+#[test]
+fn workspace_versioned_packages_read_the_version_from_the_manifest() {
+    const READ_VERSION: &str =
+        "workspaceVersion = (lib.importTOML (mvmSrc + \"/Cargo.toml\")).workspace.package.version;";
+
+    let manifest_path = repo_dir().join("Cargo.toml");
+    let manifest: toml::Value = toml::from_str(
+        &fs::read_to_string(&manifest_path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", manifest_path.display())),
+    )
+    .unwrap_or_else(|e| panic!("parsing {}: {e}", manifest_path.display()));
+    let version = manifest
+        .get("workspace")
+        .and_then(|w| w.get("package"))
+        .and_then(|p| p.get("version"))
+        .and_then(toml::Value::as_str);
+    assert!(
+        version.is_some_and(|v| !v.is_empty()),
+        "Cargo.toml must carry workspace.package.version as a string; the nix packages read it"
+    );
+
+    for recipe in ["mvmctl.nix", "mvm-sdk-cdylib.nix"] {
+        let path = nix_dir().join("packages").join(recipe);
+        let content =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        assert!(
+            content.contains(READ_VERSION) && content.contains("version = workspaceVersion;"),
+            "{recipe} must take its version from the workspace manifest"
+        );
+        let literal = content
+            .lines()
+            .map(str::trim_start)
+            .find(|line| line.starts_with("version = \""));
+        assert!(
+            literal.is_none(),
+            "{recipe} must not hardcode a version literal: {literal:?}"
+        );
+    }
+}
+
 #[test]
 fn host_mvmctl_package_keeps_native_vmm_linkage_explicit() {
     let path = nix_dir().join("packages").join("mvmctl.nix");

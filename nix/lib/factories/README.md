@@ -26,12 +26,12 @@ shapes with an explicit pointer to this composition path.
 
 - `mkFunctionService.nix` — single generic factory. Dispatches on the
   `language` input to the registry under `languages/`.
-- `languages/default.nix` — language registry. Maps a language string
-  to `{ language, runnerScript, servicePackages }`.
-- `languages/python.nix` — Python entry. Bakes `pkgs.python3` and the
-  Python wrapper from `nix/wrappers/python/`.
-- `languages/node.nix` — Node entry. Bakes `pkgs.nodejs` and the Node
-  wrapper from `nix/wrappers/node/`.
+- `languages/registry.nix` — the language registry, data only. One row per
+  language: the interpreter package (`python3`, `nodejs_22`), the wrapper
+  directory under `nix/wrappers/`, the wrapper extension, and an optional
+  shebang stamp.
+- `languages/default.nix` — the generic builder that turns each registry row
+  into `{ language, runnerScript, servicePackages }`.
 
 WASM is not yet in the registry — the user's `.wasm` IS the wrapper
 (no interpreter package, different input semantics), so it will land
@@ -40,16 +40,15 @@ sibling `mkWasmFunctionService` factory. Decision pending.
 
 ## Adding a language
 
-One file, no dispatcher edit, no caller-side switch:
+One data row, no new `.nix` file, no dispatcher edit, no caller-side switch:
 
-1. Drop `languages/<name>.nix` next to `python.nix` exporting
-   `{ language, runnerScript, servicePackages }`.
-2. Append the language to `languages/default.nix`'s attrset.
-3. Append the bare name to
-   `crates/mvm-ir/data/supported_languages.txt` so the IR validator
+1. Add a row to `languages/registry.nix`, and the wrapper scripts
+   (`oneshot.<ext>`, `longrunning.<ext>`) under `nix/wrappers/<dir>/`.
+2. Append the bare name to
+   `crates/mvm-contract/data/supported_languages.txt` so the IR validator
    accepts it as an `Entrypoint::Function.language` value.
-4. Append the name to the `results = map testLanguage [ ... ]` list
-   in `tests/factory_shape.nix`.
+3. Append the name to the `languageResults = map testLanguage [ ... ]` list
+   in the repository-root `tests/factory_shape.nix`.
 
 ## Contract
 
@@ -89,3 +88,23 @@ replaces the inlined script with the compiled `mvm-runner` binary
 baked at `/usr/lib/mvm/wrappers/runner`. Until then, **changes to
 mvm-runner's hardening must be mirrored into the wrappers** (and
 vice versa).
+
+## Nix checks and the Rust harness
+
+A property of a guest can be asserted from a Nix check or from a Rust test.
+Decide which one owns it before writing either:
+
+- **A Nix check provides the package and the session environment.** It builds
+  the derivation and fails only on what a realized derivation alone can show: a
+  store path entering a closure, a closure over its budget, an output that does
+  not build. `guest-rootfs-no-glibc` and `guest-rootfs-package-budget` in
+  `nix/flake.nix` are the shape.
+- **The Rust harness owns behavioral assertions.** What the wrapper, the
+  entrypoint or the agent does once it runs — exit status, output, the audit
+  entry, the refusal — is asserted in a `cargo nextest` test, not in a
+  `runCommand` script.
+- **Never catalog one assertion in both.** Two copies drift, and the drift stays
+  invisible until one of them is wrong. When a Nix build needs a behavior to
+  hold, it runs the Rust tests that assert it: `nix/packages/mvmctl.nix` sets
+  `doCheck` so its check phase runs the crates' own suites rather than restating
+  them in shell.

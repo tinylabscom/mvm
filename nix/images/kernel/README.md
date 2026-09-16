@@ -56,7 +56,7 @@ failure goes away. Plan 92 records the decision and tradeoffs.
 ## Tradeoff: first-boot kernel compile
 
 Because the config is novel, `cache.nixos.org` doesn't have a
-substitute. A contributor's first `dev up` compiles the kernel
+substitute. A contributor's first image build compiles the kernel
 once (3-5 min on Apple Silicon, ~10 min on slower hosts). After
 that, the kernel's nix store hash is stable across runs and
 contributors share it within the local nix store.

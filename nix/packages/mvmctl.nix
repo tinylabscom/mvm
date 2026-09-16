@@ -37,6 +37,11 @@ assert withNativeLibkrun -> withBuilderVm;
 assert withTpm2 -> tpm2-tss != null;
 
 let
+  # The workspace manifest is the only place the release version is written.
+  # It is read from the same `mvmSrc` the vendored dependencies read
+  # `Cargo.lock` from, so this adds no new evaluation-time input.
+  workspaceVersion = (lib.importTOML (mvmSrc + "/Cargo.toml")).workspace.package.version;
+
   featureList =
     [ ]
     ++ lib.optionals withBuilderVm [
@@ -51,7 +56,7 @@ let
 in
 rustPlatform.buildRustPackage {
   pname = "mvmctl";
-  version = "0.18.0-rc.2";
+  version = workspaceVersion;
 
   src = mvmSrc;
 

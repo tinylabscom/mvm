@@ -33,8 +33,11 @@ Last updated: 2026-09-16
       distro compat lanes, and Nix version-from-manifest.
   - [x] WS1 — publish and monitor `https://runmvm.com/install.sh` (#3268, #3331)
   - [x] WS2 — bake the stable version; API only on confirmed 404 (#3269)
-  - [ ] WS3–WS7 — atomic lifecycle, verification, compat, and Nix hygiene
-        (#3270–#3274)
+  - [ ] WS3–WS6 — atomic lifecycle, verification, and compat (#3270–#3273)
+  - [x] WS7 — Nix hygiene: package versions read from `Cargo.toml`, the
+        check/harness boundary written down, stale Lima and `dev up` docs
+        swept, and `check-deferrals` extended to `nix/`, `src/`, `install.sh`
+        and the `Justfile` (#3274)
 
 - [x] **VMM-agnostic Stage 0.**
       `specs/plans/2026-09-15-vmm-agnostic-stage0.md`.

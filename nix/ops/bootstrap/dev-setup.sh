@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ops/bootstrap/dev-setup.sh — Install prerequisites for building mvm from source.
+# nix/ops/bootstrap/dev-setup.sh — Install prerequisites for building mvm from source.
 #
 # Mutates: invokes the host's package manager (homebrew/apt/dnf/pacman/nix-env)
-#          to install Rust + Lima. May call sudo.
+#          to install build dependencies, then Rust, cargo-watch, and pnpm.
+#          May call sudo.
 # Idempotent: yes (existing installs are detected and skipped).
 #
-# Run this on a fresh host (or inside a Lima VM) before `cargo build`.
+# Run this on a fresh host before `cargo build`.
 #
 # Usage:
-#   ./ops/bootstrap/dev-setup.sh
+#   ./nix/ops/bootstrap/dev-setup.sh
 
 # ---------------------------------------------------------------------------
 # Color helpers

@@ -3,34 +3,25 @@
 
   # ── Why this flake exists ────────────────────────────────────────────
   #
-  # The libkrun-direct launcher (`LibkrunBuilderVm`) replaces the
-  # libkrun-backed builder VM (`nix/images/builder/`, which is actually
-  # the interactive image despite the name). This flake is the artifact
-  # `LibkrunBuilderVm` boots into: a small Linux kernel + ext4
-  # rootfs containing Nix + a curated build-tools subset +
+  # This flake is the artifact the builder VM boots into: a small Linux
+  # kernel + ext4 rootfs containing Nix + a curated build-tools subset +
   # `mvm-host-vm-init` at `/sbin/mvm-host-vm-init`.
   #
   # `packages.<system>.default` produces `$out/{vmlinux,rootfs.ext4,
-  # cmdline.txt,manifest.json}`. CI uploads these as
-  # `builder-vmlinux-<arch>` and `builder-rootfs-<arch>.ext4`
-  # alongside the existing dev-image outputs.
+  # cmdline.txt,manifest.json}`.
   #
-  # Distinct from `nix/images/builder/flake.nix` which produces the
-  # interactive image (`mvm-dev`) — the rootfs a user `dev shell`s
-  # into. The two flakes coexist and `mvmctl dev up` picks the right
-  # one via `find_builder_vm_flake` / `find_dev_image_flake`.
+  # A source-checkout `mvmctl` locates this flake through
+  # `find_builder_vm_flake`.
   #
   # ── Architecture / workspace staging ──────────────────────────────
-  #
-  # Identical pattern to `nix/images/builder/flake.nix`:
   #
   # - Stage the workspace via `builtins.path` (filter out `target/`,
   #   `.git/`, etc.) so the flake works both on a host running
   #   `nix build` directly and inside the libkrun builder VM's
   #   `path:` URL fetch.
   # - `MVM_WORKSPACE_PATH` env var override for the sandbox case
-  #   (avoids the `../../..` resolution-against-store-copy trap
-  #   that bit `nix/images/builder/flake.nix`).
+  #   (avoids resolving `../../..` against the flake's own store copy,
+  #   which does not contain the workspace).
   # - Import the parent flake's `nix/lib/` directly (skip flake-
   #   input chain → no path-input lock validation issue).
   #
@@ -259,8 +250,8 @@
         # a newer nixpkgs pin that has them) lands. The deps-volume
         # audit pipeline still works at runtime via the
         # `mvm-egress-proxy` allowlist; the SBOM/CVE tools were a
-        # nice-to-have inside the builder VM, not a load-bearing
-        # blocker for `mvmctl dev up`.
+        # nice-to-have inside the builder VM, not something a build
+        # depends on.
         # python3Packages.cyclonedx-bom
         # python3Packages.pip-audit
       ];
@@ -285,14 +276,15 @@
 
       # Extra packages for the interactive (dev) builder VM image.
       # Added on top of `builderPackages` when `interactive = true`.
-      # Provides a useful shell environment for contributors debugging
-      # inside the builder VM via `mvmctl dev shell`.
+      # Provides a shell environment inside the builder VM. No `mvmctl`
+      # verb boots this image; the builder VM `mvmctl` runs is the
+      # headless `default` output.
       #
       # The Rust toolchain (`cargo` + `rustc`) is deliberately NOT baked in:
       # it is ~1 GB of closure and `mvm` itself builds on the host, while Rust
       # guest workloads build through nix (`buildRustPackage`) — so interactive
       # `cargo`/`rustc` here only served ad-hoc poking. The builder VM has `nix`
-      # and (in the dev shell) open egress, so a contributor who wants it runs
+      # and (in this image) open egress, so a contributor who wants it runs
       # `nix shell nixpkgs#rustc nixpkgs#cargo` on demand; it then persists in
       # the `/nix-store` image. Halving the dev rootfs is worth the one-time pull.
       devPackages = pkgs: with pkgs; [
@@ -350,9 +342,9 @@
         };
 
       # Two attrs.
-      #   default — headless builder VM (production use, mvmctl build/up).
-      #   dev     — interactive builder VM (cargo + rustc + nano + bashInteractive).
-      #             Used by `mvmctl dev shell` for contributor debugging.
+      #   default — headless builder VM; the one `mvmctl` boots for builds.
+      #   dev     — interactive builder VM (`builderPackages` + `devPackages`).
+      #             No `mvmctl` verb boots it.
       #
       # Both take host binaries from MVM_HOST_BIN_DIR (set by mvmctl before
       # invoking `nix build ... --impure`). No rustPlatform.buildRustPackage
@@ -536,11 +528,11 @@
     in
     {
       packages = forAllSystems (system: {
-        # Headless builder VM — production use path (mvmctl build / mvmctl up).
+        # Headless builder VM — the image `mvmctl` boots for builds.
         # Contains only the build tooling; no interactive shell extras.
         default = mkBuilderVmImage { inherit system; interactive = false; };
-        # Interactive builder VM — contributor dev path (mvmctl dev shell).
-        # Adds cargo, rustc, nano on top of the headless package set.
+        # Interactive builder VM. No `mvmctl` verb boots it.
+        # Adds `devPackages` on top of the headless package set.
         dev = mkBuilderVmImage { inherit system; interactive = true; };
         stage0-rootfs = mkBuilderVmStage0Rootfs system;
         # Builder kernel config (base + builder delta). `kernel-configfile`

@@ -158,13 +158,16 @@ production `unreachable!` are genuine invariants, all 8 `todo!()` are string
 fixtures in xtask gate tests); ~95 real stubs out of ~1,800 raw term hits, the
 rest being the secrets-substitution domain noun.
 
-- [ ] **A3.1** `nix/profiles/minimal.nix:15-22` carries five security TODOs
+- [x] **A3.1** `nix/profiles/minimal.nix:15-22` carries five security TODOs
       (per-service uid, read-only `/etc`, setpriv, seccomp tier, dm-verity)
       gated on "the security port from `../mvm/crates/mvm-security`". That crate
       does not exist in this 19-crate workspace, so the completion event cannot
       occur, and `check-deferrals` does not scan `nix/`. The profile is an
       internal test fixture, not a user template. Decide per line: land it on
       the real profile, or delete the line.
+      Resolved: all five deleted. The fixture runs no services and is never
+      sealed, so none applies; its header now says so, and `check-deferrals`
+      walks `nix/`, `src/`, `install.sh` and the `Justfile`.
 - [ ] **A3.2** `NoopChecker` (`crates/mvm-hostd/src/supervisor/services/binary_integrity.rs:287`)
       is `pub`, returns `Ok(())` unconditionally, and is not `#[cfg(test)]`
       gated — in the crate that gates subprocess binary integrity. Its own doc
@@ -403,13 +406,15 @@ rest assorted. Roughly 15 `Phase N` hits are algorithm steps and must survive.
 
 ## H. Nix
 
-- [ ] **H1** `nix/packages/mvmctl.nix:54` hardcodes `0.18.0-rc.1`. Read the
+- [x] **H1** `nix/packages/mvmctl.nix:54` hardcodes `0.18.0-rc.1`. Read the
       version from the manifest.
-- [ ] **H2** Replace the hand-maintained vendor hash with lockfile-derived
+- [x] **H2** Replace the hand-maintained vendor hash with lockfile-derived
       vendoring, so an unrelated lock bump cannot turn the package red.
-- [ ] **H3** Write down the boundary: a Nix check provides the package and the
+      Already true: `nix/lib/static-crates-cargo-deps.nix` is `importCargoLock`
+      over the committed `Cargo.lock`; there was no vendor hash to replace.
+- [x] **H3** Write down the boundary: a Nix check provides the package and the
       session environment; the Rust harness owns the behavioural assertions.
-- [ ] **H4** `nix/ops/README.md` still tells contributors to install Lima and
+- [x] **H4** `nix/ops/README.md` still tells contributors to install Lima and
       run `mvmctl dev up`. Both were removed. Sweep it.
 
 ## I. `specs/` and the repo surface

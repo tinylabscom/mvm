@@ -7,8 +7,8 @@
 # - which wrapper-script source to inline at
 #   `/usr/lib/mvm/wrappers/runner` (`runnerScript`)
 # - the canonical language string emitted into `/etc/mvm/runtime.json`
-#   (`language`) — must match the value `mvm-ir`'s validator allowlists in
-#   `crates/mvm-ir/data/supported_languages.txt`
+#   (`language`) — must match the value the IR validator allowlists in
+#   `crates/mvm-contract/data/supported_languages.txt`
 #
 # The per-language DATA lives in ./registry.nix. THIS file is the single
 # generic builder that turns each data row into the triple above — so adding
