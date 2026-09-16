@@ -3,7 +3,7 @@
 Backing: shipped-source
 Validation: check-declared-backing
 
-**Status: W1–W7 COMPLETE** (HVF Stage 0 live-proven; Firecracker proven by test only — see Validation).
+**Status: W1–W7 COMPLETE** (HVF Stage 0 and x86_64 Firecracker Stage 0 + builds live-proven — see Validation).
 
 Stage 0 — the bootstrap that builds the builder-VM image from nothing — was the
 last builder path that talked to a VMM directly instead of through the
@@ -134,7 +134,10 @@ appends the token unconditionally, fixes it for every backend.
   console tokens were an HVF-shaped constant. The one-shot builder also stopped
   declaring an agent port its guest never serves. Builder shell jobs on
   Firecracker admit the current source image first, as libkrun's do. The
-  persistent builder still refuses Firecracker by name.
+  persistent builder still refuses Firecracker by name. The live run added two
+  more: the runner stops a guest whose kernel halts instead of powering off
+  (Firecracker does not exit on a halt), and `FcRunningVm::kill` no longer
+  requires a guest agent to flush through.
 
 ## Deliberately out of scope
 - **Deleting the libkrun Stage 0 body.** It stays as the second working
@@ -166,10 +169,15 @@ label, substituter traffic through the host egress endpoint, and
 `stage0-init: done; halting`. The cache then held a 760 MiB `rootfs.ext4`, a
 `vmlinux`, `manifest.json`, `cmdline.txt` and provenance.
 
-Firecracker is not live-proven, for Stage 0 or for builds: this host has no
-KVM, and neither KVM host was reachable when W7 landed. What is proven is that
-both boot contracts compose onto `FcDriver` with its own console, a bootable
-cmdline, no agent wait, and a `GuestDials` egress port. The libkrun Stage 0 body is
+**Firecracker is live-proven on x86_64** (W7). On an Ubuntu 24.04 KVM host with
+Firecracker v1.14.1, a cold `MVM_HOME` and nothing selected or killed by hand,
+auto-detect chose Firecracker, Stage 0 exited 0 after 17 minutes, and a builder
+shell job exited 0 with its `/out` intact — including a `curl` of
+cache.nixos.org through the guest's egress channel. The first attempt hung at
+Stage 0's halt; that is the W7 halt fix. aarch64 Firecracker is untested.
+`specs/sprint/delivery/3324-firecracker-builder-image.md` carries the evidence.
+
+The libkrun Stage 0 body is
 untouched and reachable by name, but it is no longer a fallback — nothing lowers
 onto it.
 

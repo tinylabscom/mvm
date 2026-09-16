@@ -88,10 +88,11 @@ Last updated: 2026-09-16
       Linux-with-KVM, and `Stage0Vm<D>`/`DriverBuilderVm<D>` are generic over
       the driver, so a future Windows backend inherits both. W1–W6 landed.
       **HVF Stage 0 is live-proven** on a plain `just embed` build, after its
-      bootstrap kernel moved to a source pin; Firecracker is not (no KVM host
-      in that run). W7 (#3324) gives it a builder-image resolver, so it now
-      serves one-shot builds and shell jobs too, proven by test only; its
-      persistent builder still refuses by name.
+      bootstrap kernel moved to a source pin. W7 (#3324) gives Firecracker a
+      builder-image resolver and stops guests that halt instead of powering
+      off; **x86_64 Firecracker Stage 0 and builder shell jobs are
+      live-proven** on a KVM host. Its persistent builder still refuses by
+      name, and aarch64 Firecracker is untested.
 
 - [x] **Claim-witness mutation coverage — issue #3250.**
       `specs/plans/2026-09-15-claim-witness-mutation-coverage.md`.
