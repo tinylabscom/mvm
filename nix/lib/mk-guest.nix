@@ -603,54 +603,10 @@ let
     # block any workload on a kernel without rtnetlink. Log the
     # failure and continue; an operator who needs guest-side
     # defense flagged the issue from the JSON line.
-    # Stage 2.46 — trust the per-VM egress CA (https
-    # substitution). A fresh FC boot attaches no secrets drive, so the host
-    # delivers the per-VM name-constrained intermediate CERT on the kernel
-    # cmdline as `mvm.egress_ca=pem:<body>` (cert only — the key stays host-side
-    # in the terminator). Older boots may still carry the legacy hex-encoded
-    # full PEM; accept both while the host-side encoder moves to the compact
-    # format. We decode it to a tmpfs file (writable under the dm-verity-sealed
-    # rootfs) and point the common TLS-trust env vars at a bundle = baked roots
-    # + this cert, so a workload trusts host-terminated bound-host TLS. The
-    # export reaches the entrypoint (setpriv preserves env).
-    #
-    # Honest caveat: Python `ssl` and older Node do NOT enforce X.509
-    # nameConstraints client-side, so this trust is a courtesy — the real egress
-    # boundary is the host-side allow-list check (claim 12), not this cert.
-    #
-    # Compact `pem:` tokens reconstruct the PEM body under tmpfs; the legacy
-    # hex form stays accepted for older host launches. Absent token ⇒ whole
-    # block is a no-op (no-secret guests boot byte-identically).
-    MVM_EGRESS_CA_TOKEN=$(/bin/busybox sed -n 's/.*\bmvm\.egress_ca=\([^ ]*\).*/\1/p' /proc/cmdline)
-    if [ -n "$MVM_EGRESS_CA_TOKEN" ]; then
-      /bin/busybox mkdir -p /run/mvm
-      if echo "$MVM_EGRESS_CA_TOKEN" | /bin/busybox grep -q '^pem:'; then
-        MVM_EGRESS_CA_BODY=''${MVM_EGRESS_CA_TOKEN#pem:}
-        {
-          printf '%s\n' '-----BEGIN CERTIFICATE-----'
-          printf '%s' "$MVM_EGRESS_CA_BODY" | /bin/busybox sed 's/.\{64\}/&\n/g'
-          printf '\n%s\n' '-----END CERTIFICATE-----'
-        } > /run/mvm/egress-ca.crt
-      else
-        printf '%b' "$(echo "$MVM_EGRESS_CA_TOKEN" | /bin/busybox sed 's/../\\x&/g')" \
-          > /run/mvm/egress-ca.crt
-      fi
-      # Combined bundle so the per-VM cert is trusted ALONGSIDE the baked roots
-      # (a workload still reaches cache.nixos.org/api.github.com etc.).
-      if cat /etc/ssl/certs/ca-bundle.crt /run/mvm/egress-ca.crt \
-          > /run/mvm/ca-bundle.crt 2>/dev/null; then
-       :
-      else
-        /bin/busybox cp /run/mvm/egress-ca.crt /run/mvm/ca-bundle.crt
-      fi
-      # OpenSSL (curl/most), curl, python-requests → the combined bundle;
-      # Node appends just the extra cert.
-      export SSL_CERT_FILE=/run/mvm/ca-bundle.crt
-      export CURL_CA_BUNDLE=/run/mvm/ca-bundle.crt
-      export REQUESTS_CA_BUNDLE=/run/mvm/ca-bundle.crt
-      export NODE_EXTRA_CA_CERTS=/run/mvm/egress-ca.crt
-      echo "mvm-init: installed per-VM egress CA (https substitution trust)"
-    fi
+    # The per-VM egress CA is trusted further down, in Stage 2.485: the
+    # certificate arrives on the per-boot identity drive, and that drive is not
+    # copied out until the runtime overlay has been mounted and its Rust helper
+    # resolved.
 
     # Stage 2.47 — inject the per-run secret PLACEHOLDER env.
     # The host minted the workload's placeholders BEFORE boot (so they can ride
@@ -918,6 +874,44 @@ let
       if ! "$MVM_EGRESS_CLIENT_BIN" "$MVM_IDENTITY_PROVISION_COMMAND" ${toString egressUid}; then
         echo "mvm-init: failed to provision FlowMux identity for the egress service"
         exit 1
+      fi
+    fi
+
+    # Stage 2.485 — trust the per-VM egress CA (https substitution). The host
+    # mints a name-constrained CA for the destinations the plan's secrets are
+    # bound to and puts its CERTIFICATE on the per-boot identity drive (the key
+    # stays host-side in the terminator). The step above copied that drive into
+    # /run/mvm, which is tmpfs and therefore writable under a dm-verity-sealed
+    # rootfs. Point the common TLS-trust env vars at a bundle = baked roots +
+    # this certificate, so a workload trusts host-terminated bound-host TLS.
+    # The export reaches the entrypoint (setpriv preserves env).
+    #
+    # Scope caveat: the certificate's nameConstraints bound what a leaked per-VM
+    # key could be used for, and OpenSSL-backed clients (curl, Python `ssl`,
+    # Node) do enforce them. They are not the egress control either way — the
+    # real boundary is the host-side allow-list check (claim 12), which decides
+    # whether a flow is admitted at all.
+    #
+    # The bundle is built by the same Rust helper the agent init uses rather
+    # than by `cat`: concatenating a baked bundle that does not end in a newline
+    # with the certificate fuses their armor lines, and every PEM parser then
+    # reads one truncated certificate instead of two. It writes the bundle
+    # whether or not a certificate was delivered, so the exported path always
+    # resolves — OpenSSL that cannot open SSL_CERT_FILE loads no trust store at
+    # all, which would break TLS to destinations unrelated to substitution.
+    if [ -n "$MVM_EGRESS_CLIENT_BIN" ]; then
+      if ! "$MVM_EGRESS_CLIENT_BIN" install-egress-ca-trust; then
+        echo "mvm-init: failed to install the egress CA trust bundle"
+        exit 1
+      fi
+      # OpenSSL (curl/most), curl, python-requests → the combined bundle;
+      # Node appends just the extra cert.
+      export SSL_CERT_FILE=/run/mvm/ca-bundle.crt
+      export CURL_CA_BUNDLE=/run/mvm/ca-bundle.crt
+      export REQUESTS_CA_BUNDLE=/run/mvm/ca-bundle.crt
+      if [ -r /run/mvm/egress-ca.crt ]; then
+        export NODE_EXTRA_CA_CERTS=/run/mvm/egress-ca.crt
+        echo "mvm-init: installed per-VM egress CA (https substitution trust)"
       fi
     fi
     if [ -n "''${MVM_VSOCK_EGRESS:-}" ] && [ -n "$MVM_EGRESS_CLIENT_BIN" ]; then

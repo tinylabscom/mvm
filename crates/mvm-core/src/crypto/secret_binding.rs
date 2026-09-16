@@ -3,10 +3,17 @@
 //! `mvmctl secret set --host --type` records, per (tenant, name), the
 //! auth-type and the destination allow-list: the operator's local
 //! definition of *where* a secret may go and *how* it is used. The value
-//! itself lives in [`mvm_core::crypto::secret_store::SecretStore`]; this
+//! itself lives in [`crate::crypto::secret_store::SecretStore`]; this
 //! carries metadata only — **no secret bytes** — so `mvmctl secret ls`
 //! can show name/type/hosts without a `get`, and the keyholder
 //! can consult the binding it enforces against.
+//!
+//! It sits this low because two layers read it. The keyholder resolves a
+//! credential against it on the egress path, and the launch path reads the same
+//! `allowed_hosts` to name-constrain the per-VM egress CA before the guest
+//! boots — and that launcher sits below the keyholder. One store, read from
+//! both, so a binding cannot say one thing to the certificate and another to
+//! the enforcement.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -15,9 +22,10 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use mvm_contract::ir::{AuthType, Sigv4Params};
-use mvm_core::config::mvm_home_strict;
-use mvm_core::crypto::keystore::validate_shell_id;
 use serde::{Deserialize, Serialize};
+
+use crate::config::mvm_home_strict;
+use crate::crypto::keystore::validate_shell_id;
 
 /// Per-(tenant, name) binding metadata. No secret bytes — safe to print.
 // allow(secret-debug): metadata only — auth_type + allowed_hosts. The
@@ -56,9 +64,47 @@ pub trait BindingStore: Send + Sync {
     fn delete(&self, tenant: &str, name: &str) -> Result<()>;
 }
 
+/// Every destination the `Keystore`-sourced entries of `plan_secrets` admit,
+/// de-duplicated, in plan order.
+///
+/// This is the same walk admission does to build the substitution registry, and
+/// deliberately so: the per-VM egress certificate is name-constrained to exactly
+/// the hosts the registry will later agree are bound, so the certificate and the
+/// enforcement cannot describe different destination sets.
+///
+/// `External` sources are skipped — they resolve on another path and bind no
+/// destination here. A `Keystore` secret with no recorded binding is an error
+/// rather than an empty host list: a certificate permitting nothing, minted for
+/// a workload whose endpoint would go on to refuse the same flow anyway, is a
+/// failure worth naming at launch.
+pub fn bound_hosts(
+    plan_secrets: &[crate::plan::SecretBinding],
+    tenant: &str,
+    bindings: &dyn BindingStore,
+) -> Result<Vec<String>> {
+    let mut hosts: Vec<String> = Vec::new();
+    for secret in plan_secrets {
+        let crate::plan::SecretSource::Keystore { address } = &secret.source else {
+            continue;
+        };
+        let meta = bindings.get(tenant, address)?.with_context(|| {
+            format!(
+                "secret `{address}` has no local binding; run \
+                 `mvmctl secret set {address} --host <h> --type <t>`"
+            )
+        })?;
+        for host in meta.allowed_hosts {
+            if !hosts.contains(&host) {
+                hosts.push(host);
+            }
+        }
+    }
+    Ok(hosts)
+}
+
 /// File-backed binding store. Layout: `<base>/<tenant>/<name>.json`,
 /// per-file mode 0600, per-tenant dir mode 0700 — mirrors
-/// [`mvm_core::crypto::secret_store::FileSecretStore`]. Default base is
+/// [`crate::crypto::secret_store::FileSecretStore`]. Default base is
 /// `~/.mvm/secret-bindings/`.
 pub struct FileBindingStore {
     base: PathBuf,
@@ -204,5 +250,49 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = FileBindingStore::with_dir(dir.path());
         assert!(store.put("local", "../escape", &meta()).is_err());
+    }
+
+    fn keystore_secret(name: &str, address: &str) -> crate::plan::SecretBinding {
+        crate::plan::SecretBinding {
+            name: name.into(),
+            source: crate::plan::SecretSource::Keystore {
+                address: address.into(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_plan_with_no_keystore_secrets_binds_no_destination() {
+        let dir = tempdir().unwrap();
+        let store = FileBindingStore::with_dir(dir.path());
+        let external = crate::plan::SecretBinding {
+            name: "VAULT_TOKEN".into(),
+            source: crate::plan::SecretSource::External {
+                provider: "vault".into(),
+                path: "kv/token".into(),
+            },
+        };
+        assert!(
+            bound_hosts(&[external], "local", &store)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(bound_hosts(&[], "local", &store).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_plan_secret_with_no_recorded_binding_is_refused() {
+        let dir = tempdir().unwrap();
+        let store = FileBindingStore::with_dir(dir.path());
+        let err = bound_hosts(
+            &[keystore_secret("OPENAI_API_KEY", "openai")],
+            "local",
+            &store,
+        )
+        .expect_err("an unbound plan secret must not resolve to an empty host set");
+        assert!(
+            format!("{err}").contains("openai"),
+            "the refusal must name the secret an operator has to bind: {err}"
+        );
     }
 }

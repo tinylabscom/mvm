@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use mvm_core::crypto::egress_ca::VmIntermediate;
+use mvm_core::crypto::egress_ca::VmEgressCa;
 use mvm_core::substitution_wire::{HttpFlowHead, WireResponse};
 use tracing::warn;
 use zeroize::Zeroizing;
@@ -152,7 +152,7 @@ impl LeafCache {
     /// `intermediate`, minting it at most once per bounded cache lifetime.
     fn config_for(
         &self,
-        intermediate: &VmIntermediate,
+        intermediate: &VmEgressCa,
         authority: &str,
     ) -> Result<Arc<rustls::ServerConfig>, FlowError> {
         let key = cache_key(intermediate, authority);
@@ -195,7 +195,7 @@ impl LeafCache {
 ///
 /// The issuer is identified by a digest of its certificate rather than the
 /// certificate itself, so the key stays short and carries no key material.
-fn cache_key(intermediate: &VmIntermediate, authority: &str) -> String {
+fn cache_key(intermediate: &VmEgressCa, authority: &str) -> String {
     use sha2::{Digest, Sha256};
     let issuer = hex::encode(Sha256::digest(intermediate.cert_pem().as_bytes()));
     format!("{issuer}/{authority}")
@@ -718,11 +718,18 @@ mod tests {
             FileAuditSigner::open_file(signing_key, &audit_path).expect("open audit signer");
         let recorder = Recorder::new(Arc::new(signer), TenantId(TENANT.to_string()));
 
-        let intermediate = mvm_core::crypto::egress_ca::EgressCa::load_or_init_at(dir.path())
-            .expect("load or init host ca")
-            .mint_vm_intermediate(&[BOUND_HOST])
-            .expect("mint vm intermediate");
-        let intermediate_pem = intermediate.cert_pem().to_string();
+        // Through the production delivery, so the certificate a guest is handed
+        // and the key the endpoint terminates under are the ones the launch path
+        // actually ships rather than a look-alike minted here.
+        let delivery =
+            mvm_vmm::host::network_endpoint_spawn::build_egress_tls_delivery(&[BOUND_HOST])
+                .expect("mint the per-VM egress ca");
+        let intermediate = mvm_core::crypto::egress_ca::VmEgressCa::from_pem(
+            delivery.cert_pem(),
+            delivery.key_pem(),
+        )
+        .expect("the endpoint rebuilds its ca from the delivered pems");
+        let intermediate_pem = delivery.cert_pem().to_string();
 
         let service = SubstitutionService::new(Arc::new(registry), resolver, forwarder.clone())
             .with_tenant(TENANT)
@@ -819,6 +826,15 @@ mod tests {
     /// unmodified HTTPS client would: handshake against the minted leaf, send
     /// an origin-form request, read the response back.
     fn exchange(harness: &Harness, request: &[u8]) -> Vec<u8> {
+        exchange_trusting(harness, &harness.intermediate_pem.clone(), request)
+            .expect("the guest's tls client completes its handshake")
+    }
+
+    /// As [`exchange`], but with the guest trusting exactly `trusted_pem`.
+    ///
+    /// `None` when the handshake never completed — which is the answer a client
+    /// that was delivered some other VM's certificate must get.
+    fn exchange_trusting(harness: &Harness, trusted_pem: &str, request: &[u8]) -> Option<Vec<u8>> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -838,16 +854,13 @@ mod tests {
         let server_name = rustls::pki_types::ServerName::try_from(BOUND_HOST)
             .expect("the bound host is a server name")
             .to_owned();
-        let connection = rustls::ClientConnection::new(
-            Arc::new(guest_client_config(&harness.intermediate_pem)),
-            server_name,
-        )
-        .expect("guest tls client");
+        let connection =
+            rustls::ClientConnection::new(Arc::new(guest_client_config(trusted_pem)), server_name)
+                .expect("guest tls client");
         let mut tls = rustls::StreamOwned::new(connection, guest_side);
 
-        tls.write_all(request).expect("guest writes its request");
-        tls.flush().expect("guest flush");
-        let response = read_response(&mut tls);
+        let wrote = tls.write_all(request).and_then(|()| tls.flush()).is_ok();
+        let response = wrote.then(|| read_response(&mut tls));
 
         // Close the guest side so the terminator's keep-alive loop ends and
         // the thread can be joined.
@@ -899,6 +912,70 @@ mod tests {
             out.extend_from_slice(&rest[..size]);
             rest = &rest[size + 2..];
         }
+    }
+
+    /// The end-to-end property the delivery exists for: an unmodified HTTPS
+    /// client that trusts **only** the certificate the launch path put on this
+    /// VM's identity drive completes a request whose credential the host
+    /// substituted — and a client holding some other VM's certificate does not
+    /// get that far, which is what makes the delivery per-VM rather than a
+    /// blanket trust anchor.
+    #[test]
+    fn a_client_trusting_only_the_delivered_certificate_completes_a_substituted_request() {
+        let vm = harness(BOUND_HOST, b"{\"ok\":true}");
+
+        let response = exchange_trusting(
+            &vm,
+            &vm.intermediate_pem.clone(),
+            &request_with_placeholder(&vm.placeholder, BOUND_HOST),
+        )
+        .expect("a client trusting the delivered certificate completes its handshake");
+        assert!(
+            status_line(&response).starts_with("HTTP/1.1 200"),
+            "unexpected status: {}",
+            String::from_utf8_lossy(&response)
+        );
+        let authorization = vm
+            .forwarder
+            .seen
+            .lock()
+            .expect("forwarder record lock")
+            .clone()
+            .expect("the forward leg ran")
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            .map(|(_, value)| value.clone())
+            .expect("the re-originated request carries an authorization header");
+        assert_eq!(authorization, format!("Bearer {REAL_SECRET}"));
+
+        let other_vm =
+            mvm_vmm::host::network_endpoint_spawn::build_egress_tls_delivery(&[BOUND_HOST])
+                .expect("a second VM's delivery");
+        assert_ne!(
+            other_vm.cert_pem(),
+            vm.intermediate_pem,
+            "each VM's certificate is its own"
+        );
+        let stranger = harness(BOUND_HOST, b"{\"ok\":true}");
+        assert!(
+            exchange_trusting(
+                &stranger,
+                other_vm.cert_pem(),
+                &request_with_placeholder(&stranger.placeholder, BOUND_HOST),
+            )
+            .is_none(),
+            "a client holding another VM's certificate must not complete this flow"
+        );
+        assert!(
+            stranger
+                .forwarder
+                .seen
+                .lock()
+                .expect("forwarder record lock")
+                .is_none(),
+            "and nothing may be forwarded on a flow that never handshook"
+        );
     }
 
     #[test]

@@ -411,7 +411,7 @@ pub fn assemble_with_projection(
     // `https`. Absent ⇒ `http`-only.
     let tls_intermediate = match &cfg.tls_intermediate {
         Some(ti) => Some(
-            mvm_core::crypto::egress_ca::VmIntermediate::from_pem(&ti.cert_pem, &ti.key_pem)
+            mvm_core::crypto::egress_ca::VmEgressCa::from_pem(&ti.cert_pem, &ti.key_pem)
                 .context("reconstruct per-VM egress intermediate from EndpointConfig")?,
         ),
         None => None,
