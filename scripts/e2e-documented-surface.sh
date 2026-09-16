@@ -555,7 +555,7 @@ MVM_HOME="$E2E_HOME" "$MVMCTL" doctor || true
 # 3. The documented surface, live.
 #
 # `MVM_BDD_LIVE=1` opts into the scenarios that boot a real microVM. No
-# `MVM_BDD_CI_LIVE_ONLY` here: that selector narrows to the merge-queue subset,
+# `MVM_BDD_ONLY_TAG` here: that selector narrows to one tag's subset,
 # and narrowing is what let the macOS default backend go uncovered.
 # ---------------------------------------------------------------------------
 # Bounded, because a live scenario can hang rather than fail: a guest that

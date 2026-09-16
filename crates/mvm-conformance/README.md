@@ -17,14 +17,14 @@ state and step macros live in `tests/`, while reusable logic in `src/` remains
 ordinary Rust that can be tested without starting the runner.
 
 Before a scenario runs, the harness derives `RuntimeCaps` from the host and
-environment. `scenario_gate_for_ci` interprets tags and either runs the
+environment. `scenario_gate_for_selection` interprets tags and either runs the
 scenario or reports a deliberate capability skip. Important tags include:
 
 | Tag | Meaning |
 |---|---|
 | `@wip` | Step implementation is intentionally pending |
 | `@live` | Boots or reaches a real external/runtime resource; opt in explicitly |
-| `@ci_live` | Narrow live lifecycle selected by the merge queue |
+| `@ci_live` | Narrow live lifecycle the merge queue selects with `MVM_BDD_ONLY_TAG=ci_live` |
 | Firecracker capability tags | Require usable KVM and Firecracker |
 
 Each scenario receives isolated `MVM_HOME`, Cargo state, and process cleanup so

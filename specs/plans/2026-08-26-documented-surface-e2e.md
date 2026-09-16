@@ -78,7 +78,7 @@ Two traps this feature encodes, both of which cost real time to find:
 `just e2e-docs` → `scripts/e2e-documented-surface.sh`: builds `mvmctl` and the
 TypeScript SDK `dist/`, warms one shared artifact home, reports host posture,
 then runs the suite with `MVM_BDD_LIVE=1`. It does **not** set
-`MVM_BDD_CI_LIVE_ONLY` — that selector narrows to the merge-queue subset, and
+`MVM_BDD_ONLY_TAG` — that selector narrows to one tag's subset, and
 narrowing is what let the macOS backend go uncovered.
 
 Nightly lanes `e2e-docs-linux` (Firecracker, `/dev/kvm`) and `e2e-docs-macos`
