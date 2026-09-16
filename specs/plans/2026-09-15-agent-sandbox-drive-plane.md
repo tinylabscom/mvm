@@ -30,7 +30,7 @@ invariant. This plan closes both halves.
 | G6 | The language SDKs shell out to `mvmctl` once per call | `crates/mvm-sdk/sdks/python/mvm/_sandbox.py:728`, `crates/mvm-sdk/sdks/typescript/src/_sandbox.ts:613` | WS2 |
 | G7 | `mvm-sdk` cannot link an in-process backend: `mvm-client` → `mvm-hostd` → `mvm-sdk` is a real cycle | `crates/mvm-client/Cargo.toml:43` | WS2 |
 | G8 | MCP exposes machine lifecycle only — no files, no exec stream, no stdin | `crates/mvm-mcp/src/lib.rs:586-673` (14 tools) | WS3 |
-| G9 | `host.secrets.v1` is named by ADR-001 claim 13 and by `CLAUDE.md`, but no handler is registered | `crates/mvm-hostd/src/broker/handlers/mod.rs:6-10` registers time/kv/assurance/audit/beacon | WS4 |
+| G9 | Claim 13 and the SDK sidecar catalog named the retired `host.secrets.v1` service even though the live boundary is the host-side substitution endpoint | Resolved: the claim now names and witnesses the endpoint, and the retired service no longer requests the SDK sidecar | WS4 |
 | G10 | `agent-session resume --boot` is the only agent path that starts a hypervisor, and has no tests | `crates/mvm-cli/src/commands/agent_session.rs` | WS4 |
 | G11 | Plan checkboxes are inverted: the CLI workstream is ticked over unticked store/transition workstreams | `specs/plans/2026-08-18-durable-agent-sessions.md` | WS4 |
 | G12 | `guides/agent-tool-contract.mdx` presents an unshipped surface under a heading a skimming reader takes as shipped | `public/src/content/docs/guides/agent-tool-contract.mdx:93-160` | WS0 |
@@ -308,12 +308,14 @@ Issue: [#3262](https://github.com/tinylabscom/mvm/issues/3262).
 
 Issues: [#3263](https://github.com/tinylabscom/mvm/issues/3263), [#3264](https://github.com/tinylabscom/mvm/issues/3264).
 
-- [ ] Decide `host.secrets.v1`: either implement the handler and register it in
-      `crates/mvm-hostd/src/broker/handlers/mod.rs`, or move claim 13's prose in
-      `specs/adrs/001-microvm-security-posture.md` and `CLAUDE.md` onto the
-      substitution endpoint, which is what actually enforces it. Leaving a named
-      service with no handler is the failure mode `check-claim-catalog` cannot
-      see.
+- [x] Retire `host.secrets.v1` from the SDK-served service catalog and move
+      claim 13's prose and witnesses onto the live host-side substitution
+      endpoint. `check-claim-catalog` now refuses the retired broker service as
+      claim authority, and a contract regression checks that the retired binding
+      does not request the SDK sidecar.
+- [x] Validate the claim-authority repair with focused regressions, workspace
+      check and clippy, Linux-gated target checks, generated-stub drift checks,
+      and the hermetic BDD suite.
 - [ ] Test `agent-session resume --boot` (`crates/mvm-cli/src/commands/agent_session.rs`).
       It starts a hypervisor and has no coverage.
 - [ ] Reconcile `specs/plans/2026-08-18-durable-agent-sessions.md` (WS6 ticked

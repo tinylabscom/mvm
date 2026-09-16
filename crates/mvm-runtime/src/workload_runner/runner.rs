@@ -157,7 +157,7 @@ impl BrokerGuard {
 /// rely on an in-process object outliving the call that created it.
 ///
 /// **Unconditional.** Unlike [`BrokerRegistrar`] (an unrelated, same-named
-/// host-services broker for `host.audit.v1`/`host.secrets.v1`), this is never
+/// host-services broker for admitted typed services), this is never
 /// gated on tenant admission. An unadmitted local run is exactly the case
 /// with the fewest other ways to see a boot failure, so it must not lose
 /// console capture either.
@@ -4081,7 +4081,7 @@ mod tests {
         let ports: Vec<u32> = cold.iter().map(|p| p.service.port()).collect();
         for (port, what) in [
             (EGRESS_PORT, "the gated egress endpoint"),
-            (BROKER_PORT, "host.audit.v1 / host.secrets.v1"),
+            (BROKER_PORT, "the admitted host-services broker"),
             (WORKLOAD_EXIT_PORT, "the guest's exit-code report"),
             (GUEST_AGENT_PORT, "the agent RPC"),
         ] {
@@ -4102,8 +4102,8 @@ mod tests {
 
     /// The child's broker is registered on the very socket its `BROKER_PORT`
     /// channel relays to, and under the claim's tenant — otherwise the guest
-    /// dials a path nothing is bound to and `host.audit.v1` / `host.secrets.v1`
-    /// are silently unavailable, a real degradation versus a cold boot.
+    /// dials a path nothing is bound to and admitted host services are silently
+    /// unavailable, a real degradation versus a cold boot.
     #[test]
     fn claim_registers_the_childs_broker_on_the_socket_it_wired() {
         let run = cold_boot_then_claim();

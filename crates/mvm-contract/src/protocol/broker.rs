@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 /// Reverse-DNS-like service identifier with a mandatory version segment.
 ///
-/// Examples: `host.secrets.v1`, `host.time.v1`, `host.cost.v1`, `broker.v1`.
+/// Examples: `host.kv.v1`, `host.time.v1`, `host.cost.v1`, `broker.v1`.
 ///
 /// Strings are validated at construction so the gate code can rely on the
 /// shape (in particular, the version segment is the rate-limiting parser
@@ -34,7 +34,7 @@ impl ServiceId {
     /// Parse a `ServiceId` from a string. Validates the shape:
     /// `<name>(.<sub>)*.v<n>` where `<n>` is one or more ASCII digits.
     /// Two-segment forms like `broker.v1` are valid (the meta service);
-    /// three-segment forms like `host.secrets.v1` are the common case
+    /// three-segment forms like `host.kv.v1` are the common case
     /// for namespaced services.
     pub fn parse(raw: impl Into<String>) -> Result<Self, ServiceIdParseError> {
         let raw = raw.into();
@@ -67,7 +67,7 @@ impl ServiceId {
         Ok(ServiceId(raw))
     }
 
-    /// The canonical string form (e.g. `"host.secrets.v1"`).
+    /// The canonical string form (e.g. `"host.kv.v1"`).
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -264,8 +264,7 @@ pub enum ServiceErrorCode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum Idempotency {
-    /// Each call returns a fresh result. `host.secrets.v1` ships here so
-    /// every credential has its own correlation + audit entry.
+    /// Each call returns a fresh result rather than reusing a prior response.
     MintFresh,
     /// Cache the most recent response for `ttl_ms` milliseconds.
     /// `host.cost.v1::workload` ships here at 1000ms.
@@ -306,7 +305,7 @@ mod tests {
     #[test]
     fn service_id_accepts_canonical_forms() {
         for raw in [
-            "host.secrets.v1",
+            "host.example.v1",
             "host.time.v1",
             "host.cost.v1",
             "broker.v1",
@@ -392,7 +391,7 @@ mod tests {
         let r = ServiceResponse::Err {
             correlation_id: CorrelationId::new("01HBROKER0000000000000000"),
             code: ServiceErrorCode::NotBound,
-            message: "service host.secrets.v1 not bound to this workload".into(),
+            message: "service host.example.v1 not bound to this workload".into(),
         };
         let bytes = serde_json::to_vec(&r).unwrap();
         let parsed: ServiceResponse = serde_json::from_slice(&bytes).unwrap();
@@ -442,9 +441,9 @@ mod tests {
     /// every call look like the same one.
     #[test]
     fn identifiers_render_their_own_value() {
-        let service = ServiceId::parse("host.secrets.v1".to_string()).unwrap();
-        assert_eq!(service.as_str(), "host.secrets.v1");
-        assert_eq!(service.to_string(), "host.secrets.v1");
+        let service = ServiceId::parse("host.example.v1".to_string()).unwrap();
+        assert_eq!(service.as_str(), "host.example.v1");
+        assert_eq!(service.to_string(), "host.example.v1");
 
         let correlation = CorrelationId::new("01JABCDEF0123456789ABCDEFG");
         assert_eq!(correlation.as_str(), "01JABCDEF0123456789ABCDEFG");

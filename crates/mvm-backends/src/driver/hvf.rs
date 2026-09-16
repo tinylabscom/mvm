@@ -260,7 +260,7 @@ fn relay_supervisor_config_with_handoff(
         egress_relay_socket,
         // An admitted workload carries a BROKER_PORT relay socket; the supervisor
         // splices the guest's BROKER_PORT dial to it so host.audit.v1 /
-        // host.secrets.v1 reach the per-VM broker (or the per-tenant host-agent
+        // admitted host services reach the per-VM broker (or the per-tenant host-agent
         // daemon). Absent for a builder/dev VM, which runs no admitted workload.
         broker_socket: spec.host_socket_for_service(GuestService::Broker),
         console_data_sockets,
@@ -1337,7 +1337,7 @@ mod tests {
     #[test]
     fn relay_config_wires_the_broker_relay_when_the_spec_carries_broker_port() {
         // An admitted workload's spec carries a BROKER_PORT channel; the
-        // supervisor config must relay it so host.audit.v1 / host.secrets.v1
+        // supervisor config must relay it so admitted host services
         // reach the broker. Absence ⇒ None (asserted above).
         let spec = spec_with(
             KernelImage::Path("/img/Image".into()),

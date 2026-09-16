@@ -71,7 +71,7 @@ pub struct ServiceCallCtx {
 /// per-handler constants — they're read at registration time, not
 /// per-call, so they can return cheap clones / values.
 pub trait ServiceHandler: Send + Sync + 'static {
-    /// The `ServiceId` this handler serves (e.g. `host.secrets.v1`).
+    /// The `ServiceId` this handler serves (e.g. `host.kv.v1`).
     fn id(&self) -> ServiceId;
 
     /// Agent profiles this handler is callable from. The broker's

@@ -31,11 +31,11 @@ const FEATURED_CLAIMS: Array<{
     witnesses: "fn:policy_default_is_deny_all, fn:run_net_default_is_deny_all",
   },
   {
-    title: "No raw secret value crosses the broker channel",
+    title: "The guest receives placeholders, never raw secret values",
     description:
-      "host.secrets.v1 returns destination-bound, time-bound signed credentials only. Raw secret bytes never leave the supervisor's address space.",
+      "The host-side substitution endpoint mints the guest's placeholder environment and resolves the real credential only while preparing an admitted outbound request.",
     witnesses:
-      "fn:encode_secret_env_cmdline_round_trips_pairs_as_single_token, fn:substitute",
+      "fn:handed_placeholders_never_contain_the_secret_value, fn:endpoint_bin_serves_substitution_and_refuses_unbound_destination, fn:substitute",
   },
   {
     title: "A production-safe run cannot invoke DevOnly guest-agent verbs",
@@ -78,7 +78,7 @@ export function Security() {
               {/* min-w-0 on the card, not just the witness line: as a flex
                   item it defaults to min-width:auto and so refuses to shrink
                   below its widest unbreakable child. Witness identifiers are
-                  long single tokens (fn:encode_secret_env_cmdline_...), which
+                  long single tokens (fn:handed_placeholders_never_...), which
                   pushed this card past the viewport at 390px. break-all
                   rather than break-words because these are mono identifiers —
                   breaking mid-token is fine and wrapping at all is not

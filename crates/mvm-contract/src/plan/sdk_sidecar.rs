@@ -38,11 +38,10 @@ pub const SDK_SIDECAR_LIB_PATH: &str = "/lib/libmvm_host_services.so";
 /// reviewer sees the whole SDK-reachable surface in one place. `broker.v1` is
 /// deliberately absent: it is the meta service the transport itself speaks, not
 /// a verb the SDK exposes to workload code.
-pub const SDK_HOST_SERVICES: [&str; 5] = [
+pub const SDK_HOST_SERVICES: [&str; 4] = [
     "host.audit.v1",
     "host.cost.v1",
     "host.kv.v1",
-    "host.secrets.v1",
     "host.time.v1",
 ];
 
@@ -105,6 +104,13 @@ mod tests {
             );
             assert!(is_sdk_host_service(&svc(id)));
         }
+    }
+
+    #[test]
+    fn retired_host_secrets_service_does_not_request_the_sidecar() {
+        let service = svc("host.secrets.v1");
+        assert!(!is_sdk_host_service(&service));
+        assert!(!sdk_sidecar_required_for(&[service], true));
     }
 
     #[test]

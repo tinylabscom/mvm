@@ -3899,3 +3899,15 @@ writes the plan:
 - [x] Cover valid snapshot materialization and launch-lease resolution, invalid
       ext4 refusal, missing-image failure, and the CLI registration workflow.
 - [x] Merge the implementation through the queue (#3151).
+
+## 2026-09-15 claim 13 live-authority repair
+
+- [x] Remove the retired `host.secrets.v1` name from the SDK-served host-service
+      catalog so it cannot trigger an unusable sidecar attachment.
+- [x] Anchor claim 13 and its public copies to the live host-side substitution
+      endpoint and replace existence-only witnesses with endpoint-path tests.
+- [x] Make `check-claim-catalog` reject the retired broker service as claim 13
+      authority and cover both the rejection and accepted live authority.
+- [x] Complete the required focused, workspace, gated-target, generated-stub,
+      and hermetic BDD validation matrix.
+- [ ] Merge through the queue and close #3263 from landed evidence.

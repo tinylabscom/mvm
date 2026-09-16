@@ -260,7 +260,7 @@ CloseStreamInput: CloseInput
 /**
  * Reverse-DNS-like service identifier with a mandatory version segment.
  * 
- * Examples: `host.secrets.v1`, `host.time.v1`, `host.cost.v1`, `broker.v1`.
+ * Examples: `host.kv.v1`, `host.time.v1`, `host.cost.v1`, `broker.v1`.
  * 
  * Strings are validated at construction so the gate code can rely on the shape (in particular, the version segment is the rate-limiting parser for the binding gate).
  */

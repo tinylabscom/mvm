@@ -220,9 +220,10 @@ id = "MVM-SEC-13"
 level = "build"
 witness_kinds = ["fn"]
 suite = "secrets_pii"
-statement = "No raw secret value crosses the broker channel"
+statement = "The managed substitution path hands the guest placeholders, never raw secret values"
 witnesses = [
-    "fn:encode_secret_env_cmdline_round_trips_pairs_as_single_token",
+    "fn:handed_placeholders_never_contain_the_secret_value",
+    "fn:endpoint_bin_serves_substitution_and_refuses_unbound_destination",
     "fn:substitute",
 ]
 
