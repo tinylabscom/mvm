@@ -480,6 +480,22 @@ fn smoke_test_binary(bin: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Refuse to update an install made by `install.sh`. That install is a set of
+/// versioned release directories switched as a whole; replacing files inside
+/// the active one in place would leave a release directory holding binaries
+/// from two versions under one version's name.
+fn refuse_versioned_install(current_exe: &Path) -> Result<()> {
+    if let Some(lib) = crate::install_layout::versioned_lib_dir_of(current_exe) {
+        anyhow::bail!(
+            "this mvmctl was installed by install.sh into {}, which upgrades mvmctl \
+             and its host binaries together and can roll back. Upgrade by re-running \
+             the installer: curl -fsSL https://runmvm.com/install.sh | sh",
+            lib.display()
+        );
+    }
+    Ok(())
+}
+
 /// Extract the archive and install the binary, adjacent helpers, and resources.
 fn extract_and_install(target: &str, tmp_dir: &Path, current_exe: &Path) -> Result<()> {
     let archive_name = format!("mvmctl-{}.tar.gz", target);
@@ -1112,12 +1128,13 @@ pub fn update(check_only: bool, force: bool, skip_verify: bool) -> Result<()> {
         return Ok(());
     }
 
-    let target = detect_target()?;
-    ui::info(&format!("Platform: {}", target));
-
     let current_exe =
         std::env::current_exe().context("Failed to determine path of current executable")?;
+    refuse_versioned_install(&current_exe)?;
     let current_exe = current_exe.canonicalize().unwrap_or(current_exe);
+
+    let target = detect_target()?;
+    ui::info(&format!("Platform: {}", target));
 
     let tmp_dir = tempfile::tempdir().context("Failed to create temporary directory")?;
 
@@ -1311,6 +1328,33 @@ mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
     use std::io::Write;
+
+    // --- install.sh layout ---
+
+    #[test]
+    fn update_refuses_a_binary_in_an_install_sh_release_directory() {
+        use crate::install_layout::{LIB_MARKER, RELEASE_MARKER};
+        let root = tempfile::tempdir().unwrap();
+        let release = root.path().join("lib").join("2-v0.18.0");
+        std::fs::create_dir_all(&release).unwrap();
+        std::fs::write(root.path().join("lib").join(LIB_MARKER), "").unwrap();
+        std::fs::write(release.join(RELEASE_MARKER), "complete\n").unwrap();
+        std::fs::write(release.join("mvmctl"), "").unwrap();
+
+        let error = refuse_versioned_install(&release.join("mvmctl"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("install.sh"), "{error}");
+    }
+
+    #[test]
+    fn update_proceeds_for_a_binary_outside_an_install_sh_release() {
+        let root = tempfile::tempdir().unwrap();
+        let loose = root.path().join("bin").join("mvmctl");
+        std::fs::create_dir_all(loose.parent().unwrap()).unwrap();
+        std::fs::write(&loose, "").unwrap();
+        assert!(refuse_versioned_install(&loose).is_ok());
+    }
 
     // --- smoke test ---
 

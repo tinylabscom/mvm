@@ -60,13 +60,16 @@ Last updated: 2026-09-16
       `specs/plans/2026-09-15-install-lifecycle-and-packaging-polish.md`.
       Epic #3277. Execution started. The stable install URL and its daily live
       monitor, production-host deploy check, and API-free normal install path
-      are complete; remaining work
-      adds atomic upgrade with rollback, a real uninstaller, in-process
-      signature verification to close the claim 20 limits note, installer and
-      distro compat lanes, and Nix version-from-manifest.
+      are complete, as are versioned installs with atomic upgrade and rollback,
+      the full host-binary set, and the uninstaller; remaining work adds
+      in-process signature verification to close the claim 20 limits note,
+      installer and distro compat lanes, and Nix version-from-manifest.
   - [x] WS1 — publish and monitor `https://runmvm.com/install.sh` (#3268, #3331)
   - [x] WS2 — bake the stable version; API only on confirmed 404 (#3269)
-  - [ ] WS3–WS6 — atomic lifecycle, verification, and compat (#3270–#3273)
+  - [x] WS3 — versioned release directories, one-rename upgrade, rollback, and
+        every host binary the release carries (#3270, #3342)
+  - [x] WS4 — `uninstall.sh` / `mvmctl env uninstall` (#3271)
+  - [ ] WS5–WS6 — verification and compat (#3272–#3273)
   - [x] WS7 — Nix hygiene: package versions read from `Cargo.toml`, the
         check/harness boundary written down, stale Lima and `dev up` docs
         swept, and `check-deferrals` extended to `nix/`, `src/`, `install.sh`

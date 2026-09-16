@@ -95,16 +95,10 @@
 //!   `update::update` exits early with "already up to date" and
 //!   the outer wrapper emits `UpdateInstall`. No real network, no
 //!   binary swap.)
-//! - `mvmctl uninstall --yes --all` (with `MVM_UNINSTALL_PATH_PREFIX`
-//!   pointing at a sandbox sub-dir) → `Uninstall` (Plan 70: the
-//!   override rewrites `/var/lib/mvm` and `/usr/local/bin/mvmctl`
-//!   under the prefix and skips sudo, so the positive path is
-//!   exercised end-to-end without sudo prompts or destruction of
-//!   a developer's real install)
-//! - `mvmctl uninstall --yes --dry-run` → **no** audit entry
-//!   (the positive `Uninstall` path is real-system-destructive
-//!   and not safely-hermetic, but the dry-run path is read-only
-//!   by contract and can be pinned)
+//! - `mvmctl env uninstall` against an install.sh layout staged in the
+//!   sandbox → `Uninstall` once the install is removed; with `--dry-run`,
+//!   or when a running machine refuses it → **no** audit entry. The
+//!   removal itself is exercised in depth in `tests/install_sh.rs`.
 //! - `mvmctl secret put / get / ls / rm` → secret-side audit JSONL
 //!   at `~/.mvm/audit/secrets.jsonl` carries one entry per call
 //!   with `"action":"put"` / `"get"` / `"list"` / `"delete"`. The
@@ -1675,34 +1669,54 @@ fn update_check_does_not_emit_audit_entry() {
     );
 }
 
+/// A minimal install.sh layout under the sandbox HOME: a marked library with
+/// one marked release and the `mvmctl` PATH link through `current`. Returns the
+/// PATH link.
+fn stage_versioned_install(sandbox: &AuditSandbox) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = sandbox.home_path().join(".local/bin");
+    let lib = sandbox.home_path().join(".local/lib/mvm");
+    let release = lib.join("1-v0.0.0");
+    std::fs::create_dir_all(&release).expect("mkdir release");
+    std::fs::create_dir_all(&bin).expect("mkdir bin");
+    let lib = std::fs::canonicalize(&lib).expect("canonical lib");
+    let bin = std::fs::canonicalize(&bin).expect("canonical bin");
+    std::fs::write(
+        lib.join(".mvm-lib"),
+        format!("install_dir={}\n", bin.display()),
+    )
+    .expect("mark lib");
+    std::fs::write(release.join(".mvm-release"), "complete\n").expect("mark release");
+    let stub = release.join("mvmctl");
+    std::fs::write(&stub, "#!/bin/sh\necho 'mvmctl 0.0.0'\n").expect("write stub");
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    std::os::unix::fs::symlink(lib.join("1-v0.0.0"), lib.join("current")).expect("current");
+    let link = bin.join("mvmctl");
+    std::os::unix::fs::symlink(lib.join("current/mvmctl"), &link).expect("link");
+    std::fs::create_dir_all(sandbox.mvm_root()).expect("mkdir mvm root");
+    link
+}
+
 #[test]
-fn uninstall_yes_all_emits_uninstall_audit_entry_via_prefix_override() {
-    // Plan 70: the positive `Uninstall` path mutates real system
-    // paths (`/var/lib/mvm`, `/usr/local/bin/mvmctl`) via sudo —
-    // not safely-hermetic on a developer's machine. The
-    // `MVM_UNINSTALL_PATH_PREFIX` env-var rewrites the targets
-    // under a sandbox sub-dir and skips sudo. The audit emit fires
-    // unconditionally at the end of the verb, so the test pins the
-    // emit + the on-disk side-effect (the rewritten paths are
-    // gone).
+fn uninstall_emits_uninstall_audit_entry_once_the_install_is_removed() {
+    // The entry is written after the uninstall script has removed the install
+    // and the state directory is kept, so it records an uninstall that happened.
     let sandbox = AuditSandbox::new();
-    let prefix = sandbox.home_path().join("system-root");
-    let stub_state_dir = prefix.join("var/lib/mvm");
-    let stub_bin = prefix.join("usr/local/bin/mvmctl");
-    std::fs::create_dir_all(&stub_state_dir).expect("mkdir state stub");
-    std::fs::create_dir_all(stub_bin.parent().unwrap()).expect("mkdir bin dir");
-    std::fs::write(&stub_bin, b"#!/bin/sh\nexit 0\n").expect("write stub binary");
+    let link = stage_versioned_install(&sandbox);
 
     let output = sandbox
         .mvmctl()
-        .env("MVM_UNINSTALL_PATH_PREFIX", &prefix)
-        .args(["env", "uninstall", "--yes", "--all"])
+        .args(["env", "uninstall"])
         .output()
-        .expect("spawn mvmctl uninstall");
+        .expect("spawn mvmctl env uninstall");
     assert!(
         output.status.success(),
-        "mvmctl uninstall failed: stderr={}",
+        "mvmctl env uninstall failed: stderr={}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        std::fs::symlink_metadata(&link).is_err(),
+        "the install must be gone"
     );
 
     let log = read_audit_log(&sandbox.audit_log_path());
@@ -1711,45 +1725,59 @@ fn uninstall_yes_all_emits_uninstall_audit_entry_via_prefix_override() {
         hits >= 1,
         "expected ≥1 uninstall entry, got {hits}. Full log:\n{log}"
     );
-    assert!(
-        !stub_state_dir.exists(),
-        "stub state dir at {} must be removed",
-        stub_state_dir.display()
-    );
-    assert!(
-        !stub_bin.exists(),
-        "stub binary at {} must be removed",
-        stub_bin.display()
-    );
 }
 
 #[test]
 fn uninstall_dry_run_does_not_emit_audit_entry() {
-    // `mvmctl uninstall --yes` emits `Uninstall` at the end, but
-    // its three filesystem mutations (`/var/lib/mvm`, `~/.mvm/`,
-    // `/usr/local/bin/mvmctl`) are real system paths that can't
-    // safely be exercised in a hermetic test — a dev with an
-    // actual install on the local machine would have sudo block
-    // the test mid-run. The dry-run path returns before any of
-    // those steps and (per the implementation) before the audit
-    // emit; this test pins that contract.
     let sandbox = AuditSandbox::new();
+    let link = stage_versioned_install(&sandbox);
+
     let output = sandbox
         .mvmctl()
-        .args(["env", "uninstall", "--yes", "--dry-run"])
+        .args(["env", "uninstall", "--dry-run"])
         .output()
         .expect("spawn mvmctl");
     assert!(
         output.status.success(),
-        "mvmctl uninstall --yes --dry-run failed: stderr={}",
+        "mvmctl env uninstall --dry-run failed: stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(std::fs::symlink_metadata(&link).is_ok());
 
     let log = read_audit_log(&sandbox.audit_log_path());
     let hits = count_entries_with_kind(&log, "uninstall");
     assert_eq!(
         hits, 0,
         "dry-run must not write uninstall audit entries, got {hits}. \
+         Full log:\n{log}"
+    );
+}
+
+#[test]
+fn uninstall_refused_by_a_running_machine_does_not_emit_audit_entry() {
+    // A refused uninstall did not happen, so it must not be recorded as one.
+    let sandbox = AuditSandbox::new();
+    let link = stage_versioned_install(&sandbox);
+    let vm = mvm_core::config::vm_state_dir_at(sandbox.mvm_root(), "web");
+    std::fs::create_dir_all(&vm).expect("mkdir vm state dir");
+    std::fs::write(vm.join("hvf.pid"), std::process::id().to_string()).expect("write pid");
+
+    let output = sandbox
+        .mvmctl()
+        .args(["env", "uninstall"])
+        .output()
+        .expect("spawn mvmctl");
+    assert!(
+        !output.status.success(),
+        "a running machine must refuse the uninstall"
+    );
+    assert!(std::fs::symlink_metadata(&link).is_ok());
+
+    let log = read_audit_log(&sandbox.audit_log_path());
+    let hits = count_entries_with_kind(&log, "uninstall");
+    assert_eq!(
+        hits, 0,
+        "a refused uninstall must not write uninstall audit entries, got {hits}. \
          Full log:\n{log}"
     );
 }

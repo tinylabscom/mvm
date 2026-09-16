@@ -17,6 +17,16 @@ test("the vanity route serves the repository installer with a shell content type
   assert.match(headers, /\/install\.sh\n  Content-Type: text\/x-shellscript; charset=utf-8/);
 });
 
+test("the vanity route serves the repository uninstaller with a shell content type", () => {
+  const route = readFileSync(join(publicRoot, "src/pages/uninstall.sh.ts"), "utf8");
+  const headers = readFileSync(join(publicRoot, "public/_headers"), "utf8");
+
+  assert.match(route, /new URL\("\.\.\/\.\.\/\.\.\/uninstall\.sh", import\.meta\.url\)/);
+  assert.match(route, /"Content-Type": "text\/x-shellscript; charset=utf-8"/);
+  assert.match(route, /new Response\(uninstallScript/);
+  assert.match(headers, /\/uninstall\.sh\n  Content-Type: text\/x-shellscript; charset=utf-8/);
+});
+
 test("all current mvm install commands use the production vanity URL", () => {
   for (const relativePath of [
     "../README.md",

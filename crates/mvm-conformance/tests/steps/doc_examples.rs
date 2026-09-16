@@ -116,11 +116,10 @@ struct CommandEntry {
     reason: Option<String>,
     /// Environment the exec tier sets for this path alone.
     ///
-    /// Some commands reach outside `MVM_HOME` by design and ship an explicit
-    /// sandbox hook for exactly that reason — `env uninstall` rewrites its
-    /// system paths under `MVM_UNINSTALL_PATH_PREFIX`. Without the hook such a
-    /// command "passes" only by being cancelled at its confirmation prompt,
-    /// which proves nothing and leaves the real path untested.
+    /// Some commands reach outside `MVM_HOME` by design and take those paths
+    /// from the environment — `env uninstall` removes whatever
+    /// `MVM_INSTALL_DIR` and `MVM_INSTALL_LIB_DIR` name. Pointing them into the
+    /// scratch directory keeps an executed example off a real install.
     #[serde(default)]
     env: BTreeMap<String, String>,
     /// A named fixture staged into the isolated home before this path runs.

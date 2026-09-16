@@ -102,12 +102,14 @@ exit_reports_host_state = true
 [[command]]
 path = "env cleanup"
 tier = "exec"
-env = { MVM_UNINSTALL_PATH_PREFIX = "sandbox" }
 
 [[command]]
 path = "env uninstall"
 tier = "exec"
-env = { MVM_UNINSTALL_PATH_PREFIX = "sandbox" }
+env = { MVM_INSTALL_DIR = "sandbox/bin", MVM_INSTALL_LIB_DIR = "sandbox/lib/mvm" }
+# The scratch install dir holds no install, and an uninstall that finds nothing
+# to remove exits nonzero on purpose.
+exit_reports_host_state = true
 
 [[command]]
 path = "generate template"
@@ -645,8 +647,16 @@ text = "mvmctl was built"
 reason = "\"mvmctl was built without the feature\" — a sentence about the tool"
 
 [[prose]]
+text = "mvmctl was installed"
+reason = "\"this mvmctl was installed by install.sh\" — a sentence about the tool"
+
+[[prose]]
 text = "mvmctl was"
-reason = "\"mvmctl was updated\" — a sentence about the tool"
+reason = "\"this mvmctl was built from a version...\" — a line-wrapped sentence about the tool"
+
+[[prose]]
+text = "mvmctl uninstaller"
+reason = "\"mvmctl uninstaller\" — a noun phrase naming the published script"
 
 [[prose]]
 text = "mvmctl built with"

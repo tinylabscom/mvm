@@ -2354,47 +2354,74 @@ fn test_config_set_unknown_key_fails() {
 
 #[test]
 fn test_uninstall_parses_defaults() {
-    let cli = Cli::try_parse_from(["mvmctl", "env", "uninstall", "--yes"]).unwrap();
+    let cli = Cli::try_parse_from(["mvmctl", "env", "uninstall"]).unwrap();
     assert!(matches!(
         cli.command,
         Commands::Env(env_group::Args {
             action: env_group::EnvCmd::Uninstall(uninstall::Args {
-                yes: true,
-                all: false,
+                purge: false,
                 dry_run: false,
+                force: false,
+                quiesce: false,
             })
         })
     ));
 }
 
 #[test]
-fn test_uninstall_dry_run_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "env", "uninstall", "--dry-run", "--yes"]).unwrap();
+fn test_uninstall_flags_parse() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "env",
+        "uninstall",
+        "--purge",
+        "--dry-run",
+        "--force",
+    ])
+    .unwrap();
     assert!(matches!(
         cli.command,
         Commands::Env(env_group::Args {
             action: env_group::EnvCmd::Uninstall(uninstall::Args {
-                yes: true,
-                all: false,
+                purge: true,
                 dry_run: true,
+                force: true,
+                quiesce: false,
             })
         })
     ));
 }
 
 #[test]
-fn test_uninstall_all_flag_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "env", "uninstall", "--all", "--yes"]).unwrap();
+fn test_uninstall_quiesce_rejects_purge_and_force() {
+    let quiesce =
+        Cli::try_parse_from(["mvmctl", "env", "uninstall", "--quiesce", "--dry-run"]).unwrap();
     assert!(matches!(
-        cli.command,
+        quiesce.command,
         Commands::Env(env_group::Args {
             action: env_group::EnvCmd::Uninstall(uninstall::Args {
-                yes: true,
-                all: true,
-                dry_run: false,
+                quiesce: true,
+                dry_run: true,
+                ..
             })
         })
     ));
+    for extra in ["--purge", "--force"] {
+        assert!(
+            Cli::try_parse_from(["mvmctl", "env", "uninstall", "--quiesce", extra]).is_err(),
+            "--quiesce must not accept {extra}"
+        );
+    }
+}
+
+#[test]
+fn test_uninstall_removed_flags_are_rejected() {
+    for removed in ["--yes", "--all"] {
+        assert!(
+            Cli::try_parse_from(["mvmctl", "env", "uninstall", removed]).is_err(),
+            "{removed} is no longer an uninstall flag"
+        );
+    }
 }
 
 // ---- Audit command tests ----
@@ -5064,6 +5091,10 @@ fn internal_helper_commands_short_circuit_before_startup_side_effects() {
         "/tmp/qemu-vsock-bridge.json",
     ]));
     assert!(!exits_early(&["mvmctl", "doctor"]));
+    // Uninstall must not create the state directory it may be removing.
+    assert!(exits_early(&["mvmctl", "env", "uninstall"]));
+    assert!(exits_early(&["mvmctl", "env", "uninstall", "--quiesce"]));
+    assert!(!exits_early(&["mvmctl", "env", "cleanup"]));
     assert!(!exits_early(&[
         "mvmctl",
         "machine",

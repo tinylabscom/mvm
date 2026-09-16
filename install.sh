@@ -3,11 +3,34 @@
 # GitHub releases, verifies its sha256 (and cosign signature if cosign is
 # present), installs it, and on macOS applies the required VM entitlements.
 #
+# Layout. Every release is unpacked whole into its own directory and the
+# commands on PATH reach it through one `current` link:
+#
+#   $MVM_INSTALL_LIB_DIR/.mvm-lib             marks the directory as install.sh's
+#   $MVM_INSTALL_LIB_DIR/<n>-<version>/       mvmctl, host binaries, assets/,
+#                                             and a .mvm-release marker
+#   $MVM_INSTALL_LIB_DIR/current              -> <n>-<version>
+#   $MVM_INSTALL_DIR/mvmctl                   -> $MVM_INSTALL_LIB_DIR/current/mvmctl
+#   $MVM_INSTALL_DIR/<host binary>            -> $MVM_INSTALL_LIB_DIR/current/<host binary>
+#
+# mvmctl finds its host binaries beside its own executable path. Linux reports
+# that path with every link resolved (the versioned directory) and macOS reports
+# it as invoked (the link in the install dir), so both places hold the full set.
+# An upgrade stages and verifies the new directory, then renames `current` in a
+# single step: the set is never observed half-replaced, and any failure before
+# the install is reported restores the previous `current`.
+#
+# Only directories carrying the markers are ever listed, pruned or removed, and
+# a library directory that already holds anything without the marker is refused.
+#
 # Env knobs:
 #   MVM_VERSION            pin a release tag (e.g. v0.15.2); default: baked release
-#   MVM_INSTALL_DIR        install dir; default: ~/.local/bin
+#   MVM_INSTALL_DIR        directory for the commands on PATH; default: ~/.local/bin
+#   MVM_INSTALL_LIB_DIR    versioned release directories; default: <MVM_INSTALL_DIR>/../lib/mvm
+#   MVM_INSTALL_KEEP       complete releases to keep, current included; default: 3
 #   MVM_SKIP_HASH_VERIFY   set to 1 to skip checksum (emergency only)
 #   MVM_SKIP_CODESIGN      set to 1 to skip macOS codesign
+#   MVM_SKIP_BOOTSTRAP     set to 1 to skip preparing the builder VM
 #   MVM_UPDATE_API_URL     override https://api.github.com (tests)
 #   MVM_UPDATE_DOWNLOAD_URL override https://github.com (tests)
 set -eu
@@ -17,6 +40,18 @@ DEFAULT_VERSION="v0.17.0"
 API_BASE="${MVM_UPDATE_API_URL:-https://api.github.com}"
 DL_BASE="${MVM_UPDATE_DOWNLOAD_URL:-https://github.com}"
 INSTALL_DIR="${MVM_INSTALL_DIR:-$HOME/.local/bin}"
+LIB_DIR="${MVM_INSTALL_LIB_DIR:-$(dirname "$INSTALL_DIR")/lib/mvm}"
+KEEP="${MVM_INSTALL_KEEP:-3}"
+
+# Payloads an archive may carry that a standard install deliberately leaves
+# out. Older releases bundled the optional libkrun supervisor; installing it
+# beside mvmctl would make that backend resolvable on hosts without libkrun.
+EXCLUDED_PAYLOADS="mvm-libkrun-supervisor"
+
+# Markers naming what this installer created. uninstall.sh and
+# `mvmctl env update` read the same names.
+LIB_MARKER=".mvm-lib"
+RELEASE_MARKER=".mvm-release"
 
 say() { printf '[mvm] %s\n' "$1"; }
 warn() { printf '[mvm] WARN: %s\n' "$1" >&2; }
@@ -25,6 +60,11 @@ need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
 
 need curl
 need tar
+
+case "$KEEP" in
+  ''|*[!0-9]*) die "MVM_INSTALL_KEEP must be a whole number, got: $KEEP" ;;
+esac
+[ "$KEEP" -ge 1 ] || die "MVM_INSTALL_KEEP must be at least 1"
 
 detect_target() {
   os="$(uname -s)"
@@ -74,13 +114,431 @@ sha256_of() {
   fi
 }
 
+# --- Versioned install -------------------------------------------------------
+
+SUDO=""
+LOCK=""
+STAGE=""
+PREVIOUS=""
+LIB_CREATED=0
+SWITCHED=0
+COMMITTED=0
+# Names whose PATH entry this run created where nothing existed.
+CREATED_LINKS=""
+# Unversioned entries this run preserved in a release directory, and so may
+# replace with links.
+ADOPTED=""
+# Unversioned entries in the install dir that unversioned_install_entries vouches for.
+ADOPTABLE=""
+
+# The entries of an install made by the installer before release directories,
+# in the directory $1, that are safe to treat as mvm's, one per line. That
+# installer copied these names straight into the install dir. `mvmctl` must be a
+# regular file that reports itself as mvmctl, or this returns 1 and prints
+# nothing; `assets` counts only while it holds nothing but the two entitlement
+# profiles; every other name must be a regular file. install.sh and
+# uninstall.sh carry this function verbatim, and a test holds them equal.
+unversioned_install_entries() {
+  unversioned_dir="$1"
+  if [ ! -f "$unversioned_dir/mvmctl" ] || [ -L "$unversioned_dir/mvmctl" ]; then
+    return 0
+  fi
+  unversioned_reported="$("$unversioned_dir/mvmctl" --version 2>/dev/null || true)"
+  case "$unversioned_reported" in
+    "mvmctl "*) ;;
+    *) return 1 ;;
+  esac
+  for unversioned_name in mvmctl mvm-hvf-supervisor mvm-libkrun-supervisor mvm-network-endpoint assets; do
+    unversioned_entry="$unversioned_dir/$unversioned_name"
+    if [ -L "$unversioned_entry" ] || [ ! -e "$unversioned_entry" ]; then
+      continue
+    fi
+    if [ "$unversioned_name" = "assets" ]; then
+      [ -d "$unversioned_entry" ] || continue
+      unversioned_foreign=""
+      for unversioned_asset in "$unversioned_entry"/* "$unversioned_entry"/.[!.]* "$unversioned_entry"/..?*; do
+        if [ ! -e "$unversioned_asset" ] && [ ! -L "$unversioned_asset" ]; then
+          continue
+        fi
+        case "${unversioned_asset##*/}" in
+          mvmctl.entitlements|mvm-supervisor.entitlements)
+            if [ -L "$unversioned_asset" ] || [ ! -f "$unversioned_asset" ]; then
+              unversioned_foreign=1
+            fi
+            ;;
+          *) unversioned_foreign=1 ;;
+        esac
+      done
+      [ -z "$unversioned_foreign" ] || continue
+    elif [ ! -f "$unversioned_entry" ]; then
+      continue
+    fi
+    printf '%s\n' "$unversioned_name"
+  done
+}
+
+is_listed() {
+  case " $2 " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
+# Write a marker. `tee` follows a symlink, so whatever sits at the path is
+# removed first and the file is always created fresh.
+write_file() {
+  $SUDO rm -f "$1"
+  printf '%s\n' "$2" | $SUDO tee "$1" >/dev/null
+}
+
+# Point the link at `$2` to `$1` with a single rename, so a reader sees either
+# the old target or the new one. `mv` follows a destination that is a link to a
+# directory, so the no-follow flag is required: `-T` on GNU and BusyBox, `-h` on
+# BSD and macOS.
+replace_link() {
+  target="$1"
+  link="$2"
+  staged="$link.mvm-new.$$"
+  $SUDO rm -f "$staged"
+  $SUDO ln -s "$target" "$staged" || return 1
+  if $SUDO mv -T -f "$staged" "$link" 2>/dev/null \
+    || $SUDO mv -h -f "$staged" "$link" 2>/dev/null; then
+    return 0
+  fi
+  $SUDO rm -f "$staged"
+  return 1
+}
+
+# The release directory `current` names, or nothing.
+current_release() {
+  if [ -L "$LIB_DIR/current" ]; then
+    readlink "$LIB_DIR/current"
+  fi
+}
+
+# The state a release marker records: `staging` until the release is verified,
+# then `complete`. Prints nothing for a directory without the marker.
+release_state() {
+  if [ -f "$1/$RELEASE_MARKER" ] && [ ! -L "$1" ]; then
+    cat "$1/$RELEASE_MARKER"
+  fi
+}
+
+# Marked release directory names, newest first. The numeric prefix is the
+# install order; version strings do not sort. Anything without the marker is
+# not install.sh's and is never listed.
+list_releases() {
+  for entry in "$LIB_DIR"/[1-9]*-*; do
+    if [ -L "$entry" ] || [ ! -d "$entry" ] || [ ! -f "$entry/$RELEASE_MARKER" ]; then
+      continue
+    fi
+    name="${entry##*/}"
+    case "${name%%-*}" in *[!0-9]*) continue ;; esac
+    case "$name" in *[!A-Za-z0-9._+-]*) continue ;; esac
+    printf '%s\n' "$name"
+  done | sort -t- -k1,1nr
+}
+
+# Claim the next release directory and mark it as staging. Numbering follows
+# marked releases only; a name already taken by anything is skipped, and `mkdir`
+# without `-p` fails rather than reuse one.
+claim_release_dir() {
+  suffix="$1"
+  newest="$(list_releases | head -n1)"
+  seq=1
+  if [ -n "$newest" ]; then
+    seq=$((${newest%%-*} + 1))
+  fi
+  while [ -e "$LIB_DIR/$seq-$suffix" ] || [ -L "$LIB_DIR/$seq-$suffix" ]; do
+    seq=$((seq + 1))
+  done
+  CLAIMED="$LIB_DIR/$seq-$suffix"
+  $SUDO mkdir "$CLAIMED" || die "could not create $CLAIMED"
+  write_file "$CLAIMED/$RELEASE_MARKER" "staging" || die "could not mark $CLAIMED"
+}
+
+mark_complete() {
+  write_file "$1/$RELEASE_MARKER" "complete" || die "could not mark $1 complete"
+}
+
+# Top-level entries of a release that belong on PATH: every executable file,
+# plus the assets directory mvmctl reads beside itself.
+release_entries() {
+  for entry in "$1"/*; do
+    name="${entry##*/}"
+    if [ -f "$entry" ] && [ -x "$entry" ]; then
+      printf '%s\n' "$name"
+    elif [ "$name" = "assets" ] && [ -d "$entry" ]; then
+      printf '%s\n' "$name"
+    fi
+  done
+}
+
+# Entitlement profile for an executable, relative to assets/. Binaries with no
+# profile in the release need no entitlement and keep their linker signature.
+entitlement_profile() {
+  case "$1" in
+    mvmctl) echo "mvmctl.entitlements" ;;
+    mvm-hvf-supervisor) echo "mvm-supervisor.entitlements" ;;
+    *) echo "$1.entitlements" ;;
+  esac
+}
+
+# Whether a missing profile is an error: the CLI and the HVF supervisor cannot
+# launch a VM unsigned.
+entitlement_required() {
+  case "$1" in
+    mvmctl|mvm-hvf-supervisor) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+prepare_dirs() {
+  if [ ! -e "$LIB_DIR" ] && [ ! -L "$LIB_DIR" ]; then
+    LIB_CREATED=1
+  fi
+  mkdir -p "$INSTALL_DIR" "$LIB_DIR" 2>/dev/null || true
+  # `mkdir -p` on an existing dir returns 0 regardless of ownership, so it
+  # can't double as a writability probe — test -w directly, then sudo-mkdir
+  # only on the not-writable path (e.g. MVM_INSTALL_DIR=/usr/local/bin).
+  if [ -d "$INSTALL_DIR" ] && [ -w "$INSTALL_DIR" ] \
+    && [ -d "$LIB_DIR" ] && [ -w "$LIB_DIR" ]; then
+    SUDO=""
+  else
+    warn "$INSTALL_DIR or $LIB_DIR not writable — using sudo"
+    SUDO="sudo"
+    $SUDO mkdir -p "$INSTALL_DIR" "$LIB_DIR"
+  fi
+  # Link targets are absolute, so resolve both directories once.
+  LIB_DIR="$(cd "$LIB_DIR" && pwd -P)"
+  INSTALL_DIR_PHYSICAL="$(cd "$INSTALL_DIR" && pwd -P)"
+
+  if [ ! -f "$LIB_DIR/$LIB_MARKER" ] && [ -n "$(ls -A "$LIB_DIR")" ]; then
+    die "refusing to install into $LIB_DIR: it already holds files and was not created by install.sh. Set MVM_INSTALL_LIB_DIR to a new or empty directory."
+  fi
+  if [ -e "$LIB_DIR/current" ] && [ ! -L "$LIB_DIR/current" ]; then
+    die "refusing to install: $LIB_DIR/current is not a link, so it was not made by install.sh"
+  fi
+}
+
+acquire_lock() {
+  LOCK="$LIB_DIR/.install.lock"
+  if ! $SUDO mkdir "$LOCK" 2>/dev/null; then
+    LOCK=""
+    die "another install or uninstall is in progress (remove $LIB_DIR/.install.lock if none is)"
+  fi
+  write_file "$LIB_DIR/$LIB_MARKER" "install_dir=$INSTALL_DIR_PHYSICAL" \
+    || die "could not mark $LIB_DIR"
+}
+
+# A crashed run can leave its temporary links behind. They are this
+# installer's by name, and the lock rules out a run still using one.
+remove_stale_temp_links() {
+  for entry in "$LIB_DIR"/*.mvm-new.[0-9]* "$INSTALL_DIR"/*.mvm-new.[0-9]*; do
+    if [ -L "$entry" ]; then
+      $SUDO rm -f "$entry"
+    fi
+  done
+}
+
+# Carry an install made before release directories existed into one, so the
+# first upgrade from it can be rolled back like any other. Repeatable: a run
+# that failed after adopting reuses the directory it made. Only the entries
+# unversioned_install_entries vouches for are carried; anything else in the way
+# was refused by check_link_conflicts before this runs.
+adopt_unversioned_install() {
+  [ -n "$ADOPTABLE" ] || return 0
+  case "$PREVIOUS" in
+    "$LIB_DIR"/[1-9]*-unversioned) adopted_dir="$PREVIOUS" ;;
+    *)
+      claim_release_dir "unversioned"
+      adopted_dir="$CLAIMED"
+      ;;
+  esac
+  for name in $ADOPTABLE; do
+    entry="$INSTALL_DIR/$name"
+    $SUDO rm -rf "${adopted_dir:?}/$name"
+    $SUDO cp -Rp "$entry" "$adopted_dir/$name" \
+      || die "could not preserve $entry"
+    ADOPTED="$ADOPTED $name"
+  done
+  mark_complete "$adopted_dir"
+  if [ "$PREVIOUS" != "$adopted_dir" ]; then
+    replace_link "$adopted_dir" "$LIB_DIR/current" \
+      || die "could not record the existing install in $LIB_DIR"
+    PREVIOUS="$adopted_dir"
+    say "Preserved the existing install as $adopted_dir"
+  fi
+}
+
+stage_release() {
+  claim_release_dir "$VERSION"
+  STAGE="$CLAIMED"
+  $SUDO cp -R "$SRC/." "$STAGE/" || die "could not copy the release into $STAGE"
+  for payload in $EXCLUDED_PAYLOADS; do
+    $SUDO rm -rf "${STAGE:?}/$payload"
+  done
+  [ -x "$STAGE/mvmctl" ] || die "release is missing an executable mvmctl"
+}
+
+# Refuse, before anything is adopted or staged, if a PATH entry the release
+# needs is a file or directory install.sh did not make and cannot vouch for as
+# the older installer's.
+check_link_conflicts() {
+  for name in $(release_entries "$SRC"); do
+    if is_listed "$name" "$EXCLUDED_PAYLOADS"; then
+      continue
+    fi
+    link="$INSTALL_DIR/$name"
+    if [ -e "$link" ] && [ ! -L "$link" ] && ! is_listed "$name" "$ADOPTABLE"; then
+      die "refusing to replace $link: install.sh did not create it. Move it aside and re-run."
+    fi
+  done
+}
+
+# macOS: every executable on the VM launch path must carry its role-specific
+# entitlement. Treat this as part of installation integrity: a successful
+# install must be ready to launch a VM without a hidden first-run repair.
+sign_release() {
+  [ "$(uname -s)" = "Darwin" ] || return 0
+  if [ "${MVM_SKIP_CODESIGN:-}" = "1" ]; then
+    warn "MVM_SKIP_CODESIGN=1 — skipping macOS VM entitlement signing"
+    return 0
+  fi
+  command -v codesign >/dev/null 2>&1 || die "codesign is required on macOS"
+  for name in $(release_entries "$STAGE"); do
+    [ -f "$STAGE/$name" ] || continue
+    profile="$STAGE/assets/$(entitlement_profile "$name")"
+    if [ ! -f "$profile" ]; then
+      if entitlement_required "$name"; then
+        die "missing entitlement profile: $profile"
+      fi
+      continue
+    fi
+    output="$($SUDO codesign --sign - --force --entitlements "$profile" "$STAGE/$name" 2>&1)" \
+      || die "codesign failed for $STAGE/$name: $output"
+    say "Codesigned: $name"
+  done
+}
+
+# Create the PATH entries a release needs. Each points through `current`, so
+# an entry already in place survives every later upgrade untouched. A link that
+# pointed elsewhere is recorded so a rollback can put it back.
+link_release() {
+  mkdir -p "$TMP/replaced-links"
+  for name in $(release_entries "$STAGE"); do
+    link="$INSTALL_DIR/$name"
+    target="$LIB_DIR/current/$name"
+    if [ -L "$link" ]; then
+      previous_target="$(readlink "$link")"
+      if [ "$previous_target" = "$target" ]; then
+        continue
+      fi
+      printf '%s' "$previous_target" > "$TMP/replaced-links/$name"
+    elif [ -d "$link" ]; then
+      is_listed "$name" "$ADOPTED" || die "refusing to replace $link"
+      $SUDO rm -rf "$link"
+    elif [ ! -e "$link" ]; then
+      CREATED_LINKS="$CREATED_LINKS $name"
+    fi
+    replace_link "$target" "$link" || die "could not link $link"
+  done
+}
+
+# Remove PATH entries that point through `current` at a name the current
+# release no longer carries, and unversioned files this run preserved but the
+# release does not replace.
+unlink_dropped_entries() {
+  for link in "$INSTALL_DIR"/* "$INSTALL_DIR"/.[!.]*; do
+    [ -L "$link" ] || continue
+    name="${link##*/}"
+    if [ "$(readlink "$link")" = "$LIB_DIR/current/$name" ] \
+      && [ ! -e "$LIB_DIR/current/$name" ]; then
+      $SUDO rm -f "$link"
+    fi
+  done
+  for name in $ADOPTED; do
+    if [ -e "$INSTALL_DIR/$name" ] && [ ! -L "$INSTALL_DIR/$name" ]; then
+      $SUDO rm -rf "${INSTALL_DIR:?}/$name"
+    fi
+  done
+}
+
+# Keep the newest complete releases, current always among them. A marked
+# directory still `staging` belongs to a run that never finished, so it is
+# removed and never counted.
+prune_releases() {
+  active="$(current_release)"
+  kept=0
+  for name in $(list_releases); do
+    dir="$LIB_DIR/$name"
+    if [ "$dir" = "$active" ]; then
+      kept=$((kept + 1))
+      continue
+    fi
+    if [ "$(release_state "$dir")" = "complete" ] && [ "$kept" -lt "$KEEP" ]; then
+      kept=$((kept + 1))
+      continue
+    fi
+    $SUDO rm -rf "${LIB_DIR:?}/$name"
+  done
+}
+
+rollback() {
+  if [ "$SWITCHED" = "1" ]; then
+    if [ -n "$PREVIOUS" ]; then
+      replace_link "$PREVIOUS" "$LIB_DIR/current" \
+        || warn "could not restore $LIB_DIR/current -> $PREVIOUS"
+    else
+      $SUDO rm -f "$LIB_DIR/current"
+    fi
+  fi
+  for recorded in "$TMP/replaced-links"/*; do
+    [ -f "$recorded" ] || continue
+    name="${recorded##*/}"
+    replace_link "$(cat "$recorded")" "$INSTALL_DIR/$name" \
+      || warn "could not restore $INSTALL_DIR/$name"
+  done
+  for name in $CREATED_LINKS; do
+    if [ -L "$INSTALL_DIR/$name" ]; then
+      $SUDO rm -f "$INSTALL_DIR/$name"
+    fi
+  done
+  if [ -n "$STAGE" ]; then
+    $SUDO rm -rf "$STAGE"
+  fi
+  if [ -n "$PREVIOUS" ]; then
+    warn "install failed — $INSTALL_DIR/mvmctl still runs the previous release ($PREVIOUS)"
+  fi
+}
+
+finish() {
+  status=$?
+  if [ "$COMMITTED" != "1" ] && [ -n "$LOCK" ]; then
+    rollback || true
+  fi
+  if [ -n "$LOCK" ]; then
+    $SUDO rmdir "$LOCK" 2>/dev/null || true
+  fi
+  # A first install that failed leaves no library directory behind.
+  if [ "$COMMITTED" != "1" ] && [ "$LIB_CREATED" = "1" ] && [ -n "$LOCK" ] \
+    && [ ! -L "$LIB_DIR/current" ] && [ -z "$(list_releases)" ]; then
+    $SUDO rm -f "$LIB_DIR/$LIB_MARKER"
+    $SUDO rmdir "$LIB_DIR" 2>/dev/null || true
+  fi
+  rm -rf "$TMP"
+  exit "$status"
+}
+
 TARGET="$(detect_target)"
 VERSION="${MVM_VERSION:-$DEFAULT_VERSION}"
 ARCHIVE="mvmctl-${TARGET}.tar.gz"
 REL="$DL_BASE/$REPO/releases/download/$VERSION"
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 say "Installing mvmctl $VERSION ($TARGET) to $INSTALL_DIR"
 
@@ -99,6 +557,10 @@ else
     die "download failed: $REL/$ARCHIVE"
   fi
 fi
+
+case "$VERSION" in
+  ''|*[!A-Za-z0-9._+-]*) die "release tag is not a safe directory name: $VERSION" ;;
+esac
 
 if [ "${MVM_SKIP_HASH_VERIFY:-}" = "1" ]; then
   warn "MVM_SKIP_HASH_VERIFY=1 — skipping checksum verification"
@@ -138,64 +600,39 @@ tar xzf "$TMP/$ARCHIVE" -C "$TMP"
 SRC="$TMP/mvmctl-${TARGET}"
 [ -f "$SRC/mvmctl" ] || die "archive missing mvmctl-${TARGET}/mvmctl"
 
-mkdir -p "$INSTALL_DIR" 2>/dev/null || true
-# `mkdir -p` on an existing dir returns 0 regardless of ownership, so it
-# can't double as a writability probe — test -w directly, then sudo-mkdir
-# only on the not-writable path (e.g. MVM_INSTALL_DIR=/usr/local/bin).
-if [ -w "$INSTALL_DIR" ]; then
-  SUDO=""
-else
-  warn "$INSTALL_DIR not writable — using sudo"
-  SUDO="sudo"
-  $SUDO mkdir -p "$INSTALL_DIR"
+prepare_dirs
+acquire_lock
+remove_stale_temp_links
+PREVIOUS="$(current_release)"
+if ! ADOPTABLE="$(unversioned_install_entries "$INSTALL_DIR")"; then
+  die "refusing to replace $INSTALL_DIR/mvmctl: it does not report itself as mvmctl. Move it aside and re-run."
 fi
+ADOPTABLE="$(printf '%s' "$ADOPTABLE" | tr '\n' ' ')"
+check_link_conflicts
+adopt_unversioned_install
+stage_release
+sign_release
 
-$SUDO install -m 0755 "$SRC/mvmctl" "$INSTALL_DIR/mvmctl"
+expected_version="$("$STAGE/mvmctl" --version)" \
+  || die "the new mvmctl failed to run; the previous install is unchanged"
+mark_complete "$STAGE"
 
-# Per-VM host processes mvmctl spawns at runtime (one process per guest VM).
-# They must sit NEXT TO mvmctl so the backend's adjacent-to-exe resolver finds
-# them — installing only mvmctl strands them. copy-if-exists: the bundled set
-# differs by platform (macOS ships the HVF supervisor + endpoint; Linux ships
-# only the endpoint). Optional libkrun payloads are deliberately ignored.
-# The substitution endpoint needs no VM entitlement. The supervisor is
-# signed below before the install is reported successful.
-for hostbin in mvm-hvf-supervisor mvm-network-endpoint; do
-  if [ -f "$SRC/$hostbin" ]; then
-    $SUDO install -m 0755 "$SRC/$hostbin" "$INSTALL_DIR/$hostbin"
-    say "Installed: $INSTALL_DIR/$hostbin"
-  fi
+link_release
+replace_link "$STAGE" "$LIB_DIR/current" || die "could not switch $LIB_DIR/current"
+SWITCHED=1
+
+installed_version="$("$INSTALL_DIR/mvmctl" --version)" \
+  || die "$INSTALL_DIR/mvmctl failed to run after the switch"
+[ "$installed_version" = "$expected_version" ] \
+  || die "$INSTALL_DIR/mvmctl reports '$installed_version', expected '$expected_version'"
+
+COMMITTED=1
+unlink_dropped_entries
+prune_releases
+
+for name in $(release_entries "$STAGE"); do
+  say "Installed: $INSTALL_DIR/$name"
 done
-
-if [ -d "$SRC/assets" ]; then
-  $SUDO rm -rf "$INSTALL_DIR/assets"
-  $SUDO cp -R "$SRC/assets" "$INSTALL_DIR/assets"
-fi
-
-# macOS: every executable on the VM launch path must carry its role-specific
-# entitlement. Treat this as part of installation integrity: a successful
-# install must be ready to launch a VM without a hidden first-run repair.
-if [ "$(uname -s)" = "Darwin" ]; then
-  if [ "${MVM_SKIP_CODESIGN:-}" = "1" ]; then
-    warn "MVM_SKIP_CODESIGN=1 — skipping macOS VM entitlement signing"
-  else
-    command -v codesign >/dev/null 2>&1 || die "codesign is required on macOS"
-
-    sign_target() {
-      target="$1"
-      entitlements="$2"
-      [ -f "$target" ] || return 0
-      [ -f "$entitlements" ] || die "missing entitlement profile: $entitlements"
-      output="$($SUDO codesign --sign - --force --entitlements "$entitlements" "$target" 2>&1)" \
-        || die "codesign failed for $target: $output"
-      say "Codesigned: $target"
-    }
-
-    sign_target "$INSTALL_DIR/mvmctl" "$INSTALL_DIR/assets/mvmctl.entitlements"
-    sign_target "$INSTALL_DIR/mvm-hvf-supervisor" "$INSTALL_DIR/assets/mvm-supervisor.entitlements"
-  fi
-fi
-
-say "Installed: $INSTALL_DIR/mvmctl"
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
   *) say "Add to PATH:  export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
@@ -205,7 +642,9 @@ esac
 # instead of paying their one-time download/build cost on the launch path. Opt out with
 # MVM_SKIP_BOOTSTRAP=1 (bandwidth-limited, headless, or CI installs).
 # `mvmctl bootstrap` also honors the finer MVM_SKIP_DEV_IMAGE_PREFETCH knob.
-# Non-fatal: a failure defers acquisition to the first command that needs it.
+# Non-fatal and outside the atomic step: the binaries are already verified, and
+# what bootstrap prepares lives in the mvm state directory rather than in the
+# release directory, so a network failure here is no reason to roll back.
 if [ "${MVM_SKIP_BOOTSTRAP:-}" != "1" ]; then
   say "Preparing the builder VM and workload kernel for your first machine run (skip with MVM_SKIP_BOOTSTRAP=1)..."
   if "$INSTALL_DIR/mvmctl" bootstrap; then
