@@ -83,7 +83,7 @@ pub(in crate::commands) struct Cli {
     #[arg(long, global = true)]
     pub fc_version: Option<String>,
 
-    /// Builder VMM: hvf, firecracker, qemu, or libkrun
+    /// Builder: hvf, firecracker, qemu, libkrun
     #[arg(
         long,
         global = true,
