@@ -501,21 +501,18 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     entries is witnessed by
     `stream_audit_entries_carry_the_binding_and_no_payload_bytes`.
 
-13. **No raw secret value crosses the broker channel.**
-    `host.secrets.v1` returns destination-bound, time-bound signed
-    credentials only; raw secret bytes never leave the supervisor's
-    address space. Plan 104 W5 / ADR-023 / ADR-020. Witness, per the
-    ADR-001 row: `substitute` — and only that one. The row also named
-    `encode_secret_env_cmdline_round_trips_pairs_as_single_token` until it
-    turned out to round-trip an encoder nothing calls: `mvm.secret_env` is
-    built by no backend (the guest-side parser in `nix/lib/mk-guest.nix` is
-    never fed), so the test witnessed an encoding rather than a containment. The shipped mechanism injects
-    placeholders on the invoke path from the endpoint-minted env file. The
-    cmdline token remains in tree as designed-but-unwired. Note the shape
-    of that failure, because `check-claim-catalog` cannot catch it: the
-    gate proves a named witness *exists*, never that anything calls the
-    code it tests. The six test names this bullet used to list do not
-    exist in the tree — same failure as claim 12's:
+13. **The managed substitution path hands the guest placeholders, never raw
+    secret values.** The host-side substitution endpoint mints the environment
+    delivered to the guest and resolves the real credential only while
+    preparing an admitted outbound request. There is no secret-returning
+    `host.secrets.v1` broker handler; that retired name is not part of the SDK
+    host-service surface. Plan 104 W5 / ADR-023. Witnesses, per the ADR-001
+    row: `handed_placeholders_never_contain_the_secret_value` and
+    `endpoint_bin_serves_substitution_and_refuses_unbound_destination`.
+    `encode_secret_env_cmdline_round_trips_pairs_as_single_token` only
+    round-trips an encoder nothing calls: `mvm.secret_env` is built by no
+    backend, so it is not evidence. The six test names this bullet used to list
+    do not exist in the tree:
 
     <!-- absent:begin -->
 

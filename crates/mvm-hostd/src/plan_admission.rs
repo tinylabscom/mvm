@@ -3212,11 +3212,11 @@ mod tests {
     /// message names the binding that demanded it without leaking file bytes.
     #[test]
     fn sdk_binding_without_the_sidecar_fails_closed() {
-        let plan = plan_binding(&["host.secrets.v1"]);
+        let plan = plan_binding(&["host.kv.v1"]);
         let err = enforce_sdk_sidecar_attachment(&[], &plan, LOADABLE_LIBC)
             .expect_err("a required-but-absent sidecar must refuse the launch");
         let msg = err.to_string();
-        assert!(msg.contains("host.secrets.v1"), "{msg}");
+        assert!(msg.contains("host.kv.v1"), "{msg}");
         assert!(
             msg.contains(mvm_core::plan::SDK_SIDECAR_GUEST_PATH),
             "{msg}"

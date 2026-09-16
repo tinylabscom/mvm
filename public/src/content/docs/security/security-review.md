@@ -48,7 +48,7 @@ because nothing can request it.
 
 ## 4. Can it discover or steal credentials?
 
-Raw secret values never enter the guest. <!-- allow(doc-claim:secret-non-leakage): backed by numbered claim 13 (no raw secret crosses the broker channel) plus preview claim 16, both named on the line below; the `secret-non-leakage` parity row stays Planned because it asserts more than those two do -->
+On the managed substitution path, raw secret values never enter the guest. <!-- allow(doc-claim:secret-non-leakage): backed by numbered claim 13 (the guest receives placeholders) plus preview claim 16, both named on the line below; the broader `secret-non-leakage` parity row stays Planned -->
 The workload sees placeholders; the
 host-side endpoint substitutes real credentials only into connections it
 originates, bound to destination and time. A credential scoped for one

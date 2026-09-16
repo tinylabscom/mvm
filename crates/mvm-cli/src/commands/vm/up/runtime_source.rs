@@ -861,13 +861,13 @@ mod sdk_sidecar_host_resolution_tests {
         env.set("MVM_OVERLAY_BASE_URL", UNREACHABLE_BASE_URL);
 
         let err = resolve_sdk_sidecar_attachment_for_host(
-            &[svc("host.secrets.v1")],
+            &[svc("host.kv.v1")],
             mvm_contract::guest_libc::GuestLibc::Musl,
         )
         .expect_err("a source-checkout host must refuse rather than download");
         let msg = format!("{err:#}");
 
-        assert!(msg.contains("host.secrets.v1"), "{msg}");
+        assert!(msg.contains("host.kv.v1"), "{msg}");
         assert!(
             msg.contains(mvm_core::plan::SDK_SIDECAR_GUEST_PATH),
             "{msg}"

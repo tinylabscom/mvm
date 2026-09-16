@@ -134,8 +134,8 @@ pub struct WorkloadSockets<'a> {
     /// Workload exit: the guest dials `WORKLOAD_EXIT_PORT` to report its exit code.
     pub exit: &'a Path,
     /// Host-services broker: the guest dials `BROKER_PORT`; the per-VM broker (or
-    /// the per-tenant host-agent daemon) binds here to serve `host.audit.v1` /
-    /// `host.secrets.v1`. Present only for an **admitted** workload — an
+    /// the per-tenant host-agent daemon) binds here to serve admitted typed
+    /// services. Present only for an **admitted** workload — an
     /// unadmitted VM carries no broker port, so a stray guest dial stays
     /// `ECONNREFUSED` (fail-closed).
     pub broker: Option<&'a Path>,

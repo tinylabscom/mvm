@@ -36,6 +36,7 @@ pub fn run(workspace: &Path) -> Result<()> {
 
     let mut errors: Vec<String> = Vec::new();
     structural_checks(&rows, &mut errors);
+    live_authority_checks(&rows, &mut errors);
     ledger_witnesses_are_known_to_the_model(&rows, &model_toml, &mut errors);
     declared_witness_kinds_are_populated(&model_toml, &mut errors);
 
@@ -303,6 +304,27 @@ fn structural_checks(rows: &[Row], errors: &mut Vec<String>) {
     }
 }
 
+fn live_authority_checks(rows: &[Row], errors: &mut Vec<String>) {
+    let Some(secret_claim) = rows.iter().find(|row| row.number == 13) else {
+        return;
+    };
+    if secret_claim.authority.contains("host.secrets.v1") {
+        errors.push(
+            "claim 13: authority names retired `host.secrets.v1`; name the live substitution endpoint"
+                .to_string(),
+        );
+    }
+    if !secret_claim
+        .authority
+        .to_ascii_lowercase()
+        .contains("substitution endpoint")
+    {
+        errors.push(
+            "claim 13: authority must name the live host-side substitution endpoint".to_string(),
+        );
+    }
+}
+
 fn resolve_fn_needles(workspace: &Path, needles: &mut [Needle]) -> Result<()> {
     if !needles.iter().any(|n| matches!(n.kind, Kind::Fn)) {
         return Ok(());
@@ -489,6 +511,43 @@ witnesses = [\"fn:other\"]
                 .iter()
                 .any(|e| e.contains("duplicate claim number 1"))
         );
+    }
+
+    #[test]
+    fn secret_claim_rejects_a_retired_broker_service_as_authority() {
+        let rows = vec![Row {
+            number: 13,
+            claim: "The guest receives placeholders, never raw secret values".into(),
+            witnesses: vec![Witness::Fn(
+                "handed_placeholders_never_contain_the_secret_value".into(),
+            )],
+            authority: "host.secrets.v1 returns signed credentials".into(),
+            status: "Shipped".into(),
+        }];
+        let mut errors = Vec::new();
+        live_authority_checks(&rows, &mut errors);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("retired `host.secrets.v1`")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn secret_claim_accepts_the_live_substitution_endpoint() {
+        let rows = vec![Row {
+            number: 13,
+            claim: "The guest receives placeholders, never raw secret values".into(),
+            witnesses: vec![Witness::Fn(
+                "handed_placeholders_never_contain_the_secret_value".into(),
+            )],
+            authority: "host-side substitution endpoint hands placeholders to the guest".into(),
+            status: "Shipped".into(),
+        }];
+        let mut errors = Vec::new();
+        live_authority_checks(&rows, &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
     }
 
     #[test]

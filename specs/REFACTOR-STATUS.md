@@ -11,7 +11,9 @@ Last updated: 2026-09-15
       the substitution path, add a grant-gated `DriveGrant` + `DriveOpen` /
       `DriveFile` over the existing stream plane, and retire the SDKs' argv
       transport in favour of one versioned C ABI from a new top-of-graph
-      crate. Also resolves `host.secrets.v1` having no registered handler.
+      crate. The stale `host.secrets.v1` claim authority is resolved: claim 13
+      and the SDK sidecar catalog now name the live substitution endpoint and
+      shipped typed services respectively.
 
 - [ ] **Workload display plane.**
       `specs/plans/2026-09-15-workload-display-plane.md`. Epic #3276.

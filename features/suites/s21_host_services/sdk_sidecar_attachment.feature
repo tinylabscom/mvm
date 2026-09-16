@@ -56,7 +56,7 @@ Feature: SDK sidecar attaches only for admitted SDK host-service bindings
 
   Scenario: a required sidecar that is missing from the cache fails the launch closed
     Given an empty SDK sidecar cache
-    And a workload plan that binds host service "host.secrets.v1"
+    And a workload plan that binds host service "host.kv.v1"
     When the launch path resolves the SDK sidecar
     Then the launch is refused and the error names the binding that required it
 

@@ -609,7 +609,7 @@ mod tests {
             ("volume.sealed", Volume),
             ("deps.installed", Volume),
             ("secret.put", SecretReference),
-            ("host.secrets.v1", SecretReference),
+            ("secret.substituted", SecretReference),
             ("policy.resolved", Policy),
             ("network.flow", Policy),
             ("service.call", Policy),

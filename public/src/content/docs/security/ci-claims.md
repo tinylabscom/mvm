@@ -30,7 +30,7 @@ Each numbered claim is backed by a test or a CI workflow gate.
 | 10 | No untrusted workload reaches the network unless explicitly admitted by policy. | Data containment |
 | 11 | Every application-dependency volume is hash-locked, attestation-checked, CVE-scanned, SBOM-enumerated, and bound to the workload's audit chain. | Supply chain (app layer) |
 | 12 | Every host-side broker service is bound to a signed `ExecutionPlan.services` binding, enforced before handler dispatch, and audited. | Admission and audit |
-| 13 | No raw secret value crosses the broker channel. | Data containment |
+| 13 | The managed substitution path hands the guest placeholders, never raw secret values. | Data containment |
 | 14 | Every OCI image admission records provenance in the chain-signed audit log. | Supply chain |
 | 15 | A sealed production microVM has no shell, no DevOnly guest-agent verbs, and no PTY. | Guest confinement |
 
