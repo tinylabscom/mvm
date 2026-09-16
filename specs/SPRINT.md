@@ -10,6 +10,14 @@
 
 ## In progress
 
+- [x] **Baked installer version resolution — issue #3269.**
+      `specs/plans/2026-09-15-install-lifecycle-and-packaging-polish.md` WS2.
+      The normal install path downloads the baked stable release without an
+      API request, falls back to the latest-release API only after that asset
+      returns 404, and preserves explicit `MVM_VERSION` pins. Stable release
+      preparation and the post-publish site deployment advance the sentinel;
+      prereleases remain opt-in.
+
 - [x] **Stable monitored install URL — issue #3268.**
       `specs/plans/2026-09-15-install-lifecycle-and-packaging-polish.md` WS1.
       The docs site publishes the repository-root installer byte-for-byte at

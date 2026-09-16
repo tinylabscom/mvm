@@ -1,7 +1,7 @@
 # Install lifecycle: a monitored URL, an atomic upgrade, and a way out
 
-Backing: preview
-Validation: none — this is a proposed design; no code implements it and no test exercises it.
+Backing: shipped-source
+Validation: check-sprint-append
 
 **Issues:** epic [#3277](https://github.com/tinylabscom/mvm/issues/3277); [#3268](https://github.com/tinylabscom/mvm/issues/3268), [#3269](https://github.com/tinylabscom/mvm/issues/3269), [#3270](https://github.com/tinylabscom/mvm/issues/3270), [#3271](https://github.com/tinylabscom/mvm/issues/3271), [#3272](https://github.com/tinylabscom/mvm/issues/3272), [#3273](https://github.com/tinylabscom/mvm/issues/3273), [#3274](https://github.com/tinylabscom/mvm/issues/3274)
 
@@ -52,12 +52,12 @@ Issue: [#3268](https://github.com/tinylabscom/mvm/issues/3268).
 
 Issue: [#3269](https://github.com/tinylabscom/mvm/issues/3269).
 
-- [ ] Bake a default version sentinel into `install.sh`, updated by a
+- [x] Bake a default version sentinel into `install.sh`, updated by a
       post-publish step in `.github/workflows/release.yml`.
-- [ ] Fall back to the API only on a confirmed 404 for the baked version.
-- [ ] Note for review: this changes nothing about claim 20. A baked version
+- [x] Fall back to the API only on a confirmed 404 for the baked version.
+- [x] Note for review: this changes nothing about claim 20. A baked version
       resolves the same signed manifest and the same verification ladder.
-- [ ] Extend `tests/install_sh.rs` to cover the baked path, the 404 fallback,
+- [x] Extend `tests/install_sh.rs` to cover the baked path, the 404 fallback,
       and an explicit `MVM_VERSION` override.
 
 ## WS3 — Atomic upgrade and rollback
