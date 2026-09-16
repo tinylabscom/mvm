@@ -33,7 +33,7 @@ verification under `trust`. Domains that already own their own subcommands
 **Beginner vs. advanced surfaces.** [`mvmctl machine`](#machine-beginner-ux)
 (further down) is the beginner-facing front door — one small command group for
 the common "run something in a microVM" cases, and the path the
-[getting-started docs](/getting-started/machine-scenarios/) lead with. Every
+[machine use-case guide](/guides/machine-use-cases/) leads with. Every
 verb in the grouping above is an **advanced / underlying surface**: `machine`
 is a thin UX layer over the _same_ signed, audited, OCI-provenance execution
 path. The former top-level `up`/`invoke`/`console`/`down` verbs have folded into

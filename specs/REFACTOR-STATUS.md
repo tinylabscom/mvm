@@ -4,6 +4,12 @@ Last updated: 2026-09-16
 
 ## In progress
 
+- [x] **Hermetic published-documentation link gate.**
+      `specs/plans/2026-09-15-the-big-cleanup.md` I8, issue #3328. Resolve
+      repository files, same-repository GitHub links, generated Markdown
+      routes, internal content/page routes, and static assets in `check-all`;
+      external hosts remain non-blocking.
+
 - [x] **Canonical user-config and MVM child paths.**
       `specs/plans/2026-09-15-the-big-cleanup.md` A4.5, issue #3308. One
       canonical config path and tenant parser; named helpers for every direct

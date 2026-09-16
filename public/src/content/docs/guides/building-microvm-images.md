@@ -196,8 +196,9 @@ can hide a slow launch. A backend that cannot meet it is not release-ready.
 
 The artifact expectation is surfaced on every `mkGuest` derivation as
 `passthru.mvm.expectedBootMs`, while `mvmctl bench --lane prepared-cold` enforces the
-runtime maximum from raw samples. See [ADR-013 §"Boot-time budget"](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/013-libkrun-libkrun-microvm-nix-pivot.md)
-for the original backend rationale.
+runtime maximum from raw samples. See the
+[cold-launch performance plan](https://github.com/tinylabscom/mvm/blob/main/specs/plans/299-cold-launch-performance.md)
+for the measured budgets and backend rationale.
 
 The floor is achievable because the rootfs uses **busybox-as-PID-1** with a custom `/init` (no NixOS, no systemd, no OpenRC). See [ADR-030](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/030-libkrun-pivot.md) for why this matters and the implementation breadcrumb.
 
