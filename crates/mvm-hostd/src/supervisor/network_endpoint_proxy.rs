@@ -46,8 +46,8 @@ use crate::supervisor::reversible_replacement::{
     ReplacementEngine, ReplacementFlow, StreamingReinjector,
 };
 use crate::supervisor::secret_audit::{
-    emit_rewrite_proof, emit_secret_placeholder_dropped, emit_secret_redacted,
-    emit_secret_substituted,
+    emit_rewrite_proof, emit_secret_flow_refused, emit_secret_placeholder_dropped,
+    emit_secret_redacted, emit_secret_substituted,
 };
 use crate::supervisor::tools::http_hardening::hardened_client_builder_via;
 pub use mvm_contract::substitution::{
@@ -1203,6 +1203,18 @@ pub(crate) fn error_audit(
     }
 }
 
+/// How an opaque TCP flow could be terminated and re-forwarded rather than
+/// spliced straight through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TerminationMode {
+    /// The flow is on port 443. Termination mints a per-SNI leaf under the
+    /// per-VM intermediate and decrypts from there.
+    Tls,
+    /// The flow's bytes are plaintext HTTP. Termination reads and rewrites
+    /// the request directly, with no TLS leg.
+    Cleartext,
+}
+
 impl SubstitutionService {
     pub fn new(
         registry: Arc<SubstitutionRegistry>,
@@ -1343,6 +1355,50 @@ impl SubstitutionService {
             .map(|profile| redaction_active(&profile.action))
             .unwrap_or_else(|| explicit_default_redaction(&self.redaction_policy.default));
         explicit_redaction.then_some("destination requires redaction over typed HTTP")
+    }
+
+    /// Whether an opaque TCP flow to `host:port` could be terminated and
+    /// substituted rather than refused outright.
+    ///
+    /// `None` means the existing refusal stands: `host` carries no bound
+    /// secret, so there is nothing to substitute, or a secret is bound but
+    /// this endpoint has no per-VM TLS intermediate to terminate under. A
+    /// bound destination without a terminator fails closed rather than
+    /// being spliced through untouched.
+    pub(crate) fn terminable(&self, host: &str, port: u16) -> Option<TerminationMode> {
+        if !self.registry.host_is_bound(host) {
+            return None;
+        }
+        self.tls_intermediate.as_ref()?;
+        match port {
+            443 => Some(TerminationMode::Tls),
+            80 => Some(TerminationMode::Cleartext),
+            _ => None,
+        }
+    }
+
+    /// The per-VM egress intermediate a terminated flow mints its per-SNI leaf
+    /// under. `None` on an endpoint that was never given one, which is what
+    /// makes [`Self::terminable`] refuse rather than terminate.
+    pub(crate) fn tls_intermediate(
+        &self,
+    ) -> Option<&Arc<mvm_core::crypto::egress_ca::VmIntermediate>> {
+        self.tls_intermediate.as_ref()
+    }
+
+    /// Record a chain-signed refusal of a flow to a credentialed destination,
+    /// before anything was forwarded.
+    ///
+    /// `destination` is the authority the flow was admitted against and
+    /// `reason` one of a fixed set of host-chosen labels, so neither field can
+    /// carry a byte the workload sent.
+    pub(crate) async fn audit_flow_refused(&self, destination: &str, reason: &str) {
+        let Some(recorder) = &self.recorder else {
+            return;
+        };
+        if let Err(e) = emit_secret_flow_refused(recorder, destination, reason).await {
+            tracing::warn!(error = %e, "flow refusal audit emit failed");
+        }
     }
 
     /// Record cancellation/failure metadata for a typed HTTP stream without
@@ -1695,7 +1751,7 @@ impl SubstitutionService {
         // ── cleartext :80 ──
         let mut std_stream = std_stream;
         let (mut std_stream, raw) = tokio::task::spawn_blocking(move || {
-            let raw = terminator::read::read_http_request(&mut std_stream)?;
+            let raw = terminator::read::read_http_request(&mut std_stream)?.request;
             anyhow::Ok((std_stream, raw))
         })
         .await??;
@@ -3431,6 +3487,70 @@ mod server_tests {
             Some("destination requires secret substitution over typed HTTP")
         );
         assert_eq!(service.opaque_refusal_reason("example.com"), None);
+    }
+
+    /// Build a service bound to `hosts` via one minted secret, optionally
+    /// carrying a per-VM TLS intermediate minted under a fresh host CA.
+    fn service_with_termination(
+        hosts: &[&str],
+        attach_intermediate: bool,
+    ) -> (Arc<SubstitutionService>, tempfile::TempDir) {
+        let dir = tempdir().expect("create tempdir");
+        let store = FileSecretStore::with_dir(dir.path());
+        store
+            .put(
+                "local",
+                "openai",
+                &SecretBox::new(Box::new("sk-live-zzz".to_string())),
+            )
+            .expect("seed secret store");
+        let resolver: Arc<dyn SecretResolver> =
+            Arc::new(LocalResolver::new("local", Arc::new(store)));
+        let mut reg = SubstitutionRegistry::new();
+        let _placeholder = reg.mint(bearer_ref("openai", hosts));
+        let forwarder = Arc::new(MockForwarder {
+            seen: Mutex::new(None),
+        });
+        let mut service = SubstitutionService::new(Arc::new(reg), resolver, forwarder);
+        if attach_intermediate {
+            let ca = mvm_core::crypto::egress_ca::EgressCa::load_or_init_at(dir.path())
+                .expect("load or init host ca");
+            let intermediate = ca
+                .mint_vm_intermediate(hosts)
+                .expect("mint vm intermediate");
+            service = service.with_tls_intermediate(intermediate);
+        }
+        (Arc::new(service), dir)
+    }
+
+    #[test]
+    fn a_bound_host_with_an_intermediate_is_terminable_as_tls_on_443() {
+        let (service, _dir) = service_with_termination(&["api.openai.com"], true);
+        assert_eq!(
+            service.terminable("api.openai.com", 443),
+            Some(TerminationMode::Tls)
+        );
+    }
+
+    #[test]
+    fn a_bound_host_with_an_intermediate_is_terminable_as_cleartext_on_80() {
+        let (service, _dir) = service_with_termination(&["api.openai.com"], true);
+        assert_eq!(
+            service.terminable("api.openai.com", 80),
+            Some(TerminationMode::Cleartext)
+        );
+    }
+
+    #[test]
+    fn a_bound_host_without_an_intermediate_stays_refused() {
+        let (service, _dir) = service_with_termination(&["api.openai.com"], false);
+        assert_eq!(service.terminable("api.openai.com", 443), None);
+    }
+
+    #[test]
+    fn an_unbound_host_is_not_terminable() {
+        let (service, _dir) = service_with_termination(&["api.openai.com"], true);
+        assert_eq!(service.terminable("example.com", 443), None);
     }
 
     #[test]

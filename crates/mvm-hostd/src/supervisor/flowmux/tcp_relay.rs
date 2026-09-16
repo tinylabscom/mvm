@@ -2,7 +2,9 @@
 //!
 //! One admitted flow becomes one thread that owns the upstream socket, reads
 //! from it, and frames each chunk back to the guest as `Data`. EOF becomes a
-//! `HalfClose`; an error becomes a `Reset`.
+//! `HalfClose`; an error becomes a `Reset`. The socket is the destination's
+//! for an opaque flow and one half of a local pair for a terminated one, and
+//! the relay cannot tell the difference — which is the point.
 //!
 //! The interesting part is the window. An exhausted send window is
 //! backpressure, not a failure: the guest returns credit as it consumes, so a
@@ -26,6 +28,7 @@ use mvm_core::net::session::Session;
 use tracing::warn;
 
 use super::registry::{RegistryError, StreamRegistry};
+use super::socket::FlowSocket;
 use super::{PER_IP_CONNECT_TIMEOUT, lock_registry, lock_validator, write_frame_to};
 
 /// How often the wait re-checks. The relay thread is blocked either way, so
@@ -96,13 +99,13 @@ pub(super) fn connect_first_admitted(
     None
 }
 
-/// Per-stream relay thread: read from the upstream TCP socket and forward
+/// Per-stream relay thread: read from the flow's upstream socket and forward
 /// each chunk to the guest as a `Data` frame. EOF becomes a `HalfClose`;
 /// errors become a `Reset`.
 /// Parameters for the per-stream TCP relay thread.
 pub(super) struct TcpRelayParams {
     pub(super) stream_id: u32,
-    pub(super) upstream: TcpStream,
+    pub(super) upstream: FlowSocket,
     pub(super) session: Arc<Mutex<Session>>,
     pub(super) writer: Arc<Mutex<UnixStream>>,
     pub(super) registry: Arc<Mutex<StreamRegistry>>,
