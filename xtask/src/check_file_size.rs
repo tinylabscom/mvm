@@ -23,28 +23,19 @@ const MAX_PROD_LINES: usize = 1500;
 /// the gate was repaired: a file may shrink, but may not grow, and its entry
 /// must disappear once the ordinary limit is met.
 const GRANDFATHERED: &[(&str, usize)] = &[
-    ("crates/mvm-agentd/src/guest_mount.rs", 1683),
-    ("crates/mvm-build/src/bin/mvm-host-vm-init.rs", 3737),
-    ("crates/mvm-build/src/bin/stage0-init.rs", 1531),
-    ("crates/mvm-build/src/libkrun_builder.rs", 4737),
-    ("crates/mvm-build/src/persistent_builder.rs", 1513),
+    ("crates/mvm-agentd/src/guest_mount.rs", 1620),
+    ("crates/mvm-build/src/bin/mvm-host-vm-init.rs", 3637),
+    ("crates/mvm-build/src/libkrun_builder.rs", 4485),
     ("crates/mvm-cli/src/commands/machine/mod.rs", 1745),
-    ("crates/mvm-cli/src/commands/ops/audit.rs", 1704),
-    ("crates/mvm-cli/src/commands/pool.rs", 1502),
-    ("crates/mvm-cli/src/commands/vm/checkpoint.rs", 1523),
-    ("crates/mvm-cli/src/commands/vm/exec.rs", 1729),
-    ("crates/mvm-cli/src/commands/vm/invoke.rs", 1523),
-    ("crates/mvm-cli/src/exec.rs", 1531),
-    ("crates/mvm-contract/src/plan/types.rs", 1530),
-    ("crates/mvm-hostd/src/audit/emitter.rs", 1656),
-    ("crates/mvm-hostd/src/plan_admission.rs", 2523),
+    ("crates/mvm-cli/src/commands/ops/audit.rs", 1649),
+    ("crates/mvm-cli/src/commands/vm/exec.rs", 1654),
+    ("crates/mvm-hostd/src/audit/emitter.rs", 1515),
+    ("crates/mvm-hostd/src/plan_admission.rs", 2256),
     (
         "crates/mvm-hostd/src/supervisor/network_endpoint_proxy.rs",
-        2961,
+        2422,
     ),
-    ("crates/mvm-runtime/src/backends/hvf/kernel_boot.rs", 2251),
-    ("crates/mvm-runtime/src/wasm_backend.rs", 1613),
-    ("crates/mvm-runtime/src/workload_runner/runner.rs", 1832),
+    ("crates/mvm-runtime/src/backends/hvf/kernel_boot.rs", 2208),
 ];
 
 #[derive(Debug)]
@@ -420,7 +411,18 @@ fn count_production_lines(chars: &[char], spans: &[(usize, usize)]) -> usize {
     let mut count = 0usize;
     let mut line_start = 0usize;
     for line_end in line_ends {
-        let has_masked = masked[line_start..line_end].iter().any(|value| *value);
+        // A genuinely blank line (no characters between this newline and the
+        // last one) has an empty `line_start..line_end` slice, so it can't
+        // tell the blank line apart from a truly unmasked one that way — the
+        // slice is empty either way. Its own newline character carries the
+        // real answer instead: `analyze_source` masks every character of a
+        // test span, including interior blank lines' newlines, so folding
+        // that one character in (when the file has one to fold in) recovers
+        // whether the blank line sits inside a test span or a production one.
+        let mask_check_end = line_end.saturating_add(1).min(chars.len());
+        let has_masked = masked[line_start..mask_check_end]
+            .iter()
+            .any(|value| *value);
         let has_unmasked_syntax = chars[line_start..line_end]
             .iter()
             .zip(&masked[line_start..line_end])
@@ -630,6 +632,21 @@ fn after() {}
     }
 
     #[test]
+    fn blank_line_inside_inline_test_module_does_not_count() {
+        let src = "fn before() {}\n#[cfg(test)]\nmod tests {\n    fn probe() {}\n}\n";
+        let before = production_lines(src);
+
+        let src_with_new_test = "fn before() {}\n#[cfg(test)]\nmod tests {\n    fn probe() {}\n\n    #[test]\n    fn added() {}\n}\n";
+        let after = production_lines(src_with_new_test);
+
+        assert_eq!(
+            before, after,
+            "adding a test function (with surrounding blank lines) inside an \
+             existing inline test module must not change the production count"
+        );
+    }
+
+    #[test]
     fn parent_gated_external_test_module_is_exempt() {
         let child = "fn helper() {}\n".repeat(1600);
         let tree = make_tree(&[
@@ -652,8 +669,8 @@ fn after() {}
 
     #[test]
     fn grandfathered_file_cannot_grow() {
-        let grown = "fn production() {}\n".repeat(1503);
-        let tree = make_tree(&[("crates/mvm-cli/src/commands/pool.rs", &grown)]);
+        let grown = "fn production() {}\n".repeat(1516);
+        let tree = make_tree(&[("crates/mvm-hostd/src/audit/emitter.rs", &grown)]);
         let err = run(tree.path()).expect_err("a grandfathered file may not grow");
         assert!(err.to_string().contains("grew past"), "{err}");
     }
@@ -661,15 +678,15 @@ fn after() {}
     #[test]
     fn grandfathered_file_must_leave_the_list_at_the_ordinary_limit() {
         let shrunk = "fn production() {}\n".repeat(MAX_PROD_LINES);
-        let tree = make_tree(&[("crates/mvm-cli/src/commands/pool.rs", &shrunk)]);
+        let tree = make_tree(&[("crates/mvm-hostd/src/audit/emitter.rs", &shrunk)]);
         let err = run(tree.path()).expect_err("a stale grandfather entry must fail");
         assert!(err.to_string().contains("stale grandfather"), "{err}");
     }
 
     #[test]
     fn grandfathered_file_at_its_ceiling_passes() {
-        let pinned = "fn production() {}\n".repeat(1502);
-        let tree = make_tree(&[("crates/mvm-cli/src/commands/pool.rs", &pinned)]);
+        let pinned = "fn production() {}\n".repeat(1515);
+        let tree = make_tree(&[("crates/mvm-hostd/src/audit/emitter.rs", &pinned)]);
         run(tree.path()).expect("the pinned baseline itself remains admitted");
     }
 
