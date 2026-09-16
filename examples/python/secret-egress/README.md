@@ -13,12 +13,14 @@ Demonstrates:
   destinations it may reach (`*.` subdomain wildcards supported).
 - In the guest, `os.environ["API_KEY"]` is an opaque placeholder
   (`mvm-secret-<hex>`), not the real value.
-- The request is routed through `HTTP_PROXY` (set by the host) → the in-guest
-  forward proxy → the host substitution endpoint, which injects the real
-  `Authorization: Bearer <value>` and sends the request to the bound host
+- The request is routed through `HTTP_PROXY` (set by the host) → the guest's
+  loopback egress proxy → the host endpoint, which injects the real
+  `Authorization: Bearer <value>` and originates the request to the bound host
   itself. This example uses plain `http://`, so that upstream leg is
-  cleartext; an `https://` URL sent in absolute form gets a host-originated TLS
-  connection.
+  cleartext. An `https://` URL takes the same route: the client tunnels with
+  `CONNECT`, and because the destination carries a binding the host terminates
+  the tunnel under this VM's egress CA, substitutes, and re-originates real TLS
+  upstream. An unbound destination is passed through untouched.
 
 ## How the secret reaches the host (not the guest)
 

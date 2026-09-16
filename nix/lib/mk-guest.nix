@@ -519,9 +519,9 @@ let
     # administratively DOWN and without an IPv4 address; merely raising the
     # link still leaves `127.0.0.1` unavailable, so ANY guest-internal
     # loopback service is unreachable
-    # (`connect()` → ENETUNREACH) — the egress forward proxy on
-    # 127.0.0.1:18080, the in-guest addon-dns resolver, and any local service a
-    # workload binds. Must run before the agent (which binds the forward proxy)
+    # (`connect()` → ENETUNREACH) — the egress proxy the workload's proxy
+    # environment names, the in-guest addon-dns resolver, and any local service
+    # a workload binds. Must run before the agent (which binds the egress proxy)
     # and before netinit. `ip` first (canonical), `ifconfig` fallback — both are
     # busybox applets in the defconfig this image already relies on for
     # `modprobe`. Non-fatal: a failure logs and leaves loopback down (the prior
@@ -529,7 +529,7 @@ let
     if ! /bin/busybox ip addr replace 127.0.0.1/8 dev lo 2>/dev/null \
       || ! /bin/busybox ip link set lo up 2>/dev/null; then
       /bin/busybox ifconfig lo 127.0.0.1 netmask 255.0.0.0 up 2>/dev/null \
-        || echo "mvm-init: WARNING could not configure loopback (no ip/ifconfig applet); guest-internal loopback (egress forward proxy, addon-dns) will be unreachable"
+        || echo "mvm-init: WARNING could not configure loopback (no ip/ifconfig applet); guest-internal loopback (egress proxy, addon-dns) will be unreachable"
     fi
 
     # Stage 2.45 — mount the optional config/secrets drives. The host uses a
@@ -936,35 +936,6 @@ let
       export HTTPS_PROXY="$ALL_PROXY"
       export http_proxy="$ALL_PROXY"
       export https_proxy="$ALL_PROXY"
-    fi
-
-    # Stage 2.49 — loopback forward proxy for secret-bearing egress. Started
-    # unconditionally and, unlike every other helper here, as root: relaying
-    # opens an authenticated FlowMux session, which reads the root-only guest
-    # signing key. The workload must not be able to read that key, so the
-    # process that must cannot be the workload's own uid.
-    #
-    # Not gated on MVM_VSOCK_EGRESS. That token is *off* for exactly the
-    # launches that need this: a secret-bearing workload's egress goes through
-    # the host substitution endpoint, so its guest starts no vsock egress
-    # client and this listener is the whole of its egress. A workload with no
-    # placeholders has no HTTP_PROXY pointed here and it sees no connections.
-    MVM_FORWARD_PROXY_BIN=
-    if [ "$MVM_RUNTIME_SOURCE_POLICY" = rootfs_only ]; then
-      if [ -x /usr/local/bin/mvm-forward-proxy ]; then
-        MVM_FORWARD_PROXY_BIN=/usr/local/bin/mvm-forward-proxy
-      fi
-    elif [ -x /mvm/runtime/forward-proxy ]; then
-      MVM_FORWARD_PROXY_BIN=/mvm/runtime/forward-proxy
-    elif [ -x /usr/local/bin/mvm-forward-proxy ]; then
-      MVM_FORWARD_PROXY_BIN=/usr/local/bin/mvm-forward-proxy
-    fi
-    if [ -n "$MVM_FORWARD_PROXY_BIN" ]; then
-      /bin/busybox ip addr replace 127.0.0.1/8 dev lo 2>/dev/null || true
-      /bin/busybox ip link set lo up 2>/dev/null || true
-      /bin/busybox setsid "$MVM_FORWARD_PROXY_BIN" &
-    else
-      echo "mvm-init: no forward proxy resolved; secret-bearing egress has nothing to relay through"
     fi
 
     # Stage 2.5 — guest agent supervisor. Fork the agent into

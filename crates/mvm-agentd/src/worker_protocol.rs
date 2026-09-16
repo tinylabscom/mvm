@@ -176,7 +176,7 @@ mod tests {
         let req = WorkerCallRequest {
             stdin: b"hello world".to_vec(),
             timeout_secs: 30,
-            env: vec![("HTTP_PROXY".into(), "http://127.0.0.1:18080".into())],
+            env: vec![("HTTP_PROXY".into(), "http://127.0.0.1:1080".into())],
         };
         let mut buf = Vec::new();
         write_pipe_frame(&mut buf, &req).unwrap();

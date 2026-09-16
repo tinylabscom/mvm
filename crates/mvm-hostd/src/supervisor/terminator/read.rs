@@ -1,13 +1,12 @@
 //! Bounded HTTP/1.1 request reader for the transparent egress terminator.
 //!
-//! Ported from `crates/mvm-agentd/src/forward_proxy.rs`. The terminator reads
-//! raw redirected TCP bytes off a blocking socket and needs the same
-//! headers→body logic.
+//! The terminator reads raw decrypted TCP bytes off a blocking socket, so it
+//! needs its own headers→body framing rather than a client's.
 
 use std::io::Read;
 
 /// 16 MiB cap on a single redirected request (defensive against runaway
-/// allocations; the same bound as the guest-side forward proxy).
+/// allocations).
 pub const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 
 /// Why a request could not be read.

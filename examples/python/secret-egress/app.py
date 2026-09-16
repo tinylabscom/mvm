@@ -54,16 +54,15 @@ import mvm
 )
 def call_api() -> str:
     # `API_KEY` holds the opaque placeholder, not the real key. `HTTP_PROXY` is
-    # set by the host to the in-guest forward proxy; the request is relayed to
+    # set by the host to the guest's loopback egress proxy; the request reaches
     # the host endpoint, which substitutes the real Bearer credential before
     # making the real request to the bound host.
     #
-    # The request is plain `http://` so urllib sends it to the proxy in
-    # absolute-form (`GET http://httpbin.org/get HTTP/1.1` + headers) — the
-    # form the forward proxy parses to read the placeholder. (An `https://` URL
-    # via HTTP_PROXY makes urllib issue a `CONNECT` tunnel instead, which hides
-    # the headers from the proxy; SDK-configured clients that send absolute-form
-    # are the path to credential substitution on TLS destinations.)
+    # An `https://` URL takes the same route with no change here: urllib issues
+    # a `CONNECT` tunnel, and because the destination carries a binding the host
+    # terminates that tunnel under this VM's egress CA and substitutes inside
+    # it. This example stays on plain `http://` only to keep the upstream leg
+    # readable.
     placeholder = os.environ["API_KEY"]
     request = urllib.request.Request(
         "http://httpbin.org/get",

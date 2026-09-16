@@ -1,6 +1,6 @@
 //! Low-level vsock UDS connection management: the Firecracker
 //! CONNECT/OK handshake, reconnect backoff, and the guest-facing
-//! AF_VSOCK dial path used by the substitution forward proxy.
+//! AF_VSOCK dial path used by the guest's blocking FlowMux client.
 
 use std::io::{Read, Write};
 use std::os::unix::fs::FileTypeExt;
@@ -271,7 +271,7 @@ pub fn connect_to(uds_path: &str, timeout_secs: u64) -> Result<UnixStream> {
 pub const HOST_CID: u32 = 2;
 
 /// Open a **guest→host** vsock stream to the host on `port` (AF_VSOCK to
-/// [`HOST_CID`]). This is the direction the substitution forward proxy needs —
+/// [`HOST_CID`]). This is the direction the guest's egress clients need —
 /// the opposite of [`connect_to_port`], which is the host→guest Firecracker
 /// UDS-multiplexer path. Backend-agnostic on the guest side: both QEMU
 /// (`vhost-vsock`) and Firecracker forward a guest AF_VSOCK connect to CID 2 to

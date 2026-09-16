@@ -52,9 +52,11 @@ fn supported_adapters_have_flow_classes(_world: &mut CliWorld) {
     assert_eq!(Opcode::Resolve.class(), FlowClass::Dns);
     assert_eq!(Opcode::IcmpEcho.class(), FlowClass::Icmp);
     assert_eq!(Opcode::OpenHttp.class(), FlowClass::Http);
+    // One loopback listener carries every class, so the workload's proxy
+    // environment names exactly one endpoint.
     assert_eq!(
-        mvm_agentd::forward_proxy::proxy_env_url(),
-        "http://127.0.0.1:18080"
+        mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_URL,
+        "socks5h://127.0.0.1:1080"
     );
 }
 

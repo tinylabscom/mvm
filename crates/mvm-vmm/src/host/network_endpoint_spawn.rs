@@ -1565,7 +1565,7 @@ mod tests {
         let redaction = mvm_core::policy::RedactionPolicy::default();
         let network_policy = mvm_core::policy::network_policy::NetworkPolicy::default();
         let limits = mvm_core::plan::NetworkLimits::default();
-        let terminator: SocketAddr = "127.0.0.1:18080".parse().unwrap();
+        let terminator: SocketAddr = "127.0.0.1:19443".parse().unwrap();
         let tls = ("certificate".to_string(), "private-key".to_string());
         let resolver = RemoteResolverSpawnConfig {
             uds_path: dir.path(),
