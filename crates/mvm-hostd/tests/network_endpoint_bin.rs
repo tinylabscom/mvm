@@ -176,6 +176,12 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
     assert_eq!(handed[0].0, "OPENAI_API_KEY");
     let placeholder = handed[0].1.clone();
     assert!(placeholder.starts_with("mvm-secret-"), "got {placeholder}");
+    // The handshake line is what the backend injects into the guest launch
+    // env, so it must carry the opaque placeholder and never value bytes.
+    assert!(
+        !line.contains("sk-live-xyz"),
+        "the launch-env handshake must not carry the raw secret: {line}"
+    );
 
     // The endpoint bound the UDS before the handshake, so it's reachable now.
     let mut conn = UnixStream::connect(&connector).expect("connect to typed endpoint connector");

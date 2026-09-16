@@ -412,6 +412,20 @@ Work:
       the live scenario finishes a real API turn with the raw key absent
       from guest env, the workspace volume, and the console log. Extends
       the claim-13 witness family; the ADR-001 row is not renamed here.
+      Hermetic halves landed 2026-09-15 (the live scenario stays open —
+      it needs the M2 blocker resolved first):
+      the launch-env handshake carries placeholders and no value bytes
+      (asserted inside
+      `endpoint_bin_serves_substitution_and_refuses_unbound_destination`),
+      the Anthropic `x-api-key` position substitutes like
+      `Authorization: Bearer`
+      (`substitutes_in_the_x_api_key_header_position` in the claim-13
+      `substitute` family, plus
+      `process_substitutes_the_x_api_key_header_position` on the serve
+      path), and an unbound destination refuses without forwarding or
+      leaking (`process_refuses_an_unbound_destination_without_forwarding`;
+      the guest-side 502 rendering was already
+      `renders_a_refusal_as_502`).
 - [ ] Ledger note: claim 13's row covers the broker channel; this lane
       widens practical containment to the workload's own API traffic.
       Whether that becomes new ledger prose is a maintainer decision —

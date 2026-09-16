@@ -4331,6 +4331,68 @@ mod server_tests {
         );
     }
 
+    /// The Anthropic API sends its credential in `x-api-key`, not
+    /// `Authorization`. The process path substitutes the placeholder in
+    /// that position too, and the forwarded request carries no
+    /// placeholder residue in any header.
+    #[tokio::test]
+    async fn process_substitutes_the_x_api_key_header_position() {
+        let (service, ph, forwarder, _dir) =
+            service_with("sk-ant-live-zzz", &["api.anthropic.com"]);
+        let wire = WireRequest {
+            method: "POST".into(),
+            url: "https://api.anthropic.com/v1/messages".into(),
+            headers: vec![
+                ("x-api-key".into(), ph.clone()),
+                ("anthropic-version".into(), "2023-06-01".into()),
+            ],
+            body_b64: B64.encode(b"{}"),
+        };
+        let resp = service.process(wire).await;
+        assert!(matches!(resp, WireResponse::Ok { .. }), "{resp:?}");
+        let seen = forwarder.seen.lock().unwrap();
+        let forwarded = seen.as_ref().expect("forward leg reached");
+        let x_api_key = forwarded
+            .headers
+            .iter()
+            .find(|(k, _)| k == "x-api-key")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(x_api_key, Some("sk-ant-live-zzz"));
+        assert!(
+            !forwarded.headers.iter().any(|(_, v)| v.contains(&ph)),
+            "no placeholder residue may reach the destination"
+        );
+    }
+
+    /// An unbound destination surfaces as a `Refused` on the process path
+    /// with the placeholder never resolved — the shape the in-guest
+    /// forward proxy renders to the workload as a 502.
+    #[tokio::test]
+    async fn process_refuses_an_unbound_destination_without_forwarding() {
+        let (service, ph, forwarder, _dir) =
+            service_with("sk-ant-live-zzz", &["api.anthropic.com"]);
+        let wire = WireRequest {
+            method: "POST".into(),
+            url: "https://evil.example.com/v1".into(),
+            headers: vec![("x-api-key".into(), ph.clone())],
+            body_b64: B64.encode(b"{}"),
+        };
+        let resp = service.process(wire).await;
+        match resp {
+            WireResponse::Refused { message } => {
+                assert!(
+                    !message.contains("sk-ant-live-zzz"),
+                    "the refusal must not leak the value: {message}"
+                );
+            }
+            WireResponse::Ok { .. } => panic!("unbound destination must refuse"),
+        }
+        assert!(
+            forwarder.seen.lock().unwrap().is_none(),
+            "nothing may be forwarded for an unbound destination"
+        );
+    }
+
     #[test]
     fn from_plan_builds_a_service_and_handed_placeholders() {
         use crate::keyholder::{FileBindingStore, SecretBindingMeta};
