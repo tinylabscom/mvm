@@ -169,9 +169,6 @@ pub fn standby_attach_config(
         plan,
         bundle,
         network_policy,
-        transparent_terminator_port: claim.start_config.as_ref().map(|config| {
-            mvm_vmm::host::egress_redirect::terminator_port_for_vm_name(&config.name)
-        }),
     })
 }
 

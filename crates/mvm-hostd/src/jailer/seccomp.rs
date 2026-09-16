@@ -117,7 +117,7 @@ pub(crate) const CONFINED_ROLE_SYSCALLS: &[(&str, libc::c_long)] = &[
     ("eventfd2", libc::SYS_eventfd2), // tokio reactor wakeup fd
     ("getsockname", libc::SYS_getsockname),
     ("getpeername", libc::SYS_getpeername),
-    ("getsockopt", libc::SYS_getsockopt), // SO_ORIGINAL_DST (terminator), TLS
+    ("getsockopt", libc::SYS_getsockopt), // SO_ERROR after a timed connect, TLS
     ("setsockopt", libc::SYS_setsockopt), // TCP_NODELAY, socket tuning
     ("poll", libc::SYS_poll),             // glibc resolver / connect timeouts
     ("ppoll", libc::SYS_ppoll),

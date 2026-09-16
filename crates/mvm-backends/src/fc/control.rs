@@ -186,7 +186,7 @@ pub fn stop_vm(name: &str) -> Result<()> {
 
     // Tear down this VM's egress substitution moat BEFORE the
     // not-running early return. The endpoint is a live host process holding the
-    // workload's DECRYPTED secrets and the nft REDIRECT table outlives the guest;
+    // workload's DECRYPTED secrets and outlives the guest;
     // if an FC VM crashes/OOMs on its own, a later `stop_vm` must still reap the
     // moat — decrypted secrets must not outlive the guest, even on a crash. Both
     // are best-effort + idempotent (no-op when the VM carried no secrets). The

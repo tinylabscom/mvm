@@ -219,19 +219,10 @@ pub struct EndpointConfig {
     /// Override the binding-store base dir. Default: `~/.mvm/secret-bindings`.
     #[serde(default)]
     pub binding_store_dir: Option<PathBuf>,
-    /// When set, also bind the transparent egress **terminator** TCP listener
-    /// on this host address. The nft `nat` chain REDIRECTs
-    /// the guest's outbound TCP here; the endpoint recovers the original
-    /// destination, substitutes secrets, and splices to the real host. Linux-
-    /// only. `None` (the default) preserves the substitution-channel-only
-    /// behaviour — no terminator, no nft redirect.
-    #[serde(default)]
-    pub terminator_listen: Option<std::net::SocketAddr>,
-    /// The per-VM egress intermediate (cert+key) the
-    /// transparent `https` terminator terminates bound-host TLS under.
-    /// `None` ⇒ `http`-only termination / no TLS leg. Set alongside
-    /// `terminator_listen` when the plan has secrets and the backend delivered
-    /// the matching cert to the guest's trust bundle.
+    /// The per-VM egress intermediate (cert+key) a terminated flow to a bound
+    /// host terminates TLS under. `None` ⇒ no TLS leg. Set when the plan has
+    /// secrets and the backend delivered the matching cert to the guest's
+    /// trust bundle.
     #[serde(default)]
     pub tls_intermediate: Option<TlsIntermediate>,
     /// The VM's resolved network policy for claim-10 egress. When set, the endpoint
@@ -643,7 +634,6 @@ mod tests {
             no_proxy: None,
             secret_store_dir: Some(dir.join("secrets")),
             binding_store_dir: Some(dir.join("bindings")),
-            terminator_listen: None,
             tls_intermediate: None,
             network_policy: None,
             network_limits: mvm_core::plan::NetworkLimits::default(),
@@ -726,25 +716,12 @@ mod tests {
         let cfg = parse(&serde_json::to_vec(&json).unwrap()).unwrap();
         assert_eq!(cfg.forward_timeout_secs, 30);
         assert!(cfg.secret_store_dir.is_none() && cfg.binding_store_dir.is_none());
-        // Default: no terminator listener → substitution-channel-only behaviour.
-        assert!(cfg.terminator_listen.is_none());
         assert_eq!(
             cfg.transport,
             EndpointTransport::Uds {
                 path: "/tmp/sub.sock".into()
             }
         );
-    }
-
-    #[test]
-    fn config_roundtrips_terminator_listen_when_set() {
-        let mut cfg = vsock_cfg(vec![], std::path::Path::new("/tmp/x"));
-        cfg.terminator_listen = Some("127.0.0.1:9119".parse().unwrap());
-        let bytes = serde_json::to_vec(&cfg).unwrap();
-        assert_eq!(parse(&bytes).unwrap(), cfg);
-        // SocketAddr serializes as a plain string in the JSON.
-        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["terminator_listen"], serde_json::json!("127.0.0.1:9119"));
     }
 
     #[test]

@@ -91,7 +91,6 @@ fn supervisor_takes_bridge_path_when_tenant_id_some() {
         bundle: None,
         network_policy: None,
         bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
-        transparent_terminator_port: None,
         egress_relay_socket: None,
         exclusive_image_lock: None,
     };
@@ -169,7 +168,6 @@ fn supervisor_takes_legacy_path_when_tenant_id_none() {
         bundle: None,
         network_policy: None,
         bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
-        transparent_terminator_port: None,
         egress_relay_socket: None,
         exclusive_image_lock: None,
     };

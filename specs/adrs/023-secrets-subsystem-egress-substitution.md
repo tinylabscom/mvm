@@ -22,17 +22,24 @@ A secret is a reference. The host substitutes the real value into
 outbound traffic at the egress boundary; the guest holds only a
 **named placeholder the user chooses** — `${NAME}` — never the value.
 
-### Mechanism — a host-side transparent terminator, no SDK required
+### Mechanism — host-side termination of a flow to a bound host, no SDK required
 
-An nftables `nat` REDIRECT steers the guest's outbound `:80`/`:443` to a
-per-VM terminator that recovers the original destination
-(`SO_ORIGINAL_DST`), substitutes the bound secret into the request, and —
-for `https` — terminates TLS under a per-VM name-constrained intermediate
-certificate the guest trusts, splicing every unbound host through
-untouched. A plain `curl https://<bound-host> -H "Authorization: Bearer
-$PLACEHOLDER"` with no SDK cooperation gets the real credential
-substituted host-side. An SDK/proxy-env path remains available as an
-alternative entry point, but nothing about substitution depends on it.
+The guest has no network interface. Every outbound connection leaves over
+the vsock `NetworkFlow` channel to the per-VM `mvm-network-endpoint`,
+which admits it against the egress policy before anything is dialled. A
+client that honours the guest's proxy environment reaches the endpoint
+either as a typed HTTP request or as a `CONNECT` tunnel. When an admitted
+TCP flow names a host that a secret is bound to, the endpoint terminates
+it instead of relaying it: on `:443` under a leaf minted by a per-VM
+name-constrained CA the guest trusts, on `:80` in cleartext. Each request
+is then read and put through the same substitution pipeline as a typed
+request, so the destination bind check, redaction and metering apply in
+one place. A flow to any other host is relayed opaquely and never
+decrypted. A bound host the endpoint cannot terminate — another port, or
+no per-VM CA — is refused rather than relayed, since relaying it would put
+the placeholder on the wire. A plain `curl https://<bound-host> -H
+"Authorization: Bearer $PLACEHOLDER"` using the proxy environment, with no
+SDK cooperation, gets the real credential substituted host-side.
 
 The workload never makes its own TLS handshake to the destination for a
 secret-bearing request and never holds the value. The host does not MITM

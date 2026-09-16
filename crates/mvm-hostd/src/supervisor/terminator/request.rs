@@ -1,37 +1,7 @@
 //! Reconstruct a `ProxyRequest` (the substitution stack's input) from a raw
-//! origin-form HTTP/1.1 request the terminator read off a redirected socket.
+//! origin-form HTTP/1.1 request read off a terminated flow.
 use crate::supervisor::network_endpoint_proxy::ProxyRequest;
 use anyhow::{Context, Result, bail};
-use std::net::SocketAddr;
-
-/// Cleartext (`:80`) variant — builds an `http://` URL.
-pub fn proxy_request_from_origin_form(raw: &[u8], orig_dst: SocketAddr) -> Result<ProxyRequest> {
-    proxy_request_from_origin_form_scheme(raw, orig_dst, "http")
-}
-
-/// TLS-terminated (`:443`) variant — builds an `https://` URL so the upstream
-/// re-origination leg dials the real host over TLS.
-pub fn proxy_request_from_origin_form_https(
-    raw: &[u8],
-    orig_dst: SocketAddr,
-) -> Result<ProxyRequest> {
-    proxy_request_from_origin_form_scheme(raw, orig_dst, "https")
-}
-
-fn proxy_request_from_origin_form_scheme(
-    raw: &[u8],
-    orig_dst: SocketAddr,
-    scheme: &str,
-) -> Result<ProxyRequest> {
-    let parsed = parse_origin_form(raw)?;
-    // The Host header is the name the guest dialed — `prepare_request`'s
-    // claim-12 bind-check keys on it. Fall back to the original-dst IP (HTTP/1.0).
-    let host = parsed
-        .host
-        .clone()
-        .unwrap_or_else(|| orig_dst.ip().to_string());
-    Ok(parsed.into_request(scheme, host_without_port(&host)))
-}
 
 /// Build a request whose destination is the authority the flow was opened
 /// against, refusing when the request's own `Host` header names a different
@@ -142,8 +112,8 @@ fn parse_origin_form(raw: &[u8]) -> Result<ParsedRequest> {
     if !version.starts_with("HTTP/") {
         bail!("malformed request line: {request_line:?}");
     }
-    // Origin-form (`/path`) is the transparent path; absolute-form means a
-    // proxy-configured client, not ours.
+    // Origin-form (`/path`) is what a client sends inside its tunnel;
+    // absolute-form means a request addressed to a proxy, not to this flow.
     if !target.starts_with('/') {
         bail!("expected origin-form target, got {target:?}");
     }
@@ -176,15 +146,13 @@ fn parse_origin_form(raw: &[u8]) -> Result<ParsedRequest> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
     #[test]
-    fn builds_proxy_request_url_from_host_header() {
+    fn an_authority_request_keeps_its_headers_in_order() {
         let raw = b"GET /v1/x HTTP/1.1\r\nhost: api.openai.com\r\nauthorization: Bearer mvm-secret-abc\r\n\r\n";
-        let dst = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 7), 80));
-        let req = proxy_request_from_origin_form(raw, dst).unwrap();
+        let req = proxy_request_from_connect_authority(raw, "https", "api.openai.com").unwrap();
         assert_eq!(req.method, "GET");
-        assert_eq!(req.url, "http://api.openai.com/v1/x");
+        assert_eq!(req.url, "https://api.openai.com/v1/x");
         assert_eq!(
             req.headers[1],
             ("authorization".into(), "Bearer mvm-secret-abc".into())
@@ -194,8 +162,7 @@ mod tests {
     #[test]
     fn rejects_absolute_form_target() {
         let raw = b"GET http://x/ HTTP/1.1\r\nhost: x\r\n\r\n";
-        let dst = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 7), 80));
-        assert!(proxy_request_from_origin_form(raw, dst).is_err());
+        assert!(proxy_request_from_connect_authority(raw, "https", "x").is_err());
     }
 
     #[test]
