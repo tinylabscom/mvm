@@ -95,17 +95,20 @@ Last updated: 2026-09-16
       Epic #3277. Execution started. The stable install URL and its daily live
       monitor, production-host deploy check, and API-free normal install path
       are complete, as are versioned installs with atomic upgrade and rollback,
-      the full host-binary set, and the uninstaller; remaining work adds
-      in-process signature verification to close the claim 20 limits note,
-      installer and distro compat lanes, and Nix version-from-manifest.
+      the full host-binary set, the uninstaller, and the installer, distro and
+      install-page compat lanes; remaining work adds in-process signature
+      verification to close the claim 20 limits note, and fixes the macOS
+      install of the baked default release those lanes found broken.
   - [x] WS1 — publish and monitor `https://runmvm.com/install.sh` (#3268, #3331)
   - [x] WS2 — bake the stable version; API only on confirmed 404 (#3269)
   - [x] WS3 — versioned release directories, one-rename upgrade, rollback, and
         every host binary the release carries (#3270, #3342)
   - [x] WS4 — `uninstall.sh` / `mvmctl env uninstall` (#3271)
-  - [ ] WS5–WS6 — verification and compat (#3272–#3273); Linux release
-        payloads are now static-musl while retaining compatible asset names
-        (#3371)
+  - [ ] WS5 — verification (#3272)
+  - [x] WS6 — installer back-compat, distro glibc, and install-page smoke lanes
+        in `installer-compat.yml` (#3273); Linux release payloads are now
+        static-musl while retaining compatible asset names (#3371), and the
+        macOS `v0.17.0` install the lanes surfaced is still open
   - [x] WS7 — Nix hygiene: package versions read from `Cargo.toml`, the
         check/harness boundary written down, stale Lima and `dev up` docs
         swept, and `check-deferrals` extended to `nix/`, `src/`, `install.sh`

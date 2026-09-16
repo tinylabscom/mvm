@@ -204,6 +204,7 @@ jobs:
                      scripts/cargo-stable.sh \
                      scripts/cargo-target-dir-guard.sh \
                      scripts/cargo-target-dir-guard.test.sh \
+                     scripts/installer-compat/*.sh \
                      .githooks/pre-commit \
                      .githooks/pre-commit.test.sh
 
@@ -307,6 +308,14 @@ jobs:
       # place their failure reporting is exercised before it has to work.
       - name: Security lane verdict tests
         run: bash scripts/security-lane-verdict.test.sh
+
+      # installer-compat.yml needs published releases and runs weekly and on
+      # installer pull requests, and it is not a required check. What decides
+      # its verdicts — release selection, the archive-derived expectations, the
+      # tolerated refusal, the docs extraction — runs here on every pull
+      # request, against synthetic releases through the real install.sh.
+      - name: Installer compat script tests
+        run: bash scripts/installer-compat/installer-compat.test.sh
 
       - name: Architecture scan not required for this diff
         if: needs.scope.outputs.architecture == 'false'

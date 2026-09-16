@@ -33,7 +33,7 @@ curl -fsSL https://runmvm.com/install.sh | sh
 Pin a version, or build from a checkout:
 
 \`\`\`bash
-MVM_VERSION=v0.16.1 curl -fsSL https://runmvm.com/install.sh | sh
+curl -fsSL https://runmvm.com/install.sh | MVM_VERSION=v0.16.1 sh
 cargo install mvmctl
 \`\`\`
 
