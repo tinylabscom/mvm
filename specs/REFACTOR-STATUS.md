@@ -171,8 +171,12 @@ Last updated: 2026-09-16
       Physical-M1 burn-in exposed macOS errno 57 during the `machine
       reconfigure` supervisor/socket replacement; activation now retries that
       transport-only rebind state within its existing deadline while
-      authenticated rejection remains fatal. A hardened physical runner is
-      still required; the repository currently has zero self-hosted runners.
+      authenticated rejection remains fatal. An Apple Silicon runner is now
+      registered at repository scope under the `m1` label, and both macOS jobs
+      in `e2e-docs.yml` target it (delivery:
+      `specs/sprint/delivery/3011-macos-e2e-on-self-hosted-apple-silicon.md`).
+      Still open: the first green trusted run, the fork-isolation proof, and
+      closing #3011.
 
 - [x] **Linux 6.12.109 synchronized kernel pin — issue #3213.**
       `2026-09-08-kernel-6-12-109`.

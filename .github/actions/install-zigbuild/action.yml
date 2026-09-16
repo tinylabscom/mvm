@@ -15,6 +15,13 @@ runs:
       run: |
         set -euxo pipefail
         ZIG_VERSION=0.13.0
+        # A self-hosted runner keeps its tools between jobs and its user has no
+        # sudo, so the install below would stop at a password prompt. An
+        # operator installs the pinned zig once; every later job finds it here.
+        if command -v zig >/dev/null 2>&1 && [ "$(zig version)" = "$ZIG_VERSION" ]; then
+          echo "zig $ZIG_VERSION already installed at $(command -v zig)"
+          exit 0
+        fi
         OS=$(uname -s)
         ARCH=$(uname -m)
         # macOS `uname -m` reports arm64; zig's release tarballs are named aarch64.
@@ -56,8 +63,19 @@ runs:
       # CARGO_CFG_TARGET_ARCH. On an x86_64 runner it builds the bins
       # natively for x86_64-musl (no zig); a cross path zigbuilds. Add both
       # musl targets so either path resolves regardless of runner arch.
+      #
+      # Read without Python: `tomllib` needs 3.11, and the system python3 on
+      # macOS is 3.9, so a self-hosted Mac without a newer Python would stop
+      # here before installing anything.
       run: |
-        RUST_VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['metadata']['mvm']['toolchain']['rust'])")
+        set -euo pipefail
+        RUST_VERSION=$(awk '/^\[workspace\.metadata\.mvm\.toolchain\]/ { t = 1; next }
+          /^\[/ { t = 0 }
+          t && $1 == "rust" { gsub(/"/, "", $3); print $3 }' Cargo.toml)
+        if [ -z "$RUST_VERSION" ]; then
+          echo "::error::no rust pin in [workspace.metadata.mvm.toolchain]" >&2
+          exit 1
+        fi
         rustup toolchain install "${RUST_VERSION}" --profile minimal
         rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl \
           --toolchain "${RUST_VERSION}"

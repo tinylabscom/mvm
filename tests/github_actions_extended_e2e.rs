@@ -199,39 +199,45 @@ fn an_unusable_macos_host_falls_back_to_a_checked_evidence_record() {
     );
 }
 
-/// The Linux job budget must exceed the suite's own deadline.
+/// Each live job's budget must exceed the suite's own deadline.
 ///
 /// These are one budget and they drifted apart twice. At `timeout-minutes: 60`
-/// against a 3600s suite the job had zero seconds for setup and died at exactly
-/// 60m00s three runs running; at 120 against the same 3600s it had 60 minutes
-/// of setup and 60 of suite, spent them, and was killed mid-scenario. A killed
-/// suite prints no summary, so both readings were "this run proves nothing".
+/// against a 3600s suite the Linux job had zero seconds for setup and died at
+/// exactly 60m00s three runs running; at 120 against the same 3600s it had 60
+/// minutes of setup and 60 of suite, spent them, and was killed mid-scenario. A
+/// killed suite prints no summary, so both readings were "this run proves
+/// nothing". The macOS job inherited the 3600s default under a 90-minute
+/// budget — the same shape, waiting for its first cold run.
 #[test]
-fn the_linux_job_budget_exceeds_the_suite_deadline() {
+fn each_live_job_budget_exceeds_the_suite_deadline() {
     let workflow = extended_ci();
-    let linux = job_block(&workflow, "e2e-docs-linux");
 
-    let job_minutes: u32 = field_after(linux, "timeout-minutes:")
-        .expect("the Linux lane must declare a job timeout")
-        .parse()
-        .expect("timeout-minutes must be a number");
-    let suite_seconds: u32 = field_after(linux, "MVM_E2E_TIMEOUT_SECS:")
-        .expect("the Linux lane must pin the suite deadline rather than inherit the default")
-        .trim_matches('"')
-        .parse()
-        .expect("MVM_E2E_TIMEOUT_SECS must be a number");
+    for job in ["e2e-docs-linux", "e2e-docs-macos"] {
+        let block = job_block(&workflow, job);
+        let job_minutes: u32 = field_after(block, "timeout-minutes:")
+            .unwrap_or_else(|| panic!("{job} must declare a job timeout"))
+            .parse()
+            .expect("timeout-minutes must be a number");
+        let suite_seconds: u32 = field_after(block, "MVM_E2E_TIMEOUT_SECS:")
+            .unwrap_or_else(|| {
+                panic!("{job} must pin the suite deadline rather than inherit the default")
+            })
+            .trim_matches('"')
+            .parse()
+            .expect("MVM_E2E_TIMEOUT_SECS must be a number");
 
-    assert!(
-        job_minutes * 60 > suite_seconds,
-        "the job budget ({job_minutes}m) must exceed the suite deadline \
-         ({suite_seconds}s) by the whole of setup, or the job is cancelled \
-         before the suite can report — and a cancellation names no scenario"
-    );
-    assert!(
-        job_minutes * 60 - suite_seconds >= 3600,
-        "setup measured 54 minutes on 2026-09-02; leave at least an hour of the \
-         job budget for it, or the next slow checkout repeats the failure"
-    );
+        assert!(
+            job_minutes * 60 > suite_seconds,
+            "{job}: the job budget ({job_minutes}m) must exceed the suite deadline \
+             ({suite_seconds}s) by the whole of setup, or the job is cancelled \
+             before the suite can report — and a cancellation names no scenario"
+        );
+        assert!(
+            job_minutes * 60 - suite_seconds >= 3600,
+            "{job}: setup measured 54 minutes on 2026-09-02; leave at least an hour \
+             of the job budget for it, or the next slow checkout repeats the failure"
+        );
+    }
 }
 
 /// First `key value` occurrence in a job block, as a trimmed string.
@@ -591,18 +597,88 @@ fn positive_live_egress_witnesses_use_https_instead_of_external_icmp() {
     assert!(transient.contains("curlimages/curl:8.21.0"));
 }
 
+/// No hosted macOS image can boot a guest: arm64 nests Hypervisor.framework
+/// (`HV_UNSUPPORTED`), and on Intel the HVF supervisor links as a stub. Both
+/// macOS jobs must run on the self-hosted Apple Silicon runner, or the host
+/// check silently degrades the release gate to the evidence record again.
 #[test]
-fn macos_documented_surface_uses_an_intel_runner_with_hvf_access() {
+fn macos_documented_surface_runs_on_the_self_hosted_apple_silicon_runner() {
+    let workflow = extended_ci();
+
+    for job in ["e2e-docs-macos-host-check", "e2e-docs-macos"] {
+        let block = job_block(&workflow, job);
+        assert!(
+            block.contains("runs-on: [self-hosted, macOS, ARM64, m1]"),
+            "{job} must target the self-hosted Apple Silicon runner"
+        );
+        for hosted in ["macos-latest", "macos-15-intel"] {
+            assert!(
+                !block.contains(&format!("runs-on: {hosted}")),
+                "{job} must not run on {hosted}, which cannot boot a guest"
+            );
+        }
+    }
+}
+
+/// The runner's label must be known to the workflow lint, or CI's actionlint
+/// step fails every PR that touches a workflow.
+#[test]
+fn the_self_hosted_runner_label_is_declared_for_actionlint() {
+    let config = fs::read_to_string(".github/actionlint.yaml").expect("read actionlint config");
+    assert!(
+        config.contains("self-hosted-runner:") && config.contains("- m1"),
+        "actionlint must know the `m1` self-hosted label"
+    );
+}
+
+/// Nobody logs in to the runner to read a failed run, and the suite script
+/// deletes its own log on exit — so the job keeps a copy and uploads it.
+#[test]
+fn macos_documented_surface_uploads_its_log() {
     let workflow = extended_ci();
     let macos = job_block(&workflow, "e2e-docs-macos");
 
+    let run = macos
+        .find("just e2e-docs 2>&1 | tee")
+        .expect("the macOS lane must tee the suite output to a file it keeps");
+    let pipefail = macos
+        .find("set -o pipefail")
+        .expect("piping the suite through tee needs pipefail");
     assert!(
-        macos.contains("runs-on: macos-15-intel"),
-        "the arm64 hosted runner rejects hv_vm_create with HV_UNSUPPORTED"
+        pipefail < run,
+        "without pipefail the step reports tee's status, and a red suite shows green"
     );
     assert!(
-        !macos.contains("runs-on: macos-latest"),
-        "macos-latest currently selects an arm64 VM without nested HVF"
+        macos.contains("uses: actions/upload-artifact@"),
+        "the macOS lane must upload the kept log"
+    );
+    assert!(
+        macos.contains("if: always()"),
+        "upload on success too: a green run's skip tally is how a hole gets noticed"
+    );
+}
+
+/// The shared toolchain action must work on a self-hosted Mac as its
+/// unprivileged runner user.
+#[test]
+fn the_zig_toolchain_action_runs_without_sudo_or_modern_python_once_provisioned() {
+    let action = fs::read_to_string(".github/actions/install-zigbuild/action.yml")
+        .expect("read install-zigbuild action");
+
+    let skip = action
+        .find(r#"[ "$(zig version)" = "$ZIG_VERSION" ]"#)
+        .expect("the action must skip installing a zig that is already the pinned version");
+    let sudo = action
+        .find("sudo ")
+        .expect("hosted runners still install zig with sudo");
+    assert!(
+        skip < sudo,
+        "the already-installed check must come before the first sudo, or the runner user \
+         stops at a password prompt"
+    );
+    assert!(
+        !action.contains("import tomllib"),
+        "the system python3 on macOS is 3.9 and has no tomllib"
     );
 }
 
@@ -617,32 +693,28 @@ fn documented_surface_builds_the_sdk_codegen_driver() {
 }
 
 #[test]
-fn intel_hvf_witness_does_not_install_arm_only_libkrun_firmware() {
+fn hvf_witness_does_not_install_libkrun() {
     let workflow = extended_ci();
     let macos = job_block(&workflow, "e2e-docs-macos");
 
     assert!(
         !macos.contains("uses: ./.github/actions/install-libkrun"),
-        "the Intel HVF witness cannot install libkrunfw, whose formula requires arm64"
+        "the HVF witness must not depend on libkrun, which the runner does not carry"
     );
 }
 
 #[test]
-fn intel_hvf_witness_uses_hvf_for_steady_state_builder_jobs() {
+fn hvf_witness_uses_hvf_for_steady_state_builder_jobs() {
     let workflow = extended_ci();
     let macos = job_block(&workflow, "e2e-docs-macos");
 
     assert!(
         macos.contains("MVM_BUILDER_BACKEND: hvf"),
-        "the Intel witness must build source artifacts inside the downloaded builder image under HVF"
+        "the HVF witness must build source artifacts inside the downloaded builder image under HVF"
     );
     assert!(
         !macos.contains("brew install qemu"),
-        "the Intel witness must not select QEMU's Linux-only Stage 0 host-kernel path"
-    );
-    assert!(
-        macos.contains("timeout-minutes: 90"),
-        "the cold HVF builder job and live HVF scenarios need a bounded but realistic deadline"
+        "the HVF witness must not select QEMU's Linux-only Stage 0 host-kernel path"
     );
 }
 
