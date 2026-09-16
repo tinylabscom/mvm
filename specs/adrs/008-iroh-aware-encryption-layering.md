@@ -31,11 +31,21 @@ layer stacked on a transport that already carries one:
 | Host ↔ guest (control plane) | virtio-vsock | `AuthenticatedFrame` — Ed25519-signed, session-id and monotonic-sequence replay defense (`mvm_core::policy::security`) |
 | Host process ↔ OS keystore | platform keystore API (Keychain / Secret Service / Credential Manager) | platform-native; every returned key wraps `secrecy::SecretBox` so material zeroizes on drop |
 | Volume / snapshot bytes at rest | local disk | AES-256-GCM, chunked for large snapshot images; HMAC-SHA256 integrity envelope checked before any AEAD decrypt is attempted (`mvm_core::crypto::snapshot_crypto`, `snapshot_encryption`, `snapshot_hmac`) |
-| Outbound HTTPS the host terminates on a workload's behalf | TLS | a per-VM, name-constrained intermediate CA mints a leaf per SNI for the bound hosts only; the guest trusts only that per-run intermediate, never the host CA or any private key (`mvm_core::crypto::egress_ca`) |
+| Outbound HTTPS the host terminates on a workload's behalf | TLS | a per-VM, self-signed, name-constrained CA mints a leaf per SNI for the bound hosts only; the guest receives that CA's certificate and nothing else, and trusts it for exactly the destinations the constraints name (`mvm_core::crypto::egress_ca`) |
 
 **No double-encryption where a transport already authenticates both
 ends.** The fleet control-plane hop is iroh's problem to secure and it
 already does; this repo does not add a redundant TLS layer there.
+
+**The egress CA is self-signed per VM rather than an intermediate under a
+long-lived host root.** An intermediate handed to a guest as its trust anchor
+requires partial-chain verification, which rustls supports and older
+OpenSSL-backed clients do not — and the reason this mechanism exists is that an
+unmodified HTTP client inside the guest can reach a destination without ever
+holding the credential. A per-VM anchor also keeps the blast radius where the
+VM is: nothing signs across VMs, so there is no shared key whose compromise
+would reach a guest that never ran. The name constraints are what bound it
+further, to exactly the destinations the plan's secrets are bound to.
 
 **Every secret-carrying type wraps `SecretBox<T>`.** `KeyProvider`,
 `SecretStore`, the HMAC key loader, and the key-rotation primitives all
