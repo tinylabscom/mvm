@@ -1,0 +1,80 @@
+name: Install URL watch
+
+on:
+  schedule:
+    - cron: "41 7 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check published installer
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check HTTP 200, shell content type, and installer marker
+        id: check
+        env:
+          INSTALL_URL: https://gomicrovm.com/install.sh
+        run: |
+          set -uo pipefail
+          body="${RUNNER_TEMP}/install.sh"
+          headers="${RUNNER_TEMP}/headers"
+          status="$(curl --silent --show-error --location \
+            --output "$body" --dump-header "$headers" \
+            --write-out '%{http_code}' "$INSTALL_URL")"
+          content_type="$(awk 'BEGIN { IGNORECASE=1 } /^content-type:/ { value=$0 } END { sub(/^[^:]*:[[:space:]]*/, "", value); sub(/\r$/, "", value); print value }' "$headers")"
+
+          result=0
+          if [ "$status" != "200" ]; then
+            printf 'expected HTTP 200, got %s\n' "$status" >&2
+            result=1
+          fi
+          case "$content_type" in
+            text/x-shellscript*) ;;
+            *)
+              printf 'expected text/x-shellscript content type, got %s\n' "$content_type" >&2
+              result=1
+              ;;
+          esac
+          if ! grep -Fq '# mvmctl installer.' "$body"; then
+            printf 'installer marker is missing\n' >&2
+            result=1
+          fi
+
+          echo "status=$result" >> "$GITHUB_OUTPUT"
+
+      - name: Open, update, or close the tracking issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STATUS: ${{ steps.check.outputs.status }}
+          TITLE: "Published install URL is unhealthy"
+        run: |
+          set -euo pipefail
+          existing="$(gh issue list --repo "$REPO" --state open \
+            --search "\"$TITLE\" in:title" --json number --jq '.[0].number // empty')"
+
+          if [ "$STATUS" = "0" ]; then
+            if [ -n "$existing" ]; then
+              gh issue close "$existing" --repo "$REPO" \
+                --comment "The published installer is healthy again. Watcher run: $RUN_URL"
+            fi
+            exit 0
+          fi
+
+          body="The published installer failed its HTTP status, content-type, or marker check.\n\nWatcher run: $RUN_URL"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$REPO" --body "$body"
+          else
+            gh issue create --repo "$REPO" --title "$TITLE" --body "$body"
+          fi
+          exit 1

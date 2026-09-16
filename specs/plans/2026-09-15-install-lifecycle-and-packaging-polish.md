@@ -40,13 +40,13 @@ releases and across distros.
 
 Issue: [#3268](https://github.com/tinylabscom/mvm/issues/3268).
 
-- [ ] Serve `install.sh` from the docs site at a stable vanity path, and point
+- [x] Serve `install.sh` from the docs site at a stable vanity path, and point
       every install page at it.
-- [ ] Add a scheduled workflow that curls the published URL and asserts HTTP
+- [x] Add a scheduled workflow that curls the published URL and asserts HTTP
       200, a text content type, and a marker string, filing an issue on failure.
       The adjacent project runs this daily across ten vanity URLs; the cost is
       one cron job and it catches a silently broken front door.
-- [ ] Keep the raw GitHub path working, undocumented, as a fallback.
+- [x] Keep the raw GitHub path working, undocumented, as a fallback.
 
 ## WS2 — Resolve the version without an API call
 

@@ -10,6 +10,14 @@
 
 ## In progress
 
+- [x] **Stable monitored install URL — issue #3268.**
+      `specs/plans/2026-09-15-install-lifecycle-and-packaging-polish.md` WS1.
+      The docs site publishes the repository-root installer byte-for-byte at
+      `https://gomicrovm.com/install.sh`, all install pages use that stable
+      path, and a daily watcher checks HTTP status, shell content type, and an
+      installer marker while reconciling one tracking issue on failure and
+      recovery. Website checks cover the route, docs, and monitor contract.
+
 - [x] **Claim-witness mutation coverage — issue #3250.**
       `specs/plans/2026-09-15-claim-witness-mutation-coverage.md`.
       PR #3255 added the two EOF-boundary regressions missing from the

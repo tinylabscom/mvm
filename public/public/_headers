@@ -12,6 +12,9 @@
 # or CORS headers or the browser blocks it. The site loads none today (external
 # origins appear only as link targets and a form action), so this is free; a
 # future third-party embed has to opt in explicitly.
+/install.sh
+  Content-Type: text/x-shellscript; charset=utf-8
+
 /*
   Cross-Origin-Opener-Policy: same-origin
   Cross-Origin-Embedder-Policy: require-corp
