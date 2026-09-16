@@ -14,6 +14,11 @@ Last updated: 2026-09-15
       Resolve RUSTSEC-2026-0285 through the patched rustls release set and
       require the complete Security witness before closeout.
 
+- [ ] **Linux 6.12.110 synchronized kernel pin — issue #3248.**
+      `specs/plans/2026-09-15-kernel-6-12-110.md`.
+      Both kernel consumers move together to the signed upstream 6.12.110
+      archive; structural and Linux build witnesses prevent drift.
+
 - [ ] **OTLP trace export for host-side processes.**
       `specs/plans/2026-09-14-otlp-trace-export.md`. Issue #3242.
       `mvm-observability` gains an opt-in OTLP/HTTP JSON trace exporter,

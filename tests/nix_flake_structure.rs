@@ -36,6 +36,30 @@ fn normalized_whitespace(content: &str) -> String {
 
 const CRATES_IO_API: &str = "https://crates.io/api/v1/crates";
 
+/// Load kernel pins from the external data file
+fn load_kernel_pins() -> (String, String) {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR")
+        .expect("CARGO_MANIFEST_DIR is set by cargo for integration tests");
+    let data_path = Path::new(&manifest)
+        .join("xtask")
+        .join("data")
+        .join("kernel-pins.json");
+    let content = fs::read_to_string(&data_path)
+        .unwrap_or_else(|e| panic!("kernel-pins.json must be present: {e}"));
+
+    let json: serde_json::Value = serde_json::from_str(&content)
+        .unwrap_or_else(|e| panic!("kernel-pins.json must be valid JSON: {e}"));
+
+    let version = json["kernel_version"]
+        .as_str()
+        .unwrap_or_else(|| panic!("kernel-pins.json must have kernel_version string"));
+    let hash = json["kernel_hash"]
+        .as_str()
+        .unwrap_or_else(|| panic!("kernel-pins.json must have kernel_hash string"));
+
+    (version.to_string(), hash.to_string())
+}
+
 #[test]
 fn the_crate_source_helper_rewrites_the_api_host_to_the_cdn() {
     let source = nix_dir().join("lib").join("crates-io.nix");
@@ -373,22 +397,21 @@ fn native_vmm_recipes_are_source_built_and_pinned() {
         );
     }
 
-    const KERNEL_VERSION: &str = "6.12.109";
-    const KERNEL_HASH: &str = "sha256-VITlUqM04VAZ9K66ieW1jwRlHPL04k4E3p8VLxw44/o=";
+    let (kernel_version, kernel_hash) = load_kernel_pins();
     assert!(
-        libkrunfw.contains(&format!("linux-{KERNEL_VERSION}.tar.xz"))
-            && libkrunfw.contains(&format!("hash = \"{KERNEL_HASH}\""))
+        libkrunfw.contains(&format!("linux-{kernel_version}.tar.xz"))
+            && libkrunfw.contains(&format!("hash = \"{kernel_hash}\""))
             && libkrunfw.contains("KERNEL_REMOTE")
             && libkrunfw.contains(&format!(
-                "'KERNEL_VERSION = linux-6.12.91' 'KERNEL_VERSION = linux-{KERNEL_VERSION}'"
+                "'KERNEL_VERSION = linux-6.12.91' 'KERNEL_VERSION = linux-{kernel_version}'"
             ))
             && libkrunfw.contains("ln -s ${kernelSrc} $(KERNEL_TARBALL)")
             && libkrunfw.contains("'virtio_transport_alloc_skb(&info, dgram_len, false, NULL,'"),
         "libkrunfw must pin the kernel version, substitute the source, and keep its datagram patch compatible with that kernel"
     );
     assert!(
-        kernel_base.contains(&format!("kernelVersion = \"{KERNEL_VERSION}\""))
-            && kernel_base.contains(&format!("hash = \"{KERNEL_HASH}\"")),
+        kernel_base.contains(&format!("kernelVersion = \"{kernel_version}\""))
+            && kernel_base.contains(&format!("hash = \"{kernel_hash}\"")),
         "the custom kernel must use the same verified point-release pin as libkrunfw"
     );
     assert!(

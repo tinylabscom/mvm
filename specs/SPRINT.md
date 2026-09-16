@@ -22,6 +22,12 @@
       policy, and merge after #3250 restores the mutation witness from the same
       failed Security run.
 
+- [ ] **Linux 6.12.110 synchronized kernel pin — issue #3248.**
+      `specs/plans/2026-09-15-kernel-6-12-110.md`.
+      Move both carried kernel consumers to the kernel.org-verified 6.12.110
+      archive, retain structural synchronization coverage, and require the
+      Linux build witness before merge.
+
 - [x] **CI queue consolidation.**
       `specs/plans/2026-09-10-ci-queue-consolidation.md`.
       Preserve cumulative merge-group validation while reducing runner fan-out
