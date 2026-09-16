@@ -162,8 +162,8 @@ jobs:
         # Preserve only the toolchain and test inputs needed by the guarded
         # recipe while crossing the runner's passwordless-sudo boundary.
         run: |
-          sudo --preserve-env=HOME,PATH,CARGO_HOME,RUSTUP_HOME,CARGO_TARGET_DIR,RUSTFLAGS,MVM_KERNEL_SOURCE,FC_VERSION \
-            just bdd-live-warm-claim
+          sudo --preserve-env=HOME,CARGO_HOME,RUSTUP_HOME,CARGO_TARGET_DIR,RUSTFLAGS,MVM_KERNEL_SOURCE,FC_VERSION \
+            "$HOME/.cargo/bin/just" bdd-live-warm-claim
 
   # The documented-surface lanes moved into a reusable workflow so this nightly
   # run and `release.yml` drive the identical thing. They used to live here

@@ -45,12 +45,12 @@ fn the_live_warm_claim_runs_with_mount_namespace_privilege() {
     let job = job_block(&workflow, "bdd-live-warm-claim");
 
     assert!(
-        job.contains("sudo --preserve-env=HOME,PATH,CARGO_HOME,RUSTUP_HOME,CARGO_TARGET_DIR,RUSTFLAGS,MVM_KERNEL_SOURCE,FC_VERSION"),
+        job.contains("sudo --preserve-env=HOME,CARGO_HOME,RUSTUP_HOME,CARGO_TARGET_DIR,RUSTFLAGS,MVM_KERNEL_SOURCE,FC_VERSION"),
         "the live warm-claim process must have mount-namespace privilege, not only /dev/kvm access"
     );
     assert!(
-        job.contains("just bdd-live-warm-claim"),
-        "the privileged step must still run the exact guarded warm-claim recipe"
+        job.contains("\"$HOME/.cargo/bin/just\" bdd-live-warm-claim"),
+        "the privileged step must use the runner's absolute just path because sudo replaces PATH"
     );
 }
 
