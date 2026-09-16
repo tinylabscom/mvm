@@ -326,6 +326,19 @@ impl Host {
             .join(mvm_core::config::DEFAULT_MVM_HOME_DIR_NAME)
     }
 
+    fn keys_dir(&self) -> PathBuf {
+        mvm_core::config::mvm_keys_dir_at(self.mvm_home())
+    }
+
+    fn config_path(&self) -> PathBuf {
+        let config_dir = mvm_core::config::mvm_config_dir_at(self.mvm_home());
+        config_dir.join("config.toml")
+    }
+
+    fn host_agent_dir(&self, tenant: &str) -> PathBuf {
+        mvm_core::config::host_agent_dir_at(self.mvm_home(), tenant)
+    }
+
     /// `sh <script>` with every path the scripts derive pinned inside the host.
     fn script(&self, script: &str) -> Command {
         let mut command = self.pinned(Command::new("sh"));
@@ -1237,13 +1250,15 @@ fn installed_host() -> (Host, mpsc::Sender<()>) {
     let host = Host::new();
     host.install_ok(&base, "v1.0.0");
     std::fs::write(host.bin().join("unrelated-tool"), "#!/bin/sh\n").unwrap();
-    std::fs::create_dir_all(host.mvm_home().join("keys")).unwrap();
-    std::fs::write(host.mvm_home().join("config.toml"), "").unwrap();
+    std::fs::create_dir_all(host.keys_dir()).unwrap();
+    let config_path = host.config_path();
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(config_path, "").unwrap();
     (host, stop)
 }
 
 fn record_daemon_pid(host: &Host, pid: u32) {
-    let tenant = host.mvm_home().join("host-agent").join("acme");
+    let tenant = host.host_agent_dir("acme");
     std::fs::create_dir_all(&tenant).unwrap();
     std::fs::write(tenant.join("daemon.pid"), pid.to_string()).unwrap();
 }
@@ -1684,7 +1699,7 @@ fn uninstall_sh_names_force_when_the_installed_mvmctl_predates_the_check() {
     let (base, _stop) = serve_releases(&[&release]);
     let host = Host::new();
     host.install_ok(&base, "v0.17.0");
-    std::fs::create_dir_all(host.mvm_home().join("keys")).unwrap();
+    std::fs::create_dir_all(host.keys_dir()).unwrap();
     let before = host.snapshot();
 
     let output = host.script("uninstall.sh").output().unwrap();
@@ -1699,7 +1714,7 @@ fn uninstall_sh_names_force_when_the_installed_mvmctl_predates_the_check() {
     let output = host.script("uninstall.sh").arg("--force").output().unwrap();
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(!host.lib().exists());
-    assert!(host.mvm_home().join("keys").is_dir());
+    assert!(host.keys_dir().is_dir());
 }
 
 #[test]
@@ -1765,7 +1780,7 @@ fn uninstall_sh_removes_an_unversioned_install_by_its_known_names() {
 #[test]
 fn uninstall_sh_on_an_unversioned_install_with_state_needs_force_from_an_old_mvmctl() {
     let host = unversioned_host(PRE_QUIESCE_MVMCTL);
-    std::fs::create_dir_all(host.mvm_home().join("keys")).unwrap();
+    std::fs::create_dir_all(host.keys_dir()).unwrap();
     let before = host.snapshot();
 
     let output = host.script("uninstall.sh").output().unwrap();

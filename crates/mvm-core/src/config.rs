@@ -261,7 +261,12 @@ pub fn default_microvm_cache_dir() -> String {
 
 /// Config directory for user configuration files: `<mvm_home>/config`.
 pub fn mvm_config_dir() -> String {
-    format!("{}/config", mvm_home())
+    mvm_config_dir_at(mvm_home()).to_string_lossy().into_owned()
+}
+
+/// Config directory beneath an explicit mvm home: `<mvm_home>/config`.
+pub fn mvm_config_dir_at(mvm_home: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    mvm_home.as_ref().join("config")
 }
 
 /// Default OCI registry trust policy: `<mvm_home>/oci-policy.toml`.
@@ -525,7 +530,12 @@ pub fn machine_spec_path(name: &str) -> std::path::PathBuf {
 /// Each `<tenant>/` subdir holds one resident daemon's control UDS, pid file,
 /// and spawn lock. Enumerated by `mvmctl doctor` to report daemon state.
 pub fn host_agent_root() -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_home()).join("host-agent")
+    host_agent_root_at(mvm_home())
+}
+
+/// Root of the per-tenant host-agent daemon dirs beneath an explicit mvm home.
+pub fn host_agent_root_at(mvm_home: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    mvm_home.as_ref().join("host-agent")
 }
 
 /// Per-VM marker containing the supervisor PID-file path that owns a
@@ -537,7 +547,15 @@ pub const HOST_AGENT_OWNER_PID_REF_FILE: &str = "host-agent.owner-pid";
 /// spawn lock — one set per tenant, so the daemon is `O(active tenants)` not
 /// `O(VMs)`.
 pub fn host_agent_dir(tenant: &str) -> std::path::PathBuf {
-    host_agent_root().join(tenant)
+    host_agent_dir_at(mvm_home(), tenant)
+}
+
+/// Per-tenant host-agent directory beneath an explicit mvm home.
+pub fn host_agent_dir_at(
+    mvm_home: impl AsRef<std::path::Path>,
+    tenant: &str,
+) -> std::path::PathBuf {
+    host_agent_root_at(mvm_home).join(tenant)
 }
 
 /// The per-tenant host-agent control UDS the daemon binds (mode 0700) and the
@@ -869,7 +887,12 @@ pub fn vm_hvf_broker_socket(name: &str) -> std::path::PathBuf {
 
 /// Host signing keys (e.g. `host-signer.ed25519`): `<mvm_home>/keys/`.
 pub fn mvm_keys_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_home()).join("keys")
+    mvm_keys_dir_at(mvm_home())
+}
+
+/// Host signing-key directory beneath an explicit mvm home.
+pub fn mvm_keys_dir_at(mvm_home: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    mvm_home.as_ref().join("keys")
 }
 
 /// Immutable checkpoint store: `<mvm_home>/checkpoints/`. Each checkpoint is
@@ -1911,6 +1934,27 @@ mod tests {
         assert_eq!(
             mvm_cache_dir_at("/isolated/mvm"),
             std::path::PathBuf::from("/isolated/mvm/cache")
+        );
+    }
+
+    #[test]
+    fn explicit_home_helpers_keep_state_under_the_supplied_root() {
+        let root = std::path::Path::new("/isolated/mvm");
+        assert_eq!(
+            mvm_config_dir_at(root),
+            std::path::PathBuf::from("/isolated/mvm/config")
+        );
+        assert_eq!(
+            mvm_keys_dir_at(root),
+            std::path::PathBuf::from("/isolated/mvm/keys")
+        );
+        assert_eq!(
+            host_agent_root_at(root),
+            std::path::PathBuf::from("/isolated/mvm/host-agent")
+        );
+        assert_eq!(
+            host_agent_dir_at(root, "acme"),
+            std::path::PathBuf::from("/isolated/mvm/host-agent/acme")
         );
     }
 
