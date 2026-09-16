@@ -242,14 +242,30 @@ impl BuilderVm for WebLinuxBuilderVm {
 /// cannot drift from the source of truth.
 #[must_use]
 pub fn declared_capabilities(choice: BuilderBackendChoice) -> BuilderCapabilities {
+    declared_capabilities_for(choice, HVF_STAGE0_CTOR.get().is_some())
+}
+
+/// [`declared_capabilities`] with the hvf Stage 0 registration injected, so the
+/// table is unit-testable without setting a process-wide `OnceLock` that would
+/// then leak into every other test in the binary.
+pub fn declared_capabilities_for(
+    choice: BuilderBackendChoice,
+    hvf_stage0_registered: bool,
+) -> BuilderCapabilities {
     match choice {
         BuilderBackendChoice::Libkrun | BuilderBackendChoice::Qemu => BuilderCapabilities {
             stage0_bootstrap: true,
             dependency_install: true,
         },
-        BuilderBackendChoice::Hvf | BuilderBackendChoice::WebLinux => {
-            BuilderCapabilities::default()
-        }
+        // hvf bootstraps once its Stage 0 type is registered, and reports that
+        // it does not before then — so `doctor` describes the process it is
+        // running in rather than a compile-time assumption. Dependency install
+        // is still a genuine gap on this backend.
+        BuilderBackendChoice::Hvf => BuilderCapabilities {
+            stage0_bootstrap: hvf_stage0_registered,
+            dependency_install: false,
+        },
+        BuilderBackendChoice::WebLinux => BuilderCapabilities::default(),
     }
 }
 
@@ -328,20 +344,40 @@ pub fn resolve_stage0_backend(verbose: bool) -> Box<dyn BuilderVm> {
     resolve_stage0_backend_for_choice(resolve_choice(), verbose)
 }
 
+/// Constructor for the hvf Stage 0 bootstrapper, registered by the CLI for the
+/// same reason [`HvfBuilderCtor`] is: `mvm-build` sits below the crate that
+/// owns the driver, so it cannot name the type.
+pub type HvfStage0Ctor = Box<dyn Fn() -> Box<dyn BuilderVm> + Send + Sync>;
+
+static HVF_STAGE0_CTOR: OnceLock<HvfStage0Ctor> = OnceLock::new();
+
+/// Register the hvf Stage 0 bootstrapper (first registration wins).
+///
+/// Until this is called, an hvf selection still lowers to libkrun for Stage 0 —
+/// which is the last path by which a macOS host needs the `slp/krun` Homebrew
+/// packages at all.
+pub fn register_hvf_stage0_builder(ctor: HvfStage0Ctor) {
+    let _ = HVF_STAGE0_CTOR.set(ctor);
+}
+
 /// Stage 0 driver for an explicit `choice` — used by the auto-fallback loop to
-/// construct the next backend to try. QEMU when chosen; libkrun for everything
-/// else. HVF Stage 0 remains a gap, so even the macOS auto-detect path lowers
-/// to libkrun here; Linux auto libkrun stays libkrun-only and never silently
-/// redirects onto qemu.
+/// construct the next backend to try. QEMU when chosen; hvf when its
+/// bootstrapper is registered; libkrun otherwise. Linux auto libkrun stays
+/// libkrun-only and never silently redirects onto qemu.
 pub fn resolve_stage0_backend_for_choice(
     choice: BuilderBackendChoice,
     verbose: bool,
 ) -> Box<dyn BuilderVm> {
     match stage0_backend_choice(choice) {
         BuilderBackendChoice::Qemu => Box::new(QemuBuilderVm::new()),
-        BuilderBackendChoice::Libkrun | BuilderBackendChoice::Hvf => {
-            Box::new(libkrun_stage0_backend(verbose))
-        }
+        BuilderBackendChoice::Hvf => match HVF_STAGE0_CTOR.get() {
+            Some(ctor) => ctor(),
+            // `stage0_backend_choice` only answers Hvf when the ctor is set, so
+            // this is unreachable in practice; lowering rather than panicking
+            // keeps a registration race from taking out a bootstrap.
+            None => Box::new(libkrun_stage0_backend(verbose)),
+        },
+        BuilderBackendChoice::Libkrun => Box::new(libkrun_stage0_backend(verbose)),
         BuilderBackendChoice::WebLinux => Box::new(WebLinuxBuilderVm),
     }
 }
@@ -353,13 +389,28 @@ fn libkrun_stage0_backend(verbose: bool) -> LibkrunBuilderVm {
         .with_closure_nar(closure_nar_for_host_arch())
 }
 
-/// Stage 0 currently has only two concrete driver targets: explicit qemu stays
-/// qemu; every other selection lowers to libkrun until an hvf-specific Stage 0
-/// implementation exists.
+/// Lower each selection onto a backend that actually implements Stage 0.
+///
+/// Explicit qemu stays qemu. hvf stays hvf once its bootstrapper is registered,
+/// and otherwise falls back to libkrun so a process that never registered one
+/// still bootstraps rather than failing outright. That fallback is the only
+/// remaining path by which a macOS host needs the `slp/krun` Homebrew packages.
 fn stage0_backend_choice(choice: BuilderBackendChoice) -> BuilderBackendChoice {
+    stage0_backend_choice_for(choice, HVF_STAGE0_CTOR.get().is_some())
+}
+
+/// [`stage0_backend_choice`] with the registration injected. Pure, so the
+/// lowering policy is testable the same way `auto_detect_default_for` and
+/// `builder_attempt_order` are.
+pub fn stage0_backend_choice_for(
+    choice: BuilderBackendChoice,
+    hvf_stage0_registered: bool,
+) -> BuilderBackendChoice {
     match choice {
         BuilderBackendChoice::Qemu => BuilderBackendChoice::Qemu,
-        BuilderBackendChoice::Libkrun | BuilderBackendChoice::Hvf => BuilderBackendChoice::Libkrun,
+        BuilderBackendChoice::Libkrun => BuilderBackendChoice::Libkrun,
+        BuilderBackendChoice::Hvf if hvf_stage0_registered => BuilderBackendChoice::Hvf,
+        BuilderBackendChoice::Hvf => BuilderBackendChoice::Libkrun,
         // WebLinux has no native Stage 0; the resolved WebLinuxBuilderVm fails
         // closed when its run_stage0 is invoked.
         BuilderBackendChoice::WebLinux => BuilderBackendChoice::WebLinux,
@@ -991,12 +1042,34 @@ mod tests {
         assert_eq!(builder_attempt_order(Qemu, false, true, false), vec![Qemu]);
     }
 
+    /// The whole point of the hvf Stage 0 work: once its bootstrapper is
+    /// registered, an hvf host stops lowering onto libkrun — which is the last
+    /// path by which macOS needs the `slp/krun` Homebrew packages.
     #[test]
-    fn stage0_choice_keeps_hvf_lowered_to_libkrun_and_qemu_explicit() {
+    fn a_registered_hvf_stage0_stops_the_lowering_onto_libkrun() {
         use BuilderBackendChoice::*;
-        assert_eq!(stage0_backend_choice(Hvf), Libkrun);
-        assert_eq!(stage0_backend_choice(Libkrun), Libkrun);
-        assert_eq!(stage0_backend_choice(Qemu), Qemu);
+        assert_eq!(stage0_backend_choice_for(Hvf, true), Hvf);
+        // Unregistered, it still bootstraps rather than failing.
+        assert_eq!(stage0_backend_choice_for(Hvf, false), Libkrun);
+        // Neither other backend is affected either way.
+        for registered in [true, false] {
+            assert_eq!(stage0_backend_choice_for(Libkrun, registered), Libkrun);
+            assert_eq!(stage0_backend_choice_for(Qemu, registered), Qemu);
+        }
+    }
+
+    /// `doctor` reads this, so it has to describe the process it is running in
+    /// rather than a compile-time assumption.
+    #[test]
+    fn hvf_declares_stage0_exactly_when_its_bootstrapper_is_registered() {
+        let registered = declared_capabilities_for(BuilderBackendChoice::Hvf, true);
+        assert!(registered.stage0_bootstrap);
+        // Dependency install stays a genuine gap on this backend; registering a
+        // Stage 0 bootstrapper must not be read as closing it.
+        assert!(!registered.dependency_install);
+
+        let unregistered = declared_capabilities_for(BuilderBackendChoice::Hvf, false);
+        assert!(!unregistered.stage0_bootstrap);
     }
 
     #[test]

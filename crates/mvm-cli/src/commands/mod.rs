@@ -622,6 +622,27 @@ fn register_inhouse_builder() {
                 .with_closure_nar(closure_nar),
         ) as Box<dyn mvm_build::builder_vm::BuilderVm>)
     }));
+
+    // The Stage 0 bootstrapper is a separate registration because it is a
+    // separate type: it runs in the window before a builder image exists, so
+    // unlike the builder above it resolves no image. Registering it is what
+    // stops an hvf host lowering its bootstrap onto libkrun.
+    #[cfg(feature = "builder-vm")]
+    mvm_build::builder_backend_select::register_hvf_stage0_builder(Box::new(|| {
+        Box::new(mvm_runtime::builder_runner::HvfStage0Vm::new())
+            as Box<dyn mvm_build::builder_vm::BuilderVm>
+    }));
+
+    // Stage 0's bootstrap kernel is fetched, and the fetch path (release-tag
+    // resolution, the signed checksum manifest) lives in this crate while the
+    // policy deciding when to use it lives in `mvm-build`. `download_kernel`
+    // records the digest sidecar the resolver then re-checks.
+    #[cfg(feature = "builder-vm")]
+    mvm_build::stage0_kernel::register_bootstrap_kernel_fetcher(Box::new(
+        |arch: &str, dest: &std::path::Path| {
+            crate::update::download_kernel(arch, "builder", dest).map_err(|e| format!("{e:#}"))
+        },
+    ));
 }
 
 /// Give the workload runner a real per-VM output-stream plane.

@@ -3,15 +3,16 @@
 Backing: shipped-source
 Validation: check-declared-backing
 
-**Status: IN PROGRESS.**
+**Status: W1–W4 COMPLETE** (host-side; no live hvf boot yet — see Validation).
 
-Stage 0 — the bootstrap that builds the builder-VM image from nothing — is the
-last builder path that talks to a VMM directly instead of through the
-`VmmDriver` seam. It has two concrete bodies (`libkrun_builder::run_stage0_impl`
-and `qemu_builder::run_stage0_qemu`) and no implementation on HVF, which is the
-auto-detected builder on macOS 26+ Apple Silicon. `stage0_backend_choice`
-therefore lowers `Hvf` to `Libkrun`, and that single lowering is the entire
-reason a macOS user must `brew install slp/krun/libkrun libkrunfw`.
+Stage 0 — the bootstrap that builds the builder-VM image from nothing — was the
+last builder path that talked to a VMM directly instead of through the
+`VmmDriver` seam. It had two hand-written bodies
+(`libkrun_builder::run_stage0_impl` and `qemu_builder::run_stage0_qemu`) and
+none on HVF, which is the auto-detected builder on macOS 26+ Apple Silicon, so
+`stage0_backend_choice` lowered `Hvf` to `Libkrun` — and that single lowering
+was the entire reason a macOS user had to
+`brew install slp/krun/libkrun libkrunfw`.
 
 This plan lowers Stage 0 onto `BuilderRunner<D: VmmDriver>`, which already does
 Stage 0's exact job generically for ordinary builder jobs, and gives the
@@ -81,19 +82,23 @@ appends the token unconditionally, fixes it for every backend.
 
 ## Workstreams
 
-- [ ] **W1 — bootstrap kernel resolution.** `mvm_build::stage0_kernel`: resolve a
+- [x] **W1 — bootstrap kernel resolution.** `mvm_build::stage0_kernel`: resolve a
   cached+digest-verified bootstrap kernel, else fetch the published
   `builder-vm-vmlinux-<arch>` and record its digest. Fail closed on an
   unverifiable artifact. Unit tests for cache hit, missing sidecar, digest
   mismatch, and the fetch-on-source-checkout classification.
-- [ ] **W2 — generic Stage 0 on the driver seam.** `stage0_spec()` beside
+- [x] **W2 — generic Stage 0 on the driver seam.** `stage0_spec()` beside
   `builder_spec()`, and a `BuilderRunner::stage0()` that packs the
   `work`/`mvm-bins`/`conf` trees, boots over `D: VmmDriver`, and derives its
   result from the console markers. Driver-parametric tests over `MockDriver`.
-- [ ] **W3 — HVF wiring.** `HvfBuilderVm::run_stage0` through W2;
-  `capabilities().stage0_bootstrap = true`; drop the `Hvf => Libkrun` lowering
-  in `stage0_backend_choice`.
-- [ ] **W4 — docs + stale-fact sweep.** CLAUDE.md is stale on the builder
+- [x] **W3 — HVF wiring.** A separate `HvfStage0Vm` rather than a method on
+  `HvfBuilderVm`, because that type is constructed *from* a builder image and
+  Stage 0 runs when none exists; folding both in would mean kernel and rootfs
+  fields meaningless for half its lifetime. Registered by the CLI alongside the
+  builder ctor, which is what makes `stage0_backend_choice` stop lowering
+  `Hvf` onto `Libkrun`. `declared_capabilities` answers for the live process so
+  `doctor` reports what it can actually do.
+- [x] **W4 — docs + stale-fact sweep.** CLAUDE.md is stale on the builder
   defaults, the auto-fallback, the builder NIC, and the `legacy::` backend
   paths; correct those. Record delivery under `specs/sprint/delivery/`.
 
@@ -112,3 +117,35 @@ appends the token unconditionally, fixes it for every backend.
   was deleted from the tree. Its written end state (a libkrun host VM with
   nested Firecracker) is the opposite topology from a first-class Firecracker
   builder. Needs a decision before anything is built on it.
+
+## Validation
+
+Host-side only. `cargo nextest run --workspace` is green and the four-driver
+boot-contract test covers hvf, fc, qemu and mock, but **no live hvf Stage 0 boot
+has run**. This Mac is the tier that would exercise it; a real bootstrap takes a
+published `builder-vm-vmlinux-<arch>` asset to fetch, so the first live run needs
+either a release that carries one or a hand-seeded cache entry. Until that
+happens, treat W3 as wired-and-typechecked rather than proven.
+
+The libkrun Stage 0 body is untouched and still the fallback, so a failure in the
+new path costs a `--builder libkrun` rather than a broken bootstrap.
+
+## Follow-ups
+
+- **Live-boot the hvf Stage 0.** The one thing standing between this and
+  "libkrun is optional on macOS".
+- **Move the console-marker tests.** `stage0_console_halt_outcome`,
+  `Stage0HaltOutcome` and `stage0_root_mount_nodes` moved to `stage0_host`, but
+  their tests stayed in `libkrun_builder`'s test module and reach them through a
+  `#[cfg(test)]` import. They should follow the code.
+- **Untangle the persistent-store helpers.** `prepopulate_stage0_nix_store_image`
+  and `stage0_nix_store_image_name` are re-exported from `stage0_host` rather
+  than moved, because their implementation pulls in a chain of host-mkfs
+  helpers.
+- **A Firecracker Stage 0.** `FcDriver` already implements `VmmDriver` and the
+  boot contract composes onto it, so what remains is a
+  `BuilderBackendChoice::Firecracker` variant (~8 exhaustive-match sites plus an
+  env-parser arm) and a spec-level opt-out for `FcDriver::boot`'s `mvm-agentd`
+  handshake, which a `stage0-init` guest never answers.
+- **Decide `MVM_LINUX_BUILDER_VM`'s fate.** Orphaned scaffolding whose written
+  end state is the opposite topology from a first-class Firecracker builder.

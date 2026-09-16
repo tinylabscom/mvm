@@ -27,6 +27,18 @@ Last updated: 2026-09-15
       API call, atomic upgrade with rollback, a real uninstaller, in-process
       signature verification to close the claim 20 limits note, installer and
       distro compat lanes, and Nix version-from-manifest.
+- [x] **VMM-agnostic Stage 0.**
+      `specs/plans/2026-09-15-vmm-agnostic-stage0.md`.
+      Stage 0 was the last builder path reaching for a VMM directly instead of
+      going through the `VmmDriver` seam, so `stage0_backend_choice` lowered
+      every hvf selection onto libkrun — the one remaining reason macOS needed
+      the `slp/krun/*` Homebrew trio. It now runs through
+      `BuilderRunner<D: VmmDriver>`, its console tokens come from the driver
+      rather than an HVF-shaped constant, and its bootstrap kernel is fetched
+      and digest-verified as a seed instead of extracted from libkrunfw's
+      dylib. W1–W4 landed; **no live hvf boot yet**, and Firecracker is
+      deliberately unwired pending a spec-level opt-out for `FcDriver::boot`'s
+      agent handshake.
 
 - [ ] **Claim-witness mutation coverage — issue #3250.**
       `specs/plans/2026-09-15-claim-witness-mutation-coverage.md`.

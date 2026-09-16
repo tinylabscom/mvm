@@ -165,7 +165,7 @@ impl HvfBuilderVm {
 
 /// A unique per-build job id (pid + monotonic-ish nanos); mirrors the other
 /// builders' `unique_job_id`, which is `pub(crate)` to mvm-build.
-fn unique_job_id() -> String {
+pub(super) fn unique_job_id() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -224,7 +224,7 @@ fn validate_shell_job(
 /// The HVF builder extracts artifacts to its own VM output dir; downstream code
 /// (the dev-build pipeline and slot registration) reads from the caller's
 /// `artifact_out`, so the artifacts must be copied across.
-fn copy_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+pub(super) fn copy_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
@@ -402,10 +402,15 @@ mod tests {
     #[test]
     fn the_declared_table_matches_this_backends_capabilities() {
         let b = HvfBuilderVm::new("/img/Image".into(), "/img/rootfs.ext4".into());
+        // Against the unregistered row specifically. `declared_capabilities`
+        // now answers for the *choice* in this process, which gains Stage 0
+        // once `HvfStage0Vm` is registered — while this type, which is
+        // constructed from a builder image, still cannot bootstrap one.
         assert_eq!(
             b.capabilities(),
-            mvm_build::builder_backend_select::declared_capabilities(
-                mvm_build::builder_backend_select::BuilderBackendChoice::Hvf
+            mvm_build::builder_backend_select::declared_capabilities_for(
+                mvm_build::builder_backend_select::BuilderBackendChoice::Hvf,
+                false,
             )
         );
     }
