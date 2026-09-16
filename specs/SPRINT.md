@@ -10,6 +10,12 @@
 
 ## In progress
 
+- [x] **Cover `agent-session resume --boot` and reconcile session status — issue #3264.**
+      Exercise a successful cold-tier boot through the CLI boundary and make
+      the durable-session plan and refactor rollup distinguish partial
+      workstreams from completed ones. The focused 34-test agent-session suite,
+      workspace check, workspace clippy, and full workspace test suite pass.
+
 - [x] **Canonical user-config and MVM child paths — issue #3308.**
       `config edit`, tenant defaults, and the development watcher now share the
       canonical nested config path and parser. Direct `mvm_home()` child joins
