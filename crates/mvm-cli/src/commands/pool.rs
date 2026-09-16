@@ -40,9 +40,11 @@ use mvm_hostd::plan_admission::{
     AdmittedPlan, InMemoryNonceLedger, SystemClock, admit_for_run, stash_plan_and_mint_verb_grant,
 };
 
+mod status;
 mod warm;
 
-pub use warm::{WarmParams, WarmResult};
+use status::{PoolStatus, PoolStatusEntry};
+pub use warm::WarmResult;
 
 struct HostChildGrantIssuer;
 
@@ -342,6 +344,25 @@ pub fn build_standby_spec(p: &StandbySpecParams<'_>) -> Result<StandbySpec> {
         vsock_egress: p.vsock_egress,
         id,
     })
+}
+
+/// Parameters for [`warm_to_target`] — grouped to keep the signature small.
+pub struct WarmParams<'a> {
+    pub backend: &'a AnyBackend,
+    pub signer_id: &'a str,
+    pub signing_key_path: &'a Path,
+    pub target: u32,
+    /// The resolved launch config the warm parents mirror, carrying everything
+    /// the run path resolves for a boot — the rootfs and its verity sidecar, the
+    /// runtime overlay that holds the guest agent, the universal initramfs, and
+    /// the cmdline-bearing policy fields.
+    ///
+    /// Every other input to the parent's shape is derived from this one value:
+    /// template, kernel, vCPUs, memory, image digest and egress enablement all
+    /// come out of [`compat_for_launch`]. They used to be separate fields, which
+    /// let a caller record a compat key describing something other than what
+    /// booted — a pool that fills and never drains, with no error anywhere.
+    pub launch: &'a VmStartConfig,
 }
 
 /// Warm the pool toward `target` idle standbys for the given kernel+resources.
@@ -2467,30 +2488,6 @@ fn run_warm(pool: &SupervisorStandbyPool, req: &WarmRequest) -> Result<()> {
          (MVM_RESIDENCY=warm on hosts whose default is parked).",
     );
     Ok(())
-}
-
-/// Machine-readable `pool status --json` shape.
-#[derive(serde::Serialize)]
-struct PoolStatus {
-    idle: usize,
-    claimed: usize,
-    parked: usize,
-    dead: usize,
-    standbys: Vec<PoolStatusEntry>,
-}
-
-#[derive(serde::Serialize)]
-struct PoolStatusEntry {
-    id: String,
-    state: &'static str,
-    pid: u32,
-    kernel_sha256: String,
-    vcpus: u8,
-    mem_mib: u32,
-    /// The image half of the compat key: sha256 of the rootfs the parent
-    /// booted. Every standby carries one, since a parent is only ever spawned
-    /// for a resolved launch shape; absent marks a record predating that.
-    image_sha256: Option<String>,
 }
 
 fn build_pool_status(standbys: &[StandbyHandle]) -> PoolStatus {
