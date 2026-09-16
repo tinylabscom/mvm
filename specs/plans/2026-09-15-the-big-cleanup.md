@@ -16,7 +16,8 @@ cost one of those, the item records the trade instead of taking it.
 #3305 (gate validates an orphan file) · #3306 (delete the dead KVM VMM) ·
 #3307 (**claim 1** — unadmitted `--mount` shares) · #3308 (config path + layout
 re-rolls) · #3309 (ADR parity, twelve findings) · #3310 (permissive test
-doubles) · #3311 (`specs/` cleanup). Pre-existing and folded in: #3257–#3264,
+doubles) · #3311 (`specs/` cleanup) · #3313 (miscalibrated size gate) ·
+#3314 (`mvm-core` split) · #3315 (naming + the real section-D work). Pre-existing and folded in: #3257–#3264,
 #3265–#3277 (the two design-plan epics), #3283–#3288, #3297, #3300–#3302.
 
 ## How to use this plan
@@ -222,8 +223,27 @@ family already in the lockfile covers the job.
 
 ## C. Shrink the code
 
-- [ ] **C1** Split `network_endpoint_proxy.rs` — 5,281 lines. #3302.
-- [ ] **C3** Three byte-identical hex-encode implementations, one owner.
+The 1500-line rule the brief asks for **already exists as a gate** —
+`xtask/src/check_file_size.rs`, `MAX_PROD_LINES = 1500` — and it passes clean
+because it is miscalibrated. Fix the counter before splitting anything, or the
+next oversized file arrives unnoticed.
+
+- [ ] **C1** `check-file-size` counts lines *before the first* `#[cfg(test)]`
+      rather than lines outside test spans. `libkrun_builder.rs` carries 4,632
+      production lines and is charged 887; `backends/hvf/kernel_boot.rs` carries
+      2,208 and is charged 25 — an 88× undercount. **Ten files exceed the limit
+      by real body while the gate reads green.** 81 non-test files exceed 1500
+      total lines; 83 more are in the 1000–1500 band. #3313. **Do this first.**
+- [ ] **C2** Split `network_endpoint_proxy.rs` — 5,281 lines. #3302.
+- [ ] **C3** `mvm-core`: 2,197 LOC across 13 public modules is referenced by
+      nothing; the pack subsystem (2,448 LOC) is a real seam; 1,850 LOC belongs
+      to exactly one crate each. The remaining five core modules have
+      *overlapping* consumer sets — `plan` and `crypto` have identical ones —
+      so there is no clean split and the rest stays whole. #3314.
+- [ ] **C4** Three byte-identical hex-encode implementations, one owner.
+- [ ] **C5** `CLAUDE.md` says nothing depends on `mvm-agentd` as a library.
+      Nine crates do, and at 31,436 LOC it sits mid-graph. Fix the
+      dependency-direction paragraph. Folded into #3314.
 - [ ] **C2** `mvm-contract/src/ir/hash.rs:22-32` and
       `mvm-sdk/src/compile/source.rs:368-377` are byte-identical `nibble` +
       hex-encode implementations. There is a third at
@@ -232,15 +252,43 @@ family already in the lockfile covers the job.
 
 ## D. Rust craft
 
-Measurement pass still running; the items below are already established.
+Most of section D is already done, and the measurement says so. `.unwrap()` in
+strict production is **26** across 402k LOC, with zero in `mvm-hostd`,
+`mvm-agentd`, `mvm-contract`, `mvm-fs`, `mvm-client`, `mvm-http`, `mvm-net` and
+`mvm-backends`. `panic!` is **8**. `#[allow(clippy::too_many_arguments)]` is
+**one**, in bindgen FFI — the carve-out the rule names. Named constants
+outnumber high-signal unnamed ones 2,569 to 413.
 
-- [ ] **D1** `#[allow(clippy::large_enum_variant)]` at
-      `crates/mvm-cli/src/commands/mod.rs:128` names a variant that no longer
-      exists. The project bans clippy allows outright, so box the offending
-      variant and delete the attribute rather than re-labelling it.
-- [ ] **D2** 63 `#[allow(dead_code)]` sites. Folded into #3310 — same
-      diagnosis each time: is this reachable in a shipping build, and does the
-      type system say so?
+So the remaining work is not where the brief pointed.
+
+- [ ] **D1** **502 production `.expect()` calls**, 119 in `mvm-hostd` alone
+      (admission, audit chain, egress gate). The migration off `.unwrap()`
+      happened; nothing checks that the messages name the violated invariant
+      rather than restating the call. Audit the messages. #3315.
+- [ ] **D2** **181 unnamed `Duration::from_*` literals**, concentrated in the
+      supervisor code Preview claim 18's wall-clock bound is built from. The
+      brief's "every magic length gets a name, a reason, and a test" applies
+      hardest here, because these timeouts *are* the bound. #3315.
+- [ ] **D3** 62 `f` / `f_with_X` public sibling pairs — `capture_vm_full` has
+      two extended forms, `network_policy.rs` has four pairs in one file.
+      Collapse each to one function taking a params struct, per the rule
+      CLAUDE.md already states. Per-module, not one sweep. #3315.
+- [ ] **D4** Four of the eight `panic!`s vanish if `Entrypoint` is split so
+      builder methods exist only on the variant they apply to — an
+      unrepresentable-illegal-states fix, not a panic-removal exercise.
+- [ ] **D5** `#[allow(clippy::large_enum_variant)]` at
+      `crates/mvm-cli/src/commands/mod.rs:128` names an `Up` variant ADR-027
+      deleted. Box the offending variant and delete the attribute.
+- [ ] **D6** 63 `#[allow(dead_code)]` sites. Folded into #3310.
+
+**Measurement caveat for whoever re-runs this.** A line-local tokenizer gets
+this codebase wrong: multi-line `r#"…"#` JSON fixtures contain braces that close
+the enclosing `#[cfg(test)] mod tests` early, so a naive scan counts test code
+as production. The first pass of this audit reported 655 non-test `.unwrap()`;
+the true figure is 90, and 26 under the strict definition. The repo also marks
+test code four ways, including **21 whole files** gated at their `mod X;`
+declaration site. Any tool that re-derives these numbers — including the
+`check-file-size` fix in C1 — has to handle all of it.
 
 ## E. Comments, TODOs, placeholders
 
