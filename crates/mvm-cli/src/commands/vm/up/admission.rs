@@ -72,7 +72,6 @@ pub(in crate::commands::vm) struct AdmitPlanForBootParams<'a> {
     pub secrets: Vec<mvm_core::plan::SecretBinding>,
     /// Opaque caller commitment copied into the plan and its audit entries.
     pub caller_commitment: Option<mvm_core::plan::CallerCommitment>,
-    pub no_supervisor: bool,
     pub ledger: &'a InMemoryNonceLedger,
     /// Override for the host-signer keys directory. Production callers
     /// pass `None`, which resolves to `~/.mvm/keys/`; tests pass a
@@ -253,8 +252,9 @@ impl std::fmt::Debug for AdmissionContext {
 /// `mvmctl up` call site that boots a VM: the main path, the
 /// `MVM_DIRECT_BOOT` launchd branch, and the `--watch` rebuild loop.
 ///
-/// `no_supervisor = true` short-circuits to `Ok(None)` so the legacy
-/// path keeps working while the deprecation grace window is open.
+/// There is no way to boot without it: this returns an admitted plan or an
+/// error, never an unadmitted success.
+///
 /// The caller is expected to have already resolved the rootfs path on
 /// disk (admission hashes it for the plan's `SignedImageRef`); on
 /// first build the rootfs is the freshly-emitted Nix store path, on
@@ -276,18 +276,14 @@ impl std::fmt::Debug for AdmissionContext {
 /// signed-manifest path can replace this.
 pub(in crate::commands::vm) fn admit_plan_for_boot(
     p: AdmitPlanForBootParams<'_>,
-) -> Result<Option<AdmissionContext>> {
+) -> Result<AdmissionContext> {
     admit_plan_for_boot_with_ingress(p, Vec::new())
 }
 
 pub(in crate::commands::vm) fn admit_plan_for_boot_with_ingress(
     p: AdmitPlanForBootParams<'_>,
     ingress: Vec<mvm_core::plan::IngressMapping>,
-) -> Result<Option<AdmissionContext>> {
-    if p.no_supervisor {
-        return Ok(None);
-    }
-
+) -> Result<AdmissionContext> {
     // Refuse before any hashing, bundle reads, or signing: a rejection here
     // must not have already spent the boot work it exists to avoid. Gated on
     // `restrict_agent_verbs` — the same "non-interactive, non-ad-hoc, non-dev,
@@ -719,12 +715,12 @@ pub(in crate::commands::vm) fn admit_plan_for_boot_with_ingress(
         tracing::warn!(error = %e, "audit emit_egress_destinations failed (non-fatal)");
     }
 
-    Ok(Some(AdmissionContext {
+    Ok(AdmissionContext {
         admitted,
         emitter,
         policy_bundle,
         host_signer_public_path: signer.public_path,
-    }))
+    })
 }
 
 /// Resolve a local deployment record only when it sits beside the exact
@@ -946,9 +942,8 @@ pub(super) fn resolve_policy_for_admission(
     }
 }
 
-/// Emit `plan.launched` against the supplied admission context. No-op
-/// when admission was skipped (`--no-supervisor`). Tolerates emission
-/// failure with a `tracing::warn` so a flaky audit fs can't block a
+/// Emit `plan.launched` against the supplied admission context. Tolerates
+/// emission failure with a `tracing::warn` so a flaky audit fs can't block a
 /// VM that already booted.
 ///
 /// Also persists the admitted plan into the VM state dir so
@@ -957,12 +952,11 @@ pub(super) fn resolve_policy_for_admission(
 /// Plan persistence failure is non-fatal — the launch already
 /// succeeded; the cost is that lifecycle audit will be unbound on
 /// this VM until the next launch.
-pub(in crate::commands::vm) fn emit_launched_if(
-    ctx: &Option<AdmissionContext>,
+pub(in crate::commands::vm) fn emit_launched(
+    ctx: &AdmissionContext,
     backend: &str,
     persist_plan: bool,
 ) {
-    let Some(ctx) = ctx else { return };
     if let Err(e) = ctx.emitter.emit_launched(ctx.admitted.plan(), backend) {
         tracing::warn!(error = %e, "audit emit_launched failed (non-fatal)");
     }
@@ -983,13 +977,8 @@ pub(in crate::commands::vm) fn emit_launched_if(
 /// gate actually selected) on the chain-signed admission log. Fires alongside
 /// `plan.launched`, reflecting the decision `run_inner` made — never a
 /// re-derivation — so a virtiofs-root dev boot and an Option-B block boot are
-/// distinguishable in the tamper-evident chain. No-op when admission was
-/// skipped (no plan to bind to).
-pub(in crate::commands::vm) fn emit_boot_posture_if(
-    ctx: &Option<AdmissionContext>,
-    strategy: mvm_build::run_image::RootStrategy,
-) {
-    let Some(ctx) = ctx else { return };
+/// distinguishable in the tamper-evident chain.
+fn emit_boot_posture(ctx: &AdmissionContext, strategy: mvm_build::run_image::RootStrategy) {
     let label = match strategy {
         mvm_build::run_image::RootStrategy::BlockExt4 => "block-ext4",
     };
@@ -999,50 +988,68 @@ pub(in crate::commands::vm) fn emit_boot_posture_if(
 }
 
 /// Tier A.1 admission enforcement: refuse to boot if any volume about to
-/// be attached isn't named in the verified `ExecutionPlan.shares`. No-op
-/// when admission was skipped (no plan to enforce against). Called right
-/// before every `backend.start()` so no host-fs grant reaches a guest
-/// unless the signed plan admitted it (claim 1 / claim 8).
-pub(super) fn enforce_shares_if(
-    ctx: &Option<AdmissionContext>,
+/// be attached isn't named in the verified `ExecutionPlan.shares`, so no
+/// host-fs grant reaches a guest unless the signed plan admitted it
+/// (claim 1 / claim 8).
+pub(super) fn enforce_shares(
+    ctx: &AdmissionContext,
     volumes: &[mvm_core::vm_backend::VmVolume],
 ) -> Result<()> {
-    if let Some(ctx) = ctx {
-        mvm_hostd::plan_admission::enforce_admitted_shares(volumes, ctx.admitted.plan())
-            .context("admission share check")?;
-    }
-    Ok(())
+    mvm_hostd::plan_admission::enforce_admitted_shares(volumes, ctx.admitted.plan())
+        .context("admission share check")
 }
 
 /// Refuse to boot if the kernel about to be loaded is not the one the verified
-/// `ExecutionPlan` pinned. No-op when admission was skipped.
+/// `ExecutionPlan` pinned.
 ///
-/// The sibling of [`enforce_shares_if`], called at the same point for the same
+/// The sibling of [`enforce_shares`], called at the same point for the same
 /// reason: `mvmctl` admits its plan and then starts the backend itself rather
 /// than going through `start_admitted`, so every gate that path runs has to be
 /// run here too or it does not run at all. The admitted-environment gate was
 /// the one nobody called.
-pub(super) fn enforce_kernel_if(
-    ctx: &Option<AdmissionContext>,
+pub(super) fn enforce_kernel(
+    ctx: &AdmissionContext,
     kernel_path: Option<&std::path::Path>,
 ) -> Result<()> {
-    if let Some(ctx) = ctx {
-        mvm_hostd::plan_admission::enforce_admitted_environment(kernel_path, ctx.admitted.plan())
-            .context("admission kernel check")?;
-    }
-    Ok(())
+    mvm_hostd::plan_admission::enforce_admitted_environment(kernel_path, ctx.admitted.plan())
+        .context("admission kernel check")
 }
 
-/// Emit `plan.failed` against the supplied admission context. No-op
-/// when admission was skipped. `class` is a short grep-friendly tag
+/// Close a transient run's audit narrative against the plan it booted under:
+/// `plan.launched` and the boot posture when the run succeeded, `plan.failed`
+/// when it did not.
+///
+/// `admitted` is `None` only when the run failed before admission was reached —
+/// resolving the image, say. There is no plan to bind that failure to, so
+/// nothing is recorded. It is never `None` for a run that booted: admission is
+/// unconditional, and the admit closure fills this before the backend starts.
+///
+/// Both transient paths close the same way, so they share this rather than each
+/// carrying its own copy of the two branches.
+pub(in crate::commands::vm) fn record_transient_outcome<T>(
+    admitted: Option<AdmissionContext>,
+    backend: &str,
+    strategy: mvm_build::run_image::RootStrategy,
+    outcome: &Result<T>,
+) {
+    let Some(ctx) = admitted else { return };
+    match outcome {
+        Ok(_) => {
+            emit_launched(&ctx, backend, false);
+            emit_boot_posture(&ctx, strategy);
+        }
+        Err(e) => emit_failed(&ctx, "launch", e),
+    }
+}
+
+/// Emit `plan.failed` against the supplied admission context. `class` is a short grep-friendly tag
 /// (e.g. `backend-start`, `snapshot-restore`); `err` becomes the
 /// rendered error chain.
-pub(in crate::commands::vm) fn emit_failed_if(
-    ctx: &Option<AdmissionContext>,
+pub(in crate::commands::vm) fn emit_failed(
+    ctx: &AdmissionContext,
     class: &str,
     err: &anyhow::Error,
 ) {
-    let Some(ctx) = ctx else { return };
     let msg = format!("{err:#}");
     if let Err(e) = ctx.emitter.emit_failed(ctx.admitted.plan(), class, &msg) {
         tracing::warn!(error = %e, "audit emit_failed failed (non-fatal)");
@@ -1282,7 +1289,6 @@ mod admit_plan_tests {
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
             caller_commitment: None,
-            no_supervisor: false,
             ledger,
             keys_dir: None,
             audit_dir: None,
@@ -1315,9 +1321,7 @@ mod admit_plan_tests {
         params.audit_dir = Some(&audit_dir);
         params.caller_commitment = Some(commitment.clone());
 
-        let admitted = admit_plan_for_boot(params)
-            .expect("admission succeeds")
-            .expect("supervisor admission is enabled");
+        let admitted = admit_plan_for_boot(params).expect("admission succeeds");
         assert_eq!(admitted.admitted.plan().caller_commitment, Some(commitment));
     }
 
@@ -1343,8 +1347,7 @@ mod admit_plan_tests {
             audit_dir: Some(audit_dir.path()),
             ..pinning_params(&rootfs, &ledger)
         })
-        .expect("admission")
-        .expect("Some when admission ran");
+        .expect("admission");
 
         let environment = ctx
             .admitted
@@ -1383,8 +1386,7 @@ mod admit_plan_tests {
             audit_dir: Some(audit_dir.path()),
             ..pinning_params(&rootfs, &ledger)
         })
-        .expect("admission")
-        .expect("Some when admission ran");
+        .expect("admission");
 
         std::fs::write(&kernel, b"a-general-purpose-kernel-with-user-ns").unwrap();
 
@@ -1397,50 +1399,6 @@ mod admit_plan_tests {
             format!("{err:#}").contains("admitted-environment mismatch"),
             "error must name the mismatch, got: {err:#}"
         );
-    }
-
-    #[test]
-    fn no_supervisor_short_circuits_to_none() {
-        // The escape hatch must skip admission entirely — no host
-        // signer load, no rootfs hash, no nonce burn.
-        let dir = tempfile::tempdir().unwrap();
-        let rootfs = write_rootfs(dir.path(), b"unused");
-        let ledger = InMemoryNonceLedger::new();
-        let result = admit_plan_for_boot(AdmitPlanForBootParams {
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            tenant: "local",
-            vm_name: "vm-skip",
-            backend_name: "firecracker",
-            rootfs_path: &rootfs,
-            kernel_path: None,
-            precomputed_image_sha256: None,
-            boot_artifact_identity: None,
-            cpus: 2,
-            mem_mib: 512,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::None,
-            secrets: Vec::new(),
-            caller_commitment: None,
-            no_supervisor: true,
-            ledger: &ledger,
-            keys_dir: None, // not read — short-circuit returns first
-            audit_dir: None,
-            policy_dir: None,
-            bundle_pin: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            assets: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            agent_verb_override: vec![],
-            restrict_agent_verbs: true,
-            services: Vec::new(),
-            grants: None,
-            backend_kind: None,
-            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
-        })
-        .expect("must succeed");
-        assert!(result.is_none(), "no_supervisor must return None");
     }
 
     #[test]
@@ -1466,7 +1424,6 @@ mod admit_plan_tests {
             secret_release: mvm_core::plan::SecretReleasePolicy::PlanBound,
             secrets: Vec::new(),
             caller_commitment: None,
-            no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
@@ -1484,8 +1441,7 @@ mod admit_plan_tests {
             backend_kind: None,
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
-        .expect("admission")
-        .expect("Some when admission ran");
+        .expect("admission");
         assert!(!ctx.admitted.plan_id().0.is_empty());
         assert_eq!(ctx.admitted.plan().workload.0, "vm-happy");
         assert_eq!(ctx.admitted.plan().tenant.0, "local");
@@ -1532,7 +1488,6 @@ mod admit_plan_tests {
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
             caller_commitment: None,
-            no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
@@ -1614,7 +1569,6 @@ mod admit_plan_tests {
                 secret_release: mvm_core::plan::SecretReleasePolicy::None,
                 secrets: Vec::new(),
                 caller_commitment: None,
-                no_supervisor: false,
                 ledger: &ledger,
                 keys_dir: Some(keys_dir.path()),
                 audit_dir: Some(audit_dir.path()),
@@ -1632,8 +1586,7 @@ mod admit_plan_tests {
                     "test",
                 ),
             })
-            .expect("admit")
-            .expect("a supervisor-backed admission returns a context");
+            .expect("admit");
 
             assert_eq!(
                 ctx.admitted.plan().network_mode,
@@ -1669,7 +1622,6 @@ mod admit_plan_tests {
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
             caller_commitment: None,
-            no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
@@ -1687,7 +1639,6 @@ mod admit_plan_tests {
             backend_kind: None,
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
         })
-        .unwrap()
         .unwrap();
         let a2 = admit_plan_for_boot(AdmitPlanForBootParams {
             network_mode: mvm_contract::plan::NetworkMode::default(),
@@ -1704,7 +1655,6 @@ mod admit_plan_tests {
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
             caller_commitment: None,
-            no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
@@ -1722,37 +1672,25 @@ mod admit_plan_tests {
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
             assets: Vec::new(),
         })
-        .unwrap()
         .unwrap();
         assert_ne!(a1.admitted.plan_id(), a2.admitted.plan_id());
         assert_ne!(a1.admitted.plan().nonce, a2.admitted.plan().nonce);
     }
 
-    #[test]
-    fn emit_launched_and_failed_no_op_when_admission_skipped() {
-        // emit_*_if must be a no-op when admission was skipped — the
-        // legacy --no-supervisor path must not panic or write audit
-        // lines.
-        let none: Option<AdmissionContext> = None;
-        emit_launched_if(&none, "firecracker", true);
-        emit_failed_if(
-            &none,
-            "backend-start",
-            &anyhow::anyhow!("simulated failure"),
-        );
-    }
-
-    #[test]
-    fn emit_boot_posture_audits_the_root_strategy_label() {
-        let keys_dir = tempfile::tempdir().unwrap();
-        let audit_dir = tempfile::tempdir().unwrap();
-        let rootfs_dir = tempfile::tempdir().unwrap();
-        let rootfs = write_rootfs(rootfs_dir.path(), b"boot-posture-payload");
+    /// Admit a real plan whose chain is written to `audit_dir`. The signer,
+    /// chain and plan are the production ones; only where they live is injected.
+    fn admitted_into(
+        keys_dir: &std::path::Path,
+        audit_dir: &std::path::Path,
+        vm_name: &str,
+    ) -> AdmissionContext {
+        let rootfs_dir = tempfile::tempdir().expect("rootfs dir");
+        let rootfs = write_rootfs(rootfs_dir.path(), vm_name.as_bytes());
         let ledger = InMemoryNonceLedger::new();
-        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+        admit_plan_for_boot(AdmitPlanForBootParams {
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
-            vm_name: "vm-boot-posture",
+            vm_name,
             backend_name: "firecracker",
             rootfs_path: &rootfs,
             kernel_path: None,
@@ -1764,10 +1702,9 @@ mod admit_plan_tests {
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
             caller_commitment: None,
-            no_supervisor: false,
             ledger: &ledger,
-            keys_dir: Some(keys_dir.path()),
-            audit_dir: Some(audit_dir.path()),
+            keys_dir: Some(keys_dir),
+            audit_dir: Some(audit_dir),
             policy_dir: None,
             bundle_pin: None,
             deps_volume: None,
@@ -1783,24 +1720,72 @@ mod admit_plan_tests {
             assets: Vec::new(),
         })
         .expect("admission")
-        .expect("Some when admission ran");
+    }
 
-        emit_boot_posture_if(&Some(ctx), mvm_build::run_image::RootStrategy::BlockExt4);
+    #[test]
+    fn emit_boot_posture_audits_the_root_strategy_label() {
+        let keys_dir = tempfile::tempdir().expect("keys dir");
+        let audit_dir = tempfile::tempdir().expect("audit dir");
+        let ctx = admitted_into(keys_dir.path(), audit_dir.path(), "vm-boot-posture");
 
-        let audit_path = audit_dir.path().join("local.jsonl");
-        let content = std::fs::read_to_string(&audit_path).expect("audit file exists");
+        emit_boot_posture(&ctx, mvm_build::run_image::RootStrategy::BlockExt4);
+
+        let content = std::fs::read_to_string(audit_dir.path().join("local.jsonl"))
+            .expect("audit file exists");
         assert!(
             content.contains("plan.boot_posture"),
             "audit chain must include boot posture event: {content}"
         );
         assert!(
             content.contains("\"root_strategy\":\"block-ext4\""),
-            "audit chain must carry selected root strategy: {content}"
-        );
-        assert!(
-            content.contains("\"root_strategy\":\"block-ext4\""),
             "audit chain must carry the root_strategy label: {content}"
         );
+    }
+
+    /// A transient run that booted records `plan.launched` and its posture, and
+    /// nothing that reads as a failure — the two outcomes share one helper, so
+    /// each branch is pinned to the entries it alone writes.
+    #[test]
+    fn a_transient_run_that_booted_records_launched_and_posture() {
+        let keys_dir = tempfile::tempdir().expect("keys dir");
+        let audit_dir = tempfile::tempdir().expect("audit dir");
+        let ctx = admitted_into(keys_dir.path(), audit_dir.path(), "vm-transient-ok");
+
+        let outcome: Result<()> = Ok(());
+        record_transient_outcome(
+            Some(ctx),
+            "firecracker",
+            mvm_build::run_image::RootStrategy::BlockExt4,
+            &outcome,
+        );
+
+        let content = std::fs::read_to_string(audit_dir.path().join("local.jsonl"))
+            .expect("audit file exists");
+        assert!(content.contains("plan.launched"), "{content}");
+        assert!(content.contains("plan.boot_posture"), "{content}");
+        assert!(!content.contains("plan.failed"), "{content}");
+    }
+
+    #[test]
+    fn a_transient_run_that_failed_records_failed_and_not_launched() {
+        let keys_dir = tempfile::tempdir().expect("keys dir");
+        let audit_dir = tempfile::tempdir().expect("audit dir");
+        let ctx = admitted_into(keys_dir.path(), audit_dir.path(), "vm-transient-err");
+
+        let outcome: Result<()> = Err(anyhow::anyhow!("the guest never came up"));
+        record_transient_outcome(
+            Some(ctx),
+            "firecracker",
+            mvm_build::run_image::RootStrategy::BlockExt4,
+            &outcome,
+        );
+
+        let content = std::fs::read_to_string(audit_dir.path().join("local.jsonl"))
+            .expect("audit file exists");
+        assert!(content.contains("plan.failed"), "{content}");
+        assert!(content.contains("the guest never came up"), "{content}");
+        assert!(!content.contains("plan.launched"), "{content}");
+        assert!(!content.contains("plan.boot_posture"), "{content}");
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -1842,7 +1827,6 @@ mod admit_plan_tests {
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
             caller_commitment: None,
-            no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
@@ -1860,8 +1844,7 @@ mod admit_plan_tests {
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
             assets: Vec::new(),
         })
-        .expect("admission")
-        .expect("Some when admission ran");
+        .expect("admission");
 
         let audit_path = audit_dir.path().join("local.jsonl");
         let content = std::fs::read_to_string(&audit_path).expect("audit file exists");
@@ -1902,7 +1885,6 @@ mod admit_plan_tests {
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
             caller_commitment: None,
-            no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
@@ -1920,8 +1902,7 @@ mod admit_plan_tests {
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
             assets: Vec::new(),
         })
-        .expect("admission")
-        .expect("Some when admission ran");
+        .expect("admission");
 
         assert_ne!(ctx.admitted.plan().network_policy.0, LOCAL_DEFAULT);
         assert_eq!(
@@ -1969,7 +1950,6 @@ mod admit_plan_tests {
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
             caller_commitment: None,
-            no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
@@ -1987,8 +1967,7 @@ mod admit_plan_tests {
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
             assets: Vec::new(),
         })
-        .expect("admission")
-        .expect("Some when admission ran");
+        .expect("admission");
 
         assert_ne!(ctx.admitted.plan().network_policy.0, LOCAL_DEFAULT);
         let bundle = ctx.policy_bundle.expect("generated policy bundle");
@@ -2088,8 +2067,7 @@ mod admit_plan_tests {
             ],
             ..pinning_params(&rootfs, &ledger)
         })
-        .expect("admission with a directory and a disk share")
-        .expect("Some when admission ran");
+        .expect("admission with a directory and a disk share");
 
         let shares = &ctx.admitted.plan().shares;
         let dir = shares
@@ -2139,7 +2117,6 @@ mod admit_plan_tests {
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
             caller_commitment: None,
-            no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
@@ -2168,8 +2145,7 @@ mod admit_plan_tests {
                 shebang: None,
             },
         })
-        .expect("a non-shell entrypoint must not be refused")
-        .expect("Some when admission ran");
+        .expect("a non-shell entrypoint must not be refused");
 
         assert!(!ctx.admitted.plan_id().0.is_empty());
         let verbs = ctx
@@ -2204,7 +2180,6 @@ mod admit_plan_tests {
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
             caller_commitment: None,
-            no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
@@ -2229,8 +2204,7 @@ mod admit_plan_tests {
                 shebang: None,
             },
         })
-        .expect("a shell entrypoint must still boot when nothing granted it input")
-        .expect("Some when admission ran");
+        .expect("a shell entrypoint must still boot when nothing granted it input");
 
         assert!(!ctx.admitted.plan_id().0.is_empty());
     }
@@ -2258,7 +2232,6 @@ mod admit_plan_tests {
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
             caller_commitment: None,
-            no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
@@ -2320,7 +2293,6 @@ mod admit_plan_tests {
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
             caller_commitment: None,
-            no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
@@ -2378,7 +2350,6 @@ mod admit_plan_tests {
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
             caller_commitment: None,
-            no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
@@ -2396,8 +2367,7 @@ mod admit_plan_tests {
             backend_kind: None,
             entrypoint: ResolvedEntrypoint::unresolved("this launch path resolves no entrypoint"),
         })
-        .expect("an unresolved entrypoint that asked for nothing must still boot")
-        .expect("Some when admission ran");
+        .expect("an unresolved entrypoint that asked for nothing must still boot");
 
         assert!(!ctx.admitted.plan_id().0.is_empty());
     }
@@ -2430,7 +2400,6 @@ mod admit_plan_tests {
             secrets: Vec::new(),
             caller_commitment: None,
             assets: Vec::new(),
-            no_supervisor: false,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
             policy_dir: None,
@@ -2454,8 +2423,7 @@ mod admit_plan_tests {
                 shebang: None,
             },
         })
-        .expect("dev-tier runs are out of the shell-entrypoint refusal's scope")
-        .expect("Some when admission ran");
+        .expect("dev-tier runs are out of the shell-entrypoint refusal's scope");
 
         assert!(!ctx.admitted.plan_id().0.is_empty());
     }
@@ -2661,7 +2629,6 @@ allow_hosts = ["localhost:8443"]
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
             caller_commitment: None,
-            no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
@@ -2701,8 +2668,7 @@ allow_hosts = ["localhost:8443"]
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
             assets: Vec::new(),
         })
-        .expect("admission")
-        .expect("Some when admission ran");
+        .expect("admission");
 
         let shares = &ctx.admitted.plan().shares;
         let by_tag = |tag: &str| {
@@ -2767,7 +2733,6 @@ allow_hosts = ["localhost:8443"]
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
             caller_commitment: None,
-            no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
@@ -2788,8 +2753,7 @@ allow_hosts = ["localhost:8443"]
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
             assets: Vec::new(),
         })
-        .expect("admission")
-        .expect("Some when admission ran");
+        .expect("admission");
 
         let plan_grants = ctx
             .admitted
@@ -2937,7 +2901,6 @@ allow_hosts = ["localhost:8443"]
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
             caller_commitment: None,
-            no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
@@ -3002,7 +2965,6 @@ allow_hosts = ["localhost:8443"]
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
             caller_commitment: None,
-            no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
@@ -3020,8 +2982,7 @@ allow_hosts = ["localhost:8443"]
             entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
             assets: Vec::new(),
         })
-        .expect("admission")
-        .expect("Some when admission ran");
+        .expect("admission");
         assert_eq!(ctx.admitted.plan().grants, None);
         assert_eq!(
             resolved.network_policy.resolve_rules().as_deref(),

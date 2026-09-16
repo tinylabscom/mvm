@@ -19,7 +19,7 @@ use crate::commands::vm::readiness::record_vm_readiness;
 
 use super::admission::{
     AdmitPlanForBootParams, admit_plan_for_boot_with_ingress, attach_guest_boot_config,
-    emit_failed_if, emit_launched_if, enforce_kernel_if, enforce_shares_if, guest_profile_for_boot,
+    emit_failed, emit_launched, enforce_kernel, enforce_shares, guest_profile_for_boot,
 };
 use super::policy::shares_from_volume_cfg;
 use super::runtime_source::{
@@ -78,8 +78,6 @@ pub(in crate::commands) struct PersistentImageStartParams<'a> {
     pub ports: &'a [String],
     /// Concrete backend selected by the caller.
     pub backend_name: &'a str,
-    /// Skip plan-admission signing (test escape).
-    pub no_supervisor: bool,
     /// Pre-built kernel path: skips `ensure_workload_kernel` when set.
     pub kernel_path: Option<String>,
     /// Raw `--agent-verb` strings from the CLI. Empty ⇒ use the computed
@@ -162,7 +160,6 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         network_policy,
         ports,
         backend_name,
-        no_supervisor,
         kernel_path,
         agent_verb,
         caller_commitment,
@@ -222,7 +219,6 @@ pub(in crate::commands) fn start_persistent_oci_machine(
             secret_release: mvm_core::plan::SecretReleasePolicy::default(),
             secrets: vec![],
             caller_commitment,
-            no_supervisor,
             ledger: &admission_ledger,
             keys_dir: None,
             audit_dir: None,
@@ -285,20 +281,22 @@ pub(in crate::commands) fn start_persistent_oci_machine(
     attach_runtime_overlay_if_cached(&mut start_config, backend_name)?;
     attach_universal_initramfs_if_cached(&mut start_config, backend_name)?;
     emit_runtime_source_status(&start_config);
-    if let Some(ctx) = admission.as_ref() {
-        thread_tenant_id(&mut start_config, &ctx.admitted);
-        populate_audit_substrate(&mut start_config, &ctx.admitted, ctx.policy_bundle.as_ref())?;
-        let guest_profile = guest_profile_for_boot(profile == "dev", rootfs_path);
-        attach_guest_boot_config(&mut start_config, ctx, guest_profile)?;
-        if persists_plan_before_start(backend_name) {
-            stash_plan_for_bridge(&start_config)?;
-        }
+    thread_tenant_id(&mut start_config, &admission.admitted);
+    populate_audit_substrate(
+        &mut start_config,
+        &admission.admitted,
+        admission.policy_bundle.as_ref(),
+    )?;
+    let guest_profile = guest_profile_for_boot(profile == "dev", rootfs_path);
+    attach_guest_boot_config(&mut start_config, &admission, guest_profile)?;
+    if persists_plan_before_start(backend_name) {
+        stash_plan_for_bridge(&start_config)?;
     }
-    enforce_shares_if(&admission, &start_config.volumes)?;
+    enforce_shares(&admission, &start_config.volumes)?;
     // Against the config the backend is about to be handed, not the local the
     // plan was synthesized from — that is what makes this a check rather than a
     // restatement of what admission already believed.
-    enforce_kernel_if(
+    enforce_kernel(
         &admission,
         start_config
             .kernel_path
@@ -309,7 +307,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
     // admission gate (above) and the launched/failed emits stay here.
     if let Err(err) = mvm_client::start_prepared(backend_name, &start_config) {
         let err = anyhow::anyhow!("{err}");
-        emit_failed_if(&admission, "backend-start", &err);
+        emit_failed(&admission, "backend-start", &err);
         return Err(err);
     }
     prepared_volumes.commit();
@@ -318,7 +316,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
     // `apply_grants` on the path `mvmctl` boots: without it the tier is
     // computed correctly and reported to nobody.
     super::grants_report::report_enforced_grants(&admission, backend_name, name);
-    emit_launched_if(&admission, backend_name, true);
+    emit_launched(&admission, backend_name, true);
     record_vm_readiness(name, InstanceReadiness::LaunchAccepted);
     mvm_core::audit_emit!(VmStart, vm: name);
     Ok(())

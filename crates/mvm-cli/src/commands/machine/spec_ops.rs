@@ -217,7 +217,6 @@ pub(super) fn run_reconfigure(args: MachineReconfigureArgs) -> Result<()> {
             dry_run: false,
             quiet: false,
             hypervisor: args.hypervisor.clone(),
-            no_supervisor: false,
             kernel_pin: None,
             has_ad_hoc_argv: false,
         })?;

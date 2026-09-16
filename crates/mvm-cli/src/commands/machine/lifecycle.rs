@@ -258,7 +258,6 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         network_policy,
         ports: &spec.ports,
         backend_name: &effective_hypervisor,
-        no_supervisor: args.no_supervisor,
         kernel_path,
         agent_verb: spec.agent_verb.clone(),
         caller_commitment: spec.caller_commitment.clone(),

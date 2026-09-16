@@ -27,24 +27,20 @@ use super::admission::AdmissionContext;
 /// settled at admission, and re-deriving it here would let the report describe
 /// a different request than the one that was signed.
 pub(super) fn report_enforced_grants(
-    ctx: &Option<AdmissionContext>,
+    ctx: &AdmissionContext,
     backend_name: &str,
     vm_name: &str,
 ) -> EnforcedGrants {
     let undeclared = Grants::default();
-    let requested = ctx
-        .as_ref()
-        .and_then(|ctx| ctx.admitted.plan().grants.as_ref())
-        .unwrap_or(&undeclared);
+    let requested = ctx.admitted.plan().grants.as_ref().unwrap_or(&undeclared);
 
     let enforced = read_back_tier(backend_name, vm_name, requested);
 
     mvm_client::record_enforced_grants(vm_name, &enforced);
 
-    if let Some(ctx) = ctx
-        && let Err(e) = ctx
-            .emitter
-            .emit_grants_enforced(ctx.admitted.plan(), &enforced)
+    if let Err(e) = ctx
+        .emitter
+        .emit_grants_enforced(ctx.admitted.plan(), &enforced)
     {
         tracing::warn!(error = %e, "audit emit_grants_enforced failed (non-fatal)");
     }
@@ -106,11 +102,7 @@ mod tests {
     fn admitted_with_grants(
         vm_name: &str,
         grants: Option<mvm_contract::grants::Grants>,
-    ) -> (
-        Option<AdmissionContext>,
-        tempfile::TempDir,
-        tempfile::TempDir,
-    ) {
+    ) -> (AdmissionContext, tempfile::TempDir, tempfile::TempDir) {
         let keys_dir = tempfile::tempdir().expect("keys dir");
         let audit_dir = tempfile::tempdir().expect("audit dir");
         let rootfs_dir = tempfile::tempdir().expect("rootfs dir");
@@ -132,7 +124,6 @@ mod tests {
             secret_release: mvm_core::plan::SecretReleasePolicy::None,
             secrets: Vec::new(),
             caller_commitment: None,
-            no_supervisor: false,
             ledger: &ledger,
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
@@ -177,7 +168,6 @@ mod tests {
             ..Default::default()
         };
         let (ctx, _keys, audit_dir) = admitted_with_grants("vm-grants-enforced", Some(grants));
-        assert!(ctx.is_some(), "the fixture must actually admit");
 
         let enforced = report_enforced_grants(&ctx, "libkrun", "vm-grants-enforced");
 
@@ -202,26 +192,6 @@ mod tests {
         );
     }
 
-    /// A run that was never admitted still has to record a tier: `machine
-    /// inspect` on a `--no-supervisor` boot would otherwise show the request
-    /// with nothing beside it.
-    #[test]
-    fn an_unadmitted_boot_still_records_a_tier() {
-        let home = tempfile::tempdir().expect("home");
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.isolate_mvm_home(home.path());
-
-        let enforced = report_enforced_grants(&None, "firecracker", "vm-no-admission");
-        assert_eq!(
-            mvm_client::enforced_grants_of("vm-no-admission"),
-            Some(enforced)
-        );
-    }
-
-    /// The second half of the live finding: with the mechanism missing the boot
-    /// degrades, which is deliberate — and said nothing, which is not. Every
-    /// host reaches a warning here, because a host with no gap still has an
-    /// unenforced tier to explain.
     #[test]
     fn a_degraded_boot_warns() {
         let requested = Grants {

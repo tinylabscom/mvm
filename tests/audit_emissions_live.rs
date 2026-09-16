@@ -41,10 +41,10 @@
 //!   degrade to warnings when the dev VM isn't reachable, but
 //!   Step 2 — the build-cache prune — runs on host fs and the
 //!   audit emit always fires)
-//! - `mvmctl machine run --hypervisor mock -d --no-supervisor` (with
+//! - `mvmctl machine run --hypervisor mock -d` (with
 //!   `MVM_DIRECT_BOOT=1` + stub kernel/rootfs files) → `VmStart`
 //!   (end-to-end exercise of the direct-boot path against the
-//!   in-memory `MockBackend`. The mock makes the backend dispatch
+//!   in-memory `MockBackend`, admitted like any other boot. The mock makes the backend dispatch
 //!   hermetic; `MVM_DIRECT_BOOT` skips the build + template lookup.
 //!   Together they let `machine run` complete on a CI runner with
 //!   no KVM / Nix / Apple Container / Docker / libkrun)
@@ -1100,8 +1100,9 @@ fn cleanup_emits_slot_prune_audit_entry_even_with_no_builds() {
 /// Pass-through env: `MVM_DIRECT_BOOT=1` + stub kernel/rootfs
 /// files skip the build + template-lookup pre-flight that needs
 /// real Nix; `--hypervisor mock` routes backend dispatch to
-/// [`mvm_runtime::MockBackend`]; `-d` detaches; `--no-supervisor`
-/// skips plan-64 admission.
+/// [`mvm_runtime::MockBackend`]; `-d` detaches. The boot is admitted like any
+/// other: there is no way to start a machine without a signed plan, so the
+/// VMs these tests exercise are booted the way production boots them.
 #[cfg(feature = "test-support")]
 fn bring_up_mock_vm(sandbox: &AuditSandbox, name: &str) {
     let stub_dir = sandbox.home_path().join("stub");
@@ -1128,7 +1129,6 @@ fn bring_up_mock_vm(sandbox: &AuditSandbox, name: &str) {
             "mock",
             "--name",
             name,
-            "--no-supervisor",
             "-d",
         ])
         .output()
