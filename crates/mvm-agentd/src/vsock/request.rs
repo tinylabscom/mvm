@@ -944,7 +944,7 @@ mod tests {
         let req = GuestRequest::RunEntrypoint {
             stdin: vec![1, 2, 3, 4, 5],
             timeout_secs: 30,
-            env: vec![("HTTP_PROXY".into(), "http://127.0.0.1:18080".into())],
+            env: vec![("HTTP_PROXY".into(), "http://127.0.0.1:1080".into())],
             stream_input: false,
         };
         let json = serde_json::to_string(&req).expect("serialize");
@@ -961,7 +961,7 @@ mod tests {
                 assert_eq!(timeout_secs, 30);
                 assert_eq!(
                     env,
-                    vec![("HTTP_PROXY".into(), "http://127.0.0.1:18080".into())]
+                    vec![("HTTP_PROXY".into(), "http://127.0.0.1:1080".into())]
                 );
             }
             other => panic!("expected RunEntrypoint, got {other:?}"),

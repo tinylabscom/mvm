@@ -2,8 +2,7 @@
 //!
 //! `mvm-egress-client` owns a long-lived async session and multiplexes the
 //! loopback proxy over it. Its blocking ICMP mediator cannot borrow that async
-//! session, and the secret-substitution forward proxy is a separate privileged
-//! process. They use this client instead: open a connection, do one
+//! session, so it uses this client instead: open a connection, do one
 //! authenticated exchange on it, close.
 //!
 //! Every caller here holds the guest signing key, which is root-only by
@@ -47,6 +46,22 @@ const RUN_MVM_DIR: &str = "/run/mvm";
 /// How long to wait for the host endpoint to accept a connection.
 const CONNECT_TIMEOUT_SECS: u64 = 10;
 
+/// Environment variable naming the host endpoint's Unix socket on the
+/// shared-kernel container tier: the endpoint lives on a host-owned directory
+/// bind-mounted into the container, so a guest client reaches it over AF_UNIX
+/// instead of the vsock `EGRESS_PORT` (a container has no vsock). Unset on
+/// microVM backends, which keep the vsock path.
+pub const EGRESS_ENDPOINT_SOCK_ENV: &str = "MVM_AGENT_EGRESS_ENDPOINT_SOCK";
+
+/// The bind-mounted endpoint socket a shared-kernel container reaches the host
+/// through, when the host backend configured one. `None` on microVM backends
+/// and on container boots with no endpoint, where the vsock dial is attempted
+/// and fails closed rather than silently bypassing the gate.
+pub fn egress_endpoint_socket() -> Option<PathBuf> {
+    let path = std::env::var(EGRESS_ENDPOINT_SOCK_ENV).ok()?;
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
 /// Human-readable build identity carried in the versioned FlowMux hello.
 const GUEST_BUILD: &str = concat!("mvm-agentd ", env!("CARGO_PKG_VERSION"));
 
@@ -80,7 +95,7 @@ impl SyncFlowMux {
     pub fn connect() -> Result<Self> {
         let signing_key = load_guest_signing_key(Path::new(RUN_MVM_DIR))?;
         let anchor = load_host_anchor(Path::new(RUN_MVM_DIR))?;
-        let stream = match crate::forward_proxy::egress_endpoint_socket() {
+        let stream = match egress_endpoint_socket() {
             Some(path) => UnixStream::connect(&path)
                 .with_context(|| format!("connect to the endpoint socket {}", path.display()))?,
             None => {
@@ -208,19 +223,6 @@ fn signing_key_path(dir: &Path) -> PathBuf {
 }
 
 impl SyncFlowMux {
-    /// Run one typed HTTP flow: send the request, return the host's reply.
-    ///
-    /// The request may carry `mvm-secret-<hex>` placeholders. Resolving them,
-    /// authorizing the destination and making the real connection all happen on
-    /// the host — this only frames what goes out and what comes back, which is
-    /// the whole reason the guest never holds a credential.
-    pub fn exchange_http(&mut self, request: &WireRequest) -> Result<WireResponse> {
-        match self.open_http()? {
-            HttpFlowOpen::Opened(stream_id) => self.exchange_open_http(stream_id, request),
-            HttpFlowOpen::Refused(response) => Ok(response),
-        }
-    }
-
     /// Open one typed HTTP stream without sending its request yet.
     ///
     /// Keeping stream establishment separate lets long-lived clients observe
@@ -366,6 +368,24 @@ mod tests {
 
     fn temp_dir() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
+    }
+
+    #[test]
+    fn egress_endpoint_socket_reads_the_env_only_when_set_and_non_empty() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+
+        env.remove(EGRESS_ENDPOINT_SOCK_ENV);
+        assert_eq!(egress_endpoint_socket(), None);
+        env.set(EGRESS_ENDPOINT_SOCK_ENV, "");
+        assert_eq!(egress_endpoint_socket(), None);
+        env.set(
+            EGRESS_ENDPOINT_SOCK_ENV,
+            "/run/mvm/substitution-endpoint.sock",
+        );
+        assert_eq!(
+            egress_endpoint_socket(),
+            Some(PathBuf::from("/run/mvm/substitution-endpoint.sock"))
+        );
     }
 
     #[test]
@@ -570,7 +590,10 @@ mod tests {
             headers: vec![("authorization".into(), "Bearer mvm-secret-abc".into())],
             body_b64: B64.encode(b"question"),
         };
-        let response = client.exchange_http(&request).unwrap();
+        let HttpFlowOpen::Opened(stream_id) = client.open_http().unwrap() else {
+            panic!("the test host opens the flow");
+        };
+        let response = client.exchange_open_http(stream_id, &request).unwrap();
 
         match response {
             WireResponse::Ok {
@@ -642,14 +665,8 @@ mod tests {
         });
 
         let mut client = SyncFlowMux::handshake(guest_side, guest_key, &host_anchor).unwrap();
-        let request = WireRequest {
-            method: "GET".into(),
-            url: "https://example.test/".into(),
-            headers: vec![],
-            body_b64: String::new(),
-        };
-        match client.exchange_http(&request).unwrap() {
-            WireResponse::Refused { message } => {
+        match client.open_http().unwrap() {
+            HttpFlowOpen::Refused(WireResponse::Refused { message }) => {
                 assert!(
                     message.contains("no substitution service"),
                     "got: {message}"

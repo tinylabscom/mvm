@@ -1,6 +1,6 @@
 //! AF_VSOCK socket primitives shared by the guest's synchronous vsock sites.
 //!
-//! One leaf backing three callers — the forward-proxy client dial, the
+//! One leaf backing three callers — the blocking FlowMux client dial, the
 //! one-shot workload-exit reporter, and the builder agent's listener — so the
 //! `sockaddr_vm` layout and the socket/connect/bind/listen/accept syscalls
 //! live in exactly one place instead of three hand-rolled copies. Depends only

@@ -52,9 +52,6 @@ pub mod flowmux_egress;
 pub mod flowmux_keys;
 /// Blocking one-shot FlowMux client for the guest's tokio-free callers.
 pub mod flowmux_sync;
-/// In-guest forward-proxy front: parses a workload's proxied request into a
-/// `WireRequest` for the substitution client.
-pub mod forward_proxy;
 pub mod fs_rpc;
 /// Guest-side VMGenID reseed. On a snapshot resume the host
 /// delivers a fresh generation token; when it changes (a clone, not a

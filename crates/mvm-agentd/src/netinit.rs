@@ -151,7 +151,7 @@ pub struct Report {
     /// Loopback ranges (`127.0.0.0/8`) are intentionally **not**
     /// blackholed inside the guest: a blackhole route is
     /// interface-agnostic, so it would also kill the guest's own `lo`
-    /// — breaking the forward proxy on `127.0.0.1` and any local
+    /// — breaking the egress proxy on `127.0.0.1` and any local
     /// service. The host-loopback-via-bridge threat
     /// `MANDATORY_DENY_RANGES` guards against is enforced host-side
     /// (the L4 / nft egress enforcers on the bridge), which still
@@ -247,8 +247,8 @@ pub fn install_mandatory_deny<I: RouteInstaller>(installer: &I) -> Report {
         }
         // Never blackhole the guest's own loopback. A blackhole route matches
         // by destination regardless of interface, so blackholing 127.0.0.0/8
-        // kills guest-internal loopback (the forward proxy on
-        // 127.0.0.1:18080, and any local service) — not just host loopback
+        // kills guest-internal loopback (the egress proxy the workload's
+        // proxy environment names, and any local service) — not just host loopback
         // reached via a misconfigured bridge. That host-side threat is the
         // host bridge / L4 enforcer's job; they still carry the full
         // `MANDATORY_DENY_RANGES`. Skip-and-report, never silently.
@@ -496,14 +496,14 @@ mod tests {
     fn install_skips_loopback_so_guest_internal_loopback_survives() {
         // A guest must not blackhole its own loopback: a blackhole route for
         // 127.0.0.0/8 is interface-agnostic and kills guest-internal loopback,
-        // including the forward proxy on 127.0.0.1. The host-loopback
+        // including the egress proxy on 127.0.0.1. The host-loopback
         // threat stays handled host-side with the full range list.
         let mock = MockInstaller::new();
         let report = install_mandatory_deny(&mock);
         let loopback: IpNet = "127.0.0.0/8".parse().unwrap();
         assert!(
             !mock.recorded().contains(&loopback),
-            "guest installed a blackhole for its own loopback (breaks the forward proxy)"
+            "guest installed a blackhole for its own loopback (breaks the egress proxy)"
         );
         assert!(
             !report.installed.iter().any(|r| r.cidr == loopback),

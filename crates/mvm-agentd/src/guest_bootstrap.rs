@@ -109,7 +109,6 @@ pub fn provision_guest_environment() -> Result<(), EgressClientMissing> {
     // from arrives on the identity drive this copies out.
     provision_flowmux_identity();
     provision_egress_ca();
-    start_forward_proxy();
     run_one(resolve_exec([NETINIT_OVERLAY]), "netinit");
     if cmdline_has_flag("mvm.vsock_egress=1") {
         start_vsock_egress()?;
@@ -197,36 +196,6 @@ fn provision_workload_identity() {
     }
 }
 
-/// Start the loopback forward proxy the substitution path relays through.
-///
-/// Here, as a privileged child, rather than inside the guest agent: relaying
-/// opens an authenticated FlowMux session, which reads the guest signing key,
-/// and the key is root-only precisely so the workload — whose uid the agent
-/// shares — cannot authenticate as its own guest. Served from the agent, every
-/// relay failed on that read and the workload got a `502`.
-///
-/// Unconditional, and not gated on `mvm.vsock_egress=1` in particular: that
-/// token is *off* for exactly the launches that need this. A secret-bearing
-/// workload's egress goes through the host substitution endpoint, so its guest
-/// deliberately starts no vsock egress client, and this listener is the whole
-/// of its egress. A workload with no placeholders has no `HTTP_PROXY` pointed
-/// here and the listener simply sees no connections.
-///
-/// Non-fatal if it cannot be resolved. Unlike the egress client, whose absence
-/// means an admitted network is silently unreachable, this one is used only by
-/// a launch that minted placeholders — and that launch fails loudly on its
-/// first request rather than quietly reaching the network unsubstituted.
-fn start_forward_proxy() {
-    let Some(proxy) = resolve_forward_proxy() else {
-        note_optional_step(
-            "loopback forward proxy (secret-bearing egress will have nothing to relay through)",
-            &"no executable at /mvm/runtime/forward-proxy or /usr/local/bin/mvm-forward-proxy",
-        );
-        return;
-    };
-    spawn_one(&proxy, "forward-proxy");
-}
-
 fn start_vsock_egress() -> Result<(), EgressClientMissing> {
     bring_loopback_up();
     if let Err(error) = crate::guest_net::seed_loopback_resolver() {
@@ -253,8 +222,6 @@ fn start_vsock_egress() -> Result<(), EgressClientMissing> {
 pub const NETINIT_OVERLAY: &str = "/mvm/runtime/netinit";
 
 pub const EGRESS_CLIENT_OVERLAY: &str = "/mvm/runtime/egress-client";
-
-pub const FORWARD_PROXY_OVERLAY: &str = "/mvm/runtime/forward-proxy";
 
 /// Tools the image ships that cannot work in this guest, and the overlay
 /// binary that stands in for each.
@@ -586,14 +553,6 @@ pub fn resolve_egress_client_for(is_exec: impl Fn(&Path) -> bool) -> Option<Path
     resolve_runtime_binary_for(EGRESS_CLIENT_OVERLAY, is_exec)
 }
 
-pub fn resolve_forward_proxy() -> Option<PathBuf> {
-    resolve_forward_proxy_for(is_executable)
-}
-
-pub fn resolve_forward_proxy_for(is_exec: impl Fn(&Path) -> bool) -> Option<PathBuf> {
-    resolve_runtime_binary_for(FORWARD_PROXY_OVERLAY, is_exec)
-}
-
 pub fn is_executable(path: &Path) -> bool {
     path.is_file()
         && fs::metadata(path)
@@ -864,28 +823,12 @@ mod tests {
         assert_eq!(got, None);
     }
 
+    /// Where a runtime binary came from is one decision, made by one helper.
+    /// Asserting it through that helper is what keeps a second caller from
+    /// growing its own rule.
     #[test]
-    fn resolve_forward_proxy_resolves_the_overlay_copy_and_ignores_the_baked_path() {
-        assert_eq!(
-            resolve_forward_proxy_for(|path| path == Path::new(FORWARD_PROXY_OVERLAY)),
-            Some(PathBuf::from(FORWARD_PROXY_OVERLAY))
-        );
-        assert_eq!(
-            resolve_forward_proxy_for(|path| {
-                path == Path::new("/usr/local/bin/mvm-forward-proxy")
-            }),
-            None
-        );
-    }
-
-    /// The two helpers must not drift apart: they are the same decision about
-    /// where the runtime came from, and the shared rule is what keeps them one.
-    #[test]
-    fn the_egress_client_and_the_forward_proxy_resolve_by_the_same_rule() {
-        for (overlay, baked) in [
-            (EGRESS_CLIENT_OVERLAY, "/usr/local/bin/mvm-egress-client"),
-            (FORWARD_PROXY_OVERLAY, "/usr/local/bin/mvm-forward-proxy"),
-        ] {
+    fn a_runtime_binary_resolves_from_the_overlay_and_never_the_baked_path() {
+        for (overlay, baked) in [(EGRESS_CLIENT_OVERLAY, "/usr/local/bin/mvm-egress-client")] {
             assert_eq!(
                 resolve_runtime_binary_for(overlay, |p| p == Path::new(overlay)),
                 Some(PathBuf::from(overlay)),

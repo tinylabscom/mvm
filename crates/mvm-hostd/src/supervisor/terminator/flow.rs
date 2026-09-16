@@ -873,6 +873,197 @@ mod tests {
         response
     }
 
+    /// The guest's loopback proxy, reduced to what a client configured from the
+    /// proxy environment asks of it: accept one `CONNECT`, answer `200`, then
+    /// relay bytes onto the flow the host opened.
+    ///
+    /// The production client does the same thing with the relay multiplexed
+    /// over FlowMux and the flow opened by an `OpenTcp` the claim-10 gate
+    /// admitted. The bytes either side of it are identical, which is why this
+    /// stand-in can prove what the proxy environment makes a client do without
+    /// booting a guest.
+    ///
+    /// Returns the request line it was given, so the test can assert the client
+    /// tunnelled rather than handing over an absolute-URI request.
+    fn connect_front(
+        listener: std::net::TcpListener,
+        flow_side: UnixStream,
+    ) -> std::thread::JoinHandle<String> {
+        std::thread::spawn(move || {
+            let (mut client, _peer) = listener.accept().expect("the proxy accepts one client");
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while super::super::find_subslice(&head, b"\r\n\r\n").is_none() {
+                match client.read(&mut byte) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => head.push(byte[0]),
+                }
+            }
+            let request_line = String::from_utf8_lossy(&head)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            if !request_line.starts_with("CONNECT ") {
+                // Anything else is not a tunnel, and this stand-in serves only
+                // tunnels — the same refusal shape the real proxy gives an
+                // `https` absolute-URI request.
+                let _ = client.write_all(b"HTTP/1.1 501 Not Implemented\r\n\r\n");
+                return request_line;
+            }
+            let _ = client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n");
+            let _ = client.flush();
+
+            let mut to_flow = client.try_clone().expect("clone the client socket");
+            let mut from_flow = flow_side.try_clone().expect("clone the flow socket");
+            let mut flow_in = flow_side;
+            let up = std::thread::spawn(move || {
+                let _ = std::io::copy(&mut to_flow, &mut flow_in);
+                let _ = flow_in.shutdown(std::net::Shutdown::Write);
+            });
+            let _ = std::io::copy(&mut from_flow, &mut client);
+            let _ = client.shutdown(std::net::Shutdown::Write);
+            let _ = up.join();
+            request_line
+        })
+    }
+
+    /// Drive one request the way a workload's own HTTPS client does: read the
+    /// proxy endpoint out of the environment mvm hands the guest, `CONNECT`
+    /// through it, then speak ordinary TLS.
+    ///
+    /// Returns the request line the proxy saw alongside the response bytes.
+    fn exchange_through_proxy_environment(
+        harness: &Harness,
+        request: &[u8],
+    ) -> (String, Option<Vec<u8>>) {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("build test runtime");
+        let flow = TerminatedFlow::builder()
+            .service(Arc::clone(&harness.service))
+            .runtime(runtime.handle().clone())
+            .leaves(Arc::new(LeafCache::default()))
+            .authority(BOUND_HOST, 443)
+            .mode(TerminationMode::Tls)
+            .build()
+            .expect("build terminated flow");
+
+        let (endpoint_side, guest_side) = UnixStream::pair().expect("socket pair");
+        let served = std::thread::spawn(move || flow.serve(endpoint_side));
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the guest proxy");
+        let listen = listener.local_addr().expect("proxy address");
+        let front = connect_front(listener, guest_side);
+
+        // The workload reads this, not a constant: it is the environment the
+        // launch path actually synthesizes for a guest.
+        let env: std::collections::HashMap<String, String> =
+            mvm_core::guest_netd::proxy_env_vars(&listen.to_string())
+                .into_iter()
+                .collect();
+        let proxy = env
+            .get("HTTPS_PROXY")
+            .expect("the guest proxy environment names an https proxy")
+            .strip_prefix("http://")
+            .expect("an http proxy url")
+            .to_string();
+
+        let mut tcp = std::net::TcpStream::connect(&proxy).expect("dial the proxy from the env");
+        tcp.write_all(
+            format!("CONNECT {BOUND_HOST}:443 HTTP/1.1\r\nhost: {BOUND_HOST}:443\r\n\r\n")
+                .as_bytes(),
+        )
+        .expect("write the tunnel request");
+        tcp.flush().expect("flush the tunnel request");
+        let mut reply = Vec::new();
+        let mut byte = [0u8; 1];
+        while super::super::find_subslice(&reply, b"\r\n\r\n").is_none() {
+            match tcp.read(&mut byte) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => reply.push(byte[0]),
+            }
+        }
+        let tunnelled = String::from_utf8_lossy(&reply).starts_with("HTTP/1.1 200");
+
+        let response = tunnelled.then(|| {
+            let server_name = rustls::pki_types::ServerName::try_from(BOUND_HOST)
+                .expect("the bound host is a server name")
+                .to_owned();
+            let connection = rustls::ClientConnection::new(
+                Arc::new(guest_client_config(&harness.intermediate_pem)),
+                server_name,
+            )
+            .expect("guest tls client");
+            let mut tls = rustls::StreamOwned::new(connection, tcp);
+            tls.write_all(request).expect("write the request");
+            tls.flush().expect("flush the request");
+            let body = read_response(&mut tls);
+            tls.conn.send_close_notify();
+            let _ = tls.flush();
+            let _ = tls.sock.shutdown(std::net::Shutdown::Both);
+            body
+        });
+
+        let request_line = front.join().expect("proxy front thread");
+        let _served = served.join().expect("terminated flow thread");
+        (request_line, response)
+    }
+
+    /// The whole of what retiring the second guest proxy buys: a workload's own
+    /// HTTPS client, told nothing but the standard proxy variables, reaches a
+    /// credentialed destination and the host puts the real credential on the
+    /// wire.
+    ///
+    /// The request line the proxy saw is asserted because it is the mechanism:
+    /// pointed at an HTTP proxy for an `https://` URL, an unmodified client
+    /// opens a `CONNECT` tunnel. The retired proxy answered that with `502`,
+    /// and the one that could substitute never saw a tunnel — which is why
+    /// whether a request was substituted used to depend on which variable the
+    /// workload's toolchain happened to read.
+    #[test]
+    fn a_client_configured_from_the_proxy_environment_gets_the_substituted_credential() {
+        let vm = harness(BOUND_HOST, b"{\"ok\":true}");
+        let (request_line, response) = exchange_through_proxy_environment(
+            &vm,
+            &request_with_placeholder(&vm.placeholder, BOUND_HOST),
+        );
+
+        assert_eq!(
+            request_line,
+            format!("CONNECT {BOUND_HOST}:443 HTTP/1.1"),
+            "the proxy environment must make an unmodified client tunnel"
+        );
+        let response = response.expect("the tunnel was established and the request answered");
+        assert!(
+            status_line(&response).starts_with("HTTP/1.1 200"),
+            "unexpected status: {}",
+            String::from_utf8_lossy(&response)
+        );
+        assert_eq!(dechunk(&response), b"{\"ok\":true}");
+
+        let seen = vm
+            .forwarder
+            .seen
+            .lock()
+            .expect("forwarder record lock")
+            .clone()
+            .expect("the forward leg ran");
+        assert_eq!(
+            seen.headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                .map(|(_, value)| value.as_str()),
+            Some(format!("Bearer {REAL_SECRET}").as_str()),
+            "the destination receives the real credential"
+        );
+        assert!(
+            !String::from_utf8_lossy(&response).contains(REAL_SECRET),
+            "and the guest never sees it"
+        );
+    }
+
     fn request_with_placeholder(placeholder: &str, host: &str) -> Vec<u8> {
         method_request_with_placeholder("POST", placeholder, host)
     }
