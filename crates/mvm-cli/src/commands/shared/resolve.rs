@@ -254,12 +254,12 @@ pub fn parse_peer_binding(raw: &str) -> Result<mvm_contract::peer::PeerBinding> 
 /// - **deny-all** → `flow-drop` and **unrestricted** → `open`: enforced
 ///   identically on every backend (the flow-open gate / no gate), so the tier
 ///   is backend-independent.
-/// - An **allow-list / preset** is now host **and** port enforced on every
-///   backend: Firecracker via nftables (`-d <host> --dport <port>`), libkrun
-///   via the admission-time DNS pin feeding the `L4PolicyScan` (a direct-IP dial
-///   to an unlisted address is dropped, not just an unlisted name). The tier is
+/// - An **allow-list / preset** is host **and** port enforced on every
+///   claim-bearing backend: the per-VM network endpoint's `EgressGate` decides each
+///   destination against the admission-time DNS pins (a direct-IP dial to an
+///   unlisted address is refused, not just an unlisted name). The tier is
 ///   uniformly `<backend>:l4-host-port`; the backend is still named so the
-///   receipt records which substrate enforced.
+///   receipt records which backend ran the workload.
 pub fn egress_enforcement_label(
     backend: &str,
     policy: &mvm_core::network_policy::NetworkPolicy,

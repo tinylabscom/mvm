@@ -147,7 +147,7 @@ per the threat model above.
 | 7 | Cargo dependencies are audited on every PR | supply chain | `cargo-deny` and `cargo-audit` CI jobs; a reproducibility double-build catches non-determinism that could mask injection |
 | 8 | Every workload runs from a signed, audited `ExecutionPlan` | cross-cutting | An Ed25519 host-signer keypair signs a typed plan; a validity window and a nonce replay-store gate admission; every admission emits chain-signed `plan.admitted` / `plan.launched` / `plan.failed` audit entries |
 | 9 | Every published bundle is content-addressed, key_id-pinned, and re-verified at fetch and at admit time | supply chain | A rejection ladder covers unknown key, tampered manifest, key_id mismatch, tampered or missing artifact, unsafe path, schema bump, and pin-archive/pin-signature drift |
-| 10 | No untrusted workload reaches the network unless explicitly admitted by policy | data containment | `NetworkPolicy` defaults to deny-all; Firecracker enforces it with an nftables default-deny ruleset on the TAP; libkrun enforces it with a gateway-bridge `PlanFlowPolicy` plus always-on deny-egress and per-tenant scans; an `unrestricted` policy emits an opt-in warning with a documented escape hatch |
+| 10 | No untrusted workload reaches the network unless explicitly admitted by policy | data containment | `NetworkPolicy` defaults to deny-all; no workload guest has a NIC, so every claim-bearing backend's egress leaves over vsock to one per-VM network endpoint, where `EgressGate` decides every connect, datagram, and DNS answer against the admitted policy's canonical projection, refusing the mandatory-deny ranges and TCP/22 under every policy |
 | 11 | Every application-dependency volume is hash-locked, attestation-checked, CVE-scanned, SBOM-enumerated, and bound to the workload's audit chain | supply chain (app layer) | A sealed volume carries `content/`, `sbom.cdx.json`, `fetch.log`, `cve.json`, and a hash-chained `meta.json`; the admission verifier refuses a tampered volume; a production launch fails closed on a high or critical CVE finding |
 | 12 | Every host-side broker service is bound to a signed `ExecutionPlan.services` binding, enforced before handler dispatch, and audited | cross-cutting | Binding-gated dispatch with a rejection ladder for unbound and out-of-profile calls; the handler registry is linted for policy-schema and composition coverage |
 | 13 | The managed substitution path hands the guest placeholders, never raw secret values | data containment | The host-side substitution endpoint mints the placeholder environment delivered to the guest and resolves a credential only while preparing an admitted outbound request; no secret-returning broker handler exists |
@@ -483,6 +483,37 @@ capability, and the NIC-less guest has no route around that absence. A plan
 with a narrow grant still begins from the same default-deny gate; only an
 admitted typed flow can cause the host endpoint to resolve a name, connect a
 socket, or bind an ingress listener.
+
+**Retired packet-path scans.** A host-side scan chain used to sit on the
+guest-NIC packet path: mandatory-deny egress, an L4 policy scan, a DNS
+sink-hole, a placeholder-leak scan, and an inbound SSH banner classifier. It
+lost its last caller when the guest NIC went away and has been deleted. What
+each asserted, and where it holds now:
+
+- *Link-local, cloud metadata, CGNAT, loopback* (`169.254.169.254`,
+  `169.254.0.0/16`, `100.64.0.0/10`, `127.0.0.0/8`, `::1`, `fe80::/10`):
+  `CanonicalEgress::permits` refuses these before consulting any rule, under an
+  unrestricted policy too, and `EgressGate` applies it to every address it
+  admits — a numeric target, each pinned address of a named host, and each
+  address a live lookup returns.
+- *TCP/22*: refused by the same predicate, under every policy.
+- *The L4 allow-list*: `EgressGate` over the canonical projection of the
+  admitted policy.
+- *DNS names*: `EgressGate::dns_verdict` answers only pinned names under an
+  allow-list, and strips private, loopback, link-local, and unique-local
+  answers from a live lookup under an unrestricted policy. That gates questions
+  asked through the host resolver. A raw UDP datagram to port 53 is decided by
+  the L4 rules alone, and a bare `NetworkPolicy` allow-list projects a UDP/53
+  carve-out to any address outside the mandatory-deny ranges, so no qname check
+  applies to such a datagram.
+- *A placeholder outside the substituted headers*: no equivalent. The typed
+  HTTP path substitutes and checks headers only, so a placeholder in a URL or
+  body is forwarded as-is (#3297). The placeholder is not the secret, so this
+  is a failure of the substitution contract rather than a disclosure.
+- *The inbound SSH banner classifier*: dropped, not ported. Guests ship no SSH
+  server, TCP/22 is refused at the gate, and a banner match is blinded by
+  wrapping the protocol in TLS, so it detected a service that cannot exist by
+  a signature any adversary can hide.
 
 **Verified-boot scoping (claim 3).** dm-verity is block-device-specific:
 it covers the block+ext4 backends — Firecracker and the in-process

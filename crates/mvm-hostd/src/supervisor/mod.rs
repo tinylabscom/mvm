@@ -98,6 +98,9 @@ pub mod policy_tool_gate;
 pub mod proxy;
 pub mod reaper;
 pub mod redaction_resolve;
+/// Undeclared secret/PII redaction shared by the egress endpoint and the
+/// declared-ingress transform.
+pub mod redactor;
 pub mod reversible_replacement;
 pub mod reversible_replacement_resolve;
 /// Chain-signed `secret.substituted` / `secret.placeholder_dropped`
