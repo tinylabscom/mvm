@@ -3,7 +3,8 @@
 //! Transparent `https` substitution terminates TLS at the host for **bound
 //! hosts only**. To do that without the rejected blanket-MITM, each VM gets a
 //! freshly-minted CA whose X.509 `nameConstraints permitted` is exactly the
-//! plan's bound hosts. The guest trusts only that per-run certificate (never
+//! plan's bound hosts, a `*.suffix` wildcard carried as the `suffix` subtree.
+//! The guest trusts only that per-run certificate (never
 //! any private key); the terminator holds the key and mints a leaf per SNI on
 //! the fly.
 //!
@@ -42,6 +43,11 @@ pub enum EgressCaError {
     Gen(String),
     #[error("egress CA parse: {0}")]
     Parse(String),
+    #[error(
+        "egress CA name constraint: `{0}` is a wildcard over a single DNS label, \
+         which would permit a whole top-level domain"
+    )]
+    TopLevelWildcard(String),
 }
 
 impl From<std::io::Error> for EgressCaError {
@@ -97,14 +103,20 @@ impl std::fmt::Debug for VmEgressCa {
 
 impl VmEgressCa {
     /// Mint a fresh self-signed per-VM CA (`CA:TRUE, pathlen:0`) whose
-    /// `nameConstraints permitted` is exactly `bound_hosts` (DNS). Only the
-    /// certificate ever leaves the host; the key stays in this value.
+    /// `nameConstraints permitted` holds one DNS subtree per distinct
+    /// `bound_hosts` entry — see [`dns_subtrees`] for how a `*.` pattern
+    /// lowers. Only the certificate ever leaves the host; the key stays in
+    /// this value.
+    ///
+    /// Refuses a wildcard over a single label (`*`, `*.com`) rather than mint
+    /// a CA that could speak for a whole top-level domain.
     pub fn mint(bound_hosts: &[&str]) -> Result<Self, EgressCaError> {
+        let permitted_subtrees = dns_subtrees(bound_hosts)?;
         let key = KeyPair::generate()?;
         let mut params = ca_issuer_params(VM_CA_CN)?;
         params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
         params.name_constraints = Some(NameConstraints {
-            permitted_subtrees: bound_hosts.iter().map(|h| dns_subtree(h)).collect(),
+            permitted_subtrees,
             excluded_subtrees: Vec::new(),
         });
         let cert = params.self_signed(&key)?;
@@ -181,8 +193,34 @@ impl std::fmt::Debug for Leaf {
     }
 }
 
-fn dns_subtree(host: &str) -> GeneralSubtree {
-    GeneralSubtree::DnsName(host.to_string())
+/// The permitted `dNSName` subtrees for a set of binding patterns, one per
+/// distinct subtree, in first-seen order.
+///
+/// A `*.example.com` pattern lowers to the `example.com` subtree: a `dNSName`
+/// constraint cannot carry a wildcard label, and verifiers reject one that
+/// does as malformed. The `example.com` subtree permits every depth of left
+/// label, exactly as the pattern does, and additionally the apex
+/// `example.com`, which the pattern does not. That is the same looseness an
+/// exact host already has — the `api.openai.com` subtree also permits
+/// `x.api.openai.com`. The certificate is therefore not the boundary: a flow
+/// is terminated only for a destination the binding itself admits, and that
+/// check still excludes the apex. The certificate limits what a leaked per-VM
+/// key could impersonate.
+fn dns_subtrees(bound_hosts: &[&str]) -> Result<Vec<GeneralSubtree>, EgressCaError> {
+    let mut names: Vec<&str> = Vec::with_capacity(bound_hosts.len());
+    for pattern in bound_hosts {
+        if mvm_contract::ir::host_pattern_is_single_label_wildcard(pattern) {
+            return Err(EgressCaError::TopLevelWildcard((*pattern).to_string()));
+        }
+        let name = mvm_contract::ir::host_pattern_subtree(pattern);
+        if !names.iter().any(|seen| seen.eq_ignore_ascii_case(name)) {
+            names.push(name);
+        }
+    }
+    Ok(names
+        .into_iter()
+        .map(|name| GeneralSubtree::DnsName(name.to_string()))
+        .collect())
 }
 
 #[cfg(test)]
@@ -307,6 +345,17 @@ mod tests {
             // certificate that repeats a subtree says the same thing twice.
             vec!["api.anthropic.com".into(), "api.openai.com".into()],
         );
+        // A wildcard lowers to its parent's subtree, and an exact host inside
+        // that subtree still gets its own entry — only an identical subtree is
+        // collapsed.
+        bind(
+            "search",
+            vec![
+                "*.search.example.com".into(),
+                "api.search.example.com".into(),
+                "*.SEARCH.example.com".into(),
+            ],
+        );
         // Bound by the operator but not named by this plan, so it must not widen
         // the certificate.
         bind("unused", vec!["files.example.com".into()]);
@@ -322,6 +371,12 @@ mod tests {
                 name: "ANTHROPIC_API_KEY".into(),
                 source: SecretSource::Keystore {
                     address: "anthropic".into(),
+                },
+            },
+            SecretBinding {
+                name: "SEARCH_API_KEY".into(),
+                source: SecretSource::Keystore {
+                    address: "search".into(),
                 },
             },
             // Resolved elsewhere, so it contributes no destination here.
@@ -343,11 +398,50 @@ mod tests {
             permitted_dns_names(ca.cert_pem()),
             vec![
                 "api.openai.com".to_string(),
-                "api.anthropic.com".to_string()
+                "api.anthropic.com".to_string(),
+                "search.example.com".to_string(),
+                "api.search.example.com".to_string(),
             ],
-            "the certificate must permit exactly the destinations the plan's \
-             secrets are bound to — no more, no fewer, no repeats"
+            "the certificate must permit exactly the subtrees of the destinations \
+             the plan's secrets are bound to — no more, no fewer, no repeats"
         );
+    }
+
+    #[test]
+    fn a_wildcard_binding_lowers_to_its_parent_subtree() {
+        let ca = VmEgressCa::mint(&["*.example.com", "api.openai.com"]).expect("mint");
+        assert_eq!(
+            permitted_dns_names(ca.cert_pem()),
+            vec!["example.com".to_string(), "api.openai.com".to_string()],
+            "a `*.` label is not a valid dNSName constraint; its parent is the subtree"
+        );
+
+        // And a real verifier agrees the subtree covers the wildcard's depth.
+        for sni in ["api.example.com", "a.b.example.com"] {
+            let leaf = ca.mint_leaf(sni).expect("mint leaf");
+            assert!(
+                verify_leaf_against_ca(&leaf.cert_pem, ca.cert_pem(), sni),
+                "{sni} is under the lowered subtree"
+            );
+        }
+        let outside = ca.mint_leaf("example.org").expect("mint leaf");
+        assert!(!verify_leaf_against_ca(
+            &outside.cert_pem,
+            ca.cert_pem(),
+            "example.org"
+        ));
+    }
+
+    #[test]
+    fn a_single_label_wildcard_is_refused_rather_than_constrained_to_a_tld() {
+        for pattern in ["*", "*.", "*.com"] {
+            let refused = VmEgressCa::mint(&["api.openai.com", pattern])
+                .expect_err("a single-label wildcard must not become a constraint");
+            assert!(
+                refused.to_string().contains(&format!("`{pattern}`")),
+                "the refusal names the pattern: {refused}"
+            );
+        }
     }
 
     #[test]

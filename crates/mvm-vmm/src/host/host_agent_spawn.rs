@@ -32,7 +32,10 @@ use crate::host::broker_services_spawn::{
 };
 
 /// PID file for the per-tenant host-agent daemon, under `host_agent_dir`.
-const DAEMON_PID_FILE: &str = "daemon.pid";
+pub const DAEMON_PID_FILE: &str = "daemon.pid";
+/// Executable name of the per-tenant host-agent daemon. A PID recorded in
+/// [`DAEMON_PID_FILE`] belongs to the daemon only while it runs this binary.
+pub const HOST_AGENT_BIN: &str = "mvm-host-agent";
 /// Spawn lock so concurrent `up`s converge on one daemon.
 const SPAWN_LOCK: &str = "spawn.lock";
 /// How long the daemon gets to bind its control socket before the spawn fails.
@@ -177,7 +180,7 @@ pub fn ensure_host_agent_daemon(tenant: &str) -> Result<PathBuf> {
     // Stale socket from a dead daemon would block the rebind.
     let _ = std::fs::remove_file(&control_socket);
     warm_claim_debug("resolve_daemon_binary");
-    let bin = resolve_subprocess_bin("mvm-host-agent", "MVM_HOST_AGENT_PATH")?;
+    let bin = resolve_subprocess_bin(HOST_AGENT_BIN, "MVM_HOST_AGENT_PATH")?;
     let cfg = serde_json::json!({
         "tenant_id": tenant,
         "control_socket": control_socket,
@@ -185,7 +188,7 @@ pub fn ensure_host_agent_daemon(tenant: &str) -> Result<PathBuf> {
         "signer_helper_uds_path": mvm_core::config::host_agent_signer_helper_socket(tenant),
         "software_chain_key_path": mvm_core::config::mvm_keys_dir().join(HOST_SIGNER_KEY),
     });
-    let child = spawn_detached_with_config(&bin, &cfg, "mvm-host-agent")?;
+    let child = spawn_detached_with_config(&bin, &cfg, HOST_AGENT_BIN)?;
     warm_claim_debug("daemon_spawned");
     wait_for_control_socket(&control_socket, child.id(), DAEMON_READY_TIMEOUT)?;
     warm_claim_debug("new_control_ready");

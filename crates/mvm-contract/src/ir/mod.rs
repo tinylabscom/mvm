@@ -32,4 +32,5 @@ pub use workload::{
     Network, NetworkDns, NetworkEgress, NetworkMode, NodeTool, PortForward, PortProto,
     PortTransform, PythonTool, Resources, SecretMount, SecretRef, Sigv4Params, Source, Volume,
     WarmProcessConfig, Workload, host_is_bound, host_matches,
+    host_pattern_is_single_label_wildcard, host_pattern_subtree,
 };

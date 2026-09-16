@@ -460,6 +460,10 @@ boxes, and 11 have no checkboxes at all. 112 are number-named — the style
 - [ ] **I7** Do not break the workflow doing it — gates, CI and the Justfile
       recipes keep working. `xtask check-agent-notes` and the workflow-structure
       tests both pin file locations.
+- [x] **I8** Add a hermetic published-documentation link gate (#3328).
+      Resolve repository-relative files, GitHub blob/tree URLs for this
+      repository, generated Markdown routes, internal content/page routes, and
+      static assets without making external hosts a blocking dependency.
 
 ## J. Machine hygiene
 

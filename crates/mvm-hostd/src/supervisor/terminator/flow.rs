@@ -627,6 +627,11 @@ mod tests {
     /// it is the one piece swapped out.
     const BOUND_IP: &str = "93.184.216.34";
     const OTHER_IP: &str = "198.51.100.9";
+    /// A subdomain wildcard binding, a name two labels below it that the
+    /// binding admits, and where that name is pinned.
+    const WILDCARD_PATTERN: &str = "*.wild.test";
+    const WILDCARD_SUBDOMAIN: &str = "api.eu.wild.test";
+    const WILDCARD_IP: &str = "203.0.113.17";
 
     /// Records the request the forward leg was handed, so a test can prove the
     /// destination received the real credential without a network call.
@@ -678,6 +683,12 @@ mod tests {
     /// points it away from the host the request names, so that test isolates
     /// the gate from the binding.
     fn harness(admitted: &str, response_body: &[u8]) -> Harness {
+        harness_bound_to(BOUND_HOST, admitted, response_body)
+    }
+
+    /// As [`harness`], with the secret bound to — and the certificate minted
+    /// from — `pattern` rather than [`BOUND_HOST`].
+    fn harness_bound_to(pattern: &str, admitted: &str, response_body: &[u8]) -> Harness {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = FileSecretStore::with_dir(dir.path().join("secrets"));
         store
@@ -700,7 +711,7 @@ mod tests {
                     var: "API_KEY".into(),
                 },
                 auth_type: AuthType::Bearer,
-                allowed_hosts: vec![BOUND_HOST.to_string()],
+                allowed_hosts: vec![pattern.to_string()],
                 sigv4: None,
             })
             .as_str()
@@ -721,9 +732,8 @@ mod tests {
         // Through the production delivery, so the certificate a guest is handed
         // and the key the endpoint terminates under are the ones the launch path
         // actually ships rather than a look-alike minted here.
-        let delivery =
-            mvm_vmm::host::network_endpoint_spawn::build_egress_tls_delivery(&[BOUND_HOST])
-                .expect("mint the per-VM egress ca");
+        let delivery = mvm_vmm::host::network_endpoint_spawn::build_egress_tls_delivery(&[pattern])
+            .expect("mint the per-VM egress ca");
         let intermediate = mvm_core::crypto::egress_ca::VmEgressCa::from_pem(
             delivery.cert_pem(),
             delivery.key_pem(),
@@ -754,7 +764,11 @@ mod tests {
         let now = chrono::Utc::now();
         let later = now + chrono::Duration::hours(1);
         let mut pins = DnsPinRegistry::new();
-        for (name, ip) in [(BOUND_HOST, BOUND_IP), (OTHER_HOST, OTHER_IP)] {
+        for (name, ip) in [
+            (BOUND_HOST, BOUND_IP),
+            (OTHER_HOST, OTHER_IP),
+            (WILDCARD_SUBDOMAIN, WILDCARD_IP),
+        ] {
             pins.add(DnsPin::at(
                 name,
                 vec![ip.parse().expect("pinned ip parses")],
@@ -835,6 +849,19 @@ mod tests {
     /// `None` when the handshake never completed — which is the answer a client
     /// that was delivered some other VM's certificate must get.
     fn exchange_trusting(harness: &Harness, trusted_pem: &str, request: &[u8]) -> Option<Vec<u8>> {
+        exchange_with(harness, BOUND_HOST, trusted_pem, request).ok()
+    }
+
+    /// As [`exchange_trusting`], over a flow opened to `host:443`.
+    ///
+    /// A handshake that never completed is an `Err` carrying what each side
+    /// reported: the guest client's error and the terminator's own result.
+    fn exchange_with(
+        harness: &Harness,
+        host: &str,
+        trusted_pem: &str,
+        request: &[u8],
+    ) -> Result<Vec<u8>, String> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -843,7 +870,7 @@ mod tests {
             .service(Arc::clone(&harness.service))
             .runtime(runtime.handle().clone())
             .leaves(Arc::new(LeafCache::default()))
-            .authority(BOUND_HOST, 443)
+            .authority(host, 443)
             .mode(TerminationMode::Tls)
             .build()
             .expect("build terminated flow");
@@ -851,16 +878,16 @@ mod tests {
         let (endpoint_side, guest_side) = UnixStream::pair().expect("socket pair");
         let served = std::thread::spawn(move || flow.serve(endpoint_side));
 
-        let server_name = rustls::pki_types::ServerName::try_from(BOUND_HOST)
-            .expect("the bound host is a server name")
+        let server_name = rustls::pki_types::ServerName::try_from(host)
+            .expect("the flow's host is a server name")
             .to_owned();
         let connection =
             rustls::ClientConnection::new(Arc::new(guest_client_config(trusted_pem)), server_name)
                 .expect("guest tls client");
         let mut tls = rustls::StreamOwned::new(connection, guest_side);
 
-        let wrote = tls.write_all(request).and_then(|()| tls.flush()).is_ok();
-        let response = wrote.then(|| read_response(&mut tls));
+        let wrote = tls.write_all(request).and_then(|()| tls.flush());
+        let response = wrote.as_ref().ok().map(|()| read_response(&mut tls));
 
         // Close the guest side so the terminator's keep-alive loop ends and
         // the thread can be joined.
@@ -868,9 +895,17 @@ mod tests {
         let _ = tls.flush();
         let _ = tls.sock.shutdown(std::net::Shutdown::Both);
         // A refused request still wrote its refusal, which is what the caller
-        // asserts on, so the flow's own result is not what this returns.
-        let _served = served.join().expect("terminated flow thread");
-        response
+        // asserts on, so the flow's own result only matters when the handshake
+        // failed and it is the terminator's half of the explanation.
+        let served = served.join().expect("terminated flow thread");
+        match (wrote, response) {
+            (Ok(()), Some(response)) => Ok(response),
+            (wrote, _) => Err(format!(
+                "guest client: {:?}; terminator: {:?}",
+                wrote.err(),
+                served.err()
+            )),
+        }
     }
 
     /// The guest's loopback proxy, reduced to what a client configured from the
@@ -1167,6 +1202,70 @@ mod tests {
                 .is_none(),
             "and nothing may be forwarded on a flow that never handshook"
         );
+    }
+
+    /// The certificate minted for `*.wild.test` carries the `wild.test`
+    /// subtree, which a verifier would accept for the apex too. The binding
+    /// does not admit the apex, and this is the check that keeps a flow to it
+    /// from being terminated.
+    #[test]
+    fn the_wildcard_apex_is_not_terminable() {
+        let vm = harness_bound_to(WILDCARD_PATTERN, WILDCARD_SUBDOMAIN, b"never sent");
+        let apex = WILDCARD_PATTERN
+            .strip_prefix("*.")
+            .expect("the wildcard pattern has a `*.` label");
+        assert_eq!(
+            vm.service.terminable(WILDCARD_SUBDOMAIN, 443),
+            Some(TerminationMode::Tls),
+            "a subdomain the wildcard admits terminates"
+        );
+        assert_eq!(vm.service.terminable(apex, 443), None);
+        assert_eq!(vm.service.terminable(apex, 80), None);
+    }
+
+    /// A `*.` binding admits a subdomain at any depth, so an unmodified client
+    /// trusting only the certificate minted from that binding has to complete
+    /// a terminated flow to one: the certificate's name constraints must admit
+    /// what the binding admits, in a form a real verifier accepts.
+    #[test]
+    fn a_wildcard_bound_subdomain_terminates() {
+        let vm = harness_bound_to(WILDCARD_PATTERN, WILDCARD_SUBDOMAIN, b"{\"ok\":true}");
+
+        let response = exchange_with(
+            &vm,
+            WILDCARD_SUBDOMAIN,
+            &vm.intermediate_pem.clone(),
+            &request_with_placeholder(&vm.placeholder, WILDCARD_SUBDOMAIN),
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "a client trusting the delivered certificate must complete its handshake: {error}"
+            )
+        });
+
+        assert!(
+            status_line(&response).starts_with("HTTP/1.1 200"),
+            "unexpected status: {}",
+            String::from_utf8_lossy(&response)
+        );
+        let seen = vm
+            .forwarder
+            .seen
+            .lock()
+            .expect("forwarder record lock")
+            .clone()
+            .expect("the forward leg ran");
+        assert_eq!(
+            seen.url,
+            format!("https://{WILDCARD_SUBDOMAIN}/v1/messages")
+        );
+        let authorization = seen
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            .map(|(_, value)| value.clone())
+            .expect("the re-originated request carries an authorization header");
+        assert_eq!(authorization, format!("Bearer {REAL_SECRET}"));
     }
 
     #[test]

@@ -50,7 +50,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
     match args.action {
         EnvCmd::Bootstrap(a) => bootstrap::run(cli, a, cfg),
         EnvCmd::Cleanup(a) => cleanup::run(cli, a, cfg),
-        EnvCmd::Uninstall(a) => uninstall::run(cli, a, cfg),
+        EnvCmd::Uninstall(a) => uninstall::run(&a),
         EnvCmd::Update(a) => update::run(cli, a, cfg),
         EnvCmd::Sign(a) => sign::run(cli, a, cfg),
     }

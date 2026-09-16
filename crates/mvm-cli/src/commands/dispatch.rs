@@ -67,7 +67,16 @@ impl TopLevelCommand for Commands {
     }
 
     fn is_early_command(&self) -> bool {
-        matches!(self, Commands::QemuVsockBridge(_))
+        // Uninstall runs before startup creates config, host signing keys and
+        // the command audit envelope: it must not create the state directory
+        // it is deciding whether to remove.
+        matches!(
+            self,
+            Commands::QemuVsockBridge(_)
+                | Commands::Env(env::group::Args {
+                    action: env::group::EnvCmd::Uninstall(_),
+                })
+        )
     }
 
     fn try_run_early(&self) -> Option<Result<()>> {
@@ -76,6 +85,9 @@ impl TopLevelCommand for Commands {
         }
         match self {
             Commands::QemuVsockBridge(a) => Some(qemu_bridge::run(a)),
+            Commands::Env(env::group::Args {
+                action: env::group::EnvCmd::Uninstall(a),
+            }) => Some(env::uninstall::run(a)),
             _ => None,
         }
     }

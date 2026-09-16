@@ -15,6 +15,73 @@ curl -fsSL https://runmvm.com/install.sh | sh
 MVM_VERSION=v0.16.1 curl -fsSL https://runmvm.com/install.sh | sh
 ```
 
+## Where install.sh Puts Things
+
+Each release is unpacked whole into its own directory, and the commands on
+`PATH` reach it through a single `current` link:
+
+```text
+~/.local/lib/mvm/<n>-<version>/   mvmctl, its host binaries, assets/
+~/.local/lib/mvm/current          -> <n>-<version>
+~/.local/bin/mvmctl               -> ~/.local/lib/mvm/current/mvmctl
+~/.local/bin/mvm-*                -> ~/.local/lib/mvm/current/mvm-*
+```
+
+Re-running `install.sh` upgrades: it stages and verifies the new release, then
+switches `current` in one rename, so `mvmctl` and the host binaries it spawns
+always come from the same release. If anything fails before the install is
+reported — a checksum, a signature, codesign, or the new `mvmctl` not running —
+`current` stays on (or returns to) the previous release. The three most recent
+releases are kept; set `MVM_INSTALL_KEEP` to change that. `MVM_INSTALL_DIR` and
+`MVM_INSTALL_LIB_DIR` move the two directories.
+
+The library directory and each release directory carry a marker file
+(`.mvm-lib`, `.mvm-release`), and nothing without one is ever treated as a
+release, pruned or removed. `install.sh` refuses a library directory that
+already holds files without the marker, and refuses to replace an entry in the
+install dir that it did not create.
+
+An install made by an older `install.sh`, with the binaries copied straight
+into `~/.local/bin`, is preserved as the first release directory on the next
+run, so that upgrade can roll back too.
+
+## Uninstalling
+
+```bash
+curl -fsSL https://runmvm.com/uninstall.sh | sh
+```
+
+`mvmctl env uninstall` runs the same script. It refuses while a machine is
+running, stops the per-tenant host-agent daemons (after confirming each
+recorded PID runs an installed `mvm-host-agent`), and removes the `PATH`
+entries, the `current` link and the marked release directories — nothing else
+in `~/.local/bin`. An install from the older `install.sh` is removed by the
+names that installer used: `mvmctl`, `mvm-hvf-supervisor`,
+`mvm-libkrun-supervisor`, `mvm-network-endpoint` and `assets/`. The uninstaller
+exits nonzero when it finds nothing to remove.
+
+The check for running machines is answered by the installed `mvmctl`. Releases
+before this uninstaller cannot answer it; the uninstaller then says so and asks
+you to stop your machines and re-run with `--force`. Without a state directory
+there is nothing to check, and no `--force` is needed.
+
+The state directory (`~/.mvm`, or `MVM_HOME`) holds your machines, images, keys
+and audit logs; the uninstaller asks before removing it when run interactively,
+and otherwise keeps it unless you pass `--purge`. It removes it only when it is
+recognisably mvm state — not `/`, not your home directory or any directory
+above it, and, once any symlink is resolved, either a directory named `.mvm` or
+one holding the host signing key or an audit chain — and checks that before
+removing anything else, and again just before removing the state directory. A
+state directory that is a symlink is unlinked; what it points at is left alone.
+With `HOME` unset or empty, nothing is purged:
+
+```bash
+curl -fsSL https://runmvm.com/uninstall.sh | sh -s -- --purge
+```
+
+Pass the same `MVM_INSTALL_DIR` / `MVM_INSTALL_LIB_DIR` you installed with.
+Homebrew and `cargo install` installs are removed with their own tools.
+
 ## Install Model
 
 The default install model is binary-first: install `mvmctl`, then run workloads
@@ -103,6 +170,11 @@ verification.
 tarball and swaps the install in place. `--check` reports whether a newer
 release exists without installing it, `--force` reinstalls even when already
 current, and `--skip-verify` bypasses checksum verification (don't).
+
+An `install.sh` install is upgraded by re-running `install.sh`, which moves
+`mvmctl`, its host binaries and `assets/` together and can roll back. `env update`
+refuses on such an install and says so, rather than overwrite binaries inside
+the active release directory.
 
 ```bash
 mvmctl env update --check

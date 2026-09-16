@@ -33,7 +33,7 @@ verification under `trust`. Domains that already own their own subcommands
 **Beginner vs. advanced surfaces.** [`mvmctl machine`](#machine-beginner-ux)
 (further down) is the beginner-facing front door — one small command group for
 the common "run something in a microVM" cases, and the path the
-[getting-started docs](/getting-started/machine-scenarios/) lead with. Every
+[machine use-case guide](/guides/machine-use-cases/) leads with. Every
 verb in the grouping above is an **advanced / underlying surface**: `machine`
 is a thin UX layer over the _same_ signed, audited, OCI-provenance execution
 path. The former top-level `up`/`invoke`/`console`/`down` verbs have folded into
@@ -100,7 +100,7 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl env bootstrap`            | Same as `mvmctl bootstrap` (the `env`-grouped form)                                                                                                                                                                                                           |
 | `mvmctl doctor`                   | Run diagnostics + dependency checks + security posture, including per-tenant host-agent daemon state (folded in from the dropped `mvmctl security` verb)                                                                                                      |
 | `mvmctl doctor --json`            | Output diagnostics as JSON                                                                                                                                                                                                                                    |
-| `mvmctl env update`               | Check for and install mvmctl updates                                                                                                                                                                                                                          |
+| `mvmctl env update`               | Check for and install mvmctl updates. Refuses on an `install.sh` install, which is upgraded by re-running `install.sh`                                                                                                                                        |
 | `mvmctl env update --check`       | Only check for updates, don't install                                                                                                                                                                                                                         |
 | `mvmctl env update --force`       | Force reinstall even if already up to date                                                                                                                                                                                                                    |
 | `mvmctl env update --skip-verify` | Skip cosign signature verification                                                                                                                                                                                                                            |
@@ -137,8 +137,8 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl env cleanup --<tier> --force`                               | Let the sweep proceed even when a VM appears to be running. Wiping live VM state corrupts the running guest — use only when the PID file is known stale                                                                                                                                               |
 
 To reclaim disk without losing anything unrecoverable, `--nuclear --keep-identity`
-is the command. `mvmctl env uninstall --all` also wipes `~/.mvm`, but it removes
-`/var/lib/mvm` and the `mvmctl` binary too, and needs `sudo`.
+is the command. `mvmctl env uninstall --purge` also removes `~/.mvm`, but it
+removes the installed `mvmctl` and its host binaries too.
 
 ## Manifests
 
@@ -1151,10 +1151,10 @@ running microVM.
 | `mvmctl ops metrics`             | Show runtime metrics (Prometheus text format)                                                                                  |
 | `mvmctl ops metrics --json`      | Show runtime metrics as JSON                                                                                                   |
 | `mvmctl ops mcp stdio`           | Serve capability-derived `MvmClient` tools as newline-delimited MCP JSON-RPC over local stdin/stdout                           |
-| `mvmctl env uninstall`           | Remove Firecracker, the builder microVM image, and all mvm state (confirmation required)                                       |
-| `mvmctl env uninstall -y`        | Uninstall without confirmation                                                                                                 |
-| `mvmctl env uninstall --all`     | Also remove ~/.mvm/ config dir and /usr/local/bin/mvmctl binary                                                                |
-| `mvmctl env uninstall --dry-run` | Print what would be removed without removing                                                                                   |
+| `mvmctl env uninstall`           | Remove an `install.sh` installation: its entries in `MVM_INSTALL_DIR`, the `current` link and every release directory in `MVM_INSTALL_LIB_DIR`. Runs the same script as `curl -fsSL https://runmvm.com/uninstall.sh \| sh`. Refuses while a machine is running, and stops the host-agent daemons only after confirming each recorded PID runs an installed `mvm-host-agent`. Asks before removing `~/.mvm` when interactive and keeps it otherwise. Exits nonzero when it finds nothing to remove |
+| `mvmctl env uninstall --purge`   | Also remove `~/.mvm` (or `MVM_HOME`) without asking                                                                            |
+| `mvmctl env uninstall --dry-run` | Print what would be removed without removing anything                                                                          |
+| `mvmctl env uninstall --force`   | Skip the running-machine check and host-agent daemon shutdown — for an install whose `mvmctl` predates the check, once its machines are stopped |
 
 ## Global Options
 
