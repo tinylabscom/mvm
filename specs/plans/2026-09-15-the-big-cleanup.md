@@ -316,12 +316,16 @@ The 1500-line rule the brief asks for **already exists as a gate** —
 because it is miscalibrated. Fix the counter before splitting anything, or the
 next oversized file arrives unnoticed.
 
-- [ ] **C1** `check-file-size` counts lines *before the first* `#[cfg(test)]`
+- [x] **C1** `check-file-size` counts lines *before the first* `#[cfg(test)]`
       rather than lines outside test spans. `libkrun_builder.rs` carries 4,632
       production lines and is charged 887; `backends/hvf/kernel_boot.rs` carries
-      2,208 and is charged 25 — an 88× undercount. **Ten files exceed the limit
-      by real body while the gate reads green.** 81 non-test files exceed 1500
+      2,208 and is charged 25 — an 88× undercount. **The initial spot audit found
+      ten files over the limit while the gate read green; the repaired census
+      found 20.** 81 non-test files exceed 1500
       total lines; 83 more are in the 1000–1500 band. #3313. **Do this first.**
+      The repair must scan `crates/`, root `src/`, `xtask/`, and `build.rs`,
+      exempt modules gated at their declaration site, and pin every current
+      oversized file to a shrinking-only allowance.
 - [ ] **C2** Split `network_endpoint_proxy.rs` — 5,281 lines. #3302.
 - [ ] **C3** `mvm-core`: 2,197 LOC across 13 public modules is referenced by
       nothing; the pack subsystem (2,448 LOC) is a real seam; 1,850 LOC belongs
