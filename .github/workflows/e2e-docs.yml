@@ -173,7 +173,11 @@ jobs:
   # decided by `macos_blocks_on_unusable_host` in the evidence job below.
   e2e-docs-macos-host-check:
     name: Documented surface e2e (macOS, host check)
-    runs-on: macos-15-intel
+    # The self-hosted Apple Silicon runner (issue #3011). While it is offline
+    # this job waits in the queue rather than falling back to the evidence job
+    # below — a release blocks until the runner is back, which is the intended
+    # cost of a macOS gate that has to boot something.
+    runs-on: [self-hosted, macOS, ARM64, m1]
     timeout-minutes: 10
     outputs:
       supported: ${{ steps.preflight.outputs.supported }}
@@ -183,22 +187,17 @@ jobs:
       # which reads as a supervisor bug rather than as a host that cannot run
       # one.
       #
-      # No GitHub-hosted macOS runner can boot an mvm guest today:
+      # No GitHub-hosted macOS runner can boot an mvm guest:
       #
-      #   arm64 (macos-latest)  Hypervisor.framework is nested and reports
-      #                         HV_UNSUPPORTED. libkrun goes through the same
-      #                         framework, so it does not escape this either —
-      #                         the passing `libkrun (macOS Apple Silicon)` job
-      #                         builds, tests and lints, and never boots.
-      #   x86_64 (this runner)  has the virtualization extensions, but
-      #                         `mvm-hvf-supervisor` is Apple-Silicon-only and
-      #                         links as a stub, and the libkrun Homebrew
-      #                         formula is ARM-only so it cannot be installed.
+      #   arm64 (macos-latest)    Hypervisor.framework is nested and reports
+      #                           HV_UNSUPPORTED. libkrun goes through the same
+      #                           framework, so it does not escape this either.
+      #   x86_64 (macos-15-intel) `mvm-hvf-supervisor` is Apple-Silicon-only
+      #                           and links as a stub.
       #
-      # This lane needs a self-hosted Apple Silicon runner — see issue #3011.
-      # The probe is a live `uname`, not the `runs-on` label, so pointing this
-      # workflow at such a runner is the whole change: the lane starts running
-      # for both callers with nothing here to remember to flip back.
+      # Hence the self-hosted runner. The probe stays a live `uname` rather
+      # than trusting the label, so pointing `runs-on` back at a hosted image
+      # degrades to the evidence job instead of to a 35-minute confusing red.
       - name: Preflight — this host can run the workload backend
         id: preflight
         run: |
@@ -258,12 +257,17 @@ jobs:
     # The macOS default backend is HVF, and every guest-booting BDD scenario
     # before this one carried `@firecracker` — so the backend most users run
     # had no lane that booted anything. This is that lane.
-    # macos-latest selects an arm64 hosted VM where nested HVF reports
-    # HV_UNSUPPORTED. The Intel runner exposes the virtualization extensions
-    # needed by this live witness.
-    runs-on: macos-15-intel
-    timeout-minutes: 90
+    #
+    # Self-hosted, because no hosted macOS image can boot a guest — see the
+    # host check above.
+    runs-on: [self-hosted, macOS, ARM64, m1]
+    # The same one-budget rule as the Linux job: the job must outlast the
+    # suite's own deadline by the whole of setup, or a slow run is cancelled
+    # before it can print a summary and proves nothing. A cold artifact home
+    # on the runner spends its first stretch acquiring images.
+    timeout-minutes: 180
     env:
+      MVM_E2E_TIMEOUT_SECS: "7200"
       # The documented surface includes signed release downloads. Build the
       # exact binary under test with their verifier enabled.
       MVM_E2E_FEATURES: user,release-artifact-bootstrap
@@ -275,8 +279,9 @@ jobs:
       # HVF can run the published image but cannot prepare it through Stage 0,
       # so make the signed release-artifact path explicit on this lane.
       MVM_BOOT_IMAGE: fetch
-      # Intel cannot install ARM-only libkrun. The fetched builder image is
-      # self-contained, so source artifact jobs run inside it under HVF.
+      # The runner has no libkrun installed and must not need it: HVF is the
+      # macOS 26+ default, and the fetched builder image is self-contained, so
+      # source artifact jobs run inside it under HVF.
       MVM_BUILDER_BACKEND: hvf
     steps:
       - uses: actions/checkout@v6
@@ -316,10 +321,30 @@ jobs:
         # grant. The Linux lane leaves this unset too: Firecracker detaches its
         # session and is orphaned to init before the launch returns, leaving no
         # process of ours to fire a timer.
+        #
+        # The suite script deletes its own log on exit, so keep a copy for the
+        # upload below. `pipefail` is load-bearing: without it the step's
+        # status is `tee`'s, and a red suite reports a green step.
         env:
           MVM_BDD_SNAPSHOT: "1"
           MVM_BDD_WALL_CLOCK: "1"
-        run: just e2e-docs
+        run: |
+          set -o pipefail
+          just e2e-docs 2>&1 | tee "$RUNNER_TEMP/e2e-docs.log"
+
+      # Nobody logs in to the runner to read a log. Upload on success too: a
+      # green run's "did NOT run" tally is how a skipped scenario gets noticed.
+      - name: Upload the suite log and VM logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-docs-macos-logs
+          path: |
+            ${{ runner.temp }}/e2e-docs.log
+            ~/.mvm/vms/*/console.log
+            ~/.mvm/vms/*/supervisor.log
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Dump VMM diagnostics on failure
         if: failure()

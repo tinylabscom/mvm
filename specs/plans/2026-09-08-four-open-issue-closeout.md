@@ -282,11 +282,18 @@ an unprovisioned label would not provide the required live witness.
       `just e2e-launch`, and `just e2e-docs` from a clean checkout. Resolve any
       software/setup blocker as its own issue rather than declaring the hardware
       lane ready around it.
-- [ ] Change both the macOS host-check and live macOS job to the unique
+- [x] Change both the macOS host-check and live macOS job to the unique
       self-hosted labels. Update structural tests so the two jobs cannot drift
-      onto different hosts or regain a hosted Intel label.
-- [ ] Retain the live architecture/backend preflight. A mislabeled or degraded
-      runner must refuse before spending the full suite budget.
+      onto different hosts or regain a hosted Intel label. Both jobs target
+      `[self-hosted, macOS, ARM64, m1]`;
+      `macos_documented_surface_runs_on_the_self_hosted_apple_silicon_runner`
+      asserts both and refuses `macos-latest` / `macos-15-intel`. The cutover
+      also raised the macOS budget to 180 min over a pinned 7200 s suite
+      deadline, made the zig action runnable without `sudo` or Python 3.11, and
+      uploads the suite and VM logs on every run.
+- [x] Retain the live architecture/backend preflight. A mislabeled or degraded
+      runner must refuse before spending the full suite budget. The host check
+      still probes `uname -m`, not the label.
 - [ ] Run the trusted reusable workflow and capture a green witness where the
       host check reports supported, `e2e-docs-macos` boots real HVF guests, and
       `e2e-docs-macos-evidence` is skipped automatically.

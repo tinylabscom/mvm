@@ -155,9 +155,9 @@
       burn-in then exposed macOS errno 57 while `machine reconfigure` replaced
       the HVF supervisor on the same agent socket path; activation now treats
       that transport-only socket-rebind state as retryable within the existing
-      deadline while authenticated rejection remains fatal. The physical runner
-      still needs to be provisioned, hardened, registered, and burned in; the
-      repository runner inventory currently contains zero self-hosted runners.
+      deadline while authenticated rejection remains fatal. The M1 runner is
+      registered (`m1` label) and both macOS jobs target it; the first green
+      trusted run and closing #3011 remain.
 
 - [x] **Linux 6.12.109 synchronized kernel pin — issue #3213.**
       `2026-09-08-kernel-6-12-109`.

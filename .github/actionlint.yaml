@@ -1,0 +1,8 @@
+# Custom labels on self-hosted runners. actionlint knows GitHub's hosted images
+# and the default `self-hosted`/OS/arch labels; anything else fails the
+# workflow lint until it is listed here.
+self-hosted-runner:
+  labels:
+    # The Apple Silicon laptop that boots guests under HVF for the macOS
+    # documented-surface lane (issue #3011).
+    - m1
