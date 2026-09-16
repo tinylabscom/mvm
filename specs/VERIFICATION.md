@@ -171,7 +171,8 @@ tracking issue.
 **File count is not cost, and adding shards did not make it one.** The
 two-shard split measured the gap on 2026-08-16: `1of2` finished five files
 in 100 minutes while `2of2` drew `plan_admission` (93 mutants),
-`supervisor/audit_file` (107) and `supervisor/network/stages` (108), spent
+`supervisor/audit_file` (107) and `supervisor/network/stages` (108, a file
+since deleted with the packet-path scan layer it held), spent
 its full 330 and never reached its fifth file. The response was to cut
 `mvm-hostd` four ways, on the correct diagnosis but the wrong remedy: a
 cost-blind split of an unequal surface stays unequal at any width. It

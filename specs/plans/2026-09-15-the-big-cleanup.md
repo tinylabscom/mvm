@@ -150,10 +150,13 @@ opposite one, `drop_page_cache`).
       `:1364`. ADR-001's "(CLOSED.)" at `:310` is the correct one. Every other
       drift found in this audit runs the other way, which is why this one is
       worth calling out separately. Folded into #3309.
-- [ ] **A2.9** ADR-001:150 describes the `stages.rs` scan chain as the live
+- [x] **A2.9** ADR-001:150 describes the `stages.rs` scan chain as the live
       libkrun egress mechanism, contradicting the same ADR at :441-448
       ("enforced at **one** seam"). The scan chain is dead (§A4). Fix the prose
       as part of #3297, not separately — the two must move together.
+      _Done with the scan layer's deletion: row 10 now names the endpoint and
+      `EgressGate`, and the claim-10 section records where each retired scan's
+      property is enforced today and that the SSH-banner classifier was dropped._
 
 ### A3. Incomplete, stubbed and placeholder paths
 
@@ -179,7 +182,8 @@ rest being the secrets-substitution domain noun.
       gated — in the crate that gates subprocess binary integrity. Its own doc
       says "never register in production" and nothing enforces that. Same shape
       at `network/stages.rs:62` (`NoopSubstitution`) and `:337` (`NoopScan`).
-      All three have only test callers. Gate them behind `cfg(test)` or a
+      All three have only test callers. _The two `stages.rs` doubles were
+      deleted with the scan layer; `NoopChecker` remains._ Gate them behind `cfg(test)` or a
       `test-support` feature so a production registration cannot compile.
 - [ ] **A3.3** `crates/mvm-hostd/tests/prelaunch_live.rs:143` —
       `valid_attach_boots_and_agent_reachable` is `#[ignore]`d and its body is a

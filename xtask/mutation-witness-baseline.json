@@ -277,13 +277,6 @@
       ]
     },
     {
-      "path": "crates/mvm-hostd/src/supervisor/network/stages.rs",
-      "package": "mvm-hostd",
-      "claims": [
-        13
-      ]
-    },
-    {
       "path": "crates/mvm-hostd/src/supervisor/network_endpoint.rs",
       "package": "mvm-hostd",
       "claims": [
@@ -1030,11 +1023,6 @@
       "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
       "mutant": "replace > with >= in FileAuditSigner::prune_through",
       "reason": "after verification and range validation, `through` names an existing sealed segment and a later active segment exists. Both comparisons therefore find an entry, and the result is used only as an existence proof; no input reaching this point distinguishes them."
-    },
-    {
-      "file": "crates/mvm-hostd/src/supervisor/network/stages.rs",
-      "mutant": "replace < with <= in dns_query_qname",
-      "reason": "equivalent: the guard rejects a payload shorter than the 12-byte DNS header, and the label walk that follows indexes through payload.get(i)?, which returns None rather than panicking. A 12-byte payload therefore yields None down both the mutated and unmutated paths."
     },
     {
       "file": "crates/mvm-runtime/src/vm/instance_snapshot.rs",

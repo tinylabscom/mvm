@@ -45,9 +45,6 @@ ALLOWED_FILES=(
   # Secrets scanner: a one-line comment naming "OpenSSH" as one of the PEM
   # private-key formats its generic BEGIN-block regex redacts.
   "crates/mvm-hostd/src/supervisor/secrets_scanner.rs"
-  # Inbound network scan that drops SSH server identification banners
-  # (`SSH-2.0-...`) on any TCP port; its tests construct fake banner bytes.
-  "crates/mvm-hostd/src/supervisor/network/stages.rs"
   # mkGuest's own SSH deny-scan: rejects any package/extraFile/Nix-store
   # closure path that looks SSH-shaped before a guest image is built.
   "nix/lib/mk-guest.nix"

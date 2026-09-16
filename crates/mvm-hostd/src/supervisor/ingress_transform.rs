@@ -10,8 +10,8 @@ use std::io::{Read, Write};
 
 use mvm_core::policy::{RedactionAction, ReversibleReplacementAction};
 
-use super::network::stages::{RedactingSubstitution, RedactionHits};
-use super::network_endpoint_proxy::{ForwardResponse, StreamingRedactor};
+use super::network_endpoint_proxy::ForwardResponse;
+use super::redactor::{RedactingSubstitution, RedactionHits, StreamingRedactor};
 use super::reversible_replacement::{
     ReplacementEngine, ReplacementFlow, StreamingReinjector, StreamingReplacer,
 };

@@ -41,7 +41,9 @@ use crate::supervisor::accept_loop::{
 };
 use crate::supervisor::ai_meter;
 use crate::supervisor::audit_recorder::{EventCategory, Recorder};
-use crate::supervisor::network::stages::{RedactingSubstitution, RedactionHits};
+use crate::supervisor::redactor::{
+    RedactingSubstitution, RedactionHits, SensitiveDetectionError, StreamingRedactor,
+};
 use crate::supervisor::reversible_replacement::{
     ReplacementEngine, ReplacementFlow, StreamingReinjector,
 };
@@ -386,12 +388,6 @@ pub(crate) fn redact_request(
     }
 }
 
-/// A detector violated the validated-span contract. No matched bytes or
-/// dependency error text cross this boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("sensitive-data detector failed closed")]
-pub(crate) struct SensitiveDetectionError;
-
 /// True when `action` requires body protection or observation. The default
 /// action protects curated secrets and PII, so it arms the cleartext-scan gate
 /// even when entropy and name scanning are off. Only an explicit audit-only
@@ -418,7 +414,7 @@ fn explicit_default_redaction(action: &mvm_core::policy::RedactionAction) -> boo
 #[cfg(test)]
 mod redaction_category_tests {
     use super::redaction_categories;
-    use crate::supervisor::network::stages::RedactionHits;
+    use crate::supervisor::redactor::RedactionHits;
 
     /// A counted channel that did not fire must not be named.
     ///
@@ -944,10 +940,10 @@ pub struct SubstitutionService {
     resolver: Arc<dyn SecretResolver>,
     forwarder: Arc<dyn Forwarder>,
     /// Egress redactor. Masks *undeclared* secret-shaped / PII content out
-    /// of an outbound request before forwarding — the
-    /// request-level twin of the gateway bridge's packet redactor, sharing one
-    /// `RedactingSubstitution` definition so every backend that routes egress
-    /// through this endpoint scrubs identically. Built once (rule compilation).
+    /// of an outbound request before forwarding, using the same
+    /// `RedactingSubstitution` definition as the declared-ingress transform so
+    /// every backend that routes egress through this endpoint scrubs
+    /// identically. Built once (rule compilation).
     redactor: RedactingSubstitution,
     /// Optional chain-signed audit recorder. When set, each substitution emits
     /// a `secret.substituted` entry (metadata only — claim 13).
@@ -1008,130 +1004,11 @@ struct PreparedFlow {
     redaction_action: mvm_core::policy::RedactionAction,
 }
 
-/// Raw suffix retained between transform chunks. A 64 KiB window is larger
-/// than every configured secret/PII fingerprint; an adversarial pattern that
-/// still cannot reach a stable cut by twice that bound fails closed.
-const STREAM_TRANSFORM_OVERLAP: usize = 64 * 1024;
-const MAX_STREAM_TRANSFORM_PENDING: usize = STREAM_TRANSFORM_OVERLAP * 2;
 /// Cap on how much of a streaming AI response body we retain for trailing
 /// usage extraction. SSE usage blocks are small and appear at the end of the
 /// stream; this buffer only keeps the tail so guest bandwidth is unaffected.
 const MAX_AI_STREAM_BUFFER_BYTES: usize = 256 * 1024;
 
-pub(crate) struct StreamingRedactor {
-    pending: Zeroizing<Vec<u8>>,
-}
-
-impl StreamingRedactor {
-    pub(crate) fn new() -> Self {
-        Self {
-            pending: Zeroizing::new(Vec::new()),
-        }
-    }
-
-    pub(crate) fn push(
-        &mut self,
-        redactor: &RedactingSubstitution,
-        action: &mvm_core::policy::RedactionAction,
-        chunk: &[u8],
-    ) -> Result<(Vec<u8>, RedactionHits), SensitiveDetectionError> {
-        self.pending.extend_from_slice(chunk);
-        if self.pending.len() <= STREAM_TRANSFORM_OVERLAP {
-            return Ok((Vec::new(), RedactionHits::default()));
-        }
-
-        let safe_len = self.pending.len() - STREAM_TRANSFORM_OVERLAP;
-        let (prefix, prefix_hits) = redact_or_copy(redactor, action, &self.pending[..safe_len])?;
-        let (whole, _) = redact_or_copy(redactor, action, &self.pending)?;
-        if whole.starts_with(&prefix) {
-            let suffix = self.pending.split_off(safe_len);
-            *self.pending = suffix;
-            return Ok((prefix, prefix_hits));
-        }
-        if self.pending.len() > MAX_STREAM_TRANSFORM_PENDING {
-            return Err(SensitiveDetectionError);
-        }
-        Ok((Vec::new(), RedactionHits::default()))
-    }
-
-    pub(crate) fn finish(
-        &mut self,
-        redactor: &RedactingSubstitution,
-        action: &mvm_core::policy::RedactionAction,
-    ) -> Result<(Vec<u8>, RedactionHits), SensitiveDetectionError> {
-        let pending = std::mem::take(&mut *self.pending);
-        redact_or_copy(redactor, action, &pending)
-    }
-}
-
-fn redact_or_copy(
-    redactor: &RedactingSubstitution,
-    action: &mvm_core::policy::RedactionAction,
-    bytes: &[u8],
-) -> Result<(Vec<u8>, RedactionHits), SensitiveDetectionError> {
-    match redactor.redact_bytes_for(bytes, action) {
-        Some((_redacted, hits)) if hits.detector_failures > 0 => Err(SensitiveDetectionError),
-        Some((redacted, hits)) => Ok((redacted, hits)),
-        None => Ok((bytes.to_vec(), RedactionHits::default())),
-    }
-}
-
-#[cfg(test)]
-mod streaming_redactor_tests {
-    use super::*;
-
-    #[test]
-    fn a_secret_split_across_chunks_is_withheld_and_redacted() {
-        let secret = b"sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let split = 17;
-        let mut first = vec![b'x'; STREAM_TRANSFORM_OVERLAP - split];
-        first.extend_from_slice(&secret[..split]);
-
-        let redactor = RedactingSubstitution::with_default_rules();
-        let action = mvm_core::policy::RedactionAction::default();
-        let mut stream = StreamingRedactor::new();
-        let (ready, _) = stream.push(&redactor, &action, &first).unwrap();
-        assert!(ready.is_empty(), "the possible prefix must stay withheld");
-        let (ready, _) = stream.push(&redactor, &action, &secret[split..]).unwrap();
-        let (tail, hits) = stream.finish(&redactor, &action).unwrap();
-        let output = [ready, tail].concat();
-        assert!(!output.windows(secret.len()).any(|window| window == secret));
-        assert!(!hits.secrets.is_empty(), "the split token must be detected");
-    }
-
-    #[test]
-    fn clean_streams_release_every_byte_in_order_with_bounded_carry() {
-        let redactor = RedactingSubstitution::with_default_rules();
-        let action = mvm_core::policy::RedactionAction::default();
-        let mut stream = StreamingRedactor::new();
-        let input = vec![b'x'; STREAM_TRANSFORM_OVERLAP + 123];
-        let (ready, _) = stream.push(&redactor, &action, &input).unwrap();
-        assert_eq!(ready.len(), 123);
-        assert!(stream.pending.len() <= STREAM_TRANSFORM_OVERLAP);
-        let (tail, _) = stream.finish(&redactor, &action).unwrap();
-        assert_eq!([ready, tail].concat(), input);
-    }
-
-    #[test]
-    fn a_long_clean_stream_never_grows_the_overlap_buffer() {
-        let redactor = RedactingSubstitution::with_default_rules();
-        let action = mvm_core::policy::RedactionAction::default();
-        let mut stream = StreamingRedactor::new();
-        let chunk = vec![b'x'; 8 * 1024];
-        let mut emitted = 0usize;
-
-        for _ in 0..1024 {
-            let (ready, hits) = stream.push(&redactor, &action, &chunk).unwrap();
-            assert!(hits.is_empty());
-            emitted = emitted.saturating_add(ready.len());
-            assert!(stream.pending.len() <= STREAM_TRANSFORM_OVERLAP);
-        }
-        let (tail, hits) = stream.finish(&redactor, &action).unwrap();
-        assert!(hits.is_empty());
-        emitted = emitted.saturating_add(tail.len());
-        assert_eq!(emitted, chunk.len() * 1024);
-    }
-}
 /// How an opaque TCP flow could be terminated and re-forwarded rather than
 /// spliced straight through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1359,7 +1236,7 @@ impl SubstitutionService {
         &self,
         payload: &[u8],
         action: &mvm_core::policy::RedactionAction,
-    ) -> Option<(Vec<u8>, crate::supervisor::network::stages::RedactionHits)> {
+    ) -> Option<(Vec<u8>, RedactionHits)> {
         self.redactor.redact_bytes_for(payload, action)
     }
 
@@ -2240,9 +2117,8 @@ impl SubstitutionService {
     }
 
     /// Mask undeclared secret-shaped / PII content out of a guest-authored
-    /// request before it leaves the host — the request-level twin of the
-    /// gateway bridge's packet redactor (one shared `RedactingSubstitution`).
-    /// A header value carrying a declared placeholder is left untouched (the
+    /// request before it leaves the host, through the shared
+    /// `RedactingSubstitution`. A header value carrying a declared placeholder is left untouched (the
     /// real credential is substituted into it next, and the host-reserved
     /// placeholder is not secret-shaped); every other header value and the body
     /// are scrubbed. Returns the rewritten request plus the categories that
@@ -2999,6 +2875,7 @@ mod response_body_tests {
 mod server_tests {
     use super::*;
     use crate::keyholder::LocalResolver;
+    use crate::supervisor::redactor::STREAM_TRANSFORM_OVERLAP;
     use mvm_contract::ir::{AuthType, SecretMount, SecretRef};
     use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
     use secrecy::SecretBox;
@@ -3634,9 +3511,8 @@ mod server_tests {
     }
 
     /// The endpoint scrubs an *undeclared* secret-shaped run from the
-    /// outbound body before forwarding (the same
-    /// redaction the gateway bridge applies, at the endpoint chokepoint so
-    /// every backend routing egress through it is covered), while a *declared*
+    /// outbound body before forwarding (at the endpoint chokepoint, so every
+    /// backend routing egress through it is covered), while a *declared*
     /// placeholder is still substituted to its real credential. The destination
     /// sees the real declared credential and a masked undeclared one — the
     /// undeclared secret never leaves the host.

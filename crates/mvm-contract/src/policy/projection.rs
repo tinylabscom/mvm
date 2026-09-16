@@ -194,9 +194,9 @@ fn refuse_inverted_ports(dest: &str, lo: u16, hi: u16) -> Result<(), ProjectionE
 
 /// Lower L4 rule specs to canonical rules. `refuse_overlap` gates the
 /// admission-time mandatory-deny refusal: the projection/preview path
-/// (canonicalize_effective) passes true; the kernel packet path passes
+/// (canonicalize_effective) passes true; the lenient lowering passes
 /// false, because permits() denies mandatory-deny ranges at decision
-/// time and the always-on deny scan backstops it.
+/// time.
 fn lower_l4_specs(
     specs: &[crate::policy::policies::L4RuleSpec],
     refuse_overlap: bool,
@@ -225,10 +225,10 @@ fn lower_l4_specs(
     Ok(rules)
 }
 
-/// Lenient L4 lowering for the kernel packet path: malformed-input
-/// refusals only (bad CIDR, unknown proto, inverted ports). Does NOT
-/// refuse mandatory-deny overlap — permits() denies mandatory-deny
-/// ranges at decision time and the always-on deny scan backstops it.
+/// Lenient L4 lowering: malformed-input refusals only (bad CIDR, unknown
+/// proto, inverted ports). Does NOT refuse mandatory-deny overlap —
+/// permits() denies mandatory-deny ranges at decision time, whatever the
+/// rules say.
 pub fn canonicalize_l4(
     specs: &[crate::policy::policies::L4RuleSpec],
 ) -> Result<CanonicalEgress, ProjectionError> {
@@ -258,21 +258,22 @@ pub fn canonicalize_effective(
     Ok(CanonicalEgress::Rules(rules))
 }
 
-/// The DNS service port. A bare allow-list's name resolution must still reach
-/// the resolver, so the bare lowering carves out UDP/53 (the `DnsSinkholeScan`
-/// gates *which* names resolve).
+/// The DNS service port. The bare lowering carves out UDP/53 for it; which
+/// names a guest may resolve is decided separately, by the gate's DNS verdict
+/// over the pin registry.
 const DNS_PORT: u16 = 53;
 
-/// The DNS carve-out rules so a bare allow-list can resolve names: **UDP/53
-/// only** (IPv4 + IPv6 `0.0.0.0/0` / `::/0`). TCP/53 is deliberately NOT carved
-/// out: the host-name gate (`DnsSinkholeScan`) only inspects UDP/53, so a
-/// TCP/53-to-anywhere allowance would be an ungated egress channel — the same
-/// direct-dial-to-an-unlisted-target shape this lowering exists to close. Guest
-/// resolvers (busybox / glibc / musl) query over UDP; TCP/53 fallback is rare.
+/// The DNS carve-out rules: **UDP/53 only** (IPv4 + IPv6 `0.0.0.0/0` / `::/0`).
+/// TCP/53 is deliberately NOT carved out, so a TCP/53-to-anywhere allowance
+/// cannot become a direct dial to an unlisted target. Guest resolvers
+/// (busybox / glibc / musl) query over UDP; TCP/53 fallback is rare.
 /// `CanonicalEgress::permits` still denies the mandatory-deny ranges first, so 53
-/// to cloud-metadata / link-local stays blocked. The qname gate constrains the
-/// remaining UDP/53 reach to allow-listed names; scoping it to the gateway
-/// resolver IP is a follow-up that applies uniformly to every backend.
+/// to cloud-metadata / link-local stays blocked.
+///
+/// These rules admit a UDP/53 datagram to any other address. A DNS question
+/// asked through the host's resolver is gated on its name against the pins; a
+/// raw datagram to port 53 is decided by these rules alone, so nothing here
+/// constrains its payload or its resolver.
 fn dns_carve_out_rules() -> Vec<CanonicalRule> {
     let any_v4: IpNet = "0.0.0.0/0".parse().expect("0.0.0.0/0 is a valid CIDR");
     let any_v6: IpNet = "::/0".parse().expect("::/0 is a valid CIDR");
@@ -290,21 +291,20 @@ fn dns_carve_out_rules() -> Vec<CanonicalRule> {
 /// Lower a bare [`crate::policy::network_policy::NetworkPolicy`] (the
 /// no-signed-bundle transient/dev path) + admission-time DNS pins into the
 /// canonical egress grant set — the transient analogue of
-/// [`canonicalize_effective`]. This is what makes the libkrun/HVF bare path gate
-/// `host:port` at L4 like Firecracker's nftables, closing the direct-IP-dial
-/// bypass that a name-only [`crate::policy`] sink-hole leaves open.
+/// [`canonicalize_effective`]. The endpoint's egress gate is built from this, so
+/// a bare allow-list gates `host:port` on the pinned addresses and a direct dial
+/// to an unlisted address is refused, not just an unlisted name.
 ///
 /// - unrestricted ⇒ [`CanonicalEgress::Unrestricted`] (mandatory-deny still applies).
-/// - deny-all (empty rule set) ⇒ `Rules([])`: L4 admits nothing. The flow gate
-///   drops every egress flow before a packet reaches here; the empty rule set is
-///   the fail-closed backstop.
-/// - allow-list / preset ⇒ a DNS carve-out (UDP/53 only, gated on qname by the
-///   sink-hole) plus one TCP rule per (pinned IP, port).
+/// - deny-all (empty rule set) ⇒ `Rules([])`: admits nothing.
+/// - allow-list / preset ⇒ a DNS carve-out (UDP/53 only; see
+///   `dns_carve_out_rules` for what it does and does not gate) plus one TCP
+///   rule per (pinned IP, port).
 ///
 /// Fail-closed: a host with no live, non-empty pin returns an error and the
-/// caller drops to deny-all. Lenient on mandatory-deny overlap (kernel-path
-/// posture, matching [`canonicalize_l4`]) — [`CanonicalEgress::permits`] denies
-/// those ranges at decision time and the always-on deny scan backstops it.
+/// caller drops to deny-all. Lenient on mandatory-deny overlap (matching
+/// [`canonicalize_l4`]) — [`CanonicalEgress::permits`] denies those ranges at
+/// decision time.
 pub fn canonicalize_network_policy(
     policy: &crate::policy::network_policy::NetworkPolicy,
     pins: &DnsPinRegistry,
@@ -315,8 +315,7 @@ pub fn canonicalize_network_policy(
         None => return Ok(CanonicalEgress::Unrestricted),
         Some(rules) => rules,
     };
-    // Empty rule set ⇒ deny-all: admit nothing (no DNS carve-out — a deny-all
-    // flow is dropped at the gate before it reaches the scan).
+    // Empty rule set ⇒ deny-all: admit nothing, and no DNS carve-out.
     if rules.is_empty() {
         return Ok(CanonicalEgress::Rules(Vec::new()));
     }
@@ -863,9 +862,8 @@ mod tests {
 
     #[test]
     fn mandatory_deny_wins_even_under_unrestricted() {
-        // The `open` kill-switch never reaches metadata/loopback —
-        // mirrors the gateway-bridge invariant that even an open
-        // policy keeps every packet gated by mandatory-deny.
+        // The `open` kill-switch never reaches metadata/loopback: even an
+        // open policy keeps every destination gated by mandatory-deny.
         let eg = CanonicalEgress::Unrestricted;
         for denied in ["169.254.169.254", "127.0.0.1", "100.64.0.1", "::1"] {
             assert!(
