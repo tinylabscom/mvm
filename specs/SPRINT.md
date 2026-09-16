@@ -10,6 +10,12 @@
 
 ## In progress
 
+- [x] **Dormant-control caller gate repair — issue #3334.**
+      `specs/plans/2026-09-15-the-big-cleanup.md` A0.1. Ensure plain and
+      visibility-restricted `use` items, including multiline import trees,
+      cannot satisfy a live control's production-caller requirement. Focused
+      regression tests and the full workspace test suite pass.
+
 - [x] **Published installer production-host repair — issue #3331.**
       `specs/plans/2026-09-15-install-lifecycle-and-packaging-polish.md` WS1.
       Current install surfaces and the daily watcher now use the Worker-attached

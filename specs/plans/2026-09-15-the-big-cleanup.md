@@ -22,7 +22,8 @@ doubles) · #3311 (`specs/` cleanup) · #3313 (miscalibrated size gate) ·
 #3314 (`mvm-core` split) · #3315 (naming + the real section-D work) · #3316 (**claims 11 and 13** — a
 dead control and an ambiguous witness) · #3317 (no citation gate on ADRs) ·
 #3318 (ADR-001 internal defects) ·
-#3319 (four Accepted ADRs describing nothing). Pre-existing and folded in: #3257–#3264,
+#3319 (four Accepted ADRs describing nothing) · #3334 (re-exports satisfy the
+dormant-control caller gate). Pre-existing and folded in: #3257–#3264,
 #3265–#3277 (the two design-plan epics), #3283–#3288, #3297, #3300–#3302.
 
 ## How to use this plan
@@ -47,6 +48,11 @@ hand-built inputs while no production path calls it at all.
 inspects four hand-listed symbols. **Feeding it every `fn:` witness from the
 ADR-001 ledger turns this whole class from a review discovery into a CI
 failure**, and it is the highest-leverage single change in this plan.
+
+- [x] **A0.1 Harden the dormant-control caller test (#3334).** Exclude plain,
+      public, restricted-visibility, and multiline `use` items from caller
+      evidence. A re-export moves a control's name into scope; it does not
+      prove production invokes the control.
 
 The inventory is the gate for everything else — the later sections are scoped by
 what it found. Measured 2026-09-15 against `bad9ebe561`.
