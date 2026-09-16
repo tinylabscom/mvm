@@ -1,6 +1,6 @@
 //! Internal admission and boot helpers consumed by `machine/mod.rs`:
 //! `start_persistent_oci_machine`, `admit_plan_for_boot`, `AdmitPlanForBootParams`,
-//! `AdmissionContext`, `emit_launched_if`, `emit_failed_if`,
+//! `AdmissionContext`, `emit_launched`, `emit_failed`,
 //! `persists_plan_before_start`, `resolve_workload_kernel`, and
 //! `load_workload_ir`.
 
@@ -25,8 +25,8 @@ mod runtime_source;
 
 pub(super) use admission::{
     AdmissionContext, AdmitPlanForBootParams, admit_plan_for_boot,
-    attach_guest_boot_config_for_plan, emit_boot_posture_if, emit_failed_if, emit_launched_if,
-    guest_profile_for_boot,
+    attach_guest_boot_config_for_plan, emit_failed, emit_launched, guest_profile_for_boot,
+    record_transient_outcome,
 };
 // Referenced only from `invoke.rs`'s test module (asserting the attached
 // security-policy config-drive file name) — cfg-gated so a non-test build
@@ -172,11 +172,6 @@ pub(in crate::commands) struct Args {
     /// chain string label.
     #[arg(long)]
     pub tenant: Option<String>,
-    /// Skip admission (`synthesize → sign → verify → check_window
-    /// → nonce`). One-release escape hatch; prints a deprecation warning
-    /// when set. Will be removed once admission is the only path.
-    #[arg(long)]
-    pub no_supervisor: bool,
     /// Pin the launch to a specific `.mvmpkg` bundle. The path is
     /// read at admit time, verified against the local trust store
     /// (`~/.mvm/trusted-publishers/`), and embedded into the

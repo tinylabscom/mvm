@@ -4651,28 +4651,6 @@ fn test_up_tenant_override_via_flag() {
     );
 }
 
-#[test]
-fn test_up_no_supervisor_defaults_off() {
-    // `--no-supervisor` was an `up`-only flag; `up` is retired.
-    let result = Cli::try_parse_from(["mvmctl", "up"]);
-    assert!(result.is_err(), "`up` was retired");
-    assert_eq!(
-        result.unwrap_err().kind(),
-        clap::error::ErrorKind::InvalidSubcommand
-    );
-}
-
-#[test]
-fn test_up_no_supervisor_flag_parses() {
-    // `--no-supervisor` was an `up`-only flag; `up` is retired.
-    let result = Cli::try_parse_from(["mvmctl", "up", "--no-supervisor"]);
-    assert!(result.is_err(), "`up` was retired");
-    assert_eq!(
-        result.unwrap_err().kind(),
-        clap::error::ErrorKind::InvalidSubcommand
-    );
-}
-
 // ---- `mvmctl compile --from-recording` ----
 
 #[test]
@@ -5541,4 +5519,36 @@ fn startup_registers_the_output_stream_plane() {
     // Idempotent: a second call must not panic or unregister the first.
     register_stream_plane();
     assert!(mvm_runtime::workload_runner::console_streamer_installed());
+}
+
+/// There is no way to boot without a signed plan, so there is no flag to ask
+/// for one. `--no-supervisor` used to skip admission on `machine run`, `start`
+/// and `restart`; a machine started that way had no plan, no `plan.admitted`
+/// entry and no claim-8 record, while every other boot did. Rejecting the flag
+/// at parse time keeps that second path from growing back behind a hidden arg.
+///
+/// Each argv is checked twice: without the flag it must parse, so the refusal
+/// can only be about the flag. Asserting the refusal alone would pass just as
+/// happily if some other argument in the line were the one clap rejected.
+#[test]
+fn machine_verbs_reject_the_admission_bypass_flag() {
+    for base in [
+        vec!["mvmctl", "machine", "run", "--image", "alpine"],
+        vec!["mvmctl", "machine", "start", "m1"],
+        vec!["mvmctl", "machine", "restart", "m1"],
+    ] {
+        if let Err(err) = Cli::try_parse_from(&base) {
+            panic!("{base:?} must parse without the flag, or this test proves nothing: {err}");
+        }
+        let mut with_flag = base.clone();
+        with_flag.push("--no-supervisor");
+        let err = Cli::try_parse_from(&with_flag)
+            .err()
+            .unwrap_or_else(|| panic!("{with_flag:?} must not parse"));
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::UnknownArgument,
+            "{with_flag:?} must be refused as an unknown argument: {err}"
+        );
+    }
 }

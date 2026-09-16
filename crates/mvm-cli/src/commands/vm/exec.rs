@@ -708,7 +708,7 @@ pub(in crate::commands) fn run_secure_with_source(
             volumes,
         } = inputs;
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
-        let ctx = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+        let c = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
             network_mode: admit_network_mode,
             tenant: "local",
             vm_name,
@@ -724,7 +724,6 @@ pub(in crate::commands) fn run_secure_with_source(
             secret_release: mvm_core::plan::SecretReleasePolicy::default(),
             secrets: vec![],
             caller_commitment: admit_caller_commitment.clone(),
-            no_supervisor: false,
             ledger: &ledger,
             keys_dir: None,
             audit_dir: None,
@@ -751,7 +750,6 @@ pub(in crate::commands) fn run_secure_with_source(
             ),
             assets: assets.to_vec(),
         })?;
-        let Some(c) = ctx else { return Ok(None) };
         // Persist the bare plan so the pre-start moat / endpoint can read it
         // on the backends that consume it from disk (mirrors the invoke path).
         if super::up::persists_plan_before_start(&admit_backend) {
@@ -814,19 +812,14 @@ pub(in crate::commands) fn run_secure_with_source(
             &oci_provenance,
         )?;
         let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
-        let output = match crate::exec::run_captured_with_posture(req, Some(&admit), &posture) {
-            Ok(o) => {
-                let ctx = admit_ctx.borrow_mut().take();
-                super::up::emit_launched_if(&ctx, &receipt_backend, false);
-                super::up::emit_boot_posture_if(&ctx, posture.get());
-                o
-            }
-            Err(e) => {
-                let ctx = admit_ctx.borrow_mut().take();
-                super::up::emit_failed_if(&ctx, "launch", &e);
-                return Err(e);
-            }
-        };
+        let result = crate::exec::run_captured_with_posture(req, Some(&admit), &posture);
+        super::up::record_transient_outcome(
+            admit_ctx.borrow_mut().take(),
+            &receipt_backend,
+            posture.get(),
+            &result,
+        );
+        let output = result?;
         if !json_requested && !output.stdout.is_empty() {
             print!("{}", output.stdout);
         }
@@ -1055,21 +1048,16 @@ fn run_run_args(
         audit.oci_provenance,
     )?;
     let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
-    let exit_code = match crate::exec::run_with_posture(req, audit.admit, &posture) {
-        Ok(code) => {
-            // The VM booted and the command ran (whatever its exit code), so the
-            // admission launched — emit `plan.launched` plus the resolved boot
-            // posture (virtiofs-root vs block-ext4) against the same plan.
-            let ctx = audit.ctx.borrow_mut().take();
-            super::up::emit_launched_if(&ctx, audit.backend, false);
-            super::up::emit_boot_posture_if(&ctx, posture.get());
-            code
-        }
-        Err(e) => {
-            super::up::emit_failed_if(&audit.ctx.borrow_mut().take(), "launch", &e);
-            return Err(e);
-        }
-    };
+    // A non-zero exit still means the VM booted and the command ran, so it
+    // records as launched; only a failure to run at all records as failed.
+    let result = crate::exec::run_with_posture(req, audit.admit, &posture);
+    super::up::record_transient_outcome(
+        audit.ctx.borrow_mut().take(),
+        audit.backend,
+        posture.get(),
+        &result,
+    );
+    let exit_code = result?;
     if exit_code != 0 {
         mvm_observability::exit(exit_code);
     }

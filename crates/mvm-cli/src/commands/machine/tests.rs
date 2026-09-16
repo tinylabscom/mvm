@@ -3408,7 +3408,6 @@ fn start_args_with_create_flags(
         dry_run: false,
         quiet: false,
         hypervisor: None,
-        no_supervisor: false,
         kernel_pin: None,
         has_ad_hoc_argv: false,
     }

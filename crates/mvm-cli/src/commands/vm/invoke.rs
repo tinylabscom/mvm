@@ -310,7 +310,6 @@ fn admit_entrypoint_boot(
         secret_release: params.lowered_secrets.secret_release,
         secrets: params.lowered_secrets.secrets.clone(),
         caller_commitment: params.caller_commitment,
-        no_supervisor: false,
         ledger: &ledger,
         keys_dir: None,
         audit_dir: None,
@@ -348,7 +347,6 @@ fn admit_entrypoint_boot(
         grants: None,
         backend_kind: None,
     })?;
-    let Some(ctx) = ctx else { return Ok(None) };
 
     let mut start_config = mvm_core::vm_backend::VmStartConfig::default();
     let guest_profile = super::up::guest_profile_for_boot(params.keep_alive_dev, params.rootfs);
@@ -524,16 +522,15 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
         Some(&backend_name),
     ) {
         Ok(vm) => {
-            let ctx = admit_ctx.borrow_mut().take();
-            super::up::emit_launched_if(&ctx, &backend_name, true);
-            if let Some(ctx) = ctx {
-                *admit_ctx.borrow_mut() = Some(ctx);
+            if let Some(ctx) = admit_ctx.borrow().as_ref() {
+                super::up::emit_launched(ctx, &backend_name, true);
             }
             vm
         }
         Err(e) => {
-            let ctx = admit_ctx.borrow_mut().take();
-            super::up::emit_failed_if(&ctx, "backend-start", &e);
+            if let Some(ctx) = admit_ctx.borrow_mut().take() {
+                super::up::emit_failed(&ctx, "backend-start", &e);
+            }
             return Err(e).context("Booting VM for the entrypoint call");
         }
     };
@@ -630,9 +627,8 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
 /// known.
 ///
 /// A streamed stdin is the only shape that needs anything from the boot: the
-/// grant on the admitted plan is what authorizes a write, so a boot that
-/// produced no plan — `--no-supervisor` short-circuits admission — has nothing
-/// to write under. Refusing here beats streaming into a workload nothing
+/// grant on the admitted plan is what authorizes a write, so a dispatch with no
+/// admitted plan has nothing to write under. Refusing here beats streaming into a workload nothing
 /// authorized. A one-shot payload asks for no authority and is unaffected.
 fn authorize_stdin<'a>(
     stream_stdin: bool,
@@ -642,9 +638,9 @@ fn authorize_stdin<'a>(
     match (stream_stdin, admitted) {
         (true, Some(ctx)) => Ok(DispatchStdin::Streaming(&ctx.admitted)),
         (true, None) => anyhow::bail!(
-            "streamed stdin needs an admitted plan, and this boot was not admitted \
-             (--no-supervisor): the input grant is what authorizes a write, so there \
-             is nothing here to write under"
+            "streamed stdin needs an admitted plan, and this dispatch has none: the \
+             input grant is what authorizes a write, so there is nothing here to \
+             write under"
         ),
         (false, _) => Ok(DispatchStdin::OneShot(prologue)),
     }
@@ -2670,14 +2666,13 @@ mod streamed_stdin_tests {
 
     #[test]
     fn an_unadmitted_boot_refuses_a_streamed_stdin() {
-        // `--no-supervisor` short-circuits admission, so there is no grant and
-        // nothing to write under. Streaming anyway would put the caller's
-        // bytes into a workload nothing authorized.
+        // With no admitted plan there is no grant and nothing to write under.
+        // Streaming anyway would put the caller's bytes into a workload
+        // nothing authorized.
         let error = authorize_stdin(true, None, Vec::new())
             .err()
             .expect("an unadmitted boot has no grant to write under");
         let rendered = format!("{error:#}");
-        assert!(rendered.contains("--no-supervisor"), "{rendered}");
         assert!(rendered.contains("admitted plan"), "{rendered}");
     }
 

@@ -182,7 +182,6 @@ pub(crate) fn start_args_for_run(args: &MachineRunArgs, name: &str) -> MachineSt
         dry_run: false,
         quiet: banner_suppressed(args),
         hypervisor: args.run.hypervisor.clone(),
-        no_supervisor: args.no_supervisor,
         kernel_pin: args.kernel_pin.clone(),
         has_ad_hoc_argv: !args.run.argv.is_empty(),
     }

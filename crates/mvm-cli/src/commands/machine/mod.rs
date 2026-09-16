@@ -255,9 +255,6 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Recreate a named machine when its config changed.
     #[arg(long)]
     pub force: bool,
-    /// Skip plan-admission signing (hidden; for testing only).
-    #[arg(long, hide = true)]
-    pub no_supervisor: bool,
     /// Boot the locally-built workload kernel from the mvm cache instead of the
     /// image's own kernel. Presence is the signal; the value is a label only.
     /// (Hidden — primarily threaded by `vm rekernel`.)
@@ -313,7 +310,6 @@ impl Default for MachineRunArgs {
             tty: false,
             interactive: false,
             force: false,
-            no_supervisor: false,
             kernel_pin: None,
             entrypoint: false,
             fresh: false,
@@ -852,9 +848,6 @@ pub(in crate::commands) struct MachineStartArgs {
     /// the env equivalent.
     #[arg(long, value_name = "HYPERVISOR")]
     pub hypervisor: Option<String>,
-    /// Skip plan-admission signing (hidden; for testing only).
-    #[arg(long, hide = true)]
-    pub no_supervisor: bool,
     /// Boot the locally-built workload kernel from the mvm cache instead of the
     /// image's own kernel. Presence is the signal; the value is a label only.
     /// (Hidden — primarily threaded by `vm rekernel`.)
@@ -895,9 +888,6 @@ pub(in crate::commands) struct MachineStartCmd {
     /// the env equivalent.
     #[arg(long, value_name = "HYPERVISOR")]
     pub hypervisor: Option<String>,
-    /// Skip plan-admission signing (hidden; for testing only).
-    #[arg(long, hide = true)]
-    pub no_supervisor: bool,
     /// Boot the locally-built workload kernel from the mvm cache instead of the
     /// image's own kernel. (Hidden — primarily threaded by `vm rekernel`.)
     #[arg(long = "kernel-pin", value_name = "PIN", hide = true)]
@@ -917,7 +907,6 @@ impl MachineStartCmd {
             dry_run: self.dry_run,
             quiet: false,
             hypervisor: self.hypervisor.clone(),
-            no_supervisor: self.no_supervisor,
             kernel_pin: self.kernel_pin.clone(),
             has_ad_hoc_argv: false,
         }

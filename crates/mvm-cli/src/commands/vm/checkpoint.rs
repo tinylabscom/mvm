@@ -1021,7 +1021,6 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         ),
         secrets: p.declared_secrets.to_vec(),
         caller_commitment: None,
-        no_supervisor: false,
         ledger: &ledger,
         keys_dir: None,
         audit_dir: None,
@@ -1065,13 +1064,11 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
 
     populate_fork_rootfs_verity(&mut start_config, p.instance_rootfs)?;
 
-    if let Some(ctx) = admission.as_ref() {
-        mvm_hostd::plan_admission::populate_audit_substrate(
-            &mut start_config,
-            &ctx.admitted,
-            ctx.policy_bundle.as_ref(),
-        )?;
-    }
+    mvm_hostd::plan_admission::populate_audit_substrate(
+        &mut start_config,
+        &admission.admitted,
+        admission.policy_bundle.as_ref(),
+    )?;
 
     // Mint the child's verb-grant sidecar. The backend's cmdline builder
     // reads it via verb_grant_cmdline_token at start time.
@@ -1081,10 +1078,10 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
 
     let backend = AnyBackend::from_hypervisor(&effective_hypervisor);
     if let Err(e) = backend.start(&start_config) {
-        super::up::emit_failed_if(&admission, "backend-start", &e);
+        super::up::emit_failed(&admission, "backend-start", &e);
         return Err(e);
     }
-    super::up::emit_launched_if(&admission, &effective_hypervisor, true);
+    super::up::emit_launched(&admission, &effective_hypervisor, true);
 
     if p.emit_text {
         ui::success(&format!(

@@ -1036,7 +1036,6 @@ fn cmd_start(args: StartArgs) -> Result<()> {
             secret_release: mvm_core::plan::SecretReleasePolicy::default(),
             secrets: vec![],
             caller_commitment: None,
-            no_supervisor: false,
             ledger: &ledger,
             keys_dir: None,
             audit_dir: None,
@@ -1060,7 +1059,6 @@ fn cmd_start(args: StartArgs) -> Result<()> {
                 "the session boot path resolves no entrypoint",
             ),
         })?;
-        let Some(ctx) = ctx else { return Ok(None) };
         let mut start_config = mvm_core::vm_backend::VmStartConfig::default();
         let guest_profile = super::up::guest_profile_for_boot(is_dev, rootfs);
         super::up::attach_guest_boot_config_for_plan(
@@ -1101,13 +1099,15 @@ fn cmd_start(args: StartArgs) -> Result<()> {
         Some(&backend_name),
     ) {
         Ok(vm) => {
-            let ctx = admit_ctx.borrow_mut().take();
-            super::up::emit_launched_if(&ctx, &backend_name, true);
+            if let Some(ctx) = admit_ctx.borrow_mut().take() {
+                super::up::emit_launched(&ctx, &backend_name, true);
+            }
             vm
         }
         Err(e) => {
-            let ctx = admit_ctx.borrow_mut().take();
-            super::up::emit_failed_if(&ctx, "backend-start", &e);
+            if let Some(ctx) = admit_ctx.borrow_mut().take() {
+                super::up::emit_failed(&ctx, "backend-start", &e);
+            }
             return Err(e).context("Booting session VM");
         }
     };
@@ -1121,8 +1121,9 @@ fn cmd_start(args: StartArgs) -> Result<()> {
                 vm_name: vm.vm_name.clone(),
             })
         }));
-        let ctx = admit_ctx.borrow_mut().take();
-        super::up::emit_failed_if(&ctx, "agent-wait", &err);
+        if let Some(ctx) = admit_ctx.borrow_mut().take() {
+            super::up::emit_failed(&ctx, "agent-wait", &err);
+        }
         return Err(err);
     }
 

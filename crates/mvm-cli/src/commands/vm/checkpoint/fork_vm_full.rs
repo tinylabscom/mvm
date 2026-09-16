@@ -231,8 +231,8 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
             dest_dir: p.dest_dir,
             created_unix: p.now,
             parent_liveness: ForkParentLiveness::MustBeStopped,
-            child_plan_json,
-            child_tenant_id,
+            child_plan_json: Some(child_plan_json),
+            child_tenant_id: Some(child_tenant_id),
         },
         &|child| {
             mvm_runtime::firecracker::FcForkRestorer.restore_fork(
@@ -244,7 +244,7 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
         &anchor,
     );
     if let Err(ref e) = fork_result {
-        crate::commands::vm::up::emit_failed_if(&admission, "fork-vm-full-fc", e);
+        crate::commands::vm::up::emit_failed(&admission, "fork-vm-full-fc", e);
     }
     let meta = fork_result
         .with_context(|| format!("forking FC vm_full checkpoint {:?}", p.checkpoint.as_str()))?;
@@ -257,7 +257,7 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
         p.declared_secrets,
         &crate::commands::vm::tenant_resolution::resolve_tenant(None),
     )?;
-    crate::commands::vm::up::emit_launched_if(&admission, "firecracker", true);
+    crate::commands::vm::up::emit_launched(&admission, "firecracker", true);
 
     // Deliver the fresh generation token to every restored child. A grant is
     // optional for dev/test forks, but identity rotation is not: the token is
@@ -337,9 +337,9 @@ struct AdmitForkedChildParams<'a> {
 
 /// The admitted claim-8 envelope a vm_full fork boots its child under.
 struct AdmittedForkChild {
-    admission: Option<crate::commands::vm::up::AdmissionContext>,
-    child_plan_json: Option<String>,
-    child_tenant_id: Option<String>,
+    admission: crate::commands::vm::up::AdmissionContext,
+    child_plan_json: String,
+    child_tenant_id: String,
 }
 
 /// Admit a fresh claim-8 plan for a vm_full fork child, and mint its verb-grant
@@ -403,7 +403,6 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
             ),
             secrets: p.declared_secrets.to_vec(),
             caller_commitment: None,
-            no_supervisor: false,
             ledger: &ledger,
             keys_dir: None,
             audit_dir: None,
@@ -437,21 +436,16 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
         },
     )?;
 
-    let child_plan_json = admission.as_ref().map(|ctx| {
-        serde_json::to_string(ctx.admitted.signed()).expect("admitted plan is always serializable")
-    });
-    let child_tenant_id = admission
-        .as_ref()
-        .map(|ctx| ctx.admitted.plan().tenant.0.clone());
+    let child_plan_json = serde_json::to_string(admission.admitted.signed())
+        .expect("admitted plan is always serializable");
+    let child_tenant_id = admission.admitted.plan().tenant.0.clone();
 
-    if let Some(ref plan_json_str) = child_plan_json {
-        let mint_cfg = mvm_core::vm_backend::VmStartConfig {
-            name: p.child_vm_name.to_string(),
-            plan_json: Some(plan_json_str.clone()),
-            ..Default::default()
-        };
-        mvm_hostd::plan_admission::stash_plan_for_bridge(&mint_cfg)?;
-    }
+    let mint_cfg = mvm_core::vm_backend::VmStartConfig {
+        name: p.child_vm_name.to_string(),
+        plan_json: Some(child_plan_json.clone()),
+        ..Default::default()
+    };
+    mvm_hostd::plan_admission::stash_plan_for_bridge(&mint_cfg)?;
 
     Ok(AdmittedForkChild {
         admission,
@@ -512,14 +506,14 @@ fn fork_vm_full_arm_hvf(p: ForkVmFullArmHvfParams<'_>) -> Result<()> {
             dest_dir: p.dest_dir,
             created_unix: p.now,
             parent_liveness: ForkParentLiveness::MayBeRunning,
-            child_plan_json,
-            child_tenant_id,
+            child_plan_json: Some(child_plan_json),
+            child_tenant_id: Some(child_tenant_id),
         },
         &|child| mvm_runtime::hvf_restore::HvfForkRestorer.restore_fork(child),
         &anchor,
     );
     if let Err(ref e) = fork_result {
-        crate::commands::vm::up::emit_failed_if(&admission, "fork-vm-full-hvf", e);
+        crate::commands::vm::up::emit_failed(&admission, "fork-vm-full-hvf", e);
     }
     let meta = fork_result
         .with_context(|| format!("forking HVF vm_full checkpoint {:?}", p.checkpoint.as_str()))?;
@@ -532,7 +526,7 @@ fn fork_vm_full_arm_hvf(p: ForkVmFullArmHvfParams<'_>) -> Result<()> {
         p.declared_secrets,
         &crate::commands::vm::tenant_resolution::resolve_tenant(None),
     )?;
-    crate::commands::vm::up::emit_launched_if(&admission, "hvf", true);
+    crate::commands::vm::up::emit_launched(&admission, "hvf", true);
 
     if let Err(error) = deliver_hvf_fork_post_restore(
         &p.child_vm_name,
@@ -742,13 +736,7 @@ mod tests {
             allow_secret_drop: false,
         })
         .expect("a fork child is admitted");
-        admitted
-            .admission
-            .expect("the fork path never sets no_supervisor, so admission is Some")
-            .admitted
-            .plan()
-            .secrets
-            .clone()
+        admitted.admission.admitted.plan().secrets.clone()
     }
 
     /// The declared set reaches the child's own signed plan. Declared, not
@@ -840,12 +828,7 @@ mod tests {
         })
         .expect("a cpu-bounded parent is forkable on a tier that meters CPU");
 
-        let plan = admitted
-            .admission
-            .as_ref()
-            .expect("the fork path never sets no_supervisor")
-            .admitted
-            .plan();
+        let plan = admitted.admission.admitted.plan();
         assert_eq!(
             plan.grants.as_ref().and_then(|g| g.cpu),
             Some(mvm_contract::grants::CpuGrant::Share { millicores: 500 }),
@@ -931,12 +914,7 @@ mod tests {
         })
         .expect("a grantless parent is forkable");
 
-        let plan = admitted
-            .admission
-            .as_ref()
-            .expect("the fork path never sets no_supervisor")
-            .admitted
-            .plan();
+        let plan = admitted.admission.admitted.plan();
         // The gate refuses outright when the plan's recorded tier disagrees
         // with the one it measures against, so these being one value is what
         // keeps a fork admissible at all.
