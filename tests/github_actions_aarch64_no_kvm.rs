@@ -14,7 +14,13 @@ const EXPECTED_RELEASE_HELPER_BUILD: &str =
     "cargo build --release -p mvmctl --features user,release-artifact-bootstrap,release-channel";
 const EXPECTED_SOURCE_BUILD: &str =
     "cargo build --release -p mvmctl --features user,embed-host-bins";
+const EXPECTED_ENDPOINT_BUILD: &str =
+    "cargo build --release -p mvm-hostd --bin mvm-network-endpoint";
 const COPY_SOURCE_BINARY: &str = "cp target/release/mvmctl /tmp/mvmctl-source-under-test";
+const COPY_ENDPOINT_BINARY: &str =
+    "cp target/release/mvm-network-endpoint ci-artifacts/no-kvm-binaries/";
+const INSTALL_ENDPOINT_BINARY: &str =
+    "install -m 0755 /tmp/no-kvm-binaries/mvm-network-endpoint /tmp/mvm-network-endpoint";
 const LIBRARY_ONLY_BUILD: &str =
     "cargo build --release -p mvm-cli --features release-artifact-bootstrap";
 const REQUIRED_VIRTIOFS_PACKAGE: &str = "virtiofsd";
@@ -90,6 +96,10 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
             "{source} must build the root mvmctl package in source-channel mode"
         );
         assert!(
+            contents.contains(EXPECTED_ENDPOINT_BUILD),
+            "{source} must build the source-matched network endpoint required by live VMs"
+        );
+        assert!(
             contents.contains(COPY_SOURCE_BINARY),
             "{source} must preserve the exact source-channel binary used by the smoke"
         );
@@ -162,6 +172,10 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
             job.contains(REQUIRED_KVM_DENIAL),
             "the hosted unaccelerated stages must deny KVM before making a TCG claim"
         );
+        assert!(
+            job.contains(INSTALL_ENDPOINT_BINARY),
+            "every live job must install the source-matched network endpoint beside mvmctl"
+        );
     }
     assert!(!build_job.contains(REQUIRED_CI_VSOCK_OWNERSHIP));
     assert!(!build_job.contains(REQUIRED_KVM_DENIAL));
@@ -176,8 +190,9 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
     );
     assert!(
         prepare.contains("uses: actions/upload-artifact@v7")
-            && prepare.contains(&format!("name: {BINARY_ARTIFACT}")),
-        "the prepare job must publish the exact source and release-helper binaries"
+            && prepare.contains(&format!("name: {BINARY_ARTIFACT}"))
+            && prepare.contains(COPY_ENDPOINT_BINARY),
+        "the prepare job must publish the exact source, endpoint, and release-helper binaries"
     );
     assert!(
         bootstrap_job.contains("needs: no-kvm-prepare")

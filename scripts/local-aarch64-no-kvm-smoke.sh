@@ -57,6 +57,8 @@ cd /work
 echo "Building mvmctl ..."
 cargo build --release -p mvmctl --features user,embed-host-bins
 cp target/release/mvmctl /tmp/mvmctl-source-under-test
+cargo build --release -p mvm-hostd --bin mvm-network-endpoint
+cp target/release/mvm-network-endpoint /tmp/mvm-network-endpoint
 cargo build --release -p mvmctl --features user,release-artifact-bootstrap,release-channel,embed-host-bins
 cp target/release/mvmctl /tmp/mvmctl-release-helper
 

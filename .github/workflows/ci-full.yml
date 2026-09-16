@@ -596,8 +596,10 @@ jobs:
         run: |
           cargo build --release -p mvmctl --features user,embed-host-bins
           cp target/release/mvmctl /tmp/mvmctl-source-under-test
-          cargo build --release -p mvmctl --features user,release-artifact-bootstrap,release-channel
           mkdir -p ci-artifacts/no-kvm-binaries
+          cargo build --release -p mvm-hostd --bin mvm-network-endpoint
+          cp target/release/mvm-network-endpoint ci-artifacts/no-kvm-binaries/
+          cargo build --release -p mvmctl --features user,release-artifact-bootstrap,release-channel
           cp /tmp/mvmctl-source-under-test \
             ci-artifacts/no-kvm-binaries/mvmctl-source-under-test
           cp target/release/mvmctl \
@@ -652,6 +654,7 @@ jobs:
             /tmp/mvmctl-source-under-test
           install -m 0755 /tmp/no-kvm-binaries/mvmctl-release-helper \
             /tmp/mvmctl-release-helper
+          install -m 0755 /tmp/no-kvm-binaries/mvm-network-endpoint /tmp/mvm-network-endpoint
 
       - name: Grant QEMU access to vhost-vsock
         run: |
@@ -916,6 +919,7 @@ jobs:
         run: |
           install -m 0755 /tmp/no-kvm-binaries/mvmctl-source-under-test \
             /tmp/mvmctl-source-under-test
+          install -m 0755 /tmp/no-kvm-binaries/mvm-network-endpoint /tmp/mvm-network-endpoint
 
       - name: Restore source-matched launch artifacts
         uses: actions/download-artifact@v8
