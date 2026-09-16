@@ -1287,12 +1287,13 @@ fn vsock_egress_env(vm_name: &str) -> Vec<(String, String)> {
     mvm_core::guest_netd::proxy_env_vars(mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN)
 }
 
-/// Whether the per-VM egress CA sidecar exists — i.e. egress substitution
-/// provisioned a CA whose PEM the launcher put on the guest kernel cmdline
-/// (`mvm.egress_ca=`) and the guest `/init` decoded to `/run/mvm/ca-bundle.crt`.
+/// Whether this VM booted with a per-VM egress CA — i.e. the endpoint spawner
+/// minted one for the plan's bound destinations, persisted it here, and put its
+/// certificate on the identity drive the guest assembled
+/// `/run/mvm/ca-bundle.crt` from.
 fn egress_ca_present(vm_name: &str) -> bool {
     mvm_core::config::vm_state_dir(vm_name)
-        .join("egress-intermediate.json")
+        .join(mvm_vmm::host::network_endpoint_spawn::EGRESS_CA_STATE_FILE)
         .exists()
 }
 

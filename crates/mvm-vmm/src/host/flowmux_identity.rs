@@ -34,13 +34,14 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand::TryRng;
 
 use super::network_endpoint_spawn::FlowMuxIdentitySpawnConfig;
+use super::private_file::write_private;
 
 // The drive's label and filenames are declared on the reading side, in
 // `mvm_agentd::flowmux_keys`, and used here. One declaration, so a rename
 // cannot leave the writer and the reader describing different drives.
 pub use mvm_agentd::flowmux_drive::{
-    GUEST_SIGNING_KEY_FILE, GuestIngressTarget, HOST_SIGNER_PUB_FILE, IDENTITY_DRIVE_LABEL,
-    INGRESS_TARGETS_FILE,
+    EGRESS_CA_CERT_FILE, GUEST_SIGNING_KEY_FILE, GuestIngressTarget, HOST_SIGNER_PUB_FILE,
+    IDENTITY_DRIVE_LABEL, INGRESS_TARGETS_FILE,
 };
 
 /// Mode the guest signing key is stored with. The drive is mounted read-only,
@@ -49,6 +50,26 @@ const GUEST_SIGNING_KEY_MODE: u16 = 0o400;
 
 /// Mode the public anchor is stored with.
 const HOST_SIGNER_PUB_MODE: u16 = 0o444;
+
+/// Mode the per-VM egress CA certificate is stored with. Every TLS client in
+/// the guest reads it, and a certificate is public.
+const EGRESS_CA_CERT_MODE: u16 = 0o444;
+
+/// What rides the identity drive besides this boot's keys.
+///
+/// A params struct rather than two more positional arguments: both members are
+/// optional-shaped, both are "material the host projects into the guest", and a
+/// third one is likelier than not. `Default` is the empty projection — the
+/// builder VM's own identity drive carries neither.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct IdentityDriveContents<'a> {
+    /// The signed plan's guest-loopback ingress targets.
+    pub ingress: &'a [mvm_core::plan::IngressMapping],
+    /// The per-VM egress CA **certificate** the guest adds to its trust bundle,
+    /// so an unmodified TLS client accepts a host-terminated bound-host flow.
+    /// `None` when the plan binds no destination, and never a key.
+    pub egress_ca_cert_pem: Option<&'a str>,
+}
 
 /// A minted per-boot identity: what the endpoint is told, and what the guest is
 /// given.
@@ -136,15 +157,21 @@ impl FlowMuxIdentityMaterial {
     /// under `~/.mvm`, which is already 0700, and a mode on the image is one
     /// less thing depending on that.
     pub fn write_drive(&self, path: &Path) -> Result<()> {
-        self.write_drive_with_ingress(path, &[])
+        self.write_drive_with(path, &IdentityDriveContents::default())
     }
 
-    /// Build the identity drive with the signed plan's guest-loopback ingress
-    /// projection. Host bind addresses and transformation material are omitted.
-    pub fn write_drive_with_ingress(
+    /// Build the identity drive carrying `contents` alongside this boot's keys.
+    ///
+    /// The ingress projection is the signed plan's guest-loopback targets only;
+    /// host bind addresses and transformation material are omitted. The egress
+    /// CA certificate rides here rather than the kernel cmdline for the same
+    /// reason the signing key does — the drive is per-boot, already mounted, and
+    /// has no length budget — with the difference that a certificate is public,
+    /// so it is the only one of the two a guest may leave world-readable.
+    pub fn write_drive_with(
         &self,
         path: &Path,
-        ingress: &[mvm_core::plan::IngressMapping],
+        contents: &IdentityDriveContents<'_>,
     ) -> Result<()> {
         use mvm_fs::ext4::{BuildOptions, Node, build_image_with_options};
 
@@ -152,7 +179,8 @@ impl FlowMuxIdentityMaterial {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
-        let targets = ingress
+        let targets = contents
+            .ingress
             .iter()
             .map(|mapping| GuestIngressTarget {
                 mapping_id: mapping.mapping_id,
@@ -163,7 +191,7 @@ impl FlowMuxIdentityMaterial {
             .collect::<Vec<_>>();
         let targets_json =
             serde_json::to_vec(&targets).context("serializing guest ingress targets")?;
-        let nodes = vec![
+        let mut nodes = vec![
             Node::File {
                 path: format!("/{GUEST_SIGNING_KEY_FILE}"),
                 mode: GUEST_SIGNING_KEY_MODE,
@@ -183,6 +211,23 @@ impl FlowMuxIdentityMaterial {
                 xattrs: Vec::new(),
             },
         ];
+        if let Some(cert_pem) = contents.egress_ca_cert_pem {
+            // Refused rather than shipped: a drive carrying a private key under
+            // the world-readable certificate filename would hand the guest the
+            // one thing the whole split exists to keep from it.
+            if cert_pem.contains("PRIVATE KEY") {
+                bail!(
+                    "the per-VM egress CA certificate carries private-key material; \
+                     refusing to put it on a guest-readable drive"
+                );
+            }
+            nodes.push(Node::File {
+                path: format!("/{EGRESS_CA_CERT_FILE}"),
+                mode: EGRESS_CA_CERT_MODE,
+                data: cert_pem.as_bytes().to_vec(),
+                xattrs: Vec::new(),
+            });
+        }
         let image = build_image_with_options(
             nodes,
             &BuildOptions::default().with_volume_name(IDENTITY_DRIVE_LABEL.as_bytes()),
@@ -257,21 +302,6 @@ pub fn load_inheritable_identity(state_dir: &Path) -> Result<Option<InheritableI
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     }
-}
-
-/// Write `bytes` to `path` with mode 0600, creating it fresh.
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()
 }
 
 /// Refuse an identity whose two halves do not describe the same keypair.
@@ -389,6 +419,85 @@ mod tests {
             mvm_agentd::flowmux_drive::ext4_volume_label_from_superblock(&image).as_deref(),
             Some(IDENTITY_DRIVE_LABEL),
             "the guest must find this drive by the label the host stamped"
+        );
+    }
+
+    #[test]
+    fn the_guest_trust_bundle_contains_the_certificate_and_no_key() {
+        // The guest builds `/run/mvm/ca-bundle.crt` out of what this drive
+        // carries, so the drive is the whole of what can reach that bundle.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image_path = dir.path().join("identity.ext4");
+        let ca =
+            crate::host::network_endpoint_spawn::build_egress_tls_delivery(&["api.openai.com"])
+                .expect("mint the per-VM egress ca");
+
+        FlowMuxIdentityMaterial::mint("s1", &host_key())
+            .expect("mint")
+            .write_drive_with(
+                &image_path,
+                &IdentityDriveContents {
+                    ingress: &[],
+                    egress_ca_cert_pem: Some(ca.cert_pem()),
+                },
+            )
+            .expect("write drive");
+
+        let image = std::fs::read(&image_path).expect("read image");
+        let carries = |needle: &str| image.windows(needle.len()).any(|w| w == needle.as_bytes());
+        assert!(
+            carries(ca.cert_pem().trim()),
+            "the drive must carry the certificate the guest trusts"
+        );
+        assert!(
+            !carries(ca.key_pem()),
+            "the egress CA key must never reach a drive the guest mounts"
+        );
+        assert!(
+            !carries("PRIVATE KEY"),
+            "no private-key armor may appear on the guest's identity drive \
+             beyond its own FlowMux key, which is raw bytes"
+        );
+    }
+
+    #[test]
+    fn a_certificate_carrying_key_material_is_refused_rather_than_shipped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image_path = dir.path().join("identity.ext4");
+        let poisoned = "-----BEGIN CERTIFICATE-----\nAA\n-----END CERTIFICATE-----\n\
+                        -----BEGIN PRIVATE KEY-----\nBB\n-----END PRIVATE KEY-----\n";
+
+        let refused = FlowMuxIdentityMaterial::mint("s1", &host_key())
+            .expect("mint")
+            .write_drive_with(
+                &image_path,
+                &IdentityDriveContents {
+                    ingress: &[],
+                    egress_ca_cert_pem: Some(poisoned),
+                },
+            );
+
+        assert!(
+            refused.is_err(),
+            "a certificate slot carrying a key must fail the launch, not the guest"
+        );
+    }
+
+    #[test]
+    fn a_boot_that_binds_no_destination_carries_no_certificate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image_path = dir.path().join("identity.ext4");
+        FlowMuxIdentityMaterial::mint("s1", &host_key())
+            .expect("mint")
+            .write_drive(&image_path)
+            .expect("write drive");
+
+        let image = std::fs::read(&image_path).expect("read image");
+        assert!(
+            !image
+                .windows(EGRESS_CA_CERT_FILE.len())
+                .any(|w| w == EGRESS_CA_CERT_FILE.as_bytes()),
+            "a drive with no certificate must not carry its directory entry either"
         );
     }
 

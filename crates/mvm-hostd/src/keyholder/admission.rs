@@ -15,7 +15,7 @@
 use mvm_contract::ir::{SecretMount, SecretRef};
 use mvm_core::plan::{SecretBinding, SecretSource};
 
-use super::binding::BindingStore;
+use super::BindingStore;
 use super::substitution::{Placeholder, SubstitutionRegistry};
 
 /// `(guest-facing name, opaque placeholder)` pairs handed to the guest so the

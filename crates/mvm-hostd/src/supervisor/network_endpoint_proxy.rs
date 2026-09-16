@@ -767,7 +767,7 @@ pub struct FromPlanInputs<'a> {
     pub proxy: Option<mvm_http::ProxyConfig>,
     pub redaction: mvm_core::policy::RedactionPolicy,
     pub reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy,
-    pub tls_intermediate: Option<mvm_core::crypto::egress_ca::VmIntermediate>,
+    pub tls_intermediate: Option<mvm_core::crypto::egress_ca::VmEgressCa>,
     pub recorder: Option<Recorder>,
     /// Per-VM AI egress metering/budget policy. `None` means AI egress is not
     /// metered and no budget is enforced.
@@ -986,7 +986,7 @@ pub struct SubstitutionService {
     /// The per-VM name-constrained intermediate the `https` terminator mints
     /// per-SNI leaves under. `None` ⇒ no TLS leg (`http`-only). Set from
     /// `EndpointConfig.tls_intermediate` at assemble.
-    tls_intermediate: Option<Arc<mvm_core::crypto::egress_ca::VmIntermediate>>,
+    tls_intermediate: Option<Arc<mvm_core::crypto::egress_ca::VmEgressCa>>,
     /// Per-destination redaction policy. Default = curated baseline (entropy +
     /// names off); a profile opts a destination into entropy/name redaction.
     redaction_policy: mvm_core::policy::RedactionPolicy,
@@ -1380,9 +1380,7 @@ impl SubstitutionService {
     /// The per-VM egress intermediate a terminated flow mints its per-SNI leaf
     /// under. `None` on an endpoint that was never given one, which is what
     /// makes [`Self::terminable`] refuse rather than terminate.
-    pub(crate) fn tls_intermediate(
-        &self,
-    ) -> Option<&Arc<mvm_core::crypto::egress_ca::VmIntermediate>> {
+    pub(crate) fn tls_intermediate(&self) -> Option<&Arc<mvm_core::crypto::egress_ca::VmEgressCa>> {
         self.tls_intermediate.as_ref()
     }
 
@@ -1453,7 +1451,7 @@ impl SubstitutionService {
     /// bound-host `https`. Absent ⇒ `http`-only.
     pub fn with_tls_intermediate(
         mut self,
-        intermediate: mvm_core::crypto::egress_ca::VmIntermediate,
+        intermediate: mvm_core::crypto::egress_ca::VmEgressCa,
     ) -> Self {
         self.tls_intermediate = Some(Arc::new(intermediate));
         self
@@ -3513,11 +3511,8 @@ mod server_tests {
         });
         let mut service = SubstitutionService::new(Arc::new(reg), resolver, forwarder);
         if attach_intermediate {
-            let ca = mvm_core::crypto::egress_ca::EgressCa::load_or_init_at(dir.path())
-                .expect("load or init host ca");
-            let intermediate = ca
-                .mint_vm_intermediate(hosts)
-                .expect("mint vm intermediate");
+            let intermediate = mvm_core::crypto::egress_ca::VmEgressCa::mint(hosts)
+                .expect("mint the per-VM egress ca");
             service = service.with_tls_intermediate(intermediate);
         }
         (Arc::new(service), dir)

@@ -38,6 +38,14 @@ enum StartupMode {
         uid: u32,
         requirement: IdentityRequirement,
     },
+    /// Build `/run/mvm/ca-bundle.crt` from the guest's baked roots plus the
+    /// per-VM egress certificate the identity drive delivered.
+    ///
+    /// Exposed as a verb so the shell init can call the one Rust implementation
+    /// instead of `cat`-ing the two files: a `cat` fuses the armor lines when
+    /// the baked bundle has no trailing newline, and every PEM parser then reads
+    /// one truncated certificate instead of two.
+    InstallEgressCaTrust,
 }
 
 fn startup_mode_from_args(args: impl IntoIterator<Item = String>) -> Result<StartupMode, String> {
@@ -45,6 +53,12 @@ fn startup_mode_from_args(args: impl IntoIterator<Item = String>) -> Result<Star
     let Some(command) = args.next() else {
         return Ok(StartupMode::Serve);
     };
+    if command == "install-egress-ca-trust" {
+        if args.next().is_some() {
+            return Err(format!("{command} takes no arguments"));
+        }
+        return Ok(StartupMode::InstallEgressCaTrust);
+    }
     let requirement = match command.as_str() {
         "provision-identity-for" => IdentityRequirement::Required,
         "provision-identity-for-if-present" => IdentityRequirement::IfPresent,
@@ -107,6 +121,9 @@ fn main() -> ExitCode {
     if let StartupMode::ProvisionIdentityFor { uid, requirement } = mode {
         return provision_identity_for(uid, requirement);
     }
+    if mode == StartupMode::InstallEgressCaTrust {
+        return install_egress_ca_trust();
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -151,6 +168,25 @@ fn provision_identity_for(uid: u32, requirement: IdentityRequirement) -> ExitCod
 fn provision_identity_for(_uid: u32, _requirement: IdentityRequirement) -> ExitCode {
     eprintln!("mvm-egress-client: FlowMux identity drives are only available on Linux guests");
     ExitCode::from(1)
+}
+
+/// Build the guest's combined trust bundle.
+///
+/// Fatal on failure, matching the identity provisioning beside it: the only way
+/// this fails is a delivered certificate the guest cannot read or a `/run/mvm`
+/// it cannot write, and either leaves the workload not trusting flows the host
+/// is already terminating for it.
+fn install_egress_ca_trust() -> ExitCode {
+    match mvm_agentd::flowmux_drive::install_egress_ca_trust(
+        std::path::Path::new(mvm_agentd::flowmux_drive::RUN_MVM_DIR),
+        &mvm_agentd::flowmux_drive::baked_root_bundle_candidates(),
+    ) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("mvm-egress-client: could not install the egress CA trust bundle: {error}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -297,6 +333,14 @@ mod tests {
                 uid: 989,
                 requirement: IdentityRequirement::IfPresent,
             })
+        );
+        assert_eq!(
+            startup_mode_from_args(["install-egress-ca-trust".into()]),
+            Ok(StartupMode::InstallEgressCaTrust)
+        );
+        assert!(
+            startup_mode_from_args(["install-egress-ca-trust".into(), "989".into()]).is_err(),
+            "the trust-bundle verb takes no uid; a stray argument is a wiring mistake"
         );
     }
 
