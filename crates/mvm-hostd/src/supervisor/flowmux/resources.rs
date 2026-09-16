@@ -29,6 +29,17 @@ pub struct FlowMuxVmResources {
     pub(super) registry_budget: Arc<VmFlowBudget>,
     pub(super) rate_limiter: Arc<ConnectionRateLimiter>,
     pub(super) icmp_rate: Arc<crate::supervisor::egress_rate::EgressRateGuard>,
+    /// Live terminated flows across every session this VM has open.
+    ///
+    /// Here rather than on the session for the reason this whole type exists:
+    /// a per-session counter is multiplied by
+    /// [`MAX_CONCURRENT_FLOWMUX_SESSIONS`], so a guest reaches sixteen times
+    /// the intended ceiling just by reconnecting.
+    pub(super) terminated_flows: Arc<std::sync::atomic::AtomicUsize>,
+    /// Minted TLS server configurations, shared for the same reason: one cache
+    /// per VM, not one per session, or the bound is multiplied and a
+    /// reconnecting client re-mints every leaf.
+    pub(super) leaves: Arc<crate::supervisor::terminator::flow::LeafCache>,
     session_slots: Arc<tokio::sync::Semaphore>,
 }
 
@@ -42,6 +53,8 @@ impl FlowMuxVmResources {
             registry_budget: Arc::new(VmFlowBudget::new(network, limits.max_icmp)),
             rate_limiter: Arc::new(ConnectionRateLimiter::from_limits(&limits)),
             icmp_rate: Arc::new(crate::supervisor::egress_rate::EgressRateGuard::builder().build()),
+            terminated_flows: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            leaves: Arc::new(crate::supervisor::terminator::flow::LeafCache::default()),
             session_slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_FLOWMUX_SESSIONS)),
         }
     }
@@ -51,6 +64,8 @@ impl FlowMuxVmResources {
             registry_budget: Arc::new(VmFlowBudget::from_registry_limits(limits)),
             rate_limiter: Arc::new(ConnectionRateLimiter::from_limits(&limits)),
             icmp_rate: Arc::new(crate::supervisor::egress_rate::EgressRateGuard::builder().build()),
+            terminated_flows: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            leaves: Arc::new(crate::supervisor::terminator::flow::LeafCache::default()),
             session_slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_FLOWMUX_SESSIONS)),
         }
     }

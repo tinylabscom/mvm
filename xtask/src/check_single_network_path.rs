@@ -335,6 +335,12 @@ const FLOW_AUDIT_LABEL_KEYS: &[&str] = &[
     // to leak; if that ever changes, this entry is the thing to revisit.
     "qname",
     "qtype",
+    // How a flow to a bound destination was served: terminated on the host so
+    // the credential could be substituted, or not at all. It is a fact about
+    // the shape of the decision, not about the request -- the label is one of
+    // a fixed pair of words chosen by the host, and no byte of the flow
+    // reaches it.
+    "termination",
 ];
 
 /// Files whose connect paths emit flow audit entries.

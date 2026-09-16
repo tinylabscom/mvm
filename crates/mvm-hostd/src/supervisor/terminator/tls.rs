@@ -218,7 +218,8 @@ where
     let mut tls = rustls::StreamOwned::new(conn, stream);
 
     let raw = read_http_request(&mut tls)
-        .map_err(|e| TerminatorError::Parse(format!("read decrypted request: {e}")))?;
+        .map_err(|e| TerminatorError::Parse(format!("read decrypted request: {e}")))?
+        .request;
     let mut req = proxy_request_from_origin_form_https(&raw, orig_dst)
         .map_err(|e| TerminatorError::Parse(e.to_string()))?;
     // Capture audit metadata before substitution consumes the request (claim-13
@@ -266,16 +267,7 @@ pub fn serialize_http_response(status: u16, headers: &[(String, String)], body: 
     let mut out = Vec::with_capacity(128 + body.len());
     out.extend_from_slice(format!("HTTP/1.1 {status} {}\r\n", reason_phrase(status)).as_bytes());
     for (k, v) in headers {
-        let lk = k.to_ascii_lowercase();
-        // Drop framing/hop-by-hop headers the client already resolved; we re-frame.
-        if matches!(
-            lk.as_str(),
-            "transfer-encoding" | "content-length" | "connection"
-        ) {
-            continue;
-        }
-        // Defensive: never let a header smuggle CRLF into the response.
-        if k.bytes().chain(v.bytes()).any(|b| b == b'\r' || b == b'\n') {
+        if is_framing_header(k) || smuggles_crlf(k, v) {
             continue;
         }
         out.extend_from_slice(format!("{k}: {v}\r\n").as_bytes());
@@ -286,9 +278,27 @@ pub fn serialize_http_response(status: u16, headers: &[(String, String)], body: 
     out
 }
 
+/// Whether a response header belongs to the upstream leg's transfer framing
+/// rather than to the response itself. The terminator re-frames what it writes
+/// back, so carrying these across would describe the wrong message.
+pub(super) fn is_framing_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "transfer-encoding" | "content-length" | "connection"
+    )
+}
+
+/// Whether a header name or value carries a bare CR or LF, which would end the
+/// header line early and let an upstream response inject one of its own.
+pub(super) fn smuggles_crlf(name: &str, value: &str) -> bool {
+    name.bytes()
+        .chain(value.bytes())
+        .any(|b| b == b'\r' || b == b'\n')
+}
+
 /// A minimal reason phrase for common statuses; "" for the rest (clients accept
 /// an empty reason phrase per RFC 7230).
-fn reason_phrase(status: u16) -> &'static str {
+pub(super) fn reason_phrase(status: u16) -> &'static str {
     match status {
         200 => "OK",
         201 => "Created",
@@ -300,8 +310,10 @@ fn reason_phrase(status: u16) -> &'static str {
         401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
+        421 => "Misdirected Request",
         429 => "Too Many Requests",
         500 => "Internal Server Error",
+        501 => "Not Implemented",
         502 => "Bad Gateway",
         503 => "Service Unavailable",
         _ => "",
