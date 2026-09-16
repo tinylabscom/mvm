@@ -19,7 +19,8 @@ re-rolls) · #3309 (ADR parity, twelve findings) · #3310 (permissive test
 doubles) · #3311 (`specs/` cleanup) · #3313 (miscalibrated size gate) ·
 #3314 (`mvm-core` split) · #3315 (naming + the real section-D work) · #3316 (**claims 11 and 13** — a
 dead control and an ambiguous witness) · #3317 (no citation gate on ADRs) ·
-#3318 (ADR-001 internal defects). Pre-existing and folded in: #3257–#3264,
+#3318 (ADR-001 internal defects) ·
+#3319 (four Accepted ADRs describing nothing). Pre-existing and folded in: #3257–#3264,
 #3265–#3277 (the two design-plan epics), #3283–#3288, #3297, #3300–#3302.
 
 ## How to use this plan
@@ -117,7 +118,31 @@ opposite one, `drop_page_cache`).
       duplicate/overlapping ADR pairs, of which the **045↔046↔051** cluster and
       a five-ADR networking cluster are the real consolidation candidates.
       Folded into #3311 and #3317.
-- [ ] **A2.6** ADR-001:150 describes the `stages.rs` scan chain as the live
+- [ ] **A2.6** Four `Accepted` ADRs describe implementations that are not in
+      the tree — a different class from a stale citation, because there is
+      nothing to re-point at. ADR-038 says "implemented end to end" and every
+      symbol it names returns zero hits; ADR-023's nftables REDIRECT mechanism
+      has no NIC to redirect from (`install_default_deny_nft` has only test
+      callers) though its substitution machinery is real and wired; ADR-026 §2
+      asserts a build-time setuid check its own §3 defers; ADR-025's
+      same-family merging gate does not exist, so the property holds vacuously.
+      #3319.
+- [ ] **A2.7** ADR-025's refusal of transparent host-socket networking argues
+      from "the cost mvm already chose to pay by **staying on virtio-net**".
+      mvm has no virtio-net in the workload tier and no network bridge. The
+      refusal's *conclusion* survives — its own second paragraph gives the
+      correct reason, that the mechanism would move enforcement off the vsock
+      seam — but its stated rationale contradicts the shipped design, and
+      anyone reasoning forward from it will get the egress model wrong. #3319.
+- [ ] **A2.8** **CLAUDE.md understates what ships, in one place.** `:643` says
+      "wasm fuel/epoch is declared and unwired". It is wired:
+      `cfg.consume_fuel(bounds.fuel.is_some())` and
+      `cfg.epoch_interruption(bounds.wall_clock_secs.is_some())` at
+      `crates/mvm-runtime/src/wasm_backend.rs:882-883`, `set_epoch_deadline` at
+      `:1364`. ADR-001's "(CLOSED.)" at `:310` is the correct one. Every other
+      drift found in this audit runs the other way, which is why this one is
+      worth calling out separately. Folded into #3309.
+- [ ] **A2.9** ADR-001:150 describes the `stages.rs` scan chain as the live
       libkrun egress mechanism, contradicting the same ADR at :441-448
       ("enforced at **one** seam"). The scan chain is dead (§A4). Fix the prose
       as part of #3297, not separately — the two must move together.
