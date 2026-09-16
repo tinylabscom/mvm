@@ -233,7 +233,7 @@ pub(super) fn builder_transport_check(plat: Platform) -> Check {
     use mvm_build::builder_backend_select::BuilderBackendChoice;
     let choice = mvm_build::builder_backend_select::resolve_choice();
     let info = match choice {
-        BuilderBackendChoice::Hvf => {
+        BuilderBackendChoice::Hvf | BuilderBackendChoice::Firecracker => {
             "vsock-only host/guest transport; no builder guest NIC, no DHCP or gateway bootstrap"
                 .to_string()
         }
@@ -322,6 +322,15 @@ pub(super) fn builder_backend_check(plat: Platform) -> Check {
     }
 
     let availability = match resolved {
+        BuilderBackendChoice::Firecracker => {
+            // The same VMM the Linux workload tier runs on, so availability is
+            // the same question: is there a KVM device to open.
+            if std::path::Path::new("/dev/kvm").exists() {
+                "Firecracker available (/dev/kvm present)".to_string()
+            } else {
+                "Firecracker NOT available (no /dev/kvm on this host)".to_string()
+            }
+        }
         BuilderBackendChoice::Libkrun => {
             if plat.has_libkrun() {
                 "libkrun available".to_string()

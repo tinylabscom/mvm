@@ -69,6 +69,15 @@ impl QemuBuilderVm {
 }
 
 impl BuilderVm for QemuBuilderVm {
+    /// Delegates to the inherent implementation; the trait method is what the
+    /// generic call sites reach.
+    fn run_shell_script(
+        &self,
+        job: &crate::builder_vm::BuilderShellJob,
+    ) -> Result<crate::builder_vm::BuilderShellResult, BuilderVmError> {
+        run_shell_script_qemu(job)
+    }
+
     fn capabilities(&self) -> BuilderCapabilities {
         BuilderCapabilities {
             stage0_bootstrap: true,

@@ -85,6 +85,7 @@ const MAX_VCPUS: u32 = 32;
 /// It boots what a `VmmSpec` describes and relays the guest's egress port to the
 /// host-side bridge; the claim-10 gate and substitution live in that bridge,
 /// not here.
+#[derive(Clone)]
 pub struct FcDriver {}
 
 impl FcDriver {
@@ -997,9 +998,16 @@ impl VmmDriver for FcDriver {
         // returning, so this wait sits inside the span the cold-launch budget
         // is measured against, and a guest that answered in 20 ms was reported
         // as taking a full tick to do it.
+        // ...when there is an agent to confirm. A Stage 0 guest is the Nix
+        // seed's `stage0-init`, which serves no agent port, so waiting for one
+        // would burn the whole deadline and then report a guest-agent timeout
+        // for a guest that was never going to have an agent. Its liveness is
+        // the console + the run-to-completion poll the builder runner owns.
+        // `while` rather than `loop`, and the condition is loop-invariant: it
+        // is a skip-the-whole-wait guard, not a per-iteration test.
         let deadline = Instant::now() + AGENT_READY_TIMEOUT;
         let mut attempt = 0u32;
-        loop {
+        while spec.serves_guest_agent() {
             // Fail fast if Firecracker itself died on boot (kernel panic,
             // rejected config) rather than waiting out the full agent deadline.
             // The console log carries the actionable detail. Probed ownership-

@@ -27,7 +27,7 @@ use mvm_build::builder_vm_runtime::{
 };
 
 use super::runner::{BuilderBuild, BuilderRunner};
-use mvm_backends::driver::hvf::HvfDriver;
+use crate::driver::VmmDriver;
 
 /// Default persistent nix-store disk size (GiB → MiB). Matches the other
 /// builders' generous sparse allocation; the guest formats + seeds it.
@@ -39,7 +39,11 @@ const DEFAULT_VCPUS: u32 = 4;
 const DEFAULT_MEMORY_MIB: u32 = 16 * 1024;
 
 /// The HVF builder VM, exposed through the `BuilderVm` seam.
-pub struct HvfBuilderVm {
+pub struct DriverBuilderVm<D: VmmDriver + Clone> {
+    /// The VMM this builder boots on. `Clone` because each run hands one to a
+    /// `BuilderRunner` that owns it for the boot; every shipped driver is a
+    /// stateless handle, so the clone is free.
+    driver: D,
     /// arm64 boot `Image` for the builder VM (HVF-bootable).
     kernel: PathBuf,
     /// Builder rootfs whose baked `mvm-host-vm-init` speaks the disk transport.
@@ -54,10 +58,11 @@ pub struct HvfBuilderVm {
     memory_mib: u32,
 }
 
-impl HvfBuilderVm {
+impl<D: VmmDriver + Clone + 'static> DriverBuilderVm<D> {
     /// Build against a resolved HVF builder image (kernel + disk-transport rootfs).
-    pub fn new(kernel: PathBuf, rootfs: PathBuf) -> Self {
+    pub fn new(driver: D, kernel: PathBuf, rootfs: PathBuf) -> Self {
         Self {
+            driver,
             kernel,
             rootfs,
             closure_nar: None,
@@ -108,7 +113,7 @@ impl HvfBuilderVm {
 
         let name = mvm_core::naming::builder_shell_vm_name(&job_id);
         let runtime_overlay = require_runtime_overlay_ext4()?;
-        let outcome = BuilderRunner::new(HvfDriver::new())
+        let outcome = BuilderRunner::new(self.driver.clone())
             .build(&BuilderBuild {
                 name: &name,
                 kernel: &self.kernel,
@@ -177,7 +182,7 @@ pub(super) fn unique_job_id() -> String {
 /// could not run the build), so the auto-detect fallback retries the next
 /// backend rather than surfacing a false build error.
 fn map_runner_failure(detail: String) -> BuilderVmError {
-    BuilderVmError::HvfVmmFailed { detail }
+    BuilderVmError::VmmFailed { detail }
 }
 
 /// Resolve (or build) the runtime overlay the lean HVF builder rootfs sources
@@ -239,7 +244,7 @@ pub(super) fn copy_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io
     Ok(())
 }
 
-impl BuilderVm for HvfBuilderVm {
+impl<D: VmmDriver + Clone + 'static> BuilderVm for DriverBuilderVm<D> {
     /// Neither Stage 0 nor the dependency install is wired on hvf.
     ///
     /// `run_build` serves ordinary build jobs against an already-bootstrapped
@@ -313,7 +318,7 @@ impl BuilderVm for HvfBuilderVm {
         // runs cmd.sh and tars its artifacts back onto the output disk.
         let name = format!("mvm-hvf-builder-{job_id}");
         let runtime_overlay = require_runtime_overlay_ext4()?;
-        let outcome = BuilderRunner::new(HvfDriver::new())
+        let outcome = BuilderRunner::new(self.driver.clone())
             .build(&BuilderBuild {
                 name: &name,
                 kernel: &self.kernel,
@@ -356,11 +361,16 @@ impl BuilderVm for HvfBuilderVm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_backends::driver::hvf::HvfDriver;
     use mvm_build::libkrun_builder::BuilderShellJob;
 
     #[test]
     fn an_install_job_is_refused_by_name_and_matches_the_declared_capability() {
-        let b = HvfBuilderVm::new("/img/Image".into(), "/img/rootfs.ext4".into());
+        let b = DriverBuilderVm::new(
+            HvfDriver::new(),
+            "/img/Image".into(),
+            "/img/rootfs.ext4".into(),
+        );
         let job = BuilderJob::Install {
             spec_path: "/tmp/spec.json".into(),
         };
@@ -401,7 +411,11 @@ mod tests {
     /// test that lives where the hvf impl does.
     #[test]
     fn the_declared_table_matches_this_backends_capabilities() {
-        let b = HvfBuilderVm::new("/img/Image".into(), "/img/rootfs.ext4".into());
+        let b = DriverBuilderVm::new(
+            HvfDriver::new(),
+            "/img/Image".into(),
+            "/img/rootfs.ext4".into(),
+        );
         // Against the unregistered row specifically. `declared_capabilities`
         // now answers for the *choice* in this process, which gains Stage 0
         // once `HvfStage0Vm` is registered — while this type, which is
@@ -419,7 +433,11 @@ mod tests {
     /// blanket "hvf does not work".
     #[test]
     fn hvf_declares_both_builder_gaps_and_refuses_stage0_by_name() {
-        let b = HvfBuilderVm::new("/img/Image".into(), "/img/rootfs.ext4".into());
+        let b = DriverBuilderVm::new(
+            HvfDriver::new(),
+            "/img/Image".into(),
+            "/img/rootfs.ext4".into(),
+        );
         assert!(!b.capabilities().stage0_bootstrap);
         match b.run_stage0(
             std::path::Path::new("/tmp/root"),
@@ -465,24 +483,25 @@ mod tests {
 
     #[test]
     fn with_resources_overrides_vcpus_and_memory() {
-        let b = HvfBuilderVm::new("/k".into(), "/r".into()).with_resources(2, 2048);
+        let b = DriverBuilderVm::new(HvfDriver::new(), "/k".into(), "/r".into())
+            .with_resources(2, 2048);
         assert_eq!(b.vcpus, 2);
         assert_eq!(b.memory_mib, 2048);
     }
 
     #[test]
     fn closure_nar_defaults_to_none_and_is_settable() {
-        let b = HvfBuilderVm::new("/k".into(), "/r".into());
+        let b = DriverBuilderVm::new(HvfDriver::new(), "/k".into(), "/r".into());
         assert_eq!(b.closure_nar, None);
-        let with_closure =
-            HvfBuilderVm::new("/k".into(), "/r".into()).with_closure_nar(Some("/nar".into()));
+        let with_closure = DriverBuilderVm::new(HvfDriver::new(), "/k".into(), "/r".into())
+            .with_closure_nar(Some("/nar".into()));
         assert_eq!(with_closure.closure_nar, Some(PathBuf::from("/nar")));
     }
 
     #[test]
     fn runner_failure_maps_to_vmm_level_error() {
         let e = map_runner_failure("hvf builder VM did not power off".into());
-        assert!(matches!(e, BuilderVmError::HvfVmmFailed { .. }));
+        assert!(matches!(e, BuilderVmError::VmmFailed { .. }));
     }
 
     #[test]

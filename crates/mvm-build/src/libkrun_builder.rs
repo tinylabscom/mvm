@@ -89,6 +89,10 @@ use crate::stage0_host::{
 #[cfg(test)]
 use crate::stage0_host::{Stage0HaltOutcome, stage0_console_halt_outcome, stage0_root_mount_nodes};
 use egress_process::{builder_egress_endpoint_was_terminated, builder_egress_supervisor_command};
+// Moved to `builder_vm` (nothing about them is libkrun-shaped); re-exported
+// here so existing callers keep compiling while they migrate.
+pub use crate::builder_vm::{BuilderExtraDisk, BuilderShellJob, BuilderShellResult};
+
 // These items previously lived in this file; they migrated to
 // `builder_vm_runtime` so the future VzBuilderVm path can reuse the
 // same logic without duplicating it. `INSTALL_SPEC_FILENAME` and
@@ -775,38 +779,6 @@ pub struct LibkrunBuilderVm {
     pub verbose: bool,
 }
 
-/// Additional virtio-blk device passed to a one-shot builder shell
-/// job. Devices appear after the builder VM's persistent Nix-store
-/// disk; the first extra disk here is `/dev/vdc` in the guest.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BuilderExtraDisk {
-    pub id: String,
-    pub path: PathBuf,
-    pub read_only: bool,
-}
-
-/// Generic builder-VM shell job.
-///
-/// This is intentionally narrower than [`BuilderJob`]: it is for
-/// in-tree infrastructure commands that need the Linux builder
-/// boundary but do not produce Nix build artifacts. The OCI image
-/// runner uses it to run `mkfs.ext4` and copy an OCI-unpacked rootfs
-/// into a writable virtio-blk image.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BuilderShellJob {
-    pub work_dir: PathBuf,
-    pub artifact_out: PathBuf,
-    pub script: String,
-    pub extra_disks: Vec<BuilderExtraDisk>,
-}
-
-/// Result metadata from a one-shot builder shell job.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BuilderShellResult {
-    pub job_dir: PathBuf,
-    pub vm_state_dir: PathBuf,
-}
-
 impl Default for LibkrunBuilderVm {
     fn default() -> Self {
         Self {
@@ -1137,7 +1109,13 @@ impl LibkrunBuilderVm {
     /// points at [`BuilderShellJob::work_dir`], `/out` points at
     /// [`BuilderShellJob::artifact_out`], and callers may attach
     /// additional writable or read-only virtio-blk disks.
-    pub fn run_shell_script(
+    /// The implementation behind [`BuilderVm::run_shell_script`].
+    ///
+    /// Named apart from the trait method deliberately: while both were called
+    /// `run_shell_script`, the trait impl's `Self::run_shell_script(self, job)`
+    /// resolved back to itself rather than to the inherent method, which is an
+    /// infinite recursion clippy catches but a reader would not.
+    pub fn run_shell_script_impl(
         &self,
         job: &BuilderShellJob,
     ) -> Result<BuilderShellResult, BuilderVmError> {
@@ -1566,6 +1544,15 @@ pub(crate) fn ensure_utf8_path(p: &std::path::Path, field: &str) -> Result<(), B
 }
 
 impl BuilderVm for LibkrunBuilderVm {
+    /// Delegates to the inherent implementation; the trait method is what the
+    /// generic call sites reach.
+    fn run_shell_script(
+        &self,
+        job: &crate::builder_vm::BuilderShellJob,
+    ) -> Result<crate::builder_vm::BuilderShellResult, BuilderVmError> {
+        self.run_shell_script_impl(job)
+    }
+
     fn capabilities(&self) -> BuilderCapabilities {
         BuilderCapabilities {
             stage0_bootstrap: true,

@@ -708,6 +708,24 @@ mod tests {
         );
     }
 
+    /// What makes a Firecracker Stage 0 possible at all: `FcDriver::boot`
+    /// waits for the guest agent to answer, and a Stage 0 guest is
+    /// `stage0-init`, which serves no agent. The driver skips that wait when
+    /// the spec declares no agent port, so this is the property the skip keys
+    /// on — and the builder spec must keep declaring one, or every builder boot
+    /// would stop being confirmed.
+    #[test]
+    fn stage0_declares_no_guest_agent_but_a_builder_job_does() {
+        assert!(
+            !stage0_spec(&stage0_inputs()).serves_guest_agent(),
+            "a Stage 0 guest runs stage0-init, not mvm-agentd"
+        );
+        assert!(
+            builder_spec(&inputs()).serves_guest_agent(),
+            "the builder guest does run an agent, and its boot is confirmed by it"
+        );
+    }
+
     /// The libkrun Stage 0 cmdline omits this token, so its clock sync is a
     /// no-op. HVF has no RTC, so a guest booting without it starts near the
     /// epoch and every HTTPS substituter fetch fails cert validation.

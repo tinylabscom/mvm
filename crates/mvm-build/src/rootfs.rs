@@ -504,9 +504,7 @@ fn materialize_ext4_in_builder_vm(
     options: &MaterializeExt4Options,
     device_size_bytes: u64,
 ) -> Result<(), RootfsError> {
-    use crate::builder_backend_select::BuilderBackendChoice;
-    use crate::libkrun_builder::{BuilderExtraDisk, BuilderShellJob, LibkrunBuilderVm};
-    use crate::qemu_builder::QemuBuilderVm;
+    use crate::builder_vm::{BuilderExtraDisk, BuilderShellJob};
 
     // This path copies `/work` (the host tree) into the mounted ext4, so
     // it has no way to place a node the host tree never held. Fail closed
@@ -541,20 +539,14 @@ fn materialize_ext4_in_builder_vm(
     let selected = ext4_materializer_choice();
     let explicit = crate::builder_backend_select::resolve_env_override().is_some();
     crate::builder_backend_select::run_with_builder_fallback(selected, explicit, |choice| {
-        match choice {
-            BuilderBackendChoice::Libkrun | BuilderBackendChoice::Hvf => {
-                LibkrunBuilderVm::default()
-                    .run_shell_script(&shell_job)
-                    .map(|_| ())
-            }
-            BuilderBackendChoice::Qemu => QemuBuilderVm::new()
-                .run_shell_script(&shell_job)
-                .map(|_| ()),
-            BuilderBackendChoice::WebLinux => Err(crate::builder_vm::BuilderVmError::VmmUnavailable {
-                requested: "web-linux".into(),
-                reason: "the web-linux builder is browser-only; select libkrun, qemu, or hvf on a native host".into(),
-            }),
-        }
+        // Through the trait, so the backend the selection resolved is the one
+        // that runs the job. This used to match on the choice here, and mapped
+        // `Hvf` onto `LibkrunBuilderVm` — which quietly ran an HVF host's shell
+        // jobs on libkrun, and is exactly the coupling the builder path is
+        // meant not to have.
+        crate::builder_backend_select::try_resolve_builder_backend_for(choice)?
+            .run_shell_script(&shell_job)
+            .map(|_| ())
     })?;
     Ok(())
 }
