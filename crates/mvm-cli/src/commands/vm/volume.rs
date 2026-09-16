@@ -351,8 +351,7 @@ fn kind_label(record: &VolumeRecord) -> String {
 /// the shared content-addressed cache; a guest that may write receives this
 /// private reflink/copy so it cannot poison another launch's cache object.
 fn host_snapshot_image(vm_name: &str, volume_name: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_core::config::mvm_home())
-        .join("volumes")
+    mvm_core::config::volumes_dir()
         .join("host-snapshots")
         .join(vm_name)
         .join(format!("{volume_name}.ext4"))

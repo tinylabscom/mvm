@@ -228,8 +228,7 @@ fn validate_snapshot_inputs(volume_name: &str, snapshot_id: &str) -> Result<()> 
 }
 
 fn snapshot_volume_root(volume_name: &str) -> PathBuf {
-    PathBuf::from(mvm_core::config::mvm_home())
-        .join("volumes")
+    mvm_core::config::volumes_dir()
         .join("snapshots")
         .join(volume_name)
 }

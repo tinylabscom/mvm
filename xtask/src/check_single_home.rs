@@ -15,10 +15,11 @@
 //!    variable; writing `XDG_*` into a guest's environment is fine and
 //!    deliberately not matched.
 //! 3. `home-read` — `env::var("HOME")` / `env::var_os("HOME")` /
-//!    `std::env::home_dir`. Base-dir derivation from `$HOME` belongs in
+//!    `env::home_dir` (including the `std`, `dirs`, and `home` forms).
+//!    Base-dir derivation from `$HOME` belongs in
 //!    the resolver only.
-//! 4. `vms-join` — `mvm_home` and `.join("vms"` in one statement: the
-//!    re-rolled per-VM layout. Use `vms_dir()` / `vm_state_dir()`.
+//! 4. `home-child-join` — `mvm_home` and `.join("<literal>"` in one
+//!    statement: a re-rolled child layout. Add and use a named helper.
 //!
 //! A site that trips gets routed through `mvm_core::config`; only a
 //! genuinely non-mvm use of `$HOME` (shell rc files, toolchain discovery,
@@ -36,7 +37,7 @@ enum Rule {
     HomeLiteral,
     DeletedEnv,
     HomeRead,
-    VmsJoin,
+    HomeChildJoin,
 }
 
 impl Rule {
@@ -45,7 +46,7 @@ impl Rule {
             Rule::HomeLiteral => "home-literal",
             Rule::DeletedEnv => "deleted-env",
             Rule::HomeRead => "home-read",
-            Rule::VmsJoin => "vms-join",
+            Rule::HomeChildJoin => "home-child-join",
         }
     }
 }
@@ -54,7 +55,7 @@ const ALL_RULES: &[Rule] = &[
     Rule::HomeLiteral,
     Rule::DeletedEnv,
     Rule::HomeRead,
-    Rule::VmsJoin,
+    Rule::HomeChildJoin,
 ];
 
 /// (file, exempted rule classes, reason). Keep entries scoped to the
@@ -108,11 +109,6 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
         "host toolchain discovery (~/.cargo/bin/rustup, mise python installs) lives in the real $HOME",
     ),
     (
-        "crates/mvm-cli/src/exec.rs",
-        &[Rule::HomeRead],
-        "tilde-expansion of user-supplied image paths",
-    ),
-    (
         "crates/mvm-cli/src/commands/shared/parse.rs",
         &[Rule::HomeRead],
         "tilde-expansion of user volume specs + non-mvm credential-store deny roots (~/.ssh, ~/.gnupg, ~/.aws)",
@@ -147,7 +143,7 @@ pub fn run(workspace: &Path) -> Result<()> {
     let matchers = Matchers::new();
     let mut hits: Vec<String> = Vec::new();
 
-    for root in ["crates", "src", "xtask", "tests"] {
+    for root in ["crates", "examples", "src", "xtask", "tests"] {
         crate::fs_walk::walk_files(&workspace.join(root), &mut |path| {
             scan_file(workspace, path, &matchers, &mut hits);
         })?;
@@ -180,8 +176,10 @@ impl Matchers {
                 r#"\b(?:MVM_DATA_DIR|MVM_CACHE_DIR|MVM_CONFIG_DIR|MVM_RUNTIME_DIR|MVM_STATE_DIR|MVM_SHARE_DIR|MVM_DEPS_VOLUMES_DIR)\b|env::var(?:_os)?\s*\(\s*"XDG_"#,
             )
             .expect("deleted-env regex is valid"),
-            home_read: Regex::new(r#"env::var(?:_os)?\s*\(\s*"HOME"\s*\)|std::env::home_dir"#)
-                .expect("home-read regex is valid"),
+            home_read: Regex::new(
+                r#"env::var(?:_os)?\s*\(\s*"HOME"\s*\)|\b(?:std::env|env|dirs|home)::home_dir"#,
+            )
+            .expect("home-read regex is valid"),
         }
     }
 }
@@ -246,14 +244,49 @@ fn scan_source(rel: &str, src: &str, matchers: &Matchers) -> Vec<String> {
             }
         }
     }
-    if !exempt(rel, Rule::VmsJoin) {
+    if !exempt(rel, Rule::HomeChildJoin) {
         for (line, stmt) in logical_statements(src) {
-            if stmt.contains("mvm_home") && stmt.contains(".join(\"vms\"") {
-                push(line, Rule::VmsJoin, &stmt);
+            if contains_mvm_home_child_join(&stmt) {
+                push(line, Rule::HomeChildJoin, &stmt);
             }
         }
     }
     hits
+}
+
+fn contains_mvm_home_child_join(statement: &str) -> bool {
+    let home_call = statement
+        .match_indices("mvm_home()")
+        .find_map(|(position, _)| {
+            position
+                .checked_sub(1)
+                .and_then(|before| statement.as_bytes().get(before))
+                .is_none_or(|before| !before.is_ascii_alphanumeric() && *before != b'_')
+                .then_some(position)
+        });
+    let (home_call, strict_vms_only) = if let Some(position) = home_call {
+        (position, false)
+    } else if let Some(position) = statement.find("mvm_home_strict()") {
+        (position, true)
+    } else {
+        return false;
+    };
+    let Some(mut remainder) = statement[home_call..]
+        .split_once(".join")
+        .map(|(_, rest)| rest)
+    else {
+        return false;
+    };
+    loop {
+        let trimmed = remainder.trim_start();
+        if trimmed.starts_with("(\"") || trimmed.starts_with("(r\"") {
+            return !strict_vms_only || trimmed.starts_with("(\"vms\"");
+        }
+        let Some((_, rest)) = trimmed.split_once(".join") else {
+            return false;
+        };
+        remainder = rest;
+    }
 }
 
 fn exempt(rel: &str, rule: Rule) -> bool {
@@ -478,6 +511,9 @@ mod tests {
             "let h = std::env::var(\"HOME\").unwrap();\n",
             "let h = std::env::var_os(\"HOME\");\n",
             "let h = std::env::home_dir();\n",
+            "let h = env::home_dir();\n",
+            "let h = dirs::home_dir();\n",
+            "let h = home::home_dir();\n",
         ] {
             let out = hits(PLAIN, src);
             assert_eq!(out.len(), 1, "{src}: {out:?}");
@@ -491,11 +527,23 @@ mod tests {
     }
 
     #[test]
-    fn flags_rerolled_vms_join_single_and_multi_line() {
-        let single = "let root = PathBuf::from(mvm_home()).join(\"vms\");\n";
-        let out = hits(PLAIN, single);
-        assert_eq!(out.len(), 1, "{out:?}");
-        assert!(out[0].contains("[vms-join]"), "{out:?}");
+    fn flags_any_rerolled_mvm_home_child_join() {
+        for child in [
+            "vms",
+            "config.toml",
+            "instances",
+            "artifacts",
+            "tool-staging",
+            "oci-policy.toml",
+            "attestation",
+        ] {
+            let single = format!(
+                "let root = PathBuf::from(mvm_core::config::mvm_home()).join(\"{child}\");\n"
+            );
+            let out = hits(PLAIN, &single);
+            assert_eq!(out.len(), 1, "{child}: {out:?}");
+            assert!(out[0].contains("[home-child-join]"), "{out:?}");
+        }
 
         let multi = "let root = mvm_core::config::mvm_home_strict()?\n    .join(\"vms\")\n    .join(name);\n";
         let out = hits(PLAIN, multi);
@@ -506,12 +554,29 @@ mod tests {
     fn allows_vms_dir_helper_and_unrelated_vms_join() {
         assert!(hits(PLAIN, "let root = mvm_core::config::vms_dir();\n").is_empty());
         assert!(hits(PLAIN, "let root = builder_vm_cache_dir().join(\"vms\");\n").is_empty());
+        assert!(hits(PLAIN, "let root = fixture_mvm_home().join(\"vms\");\n").is_empty());
     }
 
     #[test]
     fn resolver_file_is_exempt_from_all_rules() {
         let src = "let h = std::env::var(\"HOME\");\nlet p = format!(\"{}/.mvm\", h);\nlet v = PathBuf::from(mvm_home()).join(\"vms\");\n";
         assert!(hits("crates/mvm-core/src/config.rs", src).is_empty());
+    }
+
+    #[test]
+    fn run_scans_examples() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let example = workspace.path().join("examples/bypass.rs");
+        std::fs::create_dir_all(example.parent().expect("example parent"))
+            .expect("create examples directory");
+        std::fs::write(
+            &example,
+            "let root = PathBuf::from(mvm_core::config::mvm_home()).join(\"artifacts\");\n",
+        )
+        .expect("write example");
+
+        let error = run(workspace.path()).expect_err("examples must be scanned");
+        assert!(error.to_string().contains("examples/bypass.rs"), "{error}");
     }
 
     #[test]

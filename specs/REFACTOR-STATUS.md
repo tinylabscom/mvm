@@ -4,6 +4,13 @@ Last updated: 2026-09-16
 
 ## In progress
 
+- [x] **Canonical user-config and MVM child paths.**
+      `specs/plans/2026-09-15-the-big-cleanup.md` A4.5, issue #3308. One
+      canonical config path and tenant parser; named helpers for every direct
+      `mvm_home()` child; strengthened `check-single-home` coverage. Complete
+      with 43 focused tests, gated-target checks, all repository gates, clippy,
+      and the full workspace suite.
+
 - [x] **Honest production file-size gate.**
       `specs/plans/2026-09-15-the-big-cleanup.md` C1, issue #3313. Repair the
       test-span counter, scan every production Rust root, and ratchet the

@@ -373,7 +373,7 @@ pub struct InstanceSnapshotEntry {
 /// listing — a VM with a broken sidecar still surfaces with
 /// `sidecar = None` so the operator can investigate.
 pub fn list_instance_snapshots() -> Result<Vec<InstanceSnapshotEntry>> {
-    let root = PathBuf::from(mvm_core::config::mvm_home()).join("instances");
+    let root = mvm_core::config::instances_root();
     if !root.is_dir() {
         return Ok(Vec::new());
     }

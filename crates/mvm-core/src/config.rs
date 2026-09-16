@@ -264,6 +264,53 @@ pub fn mvm_config_dir() -> String {
     format!("{}/config", mvm_home())
 }
 
+/// Default OCI registry trust policy: `<mvm_home>/oci-policy.toml`.
+pub fn oci_policy_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home()).join("oci-policy.toml")
+}
+
+/// Root of local build artifacts: `<mvm_home>/artifacts`.
+pub fn artifacts_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home()).join("artifacts")
+}
+
+/// Root of signed plan bundles: `<mvm_home>/bundles`.
+pub fn bundles_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home()).join("bundles")
+}
+
+/// Root of persistent host volumes: `<mvm_home>/volumes`.
+pub fn volumes_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home()).join("volumes")
+}
+
+/// Remote-template cache: `<mvm_home>/templates/remote`.
+pub fn remote_templates_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home())
+        .join("templates")
+        .join("remote")
+}
+
+/// Host tool staging root: `<mvm_home>/tool-staging`.
+pub fn tool_staging_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home()).join("tool-staging")
+}
+
+/// Host attestation identity root: `<mvm_home>/attestation`.
+pub fn attestation_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home()).join("attestation")
+}
+
+/// Development runtime root: `<mvm_home>/dev`.
+pub fn dev_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home()).join("dev")
+}
+
+/// Mock-backend runtime root: `<mvm_home>/mock-vms`.
+pub fn mock_vms_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home()).join("mock-vms")
+}
+
 /// Runtime directory for ephemeral per-session / per-call state:
 /// `<mvm_home>/run`.
 ///
@@ -432,14 +479,17 @@ pub fn running_vm_dir(name: &str) -> String {
     vm_state_dir(name).display().to_string()
 }
 
-/// Per-instance state root: `<mvm_home>/instances/<name>/`. Distinct from
+/// Per-instance state root: `<mvm_home>/instances/`. Distinct from
 /// `vms/` (the VMM runtime dir) — this holds instance-snapshot artifacts that
 /// must outlive a VMM restart. Shared by the mvm-layer pause/resume
 /// orchestration and the backend warm-start path so both agree on one path.
+pub fn instances_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home()).join("instances")
+}
+
+/// Per-instance state directory: `<mvm_home>/instances/<name>/`.
 pub fn instance_dir(name: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_home())
-        .join("instances")
-        .join(name)
+    instances_root().join(name)
 }
 
 /// Sealed instance-snapshot directory: `<mvm_home>/instances/<name>/snapshot/`.
@@ -1482,6 +1532,43 @@ mod tests {
         assert_eq!(mvm_share_dir(), "/custom/root/share");
         assert_eq!(mvm_deps_volumes_dir(), "/custom/root/volumes/deps");
         assert_eq!(vms_dir(), std::path::PathBuf::from("/custom/root/vms"));
+        assert_eq!(
+            artifacts_dir(),
+            std::path::PathBuf::from("/custom/root/artifacts")
+        );
+        assert_eq!(
+            bundles_dir(),
+            std::path::PathBuf::from("/custom/root/bundles")
+        );
+        assert_eq!(
+            volumes_dir(),
+            std::path::PathBuf::from("/custom/root/volumes")
+        );
+        assert_eq!(
+            instances_root(),
+            std::path::PathBuf::from("/custom/root/instances")
+        );
+        assert_eq!(
+            tool_staging_dir(),
+            std::path::PathBuf::from("/custom/root/tool-staging")
+        );
+        assert_eq!(
+            oci_policy_path(),
+            std::path::PathBuf::from("/custom/root/oci-policy.toml")
+        );
+        assert_eq!(
+            attestation_dir(),
+            std::path::PathBuf::from("/custom/root/attestation")
+        );
+        assert_eq!(
+            remote_templates_dir(),
+            std::path::PathBuf::from("/custom/root/templates/remote")
+        );
+        assert_eq!(dev_dir(), std::path::PathBuf::from("/custom/root/dev"));
+        assert_eq!(
+            mock_vms_dir(),
+            std::path::PathBuf::from("/custom/root/mock-vms")
+        );
     }
 
     #[test]

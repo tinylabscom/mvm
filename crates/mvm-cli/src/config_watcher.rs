@@ -1,3 +1,4 @@
+#[cfg(feature = "dev-watch")]
 use std::path::Path;
 use std::sync::mpsc;
 #[cfg(feature = "dev-watch")]
@@ -26,19 +27,21 @@ pub struct ConfigWatcher {
 }
 
 impl ConfigWatcher {
-    /// Start watching `path`.  Returns immediately; the debouncer runs on a
-    /// background thread managed by `notify`.
-    pub fn start(path: &Path) -> Result<Self> {
+    /// Start watching the canonical user config path. Returns immediately;
+    /// the debouncer runs on a background thread managed by `notify`.
+    pub fn start() -> Result<Self> {
         #[cfg(not(feature = "dev-watch"))]
         {
-            let _ = path;
             anyhow::bail!(
                 "config watch support is disabled in this build; rebuild with --features dev-watch"
             );
         }
 
         #[cfg(feature = "dev-watch")]
-        Self::start_with_debounce(path, Duration::from_millis(500))
+        Self::start_with_debounce(
+            &mvm_core::user_config::config_path(),
+            Duration::from_millis(500),
+        )
     }
 
     /// Like `start` but with a configurable debounce duration.  Useful in
@@ -117,7 +120,10 @@ pub fn apply_pending_reloads(cfg: MvmConfig, rx: &mpsc::Receiver<ConfigReloadEve
     while let Ok(event) = rx.try_recv() {
         match event {
             ConfigReloadEvent::Reloaded(new_cfg) => {
-                tracing::info!("Config reloaded from ~/.mvm/config.toml");
+                tracing::info!(
+                    path = %mvm_core::user_config::config_path().display(),
+                    "Config reloaded"
+                );
                 current = new_cfg;
             }
             ConfigReloadEvent::ParseError(msg) => {

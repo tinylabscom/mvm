@@ -48,9 +48,7 @@ pub(crate) struct AttachmentLeaseRecord {
 
 impl AttachmentLeaseCatalog {
     pub(crate) fn path() -> PathBuf {
-        PathBuf::from(mvm_core::config::mvm_home())
-            .join("volumes")
-            .join("attachments.json")
+        mvm_core::config::volumes_dir().join("attachments.json")
     }
 
     pub(crate) fn load() -> Result<Self> {

@@ -362,9 +362,7 @@ mod tests {
     }
 
     fn persist_installed_bundle(bundle_sha: &str) {
-        let bundle_dir = std::path::PathBuf::from(mvm_core::config::mvm_home())
-            .join("bundles")
-            .join(bundle_sha);
+        let bundle_dir = mvm_core::config::bundles_dir().join(bundle_sha);
         std::fs::create_dir_all(bundle_dir.join("artifacts")).expect("create bundle artifacts");
         std::fs::write(bundle_dir.join("artifacts/vmlinux"), b"kernel")
             .expect("write bundle kernel");

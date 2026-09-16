@@ -85,9 +85,7 @@ pub enum LocalVolumeState {
 
 impl LocalVolumeCatalog {
     pub fn path() -> PathBuf {
-        PathBuf::from(mvm_core::config::mvm_home())
-            .join("volumes")
-            .join("registry.json")
+        mvm_core::config::volumes_dir().join("registry.json")
     }
 
     pub fn load() -> Result<Self> {
@@ -292,10 +290,7 @@ pub struct VolumeMountRegistry {
 impl VolumeMountRegistry {
     /// Disk path of the catalog for `vm_name`.
     pub fn path_for(vm_name: &str) -> PathBuf {
-        PathBuf::from(mvm_core::config::mvm_home())
-            .join("instances")
-            .join(vm_name)
-            .join("volume_mounts.json")
+        mvm_core::config::instance_dir(vm_name).join("volume_mounts.json")
     }
 
     /// Load from disk; returns an empty registry when the file is
