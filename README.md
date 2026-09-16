@@ -73,7 +73,7 @@ command.
 
 ```bash
 # Pre-built release (macOS Apple Silicon, Linux x86_64/aarch64)
-curl -fsSL https://raw.githubusercontent.com/tinylabscom/mvm/main/install.sh | sh
+curl -fsSL https://runmvm.com/install.sh | sh
 
 # From source
 git clone https://github.com/tinylabscom/mvm.git && cd mvm

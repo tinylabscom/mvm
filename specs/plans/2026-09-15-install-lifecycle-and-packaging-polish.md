@@ -3,7 +3,7 @@
 Backing: shipped-source
 Validation: check-sprint-append
 
-**Issues:** epic [#3277](https://github.com/tinylabscom/mvm/issues/3277); [#3268](https://github.com/tinylabscom/mvm/issues/3268), [#3269](https://github.com/tinylabscom/mvm/issues/3269), [#3270](https://github.com/tinylabscom/mvm/issues/3270), [#3271](https://github.com/tinylabscom/mvm/issues/3271), [#3272](https://github.com/tinylabscom/mvm/issues/3272), [#3273](https://github.com/tinylabscom/mvm/issues/3273), [#3274](https://github.com/tinylabscom/mvm/issues/3274)
+**Issues:** epic [#3277](https://github.com/tinylabscom/mvm/issues/3277); [#3268](https://github.com/tinylabscom/mvm/issues/3268), [#3269](https://github.com/tinylabscom/mvm/issues/3269), [#3270](https://github.com/tinylabscom/mvm/issues/3270), [#3271](https://github.com/tinylabscom/mvm/issues/3271), [#3272](https://github.com/tinylabscom/mvm/issues/3272), [#3273](https://github.com/tinylabscom/mvm/issues/3273), [#3274](https://github.com/tinylabscom/mvm/issues/3274), [#3331](https://github.com/tinylabscom/mvm/issues/3331)
 
 ## Outcome
 
@@ -47,6 +47,9 @@ Issue: [#3268](https://github.com/tinylabscom/mvm/issues/3268).
       The adjacent project runs this daily across ten vanity URLs; the cost is
       one cron job and it catches a silently broken front door.
 - [x] Keep the raw GitHub path working, undocumented, as a fallback.
+- [x] Correct the published host to the Worker-attached `runmvm.com`; the
+      legacy `gomicrovm.com` redirect drops request paths. Check the production
+      hostname after every site deploy, not only the generated Worker URL.
 
 ## WS2 — Resolve the version without an API call
 
