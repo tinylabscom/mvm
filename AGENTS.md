@@ -72,7 +72,7 @@ After any pull request merge, immediately sync the local main checkout before do
 ### No assistant or tool attribution in pull requests
 
 Pull requests must never identify an AI assistant, coding agent, model, or tool as
-a contributor. In particular, never mention Claude Code, Codex, or Kimi in PR
+a contributor. In particular, never mention Claude Code, Codex, Kimi, or Qwen Code in PR
 titles, bodies, contributor lists, acknowledgements, commit trailers, generated-by
 notices, or similar metadata. Do not add `Co-authored-by` or other attribution
 trailers for an assistant or tool. Keep all PR metadata focused on the code change
@@ -153,7 +153,7 @@ The builder VM is shared across worktrees by design — **never fork it per work
 
 The `MVM_HOME` override is what isolates per-feature state — templates, sockets, the microVM registry, snapshots, signing keys. Anything that would otherwise land in `~/.mvm` ends up under the worktree.
 
-State that *does* live inside the shared builder VM (`/var/lib/mvm/`, the `br-mvm` bridge, TAP devices, in-flight microVMs) is the only collision surface between worktrees. If two worktrees need to run microVMs concurrently, give them distinct microVM and TAP names — do not spin up a second builder VM.
+State that _does_ live inside the shared builder VM (`/var/lib/mvm/`, the `br-mvm` bridge, TAP devices, in-flight microVMs) is the only collision surface between worktrees. If two worktrees need to run microVMs concurrently, give them distinct microVM and TAP names — do not spin up a second builder VM.
 
 ### Optional: direnv
 
@@ -187,7 +187,7 @@ No task is complete without tests. Every feature, bug fix, or refactor must incl
 1. **Tests first**: Write or update tests covering the new/changed behavior before marking a task done. Unit tests for logic, integration tests for CLI and cross-crate interactions.
 2. **All tests green**: Run `cargo test --workspace` and confirm zero failures. New tests must pass alongside all existing tests.
 3. **Zero clippy warnings/errors**: Run `cargo clippy --workspace -- -D warnings` and fix all findings before calling a feature done. Never suppress a clippy lint with `#[allow(...)]` — fix the underlying issue instead.
-4. **Compiling workspace**: Run `cargo check --workspace` (or full `cargo test`/`cargo build`) and fix any errors before you finish. Never leave the workspace in a non-compiling state. **`--all-targets` is not exhaustive**: it silently skips targets behind `required-features` (the `mvm-conformance` cucumber runner needs `--features bdd`), and on macOS it cannot compile `cfg(target_os = "linux")` files at all — including Linux-gated *test* files, which `just check-linux` also misses because that recipe is `--lib` only. Changing the shape of a shared type (adding a struct field, a trait method, an enum variant) therefore needs `just check-gated` before pushing. Skipping it surfaces in CI as `check-nextest-groups` failing with "cargo nextest list failed", which names neither the file nor the field.
+4. **Compiling workspace**: Run `cargo check --workspace` (or full `cargo test`/`cargo build`) and fix any errors before you finish. Never leave the workspace in a non-compiling state. **`--all-targets` is not exhaustive**: it silently skips targets behind `required-features` (the `mvm-conformance` cucumber runner needs `--features bdd`), and on macOS it cannot compile `cfg(target_os = "linux")` files at all — including Linux-gated _test_ files, which `just check-linux` also misses because that recipe is `--lib` only. Changing the shape of a shared type (adding a struct field, a trait method, an enum variant) therefore needs `just check-gated` before pushing. Skipping it surfaces in CI as `check-nextest-groups` failing with "cargo nextest list failed", which names neither the file nor the field.
 5. **Update sprint spec**: After completing any phase, task, or sub-task, update `specs/SPRINT.md` to reflect the current status. Check off completed items (`- [x]`), update phase status labels (e.g. `**Status: COMPLETE**`), and add any new test counts or notes. The sprint spec must always accurately reflect what has been implemented.
 6. **Tick the plan checkboxes**: as you complete each task or sub-task, check it off (`- [x]`) in the active plan under `specs/plans/`. New plans are named by slug, not number (`2026-08-15-<slug>.md`) — see CLAUDE.md §"Naming a new plan" for why, and `xtask check-plan-names` enforces it. **The plan's checkboxes are the source of truth for progress** — a resumed or parallel session reads the last unchecked box to know exactly where to pick the work back up. Never mark a box done before its tests are green. Keep the plan and `specs/SPRINT.md` in sync.
 7. **Update the refactor rollup**: when you land, merge, or descope a workstream in any in-flight plan, tick/strike the matching box in `specs/REFACTOR-STATUS.md` in the **same** change and bump its "Last updated" date. It is a quick cross-plan index, not the source of truth — if it disagrees with a `specs/plans/` doc, the plan doc wins; fix the rollup. The plan checkboxes (item 6), `specs/SPRINT.md` (item 5), and `specs/REFACTOR-STATUS.md` move together — never update one and leave the others stale.
@@ -250,7 +250,7 @@ Privacy and security are **critical priorities** for this project and must be co
 Rules:
 
 - **Never suppress a lint with `#[allow(...)]`** — fix the underlying issue instead. If you think a suppression is genuinely necessary, explain why in a comment and get explicit approval.
-- **`#[allow(clippy::too_many_arguments)]` is banned outright — no exceptions, anywhere.** This one has *no* "explain and get approval" escape hatch. The instant a function trips the lint, introduce a **dedicated struct with a builder** (the Rust best practice) that carries those arguments, and pass the built value instead of the loose list. Give the struct a `::builder()` entry point (or `#[derive(Default)]` + `with_*` setters) with one setter per field and a `build()` that returns the validated value, then thread that single value through. A plain positional params struct is the bare minimum; the standing preference is the builder. The *only* legitimate suppression for this lint is on **bindgen-generated FFI** (e.g. `crates/deps/libkrun-sys/src/sys.rs`), which we never hand-edit. If you find an existing suppression in hand-written code, convert it to a builder as part of your change.
+- **`#[allow(clippy::too_many_arguments)]` is banned outright — no exceptions, anywhere.** This one has _no_ "explain and get approval" escape hatch. The instant a function trips the lint, introduce a **dedicated struct with a builder** (the Rust best practice) that carries those arguments, and pass the built value instead of the loose list. Give the struct a `::builder()` entry point (or `#[derive(Default)]` + `with_*` setters) with one setter per field and a `build()` that returns the validated value, then thread that single value through. A plain positional params struct is the bare minimum; the standing preference is the builder. The _only_ legitimate suppression for this lint is on **bindgen-generated FFI** (e.g. `crates/deps/libkrun-sys/src/sys.rs`), which we never hand-edit. If you find an existing suppression in hand-written code, convert it to a builder as part of your change.
 - **Fix warnings immediately** — do not accumulate clippy debt. A warning introduced now becomes harder to diagnose later.
 - **Common findings to watch for**: `clippy::too_many_arguments` (build a params struct + builder — see the hard rule above), `clippy::redundant_closure`, `clippy::needless_pass_by_value`, `clippy::single_match` → `if let`, unused imports/variables.
 - **After adding new code**, run clippy before moving on — don't wait until the end of a task.
@@ -263,12 +263,12 @@ Rules:
 
 **NEVER** cite a plan, ADR, PR, sprint, or workstream in a code comment. Process artifacts (`Plan 200`, `ADR-007`, `PR #1234`, `Sprint 52`, `W2.4`) belong in specs, commit messages, and PR descriptions — not in the source. The `check-no-spec-refs-in-comments` lint (`xtask/src/check_no_spec_refs_in_comments.rs`, a CI Lint-job gate) extracts comment text and fails the build on any such reference, so a citation that builds locally will still break the GitHub action.
 
-Keep the *reasoning* in the comment, drop the *citation*. Write the invariant or the "why" the comment is explaining, not the spec number that motivated it:
+Keep the _reasoning_ in the comment, drop the _citation_. Write the invariant or the "why" the comment is explaining, not the spec number that motivated it:
 
 - Bad: `// Plan 200 PR2: enforce uniform host:port L4 policy here`
 - Good: `// Enforce uniform host:port L4 policy — untrusted workloads never reach the network unless admitted`
 
-Spec numbers are still fine in string literals that are genuinely runtime data (error messages, audit-log fields) — the lint only scans comment text. When you need to record *why* a decision was made for future readers, put it in the commit message or the owning spec doc and link the code from there, not the other way around.
+Spec numbers are still fine in string literals that are genuinely runtime data (error messages, audit-log fields) — the lint only scans comment text. When you need to record _why_ a decision was made for future readers, put it in the commit message or the owning spec doc and link the code from there, not the other way around.
 
 ## Reuse First; Compose Small, Testable Units
 
@@ -277,7 +277,7 @@ search for an existing helper, type, trait impl, or crate that already does the
 job — `grep`/`rg` the workspace, check the facade re-exports, read the module the
 work belongs in. Duplicated logic drifts out of sync, doubles the test surface,
 and is the single most common source of bugs in this repo. If an existing helper
-is *almost* right, extend or generalize it — don't fork a second copy.
+is _almost_ right, extend or generalize it — don't fork a second copy.
 
 - **Use the helpers.** All `~/.mvm` paths go through `mvm-core::config`
   helpers (`mvm_home`, `vm_state_dir`, `mvm_keys_dir`, `mvm_cache_dir`, …) —
@@ -302,7 +302,7 @@ is *almost* right, extend or generalize it — don't fork a second copy.
   sentinel values. Push invariants into types so the compiler enforces them and
   fewer runtime checks (and tests) are even needed.
 - **Don't over-abstract (YAGNI).** Reach for a trait/builder/generic when there is
-  a *real* second case or genuine construction complexity — not speculatively. The
+  a _real_ second case or genuine construction complexity — not speculatively. The
   goal is the simplest design that's reusable and testable, not maximal
   indirection. Match the existing pattern; don't invent a framework.
 - **Builder pattern for multi-field construction.** Types with more than a couple
@@ -395,7 +395,7 @@ below extend the external guide, never relax it.
 - Run `cargo audit` (advisories), `cargo deny` (licenses, bans, duplicate
   versions), and `cargo machete` (unused deps).
 - Run clippy aggressively: `cargo clippy --workspace --all-targets
-  --all-features -- -D warnings`. Prefer enabling `clippy::pedantic` /
+--all-features -- -D warnings`. Prefer enabling `clippy::pedantic` /
   `clippy::nursery` through the `[lints]` table and allowing individual lints
   with justification over disabling whole groups.
 - Enforce `cargo fmt --check` in CI; never hand-format.
@@ -546,6 +546,7 @@ When using Playwright or other browser tools, explicitly set the output path to 
 If you accidentally save files to the repo, delete them immediately before committing.
 
 <!-- graft:start -->
+
 ## Graft — repo context graph
 
 This repo is indexed in `graft/`: small linked markdown nodes that explain each
