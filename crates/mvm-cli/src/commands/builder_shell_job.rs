@@ -17,7 +17,7 @@ use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 
 use mvm_build::builder_backend_select::{BuilderBackendChoice, resolve_choice};
-use mvm_build::builder_vm::BuilderVmError;
+use mvm_build::builder_vm::{BuilderVm, BuilderVmError};
 use mvm_build::libkrun_builder::{BuilderShellJob, LibkrunBuilderVm};
 use mvm_core::user_config::MvmConfig;
 
@@ -73,9 +73,20 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resul
             let (kernel, rootfs, _closure_nar) =
                 crate::commands::build::hvf_builder_image::resolve_hvf_builder_image()
                     .map_err(builder_vm_err)?;
-            mvm_runtime::builder_runner::hvf_builder::HvfBuilderVm::new(kernel, rootfs)
-                .run_shell_script(&job)
-                .map_err(builder_vm_err)?
+            mvm_runtime::builder_runner::DriverBuilderVm::new(
+                mvm_backends::driver::hvf::HvfDriver::new(),
+                kernel,
+                rootfs,
+            )
+            .run_shell_script(&job)
+            .map_err(builder_vm_err)?
+        }
+        BuilderBackendChoice::Firecracker => {
+            bail!(
+                "builder shell jobs are not yet wired for the Firecracker backend; \
+                 it bootstraps (Stage 0) but has no builder image resolver yet. \
+                 Use --builder hvf or --builder libkrun"
+            )
         }
         BuilderBackendChoice::Qemu => {
             bail!(

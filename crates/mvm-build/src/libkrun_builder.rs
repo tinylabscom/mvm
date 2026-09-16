@@ -80,7 +80,19 @@ use crate::builder_vm::{
 
 mod egress_process;
 
+use crate::stage0_host::{
+    materialize_stage0_root_disk, read_console_tail, stage0_guest_halt_completed_successfully,
+    stage0_run_result,
+};
+// Exercised only by this module's tests; the code itself moved to
+// `stage0_host` when Stage 0 stopped being libkrun-only.
+#[cfg(test)]
+use crate::stage0_host::{Stage0HaltOutcome, stage0_console_halt_outcome, stage0_root_mount_nodes};
 use egress_process::{builder_egress_endpoint_was_terminated, builder_egress_supervisor_command};
+// Moved to `builder_vm` (nothing about them is libkrun-shaped); re-exported
+// here so existing callers keep compiling while they migrate.
+pub use crate::builder_vm::{BuilderExtraDisk, BuilderShellJob, BuilderShellResult};
+
 // These items previously lived in this file; they migrated to
 // `builder_vm_runtime` so the future VzBuilderVm path can reuse the
 // same logic without duplicating it. `INSTALL_SPEC_FILENAME` and
@@ -767,38 +779,6 @@ pub struct LibkrunBuilderVm {
     pub verbose: bool,
 }
 
-/// Additional virtio-blk device passed to a one-shot builder shell
-/// job. Devices appear after the builder VM's persistent Nix-store
-/// disk; the first extra disk here is `/dev/vdc` in the guest.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BuilderExtraDisk {
-    pub id: String,
-    pub path: PathBuf,
-    pub read_only: bool,
-}
-
-/// Generic builder-VM shell job.
-///
-/// This is intentionally narrower than [`BuilderJob`]: it is for
-/// in-tree infrastructure commands that need the Linux builder
-/// boundary but do not produce Nix build artifacts. The OCI image
-/// runner uses it to run `mkfs.ext4` and copy an OCI-unpacked rootfs
-/// into a writable virtio-blk image.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BuilderShellJob {
-    pub work_dir: PathBuf,
-    pub artifact_out: PathBuf,
-    pub script: String,
-    pub extra_disks: Vec<BuilderExtraDisk>,
-}
-
-/// Result metadata from a one-shot builder shell job.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BuilderShellResult {
-    pub job_dir: PathBuf,
-    pub vm_state_dir: PathBuf,
-}
-
 impl Default for LibkrunBuilderVm {
     fn default() -> Self {
         Self {
@@ -1129,7 +1109,13 @@ impl LibkrunBuilderVm {
     /// points at [`BuilderShellJob::work_dir`], `/out` points at
     /// [`BuilderShellJob::artifact_out`], and callers may attach
     /// additional writable or read-only virtio-blk disks.
-    pub fn run_shell_script(
+    /// The implementation behind [`BuilderVm::run_shell_script`].
+    ///
+    /// Named apart from the trait method deliberately: while both were called
+    /// `run_shell_script`, the trait impl's `Self::run_shell_script(self, job)`
+    /// resolved back to itself rather than to the inherent method, which is an
+    /// infinite recursion clippy catches but a reader would not.
+    pub fn run_shell_script_impl(
         &self,
         job: &BuilderShellJob,
     ) -> Result<BuilderShellResult, BuilderVmError> {
@@ -1499,55 +1485,6 @@ impl LibkrunBuilderVm {
     }
 }
 
-/// Materialize the verified Stage 0 seed as the root ext4 disk libkrun boots.
-/// `RootDir` remains the cache/source representation because Stage 0 creates
-/// it before any guest-built kernel or rootfs exists; it is never handed to the
-/// VMM as a host directory.
-fn materialize_stage0_root_disk(
-    root_dir: &std::path::Path,
-    vm_state_dir: &std::path::Path,
-) -> Result<PathBuf, BuilderVmError> {
-    let image_path = vm_state_dir.join("root.ext4");
-    let input =
-        crate::rootfs::MaterializeExt4Input::new(root_dir.to_path_buf(), image_path.clone(), 0)
-            .with_deferred_nodes(stage0_root_mount_nodes());
-    crate::rootfs::materialize_ext4_pure(&input).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "materializing Stage 0 root disk from {}: {e}",
-            root_dir.display()
-        ))
-    })?;
-    Ok(image_path)
-}
-
-fn stage0_root_mount_nodes() -> Vec<mvm_fs::ext4::Node> {
-    let mut nodes = [
-        "/bin",
-        "/dev",
-        "/etc",
-        "/nix-seed-ro",
-        "/nix-stage0-store",
-        "/proc",
-        "/run",
-        "/sys",
-        "/tmp",
-    ]
-    .into_iter()
-    .map(|path| mvm_fs::ext4::Node::Dir {
-        path: path.to_string(),
-        mode: 0o755,
-        xattrs: Vec::new(),
-    })
-    .collect::<Vec<_>>();
-    nodes.push(mvm_fs::ext4::Node::File {
-        path: crate::stage0::ROOT_RUNTIME_RESERVE_PATH.to_string(),
-        mode: 0o600,
-        data: vec![0; crate::stage0::ROOT_RUNTIME_RESERVE_BYTES],
-        xattrs: Vec::new(),
-    });
-    nodes
-}
-
 #[cfg(test)]
 struct BuilderShellKrunContextParams<'a> {
     vm_name: &'a str,
@@ -1607,6 +1544,15 @@ pub(crate) fn ensure_utf8_path(p: &std::path::Path, field: &str) -> Result<(), B
 }
 
 impl BuilderVm for LibkrunBuilderVm {
+    /// Delegates to the inherent implementation; the trait method is what the
+    /// generic call sites reach.
+    fn run_shell_script(
+        &self,
+        job: &crate::builder_vm::BuilderShellJob,
+    ) -> Result<crate::builder_vm::BuilderShellResult, BuilderVmError> {
+        self.run_shell_script_impl(job)
+    }
+
     fn capabilities(&self) -> BuilderCapabilities {
         BuilderCapabilities {
             stage0_bootstrap: true,
@@ -2573,11 +2519,11 @@ fn load_builder_vm_image_from_cache(arch_dir: &Path) -> Result<BuilderVmImage, B
 /// [`acquire_nix_store_image_lock_named`]. Lives in
 /// [`builder_vm_cache_dir`] and matches `cache info`'s
 /// `nix-store-*.img` sparse-footprint report.
-pub(crate) fn stage0_nix_store_image_name() -> String {
+pub fn stage0_nix_store_image_name() -> String {
     format!("nix-store-stage0-{}.img", host_arch_tag())
 }
 
-pub(crate) fn prepopulate_stage0_nix_store_image(
+pub fn prepopulate_stage0_nix_store_image(
     image: &BuilderVmImage,
     store_image: &Path,
 ) -> Result<(), BuilderVmError> {
@@ -4166,29 +4112,6 @@ fn extract_line(buf: &[u8], idx: usize) -> String {
         .to_string()
 }
 
-/// Last `max_lines` non-empty lines of a console log, for surfacing the guest's
-/// actual error in a halt failure (the build error sits just above the halt
-/// banner). Best-effort: an unreadable/missing log yields an empty string.
-fn read_console_tail(console_log_path: &str, max_lines: usize) -> String {
-    let Ok(contents) = std::fs::read_to_string(console_log_path) else {
-        return String::new();
-    };
-    let lines: Vec<&str> = contents.lines().filter(|l| !l.trim().is_empty()).collect();
-    let start = lines.len().saturating_sub(max_lines);
-    lines[start..].join("\n")
-}
-
-fn stage0_guest_halt_completed_successfully(console_log: &Path, artifact_out: &Path) -> bool {
-    let outputs_present =
-        artifact_out.join("vmlinux").is_file() || artifact_out.join("rootfs.ext4").is_file();
-    if !outputs_present {
-        return false;
-    }
-    std::fs::read_to_string(console_log)
-        .map(|log| log.contains("stage0-init: done; halting"))
-        .unwrap_or(false)
-}
-
 fn supervisor_stdout_log_path(vm_state_dir: &Path) -> PathBuf {
     vm_state_dir.join("supervisor.stdout.log")
 }
@@ -4212,69 +4135,6 @@ fn persist_supervisor_config_dump(vm_state_dir: &Path, json: &str) -> Result<(),
             config_path.display()
         ))
     })
-}
-
-/// What the Stage 0 guest's console says about how it terminated.
-#[derive(Debug, PartialEq, Eq)]
-enum Stage0HaltOutcome {
-    /// `stage0-init` finished the build and copied artifacts to `/out`.
-    CleanHalt,
-    /// `nix build` (or a copy step) failed; the guest powered off anyway.
-    BuildFailed,
-    /// The guest refused before starting the build — no egress proxy, no
-    /// clock, a share that would not mount. Carries the refusal, because it
-    /// names a cause the nix output never will.
-    SetupFailed(String),
-    /// No terminal marker at all — a panic, kill, or truncated console.
-    NoCleanHalt,
-}
-
-/// Decide Stage 0 success from the guest console, not the VMM exit code. A
-/// libkrun supervisor that exits 0 only means the guest powered off — and
-/// `stage0-init` powers off cleanly on build failure too (its own error is
-/// printed, then `reboot`). Absent this check the caller would trip on a
-/// downstream "rootfs.ext4 missing" error that hides the real nix failure.
-/// `stage0-init` prints one stable terminal line, so match on it (the QEMU
-/// Stage 0 path keys on the same markers).
-fn stage0_console_halt_outcome(log: &str) -> Stage0HaltOutcome {
-    // Setup refusals are checked first and win over everything else: the
-    // guest stops before `nix build` runs, so any later marker would be
-    // describing a build that never started.
-    if let Some(why) = log
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("stage0-init: FATAL: "))
-    {
-        return Stage0HaltOutcome::SetupFailed(why.trim().to_string());
-    }
-    if log.contains("stage0-init: build failed") {
-        Stage0HaltOutcome::BuildFailed
-    } else if log.contains("stage0-init: done; halting") {
-        Stage0HaltOutcome::CleanHalt
-    } else {
-        Stage0HaltOutcome::NoCleanHalt
-    }
-}
-
-/// Turn a Stage 0 console's terminal state into the caller's result,
-/// naming the console log path in both failure messages so an operator
-/// always knows where to look instead of hitting a downstream error that
-/// hides the real cause. Split out of the supervisor-wait call site so
-/// this message construction is unit-testable without spawning a VM.
-fn stage0_run_result(console: &str, console_log_path: &str) -> Result<(), BuilderVmError> {
-    match stage0_console_halt_outcome(console) {
-        Stage0HaltOutcome::CleanHalt => Ok(()),
-        Stage0HaltOutcome::BuildFailed => Err(BuilderVmError::NixBuildFailed(format!(
-            "nix build failed inside the Stage 0 guest; console log at {console_log_path}\n{}",
-            read_console_tail(console_log_path, 20)
-        ))),
-        Stage0HaltOutcome::SetupFailed(why) => Err(BuilderVmError::NixBuildFailed(format!(
-            "Stage 0 guest refused to start the build: {why}; console log at {console_log_path}"
-        ))),
-        Stage0HaltOutcome::NoCleanHalt => Err(BuilderVmError::ExtractionFailed(format!(
-            "Stage 0 guest did not reach a clean halt; console log at {console_log_path}\n{}",
-            read_console_tail(console_log_path, 20)
-        ))),
-    }
 }
 
 /// Render a Path as a `&str` or surface a clear error if it

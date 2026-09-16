@@ -200,3 +200,8 @@ jobs:
         env:
           DEPLOYMENT_URL: ${{ steps.deployment.outputs.deployment-url }}
         run: ./scripts/check-site-isolation-headers.sh "$DEPLOYMENT_URL"
+
+      - name: Verify the production installer
+        env:
+          INSTALL_URL: https://runmvm.com/install.sh
+        run: sh ./scripts/check-published-installer.sh "$INSTALL_URL"

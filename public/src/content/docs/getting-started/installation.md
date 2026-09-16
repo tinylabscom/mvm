@@ -6,13 +6,13 @@ description: Install mvmctl on macOS or Linux.
 ## One-Liner
 
 ```bash
-curl -fsSL https://gomicrovm.com/install.sh | sh
+curl -fsSL https://runmvm.com/install.sh | sh
 ```
 
 ## Pin a Version
 
 ```bash
-MVM_VERSION=v0.16.1 curl -fsSL https://gomicrovm.com/install.sh | sh
+MVM_VERSION=v0.16.1 curl -fsSL https://runmvm.com/install.sh | sh
 ```
 
 ## Install Model

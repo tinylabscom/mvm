@@ -40,6 +40,7 @@ use mvm_vmm::qemu_arch::{machine_for_arch, serial_console_for_arch};
 /// boots what a `VmmSpec` describes and relays the guest's channels through
 /// the vsock bridge; the claim-10 gate and substitution live in the
 /// endpoint behind those channels, not here.
+#[derive(Clone)]
 pub struct QemuDriver;
 
 impl QemuDriver {

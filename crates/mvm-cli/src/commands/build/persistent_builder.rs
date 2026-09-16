@@ -219,6 +219,11 @@ fn persistent_backend_for(choice: BuilderBackendChoice) -> Result<PersistentBack
              use the automatic HVF selection; libkrun remains an explicit \
              contributor integration."
         ),
+        BuilderBackendChoice::Firecracker => bail!(
+            "`mvmctl persistent-builder start` has no Firecracker persistent builder \
+             yet (Firecracker serves one-shot builder jobs and Stage 0). Use \
+             `--builder hvf` on a supported Mac, or `--builder libkrun`."
+        ),
         BuilderBackendChoice::WebLinux => bail!(
             "`mvmctl persistent-builder start` has no WebLinux persistent builder \
              (WebLinux is browser-only). Use the native HVF path on a supported Mac."

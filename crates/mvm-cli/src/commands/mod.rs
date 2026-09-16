@@ -83,11 +83,11 @@ pub(in crate::commands) struct Cli {
     #[arg(long, global = true)]
     pub fc_version: Option<String>,
 
-    /// Builder VMM: libkrun, qemu, or hvf
+    /// Builder: hvf, firecracker, qemu, libkrun
     #[arg(
         long,
         global = true,
-        value_parser = ["libkrun", "qemu", "hvf"],
+        value_parser = ["libkrun", "qemu", "hvf", "firecracker"],
         hide_possible_values = true
     )]
     pub builder: Option<String>,
@@ -614,14 +614,65 @@ fn register_inhouse_builder() {
     // `mvm-backend` or `mvm-cli` directly (dependency direction), so
     // the CLI bridges the gap here.
     #[cfg(feature = "builder-vm")]
-    mvm_build::builder_backend_select::register_hvf_builder(Box::new(|| {
-        let (kernel, rootfs, closure_nar) =
-            crate::commands::build::hvf_builder_image::resolve_hvf_builder_image()?;
-        Ok(Box::new(
-            mvm_runtime::builder_runner::hvf_builder::HvfBuilderVm::new(kernel, rootfs)
-                .with_closure_nar(closure_nar),
-        ) as Box<dyn mvm_build::builder_vm::BuilderVm>)
+    mvm_build::builder_backend_select::register_driver_builders(Box::new(|choice| {
+        use mvm_build::builder_backend_select::BuilderBackendChoice as Choice;
+        use mvm_runtime::builder_runner::DriverBuilderVm;
+        type Boxed = Box<dyn mvm_build::builder_vm::BuilderVm>;
+        match choice {
+            Choice::Hvf => Some(
+                crate::commands::build::hvf_builder_image::resolve_hvf_builder_image().map(
+                    |(kernel, rootfs, closure_nar)| {
+                        Box::new(
+                            DriverBuilderVm::new(
+                                mvm_backends::driver::hvf::HvfDriver::new(),
+                                kernel,
+                                rootfs,
+                            )
+                            .with_closure_nar(closure_nar),
+                        ) as Boxed
+                    },
+                ),
+            ),
+            // Firecracker boots the same builder image over the same disk
+            // transport; what it still lacks is an image resolver of its own,
+            // so it bootstraps (Stage 0, below) but does not yet serve builds.
+            Choice::Firecracker => None,
+            Choice::Libkrun | Choice::Qemu | Choice::WebLinux => None,
+        }
     }));
+
+    // Stage 0 is a separate registration because it is a separate type: it
+    // runs in the window before a builder image exists, so unlike the builder
+    // above it resolves no image. `Stage0Vm` is generic over the driver, so
+    // each backend costs one line here rather than an implementation.
+    #[cfg(feature = "builder-vm")]
+    mvm_build::builder_backend_select::register_stage0_builders(Box::new(|choice| {
+        use mvm_build::builder_backend_select::BuilderBackendChoice as Choice;
+        use mvm_runtime::builder_runner::Stage0Vm;
+        type Boxed = Box<dyn mvm_build::builder_vm::BuilderVm>;
+        match choice {
+            Choice::Hvf => {
+                Some(Box::new(Stage0Vm::new(mvm_backends::driver::hvf::HvfDriver::new())) as Boxed)
+            }
+            Choice::Firecracker => {
+                Some(Box::new(Stage0Vm::new(mvm_backends::driver::fc::FcDriver::new())) as Boxed)
+            }
+            // libkrun, qemu and web-linux are resolved by `mvm-build` itself;
+            // it can name those without reaching up a layer.
+            Choice::Libkrun | Choice::Qemu | Choice::WebLinux => None,
+        }
+    }));
+
+    // Stage 0's bootstrap kernel is fetched, and the fetch path (release-tag
+    // resolution, the signed checksum manifest) lives in this crate while the
+    // policy deciding when to use it lives in `mvm-build`. `download_kernel`
+    // records the digest sidecar the resolver then re-checks.
+    #[cfg(feature = "builder-vm")]
+    mvm_build::stage0_kernel::register_bootstrap_kernel_fetcher(Box::new(
+        |arch: &str, dest: &std::path::Path| {
+            crate::update::download_kernel(arch, "builder", dest).map_err(|e| format!("{e:#}"))
+        },
+    ));
 }
 
 /// Give the workload runner a real per-VM output-stream plane.
