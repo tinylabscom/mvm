@@ -20,7 +20,7 @@ scheduled Security workflow.
       before EOF.
 - [x] Pass focused tests, workspace tests/check, gated compilation,
       zero-warning Clippy, formatting, and repository policy gates.
-- [ ] Pass the authoritative Linux mutation ratchet in pull-request CI.
-- [ ] Merge the issue-linked pull request.
-- [ ] Reconcile a successful scheduled Security run and close #3250 with the
+- [x] Pass the authoritative Linux mutation ratchet in pull-request CI.
+- [x] Merge the issue-linked pull request.
+- [x] Reconcile a successful complete Security run and close #3250 with the
       fresh claim evidence.

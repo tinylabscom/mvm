@@ -28,20 +28,20 @@ Last updated: 2026-09-15
       signature verification to close the claim 20 limits note, installer and
       distro compat lanes, and Nix version-from-manifest.
 
-- [ ] **Claim-witness mutation coverage — issue #3250.**
+- [x] **Claim-witness mutation coverage — issue #3250.**
       `specs/plans/2026-09-15-claim-witness-mutation-coverage.md`.
-      Cover empty EOF and short unterminated handoff replies so the scheduled
-      mutation claim regains live evidence.
+      PR #3255 covers empty EOF and short unterminated handoff replies. Fresh
+      Security run `35037577321` passed all 42 jobs and #3250 is closed.
 
-- [ ] **Security lane supply-chain repair — issue #3249.**
+- [x] **Security lane supply-chain repair — issue #3249.**
       `specs/plans/2026-09-15-security-lane-supply-chain.md`.
-      Resolve RUSTSEC-2026-0285 through the patched rustls release set and
-      require the complete Security witness before closeout.
+      PR #3292 resolves RUSTSEC-2026-0285 through rustls 0.23.45; the complete
+      Security witness is green and #3249 is closed.
 
-- [ ] **Linux 6.12.110 synchronized kernel pin — issue #3248.**
+- [x] **Linux 6.12.110 synchronized kernel pin — issue #3248.**
       `specs/plans/2026-09-15-kernel-6-12-110.md`.
-      Both kernel consumers move together to the signed upstream 6.12.110
-      archive; structural and Linux build witnesses prevent drift.
+      PR #3281 moved both kernel consumers to the signed upstream 6.12.110
+      archive; both architecture builds passed and #3248 is closed.
 
 - [ ] **OTLP trace export for host-side processes.**
       `specs/plans/2026-09-14-otlp-trace-export.md`. Issue #3242.
