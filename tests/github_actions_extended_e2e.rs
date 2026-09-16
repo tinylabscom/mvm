@@ -31,6 +31,29 @@ fn extended_ci_calls_the_shared_documented_surface_workflow() {
     );
 }
 
+/// Firecracker's snapshot contains absolute device paths. Loading a forked
+/// child remaps those paths with a private mount namespace and bind mounts,
+/// which requires CAP_SYS_ADMIN on Linux. GitHub's runner user can access KVM
+/// after chmod but does not gain that capability, so the live witness must run
+/// through the runner's passwordless sudo boundary. Otherwise the parent boots
+/// and captures successfully, then every preload fails while entering the
+/// mount namespace.
+#[test]
+fn the_live_warm_claim_runs_with_mount_namespace_privilege() {
+    let workflow =
+        fs::read_to_string(".github/workflows/ci-full.yml").expect("read extended CI workflow");
+    let job = job_block(&workflow, "bdd-live-warm-claim");
+
+    assert!(
+        job.contains("sudo --preserve-env=HOME,PATH,CARGO_HOME,RUSTUP_HOME,CARGO_TARGET_DIR,RUSTFLAGS,MVM_KERNEL_SOURCE,FC_VERSION"),
+        "the live warm-claim process must have mount-namespace privilege, not only /dev/kvm access"
+    );
+    assert!(
+        job.contains("just bdd-live-warm-claim"),
+        "the privileged step must still run the exact guarded warm-claim recipe"
+    );
+}
+
 /// So must the release workflow. This is the gate that did not exist: a tag
 /// could be cut with only the hermetic BDD lane green, and the hermetic lane
 /// boots no guest.
