@@ -69,8 +69,10 @@ The scope is narrow on purpose: it covers that one kernel. The builder image and
 the workload kernel keep the local-build invariant, so editing
 `nix/images/builder-vm/flake.nix` still shows up on the next boot. And the trust
 surface shrinks rather than grows — the bootstrap kernel stops arriving inside a
-third-party Homebrew dylib and starts arriving as our own release artifact under
-a signed checksum manifest.
+third-party Homebrew dylib and starts arriving as our own release artifact, held
+to a SHA-256 pinned in source — see `stage0-bootstrap-kernel-source-pin.md` for
+why it is a source pin rather than the signed manifest this note first
+described.
 
 ## What is not proven
 

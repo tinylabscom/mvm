@@ -663,14 +663,20 @@ fn register_inhouse_builder() {
         }
     }));
 
-    // Stage 0's bootstrap kernel is fetched, and the fetch path (release-tag
-    // resolution, the signed checksum manifest) lives in this crate while the
-    // policy deciding when to use it lives in `mvm-build`. `download_kernel`
-    // records the digest sidecar the resolver then re-checks.
+    // Stage 0's bootstrap kernel is pinned in source and verified in
+    // `mvm-build`; this crate supplies only the transport. It has to be curl:
+    // the pinned URL is a GitHub release asset, which redirects, and
+    // `mvm-http` follows no redirects. Deliberately not `download_kernel`,
+    // whose signed-manifest check needs `manifest-verify`, a feature an
+    // ordinary `just embed` build does not carry.
     #[cfg(feature = "builder-vm")]
     mvm_build::stage0_kernel::register_bootstrap_kernel_fetcher(Box::new(
-        |arch: &str, dest: &std::path::Path| {
-            crate::update::download_kernel(arch, "builder", dest).map_err(|e| format!("{e:#}"))
+        |url: &str, dest: &std::path::Path| {
+            let dest = dest
+                .to_str()
+                .ok_or_else(|| format!("destination is not UTF-8: {}", dest.display()))?;
+            crate::commands::env::artifact_verify::download_file(url, dest)
+                .map_err(|e| format!("{e:#}"))
         },
     ));
 }
