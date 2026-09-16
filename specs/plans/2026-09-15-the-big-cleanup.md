@@ -17,7 +17,8 @@ cost one of those, the item records the trade instead of taking it.
 #3307 (**claim 1** — unadmitted `--mount` shares) · #3308 (config path + layout
 re-rolls) · #3309 (ADR parity, twelve findings) · #3310 (permissive test
 doubles) · #3311 (`specs/` cleanup) · #3313 (miscalibrated size gate) ·
-#3314 (`mvm-core` split) · #3315 (naming + the real section-D work). Pre-existing and folded in: #3257–#3264,
+#3314 (`mvm-core` split) · #3315 (naming + the real section-D work) · #3316 (**claims 11 and 13** — a
+dead control and an ambiguous witness) · #3317 (no citation gate on ADRs). Pre-existing and folded in: #3257–#3264,
 #3265–#3277 (the two design-plan epics), #3283–#3288, #3297, #3300–#3302.
 
 ## How to use this plan
@@ -30,6 +31,18 @@ move together.
 run them *before* you change anything so you know what was already red.
 
 ## A. Inventory
+
+**The single most important structural finding.** `check-claim-catalog` proves a
+named witness *exists*; it never proves anything calls the code that witness
+tests. ADR-001:740-742 says so honestly. Three numbered claims are paying for
+it right now — claim 1 (#3307), claim 11 (#3316) and claim 13 (#3316) — and in
+each case the witness passes because it calls the gate function directly with
+hand-built inputs while no production path calls it at all.
+
+`xtask check-dormant-controls` is the right gate and already exists. It
+inspects four hand-listed symbols. **Feeding it every `fn:` witness from the
+ADR-001 ledger turns this whole class from a review discovery into a CI
+failure**, and it is the highest-leverage single change in this plan.
 
 The inventory is the gate for everything else — the later sections are scoped by
 what it found. Measured 2026-09-15 against `bad9ebe561`.
@@ -71,7 +84,22 @@ opposite one, `drop_page_cache`).
       and fix the one tree-side residue
       (`crates/mvm-cli/src/commands/mod.rs:128` allows
       `clippy::large_enum_variant` for an `Up` variant ADR-027 deleted).
-- [ ] **A2.2** ADR-001:150 describes the `stages.rs` scan chain as the live
+- [ ] **A2.2** **Claim 11's CVE gate has no production caller.**
+      `apply_install_gate` (`crates/mvm-build/src/app_deps_gate.rs:149`) has 14
+      in-edges and every one is a test or the nightly fixture example.
+      `machine run` never reaches it, so ADR-001:151's "a production launch
+      fails closed on a high or critical CVE finding" describes a control that
+      does not run. And claim 13's **sole** witness `fn:substitute` matches
+      **six** definitions under `content.contains("fn substitute(")`, one of
+      them a trait default returning `None` — delete the real implementation
+      and the gate stays green. #3316.
+- [ ] **A2.3** No citation gate covers `specs/adrs/`. ADR-041 says
+      `mvm_hostd::nodectl` is implemented and the module has zero bytes;
+      ADR-015 pins `PROTOCOL_VERSION = 2` against a tree that says `3`, with a
+      witness name that resolves to nothing; nine more citations name deleted
+      crates. All mechanically catchable by extending
+      `check-witness-citations` to ADRs. #3317.
+- [ ] **A2.4** ADR-001:150 describes the `stages.rs` scan chain as the live
       libkrun egress mechanism, contradicting the same ADR at :441-448
       ("enforced at **one** seam"). The scan chain is dead (§A4). Fix the prose
       as part of #3297, not separately — the two must move together.
