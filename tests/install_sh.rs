@@ -211,8 +211,92 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+fn baked_version() -> String {
+    std::fs::read_to_string(repo_root().join("install.sh"))
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("DEFAULT_VERSION=\"")?.strip_suffix('"'))
+        .expect("install.sh must carry a DEFAULT_VERSION sentinel")
+        .to_owned()
+}
+
 #[test]
-fn install_sh_downloads_verifies_and_installs() {
+fn install_sh_uses_baked_version_without_calling_api() {
+    let target = host_target();
+    let tarball = make_tarball(target);
+    let archive = format!("mvmctl-{target}.tar.gz");
+    let checks = format!("{}  {}\n", sha256_hex(&tarball), archive);
+    let version = baked_version();
+    let routes = vec![
+        (
+            format!("/tinylabscom/mvm/releases/download/{version}/{archive}"),
+            tarball.clone(),
+        ),
+        (
+            format!("/tinylabscom/mvm/releases/download/{version}/checksums-sha256.txt"),
+            checks.into_bytes(),
+        ),
+    ];
+    let (base, _stop) = serve(routes);
+
+    let install_dir = tempfile::tempdir().unwrap();
+    let status = Command::new("sh")
+        .arg(repo_root().join("install.sh"))
+        .env("MVM_UPDATE_API_URL", "http://127.0.0.1:1")
+        .env("MVM_UPDATE_DOWNLOAD_URL", &base)
+        .env("MVM_INSTALL_DIR", install_dir.path())
+        .env("MVM_SKIP_CODESIGN", "1")
+        .env("MVM_SKIP_BOOTSTRAP", "1")
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "baked install should succeed without reaching the API"
+    );
+    assert!(
+        install_dir.path().join("mvmctl").exists(),
+        "binary installed"
+    );
+}
+
+#[test]
+fn install_sh_falls_back_to_api_after_baked_version_404() {
+    let target = host_target();
+    let tarball = make_tarball(target);
+    let archive = format!("mvmctl-{target}.tar.gz");
+    let checks = format!("{}  {}\n", sha256_hex(&tarball), archive);
+    let routes = vec![
+        (
+            "/repos/tinylabscom/mvm/releases/latest".to_string(),
+            br#"{"tag_name":"v9.9.9"}"#.to_vec(),
+        ),
+        (
+            format!("/tinylabscom/mvm/releases/download/v9.9.9/{archive}"),
+            tarball,
+        ),
+        (
+            "/tinylabscom/mvm/releases/download/v9.9.9/checksums-sha256.txt".to_string(),
+            checks.into_bytes(),
+        ),
+    ];
+    let (base, _stop) = serve(routes);
+
+    let install_dir = tempfile::tempdir().unwrap();
+    let status = Command::new("sh")
+        .arg(repo_root().join("install.sh"))
+        .env("MVM_UPDATE_API_URL", &base)
+        .env("MVM_UPDATE_DOWNLOAD_URL", &base)
+        .env("MVM_INSTALL_DIR", install_dir.path())
+        .env("MVM_SKIP_CODESIGN", "1")
+        .env("MVM_SKIP_BOOTSTRAP", "1")
+        .status()
+        .unwrap();
+    assert!(status.success(), "404 should fall back to the API release");
+    assert!(install_dir.path().join("mvmctl").exists());
+}
+
+#[test]
+fn install_sh_honors_explicit_version_without_calling_api() {
     let target = host_target();
     let tarball = make_tarball(target);
     let archive = format!("mvmctl-{target}.tar.gz");
@@ -220,7 +304,7 @@ fn install_sh_downloads_verifies_and_installs() {
     let routes = vec![
         (
             format!("/tinylabscom/mvm/releases/download/v9.9.9/{archive}"),
-            tarball.clone(),
+            tarball,
         ),
         (
             "/tinylabscom/mvm/releases/download/v9.9.9/checksums-sha256.txt".to_string(),
@@ -233,15 +317,16 @@ fn install_sh_downloads_verifies_and_installs() {
     let status = Command::new("sh")
         .arg(repo_root().join("install.sh"))
         .env("MVM_VERSION", "v9.9.9")
+        .env("MVM_UPDATE_API_URL", "http://127.0.0.1:1")
         .env("MVM_UPDATE_DOWNLOAD_URL", &base)
         .env("MVM_INSTALL_DIR", install_dir.path())
         .env("MVM_SKIP_CODESIGN", "1")
+        .env("MVM_SKIP_BOOTSTRAP", "1")
         .status()
         .unwrap();
-    assert!(status.success(), "install.sh should succeed");
     assert!(
-        install_dir.path().join("mvmctl").exists(),
-        "binary installed"
+        status.success(),
+        "explicit version should succeed without reaching the API"
     );
 }
 

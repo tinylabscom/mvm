@@ -804,6 +804,24 @@ jobs:
             --notes "${RELEASE_NOTES_PREFIX}" \
             "${assets[@]}"
 
+      # The release event emitted by GITHUB_TOKEN does not start workers.yml.
+      # Dispatch the site explicitly after a stable release exists so the
+      # vanity installer bakes a version whose assets are already downloadable.
+      - name: Publish the installer with the stable release default
+        if: ${{ github.event_name == 'push' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ "${TAG_NAME#v}" == *-* ]]; then
+            echo "::notice::${TAG_NAME} is a prerelease — leaving the stable installer default unchanged"
+            exit 0
+          fi
+          gh workflow run workers.yml \
+            --ref "${TAG_NAME}" \
+            -f install_version="${TAG_NAME}"
+
       # Always, even if the publish failed: `gh release create` can create the
       # release and then fail uploading an asset, which is how the duplicate
       # name surfaced. Leaving that draft behind would accumulate one per dry

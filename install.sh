@@ -4,7 +4,7 @@
 # present), installs it, and on macOS applies the required VM entitlements.
 #
 # Env knobs:
-#   MVM_VERSION            pin a release tag (e.g. v0.15.2); default: latest
+#   MVM_VERSION            pin a release tag (e.g. v0.15.2); default: baked release
 #   MVM_INSTALL_DIR        install dir; default: ~/.local/bin
 #   MVM_SKIP_HASH_VERIFY   set to 1 to skip checksum (emergency only)
 #   MVM_SKIP_CODESIGN      set to 1 to skip macOS codesign
@@ -13,6 +13,7 @@
 set -eu
 
 REPO="tinylabscom/mvm"
+DEFAULT_VERSION="v0.17.0"
 API_BASE="${MVM_UPDATE_API_URL:-https://api.github.com}"
 DL_BASE="${MVM_UPDATE_DOWNLOAD_URL:-https://github.com}"
 INSTALL_DIR="${MVM_INSTALL_DIR:-$HOME/.local/bin}"
@@ -45,15 +46,22 @@ detect_target() {
   esac
 }
 
-resolve_version() {
-  if [ -n "${MVM_VERSION:-}" ]; then
-    echo "$MVM_VERSION"
-    return
-  fi
+resolve_latest_version() {
   curl -fsSL "$API_BASE/repos/$REPO/releases/latest" \
     | grep -m1 '"tag_name"' \
     | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/' \
     | grep . || die "could not resolve latest release tag"
+}
+
+download_archive() {
+  url="$1"
+  destination="$2"
+  status="$(curl -sSL -o "$destination" -w '%{http_code}' "$url")" || return 1
+  case "$status" in
+    2??) return 0 ;;
+    404) return 44 ;;
+    *) warn "download returned HTTP $status: $url"; return 1 ;;
+  esac
 }
 
 sha256_of() {
@@ -67,7 +75,7 @@ sha256_of() {
 }
 
 TARGET="$(detect_target)"
-VERSION="$(resolve_version)"
+VERSION="${MVM_VERSION:-$DEFAULT_VERSION}"
 ARCHIVE="mvmctl-${TARGET}.tar.gz"
 REL="$DL_BASE/$REPO/releases/download/$VERSION"
 
@@ -76,8 +84,21 @@ trap 'rm -rf "$TMP"' EXIT
 
 say "Installing mvmctl $VERSION ($TARGET) to $INSTALL_DIR"
 
-curl -fsSL "$REL/$ARCHIVE" -o "$TMP/$ARCHIVE" \
-  || die "download failed: $REL/$ARCHIVE"
+if download_archive "$REL/$ARCHIVE" "$TMP/$ARCHIVE"; then
+  :
+else
+  download_status="$?"
+  if [ "$download_status" -eq 44 ] && [ -z "${MVM_VERSION:-}" ]; then
+    warn "baked release $VERSION was not found — resolving the latest release"
+    VERSION="$(resolve_latest_version)"
+    REL="$DL_BASE/$REPO/releases/download/$VERSION"
+    say "Installing mvmctl $VERSION ($TARGET) to $INSTALL_DIR"
+    download_archive "$REL/$ARCHIVE" "$TMP/$ARCHIVE" \
+      || die "download failed: $REL/$ARCHIVE"
+  else
+    die "download failed: $REL/$ARCHIVE"
+  fi
+fi
 
 if [ "${MVM_SKIP_HASH_VERIFY:-}" = "1" ]; then
   warn "MVM_SKIP_HASH_VERIFY=1 — skipping checksum verification"
