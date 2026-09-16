@@ -132,41 +132,6 @@ pub fn encode_user_volumes_cmdline(volumes: &[VmVolume]) -> Option<String> {
     Some(format!("mvm.uvols={}", entries.join(";")))
 }
 
-/// Encode the per-VM egress intermediate **cert** (PEM) as a single
-/// `mvm.egress_ca=pem:<body>` kernel-cmdline token, mirroring `mvm.uvols`.
-/// `/init` reconstructs the PEM, writes the cert to tmpfs
-/// (`/run/mvm/egress-ca.crt`), and points the guest's TLS trust at a combined
-/// bundle so a workload trusts host-terminated bound-host TLS. The fresh FC
-/// boot attaches no secrets drive, so the cmdline is the only per-VM channel to
-/// a sealed guest. Cert-only — never the key (host-side). `None` for an empty
-/// cert (no https leg).
-///
-/// The token carries only the PEM body (no armor lines or embedded newlines),
-/// not a hex-encoded full PEM. That keeps the token compact enough for the
-/// workload cmdline budget while still staying a single space-free token that
-/// `/proc/cmdline` round-trips. Guest launchers accept the legacy hex-encoded
-/// full-PEM form too, so existing boots keep working while the host-side
-/// encoder moves to the compact format.
-pub fn encode_egress_ca_cmdline(cert_pem: &str) -> Option<String> {
-    if cert_pem.is_empty() {
-        return None;
-    }
-    let body: String = cert_pem
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim();
-            (!trimmed.is_empty()
-                && !trimmed.starts_with("-----BEGIN ")
-                && !trimmed.starts_with("-----END "))
-            .then_some(trimmed)
-        })
-        .collect();
-    if body.is_empty() {
-        return None;
-    }
-    Some(format!("mvm.egress_ca=pem:{body}"))
-}
-
 /// Decode the single positive Unix epoch carried by an
 /// `mvm.hostepoch=<seconds>` kernel-cmdline token.
 ///
@@ -1915,11 +1880,6 @@ mod tests {
     }
 
     #[test]
-    fn encode_egress_ca_cmdline_empty_is_none() {
-        assert!(encode_egress_ca_cmdline("").is_none());
-    }
-
-    #[test]
     fn host_epoch_cmdline_decoder_accepts_one_positive_epoch() {
         assert_eq!(
             decode_host_epoch_cmdline("console=ttyAMA0 mvm.hostepoch=1786425335 root=/dev/vda"),
@@ -1965,15 +1925,6 @@ mod tests {
             String::from_utf8(decoded).unwrap(),
             "API_KEY=mvm-secret-abc123\nDB_TOKEN=mvm-secret-def456"
         );
-    }
-
-    #[test]
-    fn encode_egress_ca_cmdline_compacts_pem_body_as_single_token() {
-        let pem = "-----BEGIN CERTIFICATE-----\nAB\nCD\n-----END CERTIFICATE-----\n";
-        let got = encode_egress_ca_cmdline(pem).unwrap();
-        assert_eq!(got, "mvm.egress_ca=pem:ABCD");
-        // Single cmdline token — no spaces/newlines survive the compaction.
-        assert!(!got.contains(' ') && !got.contains('\n'));
     }
 
     #[test]

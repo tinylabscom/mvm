@@ -9,16 +9,18 @@
 
 mod http_flow;
 mod ingress;
+mod open_flow;
 pub mod registry;
 mod resources;
+mod socket;
 mod tcp_relay;
-use tcp_relay::connect_first_admitted;
+use socket::FlowSocket;
 mod udp_relay;
 mod wire;
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::net::{IpAddr, SocketAddr, TcpStream};
+use std::net::{IpAddr, SocketAddr};
 use std::os::unix::net::UnixStream;
 use std::sync::{
     Arc, Mutex,
@@ -50,13 +52,12 @@ use self::udp_relay::{
     UdpAssociationHandle, UdpPeerAdmission, UdpRelayParams, UdpSendMsg, decode_udp_addr,
     run_udp_relay, udp_event_sources,
 };
-use self::wire::{
-    is_peer_disconnect, lock_registry, lock_session, lock_validator, parse_host_port,
-    write_frame_to,
-};
+use self::wire::{is_peer_disconnect, lock_registry, lock_session, lock_validator, write_frame_to};
 
 use crate::supervisor::audit_recorder::{EventCategory, Recorder};
 use crate::supervisor::dns_resolver::resolve_hostname_ips;
+use crate::supervisor::terminator;
+
 /// How this side names itself in a handshake refusal. Only ever read by a
 /// human reading the error.
 const HOST_BUILD: &str = concat!("mvm-hostd ", env!("CARGO_PKG_VERSION"));
@@ -137,6 +138,14 @@ pub struct FlowMuxSession {
     /// Per-class rate limiter for new TCP connects, UDP associations, and
     /// DNS resolves.
     rate_limiter: Arc<ConnectionRateLimiter>,
+    /// How many terminated flows this VM is holding open, against
+    /// `terminator::flow::MAX_TERMINATED_FLOWS`. Shared with every other
+    /// session on the same endpoint, so reconnecting cannot multiply it.
+    terminated_flows: Arc<std::sync::atomic::AtomicUsize>,
+    /// Minted TLS server configurations, one per terminated authority, so a
+    /// client that reconnects per request does not pay for a leaf each time.
+    /// Shared per VM for the same reason the budget is.
+    leaves: Arc<terminator::flow::LeafCache>,
 }
 
 impl std::fmt::Debug for FlowMuxSession {
@@ -151,8 +160,12 @@ impl std::fmt::Debug for FlowMuxSession {
 /// The host-side handle for one active TCP flow. The relay thread owns a
 /// clone of `upstream`; this half lets the main thread forward guest data and
 /// shut the socket down when the guest closes or resets.
+///
+/// `upstream` is the admitted destination socket for an opaque flow, and the
+/// endpoint's half of a local pair for a terminated one. The framing either
+/// side of it is identical, which is why the same handle serves both.
 struct TcpStreamHandle {
-    upstream: TcpStream,
+    upstream: FlowSocket,
     /// Set by the relay thread when the upstream socket reaches EOF.
     host_half_closed: Arc<AtomicBool>,
     /// Set by the main thread when the stream is being torn down so the relay
@@ -384,6 +397,8 @@ impl FlowMuxSession {
             recorder,
             runtime_handle: tokio::runtime::Handle::try_current().ok(),
             rate_limiter: Arc::clone(&resources.rate_limiter),
+            terminated_flows: Arc::clone(&resources.terminated_flows),
+            leaves: Arc::clone(&resources.leaves),
         })
     }
 
@@ -600,165 +615,6 @@ impl FlowMuxSession {
                 }
             }
         }
-    }
-
-    fn handle_open_tcp(&mut self, stream_id: u32, payload_len: u32) -> Result<(), FlowMuxError> {
-        if payload_len == 0 || payload_len > 256 {
-            self.send_refused(stream_id, "OpenTcp target missing or too long")?;
-            return Ok(());
-        }
-
-        let target = match std::str::from_utf8(self.frame_payload(payload_len)) {
-            Ok(s) => s,
-            Err(_) => {
-                self.send_refused(stream_id, "OpenTcp target is not UTF-8")?;
-                return Ok(());
-            }
-        };
-
-        let (host, port) = match parse_host_port(target) {
-            Ok(pair) => pair,
-            Err(e) => {
-                self.send_refused(stream_id, &format!("invalid OpenTcp target: {e}"))?;
-                return Ok(());
-            }
-        };
-        let target = target.to_string();
-
-        if let Some(reason) = self
-            .substitution
-            .as_ref()
-            .and_then(|service| service.opaque_refusal_reason(host))
-        {
-            self.send_refused(stream_id, reason)?;
-            self.emit_audit(
-                EventCategory::Host,
-                "host.flow.denied",
-                BTreeMap::from([
-                    ("stream_id".to_string(), stream_id.to_string()),
-                    ("class".to_string(), "tcp".to_string()),
-                    ("target".to_string(), target),
-                    ("reason".to_string(), "typed_transform_required".to_string()),
-                ]),
-            );
-            return Ok(());
-        }
-
-        if !self.check_connection_rate(registry::FlowClass::Tcp) {
-            self.send_refused(stream_id, "rate limited")?;
-            self.emit_audit(
-                EventCategory::Host,
-                "host.flow.denied",
-                BTreeMap::from([
-                    ("stream_id".to_string(), stream_id.to_string()),
-                    ("class".to_string(), "tcp".to_string()),
-                    ("target".to_string(), target.to_string()),
-                    ("reason".to_string(), "rate_limited".to_string()),
-                ]),
-            );
-            return Ok(());
-        }
-
-        let decision = self.gate.decide_target(host, port);
-        // Recorded on every audit entry this connect emits, so the chain says
-        // which namespace authorized (or refused) the flow rather than leaving
-        // a reader to infer it from the target's shape.
-        let route = decision.route.as_str().to_string();
-        let (ips, port) = match decision.verdict {
-            EgressVerdict::Allow { ips, port } => (ips, port),
-            EgressVerdict::Deny(reason) => {
-                self.send_refused(stream_id, &reason.to_string())?;
-                self.emit_audit(
-                    EventCategory::Host,
-                    "host.flow.denied",
-                    BTreeMap::from([
-                        ("stream_id".to_string(), stream_id.to_string()),
-                        ("class".to_string(), "tcp".to_string()),
-                        ("route".to_string(), route.clone()),
-                        ("target".to_string(), target.to_string()),
-                        ("reason".to_string(), "policy_denied".to_string()),
-                    ]),
-                );
-                return Ok(());
-            }
-            EgressVerdict::Malformed => {
-                self.send_refused(stream_id, "malformed destination")?;
-                self.emit_audit(
-                    EventCategory::Host,
-                    "host.flow.denied",
-                    BTreeMap::from([
-                        ("stream_id".to_string(), stream_id.to_string()),
-                        ("class".to_string(), "tcp".to_string()),
-                        ("route".to_string(), route.clone()),
-                        ("target".to_string(), target.to_string()),
-                        ("reason".to_string(), "malformed".to_string()),
-                    ]),
-                );
-                return Ok(());
-            }
-        };
-
-        let open_err = lock_registry(&self.registry)
-            .open_guest(stream_id, registry::FlowClass::Tcp)
-            .err();
-        if let Some(e) = open_err {
-            self.send_refused(stream_id, &e.to_string())?;
-            self.emit_audit(
-                EventCategory::Host,
-                "host.flow.denied",
-                BTreeMap::from([
-                    ("stream_id".to_string(), stream_id.to_string()),
-                    ("class".to_string(), "tcp".to_string()),
-                    ("route".to_string(), route.clone()),
-                    ("target".to_string(), target.to_string()),
-                    ("reason".to_string(), "resource_exhausted".to_string()),
-                ]),
-            );
-            return Ok(());
-        }
-
-        let upstream = match connect_first_admitted(&ips, port, self.connect_timeout) {
-            Some(stream) => stream,
-            None => {
-                warn!(stream_id, %target, "FlowMux TCP connect failed");
-                let _ = lock_registry(&self.registry).retire(stream_id);
-                self.send_connect_failed(stream_id, "connection failed")?;
-                self.emit_audit(
-                    EventCategory::Host,
-                    "host.flow.denied",
-                    BTreeMap::from([
-                        ("stream_id".to_string(), stream_id.to_string()),
-                        ("class".to_string(), "tcp".to_string()),
-                        ("route".to_string(), route.clone()),
-                        ("target".to_string(), target.to_string()),
-                        ("reason".to_string(), "connect_failed".to_string()),
-                    ]),
-                );
-                return Ok(());
-            }
-        };
-
-        let confirm_err = lock_registry(&self.registry).confirm(stream_id).err();
-        if let Some(e) = confirm_err {
-            let _ = lock_registry(&self.registry).retire(stream_id);
-            self.send_refused(stream_id, &e.to_string())?;
-            return Ok(());
-        }
-
-        self.send_opened(stream_id)?;
-        self.spawn_tcp_relay(stream_id, upstream)?;
-        self.emit_audit(
-            EventCategory::Host,
-            "host.flow.allowed",
-            BTreeMap::from([
-                ("stream_id".to_string(), stream_id.to_string()),
-                ("class".to_string(), "tcp".to_string()),
-                ("route".to_string(), route.clone()),
-                ("target".to_string(), target.to_string()),
-                ("resolved_ips".to_string(), Self::format_ips(&ips)),
-            ]),
-        );
-        Ok(())
     }
 
     fn handle_resolve(&mut self, stream_id: u32, payload_len: u32) -> Result<(), FlowMuxError> {
@@ -1013,7 +869,11 @@ impl FlowMuxSession {
         Ok(())
     }
 
-    fn spawn_tcp_relay(&mut self, stream_id: u32, upstream: TcpStream) -> Result<(), FlowMuxError> {
+    fn spawn_tcp_relay(
+        &mut self,
+        stream_id: u32,
+        upstream: FlowSocket,
+    ) -> Result<(), FlowMuxError> {
         self.ingress_handle().spawn_tcp_relay(stream_id, upstream)
     }
 
@@ -1486,12 +1346,12 @@ mod tests {
     use mvm_contract::protocol::network_flow::{Opcode, encode_into};
     use mvm_core::net::session::Session;
     use rand::Rng;
-    use std::net::SocketAddr;
+    use std::net::{SocketAddr, TcpStream};
     use std::time::Duration;
 
     use super::*;
 
-    fn fresh_keys() -> (SigningKey, VerifyingKey) {
+    pub(super) fn fresh_keys() -> (SigningKey, VerifyingKey) {
         let mut seed = [0u8; 32];
         rand::rng().fill_bytes(&mut seed);
         let key = SigningKey::from_bytes(&seed);
@@ -1535,7 +1395,7 @@ mod tests {
         );
     }
 
-    fn read_flowmux_frame(
+    pub(super) fn read_flowmux_frame(
         stream: &mut UnixStream,
         session: &mut Session,
     ) -> (Opcode, u32, Vec<u8>) {
@@ -1728,67 +1588,6 @@ mod tests {
         assert!(!goaway_payload.is_empty());
 
         // Close the guest side; the host serve loop should end cleanly.
-        drop(guest_stream);
-        host_handle.join().unwrap().unwrap();
-    }
-
-    #[test]
-    fn open_tcp_to_unknown_host_is_refused_by_default_deny_gate() {
-        let (host_key, host_verify) = fresh_keys();
-        let (guest_key, guest_verify) = fresh_keys();
-
-        let (host_stream, mut guest_stream) = UnixStream::pair().unwrap();
-
-        let gate = EgressGate::default_deny();
-        let host_handle = thread::spawn(move || {
-            let mut session = FlowMuxSession::accept(
-                host_stream,
-                "test-session",
-                host_key,
-                &guest_verify,
-                RegistryLimits::default(),
-                gate,
-            )
-            .unwrap();
-            session.serve()
-        });
-
-        let (mut guest_session, _session_id) =
-            Session::guest(&mut guest_stream, guest_key, &host_verify).unwrap();
-
-        write_frame(
-            &mut guest_stream,
-            &mut guest_session,
-            Opcode::Hello,
-            0,
-            &Handshake::local("test-guest").encode(),
-        );
-
-        let (opcode, _stream_id, _payload) =
-            read_flowmux_frame(&mut guest_stream, &mut guest_session);
-        assert_eq!(opcode, Opcode::HelloAck);
-
-        write_frame(
-            &mut guest_stream,
-            &mut guest_session,
-            Opcode::OpenTcp,
-            1,
-            b"example.com:443",
-        );
-
-        let (opcode, _stream_id, payload) =
-            read_flowmux_frame(&mut guest_stream, &mut guest_session);
-        assert_eq!(opcode, Opcode::Refused);
-        assert!(!payload.is_empty());
-
-        // The session stays alive; an unknown-stream frame afterward still
-        // receives a GoAway rather than dropping the connection.
-        write_frame(&mut guest_stream, &mut guest_session, Opcode::Data, 3, b"?");
-
-        let (opcode, _stream_id, _payload) =
-            read_flowmux_frame(&mut guest_stream, &mut guest_session);
-        assert_eq!(opcode, Opcode::GoAway);
-
         drop(guest_stream);
         host_handle.join().unwrap().unwrap();
     }
@@ -2017,25 +1816,6 @@ mod tests {
         host.join().unwrap().unwrap();
     }
 
-    #[test]
-    fn parse_host_port_accepts_ipv4_and_names() {
-        assert_eq!(
-            parse_host_port("127.0.0.1:443").unwrap(),
-            ("127.0.0.1", 443)
-        );
-        assert_eq!(
-            parse_host_port("example.com:80").unwrap(),
-            ("example.com", 80)
-        );
-    }
-
-    #[test]
-    fn parse_host_port_rejects_missing_port_and_empty_host() {
-        assert!(parse_host_port("example.com").is_err());
-        assert!(parse_host_port(":443").is_err());
-        assert!(parse_host_port("example.com:99999").is_err());
-    }
-
     fn build_dns_query(name: &str, qtype: u16, id: u16) -> Vec<u8> {
         let mut query = Vec::from(id.to_be_bytes());
         query.extend_from_slice(&[0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
@@ -2170,7 +1950,7 @@ mod tests {
         drop(guest_stream);
         host_handle.join().unwrap().unwrap();
     }
-    fn local_test_ip() -> IpAddr {
+    pub(super) fn local_test_ip() -> IpAddr {
         use mvm_contract::policy::network_policy::is_mandatory_deny;
         let socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind probe socket");
         socket
@@ -2212,7 +1992,11 @@ mod tests {
         EgressGate::new(CanonicalEgress::Rules(rules))
     }
 
-    fn gate_allowing_addr(ip: IpAddr, tcp_port: u16, udp_port: Option<u16>) -> EgressGate {
+    pub(super) fn gate_allowing_addr(
+        ip: IpAddr,
+        tcp_port: u16,
+        udp_port: Option<u16>,
+    ) -> EgressGate {
         use mvm_contract::policy::projection::{CanonicalEgress, CanonicalRule, Proto};
         let cidr = if ip.is_ipv4() {
             format!("{ip}/32")
@@ -2255,7 +2039,7 @@ mod tests {
         EgressGate::from_network_policy(&policy, &pins, &now.to_rfc3339())
     }
 
-    fn run_session(
+    pub(super) fn run_session(
         gate: EgressGate,
     ) -> (
         UnixStream,
@@ -2265,9 +2049,26 @@ mod tests {
         run_session_with(gate, RegistryLimits::default())
     }
 
-    fn run_session_with(
+    pub(super) fn run_session_with(
         gate: EgressGate,
         limits: RegistryLimits,
+    ) -> (
+        UnixStream,
+        Session,
+        thread::JoinHandle<Result<(), FlowMuxError>>,
+    ) {
+        run_session_from(limits, move |session_id, host_key, guest_anchor, limits| {
+            FlowMuxAccept::new(session_id, host_key, guest_anchor, limits, gate)
+        })
+    }
+
+    /// Run a session whose accept parameters the caller builds, so a test can
+    /// attach a substitution service the shorter helpers do not.
+    pub(super) fn run_session_from(
+        limits: RegistryLimits,
+        build: impl FnOnce(&str, SigningKey, VerifyingKey, RegistryLimits) -> FlowMuxAccept
+        + Send
+        + 'static,
     ) -> (
         UnixStream,
         Session,
@@ -2277,13 +2078,9 @@ mod tests {
         let (guest_key, guest_verify) = fresh_keys();
         let (host_stream, mut guest_stream) = UnixStream::pair().unwrap();
         let host_handle = thread::spawn(move || {
-            let mut session = FlowMuxSession::accept(
+            let mut session = FlowMuxSession::accept_with(
                 host_stream,
-                "test-session",
-                host_key,
-                &guest_verify,
-                limits,
-                gate,
+                build("test-session", host_key, guest_verify, limits),
             )
             .unwrap();
             session.serve()
@@ -2305,7 +2102,7 @@ mod tests {
         (guest_stream, guest_session, host_handle)
     }
 
-    fn write_frame(
+    pub(super) fn write_frame(
         stream: &mut UnixStream,
         session: &mut Session,
         opcode: Opcode,
@@ -2478,7 +2275,7 @@ mod tests {
         addr
     }
 
-    fn tcp_echo_server() -> SocketAddr {
+    pub(super) fn tcp_echo_server() -> SocketAddr {
         tcp_echo_server_on(local_test_ip())
     }
 
@@ -2528,97 +2325,6 @@ mod tests {
             }
         });
         addr
-    }
-
-    #[test]
-    fn open_tcp_to_allowed_local_addr_roundtrips_data() {
-        let addr = tcp_echo_server();
-        let (mut guest, mut guest_session, host) =
-            run_session(gate_allowing_addr(addr.ip(), addr.port(), None));
-        write_frame(
-            &mut guest,
-            &mut guest_session,
-            Opcode::OpenTcp,
-            1,
-            format!("{}:{}", addr.ip(), addr.port()).as_bytes(),
-        );
-        let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest, &mut guest_session);
-        assert_eq!(opcode, Opcode::Opened);
-
-        let payload = b"ping";
-        write_frame(&mut guest, &mut guest_session, Opcode::Data, 1, payload);
-        let data = loop {
-            let (opcode, _stream_id, frame) = read_flowmux_frame(&mut guest, &mut guest_session);
-            if opcode == Opcode::Data {
-                break frame;
-            }
-            // WindowUpdate and other non-data frames are expected before the
-            // upstream response reaches us.
-        };
-        assert_eq!(&data[..], payload);
-
-        write_frame(&mut guest, &mut guest_session, Opcode::HalfClose, 1, b"");
-        let opcode = loop {
-            let (op, _stream_id, _payload) = read_flowmux_frame(&mut guest, &mut guest_session);
-            if op == Opcode::HalfClose {
-                break op;
-            }
-            // WindowUpdate may be in flight before the relay observes EOF.
-            assert_eq!(op, Opcode::WindowUpdate);
-        };
-        assert_eq!(opcode, Opcode::HalfClose);
-
-        drop(guest);
-        host.join().unwrap().unwrap();
-    }
-
-    #[test]
-    fn open_tcp_to_denied_local_addr_is_refused() {
-        let addr = tcp_echo_server();
-        let (mut guest, mut guest_session, host) =
-            run_session(gate_allowing_addr(addr.ip(), addr.port(), None));
-        let denied_port = addr.port().wrapping_add(1);
-        write_frame(
-            &mut guest,
-            &mut guest_session,
-            Opcode::OpenTcp,
-            1,
-            format!("{}:{}", addr.ip(), denied_port).as_bytes(),
-        );
-        let (opcode, _stream_id, payload) = read_flowmux_frame(&mut guest, &mut guest_session);
-        assert_eq!(opcode, Opcode::Refused);
-        assert!(!payload.is_empty());
-
-        drop(guest);
-        host.join().unwrap().unwrap();
-    }
-
-    #[test]
-    fn open_tcp_to_allowed_but_unbound_addr_is_refused_truthfully() {
-        let ip = local_test_ip();
-        // Bind briefly to let the OS assign a free port, then drop the
-        // listener so the attempted connect fails with ECONNREFUSED.
-        let free_port = std::net::TcpListener::bind(std::net::SocketAddr::new(ip, 0))
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-
-        let (mut guest, mut guest_session, host) =
-            run_session(gate_allowing_addr(ip, free_port, None));
-        write_frame(
-            &mut guest,
-            &mut guest_session,
-            Opcode::OpenTcp,
-            1,
-            format!("{}:{}", ip, free_port).as_bytes(),
-        );
-        let (opcode, _stream_id, payload) = read_flowmux_frame(&mut guest, &mut guest_session);
-        assert_eq!(opcode, Opcode::ConnectFailed);
-        assert!(!payload.is_empty());
-
-        drop(guest);
-        host.join().unwrap().unwrap();
     }
 
     #[test]
@@ -2903,41 +2609,6 @@ mod tests {
         let (opcode, _, payload) = read_flowmux_frame(&mut guest, &mut guest_session);
         assert_eq!(opcode, Opcode::GoAway);
         assert!(!payload.is_empty());
-
-        drop(guest);
-        host.join().unwrap().unwrap();
-    }
-
-    #[test]
-    fn tcp_connection_rate_limit_refuses_overflow() {
-        let addr = tcp_echo_server();
-        let limits = RegistryLimits {
-            tcp_connect_rate: 1,
-            ..Default::default()
-        };
-        let (mut guest, mut guest_session, host) =
-            run_session_with(gate_allowing_addr(addr.ip(), addr.port(), None), limits);
-
-        write_frame(
-            &mut guest,
-            &mut guest_session,
-            Opcode::OpenTcp,
-            1,
-            format!("{}:{}", addr.ip(), addr.port()).as_bytes(),
-        );
-        let (opcode, _, _) = read_flowmux_frame(&mut guest, &mut guest_session);
-        assert_eq!(opcode, Opcode::Opened);
-
-        write_frame(
-            &mut guest,
-            &mut guest_session,
-            Opcode::OpenTcp,
-            3,
-            format!("{}:{}", addr.ip(), addr.port()).as_bytes(),
-        );
-        let (opcode, _, payload) = read_flowmux_frame(&mut guest, &mut guest_session);
-        assert_eq!(opcode, Opcode::Refused);
-        assert!(std::str::from_utf8(&payload).unwrap().contains("rate"));
 
         drop(guest);
         host.join().unwrap().unwrap();

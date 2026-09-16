@@ -963,33 +963,25 @@ fn mk_guest_assigns_ipv4_loopback_before_starting_guest_services() {
     );
 }
 
+/// The guest has one egress listener, and the proxy environment the init
+/// exports names it. A second listener is what made substitution depend on
+/// which variable a workload's toolchain happened to read.
 #[test]
-fn mk_guest_starts_the_forward_proxy_before_dropping_privileges() {
+fn mk_guest_exports_a_proxy_environment_naming_one_loopback_listener() {
     let path = nix_dir().join("lib").join("mk-guest.nix");
     let content = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
-    let proxy_start = content
-        .find("# Stage 2.49 — loopback forward proxy")
-        .expect("guest init starts the forward proxy");
-    let agent_start = content[proxy_start..]
-        .find("# Stage 2.5 — guest agent supervisor")
-        .map(|offset| proxy_start + offset)
-        .expect("the unprivileged guest agent starts after the forward proxy");
-    let proxy_block = &content[proxy_start..agent_start];
 
     assert!(
-        proxy_block.contains("/mvm/runtime/forward-proxy")
-            && proxy_block.contains("/usr/local/bin/mvm-forward-proxy"),
-        "both runtime-source policies must resolve the privileged helper"
+        content.contains(r#"export ALL_PROXY="socks5h://127.0.0.1:1080""#),
+        "the exported proxy environment must name the tunnelling listener"
     );
-    assert!(
-        proxy_block.contains("/bin/busybox setsid \"$MVM_FORWARD_PROXY_BIN\" &"),
-        "the init-owned process must start the proxy directly"
-    );
-    assert!(
-        !proxy_block.contains("mvm-setpriv"),
-        "the proxy reads the root-only FlowMux key and must not inherit the workload uid"
-    );
+    for var in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+        assert!(
+            content.contains(&format!(r#"export {var}="$ALL_PROXY""#)),
+            "{var} must resolve to the same listener as ALL_PROXY"
+        );
+    }
 }
 
 #[test]
@@ -1462,29 +1454,51 @@ fn mk_guest_mounts_the_sdk_sidecar_read_only_from_the_host_named_device() {
     );
 }
 
+/// The egress CA reaches a flake guest on the identity drive, and nowhere else.
+///
+/// There used to be a second carrier — a `mvm.egress_ca=` kernel-cmdline token
+/// this init parsed in two encodings — that no host ever emitted. Asserting its
+/// absence keeps a boot from growing a channel the host does not write and the
+/// drive-copy ordering below does not cover.
 #[test]
-fn mk_guest_accepts_compact_and_legacy_egress_ca_cmdline_tokens() {
+fn mk_guest_trusts_the_egress_ca_from_the_identity_drive_after_it_is_copied_out() {
     let path = nix_dir().join("lib").join("mk-guest.nix");
     let content = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
 
     assert!(
-        content.contains("mvm.egress_ca=pem:<body>"),
-        "mk-guest.nix must document the compact egress CA cmdline token so \
-         the sealed guest/runtime contract matches the host encoder."
+        !content.contains("mvm.egress_ca"),
+        "mk-guest.nix must not read the egress CA off the kernel cmdline: the \
+         certificate rides the per-boot identity drive and nothing emits that token."
+    );
+
+    let provision_at = content
+        .find("$MVM_IDENTITY_PROVISION_COMMAND")
+        .expect("mk-guest.nix must provision the FlowMux identity drive");
+    let trust_at = content
+        .find(r#""$MVM_EGRESS_CLIENT_BIN" install-egress-ca-trust"#)
+        .expect("mk-guest.nix must build the trust bundle through the shared Rust helper");
+    assert!(
+        provision_at < trust_at,
+        "the identity drive must be copied out before the certificate on it is read; \
+         reversed, every guest silently boots trusting nothing"
+    );
+
+    // `cat baked egress-ca.crt` fuses the two armor lines when the baked bundle
+    // has no trailing newline, and every PEM parser then reads one truncated
+    // certificate. The Rust helper separates them; the shell must not reimplement it.
+    assert!(
+        !content.contains("cat /etc/ssl/certs/ca-bundle.crt /run/mvm/egress-ca.crt"),
+        "the trust bundle must not be assembled by concatenation in the shell"
+    );
+
+    assert!(
+        content.contains("export SSL_CERT_FILE=/run/mvm/ca-bundle.crt"),
+        "mk-guest.nix must point the guest's TLS clients at the combined bundle"
     );
     assert!(
-        content.contains("/bin/busybox grep -q '^pem:'"),
-        "mk-guest.nix must detect the compact egress CA token format at boot."
-    );
-    assert!(
-        content.contains("-----BEGIN CERTIFICATE-----"),
-        "mk-guest.nix must reconstruct PEM armor for the compact egress CA token."
-    );
-    assert!(
-        content.contains("echo \"$MVM_EGRESS_CA_TOKEN\" | /bin/busybox sed 's/../\\\\x&/g'"),
-        "mk-guest.nix must keep the legacy hex-encoded egress CA decode path \
-         so older boots remain compatible during the token-format rollout."
+        content.contains("export NODE_EXTRA_CA_CERTS=/run/mvm/egress-ca.crt"),
+        "Node reads an extra certificate rather than a replacement bundle"
     );
 }
 

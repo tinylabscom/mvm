@@ -3441,6 +3441,7 @@ dependencies = [
  "virtio-queue",
  "virtio-vsock",
  "vm-memory",
+ "zeroize",
 ]
 
 [[package]]

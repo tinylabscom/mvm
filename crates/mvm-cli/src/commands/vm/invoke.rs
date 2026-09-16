@@ -933,8 +933,8 @@ fn dispatch_inner(call: EntrypointDispatch<'_>) -> Result<i32> {
                 DispatchStdin::Streaming(_) => Vec::new(),
             },
             timeout_secs,
-            // Secret-bearing workloads route through the in-guest forward proxy;
-            // plain vsock-egress workloads route through the loopback SOCKS5 client.
+            // Every workload routes through the guest's one loopback proxy; a
+            // secret-bearing one carries its minted placeholders alongside.
             env: workload_egress_env(vm_name),
             // A one-shot dispatch writes its payload once and has no writer
             // behind it, so the guest closes stdin and a read-to-EOF workload
@@ -1280,9 +1280,10 @@ fn workload_egress_env(vm_name: &str) -> Vec<(String, String)> {
 /// The workload launch env that routes secret-bearing egress
 /// through the substitution endpoint. Reads the `(guest var, placeholder)`
 /// pairs the endpoint minted at boot (`vm_substitution_env_path`); when
-/// present, prepends `HTTP(S)_PROXY` pointing at the in-guest forward proxy so
-/// outbound requests carrying a placeholder are routed to the host for
-/// substitution. Empty (no proxy, no vars) when the VM has no secrets — so a
+/// present, prepends the standard proxy environment pointing at the guest's
+/// loopback egress proxy so outbound requests carrying a placeholder reach the
+/// host, which terminates the ones bound to a credentialed destination and
+/// substitutes. Empty (no proxy, no vars) when the VM has no secrets — so a
 /// plain workload is unaffected.
 fn substitution_env(vm_name: &str) -> Vec<(String, String)> {
     let path = mvm_core::config::vm_substitution_env_path(vm_name);
@@ -1303,12 +1304,13 @@ fn vsock_egress_env(vm_name: &str) -> Vec<(String, String)> {
     mvm_core::guest_netd::proxy_env_vars(mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN)
 }
 
-/// Whether the per-VM egress CA sidecar exists — i.e. egress substitution
-/// provisioned a CA whose PEM the launcher put on the guest kernel cmdline
-/// (`mvm.egress_ca=`) and the guest `/init` decoded to `/run/mvm/ca-bundle.crt`.
+/// Whether this VM booted with a per-VM egress CA — i.e. the endpoint spawner
+/// minted one for the plan's bound destinations, persisted it here, and put its
+/// certificate on the identity drive the guest assembled
+/// `/run/mvm/ca-bundle.crt` from.
 fn egress_ca_present(vm_name: &str) -> bool {
     mvm_core::config::vm_state_dir(vm_name)
-        .join("egress-intermediate.json")
+        .join(mvm_vmm::host::network_endpoint_spawn::EGRESS_CA_STATE_FILE)
         .exists()
 }
 
@@ -1349,21 +1351,22 @@ fn with_egress_ca_env(
 }
 
 /// Pure half of [`substitution_env`]: given the endpoint's minted placeholder
-/// vars, prepend `HTTP(S)_PROXY` (the in-guest forward proxy) so the workload
-/// routes secret-bearing egress for substitution. Empty placeholders ⇒ empty
-/// env (a plain workload is left untouched).
+/// vars, prepend the standard proxy environment so the workload routes
+/// secret-bearing egress through the guest's one loopback proxy. Empty
+/// placeholders ⇒ empty env (a plain workload is left untouched).
+///
+/// The same environment a workload with no secrets gets, deliberately: whether
+/// a request is substituted is decided on the host, against the plan's
+/// bindings, not by which of two guest listeners the workload happened to
+/// dial. A `CONNECT` (or SOCKS) tunnel to a bound destination is terminated on
+/// the host and the credential goes in there; an unbound destination is
+/// spliced untouched.
 fn build_substitution_env(placeholders: Vec<(String, String)>) -> Vec<(String, String)> {
     if placeholders.is_empty() {
         return Vec::new();
     }
-    let proxy = mvm_agentd::forward_proxy::proxy_env_url();
-    // Both upper- and lower-case forms — toolchains differ on which they read.
-    let mut env = vec![
-        ("HTTP_PROXY".to_string(), proxy.clone()),
-        ("HTTPS_PROXY".to_string(), proxy.clone()),
-        ("http_proxy".to_string(), proxy.clone()),
-        ("https_proxy".to_string(), proxy),
-    ];
+    let mut env =
+        mvm_core::guest_netd::proxy_env_vars(mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN);
     env.extend(placeholders);
     env
 }
@@ -2432,25 +2435,79 @@ mod tests {
         assert!(super::build_substitution_env(Vec::new()).is_empty());
     }
 
+    /// A secret-bearing workload is handed the same proxy environment as a
+    /// plain one: the guest's single loopback listener, which tunnels TLS from
+    /// the first byte. That is what makes substitution independent of which
+    /// proxy variable a workload's toolchain happens to read.
     #[test]
-    fn build_substitution_env_prepends_proxy_and_keeps_placeholders() {
+    fn build_substitution_env_points_every_proxy_var_at_the_tunnelling_endpoint() {
         let env = super::build_substitution_env(vec![(
             "OPENAI_API_KEY".to_string(),
             "mvm-secret-abc123".to_string(),
         )]);
-        let proxy = mvm_agentd::forward_proxy::proxy_env_url();
-        // HTTP(S)_PROXY (upper + lower) point at the in-guest forward proxy.
+        let expected =
+            mvm_core::guest_netd::proxy_env_vars(mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN);
+        for (key, value) in &expected {
+            assert!(
+                env.iter().any(|(k, v)| k == key && v == value),
+                "missing {key}={value} in {env:?}"
+            );
+        }
+        // An `https://` destination must be reached by tunnelling, never by
+        // handing an absolute-URI request to a proxy that would forward the
+        // head in cleartext.
         assert_eq!(
             env.iter()
-                .find(|(k, _)| k == "HTTP_PROXY")
+                .find(|(k, _)| k == "ALL_PROXY")
                 .map(|(_, v)| v.as_str()),
-            Some(proxy.as_str())
+            Some("socks5h://127.0.0.1:1080")
         );
-        assert!(env.iter().any(|(k, v)| k == "https_proxy" && *v == proxy));
+        // Nothing points the workload at a second, non-tunnelling listener.
+        assert!(
+            env.iter()
+                .all(|(k, v)| !k.ends_with("_PROXY") && !k.ends_with("_proxy")
+                    || v.contains("127.0.0.1:1080")
+                    || k.eq_ignore_ascii_case("no_proxy")),
+            "a proxy var names an endpoint other than the loopback egress proxy: {env:?}"
+        );
         // The opaque placeholder var survives (never the value).
         assert!(
             env.iter()
                 .any(|(k, v)| k == "OPENAI_API_KEY" && v == "mvm-secret-abc123")
+        );
+    }
+
+    /// A workload with no secrets and one carrying them are pointed at the same
+    /// endpoint. There is no second listener to land on, so a plain workload's
+    /// admitted destination is reached through the proxy that also carries the
+    /// credentialed flows — and the two tiers cannot disagree about where
+    /// egress goes.
+    #[test]
+    fn a_plain_workload_and_a_secret_bearing_one_get_the_same_proxy_endpoint() {
+        let mut env_guard = TestEnv::new();
+        let dir = tempfile::tempdir().expect("tempdir");
+        env_guard.set("MVM_HOME", dir.path());
+        let marker = mvm_core::config::vm_vsock_egress_marker_path("plain-vm");
+        std::fs::create_dir_all(marker.parent().expect("marker parent"))
+            .expect("mkdir marker parent");
+        std::fs::write(&marker, b"1").expect("write marker");
+
+        let proxy_vars = |env: &[(String, String)]| -> Vec<(String, String)> {
+            env.iter()
+                .filter(|(k, _)| k.to_ascii_lowercase().ends_with("_proxy"))
+                .cloned()
+                .collect()
+        };
+        let plain = proxy_vars(&super::vsock_egress_env("plain-vm"));
+        let secret_bearing = proxy_vars(&super::build_substitution_env(vec![(
+            "OPENAI_API_KEY".to_string(),
+            "mvm-secret-abc123".to_string(),
+        )]));
+
+        assert!(!plain.is_empty(), "the plain workload must get a proxy");
+        assert_eq!(
+            plain, secret_bearing,
+            "a bound secret must not move the workload to a different listener"
         );
     }
 
@@ -2507,9 +2564,12 @@ mod tests {
 
         let env = super::workload_egress_env("pref-vm");
         assert!(env.iter().any(|(k, _)| k == "HTTP_PROXY"));
+        // Both paths name the same proxy, so the discriminator is the minted
+        // placeholder: only the substitution env carries one.
         assert!(
             env.iter()
-                .all(|(_, v)| !v.starts_with("http://127.0.0.1:1080"))
+                .any(|(k, v)| k == "OPENAI_API_KEY" && v == "mvm-secret-1"),
+            "the substitution env's placeholders must win over the plain vsock env: {env:?}"
         );
     }
 

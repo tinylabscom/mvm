@@ -3476,7 +3476,7 @@ mod linux {
 
         // The kernel creates `lo` administratively DOWN. Until it's up,
         // 127.0.0.0/8 has no route and every guest-internal loopback
-        // service — the egress forward proxy, addon-dns — fails to bind
+        // service — the egress proxy, addon-dns — fails to bind
         // with EADDRNOTAVAIL. Bring it up first, independent of eth0/DHCP:
         // a network:None builder VM has no eth0 at all yet still needs
         // working loopback. Non-fatal, mirroring the eth0 bring-up below.

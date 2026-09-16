@@ -23,13 +23,17 @@ token, and the token says nothing about the value it stands for.
 Alongside the placeholders, the entrypoint gets:
 
 - `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, `https_proxy` set to
-  `http://127.0.0.1:18080`, the in-guest forward proxy.
+  `http://127.0.0.1:1080`, and `ALL_PROXY` / `all_proxy` to
+  `socks5h://127.0.0.1:1080` — the same in-guest listener, which dispatches on
+  the first byte. `NO_PROXY` covers loopback.
+- `SSL_CERT_FILE`, `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE` and
+  `NODE_EXTRA_CA_CERTS` pointing at the guest's trust bundle, which carries the
+  image's own roots plus this VM's egress CA certificate.
 
-No CA bundle variables are set: this path provisions no per-VM egress CA,
-because the guest never terminates or is handed TLS for the destination. The
-entrypoint is launched with an otherwise empty environment. The real secret
+The entrypoint is launched with an otherwise empty environment. The real secret
 value is never written to the rootfs, the kernel command line, a drive, or the
-guest's environment.
+guest's environment — and neither is the egress CA's private key, which stays
+in the host process that terminates.
 
 ## What the host does
 
@@ -43,15 +47,19 @@ in the clear.
    local binding store, mints the placeholders, and hands them back to be
    injected into the entrypoint's environment. A secret with no binding fails
    the boot rather than handing the guest a placeholder nothing can resolve.
-2. **Per request**, the in-guest proxy relays the request to the endpoint over
+2. **Per connection**, the in-guest proxy relays the tunnel to the endpoint over
    the VM's authenticated vsock channel. The endpoint checks the destination
-   against the VM's network policy, then, for each request header carrying a
-   placeholder, checks the destination host in the request URL against that
-   secret's bound hosts. The value is resolved only after both checks pass.
-3. **The endpoint originates the request itself**, including the TLS
+   against the VM's network policy first. If a secret is bound to that
+   destination, it terminates the tunnel under this VM's egress CA and reads the
+   request; otherwise it relays the bytes untouched and never sees inside them.
+3. **Per request in a terminated tunnel**, for each header carrying a
+   placeholder, the endpoint checks the destination host against that secret's
+   bound hosts. The value is resolved only after both checks pass. A request
+   whose `Host` disagrees with the tunnel it arrived in is refused.
+4. **The endpoint originates the request itself**, including the TLS
    connection to the destination, validated against the host's system roots.
-   The guest never holds a TLS session with the model provider.
-4. **When the upstream response completes**, the endpoint appends a
+   The guest's TLS session is with the host, never with the model provider.
+5. **When the upstream response completes**, the endpoint appends a
    `secret.substituted` entry for each secret it substituted into that request
    to the host's chain-signed audit log.
 
@@ -172,32 +180,37 @@ images, do not: their program is PID 1, which never receives a placeholder.
 
 ## What the agent's HTTP client must do
 
-The in-guest proxy is deliberately small. A client that works through it:
+An ordinary HTTP client that reads the proxy environment works. It tunnels an
+`https://` URL through the in-guest listener with `CONNECT`, the host terminates
+that tunnel for a destination the secret is bound to, substitutes into the
+request headers and originates the upstream connection itself. The guest's TLS
+session is with the host, under this VM's egress CA — which is why the trust
+bundle matters, and why a client that ignores `SSL_CERT_FILE` and carries its
+own compiled-in root store will reject the connection.
 
-- **Sends absolute-form requests**, with the full URL as the request target:
-  `POST https://api.anthropic.com/v1/messages HTTP/1.1`. The proxy does not
-  accept `CONNECT`. Most HTTP libraries tunnel `https://` URLs through a proxy
-  with `CONNECT` by default, and those requests fail with a `502`. Check what
-  your agent's client does before assuming `HTTPS_PROXY` is enough.
-- **Expects every proxied request to go this way.** `HTTPS_PROXY` applies to
-  all of the process's HTTPS traffic, not only the requests carrying a
-  placeholder. Any other destination you admit with `--allow-host` and reach
-  through a proxy-aware client hits the same `CONNECT` refusal. Node's built-in
-  `fetch` does not read `HTTPS_PROXY` by default and connects directly, which
-  has no route out of the guest.
-- **Puts the placeholder in a header** where the credential goes, such as
-  `x-api-key: $ANTHROPIC_API_KEY` or `Authorization: Bearer $API_KEY`.
-- **Fits in one request per connection.** The proxy answers with
-  `connection: close`.
-- **Gets a response started within 30 seconds, and never stalls for 30.** On
-  the host, the upstream response head must arrive within 30 seconds of the
-  request being sent. After that, each side of the relay gives up after 30
-  seconds with no data read. A request and a response are each capped at
-  16 MiB. The whole entrypoint call is separately bounded by
-  `machine run --timeout`, which defaults to 30 seconds.
-- **Does not need incremental streaming.** The response reaches the guest in
-  one piece after the upstream response completes. A server-sent-event stream
-  arrives all at once at the end.
+Things still worth knowing:
+
+- **The placeholder goes in a header**, where the credential goes: `x-api-key:
+  $ANTHROPIC_API_KEY` or `Authorization: Bearer $API_KEY`. Substitution reads
+  request headers only. A placeholder in a request body is forwarded as-is.
+- **`HTTPS_PROXY` applies to all of the process's HTTPS traffic**, not only the
+  requests carrying a placeholder. A destination the network policy does not
+  admit is refused whether or not a secret is involved. Node's built-in `fetch`
+  does not read `HTTPS_PROXY` by default and connects directly, which has no
+  route out of a guest with no NIC.
+- **A tunnel to a destination the secret is not bound to is relayed, not
+  terminated.** The host does not sit inside TLS it has no reason to open, so
+  those connections are end-to-end with the destination and no substitution
+  happens in them.
+- **Requests are not pipelined.** Bytes that arrive past the declared
+  `Content-Length` are refused rather than served, and a `Transfer-Encoding:
+  chunked` request body is refused with a `501`.
+- **Gets a response started within 30 seconds, and never stalls for 30.** The
+  upstream response head must arrive within 30 seconds of the request being
+  sent. After that, each side gives up after 30 seconds with no data read. A
+  request and a response are each capped at 16 MiB. The whole entrypoint call
+  is separately bounded by `machine run --timeout`, which defaults to 30
+  seconds.
 
 ## Egress
 

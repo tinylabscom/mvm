@@ -83,6 +83,35 @@ pub async fn emit_secret_placeholder_dropped(
         .await
 }
 
+/// Emit `secret.flow_refused { destination, reason }` — a flow to a
+/// credentialed destination was refused before anything was forwarded.
+///
+/// `destination` is the authority the flow was admitted against, which the
+/// connect-time flow entry already names. `reason` is one of a fixed set of
+/// host-chosen labels; nothing the workload sent — no header value, no URL, no
+/// body byte — ever reaches either field (claim 13).
+///
+/// This exists because a refusal is otherwise invisible to the chain: an
+/// attempt to address a credentialed flow somewhere other than the authority
+/// it was opened against is the single most interesting event on this path,
+/// and without a record `trust audit verify` reads clean across it.
+pub async fn emit_secret_flow_refused(
+    recorder: &Recorder,
+    destination: &str,
+    reason: &str,
+) -> Result<(), RecorderError> {
+    recorder
+        .record_unbound(
+            EventCategory::Secret,
+            "secret.flow_refused",
+            [
+                ("destination".to_string(), destination.to_string()),
+                ("reason".to_string(), reason.to_string()),
+            ],
+        )
+        .await
+}
+
 /// Emit one `secret.rewrite_proof` metadata record for an owned replace or
 /// reinject event. The digests are keyed HMACs of the original and rewritten
 /// bytes; no plaintext crosses the audit chain.

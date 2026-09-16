@@ -7,7 +7,6 @@
 //! (claims 12/13).
 
 pub mod admission;
-pub mod binding;
 pub mod injector;
 pub mod remote_resolver;
 pub mod resolver;
@@ -16,8 +15,13 @@ pub mod sigv4;
 pub mod substitution;
 
 pub use admission::{AssembleError, HandedPlaceholders, assemble_registry, secret_placeholder_env};
-pub use binding::{BindingStore, FileBindingStore, SecretBindingMeta};
 pub use injector::{InjectError, Injector};
+/// The binding store lives in `mvm-core` because the launch path reads it too:
+/// the per-VM egress certificate is name-constrained to the same
+/// `allowed_hosts` the keyholder enforces, and the launcher that mints it sits
+/// below this crate. Re-exported here because this is where a caller looks for
+/// it.
+pub use mvm_core::crypto::secret_binding::{BindingStore, FileBindingStore, SecretBindingMeta};
 pub use remote_resolver::RemoteResolver;
 pub use resolver::{LocalResolver, ResolveError, SecretResolver};
 pub use signer::{SigV4Input, SignError, Signature, Signer, SigningInput};

@@ -227,7 +227,7 @@ pub fn open_session(
 
     // Assemble the child's environment block *before* forking. The guest
     // agent is multithreaded by the time it serves a ConsoleOpen request
-    // (monitoring, probe, integration, and forward-proxy threads are all
+    // (monitoring, probe, and integration threads are all
     // live), so the post-fork child may call only async-signal-safe
     // functions. `putenv`/`execvp` can `malloc` — if another thread held the
     // allocator lock at fork time the child would deadlock — so we build a

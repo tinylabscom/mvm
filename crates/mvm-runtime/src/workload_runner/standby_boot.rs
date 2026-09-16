@@ -576,14 +576,17 @@ mod tests {
         assert!(!parent.cmdline.contains("mvm.hostname="));
     }
 
-    /// The case that must never come out permissive. A secret-bearing workload's
-    /// outbound traffic belongs to the host-side substitution endpoint, so a cold
-    /// boot suppresses the guest's own egress client even though the policy allows
-    /// egress. The pool keys on that *effective* value, so the parent warmed for
-    /// such a launch suppresses it too; the remaining difference is only the
-    /// child hostname delivered after restore.
+    /// A secret-bearing workload boots the same loopback egress client as any
+    /// other — it is the workload's only way out, and which of its flows carries
+    /// a credential is the host's decision against the plan, not the guest's.
+    /// The pool keys on that *effective* value, so the parent warmed for such a
+    /// launch starts the client too; the remaining difference is only the child
+    /// hostname delivered after restore.
+    ///
+    /// A parent that differed here would be unclaimable by the launch it was
+    /// warmed for, which is a cold boot on every secret-bearing run.
     #[test]
-    fn a_secret_bearing_launch_warms_a_parent_with_no_egress_client_either() {
+    fn a_secret_bearing_launch_warms_a_parent_with_the_same_egress_client() {
         let (_env, home, _lock) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
         let mut launch = sealed_launch(tmp.path(), home.path());
@@ -594,11 +597,11 @@ mod tests {
         let spec = standby_spec_for(&launch, tmp.path());
         assert!(
             launch.network_policy.allows_egress(),
-            "fixture must exercise the suppression, not a deny-all policy"
+            "fixture must exercise a bound secret, not a deny-all policy"
         );
         assert!(
-            !spec.vsock_egress,
-            "a secret-bearing launch must warm a parent with no egress client"
+            spec.vsock_egress,
+            "a secret-bearing launch warms a parent that boots the egress client"
         );
 
         // The cold boot the parent is compared against: the admitted plan is
@@ -617,12 +620,12 @@ mod tests {
         let parent = factory_parent_spec(&parent_cfg, Path::new(&spec.vm_state_dir), fc_base);
 
         assert!(
-            !workload.cmdline.contains("mvm.vsock_egress"),
-            "a secret-bearing cold boot suppresses the guest egress client: {}",
+            workload.cmdline.contains("mvm.vsock_egress=1"),
+            "a secret-bearing cold boot starts the guest egress client: {}",
             workload.cmdline
         );
         assert!(
-            !parent.cmdline.contains("mvm.vsock_egress"),
+            parent.cmdline.contains("mvm.vsock_egress=1"),
             "so must the parent warmed for it: {}",
             parent.cmdline
         );
@@ -631,7 +634,15 @@ mod tests {
             without_per_boot_tokens(&workload.cmdline)
         );
         assert!(!parent.cmdline.contains("mvm.hostname="));
-        assert!(!parent_cfg.network_policy.allows_egress());
+        assert!(
+            parent_cfg.network_policy.allows_egress(),
+            "the parent carries the enablement the launch resolved"
+        );
+        let label = parent_cfg.network_policy.posture_label();
+        assert!(
+            !label.contains("api.example.com"),
+            "but none of its destinations, which are the claimed child's: {label}"
+        );
         assert_eq!(parent_cfg.plan_json, None, "a parent still holds no plan");
     }
 

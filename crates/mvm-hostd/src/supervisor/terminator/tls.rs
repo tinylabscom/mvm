@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use mvm_core::crypto::egress_ca::VmIntermediate;
+use mvm_core::crypto::egress_ca::VmEgressCa;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
@@ -84,10 +84,7 @@ pub const MAX_CLIENT_HELLO_PEEK: usize = 8 * 1024;
 /// chained to the per-VM intermediate (`[leaf, intermediate]`), so a guest that
 /// trusts the intermediate validates the terminated connection. We already
 /// peeked the SNI, so we mint directly rather than via a `ResolvesServerCert`.
-pub fn server_config_for_sni(
-    intermediate: &VmIntermediate,
-    sni: &str,
-) -> Result<rustls::ServerConfig> {
+pub fn server_config_for_sni(intermediate: &VmEgressCa, sni: &str) -> Result<rustls::ServerConfig> {
     let leaf = intermediate
         .mint_leaf(sni)
         .map_err(|e| anyhow!("mint leaf for {sni}: {e}"))?;
@@ -218,7 +215,8 @@ where
     let mut tls = rustls::StreamOwned::new(conn, stream);
 
     let raw = read_http_request(&mut tls)
-        .map_err(|e| TerminatorError::Parse(format!("read decrypted request: {e}")))?;
+        .map_err(|e| TerminatorError::Parse(format!("read decrypted request: {e}")))?
+        .request;
     let mut req = proxy_request_from_origin_form_https(&raw, orig_dst)
         .map_err(|e| TerminatorError::Parse(e.to_string()))?;
     // Capture audit metadata before substitution consumes the request (claim-13
@@ -266,16 +264,7 @@ pub fn serialize_http_response(status: u16, headers: &[(String, String)], body: 
     let mut out = Vec::with_capacity(128 + body.len());
     out.extend_from_slice(format!("HTTP/1.1 {status} {}\r\n", reason_phrase(status)).as_bytes());
     for (k, v) in headers {
-        let lk = k.to_ascii_lowercase();
-        // Drop framing/hop-by-hop headers the client already resolved; we re-frame.
-        if matches!(
-            lk.as_str(),
-            "transfer-encoding" | "content-length" | "connection"
-        ) {
-            continue;
-        }
-        // Defensive: never let a header smuggle CRLF into the response.
-        if k.bytes().chain(v.bytes()).any(|b| b == b'\r' || b == b'\n') {
+        if is_framing_header(k) || smuggles_crlf(k, v) {
             continue;
         }
         out.extend_from_slice(format!("{k}: {v}\r\n").as_bytes());
@@ -286,9 +275,27 @@ pub fn serialize_http_response(status: u16, headers: &[(String, String)], body: 
     out
 }
 
+/// Whether a response header belongs to the upstream leg's transfer framing
+/// rather than to the response itself. The terminator re-frames what it writes
+/// back, so carrying these across would describe the wrong message.
+pub(super) fn is_framing_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "transfer-encoding" | "content-length" | "connection"
+    )
+}
+
+/// Whether a header name or value carries a bare CR or LF, which would end the
+/// header line early and let an upstream response inject one of its own.
+pub(super) fn smuggles_crlf(name: &str, value: &str) -> bool {
+    name.bytes()
+        .chain(value.bytes())
+        .any(|b| b == b'\r' || b == b'\n')
+}
+
 /// A minimal reason phrase for common statuses; "" for the rest (clients accept
 /// an empty reason phrase per RFC 7230).
-fn reason_phrase(status: u16) -> &'static str {
+pub(super) fn reason_phrase(status: u16) -> &'static str {
     match status {
         200 => "OK",
         201 => "Created",
@@ -300,8 +307,10 @@ fn reason_phrase(status: u16) -> &'static str {
         401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
+        421 => "Misdirected Request",
         429 => "Too Many Requests",
         500 => "Internal Server Error",
+        501 => "Not Implemented",
         502 => "Bad Gateway",
         503 => "Service Unavailable",
         _ => "",
@@ -499,9 +508,7 @@ mod tests {
 
     #[test]
     fn ingress_server_config_accepts_one_host_owned_pem_bundle() {
-        let dir = tempfile::tempdir().unwrap();
-        let ca = mvm_core::crypto::egress_ca::EgressCa::load_or_init_at(dir.path()).unwrap();
-        let intermediate = ca.mint_vm_intermediate(&["localhost"]).unwrap();
+        let intermediate = mvm_core::crypto::egress_ca::VmEgressCa::mint(&["localhost"]).unwrap();
         let leaf = intermediate.mint_leaf("localhost").unwrap();
         let bundle = format!(
             "{}{}{}",
@@ -554,7 +561,7 @@ mod tests {
 
     use crate::keyholder::{LocalResolver, SubstitutionRegistry};
     use mvm_contract::ir::{AuthType, SecretMount, SecretRef};
-    use mvm_core::crypto::egress_ca::{EgressCa, VmIntermediate};
+    use mvm_core::crypto::egress_ca::VmEgressCa;
     use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
     use secrecy::SecretBox;
     use std::net::{TcpListener, TcpStream};
@@ -586,11 +593,9 @@ mod tests {
 
     #[test]
     fn bound_sni_terminates_substitutes_and_reoriginates() {
-        let dir = tempfile::tempdir().unwrap();
-        let ca = EgressCa::load_or_init_at(dir.path()).unwrap();
-        let inter = ca.mint_vm_intermediate(&["api.openai.com"]).unwrap();
+        let inter = VmEgressCa::mint(&["api.openai.com"]).unwrap();
         // Reconstruct exactly as the endpoint would, from the delivered PEMs.
-        let inter = VmIntermediate::from_pem(inter.cert_pem(), &inter.key_pem()).unwrap();
+        let inter = VmEgressCa::from_pem(inter.cert_pem(), &inter.key_pem()).unwrap();
 
         // Substitution registry: placeholder → real token, bound to the host.
         let sdir = tempfile::tempdir().unwrap();
@@ -774,10 +779,8 @@ mod tests {
         action: RedactionAction,
         request_template: &str,
     ) -> Driven {
-        let dir = tempfile::tempdir().unwrap();
-        let ca = EgressCa::load_or_init_at(dir.path()).unwrap();
-        let inter = ca.mint_vm_intermediate(&[dst_host]).unwrap();
-        let inter = VmIntermediate::from_pem(inter.cert_pem(), &inter.key_pem()).unwrap();
+        let inter = VmEgressCa::mint(&[dst_host]).unwrap();
+        let inter = VmEgressCa::from_pem(inter.cert_pem(), &inter.key_pem()).unwrap();
 
         let sdir = tempfile::tempdir().unwrap();
         let store = FileSecretStore::with_dir(sdir.path());

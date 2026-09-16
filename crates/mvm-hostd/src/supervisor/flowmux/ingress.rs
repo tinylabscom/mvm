@@ -10,6 +10,7 @@ use mvm_contract::protocol::network_flow::{Direction, Opcode, SessionValidator};
 use mvm_core::net::session::Session;
 
 use super::registry::{self, StreamRegistry};
+use super::socket::FlowSocket;
 use super::tcp_relay::{TcpRelayParams, run_tcp_relay};
 use super::udp_relay::{
     UdpAssociationHandle, UdpPeerAdmission, UdpRelayParams, run_udp_relay, udp_event_sources,
@@ -77,7 +78,7 @@ impl FlowMuxIngressHandle {
         lock_tcp_streams(&self.streams).insert(
             stream_id,
             TcpStreamHandle {
-                upstream: tracked,
+                upstream: FlowSocket::from(tracked),
                 host_half_closed: Arc::new(AtomicBool::new(false)),
                 retired: Arc::new(AtomicBool::new(false)),
             },
@@ -118,7 +119,7 @@ impl FlowMuxIngressHandle {
         }
 
         match receiver.recv_timeout(Duration::from_secs(5)) {
-            Ok(Ok(())) => self.spawn_tcp_relay(stream_id, external),
+            Ok(Ok(())) => self.spawn_tcp_relay(stream_id, FlowSocket::from(external)),
             Ok(Err(reason)) => {
                 if let Some(handle) = lock_tcp_streams(&self.streams).remove(&stream_id) {
                     let _ = handle.upstream.shutdown(std::net::Shutdown::Both);
@@ -290,7 +291,7 @@ impl FlowMuxIngressHandle {
     pub(super) fn spawn_tcp_relay(
         &self,
         stream_id: u32,
-        upstream: TcpStream,
+        upstream: FlowSocket,
     ) -> Result<(), FlowMuxError> {
         let upstream_read = upstream.try_clone()?;
         let host_half_closed = Arc::new(AtomicBool::new(false));

@@ -519,9 +519,9 @@ let
     # administratively DOWN and without an IPv4 address; merely raising the
     # link still leaves `127.0.0.1` unavailable, so ANY guest-internal
     # loopback service is unreachable
-    # (`connect()` → ENETUNREACH) — the egress forward proxy on
-    # 127.0.0.1:18080, the in-guest addon-dns resolver, and any local service a
-    # workload binds. Must run before the agent (which binds the forward proxy)
+    # (`connect()` → ENETUNREACH) — the egress proxy the workload's proxy
+    # environment names, the in-guest addon-dns resolver, and any local service
+    # a workload binds. Must run before the agent (which binds the egress proxy)
     # and before netinit. `ip` first (canonical), `ifconfig` fallback — both are
     # busybox applets in the defconfig this image already relies on for
     # `modprobe`. Non-fatal: a failure logs and leaves loopback down (the prior
@@ -529,7 +529,7 @@ let
     if ! /bin/busybox ip addr replace 127.0.0.1/8 dev lo 2>/dev/null \
       || ! /bin/busybox ip link set lo up 2>/dev/null; then
       /bin/busybox ifconfig lo 127.0.0.1 netmask 255.0.0.0 up 2>/dev/null \
-        || echo "mvm-init: WARNING could not configure loopback (no ip/ifconfig applet); guest-internal loopback (egress forward proxy, addon-dns) will be unreachable"
+        || echo "mvm-init: WARNING could not configure loopback (no ip/ifconfig applet); guest-internal loopback (egress proxy, addon-dns) will be unreachable"
     fi
 
     # Stage 2.45 — mount the optional config/secrets drives. The host uses a
@@ -603,54 +603,10 @@ let
     # block any workload on a kernel without rtnetlink. Log the
     # failure and continue; an operator who needs guest-side
     # defense flagged the issue from the JSON line.
-    # Stage 2.46 — trust the per-VM egress CA (https
-    # substitution). A fresh FC boot attaches no secrets drive, so the host
-    # delivers the per-VM name-constrained intermediate CERT on the kernel
-    # cmdline as `mvm.egress_ca=pem:<body>` (cert only — the key stays host-side
-    # in the terminator). Older boots may still carry the legacy hex-encoded
-    # full PEM; accept both while the host-side encoder moves to the compact
-    # format. We decode it to a tmpfs file (writable under the dm-verity-sealed
-    # rootfs) and point the common TLS-trust env vars at a bundle = baked roots
-    # + this cert, so a workload trusts host-terminated bound-host TLS. The
-    # export reaches the entrypoint (setpriv preserves env).
-    #
-    # Honest caveat: Python `ssl` and older Node do NOT enforce X.509
-    # nameConstraints client-side, so this trust is a courtesy — the real egress
-    # boundary is the host-side allow-list check (claim 12), not this cert.
-    #
-    # Compact `pem:` tokens reconstruct the PEM body under tmpfs; the legacy
-    # hex form stays accepted for older host launches. Absent token ⇒ whole
-    # block is a no-op (no-secret guests boot byte-identically).
-    MVM_EGRESS_CA_TOKEN=$(/bin/busybox sed -n 's/.*\bmvm\.egress_ca=\([^ ]*\).*/\1/p' /proc/cmdline)
-    if [ -n "$MVM_EGRESS_CA_TOKEN" ]; then
-      /bin/busybox mkdir -p /run/mvm
-      if echo "$MVM_EGRESS_CA_TOKEN" | /bin/busybox grep -q '^pem:'; then
-        MVM_EGRESS_CA_BODY=''${MVM_EGRESS_CA_TOKEN#pem:}
-        {
-          printf '%s\n' '-----BEGIN CERTIFICATE-----'
-          printf '%s' "$MVM_EGRESS_CA_BODY" | /bin/busybox sed 's/.\{64\}/&\n/g'
-          printf '\n%s\n' '-----END CERTIFICATE-----'
-        } > /run/mvm/egress-ca.crt
-      else
-        printf '%b' "$(echo "$MVM_EGRESS_CA_TOKEN" | /bin/busybox sed 's/../\\x&/g')" \
-          > /run/mvm/egress-ca.crt
-      fi
-      # Combined bundle so the per-VM cert is trusted ALONGSIDE the baked roots
-      # (a workload still reaches cache.nixos.org/api.github.com etc.).
-      if cat /etc/ssl/certs/ca-bundle.crt /run/mvm/egress-ca.crt \
-          > /run/mvm/ca-bundle.crt 2>/dev/null; then
-       :
-      else
-        /bin/busybox cp /run/mvm/egress-ca.crt /run/mvm/ca-bundle.crt
-      fi
-      # OpenSSL (curl/most), curl, python-requests → the combined bundle;
-      # Node appends just the extra cert.
-      export SSL_CERT_FILE=/run/mvm/ca-bundle.crt
-      export CURL_CA_BUNDLE=/run/mvm/ca-bundle.crt
-      export REQUESTS_CA_BUNDLE=/run/mvm/ca-bundle.crt
-      export NODE_EXTRA_CA_CERTS=/run/mvm/egress-ca.crt
-      echo "mvm-init: installed per-VM egress CA (https substitution trust)"
-    fi
+    # The per-VM egress CA is trusted further down, in Stage 2.485: the
+    # certificate arrives on the per-boot identity drive, and that drive is not
+    # copied out until the runtime overlay has been mounted and its Rust helper
+    # resolved.
 
     # Stage 2.47 — inject the per-run secret PLACEHOLDER env.
     # The host minted the workload's placeholders BEFORE boot (so they can ride
@@ -920,6 +876,44 @@ let
         exit 1
       fi
     fi
+
+    # Stage 2.485 — trust the per-VM egress CA (https substitution). The host
+    # mints a name-constrained CA for the destinations the plan's secrets are
+    # bound to and puts its CERTIFICATE on the per-boot identity drive (the key
+    # stays host-side in the terminator). The step above copied that drive into
+    # /run/mvm, which is tmpfs and therefore writable under a dm-verity-sealed
+    # rootfs. Point the common TLS-trust env vars at a bundle = baked roots +
+    # this certificate, so a workload trusts host-terminated bound-host TLS.
+    # The export reaches the entrypoint (setpriv preserves env).
+    #
+    # Scope caveat: the certificate's nameConstraints bound what a leaked per-VM
+    # key could be used for, and OpenSSL-backed clients (curl, Python `ssl`,
+    # Node) do enforce them. They are not the egress control either way — the
+    # real boundary is the host-side allow-list check (claim 12), which decides
+    # whether a flow is admitted at all.
+    #
+    # The bundle is built by the same Rust helper the agent init uses rather
+    # than by `cat`: concatenating a baked bundle that does not end in a newline
+    # with the certificate fuses their armor lines, and every PEM parser then
+    # reads one truncated certificate instead of two. It writes the bundle
+    # whether or not a certificate was delivered, so the exported path always
+    # resolves — OpenSSL that cannot open SSL_CERT_FILE loads no trust store at
+    # all, which would break TLS to destinations unrelated to substitution.
+    if [ -n "$MVM_EGRESS_CLIENT_BIN" ]; then
+      if ! "$MVM_EGRESS_CLIENT_BIN" install-egress-ca-trust; then
+        echo "mvm-init: failed to install the egress CA trust bundle"
+        exit 1
+      fi
+      # OpenSSL (curl/most), curl, python-requests → the combined bundle;
+      # Node appends just the extra cert.
+      export SSL_CERT_FILE=/run/mvm/ca-bundle.crt
+      export CURL_CA_BUNDLE=/run/mvm/ca-bundle.crt
+      export REQUESTS_CA_BUNDLE=/run/mvm/ca-bundle.crt
+      if [ -r /run/mvm/egress-ca.crt ]; then
+        export NODE_EXTRA_CA_CERTS=/run/mvm/egress-ca.crt
+        echo "mvm-init: installed per-VM egress CA (https substitution trust)"
+      fi
+    fi
     if [ -n "''${MVM_VSOCK_EGRESS:-}" ] && [ -n "$MVM_EGRESS_CLIENT_BIN" ]; then
       /bin/busybox ip addr replace 127.0.0.1/8 dev lo 2>/dev/null || true
       /bin/busybox ip link set lo up 2>/dev/null || true
@@ -942,35 +936,6 @@ let
       export HTTPS_PROXY="$ALL_PROXY"
       export http_proxy="$ALL_PROXY"
       export https_proxy="$ALL_PROXY"
-    fi
-
-    # Stage 2.49 — loopback forward proxy for secret-bearing egress. Started
-    # unconditionally and, unlike every other helper here, as root: relaying
-    # opens an authenticated FlowMux session, which reads the root-only guest
-    # signing key. The workload must not be able to read that key, so the
-    # process that must cannot be the workload's own uid.
-    #
-    # Not gated on MVM_VSOCK_EGRESS. That token is *off* for exactly the
-    # launches that need this: a secret-bearing workload's egress goes through
-    # the host substitution endpoint, so its guest starts no vsock egress
-    # client and this listener is the whole of its egress. A workload with no
-    # placeholders has no HTTP_PROXY pointed here and it sees no connections.
-    MVM_FORWARD_PROXY_BIN=
-    if [ "$MVM_RUNTIME_SOURCE_POLICY" = rootfs_only ]; then
-      if [ -x /usr/local/bin/mvm-forward-proxy ]; then
-        MVM_FORWARD_PROXY_BIN=/usr/local/bin/mvm-forward-proxy
-      fi
-    elif [ -x /mvm/runtime/forward-proxy ]; then
-      MVM_FORWARD_PROXY_BIN=/mvm/runtime/forward-proxy
-    elif [ -x /usr/local/bin/mvm-forward-proxy ]; then
-      MVM_FORWARD_PROXY_BIN=/usr/local/bin/mvm-forward-proxy
-    fi
-    if [ -n "$MVM_FORWARD_PROXY_BIN" ]; then
-      /bin/busybox ip addr replace 127.0.0.1/8 dev lo 2>/dev/null || true
-      /bin/busybox ip link set lo up 2>/dev/null || true
-      /bin/busybox setsid "$MVM_FORWARD_PROXY_BIN" &
-    else
-      echo "mvm-init: no forward proxy resolved; secret-bearing egress has nothing to relay through"
     fi
 
     # Stage 2.5 — guest agent supervisor. Fork the agent into

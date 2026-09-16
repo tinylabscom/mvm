@@ -248,12 +248,18 @@ fn check_network_flow_channels(workspace: &Path) -> Result<()> {
 /// gated — the copy gets a new caller, the caller drifts, and nothing says so.
 const PEER_BRANCH_OWNER: &str = "crates/mvm-vmm/src/vsock_egress_bridge/egress_gate.rs";
 
-/// The connect sites that route a guest target through the gate. Both must go
-/// through `decide_target`; neither may call `decide_peer` or re-derive the
-/// branch itself.
-const PEER_BRANCH_CALLERS: &[&str] = &[
+/// The connect sites that route a guest target through the gate. Each must go
+/// through `decide_target`.
+const PEER_BRANCH_CALLERS: &[&str] = &["crates/mvm-hostd/src/supervisor/flowmux/open_flow.rs"];
+
+/// The module tree those connect sites live in. No file here may call
+/// `decide_peer` or re-derive the branch itself — stated over the whole tree
+/// rather than over the one file that calls `decide_target`, so splitting the
+/// connect path into a new sibling cannot move a second branch out from under
+/// the check.
+const PEER_BRANCH_NON_DERIVERS: &[&str] = &[
     "crates/mvm-hostd/src/supervisor/flowmux.rs",
-    "crates/mvm-hostd/src/supervisor/flowmux/session.rs",
+    "crates/mvm-hostd/src/supervisor/flowmux",
 ];
 
 /// Deliberate non-callers: production code that sees a target but must not
@@ -280,7 +286,7 @@ fn check_single_peer_resolver(workspace: &Path) -> Result<()> {
         );
     }
 
-    // Every connect site goes through it, and none reaches past it.
+    // Every connect site goes through it.
     for rel in PEER_BRANCH_CALLERS {
         let src = production_code(&read(workspace, rel)?);
         if !src.contains("gate.decide_target(") {
@@ -290,18 +296,32 @@ fn check_single_peer_resolver(workspace: &Path) -> Result<()> {
                  way is outside the gate."
             );
         }
-        if src.contains("decide_peer(") {
-            bail!(
-                "check-single-network-path: {rel} calls `decide_peer` directly, bypassing \
-                 the peer/host branch in {PEER_BRANCH_OWNER}. Call `decide_target`."
-            );
+    }
+
+    // And nothing in the tree they live in reaches past it.
+    let mut derived = Vec::new();
+    for rel in PEER_BRANCH_NON_DERIVERS {
+        let path = workspace.join(rel);
+        if !path.exists() {
+            bail!("check-single-network-path: {rel} is missing");
         }
-        if src.contains("is_peer_target") {
-            bail!(
-                "check-single-network-path: {rel} re-derives the peer/host branch. The \
-                 branch belongs to {PEER_BRANCH_OWNER} alone."
-            );
-        }
+        scan_path(workspace, &path, &mut |file, code| {
+            if code.contains("decide_peer(") {
+                derived.push(format!(
+                    "{file} calls `decide_peer` directly, bypassing the peer/host branch \
+                     in {PEER_BRANCH_OWNER}. Call `decide_target`."
+                ));
+            }
+            if code.contains("is_peer_target") {
+                derived.push(format!(
+                    "{file} re-derives the peer/host branch. The branch belongs to \
+                     {PEER_BRANCH_OWNER} alone."
+                ));
+            }
+        })?;
+    }
+    if !derived.is_empty() {
+        bail!("check-single-network-path:\n  {}", derived.join("\n  "));
     }
 
     // A refusal site may name the suffix; it may not resolve through it.
@@ -338,12 +358,21 @@ const FLOW_AUDIT_LABEL_KEYS: &[&str] = &[
     // to leak; if that ever changes, this entry is the thing to revisit.
     "qname",
     "qtype",
+    // How a flow to a bound destination was served: terminated on the host so
+    // the credential could be substituted, or not at all. It is a fact about
+    // the shape of the decision, not about the request -- the label is one of
+    // a fixed pair of words chosen by the host, and no byte of the flow
+    // reaches it.
+    "termination",
 ];
 
-/// Files whose connect paths emit flow audit entries.
+/// Where the connect paths that emit flow audit entries live. The whole
+/// FlowMux module tree, not the one file that happens to hold them today, so
+/// moving a connect path into a sibling cannot move its labels out from under
+/// the allow-list.
 const FLOW_AUDIT_SITES: &[&str] = &[
     "crates/mvm-hostd/src/supervisor/flowmux.rs",
-    "crates/mvm-hostd/src/supervisor/flowmux/session.rs",
+    "crates/mvm-hostd/src/supervisor/flowmux",
 ];
 
 fn check_flow_audit_labels(workspace: &Path) -> Result<()> {
@@ -354,11 +383,10 @@ fn check_flow_audit_labels(workspace: &Path) -> Result<()> {
         Regex::new(r#"\(\s*"([a-z_]+)"\.to_string\(\)\s*,"#).context("compile label regex")?;
     let allowed: std::collections::BTreeSet<&str> = FLOW_AUDIT_LABEL_KEYS.iter().copied().collect();
 
-    for rel in FLOW_AUDIT_SITES {
+    for (rel, raw) in collect_raw_sources(workspace, FLOW_AUDIT_SITES)? {
         // NOT `production_code`: that blanks string literals, and the label
         // keys *are* string literals — reading them through it finds nothing
         // and the gate passes on anything. Strip the test module only.
-        let raw = read(workspace, rel)?;
         let src = raw.split("#[cfg(test)]").next().unwrap_or(&raw).to_string();
         for block in src.split("emit_audit(").skip(1) {
             // Bound to the end of this call's label map.
@@ -491,6 +519,34 @@ fn check_socket_owners(workspace: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Read every non-test Rust source under each entry, verbatim.
+///
+/// An entry is a file or a directory. Verbatim because the callers that need
+/// this are reading string literals, which `production_code` blanks.
+fn collect_raw_sources(workspace: &Path, entries: &[&str]) -> Result<Vec<(String, String)>> {
+    let mut out = Vec::new();
+    for entry in entries {
+        let path = workspace.join(entry);
+        if path.is_file() {
+            let rel = display(workspace, &path);
+            if !is_test_path(&rel) {
+                out.push((rel, std::fs::read_to_string(&path)?));
+            }
+            continue;
+        }
+        if !path.is_dir() {
+            bail!("check-single-network-path: {entry} is missing");
+        }
+        for_each_file(&path, Some("rs"), &mut |file, source| {
+            let rel = display(workspace, file);
+            if !is_test_path(&rel) {
+                out.push((rel, source.to_string()));
+            }
+        })?;
+    }
+    Ok(out)
 }
 
 fn scan_path(workspace: &Path, path: &Path, visit: &mut dyn FnMut(&str, &str)) -> Result<()> {

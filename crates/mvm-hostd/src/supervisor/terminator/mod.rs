@@ -6,6 +6,7 @@
 //! credential. Each sub-module is its own self-contained concern.
 
 pub mod error;
+pub mod flow;
 pub mod handler;
 pub mod listener;
 pub mod orig_dst;

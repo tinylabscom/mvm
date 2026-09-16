@@ -509,7 +509,6 @@ provision_guest_bin_dir() {
   local required=(
     mvm-guest-agent mvm-guest-netinit mvm-egress-client mvm-oci-entrypoint
     mvm-seccomp-apply mvm-runner mvm-addon-dns mvm-exit-report mvm-ping
-    mvm-forward-proxy
   )
   local bin
   for bin in "${required[@]}"; do

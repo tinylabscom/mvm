@@ -76,18 +76,16 @@ pub const LOCAL_BUILD_EPOCH_FILE: &str = "BUILD_EPOCH";
 /// boot that silently strands the agent — fail at resolve time instead.
 ///
 /// Public because every fixture that builds "a valid overlay" has to agree with
-/// it, and each hand-written copy is one an added entry silently invalidates —
-/// four of them existed, and adding `/forward-proxy` broke three.
+/// it, and each hand-written copy is one an added entry silently invalidates.
 pub const REQUIRED_OVERLAY_GUEST_PATHS: &[&str] = &[
     "/agent",
     "/netinit",
     "/seccomp-apply",
     "/runner",
+    // The whole of a workload's egress, whether or not its plan binds a
+    // credential: an overlay without it strands the workload as completely as
+    // one without the agent.
     "/egress-client",
-    // The whole of a secret-bearing workload's egress: that launch starts no
-    // vsock egress client, so an overlay without this strands it as completely
-    // as one without the agent.
-    "/forward-proxy",
     "/addon-dns",
     "/exit-report",
     "/VERSION",
@@ -1199,34 +1197,6 @@ mod tests {
         match err {
             OverlayError::PayloadIncomplete { missing_path, .. } => {
                 assert_eq!(missing_path, "/exit-report");
-            }
-            other => panic!("expected PayloadIncomplete, got {other:?}"),
-        }
-    }
-
-    /// A secret-bearing workload starts no vsock egress client, so this is the
-    /// whole of its egress: an overlay without it strands that workload as
-    /// completely as one without the agent, and must be refused at resolve
-    /// time rather than at its first request.
-    #[test]
-    fn resolve_rejects_overlay_payload_missing_forward_proxy() {
-        let cache = make_cache(
-            "0.14.0",
-            "aarch64",
-            &[
-                (
-                    "overlay.ext4",
-                    &overlay_ext4_bytes_without(&["/forward-proxy"]),
-                ),
-                ("overlay.verity", b"sidecar"),
-                ("overlay.roothash", format!("{FAKE_ROOTHASH}\n").as_bytes()),
-                ("VERSION", b"0.14.0\n"),
-            ],
-        );
-        let resolver = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.14.0".into());
-        match resolver.resolve("aarch64").unwrap_err() {
-            OverlayError::PayloadIncomplete { missing_path, .. } => {
-                assert_eq!(missing_path, "/forward-proxy");
             }
             other => panic!("expected PayloadIncomplete, got {other:?}"),
         }

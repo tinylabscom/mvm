@@ -96,10 +96,11 @@ pub fn plan_json_has_ingress(plan_json: &str) -> bool {
     mvm_core::plan::plan_from_admitted_json(plan_json).is_ok_and(|plan| !plan.ingress.is_empty())
 }
 
-/// True when the workload's persisted plan carries at least one bound secret
-/// (i.e. the credential-substitution endpoint will own `EGRESS_PORT`). The
-/// transparent-TCP vsock egress path (Phase A) is scoped to the `false` case so
-/// the two never contend for the port.
+/// True when the workload's persisted plan carries at least one bound secret,
+/// i.e. the host endpoint has a credential to substitute into a flow. A
+/// workload whose policy admits nothing can still reach a bound destination
+/// through its bindings, so this is the second reason to stand an endpoint up
+/// at all.
 pub fn state_has_bound_secrets(state_dir: &Path) -> Result<bool> {
     Ok(read_plan_json_from_state(state_dir)?
         .as_deref()
@@ -110,28 +111,24 @@ pub fn state_has_bound_secrets(state_dir: &Path) -> Result<bool> {
 /// started — the *effective* client enablement, not just the raw policy.
 ///
 /// The guest starts that client when the launch allows egress, or when its
-/// admitted plan declares host-owned ingress, and it carries no bound secrets.
-/// A secret-bearing workload's egress goes through the host-side substitution
-/// endpoint, which owns the shared egress port, so the raw client stays off
-/// and must not contend for it. These inputs are read from the launch config,
-/// so the answer is available at warm-claim decision time.
+/// admitted plan declares host-owned ingress. A bound secret does not change
+/// the answer: the guest's loopback proxy is the one entry point a workload
+/// has, whether or not its plan binds a credential, and both kinds of flow
+/// leave over the same authenticated session to the same endpoint. Which of
+/// them gets a credential substituted into it is decided on the host, against
+/// the plan's bindings — not by which listener the workload dialled. These
+/// inputs are read from the launch config, so the answer is available at
+/// warm-claim decision time.
 ///
 /// This is the value the warm pool partitions on. It is the same predicate the
 /// guest's cmdline token is derived from, with the plan read from the config
-/// instead of from disk; when the two sources can disagree (a launch path that
-/// has not persisted its plan beside the VM yet) this is the *conservative*
-/// side — it can only withhold the client from a warm child that a cold boot
-/// would have started it for, never the reverse.
+/// instead of from disk.
 pub fn effective_vsock_egress(config: &VmStartConfig) -> bool {
     let plan_has_ingress = config
         .plan_json
         .as_deref()
         .is_some_and(plan_json_has_ingress);
-    (config.network_policy.admits_outbound() || plan_has_ingress)
-        && !config
-            .plan_json
-            .as_deref()
-            .is_some_and(plan_json_has_bound_secrets)
+    config.network_policy.admits_outbound() || plan_has_ingress
 }
 
 #[cfg(test)]
@@ -262,17 +259,21 @@ mod phase_a_tests {
         ))));
     }
 
-    /// The case that must never come out permissive: a secret-bearing workload's
-    /// outbound traffic belongs to the host-side substitution endpoint, so the
-    /// guest's own egress client stays off even though the policy allows egress.
+    /// A secret-bearing workload boots the same loopback proxy as a plain one.
+    ///
+    /// It is the workload's only way out: nothing else in the guest listens,
+    /// and the substitution decision is the host's to make against the plan's
+    /// bindings. Withholding the client here left a workload whose plan bound
+    /// a credential with no tunnelling egress path at all, which is what forced
+    /// a second, non-tunnelling listener to exist beside it.
     #[test]
-    fn effective_egress_is_off_when_the_admitted_plan_binds_a_secret() {
+    fn effective_egress_is_on_when_the_admitted_plan_binds_a_secret() {
         let cfg = allow_list_launch(Some(plan_json_with_one_bound_secret()));
         assert!(
             cfg.network_policy.allows_egress(),
-            "fixture must exercise the suppression, not a deny-all policy"
+            "fixture must exercise a plan with a bound secret, not a deny-all policy"
         );
-        assert!(!effective_vsock_egress(&cfg));
+        assert!(effective_vsock_egress(&cfg));
     }
 
     /// A peer-only policy is deny-all for ordinary egress and still needs the
@@ -297,16 +298,18 @@ mod phase_a_tests {
         assert!(effective_vsock_egress(&cfg));
     }
 
-    /// The peer route does not widen the secret suppression: a secret-bearing
-    /// workload's outbound traffic still belongs to the substitution endpoint.
+    /// A bound secret does not withdraw the peer route's client either. The
+    /// peer dial and the credentialed dial are the same guest listener and the
+    /// same session; the host tells them apart, and refuses to terminate a peer
+    /// flow regardless of what its name is bound to.
     #[test]
-    fn a_peer_binding_does_not_reinstate_the_client_for_a_secret_bearing_plan() {
+    fn a_peer_binding_keeps_the_client_for_a_secret_bearing_plan() {
         let cfg = VmStartConfig {
             network_policy: NetworkPolicy::deny_all().with_peers(vec![peer_binding()]),
             plan_json: Some(plan_json_with_one_bound_secret()),
             ..Default::default()
         };
-        assert!(!effective_vsock_egress(&cfg));
+        assert!(effective_vsock_egress(&cfg));
     }
 
     fn peer_binding() -> mvm_contract::peer::PeerBinding {
@@ -353,8 +356,11 @@ mod phase_a_tests {
         assert!(effective_vsock_egress(&cfg));
     }
 
+    /// Ingress alone still starts the client under deny-all when the plan also
+    /// binds a secret — the two facts are independent and neither suppresses
+    /// the other.
     #[test]
-    fn ingress_does_not_bypass_secret_suppression() {
+    fn ingress_starts_the_client_for_a_secret_bearing_plan_too() {
         let mut plan = mvm_core::plan::test_support::PlanFixture::new()
             .secrets(vec![mvm_core::plan::SecretBinding {
                 name: "API_KEY".into(),
@@ -379,6 +385,7 @@ mod phase_a_tests {
             plan_json: Some(serde_json::to_string(&plan).expect("serialize ingress fixture")),
             ..Default::default()
         };
-        assert!(!effective_vsock_egress(&cfg));
+        assert!(!cfg.network_policy.allows_egress());
+        assert!(effective_vsock_egress(&cfg));
     }
 }

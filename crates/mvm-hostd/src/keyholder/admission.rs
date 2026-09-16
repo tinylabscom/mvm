@@ -15,7 +15,7 @@
 use mvm_contract::ir::{SecretMount, SecretRef};
 use mvm_core::plan::{SecretBinding, SecretSource};
 
-use super::binding::BindingStore;
+use super::BindingStore;
 use super::substitution::{Placeholder, SubstitutionRegistry};
 
 /// `(guest-facing name, opaque placeholder)` pairs handed to the guest so the
@@ -25,8 +25,8 @@ pub type HandedPlaceholders = Vec<(String, Placeholder)>;
 /// The guest env vars to inject for these secrets: each secret's mount var set
 /// to its **opaque placeholder** — never the value (claim 13). The supervisor
 /// adds these to the workload's environment at launch; the workload reads
-/// `OPENAI_API_KEY` etc. and gets a placeholder, which the forward proxy
-/// substitutes on egress.
+/// `OPENAI_API_KEY` etc. and gets a placeholder, which the host substitutes
+/// into the request when it terminates the flow to the bound destination.
 pub fn secret_placeholder_env(handed: &HandedPlaceholders) -> Vec<(String, String)> {
     handed
         .iter()

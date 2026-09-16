@@ -26,8 +26,8 @@ Specialized binaries keep privilege and dependency boundaries small:
 - `mvm-guest-agent` owns normal workload lifecycle and health.
 - `mvm-runner` and `mvm-oci-entrypoint` prepare and exec the workload.
 - `mvm-builder-agent` handles isolated builder sessions and file transfer.
-- `mvm-guest-netinit`, `mvm-forward-proxy`, and `mvm-egress-client` configure
-  or mediate network access.
+- `mvm-guest-netinit` and `mvm-egress-client` configure or mediate network
+  access.
 - `mvm-addon-dns` and `mvm-addon-vsock-bridge` expose optional local addon
   services.
 - `mvm-seccomp-apply` and `mvm-setpriv` apply the final sandbox and identity.
@@ -45,7 +45,7 @@ admitted execution.
 | Workload launch | `entrypoint`, `guest_bootstrap`, `runner`, `child_wait` |
 | Builder guest | `builder_agent`, `builder_session`, `builder_transfer` |
 | Host services | `broker_client`, `host_audit`, `host_time`, `host_cost`, `host_kv` |
-| Networking | `guest_net`, `netinit`, `forward_proxy`, `flowmux_egress` |
+| Networking | `guest_net`, `netinit`, `flowmux_egress`, `flowmux_sync` |
 | Guest resources | `guest_mount`, `genid`, `lifecycle_hooks`, `console` |
 
 ## Features and platforms
