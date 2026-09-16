@@ -79,6 +79,14 @@ pub struct MachineSpec {
     /// computed sealed-prod default at each start.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_verb: Vec<String>,
+    /// Raw `--secret NAME[:HOST,...]` specs, persisted so the bindings
+    /// survive a stop/start the way `allow_host` does. Stored raw rather
+    /// than resolved: the spec is the record of what the operator asked
+    /// for; resolution (and its fail-closed validation against the secret
+    /// and binding stores) happens at each start's admission. Never a
+    /// value — the sidecar shape has no slot for one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets: Vec<String>,
     /// Opaque commitment bound into every execution plan for this machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caller_commitment: Option<mvm_contract::plan::CallerCommitment>,
@@ -204,6 +212,7 @@ pub fn machine_config_matches(a: &MachineSpec, b: &MachineSpec) -> bool {
         && a.volumes == b.volumes
         && a.init == b.init
         && a.agent_verb == b.agent_verb
+        && a.secrets == b.secrets
         && a.grants == b.grants
 }
 
@@ -250,6 +259,12 @@ pub fn machine_config_diff(current: &MachineSpec, desired: &MachineSpec) -> Stri
     }
     if current.agent_verb != desired.agent_verb {
         changed.push("agent-verb");
+    }
+    // A changed secret set is a changed launch: the running VM's endpoint
+    // holds the bindings it was admitted with, so reusing it would serve
+    // a set nobody asked for any more.
+    if current.secrets != desired.secrets {
+        changed.push("secrets");
     }
     // A changed permission set is a changed launch: the running VM was
     // admitted under the old one, so reusing it would leave the machine
@@ -403,12 +418,27 @@ mod tests {
             volumes: vec![],
             init: vec![],
             agent_verb: vec![],
+            secrets: vec![],
             caller_commitment: None,
             created_at: None,
             last_started_at: None,
             health_check: None,
             grants: None,
         }
+    }
+
+    #[test]
+    fn secrets_round_trip_and_skip_when_absent() {
+        let mut spec = spec_fixture("web");
+        spec.secrets = vec!["claude:api.anthropic.com".to_string()];
+        let json = serde_json::to_string(&spec).expect("serialize");
+        let parsed: MachineSpec = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.secrets, spec.secrets);
+
+        // A spec with no secrets must not start emitting the key, so
+        // rewriting an old spec does not gratuitously change its bytes.
+        let bare = spec_fixture("bare");
+        assert!(!serde_json::to_string(&bare).unwrap().contains("secrets"));
     }
 
     #[test]
@@ -639,6 +669,7 @@ mod tests {
             volumes: vec!["/data:/data:ro".into()],
             init: vec![],
             agent_verb: vec![],
+            secrets: vec![],
             caller_commitment: None,
             created_at: None,
             last_started_at: None,

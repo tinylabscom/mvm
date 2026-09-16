@@ -61,6 +61,16 @@ pub struct ServiceProvider {
     /// account and stay on the command line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sigv4_service: Option<String>,
+    /// The environment variable the provider's own SDK/CLI conventionally
+    /// reads its credential from (`ANTHROPIC_API_KEY`, `GITHUB_TOKEN`).
+    /// A run binding a secret authored under this provider surfaces its
+    /// opaque placeholder to the guest under this name, so the workload's
+    /// stock tooling picks it up with no configuration. Naming only — never
+    /// an input to any destination or substitution decision. `None` when the
+    /// provider has no single conventional variable (SigV4's credential is
+    /// two halves).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_var: Option<String>,
     /// Searchable tags.
     #[serde(default)]
     pub tags: Vec<String>,
@@ -80,6 +90,10 @@ pub enum ProviderInvalid {
     /// auth type that has no use for one. Either way the entry claims
     /// something it cannot deliver.
     Sigv4ScopeMismatch,
+    /// `env_var` is present but not a well-formed environment variable name
+    /// (`[A-Za-z_][A-Za-z0-9_]*`). A malformed name would surface a
+    /// placeholder under a variable no tool can read.
+    BadEnvVar,
 }
 
 impl ProviderInvalid {
@@ -92,8 +106,22 @@ impl ProviderInvalid {
             ProviderInvalid::Sigv4ScopeMismatch => {
                 "sigv4_service must be set for sigv4 auth and absent otherwise"
             }
+            ProviderInvalid::BadEnvVar => "env_var must be a well-formed environment variable name",
         }
     }
+}
+
+/// Whether `name` is a well-formed environment variable name:
+/// `[A-Za-z_][A-Za-z0-9_]*`. Shared by the catalog's own validation and by
+/// callers deriving a guest-facing variable for an uncatalogued secret.
+#[must_use]
+pub fn is_valid_env_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 impl ServiceProvider {
@@ -117,6 +145,11 @@ impl ServiceProvider {
         // value that would be silently dropped.
         if matches!(self.auth, AuthType::Sigv4) != self.sigv4_service.is_some() {
             return Err(ProviderInvalid::Sigv4ScopeMismatch);
+        }
+        if let Some(var) = &self.env_var
+            && !is_valid_env_var_name(var)
+        {
+            return Err(ProviderInvalid::BadEnvVar);
         }
         Ok(())
     }
@@ -198,8 +231,14 @@ fn provider(
         hosts: hosts.iter().map(|h| (*h).to_string()).collect(),
         auth,
         sigv4_service: sigv4_service.map(ToString::to_string),
+        env_var: None,
         tags: tags.iter().map(|t| (*t).to_string()).collect(),
     }
+}
+
+fn with_env_var(mut p: ServiceProvider, var: &str) -> ServiceProvider {
+    p.env_var = Some(var.to_string());
+    p
 }
 
 /// The catalog shipped with this build.
@@ -213,37 +252,49 @@ pub fn builtin() -> ServiceCatalog {
     ServiceCatalog {
         schema_version: default_schema_version(),
         providers: vec![
-            provider(
-                "openai",
-                "OpenAI HTTP API",
-                &["api.openai.com"],
-                AuthType::Bearer,
-                None,
-                &["llm", "ai"],
+            with_env_var(
+                provider(
+                    "openai",
+                    "OpenAI HTTP API",
+                    &["api.openai.com"],
+                    AuthType::Bearer,
+                    None,
+                    &["llm", "ai"],
+                ),
+                "OPENAI_API_KEY",
             ),
-            provider(
-                "anthropic",
-                "Anthropic HTTP API",
-                &["api.anthropic.com"],
-                AuthType::Bearer,
-                None,
-                &["llm", "ai"],
+            with_env_var(
+                provider(
+                    "anthropic",
+                    "Anthropic HTTP API",
+                    &["api.anthropic.com"],
+                    AuthType::Bearer,
+                    None,
+                    &["llm", "ai"],
+                ),
+                "ANTHROPIC_API_KEY",
             ),
-            provider(
-                "github",
-                "GitHub REST + GraphQL API",
-                &["api.github.com"],
-                AuthType::Bearer,
-                None,
-                &["git", "forge", "vcs"],
+            with_env_var(
+                provider(
+                    "github",
+                    "GitHub REST + GraphQL API",
+                    &["api.github.com"],
+                    AuthType::Bearer,
+                    None,
+                    &["git", "forge", "vcs"],
+                ),
+                "GITHUB_TOKEN",
             ),
-            provider(
-                "stripe",
-                "Stripe HTTP API",
-                &["api.stripe.com"],
-                AuthType::Bearer,
-                None,
-                &["payments"],
+            with_env_var(
+                provider(
+                    "stripe",
+                    "Stripe HTTP API",
+                    &["api.stripe.com"],
+                    AuthType::Bearer,
+                    None,
+                    &["payments"],
+                ),
+                "STRIPE_API_KEY",
             ),
             provider(
                 "aws-s3",
@@ -338,5 +389,48 @@ mod tests {
         let c = builtin();
         let json = serde_json::to_string(&c).unwrap();
         assert_eq!(serde_json::from_str::<ServiceCatalog>(&json).unwrap(), c);
+    }
+
+    #[test]
+    fn a_catalog_serialized_before_env_var_existed_still_deserializes() {
+        // The field is additive: an entry without it reads back as `None`.
+        let json = r#"{"schema_version":1,"providers":[{
+            "name":"openai","description":"d","hosts":["api.openai.com"],
+            "auth":"bearer","tags":[]}]}"#;
+        let c: ServiceCatalog = serde_json::from_str(json).unwrap();
+        assert_eq!(c.providers[0].env_var, None);
+    }
+
+    #[test]
+    fn bearer_api_providers_name_their_conventional_env_var() {
+        let c = builtin();
+        let var = |name: &str| c.find(name).unwrap().env_var.clone();
+        assert_eq!(var("anthropic").as_deref(), Some("ANTHROPIC_API_KEY"));
+        assert_eq!(var("openai").as_deref(), Some("OPENAI_API_KEY"));
+        assert_eq!(var("github").as_deref(), Some("GITHUB_TOKEN"));
+        assert_eq!(var("stripe").as_deref(), Some("STRIPE_API_KEY"));
+        // SigV4 credentials are two halves; no single conventional variable.
+        assert_eq!(var("aws-s3"), None);
+    }
+
+    #[test]
+    fn a_malformed_env_var_name_is_invalid() {
+        let mut p = provider("x", "d", &["h.example"], AuthType::Bearer, None, &[]);
+        for bad in ["", "9KEY", "API-KEY", "API KEY", "K\u{e9}Y"] {
+            p.env_var = Some(bad.to_string());
+            assert_eq!(p.validate(), Err(ProviderInvalid::BadEnvVar), "{bad:?}");
+        }
+        p.env_var = Some("ANTHROPIC_API_KEY".to_string());
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn is_valid_env_var_name_accepts_the_posix_shape_only() {
+        assert!(is_valid_env_var_name("ANTHROPIC_API_KEY"));
+        assert!(is_valid_env_var_name("_X9"));
+        assert!(!is_valid_env_var_name(""));
+        assert!(!is_valid_env_var_name("1X"));
+        assert!(!is_valid_env_var_name("A-B"));
+        assert!(!is_valid_env_var_name("A B"));
     }
 }

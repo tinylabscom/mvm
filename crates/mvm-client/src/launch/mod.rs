@@ -494,6 +494,10 @@ fn persisted_spec_from_request(request: &LaunchRequest, name: &str) -> mp::Machi
         volumes: vec![],
         init: vec![],
         agent_verb: vec![],
+        // Typed secret references travel on the request itself and land in
+        // the `secret-refs.json` sidecar; the raw CLI spec strings are a
+        // different authoring surface this path does not use.
+        secrets: vec![],
         caller_commitment: None,
         created_at: Some(mvm_core::util::time::utc_now()),
         last_started_at: None,

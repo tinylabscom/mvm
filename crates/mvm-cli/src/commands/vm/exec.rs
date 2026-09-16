@@ -335,6 +335,15 @@ pub(in crate::commands) struct RunArgs {
     /// Inject an environment variable (KEY=VALUE, repeatable).
     #[arg(short, long)]
     pub env: Vec<String>,
+    // The optional host list narrows the destinations this run declares and
+    // is validated against the stored binding's allow-list; enforcement on
+    // the wire stays the stored binding. The guest receives only the
+    // endpoint-minted placeholder under the provider's conventional variable
+    // (`anthropic` → ANTHROPIC_API_KEY). Plain comment, not doc: clap derives
+    // long_help from doc comments and the machine-run summary gate caps it.
+    /// Bind a stored secret for host-side substitution (repeatable).
+    #[arg(long = "secret", value_name = "NAME[:HOST,...]")]
+    pub secret: Vec<String>,
     /// Set a per-command timeout in seconds.
     #[arg(long)]
     pub timeout: Option<u64>,
@@ -472,6 +481,7 @@ impl Default for RunArgs {
             profile: RunProfile::Standard,
             mounts: Vec::new(),
             env: Vec::new(),
+            secret: Vec::new(),
             timeout: None,
             receipt: None,
             caller_commitment: None,
@@ -683,6 +693,10 @@ pub(in crate::commands) fn run_secure_with_source(
     let admit_caller_commitment = args.caller_commitment.clone();
     let admit_host_services =
         super::host_services::parse_host_service_bindings(&args.host_service)?;
+    // Resolved before boot so an unknown secret, a missing binding, or an
+    // out-of-policy destination refuses here — never after a VM exists.
+    let admit_secrets = super::run_secrets::resolve_cli_run_secrets(&args.secret, "local")
+        .context("resolving --secret bindings")?;
     let admit_pty = args.pty;
     let admit_has_argv = !args.argv.is_empty();
     let admit_is_dev = matches!(args.profile, RunProfile::Dev);
@@ -719,9 +733,10 @@ pub(in crate::commands) fn run_secure_with_source(
             cpus: admit_cpus,
             mem_mib: admit_mem_mib,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            // No secrets on the plain transient path; deny secret release.
-            secret_release: mvm_core::plan::SecretReleasePolicy::default(),
-            secrets: vec![],
+            // `--secret` bindings, resolved fail-closed above; a run
+            // without the flag keeps the deny-release default.
+            secret_release: admit_secrets.lowered.secret_release,
+            secrets: admit_secrets.lowered.secrets.clone(),
             caller_commitment: admit_caller_commitment.clone(),
             no_supervisor: false,
             ledger: &ledger,
@@ -2213,6 +2228,47 @@ mod tests {
                 .map(ToString::to_string),
             Some(digest)
         );
+    }
+
+    /// `--secret` is shared `RunArgs` surface, so both `run` and
+    /// `machine run` accept the same repeatable `NAME[:HOST,...]` spelling.
+    #[test]
+    fn run_and_machine_run_parse_repeatable_secret_specs() {
+        use clap::Parser;
+
+        let parsed = crate::commands::Cli::try_parse_from([
+            "mvmctl",
+            "run",
+            "--secret",
+            "claude",
+            "--secret",
+            "gh:api.github.com",
+            "--",
+            "x",
+        ])
+        .expect("run --secret parses");
+        let crate::commands::Commands::Run(parsed) = parsed.command else {
+            panic!("expected Commands::Run");
+        };
+        assert_eq!(parsed.run.secret, vec!["claude", "gh:api.github.com"]);
+
+        let parsed = crate::commands::Cli::try_parse_from([
+            "mvmctl",
+            "machine",
+            "run",
+            "--secret",
+            "claude:api.anthropic.com",
+            "--",
+            "x",
+        ])
+        .expect("machine run --secret parses");
+        let crate::commands::Commands::Machine(machine) = parsed.command else {
+            panic!("expected Commands::Machine");
+        };
+        let crate::commands::machine::MachineAction::Run(parsed) = machine.action else {
+            panic!("expected MachineAction::Run");
+        };
+        assert_eq!(parsed.run.secret, vec!["claude:api.anthropic.com"]);
     }
 
     #[test]

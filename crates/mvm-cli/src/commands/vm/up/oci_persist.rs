@@ -85,6 +85,11 @@ pub(in crate::commands) struct PersistentImageStartParams<'a> {
     /// Raw `--agent-verb` strings from the CLI. Empty ⇒ use the computed
     /// sealed-prod default.
     pub agent_verb: Vec<String>,
+    /// Raw `--secret NAME[:HOST,...]` specs from the machine spec. Resolved
+    /// fail-closed against the secret + binding stores at each start, so a
+    /// secret removed or re-bound since the machine was created refuses
+    /// rather than booting under a stale assumption.
+    pub secrets: Vec<String>,
     /// Opaque commitment persisted with and admitted for this machine.
     pub caller_commitment: Option<mvm_core::plan::CallerCommitment>,
     /// True when the caller will run a trailing `-- argv` command after boot
@@ -165,6 +170,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         no_supervisor,
         kernel_path,
         agent_verb,
+        secrets,
         caller_commitment,
         has_ad_hoc_argv,
         grants,
@@ -206,6 +212,14 @@ pub(in crate::commands) fn start_persistent_oci_machine(
 
     let admission_ledger = InMemoryNonceLedger::new();
     let ingress = machine_port_ingress(ports)?;
+    // Resolved fail-closed on every start (a secret removed or re-bound
+    // since the spec was written refuses here), and the reference set is
+    // recorded beside the spec so `mvmctl secret rm` refuses while this
+    // machine still names the secret.
+    let run_secrets = crate::commands::vm::run_secrets::resolve_and_record_machine_secrets(
+        &secrets, "local", name,
+    )
+    .context("resolving machine --secret bindings")?;
     let admission = admit_plan_for_boot_with_ingress(
         AdmitPlanForBootParams {
             network_mode: crate::commands::machine::preflight_network(),
@@ -219,8 +233,8 @@ pub(in crate::commands) fn start_persistent_oci_machine(
             cpus,
             mem_mib: u64::from(memory_mib),
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::default(),
-            secrets: vec![],
+            secret_release: run_secrets.lowered.secret_release,
+            secrets: run_secrets.lowered.secrets.clone(),
             caller_commitment,
             no_supervisor,
             ledger: &admission_ledger,
