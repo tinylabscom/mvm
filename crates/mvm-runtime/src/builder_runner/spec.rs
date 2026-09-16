@@ -136,6 +136,120 @@ pub fn builder_spec(inputs: &BuilderSpecInputs<'_>) -> VmmSpec {
     }
 }
 
+/// Stage 0's kernel cmdline, minus the console tokens.
+///
+/// Three tokens differ from [`BUILDER_CMDLINE`], and each one is why Stage 0
+/// needs its own: the root is **writable** (the seed's PID 1 creates its
+/// bootstrap state and deletes the size reserve baked into the image), PID 1 is
+/// the seed's own `/init` rather than the builder rootfs's
+/// `/sbin/mvm-host-vm-init`, and `rootwait` is present because the root device
+/// is the one disk Stage 0 cannot retry.
+///
+/// `mvm.builder_transport=disk` is load-bearing beyond transport selection:
+/// `stage0-init` refuses to run without it on any backend that is not QEMU.
+const STAGE0_CMDLINE_TAIL: &str = "root=/dev/vda rw rootfstype=ext4 init=/init rootwait \
+     mvm.builder_transport=disk mvm.builder_input=/dev/vdc mvm.builder_output=/dev/vdd \
+     mvm.vsock_egress=1";
+
+/// The resolved host artifacts a Stage 0 bootstrap VM boots with.
+///
+/// Disk slots match [`BuilderSpecInputs`] one for one — `vda` root, `vdb`
+/// nix-store, `vdc` input, `vdd` output, identity last — because `stage0-init`
+/// and `mvm-host-vm-init` read the same transport contract. The root is
+/// writable here and read-only there; that is the only slot-level difference.
+pub struct Stage0SpecInputs<'a> {
+    pub name: &'a str,
+    /// The bootstrap kernel. Unlike every other kernel in the system this one
+    /// cannot have been built locally, because Stage 0 is what makes local
+    /// kernel builds possible — see `mvm_build::stage0_kernel`.
+    pub kernel: &'a Path,
+    /// The Nix-seed root, materialized as ext4 (mounted **read-write**).
+    pub root_disk: &'a Path,
+    /// Persistent Stage 0 Nix store (writable). Found in the guest by ext4
+    /// label, not by slot.
+    pub nix_store: &'a Path,
+    /// Input disk: the packed `{work, mvm-bins, conf}` tar (read-only).
+    pub input_disk: &'a Path,
+    /// Output disk: the guest writes its artifact tar here (writable).
+    pub output_disk: &'a Path,
+    /// This boot's FlowMux identity drive (read-only), found by ext4 label.
+    pub identity_drive: &'a Path,
+    /// Write-only console capture path. Load-bearing rather than cosmetic:
+    /// Stage 0's result is read out of these markers, because the guest powers
+    /// off on success and failure alike.
+    pub console_log: PathBuf,
+    /// Host-side egress relay UDS wired to `EGRESS_PORT`.
+    pub egress_socket: PathBuf,
+    /// The console tokens for the VMM that will boot this, taken from
+    /// `VmmDriver::workload_base_bootargs(false)`.
+    ///
+    /// Supplied by the driver rather than hardcoded because the console device
+    /// *is* backend-specific — libkrun exposes a virtio-console (`hvc0`), the
+    /// HVF device model a PL011 (`ttyAMA0`). [`BUILDER_CMDLINE`] hardcodes the
+    /// HVF pair, which is why it is only ever correct for the one driver it is
+    /// used with; taking the base from the driver is what lets Stage 0 boot on
+    /// any of them.
+    pub console_base: &'a str,
+    pub vcpus: u32,
+    pub memory_mib: u32,
+}
+
+/// Compose the Stage 0 `VmmSpec`.
+///
+/// Trusted-builder, no plan binding, no virtio-fs, and no agent port: the guest
+/// is `stage0-init`, not `mvm-agentd`, so nothing on the host may wait for an
+/// agent handshake that will never arrive.
+pub fn stage0_spec(inputs: &Stage0SpecInputs<'_>) -> VmmSpec {
+    let block = |source: &Path, slot: u8, read_only: bool| BlockDev {
+        source: source.to_path_buf(),
+        read_only,
+        ephemeral: false,
+        slot,
+    };
+
+    // The builder VM's clock seed, which the libkrun Stage 0 path omits. HVF
+    // has no RTC, so without it the guest starts near the epoch and every
+    // HTTPS substituter fetch fails certificate validation before `nix build`
+    // gets anywhere.
+    let cmdline = format!(
+        "{} {STAGE0_CMDLINE_TAIL} {}",
+        inputs.console_base.trim(),
+        mvm_build::builder_vm::builder_hostepoch_cmdline_token()
+    );
+
+    VmmSpec {
+        name: inputs.name.to_string(),
+        kernel: KernelImage::Path(inputs.kernel.to_path_buf()),
+        initramfs: None,
+        cmdline,
+        vcpus: inputs.vcpus,
+        cpu_grant: None,
+        memory_mib: inputs.memory_mib,
+        mem_initial_mib: None,
+        blocks: vec![
+            block(inputs.root_disk, 0, false),     // vda: nix-seed root, RW
+            block(inputs.nix_store, 1, false),     // vdb: nix-store, RW persist
+            block(inputs.input_disk, 2, true),     // vdc: input tar, RO
+            block(inputs.output_disk, 3, false),   // vdd: output tar, RW persist
+            block(inputs.identity_drive, 4, true), // vde: FlowMux identity, RO
+        ],
+        // NetworkFlow only. A Stage 0 guest serves no MachineControl port, and
+        // naming one would have the host dial a socket nothing ever binds.
+        vsock: vec![VsockPort {
+            service: GuestService::NetworkFlow,
+            host_uds: inputs.egress_socket.clone(),
+            direction: VsockDirection::HostDials,
+        }],
+        console: ConsoleCapture {
+            log_path: inputs.console_log.clone(),
+        },
+        shares: Vec::new(),
+        trusted_builder: true,
+        builder_egress_endpoint: None,
+        plan_binding: None,
+    }
+}
+
 /// The resolved host artifacts a **persistent** builder VM boots with. Same
 /// disk layout as [`BuilderSpecInputs`] — `vda` rootfs (RO), `vdb` nix-store
 /// (RW), `vdc` input (RO), `vdd` output (RW), optional `vde` overlay (RO) —
@@ -481,5 +595,129 @@ mod tests {
         );
         assert!(spec.blocks[5].read_only);
         assert!(spec.cmdline.contains("mvm.runtime_data=/dev/vde"));
+    }
+
+    fn stage0_inputs() -> Stage0SpecInputs<'static> {
+        Stage0SpecInputs {
+            name: "mvm-stage0-1-2",
+            kernel: Path::new("/cache/kernels/aarch64/stage0-bootstrap/vmlinux"),
+            root_disk: Path::new("/state/root.ext4"),
+            nix_store: Path::new("/cache/nix-store-stage0-aarch64.img"),
+            input_disk: Path::new("/state/input.img"),
+            output_disk: Path::new("/state/output.img"),
+            identity_drive: Path::new("/state/flowmux-identity.ext4"),
+            console_log: PathBuf::from("/state/console.log"),
+            egress_socket: PathBuf::from("/state/vsock-5253.sock"),
+            console_base: "earlycon=pl011,0x9000000 console=ttyAMA0 panic=-1 nokaslr loglevel=8",
+            vcpus: 4,
+            memory_mib: 24 * 1024,
+        }
+    }
+
+    /// The one slot-level difference from an ordinary builder job, and Stage 0
+    /// cannot boot without it: the seed's PID 1 creates its bootstrap state on
+    /// the root and deletes the size reserve baked into the image.
+    #[test]
+    fn stage0_mounts_its_root_writable_unlike_a_builder_job() {
+        let spec = stage0_spec(&stage0_inputs());
+
+        assert_eq!(spec.blocks[0].device_node(), "/dev/vda");
+        assert!(
+            !spec.blocks[0].read_only,
+            "the Stage 0 seed root must be writable"
+        );
+        assert!(spec.cmdline.contains("root=/dev/vda rw"));
+
+        // The contrast that makes the point: the same slot is read-only for a
+        // builder job booting an already-built rootfs.
+        assert!(builder_spec(&inputs()).blocks[0].read_only);
+    }
+
+    /// The console device is backend-specific, so a hardcoded pair boots one
+    /// VMM and silently produces an empty console on another — and Stage 0's
+    /// console *is* its result channel.
+    #[test]
+    fn the_stage0_console_tokens_come_from_the_driver() {
+        let mut inputs = stage0_inputs();
+        inputs.console_base = "console=hvc0";
+        let spec = stage0_spec(&inputs);
+
+        assert!(
+            spec.cmdline.starts_with("console=hvc0 "),
+            "{}",
+            spec.cmdline
+        );
+        assert!(
+            !spec.cmdline.contains("ttyAMA0"),
+            "no HVF console may leak into a non-HVF boot: {}",
+            spec.cmdline
+        );
+    }
+
+    /// Stage 0 boots the seed's own PID 1. Naming the builder rootfs's init
+    /// would panic the guest, since the seed does not carry that binary.
+    #[test]
+    fn stage0_boots_the_seed_init_over_the_disk_transport() {
+        let spec = stage0_spec(&stage0_inputs());
+
+        assert!(spec.cmdline.contains("init=/init"));
+        assert!(!spec.cmdline.contains("mvm-host-vm-init"));
+        // `stage0-init` refuses to run without this on any non-QEMU backend.
+        assert!(spec.cmdline.contains("mvm.builder_transport=disk"));
+        assert!(spec.cmdline.contains("mvm.builder_input=/dev/vdc"));
+        assert!(spec.cmdline.contains("mvm.builder_output=/dev/vdd"));
+        assert!(spec.cmdline.contains("mvm.vsock_egress=1"));
+    }
+
+    /// The cmdline names device letters, so the slots have to agree with it.
+    #[test]
+    fn stage0_disk_slots_match_the_device_names_in_its_cmdline() {
+        let spec = stage0_spec(&stage0_inputs());
+
+        assert_eq!(spec.blocks.len(), 5);
+        assert_eq!(spec.blocks[1].device_node(), "/dev/vdb");
+        assert!(!spec.blocks[1].read_only, "the store must stay writable");
+        assert_eq!(spec.blocks[2].device_node(), "/dev/vdc");
+        assert_eq!(spec.blocks[2].source, PathBuf::from("/state/input.img"));
+        assert!(
+            spec.blocks[2].read_only,
+            "the guest never writes its inputs"
+        );
+        assert_eq!(spec.blocks[3].device_node(), "/dev/vdd");
+        assert_eq!(spec.blocks[3].source, PathBuf::from("/state/output.img"));
+        assert!(!spec.blocks[3].read_only, "the guest writes its artifacts");
+        assert_eq!(spec.blocks[4].device_node(), "/dev/vde");
+        assert!(spec.blocks[4].read_only);
+        // File-served, never RAM-backed: the output has to outlive the guest
+        // for the host to read it back.
+        assert!(spec.blocks.iter().all(|b| !b.ephemeral));
+    }
+
+    /// A Stage 0 guest is `stage0-init`, not `mvm-agentd`. Naming a control
+    /// port would have the host dial a socket nothing ever binds.
+    #[test]
+    fn stage0_names_only_the_egress_port() {
+        let spec = stage0_spec(&stage0_inputs());
+
+        assert_eq!(spec.vsock.len(), 1);
+        assert_eq!(spec.vsock[0].service, GuestService::NetworkFlow);
+        assert_eq!(spec.vsock[0].direction, VsockDirection::HostDials);
+        assert!(
+            spec.shares.is_empty(),
+            "a Stage 0 guest gets no virtio-fs device"
+        );
+    }
+
+    /// The libkrun Stage 0 cmdline omits this token, so its clock sync is a
+    /// no-op. HVF has no RTC, so a guest booting without it starts near the
+    /// epoch and every HTTPS substituter fetch fails cert validation.
+    #[test]
+    fn stage0_seeds_the_guest_clock_from_the_host() {
+        let spec = stage0_spec(&stage0_inputs());
+        assert!(
+            spec.cmdline.contains("mvm.hostepoch="),
+            "Stage 0 must carry the host clock seed: {}",
+            spec.cmdline
+        );
     }
 }

@@ -17,8 +17,8 @@ use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::vm_backend::VmStatus;
 
-use super::spec::{BuilderSpecInputs, builder_spec};
-use crate::driver::VmmDriver;
+use super::spec::{BuilderSpecInputs, Stage0SpecInputs, builder_spec, stage0_spec};
+use crate::driver::{VmmDriver, VmmSpec};
 use crate::network_endpoint_spawn::{
     EndpointGuard, EndpointTransport, SubstitutionSpawnParams, spawn_network_endpoint,
 };
@@ -87,14 +87,7 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
     /// Pack the inputs onto the input disk, boot the builder VM, wait for it to
     /// finish, and extract the artifact tar off the output disk.
     pub fn build(&self, b: &BuilderBuild<'_>) -> Result<BuilderOutcome> {
-        let state_dir = vm_state_dir(b.name);
-        std::fs::create_dir_all(&state_dir)
-            .with_context(|| format!("create builder state dir {}", state_dir.display()))?;
-
-        let input_disk = state_dir.join("input.img");
-        let output_disk = state_dir.join("output.img");
-        let output_dir = state_dir.join("out");
-        let egress_socket = vm_vsock_port_socket_at(&state_dir, EGRESS_PORT);
+        let transport = BootTransport::stage(b.name)?;
 
         // A source checkout's work tree may contain tens of GiB of local build
         // state. Keep it out of the raw transport disk using the same filtering
@@ -119,47 +112,112 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
                 },
             ],
             b.closure_nar,
-            &input_disk,
+            &transport.input_disk,
             INPUT_DISK_MIN,
         )?;
-        create_output_disk(&output_disk, b.output_size)?;
-
-        // This boot's FlowMux identity. The builder guest reads it off a small
-        // read-only drive before starting its egress client, which will not
-        // bind without it -- and the builder has no NIC, so no egress means no
-        // build.
-        let builder_identity =
-            mvm_vmm::host::flowmux_identity::FlowMuxIdentityMaterial::mint_from_host_signer(
-                b.name,
-            )?;
-        let identity_drive = state_dir.join(mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE);
-        builder_identity.write_drive(&identity_drive)?;
+        create_output_disk(&transport.output_disk, b.output_size)?;
 
         let spec = builder_spec(&BuilderSpecInputs {
             name: b.name,
             kernel: b.kernel,
             rootfs: b.rootfs,
             nix_store: b.nix_store,
-            input_disk: &input_disk,
-            output_disk: &output_disk,
+            input_disk: &transport.input_disk,
+            output_disk: &transport.output_disk,
             runtime_overlay: b.runtime_overlay,
-            console_log: state_dir.join("console.log"),
-            agent_socket: Some(state_dir.join("agent.sock")),
-            egress_socket: egress_socket.clone(),
-            identity_drive: &identity_drive,
+            console_log: transport.state_dir.join("console.log"),
+            agent_socket: Some(transport.state_dir.join("agent.sock")),
+            egress_socket: transport.egress_socket.clone(),
+            identity_drive: &transport.identity_drive,
             vcpus: b.vcpus,
             memory_mib: b.memory_mib,
         });
 
+        self.run_to_completion(&spec, &transport)
+    }
+
+    /// Bootstrap a builder VM from the Nix seed — Stage 0.
+    ///
+    /// The same disk transport and the same run-to-completion contract as
+    /// [`build`](Self::build); what differs is that the guest is the seed's own
+    /// `stage0-init` booting a fetched bootstrap kernel, because at this point
+    /// no builder image exists to have produced either one.
+    ///
+    /// Generic over the driver like the rest of this type, so a backend that
+    /// can boot a builder can bootstrap one. That is the whole point of routing
+    /// Stage 0 through here: the previous shape had a separate hand-written
+    /// body per VMM, and a backend without one simply could not bootstrap.
+    pub fn stage0(&self, s: &Stage0Run<'_>) -> Result<BuilderOutcome> {
+        let transport = BootTransport::stage(s.name)?;
+
+        let work_staging = stage_filtered_work_input(s.workspace_src)?;
+
+        // `conf` rather than `job`: Stage 0 is not handed a rendered `cmd.sh`,
+        // it is handed `stage0-build.conf` naming the flake attr and output
+        // mode. The guest reads it off the input disk.
+        pack_input_disk(
+            &[
+                InputTree {
+                    name: "work",
+                    src: work_staging.path(),
+                },
+                InputTree {
+                    name: "mvm-bins",
+                    src: s.host_bin_dir,
+                },
+                InputTree {
+                    name: "conf",
+                    src: s.conf_dir,
+                },
+            ],
+            s.closure_nar,
+            &transport.input_disk,
+            INPUT_DISK_MIN,
+        )?;
+        create_output_disk(&transport.output_disk, s.output_size)?;
+
+        let spec = stage0_spec(&Stage0SpecInputs {
+            name: s.name,
+            kernel: s.kernel,
+            root_disk: s.root_disk,
+            nix_store: s.nix_store,
+            input_disk: &transport.input_disk,
+            output_disk: &transport.output_disk,
+            identity_drive: &transport.identity_drive,
+            console_log: transport.state_dir.join("console.log"),
+            egress_socket: transport.egress_socket.clone(),
+            // The console device is backend-specific and Stage 0's console is
+            // its result channel, so the tokens come from the driver that will
+            // actually boot this rather than from a constant.
+            console_base: &self.driver.workload_base_bootargs(false),
+            vcpus: s.vcpus,
+            memory_mib: s.memory_mib,
+        });
+
+        self.run_to_completion(&spec, &transport)
+    }
+
+    /// Spawn the egress endpoint, boot, wait for power-off, and read the output
+    /// disk back.
+    ///
+    /// Shared by [`build`](Self::build) and [`stage0`](Self::stage0) because
+    /// the two differ only in what they pack and how the spec is composed. The
+    /// output disk is read unconditionally, before any success check, so a
+    /// guest that halted after producing artifacts still yields them.
+    fn run_to_completion(
+        &self,
+        spec: &VmmSpec,
+        transport: &BootTransport,
+    ) -> Result<BuilderOutcome> {
         let builder_policy = NetworkPolicy::trusted_build_egress();
         spawn_network_endpoint(SubstitutionSpawnParams {
-            vm_name: b.name,
-            state_dir: &state_dir,
+            vm_name: &transport.name,
+            state_dir: &transport.state_dir,
             tenant: "builder",
             secrets: &[],
             redaction: &RedactionPolicy::default(),
             transport: EndpointTransport::Uds {
-                path: egress_socket,
+                path: transport.egress_socket.clone(),
             },
             terminator_listen: None,
             egress_proxy: None,
@@ -169,12 +227,12 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
             ingress: &[],
             resolver_remote: None,
             binding_store_dir: None,
-            flowmux_identity: Some(builder_identity.spawn_config().clone()),
+            flowmux_identity: Some(transport.identity.spawn_config().clone()),
             session_marker: None,
         })?;
-        let mut endpoint_guard = EndpointGuard::new(b.name);
+        let mut endpoint_guard = EndpointGuard::new(&transport.name);
 
-        let vm = self.driver.boot(&spec)?;
+        let vm = self.driver.boot(spec)?;
         // A builder is run-to-completion: the guest powers off after the job, and
         // `status()` flips to Stopped/Failed when the supervisor drops its PID
         // file. (Unlike a workload, it reports no exit code over vsock — its result
@@ -190,11 +248,82 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
         }
 
         // The guest wrote a tar onto the output disk; extract it host-side.
-        read_output_disk(&output_disk, &output_dir)?;
+        let output_dir = transport.state_dir.join("out");
+        read_output_disk(&transport.output_disk, &output_dir)?;
         endpoint_guard.defuse();
         Ok(BuilderOutcome {
             stopped,
             output_dir,
+        })
+    }
+}
+
+/// Resolved inputs for one Stage 0 bootstrap.
+///
+/// The Stage 0 counterpart of [`BuilderBuild`]. Both name a kernel and a root
+/// image; the difference is provenance. A build's pair was produced by an
+/// earlier Stage 0, while these were fetched (the kernel) and materialized from
+/// the verified Nix seed (the root), because nothing has been built yet.
+pub struct Stage0Run<'a> {
+    pub name: &'a str,
+    /// The fetched, digest-verified bootstrap kernel
+    /// (`mvm_build::stage0_kernel`).
+    pub kernel: &'a Path,
+    /// The Nix-seed root materialized as ext4, mounted read-write.
+    pub root_disk: &'a Path,
+    /// Persistent Stage 0 Nix store (writable; survives across attempts).
+    pub nix_store: &'a Path,
+    /// Source tree → the guest's `/work`. Filtered before packing.
+    pub workspace_src: &'a Path,
+    /// Host mvm binaries → the guest's `/mvm-bins`.
+    pub host_bin_dir: &'a Path,
+    /// Directory holding `stage0-build.conf` → the guest's `conf` input tree.
+    pub conf_dir: &'a Path,
+    /// Optional seeded Nix store closure NAR.
+    pub closure_nar: Option<&'a Path>,
+    /// Output disk size in bytes; must exceed the built kernel + rootfs tar.
+    pub output_size: u64,
+    pub vcpus: u32,
+    pub memory_mib: u32,
+}
+
+/// The per-boot host-side state both entry points set up identically: the state
+/// dir, the transport disk paths, the egress socket, and this boot's FlowMux
+/// identity drive.
+struct BootTransport {
+    name: String,
+    state_dir: PathBuf,
+    input_disk: PathBuf,
+    output_disk: PathBuf,
+    egress_socket: PathBuf,
+    identity_drive: PathBuf,
+    identity: mvm_vmm::host::flowmux_identity::FlowMuxIdentityMaterial,
+}
+
+impl BootTransport {
+    /// Create the state dir and mint this boot's identity.
+    ///
+    /// The guest reads that identity off a small read-only drive before
+    /// starting its egress client, which will not bind without it — and a
+    /// builder has no NIC, so no egress means no build.
+    fn stage(name: &str) -> Result<Self> {
+        let state_dir = vm_state_dir(name);
+        std::fs::create_dir_all(&state_dir)
+            .with_context(|| format!("create builder state dir {}", state_dir.display()))?;
+
+        let identity =
+            mvm_vmm::host::flowmux_identity::FlowMuxIdentityMaterial::mint_from_host_signer(name)?;
+        let identity_drive = state_dir.join(mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE);
+        identity.write_drive(&identity_drive)?;
+
+        Ok(Self {
+            name: name.to_string(),
+            input_disk: state_dir.join("input.img"),
+            output_disk: state_dir.join("output.img"),
+            egress_socket: vm_vsock_port_socket_at(&state_dir, EGRESS_PORT),
+            identity_drive,
+            identity,
+            state_dir,
         })
     }
 }
@@ -419,5 +548,156 @@ mod tests {
             std::fs::read(extracted.join("closure-seed/nix-closure.nar")).unwrap(),
             b"pretend-nar-bytes"
         );
+    }
+
+    /// Stage 0's extra fixture pieces: the seed root and the conf dir carrying
+    /// `stage0-build.conf`.
+    fn stage0_fixture(fx: &BuilderFixture) -> (PathBuf, PathBuf) {
+        let root_disk = fx.tmp.path().join("root.ext4");
+        std::fs::write(&root_disk, b"seed-root").unwrap();
+        let conf = fx.tmp.path().join("conf");
+        std::fs::create_dir_all(&conf).unwrap();
+        std::fs::write(
+            conf.join("stage0-build.conf"),
+            b"MVM_STAGE0_BUILD_ATTR=default\nMVM_STAGE0_OUTPUT_MODE=image\n",
+        )
+        .unwrap();
+        (root_disk, conf)
+    }
+
+    #[test]
+    fn stage0_packs_the_conf_tree_boots_the_seed_and_extracts_the_output() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut env = TestEnv::new();
+        let fx = builder_fixture(&mut env);
+        let (root_disk, conf) = stage0_fixture(&fx);
+        let tmp = &fx.tmp;
+
+        // Same reason as the build tests: `stage0` defuses its own guard, so
+        // without one here the stub endpoint outlives the run.
+        let _endpoint = EndpointGuard::new("stage0-unit");
+
+        let runner = BuilderRunner::new(MockDriver::default().reporting_status(VmStatus::Stopped));
+        let outcome = runner
+            .stage0(&Stage0Run {
+                name: "stage0-unit",
+                kernel: &fx.kernel,
+                root_disk: &root_disk,
+                nix_store: &fx.nix_store,
+                workspace_src: &fx.work,
+                host_bin_dir: &fx.bins,
+                conf_dir: &conf,
+                closure_nar: None,
+                output_size: 1 << 20,
+                vcpus: 2,
+                memory_mib: 1024,
+            })
+            .expect("stage0 orchestrates against the mock driver");
+
+        assert!(outcome.stopped);
+        assert!(outcome.output_dir.exists());
+
+        let specs = runner.driver.booted_specs();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].blocks.len(), 5);
+        assert!(specs[0].cmdline.contains("init=/init"));
+        assert!(
+            !specs[0].cmdline.contains("mvm-host-vm-init"),
+            "the seed does not carry the builder rootfs's PID 1"
+        );
+
+        // `conf` rather than `job` is what makes the guest build the requested
+        // attr: without it `stage0-init` silently falls back to a default.
+        let packed = tmp.path().join("packed-stage0-input");
+        mvm_build::builder_disk_transport::read_output_disk(
+            &tmp.path().join("vms/stage0-unit/input.img"),
+            &packed,
+        )
+        .unwrap();
+        assert!(packed.join("conf/stage0-build.conf").exists());
+        assert!(packed.join("work/flake.nix").exists());
+        assert!(packed.join("mvm-bins/mvm-host-vm-init").exists());
+        assert!(
+            !packed.join("job").exists(),
+            "Stage 0 is handed a build conf, not a rendered cmd.sh"
+        );
+        assert!(
+            !packed.join("work/target").exists(),
+            "the Stage 0 input transport must exclude host target/ state"
+        );
+    }
+
+    /// The portability claim, checked rather than asserted in prose: Stage 0's
+    /// boot contract composes onto **every** shipped driver, each carrying its
+    /// own console device.
+    ///
+    /// This proves the spec is well-formed per backend, which is what makes a
+    /// Firecracker or future Windows Stage 0 a wiring change rather than a
+    /// rewrite. It deliberately does not claim a live boot: `FcDriver::boot`
+    /// still waits for an `mvm-agentd` handshake that a `stage0-init` guest
+    /// never sends, and that opt-out is not built yet.
+    #[test]
+    fn the_stage0_boot_contract_composes_onto_every_shipped_driver() {
+        use crate::driver::VmmDriver;
+        use mvm_backends::driver::{fc::FcDriver, hvf::HvfDriver, qemu::QemuDriver};
+
+        let drivers: Vec<(&str, Box<dyn VmmDriver>)> = vec![
+            ("hvf", Box::new(HvfDriver::new())),
+            ("fc", Box::new(FcDriver::new())),
+            ("qemu", Box::new(QemuDriver::new())),
+            ("mock", Box::new(MockDriver::default())),
+        ];
+
+        for (name, driver) in drivers {
+            let base = driver.workload_base_bootargs(false);
+            let spec = stage0_spec(&Stage0SpecInputs {
+                name: "stage0-portability",
+                kernel: Path::new("/cache/vmlinux"),
+                root_disk: Path::new("/state/root.ext4"),
+                nix_store: Path::new("/cache/nix-store.img"),
+                input_disk: Path::new("/state/input.img"),
+                output_disk: Path::new("/state/output.img"),
+                identity_drive: Path::new("/state/flowmux-identity.ext4"),
+                console_log: PathBuf::from("/state/console.log"),
+                egress_socket: PathBuf::from("/state/vsock-5253.sock"),
+                console_base: &base,
+                vcpus: 4,
+                memory_mib: 4096,
+            });
+
+            // The guest's side of the contract, identical on every backend.
+            for token in [
+                "root=/dev/vda rw",
+                "init=/init",
+                "mvm.builder_transport=disk",
+                "mvm.builder_input=/dev/vdc",
+                "mvm.builder_output=/dev/vdd",
+                "mvm.vsock_egress=1",
+                "mvm.hostepoch=",
+            ] {
+                assert!(
+                    spec.cmdline.contains(token),
+                    "{name}: Stage 0 cmdline is missing {token}: {}",
+                    spec.cmdline
+                );
+            }
+
+            // Whatever console that driver uses, it must actually name one —
+            // Stage 0's result is parsed out of the console log.
+            assert!(
+                spec.cmdline.contains("console="),
+                "{name}: Stage 0 needs a console to report its result on: {}",
+                spec.cmdline
+            );
+            // Five disks and no virtio-fs on every backend.
+            assert_eq!(spec.blocks.len(), 5, "{name}");
+            assert!(spec.shares.is_empty(), "{name}");
+            // The kernel refuses a longer cmdline, and a backend whose console
+            // base pushed it over would fail at boot with nothing to read.
+            mvm_build::builder_cmdline::checked_builder_cmdline(spec.cmdline.clone())
+                .unwrap_or_else(|e| panic!("{name}: Stage 0 cmdline is not bootable: {e}"));
+        }
     }
 }
