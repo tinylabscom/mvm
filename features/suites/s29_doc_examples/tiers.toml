@@ -647,8 +647,16 @@ text = "mvmctl was built"
 reason = "\"mvmctl was built without the feature\" — a sentence about the tool"
 
 [[prose]]
+text = "mvmctl was installed"
+reason = "\"this mvmctl was installed by install.sh\" — a sentence about the tool"
+
+[[prose]]
 text = "mvmctl was"
-reason = "\"mvmctl was updated\" — a sentence about the tool"
+reason = "\"this mvmctl was built from a version...\" — a line-wrapped sentence about the tool"
+
+[[prose]]
+text = "mvmctl uninstaller"
+reason = "\"mvmctl uninstaller\" — a noun phrase naming the published script"
 
 [[prose]]
 text = "mvmctl built with"
