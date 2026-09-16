@@ -30,6 +30,7 @@ pub(super) mod readiness;
 pub(super) mod redaction_flags;
 pub(super) mod rekernel;
 pub(super) mod run_plan;
+pub(in crate::commands) mod run_secrets;
 pub(super) mod runtime_pack;
 pub(super) mod sandbox;
 pub(super) mod sdk_no_vm;

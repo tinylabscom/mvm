@@ -447,6 +447,29 @@ mod tests {
         assert!(!out.contains(ph.as_str()), "placeholder must be gone");
     }
 
+    /// Substitution is positional-agnostic: an `x-api-key` header (the
+    /// Anthropic API's credential position) is rewritten exactly like an
+    /// `Authorization: Bearer` one — the placeholder is replaced wherever
+    /// it appears in the request text, not only in catalog-templated
+    /// positions.
+    #[test]
+    fn substitutes_in_the_x_api_key_header_position() {
+        let (_dir, spy) = spy_with("anthropic", "sk-ant-live-zzz");
+        let mut reg = SubstitutionRegistry::new();
+        let ph = reg.mint(bearer_ref("anthropic", &["api.anthropic.com"]));
+        let endpoint = NetworkEndpoint::new(&reg, &spy);
+
+        let req = format!(
+            "POST /v1/messages HTTP/1.1\r\nx-api-key: {}\r\n\r\n",
+            ph.as_str()
+        );
+        let out = endpoint
+            .substitute(ph.as_str(), "api.anthropic.com", &req)
+            .unwrap();
+        assert!(out.contains("x-api-key: sk-ant-live-zzz"));
+        assert!(!out.contains(ph.as_str()), "placeholder must be gone");
+    }
+
     #[test]
     fn unknown_placeholder_is_refused_without_decrypting() {
         let (_dir, spy) = spy_with("openai", "sk-live-zzz");

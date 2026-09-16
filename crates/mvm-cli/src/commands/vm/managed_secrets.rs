@@ -8,7 +8,7 @@ use mvm_core::plan::{SecretBinding, SecretReleasePolicy, SecretSource};
 // channel). The `Debug` derive prints binding refs only, never
 // plaintext.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct LoweredPlanSecrets {
+pub(in crate::commands) struct LoweredPlanSecrets {
     pub secrets: Vec<SecretBinding>,
     pub secret_release: SecretReleasePolicy,
 }

@@ -619,6 +619,111 @@ mod tests {
         }
     }
 
+    /// The guest relay aggregates a chunk-streamed response into ONE
+    /// `WireResponse`: the host may frame an upstream SSE body as many
+    /// `HttpResponseBody` frames, but `exchange_http` returns only after
+    /// `HttpComplete`, with the concatenated body. This is the buffering
+    /// boundary for streaming consumers behind the forward-proxy front —
+    /// incremental delivery ends here today, not on the wire (the wire
+    /// frames arrive incrementally; the front renders one response).
+    #[test]
+    fn a_chunk_streamed_response_is_handed_over_whole_after_completion() {
+        use mvm_core::net::session::Session;
+
+        let (guest_side, host_side) = UnixStream::pair().unwrap();
+        let guest_key = SigningKey::from_bytes(&[3u8; 32]);
+        let host_key = SigningKey::from_bytes(&[9u8; 32]);
+        let host_anchor = host_key.verifying_key();
+
+        let host = std::thread::spawn(move || {
+            let mut stream = host_side;
+            let (mut session, _peer) =
+                Session::host(&mut stream, "test-session", host_key).unwrap();
+
+            let recv = |session: &mut Session, stream: &mut UnixStream| {
+                let sealed = read_sealed_frame(stream, MAX_FRAME_LEN + 512).unwrap();
+                let plain = session.open(&sealed).unwrap();
+                let parsed = decode(&plain).unwrap();
+                (parsed.header.opcode, parsed.header.stream_id)
+            };
+            let send = |session: &mut Session,
+                        stream: &mut UnixStream,
+                        opcode: Opcode,
+                        stream_id: u32,
+                        payload: &[u8]| {
+                let mut wire = Vec::new();
+                encode_into(&mut wire, opcode, stream_id, payload).unwrap();
+                let sealed = session.seal(&wire).unwrap();
+                write_sealed_frame(stream, &sealed).unwrap();
+            };
+
+            let (opcode, _) = recv(&mut session, &mut stream);
+            assert_eq!(opcode, Opcode::Hello);
+            send(
+                &mut session,
+                &mut stream,
+                Opcode::HelloAck,
+                0,
+                &Handshake::local("test-host").encode(),
+            );
+            let (opcode, sid) = recv(&mut session, &mut stream);
+            assert_eq!(opcode, Opcode::OpenHttp);
+            send(&mut session, &mut stream, Opcode::Opened, sid, &[]);
+            let (opcode, _) = recv(&mut session, &mut stream);
+            assert_eq!(opcode, Opcode::HttpRequestHead);
+
+            // An SSE-shaped body, streamed as three separate frames the way
+            // the host's forward task frames upstream chunks as they land.
+            let head = HttpFlowResponseHead::Ok {
+                status: 200,
+                headers: vec![("content-type".into(), "text/event-stream".into())],
+                body_len: None,
+            };
+            send(
+                &mut session,
+                &mut stream,
+                Opcode::HttpResponseHead,
+                sid,
+                &serde_json::to_vec(&head).unwrap(),
+            );
+            for chunk in [
+                &b"event: message_start\n\n"[..],
+                &b"event: message_delta\n\n"[..],
+                &b"event: message_stop\n\n"[..],
+            ] {
+                send(
+                    &mut session,
+                    &mut stream,
+                    Opcode::HttpResponseBody,
+                    sid,
+                    chunk,
+                );
+            }
+            send(&mut session, &mut stream, Opcode::HttpComplete, sid, &[]);
+        });
+
+        let mut client = SyncFlowMux::handshake(guest_side, guest_key, &host_anchor).unwrap();
+        let request = WireRequest {
+            method: "POST".into(),
+            url: "https://api.anthropic.com/v1/messages".into(),
+            headers: vec![("accept".into(), "text/event-stream".into())],
+            body_b64: String::new(),
+        };
+        let response = client.exchange_http(&request).unwrap();
+        host.join().unwrap();
+
+        match response {
+            WireResponse::Ok { body_b64, .. } => {
+                assert_eq!(
+                    B64.decode(body_b64.as_bytes()).unwrap(),
+                    b"event: message_start\n\nevent: message_delta\n\nevent: message_stop\n\n",
+                    "the three streamed frames arrive as one concatenated body"
+                );
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
     /// A host that refuses the open surfaces as a refusal, not a panic or a
     /// hang — the workload gets a 502, never the host's internals.
     #[test]

@@ -1511,6 +1511,68 @@ mod admit_plan_tests {
     }
 
     #[test]
+    fn admitted_plan_carries_the_secret_bindings_and_planbound_release() {
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"hello rootfs");
+        let ledger = InMemoryNonceLedger::new();
+        let bindings = vec![mvm_core::plan::SecretBinding {
+            name: "ANTHROPIC_API_KEY".to_string(),
+            source: mvm_core::plan::SecretSource::Keystore {
+                address: "claude".to_string(),
+            },
+        }];
+        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            network_mode: mvm_contract::plan::NetworkMode::default(),
+            tenant: "local",
+            vm_name: "vm-secret",
+            backend_name: "firecracker",
+            rootfs_path: &rootfs,
+            kernel_path: None,
+            precomputed_image_sha256: None,
+            boot_artifact_identity: None,
+            cpus: 1,
+            mem_mib: 256,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::PlanBound,
+            secrets: bindings.clone(),
+            caller_commitment: None,
+            no_supervisor: false,
+            ledger: &ledger,
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            assets: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            restrict_agent_verbs: true,
+            services: Vec::new(),
+            grants: None,
+            backend_kind: None,
+            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
+        })
+        .expect("admission")
+        .expect("Some when admission ran");
+        // The signed plan is the shape the substitution endpoint decodes its
+        // bindings from, so the binding must survive into it verbatim.
+        assert_eq!(ctx.admitted.plan().secrets, bindings);
+        assert_eq!(
+            ctx.admitted.plan().admission_profile.secret_release,
+            mvm_core::plan::SecretReleasePolicy::PlanBound
+        );
+        // And it must survive the serialized signed envelope — the exact
+        // bytes the endpoint spawn path reads back.
+        let signed = serde_json::to_string(ctx.admitted.signed()).unwrap();
+        let decoded = mvm_core::plan::secrets_from_signed_json(&signed).unwrap();
+        assert_eq!(decoded, bindings);
+    }
+
+    #[test]
     fn admission_failure_when_rootfs_missing() {
         // sha256_file fails when the file does not exist; the helper
         // must propagate the error with context naming the rootfs path.

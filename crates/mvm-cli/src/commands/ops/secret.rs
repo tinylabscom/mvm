@@ -932,6 +932,7 @@ mod tests {
             hosts: vec!["h.example".into()],
             auth: AuthType::Sigv4,
             sigv4_service: None,
+            env_var: None,
             tags: vec![],
         };
         assert!(bad.validate().is_err());
