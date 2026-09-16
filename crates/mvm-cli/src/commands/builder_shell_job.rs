@@ -82,22 +82,26 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resul
             .map_err(builder_vm_err)?
         }
         BuilderBackendChoice::Firecracker => {
-            bail!(
-                "builder shell jobs are not yet wired for the Firecracker backend; \
-                 it bootstraps (Stage 0) but has no builder image resolver yet. \
-                 Use --builder hvf or --builder libkrun"
+            let image = crate::commands::build::fc_builder_image::resolve_fc_builder_image()
+                .map_err(builder_vm_err)?;
+            mvm_runtime::builder_runner::DriverBuilderVm::new(
+                mvm_backends::driver::fc::FcDriver::new(),
+                image.kernel,
+                image.rootfs,
             )
+            .run_shell_script(&job)
+            .map_err(builder_vm_err)?
         }
         BuilderBackendChoice::Qemu => {
             bail!(
                 "builder shell jobs are not yet wired for the QEMU backend; \
-                 use --builder hvf or --builder libkrun"
+                 use --builder hvf, --builder firecracker, or --builder libkrun"
             )
         }
         BuilderBackendChoice::WebLinux => {
             bail!(
                 "builder shell jobs are not available for the WebLinux backend; \
-                 WebLinux is browser-only; use --builder hvf or --builder libkrun"
+                 WebLinux is browser-only; use --builder hvf, --builder firecracker, or --builder libkrun"
             )
         }
     };
@@ -128,7 +132,13 @@ fn admit_source_builder_image(
     choice: BuilderBackendChoice,
     bootstrap: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
-    if choice == BuilderBackendChoice::Libkrun {
+    // libkrun and Firecracker boot the Stage 0 image as-is, so a stale one is
+    // rebuilt before the job rather than run. HVF boots a re-baked copy
+    // resolved by its own resolver.
+    if matches!(
+        choice,
+        BuilderBackendChoice::Libkrun | BuilderBackendChoice::Firecracker
+    ) {
         bootstrap().context("admitting the current source builder VM image")?;
     }
     Ok(())
@@ -162,6 +172,17 @@ mod tests {
         })
         .expect_err("admission failure must propagate");
         assert!(err.to_string().contains("admitting the current source"));
+    }
+
+    #[test]
+    fn firecracker_shell_jobs_admit_the_current_source_image() {
+        let called = Cell::new(false);
+        admit_source_builder_image(BuilderBackendChoice::Firecracker, || {
+            called.set(true);
+            Ok(())
+        })
+        .expect("source image admission");
+        assert!(called.get());
     }
 
     #[test]

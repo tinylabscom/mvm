@@ -9,21 +9,27 @@ use std::path::{Path, PathBuf};
 use crate::driver::{BlockDev, ConsoleCapture, KernelImage, VmmSpec, VsockDirection, VsockPort};
 use mvm_net::channel::GuestService;
 
-/// Kernel cmdline for the disk-transport builder on the HVF VMM. Mirrors
-/// the console args the workload default uses (PL011 earlycon + `ttyAMA0`), but
-/// boots the builder's PID 1 (`/sbin/mvm-host-vm-init`, not the workload
+/// The builder's kernel cmdline, minus the console tokens.
+///
+/// Boots the builder's PID 1 (`/sbin/mvm-host-vm-init`, not the workload
 /// `/init`), mounts the rootfs read-only, and selects the disk transport with its
 /// input/output block devices. The device names match `mvm-host-vm-init`'s
 /// defaults (`/dev/vdc` in, `/dev/vdd` out) and the slot order below.
-pub const BUILDER_CMDLINE: &str = "earlycon=pl011,0x9000000 console=ttyAMA0 panic=-1 nokaslr \
-     loglevel=8 root=/dev/vda ro rootfstype=ext4 init=/sbin/mvm-host-vm-init \
-     mvm.builder_transport=disk mvm.builder_input=/dev/vdc mvm.builder_output=/dev/vdd \
-     mvm.vsock_egress=1";
+///
+/// The console tokens are not here because they are not the builder's to
+/// choose. HVF's device model exposes a PL011 (`ttyAMA0`); Firecracker's is a
+/// 16550 (`ttyS0`). This used to be one constant carrying HVF's pair, which is
+/// correct on exactly one backend: on Firecracker the kernel got a console
+/// device that does not exist, and every `mvm-host-vm-init:` line — the only
+/// diagnostics a failed build leaves — went nowhere.
+pub const BUILDER_CMDLINE_TAIL: &str = "root=/dev/vda ro rootfstype=ext4 \
+     init=/sbin/mvm-host-vm-init mvm.builder_transport=disk mvm.builder_input=/dev/vdc \
+     mvm.builder_output=/dev/vdd mvm.vsock_egress=1";
 const BUILDER_RUNTIME_DEVICE: &str = "/dev/vde";
 
 /// The resolved host artifacts a builder VM boots with. Disk slots are fixed:
 /// `vda` rootfs (RO), `vdb` nix-store (RW, persistent), `vdc` input (RO), `vdd`
-/// output (RW, persistent) — matching [`BUILDER_CMDLINE`] and the guest init.
+/// output (RW, persistent) — matching [`BUILDER_CMDLINE_TAIL`] and the guest init.
 pub struct BuilderSpecInputs<'a> {
     pub name: &'a str,
     /// arm64 boot `Image` for the builder VM.
@@ -40,16 +46,35 @@ pub struct BuilderSpecInputs<'a> {
     pub runtime_overlay: Option<&'a Path>,
     /// Write-only console capture path.
     pub console_log: PathBuf,
-    /// Optional host→guest agent RPC socket (the host dials the guest agent).
-    pub agent_socket: Option<PathBuf>,
     /// Host-side egress relay UDS wired to `EGRESS_PORT`.
     pub egress_socket: PathBuf,
     /// This boot's FlowMux identity drive (read-only). The guest reads its
     /// signing key and the host anchor off it before starting the egress
     /// client, which will not bind without them.
     pub identity_drive: &'a Path,
+    /// The console tokens for the VMM that will boot this, taken from
+    /// `VmmDriver::workload_base_bootargs(false)`. See [`BUILDER_CMDLINE_TAIL`]
+    /// for why the builder cannot choose them itself.
+    pub console_base: &'a str,
     pub vcpus: u32,
     pub memory_mib: u32,
+}
+
+/// The builder's egress channel: the guest dials the host-side endpoint.
+///
+/// `GuestDials` because that is what happens — the guest's egress client
+/// connects out to `EGRESS_PORT`, exactly as a workload's does, and workloads
+/// already declare it this way. The builder specs said `HostDials`. HVF ignores
+/// the direction, so it booted fine there; Firecracker bridges only
+/// `GuestDials` ports, so on Firecracker the guest's dial found no listener and
+/// every `nix build` substituter fetch had no network. One helper, so the three
+/// builder specs cannot disagree about it again.
+fn builder_egress_port(egress_socket: &Path) -> VsockPort {
+    VsockPort {
+        service: GuestService::NetworkFlow,
+        host_uds: egress_socket.to_path_buf(),
+        direction: VsockDirection::GuestDials,
+    }
 }
 
 /// Compose the builder `VmmSpec`. Trusted-builder: no egress gate, no
@@ -68,28 +93,24 @@ pub fn builder_spec(inputs: &BuilderSpecInputs<'_>) -> VmmSpec {
         slot,
     };
 
-    let mut vsock = Vec::new();
-    if let Some(sock) = &inputs.agent_socket {
-        vsock.push(VsockPort {
-            service: GuestService::MachineControl,
-            host_uds: sock.clone(),
-            direction: VsockDirection::HostDials,
-        });
-    }
-    vsock.push(VsockPort {
-        service: GuestService::NetworkFlow,
-        host_uds: inputs.egress_socket.clone(),
-        direction: VsockDirection::HostDials,
-    });
+    // Egress only. A one-shot builder names no `MachineControl` port: it is
+    // run-to-completion, so the host learns it finished from power-off and reads
+    // its result off the output disk, and nothing on the host ever dials its
+    // agent. Naming one anyway is not free — `FcDriver::boot` waits for any
+    // declared agent to answer before returning, and a builder's PID 1 starts
+    // that agent only after preparing a cold Nix store and untarring the work
+    // tree, which can outlast the wait.
+    let vsock = vec![builder_egress_port(&inputs.egress_socket)];
 
+    let cmdline = format!("{} {BUILDER_CMDLINE_TAIL}", inputs.console_base.trim());
     let cmdline = if inputs.runtime_overlay.is_some() {
-        format!("{BUILDER_CMDLINE} mvm.runtime_data={BUILDER_RUNTIME_DEVICE}")
+        format!("{cmdline} mvm.runtime_data={BUILDER_RUNTIME_DEVICE}")
     } else {
-        BUILDER_CMDLINE.to_string()
+        cmdline
     };
-    // Seed the RTC-less HVF builder guest's wall clock from the host: PID 1
-    // (mvm-host-vm-init) reads this token and calls settimeofday, so a cold Nix
-    // store's HTTPS fetch doesn't fail cert validation against a ~1970 clock.
+    // Seed the guest's wall clock from the host: PID 1 (mvm-host-vm-init) reads
+    // this token and calls settimeofday, so an RTC-less guest's HTTPS fetch
+    // doesn't fail cert validation against a ~1970 clock.
     let cmdline = format!(
         "{cmdline} {}",
         mvm_build::builder_vm::builder_hostepoch_cmdline_token()
@@ -138,7 +159,7 @@ pub fn builder_spec(inputs: &BuilderSpecInputs<'_>) -> VmmSpec {
 
 /// Stage 0's kernel cmdline, minus the console tokens.
 ///
-/// Three tokens differ from [`BUILDER_CMDLINE`], and each one is why Stage 0
+/// Three tokens differ from [`BUILDER_CMDLINE_TAIL`], and each one is why Stage 0
 /// needs its own: the root is **writable** (the seed's PID 1 creates its
 /// bootstrap state and deletes the size reserve baked into the image), PID 1 is
 /// the seed's own `/init` rather than the builder rootfs's
@@ -185,10 +206,8 @@ pub struct Stage0SpecInputs<'a> {
     ///
     /// Supplied by the driver rather than hardcoded because the console device
     /// *is* backend-specific — libkrun exposes a virtio-console (`hvc0`), the
-    /// HVF device model a PL011 (`ttyAMA0`). [`BUILDER_CMDLINE`] hardcodes the
-    /// HVF pair, which is why it is only ever correct for the one driver it is
-    /// used with; taking the base from the driver is what lets Stage 0 boot on
-    /// any of them.
+    /// HVF device model a PL011 (`ttyAMA0`), Firecracker a 16550 (`ttyS0`).
+    /// Taking the base from the driver is what lets Stage 0 boot on any of them.
     pub console_base: &'a str,
     pub vcpus: u32,
     pub memory_mib: u32,
@@ -235,11 +254,7 @@ pub fn stage0_spec(inputs: &Stage0SpecInputs<'_>) -> VmmSpec {
         ],
         // NetworkFlow only. A Stage 0 guest serves no MachineControl port, and
         // naming one would have the host dial a socket nothing ever binds.
-        vsock: vec![VsockPort {
-            service: GuestService::NetworkFlow,
-            host_uds: inputs.egress_socket.clone(),
-            direction: VsockDirection::HostDials,
-        }],
+        vsock: vec![builder_egress_port(&inputs.egress_socket)],
         console: ConsoleCapture {
             log_path: inputs.console_log.clone(),
         },
@@ -293,6 +308,9 @@ pub struct PersistentBuilderSpecInputs<'a> {
     /// self-reaps when orphaned, so the supervisor is the only process whose
     /// life matches the VM's.
     pub builder_egress_endpoint: mvm_vmm::host::hvf_supervisor::BuilderEgressEndpoint,
+    /// The console tokens for the VMM that will boot this, taken from
+    /// `VmmDriver::workload_base_bootargs(false)`. See [`BUILDER_CMDLINE_TAIL`].
+    pub console_base: &'a str,
     pub vcpus: u32,
     pub memory_mib: u32,
 }
@@ -321,11 +339,12 @@ pub fn persistent_builder_spec(inputs: &PersistentBuilderSpecInputs<'_>) -> VmmS
         block(inputs.input_disk, 2, true),   // vdc: input tar, RO
         block(inputs.output_disk, 3, false), // vdd: output tar, RW persist
     ];
+    let base = format!("{} {BUILDER_CMDLINE_TAIL}", inputs.console_base.trim());
     let cmdline = if let Some(runtime_overlay) = inputs.runtime_overlay {
         blocks.push(block(runtime_overlay, 4, true)); // vde: runtime overlay, RO
-        format!("{BUILDER_CMDLINE} mvm.runtime_data={BUILDER_RUNTIME_DEVICE}")
+        format!("{base} mvm.runtime_data={BUILDER_RUNTIME_DEVICE}")
     } else {
-        BUILDER_CMDLINE.to_string()
+        base
     };
     // Appended last and found in the guest by ext4 label rather than by slot,
     // so the optional overlay above cannot shift it out from under the guest.
@@ -343,8 +362,10 @@ pub fn persistent_builder_spec(inputs: &PersistentBuilderSpecInputs<'_>) -> VmmS
         host_uds: host_uds.clone(),
         direction: VsockDirection::HostDials,
     };
+    // The control ports genuinely are host-dials — the dispatch client connects
+    // to a listener in the guest. Egress is the one channel the guest dials.
     let vsock = vec![
-        host_dials(GuestService::NetworkFlow, &inputs.egress_socket),
+        builder_egress_port(&inputs.egress_socket),
         host_dials(GuestService::BuilderDispatch, &inputs.dispatch_socket),
         host_dials(GuestService::BuilderdControl, &inputs.builderd_socket),
     ];
@@ -376,6 +397,18 @@ pub fn persistent_builder_spec(inputs: &PersistentBuilderSpecInputs<'_>) -> VmmS
 mod tests {
     use super::*;
 
+    /// HVF's console base, as `HvfDriver::workload_base_bootargs(false)`
+    /// renders it. Pinned here so the tests can prove the refactor left HVF's
+    /// cmdline byte-identical.
+    const HVF_CONSOLE_BASE: &str =
+        "earlycon=pl011,0x9000000 console=ttyAMA0 panic=-1 nokaslr loglevel=8";
+
+    /// The builder cmdline before the console moved to the driver, verbatim.
+    const PRE_REFACTOR_BUILDER_CMDLINE: &str = "earlycon=pl011,0x9000000 console=ttyAMA0 \
+         panic=-1 nokaslr loglevel=8 root=/dev/vda ro rootfstype=ext4 \
+         init=/sbin/mvm-host-vm-init mvm.builder_transport=disk mvm.builder_input=/dev/vdc \
+         mvm.builder_output=/dev/vdd mvm.vsock_egress=1";
+
     fn persistent_inputs() -> PersistentBuilderSpecInputs<'static> {
         PersistentBuilderSpecInputs {
             name: "bld-persistent",
@@ -396,6 +429,7 @@ mod tests {
                 socket: PathBuf::from("/state/vsock-5253.sock"),
                 identity_drive: PathBuf::from("/state/flowmux-identity.ext4"),
             },
+            console_base: HVF_CONSOLE_BASE,
             vcpus: 4,
             memory_mib: 8192,
         }
@@ -465,12 +499,16 @@ mod tests {
         assert!(services.contains(&GuestService::BuilderDispatch));
         assert!(services.contains(&GuestService::BuilderdControl));
         assert!(services.contains(&GuestService::NetworkFlow));
-        // Every one is host-dials: the guest listens, the host connects.
-        assert!(
-            spec.vsock
-                .iter()
-                .all(|p| p.direction == VsockDirection::HostDials)
-        );
+        // The control ports are host-dials: the guest listens, the host
+        // connects. Egress is the opposite — the guest dials out.
+        for port in &spec.vsock {
+            let expected = if port.service == GuestService::NetworkFlow {
+                VsockDirection::GuestDials
+            } else {
+                VsockDirection::HostDials
+            };
+            assert_eq!(port.direction, expected, "{:?}", port.service);
+        }
     }
 
     #[test]
@@ -510,8 +548,8 @@ mod tests {
             output_disk: Path::new("/state/output.img"),
             runtime_overlay: None,
             console_log: PathBuf::from("/state/console.log"),
-            agent_socket: Some(PathBuf::from("/state/agent.sock")),
             egress_socket: PathBuf::from("/state/vsock-21002.sock"),
+            console_base: HVF_CONSOLE_BASE,
             vcpus: 4,
             memory_mib: 4096,
         }
@@ -565,13 +603,71 @@ mod tests {
         assert!(spec.cmdline.contains("mvm.vsock_egress=1"));
     }
 
+    /// A run-to-completion builder names only its egress channel. Nothing on
+    /// the host ever dials its agent, and naming one would make Firecracker wait
+    /// for it before `boot` returns.
     #[test]
-    fn builder_spec_without_an_agent_socket_has_no_vsock_ports() {
-        let mut i = inputs();
-        i.agent_socket = None;
-        let spec = builder_spec(&i);
+    fn a_builder_job_names_only_its_egress_channel() {
+        let spec = builder_spec(&inputs());
         assert_eq!(spec.vsock.len(), 1);
         assert_eq!(spec.vsock[0].service, GuestService::NetworkFlow);
+        assert_eq!(spec.vsock[0].direction, VsockDirection::GuestDials);
+    }
+
+    /// The refactor that moved the console tokens to the driver must not have
+    /// moved a single byte for the one backend already in production.
+    #[test]
+    fn the_builder_cmdline_on_hvf_is_byte_identical_to_the_old_constant() {
+        let one_shot = builder_spec(&inputs()).cmdline;
+        let persistent = persistent_builder_spec(&persistent_inputs()).cmdline;
+        for (which, cmdline) in [("one-shot", &one_shot), ("persistent", &persistent)] {
+            assert!(
+                cmdline.starts_with(PRE_REFACTOR_BUILDER_CMDLINE),
+                "{which} HVF builder cmdline drifted:\n  was: {PRE_REFACTOR_BUILDER_CMDLINE}\n  now: {cmdline}"
+            );
+        }
+    }
+
+    /// On Firecracker the builder must get Firecracker's serial console. With
+    /// HVF's PL011 pair baked in, the kernel had no console device and every
+    /// diagnostic PID 1 printed went nowhere.
+    #[test]
+    fn the_builder_console_comes_from_the_driver() {
+        let mut one_shot = inputs();
+        one_shot.console_base = "console=ttyS0 reboot=k panic=1 net.ifnames=0";
+        let mut persistent = persistent_inputs();
+        persistent.console_base = "console=ttyS0 reboot=k panic=1 net.ifnames=0";
+
+        for cmdline in [
+            builder_spec(&one_shot).cmdline,
+            persistent_builder_spec(&persistent).cmdline,
+        ] {
+            assert!(cmdline.starts_with("console=ttyS0 "), "{cmdline}");
+            assert!(!cmdline.contains("ttyAMA0"), "{cmdline}");
+            assert!(!cmdline.contains("pl011"), "{cmdline}");
+            assert!(cmdline.contains("init=/sbin/mvm-host-vm-init"), "{cmdline}");
+        }
+    }
+
+    /// The guest dials out for egress on every builder shape. Firecracker
+    /// bridges only guest-dials ports, so a host-dials declaration left the
+    /// builder with no network there while HVF, which ignores direction, booted
+    /// fine and hid it.
+    #[test]
+    fn every_builder_egress_channel_is_guest_dials() {
+        let specs = [
+            ("one-shot", builder_spec(&inputs())),
+            ("stage0", stage0_spec(&stage0_inputs())),
+            ("persistent", persistent_builder_spec(&persistent_inputs())),
+        ];
+        for (which, spec) in specs {
+            let egress = spec
+                .vsock
+                .iter()
+                .find(|p| p.service == GuestService::NetworkFlow)
+                .unwrap_or_else(|| panic!("{which} declares no egress channel"));
+            assert_eq!(egress.direction, VsockDirection::GuestDials, "{which}");
+        }
     }
 
     #[test]
@@ -701,29 +797,29 @@ mod tests {
 
         assert_eq!(spec.vsock.len(), 1);
         assert_eq!(spec.vsock[0].service, GuestService::NetworkFlow);
-        assert_eq!(spec.vsock[0].direction, VsockDirection::HostDials);
+        assert_eq!(spec.vsock[0].direction, VsockDirection::GuestDials);
         assert!(
             spec.shares.is_empty(),
             "a Stage 0 guest gets no virtio-fs device"
         );
     }
 
-    /// What makes a Firecracker Stage 0 possible at all: `FcDriver::boot`
-    /// waits for the guest agent to answer, and a Stage 0 guest is
-    /// `stage0-init`, which serves no agent. The driver skips that wait when
-    /// the spec declares no agent port, so this is the property the skip keys
-    /// on — and the builder spec must keep declaring one, or every builder boot
-    /// would stop being confirmed.
+    /// `FcDriver::boot` waits for any declared guest agent to answer before it
+    /// returns. No builder shape should declare one: Stage 0 runs `stage0-init`,
+    /// which serves no agent at all, and a builder's PID 1 starts its agent only
+    /// after preparing a cold Nix store and untarring the work tree, which can
+    /// outlast the wait. Every builder is run-to-completion — power-off and the
+    /// output disk are its readiness signal, and no host code dials its agent.
     #[test]
-    fn stage0_declares_no_guest_agent_but_a_builder_job_does() {
-        assert!(
-            !stage0_spec(&stage0_inputs()).serves_guest_agent(),
-            "a Stage 0 guest runs stage0-init, not mvm-agentd"
-        );
-        assert!(
-            builder_spec(&inputs()).serves_guest_agent(),
-            "the builder guest does run an agent, and its boot is confirmed by it"
-        );
+    fn no_builder_shape_makes_the_driver_wait_for_an_agent() {
+        let specs = [
+            ("one-shot", builder_spec(&inputs())),
+            ("stage0", stage0_spec(&stage0_inputs())),
+            ("persistent", persistent_builder_spec(&persistent_inputs())),
+        ];
+        for (which, spec) in specs {
+            assert!(!spec.serves_guest_agent(), "{which} declares an agent port");
+        }
     }
 
     /// The libkrun Stage 0 cmdline omits this token, so its clock sync is a

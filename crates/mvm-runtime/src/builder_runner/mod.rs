@@ -16,7 +16,7 @@ pub use hvf_persistent::{HvfPersistentHostVm, PersistentHvfSession};
 pub use inject::{InjectRequest, default_inject_work_dir, inject_host_binaries};
 pub use runner::{BuilderBuild, BuilderOutcome, BuilderRunner, Stage0Run};
 pub use spec::{
-    BUILDER_CMDLINE, BuilderSpecInputs, PersistentBuilderSpecInputs, Stage0SpecInputs,
+    BUILDER_CMDLINE_TAIL, BuilderSpecInputs, PersistentBuilderSpecInputs, Stage0SpecInputs,
     builder_spec, persistent_builder_spec, stage0_spec,
 };
 pub use stage0_vm::Stage0Vm;

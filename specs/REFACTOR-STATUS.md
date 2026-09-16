@@ -89,8 +89,9 @@ Last updated: 2026-09-16
       the driver, so a future Windows backend inherits both. W1–W6 landed.
       **HVF Stage 0 is live-proven** on a plain `just embed` build, after its
       bootstrap kernel moved to a source pin; Firecracker is not (no KVM host
-      in that run), and it bootstraps but has
-      no builder-image resolver, so steady-state builds on it refuse by name.
+      in that run). W7 (#3324) gives it a builder-image resolver, so it now
+      serves one-shot builds and shell jobs too, proven by test only; its
+      persistent builder still refuses by name.
 
 - [x] **Claim-witness mutation coverage — issue #3250.**
       `specs/plans/2026-09-15-claim-witness-mutation-coverage.md`.

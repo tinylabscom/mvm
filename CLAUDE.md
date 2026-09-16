@@ -126,7 +126,7 @@ Its bootstrap kernel is fetched rather than built: it cannot be built, because S
 The builder VM (the Linux guest that runs `nix build` inside `mvmctl machine build` / `mvmctl machine run --flake`) picks between three host VMMs:
 
 - **hvf** — the HVF builder (Hypervisor.framework, no Homebrew deps). Default on macOS 26+ Apple Silicon. macOS-only.
-- **firecracker** — the Firecracker builder, the same VMM the Linux workload tier runs on, so a Linux host needs no second hypervisor to build with. Default on Linux-with-KVM. Bootstraps (Stage 0) today; it has no builder-image resolver yet, so steady-state builds on it refuse by name rather than running elsewhere.
+- **firecracker** — the Firecracker builder, the same VMM the Linux workload tier runs on, so a Linux host needs no second hypervisor to build with. Default on Linux-with-KVM. Bootstraps (Stage 0) and serves one-shot builds and shell jobs from the image Stage 0 produced, booted as-is; only the persistent builder refuses it by name. Not yet live-proven on a KVM host.
 - **libkrun** — third-party in-process VMM via the `slp/krun/*` Homebrew trio. **Never auto-detected, and never fallen back to**; it runs only when named by `--builder libkrun` / `MVM_BUILDER_BACKEND=libkrun`. No builder path reaches it otherwise: a backend with no Stage 0 refuses and says so rather than lowering onto libkrun.
 - **qemu** — QEMU/microvm_nix builder (Linux dev/test substrate). Opt-in only.
 
