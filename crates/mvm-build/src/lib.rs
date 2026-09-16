@@ -86,6 +86,8 @@ pub mod rootfs_inject;
 pub mod run_image;
 pub mod runtime_identity;
 pub mod stage0;
+/// The one kernel Stage 0 can neither build nor resolve by the ordinary policy.
+pub mod stage0_kernel;
 /// Whether a builder guest may fall back to a tmpfs Nix store, or must stop.
 pub mod store_readiness;
 pub mod template_reuse;
