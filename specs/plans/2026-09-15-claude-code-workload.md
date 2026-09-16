@@ -400,6 +400,22 @@ Work:
       incremental delivery through the substitution relay
       (`crates/mvm-agentd/src/substitution_client.rs`), and fix if the wire
       shape buffers whole bodies.
+      Read + pinned 2026-09-15, fix not yet built. The wire is NOT the
+      buffering point: the host forward task frames each upstream chunk
+      guest-ward as it lands (`HttpResponseBody` frames, with an
+      inter-chunk silence deadline; the whole-request timeout bounds only
+      obtaining the response head, so a long SSE turn is not cut off at
+      `forward_timeout_secs`). The buffering point is the guest relay:
+      `flowmux_sync::read_http_response` drains every frame to
+      `HttpComplete` into one `WireResponse`, and the forward-proxy front
+      renders one complete HTTP response with recomputed content-length
+      (`a_chunk_streamed_response_is_handed_over_whole_after_completion`).
+      A workload behind `HTTP_PROXY` therefore sees the whole SSE body
+      only after upstream close — first-token latency becomes
+      full-response latency, and `MAX_FORWARD_RESPONSE_BYTES` /
+      `MAX_HTTP_RESPONSE_BODY_LEN` cap the turn. Fixing it means an
+      incremental front: the proxy streaming body bytes to the workload
+      as body frames arrive (the wire shape already supports it).
 - [ ] Fallback, only if the typed path cannot carry this traffic: wire
       ADR-023's TLS terminator for CONNECT flows at the endpoint (the guest
       already trusts the per-VM egress CA via the injected
