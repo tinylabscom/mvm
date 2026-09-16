@@ -36,8 +36,7 @@ entrypoint starts.
 ## Host directory shares
 
 Separately from the drives above, `--mount host_dir:/guest/path[:ro]` shares
-a host directory into a **transient** run. `--volume` remains accepted as a
-compatibility alias, but `-v` is global verbosity. The guest path must be
+a host directory into a **transient** run. The guest path must be
 under `/data` or `/work`. Directory shares are read-only snapshots: the
 directory is materialized into a throwaway image at boot, so a `:rw` request
 is refused — a write would land in the discarded snapshot, never in the host

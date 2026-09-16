@@ -343,7 +343,12 @@ Per AGENTS.md, no workstream is done without tests. The mounted-PTY plan
 
 - [ ] `claude-code` entry in `tinylabscom/mvm-templates` (`template.toml`,
       `flake.nix`, `index.json` row with an `mvm_version` floor), mirroring
-      the shipped example.
+      the shipped example. Packaging acquisition (pinning/refreshing the
+      native binary version + checksums) belongs to that repo's tooling,
+      per review.
+- [ ] Launch gate, per review: a `bdd` scenario covering the template's
+      documented commands must exist and pass before the template is
+      published — the s34 live scenario is the base to extend.
 - [ ] Note for the security backlog: template fetch is unsigned text
       download (`fetch_and_cache_remote_template`); this plan does not fix
       that, but shipping a credential-adjacent template makes it worth a
@@ -429,6 +434,49 @@ Work:
   material.
 - `just ci` green, the live scenario green in its opt-in lane, doc gates
   (`check-doc-claims`, `check-declared-backing`, `check-plan-names`) green.
+
+## Review feedback and upstream events (2026-09-16)
+
+Recorded from maintainer review of the PR set, plus what main shipped while
+the branches were open:
+
+- **The W5 fork resolved itself twice.** The maintainer picked Option A on
+  the draft PR; independently, main shipped CONNECT termination to bound
+  hosts (the #3283/#3338 work: per-VM name-constrained CA, gate + meter +
+  redaction on the terminated flow, refusal never degrades to opaque
+  relay) — which is the Option-B shape rebuilt for the vsock topology, and
+  its motivating bug is the same fact this plan's W5-M2 pinned. The draft
+  PR needs a salvage pass against that reality before any further Option-A
+  work; the surviving candidates are the `--secret` run-surface flag (a
+  CLI convenience the IR-file flow does not replace) and the `x-api-key`
+  witness tests if upstream lacks them.
+- **Tier model, per review**: locally, everything starts dev-tier; `mvmd`
+  is the only authorized client to start prod-tier workloads. Lane B's
+  `--prod` framing is therefore an mvmd-lane destination, not a local
+  `mvmctl` promise; the sealed image + stdin plane remain the local
+  deliverable.
+- **`--volume` is deprecated and headed for removal**: the config-secrets
+  guide no longer advertises the alias (this PR); deleting the
+  `visible_alias` from the CLI and sweeping the remaining doc mentions is
+  its own small change.
+
+### Icebox, per review
+
+- **Template stacking**: express guest images as consumable layers
+  (alpine → node → claude-code) so templates compose instead of each
+  flake restating the base.
+- **Single-command volume UX**: collapse `machine volume mount` +
+  `machine run` into one invocation (create/register the volume at run
+  time).
+- **`Dockerfile`-like authoring**: evaluate whether `mvm.toml` should
+  grow an imperative-feeling layer or stay declarative; open question
+  from review, no position taken here.
+- **Boot-beacon activity unification**: the guest agent's one-shot
+  `host.beacon.v1` boot report could also stamp the name registry's
+  `last_active`, so a machine reads active from agent-alive rather than
+  first console attach. Distinct from the console heartbeat, which stays
+  presence-based; needs a deliberate look at the hostd→registry crate
+  boundary.
 
 ## Out of scope, named so nobody trips on it
 
