@@ -4,6 +4,13 @@ Last updated: 2026-09-16
 
 ## In progress
 
+- [x] **Canonical user-config and MVM child paths.**
+      `specs/plans/2026-09-15-the-big-cleanup.md` A4.5, issue #3308. One
+      canonical config path and tenant parser; named helpers for every direct
+      `mvm_home()` child; strengthened `check-single-home` coverage. Complete
+      with 43 focused tests, gated-target checks, all repository gates, clippy,
+      and the full workspace suite.
+
 - [x] **Honest production file-size gate.**
       `specs/plans/2026-09-15-the-big-cleanup.md` C1, issue #3313. Repair the
       test-span counter, scan every production Rust root, and ratchet the
@@ -1507,8 +1514,8 @@ for detailed scope and acceptance criteria.
       `SessionTransitionError`, and store-level `park`/`resume` fenced on
       the caller's expected generation — a check-then-act refusal, not a
       compare-and-swap, so a second caller racing on the same generation is
-      not yet serialized; the module has no call sites yet, so nothing races
-      it in production today.
+      not yet serialized. The CLI's park and resume commands are production
+      callers, so that concurrency limitation is live rather than theoretical.
       `ApprovalLedger::head()` (`crates/mvm-contract/src/policy/approval.rs`)
       content-addresses the ledger's decision state — every record's
       approval id, its capability, and its terminal state, deliberately
@@ -1524,7 +1531,7 @@ resume` takes a `current_head` and refuses when it differs from the
       have one (the Firecracker stop-time filesystem flush at
       `crates/mvm-backends/src/driver/fc.rs`'s
       `prepare_guest_filesystems_for_stop`), nothing on a park path calls
-      it. WS4 is DONE: the ledger-head comparison landed, `resume_session`
+      it. WS4 is partial: the ledger-head comparison landed, `resume_session`
       (`crates/mvm-hostd/src/session_resume.rs`) loads the record, refuses
       anything but `Hibernated`, resolves the resume point, checks the
       record's stored `meta_digest` against a fresh `compute_meta_digest()`,
@@ -1542,19 +1549,22 @@ resume` takes a `current_head` and refuses when it differs from the
       a scheduler that calls `demote`, and actual byte movement between tiers
       remain undelivered.
 
-      WS6 and WS7 are DONE, both via
+      WS6 is done and WS7 is partial, both via
       `2026-08-19-session-cli-and-audit` and
       `2026-08-19-resume-boot`
       (`crates/mvm-cli/src/commands/agent_session.rs` and
       `crates/mvm-hostd/src/session_resume.rs`). `mvmctl agent-session`
       carries `open`, `ls`, `show`, `park` and `resume`, and `resume --boot`
       cold-boots a `Cold`-tier session through the shared post-admission tail,
-      refusing `Parked` and `Resident` by name. `session.resumed` is emitted
+      refusing `Parked` and `Resident` by name. The CLI-owned boot path is
+      covered by a successful mock-backend cold boot as well as the tier and
+      input refusals. `session.resumed` is emitted
       before the boot attempt so a failed boot leaves the chain consistent
       with the moved record. Known limitation: on x86 Firecracker the plan
       pins the source `vmlinux` digest, but the VMM loads an ELF sibling
-      derived from it; the derived file is not itself pinned. WS8 BDD remains
-      untouched.
+      derived from it; the derived file is not itself pinned. WS7 still lacks
+      whole-session chain verification and several lifecycle events; WS8 BDD
+      remains untouched.
 
 - [~] **Admission-bound AI assurance sessions** —
       `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4,

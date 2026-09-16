@@ -44,9 +44,7 @@ impl Isolated {
 
     /// The tenant audit chain the admitted boot writes.
     fn audit_text(&self) -> String {
-        let audit = std::path::PathBuf::from(mvm_core::config::mvm_home())
-            .join("audit")
-            .join("local.jsonl");
+        let audit = mvm_core::config::mvm_audit_dir().join("local.jsonl");
         std::fs::read_to_string(audit).unwrap_or_default()
     }
 }

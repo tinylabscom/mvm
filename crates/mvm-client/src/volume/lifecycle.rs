@@ -28,15 +28,12 @@ use secrecy::ExposeSecret;
 use super::lease::ensure_volume_not_attached;
 /// Root for mvm-managed encrypted volume state (`encrypted/` + `unlocked/`).
 pub(crate) fn default_mvm_volume_root() -> PathBuf {
-    PathBuf::from(mvm_core::config::mvm_home())
-        .join("volumes")
-        .join("mvm-managed")
+    mvm_core::config::volumes_dir().join("mvm-managed")
 }
 
 /// Directory holding the local master KEK versions (`v<N>.bin`, 0600).
 pub(crate) fn local_master_key_dir() -> PathBuf {
-    PathBuf::from(mvm_core::config::mvm_home())
-        .join("volumes")
+    mvm_core::config::volumes_dir()
         .join("master-keys")
         .join("local")
 }

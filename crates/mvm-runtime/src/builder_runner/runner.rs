@@ -219,7 +219,6 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
             transport: EndpointTransport::Uds {
                 path: transport.egress_socket.clone(),
             },
-            terminator_listen: None,
             egress_proxy: None,
             tls_intermediate: None,
             network_policy: Some(&builder_policy),

@@ -137,11 +137,6 @@ impl Drop for SessionCleanup {
 }
 
 #[cfg(target_os = "macos")]
-fn mvm_home() -> PathBuf {
-    PathBuf::from(mvm_core::config::mvm_home())
-}
-
-#[cfg(target_os = "macos")]
 fn mvm_cache_dir() -> PathBuf {
     PathBuf::from(mvm_core::config::mvm_cache_dir())
 }
@@ -247,7 +242,7 @@ fn resolved_digest_from_run_output(output: &str) -> Option<String> {
 fn prod_policy_path() -> PathBuf {
     std::env::var_os("MVM_OCI_POLICY")
         .map(PathBuf::from)
-        .unwrap_or_else(|| mvm_home().join("oci-policy.toml"))
+        .unwrap_or_else(mvm_core::config::oci_policy_path)
 }
 
 #[cfg(target_os = "macos")]

@@ -183,9 +183,7 @@ pub fn workload_build_fingerprint(
 /// assert directly against the on-disk record path rather than
 /// reconstructing it.
 pub(crate) fn build_cache_dir() -> PathBuf {
-    PathBuf::from(mvm_core::config::mvm_home())
-        .join("dev")
-        .join("build-cache")
+    mvm_core::config::dev_dir().join("build-cache")
 }
 
 /// Look up the typed cache record a previous build wrote for

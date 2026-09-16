@@ -1033,6 +1033,108 @@ mod tests {
     }
 
     #[cfg(feature = "test-support")]
+    fn install_runtime_overlay(home: &std::path::Path) {
+        use mvm_build::runtime_overlay::{InstallOptions, install_overlay_into_cache};
+        use mvm_fs::ext4::Node;
+        use mvm_fs::overlay::{REQUIRED_OVERLAY_GUEST_PATHS, read_overlay_artifact_from_dir};
+
+        let source = home.join("runtime-overlay-source");
+        std::fs::create_dir_all(&source).unwrap();
+        let nodes = REQUIRED_OVERLAY_GUEST_PATHS
+            .iter()
+            .map(|path| Node::File {
+                path: path.to_string(),
+                mode: 0o755,
+                data: b"session-resume-runtime-stub".to_vec(),
+                xattrs: Vec::new(),
+            })
+            .collect();
+        let ext4 = mvm_fs::ext4::build_image(nodes).unwrap();
+        std::fs::write(source.join("overlay.ext4"), ext4).unwrap();
+        std::fs::write(source.join("overlay.verity"), b"verity-sidecar").unwrap();
+        std::fs::write(
+            source.join("overlay.roothash"),
+            format!("{}\n", "ab".repeat(32)),
+        )
+        .unwrap();
+        std::fs::write(
+            source.join("VERSION"),
+            format!("{}\n", env!("CARGO_PKG_VERSION")),
+        )
+        .unwrap();
+
+        let artifact = read_overlay_artifact_from_dir(&source, std::env::consts::ARCH).unwrap();
+        install_overlay_into_cache(
+            &artifact,
+            &home.join("cache"),
+            &InstallOptions { overwrite: true },
+        )
+        .unwrap();
+    }
+
+    #[cfg(feature = "test-support")]
+    fn seed_resume_checkpoint(
+        store: &CheckpointStore,
+        dir: &std::path::Path,
+    ) -> mvm_core::checkpoint::CheckpointMeta {
+        use mvm_core::checkpoint::CheckpointId;
+        use mvm_runtime::checkpoint::{CaptureFsQuickParams, capture_fs_quick};
+
+        let rootfs = dir.join("rootfs.ext4");
+        std::fs::write(&rootfs, b"fake-ext4-bytes").unwrap();
+        capture_fs_quick(
+            store,
+            CaptureFsQuickParams {
+                id: CheckpointId::new("cp-parent"),
+                vm_name: "vm-alpha".to_string(),
+                rootfs,
+                supervisor_config_digest: "digest".to_string(),
+                runtime_overlay_version: None,
+                tag: None,
+                created_unix: 1,
+                quiesced: true,
+                grants: None,
+            },
+        )
+        .unwrap()
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn booting_resume_reaches_the_cli_backend_boundary_and_starts_the_session() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        install_runtime_overlay(home.path());
+
+        let sessions = AgentSessionStore::at(home.path().join("sessions"));
+        let checkpoints = CheckpointStore::at(home.path().join("checkpoints"));
+        let parent = seed_resume_checkpoint(&checkpoints, home.path());
+        let mut record = parked("sess-boot", ParkReason::RetentionDemotion);
+        assert_eq!(record.storage_tier, Some(StorageTier::Cold));
+        record.parent_checkpoint = Some(parent.meta_digest);
+        sessions.write(&record).unwrap();
+
+        let kernel = stub_kernel(home.path());
+        let mut args = boot_args("sess-boot", &kernel);
+        args.kernel_sha256 = Some(mvm_core::crypto::image_verify::sha256_file(&kernel).unwrap());
+        args.approval_head = record.approval_head.as_ref().map(ToString::to_string);
+
+        let booted = resume_boot_record(&sessions, &checkpoints, &args)
+            .expect("the CLI boot path must start a cold-tier session");
+
+        assert_eq!(booted.record.state, SandboxResidency::Active);
+        assert_eq!(booted.record.generation, record.generation + 1);
+        assert_eq!(booted.started.vm_id.0, "sess-boot");
+        assert_eq!(booted.started.admitted.plan().workload.0, "sess-boot");
+        assert_eq!(
+            sessions.load(&record.session_id).unwrap(),
+            booted.record,
+            "the successful boot must persist the new residency"
+        );
+    }
+
+    #[cfg(feature = "test-support")]
     #[test]
     fn boot_refuses_a_parked_tier_session_naming_the_tier() {
         // The flag reaches the tier gate: a session parked with a memory image

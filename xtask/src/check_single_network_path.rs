@@ -93,7 +93,6 @@ const ENDPOINT_SOCKET_OWNERS: &[&str] = &[
     "crates/mvm-hostd/src/supervisor/dns_resolver.rs",
     "crates/mvm-hostd/src/supervisor/flowmux.rs",
     "crates/mvm-hostd/src/supervisor/flowmux/",
-    "crates/mvm-hostd/src/supervisor/terminator/",
     "crates/mvm-http/src/client.rs",
 ];
 
@@ -657,6 +656,10 @@ mod tests {
         ));
         assert!(!path_allowed(
             "crates/mvm-hostd/src/supervisor/new_dialer.rs",
+            ENDPOINT_SOCKET_OWNERS
+        ));
+        assert!(!path_allowed(
+            "crates/mvm-hostd/src/supervisor/terminator/flow.rs",
             ENDPOINT_SOCKET_OWNERS
         ));
         assert!(

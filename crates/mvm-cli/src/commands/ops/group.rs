@@ -21,7 +21,7 @@ pub(in crate::commands) struct Args {
 pub(in crate::commands) enum OpsCmd {
     /// Show runtime metrics (Prometheus text format by default)
     Metrics(metrics::Args),
-    /// Read or write global operator config (~/.mvm/config.toml)
+    /// Read or write global operator config (~/.mvm/config/config.toml)
     Config(config::Args),
     /// Serve MvmClient operations to local MCP clients
     Mcp(mcp::Args),

@@ -217,7 +217,7 @@ gate. The duplication is one layer up, in what happens *around* the boot.
       severity item in this plan.**
 - [ ] **A4.4** `check-single-network-path` validates an orphan file the
       compiler never compiles. #3305.
-- [ ] **A4.5** `mvmctl config edit` opens the wrong path; seven sites re-roll
+- [x] **A4.5** `mvmctl config edit` opens the wrong path; seven sites re-roll
       the `~/.mvm` layout past the gate. #3308.
 - [ ] **A4.6** Egress: three decision sites, three APIs, one of them behind an
       `Option` that can be `None`. #3301, #3297, #3288, #3302 — all four

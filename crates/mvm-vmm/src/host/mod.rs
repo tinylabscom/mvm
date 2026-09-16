@@ -12,7 +12,6 @@ pub mod config;
 pub mod console_capture;
 pub mod drive_file;
 pub mod egress_bridge;
-pub mod egress_redirect;
 pub mod egress_shared;
 pub mod fc_kernel;
 pub mod flowmux_identity;

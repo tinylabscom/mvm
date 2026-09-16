@@ -525,7 +525,6 @@ mod tests {
             bundle: None,
             network_policy: None,
             bridge_restart_policy: BridgeRestartPolicy::HardFail,
-            transparent_terminator_port: None,
             egress_relay_socket: None,
             exclusive_image_lock: None,
         }

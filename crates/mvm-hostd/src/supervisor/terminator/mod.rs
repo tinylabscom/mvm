@@ -1,15 +1,13 @@
-//! Transparent egress terminator.
+//! Host-side termination of an admitted egress flow to a credentialed host.
 //!
-//! The host nft `nat` chain REDIRECTs a guest's outbound TCP to the terminator
-//! listener, which recovers the original destination, substitutes any opaque
-//! secret placeholders in the payload, and forwards the request under the real
-//! credential. Each sub-module is its own self-contained concern.
+//! When a guest opens an opaque FlowMux TCP flow to a host that carries a bound
+//! secret, the endpoint serves it here instead of relaying it: `flow` terminates
+//! the guest's TLS when the flow is encrypted, under a leaf minted by the per-VM
+//! CA (`tls`), reads each HTTP/1.1 request (`read`), rebuilds it against the
+//! authority the flow was admitted for (`request`), and drives it through the
+//! substitution service.
 
-pub mod error;
 pub mod flow;
-pub mod handler;
-pub mod listener;
-pub mod orig_dst;
 pub mod read;
 pub mod request;
 pub mod tls;

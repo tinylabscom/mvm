@@ -2,7 +2,7 @@
 //!
 //! Resolution order, lowest precedence first:
 //!   1. Built-in default `"local"`
-//!   2. `~/.mvm/config.toml`  `[tenant] name = "..."`
+//!   2. `~/.mvm/config/config.toml`  `[tenant] name = "..."`
 //!   3. `MVM_TENANT` env var (non-empty)
 //!   4. `--tenant` CLI flag
 //!
@@ -10,17 +10,6 @@
 //! this resolver only handles the tenant *value* — a string label for
 //! the audit chain file — not identity / authentication / credential
 //! storage.
-
-#[derive(serde::Deserialize, Default)]
-struct ConfigFile {
-    #[serde(default)]
-    tenant: Option<TenantBlock>,
-}
-
-#[derive(serde::Deserialize)]
-struct TenantBlock {
-    name: String,
-}
 
 pub fn resolve_tenant(flag_value: Option<&str>) -> String {
     if let Some(v) = flag_value
@@ -40,16 +29,8 @@ pub fn resolve_tenant(flag_value: Option<&str>) -> String {
 }
 
 fn read_config_tenant() -> Option<String> {
-    let path = std::path::PathBuf::from(mvm_core::config::mvm_home()).join("config.toml");
-    let body = std::fs::read_to_string(&path).ok()?;
-    let parsed: ConfigFile = toml::from_str(&body).ok()?;
-    parsed.tenant.and_then(|t| {
-        if t.name.is_empty() {
-            None
-        } else {
-            Some(t.name)
-        }
-    })
+    let name = mvm_core::user_config::load(None).tenant.name;
+    (!name.is_empty()).then_some(name)
 }
 
 #[cfg(test)]
@@ -86,9 +67,26 @@ mod tests {
     fn empty_env_falls_through_to_default() {
         let mut env = TestEnv::new();
         env.set("MVM_TENANT", "");
-        // Either default or whatever ~/.mvm/config.toml says; both
+        // Either default or whatever ~/.mvm/config/config.toml says; both
         // are non-empty. The empty MVM_TENANT must NOT come through.
         let resolved = resolve_tenant(None);
         assert!(!resolved.is_empty());
+    }
+
+    #[test]
+    fn canonical_user_config_supplies_tenant_default() {
+        let home = tempfile::tempdir().expect("temporary mvm home");
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        env.remove("MVM_TENANT");
+        let cfg = mvm_core::user_config::MvmConfig {
+            tenant: mvm_core::user_config::UserTenantConfig {
+                name: "from-config".to_string(),
+            },
+            ..mvm_core::user_config::MvmConfig::default()
+        };
+        mvm_core::user_config::save(&cfg, None).expect("save canonical user config");
+
+        assert_eq!(resolve_tenant(None), "from-config");
     }
 }

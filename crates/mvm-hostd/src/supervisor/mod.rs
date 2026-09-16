@@ -108,9 +108,8 @@ pub mod secrets_scanner;
 /// self-measurement the in-process VMM tiers record at teardown.
 pub mod self_usage;
 pub mod sensitive_detector;
-/// Transparent egress terminator primitives: original destination
-/// recovery after nft REDIRECT, plus the future forward/substitute
-/// legs (orig_dst is the only piece here now).
+/// Termination of an admitted FlowMux flow to a host carrying a bound secret:
+/// TLS under the per-VM CA, request framing, and the hand-off to substitution.
 pub mod terminator;
 /// Live forensic transcript capture sink — fills an armed capture's manifest
 /// with encrypted byte chunks as they cross the host bridge.

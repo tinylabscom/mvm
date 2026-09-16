@@ -10,6 +10,20 @@
 
 ## In progress
 
+- [x] **Cover `agent-session resume --boot` and reconcile session status — issue #3264.**
+      Exercise a successful cold-tier boot through the CLI boundary and make
+      the durable-session plan and refactor rollup distinguish partial
+      workstreams from completed ones. The focused 34-test agent-session suite,
+      workspace check, workspace clippy, and full workspace test suite pass.
+
+- [x] **Canonical user-config and MVM child paths — issue #3308.**
+      `config edit`, tenant defaults, and the development watcher now share the
+      canonical nested config path and parser. Direct `mvm_home()` child joins
+      route through named `mvm-core::config` helpers, while
+      `check-single-home` covers literal child joins, alternate home-directory
+      APIs, and examples. Complete with 43 focused tests, gated-target checks,
+      all 67 repository gates, clippy, and the full workspace suite.
+
 - [x] **Honest production file-size gate — issue #3313.**
       `specs/plans/2026-09-15-the-big-cleanup.md` C1. Count lines outside all
       test-only items and externally gated test modules, scan every production

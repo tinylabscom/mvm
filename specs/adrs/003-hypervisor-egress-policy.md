@@ -37,16 +37,17 @@ credential. A per-VM host-side substitution endpoint checks the request's
 destination against the plan's secret bindings and substitutes the real
 credential only on the outbound leg, after that check passes. For `https`
 destinations that need substitution, TLS is terminated at the host only for
-those specific bound hosts: each VM gets a freshly minted intermediate CA,
-chained to a long-lived host CA, whose `nameConstraints` are exactly that
-plan's bound hosts. The guest trusts only this per-VM intermediate — never
-the host CA, never any private key. SNI outside the plan's bound hosts is
-spliced through untouched; the terminator never decrypts it, so end-to-end
-TLS holds for everything the guest wasn't explicitly asking to have
-substituted. Not every TLS client enforces `nameConstraints`; the
-certificate constraint is defense in depth, and the real boundary is the
-host-side allow-list check the substitution endpoint runs before every
-substitution.
+those specific bound hosts: each VM gets a freshly minted, self-signed CA
+whose `nameConstraints` are exactly that plan's bound hosts. The guest
+receives that CA's certificate and nothing else — no private key, and no
+long-lived root shared across VMs, because there is none. A flow to a host
+outside the plan's bound hosts is relayed opaquely; the endpoint never
+decrypts it, so end-to-end TLS holds for everything the guest wasn't
+explicitly asking to have substituted. The certificate constraint is defense
+in depth: OpenSSL- and rustls-backed clients enforce it from a self-signed
+anchor, but the real boundary is the host-side allow-list check the
+substitution endpoint runs before every substitution, which holds whatever
+the guest's TLS library validates.
 
 **Per-VM network provisioning goes through one trait.** Each backend's
 provider brings a VM up against an admitted network spec and reports the
@@ -61,9 +62,9 @@ network-device attack class for every production workload backend. One runner
 seam means default-deny and secret substitution are enforced in one place,
 instead of being re-derived once per VMM's network stack.
 
-The name-constrained per-VM CA bounds the blast radius of a leaked
-intermediate key to exactly the hosts that plan was allowed to reach, at the
-cost of one more certificate in the chain for every bound-host TLS
-handshake. Clients that don't enforce `nameConstraints` get no benefit from
-the constraint itself, but the substitution endpoint's allow-list check
-still holds regardless of what the guest's TLS library validates.
+The name-constrained per-VM CA bounds the blast radius of a leaked CA key
+to exactly the hosts that plan was allowed to reach, and to that one VM:
+nothing signs across VMs. A client that did not enforce `nameConstraints`
+would get no benefit from the constraint itself, but the substitution
+endpoint's allow-list check still holds regardless of what the guest's TLS
+library validates.

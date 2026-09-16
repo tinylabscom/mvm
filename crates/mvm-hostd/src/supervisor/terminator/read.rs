@@ -1,11 +1,11 @@
-//! Bounded HTTP/1.1 request reader for the transparent egress terminator.
+//! Bounded HTTP/1.1 request reader for a terminated egress flow.
 //!
-//! The terminator reads raw decrypted TCP bytes off a blocking socket, so it
-//! needs its own headers→body framing rather than a client's.
+//! A terminated flow reads raw bytes off a blocking stream, so it needs its own
+//! headers→body framing rather than a client's.
 
 use std::io::Read;
 
-/// 16 MiB cap on a single redirected request (defensive against runaway
+/// 16 MiB cap on a single terminated request (defensive against runaway
 /// allocations).
 pub const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 
@@ -69,8 +69,8 @@ pub struct HttpRequest {
 /// Read one full HTTP/1.1 request off `stream`: headers up to `\r\n\r\n`,
 /// then the `Content-Length` body (if any). Bounded by [`MAX_REQUEST_BYTES`].
 ///
-/// Generic over `Read` so it serves both the cleartext `:80` path (a raw
-/// `TcpStream`) and the `:443` path (a decrypted `rustls` stream).
+/// Generic over `Read` so it serves both a cleartext flow (the raw stream) and
+/// a TLS flow (the decrypted `rustls` stream).
 pub fn read_http_request<R: Read>(stream: &mut R) -> Result<HttpRequest, ReadError> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];

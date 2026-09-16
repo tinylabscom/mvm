@@ -1054,7 +1054,6 @@ impl LibkrunBuilderVm {
             // override). Step 3 flips builder/dev to trusted_build_egress when
             // they move onto the bridge.
             network_policy: None,
-            transparent_terminator_port: None,
             egress_relay_socket: None,
             exclusive_image_lock: None,
             // Builder VMs are always hard-fail; they don't model
@@ -1260,7 +1259,6 @@ impl LibkrunBuilderVm {
             // override). Step 3 flips builder/dev to trusted_build_egress when
             // they move onto the bridge.
             network_policy: None,
-            transparent_terminator_port: None,
             egress_relay_socket: None,
             exclusive_image_lock: None,
             // Builder VMs are always hard-fail; they don't model
@@ -1768,7 +1766,6 @@ impl BuilderVm for LibkrunBuilderVm {
             // override). Step 3 flips builder/dev to trusted_build_egress when
             // they move onto the bridge.
             network_policy: None,
-            transparent_terminator_port: None,
             egress_relay_socket: None,
             exclusive_image_lock: None,
             // Builder VMs are always hard-fail; they don't model
@@ -2020,7 +2017,6 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
             // override). Step 3 flips builder/dev to trusted_build_egress when
             // they move onto the bridge.
             network_policy: None,
-            transparent_terminator_port: None,
             egress_relay_socket: None,
             exclusive_image_lock: None,
             // Builder VMs are always hard-fail; they don't model
@@ -4405,7 +4401,6 @@ impl LibkrunPersistentHostVm {
             // override). Step 3 flips builder/dev to trusted_build_egress when
             // they move onto the bridge.
             network_policy: None,
-            transparent_terminator_port: None,
             egress_relay_socket: None,
             // The supervisor holds this for its whole life. This process starts
             // the session and exits, so a lock taken here would not survive to

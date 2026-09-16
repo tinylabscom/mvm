@@ -13,12 +13,8 @@ use mvm_core::vm_backend::VmBackend;
 /// substitution endpoint; the backend only declares the mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EgressSubstitutionTransport {
-    /// macOS native path: the guest still has a proxy-aware vsock/UDS
-    /// channel, and ordinary `:80/:443` TCP is intercepted by the native gateway
-    /// and forwarded to the same host terminator.
-    RvproxyTransparentTerminator,
-    /// Proxy-aware channel only: the guest dials the substitution port over
-    /// vsock, bridged to a host unix socket; no transparent `:80/:443` leg.
+    /// Proxy-aware channel: the guest dials the substitution port over vsock,
+    /// bridged to a host unix socket.
     VsockUdsChannel,
     /// Proxy-aware channel via a wasm host import: the guest calls
     /// `mvm:egress` and the host relays the request to the substitution
@@ -32,12 +28,6 @@ impl EgressSubstitutionTransport {
     /// Whether this transport can carry proxy-aware substitution requests.
     pub fn supports_proxy_aware_substitution(self) -> bool {
         !matches!(self, Self::None)
-    }
-
-    /// Whether this transport can transparently intercept ordinary guest
-    /// `:80`/`:443` egress and deliver it to the host terminator.
-    pub fn supports_transparent_terminator(self) -> bool {
-        matches!(self, Self::RvproxyTransparentTerminator)
     }
 }
 
@@ -102,18 +92,16 @@ mod tests {
         let transport = crate::backend::hvf_runner().egress_substitution_transport();
         assert_eq!(transport, EgressSubstitutionTransport::VsockUdsChannel);
         assert!(transport.supports_proxy_aware_substitution());
-        assert!(!transport.supports_transparent_terminator());
     }
 
     #[test]
     fn libkrun_runner_declares_vsock_uds_channel() {
         // Post-flip libkrun carries egress over the runner's vsock UDS channel
-        // (proxy-aware substitution, no transparent :80/:443 terminator) — the
-        // same posture as HVF, reached through the blanket runner impl.
+        // (proxy-aware substitution) — the same posture as HVF, reached through
+        // the blanket runner impl.
         let transport = crate::backend::libkrun_runner().egress_substitution_transport();
         assert_eq!(transport, EgressSubstitutionTransport::VsockUdsChannel);
         assert!(transport.supports_proxy_aware_substitution());
-        assert!(!transport.supports_transparent_terminator());
     }
 
     #[test]
@@ -122,7 +110,6 @@ mod tests {
         let transport = MockBackend::new().egress_substitution_transport();
         assert_eq!(transport, EgressSubstitutionTransport::None);
         assert!(!transport.supports_proxy_aware_substitution());
-        assert!(!transport.supports_transparent_terminator());
     }
 
     #[test]

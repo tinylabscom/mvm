@@ -108,7 +108,7 @@ pub(in crate::commands) struct Args {
     /// Supported by Firecracker and libkrun.
     #[arg(long)]
     pub warm_pool_size: Option<u32>,
-    /// Reload ~/.mvm/config.toml automatically when it changes
+    /// Reload ~/.mvm/config/config.toml automatically when it changes
     #[arg(long)]
     pub watch_config: bool,
     /// Watch the flake for changes and auto-rebuild + reboot (requires local --flake)
@@ -166,7 +166,7 @@ pub(in crate::commands) struct Args {
     /// Tenant for the synthesized `ExecutionPlan`. When
     /// unset the value is resolved via the 4-level precedence chain
     /// (built-in `"local"` →
-    /// `~/.mvm/config.toml` `[tenant] name` → `MVM_TENANT` env →
+    /// `~/.mvm/config/config.toml` `[tenant] name` → `MVM_TENANT` env →
     /// `--tenant` flag). Identity / `mvmctl auth` is the subject of
     /// a separate effort; this flag is just the audit
     /// chain string label.
