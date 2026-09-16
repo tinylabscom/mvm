@@ -10,23 +10,24 @@
 
 ## In progress
 
-- [ ] **Claim-witness mutation coverage — issue #3250.**
+- [x] **Claim-witness mutation coverage — issue #3250.**
       `specs/plans/2026-09-15-claim-witness-mutation-coverage.md`.
-      Add the two EOF-boundary regressions missing from the scheduled
-      `mvm-backends` mutation shard, then require the authoritative Linux
-      ratchet and a fresh scheduled Security witness before closeout.
+      PR #3255 added the two EOF-boundary regressions missing from the
+      `mvm-backends` mutation shard. Fresh Security run `35037577321` passed
+      all 42 jobs after merge, restoring the mutation witness and closing
+      #3250.
 
-- [ ] **Security lane supply-chain repair — issue #3249.**
+- [x] **Security lane supply-chain repair — issue #3249.**
       `specs/plans/2026-09-15-security-lane-supply-chain.md`.
-      Upgrade rustls to the fixed compatible release set, preserve dependency
-      policy, and merge after #3250 restores the mutation witness from the same
-      failed Security run.
+      PR #3292 upgraded rustls to 0.23.45 with the compatible cryptographic
+      dependency set. The complete Security witness is green and #3249 is
+      closed.
 
-- [ ] **Linux 6.12.110 synchronized kernel pin — issue #3248.**
+- [x] **Linux 6.12.110 synchronized kernel pin — issue #3248.**
       `specs/plans/2026-09-15-kernel-6-12-110.md`.
-      Move both carried kernel consumers to the kernel.org-verified 6.12.110
-      archive, retain structural synchronization coverage, and require the
-      Linux build witness before merge.
+      PR #3281 moved both carried kernel consumers to the kernel.org-verified
+      6.12.110 archive. Both architecture builds and the complete merge-queue
+      witness passed, and #3248 is closed.
 
 - [x] **CI queue consolidation.**
       `specs/plans/2026-09-10-ci-queue-consolidation.md`.
