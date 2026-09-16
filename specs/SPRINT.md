@@ -10,6 +10,14 @@
 
 ## In progress
 
+- [x] **Hermetic published-documentation link gate — issue #3328.**
+      Validate repository files, same-repository GitHub links, and internal
+      documentation/site routes on every `check-all` run, and repair the
+      stale links the new gate exposes. Seven focused tests and the 397-link
+      published-doc scan pass, along with workspace check and clippy; the full
+      workspace run passed all suites except one load-induced lease-TTL flake,
+      whose exact isolated rerun passed.
+
 - [x] **Cover `agent-session resume --boot` and reconcile session status — issue #3264.**
       Exercise a successful cold-tier boot through the CLI boundary and make
       the durable-session plan and refactor rollup distinguish partial

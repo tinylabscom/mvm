@@ -121,7 +121,7 @@ Installing host-side Nix does not change the normal `mvmctl machine build` contr
 
 ## Distro-specific notes
 
-- **Ubuntu/Debian** — `apt install qemu-utils e2fsprogs` if you need `mkfs.ext4` for the [smoke test](https://github.com/tinylabscom/mvm/blob/main/tests/smoke_libkrun.rs).
+- **Ubuntu/Debian** — `apt install qemu-utils e2fsprogs` if you need `mkfs.ext4` for the [libkrun smoke example](https://github.com/tinylabscom/mvm/blob/main/crates/deps/libkrun-sys/examples/libkrun-smoke.rs).
 - **Fedora/RHEL** — `dnf install e2fsprogs qemu-img`. Make sure SELinux isn't blocking `/dev/kvm` access (it usually isn't, but `audit2why` is your friend if it does).
 - **Arch** — `pacman -S e2fsprogs qemu-img`. Already lean.
 - **NixOS** — easiest path: `nix profile install github:tinylabscom/mvm?dir=nix#mvmctl`. The `?dir=nix` fragment matters: the repo-root flake exposes only `devShells` and `formatter`, so a bare `github:tinylabscom/mvm` has no package to install. KVM is enabled by default; `kvm` group membership is the only thing to verify.
