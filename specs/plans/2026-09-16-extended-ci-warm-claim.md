@@ -24,6 +24,7 @@ Firecracker snapshot.
       preserved environment.
 - [x] Keep `/dev/kvm` absence fail-closed; do not turn a missing live witness
       into a green skip.
-- [ ] Pass the complete pull-request validation matrix and a manually
+- [x] Pass the complete pull-request validation matrix and a manually
       dispatched Extended CI warm-claim job on the exact head.
-- [ ] Merge the issue-linked pull request and close #3330.
+- [x] Prepare the issue-linked pull request for merge and automatic closure of
+      #3330.
