@@ -366,6 +366,13 @@ pub struct WarmResult {
     pub spawned: u32,
     /// Spawn attempts that failed (each was logged as a warning).
     pub failed: u32,
+    /// Human-readable failure chains, one for each failed attempt.
+    ///
+    /// Pool warming is best-effort across attempts, so failures cannot be
+    /// returned immediately. Keep their full context for the command boundary
+    /// instead of requiring a tracing subscriber to explain why the target was
+    /// not reached.
+    pub failures: Vec<String>,
 }
 
 /// Warm the pool toward `target` idle standbys for the given kernel+resources.
@@ -583,6 +590,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
         return Ok(WarmResult {
             spawned: 0,
             failed: 0,
+            failures: Vec::new(),
         });
     }
     if !p.backend.capabilities().standby_pool {
@@ -590,6 +598,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
             return Ok(WarmResult {
                 spawned: 0,
                 failed: 0,
+                failures: Vec::new(),
             });
         }
         return Err(anyhow::Error::new(StandbyError::Unsupported {
@@ -622,6 +631,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
     };
     let mut spawned = 0u32;
     let mut failed = 0u32;
+    let mut failures = Vec::new();
     for _ in have..p.target {
         // Every compat field comes from `want`, so the recorded handle's own
         // `compat()` is `want` — the exact value the claim searches for.
@@ -669,6 +679,8 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
                             if let Err(error) =
                                 p.backend.preload_standby_via_runner(&preload, &mut handle)
                             {
+                                failures
+                                    .push(format!("preloading standby '{}': {error:#}", handle.id));
                                 tracing::warn!(
                                     standby = %handle.id,
                                     %error,
@@ -686,6 +698,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
                         spawned += 1;
                     }
                     Err(e) => {
+                        failures.push(format!("auditing captured standby '{}': {e:#}", handle.id));
                         tracing::warn!(
                             standby = %handle.id,
                             error = %e,
@@ -698,6 +711,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
                 }
             }
             Err(e) => {
+                failures.push(format!("spawning standby: {e:#}"));
                 tracing::warn!(error = %e, "spawn standby failed; pool stays under target");
                 failed += 1;
             }
@@ -716,7 +730,11 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
             "evicted warm parents over memory budget"
         );
     }
-    Ok(WarmResult { spawned, failed })
+    Ok(WarmResult {
+        spawned,
+        failed,
+        failures,
+    })
 }
 
 /// The compat-key image identity for a launch: the sha256 of its rootfs image.
@@ -2187,6 +2205,15 @@ mod tests {
             result.failed, 2,
             "both spawn attempts must be counted as failures"
         );
+        assert_eq!(result.failures.len(), 2);
+        assert!(
+            result
+                .failures
+                .iter()
+                .all(|failure| failure.contains("spawning standby")),
+            "each failed attempt should retain its error context: {:?}",
+            result.failures
+        );
     }
 
     #[cfg(feature = "test-support")]
@@ -2230,6 +2257,7 @@ mod tests {
         // Already at target → no spawns attempted, no failures.
         assert_eq!(result.spawned, 0);
         assert_eq!(result.failed, 0);
+        assert!(result.failures.is_empty());
     }
 
     // Two launches warming the same pool to the same target concurrently must
@@ -2449,8 +2477,9 @@ fn run_warm(pool: &SupervisorStandbyPool, req: &WarmRequest) -> Result<()> {
             "{}/{} standby(s) warmed; {} spawn(s) failed — check logs for details.",
             idle_after, target, result.failed,
         ));
+        let details = result.failures.join("; ");
         return Err(anyhow::anyhow!(
-            "pool warm: {}/{} standby(s) warmed, {} failed",
+            "pool warm: {}/{} standby(s) warmed, {} failed: {details}",
             idle_after,
             target,
             result.failed,

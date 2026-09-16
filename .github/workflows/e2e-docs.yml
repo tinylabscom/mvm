@@ -124,16 +124,13 @@ jobs:
           /usr/bin/firecracker --version
 
       - name: Grant /dev/kvm access for the job
-        id: kvm_check
         run: |
           set -euo pipefail
           if [ ! -e /dev/kvm ]; then
-            echo "::warning::/dev/kvm missing on this runner — the documented surface cannot boot. Skipping."
-            echo "KVM_AVAILABLE=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "::error::/dev/kvm missing on this runner — the documented surface cannot boot." >&2
+            exit 1
           fi
           sudo chmod 666 /dev/kvm
-          echo "KVM_AVAILABLE=true" >> "$GITHUB_OUTPUT"
 
       - name: Grant QEMU Stage 0 access to vhost-vsock
         run: |
