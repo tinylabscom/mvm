@@ -1,7 +1,7 @@
 //! HVF builder-image auto-resolver.
 //!
 //! Produces (or reuses from a hash-keyed cache) the HVF-bootable builder
-//! image pair (kernel + injected rootfs) that `HvfBuilderVm` needs.
+//! image pair (kernel + injected rootfs) that `DriverBuilderVm` needs.
 //!
 //! The cache key is a SHA-256 over the digests of three inputs:
 //! - the base kernel image
@@ -69,7 +69,7 @@ fn closure_nar_path(arch_dir: &Path) -> Option<PathBuf> {
 ///   call, cache hit or miss.
 ///
 /// On cache hit the existing kernel/rootfs pair is returned without rebaking.
-/// On any VMM-level failure returns `BuilderVmError::HvfVmmFailed`; the
+/// On any VMM-level failure returns `BuilderVmError::VmmFailed`; the
 /// standard builder path reports that failure without acquiring an optional
 /// libkrun dependency.
 pub fn resolve_hvf_builder_image() -> Result<(PathBuf, PathBuf, Option<PathBuf>), BuilderVmError> {
@@ -81,7 +81,7 @@ pub fn resolve_hvf_builder_image() -> Result<(PathBuf, PathBuf, Option<PathBuf>)
     let base_rootfs = arch_dir.join("rootfs.ext4");
 
     if !vmlinux.is_file() {
-        return Err(BuilderVmError::HvfVmmFailed {
+        return Err(BuilderVmError::VmmFailed {
             detail: format!(
                 "base builder-VM kernel not found at {}; run `mvmctl bootstrap` \
                  with the libkrun builder to produce the base image first",
@@ -90,7 +90,7 @@ pub fn resolve_hvf_builder_image() -> Result<(PathBuf, PathBuf, Option<PathBuf>)
         });
     }
     if !base_rootfs.is_file() {
-        return Err(BuilderVmError::HvfVmmFailed {
+        return Err(BuilderVmError::VmmFailed {
             detail: format!(
                 "base builder-VM rootfs not found at {}; run `mvmctl bootstrap` \
                  with the libkrun builder to produce the base image first",
@@ -101,7 +101,7 @@ pub fn resolve_hvf_builder_image() -> Result<(PathBuf, PathBuf, Option<PathBuf>)
 
     let host_bins_cache = PathBuf::from(mvm_core::config::mvm_cache_dir()).join("host-bins");
     let host_bin_dir = ensure_boot_host_binaries(&host_bins_cache)
-        .map_err(|e| BuilderVmError::HvfVmmFailed {
+        .map_err(|e| BuilderVmError::VmmFailed {
             detail: format!("materialize boot host binaries: {e}"),
         })?
         .dir;
@@ -127,7 +127,7 @@ pub fn resolve_hvf_builder_image() -> Result<(PathBuf, PathBuf, Option<PathBuf>)
     // Remove any incomplete out_dir from a previous failed rename step.
     let _ = fs::remove_dir_all(&out_dir);
 
-    fs::create_dir_all(&partial).map_err(|e| BuilderVmError::HvfVmmFailed {
+    fs::create_dir_all(&partial).map_err(|e| BuilderVmError::VmmFailed {
         detail: format!("create staging dir {}: {e}", partial.display()),
     })?;
 
@@ -136,7 +136,7 @@ pub fn resolve_hvf_builder_image() -> Result<(PathBuf, PathBuf, Option<PathBuf>)
 
     let bake_result = (|| {
         // Copy the base kernel — already a raw arm64 boot Image on aarch64.
-        fs::copy(&vmlinux, &partial_kernel).map_err(|e| BuilderVmError::HvfVmmFailed {
+        fs::copy(&vmlinux, &partial_kernel).map_err(|e| BuilderVmError::VmmFailed {
             detail: format!(
                 "copy base kernel {} -> {}: {e}",
                 vmlinux.display(),
@@ -145,10 +145,10 @@ pub fn resolve_hvf_builder_image() -> Result<(PathBuf, PathBuf, Option<PathBuf>)
         })?;
 
         let patcher_path = host_bin_dir.join("mvm-rootfs-patcher");
-        let patcher = fs::read(&patcher_path).map_err(|e| BuilderVmError::HvfVmmFailed {
+        let patcher = fs::read(&patcher_path).map_err(|e| BuilderVmError::VmmFailed {
             detail: format!("read embedded patcher at {}: {e}", patcher_path.display()),
         })?;
-        let host_init_bytes = fs::read(&host_init).map_err(|e| BuilderVmError::HvfVmmFailed {
+        let host_init_bytes = fs::read(&host_init).map_err(|e| BuilderVmError::VmmFailed {
             detail: format!(
                 "read embedded mvm-host-vm-init at {}: {e}",
                 host_init.display()
@@ -170,7 +170,7 @@ pub fn resolve_hvf_builder_image() -> Result<(PathBuf, PathBuf, Option<PathBuf>)
                 }],
             },
         )
-        .map_err(|e| BuilderVmError::HvfVmmFailed {
+        .map_err(|e| BuilderVmError::VmmFailed {
             detail: format!("bake hvf builder rootfs: {e}"),
         })
     })();
@@ -192,7 +192,7 @@ pub fn resolve_hvf_builder_image() -> Result<(PathBuf, PathBuf, Option<PathBuf>)
         }
         Err(e) => {
             let _ = fs::remove_dir_all(&partial);
-            return Err(BuilderVmError::HvfVmmFailed {
+            return Err(BuilderVmError::VmmFailed {
                 detail: format!(
                     "promote staged image {} -> {}: {e}",
                     partial.display(),
@@ -212,8 +212,9 @@ pub fn resolve_hvf_builder_image() -> Result<(PathBuf, PathBuf, Option<PathBuf>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_backends::driver::hvf::HvfDriver;
     use mvm_build::libkrun_builder::BuilderShellJob;
-    use mvm_runtime::builder_runner::hvf_builder::HvfBuilderVm;
+    use mvm_runtime::builder_runner::DriverBuilderVm;
 
     #[test]
     fn cache_key_is_stable_and_input_sensitive() {
@@ -351,7 +352,7 @@ fi
             extra_disks: Vec::new(),
         };
 
-        let result = HvfBuilderVm::new(kernel_path, rootfs_path)
+        let result = DriverBuilderVm::new(HvfDriver::new(), kernel_path, rootfs_path)
             .run_shell_script(&job)
             .expect("builder shell job must succeed");
         let mount_line = std::fs::read_to_string(result.job_dir.join("runtime-mount.txt"))

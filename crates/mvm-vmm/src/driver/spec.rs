@@ -152,6 +152,22 @@ pub struct PlanBinding {
 }
 
 impl VmmSpec {
+    /// Does this guest run `mvm-agentd`, i.e. is there an agent for the host to
+    /// wait on after starting the VM?
+    ///
+    /// Answered from the spec rather than assumed, because it is not always
+    /// true. A workload and the steady-state builder both declare a
+    /// [`GuestService::MachineControl`] channel — the agent's own port — but a
+    /// Stage 0 guest is the Nix seed's `stage0-init`, which serves no agent and
+    /// would never answer. A driver that waits unconditionally cannot boot one:
+    /// it burns its whole readiness deadline and then reports a guest-agent
+    /// timeout for a guest that was never going to have an agent.
+    pub fn serves_guest_agent(&self) -> bool {
+        self.vsock
+            .iter()
+            .any(|p| p.service == GuestService::MachineControl)
+    }
+
     /// The host unix socket a standing guest service binds to.
     /// `None` when the spec carries no channel for that service. Drivers use
     /// this lookup instead of each re-scanning the raw channel list.

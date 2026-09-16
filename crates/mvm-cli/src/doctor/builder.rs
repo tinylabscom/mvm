@@ -233,7 +233,7 @@ pub(super) fn builder_transport_check(plat: Platform) -> Check {
     use mvm_build::builder_backend_select::BuilderBackendChoice;
     let choice = mvm_build::builder_backend_select::resolve_choice();
     let info = match choice {
-        BuilderBackendChoice::Hvf => {
+        BuilderBackendChoice::Hvf | BuilderBackendChoice::Firecracker => {
             "vsock-only host/guest transport; no builder guest NIC, no DHCP or gateway bootstrap"
                 .to_string()
         }
@@ -322,6 +322,15 @@ pub(super) fn builder_backend_check(plat: Platform) -> Check {
     }
 
     let availability = match resolved {
+        BuilderBackendChoice::Firecracker => {
+            // The same VMM the Linux workload tier runs on, so availability is
+            // the same question: is there a KVM device to open.
+            if std::path::Path::new("/dev/kvm").exists() {
+                "Firecracker available (/dev/kvm present)".to_string()
+            } else {
+                "Firecracker NOT available (no /dev/kvm on this host)".to_string()
+            }
+        }
         BuilderBackendChoice::Libkrun => {
             if plat.has_libkrun() {
                 "libkrun available".to_string()
@@ -826,7 +835,7 @@ mod tests {
 
     #[cfg(all(target_os = "linux", feature = "builder-vm"))]
     #[test]
-    fn builder_backend_check_linux_reports_qemu_auto_detected() {
+    fn builder_backend_check_linux_reports_firecracker_auto_detected() {
         let mut env = TestEnv::new();
         env.remove("MVM_BUILDER_BACKEND");
 
@@ -835,10 +844,12 @@ mod tests {
         assert!(c.ok, "builder backend check must not fail informational");
         assert_eq!(c.name, "builder backend");
         assert_eq!(c.category, "platform");
-        // Format: `<backend> — <source> — <availability>`
+        // Format: `<backend> — <source> — <availability>`. Linux-with-KVM
+        // builds on the VMM its workloads already run on; QEMU is the explicit
+        // dev/test tier, not the automatic answer.
         assert!(
-            c.info.starts_with("qemu — "),
-            "expected qemu-resolved line; got: {}",
+            c.info.starts_with("firecracker — "),
+            "expected firecracker-resolved line; got: {}",
             c.info
         );
         assert!(
@@ -847,7 +858,8 @@ mod tests {
             c.info
         );
         assert!(
-            c.info.contains("QEMU available") || c.info.contains("QEMU NOT available"),
+            c.info.contains("Firecracker available")
+                || c.info.contains("Firecracker NOT available"),
             "expected per-VMM availability segment; got: {}",
             c.info
         );
@@ -914,7 +926,7 @@ mod tests {
 
         assert!(c.ok);
         // Env override flips the resolved backend even when
-        // `auto_detect_default()` would have picked qemu.
+        // `auto_detect_default()` would have picked firecracker.
         assert!(
             c.info.starts_with("qemu — "),
             "expected qemu-resolved line under env override; got: {}",

@@ -10,6 +10,14 @@
 
 ## In progress
 
+- [x] **Published installer production-host repair — issue #3331.**
+      `specs/plans/2026-09-15-install-lifecycle-and-packaging-polish.md` WS1.
+      Current install surfaces and the daily watcher now use the Worker-attached
+      `https://runmvm.com/install.sh` instead of the legacy `gomicrovm.com`
+      redirect that discarded `/install.sh`. Site deployment also probes the
+      production hostname for HTTP 200, shell content type, and the installer
+      marker before reporting success.
+
 - [x] **Baked installer version resolution — issue #3269.**
       `specs/plans/2026-09-15-install-lifecycle-and-packaging-polish.md` WS2.
       The normal install path downloads the baked stable release without an
@@ -21,7 +29,7 @@
 - [x] **Stable monitored install URL — issue #3268.**
       `specs/plans/2026-09-15-install-lifecycle-and-packaging-polish.md` WS1.
       The docs site publishes the repository-root installer byte-for-byte at
-      `https://gomicrovm.com/install.sh`, all install pages use that stable
+      `https://runmvm.com/install.sh`, all install pages use that stable
       path, and a daily watcher checks HTTP status, shell content type, and an
       installer marker while reconciling one tracking issue on failure and
       recovery. Website checks cover the route, docs, and monitor contract.

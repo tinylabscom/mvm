@@ -86,6 +86,15 @@ pub mod rootfs_inject;
 pub mod run_image;
 pub mod runtime_identity;
 pub mod stage0;
+/// Host-side Stage 0 pieces that belong to no particular VMM.
+///
+/// Gated with `builder-vm` because it materializes the seed root through the
+/// pure ext4 writer and re-exports the persistent-store helpers, exactly the
+/// closure the code had while it lived inside `libkrun_builder`.
+#[cfg(feature = "builder-vm")]
+pub mod stage0_host;
+/// The one kernel Stage 0 can neither build nor resolve by the ordinary policy.
+pub mod stage0_kernel;
 /// Whether a builder guest may fall back to a tmpfs Nix store, or must stop.
 pub mod store_readiness;
 pub mod template_reuse;

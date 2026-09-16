@@ -44,6 +44,7 @@ const SNAPSHOT_PUBLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_
 /// It boots what a `VmmSpec` describes and relays the guest's egress port to the
 /// host-side bridge; the claim-10 gate and substitution live in that bridge, not
 /// here.
+#[derive(Clone)]
 pub struct HvfDriver;
 
 impl HvfDriver {

@@ -41,7 +41,7 @@ use mvm_build::persistent_builder::PersistentBuilderSupervisor;
 use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_state_dir};
 use mvm_net::channel::GuestService;
 
-use super::hvf_builder::require_runtime_overlay_ext4;
+use super::driver_builder::require_runtime_overlay_ext4;
 use super::spec::{PersistentBuilderSpecInputs, persistent_builder_spec};
 use crate::driver::traits::RunningVm;
 use mvm_backends::driver::hvf::HvfDriver;
@@ -69,7 +69,7 @@ const READY_PROBE_WORKLOAD_ID: uuid::Uuid = uuid::Uuid::nil();
 ///
 /// The image (an HVF-bootable kernel plus a rootfs whose baked
 /// `mvm-host-vm-init` speaks the dispatch protocol) is supplied by the caller,
-/// same as [`HvfBuilderVm`](super::HvfBuilderVm).
+/// same as [`DriverBuilderVm`](super::DriverBuilderVm).
 pub struct HvfPersistentHostVm {
     kernel: PathBuf,
     rootfs: PathBuf,

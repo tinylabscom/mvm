@@ -69,6 +69,28 @@ impl QemuBuilderVm {
 }
 
 impl BuilderVm for QemuBuilderVm {
+    /// Delegates to the implementation; the trait method is what the generic
+    /// call sites reach. Feature-gated the same way that implementation is, so
+    /// a build without `builder-vm` refuses by name rather than failing to
+    /// compile.
+    fn run_shell_script(
+        &self,
+        job: &crate::builder_vm::BuilderShellJob,
+    ) -> Result<crate::builder_vm::BuilderShellResult, BuilderVmError> {
+        #[cfg(feature = "builder-vm")]
+        {
+            run_shell_script_qemu(job)
+        }
+        #[cfg(not(feature = "builder-vm"))]
+        {
+            let _ = job;
+            Err(BuilderVmError::VmmUnavailable {
+                requested: "qemu-builder-shell-job".to_string(),
+                reason: "the QEMU builder backend requires the `builder-vm` feature".to_string(),
+            })
+        }
+    }
+
     fn capabilities(&self) -> BuilderCapabilities {
         BuilderCapabilities {
             stage0_bootstrap: true,
