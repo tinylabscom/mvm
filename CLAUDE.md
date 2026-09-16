@@ -117,7 +117,7 @@ binaries are already embedded.
 
 **macOS 26+ Apple Silicon** users need no Homebrew prerequisites: hvf is the auto-detect default on that tier and now bootstraps its own builder VM (see "Builder backend selection" below).
 
-That last part is recent, and it is the whole reason the Homebrew requirement is gone. Stage 0 — the bootstrap that builds the builder image from nothing — used to have a hand-written body per VMM and none on hvf, so `stage0_backend_choice` lowered every hvf selection onto libkrun. Stage 0 now runs through `BuilderRunner<D: VmmDriver>` like every other builder job, and `mvmctl` registers an `HvfStage0Vm` at startup. If that registration is ever missing, the lowering onto libkrun still happens as a fallback — which is the one remaining path by which a macOS host would want the `slp/krun/*` trio.
+That last part is recent, and it is the whole reason the Homebrew requirement is gone. Stage 0 — the bootstrap that builds the builder image from nothing — used to have a hand-written body per VMM and none on hvf, so the dispatch lowered every hvf selection onto libkrun. Stage 0 now runs through `BuilderRunner<D: VmmDriver>` like every other builder job, as a `Stage0Vm<D>` generic over the driver, and `mvmctl` registers one per backend at startup. **Nothing lowers onto libkrun any more**: a backend with no registered Stage 0 refuses and names itself, because a missing registration is our wiring bug and should not present as "install these Homebrew packages".
 
 Its bootstrap kernel is fetched rather than built: it cannot be built, because Stage 0 is what makes local kernel builds possible. `mvm_build::stage0_kernel` classifies it as a **bootstrap seed** — the same classification Stage 0 already gives its Nix root tarball — so it is fetched and digest-verified even in a source checkout. This is a deliberate, narrow exception to "contributor builds never depend on mvm-published artifacts"; it covers that one kernel and nothing else, and the builder image and workload kernel keep the local-build invariant unchanged.
 
@@ -126,7 +126,8 @@ Its bootstrap kernel is fetched rather than built: it cannot be built, because S
 The builder VM (the Linux guest that runs `nix build` inside `mvmctl machine build` / `mvmctl machine run --flake`) picks between three host VMMs:
 
 - **hvf** — the HVF builder (Hypervisor.framework, no Homebrew deps). Default on macOS 26+ Apple Silicon. macOS-only.
-- **libkrun** — third-party in-process VMM via the `slp/krun/*` Homebrew trio. **Never auto-detected**; explicit opt-in only. Works everywhere mvm runs, and is still the Stage 0 fallback on a host whose hvf bootstrapper has not been registered.
+- **firecracker** — the Firecracker builder, the same VMM the Linux workload tier runs on, so a Linux host needs no second hypervisor to build with. Default on Linux-with-KVM. Bootstraps (Stage 0) today; it has no builder-image resolver yet, so steady-state builds on it refuse by name rather than running elsewhere.
+- **libkrun** — third-party in-process VMM via the `slp/krun/*` Homebrew trio. **Never auto-detected, and never fallen back to**; it runs only when named by `--builder libkrun` / `MVM_BUILDER_BACKEND=libkrun`. No builder path reaches it otherwise: a backend with no Stage 0 refuses and says so rather than lowering onto libkrun.
 - **qemu** — QEMU/microvm_nix builder (Linux dev/test substrate). Opt-in only.
 
 (The Apple Virtualization.framework builder was removed in Plan 226 R1P1.)
@@ -135,7 +136,7 @@ Selection priority (highest first):
 
 1. `--builder <libkrun|qemu|hvf>` global CLI flag.
 2. `MVM_BUILDER_BACKEND=libkrun|qemu|hvf` env var (case-insensitive, whitespace-trimmed; unrecognised values — including any retired backend name — log a warning and fall through to auto-detect).
-3. Auto-detect (`auto_detect_default_for`): **Apple Silicon macOS → hvf; every other host → qemu.** libkrun appears nowhere in it.
+3. Auto-detect (`auto_detect_default_for`): **Apple Silicon macOS → hvf; Linux-with-KVM → firecracker; every other host → qemu.** libkrun appears nowhere in it.
 
    Note what that means on macOS 13–25 Apple Silicon: auto-detect still answers hvf, which then reports the macOS 26 floor as unavailable — and there is no fallback (below). That tier has to pass `--builder libkrun` explicitly.
 

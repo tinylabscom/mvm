@@ -3,7 +3,7 @@
 Backing: shipped-source
 Validation: check-declared-backing
 
-**Status: W1–W4 COMPLETE** (host-side; no live hvf boot yet — see Validation).
+**Status: W1–W6 COMPLETE** (host-side; no live boot on any backend yet — see Validation).
 
 Stage 0 — the bootstrap that builds the builder-VM image from nothing — was the
 last builder path that talked to a VMM directly instead of through the
@@ -102,21 +102,38 @@ appends the token unconditionally, fixes it for every backend.
   defaults, the auto-fallback, the builder NIC, and the `legacy::` backend
   paths; correct those. Record delivery under `specs/sprint/delivery/`.
 
-## Deliberately out of scope
+- [x] **W5 — Firecracker, and a Linux builder VM.** `Stage0Vm<D>` and
+  `DriverBuilderVm<D>` generic over `VmmDriver` instead of HVF-only;
+  `BuilderBackendChoice::Firecracker`, auto-detected on Linux-with-KVM.
+  `FcDriver::boot`'s agent-ready wait is gated on `VmmSpec::serves_guest_agent`,
+  so a `stage0-init` guest is not waited on. `HvfVmmFailed` → `VmmFailed`.
+- [x] **W6 — no builder path requires libkrun.** The Stage 0 lowering onto
+  libkrun is deleted (an unregistered backend refuses and names itself);
+  `run_shell_script` moves onto the `BuilderVm` trait so the ext4 materializer
+  and verity sealer stop mapping `Hvf` onto `LibkrunBuilderVm`; the shell-job
+  records move out of `libkrun_builder` so `libkrun` leaves the HVF builder's
+  public signature.
 
-- **A Firecracker `BuilderBackendChoice`.** `FcDriver` already implements
-  `VmmDriver`, so W2 makes a Firecracker Stage 0 a wiring change rather than a
-  rewrite — but `FcDriver::boot` blocks on an `mvm-agentd` handshake that a
-  `stage0-init` guest will never answer, so it needs a spec-level opt-out first.
-  Tracked, not built here.
+## Deliberately out of scope
 - **Deleting the libkrun Stage 0 body.** It stays as the second working
   implementation until the generic path has live mileage. Removing it is a
   follow-up, not a precondition.
 - **`MVM_LINUX_BUILDER_VM`.** Orphaned scaffolding: a predicate, a readiness
   check and two doctor lines with no dispatch consumer, citing a plan file that
   was deleted from the tree. Its written end state (a libkrun host VM with
-  nested Firecracker) is the opposite topology from a first-class Firecracker
-  builder. Needs a decision before anything is built on it.
+  nested Firecracker) is now clearly the wrong topology — W5 makes Firecracker
+  the Linux builder directly — so this should be deleted rather than finished.
+- **A Firecracker builder-image resolver.** Firecracker bootstraps but cannot
+  serve steady-state builds: only HVF has a resolver
+  (`hvf_builder_image.rs`), so `register_driver_builders` returns `None` for
+  Firecracker and those paths refuse by name.
+- **The rest of the libkrun module residue.** `BuilderVmImage`, the Stage 0
+  store chain, the transport helpers and the image-cache readers are all
+  VMM-neutral but still live in `libkrun_builder`, so the module cannot yet be
+  feature-gated. No path *reaches* libkrun; the imports simply still name it.
+- **Making `builder-vm` unconditional.** It cannot be turned off
+  (`mvm-runtime` pins it) and costs zero crates in the closure, so ~120 of its
+  cfg sites are dead configuration.
 
 ## Validation
 

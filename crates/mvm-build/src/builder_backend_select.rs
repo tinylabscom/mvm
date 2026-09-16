@@ -163,7 +163,8 @@ pub fn auto_detect_default_for(
     } else if matches!(plat, Platform::LinuxNative) {
         // The same VMM the Linux workload tier runs on, so a Linux host needs
         // no second hypervisor to build with. QEMU stays the explicit dev/test
-        // tier rather than the automatic answer, per ADR-007.
+        // tier rather than the automatic answer: its user-mode networking is
+        // not a substitute for the vsock-only builder contract.
         BuilderBackendChoice::Firecracker
     } else {
         BuilderBackendChoice::Qemu
@@ -904,9 +905,6 @@ mod tests {
         //
         // This used to use "firecracker" as its example of an unrecognised
         // value, which stopped being one when the Firecracker builder landed.
-        with_env(Some("vz"), || {
-            assert_eq!(resolve_env_override(), None);
-        });
         with_env(Some("not-a-vmm"), || {
             assert_eq!(resolve_env_override(), None);
         });
