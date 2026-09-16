@@ -31,8 +31,8 @@ invariant. This plan closes both halves.
 | G7 | `mvm-sdk` cannot link an in-process backend: `mvm-client` → `mvm-hostd` → `mvm-sdk` is a real cycle | `crates/mvm-client/Cargo.toml:43` | WS2 |
 | G8 | MCP exposes machine lifecycle only — no files, no exec stream, no stdin | `crates/mvm-mcp/src/lib.rs:586-673` (14 tools) | WS3 |
 | G9 | Claim 13 and the SDK sidecar catalog named the retired `host.secrets.v1` service even though the live boundary is the host-side substitution endpoint | Resolved: the claim now names and witnesses the endpoint, and the retired service no longer requests the SDK sidecar | WS4 |
-| G10 | `agent-session resume --boot` is the only agent path that starts a hypervisor, and has no tests | `crates/mvm-cli/src/commands/agent_session.rs` | WS4 |
-| G11 | Plan checkboxes are inverted: the CLI workstream is ticked over unticked store/transition workstreams | `specs/plans/2026-08-18-durable-agent-sessions.md` | WS4 |
+| G10 | Resolved: `agent-session resume --boot` is covered at the CLI boundary with a successful cold-tier mock-backend boot, plus its existing refusal tests | `crates/mvm-cli/src/commands/agent_session.rs` | WS4 |
+| G11 | Resolved: partially delivered session workstreams use `[~]`, while the fully delivered CLI remains `[x]`; the refactor rollup now says the same | `specs/plans/2026-08-18-durable-agent-sessions.md` | WS4 |
 | G12 | `guides/agent-tool-contract.mdx` presents an unshipped surface under a heading a skimming reader takes as shipped | `public/src/content/docs/guides/agent-tool-contract.mdx:93-160` | WS0 |
 | G13 | **An off-the-shelf HTTPS client cannot use substitution.** The substituting guest proxy refuses `CONNECT`; the TLS terminator and per-VM egress CA exist but the workload runner never enables them. No shipped agent CLI can reach its model API with the key substituted | `crates/mvm-agentd/src/forward_proxy.rs:62-66,135`; `crates/mvm-runtime/src/workload_runner/runner/spawner.rs:107-110` | WS-S |
 | G14 | Secrets reach a workload only through `machine run --entrypoint --from-workload-ir`; transient, persistent and session paths hardcode an empty list, and PID 1 never gets a placeholder | `crates/mvm-cli/src/exec.rs:724`, `commands/vm/up/oci_persist.rs:223`, `exec/session.rs:1036` | WS-S |
@@ -316,9 +316,11 @@ Issues: [#3263](https://github.com/tinylabscom/mvm/issues/3263), [#3264](https:/
 - [x] Validate the claim-authority repair with focused regressions, workspace
       check and clippy, Linux-gated target checks, generated-stub drift checks,
       and the hermetic BDD suite.
-- [ ] Test `agent-session resume --boot` (`crates/mvm-cli/src/commands/agent_session.rs`).
-      It starts a hypervisor and has no coverage.
-- [ ] Reconcile `specs/plans/2026-08-18-durable-agent-sessions.md` (WS6 ticked
+- [x] Test `agent-session resume --boot` (`crates/mvm-cli/src/commands/agent_session.rs`).
+      Cover a successful cold-tier boot through the CLI-owned client boundary,
+      including the approval fence, durable generation transition, admitted
+      workload identity, runtime overlay, and mock backend start.
+- [x] Reconcile `specs/plans/2026-08-18-durable-agent-sessions.md` (WS6 ticked
       over unticked WS1/WS3/WS4) and the matching rows in
       `specs/REFACTOR-STATUS.md`.
 - [ ] Add a BDD scenario that boots the `examples/agent-workload/` image, drives

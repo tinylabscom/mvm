@@ -389,14 +389,14 @@ Numbering was reconciled before these documents landed on main (PR #2691):
 
 ## Workstreams
 
-- [ ] **WS1 — Session store.** `mvm-runtime/src/agent_session/` mirroring
+- [~] **WS1 — Session store.** `mvm-runtime/src/agent_session/` mirroring
       `checkpoint/`, over a new `mvm_core::config::agent_sessions_dir()`.
       Record and store landed
       (`2026-08-18-durable-session-substrate`); journal
       persistence and approval-ledger head caching have not.
 - [ ] **WS2 — `SessionBinding` on `CheckpointMeta`.** Field, digest coverage,
       digest tests.
-- [ ] **WS3 — Park path.** `ParkReason`, tier selection, quiesce sequence over
+- [~] **WS3 — Park path.** `ParkReason`, tier selection, quiesce sequence over
       the existing guest verbs, hibernation record commit ordering.
       `ParkReason`, `select_tier`, the record's `park()`/`resume()`
       transitions, and crash-safe record commit landed
@@ -411,7 +411,7 @@ Numbering was reconciled before these documents landed on main (PR #2691):
       D3 describes has no way to find the parked session an incoming response
       belongs to. That lookup is unbuilt and is not tracked as anyone's task
       today.
-- [ ] **WS4 — Resume path.** `resume_session`, incremental ledger-head
+- [~] **WS4 — Resume path.** `resume_session`, incremental ledger-head
       verification, fresh-plan synthesis, tier selection, `PostRestore`
       fabric re-registration.
       The ledger-head half of verification landed
@@ -443,7 +443,7 @@ Numbering was reconciled before these documents landed on main (PR #2691):
       real resume; the steps it does not implement — tier selection,
       `PostRestore`, credential minting — still do not. A session parked with
       `approval_head: None` resumes with no ledger fence at all.
-- [ ] **WS5 — Retention ladder + GC.** Partially delivered by
+- [~] **WS5 — Retention ladder + GC.** Partially delivered by
       `2026-08-18-session-retention`: the existing
       `checkpoints_dir()` sweep (`mvmctl cache prune`) now refuses to reap a
       checkpoint any live or hibernated session names as its parent, a manual
@@ -474,7 +474,7 @@ Numbering was reconciled before these documents landed on main (PR #2691):
       `approve` and `close` are **not** delivered: there is no `close()`
       transition on the record and no approval-grant surface for a CLI to
       drive.
-- [ ] **WS7 — Chain records.** Partial. `session.parked` and
+- [~] **WS7 — Chain records.** Partial. `session.parked` and
       `session.resumed` are emitted by the CLI's park and resume paths
       (`AuditEmitter::emit_session_parked` / `emit_session_resumed`), each
       carrying non-colliding extras so a per-event label cannot overwrite a
