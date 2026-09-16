@@ -1381,6 +1381,7 @@ pub fn resolve_launch(
             vm_name: &vm_name,
             sdk_sidecar: sdk_sidecar.as_ref(),
             assets: shape.assets,
+            volumes: &start_config.volumes,
         })?
     {
         start_config.tenant_id = Some(sub.tenant_id);

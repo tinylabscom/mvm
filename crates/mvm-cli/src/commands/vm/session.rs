@@ -1018,6 +1018,7 @@ fn cmd_start(args: StartArgs) -> Result<()> {
             vm_name,
             sdk_sidecar: _,
             assets,
+            volumes,
         } = inputs;
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
         let ctx = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
@@ -1042,7 +1043,7 @@ fn cmd_start(args: StartArgs) -> Result<()> {
             policy_dir: None,
             bundle_pin: None,
             deps_volume: None,
-            shares: vec![],
+            shares: mvm_hostd::run::shares_from_vm_volumes(volumes),
             assets: assets.to_vec(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),

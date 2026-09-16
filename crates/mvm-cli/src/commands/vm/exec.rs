@@ -705,6 +705,7 @@ pub(in crate::commands) fn run_secure_with_source(
             vm_name,
             sdk_sidecar,
             assets,
+            volumes,
         } = inputs;
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
         let ctx = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
@@ -730,14 +731,10 @@ pub(in crate::commands) fn run_secure_with_source(
             policy_dir: None,
             bundle_pin: None,
             deps_volume: None,
-            // The grant comes from the attachment the launch resolution chose,
-            // not from a second resolution here: one lookup produces the volume
-            // that is attached and the grant that admits it, so the plan cannot
-            // name bytes other than the ones mounted.
-            shares: sdk_sidecar
-                .map(|attachment| attachment.grant.clone())
-                .into_iter()
-                .collect(),
+            // The grants come from the launch config's own volume list, so the
+            // plan names exactly what the backend will mount and every
+            // attachment has something to be checked against (claim 1).
+            shares: super::up::policy::admitted_shares_for_boot(volumes, sdk_sidecar),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: admit_network_policy.clone(),
             agent_verb_override: admit_agent_verb.clone(),
