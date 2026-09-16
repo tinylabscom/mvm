@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MvmConfig {
+    /// Default tenant label used when neither the CLI nor `MVM_TENANT` names one.
+    pub tenant: UserTenantConfig,
     /// vCPUs allocated to the dev VM (default: 8). macOS uses Apple
     /// Container; Linux uses native KVM.
     pub dev_vm_cpus: u32,
@@ -87,6 +89,14 @@ pub struct MvmConfig {
     /// issuer key — the plan's grants are still measured against this host's
     /// ceiling and budget, which the signer cannot widen.
     pub trusted_plan_signers: Vec<TrustedPlanSigner>,
+}
+
+/// Tenant defaults stored in the user config's `[tenant]` table.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UserTenantConfig {
+    /// Default tenant label. An empty value falls back to `local`.
+    pub name: String,
 }
 
 /// One external plan signer the operator has chosen to trust: the
@@ -218,6 +228,7 @@ impl MvmConfig {
 impl Default for MvmConfig {
     fn default() -> Self {
         Self {
+            tenant: UserTenantConfig::default(),
             dev_vm_cpus: 8,
             dev_vm_mem_gib: 16,
             default_cpus: 2,
@@ -260,8 +271,13 @@ fn config_dir(override_dir: Option<&Path>) -> PathBuf {
     }
 }
 
-fn config_path(dir: &Path) -> PathBuf {
+fn config_path_at(dir: &Path) -> PathBuf {
     dir.join("config.toml")
+}
+
+/// Canonical user config path: `<mvm_home>/config/config.toml`.
+pub fn config_path() -> PathBuf {
+    config_path_at(&config_dir(None))
 }
 
 /// Load `MvmConfig` from `<mvm_config_dir>/config.toml` (or `override_dir/config.toml` in tests).
@@ -270,7 +286,7 @@ fn config_path(dir: &Path) -> PathBuf {
 /// parsed, defaults are returned with a warning.
 pub fn load(override_dir: Option<&Path>) -> MvmConfig {
     let dir = config_dir(override_dir);
-    let path = config_path(&dir);
+    let path = config_path_at(&dir);
 
     if !path.exists() {
         let cfg = MvmConfig::default();
@@ -300,7 +316,7 @@ pub fn save(cfg: &MvmConfig, override_dir: Option<&Path>) -> Result<()> {
     let dir = config_dir(override_dir);
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("Failed to create config directory: {}", dir.display()))?;
-    let path = config_path(&dir);
+    let path = config_path_at(&dir);
     let text = toml::to_string_pretty(cfg).context("Failed to serialize config")?;
     std::fs::write(&path, text)
         .with_context(|| format!("Failed to write config to {}", path.display()))
@@ -464,6 +480,9 @@ mod tests {
     #[test]
     fn test_toml_roundtrip() {
         let cfg = MvmConfig {
+            tenant: UserTenantConfig {
+                name: "tenant-a".to_string(),
+            },
             dev_vm_cpus: 4,
             metrics_port: Some(9091),
             ..MvmConfig::default()
@@ -474,6 +493,15 @@ mod tests {
         assert_eq!(parsed.dev_vm_cpus, 4);
         assert_eq!(parsed.metrics_port, Some(9091));
         assert_eq!(parsed.dev_vm_mem_gib, 16);
+        assert_eq!(parsed.tenant.name, "tenant-a");
+    }
+
+    #[test]
+    fn canonical_config_path_is_nested_under_config_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = crate::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        assert_eq!(config_path(), home.path().join("config/config.toml"));
     }
 
     #[test]

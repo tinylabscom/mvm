@@ -86,7 +86,7 @@ pub struct ManifestSignature {
 /// that worker's enrolled attestation pubkey via [`verify_signature`]'s
 /// `trusted_signers`. This loader is the local host's own signing identity.
 pub fn host_snapshot_identity() -> Result<IdentityKey> {
-    let dir = PathBuf::from(crate::config::mvm_home()).join("attestation");
+    let dir = crate::config::attestation_dir();
     crate::crypto::attestation::identity::load_or_init_at(&dir)
 }
 

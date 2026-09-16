@@ -27,7 +27,7 @@
 //!
 //! Boundary: build inputs + dev sizing only. No `role` (the flake's
 //! profile selects role variants), no `[network]` (runtime policy
-//! lives in `mvmctl up` flags / `~/.mvm/config.toml` / mvmd tenant
+//! lives in `mvmctl up` flags / `~/.mvm/config/config.toml` / mvmd tenant
 //! config), no dependencies (Nix owns build deps; mvmd owns runtime
 //! deps).
 

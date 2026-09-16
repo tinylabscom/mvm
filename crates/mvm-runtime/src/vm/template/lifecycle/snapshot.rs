@@ -40,7 +40,7 @@ pub fn template_snapshot_info_for_slot(slot_hash: &str) -> Result<Option<Snapsho
 /// `template_id` is set to the manifest hash; `role` is empty (manifest
 /// schema doesn't carry a role); `default_network_policy` is `None`
 /// (the manifest schema doesn't carry network policy either —
-/// runtime policy comes from CLI flags / `~/.mvm/config.toml` / mvmd).
+/// runtime policy comes from CLI flags / `~/.mvm/config/config.toml` / mvmd).
 fn persisted_to_synthetic_spec(p: &PersistedManifest) -> TemplateSpec {
     TemplateSpec {
         schema_version: p.schema_version,
@@ -264,9 +264,7 @@ mod tests {
     /// resolves it. Only `manifest.json` is read for the arch decision — no
     /// signature, no install step.
     fn install_bundle_manifest(sha: &str, arch: &str) {
-        let dir = std::path::PathBuf::from(mvm_core::config::mvm_home())
-            .join("bundles")
-            .join(sha);
+        let dir = mvm_core::config::bundles_dir().join(sha);
         std::fs::create_dir_all(&dir).expect("bundle dir");
         let manifest = serde_json::json!({
             "schema_version": mvm_core::plan::bundle::BUNDLE_SCHEMA_VERSION,

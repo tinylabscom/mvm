@@ -168,7 +168,7 @@ fn libkrun_lifecycle_start_status_stop() {
 }
 
 fn dev_artifacts_dir() -> PathBuf {
-    PathBuf::from(mvm_core::config::mvm_home()).join("dev/current")
+    mvm_core::config::dev_dir().join("current")
 }
 
 fn vms_root() -> PathBuf {

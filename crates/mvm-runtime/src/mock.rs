@@ -149,9 +149,7 @@ impl MockBackend {
     /// `pause.rs` and `resume.rs` read the snapshot directory through
     /// here when `--hypervisor mock` is set.
     pub fn vm_dir(name: &str) -> std::path::PathBuf {
-        std::path::PathBuf::from(mvm_core::config::mvm_home())
-            .join("mock-vms")
-            .join(name)
+        mvm_core::config::mock_vms_dir().join(name)
     }
 }
 

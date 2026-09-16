@@ -84,9 +84,7 @@ impl RegistryConfig {
             .unwrap_or_else(|| {
                 "https://raw.githubusercontent.com/tinylabscom/mvm-templates/main".to_string()
             });
-        let cache_root = PathBuf::from(mvm_core::config::mvm_home())
-            .join("templates")
-            .join("remote");
+        let cache_root = mvm_core::config::remote_templates_dir();
         Self {
             registry_url,
             cache_root,

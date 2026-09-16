@@ -327,7 +327,7 @@ fn check_tool_staging_dir(home: Option<&std::path::Path>) -> PostureCheck {
     let path = match std::env::var_os(mvm_hostd::supervisor::tools::staging::STAGING_DIR_ENV_VAR) {
         Some(p) => std::path::PathBuf::from(p),
         None => match home {
-            Some(_) => std::path::PathBuf::from(mvm_core::config::mvm_home()).join("tool-staging"),
+            Some(_) => mvm_core::config::tool_staging_dir(),
             None => {
                 return PostureCheck {
                     name: "tool_staging_dir",

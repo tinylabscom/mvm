@@ -905,7 +905,7 @@ fn manifest_alias_set_emits_manifest_alias_set_audit_entry() {
 #[test]
 fn config_set_emits_config_change_audit_entry() {
     // `mvmctl config set <key> <value>` writes to
-    // `~/.mvm/config.toml` and emits `ConfigChange` — config file
+    // `~/.mvm/config/config.toml` and emits `ConfigChange` — config file
     // mutations are the only after-the-fact record of operator
     // intent on settings that change runtime behavior (default
     // backend, network policy, etc.).
