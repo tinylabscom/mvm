@@ -22,13 +22,13 @@ You **do not need Nix on your Mac**. You run `mvmctl machine build` from macOS, 
 ### One-liner
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tinylabscom/mvm/main/install.sh | sh
+curl -fsSL https://gomicrovm.com/install.sh | sh
 ```
 
 ### Pin a version
 
 ```bash
-MVM_VERSION=v0.16.1 curl -fsSL https://raw.githubusercontent.com/tinylabscom/mvm/main/install.sh | sh
+MVM_VERSION=v0.16.1 curl -fsSL https://gomicrovm.com/install.sh | sh
 ```
 
 ### From source
