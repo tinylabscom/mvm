@@ -221,6 +221,16 @@ fn discover_adrs(root: &Path) -> Result<BTreeMap<u32, String>> {
 /// sequenced, not to make broken references permanent.
 const KNOWN_MISSING_ADRS: &[(u32, &str)] = &[
     (
+        106,
+        "cited by ADR-001's claim-3 row for the block+ext4 dm-verity scoping; the file was never \
+         written or was deleted — the scoping rationale must move into ADR-001 itself (#3318)",
+    ),
+    (
+        107,
+        "cited by ADR-001 as the sole authority for why virtiofs-root does not witness claim 3; \
+         the file does not exist, so a numbered claim's backend exclusion rests on nothing (#3318)",
+    ),
+    (
         9,
         "function-call entrypoints — split across ADR-005/008/010/011 during the function-service \
          refactor; references to the original ADR-009 number are historical",
