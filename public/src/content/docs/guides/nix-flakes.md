@@ -266,70 +266,159 @@ These map to `packages.${system}.<profile>` in the flake.
 
 ## Running an LLM agent inside a microVM
 
-A worked example: a microVM that boots `claude-code` (or any other
-agent binary) and reads its API key from a file you mount into the
-guest yourself. This is a manual file-materialization path, not the
-managed-secret model. For host-mediated managed secret refs, use
-`mvm.toml` or the SDKs. You write this in **your project's** flake —
-mvm doesn't ship a starter image to fork; you compose `mkGuest`
-yourself per [Building MicroVM Images](/guides/building-microvm-images).
+The API key stays on the host. The guest receives an opaque placeholder
+(`mvm-secret-…`) in its environment, sends it where the key would go, and the
+per-VM network endpoint on the host swaps in the real key on the way out, only
+toward the hosts the secret is bound to. What the guest receives, what the host
+checks, and what gets audited is covered in
+[Agent sandbox](/guides/agent-sandbox/). This section is the flake shape that
+path needs. You write it in **your project's** flake; mvm does not ship a
+starter image to fork.
+
+Two things make this image different from a plain `entrypoint.command` image:
+
+- **The agent runs per call, not as PID 1.** The placeholder is injected only
+  into the entrypoint the guest agent launches for
+  `mvmctl machine run --entrypoint`. Nothing injects it into PID 1's
+  environment. In a plain `entrypoint.command` image the same file is both
+  PID 1's command and the per-call entrypoint, so the agent would also run at
+  boot, without a placeholder, and the VM powers off when it exits. Here PID 1
+  idles (`bootCommand`), and `/etc/mvm/entrypoint` is a separate script the
+  guest agent runs on each call.
+- **The per-call entrypoint starts with an empty environment.** It gets
+  `HTTP_PROXY`/`HTTPS_PROXY` (and lowercase forms) pointing at the in-guest
+  proxy, the placeholder variables, and nothing else. Set `HOME`, `PATH`, and
+  anything else your agent needs in the script.
 
 ```nix
-# my-claude-code-vm/flake.nix
+# my-agent-vm/flake.nix
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
     mvm.url     = "github:tinylabscom/mvm";
-    # Or from numtide/llm-agents.nix for the agent binary.
   };
 
   outputs = { self, nixpkgs, mvm, ... }:
     let
       system = "x86_64-linux";
       pkgs   = import nixpkgs { inherit system; };
+
+      idle = [ "/bin/sh" "-c" "while :; do /bin/busybox sleep 2147483647; done" ];
+
+      # One Messages API call; the prompt arrives on stdin.
+      agent = pkgs.writeScript "agent" ''
+        #!${pkgs.python3}/bin/python3
+        import http.client, json, os, sys, urllib.parse
+
+        proxy = urllib.parse.urlsplit(os.environ["HTTPS_PROXY"])
+        conn = http.client.HTTPConnection(proxy.hostname, proxy.port, timeout=30)
+        # Absolute-form request: the in-guest proxy reads the destination from
+        # the URL and does not accept CONNECT tunnels.
+        conn.request(
+            "POST",
+            "https://api.anthropic.com/v1/messages",
+            body=json.dumps({
+                "model": "claude-opus-5",
+                "max_tokens": 1024,
+                "messages": [{"role": "user", "content": sys.stdin.read()}],
+            }),
+            headers={
+                "x-api-key": os.environ["ANTHROPIC_API_KEY"],  # the placeholder
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+        )
+        resp = conn.getresponse()
+        sys.stdout.write(resp.read().decode())
+        sys.exit(0 if resp.status == 200 else 1)
+      '';
+
+      entry = pkgs.writeScript "agent-entrypoint" ''
+        #!/bin/sh
+        export HOME=/tmp
+        exec ${agent}
+      '';
     in
     {
       packages.${system}.default = mvm.lib.${system}.mkGuest {
-        name = "claude-code";
-
-        entrypoint.command = [ "${pkgs.claude-code}/bin/claude" "code" ];
-
-        # If you choose to mount a credentials file manually, keep it
-        # out of the rootfs and point the app at the mounted path.
-        # Managed secret refs are declared through mvm.toml / SDKs,
-        # not through this flake-only example.
-
-        # Defense in depth: the workload is rootless by default in
-        # prod (uid 1000); per-service seccomp tier lands in Phase 6.
-        # See /guides/building-microvm-images#rootless-workloads.
+        name = "agent";
+        # PID 1 only keeps the VM up. `entrypoint.command` classifies the
+        # image as sealed; with `bootCommand` set, mkGuest does not write it
+        # to /etc/mvm/entrypoint.
+        entrypoint.command = idle;
+        bootCommand = idle;
+        extraFiles."/etc/mvm/entrypoint" = { source = entry; mode = "0755"; };
+        packages = [ pkgs.python3 ];
       };
     };
 }
 ```
 
-```bash
-mkdir -p ~/.mvm/config/secrets
-printf '%s\n' 'sk-ant-…' > ~/.mvm/config/secrets/anthropic
-chmod 0400 ~/.mvm/config/secrets/anthropic
+The secret is declared in Workload IR, not in the flake and not in `mvm.toml`
+(which has no secret key). The SDKs write this file for you
+(`mvm.secret(...)` compiled by `mvmctl build compile`); for a hand-written
+flake, write it yourself next to `flake.nix`:
 
-cd my-claude-code-vm
-mvmctl machine build
-mvmctl machine run --manifest . --profile dev --name agent -d \
-  --mount "$PWD:/work:rw" \
-  --mount "$HOME/.mvm/config/secrets:/data/secrets:ro"
+```json
+{
+  "schema_version": "0.1",
+  "id": "agent",
+  "apps": [
+    {
+      "name": "agent",
+      "source": { "kind": "local_path", "path": "." },
+      "image": { "kind": "nix_packages", "packages": [] },
+      "entrypoints": [],
+      "resources": { "cpu_cores": 2, "memory_mb": 2048, "rootfs_size_mb": 4096 },
+      "env": {
+        "ANTHROPIC_API_KEY": {
+          "kind": "secret_ref",
+          "ref": {
+            "name": "anthropic",
+            "mount": { "kind": "env", "var": "ANTHROPIC_API_KEY" },
+            "auth_type": "bearer",
+            "allowed_hosts": ["api.anthropic.com"]
+          }
+        }
+      }
+    }
+  ]
+}
 ```
 
-A guest mount path must sit under `/data` or `/work` — those are the only two
-allow-roots. `/mnt/*` is refused outright so a share cannot shadow the
-runtime's own config and secrets drives. A `:rw` share additionally needs a
-**persistent** machine (`--name` plus `-d`) and `--profile dev`; a transient
-run's shares are read-only under every profile.
+The entrypoint path uses only the secret references from this file: those in
+an app's `env`, and those in an entrypoint's own `env`.
+`var` names the guest variable; `name` is the host secret it resolves to. The
+destination list and auth type the host enforces come from
+`mvmctl secret set`, not from `allowed_hosts` and `auth_type` here.
 
-Inside the guest, your workload can read the file you mounted under
-`/data/secrets`. If you do not want the guest to ever see the raw
-credential, do not use this manual file-mount pattern; use managed
-secret refs instead.
+```bash
+# Store the key and bind it to api.anthropic.com. Prompts for the value, or
+# reads it from a pipe; it never goes on the command line.
+mvmctl secret set anthropic --provider anthropic
+
+cd my-agent-vm
+echo "Say hello in five words." | mvmctl machine run --flake . --entrypoint \
+  --from-workload-ir ./workload.json \
+  --allow-host api.anthropic.com \
+  --timeout 120
+```
+
+`--timeout` bounds the whole entrypoint call and defaults to 30 seconds; a call
+that outlives it exits with status 124. Each proxied request also has its own
+30-second limits (to the response head, and on any stall), so keep a single
+model call short (the example caps `max_tokens`).
+
+`--allow-host` is required: egress is denied by default, and a bound secret
+does not open a destination on its own. `--from-workload-ir` is what puts the
+secret into the signed plan; without it the entrypoint runs with no placeholder
+and no proxy variables.
+
+If a workload needs a credential that is not sent in an HTTP request header
+(a database password, a TLS client key), substitution cannot carry it. See
+[Secrets and credentials](/guides/secrets-and-credentials/) for file-shaped
+secrets, and treat any guest that can read one as holding the real value.
 
 Why a microVM and not a process sandbox: process sandboxes share the host kernel and trust it. A microVM gives the agent its own kernel, so a kernel exploit can't pivot to the host.
 
-Full security composition (per-service uid, seccomp tier, secrets mode, verified boot) is documented in [ADR-001](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/001-microvm-security-posture.md) and the [Rootless workloads section](/guides/building-microvm-images#rootless-workloads).
+Full security composition (per-service uid, seccomp tier, verified boot) is documented in [ADR-001](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/001-microvm-security-posture.md) and the [Rootless workloads section](/guides/building-microvm-images#rootless-workloads).

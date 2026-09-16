@@ -35,6 +35,8 @@ policy decision, or troubleshooting path.
 
 Start with [AI Agent Integration](/guides/ai-agent-integration/) for the
 system shape, then use [Agent Tool Contract](/guides/agent-tool-contract/)
-for the model-facing request and response boundary. Keep tool calls
+for the model-facing request and response boundary, and
+[Agent Sandbox](/guides/agent-sandbox/) for how an agent calls a model API
+while its key stays on the host. Keep tool calls
 narrow: explicit files, explicit argv, explicit timeouts, explicit egress,
 and explicit retention.

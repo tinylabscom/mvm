@@ -4,8 +4,9 @@ Declares a **bearer** secret bound to a single destination host. The guest
 never sees the real credential: `mvm.secret(...)` only puts an opaque
 placeholder (`mvm-secret-<hex>`) into the `API_KEY` env var. On an outbound
 request carrying that placeholder, the host substitution endpoint swaps in the
-real value and makes the real TLS — and refuses any destination not in
-`hosts=[...]` (claim 12). The raw secret stays on the host, in one process.
+real value and originates the upstream request itself — and refuses any
+destination not in `hosts=[...]` (claim 12). The raw secret stays on the host,
+in one process.
 
 Set the secret on the host first (the value is piped, never on argv):
 
@@ -15,12 +16,16 @@ Set the secret on the host first (the value is piped, never on argv):
 Run it locally on a /dev/kvm host:
 
     mvmctl build compile examples/python/secret-egress/app.py --out /tmp/secret-egress
-    mvmctl machine run --flake /tmp/secret-egress
+    mvmctl machine run --flake /tmp/secret-egress --entrypoint \
+        --from-workload-ir /tmp/secret-egress/workload.json \
+        --allow-host httpbin.org:80
 
 `compile` strips the managed `SecretRef` out of the baked image (secret-free
-rootfs) and records it in `workload.json`; `up` lowers that into a signed
-`ExecutionPlan.secrets` and admits it, spawning the per-VM substitution
-endpoint at boot. `httpbin.org/get` reflects the request headers, so the
+rootfs) and records it in `workload.json`. Nothing discovers that file on its
+own: `--entrypoint --from-workload-ir` is what lowers it into a signed
+`ExecutionPlan.secrets`, admits it, and injects the placeholder into the
+per-call entrypoint. A plain `machine run --flake` runs with no placeholder.
+`--allow-host` admits the destination; egress is denied by default. `httpbin.org/get` reflects the request headers, so the
 response shows the **real** credential reached the destination while the
 workload only ever held the placeholder; any host not in `hosts=[...]` is
 refused (claim 12).
