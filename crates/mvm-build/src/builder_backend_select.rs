@@ -14,7 +14,8 @@
 //! 2. **Env var** `MVM_BUILDER_BACKEND` — `libkrun` / `hvf` /
 //!    `qemu`, case-insensitive, surrounding whitespace trimmed.
 //! 3. **Auto-detect** by host platform when neither override is set:
-//!    Apple Silicon macOS → HVF builder; every other host → QEMU builder.
+//!    Apple Silicon macOS 26+ → HVF builder; Linux with KVM → Firecracker;
+//!    every other host → QEMU builder.
 //!
 //! An unrecognised env value (typo, removed backend) falls through to
 //! auto-detect with a `tracing::warn!` so the operator sees the
@@ -143,13 +144,12 @@ impl BuilderBackendChoice {
     }
 }
 
-/// Pure auto-detect from the platform and a single boolean:
-/// "is this host macOS on Apple Silicon?" Lifted out so unit tests are
-/// fully hermetic — they don't have to spoof the live OS version or the
-/// compile-time `cfg!(target_arch)` macro.
+/// Pure auto-detect from the platform, architecture, and HVF-default OS tier.
+/// Lifted out so unit tests are fully hermetic — they don't have to spoof the
+/// live OS version or the compile-time `cfg!(target_arch)` macro.
 ///
 /// Decision:
-/// - Apple Silicon macOS → HVF builder (the backend reports the macOS 26 floor)
+/// - Apple Silicon macOS 26+ → HVF builder
 /// - Linux with `/dev/kvm` → Firecracker builder, the VMM the Linux workload
 ///   tier already uses
 /// - every other host → QEMU builder (availability determines whether the
@@ -157,8 +157,9 @@ impl BuilderBackendChoice {
 pub fn auto_detect_default_for(
     plat: Platform,
     is_macos_apple_silicon: bool,
+    is_hvf_default_tier: bool,
 ) -> BuilderBackendChoice {
-    if is_macos_apple_silicon {
+    if is_macos_apple_silicon && is_hvf_default_tier {
         BuilderBackendChoice::Hvf
     } else if matches!(plat, Platform::LinuxNative) {
         // The same VMM the Linux workload tier runs on, so a Linux host needs
@@ -171,12 +172,14 @@ pub fn auto_detect_default_for(
     }
 }
 
-/// Auto-detect using the live runtime platform + compile-time arch.
-/// The architecture check keeps unsupported Intel hosts out of the native HVF
-/// path. Runtime availability reports the macOS 26 minimum on older systems.
+/// Auto-detect using the live runtime platform, OS version, and compile-time
+/// architecture. The architecture check keeps unsupported Intel hosts out of
+/// the native HVF path, while the platform predicate keeps macOS 13–25 on the
+/// QEMU builder instead of selecting an unavailable backend.
 pub fn auto_detect_default() -> BuilderBackendChoice {
-    let is_target = matches!(current(), Platform::MacOS) && cfg!(target_arch = "aarch64");
-    auto_detect_default_for(current(), is_target)
+    let platform = current();
+    let is_target = matches!(platform, Platform::MacOS) && cfg!(target_arch = "aarch64");
+    auto_detect_default_for(platform, is_target, platform.is_hvf_default_tier())
 }
 
 /// Parse the env var on its own, without applying auto-detect when
@@ -831,8 +834,16 @@ mod tests {
     #[test]
     fn auto_detect_default_for_apple_silicon_macos_picks_hvf() {
         assert_eq!(
-            auto_detect_default_for(Platform::MacOS, true),
+            auto_detect_default_for(Platform::MacOS, true, true),
             BuilderBackendChoice::Hvf
+        );
+    }
+
+    #[test]
+    fn auto_detect_default_for_pre_26_apple_silicon_macos_picks_qemu() {
+        assert_eq!(
+            auto_detect_default_for(Platform::MacOS, true, false),
+            BuilderBackendChoice::Qemu
         );
     }
 
@@ -841,26 +852,25 @@ mod tests {
         // Linux-with-KVM builds on the VMM its workloads already run on. QEMU
         // stays the explicit dev/test tier rather than the automatic answer.
         assert_eq!(
-            auto_detect_default_for(Platform::LinuxNative, false),
+            auto_detect_default_for(Platform::LinuxNative, false, false),
             BuilderBackendChoice::Firecracker
         );
     }
 
     #[test]
     fn auto_detect_default_never_selects_optional_libkrun() {
-        // Supported Apple Silicon Macs pass `true` regardless of OS version,
-        // select HVF, and let the HVF availability check enforce its OS floor.
-        // Other hosts stay on the dependency-free QEMU builder path.
+        // Intel Macs and hosts without KVM stay on the dependency-free QEMU
+        // builder path. libkrun remains an explicit opt-in backend.
         assert_eq!(
-            auto_detect_default_for(Platform::MacOS, false),
+            auto_detect_default_for(Platform::MacOS, false, false),
             BuilderBackendChoice::Qemu
         );
         assert_eq!(
-            auto_detect_default_for(Platform::Wsl2, false),
+            auto_detect_default_for(Platform::Wsl2, false, false),
             BuilderBackendChoice::Qemu
         );
         assert_eq!(
-            auto_detect_default_for(Platform::LinuxNoKvm, false),
+            auto_detect_default_for(Platform::LinuxNoKvm, false, false),
             BuilderBackendChoice::Qemu
         );
     }
@@ -1161,16 +1171,16 @@ mod tests {
     #[test]
     fn linux_with_kvm_auto_detects_the_firecracker_builder() {
         assert_eq!(
-            auto_detect_default_for(Platform::LinuxNative, false),
+            auto_detect_default_for(Platform::LinuxNative, false, false),
             BuilderBackendChoice::Firecracker
         );
         // Apple Silicon is unchanged, and a non-KVM host still gets QEMU.
         assert_eq!(
-            auto_detect_default_for(Platform::MacOS, true),
+            auto_detect_default_for(Platform::MacOS, true, true),
             BuilderBackendChoice::Hvf
         );
         assert_eq!(
-            auto_detect_default_for(Platform::LinuxNoKvm, false),
+            auto_detect_default_for(Platform::LinuxNoKvm, false, false),
             BuilderBackendChoice::Qemu
         );
     }

@@ -10,6 +10,15 @@
 
 ## In progress
 
+- [x] **Keep pre-26 Apple Silicon Macs off the unavailable HVF builder — issue #3325.**
+      Auto-detection now requires both Apple Silicon and the existing macOS
+      26+ HVF-default tier before selecting HVF; older supported Macs select
+      QEMU while explicit backend choices remain unchanged. The feature-enabled
+      selector module passes 54 tests with one ignored, and the exact doctor
+      regression test passes; workspace check, clippy, and all 68 repository
+      gates pass. The full workspace run passed all suites except two parallel
+      image-lock collisions, and both exact isolated reruns passed.
+
 - [x] **Hermetic published-documentation link gate — issue #3328.**
       Validate repository files, same-repository GitHub links, and internal
       documentation/site routes on every `check-all` run, and repair the

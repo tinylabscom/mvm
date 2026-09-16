@@ -516,6 +516,9 @@ Measured and partly executed 2026-09-15.
       coverage. Issue #3264.
 - [ ] **K5** Install and packaging lifecycle. Epic #3277.
 - [ ] **K6** The signature hole in claim 20. Issue #3272.
+- [x] **K7** Keep macOS 13–25 Apple Silicon auto-detection off the unavailable
+      HVF builder by consulting the existing macOS 26+ platform tier. Issue
+      #3325.
 
 ## Definition of done
 

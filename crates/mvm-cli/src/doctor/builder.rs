@@ -277,7 +277,8 @@ pub(super) fn builder_transport_check(_plat: Platform) -> Check {
 ///
 /// `mvm_build::builder_backend_select` enforces priority
 /// `--builder` flag > `MVM_BUILDER_BACKEND` env > platform default
-/// (Apple Silicon macOS → hvf; all other native hosts → qemu). The flag is
+/// (Apple Silicon macOS 26+ → hvf; Linux with KVM → firecracker; all other
+/// hosts → qemu). The flag is
 /// folded into the env at startup (`commands::run`), so by the time doctor
 /// runs every override is observable via env.
 ///
@@ -285,6 +286,19 @@ pub(super) fn builder_transport_check(_plat: Platform) -> Check {
 /// explicit development override selects it.
 #[cfg(feature = "builder-vm")]
 pub(super) fn builder_backend_check(plat: Platform) -> Check {
+    builder_backend_check_for(
+        plat,
+        matches!(plat, Platform::MacOS) && cfg!(target_arch = "aarch64"),
+        plat.is_hvf_default_tier(),
+    )
+}
+
+#[cfg(feature = "builder-vm")]
+fn builder_backend_check_for(
+    plat: Platform,
+    is_macos_apple_silicon: bool,
+    is_hvf_default_tier: bool,
+) -> Check {
     use mvm_build::builder_backend_select::{
         BuilderBackendChoice, MVM_BUILDER_BACKEND_ENV, MVM_LINUX_BUILDER_VM_ENV,
         auto_detect_default_for, linux_builder_vm_requested, resolve_env_override,
@@ -297,10 +311,7 @@ pub(super) fn builder_backend_check(plat: Platform) -> Check {
     // while the availability half described `plat`, so the two could disagree
     // and the report would be internally inconsistent. It also made the
     // function untestable for any platform other than the one running it.
-    let auto = auto_detect_default_for(
-        plat,
-        matches!(plat, Platform::MacOS) && cfg!(target_arch = "aarch64"),
-    );
+    let auto = auto_detect_default_for(plat, is_macos_apple_silicon, is_hvf_default_tier);
     let resolved = env_override.unwrap_or(auto);
 
     // Best-effort: detect whether the override came from the
@@ -824,13 +835,27 @@ mod tests {
 
         #[cfg(target_arch = "aarch64")]
         {
-            let macos = builder_backend_check(Platform::MacOS);
+            let macos = builder_backend_check_for(Platform::MacOS, true, true);
             assert!(
                 macos.info.starts_with("hvf — "),
-                "macOS on aarch64 must resolve HVF regardless of the running host; got: {}",
+                "macOS 26+ on aarch64 must resolve HVF regardless of the running host; got: {}",
                 macos.info
             );
         }
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn builder_backend_check_reports_qemu_below_the_hvf_os_floor() {
+        let mut env = TestEnv::new();
+        env.remove("MVM_BUILDER_BACKEND");
+
+        let macos = builder_backend_check_for(Platform::MacOS, true, false);
+        assert!(
+            macos.info.starts_with("qemu — "),
+            "pre-26 Apple Silicon macOS must not report unavailable HVF; got: {}",
+            macos.info
+        );
     }
 
     #[cfg(all(target_os = "linux", feature = "builder-vm"))]
