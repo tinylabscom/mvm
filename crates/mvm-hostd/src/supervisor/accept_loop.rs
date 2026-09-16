@@ -56,9 +56,8 @@ pub fn classify_accept_error(err: &io::Error, consecutive: u32) -> AcceptAction 
         // connection* rather than about the listener. Linux passes errors
         // already pending on the new socket back through the accept call, and
         // the man page is explicit that an application should treat them like
-        // EAGAIN and retry. Omitting them is not neutral: the terminator loop
-        // is bound to a real TcpListener, so a single EPROTO there would end
-        // transparent egress for that VM permanently — the exact failure this
+        // EAGAIN and retry. Omitting them is not neutral: a single EPROTO would
+        // end the listener for that VM permanently — the exact failure this
         // module exists to prevent, arriving through a different errno.
         _ => matches!(
             err.raw_os_error(),
@@ -99,9 +98,7 @@ fn retry_delay(consecutive: u32) -> Duration {
 ///
 /// A VM that loses egress goes quiet rather than failing loudly — the workload
 /// keeps running and its connections simply stop working. Without an entry in
-/// the chain the only trace is a line on this process's stderr, and for the
-/// terminator (a spawned task the primary loop does not join) not even the
-/// process exit signals it.
+/// the chain the only trace is a line on this process's stderr.
 pub async fn record_listener_stopped(recorder: Option<&Recorder>, listener: &str, reason: &str) {
     let Some(recorder) = recorder else {
         tracing::warn!(
@@ -165,13 +162,12 @@ mod tests {
     }
 
     #[test]
-    fn a_pending_connections_network_error_retries_rather_than_ending_the_terminator() {
+    fn a_pending_connections_network_error_retries_rather_than_ending_the_listener() {
         // Linux `accept()` reports errors already pending on the *new* socket
         // through the accept call. The man page is explicit that these should be
         // treated like EAGAIN and retried — they describe one dead connection
-        // attempt, never the listener. This matters for `serve_terminator`,
-        // which is the one loop bound to a real TcpListener: without this, a
-        // single EPROTO permanently ends transparent egress for that VM.
+        // attempt, never the listener. Without this, a single EPROTO permanently
+        // ends the listener for that VM.
         for code in [
             libc::EPROTO,
             libc::EPERM,
@@ -213,14 +209,14 @@ mod tests {
 
         let signer = Arc::new(CapturingAuditSigner::new());
         let recorder = Recorder::new(signer.clone(), TenantId("local".into()));
-        record_listener_stopped(Some(&recorder), "terminator", "bad file descriptor").await;
+        record_listener_stopped(Some(&recorder), "substitution-vsock", "bad file descriptor").await;
 
         let entries = signer.entries();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].event, "host.listener_stopped");
         assert_eq!(
             entries[0].labels.get("listener").map(String::as_str),
-            Some("terminator")
+            Some("substitution-vsock")
         );
         assert_eq!(
             entries[0].labels.get("reason").map(String::as_str),

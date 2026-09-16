@@ -79,11 +79,8 @@ fn main() -> Result<()> {
     );
 
     // Bind BEFORE the handshake so the backend knows the endpoint is reachable
-    // the moment it reads the ready line — no listen/connect race at boot. The
-    // terminator listener binds here too when configured, so the nft redirect
-    // target is live before the guest boots.
+    // the moment it reads the ready line — no listen/connect race at boot.
     let bound = bind_transport(&cfg.transport)?;
-    let terminator = bind_terminator(cfg.terminator_listen)?;
     let session_readiness = bind_session_readiness(cfg.session_ready_socket.as_deref())?;
     let connector = bind_connector(cfg.connector_uds_path.as_deref())?;
     // Always assembled. The one mode that skipped it was `raw`, which is gone:
@@ -150,8 +147,8 @@ fn main() -> Result<()> {
         .build()
         .context("tokio runtime build failed")?;
 
-    // One configured deadline for the forward leg AND the untrusted guest socket
-    // (terminator). The UDS/vsock path already honors this via HardenedForwarder.
+    // One configured deadline for the forward leg. The UDS/vsock path honors it
+    // via HardenedForwarder.
     let forward_timeout = std::time::Duration::from_secs(cfg.forward_timeout_secs);
 
     // Self-confine before serving any guest byte. The runtime's worker threads
@@ -172,7 +169,6 @@ fn main() -> Result<()> {
                 .cfg(&cfg)
                 .service(assembled.map(|(service, _)| service))
                 .bound(bound)
-                .terminator(terminator)
                 .ingress(ingress)
                 .session_readiness(session_readiness)
                 .connector(connector)
@@ -621,20 +617,6 @@ fn bind_transport(transport: &EndpointTransport) -> Result<Bound> {
     }
 }
 
-/// Bind the transparent egress terminator's TCP listener, if configured. Bound
-/// here (outside the runtime, set non-blocking) so it's reachable before the
-/// ready handshake.
-fn bind_terminator(addr: Option<std::net::SocketAddr>) -> Result<Option<std::net::TcpListener>> {
-    let Some(addr) = addr else {
-        return Ok(None);
-    };
-    let listener = std::net::TcpListener::bind(addr)
-        .with_context(|| format!("terminator TCP bind on {addr} failed"))?;
-    listener.set_nonblocking(true)?;
-    info!(terminator_addr = %addr, "egress terminator bound");
-    Ok(Some(listener))
-}
-
 /// A host-local event listener for launch readiness. It is bound before the
 /// process-ready handshake, exactly like the guest transport, so the launcher
 /// can connect without a listen race after the guest starts.
@@ -683,16 +665,13 @@ fn bind_connector(path: Option<&std::path::Path>) -> Result<Option<BoundConnecto
     Ok(Some(BoundConnector(listener)))
 }
 
-/// Run the primary substitution accept loop, plus the terminator accept loop
-/// when one is bound, until a listener errors (or the process is killed). The
-/// loops run concurrently: a terminated guest reaches the substitution channel
-/// (placeholder-bearing requests) AND the redirected terminator path.
+/// Run the primary substitution accept loop until a listener errors (or the
+/// process is killed).
 struct ServeParams<'a> {
     cfg: &'a EndpointConfig,
     service:
         Option<std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService>>,
     bound: Bound,
-    terminator: Option<std::net::TcpListener>,
     ingress: BoundIngress,
     session_readiness: Option<BoundSessionReadiness>,
     connector: Option<BoundConnector>,
@@ -705,7 +684,6 @@ struct ServeParamsBuilder<'a> {
     service:
         Option<std::sync::Arc<mvm_hostd::supervisor::network_endpoint_proxy::SubstitutionService>>,
     bound: Option<Bound>,
-    terminator: Option<std::net::TcpListener>,
     ingress: Option<BoundIngress>,
     session_readiness: Option<BoundSessionReadiness>,
     connector: Option<BoundConnector>,
@@ -719,7 +697,6 @@ impl<'a> ServeParams<'a> {
             cfg: None,
             service: None,
             bound: None,
-            terminator: None,
             ingress: None,
             session_readiness: None,
             connector: None,
@@ -747,11 +724,6 @@ impl<'a> ServeParamsBuilder<'a> {
 
     fn bound(mut self, bound: Bound) -> Self {
         self.bound = Some(bound);
-        self
-    }
-
-    fn terminator(mut self, terminator: Option<std::net::TcpListener>) -> Self {
-        self.terminator = terminator;
         self
     }
 
@@ -785,7 +757,6 @@ impl<'a> ServeParamsBuilder<'a> {
             cfg: self.cfg.context("ServeParams missing cfg")?,
             service: self.service,
             bound: self.bound.context("ServeParams missing bound")?,
-            terminator: self.terminator,
             ingress: self.ingress.context("ServeParams missing ingress")?,
             session_readiness: self.session_readiness,
             connector: self.connector,
@@ -804,7 +775,6 @@ async fn serve(params: ServeParams<'_>) -> Result<()> {
         cfg,
         service,
         bound,
-        terminator,
         ingress,
         session_readiness,
         connector,
@@ -826,22 +796,6 @@ async fn serve(params: ServeParams<'_>) -> Result<()> {
         }
         None => None,
     };
-    // Spawn the terminator loop first so it's accepting while the primary loop
-    // owns the task.
-    let terminator_task = match terminator {
-        Some(std_listener) => {
-            let service = service
-                .as_ref()
-                .context("terminator configured without a substitution service")?;
-            let listener = tokio::net::TcpListener::from_std(std_listener)
-                .context("adopting terminator TCP listener into the tokio runtime")?;
-            Some(tokio::spawn(
-                std::sync::Arc::clone(service).serve_terminator(listener, forward_timeout),
-            ))
-        }
-        None => None,
-    };
-
     match cfg.egress_mode {
         // Default, secret-bearing path: framed WireRequest substitution.
         EgressMode::Wire => {
@@ -863,9 +817,6 @@ async fn serve(params: ServeParams<'_>) -> Result<()> {
         }
     }
 
-    if let Some(task) = terminator_task {
-        task.abort();
-    }
     if let Some(task) = readiness_task {
         task.abort();
     }
@@ -1279,7 +1230,6 @@ mod tests {
             no_proxy: None,
             secret_store_dir: None,
             binding_store_dir: None,
-            terminator_listen: None,
             tls_intermediate: None,
             network_policy: Some(mvm_core::policy::network_policy::NetworkPolicy::allow_list(
                 vec![mvm_core::policy::network_policy::HostPort::new(
@@ -1317,7 +1267,6 @@ mod tests {
             no_proxy: None,
             secret_store_dir: None,
             binding_store_dir: None,
-            terminator_listen: None,
             tls_intermediate: None,
             network_policy: None,
             network_limits: mvm_core::plan::NetworkLimits::default(),
@@ -1794,7 +1743,6 @@ mod tests {
             no_proxy: None,
             secret_store_dir: None,
             binding_store_dir: None,
-            terminator_listen: None,
             tls_intermediate: None,
             network_policy: None,
             network_limits: mvm_core::plan::NetworkLimits::default(),

@@ -438,8 +438,8 @@ fn wasm_endpoint_plan(
 /// endpoint spawn needs from a decided [`WasmEndpointPlan`]. Pure (no I/O)
 /// so the wasm-specific literal fields are unit-testable without a spawn:
 /// always `Uds` (the host-import connects to the endpoint directly — wasm has
-/// no VMM to proxy a per-port vsock socket), no terminator (no TAP/nft
-/// REDIRECT to feed), no TLS intermediate (http-only POC; HTTPS termination
+/// no VMM to proxy a per-port vsock socket), no TLS intermediate (http-only
+/// POC; HTTPS termination
 /// is a later phase), and — unlike libkrun/hvf, which serve raw pass-through
 /// when a run carries no secrets — the wasm tier mints no FlowMux identity:
 /// the `mvm:egress` host-import always speaks the `WireRequest` wire
@@ -457,7 +457,6 @@ fn wasm_network_endpoint_spawn_params<'a>(
         transport: crate::network_endpoint_spawn::EndpointTransport::Uds {
             path: plan.socket_path.clone(),
         },
-        terminator_listen: None,
         egress_proxy: None,
         tls_intermediate: None,
         network_policy: Some(network_policy),
@@ -2022,7 +2021,7 @@ mod tests {
     // Secrets present (even under a deny-all `VmStartConfig::network_policy`,
     // since the endpoint itself gates per-destination) must produce a spawn
     // plan whose params mirror libkrun/hvf except for the wasm-only
-    // deviations: always `Uds`, no terminator, no TLS, and — the one field
+    // deviations: always `Uds`, no TLS, and — the one field
     // that must NOT mirror libkrun — the wasm tier never carries an identity.
     #[test]
     fn wasm_endpoint_plan_params_mirror_libkrun_with_wasm_deviations() {
@@ -2073,10 +2072,6 @@ mod tests {
             crate::network_endpoint_spawn::EndpointTransport::Uds {
                 path: plan.socket_path.clone(),
             }
-        );
-        assert!(
-            params.terminator_listen.is_none(),
-            "wasm has no TAP/nft REDIRECT to feed a terminator"
         );
         assert!(
             params.tls_intermediate.is_none(),

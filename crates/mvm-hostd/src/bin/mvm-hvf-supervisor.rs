@@ -511,7 +511,6 @@ fn spawn_owned_builder_endpoint(
             transport: mvm_vmm::host::network_endpoint_spawn::EndpointTransport::Uds {
                 path: endpoint.socket.clone(),
             },
-            terminator_listen: None,
             egress_proxy: None,
             tls_intermediate: None,
             network_policy: Some(&policy),

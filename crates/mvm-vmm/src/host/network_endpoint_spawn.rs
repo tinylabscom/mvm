@@ -14,7 +14,6 @@ use mvm_contract::stream::secret_fingerprint::SecretFingerprint;
 use mvm_core::plan::{IngressMapping, SecretBinding};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
@@ -565,7 +564,7 @@ pub struct FlowMuxIdentitySpawnConfig {
 
 /// Inputs to [`spawn_network_endpoint`]. Grouped into a struct (rather
 /// than threading bare positional args) so the backend-shaped fields —
-/// `transport` (vsock vs UDS), `terminator_listen`, `tls_intermediate` — read
+/// `transport` (vsock vs UDS), `tls_intermediate` — read
 /// at the callsite and stay under the argument-count lint.
 pub struct SubstitutionSpawnParams<'a> {
     /// VM name; keys the per-VM substitution env path.
@@ -581,9 +580,6 @@ pub struct SubstitutionSpawnParams<'a> {
     /// Backend-shaped guest→host channel: `Vsock` (FC/QEMU) or `Uds`
     /// (libkrun/HVF, the per-VM socket the VMM proxies).
     pub transport: EndpointTransport,
-    /// `Some(addr)` ⇒ also run the transparent HTTP terminator on that host TCP
-    /// addr (FC nft REDIRECT feeds it). `None` on slirp / in-process VMMs.
-    pub terminator_listen: Option<SocketAddr>,
     /// The operator's upstream proxy for the endpoint's forward leg, on a host
     /// whose only route out is a proxy.
     ///
@@ -639,7 +635,6 @@ pub struct SubstitutionSpawnParamsBuilder<'a> {
     secrets: Option<&'a [SecretBinding]>,
     redaction: Option<&'a mvm_core::policy::RedactionPolicy>,
     transport: Option<EndpointTransport>,
-    terminator_listen: Option<SocketAddr>,
     tls_intermediate: Option<(String, String)>,
     network_policy: Option<&'a mvm_core::policy::network_policy::NetworkPolicy>,
     network_limits: Option<mvm_core::plan::NetworkLimits>,
@@ -661,7 +656,6 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
             secrets: None,
             redaction: None,
             transport: None,
-            terminator_listen: None,
             tls_intermediate: None,
             network_policy: None,
             network_limits: None,
@@ -712,13 +706,6 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
     #[must_use]
     pub fn transport(mut self, transport: EndpointTransport) -> Self {
         self.transport = Some(transport);
-        self
-    }
-
-    /// Set `terminator_listen`. Takes a value or an `Option`; unset means `None`.
-    #[must_use]
-    pub fn terminator_listen(mut self, terminator_listen: impl Into<Option<SocketAddr>>) -> Self {
-        self.terminator_listen = terminator_listen.into();
         self
     }
 
@@ -815,7 +802,6 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
                 "SubstitutionSpawnParams",
                 "transport",
             ))?,
-            terminator_listen: self.terminator_listen,
             tls_intermediate: self.tls_intermediate,
             network_policy: self.network_policy,
             network_limits: self.network_limits.ok_or(BuilderError::missing(
@@ -896,7 +882,6 @@ pub fn endpoint_config_for_identity(
         transport: EndpointTransport::Uds {
             path: PathBuf::from("/nonexistent/vsock-5253.sock"),
         },
-        terminator_listen: None,
         egress_proxy: None,
         session_marker: None,
         tls_intermediate: None,
@@ -959,13 +944,6 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
             cfg["no_proxy"] = serde_json::Value::String(v.to_string());
         }
     }
-    if let Some(addr) = params.terminator_listen {
-        // `EndpointConfig.terminator_listen: Option<SocketAddr>`:
-        // present ⇒ the endpoint runs the host TCP terminator concurrently with
-        // the vsock substitution transport. `SocketAddr`'s Display ("ip:port")
-        // is the wire form `serde(SocketAddr)` round-trips.
-        cfg["terminator_listen"] = serde_json::Value::String(addr.to_string());
-    }
     if let Some((cert_pem, key_pem)) = &params.tls_intermediate {
         // `EndpointConfig.tls_intermediate`: the per-VM name-constrained
         // intermediate the `https` terminator mints per-SNI leaves under. The
@@ -1018,9 +996,8 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
 /// plan's secret bindings on stdin, reads back the minted `(guest var,
 /// placeholder)` handshake line, and persists it to the per-VM substitution env
 /// file for the invoke path to inject (`HTTP_PROXY` + placeholder vars). The
-/// endpoint serves the guest→host substitution channel over `transport`; when
-/// `terminator_listen` is `Some`, it *also* runs the transparent HTTP
-/// terminator on that host TCP addr. Detached via `setsid` so it outlives
+/// endpoint serves the guest→host substitution channel over `transport`.
+/// Detached via `setsid` so it outlives
 /// `mvmctl up`; the stop path reaps
 /// it via [`SUBST_PID_FILE`]. The real secret values never leave the endpoint's
 /// address space — only the opaque placeholders are persisted/handed out.
@@ -1565,7 +1542,6 @@ mod tests {
         let redaction = mvm_core::policy::RedactionPolicy::default();
         let network_policy = mvm_core::policy::network_policy::NetworkPolicy::default();
         let limits = mvm_core::plan::NetworkLimits::default();
-        let terminator: SocketAddr = "127.0.0.1:19443".parse().unwrap();
         let tls = ("certificate".to_string(), "private-key".to_string());
         let resolver = RemoteResolverSpawnConfig {
             uds_path: dir.path(),
@@ -1593,7 +1569,6 @@ mod tests {
             })
             .network_limits(limits)
             .ingress(&[])
-            .terminator_listen(terminator)
             .tls_intermediate(tls.clone())
             .network_policy(&network_policy)
             .resolver_remote(resolver)
@@ -1603,7 +1578,6 @@ mod tests {
             .build()
             .expect("every named builder input is retained");
 
-        assert_eq!(params.terminator_listen, Some(terminator));
         assert_eq!(params.tls_intermediate, Some(tls));
         assert_eq!(params.network_policy, Some(&network_policy));
         assert_eq!(params.resolver_remote, Some(resolver));
@@ -2098,7 +2072,6 @@ mod tests {
             secrets: &[],
             redaction: &redaction,
             transport: EndpointTransport::Uds { path: sock.clone() },
-            terminator_listen: None,
             egress_proxy: None,
             session_marker: None,
             tls_intermediate: None,
@@ -2164,7 +2137,6 @@ mod tests {
             transport: EndpointTransport::Uds {
                 path: dir.join("vsock-5253.sock"),
             },
-            terminator_listen: None,
             egress_proxy: None,
             session_marker: None,
             tls_intermediate: None,
@@ -2239,7 +2211,6 @@ mod tests {
             transport: EndpointTransport::Uds {
                 path: dir.join("vsock-5253.sock"),
             },
-            terminator_listen: None,
             egress_proxy: None,
             session_marker: None,
             tls_intermediate: None,
@@ -2309,7 +2280,6 @@ mod tests {
             transport: EndpointTransport::Uds {
                 path: dir.join("vsock-5253.sock"),
             },
-            terminator_listen: None,
             egress_proxy: None,
             session_marker: None,
             tls_intermediate: None,
@@ -2371,7 +2341,6 @@ mod tests {
             transport: EndpointTransport::Uds {
                 path: sock.to_path_buf(),
             },
-            terminator_listen: None,
             egress_proxy: None,
             session_marker: None,
             tls_intermediate: None,

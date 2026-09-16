@@ -62,34 +62,6 @@ const MAX_FORWARD_RESPONSE_BYTES: usize = MAX_FRAME_BYTES;
 /// Typed FlowMux request ceiling, independent of transport frame size.
 const MAX_HTTP_STREAM_BODY_BYTES: usize = 32 * 1024 * 1024;
 const HTTP_REQUEST_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-#[cfg(not(target_os = "linux"))]
-const RVPROXY_ORIGINAL_DST_MAGIC: &[u8; 8] = b"RVPXOD01";
-
-fn recover_terminator_original_destination(
-    stream: &mut std::net::TcpStream,
-) -> anyhow::Result<std::net::SocketAddr> {
-    #[cfg(target_os = "linux")]
-    {
-        Ok(crate::supervisor::terminator::orig_dst::original_dst(
-            stream,
-        )?)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        use std::io::Read;
-
-        let mut header = [0_u8; 14];
-        stream.read_exact(&mut header)?;
-        anyhow::ensure!(
-            &header[..8] == RVPROXY_ORIGINAL_DST_MAGIC,
-            "invalid original-destination preamble"
-        );
-        let ip = std::net::Ipv4Addr::new(header[8], header[9], header[10], header[11]);
-        let port = u16::from_be_bytes([header[12], header[13]]);
-        Ok(std::net::SocketAddr::from((ip, port)))
-    }
-}
-
 /// Errors from preparing a routed request for forwarding.
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
@@ -369,9 +341,7 @@ fn url_host_port(url: &str) -> Option<String> {
 
 /// Capture per-secret audit metadata (name + auth-type) for every header that
 /// carries a known placeholder — BEFORE substitution consumes the request.
-/// `resolve_meta` touches no secret value, so this is claim-13 safe. Shared by
-/// the UDS/vsock `process` path and the terminator path so their two audit
-/// emissions can't drift.
+/// `resolve_meta` touches no secret value, so this is claim-13 safe.
 pub(crate) fn collect_substituted_meta(
     endpoint: &NetworkEndpoint<'_>,
     headers: &[(String, String)],
@@ -385,8 +355,7 @@ pub(crate) fn collect_substituted_meta(
 
 /// Mask undeclared secret/PII content in `req` per the destination `action`,
 /// leaving declared placeholders intact (they're substituted next). Returns the
-/// categories that fired. Shared by the vsock/UDS `process` path and both
-/// terminator cores so they scrub identically — one definition, no drift.
+/// categories that fired.
 ///
 /// A header value carrying a declared placeholder is left untouched (the real
 /// credential is substituted into it next, and the host-reserved placeholder is
@@ -600,7 +569,7 @@ mod redaction_gate_tests {
     }
 }
 
-/// The fail-closed scan-gate the cleartext cores run before substitute/forward:
+/// The fail-closed scan-gate run before substitute/forward:
 /// when the destination opted into redaction, a `content-encoding` (compressed)
 /// or over-cap body can't be scanned in the clear, so it's refused rather than
 /// forwarded unscanned. Returns the reason marker when the request must be
@@ -1163,46 +1132,6 @@ mod streaming_redactor_tests {
         assert_eq!(emitted, chunk.len() * 1024);
     }
 }
-/// Which audit an error path owes, given the cause and whether the request
-/// carried a placeholder.
-///
-/// Every error on these paths is fail-closed — the socket closes WITHOUT
-/// forwarding — but the causes are not equally interesting. A refusal that
-/// dropped a placeholder and a fail-closed refusal are both claim-bearing
-/// events an operator must be able to see; a parse or forward failure is not
-/// secret-relevant and gets no entry.
-///
-/// Extracted from the two call sites that had this match inline and identical.
-/// Two copies of a security classification is how they drift, and it is why
-/// deleting either one's `FailClosed` arm changed no test: the classification
-/// had no name and so nothing could assert on it directly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ErrorAudit<'a> {
-    /// claim-12: a placeholder was dropped rather than substituted.
-    PlaceholderDropped,
-    /// A fail-closed refusal, carrying the reason to record.
-    FailClosed(&'a str),
-    /// Not secret-relevant; nothing to record.
-    Silent,
-}
-
-pub(crate) fn error_audit(
-    error: &crate::supervisor::terminator::error::TerminatorError,
-    carried_placeholder: bool,
-) -> ErrorAudit<'_> {
-    match error {
-        crate::supervisor::terminator::error::TerminatorError::Refused(_)
-            if carried_placeholder =>
-        {
-            ErrorAudit::PlaceholderDropped
-        }
-        crate::supervisor::terminator::error::TerminatorError::FailClosed(reason) => {
-            ErrorAudit::FailClosed(reason)
-        }
-        _ => ErrorAudit::Silent,
-    }
-}
-
 /// How an opaque TCP flow could be terminated and re-forwarded rather than
 /// spliced straight through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1651,292 +1580,6 @@ impl SubstitutionService {
                     tracing::warn!(error = %e, "vsock substitution connection failed");
                 }
             });
-        }
-    }
-
-    /// Accept loop for the transparent egress **terminator**: guest outbound TCP
-    /// is redirected here, we recover the original destination, substitute any
-    /// secret placeholder in the request (claim-12 bind-checked), and splice the
-    /// request to the real destination — returning its response verbatim.
-    ///
-    /// Linux recovers the destination via `SO_ORIGINAL_DST`; the native
-    /// connections carry a compact preamble before the first guest byte. The
-    /// substitution core (`terminator::handler::handle_request`) and splice
-    /// (`terminator::listener::forward_http_raw`) are sync + blocking, so each
-    /// connection's syscalls run on `spawn_blocking` threads, off the reactor.
-    /// A failure on one connection is logged and the socket dropped — never
-    /// fatal to the loop.
-    ///
-    /// `timeout` is the configured per-connection I/O deadline (the endpoint's
-    /// `forward_timeout_secs`), applied to BOTH the untrusted guest-facing socket
-    /// (read+write) and the upstream forward leg. Without it a guest that sends a
-    /// partial header or stops reading mid-write-back would park a blocking-pool
-    /// thread forever — a bounded pool means a hostile guest could exhaust it.
-    pub async fn serve_terminator(
-        self: Arc<Self>,
-        listener: tokio::net::TcpListener,
-        timeout: std::time::Duration,
-    ) {
-        let mut transient = 0u32;
-        loop {
-            match listener.accept().await {
-                Ok((stream, _)) => {
-                    transient = 0;
-                    let me = Arc::clone(&self);
-                    tokio::spawn(async move {
-                        if let Err(e) = me.handle_terminator_connection(stream, timeout).await {
-                            tracing::warn!(error = %e, "terminator connection failed");
-                        }
-                    });
-                }
-                Err(e) => match classify_accept_error(&e, transient) {
-                    AcceptAction::Retry(delay) => {
-                        tracing::warn!(error = %e, "terminator accept failed; retrying");
-                        transient = transient.saturating_add(1);
-                        tokio::time::sleep(delay).await;
-                    }
-                    AcceptAction::Fatal => {
-                        tracing::error!(error = %e, "terminator accept failed; stopping");
-                        record_listener_stopped(
-                            self.recorder.as_deref(),
-                            "terminator",
-                            &e.to_string(),
-                        )
-                        .await;
-                        return;
-                    }
-                },
-            }
-        }
-    }
-
-    /// Handle one redirected guest connection: recover orig-dst, read the
-    /// request, substitute + forward, write the response back. claim-12
-    /// fail-closed is enforced inside `handle_request` (it refuses an unbound
-    /// destination / unknown placeholder before the forward runs); on refusal
-    /// we log and close WITHOUT forwarding.
-    async fn handle_terminator_connection(
-        &self,
-        stream: tokio::net::TcpStream,
-        timeout: std::time::Duration,
-    ) -> anyhow::Result<()> {
-        use crate::keyholder::NetworkEndpoint;
-        use crate::supervisor::terminator;
-        use std::io::Write;
-
-        // The orig-dst getsockopt + bounded request read are blocking syscalls.
-        // The redirected socket is UNTRUSTED: set read+write deadlines so a guest
-        // that never completes its header (`\r\n\r\n`) or stalls mid-write-back
-        // can't park this blocking-pool thread forever (bounded pool ⇒ DoS).
-        let std_stream = stream.into_std()?;
-        std_stream.set_nonblocking(false)?;
-        std_stream.set_read_timeout(Some(timeout))?;
-        std_stream.set_write_timeout(Some(timeout))?;
-
-        let (std_stream, orig_dst) = tokio::task::spawn_blocking(move || {
-            let mut std_stream = std_stream;
-            let orig_dst = recover_terminator_original_destination(&mut std_stream)?;
-            anyhow::Ok((std_stream, orig_dst))
-        })
-        .await??;
-
-        if orig_dst.port() == 443 {
-            return self
-                .handle_https_terminator(std_stream, orig_dst, timeout)
-                .await;
-        }
-
-        // ── cleartext :80 ──
-        let mut std_stream = std_stream;
-        let (mut std_stream, raw) = tokio::task::spawn_blocking(move || {
-            let raw = terminator::read::read_http_request(&mut std_stream)?.request;
-            anyhow::Ok((std_stream, raw))
-        })
-        .await??;
-
-        // Capture audit metadata before substitution consumes the request —
-        // same as the UDS/vsock `process` path (shared helper so they can't
-        // drift). resolve_meta touches no value, so this is claim-13 safe.
-        let req = terminator::request::proxy_request_from_origin_form(&raw, orig_dst)?;
-        let endpoint = NetworkEndpoint::new(&self.registry, self.resolver.as_ref());
-        let destination = destination_host(&req.url).ok();
-        let substituted = collect_substituted_meta(&endpoint, &req.headers);
-        // Whether the request smuggled a host placeholder at all — decides if a
-        // refusal is a claim-12 placeholder drop (audited) or a plain bad request.
-        let carried_placeholder = req
-            .headers
-            .iter()
-            .any(|(_, v)| find_placeholder(v).is_some());
-        drop(req);
-
-        // Resolve the per-destination redaction action; clone so the closure owns
-        // it across spawn_blocking.
-        let action = destination
-            .as_deref()
-            .map(|d| {
-                crate::supervisor::redaction_resolve::resolve(&self.redaction_policy, d).clone()
-            })
-            .unwrap_or_default();
-
-        // Substitution + redaction + the raw forward leg are sync; run them off
-        // the reactor. Clone the Arcs the closure needs (it must be 'static —
-        // can't borrow &self across spawn_blocking); the endpoint + redactor are
-        // rebuilt inside.
-        let registry = Arc::clone(&self.registry);
-        let resolver = Arc::clone(&self.resolver);
-        let forwarded = tokio::task::spawn_blocking(move || {
-            let endpoint = NetworkEndpoint::new(&registry, resolver.as_ref());
-            // The redactor is the shared curated ruleset (same as the service's),
-            // rebuilt here so the closure stays 'static without cloning rule state.
-            let redactor = RedactingSubstitution::with_default_rules();
-            terminator::handler::handle_request(
-                &raw,
-                orig_dst,
-                &endpoint,
-                &redactor,
-                &action,
-                |prepared, dst| terminator::listener::forward_http_raw(prepared, dst, timeout),
-            )
-        })
-        .await?;
-
-        let (resp, redaction_hits) = match forwarded {
-            Ok(ok) => ok,
-            Err(e) => {
-                // Every error path is fail-closed: the socket closes WITHOUT
-                // forwarding. Audit per cause so a claim-12 drop / fail-closed
-                // refusal is observable; a parse / forward failure isn't
-                // secret-relevant.
-                match error_audit(&e, carried_placeholder) {
-                    ErrorAudit::PlaceholderDropped => {
-                        self.audit_placeholder_dropped(destination.as_deref()).await;
-                    }
-                    ErrorAudit::FailClosed(reason) => {
-                        self.audit_fail_closed(destination.as_deref(), reason).await;
-                    }
-                    ErrorAudit::Silent => {}
-                }
-                tracing::warn!(error = %e, "terminator refused or forward failed; closing");
-                return Ok(());
-            }
-        };
-
-        self.audit_substitutions(&substituted, destination.as_deref())
-            .await;
-        self.audit_redactions(&redaction_hits, destination.as_deref())
-            .await;
-
-        tokio::task::spawn_blocking(move || {
-            std_stream.write_all(&resp)?;
-            std_stream.flush()
-        })
-        .await??;
-        Ok(())
-    }
-
-    /// `:443`: peek the ClientHello SNI, then **terminate** TLS for a
-    /// bound host (mint a leaf under the per-VM intermediate, decrypt, substitute,
-    /// re-originate over the hardened forwarder) or **splice** an unbound
-    /// host straight through without decrypting. Fail-closed: a bound host whose
-    /// substitution refuses closes the socket without forwarding (claim 12).
-    async fn handle_https_terminator(
-        &self,
-        std_stream: std::net::TcpStream,
-        orig_dst: std::net::SocketAddr,
-        timeout: std::time::Duration,
-    ) -> anyhow::Result<()> {
-        use crate::keyholder::NetworkEndpoint;
-        use crate::supervisor::terminator::tls;
-
-        // Peek the SNI without consuming the stream (blocking).
-        let (std_stream, sni) = tokio::task::spawn_blocking(move || {
-            let sni = tls::peek_sni(&std_stream)?;
-            anyhow::Ok((std_stream, sni))
-        })
-        .await??;
-
-        // Terminate ONLY a host bound by some workload secret, and only when we
-        // hold the per-VM intermediate. Everything else is spliced end-to-end —
-        // never decrypted (zero added host visibility over substitution's needs).
-        let bound_sni = sni.filter(|s| self.registry.host_is_bound(s));
-        let (intermediate, sni) = match (self.tls_intermediate.clone(), bound_sni) {
-            (Some(intermediate), Some(sni)) => (intermediate, sni),
-            _ => {
-                return tokio::task::spawn_blocking(move || {
-                    tls::splice_unbound(std_stream, orig_dst, timeout)
-                })
-                .await?;
-            }
-        };
-
-        // The SNI is the bound destination; resolve its redaction action here so
-        // the terminated (cleartext) request is scrubbed identically to the `:80`
-        // and vsock paths. The spliced/unbound arm above never reaches this —
-        // it's ciphertext, nothing to scan, redaction correctly does not apply.
-        let dest = sni.clone();
-        let action =
-            crate::supervisor::redaction_resolve::resolve(&self.redaction_policy, &dest).clone();
-
-        let config = Arc::new(tls::server_config_for_sni(&intermediate, &sni)?);
-        let registry = Arc::clone(&self.registry);
-        let resolver = Arc::clone(&self.resolver);
-        let forwarder = Arc::clone(&self.forwarder);
-        let handle = tokio::runtime::Handle::current();
-        let (outcome, carried_placeholder) = tokio::task::spawn_blocking(move || {
-            let endpoint = NetworkEndpoint::new(&registry, resolver.as_ref());
-            let redactor = RedactingSubstitution::with_default_rules();
-            let mut carried = false;
-            let outcome = tls::terminate_and_substitute(
-                std_stream,
-                tls::TlsTermination::builder()
-                    .with_config(config)
-                    .with_orig_dst(orig_dst)
-                    .with_endpoint(&endpoint)
-                    .with_redactor(&redactor)
-                    .with_action(&action)
-                    .build(),
-                &mut carried,
-                |prepared| {
-                    // The upstream leg reuses the hardened forwarder (TLS
-                    // + system roots + SSRF filter); block_on is safe on a
-                    // blocking thread. The client decoded the body, so we re-frame.
-                    let resp = handle
-                        .block_on(forwarder.forward(prepared.clone()))
-                        .map_err(|e| anyhow::anyhow!("upstream forward: {e}"))?;
-                    Ok(tls::serialize_http_response(
-                        resp.status,
-                        &resp.headers,
-                        &resp.body,
-                    ))
-                },
-            );
-            (outcome, carried)
-        })
-        .await?;
-
-        match outcome {
-            Ok(o) => {
-                self.audit_substitutions(&o.substituted, o.destination.as_deref())
-                    .await;
-                self.audit_redactions(&o.redaction_hits, o.destination.as_deref())
-                    .await;
-                Ok(())
-            }
-            Err(e) => {
-                // Every error path is fail-closed (the socket closes WITHOUT
-                // forwarding); audit per cause exactly like the `:80` path.
-                match error_audit(&e, carried_placeholder) {
-                    ErrorAudit::PlaceholderDropped => {
-                        self.audit_placeholder_dropped(Some(&dest)).await;
-                    }
-                    ErrorAudit::FailClosed(reason) => {
-                        self.audit_fail_closed(Some(&dest), reason).await;
-                    }
-                    ErrorAudit::Silent => {}
-                }
-                tracing::warn!(error = %e, "https terminator refused or failed; closing");
-                Ok(())
-            }
         }
     }
 
@@ -2517,8 +2160,7 @@ impl SubstitutionService {
             .unwrap_or_default();
         // Fail closed: a body we can't scan in cleartext is a silent bypass. A
         // compressed body, or one over the scan cap, to a redaction-opted-in
-        // destination is refused before any forward leg runs. Shared with the
-        // cleartext terminator cores so the gate can't drift.
+        // destination is refused before any forward leg runs.
         if let Some(reason) = fail_closed_reason(&req.headers, req.body.len(), &action) {
             self.audit_fail_closed(destination.as_deref(), reason).await;
             return Err(WireResponse::Refused {
@@ -4985,55 +4627,6 @@ fn ingress_transform_refusal_audit_contains_only_a_stable_reason() {
     assert!(!encoded.contains("payload"));
     assert!(!encoded.contains("PRIVATE KEY"));
     assert!(!encoded.contains("sk-"));
-}
-
-#[cfg(test)]
-mod error_audit_tests {
-    use super::*;
-    use crate::supervisor::terminator::error::TerminatorError;
-
-    /// A fail-closed refusal must be audited. This is the one the mutation lane
-    /// caught: deleting the `FailClosed` arm left every test passing, because a
-    /// missing audit entry is invisible to anything that only checks the socket
-    /// closed — and every one of these paths closes the socket either way.
-    #[test]
-    fn a_fail_closed_refusal_is_audited_with_its_reason() {
-        let err = TerminatorError::FailClosed("body not scannable in cleartext");
-        assert_eq!(
-            error_audit(&err, false),
-            ErrorAudit::FailClosed("body not scannable in cleartext")
-        );
-        // The reason travels regardless of whether a placeholder was carried:
-        // fail-closed is about what could not be scanned, not about substitution.
-        assert_eq!(
-            error_audit(&err, true),
-            ErrorAudit::FailClosed("body not scannable in cleartext")
-        );
-    }
-
-    /// A refusal is claim-12 relevant only when a placeholder was actually
-    /// dropped. Refusing a request that carried none is not a secret event.
-    #[test]
-    fn a_refusal_is_audited_only_when_it_dropped_a_placeholder() {
-        let err = TerminatorError::Refused("unbound destination".into());
-        assert_eq!(error_audit(&err, true), ErrorAudit::PlaceholderDropped);
-        assert_eq!(error_audit(&err, false), ErrorAudit::Silent);
-    }
-
-    /// Parse and forward failures are fail-closed like everything else here,
-    /// but they are not secret-relevant and must not manufacture audit entries
-    /// — an audit log that records ordinary I/O failures as security events is
-    /// as unreadable as one that records nothing.
-    #[test]
-    fn parse_and_forward_failures_record_nothing() {
-        for err in [
-            TerminatorError::Parse("bad request line".into()),
-            TerminatorError::Forward("connection reset".into()),
-        ] {
-            assert_eq!(error_audit(&err, false), ErrorAudit::Silent, "{err}");
-            assert_eq!(error_audit(&err, true), ErrorAudit::Silent, "{err}");
-        }
-    }
 }
 
 #[cfg(test)]

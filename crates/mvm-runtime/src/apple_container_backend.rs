@@ -223,8 +223,8 @@ impl VmBackend for AppleContainerBackend {
 impl WorkloadBackend for AppleContainerBackend {
     fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
         // The same posture as the HVF runner this backend delegates to:
-        // proxy-aware substitution over the vsock UDS channel, no
-        // transparent :80/:443 terminator. Delegating keeps the two in
+        // proxy-aware substitution over the vsock UDS channel. Delegating
+        // keeps the two in
         // lock-step if the runner's transport ever changes.
         self.runner.egress_substitution_transport()
     }
@@ -463,7 +463,6 @@ mod tests {
         );
         assert_eq!(transport, EgressSubstitutionTransport::VsockUdsChannel);
         assert!(transport.supports_proxy_aware_substitution());
-        assert!(!transport.supports_transparent_terminator());
     }
 
     #[test]

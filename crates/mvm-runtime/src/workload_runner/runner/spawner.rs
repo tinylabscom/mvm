@@ -118,7 +118,6 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
             secrets: req.secrets,
             redaction: req.redaction,
             transport: EndpointTransport::Uds { path: uds.clone() },
-            terminator_listen: None,
             // None ⇒ inherit the host's proxy environment, resolved once inside
             // `spawn_network_endpoint` for every backend.
             egress_proxy: None,

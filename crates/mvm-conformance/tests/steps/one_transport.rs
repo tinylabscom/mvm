@@ -555,7 +555,6 @@ fn secret_bearing_config() -> mvm_hostd::supervisor::network_endpoint::EndpointC
         no_proxy: None,
         secret_store_dir: None,
         binding_store_dir: None,
-        terminator_listen: None,
         tls_intermediate: None,
         network_policy: None,
         egress_mode: Default::default(),

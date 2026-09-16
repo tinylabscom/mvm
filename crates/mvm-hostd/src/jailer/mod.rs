@@ -456,7 +456,7 @@ mod tests {
         );
         // Thread creation for tokio workers / blocking pool.
         assert!(spec.allowed_syscalls.contains(&"clone"));
-        // Socket-option negotiation (incl. SO_ORIGINAL_DST on the terminator).
+        // Socket-option negotiation.
         assert!(spec.allowed_syscalls.contains(&"getsockopt"));
         assert!(spec.allowed_syscalls.contains(&"setsockopt"));
         // Cert-store dir read for rustls-native-certs.

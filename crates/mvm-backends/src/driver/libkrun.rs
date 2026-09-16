@@ -204,14 +204,13 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
             .map(|b| b.signing_key_path.clone()),
         network_policy: None,
         bridge_restart_policy: BridgeRestartPolicy::HardFail,
-        // No transparent :80/:443 terminator: the runner routes egress through
-        // the per-VM gating endpoint over vsock only. The runner puts that
+        // The runner routes egress through the per-VM gating endpoint over
+        // vsock only. The runner puts that
         // endpoint's host UDS on the spec's EGRESS_PORT channel, so pinning the
         // guest egress port's host-listen socket to it makes the endpoint the
         // sole path off the box — the claim-10 gate and secret substitution live
         // there. A spec without an EGRESS_PORT channel (none of the workload
         // paths) leaves this unset and the derived socket unchanged.
-        transparent_terminator_port: None,
         egress_relay_socket: spec.host_socket_for_service(GuestService::NetworkFlow),
         exclusive_image_lock: None,
     })
@@ -793,7 +792,6 @@ mod tests {
         assert_eq!(cfg.gateway_audit_socket, None);
         assert_eq!(cfg.gateway_events_socket, None);
         assert_eq!(cfg.signing_key_path, None);
-        assert_eq!(cfg.transparent_terminator_port, None);
         // Egress is not a role field: the spec's EGRESS_PORT channel names the
         // per-VM gating endpoint UDS, and the relay pins the guest egress port's
         // host-listen socket to it so the endpoint is the sole path off the box.
