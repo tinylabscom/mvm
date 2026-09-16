@@ -10,6 +10,14 @@
 
 ## In progress
 
+- [x] **Honest production file-size gate — issue #3313.**
+      `specs/plans/2026-09-15-the-big-cleanup.md` C1. Count lines outside all
+      test-only items and externally gated test modules, scan every production
+      Rust root, and replace the false-green baseline with exact shrinking-only
+      allowances. Complete: 1,633 Rust files are covered, the 19 current
+      exceptions can only shrink, and 15 focused checker tests cover the parser,
+      root discovery, external modules, and ratchet behavior.
+
 - [x] **Dormant-control caller gate repair — issue #3334.**
       `specs/plans/2026-09-15-the-big-cleanup.md` A0.1. Ensure plain and
       visibility-restricted `use` items, including multiline import trees,

@@ -4,6 +4,13 @@ Last updated: 2026-09-16
 
 ## In progress
 
+- [x] **Honest production file-size gate.**
+      `specs/plans/2026-09-15-the-big-cleanup.md` C1, issue #3313. Repair the
+      test-span counter, scan every production Rust root, and ratchet the
+      current oversized files downward without admitting new ones. Complete:
+      1,633 files scanned with 19 exact shrinking-only exceptions and 15 focused
+      checker tests.
+
 - [x] **Dormant-control caller gate repair.**
       `specs/plans/2026-09-15-the-big-cleanup.md` A0.1, issue #3334.
       Exclude import and re-export declarations from production-caller
