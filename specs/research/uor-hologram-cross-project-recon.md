@@ -106,7 +106,8 @@ the whole survey: five independent repos re-invented a discipline that is a
 superset of mvm's claim ledger.
 
 ### 5.2 Content-addressed, replayable claims ledger
-Project `specs/claims/catalog.md` into a content-addressed, CI-write-only form
+Project the ledger table in `specs/adrs/001-microvm-security-posture.md` into a
+content-addressed, CI-write-only form
 (`uor-registry` pattern): each claim → canonical object → address; catalog →
 `registry.json`; witness-mapping changes → `lineage.jsonl`; each gate run →
 `log.jsonl` with a `state_address`. Upgrades drift-detection from text-grep to
@@ -156,7 +157,7 @@ signed/audited authority (theirs is capability-only, unsigned).
 
 **Why this one.** Five independent repos (`template`, `uor-matmul`, `hologram`,
 `hologram-storage`, `uor-vv`/`arch-map`) converged on nearly the same claim-discipline,
-and it is a superset of mvm's. mvm already has ~60% of it: `specs/claims/catalog.md`
+and it is a superset of mvm's. mvm already has ~60% of it: the ADR-001 ledger table
 + `xtask check-claim-catalog` (witness existence + contiguity, typed `fn:`/`ci:`
 witnesses) + the cucumber `mvm-conformance` harness + the mutation-witness gate. The
 five deltas below are pure pattern adoption — no external dependency, no new crate —
