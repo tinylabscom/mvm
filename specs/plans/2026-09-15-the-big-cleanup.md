@@ -1,7 +1,9 @@
 # The big cleanup
 
-Backing: shipped-source
-Validation: check-claim-catalog
+Backing: preview
+Validation: none — the measurements below are reproducible from the
+commands recorded with them, but the remediation this plan sequences is proposed,
+not landed.
 
 The tree grew faster than it was pruned. Generated code added call paths beside
 existing ones instead of into them, named things after the process that produced
@@ -34,8 +36,8 @@ run them *before* you change anything so you know what was already red.
 
 ## A. Inventory
 
-**The single most important structural finding.** `check-claim-catalog` proves a
-named witness *exists*; it never proves anything calls the code that witness
+**The single most important structural finding.** `check-claim-catalog` checks that a
+named witness *exists*; it never checks that anything calls the code that witness
 tests. ADR-001:740-742 says so honestly. Three numbered claims are paying for
 it right now — claim 1 (#3307), claim 11 (#3316) and claim 13 (#3316) — and in
 each case the witness passes because it calls the gate function directly with
@@ -380,7 +382,7 @@ rest assorted. Roughly 15 `Phase N` hits are algorithm steps and must survive.
       test, and this tree has a named instance of the class: claim 1's and
       claim 19's share witnesses pass by calling `enforce_admitted_shares`
       directly with hand-built inputs, while no transient boot ever calls it
-      (#3307). `check-claim-catalog` cannot catch this — it proves a witness
+      (#3307). `check-claim-catalog` cannot catch this — it checks that a witness
       exists, never that production calls the code the witness tests. Audit
       every claim witness for a production caller, with `graft callers` on the
       subject rather than on the test.
@@ -459,7 +461,7 @@ Measured and partly executed 2026-09-15.
       `fix/3250-claim-witness`, `fix/m1-e2e-prereqs`,
       `fix/m1-reconfigure-handshake`, `release/v0.18.0-rc.2`,
       `release/v0.18.0-rc.2-evidence`. Their sessions have shipped. Retire the
-      worktrees once each session confirms it is finished.
+      worktrees once each session reports it is finished.
 - [ ] **J4** 21 remote branches have a CLOSED (not merged) PR and 24 have no PR
       at all. Classify and sweep. Use the merged-PR-head signal, not
       `git branch --merged` — this repo squash-merges, so `--merged` reports
