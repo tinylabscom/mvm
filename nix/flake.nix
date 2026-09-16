@@ -184,9 +184,8 @@
 
       # ── Internal: nixosConfigurations.minimal ────────────────────
       #
-      # Test fixture for our smoke tests (`tests/smoke_libkrun.rs`,
-      # `tests/nix_flake_structure.rs`). NOT a starter template —
-      # users write their own flake. The `internal` namespace makes
+      # Test fixture pinned by `tests/nix_flake_structure.rs`. NOT a
+      # starter template — users write their own flake. The `internal` namespace makes
       # the boundary unambiguous so CI lints can grep for it.
       nixosConfigurations.internal-minimal-x86_64-linux =
         mkProfile "x86_64-linux" "minimal";

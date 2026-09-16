@@ -14,15 +14,19 @@
 //! deferred code decisions. Genuine non-deferral uses get the narrowest
 //! possible `EXEMPTIONS` entry with a reason.
 //!
-//! This adaptation scans production source (outside `#[cfg(test)]` blocks and
-//! outside `tests/` directories) for `TODO`, `FIXME`, `unimplemented!`, and
-//! the phrase `later version`. Test-only stubs and test files are allowed
-//! `unimplemented!` because mock backends commonly use it; deferred behavior
-//! in tests is still caught by `TODO`/`FIXME`.
+//! This adaptation scans the Rust trees (`crates/`, `xtask/`, `src/`), every
+//! text file under `nix/`, the root `install.sh` and `Justfile`, and root
+//! markdown for `TODO`, `FIXME`, `unimplemented!`, and the phrase
+//! `later version`. Production source is checked outside `#[cfg(test)]`
+//! blocks and outside `tests/` directories: test-only stubs and test files are
+//! allowed `unimplemented!` because mock backends commonly use it; deferred
+//! behavior in tests is still caught by `TODO`/`FIXME`.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+
+use crate::fs_walk::walk_files;
 
 /// Marker halves. Concatenating each pair yields the real token.
 const MARKERS: &[(&str, &str)] = &[
@@ -58,26 +62,84 @@ const EXEMPTIONS: &[(&str, &str)] = &[
     ),
 ];
 
+/// Trees walked for Rust sources and their manifests and docs.
+const SOURCE_TREES: &[&str] = &["crates", "xtask", "src"];
+
+/// Extensions read under [`SOURCE_TREES`].
+const SOURCE_EXTENSIONS: &[&str] = &["rs", "md", "toml"];
+
+/// Trees read in full: every text file, whatever its extension, so a new
+/// script or config format cannot land outside the gate.
+const WHOLE_TREES: &[&str] = &["nix"];
+
+/// Individual root files outside any walked tree.
+const ROOT_FILES: &[&str] = &["install.sh", "Justfile"];
+
 /// Run the R4 gate.
 pub fn run(workspace: &Path) -> Result<()> {
-    let mut files: Vec<PathBuf> = Vec::new();
-
-    // Scan every crate source tree and xtask.
-    for dir in [workspace.join("crates"), workspace.join("xtask")] {
-        gather(&dir, &mut files)?;
+    let violations = find_violations(workspace)?;
+    if !violations.is_empty() {
+        bail!(
+            "R4: nothing is deferred. None of {} may appear outside backticks, string literals, or exemptions.\n\n{}",
+            MARKERS
+                .iter()
+                .map(|(l, r)| format!("`{l}{r}`"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            violations.join("\n")
+        );
     }
 
-    // Scan root markdown files discovered rather than listed, so a new doc
-    // cannot silently bypass the gate.
-    for entry in std::fs::read_dir(workspace)? {
-        let path = entry?.path();
-        if path.extension().is_some_and(|e| e == "md") {
+    eprintln!("check-deferrals: clean (R4)");
+    Ok(())
+}
+
+/// Every file the gate reads, in a stable order.
+fn scanned_files(workspace: &Path) -> Result<Vec<PathBuf>> {
+    let mut files: Vec<PathBuf> = Vec::new();
+
+    for tree in SOURCE_TREES {
+        walk_files(&workspace.join(tree), &mut |path| {
+            if path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| SOURCE_EXTENSIONS.contains(&e))
+            {
+                files.push(path.to_path_buf());
+            }
+        })?;
+    }
+
+    for tree in WHOLE_TREES {
+        walk_files(&workspace.join(tree), &mut |path| {
+            files.push(path.to_path_buf());
+        })?;
+    }
+
+    for name in ROOT_FILES {
+        let path = workspace.join(name);
+        if path.is_file() {
             files.push(path);
         }
     }
 
+    // Scan root markdown files discovered rather than listed, so a new doc
+    // cannot silently bypass the gate.
+    let mut root_docs: Vec<PathBuf> = std::fs::read_dir(workspace)
+        .with_context(|| format!("reading {}", workspace.display()))?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| path.is_file() && path.extension().is_some_and(|e| e == "md"))
+        .collect();
+    root_docs.sort();
+    files.extend(root_docs);
+
+    Ok(files)
+}
+
+/// Every deferral marker the gate reports, as `path:line: text`.
+fn find_violations(workspace: &Path) -> Result<Vec<String>> {
     let mut violations: Vec<String> = Vec::new();
-    for path in files {
+    for path in scanned_files(workspace)? {
         let rel = path
             .strip_prefix(workspace)
             .unwrap_or(&path)
@@ -86,8 +148,11 @@ pub fn run(workspace: &Path) -> Result<()> {
         if EXEMPTIONS.iter().any(|(glob, _)| *glob == rel) {
             continue;
         }
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        // A file that is not UTF-8 is a binary blob and carries no comment.
+        let Ok(text) = String::from_utf8(bytes) else {
+            continue;
+        };
         let is_test_file = is_test_path(&rel);
         let test_ranges = test_line_ranges(&text);
         for (i, line) in text.lines().enumerate() {
@@ -112,43 +177,7 @@ pub fn run(workspace: &Path) -> Result<()> {
             }
         }
     }
-
-    if !violations.is_empty() {
-        bail!(
-            "R4: nothing is deferred. None of {} may appear outside backticks, string literals, or exemptions.\n\n{}",
-            MARKERS
-                .iter()
-                .map(|(l, r)| format!("`{l}{r}`"))
-                .collect::<Vec<_>>()
-                .join(", "),
-            violations.join("\n")
-        );
-    }
-
-    eprintln!("check-deferrals: clean (R4)");
-    Ok(())
-}
-
-fn gather(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    if !dir.is_dir() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if path.is_dir() {
-            if name == "target" || name == ".git" || name == "node_modules" {
-                continue;
-            }
-            gather(&path, out)?;
-        } else if path
-            .extension()
-            .is_some_and(|e| e == "rs" || e == "md" || e == "toml")
-        {
-            out.push(path);
-        }
-    }
-    Ok(())
+    Ok(violations)
 }
 
 fn is_test_path(rel: &str) -> bool {
@@ -279,6 +308,68 @@ mod tests {
         assert!(tokens.contains(&"TODO".to_string()));
         assert!(tokens.contains(&"FIXME".to_string()));
         assert!(tokens.contains(&"unimplemented!".to_string()));
+    }
+
+    fn plant(root: &Path, rel: &str, body: &str) {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().expect("planted path has a parent"))
+            .expect("create planted dir");
+        std::fs::write(&path, body).expect("write planted file");
+    }
+
+    /// Each root the gate claims to cover must be read: a marker planted under
+    /// it is reported. The `nix/` entries use extensions outside the Rust tree
+    /// set, so the whole tree is proven walked rather than its `.md` files.
+    #[test]
+    fn a_marker_planted_under_every_root_is_reported() {
+        let marker = format!("{}{}", MARKERS[0].0, MARKERS[0].1);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let planted = [
+            ("crates/demo/src/lib.rs", format!("// {marker} planted\n")),
+            ("xtask/src/demo.rs", format!("// {marker} planted\n")),
+            ("src/lib.rs", format!("// {marker} planted\n")),
+            ("nix/profiles/demo.nix", format!("# {marker} planted\n")),
+            ("nix/ops/demo/run.sh", format!("# {marker} planted\n")),
+            (
+                "nix/ops/demo/cloud-init.yaml",
+                format!("# {marker} planted\n"),
+            ),
+            ("install.sh", format!("# {marker} planted\n")),
+            ("Justfile", format!("# {marker} planted\n")),
+            ("README.md", format!("{marker} planted\n")),
+        ];
+        for (rel, body) in &planted {
+            plant(tmp.path(), rel, body);
+        }
+
+        let violations = find_violations(tmp.path()).expect("scan planted workspace");
+
+        let unscanned: Vec<&str> = planted
+            .iter()
+            .map(|(rel, _)| *rel)
+            .filter(|rel| {
+                let prefix = format!("{rel}:1:");
+                !violations.iter().any(|v| v.starts_with(&prefix))
+            })
+            .collect();
+        assert!(
+            unscanned.is_empty(),
+            "not scanned: {unscanned:?}; reported: {violations:?}"
+        );
+        assert_eq!(violations.len(), planted.len(), "{violations:?}");
+    }
+
+    /// A binary file under a whole-file tree carries no comment to defer, so
+    /// it is skipped rather than failing the gate.
+    #[test]
+    fn a_non_utf8_file_under_nix_is_skipped() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("nix/blob.bin");
+        std::fs::create_dir_all(path.parent().expect("blob has a parent")).expect("create nix dir");
+        std::fs::write(&path, [0xff, 0xfe, 0x00, 0x80]).expect("write blob");
+
+        let violations = find_violations(tmp.path()).expect("scan tolerates a binary file");
+        assert!(violations.is_empty(), "{violations:?}");
     }
 
     #[test]

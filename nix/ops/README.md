@@ -11,17 +11,19 @@ membership, network interfaces, firewall rules, systemd units,
 
 | Subdir | Purpose | When to run |
 |---|---|---|
-| [`bootstrap/`](bootstrap/) | First-time setup — install Lima, Homebrew, etc. | Once, manually, before `mvmctl dev up`. |
+| [`bootstrap/`](bootstrap/) | First-time setup — system build dependencies and the Rust toolchain for a source checkout. | Once, manually, before the first `cargo build`. |
 | [`permissions/`](permissions/) | One-shot privilege grants — `/dev/kvm` access, group membership. | Once per host, manually, with explicit sudo. |
-| [`networking/`](networking/) | Bridge / TAP / iptables setup if not done by mvmctl. | Strict-mode pre-condition; otherwise mvmctl handles inline. |
 | [`systemd/`](systemd/) | mvm systemd unit installation (Linux production hosts). | When deploying mvm as a managed service. |
-| [`hetzner/`](hetzner/) | Cloud-init for a Hetzner test box (Linux+KVM) running the full workspace suite. | Per-PR or ad hoc, when Lima on macOS isn't enough (live Firecracker, longer fuzz). |
+| [`hetzner/`](hetzner/) | Cloud-init for a Hetzner test box (Linux+KVM) running the full workspace suite. | Ad hoc, when a macOS host isn't enough (live Firecracker, longer fuzz). |
 
 Every script in `ops/` MUST have a header listing:
 - What host state it changes
 - Why elevated privileges are required
 - Whether it's idempotent
 
-`mvmctl` itself **does not invoke these scripts automatically**. The
-shell hook in `nix/devshells/host.nix` may *point* a contributor at
-the right script, but it never runs one.
+There is no host network setup to script. Workload microVMs boot without a
+NIC and their egress leaves over vsock to a per-VM host endpoint, so `mvmctl`
+creates no host bridge, TAP device, or firewall rule.
+
+Nothing invokes these scripts automatically — not `mvmctl`, not a flake
+output. A contributor runs each one by hand.

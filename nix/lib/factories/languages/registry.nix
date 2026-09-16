@@ -13,7 +13,7 @@
 #                 instead. `null` when the runtime needs none.
 #
 # Adding a language is one ROW here + the bare name in
-# `crates/mvm-ir/data/supported_languages.txt`. No new .nix file, no logic.
+# `crates/mvm-contract/data/supported_languages.txt`. No new .nix file, no logic.
 # The only other per-language artifact is the wrapper script under
 # nix/wrappers/<wrapperDir>/ — unavoidable, since dispatch genuinely differs.
 

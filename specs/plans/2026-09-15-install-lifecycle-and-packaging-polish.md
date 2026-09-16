@@ -121,15 +121,21 @@ Issue: [#3273](https://github.com/tinylabscom/mvm/issues/3273).
 
 Issue: [#3274](https://github.com/tinylabscom/mvm/issues/3274).
 
-- [ ] Read the version via `importTOML` from `Cargo.toml` in
+- [x] Read the version via `importTOML` from `Cargo.toml` in
       `nix/packages/mvmctl.nix` instead of the hardcoded `0.18.0-rc.1`.
-- [ ] Use `cargoLock.lockFile` rather than a hand-maintained `cargoHash`, so an
-      unrelated lock bump does not turn the package red.
-- [ ] Write the check/harness boundary down in `nix/lib/factories/README.md`:
+      `nix/packages/mvm-sdk-cdylib.nix` carried the same literal and reads the
+      manifest too; `_release-prep` no longer rewrites either file.
+- [x] Use `cargoLock.lockFile` rather than a hand-maintained `cargoHash`, so an
+      unrelated lock bump does not turn the package red. Already true: the
+      package vendors through `nix/lib/static-crates-cargo-deps.nix`, which is
+      nixpkgs' `importCargoLock` over the committed `Cargo.lock`. There was no
+      `cargoHash`, and `Cargo.lock` has no non-registry sources needing
+      `outputHashes`.
+- [x] Write the check/harness boundary down in `nix/lib/factories/README.md`:
       a Nix check provides the package and session environment; the Rust
       harness owns the behavioral assertions. Two catalogs drift, and the drift
       is invisible until one of them is wrong.
-- [ ] Sweep `nix/ops/README.md` and any sibling doc still naming Lima or
+- [x] Sweep `nix/ops/README.md` and any sibling doc still naming Lima or
       `mvmctl dev up`.
 
 ## Acceptance
@@ -139,5 +145,5 @@ Issue: [#3274](https://github.com/tinylabscom/mvm/issues/3274).
       verification that no longer depends on a host `cosign`.
 - [ ] A failed upgrade leaves a working previous install.
 - [ ] `uninstall.sh` exists, is tested, and refuses ambiguity.
-- [ ] `nix/packages/mvmctl.nix` cannot drift from `Cargo.toml`.
+- [x] `nix/packages/mvmctl.nix` cannot drift from `Cargo.toml`.
 - [ ] `just ci` and every xtask gate green.

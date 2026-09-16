@@ -22,6 +22,10 @@
   pkgs,
   lib,
   mvmSrc,
+  # Most callers can read the version from the source tree directly. Nested
+  # flakes may pass the version from their unfiltered workspace root so Nix
+  # never has to import a manifest through a temporary filtered store path.
+  workspaceVersion ? (lib.importTOML (mvmSrc + "/Cargo.toml")).workspace.package.version,
   # Which libc the cdylib is built against. A guest can only `dlopen` the
   # variant matching its own: musl's loader fails resolving glibc-only symbols
   # such as `_dl_find_object`, and one process cannot use two libcs. The host
@@ -64,11 +68,12 @@ let
   # alias, and a linker path that does not exist fails loudly, whereas an
   # unset linker fails silently by falling back to the host cc.
   muslLinker = "${pkgs.pkgsMusl.stdenv.cc}/bin/gcc";
+
 in
 
 pkgs.rustPlatform.buildRustPackage ({
   pname = "mvm-sdk-cdylib" + lib.optionalString isMusl "-musl";
-  version = "0.18.0-rc.2";
+  version = workspaceVersion;
 
   src = mvmSrc;
 

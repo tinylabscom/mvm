@@ -534,7 +534,7 @@ model-write:
 honesty:
     cargo run -p xtask -- check-honesty
 
-# R4: verify no TODO/FIXME/unimplemented!/placeholder markers are deferred.
+# Verify no deferral marker (`TODO`, `FIXME`, `unimplemented!`) is left in the tree.
 deferrals:
     cargo run -p xtask -- check-deferrals
 
@@ -710,13 +710,12 @@ _release-prep VERSION:
     fi
     cargo update -w
     # The runtime-overlay flake pins its version to the workspace version
-    # (check-runtime-overlay-version fails closed on a mismatch, ADR-018); the
-    # nix package versions should track too. Bump them alongside Cargo.toml.
+    # (check-runtime-overlay-version fails closed on a mismatch), so bump it
+    # alongside Cargo.toml. The mvmctl and SDK cdylib nix packages read their
+    # version from Cargo.toml and need no edit.
     sed -i.bak -E "s/(overlayVersion[[:space:]]*=[[:space:]]*\")[^\"]*(\")/\1$V\2/" nix/images/runtime-overlay/flake.nix
     rm nix/images/runtime-overlay/flake.nix.bak
-    sed -i.bak -E "s/(^[[:space:]]*version = \")[0-9][^\"]*(\")/\1$V\2/" nix/packages/mvmctl.nix nix/packages/mvm-sdk-cdylib.nix
-    rm nix/packages/*.bak
-    git add nix/images/runtime-overlay/flake.nix nix/packages/mvmctl.nix nix/packages/mvm-sdk-cdylib.nix
+    git add nix/images/runtime-overlay/flake.nix
     # The cargo-fuzz crates are separate workspaces with their own lockfiles,
     # each pinning the internal `mvm-*` crates by version. A bump leaves every
     # one of them naming the old version, and ci.yml's "cargo-fuzz crates still

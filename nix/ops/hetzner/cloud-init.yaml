@@ -2,13 +2,13 @@
 # Hetzner Cloud first-boot config for an mvm test box.
 #
 # Provisions a Linux host that can run the full mvm workspace test
-# suite — including the live-KVM smokes that Lima on macOS can't
-# (`mvmctl console <fc-vm>`, real `nix build` of microVM images, the
+# suite — including the live-KVM smokes that a macOS host can't
+# (`mvmctl machine console <fc-vm>`, real `nix build` of microVM images, the
 # seccomp functional probes, and `cargo fuzz`).
 #
 # Where this lives in the test pyramid:
 #   • macOS host:          per-crate cargo test / clippy (fast feedback)
-#   • Lima (aarch64-linux): workspace clippy + Linux-gated tests (CI parity)
+#   • CI (Linux runners):  workspace clippy + Linux-gated tests
 #   • Hetzner (this box):  live-KVM Firecracker, longer fuzz, real perf
 #
 # Tested against Hetzner CCX23 (x86_64, 4 dedicated vCPU, 16 GB RAM,
@@ -16,8 +16,8 @@
 # work too — the runcmd block detects architecture at boot.
 #
 # Pinned Firecracker version follows `crates/mvm-core/src/config.rs::
-# FC_VERSION_DEFAULT`. Bump there first, then here, so the dev-host
-# Lima install and the Hetzner box stay in lockstep.
+# FC_VERSION_DEFAULT`. Bump there first, then here, so the workspace
+# default and the Hetzner box stay in lockstep.
 #
 # Idempotency: cloud-init only runs runcmd on first boot. Re-running
 # is the operator's job; everything below is written so a manual

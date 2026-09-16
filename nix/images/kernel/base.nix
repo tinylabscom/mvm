@@ -33,7 +33,7 @@
 # compiles the kernel once (3-5 min on Apple Silicon, ~10 min slower).
 # Sharing the base means the builder and workload kernels reuse most of
 # the same closure, and `mvmctl kernel build` (+ the hash-keyed GHA
-# prebuilt) move that cost out of the hot `dev up` loop.
+# prebuilt) move that cost out of the hot build loop.
 
 { pkgs }:
 
