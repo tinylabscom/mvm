@@ -553,6 +553,30 @@ pub fn host_matches(pattern: &str, host: &str) -> bool {
     }
 }
 
+/// The DNS name whose subtree holds every host `pattern` admits: the suffix of a
+/// `*.suffix` wildcard, or an exact host unchanged.
+///
+/// The subtree is wider than the pattern by exactly the apex — `example.com`
+/// holds `example.com` itself, which `*.example.com` does not admit.
+pub fn host_pattern_subtree(pattern: &str) -> &str {
+    pattern.strip_prefix("*.").unwrap_or(pattern)
+}
+
+/// Whether `pattern` is a wildcard over fewer than two DNS labels — bare `*`,
+/// `*.`, `*.com`. Its subtree would be a whole top-level domain, or the entire
+/// namespace.
+///
+/// Counting labels is all this does. It has no public-suffix knowledge, so
+/// `*.co.uk` is two labels and is not caught.
+pub fn host_pattern_is_single_label_wildcard(pattern: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    pattern
+        .strip_prefix("*.")
+        .is_some_and(|suffix| suffix.split('.').filter(|label| !label.is_empty()).count() < 2)
+}
+
 /// Whether `destination` is bound by an `allowed_hosts` set — the claim-12
 /// predicate every path must decide identically.
 ///
@@ -1000,5 +1024,28 @@ mod tests {
         assert!(!host_is_bound(&allowed, "evil.example.org"));
         assert!(!host_is_bound(&allowed, "example.com"));
         assert!(!host_is_bound(&allowed, "evilexample.com"));
+    }
+
+    #[test]
+    fn a_host_patterns_subtree_drops_only_a_leading_wildcard_label() {
+        assert_eq!(host_pattern_subtree("*.example.com"), "example.com");
+        assert_eq!(host_pattern_subtree("*.a.b.example.com"), "a.b.example.com");
+        assert_eq!(host_pattern_subtree("api.openai.com"), "api.openai.com");
+    }
+
+    #[test]
+    fn a_wildcard_over_fewer_than_two_labels_is_single_label() {
+        for pattern in ["*", "*.", "*.com", "*.io", "*.com.", "*..com"] {
+            assert!(
+                host_pattern_is_single_label_wildcard(pattern),
+                "{pattern} spans a top-level domain"
+            );
+        }
+        for pattern in ["*.example.com", "*.co.uk", "com", "api.openai.com"] {
+            assert!(
+                !host_pattern_is_single_label_wildcard(pattern),
+                "{pattern} is not a single-label wildcard"
+            );
+        }
     }
 }

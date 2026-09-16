@@ -129,9 +129,11 @@ fn fingerprints() -> MutexGuard<'static, HashMap<String, Vec<SecretFingerprint>>
 /// own; a second sink has to be written on purpose.
 #[derive(Clone, PartialEq, Eq)]
 pub struct EgressTlsDelivery {
-    /// The destinations the certificate's `nameConstraints permitted` carries —
-    /// the exact slice it was minted from, recorded so a later boot can ask what
-    /// this CA is allowed to speak for without re-parsing X.509.
+    /// The binding patterns the certificate was minted from — the exact slice,
+    /// `*.` wildcards included, whose subtrees its `nameConstraints permitted`
+    /// carries. Recorded so a later boot can ask what this CA is allowed to
+    /// speak for without re-parsing X.509, using the same matching the binding
+    /// check uses.
     bound_hosts: Vec<String>,
     /// The CA cert PEM: delivered to the guest's trust bundle, and what the
     /// endpoint's minted leaves chain to.
@@ -176,16 +178,18 @@ impl EgressTlsDelivery {
 
     /// The first entry of `wanted` this certificate does not permit, if any.
     ///
-    /// Exact names, not the binding allow-list's `*.` matching: this answers
-    /// "was the certificate minted for that destination", and a name the mint
-    /// never saw is outside the permitted subtrees no matter how it is spelled.
-    /// A conservative answer here costs a refusal; a generous one costs a leaf
-    /// the guest's own TLS stack rejects, after the flow was admitted.
+    /// Decided by the binding allow-list's own matching over the patterns the
+    /// certificate was minted from, so `api.example.com` — or `*.api.example.com`
+    /// — is covered by a `*.example.com` mint. Every name that matching admits
+    /// lies inside the subtrees the mint wrote, which also hold each wildcard's
+    /// apex; the apex is still reported here, because the binding does not
+    /// admit it. A conservative answer costs a refusal; a generous one costs a
+    /// leaf the guest's own TLS stack rejects, after the flow was admitted.
     #[must_use]
     pub fn first_unpermitted<'a>(&self, wanted: &'a [String]) -> Option<&'a str> {
         wanted
             .iter()
-            .find(|host| !self.bound_hosts.contains(host))
+            .find(|host| !mvm_contract::ir::host_is_bound(&self.bound_hosts, host))
             .map(String::as_str)
     }
 }

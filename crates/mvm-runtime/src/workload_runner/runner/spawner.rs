@@ -343,6 +343,42 @@ mod tests {
         assert!(inherited.endpoint_tls().is_some());
     }
 
+    /// A parent bound by wildcard holds a certificate for that whole subtree,
+    /// so a child binding a name the wildcard admits is covered by it — and the
+    /// child's own record keeps the parent's pattern, not the lowered subtree.
+    /// The wildcard's apex is not admitted by the binding, so a child naming it
+    /// is refused even though the certificate would accept it.
+    #[test]
+    fn a_child_binding_a_subdomain_of_its_parents_wildcard_inherits_it() {
+        let parent = tempfile::tempdir().expect("tempdir");
+        BootEgressCa::mint(&hosts(&["*.example.com"]), parent.path()).expect("parent mints");
+
+        for child_hosts in [
+            &["api.example.com"][..],
+            &["a.b.example.com", "*.example.com"][..],
+            &["*.api.example.com"][..],
+        ] {
+            let child = tempfile::tempdir().expect("tempdir");
+            let inherited = BootEgressCa::inherit(parent.path(), child.path(), &hosts(child_hosts))
+                .unwrap_or_else(|e| {
+                    panic!("{child_hosts:?} is under the parent's wildcard: {e:#}")
+                });
+            assert!(inherited.endpoint_tls().is_some());
+            assert_eq!(
+                load_egress_tls_delivery(child.path())
+                    .expect("load")
+                    .expect("recorded")
+                    .bound_hosts(),
+                ["*.example.com"],
+            );
+        }
+
+        let child = tempfile::tempdir().expect("tempdir");
+        let refused = BootEgressCa::inherit(parent.path(), child.path(), &hosts(&["example.com"]))
+            .expect_err("the apex is not bound by the parent's wildcard");
+        assert!(format!("{refused:#}").contains("example.com"));
+    }
+
     #[test]
     fn a_child_of_a_parent_that_terminated_nothing_terminates_nothing() {
         let parent = tempfile::tempdir().expect("tempdir");
