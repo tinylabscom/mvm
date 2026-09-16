@@ -669,24 +669,27 @@ fn after() {}
 
     #[test]
     fn grandfathered_file_cannot_grow() {
-        let grown = "fn production() {}\n".repeat(1516);
-        let tree = make_tree(&[("crates/mvm-hostd/src/audit/emitter.rs", &grown)]);
+        let (path, limit) = GRANDFATHERED[0];
+        let grown = "fn production() {}\n".repeat(limit + 1);
+        let tree = make_tree(&[(path, &grown)]);
         let err = run(tree.path()).expect_err("a grandfathered file may not grow");
         assert!(err.to_string().contains("grew past"), "{err}");
     }
 
     #[test]
     fn grandfathered_file_must_leave_the_list_at_the_ordinary_limit() {
+        let (path, _) = GRANDFATHERED[0];
         let shrunk = "fn production() {}\n".repeat(MAX_PROD_LINES);
-        let tree = make_tree(&[("crates/mvm-hostd/src/audit/emitter.rs", &shrunk)]);
+        let tree = make_tree(&[(path, &shrunk)]);
         let err = run(tree.path()).expect_err("a stale grandfather entry must fail");
         assert!(err.to_string().contains("stale grandfather"), "{err}");
     }
 
     #[test]
     fn grandfathered_file_at_its_ceiling_passes() {
-        let pinned = "fn production() {}\n".repeat(1515);
-        let tree = make_tree(&[("crates/mvm-hostd/src/audit/emitter.rs", &pinned)]);
+        let (path, limit) = GRANDFATHERED[0];
+        let pinned = "fn production() {}\n".repeat(limit);
+        let tree = make_tree(&[(path, &pinned)]);
         run(tree.path()).expect("the pinned baseline itself remains admitted");
     }
 
