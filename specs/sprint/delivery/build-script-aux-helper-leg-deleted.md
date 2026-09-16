@@ -1,6 +1,6 @@
 # `mvm-cli(build)` no longer compiles the per-VM host helpers
 
-Plan: `specs/plans/2026-08-28-build-script-drops-the-aux-helper-leg.md`
+Plan: `2026-08-28-build-script-drops-the-aux-helper-leg`
 
 `crates/mvm-cli/build.rs`'s second leg ran seven sequential nested
 `cargo build -p mvm-hostd --bin …` invocations into a private target directory.
@@ -29,7 +29,7 @@ when its sources change, so there is no stale state left to detect.
 `--features libkrun-sys` invocation — so it also stops failing on hosts without
 libkrun, which it did before.
 
-Retires `specs/plans/2026-08-26-aux-helper-staleness-gate.md`, closes the
+Retires `2026-08-26-aux-helper-staleness-gate`, closes the
 `MVM_LIBKRUN_HEADER` rerun-if-env-changed item in
 `specs/plans/2026-08-17-embedded-binary-content-store.md`, and moots §2 of
 `specs/plans/2026-08-15-aux-helper-binary-freshness.md`.

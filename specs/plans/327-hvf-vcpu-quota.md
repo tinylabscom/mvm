@@ -58,7 +58,7 @@ design is committed. A negative answer to (1) ends the plan.
    costs CPU itself. Measure the controller's own consumption; a scheduler that
    spends a meaningful slice of the budget it is enforcing is not viable.
 
-**Deliverable:** `specs/plans/327-hvf-quota-spike-findings.md` with the raw
+**Deliverable:** `specs/benchmarks/327-hvf-quota-spike-findings.md` with the raw
 numbers, the period/quota values tried, and a one-line verdict — **"Phase 1
 proceeds"** or **"the approach does not bound / costs too much, and here is
 what it would take instead"**.

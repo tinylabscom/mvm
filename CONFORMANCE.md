@@ -107,7 +107,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-13` | `build` | No raw secret value crosses the broker channel | `fn:encode_secret_env_cmdline_round_trips_pairs_as_single_token`, `fn:substitute` |
+| `MVM-SEC-13` | `build` | The managed substitution path hands the guest placeholders, never raw secret values | `fn:handed_placeholders_never_contain_the_secret_value`, `fn:endpoint_bin_serves_substitution_and_refuses_unbound_destination`, `fn:substitute` |
 
 ## supply_chain
 

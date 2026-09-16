@@ -1,7 +1,7 @@
 # Resume Boot — live witness and defect fixes
 
 Date: 2026-08-19
-Plan: `specs/plans/2026-08-19-resume-boot.md`
+Plan: `2026-08-19-resume-boot`
 
 ## What was witnessed
 
@@ -97,6 +97,6 @@ runs validate the rest of the workspace.
 - `crates/mvm-cli/src/commands/agent_session.rs` — pass the chain emitter into
   `resume_and_boot` instead of recording after the boot.
 - `specs/plans/2026-08-18-durable-agent-sessions.md` — D5 state update.
-- `specs/plans/2026-08-19-resume-boot.md` — all checkboxes ticked.
+- `2026-08-19-resume-boot` — all checkboxes ticked.
 - `specs/REFACTOR-STATUS.md` — durable agent sessions status update.
 - `specs/sprint/delivery/resume-boot.md` — this file.

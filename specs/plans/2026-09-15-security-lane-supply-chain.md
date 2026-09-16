@@ -22,5 +22,5 @@ has merged, so every failed job named by the issue is repaired.
 - [x] Pass `cargo audit`, `cargo deny check`, workspace tests/check, gated
       compilation, zero-warning Clippy, formatting, and repository policy gates.
 - [x] Merge the #3250 mutation-coverage prerequisite.
-- [ ] Pass the complete Security workflow on the pull-request head.
-- [ ] Merge this issue-linked pull request and close #3249.
+- [x] Pass the complete Security workflow on the pull-request head.
+- [x] Merge this issue-linked pull request and close #3249.

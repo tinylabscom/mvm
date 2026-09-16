@@ -7,7 +7,7 @@ reached from `mvmctl cache prune` — and it predates this branch. It knows
 nothing about sessions, so a session parked past the sweep's age cut loses
 the checkpoint it resumes from and becomes permanently unresumable: the
 session record survives, pointing at nothing. This branch delivers
-`specs/plans/2026-08-18-session-retention.md` Tasks 1–3: teaching that sweep
+`2026-08-18-session-retention` Tasks 1–3: teaching that sweep
 about sessions, closing the same manual door on `mvmctl vm checkpoint rm`,
 and adding the one-way `demote` transition the tier ladder needs.
 

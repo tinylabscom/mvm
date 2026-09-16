@@ -1,6 +1,6 @@
 # Witness reachability: measured, refused, and the doc comments it surfaced
 
-Plan: `specs/plans/2026-09-01-committed-agent-notes-and-asserted-absence.md`
+Plan: `2026-09-01-committed-agent-notes-and-asserted-absence`
 
 ## Outcome
 

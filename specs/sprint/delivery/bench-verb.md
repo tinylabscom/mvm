@@ -1,6 +1,6 @@
 # `mvmctl bench` — the harness gets a front door
 
-**Plan:** `specs/plans/329-run-first-cli-and-upstream-adoption.md` Phase 7.
+**Plan:** `329-run-first-cli-and-upstream-adoption` Phase 7.
 
 ## What existed and what did not
 

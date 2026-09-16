@@ -1,6 +1,6 @@
 # `mvmctl plugin install` — telling an agent mvm exists
 
-**Plan:** `specs/plans/329-run-first-cli-and-upstream-adoption.md` Phase 6.
+**Plan:** `329-run-first-cli-and-upstream-adoption` Phase 6.
 
 ## The MCP question, answered by not building one
 

@@ -1,6 +1,6 @@
 # The libkrun seeded closure rides the input disk
 
-Stage C of `specs/plans/2026-08-31-remove-virtio-fs.md`, libkrun half. Both
+Stage C of `2026-08-31-remove-virtio-fs`, libkrun half. Both
 one-shot libkrun transport paths (`run_shell_script`, `run_build`) now pass the
 seeded Nix store closure to `prepare_builder_transport_disks` instead of
 attaching it as a separate virtio-fs share.

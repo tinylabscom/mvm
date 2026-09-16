@@ -24,7 +24,7 @@ a named machine you start and stop, not a job you run.
 ## Why the obvious fix is the wrong one
 
 Making a share writable puts a guest-driven FUSE parser back on the host — the
-thing `specs/plans/2026-08-31-remove-virtio-fs.md` removed, and the reason
+thing `2026-08-31-remove-virtio-fs` removed, and the reason
 claim 1 can now rest on the guest having *no* channel to host filesystem
 structure rather than on virtio-fs behaving. The vsock-only data plane is also
 what makes claims 10 and 13 and the audit chain enforceable. A writable host
@@ -139,7 +139,7 @@ drive.
 
 ## Adjacent, already recorded
 
-`specs/plans/2026-09-02-retire-dirshare.md` covers the read direction and the
+`2026-09-02-retire-dirshare` covers the read direction and the
 `DirShare` grant record. Its open question — a registered volume that the
 transient path silently ignores — is now a warning rather than silence, but the
 underlying asymmetry (registrations apply to `machine start` only) is the same

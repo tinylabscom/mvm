@@ -1,6 +1,6 @@
 # `mvmctl --help` and the CLI reference now describe one product
 
-**Plan:** `specs/plans/329-run-first-cli-and-upstream-adoption.md`, Phase A
+**Plan:** `329-run-first-cli-and-upstream-adoption`, Phase A
 (added in this change). **ADR:** ADR-027, amended.
 
 ## What was wrong

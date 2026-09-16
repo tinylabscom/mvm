@@ -5,10 +5,10 @@ nine-step sequence and names two of them — synthesis and admission — as the
 hard constraint the whole design rests on: admission has to stay cheap
 because it now runs once per resume rather than once per task. This branch
 delivers those two steps, on top of the session store
-`specs/plans/2026-08-18-durable-session-substrate.md` and
-`specs/plans/2026-08-18-durable-session-park.md` landed and the ledger-head
-fence `specs/plans/2026-08-18-session-approval-head.md` landed —
-`specs/plans/2026-08-18-resume-session-orchestrator.md` Tasks 1–2, with no
+`2026-08-18-durable-session-substrate` and
+`2026-08-18-durable-session-park` landed and the ledger-head
+fence `2026-08-18-session-approval-head` landed —
+`2026-08-18-resume-session-orchestrator` Tasks 1–2, with no
 VM, backend, or async surface involved.
 
 ## Delivered

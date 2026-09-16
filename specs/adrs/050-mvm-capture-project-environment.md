@@ -102,7 +102,6 @@ backend.
 
 ## Related
 
-- `specs/plans/2026-08-20-mvm-capture.md`
 - `crates/mvm-capture/`
 - `crates/mvm-cli/src/commands/capture/`
 - `tests/fixtures/capture/rust-hello/`

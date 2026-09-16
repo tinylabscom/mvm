@@ -1,6 +1,6 @@
 # 2698 — forked children are admitted with no secret bindings
 
-Issue: #2698. Plan: `specs/plans/2026-08-18-fork-inherits-secret-bindings.md`.
+Issue: #2698. Plan: `2026-08-18-fork-inherits-secret-bindings`.
 PR: #2696.
 
 ## Delivered

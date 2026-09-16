@@ -282,14 +282,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let resolver = SdkSidecarResolver::new(dir.path().to_path_buf(), "1.2.3".into());
         let err = resolve_sdk_sidecar_attachment(
-            &[svc("host.secrets.v1")],
+            &[svc("host.kv.v1")],
             &resolver,
             GuestArch::host(),
             mvm_contract::guest_libc::GuestLibc::Musl,
         )
         .expect_err("a cold cache must refuse a sidecar-requiring workload");
         let rendered = format!("{err:#}");
-        assert!(rendered.contains("host.secrets.v1"), "{rendered}");
+        assert!(rendered.contains("host.kv.v1"), "{rendered}");
         assert!(
             rendered.contains("mvmctl build sdk-sidecar build"),
             "{rendered}"

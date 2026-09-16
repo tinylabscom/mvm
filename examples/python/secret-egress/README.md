@@ -62,7 +62,7 @@ per-call entrypoint its placeholder and proxy env. A plain
 default, and the example calls plain `http://`. Deploying to a multi-tenant
 fleet is a separate `mvmd` concern; this is the local dev/test path. The
 runtime substitution is exercised per the boot-e2e runbook in
-`specs/plans/129-secrets-subsystem.md`.
+`129-secrets-subsystem`.
 
 `httpbin.org/get` reflects the request headers, so the returned JSON shows
 the substituted credential reached the destination — proving the guest only

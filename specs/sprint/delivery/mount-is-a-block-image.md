@@ -1,6 +1,6 @@
 # `--mount` is a block image, not a virtio-fs share
 
-**Status: COMPLETE** — Stage A of `specs/plans/2026-08-31-remove-virtio-fs.md`.
+**Status: COMPLETE** — Stage A of `2026-08-31-remove-virtio-fs`.
 
 ## What changed
 

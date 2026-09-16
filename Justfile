@@ -699,6 +699,15 @@ _release-prep VERSION:
         -e "s/^version = \"[^\"]*\"/version = \"$V\"/" \
         -e "s/(path = \"[^\"]*\", version = )\"[^\"]*\"/\1\"$V\"/" Cargo.toml
     rm Cargo.toml.bak
+    # Stable release PRs also advance the installer's checked-in default. A
+    # prerelease must remain opt-in, matching GitHub's releases/latest
+    # behavior and the installer's historical contract.
+    if [[ "$V" != *-* ]]; then
+        sed -i.bak -E "s/^DEFAULT_VERSION=\"v[^\"]+\"/DEFAULT_VERSION=\"v$V\"/" install.sh
+        rm install.sh.bak
+        grep -qxF "DEFAULT_VERSION=\"v$V\"" install.sh
+        git add install.sh
+    fi
     cargo update -w
     # The runtime-overlay flake pins its version to the workspace version
     # (check-runtime-overlay-version fails closed on a mismatch, ADR-018); the

@@ -58,7 +58,7 @@ intended behaviour; it now implements it, warns when it reclaims, and honours
 
 Supersedes the freshness half of
 `specs/plans/2026-08-15-aux-helper-binary-freshness.md`. Does not re-litigate
-`specs/plans/334-build-critical-path.md`, whose five refuted hypotheses stand;
+`334-build-critical-path`, whose five refuted hypotheses stand;
 its baseline was a warm `cargo build -p mvm-cli`, and the cold and per-profile
 costs addressed here were outside it.
 

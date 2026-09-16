@@ -312,6 +312,6 @@ hypothetical.
 
 ## Out of scope
 
-VM-to-VM fan-out (`specs/plans/296-fleet-stream-fan-out.md`). The deferred
+VM-to-VM fan-out (`296-fleet-stream-fan-out`). The deferred
 minors in plan 283's ledger — they are individually small and want triage, not a
 workstream.

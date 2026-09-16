@@ -1,6 +1,6 @@
 # Committed agent notes, and a gate for prose that asserts absence
 
-Plan: `specs/plans/2026-09-01-committed-agent-notes-and-asserted-absence.md`
+Plan: `2026-09-01-committed-agent-notes-and-asserted-absence`
 
 ## Delivered
 

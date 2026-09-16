@@ -115,7 +115,7 @@ populated it. Steady state after that is unchanged.
   this tree produces. Its other two items — the two divergent
   `mvm-network-endpoint` resolvers, and `pack_stage0_work_disk` writing a
   multi-GB non-sparse file — are independent and still stand.
-- Does **not** re-litigate `specs/plans/334-build-critical-path.md`. Its five
+- Does **not** re-litigate `334-build-critical-path`. Its five
   refuted hypotheses stand: dependency count, crate splitting for the serial
   chain (measured at 1%), the tree-sitter `opt-level` override, feature
   ping-pong, and cross-invocation thrash. 334's baseline was a *warm*
@@ -143,7 +143,7 @@ populated it. Steady state after that is unchanged.
       (only in `libkrun-sys/build.rs`), so changing it did not re-select the
       helper set. Closed 2026-08-28 by deleting the probe along with the whole
       aux-helper leg —
-      `specs/plans/2026-08-28-build-script-drops-the-aux-helper-leg.md`. The
+      `2026-08-28-build-script-drops-the-aux-helper-leg`. The
       `libkrun.h` check now lives in `just build-supervisors`, where a host
       probe belongs and where no fingerprint depends on it.
 - [ ] **Phase 4a** — dead edges: `mvm-runtime → libkrun-sys` has zero use

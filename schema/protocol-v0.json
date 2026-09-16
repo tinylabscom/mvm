@@ -4181,7 +4181,7 @@
       "additionalProperties": false
     },
     "ServiceId": {
-      "description": "Reverse-DNS-like service identifier with a mandatory version segment.\n\nExamples: `host.secrets.v1`, `host.time.v1`, `host.cost.v1`, `broker.v1`.\n\nStrings are validated at construction so the gate code can rely on the shape (in particular, the version segment is the rate-limiting parser for the binding gate).",
+      "description": "Reverse-DNS-like service identifier with a mandatory version segment.\n\nExamples: `host.kv.v1`, `host.time.v1`, `host.cost.v1`, `broker.v1`.\n\nStrings are validated at construction so the gate code can rely on the shape (in particular, the version segment is the rate-limiting parser for the binding gate).",
       "type": "string"
     },
     "Sha256Digest": {

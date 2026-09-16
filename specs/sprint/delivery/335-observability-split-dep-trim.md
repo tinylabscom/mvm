@@ -57,6 +57,6 @@ ephemeral secrets. Cryptographic seed generation across a breaking API change
 
 This changes build time by roughly nothing, and was never expected to.
 Dependencies are cached and do not recompile on an inner-loop edit; that was
-measured separately (see `specs/plans/334-build-critical-path.md`). The
+measured separately (see `334-build-critical-path`). The
 justification here is **security surface**: what the sealed guest agent and the
 embedded musl binaries link.

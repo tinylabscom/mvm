@@ -1,6 +1,6 @@
 # A materialized mount is found by label, not by slot
 
-Stage A of `specs/plans/2026-08-31-remove-virtio-fs.md`, the box that read:
+Stage A of `2026-08-31-remove-virtio-fs`, the box that read:
 *"The guest mounts by volume label rather than by the device node
 `workload_volume_devices` resolves. The image **is** labelled, but the guest is
 still handed a node… the difference between 'works' and 'cannot silently mount

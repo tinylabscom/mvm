@@ -420,8 +420,11 @@ refused (witness); density target met and gated; clippy/nextest green.
 
 ## Phase 5 — Security witness consolidation & fuzz
 
-- [ ] Register every NEW witness (surfaces 1, 2, 4, 6, 10) in
-      `specs/claims/catalog.md` so `xtask check-claim-catalog` binds them; keep
+- [ ] Register every NEW witness (surfaces 1, 2, 4, 6, 10) in the two ledger
+      surfaces that exist — `model/claims.toml` for the conformance ID and the
+      marker-delimited table in `specs/adrs/001-microvm-security-posture.md`,
+      which is what `xtask check-claim-catalog` walks. There is no
+      `specs/claims/catalog.md` and this plan must not recreate one; keep
       the claim numbering table consistent (extends claims 1, 3, 8, 10, 13 into
       the restore path — no new numbered claim, no relaxation).
 - [ ] Extend `crates/mvm-core/fuzz/fuzz_targets/fuzz_snapshot_frame.rs` to cover

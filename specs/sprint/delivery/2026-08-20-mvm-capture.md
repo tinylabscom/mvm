@@ -20,7 +20,7 @@ Implemented the first slice of `mvm capture`.
   `.env` secret in a separate temporary project.
 - Added library and CLI integration tests proving report versioning, secret
   redaction, canonical IR resolution, and Nix rendering.
-- Added ADR-050 and plan `specs/plans/2026-08-20-mvm-capture.md`.
+- Added ADR-050 and plan `2026-08-20-mvm-capture`.
 - Made the `.env` redaction witness self-contained: it creates the secret file
   in a temporary project and therefore runs identically in a clean CI checkout.
 - Raised the all-features workspace closure ratchet by one, from 469 to 470,

@@ -1,6 +1,6 @@
 # An `image =` manifest builds now
 
-**Plans:** `specs/plans/329-run-first-cli-and-upstream-adoption.md` Phase 4 and
+**Plans:** `329-run-first-cli-and-upstream-adoption` Phase 4 and
 `specs/plans/255-vsock-first-snapshot-egress-adoption.md` Phase 4 — both of
 which specified this as `mvmctl template build --image <ref>`.
 

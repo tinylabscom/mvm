@@ -2255,7 +2255,7 @@ mod tests {
         assert_eq!(
             std::fs::read_link(fc_guest_dial_socket(&runtime, BROKER_PORT)).unwrap(),
             PathBuf::from("/run/broker.sock"),
-            "host.audit.v1 / host.secrets.v1 must be reachable before it resumes"
+            "admitted host services must be reachable before it resumes"
         );
         // The exit port is bound by the driver, not symlinked: a real socket.
         let exit_sock = fc_guest_dial_socket(&runtime, WORKLOAD_EXIT_PORT);

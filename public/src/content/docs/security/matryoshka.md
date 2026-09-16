@@ -97,7 +97,7 @@ allowed to run inside those layers at all.
 | 10  | No untrusted workload reaches the network unless policy admits it          | data containment         | Policy defaults to deny-all; the workload guest has no NIC, so egress leaves only over vsock to a host endpoint that authorizes it                       |
 | 11  | Every application-dependency volume is sealed and audited                  | supply chain (app layer) | A hash-locked volume carrying an SBOM, a CVE scan, and a hash-chained manifest; admission refuses a tampered volume                                      |
 | 12  | Every broker service is bound to a signed plan binding                     | admission                | Binding-gated dispatch, enforced before the handler runs, with a rejection ladder for unbound and out-of-profile calls                                   |
-| 13  | No raw secret value crosses the broker channel                             | data containment         | Destination-bound, time-bound signed credentials only; raw secret bytes never leave the supervisor's address space                                       |
+| 13  | Managed substitution hands the guest placeholders, never raw secret values | data containment         | The host-side substitution endpoint mints the guest environment and resolves credentials only while preparing an admitted outbound request              |
 | 14  | Every OCI image admission records provenance in the audit log              | supply chain             | A provenance entry carries registry, repo, resolved digest, layer digests, and trust verdict; production refuses a mutable reference                     |
 | 15  | A sealed production microVM has no shell, no DevOnly verbs, no PTY         | L4                       | Only the dev `/init` serves a console; console capture is write-only with no host input; the host gate refuses `console` on a sealed image               |
 
@@ -194,6 +194,4 @@ If your threat model needs any of those, mvm is not the right tool today. ADR-00
 ## See also
 
 - [ADR-001 (full decision record)](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/001-microvm-security-posture.md)
-- [Plan 25 (microVM hardening — the implementation sequence for claims 1–7)](https://github.com/tinylabscom/mvm/blob/main/specs/plans/25-microvm-hardening.md)
-- [Plan 53 (cross-platform roadmap — backend tier discipline)](https://github.com/tinylabscom/mvm/blob/main/specs/plans/53-cross-platform-roadmap.md)
 - ["Your container is not a sandbox" (emirb, 2026)](https://emirb.github.io/blog/microvm-2026/) — the post that crystallized the matryoshka framing in the broader microVM ecosystem.
