@@ -54,3 +54,17 @@ Whether that env can be dropped is a follow-up that this runner can answer.
 Registering the runner, the unprivileged user, the one-time zig install and the
 power settings are machine setup, not repository state, and are not recorded
 here.
+
+## First live run
+
+The first trusted run after the merge was the release workflow on `main` at
+`d530f731b9` (run `35151392843`). On `m1-runner` the host check reported
+`supported=true`, the evidence job was skipped, and the documented surface
+passed: 75 features, 310 scenarios, 309 passed and 1 skipped, in 39 minutes on
+a warm artifact home. Twenty scenarios did not run, each for a reason on the
+script's macOS allow-list (4 `@wip`, 5 Firecracker, 6 TLS-tunnel client, 2
+bundle fixture, 1 perf-budget host, 1 warm claim, 1 unenforceable wall clock).
+#3011 is closed.
+
+Not yet witnessed: the release caller blocking on a red live macOS job, and a
+fork-isolation guarantee stronger than the approval policy.

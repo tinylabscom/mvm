@@ -156,8 +156,8 @@
       the HVF supervisor on the same agent socket path; activation now treats
       that transport-only socket-rebind state as retryable within the existing
       deadline while authenticated rejection remains fatal. The M1 runner is
-      registered (`m1` label) and both macOS jobs target it; the first green
-      trusted run and closing #3011 remain.
+      registered (`m1` label) and both macOS jobs target it; its first trusted
+      run passed 309/310 and #3011 is closed.
 
 - [x] **Linux 6.12.109 synchronized kernel pin — issue #3213.**
       `2026-09-08-kernel-6-12-109`.

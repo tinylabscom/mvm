@@ -271,7 +271,12 @@ an unprovisioned label would not provide the required live witness.
       procedures outside the source tree where operational secrets belong.
 - [ ] Because this is a public repository, prove the unique label is reachable
       only from trusted merged-main schedules and protected release callers.
-      Fork pull-request code must never execute on this runner.
+      Fork pull-request code must never execute on this runner. Partial:
+      `e2e-docs.yml` is `workflow_call`-only (Extended CI's cron/dispatch and
+      `release.yml`), and the fork-PR approval policy is
+      `all_external_contributors`. Approval is still a human gate, not a
+      mechanical refusal — a maintainer who approves a fork PR editing
+      `.github/` can still reach the label.
 - [ ] Ensure each job begins from a clean workspace and leaves no workload VM,
       builder session, TAP/device state, signing material, or job credential
       behind. Bound concurrency to the host's proven capacity.
@@ -294,22 +299,29 @@ an unprovisioned label would not provide the required live witness.
 - [x] Retain the live architecture/backend preflight. A mislabeled or degraded
       runner must refuse before spending the full suite budget. The host check
       still probes `uname -m`, not the label.
-- [ ] Run the trusted reusable workflow and capture a green witness where the
+- [x] Run the trusted reusable workflow and capture a green witness where the
       host check reports supported, `e2e-docs-macos` boots real HVF guests, and
-      `e2e-docs-macos-evidence` is skipped automatically.
+      `e2e-docs-macos-evidence` is skipped automatically. Witness: release run `35151392843` on `main` at `d530f731b9`: 75 features, 310 scenarios (309 passed, 1 skipped) on `m1-runner`
+      in 39 min; host check `success`, evidence job `skipped`. All 20 scenarios
+      that did not run carry reasons on the macOS allow-list (4 `@wip`, 5
+      Firecracker, 6 TLS-tunnel client, 2 bundle fixture, 1 perf-budget host,
+      1 warm claim, 1 unenforceable wall clock).
 - [ ] Prove the release caller blocks on the live macOS job when it fails and
       cannot quietly substitute a stale committed evidence record while the
       capable runner path is selected.
-- [ ] Run workflow lint, `tests/github_actions_extended_e2e.rs`, repository
-      policy gates, and the complete live macOS documented-surface suite.
-- [ ] Merge the issue-linked workflow PR, confirm one post-merge trusted run,
-      and close #3011.
+- [x] Run workflow lint, `tests/github_actions_extended_e2e.rs`, repository
+      policy gates, and the complete live macOS documented-surface suite. Lint,
+      the structural tests and the gates ran on #3354; the live suite is the
+      witness above.
+- [x] Merge the issue-linked workflow PR, confirm one post-merge trusted run,
+      and close #3011. #3354 merged as `d530f731b9`; the post-merge run is the
+      witness above; #3011 is closed.
 
 ## Final closeout
 
-- [ ] Confirm #3207, #3190, #3039, and #3011 are all closed by their merged PRs
+- [x] Confirm #3207, #3190, #3039, and #3011 are all closed by their merged PRs
       or, for runner provisioning, by the merged workflow change plus the named
-      post-merge operational witness.
+      post-merge operational witness. All four confirmed closed on 2026-09-16.
 - [ ] Confirm no required scenario is green through an accidental skip: the
       macOS lane ran on HVF, warm claim ran on both supported backends, the lock
       failure test exercised contention, and the release test compared the

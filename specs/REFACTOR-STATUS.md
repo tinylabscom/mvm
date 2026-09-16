@@ -175,8 +175,10 @@ Last updated: 2026-09-16
       registered at repository scope under the `m1` label, and both macOS jobs
       in `e2e-docs.yml` target it (delivery:
       `specs/sprint/delivery/3011-macos-e2e-on-self-hosted-apple-silicon.md`).
-      Still open: the first green trusted run, the fork-isolation proof, and
-      closing #3011.
+      The first post-merge trusted run is green on the runner (release run
+      `35151392843`: 309/310 passed, every non-run on the macOS allow-list) and
+      #3011 is closed. Still open: a mechanical fork-isolation proof, and a
+      witness that the release caller blocks on a red live macOS job.
 
 - [x] **Linux 6.12.109 synchronized kernel pin — issue #3213.**
       `2026-09-08-kernel-6-12-109`.
