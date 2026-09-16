@@ -1,6 +1,6 @@
 # QEMU builder on the disk transport
 
-Stage C of `specs/plans/2026-08-31-remove-virtio-fs.md`, QEMU half. Both
+Stage C of `2026-08-31-remove-virtio-fs`, QEMU half. Both
 one-shot QEMU builder sites (`run_shell_script_qemu`, `run_build_qemu`) now move
 their job in and their artifacts out over the raw-tar-on-a-disk transport the
 libkrun and HVF one-shot builders already use, instead of four

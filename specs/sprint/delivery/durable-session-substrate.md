@@ -4,7 +4,7 @@
 long-running agent task outlives the disposable sandbox that runs it, and
 today there is no verifiable resume point between a live checkpoint and a
 sealed archive. This branch delivers the substrate that later park/resume/
-retention work builds on — `specs/plans/2026-08-18-durable-session-substrate.md`
+retention work builds on — `2026-08-18-durable-session-substrate`
 Tasks 1–5 — with no VM, backend, or async surface involved.
 
 ## Delivered
@@ -58,7 +58,7 @@ first GC, only the session-awareness it lacked), WS6 CLI (`mvmctl session
 scenarios. `SessionBinding` and `parent_checkpoint` are what that GC reads to
 refuse reaping a checkpoint a live or hibernated session still names as its
 parent, but nothing enforced that refusal at the time this was written.
-`specs/plans/2026-08-18-session-retention.md` has since delivered the refusal
+`2026-08-18-session-retention` has since delivered the refusal
 (both the sweep and a manual `mvmctl vm checkpoint rm`) plus a one-way
 `demote` transition; retention classes, expiry, and a scheduler that calls
 `demote` remain undelivered.

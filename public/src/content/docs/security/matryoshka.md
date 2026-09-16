@@ -194,6 +194,4 @@ If your threat model needs any of those, mvm is not the right tool today. ADR-00
 ## See also
 
 - [ADR-001 (full decision record)](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/001-microvm-security-posture.md)
-- [Plan 25 (microVM hardening — the implementation sequence for claims 1–7)](https://github.com/tinylabscom/mvm/blob/main/specs/plans/25-microvm-hardening.md)
-- [Plan 53 (cross-platform roadmap — backend tier discipline)](https://github.com/tinylabscom/mvm/blob/main/specs/plans/53-cross-platform-roadmap.md)
 - ["Your container is not a sandbox" (emirb, 2026)](https://emirb.github.io/blog/microvm-2026/) — the post that crystallized the matryoshka framing in the broader microVM ecosystem.

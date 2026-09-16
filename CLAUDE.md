@@ -844,7 +844,7 @@ macOS / Linux Host
 
 ## Naming a new plan
 
-**Name it by slug, not by number**: `specs/plans/2026-08-15-sdk-surface-generated-from-rust.md`.
+**Name it by slug, not by number**: `specs/plans/2026-09-15-agent-sandbox-drive-plane.md`.
 A date prefix keeps plans sorting chronologically, which is the only thing the
 numbers were really giving.
 

@@ -29,7 +29,7 @@
       Linux build witness before merge.
 
 - [x] **CI queue consolidation.**
-      `specs/plans/2026-09-10-ci-queue-consolidation.md`.
+      `2026-09-10-ci-queue-consolidation`.
       Preserve cumulative merge-group validation while reducing runner fan-out
       and the measured Rust critical path. Work covers merge-group scope,
       required aggregate ownership, trusted feature-cache warming, duplicate
@@ -99,7 +99,7 @@
       repository runner inventory currently contains zero self-hosted runners.
 
 - [x] **Linux 6.12.109 synchronized kernel pin — issue #3213.**
-      `specs/plans/2026-09-08-kernel-6-12-109.md`.
+      `2026-09-08-kernel-6-12-109`.
       The custom workload/builder kernel and libkrunfw firmware build use the
       same kernel.org-verified Linux 6.12.109 archive and SRI hash. The
       structural synchronization suite, both native kernel builds, Nix
@@ -107,7 +107,7 @@
       zero-warning Clippy are green; merged via #3214 and issue #3213 closed.
 
 - [ ] **Shared website shell.**
-      `specs/plans/2026-09-07-shared-site-shell.md`.
+      `2026-09-07-shared-site-shell`.
       The homepage navigation now links to Blog; the blog and pricing routes
       render the same responsive header component as the homepage; and homepage
       sections render immediately without the previous reveal effect. Focused
@@ -120,7 +120,7 @@
       delivery branch.
 
 - [x] **Publish the reviewed CVE evidence corpus.**
-      `specs/plans/2026-09-06-public-cve-corpus.md`.
+      `2026-09-06-public-cve-corpus`.
       The generated bundle is live at
       <https://runmvm.com/security/cve-corpus/> with checksum verification, a
       discoverable guide, and the non-certifying tier stated explicitly;
@@ -152,7 +152,7 @@
       tests now pass concurrently. The live hosted no-KVM run, documented-
       surface release gate, and merge delivery remain.
 - [x] **Alternative CLI help coverage performance.**
-      `specs/plans/2026-09-03-bdd-help-coverage.md`.
+      `2026-09-03-bdd-help-coverage`.
       The BDD contract still executes both `mvmctl <path> -h` and
       `mvmctl help <path>` for every command and nested subcommand, but divides
       the command tree across at most eight scoped workers instead of spawning
@@ -160,7 +160,7 @@
       are green; the complete hermetic BDD suite passed 247 of 248 scenarios
       with the one existing backend-capability skip.
 - [ ] **Remove virtio-fs from workload and builder execution.**
-      `specs/plans/2026-08-31-remove-virtio-fs.md`.
+      `2026-08-31-remove-virtio-fs`.
       Workloads, the dev-tier root, Stage 0, and builder inputs and artifacts
       now cross the virtualization boundary as block devices. libkrun Stage 0
       materializes its verified seed as an ext4 root and uses the shared raw-tar
@@ -183,7 +183,7 @@
       the plan's broader output-surface design and merge delivery remain.
 
 - [ ] **Retire runtime directory-share volume variants.**
-      `specs/plans/2026-09-02-retire-dirshare.md`.
+      `2026-09-02-retire-dirshare`.
       Runtime volumes are disk-only, while signed plans retain
       `ShareKind::DirShare` as the audited directory-grant fact and admission
       derives it from `materialized_image`. Managed `--host` attachments are
@@ -194,7 +194,7 @@
       remains.
 
 - [x] **Refresh host-directory snapshots at machine start.**
-      `specs/plans/2026-09-03-refresh-host-snapshot-at-start.md`.
+      `2026-09-03-refresh-host-snapshot-at-start`.
       Persistent `machine volume mount --host` and transient `--mount` now use
       one content-addressed ext4 cache. The source identity hashes file bytes,
       paths, modes, symlink targets, and guest-visible xattrs rather than
@@ -213,7 +213,7 @@
       A live Firecracker witness changed source bytes while preserving mtime;
       the restarted guest observed `dir-volume-refreshed`.
 - [ ] **Content-addressed asset identity.**
-      `specs/plans/2026-09-02-content-addressed-asset-identity.md`.
+      `2026-09-02-content-addressed-asset-identity`.
       Every dataset, model, prompt, agent, policy, and compute environment a
       workload names now carries a content-derived identity in the signed
       plan: `AssetIdentity{kind, locator, content_sha256}` records ride
@@ -230,7 +230,7 @@
       Workspace check, host tests, gated Linux cross-check, clippy, fmt, and
       the claim/CLI lint gates are green. Merge delivery remains.
 - [x] **Aux host-helper contract verification.**
-      `specs/plans/2026-09-02-aux-helper-contract.md`.
+      `2026-09-02-aux-helper-contract`.
       Host helpers now carry a compiled-in contract version and answer a
       `--contract-version` probe; `mvmctl` probes before spawn and never
       hands a moved-on config contract to a helper built from an older
@@ -274,7 +274,7 @@
       checks are green; merge delivery remains.
 
 - [x] **Signed caller commitment — issue #3070, PR #3076.**
-      `specs/plans/2026-09-01-signed-caller-commitment.md`.
+      `2026-09-01-signed-caller-commitment`.
       One typed opaque 32-byte commitment now reaches the signed execution
       plan and every chain-signed plan audit entry from `run` and `machine
       run`, including persistent-machine restarts. Workspace tests, Clippy,
@@ -283,7 +283,7 @@
       as `8623950746`; issue #3070 is closed.
 
 - [x] **Contributor SDK-sidecar recovery guidance.**
-      `specs/plans/2026-09-01-contributor-sidecar-recovery.md`.
+      `2026-09-01-contributor-sidecar-recovery`.
       Release embedding now repairs the pinned macOS LLVM tool loader path at
       the rustc boundary, unembedded binaries name the matching profile and
       executable, stale-sidecar warnings identify the real host-services owner
@@ -551,7 +551,7 @@
 - [ ] **Cloudflare Workers Static Assets migration.**
       `specs/plans/2026-09-07-cloudflare-workers-static-assets.md` supersedes the
       completed repository work in
-      `specs/plans/2026-08-27-cloudflare-pages-cutover.md`. The site now has an
+      `2026-08-27-cloudflare-pages-cutover`. The site now has an
       assets-only Worker configuration, Worker production/version-preview/local
       commands, an account-authentication preflight, portable asset-limit gates,
       and the existing complete-WebLinux-bundle and live COOP/COEP checks.
@@ -590,7 +590,7 @@
       and close issue #2900 through the merged PR.
 
 - [x] **Site QEMU-WASM release artifact.**
-      `specs/plans/2026-08-26-site-qemu-wasm-release-artifact.md`.
+      `2026-08-26-site-qemu-wasm-release-artifact`.
       Move the expensive browser QEMU pack build from every Cloudflare site
       deployment to the `boot-image/v*` release train. The deployment downloads the
       latest semantic-versioned pack and verifies its keyless release identity
@@ -618,7 +618,7 @@
       green; merge delivery remains.
 
 - [x] **AI egress metering and token budgets.**
-      `specs/plans/2026-08-21-ai-egress-metering-and-budget.md`.
+      `2026-08-21-ai-egress-metering-and-budget`.
       Provider-reported token counts at the host substitution endpoint,
       per-VM Prometheus metrics, chain-signed audit records, and an optional
       token budget that refuses further AI egress when exhausted. OpenAI and
@@ -878,7 +878,7 @@ and nothing depends on it.
       targets and points normal users to reinstall/update; `mvmctl env sign`
       remains an advanced repair path for source and legacy installations.
       Focused Rust and CLI tests plus installer shell validation cover the
-      changed behavior; see `specs/plans/312-automatic-macos-entitlement-signing.md`.
+      changed behavior; see `312-automatic-macos-entitlement-signing`.
 
 - [x] Audit-chain verification failure no longer reports as "never audited" —
       **issue #2258, plan 302 WS6**. `SignedChainAnchor` remembers the chains
@@ -965,7 +965,7 @@ and nothing depends on it.
       which should follow the `feat/seccomp-audit` tooling.
 
 - [x] Durable agent session and event contract — **issue #2167**, plan
-      `specs/plans/2167-agent-session-contract.md`. Added the versioned
+      `2167-agent-session-contract`. Added the versioned
       transport-neutral contract in `mvm-contract`, with strict public IDs,
       lifecycle commands, durable/ephemeral event envelopes, bounded cursor
       history, retention, idempotent retries, cancellation confirmation,
@@ -975,7 +975,7 @@ and nothing depends on it.
       three non-`@wip` BDD scenarios pass.
 
 - [x] Unified runtime policy and human approval — **issue #2168**, plan
-      `specs/plans/2168-runtime-approval.md`. Added typed fail-closed policy
+      `2168-runtime-approval`. Added typed fail-closed policy
       evaluation bound to signed admission, deterministic rule precedence,
       digest-only approval metadata, and durable approval lifecycle events on
       the agent-session cursor. Authorization, first-valid-response, expiry,
@@ -985,7 +985,7 @@ and nothing depends on it.
       sealed-production, guest, and command-gate enforcement remains in force.
 
 - [x] Typed capability bindings — **issue #2170**, plan
-      `specs/plans/2170-typed-capability-bindings.md`. The implementation is
+      `2170-typed-capability-bindings`. The implementation is
       complete through per-verb descriptors, exact signed admission bindings,
       bounded typed invocation, digest-only audit events, refusal witnesses,
       and a real UDS round trip. The PR carries the remaining host-specific
@@ -1165,7 +1165,7 @@ and nothing depends on it.
       backends into `mvm-runtime`.
 
       The Firecracker extraction that finishes this is complete —
-      `specs/plans/298-extract-firecracker-driver.md`. All five drivers now
+      `298-extract-firecracker-driver`. All five drivers now
       live in `mvm-backends`; `mvm-runtime::driver` is re-exports only, and
       `mvm-backends` depends on neither `mvm-runtime` nor `mvm-build`. The
       backend-agnostic snapshot seam (`SnapshotIO`, the guarded load paths,
@@ -1546,7 +1546,7 @@ updates only its own entry below.
       `mvmctl trust audit transcript export` path is covered by success and
       tamper-refusal scenarios; 8,403 workspace tests, doctests, clippy/model
       gates, and all 76 BDD scenarios pass. Tracked in
-      `specs/plans/280-transcript-root-audit-binding.md`.
+      `280-transcript-root-audit-binding`.
 - [x] L3 TUN-over-vsock network mode (plan 285 / ADR-036): a workload that
       declares `raw_ip_stack` gets a real in-guest IP stack with no guest
       NIC. There is no operator-facing mode selector — the transport is
@@ -1660,7 +1660,7 @@ updates only its own entry below.
       budgets, and teardown cancellation are implemented. Null-node routing was
       evaluated and deferred with no production-path change. Delivered through
       #1876 and #1878; tracked in
-      `specs/plans/266-vsock-overload-hardening.md`.
+      `266-vsock-overload-hardening`.
 
 - [x] Claim witnesses are now mutation-tested, not merely present.
       `check-claim-catalog` proves a witness exists; nothing proved it can
@@ -1991,7 +1991,7 @@ updates only its own entry below.
       microVM). QEMU stays an opt-in Tier-2 dev/test backend, never
       workload-bearing. Verification: workspace `cargo nextest run`, workspace
       all-target Clippy, and `cargo xtask check-claim-catalog` are green; the
-      migration boundary is recorded in `MIGRATION-269.md`.
+      migration boundary is recorded in `specs/notes/269-backend-shim-migration-boundary.md`.
 - [x] Lightweight guest WS-3: runtime-overlay guest executables now build
       static-musl without the shared loader bundle; the glibc SDK FFI is
       published as a separate `sdk-sidecar` output with an explicit
@@ -3118,7 +3118,7 @@ error is worth closing separately: a build producing no artifact should fail,
 not wait. For the initramfs this is now moot because the Nix build path was
 removed entirely; the cargo build either produces the artifact or returns a
 typed error.
-HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214; Plan 270 designs for HVF but does not duplicate that work. Plan 268 (`specs/plans/268-backend-shim-removal.md`) stays a separate future workstream and is not absorbed here.
+HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214; Plan 270 designs for HVF but does not duplicate that work. Plan 268 (`268-backend-shim-removal`) stays a separate future workstream and is not absorbed here.
 
 ### Deferred: a dry run should not require a bootable backend
 

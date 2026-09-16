@@ -8,4 +8,4 @@
       missing impure input.
 - [x] Structural tests pin both contracts in `ci-full.yml`.
 
-Owning plan: `specs/plans/2026-08-24-extended-ci-lane-repair.md`.
+Owning plan: `2026-08-24-extended-ci-lane-repair`.

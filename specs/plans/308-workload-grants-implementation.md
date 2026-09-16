@@ -1346,7 +1346,7 @@ unprivileged on a default distro. Finding that out during Task 9 would mean
 discarding Task 9.
 
 **Files:**
-- Create: `specs/plans/308-cgroup-delegation-findings.md`
+- Create: `specs/benchmarks/308-cgroup-delegation-findings.md`
 
 - [ ] **Step 1: Probe the host**
 
@@ -1376,7 +1376,7 @@ kill $PID; rmdir "$CG"
 
 - [ ] **Step 3: Record the finding**
 
-Write `specs/plans/308-cgroup-delegation-findings.md` containing: the distro
+Write `specs/benchmarks/308-cgroup-delegation-findings.md` containing: the distro
 and systemd version, the exact `cgroup.controllers` contents at both levels,
 whether `cpu.max` was writable unprivileged, whether the limit measurably
 bound a spinner, and a one-line verdict — **"Task 9 proceeds as written"** or
@@ -1389,7 +1389,7 @@ scope via `org.freedesktop.systemd1.Manager.StartTransientUnit` with a
 - [ ] **Step 4: Commit**
 
 ```bash
-git add specs/plans/308-cgroup-delegation-findings.md
+git add specs/benchmarks/308-cgroup-delegation-findings.md
 git commit -m "docs: record cgroup v2 cpu-delegation findings for the grants plan"
 ```
 
@@ -1453,7 +1453,7 @@ can be wired and reviewed while the Linux implementation is still absent.
 
 ### Task 9: The CPU bound, via a systemd transient scope
 
-**Redesigned after Task 8's spike. Read `specs/plans/308-cgroup-delegation-findings.md`
+**Redesigned after Task 8's spike. Read `specs/benchmarks/308-cgroup-delegation-findings.md`
 before starting.** The original design — `mkdir` a leaf under
 `user@<uid>.service` and migrate the VMM into it — does not work unprivileged,
 and the reason is not the one the plan assumed. The `cpu` controller *is*
@@ -2616,7 +2616,7 @@ A test asserting `cpu.max` file contents proves the write, not the limit. On
 the KVM box, boot a workload with `--cpu-limit 1500`, run an in-guest spinner
 across more vCPUs than the quota allows, and measure with `/proc/stat` that it
 is held near 1.5 cores. Record the measured figure in
-`specs/plans/308-cgroup-delegation-findings.md`.
+`specs/benchmarks/308-cgroup-delegation-findings.md`.
 
 Also confirm the born-into-cgroup property, which the read-back test cannot:
 capture the VMM pid at exec and assert `/proc/<pid>/cgroup` already names the

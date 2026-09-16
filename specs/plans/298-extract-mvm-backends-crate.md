@@ -252,7 +252,7 @@ The key invariant is that `mvm-backends` sits *below* `mvm-runtime`. That only w
   `FcDriver` remains in `mvm-runtime/src/driver/fc.rs` because it still couples to
   `crate::microvm`, `crate::firecracker`, and `crate::vm::instance_snapshot`; those
   FC-specific mechanics need their own extraction pass before the file can land in
-  `mvm-backends`. **Handed off to `specs/plans/298-extract-firecracker-driver.md`**,
+  `mvm-backends`. **Handed off to `298-extract-firecracker-driver`**,
   which records the seam decision (`VmmDriver` stays the single backend trait) and a
   hard trait/type budget for the move.
 

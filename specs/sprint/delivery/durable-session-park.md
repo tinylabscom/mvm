@@ -3,8 +3,8 @@
 `specs/plans/2026-08-18-durable-agent-sessions.md` D1/D3/D4 frame hibernation
 as a third state between a live session and a sealed archive. This branch
 delivers the state machine that transition rests on —
-`specs/plans/2026-08-18-durable-session-park.md` Tasks 1–5, on top of the
-filesystem store `specs/plans/2026-08-18-durable-session-substrate.md` landed
+`2026-08-18-durable-session-park` Tasks 1–5, on top of the
+filesystem store `2026-08-18-durable-session-substrate` landed
 — with no VM, backend, or async surface involved.
 
 ## Delivered

@@ -15,4 +15,4 @@ Added `just embed-refresh` to drop the cache on demand, and exported
 `MVM_EMBEDDED_BINS_REUSED` so a reused set is observable.
 
 Full measurement log, including five refuted hypotheses, in
-`specs/plans/334-build-critical-path.md`.
+`334-build-critical-path`.

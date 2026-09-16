@@ -99,8 +99,7 @@ chain-signed audit log.
   no-op rebuilds by content address (`--interval-ms`, default 500; `--once` for
   a single pass).
 
-The following is specified in `specs/plans/291-develop-build-deploy-attested.md`
-and **does not exist yet**. It is listed here so the intended shape is legible,
+The following **does not exist yet**. It is listed here so the intended shape is legible,
 not because it can be run:
 
 - **Capture from the sandbox** — install a dependency inside a dev sandbox and

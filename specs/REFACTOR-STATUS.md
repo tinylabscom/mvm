@@ -55,7 +55,7 @@ Last updated: 2026-09-15
       logs/metrics signals.
 
 - [x] **CI queue consolidation.**
-      `specs/plans/2026-09-10-ci-queue-consolidation.md`.
+      `2026-09-10-ci-queue-consolidation`.
       Correct cumulative `HEADGREEN` scope, make every queue witness honestly
       required or remove its queue fan-out, warm the measured feature-test
       critical path from trusted main, and remove duplicate nextest listings.
@@ -111,14 +111,14 @@ Last updated: 2026-09-15
       still required; the repository currently has zero self-hosted runners.
 
 - [x] **Linux 6.12.109 synchronized kernel pin — issue #3213.**
-      `specs/plans/2026-09-08-kernel-6-12-109.md`.
+      `2026-09-08-kernel-6-12-109`.
       Both kernel consumers use the kernel.org-verified archive and SRI hash;
       structural coverage, both architecture builds, Nix evaluation, live
       tree-built boot, the workspace suite, check, and zero-warning Clippy are
       green. Merged via #3214; issue #3213 is closed.
 
 - [ ] **Shared website shell.**
-      `specs/plans/2026-09-07-shared-site-shell.md`.
+      `2026-09-07-shared-site-shell`.
       Homepage, blog, and pricing share one responsive header; Blog is present
       in the shared navigation; the page reveal is removed; and CI regressions
       cover the shared shell. All non-doc routes also share one responsive
@@ -127,7 +127,7 @@ Last updated: 2026-09-15
       publish through the existing Pages workflow. PR review remains.
 
 - [x] **Public CVE evidence corpus.**
-      `specs/plans/2026-09-06-public-cve-corpus.md`.
+      `2026-09-06-public-cve-corpus`.
       The generated assurance bundle is live at
       <https://runmvm.com/security/cve-corpus/> with its checksums and
       non-certifying claim boundary intact; merged via #3192 and deployed by
@@ -158,7 +158,7 @@ Last updated: 2026-09-15
       run, live documented-surface evidence, and merge delivery remain.
 
 - [x] **Alternative CLI help coverage performance.**
-      `specs/plans/2026-09-03-bdd-help-coverage.md`.
+      `2026-09-03-bdd-help-coverage`.
       Both alternative help forms remain covered for the complete generated
       command tree. At most eight scoped workers share the paths, keeping
       subprocess concurrency bounded while eliminating the serial bottleneck.
@@ -174,7 +174,7 @@ Last updated: 2026-09-15
       provenance and checksum-policy decisions remain in WS-B and WS-C.
 
 - [x] **Persistent host-directory snapshots.**
-      `specs/plans/2026-09-02-retire-dirshare.md`.
+      `2026-09-02-retire-dirshare`.
       Ad-hoc `--host <directory>` registration now creates a private ext4
       snapshot on verified encrypted backing and registers it as a block
       volume. Focused materialization, validation, error-path, launch-lease,
@@ -193,7 +193,7 @@ Last updated: 2026-09-15
       policy checks, and BDD are green. Broader surface design and merge remain.
 
 - [x] **Refresh host-directory snapshots at machine start.**
-      `specs/plans/2026-09-03-refresh-host-snapshot-at-start.md`.
+      `2026-09-03-refresh-host-snapshot-at-start`.
       Persistent `--host` and transient `--mount` share one verified,
       content-addressed ext4 image cache. Start-time source fingerprints cover
       emitted filesystem semantics, changed snapshots refresh before lease
@@ -206,7 +206,7 @@ Last updated: 2026-09-15
       gated compilation, and hermetic BDD are green. A live Firecracker
       restart observed changed bytes even when the source mtime was preserved.
 - [x] **Cargo target-dir guard.**
-      `specs/plans/2026-09-02-cargo-target-dir-guard.md`.
+      `2026-09-02-cargo-target-dir-guard`.
       Both cargo wrapper scripts reclaim a CARGO_TARGET_DIR pointing outside
       the current source tree — the compile-time sibling of the stale-helper
       bug, observed as an E0063 naming a field deleted by a merged PR, served
@@ -215,7 +215,7 @@ Last updated: 2026-09-15
       reclaimed loudly, MVM_DEV_ENV_KEEP_INHERITED=1 keeps them anyway. Gate
       tests and CI shellcheck green; merged via #3135.
 - [x] **Aux host-helper contract verification.**
-      `specs/plans/2026-09-02-aux-helper-contract.md`.
+      `2026-09-02-aux-helper-contract`.
       Host helpers answer a `--contract-version` probe and `mvmctl` verifies
       the answer before spawning: a stale helper in a source checkout is
       rebuilt in the running binary's profile, and any other stale pick is a
@@ -241,7 +241,7 @@ Last updated: 2026-09-15
       studio pages, scout verification) remain open in the plan.
 
 - [ ] **Signed caller commitment — issue #3070.**
-      `specs/plans/2026-09-01-signed-caller-commitment.md`.
+      `2026-09-01-signed-caller-commitment`.
       Replaces reliance on overwriteable free-form audit labels with one typed,
       opaque 32-byte commitment covered by the plan identity/signature and
       copied into chain-signed audit entries. Workspace tests, zero-warning
@@ -249,7 +249,7 @@ Last updated: 2026-09-15
       non-live BDD suite are green; merge delivery remains.
 
 - [x] **Contributor SDK-sidecar recovery guidance.**
-      `specs/plans/2026-09-01-contributor-sidecar-recovery.md`.
+      `2026-09-01-contributor-sidecar-recovery`.
       The source-checkout recovery path now distinguishes debug and release
       embedded binaries, repairs the pinned macOS rust-objcopy loader at the
       compiler boundary, reports actionable sidecar provenance only when a
@@ -347,7 +347,7 @@ Last updated: 2026-09-15
       workspace tests, zero-warning Clippy, formatting, and policy gates are
       green; live Firecracker/HVF evidence and merge delivery remain.
 
-- [x] **Remove virtio-fs — `specs/plans/2026-08-31-remove-virtio-fs.md`.**
+- [x] **Remove virtio-fs — `2026-08-31-remove-virtio-fs`.**
       Stage A: `--mount` is materialized into an ext4 image and attached as
       virtio-blk, the directory-share capability seam is gone, and the runtime
       `VmVolumeKind::DirShare` / local `Directory` variants are retired while
@@ -369,7 +369,7 @@ Last updated: 2026-09-15
       then became a refusal mirroring Firecracker's, which left
       `crates/mvm-vmm/src/host/virtiofsd.rs` with no consumers: deleted, along
       with `mvm-vmm`'s `which` dependency and the `--sandbox none` flag that
-      started the plan. `specs/plans/2026-08-31-virtiofsd-sandbox-parity.md` is
+      started the plan. `2026-08-31-virtiofsd-sandbox-parity` is
       superseded by that deletion.
       The persistent HVF builder has moved too: `persistent_builder_spec`
       declares no shares, readiness moved from a marker file inside the (now
@@ -396,7 +396,7 @@ Last updated: 2026-09-15
       Block and virtiofs roots were distinct standby compatibility shapes, so
       HVF's read-only OCI dev root could claim only a parent that booted the
       same device model. The virtiofs root has since been removed
-      (`specs/plans/2026-08-31-remove-virtio-fs.md` Stage B); the compat key
+      (`2026-08-31-remove-virtio-fs` Stage B); the compat key
       still compares the recorded strategy, because a parent warmed before that
       removal declares its own on disk. The cross-platform witness explicitly warms capacity in the
       artifact-warm home and checks request-state cleanup against a baseline.
@@ -550,7 +550,7 @@ Last updated: 2026-09-15
 
 - [ ] **Cloudflare Workers Static Assets migration.**
       `specs/plans/2026-09-07-cloudflare-workers-static-assets.md` supersedes
-      `specs/plans/2026-08-27-cloudflare-pages-cutover.md`. The assets-only
+      `2026-08-27-cloudflare-pages-cutover`. The assets-only
       Worker config, local/CI deployment commands, credential preflight, static
       asset limit checks, WebLinux bundle gate, and header verification are in
       place. The `mvm` Worker is deployed, `runmvm.com` is attached and verified,
@@ -597,7 +597,7 @@ Last updated: 2026-09-15
 ## Completed
 
 - [x] **Signed caller commitment — issue #3070, PR #3076.**
-      `specs/plans/2026-09-01-signed-caller-commitment.md`.
+      `2026-09-01-signed-caller-commitment`.
       Replaces reliance on overwriteable free-form audit labels with one typed,
       opaque 32-byte commitment covered by the plan identity/signature and
       copied into chain-signed audit entries. Workspace tests, zero-warning
@@ -659,7 +659,7 @@ Last updated: 2026-09-15
       address throughout; no deprecated semantic-name aliases remain.
 
 - [x] **Site QEMU-WASM release artifact** —
-      `specs/plans/2026-08-26-site-qemu-wasm-release-artifact.md`.
+      `2026-08-26-site-qemu-wasm-release-artifact`.
       The browser QEMU pack now builds on the `boot-image/v*` release cadence;
       Cloudflare deployment consumes the signed, checksummed release artifact while
       retaining the current revision's demo shell. Its oversized WASM module is
@@ -670,7 +670,7 @@ Last updated: 2026-09-15
       actionlint, and Clippy are green.
 
 - [x] **AI egress metering and token budgets** —
-      `specs/plans/2026-08-21-ai-egress-metering-and-budget.md`.
+      `2026-08-21-ai-egress-metering-and-budget`.
       Provider-reported token counts (OpenAI + Anthropic) at the host
       substitution endpoint, per-VM Prometheus metrics, audit records, and an
       optional token budget that refuses further AI egress when exhausted.
@@ -715,7 +715,7 @@ for detailed scope and acceptance criteria.
       `specs/sprint/delivery/qemu-declares-no-vcpu-ceiling-on-purpose.md`.
 
 - [x] **virtiofsd sandbox parity — issue #3022.**
-      `specs/plans/2026-08-31-virtiofsd-sandbox-parity.md`.
+      `2026-08-31-virtiofsd-sandbox-parity`.
       The shared QEMU helper selects the namespace sandbox explicitly for both
       Rust and C daemon flavours, and focused argv tests prevent either
       implementation from silently losing confinement. PR #3026 passed its
@@ -915,7 +915,7 @@ for detailed scope and acceptance criteria.
       The standalone hostd fuzz lock is refreshed for the current dependency
       graph.
       The owning plan is
-      `specs/plans/2026-08-20-artifact-acquisition-contract.md`.
+      `2026-08-20-artifact-acquisition-contract`.
 
 - [x] **Issue #2792 — Security watcher delivery has an independent backstop.**
       The scheduled claim-witness reconciliation now inspects only scheduled
@@ -1196,7 +1196,7 @@ for detailed scope and acceptance criteria.
       `impl VmBackend for WorkloadRunner<D: VmmDriver, ...>`. `WasmBackend` is
       the sole documented direct-`VmBackend` exemption. Workspace nextest,
       all-target Clippy, and `check-claim-catalog` are green; migration
-      boundary recorded in `MIGRATION-269.md`.
+      boundary recorded in `specs/notes/269-backend-shim-migration-boundary.md`.
 
 - [x] **Plan 322 — persistent-machine README contract.** `machine create`
       accepts the optional machine name positionally, and real-binary coverage,
@@ -1320,7 +1320,7 @@ for detailed scope and acceptance criteria.
       package Clippy are green; merge is pending.
 
 - [x] **`.mvmev` offline verifiability**
-      (`specs/plans/2026-08-25-mvmev-offline-verifiability.md`, issue #2863).
+      (`2026-08-25-mvmev-offline-verifiability`, issue #2863).
       The format-level gap is complete: schema version 1 now normatively names
       RFC 8785 JCS over integer-only, ASCII JSON; the public reference specifies
       parse/recanonicalize/verify order, member layout, SHA-256 address rules,
@@ -1423,7 +1423,7 @@ for detailed scope and acceptance criteria.
       `main`, including every mutation shard and both reproducibility builds.
 
 - [x] **Secret bindings for forked children** —
-      `specs/plans/2026-08-18-fork-inherits-secret-bindings.md`, issue #2698.
+      `2026-08-18-fork-inherits-secret-bindings`, issue #2698.
       Option A (W0 and A1–A6) is complete: fork bindings are explicit,
       tenant-validated before clone/boot, carried by every booting entry point,
       and recorded as names plus allowed hosts without source or value data.
@@ -1433,15 +1433,15 @@ for detailed scope and acceptance criteria.
 
 - [~] **Durable agent sessions** —
       `specs/plans/2026-08-18-durable-agent-sessions.md` (design) +
-      `specs/plans/2026-08-18-durable-session-substrate.md` (implementation,
+      `2026-08-18-durable-session-substrate` (implementation,
       Tasks 1–5 complete) +
-      `specs/plans/2026-08-18-durable-session-park.md` (implementation,
+      `2026-08-18-durable-session-park` (implementation,
       Tasks 1–5 complete) +
-      `specs/plans/2026-08-18-session-approval-head.md` (implementation,
+      `2026-08-18-session-approval-head` (implementation,
       Tasks 1–4 complete) +
-      `specs/plans/2026-08-18-resume-session-orchestrator.md` (implementation,
+      `2026-08-18-resume-session-orchestrator` (implementation,
       Tasks 1–3 complete) +
-      `specs/plans/2026-08-18-session-retention.md` (implementation, Tasks 1–3
+      `2026-08-18-session-retention` (implementation, Tasks 1–3
       complete). `CheckpointMeta` gains `Option<SessionBinding>`
       (`session_id`/`generation`/`journal_cursor`/`approval_head`), folded
       into `meta_digest` the same way `grants` already is; `approval_head` is
@@ -1495,8 +1495,8 @@ resume` takes a `current_head` and refuses when it differs from the
       remain undelivered.
 
       WS6 and WS7 are DONE, both via
-      `specs/plans/2026-08-19-session-cli-and-audit.md` and
-      `specs/plans/2026-08-19-resume-boot.md`
+      `2026-08-19-session-cli-and-audit` and
+      `2026-08-19-resume-boot`
       (`crates/mvm-cli/src/commands/agent_session.rs` and
       `crates/mvm-hostd/src/session_resume.rs`). `mvmctl agent-session`
       carries `open`, `ls`, `show`, `park` and `resume`, and `resume --boot`
@@ -1553,10 +1553,10 @@ resume` takes a `current_head` and refuses when it differs from the
       `specs/plans/2026-08-15-aux-helper-binary-freshness.md`.
       The per-VM aux leg — the last unconditional rebuild, and by 2026-08-26
       **17.8s of a 20.9s** inner-loop rebuild (85%) — was first made cheap by
-      `specs/plans/2026-08-26-aux-helper-staleness-gate.md` (reuse on a key
+      `2026-08-26-aux-helper-staleness-gate` (reuse on a key
       miss, plus a spawn-time refusal of the marked binary; **20.9s → 8.5s**),
       and on 2026-08-28 **deleted outright** by
-      `specs/plans/2026-08-28-build-script-drops-the-aux-helper-leg.md`. Those
+      `2026-08-28-build-script-drops-the-aux-helper-leg`. Those
       seven binaries are ordinary `mvm-hostd` `[[bin]]`s that a workspace
       `cargo build` already produces where `aux_bin::resolve` already looked, so
       the leg was a duplicate compile of `mvm-hostd`'s closure per worktree.
@@ -1566,7 +1566,7 @@ resume` takes a `current_head` and refuses when it differs from the
       went with it — cargo owns freshness, so staleness is no longer
       representable rather than merely detected.
       The remaining musl leg then went opt-in behind `embed-host-bins` —
-      `specs/plans/2026-08-28-embedded-host-binaries-are-opt-in.md` — so the
+      `2026-08-28-embedded-host-binaries-are-opt-in` — so the
       script no longer runs on the inner loop **at all**: with the feature off
       it watches four files and writes an empty table, and a `mvm-core` edit
       produces zero build-script executions. `just embed` and the tag-push
@@ -1646,7 +1646,7 @@ resume` takes a `current_head` and refuses when it differs from the
   - [ ] Native libkrun Python host-time acceptance passes
 
 - [x] Plan 323 — Concurrent builds through one builder VM
-      (`specs/plans/323-concurrent-builds-one-builder-vm.md`)
+      (`323-concurrent-builds-one-builder-vm`)
   - [x] Phase 1 — a contended Nix-store image lock queues (naming the holding
         pid and command) instead of failing the second build outright;
         `MVM_BUILDER_LOCK_WAIT_SECS` bounds the wait and `0` restores
@@ -1662,7 +1662,7 @@ resume` takes a `current_head` and refuses when it differs from the
         message, the wait override, and the persistent-builder path
 
 - [x] Plan 322 — Scope merge-group Rust CI to behavior-changing diffs
-      (`specs/plans/322-merge-group-ci-scope.md`)
+      (`322-merge-group-ci-scope`)
   - [x] Fail-closed path classification preserves required aggregates while
         prose/site-only diffs avoid six cold Rust jobs; validation is complete.
 - [x] Plan 315 — Bootstrap means machine-ready
@@ -1682,7 +1682,7 @@ resume` takes a `current_head` and refuses when it differs from the
         Linux all-target Clippy remains for CI or a supported builder entry point
 
 - [x] Plan 316 — website and docs redesign (agent design review completed and maintainer sign-off received; merged via #2438)
-      (`specs/plans/316-website-redesign.md`)
+      (`316-website-redesign`)
   - [x] Homepage sections, docs chrome, and shared primitives rebuilt onto
         token-driven surfaces; stale Apple Virtualization / Docker-fallback /
         nonexistent Nix service-builder claims and the third-party Google
@@ -1722,7 +1722,7 @@ resume` takes a `current_head` and refuses when it differs from the
         claims
 
 - [x] Plan 315 — HVF virtio-vsock transmit-credit regression
-      (`specs/plans/315-hvf-vsock-credit-regression.md`)
+      (`315-hvf-vsock-credit-regression`)
   - [x] Restore bounded guest credit recording, fail-closed unknown-credit
         behavior, protocol counter wrapping, and complete state teardown
   - [x] Prove first-window stop/resume and byte-for-byte 32 MiB delivery;
@@ -1761,7 +1761,7 @@ resume` takes a `current_head` and refuses when it differs from the
         large-image work; guest-side `mvm-agentd` needs a profile egress path
         first.
 - [x] Plan 2167 — durable agent session and event contract
-      (`specs/plans/2167-agent-session-contract.md`)
+      (`2167-agent-session-contract`)
   - [x] Versioned public IDs, lifecycle commands, durable/ephemeral event
         envelopes, typed errors, and bounded retention/cursor semantics
   - [x] Idempotent prompt delivery, cancellation confirmation, restart replay,
@@ -1770,7 +1770,7 @@ resume` takes a `current_head` and refuses when it differs from the
         three non-`@wip` BDD scenarios
 
 - [x] Plan 2168 — unified runtime policy and human approval
-      (`specs/plans/2168-runtime-approval.md`)
+      (`2168-runtime-approval`)
   - [x] Typed fail-closed policy evaluation requires signed admission and
         applies deterministic specificity/priority/effect precedence
   - [x] Approval requests, authorized first responses, expiry, cancellation,
@@ -1780,7 +1780,7 @@ resume` takes a `current_head` and refuses when it differs from the
         re-exports, unit tests, and three non-`@wip` BDD scenarios
 
 - [x] Plan 2170 — typed capability bindings
-      (`specs/plans/2170-typed-capability-bindings.md`)
+      (`2170-typed-capability-bindings`)
   - [x] Versioned per-verb descriptors, schema references, limits, and exact
         descriptor-digest bindings
   - [x] Host-signed admission allowlist and invocation-time fail-closed gates
@@ -2017,7 +2017,7 @@ resume` takes a `current_head` and refuses when it differs from the
     comparison, and the adopt/decline decision remain open.
 
 - [ ] Plan 311 — Launch critical-path waste on real-sized images
-      (`specs/plans/311-launch-critical-path-waste.md`), branch
+      (`311-launch-critical-path-waste`), branch
       `plan/311-launch-critical-path`. Sits beneath Plan 299's contract: its
       baseline runs `alpine` (9.9 MB rootfs), and three per-launch costs are
       invisible at that size. On `python:3.12` (1.1 GB, 116x) a debug profile
@@ -2355,7 +2355,7 @@ resume` takes a `current_head` and refuses when it differs from the
   - [x] `mvm-backends` crate scaffolded; `MockDriver` lives under `test-support`
   - [x] Host command execution (`shell`, `linux_env`) moved to `mvm-vmm::host`
   - [x] Move concrete drivers: all five (`FcDriver`, `HvfDriver`, `LibkrunDriver`, `QemuDriver`, `MockDriver`) now live in `mvm-backends`
-- [x] Extract the Firecracker driver (`specs/plans/298-extract-firecracker-driver.md`)
+- [x] Extract the Firecracker driver (`298-extract-firecracker-driver`)
   - [x] Snapshot seam (`SnapshotIO`, guarded load paths, device-model guard, the single `CannedIO` double) lifted into `mvm-vmm`
   - [x] `ForkVmFullRestorer` deleted — one method, one impl, one call site; now a callback
   - [x] FC mechanics moved to `mvm-backends::fc` (API client, VMM process, control, observe, guards, snapshot, fork namespace, `FirecrackerIO`, `FcVmFullControl`)
@@ -2381,7 +2381,7 @@ resume` takes a `current_head` and refuses when it differs from the
         `web/audit-verify/`, fix the stale `mvm-verify` refs in ADR-031, add
         `mvmctl audit pubkey`
 - [x] Plan 320 — A live wasm sandbox demo on the website
-      (`specs/plans/320-wasm-browser-demo.md`) — PR #2429 merged to `main`;
+      (`320-wasm-browser-demo`) — PR #2429 merged to `main`;
       hardening items closed in #2441. This follow-up fix (#2447) adds the
       wasm build to `.github/workflows/pages.yml` and corrects
       `web/mvm-demo/build.sh` to preserve the `pkg/` subdirectory when staging,
@@ -2447,7 +2447,7 @@ resume` takes a `current_head` and refuses when it differs from the
   - [ ] Does **not** retire `web/audit-verify/` (no Merkle inclusion) — B5 and
         `mvmctl audit pubkey` remain plan 301's
 - [ ] Run-first CLI ergonomics
-      (`specs/plans/329-run-first-cli-and-upstream-adoption.md` — note three
+      (`329-run-first-cli-and-upstream-adoption` — note three
       plans share the number 329; refer to this one by path) — Phase A landed:
       ADR-027 amended so `run` is a first-class visible verb, the fifteen
       user-facing verb groups promoted out of `hide = true`, twelve missing
@@ -2501,7 +2501,7 @@ resume` takes a `current_head` and refuses when it differs from the
   - [ ] WS6 Documentation and registry conventions
 
 - [x] Plan 291 — Develop → build → deploy an attested workload image
-      (`specs/plans/291-develop-build-deploy-attested.md`)
+      (`291-develop-build-deploy-attested`)
   - [x] WS1 `mvmctl deploy`: seal, BLAKE3 identity + SHA-256 interop, deploy
         record; retain the local sealed artifact and ship it to mvmd through
         the authenticated upload contract when a remote is configured
@@ -2535,7 +2535,7 @@ resume` takes a `current_head` and refuses when it differs from the
   - [ ] Build-level claim promotion and adversarial backend witnesses
 
 - [x] Plan 289 — Host-side machine logs
-      (`specs/plans/289-host-side-machine-logs.md`)
+      (`289-host-side-machine-logs`)
   - [x] Read backend-captured logs from the isolated host VM state directory
   - [x] Preserve log flags without shell interpolation; follow mode honors the
         requested line count. Superseded by plan 295, which replaced the reader:
@@ -2547,7 +2547,7 @@ resume` takes a `current_head` and refuses when it differs from the
   - [x] Complete workspace tests, check, formatting, and all-target clippy
 
 - [x] Plan 286 — Guest-kernel hardware floor
-      (`specs/plans/286-kernel-floor.md`)
+      (`286-kernel-floor`)
   - [x] Audit resolved x86_64/aarch64 configs and enforce required cuts
   - [x] Ratchet workload configs to 902 x86_64 / 936 aarch64 built-ins
   - [x] Shrink the x86_64 workload image by 46.8% and boot it on Firecracker
@@ -2556,14 +2556,14 @@ resume` takes a `current_head` and refuses when it differs from the
   - [x] Full validation, merge-queue readiness and rollup closeout
 
 - [x] Plan 285 — HVF virtio-rng
-      (`specs/plans/285-hvf-virtio-rng.md`, issue #2060)
+      (`285-hvf-virtio-rng`, issue #2060)
   - [x] Portable bounded virtio-mmio entropy device and negative tests
   - [x] HVF FDT/run-loop wiring while retaining the early boot seed
   - [x] Live HVF guest binds `virtio_rng.0` and serves distinct entropy reads
   - [x] Full gates, merge, and issue closeout
 
 - [x] Plan 284 — Zero-open-issue reconciliation
-      (`specs/plans/284-zero-open-issue-reconciliation.md`)
+      (`284-zero-open-issue-reconciliation`)
   - [x] Classify and reconcile the original 19 open issues
   - [x] Land the queued fixes for #2007, #2028, and #2029
   - [x] Land the security, kernel-pin, installer-fixture, and cold-cache-test
@@ -2585,7 +2585,7 @@ resume` takes a `current_head` and refuses when it differs from the
         witness kills the final comparison survivor from the corrected-head run
 
 - [x] Plan 283 — Production object-store volumes
-      (`specs/plans/283-production-object-store-volumes.md`, issue #2040)
+      (`283-production-object-store-volumes`, issue #2040)
   - [x] Canonical mvm contract and dead S3-path removal
   - [x] Live local/block attachment through the admitted VM launch path
   - [x] mvmd OpenDAL → `object_store` migration with mandatory encryption
@@ -2692,7 +2692,7 @@ resume` takes a `current_head` and refuses when it differs from the
   - [ ] Deferred to the broker task: re-seal the stream transcript periodically,
         so durable history exists for a _running_ VM and survives a kill
 - [x] Plan 282 — Merge queue auto-requeue
-      (`specs/plans/282-merge-queue-auto-requeue.md`)
+      (`282-merge-queue-auto-requeue`)
   - [x] Refuse conflicts and bound retry attempts per PR
   - [x] Keep privileged execution on the trusted base ref with no checkout
   - [x] Complete repository validation and queue the PR
@@ -2738,7 +2738,7 @@ resume` takes a `current_head` and refuses when it differs from the
         persistent-OCI path accept `--hypervisor apple-container`
   - [ ] Container-mode closure (later stage)
 - [x] Plan 281 — Merge queue latency audit
-      (`specs/plans/281-merge-queue-latency.md`)
+      (`281-merge-queue-latency`)
   - [x] Measure queue, merge-group, runner, execution, rebuild, and post-check
         latency from live GitHub metadata and logs
   - [x] Preserve required exact-commit validation while making merge-group
@@ -2757,7 +2757,7 @@ resume` takes a `current_head` and refuses when it differs from the
         (416 of 1872 files, 22%, stop being cache keys)
 
 - [x] Plan 284 — CI lint and merge-queue latency
-      (`specs/plans/284-ci-lint-latency.md`)
+      (`284-ci-lint-latency`)
   - [x] Target only the packages that own `test-support` code
   - [x] Remove branch-local multi-gigabyte Cargo target caches
   - [x] Share nested `mvm-cli` builds across feature fingerprints
@@ -2767,7 +2767,7 @@ resume` takes a `current_head` and refuses when it differs from the
         passed and measured a 19–21 minute runner wait
 
 - [x] Plan 297 — Parallel pull-request CI lanes
-      (`specs/plans/297-ci-parallel-lanes.md`)
+      (`297-ci-parallel-lanes`)
   - [x] Split independent lint and Linux-only test coverage into concurrent
         jobs without changing required check names
   - [x] Keep targeted feature coverage and Linux conformance coverage intact
@@ -2928,7 +2928,7 @@ resume` takes a `current_head` and refuses when it differs from the
         ~5–6 ms gap is Firecracker process startup + snapshot resume.
 
 - [x] Plan 273 — SDK sidecar release acquisition
-      (`specs/plans/273-sdk-sidecar-release-acquisition.md`)
+      (`273-sdk-sidecar-release-acquisition`)
   - [x] Publish `sdk-sidecar-<arch>.tar.gz` per-arch release assets, with
         `tests/release_assets.rs` pinning the workflow's names to the Rust
         constructor that requests them
@@ -2939,7 +2939,7 @@ resume` takes a `current_head` and refuses when it differs from the
         source checkout keeps the fail-closed refusal
 
 - [x] Plan 277 — release-artifact signature verification
-      (`specs/plans/277-release-artifact-signature-verification.md`)
+      (`277-release-artifact-signature-verification`)
   - [x] Sign the image tarballs with `--new-bundle-format`, the only shape the
         in-binary Rust verifier parses; binary tarballs stay legacy for the
         cosign-CLI consumers (`install.sh`, `mvmctl update`)
@@ -2949,7 +2949,7 @@ resume` takes a `current_head` and refuses when it differs from the
   - [x] Docs + rollup; closes plan 273's one deferred gap
 
 - [x] Plan 266 — lightweight microVM guest
-      (`specs/plans/266-lightweight-microvm-guest.md`)
+      (`266-lightweight-microvm-guest`)
   - [x] WS-1/WS-2: static-musl privilege drop via the in-house `mvm-setpriv`
   - [x] WS-3: static-musl runtime overlay with the glibc SDK FFI split out
   - [x] WS-3 follow-up: plan-driven automatic SDK-sidecar attachment, gated
@@ -2960,7 +2960,7 @@ resume` takes a `current_head` and refuses when it differs from the
         with the optional SDK sidecar reported separately
 
 - [x] Plan 280 — transcript root audit binding
-      (`specs/plans/280-transcript-root-audit-binding.md`)
+      (`280-transcript-root-audit-binding`)
   - [x] Version-2 manifest root over fixed metadata and ordered ciphertext
         chunk records, with deterministic and mutation coverage
   - [x] Ordered `gateway.transcript_sealed` emission after atomic manifest
@@ -3005,7 +3005,7 @@ resume` takes a `current_head` and refuses when it differs from the
   - [ ] OCI-image template build path and CLI facade completion
 
 - [~] Plan 302 — audit-chain write-path hardening
-  (`specs/plans/302-audit-chain-write-path-hardening.md`)
+  (`302-audit-chain-write-path-hardening`)
   - [x] `ReceiptStore` links and signs under one lock — the head read was
         outside it, so two emitters could claim one parent
   - [x] Receipt lock switched from process-scoped `fcntl` to `flock`, which
@@ -3040,7 +3040,7 @@ resume` takes a `current_head` and refuses when it differs from the
   - [ ] Double-key the stale-name relief valves
 
 - [x] Plan 333 — dependency hygiene: four defects and a ratchet, not a cut
-      (`specs/plans/333-dependency-hygiene.md`)
+      (`333-dependency-hygiene`)
   - [x] Phase 5 — the four defects: `hickory-proto` declared unconditionally in
         `mvm-hostd` while every consumer is `cfg(target_os = "linux")` (−6 on
         macOS, retires the shipped duplicate `rand` major there; `rand_core`
@@ -3080,7 +3080,7 @@ resume` takes a `current_head` and refuses when it differs from the
         closure at 468, so the ~62 `wasmtime`-family packages behind an
         off-by-default feature stay observed. Not a lockfile count: measured,
         that number does not move when a dependency is removed (~120 orphans)
-  - [x] Sigstore 0.9→0.11 (`specs/plans/2026-08-17-sigstore-0-11-upgrade.md`):
+  - [x] Sigstore 0.9→0.11 (`2026-08-17-sigstore-0-11-upgrade`):
         sigstore-verify stack bumped, rustls feature selected (ring backend,
         not aws-lc-rs), dead `VerificationResult.success` API usage removed.
         Stale `rand`/`rand_core` ALLOWLIST entries ratcheted down in both

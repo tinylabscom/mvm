@@ -1,6 +1,6 @@
 # Stage C's persistent-builder recipe, re-scoped against the tree
 
-No code. This corrects `specs/plans/2026-08-31-remove-virtio-fs.md`'s Stage C
+No code. This corrects `2026-08-31-remove-virtio-fs`'s Stage C
 persistent-builder section, which describes a migration of a code path that no
 build takes and would have consumed a large implementation before that surfaced.
 

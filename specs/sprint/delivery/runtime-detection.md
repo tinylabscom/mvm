@@ -1,6 +1,6 @@
 # `mvmctl run npm test` picks the image
 
-**Plan:** `specs/plans/329-run-first-cli-and-upstream-adoption.md`, Phase 2.
+**Plan:** `329-run-first-cli-and-upstream-adoption`, Phase 2.
 
 ## What shipped
 

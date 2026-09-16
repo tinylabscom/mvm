@@ -1,6 +1,6 @@
 # One `just embed` now sticks
 
-Plan: `specs/plans/2026-08-28-embedded-host-binaries-are-opt-in.md` (follow-up)
+Plan: `2026-08-28-embedded-host-binaries-are-opt-in` (follow-up)
 
 An unembedded `mvmctl` kept coming back after a `just embed` that had genuinely
 worked. Three causes, one root.

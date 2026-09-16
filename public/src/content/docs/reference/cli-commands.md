@@ -142,7 +142,7 @@ is the command. `mvmctl env uninstall --all` also wipes `~/.mvm`, but it removes
 
 ## Manifests
 
-> **Status:** the `mvmctl init/build/manifest *` surface below is the **plan-38 model**, shipped on `feat/manifest-driven-template-dx-claude`. The user-facing primitive is an `mvm.toml` file alongside your `flake.nix`. See the [Manifests guide](/guides/manifests/) for the conceptual model. The old `mvmctl template <verb>` namespace was removed; clap returns "unrecognized subcommand" for old invocations. `mvmctl manifest push` / `pull` are planned in [plan 39](https://github.com/tinylabscom/mvm/blob/main/specs/plans/39-manifest-push-pull.md) but not yet implemented.
+> **Status:** the `mvmctl init/build/manifest *` surface below is the **plan-38 model**, shipped on `feat/manifest-driven-template-dx-claude`. The user-facing primitive is an `mvm.toml` file alongside your `flake.nix`. See the [Manifests guide](/guides/manifests/) for the conceptual model. The old `mvmctl template <verb>` namespace was removed; clap returns "unrecognized subcommand" for old invocations. `mvmctl manifest push` / `pull` are planned but not yet implemented.
 
 ### Scaffolding (top-level)
 
@@ -180,7 +180,7 @@ is the command. `mvmctl env uninstall --all` also wipes `~/.mvm`, but it removes
 | `mvmctl manifest verify --check-signature`          | Reserved for plan 36 (sealed-signed-builder-image); errors today with "not yet wired"                                                      |
 | `mvmctl manifest prune --orphans`                   | Remove builds whose source manifest is gone                                                                                                |
 | `mvmctl manifest prune --orphans --dry-run`         | Preview what would be removed                                                                                                              |
-| `mvmctl manifest push` / `mvmctl manifest pull`     | **Planned, not yet implemented.** Tracked in [plan 39](https://github.com/tinylabscom/mvm/blob/main/specs/plans/39-manifest-push-pull.md). |
+| `mvmctl manifest push` / `mvmctl manifest pull`     | **Planned, not yet implemented.** |
 
 ## Configuration
 

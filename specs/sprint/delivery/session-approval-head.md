@@ -4,8 +4,8 @@
 head as one of the hibernation record's fields, and D5 sketches a resume that
 compares against it instead of replaying the ledger's full history. This
 branch delivers the piece that made both producible —
-`specs/plans/2026-08-18-session-approval-head.md` Tasks 1–3, on top of the
-park state machine `specs/plans/2026-08-18-durable-session-park.md` landed —
+`2026-08-18-session-approval-head` Tasks 1–3, on top of the
+park state machine `2026-08-18-durable-session-park` landed —
 with no VM, backend, or async surface involved.
 
 ## Delivered

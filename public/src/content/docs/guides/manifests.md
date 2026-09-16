@@ -5,9 +5,8 @@ description: How mvmctl turns an mvm.toml into a built image or a named machine.
 
 > **Status:** `mvm.toml` / `Mvmfile.toml` is schema v1. A manifest selects
 > exactly one source: `flake = ...` for the build/slot flow, or `image = ...`
-> for `mvmctl machine create`. `mvmctl manifest push` and `pull` are tracked in
-> [plan 39](https://github.com/tinylabscom/mvm/blob/main/specs/plans/39-manifest-push-pull.md)
-> and not yet implemented.
+> for `mvmctl machine create`. `mvmctl manifest push` and `pull` are not yet
+> implemented.
 
 A manifest is the user-facing primitive for "what source should back this VM
 and how should it be sized." It can sit next to a `flake.nix` for source-built
@@ -221,7 +220,7 @@ mvmctl manifest prune --orphans --dry-run       # preview what would be removed
 
 ## Sharing via a registry (planned)
 
-Pushing a built slot to an S3-compatible registry and pulling it on another machine is **planned but not yet implemented** — the design is captured in [plan 39](https://github.com/tinylabscom/mvm/blob/main/specs/plans/39-manifest-push-pull.md). The dominant question (where pull installs the slot when the source's `manifest_path` doesn't exist on the target) is resolved there. The shape will be:
+Pushing a built slot to an S3-compatible registry and pulling it on another machine is **planned but not yet implemented**. The open question is where pull installs the slot when the source's `manifest_path` does not exist on the target. The shape will be:
 
 ```bash
 # producer
@@ -270,4 +269,3 @@ To keep the schema small and the boundaries crisp, the following are explicitly 
 
 - [Nix flakes guide](./nix-flakes.md) — writing the `flake.nix` half of the equation
 - [CLI reference](../reference/cli-commands.md) — full flag/option list
-- [Plan 38](https://github.com/tinylabscom/mvm/blob/main/specs/plans/38-manifest-driven-template-dx.md) — the design doc this guide tracks

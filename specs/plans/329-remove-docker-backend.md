@@ -74,7 +74,7 @@ MVM's core value proposition is hardware-isolated microVMs: per-workload kernel,
 ### Phase 4 — Documentation
 
 - [x] Update `specs/adrs/034-docker-dev-tier-backend.md` status to **Retired** and add a note explaining the reversal.
-- [x] Update `MIGRATION-269.md` if it references DockerBackend.
+- [x] Update `specs/notes/269-backend-shim-migration-boundary.md` if it references DockerBackend.
 - [x] Update `CLAUDE.md` runtime module listing.
 - [x] Update `specs/notes/2026-07-29-universal-initramfs-future-tiers.md`.
 - [x] Update public docs (`public/src/content/docs/`) to remove Docker install/run references.
