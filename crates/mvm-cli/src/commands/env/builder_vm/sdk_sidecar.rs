@@ -114,10 +114,14 @@ fn build_sdk_sidecar_via_hvf(
         script: sdk_sidecar_builder_script(arch, libc),
         extra_disks: Vec::new(),
     };
-    mvm_runtime::builder_runner::hvf_builder::HvfBuilderVm::new(kernel, rootfs)
-        .with_closure_nar(closure_nar)
-        .run_shell_script(&job)
-        .map_err(|error| anyhow::anyhow!("HVF builder shell job: {error}"))?;
+    mvm_runtime::builder_runner::DriverBuilderVm::new(
+        mvm_backends::driver::hvf::HvfDriver::new(),
+        kernel,
+        rootfs,
+    )
+    .with_closure_nar(closure_nar)
+    .run_shell_script(&job)
+    .map_err(|error| anyhow::anyhow!("HVF builder shell job: {error}"))?;
     Ok(())
 }
 

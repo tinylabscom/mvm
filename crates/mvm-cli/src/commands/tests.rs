@@ -4738,10 +4738,12 @@ fn builder_flag_appears_in_help() {
         help.contains("--builder"),
         "`--builder` flag not surfaced in `mvmctl --help`; help text was:\n{help}"
     );
-    assert!(
-        help.contains("libkrun") && help.contains("hvf"),
-        "`--builder` value choices missing from help; help text was:\n{help}"
-    );
+    for backend in ["hvf", "firecracker", "qemu", "libkrun"] {
+        assert!(
+            help.contains(backend),
+            "`--builder` value {backend} missing from help; help text was:\n{help}"
+        );
+    }
 }
 
 #[test]
@@ -4752,10 +4754,9 @@ fn builder_flag_accepts_libkrun() {
 
 #[test]
 fn builder_flag_rejects_unknown_value() {
-    // Clap's `value_parser = ["libkrun", "qemu", "hvf"]` should refuse
-    // anything outside that set. Catches typos like `=vmz` early
-    // rather than letting `MVM_BUILDER_BACKEND_ENV`'s
-    // warn-and-fall-through path eat them.
+    // Clap's builder value parser should refuse anything outside the supported
+    // backend set. Catches typos like `=vmz` early rather than letting
+    // `MVM_BUILDER_BACKEND_ENV`'s warn-and-fall-through path eat them.
     let err = Cli::try_parse_from(["mvmctl", "--builder", "bogus", "doctor"]).unwrap_err();
     let msg = err.to_string();
     assert!(

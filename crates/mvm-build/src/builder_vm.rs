@@ -516,6 +516,27 @@ pub trait BuilderVm {
     /// without provoking the failure it is trying to avoid.
     fn capabilities(&self) -> BuilderCapabilities;
 
+    /// Run a narrow shell job inside this backend's builder VM.
+    ///
+    /// On the trait rather than as an inherent method on each backend, because
+    /// the call sites are generic: the ext4 materializer and the verity sealer
+    /// both take whatever backend the selection resolved. While this was
+    /// inherent-only, `mvm-build` could not name the HVF implementation (it
+    /// lives a layer up), so both sites matched `Hvf => LibkrunBuilderVm` and
+    /// quietly ran an HVF host's shell jobs on libkrun.
+    ///
+    /// Defaults to a named refusal so a backend that has not wired one says so
+    /// instead of appearing to work.
+    fn run_shell_script(
+        &self,
+        _job: &BuilderShellJob,
+    ) -> Result<BuilderShellResult, BuilderVmError> {
+        Err(BuilderVmError::VmmUnavailable {
+            requested: "builder-shell-job".to_string(),
+            reason: "this builder backend does not run shell jobs".to_string(),
+        })
+    }
+
     /// Tear down any persistent state (warm builder pool entries,
     /// pulled images older than N days, etc.). No-op for stateless
     /// implementations.
@@ -582,8 +603,8 @@ pub enum BuilderVmError {
     /// The hvf builder VM could not run the build (boot / disk-transport /
     /// power-off-timeout failure) — a VMM-level failure that triggers the
     /// builder-backend fallback, distinct from a genuine `nix build` error.
-    #[error("hvf builder VMM-level failure: {detail}")]
-    HvfVmmFailed { detail: String },
+    #[error("builder VMM-level failure: {detail}")]
+    VmmFailed { detail: String },
 
     /// The persistent builder Nix store has a dangling/GC'd path — every build
     /// re-evals to the same missing path and fails identically, so builds
@@ -1225,6 +1246,47 @@ pub fn emit_sidecar_via_passthru_query(
 /// single source of the guest binaries, so a rootfs still carrying a baked
 /// agent/netinit pair could silently degrade back to it.
 pub use mvm_vmm::host::runtime_meta::admit_runtime_overlay_contract;
+
+// ──────────────────────────────────────────────────────────────────
+// Builder shell jobs
+//
+// Moved here from `libkrun_builder` because nothing about them is
+// libkrun-shaped: they are three plain records every backend consumes. While
+// they lived in that module the HVF builder's own public signature spelled
+// `mvm_build::libkrun_builder::BuilderShellJob`, which is how libkrun's name
+// reached callers that never touch it.
+// ──────────────────────────────────────────────────────────────────
+
+/// job. Devices appear after the builder VM's persistent Nix-store
+/// disk; the first extra disk here is `/dev/vdc` in the guest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuilderExtraDisk {
+    pub id: String,
+    pub path: PathBuf,
+    pub read_only: bool,
+}
+
+/// Generic builder-VM shell job.
+///
+/// This is intentionally narrower than [`BuilderJob`]: it is for
+/// in-tree infrastructure commands that need the Linux builder
+/// boundary but do not produce Nix build artifacts. The OCI image
+/// runner uses it to run `mkfs.ext4` and copy an OCI-unpacked rootfs
+/// into a writable virtio-blk image.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuilderShellJob {
+    pub work_dir: PathBuf,
+    pub artifact_out: PathBuf,
+    pub script: String,
+    pub extra_disks: Vec<BuilderExtraDisk>,
+}
+
+/// Result metadata from a one-shot builder shell job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuilderShellResult {
+    pub job_dir: PathBuf,
+    pub vm_state_dir: PathBuf,
+}
 
 #[cfg(test)]
 mod tests {

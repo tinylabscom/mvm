@@ -278,9 +278,7 @@ fn seal_run_rootfs_for_runtime_with(
 
 #[cfg(feature = "builder-vm")]
 fn seal_run_rootfs_with_verity_builder_vm(rootfs_ext4: &Path) -> Result<()> {
-    use crate::builder_backend_select::BuilderBackendChoice;
-    use crate::libkrun_builder::{BuilderShellJob, LibkrunBuilderVm};
-    use crate::qemu_builder::QemuBuilderVm;
+    use crate::builder_vm::BuilderShellJob;
 
     let artifact_out = rootfs_ext4
         .parent()
@@ -297,20 +295,14 @@ fn seal_run_rootfs_with_verity_builder_vm(rootfs_ext4: &Path) -> Result<()> {
     let selected = crate::builder_backend_select::resolve_choice();
     let explicit = crate::builder_backend_select::resolve_env_override().is_some();
     crate::builder_backend_select::run_with_builder_fallback(selected, explicit, |choice| {
-        match choice {
-            BuilderBackendChoice::Libkrun | BuilderBackendChoice::Hvf => {
-                LibkrunBuilderVm::default()
-                    .run_shell_script(&shell_job)
-                    .map(|_| ())
-            }
-            BuilderBackendChoice::Qemu => QemuBuilderVm::new()
-                .run_shell_script(&shell_job)
-                .map(|_| ()),
-            BuilderBackendChoice::WebLinux => Err(crate::builder_vm::BuilderVmError::VmmUnavailable {
-                requested: "web-linux".into(),
-                reason: "the web-linux builder is browser-only; select libkrun, qemu, or hvf on a native host".into(),
-            }),
-        }
+        // Through the trait, so the backend the selection resolved is the one
+        // that runs the job. This used to match on the choice here, and mapped
+        // `Hvf` onto `LibkrunBuilderVm` — which quietly ran an HVF host's shell
+        // jobs on libkrun, and is exactly the coupling the builder path is
+        // meant not to have.
+        crate::builder_backend_select::try_resolve_builder_backend_for(choice)?
+            .run_shell_script(&shell_job)
+            .map(|_| ())
     })?;
     Ok(())
 }

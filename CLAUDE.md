@@ -115,14 +115,19 @@ with `MVM_EMBED_ZIG=/path/to/zig` if needed.
 End-users running a downloaded mvmctl don't need any of this — the
 binaries are already embedded.
 
-**macOS 26+ Apple Silicon** users need no Homebrew prerequisites for the HVF builder (the auto-detect default on that tier — see "Builder backend selection" below). The `slp/krun/*` Homebrew trio is only required if you explicitly opt into libkrun via `--builder libkrun` or `MVM_BUILDER_BACKEND=libkrun`.
+**macOS 26+ Apple Silicon** users need no Homebrew prerequisites: hvf is the auto-detect default on that tier and now bootstraps its own builder VM (see "Builder backend selection" below).
+
+That last part is recent, and it is the whole reason the Homebrew requirement is gone. Stage 0 — the bootstrap that builds the builder image from nothing — used to have a hand-written body per VMM and none on hvf, so the dispatch lowered every hvf selection onto libkrun. Stage 0 now runs through `BuilderRunner<D: VmmDriver>` like every other builder job, as a `Stage0Vm<D>` generic over the driver, and `mvmctl` registers one per backend at startup. **Nothing lowers onto libkrun any more**: a backend with no registered Stage 0 refuses and names itself, because a missing registration is our wiring bug and should not present as "install these Homebrew packages".
+
+Its bootstrap kernel is fetched rather than built: it cannot be built, because Stage 0 is what makes local kernel builds possible. `mvm_build::stage0_kernel` classifies it as a **bootstrap seed** — the same classification Stage 0 already gives its Nix root tarball — so it is fetched and digest-verified even in a source checkout. This is a deliberate, narrow exception to "contributor builds never depend on mvm-published artifacts"; it covers that one kernel and nothing else, and the builder image and workload kernel keep the local-build invariant unchanged.
 
 ## Builder backend selection (Plan 98)
 
 The builder VM (the Linux guest that runs `nix build` inside `mvmctl machine build` / `mvmctl machine run --flake`) picks between three host VMMs:
 
 - **hvf** — the HVF builder (Hypervisor.framework, no Homebrew deps). Default on macOS 26+ Apple Silicon. macOS-only.
-- **libkrun** — third-party in-process VMM via the `slp/krun/*` Homebrew trio. Default on Linux and macOS 13-25. Works everywhere mvm runs.
+- **firecracker** — the Firecracker builder, the same VMM the Linux workload tier runs on, so a Linux host needs no second hypervisor to build with. Default on Linux-with-KVM. Bootstraps (Stage 0) today; it has no builder-image resolver yet, so steady-state builds on it refuse by name rather than running elsewhere.
+- **libkrun** — third-party in-process VMM via the `slp/krun/*` Homebrew trio. **Never auto-detected, and never fallen back to**; it runs only when named by `--builder libkrun` / `MVM_BUILDER_BACKEND=libkrun`. No builder path reaches it otherwise: a backend with no Stage 0 refuses and says so rather than lowering onto libkrun.
 - **qemu** — QEMU/microvm_nix builder (Linux dev/test substrate). Opt-in only.
 
 (The Apple Virtualization.framework builder was removed in Plan 226 R1P1.)
@@ -131,11 +136,25 @@ Selection priority (highest first):
 
 1. `--builder <libkrun|qemu|hvf>` global CLI flag.
 2. `MVM_BUILDER_BACKEND=libkrun|qemu|hvf` env var (case-insensitive, whitespace-trimmed; unrecognised values — including any retired backend name — log a warning and fall through to auto-detect).
-3. Auto-detect: macOS 26+ Apple Silicon → hvf; Linux → qemu; other macOS → libkrun.
+3. Auto-detect (`auto_detect_default_for`): **Apple Silicon macOS → hvf; Linux-with-KVM → firecracker; every other host → qemu.** libkrun appears nowhere in it.
+
+   Note what that means on macOS 13–25 Apple Silicon: auto-detect still answers hvf, which then reports the macOS 26 floor as unavailable — and there is no fallback (below). That tier has to pass `--builder libkrun` explicitly.
 
 `mvmctl doctor` reports the resolved choice on the `builder backend` line with format `<backend> — <source> — <availability>` so the override path is observable.
 
-**Auto-fallback (ADR-007).** When the _auto-detected_ builder fails to **create its VM** — a VMM-level failure distinct from a `nix build` error — mvm transparently retries the next backend on macOS 26+ (hvf → libkrun). One policy (`builder_attempt_order` + `run_with_builder_fallback`) drives every builder entry point. A genuine build error surfaces unchanged with no retry, and an explicit `--builder` / `MVM_BUILDER_BACKEND` disables the fallback. On Linux the auto-detect default is **qemu**; the rootfs-backed libkrun builder now boots and builds on Linux/KVM (the guest kernel parses libkrun's virtio-mmio cmdline devices, and a poweroff-fallback halt defers to the on-disk build result) and is selectable as an explicit opt-in via `--builder libkrun`.
+**Auto-fallback (ADR-007) is not wired.** `builder_attempt_order` returns a
+single-element vector in every branch, so a builder that cannot create its VM
+surfaces that failure rather than retrying another backend. The policy seam
+(`builder_attempt_order` + `run_with_builder_fallback`) is still the one place
+every builder entry point goes through, so restoring a fallback is a change to
+one function — but do not describe the hvf → libkrun retry as something that
+happens today, because it does not. A genuine build error surfaces unchanged
+either way.
+
+The rootfs-backed libkrun builder does boot and build on Linux/KVM (the guest
+kernel parses libkrun's virtio-mmio cmdline devices, and a poweroff-fallback
+halt defers to the on-disk build result); it is reachable only via an explicit
+`--builder libkrun`.
 
 The backends produce byte-identical `BuilderArtifacts` (kernel + rootfs from the same `nix/images/builder-vm/` flake), so switching backends mid-development is supported.
 
@@ -155,7 +174,7 @@ Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, disting
 - `mvm-net` -- `NetworkProvider` trait + provisioning/policy/registry seam (vsock/UDS + egress-tunnel plumbing). Was `mvm-network`; the concrete TAP/bridge impl lives in `mvm-runtime`.
 - `mvm-build` -- Nix builder pipeline + artifact cache; hosts the builder-VM-only `[[bin]]`s (`mvm-host-vm-init` etc., cfg-gated Linux, cross-compiled + embedded by `mvm-cli/build.rs`).
 - `mvm-vmm` -- backend-agnostic VMM device model and hypervisor seam: guest memory, FDT, arm64 kernel loading, virtio-mmio, the `hv::HypervisorVm`/`HypervisorVcpu` traits, the `driver::VmmDriver` seam, and the vsock transport. Low enough that `mvm-backends` can implement a backend without depending on `mvm-runtime`'s orchestration.
-- `mvm-backends` -- the concrete VMM mechanics behind that seam (`fc/`, `legacy::{libkrun,qemu,hvf}`, `mock`). Orchestration stays in `mvm-runtime`; this crate owns only how a VM is built and run.
+- `mvm-backends` -- the concrete VMM mechanics behind that seam: `driver/{fc,hvf,libkrun,qemu}.rs` (the `VmmDriver` impls), their `*_process.rs` host-process siblings, `fc/`, and `mock.rs`. There is no `legacy` module — the `*_process.rs` files were briefly named `*_legacy` during the backend split and nothing in them is legacy. Orchestration stays in `mvm-runtime`; this crate owns only how a VM is built and run.
 - `mvm-http` -- a minimal HTTP/1.1-over-rustls client, deliberately smaller than a general one (no HTTP/2, redirects, pooling, proxy, compression), to keep the hyper/tower stack out of the shipped `mvmctl` closure.
 - `mvm-runtime` -- the big runtime crate (absorbs `mvm` + `mvm-backend` + `mvm-base`): the `VmBackend` trait and the `AnyBackend` dispatch over every backend, VM lifecycle (`vm/` templates + checkpoints), `microvm/` (Firecracker driver), `base/` (shell/ui/linux_env/cow host substrate), `storage/` (dm-thin), `network/` (the TAP/gateway impl behind the `mvm-net` seam). Re-exports the `mvmctl::runtime`/`::backend` contract.
 - `mvm-client` -- the local/remote client facade: `LocalBackend` (default) + `GatewayBackend` (the `remote` feature), the canonical host-wide machine inventory (`inventory`, which backs `mvmctl machine ls` and non-CLI consumers), plus a re-export of `mvm-core`'s `MvmClient` trait and its `stream` reader. There is **no `dyn MvmClient` facade in the CLI** — `mvm-cli` uses `AnyBackend` directly for the backend surface, and the routing-everything-through-the-client refactor has not landed. Say what the code does, not what the plan said.
@@ -186,7 +205,7 @@ mvm-contract: `verify` (audit-log verifier), `ir/` (Workload IR), wire/policy DT
 
 mvm-core: `plan/` (ExecutionPlan, bundle, signing, validity), `policy/` (security, audit, network_policy, bundle/resolver), `crypto/` (attestation, keystore, secret_store, snapshot_*), `protocol.rs`, `agent.rs`, `catalog.rs`, `config.rs` (paths/`MVM_HOME`)
 
-mvm-runtime: `backend.rs` (`AnyBackend` dispatch + `FirecrackerBackend`), `driver/` + `workload_runner/` (the converged runner seam every claim-bearing workload boots through), `backends/hvf/`, `wasm_backend.rs`, `apple_container_backend.rs`, `mock.rs`; the libkrun/qemu/hvf VMM impls themselves live in `mvm-backends` (`legacy::{libkrun,qemu,hvf}`) and are re-exported from `lib.rs`. Also `microvm/` (Firecracker driver), `vm/` (templates + `template/lifecycle/`, checkpoints), `agent_session/` (filesystem store for durable agent sessions, the checkpoint analog), `base/` (shell, ui, linux_env, cow), `storage/`, `network/`, `codesign.rs`, `artifacts/`
+mvm-runtime: `backend.rs` (`AnyBackend` dispatch + `FirecrackerBackend`), `driver/` + `workload_runner/` (the converged runner seam every claim-bearing workload boots through), `backends/hvf/`, `wasm_backend.rs`, `apple_container_backend.rs`, `mock.rs`; the libkrun/qemu/hvf VMM impls themselves live in `mvm-backends` (`driver/{libkrun,qemu,hvf}.rs`) and are re-exported from `lib.rs`; the raw HVF substrate (`hv_impl.rs`, `kernel_boot.rs`, …) stays in `mvm-runtime/src/backends/hvf/`. Also `microvm/` (Firecracker driver), `vm/` (templates + `template/lifecycle/`, checkpoints), `agent_session/` (filesystem store for durable agent sessions, the checkpoint analog), `base/` (shell, ui, linux_env, cow), `storage/`, `network/`, `codesign.rs`, `artifacts/`
 
 mvm-fs: `oci/unpack/` (allow-listed unpacker), `oci/`, the ext4 writer, `overlay`
 
@@ -219,7 +238,7 @@ The `RuntimeBuildEnv` in mvm implements only `ShellEnvironment`. The full `Build
 ### Key Design Decisions
 
 - **Firecracker-only on Linux; libkrun (macOS 13-25) / HVF (macOS 26+) on macOS**: no Docker/containers on any auto-detected runtime path. The only container-tier backend is `--hypervisor apple-container` (Apple's prebuilt container kernel on the in-house HVF VMM), and `auto_select` returns it only when explicitly selected; it is not a fallback. Builds run Nix inside the builder VM (libkrun on macOS 13-25 / HVF on macOS 26+ / libkrun on Linux, with an auto-fallback to the QEMU builder where libkrun can't create its VM — ADR-007; note the _builder_ VMM is not Firecracker even on Linux). The QEMU/microvm_nix backend (Plan 166) is a **`mvm`-only dev/test backend, never used by `mvmd`** — it carries no untrusted multi-tenant workload. Egress default-deny is enforced at one seam for every workload runner — Firecracker, libkrun, HVF, QEMU, and `apple-container`, which holds an `HvfRunner` and substitutes only the kernel image, so it inherits that seam verbatim: the per-VM `mvm-network-endpoint`, whose shared `EgressGate` is the sole claim-10 decision point. `xtask check-single-network-path` pins every runner to that one spawn site and endpoint binary so a backend cannot grow a second gate. Wasm has no guest network and remains outside the microVM funnel.
-- **Workload microVMs have no NIC**: every workload *microVM* backend boots the guest with a virtio-vsock device and **no net device at all** — Firecracker's config sequence omits `/network-interfaces`, libkrun pins `NetworkingMode::VsockDirect` (which never calls a net attach), HVF's device model has no net device (and `apple-container` is that same device model with a different kernel image), and the QEMU workload driver emits no `-netdev`. The non-microVM tiers reach the same end differently: the Wasm tier mediates no networking at all. Egress leaves the guest only over the `NetworkFlow` channel to the host-side endpoint. This is what makes claim 10 (default-deny), claim 13 (no raw secret to the guest), and the audit chain mechanically enforceable: the host endpoint _originates_ every outbound connection, so it can authorize, substitute, and log it. `xtask check-single-network-path` fails closed if a guest NIC, raw-packet stack, alternate spawn implementation, or second workload socket owner appears. The builder VM is the opposite tier and **does** have a NIC — see **Host dependencies**.
+- **Workload microVMs have no NIC**: every workload *microVM* backend boots the guest with a virtio-vsock device and **no net device at all** — Firecracker's config sequence omits `/network-interfaces`, libkrun pins `NetworkingMode::VsockDirect` (which never calls a net attach), HVF's device model has no net device (and `apple-container` is that same device model with a different kernel image), and the QEMU workload driver emits no `-netdev`. The non-microVM tiers reach the same end differently: the Wasm tier mediates no networking at all. Egress leaves the guest only over the `NetworkFlow` channel to the host-side endpoint. This is what makes claim 10 (default-deny), claim 13 (no raw secret to the guest), and the audit chain mechanically enforceable: the host endpoint _originates_ every outbound connection, so it can authorize, substitute, and log it. `xtask check-single-network-path` fails closed if a guest NIC, raw-packet stack, alternate spawn implementation, or second workload socket owner appears. The builder VM is **also NIC-less** on libkrun and hvf: its `nix build` substituter traffic rides the same vsock `NetworkFlow` relay under `NetworkPolicy::trusted_build_egress()`. The one exception is the **QEMU** builder, which attaches a `virtio-net-pci` on user-mode slirp — that tier is the outlier, not the model.
 - **No SSH in microVMs, ever**: microVMs are headless workloads. No sshd, no SSH keys, no SSH users in any rootfs. Guest communication uses Firecracker vsock only. The builder VM (where Nix builds run) is headless too — no interactive shell or console, just a build engine you debug through its logs. See **Security model** below for the full posture.
 - **Builder VM is headless**: there is no interactive shell into it. The builder VM exists solely to run `nix build` on behalf of `mvmctl build` / `mvmctl machine run`; `mvmctl bootstrap` optionally pre-fetches/builds its image ahead of time, but builds auto-bootstrap it on first use if you skip that step. On macOS 26+ Apple Silicon: a long-lived HVF builder VM with Nix + build tools. On other macOS: libkrun builder VM. On Linux with KVM: Firecracker directly. None of these start or SSH into a workload microVM — the builder VM and workload microVMs are always separate.
 - **Headless microVMs**: `mvmctl run` and `mvmctl machine start` boot Firecracker as a daemon. Interactive access via `mvmctl machine console` (PTY-over-vsock, dev-mode only).

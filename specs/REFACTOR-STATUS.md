@@ -35,6 +35,21 @@ Last updated: 2026-09-16
   - [ ] WS3–WS7 — atomic lifecycle, verification, compat, and Nix hygiene
         (#3270–#3274)
 
+- [x] **VMM-agnostic Stage 0.**
+      `specs/plans/2026-09-15-vmm-agnostic-stage0.md`.
+      Stage 0 was the last builder path reaching for a VMM directly instead of
+      going through the `VmmDriver` seam, so `stage0_backend_choice` lowered
+      every hvf selection onto libkrun — the one remaining reason macOS needed
+      the `slp/krun/*` Homebrew trio. It now runs through
+      `BuilderRunner<D: VmmDriver>`, its console tokens come from the driver
+      rather than an HVF-shaped constant, and its bootstrap kernel is fetched
+      and digest-verified as a seed instead of extracted from libkrunfw's
+      dylib. Firecracker is now a real builder choice, auto-detected on
+      Linux-with-KVM, and `Stage0Vm<D>`/`DriverBuilderVm<D>` are generic over
+      the driver, so a future Windows backend inherits both. W1–W6 landed;
+      **no live boot on any backend yet**, and Firecracker bootstraps but has
+      no builder-image resolver, so steady-state builds on it refuse by name.
+
 - [x] **Claim-witness mutation coverage — issue #3250.**
       `specs/plans/2026-09-15-claim-witness-mutation-coverage.md`.
       PR #3255 covers empty EOF and short unterminated handoff replies. Fresh

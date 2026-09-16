@@ -43,16 +43,40 @@ fn closure_nar_for_host_arch() -> Option<PathBuf> {
     crate::builder_pack::closure_nar_path(&builder_vm_cache_dir().join(host_arch_tag()))
 }
 
-/// Constructor for the hvf builder, registered by the CLI (which can name
-/// `HvfBuilderVm` and resolve its image). `mvm-build` sits below
-/// `mvm-backend`, so it cannot construct the hvf builder itself.
-pub type HvfBuilderCtor = Box<dyn Fn() -> Result<Box<dyn BuilderVm>, BuilderVmError> + Send + Sync>;
+/// Constructor for a driver-backed builder, registered by the CLI (which can
+/// name the driver types and resolve a builder image). `mvm-build` sits below
+/// the crate that owns them, so it cannot construct one itself.
+///
+/// Returns `None` for a choice this process has no driver-backed builder for,
+/// so the caller refuses by name instead of substituting another backend.
+pub type DriverBuilderCtor = Box<
+    dyn Fn(BuilderBackendChoice) -> Option<Result<Box<dyn BuilderVm>, BuilderVmError>>
+        + Send
+        + Sync,
+>;
 
-static HVF_CTOR: OnceLock<HvfBuilderCtor> = OnceLock::new();
+static DRIVER_BUILDER_CTOR: OnceLock<DriverBuilderCtor> = OnceLock::new();
 
-/// Register the hvf builder constructor (first registration wins).
-pub fn register_hvf_builder(ctor: HvfBuilderCtor) {
-    let _ = HVF_CTOR.set(ctor);
+/// Register the driver-backed builder constructors (first registration wins).
+pub fn register_driver_builders(ctor: DriverBuilderCtor) {
+    let _ = DRIVER_BUILDER_CTOR.set(ctor);
+}
+
+/// Resolve a driver-backed builder, or a named refusal when this process has
+/// none for `choice`.
+fn driver_builder(choice: BuilderBackendChoice) -> Result<Box<dyn BuilderVm>, BuilderVmError> {
+    DRIVER_BUILDER_CTOR
+        .get()
+        .and_then(|ctor| ctor(choice))
+        .unwrap_or_else(|| {
+            Err(BuilderVmError::VmmUnavailable {
+                requested: choice.name().to_string(),
+                reason: format!(
+                    "no {} builder is registered in this build (CLI startup did not run,                      or this backend has no builder yet)",
+                    choice.name()
+                ),
+            })
+        })
 }
 
 /// Env-var name the dispatch consults. Surfaced as a constant so
@@ -95,6 +119,11 @@ pub enum BuilderBackendChoice {
     /// auto-detected default on macOS-26 Apple Silicon; opt-in elsewhere via
     /// `MVM_BUILDER_BACKEND=hvf` / `--builder hvf`.
     Hvf,
+    /// Firecracker builder VM — the destination Linux backend, and the same
+    /// VMM the Linux workload tier already runs on. Auto-detected on
+    /// Linux-with-KVM; opt-in elsewhere via `MVM_BUILDER_BACKEND=firecracker`
+    /// / `--builder firecracker`.
+    Firecracker,
     /// Browser-hosted WebLinux builder VM. Native hosts never auto-detect
     /// this; it is parsed only for catalog/help parity and fails closed if
     /// a native build tries to resolve it.
@@ -108,6 +137,7 @@ impl BuilderBackendChoice {
             BuilderBackendChoice::Libkrun => "libkrun",
             BuilderBackendChoice::Qemu => "qemu",
             BuilderBackendChoice::Hvf => "hvf",
+            BuilderBackendChoice::Firecracker => "firecracker",
             BuilderBackendChoice::WebLinux => "web-linux",
         }
     }
@@ -120,14 +150,22 @@ impl BuilderBackendChoice {
 ///
 /// Decision:
 /// - Apple Silicon macOS → HVF builder (the backend reports the macOS 26 floor)
+/// - Linux with `/dev/kvm` → Firecracker builder, the VMM the Linux workload
+///   tier already uses
 /// - every other host → QEMU builder (availability determines whether the
 ///   unsupported/dev host can actually run it)
 pub fn auto_detect_default_for(
-    _plat: Platform,
+    plat: Platform,
     is_macos_apple_silicon: bool,
 ) -> BuilderBackendChoice {
     if is_macos_apple_silicon {
         BuilderBackendChoice::Hvf
+    } else if matches!(plat, Platform::LinuxNative) {
+        // The same VMM the Linux workload tier runs on, so a Linux host needs
+        // no second hypervisor to build with. QEMU stays the explicit dev/test
+        // tier rather than the automatic answer: its user-mode networking is
+        // not a substitute for the vsock-only builder contract.
+        BuilderBackendChoice::Firecracker
     } else {
         BuilderBackendChoice::Qemu
     }
@@ -158,6 +196,7 @@ pub fn resolve_env_override() -> Option<BuilderBackendChoice> {
         "libkrun" => Some(BuilderBackendChoice::Libkrun),
         "qemu" => Some(BuilderBackendChoice::Qemu),
         "hvf" => Some(BuilderBackendChoice::Hvf),
+        "firecracker" | "fc" => Some(BuilderBackendChoice::Firecracker),
         other => {
             tracing::warn!(
                 value = %other,
@@ -242,14 +281,30 @@ impl BuilderVm for WebLinuxBuilderVm {
 /// cannot drift from the source of truth.
 #[must_use]
 pub fn declared_capabilities(choice: BuilderBackendChoice) -> BuilderCapabilities {
+    declared_capabilities_for(choice, stage0_is_registered_for(choice))
+}
+
+/// [`declared_capabilities`] with the Stage 0 registration injected, so the
+/// table is unit-testable without setting a process-wide `OnceLock` that would
+/// then leak into every other test in the binary.
+pub fn declared_capabilities_for(
+    choice: BuilderBackendChoice,
+    stage0_registered: bool,
+) -> BuilderCapabilities {
     match choice {
         BuilderBackendChoice::Libkrun | BuilderBackendChoice::Qemu => BuilderCapabilities {
             stage0_bootstrap: true,
             dependency_install: true,
         },
-        BuilderBackendChoice::Hvf | BuilderBackendChoice::WebLinux => {
-            BuilderCapabilities::default()
-        }
+        // hvf and Firecracker bootstrap once their driver-backed Stage 0 is
+        // registered, and report that they do not before then — so `doctor`
+        // describes the process it is running in rather than a compile-time
+        // assumption. Dependency install is still a genuine gap on both.
+        BuilderBackendChoice::Hvf | BuilderBackendChoice::Firecracker => BuilderCapabilities {
+            stage0_bootstrap: stage0_registered,
+            dependency_install: false,
+        },
+        BuilderBackendChoice::WebLinux => BuilderCapabilities::default(),
     }
 }
 
@@ -273,23 +328,17 @@ pub fn resolve_builder_backend() -> Box<dyn BuilderVm> {
 pub fn resolve_builder_backend_with_override(
     flag: Option<BuilderBackendChoice>,
 ) -> Box<dyn BuilderVm> {
-    match resolve_choice_with_override(flag) {
+    let choice = resolve_choice_with_override(flag);
+    match choice {
         BuilderBackendChoice::Libkrun => {
             Box::new(LibkrunBuilderVm::default().with_closure_nar(closure_nar_for_host_arch()))
         }
         BuilderBackendChoice::Qemu => Box::new(QemuBuilderVm::new()),
-        BuilderBackendChoice::Hvf => {
-            // Delegate to the registered constructor; panic if not registered
-            // (only reachable when the CLI has not called register_hvf_builder,
-            // which is a programming error at startup).
-            HVF_CTOR.get().expect(
-                "hvf builder constructor not registered — \
-                     call register_hvf_builder at CLI startup before \
-                     resolving an Hvf backend via the infallible path",
-            )()
-            .expect("registered hvf builder constructor failed")
-        }
         BuilderBackendChoice::WebLinux => Box::new(WebLinuxBuilderVm),
+        // Only reachable when CLI startup did not register the driver-backed
+        // builders, which is a programming error rather than a host condition.
+        BuilderBackendChoice::Hvf | BuilderBackendChoice::Firecracker => driver_builder(choice)
+            .expect("driver-backed builder not registered — call register_driver_builders at CLI startup before resolving via the infallible path"),
     }
 }
 
@@ -298,19 +347,22 @@ pub fn resolve_builder_backend_with_override(
 pub fn try_resolve_builder_backend_with_override(
     flag: Option<BuilderBackendChoice>,
 ) -> Result<Box<dyn BuilderVm>, BuilderVmError> {
-    match resolve_choice_with_override(flag) {
+    try_resolve_builder_backend_for(resolve_choice_with_override(flag))
+}
+
+/// As [`try_resolve_builder_backend_with_override`] but for an already-resolved
+/// choice. The shell-job call sites take the choice the fallback loop handed
+/// them, so they cannot re-resolve.
+pub fn try_resolve_builder_backend_for(
+    choice: BuilderBackendChoice,
+) -> Result<Box<dyn BuilderVm>, BuilderVmError> {
+    match choice {
         BuilderBackendChoice::Libkrun => Ok(Box::new(
             LibkrunBuilderVm::default().with_closure_nar(closure_nar_for_host_arch()),
         )),
         BuilderBackendChoice::Qemu => Ok(Box::new(QemuBuilderVm::new())),
-        BuilderBackendChoice::Hvf => match HVF_CTOR.get() {
-            Some(ctor) => ctor(),
-            None => Err(BuilderVmError::VmmUnavailable {
-                requested: "hvf".into(),
-                reason: "hvf builder constructor not registered (CLI startup did not run)".into(),
-            }),
-        },
         BuilderBackendChoice::WebLinux => Ok(Box::new(WebLinuxBuilderVm)),
+        BuilderBackendChoice::Hvf | BuilderBackendChoice::Firecracker => driver_builder(choice),
     }
 }
 
@@ -328,21 +380,96 @@ pub fn resolve_stage0_backend(verbose: bool) -> Box<dyn BuilderVm> {
     resolve_stage0_backend_for_choice(resolve_choice(), verbose)
 }
 
+/// Constructor for a driver-backed Stage 0 bootstrapper, registered by the CLI
+/// for the same reason [`HvfBuilderCtor`] is: `mvm-build` sits below the crate
+/// that owns the drivers, so it cannot name them.
+///
+/// Returns `None` for a choice this process has no bootstrapper for, so the
+/// caller can refuse by name instead of silently running somewhere else.
+pub type Stage0Ctor = Box<dyn Fn(BuilderBackendChoice) -> Option<Box<dyn BuilderVm>> + Send + Sync>;
+
+static STAGE0_CTOR: OnceLock<Stage0Ctor> = OnceLock::new();
+
+/// Register the driver-backed Stage 0 bootstrappers (first registration wins).
+pub fn register_stage0_builders(ctor: Stage0Ctor) {
+    let _ = STAGE0_CTOR.set(ctor);
+}
+
+/// Can this process bootstrap on `choice`?
+pub fn stage0_is_registered_for(choice: BuilderBackendChoice) -> bool {
+    STAGE0_CTOR.get().is_some_and(|ctor| ctor(choice).is_some())
+}
+
 /// Stage 0 driver for an explicit `choice` — used by the auto-fallback loop to
-/// construct the next backend to try. QEMU when chosen; libkrun for everything
-/// else. HVF Stage 0 remains a gap, so even the macOS auto-detect path lowers
-/// to libkrun here; Linux auto libkrun stays libkrun-only and never silently
-/// redirects onto qemu.
+/// construct the next backend to try. QEMU when chosen; hvf when its
+/// bootstrapper is registered; libkrun otherwise. Linux auto libkrun stays
+/// libkrun-only and never silently redirects onto qemu.
 pub fn resolve_stage0_backend_for_choice(
     choice: BuilderBackendChoice,
     verbose: bool,
 ) -> Box<dyn BuilderVm> {
-    match stage0_backend_choice(choice) {
-        BuilderBackendChoice::Qemu => Box::new(QemuBuilderVm::new()),
-        BuilderBackendChoice::Libkrun | BuilderBackendChoice::Hvf => {
-            Box::new(libkrun_stage0_backend(verbose))
+    // libkrun is reachable here only when it was asked for by name. Nothing
+    // lowers onto it any more: a selection that cannot bootstrap refuses and
+    // says so, rather than quietly running on a VMM the operator did not choose
+    // and, on macOS, would have had to install from Homebrew to get.
+    if let BuilderBackendChoice::Libkrun = choice {
+        return Box::new(libkrun_stage0_backend(verbose));
+    }
+    if let BuilderBackendChoice::Qemu = choice {
+        return Box::new(QemuBuilderVm::new());
+    }
+    if let BuilderBackendChoice::WebLinux = choice {
+        return Box::new(WebLinuxBuilderVm);
+    }
+    STAGE0_CTOR
+        .get()
+        .and_then(|ctor| ctor(choice))
+        .unwrap_or_else(|| Box::new(UnregisteredStage0Vm { choice }))
+}
+
+/// Refuses by name when this process has no Stage 0 bootstrapper for `choice`.
+///
+/// A refusal rather than a substitution. The previous shape lowered an
+/// unregistered hvf selection onto libkrun, which meant a wiring bug presented
+/// as "install these Homebrew packages" instead of as the wiring bug it was.
+struct UnregisteredStage0Vm {
+    choice: BuilderBackendChoice,
+}
+
+impl BuilderVm for UnregisteredStage0Vm {
+    fn capabilities(&self) -> BuilderCapabilities {
+        BuilderCapabilities::default()
+    }
+
+    fn run_build(
+        &self,
+        _job: &BuilderJob,
+        _mounts: &BuilderMounts,
+    ) -> Result<BuilderArtifacts, BuilderVmError> {
+        Err(self.refusal())
+    }
+
+    fn run_stage0(
+        &self,
+        _guest_root_dir: &Path,
+        _entry_path: &str,
+        _workspace_dir: &Path,
+        _artifact_out: &Path,
+        _host_bin_dir: &Path,
+    ) -> Result<(), BuilderVmError> {
+        Err(self.refusal())
+    }
+}
+
+impl UnregisteredStage0Vm {
+    fn refusal(&self) -> BuilderVmError {
+        BuilderVmError::VmmUnavailable {
+            requested: format!("{}-stage0", self.choice.name()),
+            reason: format!(
+                "no Stage 0 bootstrapper is registered for the {} backend in this build.                  This is an mvmctl wiring error, not a host problem; select another                  backend with `--builder` to work around it.",
+                self.choice.name()
+            ),
         }
-        BuilderBackendChoice::WebLinux => Box::new(WebLinuxBuilderVm),
     }
 }
 
@@ -351,19 +478,6 @@ fn libkrun_stage0_backend(verbose: bool) -> LibkrunBuilderVm {
         .with_resources(DEFAULT_VCPUS, LIBKRUN_STAGE0_MEMORY_MIB)
         .with_verbose(verbose)
         .with_closure_nar(closure_nar_for_host_arch())
-}
-
-/// Stage 0 currently has only two concrete driver targets: explicit qemu stays
-/// qemu; every other selection lowers to libkrun until an hvf-specific Stage 0
-/// implementation exists.
-fn stage0_backend_choice(choice: BuilderBackendChoice) -> BuilderBackendChoice {
-    match choice {
-        BuilderBackendChoice::Qemu => BuilderBackendChoice::Qemu,
-        BuilderBackendChoice::Libkrun | BuilderBackendChoice::Hvf => BuilderBackendChoice::Libkrun,
-        // WebLinux has no native Stage 0; the resolved WebLinuxBuilderVm fails
-        // closed when its run_stage0 is invoked.
-        BuilderBackendChoice::WebLinux => BuilderBackendChoice::WebLinux,
-    }
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -398,7 +512,7 @@ pub fn is_builder_vm_level_failure(e: &BuilderVmError) -> bool {
         e,
         BuilderVmError::SupervisorExited { .. }
             | BuilderVmError::LibkrunUnavailable(_)
-            | BuilderVmError::HvfVmmFailed { .. }
+            | BuilderVmError::VmmFailed { .. }
             | BuilderVmError::VmmUnavailable { .. }
     )
 }
@@ -723,10 +837,12 @@ mod tests {
     }
 
     #[test]
-    fn auto_detect_default_for_linux_native_picks_qemu() {
+    fn auto_detect_default_for_linux_native_picks_firecracker() {
+        // Linux-with-KVM builds on the VMM its workloads already run on. QEMU
+        // stays the explicit dev/test tier rather than the automatic answer.
         assert_eq!(
             auto_detect_default_for(Platform::LinuxNative, false),
-            BuilderBackendChoice::Qemu
+            BuilderBackendChoice::Firecracker
         );
     }
 
@@ -786,7 +902,10 @@ mod tests {
     fn resolve_env_override_returns_none_for_unrecognised() {
         // Typo / removed backend / accidental value: log a warning
         // and fall through to auto-detect (the caller's job).
-        with_env(Some("firecracker"), || {
+        //
+        // This used to use "firecracker" as its example of an unrecognised
+        // value, which stopped being one when the Firecracker builder landed.
+        with_env(Some("not-a-vmm"), || {
             assert_eq!(resolve_env_override(), None);
         });
     }
@@ -991,12 +1110,96 @@ mod tests {
         assert_eq!(builder_attempt_order(Qemu, false, true, false), vec![Qemu]);
     }
 
+    /// Nothing lowers onto libkrun any more. An unregistered backend refuses
+    /// and names itself; it does not quietly bootstrap on a VMM the operator
+    /// never chose and, on macOS, would have had to install from Homebrew.
     #[test]
-    fn stage0_choice_keeps_hvf_lowered_to_libkrun_and_qemu_explicit() {
-        use BuilderBackendChoice::*;
-        assert_eq!(stage0_backend_choice(Hvf), Libkrun);
-        assert_eq!(stage0_backend_choice(Libkrun), Libkrun);
-        assert_eq!(stage0_backend_choice(Qemu), Qemu);
+    fn an_unregistered_stage0_refuses_rather_than_falling_back_to_libkrun() {
+        // No ctor is registered in this test binary, so hvf resolves to the
+        // refusing stub rather than to a libkrun builder.
+        let vm = resolve_stage0_backend_for_choice(BuilderBackendChoice::Hvf, false);
+        assert!(
+            !vm.capabilities().stage0_bootstrap,
+            "an unregistered backend must not claim it can bootstrap"
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let err = vm
+            .run_stage0(
+                tmp.path(),
+                "/init",
+                tmp.path(),
+                &tmp.path().join("out"),
+                tmp.path(),
+            )
+            .expect_err("an unregistered backend cannot bootstrap");
+        match err {
+            BuilderVmError::VmmUnavailable { requested, reason } => {
+                assert_eq!(requested, "hvf-stage0");
+                assert!(
+                    reason.contains("wiring error"),
+                    "a missing registration is ours, not the host's: {reason}"
+                );
+                assert!(
+                    !reason.contains("libkrun") && !reason.contains("brew"),
+                    "the refusal must not send anyone to Homebrew: {reason}"
+                );
+            }
+            other => panic!("expected a named refusal, got {other:?}"),
+        }
+    }
+
+    /// libkrun stays reachable — but only when it was asked for by name.
+    #[test]
+    fn libkrun_stage0_is_still_available_when_explicitly_selected() {
+        let vm = resolve_stage0_backend_for_choice(BuilderBackendChoice::Libkrun, false);
+        assert!(vm.capabilities().stage0_bootstrap);
+    }
+
+    /// Linux gets a builder on the VMM its workloads already use, rather than
+    /// on the QEMU dev/test tier.
+    #[test]
+    fn linux_with_kvm_auto_detects_the_firecracker_builder() {
+        assert_eq!(
+            auto_detect_default_for(Platform::LinuxNative, false),
+            BuilderBackendChoice::Firecracker
+        );
+        // Apple Silicon is unchanged, and a non-KVM host still gets QEMU.
+        assert_eq!(
+            auto_detect_default_for(Platform::MacOS, true),
+            BuilderBackendChoice::Hvf
+        );
+        assert_eq!(
+            auto_detect_default_for(Platform::LinuxNoKvm, false),
+            BuilderBackendChoice::Qemu
+        );
+    }
+
+    #[test]
+    fn firecracker_is_selectable_by_name_and_by_its_short_alias() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        for value in ["firecracker", "fc", "  FireCracker  "] {
+            env.set(MVM_BUILDER_BACKEND_ENV, value);
+            assert_eq!(
+                resolve_env_override(),
+                Some(BuilderBackendChoice::Firecracker),
+                "{value:?} must select the Firecracker builder"
+            );
+        }
+    }
+
+    /// `doctor` reads this, so it has to describe the process it is running in
+    /// rather than a compile-time assumption.
+    #[test]
+    fn hvf_declares_stage0_exactly_when_its_bootstrapper_is_registered() {
+        let registered = declared_capabilities_for(BuilderBackendChoice::Hvf, true);
+        assert!(registered.stage0_bootstrap);
+        // Dependency install stays a genuine gap on this backend; registering a
+        // Stage 0 bootstrapper must not be read as closing it.
+        assert!(!registered.dependency_install);
+
+        let unregistered = declared_capabilities_for(BuilderBackendChoice::Hvf, false);
+        assert!(!unregistered.stage0_bootstrap);
     }
 
     #[test]
@@ -1239,7 +1442,7 @@ mod tests {
     fn hvf_boot_failure_remains_a_vmm_level_error() {
         // The variant HvfBuilderVm::run_build returns for a boot/power-off
         // failure remains distinguishable from a guest build failure.
-        assert!(is_builder_vm_level_failure(&BuilderVmError::HvfVmmFailed {
+        assert!(is_builder_vm_level_failure(&BuilderVmError::VmmFailed {
             detail: "boot failed".into(),
         }));
     }
@@ -1247,11 +1450,32 @@ mod tests {
     // ── Registration hook ─────────────────────────────────────────
 
     #[test]
-    fn hvf_uses_registered_ctor() {
-        // Registered ctor returns a stub; resolution routes Hvf to it.
-        register_hvf_builder(Box::new(|| Ok(Box::new(crate::builder_vm::StubBuilderVm))));
-        let _b = try_resolve_builder_backend_with_override(Some(BuilderBackendChoice::Hvf))
+    fn a_driver_backed_choice_uses_the_registered_ctor() {
+        // Registered ctor answers for hvf and declines Firecracker; resolution
+        // routes each accordingly rather than substituting a third backend.
+        register_driver_builders(Box::new(|choice| match choice {
+            BuilderBackendChoice::Hvf => Some(Ok(
+                Box::new(crate::builder_vm::StubBuilderVm) as Box<dyn BuilderVm>
+            )),
+            _ => None,
+        }));
+
+        try_resolve_builder_backend_for(BuilderBackendChoice::Hvf)
             .expect("registered ctor constructs a builder");
+
+        // A declined choice refuses by name. It must not fall back to libkrun,
+        // which is what would put a Homebrew dependency under a Linux host.
+        let refused = try_resolve_builder_backend_for(BuilderBackendChoice::Firecracker);
+        let Err(err) = refused else {
+            panic!("an unregistered driver-backed builder must not resolve");
+        };
+        match err {
+            BuilderVmError::VmmUnavailable { requested, reason } => {
+                assert_eq!(requested, "firecracker");
+                assert!(!reason.contains("libkrun"), "{reason}");
+            }
+            other => panic!("expected a named refusal, got {other:?}"),
+        }
     }
 
     // ── HVF failures never acquire a hidden libkrun dependency ─────────
