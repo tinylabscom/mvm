@@ -74,7 +74,7 @@ them; it does not build a second transport.
 
 Issues: [#3257](https://github.com/tinylabscom/mvm/issues/3257), [#3258](https://github.com/tinylabscom/mvm/issues/3258), [#3259](https://github.com/tinylabscom/mvm/issues/3259).
 
-- [ ] Rewrite `public/src/content/docs/guides/nix-flakes.md:277-330` onto the
+- [x] Rewrite `public/src/content/docs/guides/nix-flakes.md:277-330` onto the
       substitution path: `mvm.secret(...)` bound to the model host, an agent
       network preset, and a placeholder in the guest env. Delete the
       `printf 'sk-ant-…' > …` + `--mount` recipe. The manual file-mount pattern
@@ -86,13 +86,13 @@ Issues: [#3257](https://github.com/tinylabscom/mvm/issues/3257), [#3258](https:/
 - [ ] Create `nix/images/examples/llm-agent/` so
       `crates/mvm-contract/src/policy/network_policy.rs:111` resolves, or delete
       the reference. Do not leave a doc comment pointing at an absent path.
-- [ ] Write `public/src/content/docs/guides/agent-sandbox.md`: what the guest
+- [x] Write `public/src/content/docs/guides/agent-sandbox.md`: what the guest
       receives (a placeholder), what the host does (substitute after the egress
       gate, audit), what egress is allowed, what the audit chain records, and —
       plainly — every limit a user will hit today (G13–G17). This is the page
       the product claim rests on, so it states what ships, not what WS-S will
       make true.
-- [ ] Correct the framing in `public/src/content/docs/guides/agent-tool-contract.mdx:93-160`
+- [x] Correct the framing in `public/src/content/docs/guides/agent-tool-contract.mdx:93-160`
       so an unshipped surface is not presented as shipped.
 - [ ] Add the example to `just e2e-docs` so the documented commands are
       executed, not just written.
@@ -169,20 +169,20 @@ retires the second guest proxy (#3288).
 
 ### Ordered tasks
 
-- [ ] T0. Delete `crates/mvm-hostd/src/supervisor/flowmux/session.rs`, which no
+- [x] T0. Delete `crates/mvm-hostd/src/supervisor/flowmux/session.rs`, which no
       `mod` declares and the compiler never sees, and repoint the
       `check_single_network_path` entries that name it. A gate asserting things
       about an uncompiled file is worse than no gate.
-- [ ] T1. `terminable(host, port) -> Option<TerminationMode>` beside
+- [x] T1. `terminable(host, port) -> Option<TerminationMode>` beside
       `opaque_refusal_reason`, with the bound-but-no-intermediate case returning
       `None` so the flow stays refused.
-- [ ] T2. Generalize `TcpStreamHandle.upstream` to a `FlowSocket` so a flow can
+- [x] T2. Generalize `TcpStreamHandle.upstream` to a `FlowSocket` so a flow can
       be backed by a socket pair as well as a TCP stream. The one real refactor.
-- [ ] T3. `terminator/flow.rs`: terminate, read the request, hand it to
+- [x] T3. `terminator/flow.rs`: terminate, read the request, hand it to
       `process_body_stream`, write the response back chunked, loop for
       keep-alive. Refuse when the decrypted `Host` disagrees with the `CONNECT`
       authority.
-- [ ] T4. Hook `handle_open_tcp`: gate first, then terminate, refuse or relay.
+- [x] T4. Hook `handle_open_tcp`: gate first, then terminate, refuse or relay.
 - [ ] T5. Mint, persist and configure the per-VM CA at the endpoint spawner,
       honouring warm-claim inheritance.
 - [ ] T6. Deliver the certificate to the guest on the per-boot identity drive

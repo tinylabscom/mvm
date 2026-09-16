@@ -6,7 +6,14 @@ Last updated: 2026-09-15
 
 - [ ] **Agent sandbox drive plane.**
       `specs/plans/2026-09-15-agent-sandbox-drive-plane.md`. Epic #3275.
-      Planned, not started. Makes the AI-agent claim end-to-end: correct the published
+      In progress. WS0's doc half is done (#3257, #3259): the recipe that
+      mounted a raw API key into a guest is gone and the agent-sandbox guide
+      states the mechanism's limits alongside it. WS-S, added after
+      documenting the path turned up six gaps, is underway — the host now
+      terminates a CONNECT flow to a host carrying a bound secret (#3283
+      T0-T4), and the per-VM CA that turns it on is in review. Open: the
+      example (#3258), the drive plane itself (#3260), the SDK's argv
+      transport (#3261), MCP (#3262), and the rest of WS-S. Makes the AI-agent claim end-to-end: correct the published
       recipe that mounts a raw API key into a guest, ship an agent example on
       the substitution path, add a grant-gated `DriveGrant` + `DriveOpen` /
       `DriveFile` over the existing stream plane, and retire the SDKs' argv
