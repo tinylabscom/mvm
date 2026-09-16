@@ -35,6 +35,14 @@ pub const HOST_SIGNER_PUB_FILE: &str = "host-signer.pub";
 /// Basename of the guest-visible declared ingress targets on the drive.
 pub const INGRESS_TARGETS_FILE: &str = "flowmux-ingress.json";
 
+/// Basename of the per-VM egress CA **certificate** on the drive.
+///
+/// Optional, unlike the three above: a boot whose plan binds no destination has
+/// nothing for the host to terminate and carries no certificate. Certificate
+/// only — the matching key stays in the host's terminator and never rides a
+/// drive a guest can mount.
+pub const EGRESS_CA_CERT_FILE: &str = "egress-ca.crt";
+
 /// One guest-loopback target keyed by the signed ingress mapping ID.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -52,6 +60,65 @@ pub struct GuestIngressTarget {
 /// Where the guest copies the drive's contents to.
 pub const RUN_MVM_DIR: &str = "/run/mvm";
 
+/// Basename of the combined trust bundle — the guest's baked roots plus this
+/// VM's egress CA certificate — the guest's TLS clients are pointed at.
+pub const GUEST_CA_BUNDLE_FILE: &str = "ca-bundle.crt";
+
+/// Where a guest rootfs keeps its baked trust roots, most specific first. The
+/// first readable one wins; a rootfs with none still gets a bundle, carrying
+/// just this VM's certificate.
+#[must_use]
+pub fn baked_root_bundle_candidates() -> [&'static Path; 3] {
+    [
+        Path::new("/etc/ssl/certs/ca-certificates.crt"),
+        Path::new("/etc/ssl/cert.pem"),
+        Path::new("/etc/ssl/certs/ca-bundle.crt"),
+    ]
+}
+
+/// Write `<run_dir>/ca-bundle.crt` = the first readable entry of `baked_roots`,
+/// then the certificate the host delivered at `<run_dir>/egress-ca.crt`.
+///
+/// The certificate is read out of `run_dir` rather than off the kernel cmdline:
+/// `/proc/cmdline` is world-readable, logged, and length-bounded, and a boot
+/// binding many destinations would silently lose the tail of a PEM. It is
+/// [`provision_identity_from_drive`] that puts it there, so this runs after.
+///
+/// **The bundle is written whether or not a certificate arrived.** The host
+/// exports `SSL_CERT_FILE` at this path from its own side of the boot, and
+/// OpenSSL that cannot open `SSL_CERT_FILE` loads *no* trust store at all — so
+/// a missing bundle breaks every TLS connection the workload makes, including
+/// the ones that have nothing to do with substitution. A bundle carrying only
+/// the baked roots is the same trust the guest would have had, and it keeps the
+/// exported path resolving.
+///
+/// A certificate that is present but unreadable is an error, not an absence:
+/// the host is terminating flows for this guest and the guest is about to not
+/// trust them.
+pub fn install_egress_ca_trust(run_dir: &Path, baked_roots: &[&Path]) -> std::io::Result<()> {
+    let cert_path = run_dir.join(EGRESS_CA_CERT_FILE);
+    let delivered = match std::fs::read(&cert_path) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    let mut bundle = Vec::new();
+    if let Some(bytes) = baked_roots.iter().find_map(|path| std::fs::read(path).ok()) {
+        bundle.extend_from_slice(&bytes);
+    }
+    if let Some(cert) = delivered {
+        // A PEM file is a concatenation of armored blocks, and the baked bundle
+        // is not guaranteed to end in a newline. Without this the two armor
+        // lines fuse into `-----END CERTIFICATE----------BEGIN CERTIFICATE-----`
+        // and the parser sees one truncated certificate instead of two.
+        if !bundle.is_empty() && !bundle.ends_with(b"\n") {
+            bundle.push(b'\n');
+        }
+        bundle.extend_from_slice(&cert);
+    }
+    std::fs::write(run_dir.join(GUEST_CA_BUNDLE_FILE), bundle)
+}
+
 /// Mode the signing key is written with inside the guest.
 pub const GUEST_SIGNING_KEY_MODE: u32 = 0o400;
 
@@ -60,6 +127,11 @@ pub const HOST_SIGNER_PUB_MODE: u32 = 0o444;
 
 /// Mode the non-secret ingress target map is written with inside the guest.
 pub const INGRESS_TARGETS_MODE: u32 = 0o444;
+
+/// Mode the per-VM egress CA certificate is written with inside the guest.
+/// Every TLS client in the guest has to read it, and it is a public
+/// certificate.
+pub const EGRESS_CA_CERT_MODE: u32 = 0o444;
 
 /// Where the kernel lists this guest's block devices.
 const SYS_CLASS_BLOCK: &str = "/sys/class/block";
@@ -218,9 +290,10 @@ pub use linux::{provision_identity_from_drive, provision_identity_from_drive_for
 #[cfg(target_os = "linux")]
 mod linux {
     use super::{
-        GUEST_SIGNING_KEY_FILE, GUEST_SIGNING_KEY_MODE, HOST_SIGNER_PUB_FILE, HOST_SIGNER_PUB_MODE,
-        IDENTITY_DRIVE_LABEL, INGRESS_TARGETS_FILE, INGRESS_TARGETS_MODE, IdentityDriveError,
-        RUN_MVM_DIR, find_labeled_ext4_disk_among, virtio_block_devices,
+        EGRESS_CA_CERT_FILE, EGRESS_CA_CERT_MODE, GUEST_SIGNING_KEY_FILE, GUEST_SIGNING_KEY_MODE,
+        HOST_SIGNER_PUB_FILE, HOST_SIGNER_PUB_MODE, IDENTITY_DRIVE_LABEL, INGRESS_TARGETS_FILE,
+        INGRESS_TARGETS_MODE, IdentityDriveError, RUN_MVM_DIR, find_labeled_ext4_disk_among,
+        virtio_block_devices,
     };
     use std::path::Path;
 
@@ -284,7 +357,25 @@ mod linux {
             INGRESS_TARGETS_MODE,
             "the declared ingress targets",
             None,
+        )?;
+        copy_optional(
+            EGRESS_CA_CERT_FILE,
+            EGRESS_CA_CERT_MODE,
+            "the per-VM egress CA certificate",
         )
+    }
+
+    /// Copy a drive file that a boot may legitimately not carry.
+    ///
+    /// Only absence is tolerated. A file that is present and unreadable is
+    /// still a provisioning failure: the guest would otherwise boot trusting
+    /// nothing while the host terminates its bound-host flows, and the first
+    /// symptom would be a certificate error from an unmodified client.
+    fn copy_optional(name: &str, mode: u32, what: &str) -> Result<(), IdentityDriveError> {
+        if !Path::new(MOUNTPOINT).join(name).exists() {
+            return Ok(());
+        }
+        copy_one(name, mode, what, None)
     }
 
     fn copy_one(
@@ -363,6 +454,120 @@ mod linux {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_trust_bundle_is_the_baked_roots_plus_the_delivered_certificate() {
+        let run = tempfile::tempdir().expect("tempdir");
+        let roots = tempfile::tempdir().expect("tempdir");
+        let baked = roots.path().join("ca-certificates.crt");
+        std::fs::write(
+            &baked,
+            b"-----BEGIN CERTIFICATE-----\nROOT\n-----END CERTIFICATE-----",
+        )
+        .expect("write baked roots");
+        std::fs::write(
+            run.path().join(EGRESS_CA_CERT_FILE),
+            b"-----BEGIN CERTIFICATE-----\nVM\n-----END CERTIFICATE-----\n",
+        )
+        .expect("deliver the certificate");
+
+        install_egress_ca_trust(run.path(), &[baked.as_path()]).expect("install");
+
+        let bundle = std::fs::read(run.path().join(GUEST_CA_BUNDLE_FILE)).expect("bundle written");
+        let text = String::from_utf8(bundle).expect("bundle is utf8");
+        assert!(
+            text.contains("ROOT"),
+            "the workload must keep reaching the destinations its own roots cover"
+        );
+        assert!(
+            text.contains("VM"),
+            "and must trust the certificate the host terminates under"
+        );
+        assert!(
+            text.contains("-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----"),
+            "the two must be separated by a newline, or the concatenation parses as \
+             one truncated certificate: {text}"
+        );
+    }
+
+    #[test]
+    fn a_guest_handed_no_certificate_still_gets_a_bundle_of_its_own_roots() {
+        // The host exports SSL_CERT_FILE at this path either way, and OpenSSL
+        // that cannot open SSL_CERT_FILE loads no trust store at all — so a
+        // missing bundle would break TLS to destinations that have nothing to do
+        // with substitution.
+        let run = tempfile::tempdir().expect("tempdir");
+        let roots = tempfile::tempdir().expect("tempdir");
+        let baked = roots.path().join("ca-certificates.crt");
+        std::fs::write(
+            &baked,
+            b"-----BEGIN CERTIFICATE-----\nROOT\n-----END CERTIFICATE-----\n",
+        )
+        .expect("write baked roots");
+
+        install_egress_ca_trust(run.path(), &[baked.as_path()]).expect("absence is not a failure");
+
+        let bundle = std::fs::read(run.path().join(GUEST_CA_BUNDLE_FILE))
+            .expect("the exported path must resolve even with nothing terminated");
+        let text = String::from_utf8(bundle).expect("bundle is utf8");
+        assert!(text.contains("ROOT"));
+        assert!(
+            !text.contains("VM"),
+            "nothing was delivered, so nothing extra is trusted"
+        );
+    }
+
+    #[test]
+    fn a_present_but_unreadable_certificate_is_a_failure() {
+        // A directory at the certificate's path is present and unreadable as a
+        // file — the same class as a truncated or permission-denied copy. The
+        // host is terminating flows for this guest; silently carrying on would
+        // leave it not trusting them.
+        let run = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(run.path().join(EGRESS_CA_CERT_FILE)).expect("plant an unreadable one");
+        assert!(
+            install_egress_ca_trust(run.path(), &[]).is_err(),
+            "a delivered certificate that cannot be read must not read as absent"
+        );
+    }
+
+    #[test]
+    fn a_rootfs_with_no_baked_roots_still_trusts_the_delivered_certificate() {
+        let run = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            run.path().join(EGRESS_CA_CERT_FILE),
+            b"-----BEGIN CERTIFICATE-----\nVM\n-----END CERTIFICATE-----\n",
+        )
+        .expect("deliver the certificate");
+
+        install_egress_ca_trust(run.path(), &[Path::new("/nonexistent/roots.crt")])
+            .expect("install");
+
+        let bundle = std::fs::read(run.path().join(GUEST_CA_BUNDLE_FILE)).expect("bundle written");
+        assert!(String::from_utf8_lossy(&bundle).contains("VM"));
+    }
+
+    /// The certificate is copied out of the identity drive, so the copy has to
+    /// happen first. Reversed, every guest boots trusting nothing and the only
+    /// symptom is a certificate error from an unmodified client.
+    #[test]
+    fn the_identity_drive_is_provisioned_before_the_trust_bundle_is_built() {
+        let source = include_str!("guest_bootstrap.rs");
+        let body = source
+            .split_once("pub fn provision_guest_environment()")
+            .expect("the shared bootstrap is in that file")
+            .1;
+        let identity = body
+            .find("provision_flowmux_identity();")
+            .expect("the bootstrap provisions the identity drive");
+        let trust = body
+            .find("provision_egress_ca();")
+            .expect("the bootstrap builds the trust bundle");
+        assert!(
+            identity < trust,
+            "provision_flowmux_identity() must run before provision_egress_ca()"
+        );
+    }
 
     /// A superblock-shaped buffer carrying `label`.
     fn superblock_with_label(label: &[u8]) -> Vec<u8> {

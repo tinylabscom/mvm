@@ -28,6 +28,10 @@ tracing = { workspace = true }
 # JSON serialization for host-service configs.
 serde_json = { workspace = true }
 serde = { workspace = true }
+# The per-VM egress CA key is held and serialized here; `Zeroizing` keeps the
+# in-memory copies from outliving their use. Already in this crate's closure
+# through mvm-core, so it adds nothing to the shipped dependency set.
+zeroize = { workspace = true }
 # Host event loop for the vsock host-side I/O thread.
 mio = { workspace = true, features = ["os-poll", "os-ext"] }
 

@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use mvm_core::crypto::egress_ca::VmIntermediate;
+use mvm_core::crypto::egress_ca::VmEgressCa;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
@@ -84,10 +84,7 @@ pub const MAX_CLIENT_HELLO_PEEK: usize = 8 * 1024;
 /// chained to the per-VM intermediate (`[leaf, intermediate]`), so a guest that
 /// trusts the intermediate validates the terminated connection. We already
 /// peeked the SNI, so we mint directly rather than via a `ResolvesServerCert`.
-pub fn server_config_for_sni(
-    intermediate: &VmIntermediate,
-    sni: &str,
-) -> Result<rustls::ServerConfig> {
+pub fn server_config_for_sni(intermediate: &VmEgressCa, sni: &str) -> Result<rustls::ServerConfig> {
     let leaf = intermediate
         .mint_leaf(sni)
         .map_err(|e| anyhow!("mint leaf for {sni}: {e}"))?;
@@ -511,9 +508,7 @@ mod tests {
 
     #[test]
     fn ingress_server_config_accepts_one_host_owned_pem_bundle() {
-        let dir = tempfile::tempdir().unwrap();
-        let ca = mvm_core::crypto::egress_ca::EgressCa::load_or_init_at(dir.path()).unwrap();
-        let intermediate = ca.mint_vm_intermediate(&["localhost"]).unwrap();
+        let intermediate = mvm_core::crypto::egress_ca::VmEgressCa::mint(&["localhost"]).unwrap();
         let leaf = intermediate.mint_leaf("localhost").unwrap();
         let bundle = format!(
             "{}{}{}",
@@ -566,7 +561,7 @@ mod tests {
 
     use crate::keyholder::{LocalResolver, SubstitutionRegistry};
     use mvm_contract::ir::{AuthType, SecretMount, SecretRef};
-    use mvm_core::crypto::egress_ca::{EgressCa, VmIntermediate};
+    use mvm_core::crypto::egress_ca::VmEgressCa;
     use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
     use secrecy::SecretBox;
     use std::net::{TcpListener, TcpStream};
@@ -598,11 +593,9 @@ mod tests {
 
     #[test]
     fn bound_sni_terminates_substitutes_and_reoriginates() {
-        let dir = tempfile::tempdir().unwrap();
-        let ca = EgressCa::load_or_init_at(dir.path()).unwrap();
-        let inter = ca.mint_vm_intermediate(&["api.openai.com"]).unwrap();
+        let inter = VmEgressCa::mint(&["api.openai.com"]).unwrap();
         // Reconstruct exactly as the endpoint would, from the delivered PEMs.
-        let inter = VmIntermediate::from_pem(inter.cert_pem(), &inter.key_pem()).unwrap();
+        let inter = VmEgressCa::from_pem(inter.cert_pem(), &inter.key_pem()).unwrap();
 
         // Substitution registry: placeholder → real token, bound to the host.
         let sdir = tempfile::tempdir().unwrap();
@@ -786,10 +779,8 @@ mod tests {
         action: RedactionAction,
         request_template: &str,
     ) -> Driven {
-        let dir = tempfile::tempdir().unwrap();
-        let ca = EgressCa::load_or_init_at(dir.path()).unwrap();
-        let inter = ca.mint_vm_intermediate(&[dst_host]).unwrap();
-        let inter = VmIntermediate::from_pem(inter.cert_pem(), &inter.key_pem()).unwrap();
+        let inter = VmEgressCa::mint(&[dst_host]).unwrap();
+        let inter = VmEgressCa::from_pem(inter.cert_pem(), &inter.key_pem()).unwrap();
 
         let sdir = tempfile::tempdir().unwrap();
         let store = FileSecretStore::with_dir(sdir.path());

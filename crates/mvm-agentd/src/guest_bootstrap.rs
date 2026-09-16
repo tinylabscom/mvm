@@ -104,9 +104,11 @@ pub fn provision_guest_environment() -> Result<(), EgressClientMissing> {
     provision_pty_devices();
     provision_workload_identity();
     mount_mediated_tools();
-    provision_egress_ca();
     provision_verb_grant();
+    // Before `provision_egress_ca`: the certificate it builds a trust bundle
+    // from arrives on the identity drive this copies out.
     provision_flowmux_identity();
+    provision_egress_ca();
     start_forward_proxy();
     run_one(resolve_exec([NETINIT_OVERLAY]), "netinit");
     if cmdline_has_flag("mvm.vsock_egress=1") {
@@ -500,35 +502,23 @@ pub fn bind_mount_file(source: &str, target: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Add the per-VM egress CA certificate to a trust bundle the guest's TLS
+/// clients can be pointed at.
+///
+/// The certificate itself arrives on the per-boot identity drive, which
+/// [`provision_flowmux_identity`] copies to `/run/mvm` — so this runs after it.
+/// Reading it from there rather than from the kernel cmdline is deliberate:
+/// `/proc/cmdline` is world-readable, logged, and length-bounded, and a boot
+/// that binds many destinations would silently lose the tail of a PEM.
+///
+/// No certificate means the plan bound no destination, so the host terminates
+/// nothing and there is nothing to trust. That is the common case and is
+/// silent.
 pub fn provision_egress_ca() {
-    let Some(hex) = cmdline_value("mvm.egress_ca") else {
-        return;
-    };
-    let Some(cert) = hex_decode(&hex) else {
-        eprintln!("mvm-guest-init: malformed egress CA token");
-        return;
-    };
-    let _ = fs::create_dir_all("/run/mvm");
-    if let Err(e) = fs::write("/run/mvm/egress-ca.crt", &cert) {
-        eprintln!("mvm-guest-init: write egress CA: {e}");
-        return;
-    }
-    let mut bundle = Vec::new();
-    for candidate in [
-        "/etc/ssl/certs/ca-certificates.crt",
-        "/etc/ssl/cert.pem",
-        "/etc/ssl/certs/ca-bundle.crt",
-    ] {
-        if let Ok(bytes) = fs::read(candidate) {
-            bundle.extend_from_slice(&bytes);
-            if !bundle.ends_with(b"\n") {
-                bundle.push(b'\n');
-            }
-            break;
-        }
-    }
-    bundle.extend_from_slice(&cert);
-    if let Err(e) = fs::write("/run/mvm/ca-bundle.crt", bundle) {
+    if let Err(e) = crate::flowmux_drive::install_egress_ca_trust(
+        Path::new(crate::flowmux_drive::RUN_MVM_DIR),
+        &crate::flowmux_drive::baked_root_bundle_candidates(),
+    ) {
         eprintln!("mvm-guest-init: write CA bundle: {e}");
     }
 }
@@ -713,29 +703,6 @@ pub fn cmdline_has_flag(flag: &str) -> bool {
     cmdline().split_whitespace().any(|part| part == flag)
 }
 
-pub fn hex_decode(input: &str) -> Option<Vec<u8>> {
-    let bytes = input.as_bytes();
-    if !bytes.len().is_multiple_of(2) {
-        return None;
-    }
-    let mut out = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.as_chunks::<2>().0 {
-        let hi = hex_val(pair[0])?;
-        let lo = hex_val(pair[1])?;
-        out.push((hi << 4) | lo);
-    }
-    Some(out)
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
-}
-
 /// Standard-alphabet base64 decode, hand-rolled to keep this PID 1 free of
 /// external crates (see the module doc). Rejects a character after padding,
 /// a trailing partial character, and non-zero padding bits.
@@ -843,14 +810,6 @@ pub fn bring_loopback_up_with_busybox() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn hex_decode_accepts_lower_upper_and_rejects_bad_input() {
-        assert_eq!(hex_decode("2f62696e").unwrap(), b"/bin");
-        assert_eq!(hex_decode("2F").unwrap(), b"/");
-        assert!(hex_decode("0").is_none());
-        assert!(hex_decode("zz").is_none());
-    }
 
     #[test]
     fn base64_decode_round_trips_each_padding_length() {

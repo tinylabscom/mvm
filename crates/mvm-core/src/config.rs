@@ -1102,14 +1102,6 @@ pub fn mvm_secrets_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_home()).join("secrets")
 }
 
-/// The long-lived host egress CA's home:
-/// `<mvm_home>/egress-ca/` (holds `ca.crt` + `ca.key`, key mode 0400).
-/// The per-VM name-constrained intermediates the transparent `https`
-/// terminator uses are minted under this CA; see `crypto::egress_ca`.
-pub fn egress_ca_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_home()).join("egress-ca")
-}
-
 /// Check if running in production mode (MVM_PRODUCTION=1).
 pub fn is_production_mode() -> bool {
     std::env::var("MVM_PRODUCTION")
