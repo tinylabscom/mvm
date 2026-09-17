@@ -23,6 +23,7 @@
 //! - `FD3_HEX HEX`        — hex-decode HEX, write raw bytes to fd 3
 //! - `SLEEP_MS N`         — sleep N milliseconds
 //! - `UNBOUNDED_STDOUT`   — write `b'A'` blocks to stdout until killed
+//! - `FDS`                — write `N TARGET\n` for each open descriptor
 //! - `EXIT N`             — exit with code N; terminates the block
 //!
 //! Lives under `tests/bin/` with `test = false`, mirroring `fake-runner`.
@@ -91,6 +92,13 @@ fn main() {
                 std::thread::sleep(Duration::from_millis(ms));
             }
             "UNBOUNDED_STDOUT" => unbounded_stdout(),
+            "FDS" => {
+                let mut out = io::stdout().lock();
+                for (fd, target) in open_descriptors() {
+                    writeln!(out, "{fd} {target}").unwrap();
+                }
+                out.flush().unwrap();
+            }
             "EXIT" => {
                 let code: i32 = arg.parse().unwrap_or_else(|_| {
                     eprintln!("entrypoint-test-wrapper: bad EXIT arg {arg:?}");
@@ -185,4 +193,25 @@ fn unbounded_stdout() {
             return;
         }
     }
+}
+
+/// Every descriptor this process holds, with what it refers to. The names are
+/// collected first and resolved after the directory is closed, so the
+/// directory's own descriptor fails to resolve and is left out.
+fn open_descriptors() -> Vec<(u32, String)> {
+    let names: Vec<u32> = std::fs::read_dir("/proc/self/fd")
+        .map(|dir| {
+            dir.filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut open: Vec<(u32, String)> = names
+        .into_iter()
+        .filter_map(|fd| {
+            let target = std::fs::read_link(format!("/proc/self/fd/{fd}")).ok()?;
+            Some((fd, target.display().to_string()))
+        })
+        .collect();
+    open.sort();
+    open
 }

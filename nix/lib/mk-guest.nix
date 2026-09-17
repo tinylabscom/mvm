@@ -360,6 +360,19 @@ let
       || (builderUid != null && egressUid == builderUid)
     then throw "mkGuest: uid 989 is reserved for the FlowMux egress service"
     else true;
+  # Dedicated owner for the CRNG reseed helper, the one guest process holding
+  # CAP_SYS_ADMIN. Sharing a uid with the agent or the workload would let that
+  # process signal it, change its limits, or pose as it on its socket. The
+  # guest agent's `CRNG_RESEED_HELPER_UID` is the same number.
+  crngReseedUid = 988;
+  assertDedicatedCrngReseedUid =
+    if crngReseedUid == 0
+      || crngReseedUid == agentUid
+      || crngReseedUid == entrypointUid
+      || crngReseedUid == egressUid
+      || (builderUid != null && crngReseedUid == builderUid)
+    then throw "mkGuest: uid 988 is reserved for the CRNG reseed helper"
+    else true;
 
   # Wrap a command-line in `setpriv` when the target uid is non-zero.
   #
@@ -980,6 +993,24 @@ let
       echo "mvm-init: no guest agent resolved from /mvm/runtime and no baked fallback"
       exit 1
     fi
+    # CRNG reseed helper. A restored clone must rekey the kernel generator at
+    # once, and those ioctls need CAP_SYS_ADMIN, which the agent never holds.
+    # This root init starts a separate process holding only that capability,
+    # under its own uid; it reseeds from a token and does nothing else. It runs
+    # in the agent's group so the agent can connect: the directory is the
+    # helper's with group read and search, the socket it binds is 0660, and
+    # the agent checks the peer uid before trusting a reply. If it fails to
+    # start, the agent reports every restore as not reseeded and the host
+    # refuses the clone.
+    /bin/busybox mkdir -p /run/mvm/crng-reseed
+    /bin/busybox chown ${toString crngReseedUid}:${toString agentUid} /run/mvm/crng-reseed
+    /bin/busybox chmod 0750 /run/mvm/crng-reseed
+    /bin/busybox setsid ${setpriv} \
+      --reuid=${toString crngReseedUid} --regid=${toString agentUid} \
+      --clear-groups --securebits=keep-caps \
+      --inh-caps=+sys_admin --ambient-caps=+sys_admin --no-new-privs \
+      -- "$MVM_AGENT_BIN" --crng-reseed-helper --listen &
+
     # Static-musl mvm-setpriv — the helper applies the uid/gid, group, and
     # no-new-privileges drop before the agent exec. Without this step the
     # agent never forks and vsock port 5252 stays unbound.
@@ -1093,7 +1124,7 @@ let
   # one under-indented line anywhere in the block above silently moves every
   # other line — including the shebang — one column right. Assert the rendered
   # bytes instead of trusting the indentation to stay uniform.
-  initScript = builtins.seq assertDedicatedEgressUid (
+  initScript = builtins.seq assertDedicatedEgressUid (builtins.seq assertDedicatedCrngReseedUid (
     lib.throwIf (!lib.hasPrefix "#!/bin/sh\n" initText) ''
       mkGuest: the rendered /init does not start with the "#!/bin/sh" shebang.
       The kernel exec()s /init and will panic with ENOEXEC. This almost always
@@ -1101,7 +1132,7 @@ let
       less than its neighbours, which moves the whole script one or more
       columns right. Re-align that line.
     '' (pkgs.writeScript "mvm-init" initText)
-  );
+  ));
 
   # Render the entrypoint as a shell-sourced fragment. /init does
   # `. /etc/mvm/entrypoint`, so this is just a script.

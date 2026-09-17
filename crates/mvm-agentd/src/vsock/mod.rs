@@ -32,14 +32,14 @@ pub use activation::{
     RuntimeOverlayConfig, VolumeConfig, VolumeConfigKind,
 };
 pub use api::{
-    PRIMED_MARKER_PATH, PostRestoreReply, checkpoint_integrations, interpret_primed_status,
-    mount_volume_on, ping, ping_at, post_restore_at, post_restore_with_grant_and_clock_at,
-    post_restore_with_grant_at, query_fs_diff, query_fs_diff_at, query_fs_diff_on,
-    query_integration_status, query_integration_status_at, query_primed_at, query_probe_status,
-    query_probe_status_at, query_resource_usage, query_resource_usage_at, query_worker_status,
-    query_worker_status_at, request_sleep_prep, request_sleep_prep_on, send_fs_request,
-    send_fs_request_on, send_proc_request, send_proc_request_on, send_proc_wait, send_proc_wait_on,
-    signal_wake, workload_is_primed_at,
+    PRIMED_MARKER_PATH, PostRestoreReply, checkpoint_integrations, describe_missing_reseed,
+    interpret_primed_status, mount_volume_on, ping, ping_at, post_restore_at,
+    post_restore_with_grant_and_clock_at, post_restore_with_grant_at, query_fs_diff,
+    query_fs_diff_at, query_fs_diff_on, query_integration_status, query_integration_status_at,
+    query_primed_at, query_probe_status, query_probe_status_at, query_resource_usage,
+    query_resource_usage_at, query_worker_status, query_worker_status_at, request_sleep_prep,
+    request_sleep_prep_on, send_fs_request, send_fs_request_on, send_proc_request,
+    send_proc_request_on, send_proc_wait, send_proc_wait_on, signal_wake, workload_is_primed_at,
 };
 pub use connection::{
     HOST_CID, connect_host_vsock, connect_to, connect_to_port, connect_to_port_once, send_request,
@@ -52,9 +52,9 @@ pub use request::{GuestRequest, StageFile};
 pub use request_policy::RequestClass;
 pub use response::{
     BootTimingReport, ComponentState, GuestCapability, GuestResponse, ProtocolNegotiation,
-    ProtocolUpgradeAction, ReadinessReport, ResponseContract, ResponseKind, ResponseVariant,
-    RunEntrypointError, TrafficPlane, Verb, VolumeMountErrorKind, VolumeMountResult,
-    protocol_hello_response, supported_capabilities,
+    ProtocolUpgradeAction, ReadinessReport, ReseedShortfall, ResponseContract, ResponseKind,
+    ResponseVariant, RunEntrypointError, TrafficPlane, Verb, VolumeMountErrorKind,
+    VolumeMountResult, protocol_hello_response, supported_capabilities,
 };
 pub use response_payloads::{
     EntrypointEvent, ExecEvent, ExecOutcomeWire, FsChange, FsChangeKind, FsEntry, FsEntryKind,

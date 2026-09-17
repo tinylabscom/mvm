@@ -15,6 +15,11 @@
 //! * `MVM_LIVE_ROOTFS` pointing at an ext4 rootfs whose `/init` binds the guest
 //!   agent vsock port, because `FcDriver::boot` returns only once the agent
 //!   answers — that is what makes the captured memory a fully-booted guest.
+//!   That `/init` must also start the CRNG reseed helper
+//!   (`mvm-guest-agent --crng-reseed-helper --listen` under its own uid, as
+//!   mkGuest's init does). A rootfs built before the helper existed boots and
+//!   captures fine, but its child reports `reseeded: false` and the identity
+//!   assertion below fails; rebuild the rootfs rather than relaxing it.
 //!
 //! It is `#[ignore]` so CI never runs it; execute manually on a KVM box with
 //! `cargo test -p mvm-runtime --test fc_warm_pool_live -- --ignored --nocapture`.

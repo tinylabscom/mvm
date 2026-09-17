@@ -118,6 +118,7 @@ fn parse_capability(value: &str) -> Result<u32, String> {
     let number = match value {
         "kill" => Ok(CAP_KILL),
         "net_bind_service" => Ok(CAP_NET_BIND_SERVICE),
+        "sys_admin" => Ok(CAP_SYS_ADMIN),
         "sys_time" => Ok(CAP_SYS_TIME),
         _ => Err(format!("unsupported capability {value:?}")),
     }?;
@@ -178,7 +179,7 @@ fn prctl(option: libc::c_int, arg: libc::c_ulong, message: &str) -> Result<(), S
 
 #[cfg(target_os = "linux")]
 fn raise_ambient_capabilities(capabilities: u32) -> Result<(), String> {
-    for capability in [CAP_KILL, CAP_NET_BIND_SERVICE, CAP_SYS_TIME] {
+    for capability in [CAP_KILL, CAP_NET_BIND_SERVICE, CAP_SYS_ADMIN, CAP_SYS_TIME] {
         if capabilities & (1u32 << capability) == 0 {
             continue;
         }
@@ -294,6 +295,7 @@ const _: () = {
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 const CAP_KILL: u32 = 5;
 const CAP_NET_BIND_SERVICE: u32 = 10;
+const CAP_SYS_ADMIN: u32 = 21;
 const CAP_SYS_TIME: u32 = 25;
 #[cfg(target_os = "linux")]
 const PR_SET_KEEPCAPS: libc::c_int = 8;
@@ -397,6 +399,37 @@ mod tests {
         assert!(invocation.securebits_keep_caps);
         assert_ne!(invocation.capabilities & (1u32 << CAP_KILL), 0);
         assert_ne!(invocation.capabilities & (1u32 << CAP_SYS_TIME), 0);
+    }
+
+    #[test]
+    fn parses_the_reseed_helper_launch() {
+        let invocation = parse_args(args(&[
+            "--reuid=990",
+            "--regid=990",
+            "--clear-groups",
+            "--securebits=keep-caps",
+            "--inh-caps=+sys_admin",
+            "--ambient-caps=+sys_admin",
+            "--no-new-privs",
+            "--",
+            "/mvm/runtime/agent",
+            "--crng-reseed-helper",
+            "--listen",
+        ]))
+        .expect("valid helper launch");
+        assert_eq!(invocation.capabilities, 1u32 << CAP_SYS_ADMIN);
+        assert_eq!(invocation.command_args.len(), 2);
+    }
+
+    #[test]
+    fn capability_numbers_match_the_guest_mount_constants() {
+        assert_eq!(CAP_KILL, mvm_agentd::guest_mount::CAP_KILL);
+        assert_eq!(
+            CAP_NET_BIND_SERVICE,
+            mvm_agentd::guest_mount::CAP_NET_BIND_SERVICE
+        );
+        assert_eq!(CAP_SYS_ADMIN, mvm_agentd::guest_mount::CAP_SYS_ADMIN);
+        assert_eq!(CAP_SYS_TIME, mvm_agentd::guest_mount::CAP_SYS_TIME);
     }
 
     #[test]

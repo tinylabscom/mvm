@@ -626,6 +626,16 @@ fn serve_until_activated(listener: &AgentListener, server: &GuestServer) -> bool
 }
 
 fn main() {
+    // The reseed helper is this binary started with one argument; it must not
+    // parse agent configuration or touch any agent state.
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new(mvm_agentd::crng_reseed::HELPER_ARG))
+    {
+        std::process::exit(mvm_agentd::crng_reseed::run_helper(
+            std::env::args_os().skip(2),
+        ));
+    }
+
     let cfg = parse_config();
 
     // Resolve the active vsock profile from the baked image config.

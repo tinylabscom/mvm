@@ -4262,6 +4262,7 @@ mod tests {
                 detail: None,
                 reseeded,
                 clock_resynced,
+                reseed_shortfall: None,
             })
         };
         let cases = [
@@ -4318,6 +4319,7 @@ mod tests {
                 detail: None,
                 reseeded: false,
                 clock_resynced: true,
+                reseed_shortfall: None,
             },
         ));
         assert!(out.result.is_err());

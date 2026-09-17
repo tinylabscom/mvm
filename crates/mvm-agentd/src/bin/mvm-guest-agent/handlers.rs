@@ -600,15 +600,12 @@ pub(crate) fn handle_post_restore(
     host_epoch_secs: Option<u64>,
     grant_envelope: Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
 ) -> GuestResponse {
-    // First, rotate the VMGenID: feed the host-minted token to the
+    // First, rotate the generation token: feed the host-minted token to the
     // process-resident reseeder. Its state is captured in the snapshot,
     // so two clones of one snapshot both diverge from the captured
     // value when the host delivers each a distinct fresh token. A
     // zero token (no-rotation restore) is a no-op.
-    let reseeded = matches!(
-        reseed_on_post_restore(token),
-        mvm_agentd::genid::GenIdAction::Reseeded
-    );
+    let reseed = reseed_on_post_restore(token);
     let (clock_resynced, clock_error) = match host_epoch_secs {
         None => (false, None),
         Some(epoch_secs) => match mvm_agentd::restore_clock::resync(epoch_secs) {
@@ -659,29 +656,78 @@ pub(crate) fn handle_post_restore(
         )),
         Err(e) => Some(format!("failed to send signal: {}", e)),
     };
-    let errors = [hostname_error, clock_error, signal_detail]
+    post_restore_ack(PostRestoreSteps {
+        reseed,
+        hostname_requested: hostname.is_some(),
+        hostname_error,
+        clock_requested: host_epoch_secs.is_some(),
+        clock_resynced,
+        clock_error,
+        signal_error: signal_detail,
+    })
+}
+
+/// What each post-restore step did, gathered so the acknowledgement is decided
+/// in one place that can be tested without a guest.
+struct PostRestoreSteps {
+    reseed: mvm_agentd::genid::GenIdAction,
+    hostname_requested: bool,
+    hostname_error: Option<String>,
+    clock_requested: bool,
+    clock_resynced: bool,
+    clock_error: Option<String>,
+    signal_error: Option<String>,
+}
+
+/// Build the `PostRestoreAck`.
+///
+/// `success` covers the steps that finish bringing the guest back — hostname,
+/// clock, the init signal. The reseed is reported on its own, as `reseeded`
+/// plus a shortfall and a reason in `detail`, so a guest that could not reseed
+/// is not mistaken for one whose drives are still unmounted.
+fn post_restore_ack(steps: PostRestoreSteps) -> GuestResponse {
+    let reseeded = steps.reseed.reseeded();
+    let (reseed_shortfall, reseed_note) = match steps.reseed {
+        mvm_agentd::genid::GenIdAction::ReseedFailed(failure) => {
+            let label = match failure.shortfall {
+                mvm_agentd::vsock::ReseedShortfall::HelperMissing => "restore reseed unavailable",
+                mvm_agentd::vsock::ReseedShortfall::Failed => "restore reseed failed",
+            };
+            (
+                Some(failure.shortfall),
+                Some(format!("{label}: {}", failure.reason)),
+            )
+        }
+        mvm_agentd::genid::GenIdAction::Unchanged | mvm_agentd::genid::GenIdAction::Reseeded => {
+            (None, None)
+        }
+    };
+    let errors = [steps.hostname_error, steps.clock_error, steps.signal_error]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
     let success = errors.is_empty();
-    let detail = if success {
-        Some(
-            match (hostname.is_some(), host_epoch_secs.is_some()) {
-                (true, true) => "post-restore hostname, clock sync, and init signal completed",
-                (true, false) => "post-restore hostname and init signal completed",
-                (false, true) => "post-restore clock sync and init signal completed",
-                (false, false) => "post-restore signal sent to init",
-            }
-            .to_string(),
-        )
+    let summary = if success {
+        match (steps.hostname_requested, steps.clock_requested) {
+            (true, true) => "post-restore hostname, clock sync, and init signal completed",
+            (true, false) => "post-restore hostname and init signal completed",
+            (false, true) => "post-restore clock sync and init signal completed",
+            (false, false) => "post-restore signal sent to init",
+        }
+        .to_string()
     } else {
-        Some(errors.join("; "))
+        errors.join("; ")
+    };
+    let detail = match reseed_note {
+        Some(note) => format!("{summary}; {note}"),
+        None => summary,
     };
     GuestResponse::PostRestoreAck {
         success,
-        detail,
+        detail: Some(detail),
         reseeded,
-        clock_resynced,
+        clock_resynced: steps.clock_resynced,
+        reseed_shortfall,
     }
 }
 
@@ -937,6 +983,132 @@ pub(crate) fn handle_update_idle_timeout(secs: u64) -> GuestResponse {
             previous_secs: 0,
             applied_secs: 0,
         },
+    }
+}
+
+#[cfg(test)]
+mod post_restore_ack_tests {
+    use mvm_agentd::genid::{GenIdAction, ReseedFailure};
+    use mvm_agentd::vsock::ReseedShortfall;
+
+    use super::*;
+
+    fn steps(reseed: GenIdAction) -> PostRestoreSteps {
+        PostRestoreSteps {
+            reseed,
+            hostname_requested: true,
+            hostname_error: None,
+            clock_requested: true,
+            clock_resynced: true,
+            clock_error: None,
+            signal_error: None,
+        }
+    }
+
+    fn failed(shortfall: ReseedShortfall, reason: &str) -> GenIdAction {
+        GenIdAction::ReseedFailed(ReseedFailure {
+            shortfall,
+            reason: reason.to_string(),
+        })
+    }
+
+    #[test]
+    fn a_failed_reseed_is_reported_as_not_reseeded_and_names_the_reason() {
+        let GuestResponse::PostRestoreAck {
+            success,
+            detail,
+            reseeded,
+            clock_resynced,
+            reseed_shortfall,
+        } = post_restore_ack(steps(failed(
+            ReseedShortfall::Failed,
+            "forcing the kernel generator to rekey failed: EPERM",
+        )))
+        else {
+            panic!("post-restore must answer with a PostRestoreAck");
+        };
+        assert!(!reseeded, "a failed reseed must never be reported as done");
+        assert_eq!(reseed_shortfall, Some(ReseedShortfall::Failed));
+        assert!(
+            success,
+            "the restore steps themselves completed; the reseed is reported on its own"
+        );
+        let detail = detail.expect("a failure carries its reason");
+        assert!(
+            detail.contains("restore reseed failed") && detail.contains("EPERM"),
+            "{detail}"
+        );
+        assert!(clock_resynced);
+    }
+
+    #[test]
+    fn a_guest_without_a_helper_says_so_distinctly() {
+        let GuestResponse::PostRestoreAck {
+            reseeded,
+            reseed_shortfall,
+            detail,
+            ..
+        } = post_restore_ack(steps(failed(
+            ReseedShortfall::HelperMissing,
+            "no CRNG reseed helper is running in this guest",
+        )))
+        else {
+            panic!("post-restore must answer with a PostRestoreAck");
+        };
+        assert!(!reseeded);
+        assert_eq!(reseed_shortfall, Some(ReseedShortfall::HelperMissing));
+        assert!(
+            detail.is_some_and(|d| d.contains("restore reseed unavailable")),
+            "an image without a helper is not reported as a failed reseed"
+        );
+    }
+
+    #[test]
+    fn a_failed_restore_step_and_a_failed_reseed_are_both_reported() {
+        let mut both = steps(failed(ReseedShortfall::Failed, "EPERM"));
+        both.signal_error = Some("kill failed".to_string());
+        let GuestResponse::PostRestoreAck {
+            success, detail, ..
+        } = post_restore_ack(both)
+        else {
+            panic!("post-restore must answer with a PostRestoreAck");
+        };
+        assert!(!success);
+        let detail = detail.unwrap_or_default();
+        assert!(
+            detail.contains("kill failed") && detail.contains("restore reseed failed"),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn a_completed_reseed_is_reported_as_reseeded() {
+        let GuestResponse::PostRestoreAck {
+            success,
+            reseeded,
+            reseed_shortfall,
+            ..
+        } = post_restore_ack(steps(GenIdAction::Reseeded))
+        else {
+            panic!("post-restore must answer with a PostRestoreAck");
+        };
+        assert!(success && reseeded);
+        assert_eq!(reseed_shortfall, None);
+    }
+
+    #[test]
+    fn a_no_rotation_restore_succeeds_without_claiming_a_reseed() {
+        let GuestResponse::PostRestoreAck {
+            success,
+            reseeded,
+            reseed_shortfall,
+            ..
+        } = post_restore_ack(steps(GenIdAction::Unchanged))
+        else {
+            panic!("post-restore must answer with a PostRestoreAck");
+        };
+        assert!(success && !reseeded);
+        assert_eq!(reseed_shortfall, None);
     }
 }
 

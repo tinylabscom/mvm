@@ -45,11 +45,56 @@ const _: () = {
 };
 
 unsafe extern "C" {
-    pub(crate) fn socket(domain: i32, typ: i32, protocol: i32) -> i32;
     pub(crate) fn bind(sockfd: i32, addr: *const core::ffi::c_void, addrlen: u32) -> i32;
     pub(crate) fn listen(sockfd: i32, backlog: i32) -> i32;
-    pub(crate) fn accept(sockfd: i32, addr: *mut core::ffi::c_void, addrlen: *mut u32) -> i32;
     pub(crate) fn close(fd: i32) -> i32;
+}
+
+/// `socket(2)` with close-on-exec set, so no child the agent spawns — a
+/// workload, or the reseed helper — inherits the control listener.
+pub(crate) fn socket_cloexec(domain: i32, typ: i32) -> i32 {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: plain integer arguments.
+        unsafe { libc::socket(domain, typ | libc::SOCK_CLOEXEC, 0) }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // SAFETY: plain integer arguments.
+        let fd = unsafe { libc::socket(domain, typ, 0) };
+        set_cloexec_or_close(fd)
+    }
+}
+
+/// `accept(2)` with close-on-exec set on the new connection, for the same
+/// reason as [`socket_cloexec`]: an accepted control connection must not leak
+/// into anything spawned while it is open.
+pub(crate) fn accept_cloexec(sockfd: i32, addr: *mut core::ffi::c_void, addrlen: *mut u32) -> i32 {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: the caller passes a writable address buffer and its length,
+        // exactly as for `accept(2)`.
+        unsafe { libc::accept4(sockfd, addr.cast(), addrlen, libc::SOCK_CLOEXEC) }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // SAFETY: as above.
+        let fd = unsafe { libc::accept(sockfd, addr.cast(), addrlen) };
+        set_cloexec_or_close(fd)
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_cloexec_or_close(fd: i32) -> i32 {
+    if fd < 0 {
+        return fd;
+    }
+    // SAFETY: plain descriptor flag update on a descriptor this function owns.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+        unsafe { libc::close(fd) };
+        return -1;
+    }
+    fd
 }
 
 /// Whether an accepted vsock peer may drive the control port. Only the host

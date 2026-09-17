@@ -49,6 +49,7 @@ fn rotated_child_identity() -> PostRestoreOutcome {
         detail: None,
         reseeded: true,
         clock_resynced: true,
+        reseed_shortfall: None,
     }
 }
 

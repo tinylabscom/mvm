@@ -1043,6 +1043,113 @@ fn mk_guest_exports_a_proxy_environment_naming_one_loopback_listener() {
     }
 }
 
+/// Split a rendered `/init` block into its `mvm-setpriv` launches, each up to
+/// and including the `&` that backgrounds it.
+fn setpriv_launches(block: &str) -> Vec<&str> {
+    block
+        .match_indices("/bin/busybox setsid ${setpriv}")
+        .map(|(start, _)| {
+            let rest = &block[start..];
+            let end = rest.find(" &\n").expect("each launch is backgrounded");
+            &rest[..end]
+        })
+        .collect()
+}
+
+/// The CRNG reseed helper is the only process the init grants CAP_SYS_ADMIN,
+/// and the agent's own launch never carries it: the capability boundary is
+/// between two processes, not a hand-off inside the agent.
+#[test]
+fn mk_guest_gives_sys_admin_to_the_reseed_helper_and_never_the_agent() {
+    let path = nix_dir().join("lib").join("mk-guest.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
+    let agent_start = content
+        .find("# Stage 2.5 — guest agent supervisor")
+        .expect("guest agent init block starts");
+    let agent_end = content[agent_start..]
+        .find("# Stage 3 — hostname + console")
+        .map(|offset| agent_start + offset)
+        .expect("hostname stage follows the agent block");
+    let launches = setpriv_launches(&content[agent_start..agent_end]);
+    use mvmctl::guest::crng_reseed::{HELPER_ARG, HELPER_SOCKET, LISTEN_ARG};
+    let helper_args = format!("{HELPER_ARG} {LISTEN_ARG}");
+    let socket_dir = Path::new(HELPER_SOCKET)
+        .parent()
+        .and_then(Path::to_str)
+        .expect("the helper socket has a parent directory");
+    let helper = launches
+        .iter()
+        .find(|launch| launch.ends_with(&format!("\"$MVM_AGENT_BIN\" {helper_args}")))
+        .expect("the init launches the reseed helper with the agent's own arguments");
+    let agent = launches
+        .iter()
+        .find(|launch| launch.ends_with("-- \"$MVM_AGENT_BIN\""))
+        .expect("the init launches the agent");
+
+    for flag in [
+        "--inh-caps=+sys_admin --ambient-caps=+sys_admin",
+        "--no-new-privs",
+        "--clear-groups",
+    ] {
+        assert!(helper.contains(flag), "helper launch must carry {flag}");
+    }
+    for other in ["+kill", "+sys_time", "+net_bind_service"] {
+        assert!(
+            !helper.contains(other),
+            "helper must hold only CAP_SYS_ADMIN, not {other}"
+        );
+    }
+    assert!(
+        agent.contains("--inh-caps=+kill --ambient-caps=+kill")
+            && agent.contains("--inh-caps=+sys_time --ambient-caps=+sys_time")
+            && agent.contains("--no-new-privs"),
+        "agent launch keeps its restore capabilities"
+    );
+    assert!(
+        !agent.contains("sys_admin"),
+        "the agent must never be launched with CAP_SYS_ADMIN"
+    );
+
+    assert!(
+        helper.contains("--reuid=${toString crngReseedUid} --regid=${toString agentUid}"),
+        "the helper runs under its own uid, in the agent's group so the agent can connect"
+    );
+    assert!(
+        agent.contains("--reuid=${toString agentUid}"),
+        "the agent keeps its own uid"
+    );
+
+    let block = &content[agent_start..agent_end];
+    let dir_owned = block
+        .find(&format!(
+            "/bin/busybox chown ${{toString crngReseedUid}}:${{toString agentUid}} {socket_dir}\n"
+        ))
+        .expect("the socket directory belongs to the helper, readable by the agent's group");
+    let dir_private = block
+        .find(&format!("/bin/busybox chmod 0750 {socket_dir}\n"))
+        .expect("no other uid can enter the socket directory");
+    let helper_at = block.find(&helper_args).expect("helper launch");
+    assert!(
+        dir_owned < helper_at && dir_private < helper_at,
+        "the directory must be locked down before the helper binds in it"
+    );
+
+    // The uid the image reserves is the one the agent trusts on the socket, and
+    // the image refuses to build if anything else was given it.
+    let helper_uid = mvmctl::guest::guest_mount::CRNG_RESEED_HELPER_UID;
+    assert!(
+        content.contains(&format!("crngReseedUid = {helper_uid};")),
+        "mkGuest must reserve the uid the agent checks the helper against"
+    );
+    assert!(
+        content.contains(&format!(
+            "uid {helper_uid} is reserved for the CRNG reseed helper"
+        )) && content.contains("builtins.seq assertDedicatedCrngReseedUid"),
+        "a collision with the reserved uid must fail the image build"
+    );
+}
+
 #[test]
 fn mk_guest_provisions_vsock_egress_identity_before_privilege_drop() {
     let path = nix_dir().join("lib").join("mk-guest.nix");

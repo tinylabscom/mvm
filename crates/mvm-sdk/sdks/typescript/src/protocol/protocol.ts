@@ -405,7 +405,11 @@ PostRestoreAck: {
 clock_resynced?: boolean
 detail?: (string | null)
 /**
- * `true` iff the delivered generation token changed and the guest reseeded its CSPRNG (a fresh clone). `false` for an unchanged/zero token (a plain wake or no-rotation restore). Defaults to `false` on the wire for forward-compat with a pre-rotation ack.
+ * Why a requested rotation did not happen, so the host can tell an image that cannot reseed from a reseed that failed. `None` when the guest reseeded or no rotation was requested.
+ */
+reseed_shortfall?: (ReseedShortfall | null)
+/**
+ * `true` iff the delivered generation token changed and the guest rekeyed its kernel generator from it (a fresh clone). `false` for an unchanged/zero token (a plain wake or no-rotation restore) and for a reseed that failed. Defaults to `false` on the wire for forward-compat with a pre-rotation ack.
  */
 reseeded?: boolean
 success: boolean
@@ -533,6 +537,10 @@ Exit: {
 code: number
 }
 } | "TimedOut")
+/**
+ * Why a restored guest did not reseed its kernel generator when asked to.
+ */
+export type ReseedShortfall = ("helper_missing" | "failed")
 /**
  * Kind of filesystem change.
  */
