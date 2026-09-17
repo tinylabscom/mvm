@@ -192,12 +192,17 @@ impl IcmpSocket {
 }
 
 fn recv_timeout_timeval(timeout: Duration) -> libc::timeval {
+    #[cfg(target_os = "linux")]
+    let microseconds = timeout.subsec_micros().into();
+    #[cfg(not(target_os = "linux"))]
+    let microseconds = timeout
+        .subsec_micros()
+        .try_into()
+        .expect("subsecond microseconds always fit in timeval::tv_usec");
+
     libc::timeval {
         tv_sec: i64::try_from(timeout.as_secs()).unwrap_or(i64::MAX),
-        tv_usec: timeout
-            .subsec_micros()
-            .try_into()
-            .expect("subsecond microseconds always fit in timeval::tv_usec"),
+        tv_usec: microseconds,
     }
 }
 
