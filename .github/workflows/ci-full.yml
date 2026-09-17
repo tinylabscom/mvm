@@ -274,6 +274,19 @@ jobs:
           MVM_E2E_HOME: ${{ runner.temp }}/source-bootstrap-home
         run: just e2e-source-bootstrap
 
+      # A Stage 0 guest that refuses to build says why only on its console, and
+      # the runner is gone by the time anyone reads the job log.
+      - name: Upload the Stage 0 and builder consoles
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: source-bootstrap-consoles
+          path: |
+            ${{ runner.temp }}/source-bootstrap-home/vms/*/console.log
+            ${{ runner.temp }}/source-bootstrap-home/vms/*/firecracker.log
+          if-no-files-found: warn
+          retention-days: 14
+
 
   sdk-release-dry-run:
     name: SDK release dry-run

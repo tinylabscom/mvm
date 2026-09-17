@@ -647,6 +647,20 @@ fn the_source_bootstrap_budget_outlasts_the_stage0_builder_timeout() {
     );
 }
 
+/// A refusing Stage 0 guest explains itself only on its console.
+#[test]
+fn the_source_bootstrap_job_keeps_the_guest_consoles_of_a_failed_run() {
+    let workflow = ci_full();
+    let job = job_block(&workflow, "source-bootstrap-linux");
+
+    assert!(
+        job.contains("if: failure()")
+            && job.contains("uses: actions/upload-artifact@v7")
+            && job.contains("${{ runner.temp }}/source-bootstrap-home/vms/*/console.log"),
+        "a failed source bootstrap must upload the guest consoles that name the cause"
+    );
+}
+
 #[test]
 fn the_source_bootstrap_job_makes_the_stage0_boot_files_readable() {
     let workflow = ci_full();
