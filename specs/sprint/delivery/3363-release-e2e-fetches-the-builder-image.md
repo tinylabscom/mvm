@@ -66,14 +66,31 @@ revocation channel are defined.
 
 ## Live evidence
 
-On the x86_64 KVM host, against a cold home with `MVM_BOOT_IMAGE=fetch` and the
-Firecracker builder:
+On the x86_64 KVM host (8 cores, rotational disks), against a cold home with
+`MVM_BOOT_IMAGE=fetch` and the Firecracker builder, running this change:
 
 | Step | Seconds | Result |
 |---|---:|---|
-| `mvmctl bootstrap` (fetch + verify the pinned image) | 430 | cache holds the published 764530688-byte rootfs |
-| `machine build --flake examples/exit_code` | 869 | built through the fetched image |
-| unembedded `build sdk-sidecar build` (glibc + musl) | 615 | two Firecracker shell jobs; no Stage 0 cache created |
+| `mvmctl bootstrap` (fetch + verify the pinned image) | 399 | `Builder VM image source: fetched (boot-image/v0.1.5), signature and digests verified` |
+| unembedded `build sdk-sidecar build`, cold Nix store | 1466 | glibc and musl built as Firecracker shell jobs; no Stage 0 cache created |
+| `machine build --flake examples/exit_code` (earlier run, same image) | 869 | built through the fetched image |
+
+The sidecar figure splits into about 4 minutes rebuilding the embedded
+bootstrap helper, 13 minutes for the glibc image and 7 for musl. That cost was
+already inside the baseline's 37 minutes — the Stage 0 sidecar build on the
+2026-09-16 release dry run took 24 — so what this change removes is the
+from-source builder image bootstrap, not the sidecar.
+
+## What to expect from the measurement
 
 The release-lane speedup is not claimed here. It is measured against the
-2026-09-15 baseline on two post-merge runs and recorded on #3363.
+2026-09-15 baseline on two post-merge runs and recorded on #3363. Two things
+are already known:
+
+- The failure it prevents is the larger effect: a Stage 0 hang cost the whole
+  180-minute budget and a release dry run, and the lane no longer runs one.
+- On a healthy night the saving may fall short of the 25-minute target, because
+  the source-matched SDK sidecar build is now the dominant preparation cost. If
+  the measurement confirms that, the next candidate is acquiring the published
+  signed sidecar when its source fingerprint matches the tree — a change to what
+  the release gate proves, and a decision to take on its own.
