@@ -15,6 +15,7 @@
 
 use anyhow::{Context, Result};
 use mvm_contract::protocol::agent_session::AgentSessionId;
+use mvm_core::session_transition::{SessionTransitionDigest, TransitionIdentity, TransitionKind};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -80,6 +81,266 @@ pub struct AgentSessionRecord {
     /// Why the session was parked. `None` while the session is active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub park_reason: Option<ParkReason>,
+    /// The transition this record last took, kept so a caller whose response
+    /// was lost can retry it and be told it already happened. `None` for a
+    /// record no transition has touched since it was opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_transition: Option<RecordedTransition>,
+}
+
+/// The identity and reproducible outcome of the last transition a record took.
+///
+/// Only the last one: a retry of anything older is refused as superseded,
+/// because the record has since moved on and cannot say what that earlier call
+/// returned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordedTransition {
+    pub identity: TransitionIdentity,
+    /// `identity`'s content address, stored so a retry compares one digest
+    /// rather than re-deriving what the recorded call hashed.
+    pub digest: SessionTransitionDigest,
+    /// The plan a resume was admitted under. A replayed resume reports this
+    /// rather than admitting a second plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admitted_plan_id: Option<String>,
+}
+
+impl RecordedTransition {
+    #[must_use]
+    pub fn new(identity: TransitionIdentity, admitted_plan_id: Option<String>) -> Self {
+        Self {
+            digest: identity.digest(),
+            identity,
+            admitted_plan_id,
+        }
+    }
+}
+
+/// Which generation a transition is fenced against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenerationFence {
+    /// The caller read the session at this generation. The transition refuses
+    /// if the record has moved on, and an exact retry of a transition that
+    /// already applied is answered as a replay.
+    Observed(u64),
+    /// Read the generation at call time. Nothing the caller held can be stale,
+    /// so nothing is fenced — and a retry cannot be recognised as one, because
+    /// the generation it would compare is whatever the record says now.
+    ReadCurrent,
+}
+
+impl GenerationFence {
+    /// The generation this fence evaluates a transition against.
+    #[must_use]
+    pub fn resolve(self, current: &AgentSessionRecord) -> u64 {
+        match self {
+            Self::Observed(generation) => generation,
+            Self::ReadCurrent => current.generation,
+        }
+    }
+
+    #[must_use]
+    pub fn is_observed(self) -> bool {
+        matches!(self, Self::Observed(_))
+    }
+}
+
+/// A transition identity together with whether a retry of it may be answered
+/// as a replay.
+///
+/// `replayable` is false whenever any state the identity records as observed
+/// was read at call time instead of supplied by the caller: such an identity
+/// describes the record as it is now, so it would match a transition the
+/// caller never made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransitionClaim {
+    pub identity: TransitionIdentity,
+    pub replayable: bool,
+}
+
+/// What a store transition did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransitionResult {
+    /// The transition applied and this record was written.
+    Applied(AgentSessionRecord),
+    /// An identical transition had already applied. Nothing was written; this
+    /// is the record as that transition left it.
+    Replayed(AgentSessionRecord),
+}
+
+impl TransitionResult {
+    #[must_use]
+    pub fn record(&self) -> &AgentSessionRecord {
+        match self {
+            Self::Applied(record) | Self::Replayed(record) => record,
+        }
+    }
+
+    #[must_use]
+    pub fn into_record(self) -> AgentSessionRecord {
+        match self {
+            Self::Applied(record) | Self::Replayed(record) => record,
+        }
+    }
+
+    #[must_use]
+    pub fn is_replay(&self) -> bool {
+        matches!(self, Self::Replayed(_))
+    }
+}
+
+/// How a retry relates to the transition the record last took.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryVerdict {
+    /// Not a retry of anything recorded: evaluate it as a new transition.
+    Apply,
+    /// The recorded transition, again. Answer with its outcome; write nothing.
+    Replay,
+}
+
+/// Why a transition was refused as conflicting with the record's history.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TransitionConflict {
+    /// The same step was already taken with a different request.
+    #[error(
+        "session {session}: a {kind} from generation {generation} was already applied with \
+         different inputs ({differences}); refusing to apply a second one"
+    )]
+    ChangedRequest {
+        session: String,
+        kind: TransitionKind,
+        generation: u64,
+        differences: String,
+    },
+    /// The record has moved past the generation the caller observed.
+    #[error("session {session} is at generation {current}, not the expected {expected}{last}")]
+    Superseded {
+        session: String,
+        current: u64,
+        expected: u64,
+        /// Rendered description of the transition that moved it, or empty.
+        last: String,
+    },
+}
+
+/// Decide whether `claim` replays, conflicts with, or is new to `current`.
+///
+/// Order matters. A replay is recognised before the generation fence, because a
+/// resume that applied has already moved the generation the caller observed —
+/// the fence alone would refuse exactly the retry this exists to answer. A
+/// changed request for the same step is named before the generic fence refusal
+/// so the operator is told which input differs rather than only that the
+/// session moved.
+pub fn classify_retry(
+    current: &AgentSessionRecord,
+    claim: &TransitionClaim,
+) -> Result<RetryVerdict, TransitionConflict> {
+    let retried = &claim.identity;
+    if claim.replayable
+        && let Some(recorded) = current.last_transition.as_ref()
+    {
+        if recorded.digest == retried.digest() {
+            return Ok(RetryVerdict::Replay);
+        }
+        if recorded.identity.occupies_same_slot(retried) {
+            let differences = recorded
+                .identity
+                .differences(retried)
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(TransitionConflict::ChangedRequest {
+                session: current.session_id.as_str().to_string(),
+                kind: retried.kind,
+                generation: retried.observed_generation,
+                differences,
+            });
+        }
+    }
+    if current.generation != retried.observed_generation {
+        return Err(TransitionConflict::Superseded {
+            session: current.session_id.as_str().to_string(),
+            current: current.generation,
+            expected: retried.observed_generation,
+            last: describe_last_transition(current),
+        });
+    }
+    Ok(RetryVerdict::Apply)
+}
+
+/// `"; its last transition was a <kind> from generation <n>"`, or empty.
+fn describe_last_transition(current: &AgentSessionRecord) -> String {
+    current
+        .last_transition
+        .as_ref()
+        .map(|last| {
+            format!(
+                "; its last transition was a {} from generation {}",
+                last.identity.kind, last.identity.observed_generation
+            )
+        })
+        .unwrap_or_default()
+}
+
+/// The identity of parking `session` at `generation` with `input`.
+///
+/// Every field of [`ParkInput`] is covered, because each one changes what the
+/// park writes. The reason is hashed in its stored spelling so the identity
+/// does not depend on how a CLI chose to spell it.
+#[must_use]
+pub fn park_identity(
+    session: &AgentSessionId,
+    generation: u64,
+    input: &ParkInput,
+) -> TransitionIdentity {
+    TransitionIdentity::new(TransitionKind::Park, session.as_str(), generation)
+        .input("reason", park_reason_key(input.reason))
+        .input("journal_cursor", input.journal_cursor)
+        .optional_input(
+            "approval_head",
+            input.approval_head.as_ref().map(ToString::to_string),
+        )
+}
+
+/// The serde spelling of a park reason, which is also what a record stores.
+fn park_reason_key(reason: ParkReason) -> &'static str {
+    match reason {
+        ParkReason::ApprovalWait => "approval_wait",
+        ParkReason::Idle => "idle",
+        ParkReason::HostShutdown => "host_shutdown",
+        ParkReason::Operator => "operator",
+        ParkReason::RetentionDemotion => "retention_demotion",
+    }
+}
+
+/// Refuse a state-machine rejection, naming the last transition when there is
+/// one: "not active" alone does not tell a retrying caller that the session is
+/// hibernated because of a transition it did not make.
+fn refused(current: &AgentSessionRecord, error: SessionTransitionError) -> anyhow::Error {
+    anyhow::anyhow!(
+        "session {}: {error}{}",
+        current.session_id.as_str(),
+        describe_last_transition(current)
+    )
+}
+
+/// What a store resume commits besides the state transition.
+///
+/// A params struct because the identity, the head and the admitted plan are all
+/// inputs the orchestrator computed, and a positional call could pass the
+/// record's own head back where the current one belongs.
+#[derive(Debug, Clone, Copy)]
+pub struct ResumeTransition<'a> {
+    /// The resume's identity, built by the caller that holds the plan material.
+    pub claim: &'a TransitionClaim,
+    /// The approval ledger's head now, compared against the one recorded at park.
+    pub current_head: Option<&'a mvm_core::checkpoint::ApprovalHead>,
+    /// The plan the resume was admitted under, recorded so a replay can report
+    /// it without admitting another.
+    pub admitted_plan_id: Option<&'a str>,
+    pub now_unix: u64,
 }
 
 /// Why a park, resume, or demote was refused.
@@ -337,7 +598,14 @@ impl AgentSessionStore {
         Ok(out)
     }
 
-    /// Park a session, refusing if it has moved past `expected_generation`.
+    /// Park a session, refusing if it has moved past the fenced generation.
+    ///
+    /// A retry of a park that already applied — same generation observed, same
+    /// input — is answered with [`TransitionResult::Replayed`] and writes
+    /// nothing, provided the caller supplied the generation it observed. A
+    /// retry that changed its input for the same step is refused naming the
+    /// input. With [`GenerationFence::ReadCurrent`] neither can be recognised,
+    /// and a second park refuses on the state machine as it always did.
     ///
     /// What the fence does: refuses the park when the on-disk record is no
     /// longer at the generation the caller expected — i.e. the caller is
@@ -363,18 +631,33 @@ impl AgentSessionStore {
     pub fn park(
         &self,
         id: &AgentSessionId,
-        expected_generation: u64,
+        fence: GenerationFence,
         input: ParkInput,
         now_unix: u64,
-    ) -> Result<AgentSessionRecord> {
+    ) -> Result<TransitionResult> {
         let current = self.load(id)?;
-        fence(&current, expected_generation)?;
-        let parked = current.park(&input, now_unix)?;
+        let claim = TransitionClaim {
+            identity: park_identity(id, fence.resolve(&current), &input),
+            replayable: fence.is_observed(),
+        };
+        if classify_retry(&current, &claim)? == RetryVerdict::Replay {
+            return Ok(TransitionResult::Replayed(current));
+        }
+        let mut parked = current
+            .park(&input, now_unix)
+            .map_err(|e| refused(&current, e))?;
+        parked.last_transition = Some(RecordedTransition::new(claim.identity, None));
         self.write(&parked)?;
-        Ok(parked)
+        Ok(TransitionResult::Applied(parked))
     }
 
-    /// Resume a session, refusing if it has moved past `expected_generation`.
+    /// Resume a session, refusing if it has moved past the generation its
+    /// claim observed.
+    ///
+    /// The identity is the caller's to build, because what determines a
+    /// resume's outcome — the plan material — is not something this store
+    /// holds. A replay is recognised here as well as by the caller, so two
+    /// retries racing past the caller's check still write only once.
     ///
     /// Same fence, same limit as `park`: it refuses a caller working from a
     /// superseded record, but the load-then-write pair is not a
@@ -393,12 +676,13 @@ impl AgentSessionStore {
     pub fn resume(
         &self,
         id: &AgentSessionId,
-        expected_generation: u64,
-        current_head: Option<&mvm_core::checkpoint::ApprovalHead>,
-        now_unix: u64,
-    ) -> Result<AgentSessionRecord> {
+        transition: ResumeTransition<'_>,
+    ) -> Result<TransitionResult> {
         let current = self.load(id)?;
-        fence(&current, expected_generation)?;
+        if classify_retry(&current, transition.claim)? == RetryVerdict::Replay {
+            return Ok(TransitionResult::Replayed(current));
+        }
+        let current_head = transition.current_head;
         // Refuse when the ledger moved while the session was parked: the grants
         // it would resume under are not the ones it was admitted for, and the
         // caller should re-admit deliberately rather than inherit silently.
@@ -416,23 +700,16 @@ impl AgentSessionStore {
                 ),
             }
         }
-        let live = current.resume(now_unix)?;
+        let mut live = current
+            .resume(transition.now_unix)
+            .map_err(|e| refused(&current, e))?;
+        live.last_transition = Some(RecordedTransition::new(
+            transition.claim.identity.clone(),
+            transition.admitted_plan_id.map(str::to_string),
+        ));
         self.write(&live)?;
-        Ok(live)
+        Ok(TransitionResult::Applied(live))
     }
-}
-
-/// Refuse an operation whose caller is working from a superseded record.
-fn fence(current: &AgentSessionRecord, expected: u64) -> Result<()> {
-    if current.generation != expected {
-        anyhow::bail!(
-            "session {} is at generation {}, not the expected {}",
-            current.session_id.as_str(),
-            current.generation,
-            expected
-        );
-    }
-    Ok(())
 }
 
 /// Whether `record`'s resume point must survive garbage collection.
@@ -507,6 +784,7 @@ mod tests {
             approval_head: None,
             storage_tier: None,
             park_reason: None,
+            last_transition: None,
         }
     }
 
@@ -754,7 +1032,7 @@ mod tests {
         let parked = store
             .park(
                 &rec.session_id,
-                1,
+                GenerationFence::Observed(1),
                 ParkInput {
                     reason: ParkReason::ApprovalWait,
                     journal_cursor: 42,
@@ -762,7 +1040,8 @@ mod tests {
                 },
                 1_755_000_100,
             )
-            .unwrap();
+            .unwrap()
+            .into_record();
 
         assert_eq!(parked.journal_cursor, 42);
         assert_eq!(parked.approval_head, Some(head.clone()));
@@ -783,7 +1062,7 @@ mod tests {
         store
             .park(
                 &rec.session_id,
-                1,
+                GenerationFence::Observed(1),
                 ParkInput {
                     reason: ParkReason::Idle,
                     journal_cursor: 7,
@@ -799,7 +1078,7 @@ mod tests {
             store
                 .park(
                     &rec.session_id,
-                    1,
+                    GenerationFence::Observed(1),
                     ParkInput {
                         reason: ParkReason::Idle,
                         journal_cursor: 99,
@@ -822,11 +1101,12 @@ mod tests {
         let parked = store
             .park(
                 &rec.session_id,
-                1,
+                GenerationFence::Observed(1),
                 park_input(ParkReason::ApprovalWait),
                 1_755_000_100,
             )
-            .unwrap();
+            .unwrap()
+            .into_record();
         assert_eq!(parked.state, SandboxResidency::Hibernated);
         assert_eq!(
             store.load(&rec.session_id).unwrap().park_reason,
@@ -843,15 +1123,15 @@ mod tests {
         store
             .park(
                 &rec.session_id,
-                1,
+                GenerationFence::Observed(1),
                 park_input(ParkReason::Idle),
                 1_755_000_100,
             )
             .unwrap();
 
-        let live = store
-            .resume(&rec.session_id, 1, None, 1_755_000_200)
-            .unwrap();
+        let live = resume_at(&store, &rec.session_id, 1, None, 1_755_000_200)
+            .unwrap()
+            .into_record();
         assert_eq!(live.generation, 2);
         assert_eq!(store.load(&rec.session_id).unwrap().generation, 2);
     }
@@ -863,13 +1143,23 @@ mod tests {
         let rec = record("sess-alpha");
         store.write(&rec).unwrap();
         store
-            .park(&rec.session_id, 1, park_input(ParkReason::Idle), 100)
+            .park(
+                &rec.session_id,
+                GenerationFence::Observed(1),
+                park_input(ParkReason::Idle),
+                100,
+            )
             .unwrap();
-        store.resume(&rec.session_id, 1, None, 200).unwrap(); // now generation 2
+        resume_at(&store, &rec.session_id, 1, None, 200).unwrap(); // now generation 2
 
         // A caller still holding generation 1 must not be able to park it.
         let err = store
-            .park(&rec.session_id, 1, park_input(ParkReason::Operator), 300)
+            .park(
+                &rec.session_id,
+                GenerationFence::Observed(1),
+                park_input(ParkReason::Operator),
+                300,
+            )
             .unwrap_err()
             .to_string();
         assert!(err.contains("generation"), "unexpected error: {err}");
@@ -888,7 +1178,7 @@ mod tests {
         store.write(&rec).unwrap();
 
         // Resuming an active session is refused; the record must be unchanged.
-        assert!(store.resume(&rec.session_id, 1, None, 400).is_err());
+        assert!(resume_at(&store, &rec.session_id, 1, None, 400).is_err());
         let after = store.load(&rec.session_id).unwrap();
         assert_eq!(after.state, SandboxResidency::Active);
         assert_eq!(after.generation, 1);
@@ -989,6 +1279,30 @@ mod tests {
         assert_eq!(resumed.approval_head, park_input.approval_head);
     }
 
+    /// Resume through the store with a bare resume identity, the way a caller
+    /// that holds no plan material of its own would.
+    fn resume_at(
+        store: &AgentSessionStore,
+        id: &AgentSessionId,
+        generation: u64,
+        head: Option<&mvm_core::checkpoint::ApprovalHead>,
+        now_unix: u64,
+    ) -> Result<TransitionResult> {
+        let claim = TransitionClaim {
+            identity: TransitionIdentity::new(TransitionKind::Resume, id.as_str(), generation),
+            replayable: true,
+        };
+        store.resume(
+            id,
+            ResumeTransition {
+                claim: &claim,
+                current_head: head,
+                admitted_plan_id: Some("plan-test"),
+                now_unix,
+            },
+        )
+    }
+
     fn head_of(byte: &str) -> mvm_core::checkpoint::ApprovalHead {
         mvm_core::checkpoint::ApprovalHead::parse(format!("sha256:{}", byte.repeat(32))).unwrap()
     }
@@ -1003,7 +1317,7 @@ mod tests {
         store
             .park(
                 &rec.session_id,
-                1,
+                GenerationFence::Observed(1),
                 ParkInput {
                     reason: ParkReason::ApprovalWait,
                     journal_cursor: 5,
@@ -1013,7 +1327,9 @@ mod tests {
             )
             .unwrap();
 
-        let live = store.resume(&rec.session_id, 1, Some(&head), 200).unwrap();
+        let live = resume_at(&store, &rec.session_id, 1, Some(&head), 200)
+            .unwrap()
+            .into_record();
         assert_eq!(live.generation, 2);
         assert_eq!(live.journal_cursor, 5, "the cursor survives the resume");
     }
@@ -1027,7 +1343,7 @@ mod tests {
         store
             .park(
                 &rec.session_id,
-                1,
+                GenerationFence::Observed(1),
                 ParkInput {
                     reason: ParkReason::ApprovalWait,
                     journal_cursor: 5,
@@ -1037,8 +1353,7 @@ mod tests {
             )
             .unwrap();
 
-        let err = store
-            .resume(&rec.session_id, 1, Some(&head_of("cd")), 200)
+        let err = resume_at(&store, &rec.session_id, 1, Some(&head_of("cd")), 200)
             .unwrap_err()
             .to_string();
         assert!(err.contains("approval"), "unexpected error: {err}");
@@ -1060,7 +1375,7 @@ mod tests {
         store
             .park(
                 &rec.session_id,
-                1,
+                GenerationFence::Observed(1),
                 ParkInput {
                     reason: ParkReason::Idle,
                     journal_cursor: 0,
@@ -1069,11 +1384,7 @@ mod tests {
                 100,
             )
             .unwrap();
-        assert!(
-            store
-                .resume(&rec.session_id, 1, Some(&head_of("cd")), 200)
-                .is_ok()
-        );
+        assert!(resume_at(&store, &rec.session_id, 1, Some(&head_of("cd")), 200).is_ok());
     }
 
     fn digest_of(byte: &str) -> mvm_core::checkpoint::CheckpointDigest {
@@ -1199,5 +1510,357 @@ mod tests {
         assert_eq!(cold.journal_cursor, 42);
         assert_eq!(cold.parent_checkpoint, Some(digest_of("11")));
         assert_eq!(cold.approval_head, Some(head));
+    }
+
+    // ── exact retry ─────────────────────────────────────────────────────
+
+    fn record_bytes(tmp: &Path, id: &str) -> Vec<u8> {
+        std::fs::read(tmp.join(id).join(RECORD_FILE)).unwrap()
+    }
+
+    fn resume_claim(id: &AgentSessionId, generation: u64, image: &str) -> TransitionClaim {
+        TransitionClaim {
+            identity: TransitionIdentity::new(TransitionKind::Resume, id.as_str(), generation)
+                .input("image_sha256", image),
+            replayable: true,
+        }
+    }
+
+    fn resume_with(
+        store: &AgentSessionStore,
+        id: &AgentSessionId,
+        claim: &TransitionClaim,
+        now_unix: u64,
+    ) -> Result<TransitionResult> {
+        store.resume(
+            id,
+            ResumeTransition {
+                claim,
+                current_head: None,
+                admitted_plan_id: Some("plan-first"),
+                now_unix,
+            },
+        )
+    }
+
+    #[test]
+    fn an_exact_park_retry_replays_the_original_result_and_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let rec = record("sess-alpha");
+        store.write(&rec).unwrap();
+        let first = store
+            .park(
+                &rec.session_id,
+                GenerationFence::Observed(1),
+                park_input(ParkReason::ApprovalWait),
+                100,
+            )
+            .unwrap();
+        assert!(!first.is_replay());
+        let before = record_bytes(tmp.path(), "sess-alpha");
+
+        // Later, which is the only time a retry can happen: the clock must not
+        // make it look like a new request.
+        let retry = store
+            .park(
+                &rec.session_id,
+                GenerationFence::Observed(1),
+                park_input(ParkReason::ApprovalWait),
+                9_999,
+            )
+            .unwrap();
+        assert!(retry.is_replay(), "an identical retry must be a replay");
+        assert_eq!(retry.record(), first.record());
+        assert_eq!(retry.record().updated_unix, 100);
+        assert_eq!(
+            record_bytes(tmp.path(), "sess-alpha"),
+            before,
+            "a replay must not rewrite a byte"
+        );
+    }
+
+    #[test]
+    fn a_park_retry_with_a_different_input_is_a_conflict_naming_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let rec = record("sess-alpha");
+        store.write(&rec).unwrap();
+        store
+            .park(
+                &rec.session_id,
+                GenerationFence::Observed(1),
+                park_input(ParkReason::ApprovalWait),
+                100,
+            )
+            .unwrap();
+        let before = record_bytes(tmp.path(), "sess-alpha");
+
+        let err = store
+            .park(
+                &rec.session_id,
+                GenerationFence::Observed(1),
+                park_input(ParkReason::Operator),
+                200,
+            )
+            .expect_err("a changed request for the same step must not apply");
+        let conflict = err
+            .downcast_ref::<TransitionConflict>()
+            .expect("the refusal is a typed conflict");
+        assert!(
+            matches!(conflict, TransitionConflict::ChangedRequest { .. }),
+            "{conflict:?}"
+        );
+        let text = err.to_string();
+        assert!(
+            text.contains("reason: recorded approval_wait, retried operator"),
+            "{text}"
+        );
+        assert_eq!(record_bytes(tmp.path(), "sess-alpha"), before);
+    }
+
+    #[test]
+    fn a_park_retry_without_an_observed_generation_cannot_claim_a_replay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let rec = record("sess-alpha");
+        store.write(&rec).unwrap();
+        store
+            .park(
+                &rec.session_id,
+                GenerationFence::ReadCurrent,
+                park_input(ParkReason::Idle),
+                100,
+            )
+            .unwrap();
+        let before = record_bytes(tmp.path(), "sess-alpha");
+
+        let err = store
+            .park(
+                &rec.session_id,
+                GenerationFence::ReadCurrent,
+                park_input(ParkReason::Idle),
+                200,
+            )
+            .expect_err("without an observed generation a retry refuses as it always did");
+        let text = err.to_string();
+        assert!(text.contains("not active"), "{text}");
+        assert!(
+            text.contains("last transition was a park from generation 1"),
+            "{text}"
+        );
+        assert_eq!(record_bytes(tmp.path(), "sess-alpha"), before);
+    }
+
+    #[test]
+    fn a_park_applied_without_an_observed_generation_replays_for_a_caller_who_supplies_it() {
+        // The recorded identity names the generation the park was evaluated
+        // at, however that generation was obtained, so a later exact retry
+        // still recognises it.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let rec = record("sess-alpha");
+        store.write(&rec).unwrap();
+        store
+            .park(
+                &rec.session_id,
+                GenerationFence::ReadCurrent,
+                park_input(ParkReason::Idle),
+                100,
+            )
+            .unwrap();
+        let retry = store
+            .park(
+                &rec.session_id,
+                GenerationFence::Observed(1),
+                park_input(ParkReason::Idle),
+                200,
+            )
+            .unwrap();
+        assert!(retry.is_replay());
+    }
+
+    #[test]
+    fn an_exact_resume_retry_replays_after_the_generation_it_observed_moved() {
+        // The case the fence alone gets wrong: the resume already advanced the
+        // generation the retry observed, so a plain fence would refuse the
+        // retry of a resume that succeeded.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let rec = record("sess-alpha");
+        store.write(&rec).unwrap();
+        store
+            .park(
+                &rec.session_id,
+                GenerationFence::Observed(1),
+                park_input(ParkReason::Operator),
+                100,
+            )
+            .unwrap();
+        let claim = resume_claim(&rec.session_id, 1, "aa");
+        let first = resume_with(&store, &rec.session_id, &claim, 200).unwrap();
+        assert_eq!(first.record().generation, 2);
+        let before = record_bytes(tmp.path(), "sess-alpha");
+
+        let retry = resume_with(&store, &rec.session_id, &claim, 300).unwrap();
+        assert!(retry.is_replay());
+        assert_eq!(retry.record(), first.record());
+        assert_eq!(retry.record().generation, 2, "no second generation opened");
+        assert_eq!(
+            retry
+                .record()
+                .last_transition
+                .as_ref()
+                .and_then(|t| t.admitted_plan_id.as_deref()),
+            Some("plan-first"),
+            "the replay carries the plan the original resume was admitted under"
+        );
+        assert_eq!(record_bytes(tmp.path(), "sess-alpha"), before);
+    }
+
+    #[test]
+    fn a_resume_retry_with_different_material_is_a_conflict_naming_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let rec = record("sess-alpha");
+        store.write(&rec).unwrap();
+        store
+            .park(
+                &rec.session_id,
+                GenerationFence::Observed(1),
+                park_input(ParkReason::Operator),
+                100,
+            )
+            .unwrap();
+        resume_with(
+            &store,
+            &rec.session_id,
+            &resume_claim(&rec.session_id, 1, "aa"),
+            200,
+        )
+        .unwrap();
+        let before = record_bytes(tmp.path(), "sess-alpha");
+
+        let err = resume_with(
+            &store,
+            &rec.session_id,
+            &resume_claim(&rec.session_id, 1, "bb"),
+            300,
+        )
+        .expect_err("a resume from the same generation with other material must not apply");
+        assert!(
+            err.to_string()
+                .contains("image_sha256: recorded aa, retried bb"),
+            "{err}"
+        );
+        assert_eq!(record_bytes(tmp.path(), "sess-alpha"), before);
+    }
+
+    #[test]
+    fn a_retry_against_a_superseded_generation_names_the_generation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let rec = record("sess-alpha");
+        store.write(&rec).unwrap();
+        let park = |generation, now| {
+            store.park(
+                &rec.session_id,
+                GenerationFence::Observed(generation),
+                park_input(ParkReason::Operator),
+                now,
+            )
+        };
+        park(1, 100).unwrap();
+        resume_with(
+            &store,
+            &rec.session_id,
+            &resume_claim(&rec.session_id, 1, "aa"),
+            200,
+        )
+        .unwrap();
+        park(2, 300).unwrap();
+
+        // The first resume is no longer the last transition, so its retry is
+        // not a replay — and it must not apply a second time either.
+        let err = resume_with(
+            &store,
+            &rec.session_id,
+            &resume_claim(&rec.session_id, 1, "aa"),
+            400,
+        )
+        .expect_err("a retry of a superseded transition must refuse");
+        let conflict = err.downcast_ref::<TransitionConflict>().unwrap();
+        assert_eq!(
+            conflict,
+            &TransitionConflict::Superseded {
+                session: "sess-alpha".to_string(),
+                current: 2,
+                expected: 1,
+                last: "; its last transition was a park from generation 2".to_string(),
+            }
+        );
+        assert_eq!(
+            store.load(&rec.session_id).unwrap().state,
+            SandboxResidency::Hibernated
+        );
+    }
+
+    #[test]
+    fn park_identity_covers_every_park_input() {
+        let id = AgentSessionId::parse("sess-alpha").unwrap();
+        let base = ParkInput {
+            reason: ParkReason::Idle,
+            journal_cursor: 1,
+            approval_head: None,
+        };
+        let digest = |generation, input: &ParkInput| park_identity(&id, generation, input).digest();
+        let reference = digest(1, &base);
+        assert_ne!(digest(2, &base), reference, "generation");
+        for changed in [
+            ParkInput {
+                reason: ParkReason::Operator,
+                ..base.clone()
+            },
+            ParkInput {
+                journal_cursor: 2,
+                ..base.clone()
+            },
+            ParkInput {
+                approval_head: Some(head_of("ab")),
+                ..base.clone()
+            },
+        ] {
+            assert_ne!(digest(1, &changed), reference, "{changed:?}");
+        }
+    }
+
+    #[test]
+    fn the_hashed_reason_spelling_is_the_stored_one() {
+        for reason in [
+            ParkReason::ApprovalWait,
+            ParkReason::Idle,
+            ParkReason::HostShutdown,
+            ParkReason::Operator,
+            ParkReason::RetentionDemotion,
+        ] {
+            assert_eq!(
+                serde_json::to_string(&reason).unwrap(),
+                format!("\"{}\"", park_reason_key(reason))
+            );
+        }
+    }
+
+    #[test]
+    fn a_record_with_a_last_transition_round_trips() {
+        let mut rec = record("sess-alpha");
+        rec.last_transition = Some(RecordedTransition::new(
+            resume_claim(&rec.session_id, 1, "aa").identity,
+            Some("plan-first".to_string()),
+        ));
+        let json = serde_json::to_string(&rec).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AgentSessionRecord>(&json).unwrap(),
+            rec
+        );
     }
 }

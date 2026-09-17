@@ -22,8 +22,10 @@ use mvm_core::plan::{
     AttestationMode, PlanSeccompTier, SecretReleasePolicy, SynthesisInput, Variant,
 };
 use mvm_core::protocol::vm_backend::VmStartConfig;
+use mvm_core::session_transition::{TransitionIdentity, TransitionKind};
 use mvm_runtime::agent_session::{
-    AgentSessionRecord, AgentSessionStore, SandboxResidency, StorageTier,
+    AgentSessionRecord, AgentSessionStore, GenerationFence, ResumeTransition, RetryVerdict,
+    SandboxResidency, StorageTier, TransitionClaim, TransitionResult, classify_retry,
 };
 use mvm_runtime::checkpoint::CheckpointStore;
 
@@ -160,8 +162,9 @@ pub struct ResumeRequest<'a> {
     pub session_id: &'a AgentSessionId,
     /// The generation the caller believes the record is at. A record that has
     /// moved on is one the caller is no longer describing, and the store's
-    /// fence refuses it.
-    pub expected_generation: u64,
+    /// fence refuses it. Only an observed generation lets a retry of a resume
+    /// that already applied be answered as a replay.
+    pub generation: GenerationFence,
     /// The approval ledger's head right now. The store refuses when it differs
     /// from the head recorded at park time, so a resume cannot silently run
     /// under grants the session was never admitted for.
@@ -171,6 +174,80 @@ pub struct ResumeRequest<'a> {
     /// Host signer key directory. `None` uses the host's canonical one.
     pub host_signer_keys_dir: Option<&'a Path>,
     pub now_unix: u64,
+}
+
+/// The identity of resuming `record` as `req` asks, with or without a boot.
+///
+/// Covers every input that decides what the resume produces: the approval
+/// head the caller asserts, each field of the plan material, and whether a
+/// sandbox is booted. The signer directory and the clock are left out — they
+/// decide who signs and when, not what is admitted.
+#[must_use]
+pub fn resume_claim(
+    record: &AgentSessionRecord,
+    req: &ResumeRequest<'_>,
+    boot: bool,
+) -> TransitionClaim {
+    let material = req.material;
+    let identity = TransitionIdentity::new(
+        TransitionKind::Resume,
+        req.session_id.as_str(),
+        req.generation.resolve(record),
+    )
+    .optional_input(
+        "approval_head",
+        req.current_approval_head.map(ToString::to_string),
+    )
+    .input("backend", &material.backend_name)
+    .input("image", &material.image_name)
+    .input("image_sha256", &material.image_sha256)
+    .optional_input("kernel_sha256", material.kernel_sha256.clone())
+    .input("cpus", material.cpus)
+    .input("mem_mib", material.mem_mib)
+    .input("boot", boot);
+    TransitionClaim {
+        identity,
+        replayable: req.generation.is_observed(),
+    }
+}
+
+/// What a resume did.
+#[derive(Debug)]
+pub enum ResumeOutcome {
+    /// The session was re-admitted and its record advanced.
+    Resumed(Box<ResumedSession>),
+    /// An identical resume had already applied. Nothing was admitted, written
+    /// or chained; this reports what that resume produced.
+    Replayed(Box<ReplayedResume>),
+}
+
+/// The recorded result of a resume that had already applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayedResume {
+    /// The record as the original resume left it.
+    pub record: AgentSessionRecord,
+    /// The plan the original resume was admitted under.
+    pub admitted_plan_id: String,
+}
+
+impl ReplayedResume {
+    fn from_record(record: AgentSessionRecord) -> Result<Self> {
+        let admitted_plan_id = record
+            .last_transition
+            .as_ref()
+            .and_then(|t| t.admitted_plan_id.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "session {} records a resume with no admitted plan, so its result cannot be \
+                     reproduced",
+                    record.session_id.as_str()
+                )
+            })?;
+        Ok(Self {
+            record,
+            admitted_plan_id,
+        })
+    }
 }
 
 /// A session brought back into residency: the advanced record, and the plan
@@ -227,8 +304,32 @@ pub fn resume_session(
     req: &ResumeRequest<'_>,
     clock: &dyn Clock,
     ledger: &InMemoryNonceLedger,
-) -> Result<ResumedSession> {
+) -> Result<ResumeOutcome> {
+    resume_session_as(sessions, checkpoints, req, false, clock, ledger)
+}
+
+/// [`resume_session`], with whether the caller goes on to boot folded into the
+/// resume's identity.
+///
+/// The retry check runs first, before the residency check and before anything
+/// is signed: a resume that already applied has left the session active, so
+/// the residency check would refuse exactly the retry this answers, and a
+/// replay must not admit — and so sign — a second plan.
+fn resume_session_as(
+    sessions: &AgentSessionStore,
+    checkpoints: &CheckpointStore,
+    req: &ResumeRequest<'_>,
+    boot: bool,
+    clock: &dyn Clock,
+    ledger: &InMemoryNonceLedger,
+) -> Result<ResumeOutcome> {
     let record = sessions.load(req.session_id)?;
+    let claim = resume_claim(&record, req, boot);
+    if classify_retry(&record, &claim)? == RetryVerdict::Replay {
+        return Ok(ResumeOutcome::Replayed(Box::new(
+            ReplayedResume::from_record(record)?,
+        )));
+    }
     if record.state != SandboxResidency::Hibernated {
         anyhow::bail!(
             "session {} is not parked, so it cannot be resumed",
@@ -281,17 +382,28 @@ pub fn resume_session(
 
     // Only now: the transition. Everything above can refuse without having
     // moved the record.
-    let record = sessions.resume(
+    let plan_id = admitted.plan_id().0.clone();
+    let result = sessions.resume(
         req.session_id,
-        req.expected_generation,
-        req.current_approval_head,
-        req.now_unix,
+        ResumeTransition {
+            claim: &claim,
+            current_head: req.current_approval_head,
+            admitted_plan_id: Some(&plan_id),
+            now_unix: req.now_unix,
+        },
     )?;
 
-    Ok(ResumedSession {
-        record,
-        admitted,
-        resume_point: parent,
+    Ok(match result {
+        TransitionResult::Applied(record) => ResumeOutcome::Resumed(Box::new(ResumedSession {
+            record,
+            admitted,
+            resume_point: parent,
+        })),
+        // Another caller applied the same resume between the check above and
+        // this write. The plan signed here reaches nothing and is dropped.
+        TransitionResult::Replayed(record) => {
+            ResumeOutcome::Replayed(Box::new(ReplayedResume::from_record(record)?))
+        }
     })
 }
 
@@ -555,6 +667,25 @@ fn require_cold_tier(record: &AgentSessionRecord) -> Result<()> {
     }
 }
 
+/// Refuse a retried `resume --boot` that already applied.
+///
+/// A replay must never boot a second sandbox, and it cannot truthfully report
+/// the first: the record moves before the boot is attempted, so it reads the
+/// same whether that boot succeeded, failed, or has since exited. Answering
+/// "booted" from the record would state something it does not know. The refusal
+/// still says the resume applied and under which plan, so the caller can tell
+/// this apart from a resume that never happened and go and look at the machine.
+fn boot_replay_refusal(replayed: &ReplayedResume) -> anyhow::Error {
+    anyhow::anyhow!(
+        "session {id}: this resume --boot already applied (generation {generation}, plan \
+         {plan}); a replay never boots a second sandbox, and the session record cannot say \
+         whether the first boot succeeded — check the machine named {id} directly",
+        id = replayed.record.session_id.as_str(),
+        generation = replayed.record.generation,
+        plan = replayed.admitted_plan_id,
+    )
+}
+
 /// Resume a parked session and boot it: admit, transition, **then** start.
 ///
 /// The record moves before the VM does. Both orders can fail, and the question
@@ -591,7 +722,10 @@ pub fn resume_and_boot(
         require_cold_tier(&record)?;
     }
 
-    let resumed = resume_session(sessions, checkpoints, req.resume, clock, ledger)?;
+    let resumed = match resume_session_as(sessions, checkpoints, req.resume, true, clock, ledger)? {
+        ResumeOutcome::Resumed(resumed) => *resumed,
+        ResumeOutcome::Replayed(replayed) => return Err(boot_replay_refusal(&replayed)),
+    };
 
     // The record moved before this point. Log the transition in the chain now,
     // before anything that can fail to boot: a boot failure must not erase the
@@ -674,6 +808,7 @@ mod tests {
             approval_head: None,
             storage_tier: None,
             park_reason: None,
+            last_transition: None,
         };
         active
             .park(
@@ -849,7 +984,7 @@ mod tests {
         ) -> ResumeRequest<'a> {
             ResumeRequest {
                 session_id: &record.session_id,
-                expected_generation: record.generation,
+                generation: GenerationFence::Observed(record.generation),
                 current_approval_head: record.approval_head.as_ref(),
                 material,
                 host_signer_keys_dir: Some(self.keys.path()),
@@ -858,6 +993,15 @@ mod tests {
         }
 
         fn resume(&self, req: &ResumeRequest<'_>) -> anyhow::Result<ResumedSession> {
+            match self.resume_outcome(req)? {
+                ResumeOutcome::Resumed(resumed) => Ok(*resumed),
+                ResumeOutcome::Replayed(replayed) => {
+                    anyhow::bail!("unexpected replay: {replayed:?}")
+                }
+            }
+        }
+
+        fn resume_outcome(&self, req: &ResumeRequest<'_>) -> anyhow::Result<ResumeOutcome> {
             resume_session(
                 &self.sessions,
                 &self.checkpoints,
@@ -1438,7 +1582,7 @@ mod tests {
 
         let m = material();
         let mut req = fx.request(&rec, &m);
-        req.expected_generation = rec.generation + 5;
+        req.generation = GenerationFence::Observed(rec.generation + 5);
 
         let err = fx
             .resume(&req)
@@ -1573,6 +1717,277 @@ mod tests {
             booted.record.generation,
             rec.generation + 1,
             "the booted record must be the new generation"
+        );
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // exact retry
+    // ───────────────────────────────────────────────────────────────
+
+    /// A parked session with a real resume point, written to the store.
+    fn parked_with_resume_point(fx: &Fixture) -> AgentSessionRecord {
+        let parent = seed_checkpoint(&fx.checkpoints, fx.tmp.path(), "cp-parent");
+        let mut rec = parked_record("sess-alpha");
+        rec.parent_checkpoint = Some(parent.meta_digest.clone());
+        fx.sessions.write(&rec).unwrap();
+        rec
+    }
+
+    fn record_bytes(fx: &Fixture) -> Vec<u8> {
+        std::fs::read(fx.tmp.path().join("sessions/sess-alpha/session.json")).unwrap()
+    }
+
+    #[test]
+    fn an_exact_resume_retry_replays_without_admitting_a_second_plan() {
+        let (_env, _home) = isolated_host(GrantCeiling::default());
+        let fx = Fixture::new();
+        let rec = parked_with_resume_point(&fx);
+        let m = material();
+        let req = fx.request(&rec, &m);
+        let first = fx.resume(&req).expect("the first resume applies");
+        let before = record_bytes(&fx);
+
+        // A ceiling this workload no longer fits. A retry that reached
+        // admission would be refused by it; a replay never gets there.
+        mvm_core::user_config::save(
+            &mvm_core::user_config::MvmConfig {
+                max_memory_mib: Some(128),
+                ..mvm_core::user_config::MvmConfig::default()
+            },
+            None,
+        )
+        .unwrap();
+
+        let retry = ResumeRequest {
+            now_unix: req.now_unix + 3_600,
+            ..fx.request(&rec, &m)
+        };
+        match fx
+            .resume_outcome(&retry)
+            .expect("an exact retry is answered")
+        {
+            ResumeOutcome::Replayed(replayed) => {
+                assert_eq!(replayed.record, first.record);
+                assert_eq!(replayed.admitted_plan_id, first.admitted.plan_id().0);
+            }
+            ResumeOutcome::Resumed(_) => panic!("an exact retry must not resume again"),
+        }
+        assert_eq!(
+            record_bytes(&fx),
+            before,
+            "a replay must not rewrite a byte"
+        );
+    }
+
+    #[test]
+    fn a_resume_retry_with_different_material_is_refused_naming_it() {
+        let (_env, _home) = isolated_host(GrantCeiling::default());
+        let fx = Fixture::new();
+        let rec = parked_with_resume_point(&fx);
+        let m = material();
+        fx.resume(&fx.request(&rec, &m)).unwrap();
+        let before = record_bytes(&fx);
+
+        let changed = ResumePlanMaterial {
+            cpus: 4,
+            ..material()
+        };
+        let err = fx
+            .resume_outcome(&fx.request(&rec, &changed))
+            .expect_err("a changed resume from the same generation must not apply");
+        assert!(
+            err.to_string().contains("cpus: recorded 2, retried 4"),
+            "{err}"
+        );
+        assert_eq!(record_bytes(&fx), before);
+    }
+
+    #[test]
+    fn a_resume_retry_without_an_observed_generation_refuses_as_before() {
+        let (_env, _home) = isolated_host(GrantCeiling::default());
+        let fx = Fixture::new();
+        let rec = parked_with_resume_point(&fx);
+        let m = material();
+        fx.resume(&fx.request(&rec, &m)).unwrap();
+
+        let retry = ResumeRequest {
+            generation: GenerationFence::ReadCurrent,
+            ..fx.request(&rec, &m)
+        };
+        let err = fx
+            .resume_outcome(&retry)
+            .expect_err("without an observed generation a retry cannot be recognised");
+        assert!(err.to_string().contains("not parked"), "{err}");
+    }
+
+    #[test]
+    fn the_resume_identity_ignores_the_clock_and_the_signer() {
+        let fx = Fixture::new();
+        let rec = parked_record("sess-alpha");
+        let m = material();
+        let base = resume_claim(&rec, &fx.request(&rec, &m), false);
+        let other_keys = tempfile::tempdir().unwrap();
+        let later = ResumeRequest {
+            now_unix: 42,
+            host_signer_keys_dir: Some(other_keys.path()),
+            ..fx.request(&rec, &m)
+        };
+        assert_eq!(
+            resume_claim(&rec, &later, false).identity.digest(),
+            base.identity.digest()
+        );
+    }
+
+    #[test]
+    fn the_resume_identity_covers_every_outcome_input() {
+        let fx = Fixture::new();
+        let rec = parked_record("sess-alpha");
+        let m = material();
+        let base = resume_claim(&rec, &fx.request(&rec, &m), false)
+            .identity
+            .digest();
+        let digest_of = |material: &ResumePlanMaterial| {
+            resume_claim(&rec, &fx.request(&rec, material), false)
+                .identity
+                .digest()
+        };
+        for changed in [
+            ResumePlanMaterial {
+                backend_name: "libkrun".into(),
+                ..material()
+            },
+            ResumePlanMaterial {
+                image_name: "other".into(),
+                ..material()
+            },
+            ResumePlanMaterial {
+                image_sha256: "ef".repeat(32),
+                ..material()
+            },
+            ResumePlanMaterial {
+                kernel_sha256: None,
+                ..material()
+            },
+            ResumePlanMaterial {
+                cpus: 3,
+                ..material()
+            },
+            ResumePlanMaterial {
+                mem_mib: 1024,
+                ..material()
+            },
+        ] {
+            assert_ne!(digest_of(&changed), base, "{changed:?}");
+        }
+        assert_ne!(
+            resume_claim(&rec, &fx.request(&rec, &m), true)
+                .identity
+                .digest(),
+            base,
+            "boot"
+        );
+        let other_head = head_of("ef");
+        let moved = ResumeRequest {
+            current_approval_head: Some(&other_head),
+            ..fx.request(&rec, &m)
+        };
+        assert_ne!(
+            resume_claim(&rec, &moved, false).identity.digest(),
+            base,
+            "approval head"
+        );
+        let observed = ResumeRequest {
+            generation: GenerationFence::Observed(rec.generation + 1),
+            ..fx.request(&rec, &m)
+        };
+        assert_ne!(
+            resume_claim(&rec, &observed, false).identity.digest(),
+            base,
+            "generation"
+        );
+    }
+
+    #[test]
+    fn a_retried_boot_resume_boots_nothing_and_says_the_resume_applied() {
+        let (_env, _home) = isolated_host_with_runtime_overlay();
+        let fx = Fixture::new();
+        let (rec, m, kernel) = boot_fixture(&fx, ParkReason::RetentionDemotion);
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let state = fx.tmp.path().join("state");
+        let audit_dir = fx.tmp.path().join("audit");
+        let emitter = crate::audit::emitter::AuditEmitter::with_dir(
+            ed25519_dalek::SigningKey::from_bytes(&[31u8; 32]),
+            &audit_dir,
+        )
+        .unwrap();
+        let req = fx.request(&rec, &m);
+        let boot = || {
+            resume_and_boot(
+                &fx.sessions,
+                &fx.checkpoints,
+                &ResumeBootRequest {
+                    resume: &req,
+                    backend: &backend,
+                    state_dir: &state,
+                    kernel_path: Some(&kernel),
+                    emitter: Some(&emitter),
+                },
+                &crate::plan_admission::SystemClock,
+                &crate::plan_admission::InMemoryNonceLedger::new(),
+            )
+        };
+        let booted = boot().expect("the first boot resume starts the sandbox");
+        let running = backend.list().unwrap().len();
+        let before = record_bytes(&fx);
+
+        let err = boot().expect_err("a retried boot resume must not boot again");
+        let text = format!("{err:#}");
+        assert!(text.contains("already applied"), "{text}");
+        assert!(
+            text.contains(&booted.started.admitted.plan_id().0),
+            "{text}"
+        );
+        assert!(text.contains("never boots a second sandbox"), "{text}");
+        assert_eq!(backend.list().unwrap().len(), running, "no second sandbox");
+        assert_eq!(record_bytes(&fx), before);
+        let chain = std::fs::read_to_string(audit_dir.join("local.jsonl")).unwrap();
+        assert_eq!(
+            chain.matches("\"session.resumed\"").count(),
+            1,
+            "a replay adds no chain entry: {chain}"
+        );
+    }
+
+    #[test]
+    fn a_plain_retry_of_a_boot_resume_is_refused_naming_boot() {
+        let (_env, _home) = isolated_host_with_runtime_overlay();
+        let fx = Fixture::new();
+        let (rec, m, kernel) = boot_fixture(&fx, ParkReason::RetentionDemotion);
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let state = fx.tmp.path().join("state");
+        let req = fx.request(&rec, &m);
+        resume_and_boot(
+            &fx.sessions,
+            &fx.checkpoints,
+            &ResumeBootRequest {
+                resume: &req,
+                backend: &backend,
+                state_dir: &state,
+                kernel_path: Some(&kernel),
+                emitter: None,
+            },
+            &crate::plan_admission::SystemClock,
+            &crate::plan_admission::InMemoryNonceLedger::new(),
+        )
+        .unwrap();
+
+        let err = fx
+            .resume_outcome(&fx.request(&rec, &m))
+            .expect_err("a boot resume retried without --boot is a different request");
+        assert!(
+            err.to_string()
+                .contains("boot: recorded true, retried false"),
+            "{err}"
         );
     }
 }

@@ -907,8 +907,8 @@ concept over a different store.
 | `mvmctl agent-session open <id> [--resume-point <sha256:...>] [--member <name>]...`                                                                                    | Record a new session, resident from the start, at generation 1. Refuses if a record already exists under that id. `--member` is repeatable.                                                                  |
 | `mvmctl agent-session ls [--json]`                                                                                                                                     | List every session recorded on this host, one summary line each: id, generation, residency, and — when parked — reason and storage tier.                                                                     |
 | `mvmctl agent-session show <id> [--json]`                                                                                                                              | Print one session's recorded state in full: residency, generation, storage tier, park reason, journal cursor, resume point, approval head, members, timestamps. An absent session is an error naming the id. |
-| `mvmctl agent-session park <id> --reason <reason> [--journal-cursor <n>] [--approval-head <sha256:...>]`                                                               | Release an active session's sandbox. `--reason` is one of `approval-wait`, `idle`, `host-shutdown`, `operator`, `retention-demotion`, and selects the storage tier. Emits a `session.parked` chain entry.    |
-| `mvmctl agent-session resume <id> --backend <name> --image <ref> --image-sha256 <hex> --cpus <n> --mem-mib <n> [--kernel-sha256 <hex>] [--approval-head <sha256:...>]` | Re-admit a parked session under a freshly signed `ExecutionPlan`. Emits a `session.resumed` chain entry.                                                                                                     |
+| `mvmctl agent-session park <id> --reason <reason> [--journal-cursor <n>] [--approval-head <sha256:...>] [--expected-generation <n>] [--json]` | Release an active session's sandbox. `--reason` is one of `approval-wait`, `idle`, `host-shutdown`, `operator`, `retention-demotion`, and selects the storage tier. Emits a `session.parked` chain entry. |
+| `mvmctl agent-session resume <id> --backend <name> --image <ref> --image-sha256 <hex> --cpus <n> --mem-mib <n> [--kernel-sha256 <hex>] [--approval-head <sha256:...>] [--boot [--kernel <path>]] [--expected-generation <n>] [--json]` | Re-admit a parked session under a freshly signed `ExecutionPlan`. Emits a `session.resumed` chain entry. |
 
 `open` is what gives the other four subcommands something to act on: `park` and
 `resume` both need a record that already exists, and nothing else on the host
@@ -930,6 +930,43 @@ ledger is _now_. The store refuses when it differs from the head recorded at
 park time, so a session cannot silently resume under grants it was never
 admitted for. A session parked without a head resumes unfenced, and
 `agent-session show` says so in as many words.
+
+### Retrying after a lost response
+
+A caller whose `park` or `resume` applied but whose response never arrived
+cannot tell that apart from one that did not apply. `--expected-generation`
+makes the retry safe. Pass the generation you read the session at (as `show`
+prints it) and repeat the command unchanged:
+
+- If that exact transition already applied, the command returns its original
+  result marked as a replay — `replay: this park had already applied` in text,
+  `"replayed": true` under `--json` — writes nothing, and adds no audit entry.
+  A replayed `resume` reports the plan the original was admitted under and
+  admits no second one.
+- If the same step was taken with different inputs (another `--reason`, other
+  plan material, `--boot` added or dropped), the command refuses and names each
+  input that differs. It never applies a second transition.
+- If the session has since moved past that generation, the command refuses
+  naming the current generation and the transition that moved it.
+
+The identity a retry is compared by is a SHA-256 over a domain-separation tag
+and length-prefixed fields: the transition kind, the session, the observed
+generation, and every input that decides the outcome — for `park` the reason,
+journal cursor and approval head; for `resume` the approval head, backend,
+image, image and kernel SHA-256, vCPUs, memory, and whether it boots.
+Timestamps are not part of it. Only the session's last transition is kept, so a
+retry of anything older is refused as superseded.
+
+Without `--expected-generation` the generation is read at call time. That fences
+nothing, and a retry cannot be recognised: a second `park` refuses because the
+session is no longer active, and a second `resume` refuses because it is no
+longer parked.
+
+`resume --boot` is never replayed. A retry of a boot resume that already applied
+is refused with a message saying it applied and under which plan: the record
+moves before the boot is attempted, so it cannot say whether that boot
+succeeded, and answering "booted" from it would claim something it does not
+know. Check the machine named after the session directly.
 
 Both chain entries are best-effort: if the entry cannot be written the
 transition is still reported as done, with a warning, because the store write

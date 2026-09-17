@@ -1649,6 +1649,14 @@ resume` takes a `current_head` and refuses when it differs from the
       whole-session chain verification and several lifecycle events; WS8 BDD
       remains untouched.
 
+      Park and resume are retry-exact
+      (`specs/sprint/delivery/session-exact-replay-and-retention.md`): the
+      record keeps its last transition's identity
+      (`mvm_core::session_transition`), and a retry carrying
+      `--expected-generation` replays the recorded result with no write and no
+      chain entry, or refuses naming the input or generation that differs. A
+      retried `resume --boot` is refused rather than replayed.
+
 - [~] **Admission-bound AI assurance sessions** —
       `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4,
       W6/W7, W7b landed and W5 partial: the envelope, the authority

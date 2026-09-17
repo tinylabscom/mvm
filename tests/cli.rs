@@ -639,3 +639,106 @@ fn recorded_features_are_declared_root_features() {
         );
     }
 }
+
+/// Run `mvmctl agent-session …` against an isolated home.
+fn agent_session(mvm_home: &std::path::Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", mvm_home)
+        .env("HOME", mvm_home)
+        .env("MVM_NO_AUTO_DEV", "1")
+        .arg("agent-session")
+        .args(args)
+        .output()
+        .expect("run mvmctl agent-session")
+}
+
+/// `park` and `resume` advertise the generation fence that makes a retry
+/// exact.
+#[test]
+fn agent_session_park_and_resume_help_list_the_retry_flags() {
+    let home = tempfile::tempdir().unwrap();
+    for verb in ["park", "resume"] {
+        let out = agent_session(home.path(), &[verb, "--help"]);
+        assert!(
+            out.status.success(),
+            "agent-session {verb} --help must exit 0, stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let help = String::from_utf8_lossy(&out.stdout);
+        assert!(help.contains("--expected-generation"), "{verb}: {help}");
+        assert!(help.contains("--json"), "{verb}: {help}");
+    }
+}
+
+#[test]
+fn agent_session_park_refuses_a_non_numeric_expected_generation() {
+    let home = tempfile::tempdir().unwrap();
+    let out = agent_session(
+        home.path(),
+        &[
+            "park",
+            "sess-a",
+            "--reason",
+            "idle",
+            "--expected-generation",
+            "one",
+        ],
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--expected-generation"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A park whose response was lost is retried with the same arguments and is
+/// told it already applied, rather than being refused as "not active".
+#[test]
+fn agent_session_park_retry_is_reported_as_a_replay() {
+    let home = tempfile::tempdir().unwrap();
+    let open = agent_session(home.path(), &["open", "sess-a"]);
+    assert!(
+        open.status.success(),
+        "{}",
+        String::from_utf8_lossy(&open.stderr)
+    );
+    let park = [
+        "park",
+        "sess-a",
+        "--reason",
+        "approval-wait",
+        "--expected-generation",
+        "1",
+        "--json",
+    ];
+    let replayed = |out: &std::process::Output| -> bool {
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        json["replayed"].as_bool().unwrap()
+    };
+    assert!(!replayed(&agent_session(home.path(), &park)));
+    assert!(replayed(&agent_session(home.path(), &park)));
+
+    let changed = agent_session(
+        home.path(),
+        &[
+            "park",
+            "sess-a",
+            "--reason",
+            "idle",
+            "--expected-generation",
+            "1",
+        ],
+    );
+    assert!(!changed.status.success());
+    assert!(
+        String::from_utf8_lossy(&changed.stderr).contains("recorded approval_wait, retried idle"),
+        "{}",
+        String::from_utf8_lossy(&changed.stderr)
+    );
+}

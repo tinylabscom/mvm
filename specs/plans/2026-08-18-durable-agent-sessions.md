@@ -92,6 +92,7 @@ storage tier                    (built — Resident | Parked | Cold)
 park reason                     (built)
 audit-chain head                (not built)
 retention class + expiry        (not built)
+last transition identity        (built — exact retry of park / resume)
 ```
 
 `2026-08-18-durable-session-park` Task 3 landed the first seven
@@ -423,6 +424,12 @@ Numbering was reconciled before these documents landed on main (PR #2691):
       D3 describes has no way to find the parked session an incoming response
       belongs to. That lookup is unbuilt and is not tracked as anyone's task
       today.
+      A park is retry-exact (`specs/sprint/delivery/session-exact-replay-and-retention.md`):
+      the record keeps the identity of its last transition — a domain-separated,
+      length-prefixed SHA-256 over kind, session, observed generation and every
+      `ParkInput` field (`mvm_core::session_transition`) — and a park retried
+      with `--expected-generation` either replays the recorded result without a
+      write or refuses naming the input that changed.
 - [~] **WS4 — Resume path.** `resume_session`, incremental ledger-head
       verification, fresh-plan synthesis, tier selection, `PostRestore`
       fabric re-registration.
@@ -455,6 +462,14 @@ Numbering was reconciled before these documents landed on main (PR #2691):
       real resume; the steps it does not implement — tier selection,
       `PostRestore`, credential minting — still do not. A session parked with
       `approval_head: None` resumes with no ledger fence at all.
+      A resume is retry-exact (`specs/sprint/delivery/session-exact-replay-and-retention.md`):
+      its identity covers the asserted approval head, every
+      `ResumePlanMaterial` field, and whether it boots; `resume_session`
+      checks it before the residency check and before admission, so a replay
+      signs no second plan and reports the recorded `admitted_plan_id`. A
+      retried `resume --boot` that already applied is refused rather than
+      replayed — the record moves before the boot, so it cannot say whether the
+      boot succeeded.
 - [~] **WS5 — Retention ladder + GC.** Partially delivered by
       `2026-08-18-session-retention`: the existing
       `checkpoints_dir()` sweep (`mvmctl cache prune`) now refuses to reap a
@@ -503,6 +518,8 @@ Numbering was reconciled before these documents landed on main (PR #2691):
       `session.opened`, `sandbox.admitted`, `approval.requested`,
       `approval.granted` and `session.hibernated` are unwritten, and nothing
       yet routes through the `AgentApprovalEvent::audit_action` projection.
+      A replayed park or resume adds no entry: the entry the original
+      transition wrote is the record of it.
 
       **Event naming.** The two entries that exist are spelled `session.parked`
       and `session.resumed`, not the `sandbox.parked` / `sandbox.resumed` this

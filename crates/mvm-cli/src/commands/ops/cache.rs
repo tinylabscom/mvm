@@ -1456,6 +1456,7 @@ mod tests {
             approval_head: None,
             storage_tier: None,
             park_reason: None,
+            last_transition: None,
         };
         session_store.write(&record).unwrap();
 

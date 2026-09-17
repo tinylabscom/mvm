@@ -146,6 +146,9 @@ pub mod residency;
 /// What a caller declared a machine should boot from — the one type both the
 /// declaration boundary and the build side name.
 pub mod rootfs_source;
+/// Content identity of a durable agent-session transition, so a retry after a
+/// lost response can be told apart from a new request.
+pub mod session_transition;
 /// Hardened snapshot frame v0: cap-bounded, fail-closed parsing of the
 /// snapshot container mvm controls (eager-CoW / raw-hypervisor path).
 pub mod snapshot_frame;

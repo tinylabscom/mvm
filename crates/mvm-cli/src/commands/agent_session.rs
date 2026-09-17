@@ -22,12 +22,14 @@ use mvm_core::user_config::MvmConfig;
 use mvm_hostd::plan_admission::AdmittedPlan;
 use mvm_hostd::plan_admission::{InMemoryNonceLedger, SystemClock};
 use mvm_hostd::session_resume::{
-    BootedSession, ResumePlanMaterial, ResumeRequest, ResumedSession, resume_session,
+    BootedSession, ResumeOutcome, ResumePlanMaterial, ResumeRequest, resume_session,
 };
 use mvm_runtime::agent_session::{
-    AgentSessionRecord, AgentSessionStore, ParkInput, ParkReason, SandboxResidency, StorageTier,
+    AgentSessionRecord, AgentSessionStore, GenerationFence, ParkInput, ParkReason,
+    SandboxResidency, StorageTier, TransitionResult,
 };
 use mvm_runtime::checkpoint::CheckpointStore;
+use serde::Serialize;
 
 use super::Cli;
 
@@ -35,6 +37,20 @@ use super::Cli;
 pub(in crate::commands) struct Args {
     #[command(subcommand)]
     pub action: AgentSessionAction,
+}
+
+impl Args {
+    /// Whether this invocation prints a JSON payload on stdout, so host chrome
+    /// has to go to stderr instead.
+    pub(in crate::commands) fn emits_machine_readable_stdout(&self) -> bool {
+        match &self.action {
+            AgentSessionAction::Open(_) => false,
+            AgentSessionAction::Ls(a) => a.json,
+            AgentSessionAction::Show(a) => a.json,
+            AgentSessionAction::Park(a) => a.retry.json,
+            AgentSessionAction::Resume(a) => a.retry.json,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -106,6 +122,32 @@ pub(in crate::commands) struct ParkArgs {
     /// `sha256:<64-hex>`. A session parked without one resumes unfenced.
     #[arg(long)]
     pub approval_head: Option<String>,
+    #[command(flatten)]
+    pub retry: RetryArgs,
+}
+
+/// The generation fence every transition takes, and what makes a retry exact.
+#[derive(ClapArgs, Debug, Clone, Default)]
+pub(in crate::commands) struct RetryArgs {
+    /// Generation you read the session at, as `show` prints it. The transition
+    /// refuses if the session has since moved on, and a retry of one that
+    /// already applied is answered with its original result, marked as a
+    /// replay, writing nothing and adding no audit entry. Without it the
+    /// generation is read at call time: nothing is fenced, and a retry after a
+    /// lost response cannot be told apart from a new request — it is refused
+    /// or applied again, never recognised as a replay.
+    #[arg(long, value_name = "N")]
+    pub expected_generation: Option<u64>,
+    /// Emit the result as JSON, including whether it was a replay
+    #[arg(long)]
+    pub json: bool,
+}
+
+impl RetryArgs {
+    fn fence(&self) -> GenerationFence {
+        self.expected_generation
+            .map_or(GenerationFence::ReadCurrent, GenerationFence::Observed)
+    }
 }
 
 /// The workload half of a resume, taken as flags.
@@ -158,6 +200,11 @@ pub(in crate::commands) struct ResumeArgs {
     /// the boot hashes this file against it.
     #[arg(long)]
     pub kernel: Option<std::path::PathBuf>,
+    /// A retried `--boot` resume that already applied is refused rather than
+    /// replayed: it never boots a second sandbox, and the record cannot say
+    /// whether the first boot succeeded.
+    #[command(flatten)]
+    pub retry: RetryArgs,
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
@@ -232,6 +279,7 @@ fn open_record(store: &AgentSessionStore, args: &OpenArgs) -> Result<AgentSessio
         approval_head: None,
         storage_tier: None,
         park_reason: None,
+        last_transition: None,
     };
     store.write(&record)?;
     Ok(record)
@@ -272,26 +320,48 @@ fn show(store: &AgentSessionStore, raw_id: &str, json: bool) -> Result<()> {
 
 /// Park a session, then bind the park into the chain-signed audit log.
 fn park(store: &AgentSessionStore, args: &ParkArgs) -> Result<()> {
-    let record = park_record(store, args)?;
-    println!("{}", summary_line(&record));
+    let result = park_and_chain(store, args, |record| {
+        record_park_in_chain(record, &host_audit_emitter()?)
+    })?;
+    report_transition(
+        &TransitionReport::of(TransitionVerb::Park, &result),
+        args.retry.json,
+    )
+}
+
+/// Apply the park and, unless it was a replay, chain it.
+///
+/// The chain half is a parameter so a test can hand it a real emitter over a
+/// scratch directory. A replay chains nothing: the entry the original park
+/// wrote is the record of that transition, and a second one would claim the
+/// session parked twice.
+fn park_and_chain(
+    store: &AgentSessionStore,
+    args: &ParkArgs,
+    chain: impl FnOnce(&AgentSessionRecord) -> Result<()>,
+) -> Result<TransitionResult> {
+    let result = park_record(store, args)?;
+    if result.is_replay() {
+        return Ok(result);
+    }
     // The record is already durable at this point. A chain entry that cannot
     // be written is reported rather than raised: failing here would tell an
     // operator the park did not happen when it did, and a park with no entry
     // is the lesser of those two wrongs.
-    if let Err(error) = record_park_in_chain(&record) {
+    if let Err(error) = chain(result.record()) {
         crate::ui::warn(&format!(
             "session {} parked, but the park was not recorded in the audit chain: {error:#}",
-            record.session_id.as_str()
+            result.record().session_id.as_str()
         ));
     }
-    Ok(())
+    Ok(result)
 }
 
 /// Apply the park to the store and return the record it wrote.
 ///
 /// Split from the audit half so the transition is testable without a signer
 /// or an audit directory.
-fn park_record(store: &AgentSessionStore, args: &ParkArgs) -> Result<AgentSessionRecord> {
+fn park_record(store: &AgentSessionStore, args: &ParkArgs) -> Result<TransitionResult> {
     let id = parse_session_id(&args.session_id)?;
     let reason = parse_park_reason(&args.reason)?;
     let approval_head = args
@@ -300,18 +370,18 @@ fn park_record(store: &AgentSessionStore, args: &ParkArgs) -> Result<AgentSessio
         .map(ApprovalHead::parse)
         .transpose()
         .map_err(|e| anyhow::anyhow!("invalid --approval-head: {e}"))?;
-    let current = store
-        .load(&id)
-        .with_context(|| format!("no agent session '{}' on this host", args.session_id))?;
-    // The store's fence refuses a caller working from a record some other
-    // transition has superseded. This command loaded the record a moment ago
-    // and is the caller, so it passes what it just read; the fence is doing
-    // nothing for it. What the fence cannot do either way is serialize two
-    // concurrent parks of one session — that needs file locking the store
-    // does not have.
+    anyhow::ensure!(
+        store.exists(&id),
+        "no agent session '{}' on this host",
+        args.session_id
+    );
+    // With --expected-generation the fence is the caller's, and an exact retry
+    // replays; without it the store reads the generation itself, which fences
+    // nothing. Neither serializes two concurrent parks of one session — that
+    // needs file locking the store does not have.
     store.park(
         &id,
-        current.generation,
+        args.retry.fence(),
         ParkInput {
             reason,
             journal_cursor: args.journal_cursor,
@@ -385,20 +455,32 @@ fn park_audit_extras(record: &AgentSessionRecord) -> Vec<(String, String)> {
 /// plan is the authority the residency actually ran with. A session with no
 /// member, or a member with no persisted plan, has nothing to bind to and is
 /// reported rather than recorded under a plan it never ran.
-fn record_park_in_chain(record: &AgentSessionRecord) -> Result<()> {
+fn record_park_in_chain(
+    record: &AgentSessionRecord,
+    emitter: &super::vm::audit_chain::AuditEmitter,
+) -> Result<()> {
+    let plan = member_plan(record)?;
+    emitter.emit_session_parked(&plan, park_audit_extras(record))
+}
+
+/// The admitted plan of the session's first member sandbox.
+fn member_plan(record: &AgentSessionRecord) -> Result<mvm_core::plan::ExecutionPlan> {
     let member = record.members.first().ok_or_else(|| {
         anyhow::anyhow!(
             "session {} records no member sandbox, so there is no admitted plan to bind to",
             record.session_id.as_str()
         )
     })?;
-    let plan = mvm_hostd::audit::plan_persist::read_plan(member)
-        .with_context(|| format!("reading the admitted plan of member sandbox '{member}'"))?;
+    mvm_hostd::audit::plan_persist::read_plan(member)
+        .with_context(|| format!("reading the admitted plan of member sandbox '{member}'"))
+}
+
+/// The host's chain-signed audit emitter, under the host signer.
+fn host_audit_emitter() -> Result<super::vm::audit_chain::AuditEmitter> {
     let signer = super::vm::host_signer::load_or_init()
-        .context("loading the host signer to sign the park entry")?;
-    let emitter = super::vm::audit_chain::AuditEmitter::new(signer.signing)
-        .context("opening the audit chain to record the park")?;
-    emitter.emit_session_parked(&plan, park_audit_extras(record))
+        .context("loading the host signer to sign the session entry")?;
+    super::vm::audit_chain::AuditEmitter::new(signer.signing)
+        .context("opening the audit chain to record the session transition")
 }
 
 /// Re-admit a parked session, then bind the resume into the audit chain.
@@ -410,20 +492,49 @@ fn resume(
     if args.boot {
         return resume_booting(sessions, checkpoints, args);
     }
-    let resumed = resume_record(sessions, checkpoints, args)?;
-    println!("{}", summary_line(&resumed.record));
-    println!("admitted plan:  {}", resumed.admitted.plan_id().0);
-    // Said plainly rather than implied by silence: a resume re-admits the
-    // session under a fresh signed plan and stops there. Restoring the memory
-    // image and starting a sandbox from it is not wired.
-    println!("(no sandbox was booted — a resume re-admits the session, nothing more)");
-    if let Err(error) = record_resume_in_chain(&resumed.record, &resumed.admitted) {
-        crate::ui::warn(&format!(
-            "session {} resumed, but the resume was not recorded in the audit chain: {error:#}",
-            resumed.record.session_id.as_str()
-        ));
+    let report = match resume_record(sessions, checkpoints, args)? {
+        ResumeOutcome::Resumed(resumed) => {
+            if let Err(error) = record_resume_in_chain(&resumed.record, &resumed.admitted) {
+                crate::ui::warn(&format!(
+                    "session {} resumed, but the resume was not recorded in the audit chain: \
+                     {error:#}",
+                    resumed.record.session_id.as_str()
+                ));
+            }
+            OwnedResumeReport {
+                replayed: false,
+                record: resumed.record,
+                admitted_plan_id: resumed.admitted.plan_id().0.clone(),
+            }
+        }
+        // Nothing was admitted and nothing is chained: the entry the original
+        // resume wrote is the record of it.
+        ResumeOutcome::Replayed(replayed) => OwnedResumeReport {
+            replayed: true,
+            record: replayed.record,
+            admitted_plan_id: replayed.admitted_plan_id,
+        },
+    };
+    report_transition(&report.borrowed(), args.retry.json)
+}
+
+/// A resume's reportable result, owned across the two outcomes it comes from.
+struct OwnedResumeReport {
+    replayed: bool,
+    record: AgentSessionRecord,
+    admitted_plan_id: String,
+}
+
+impl OwnedResumeReport {
+    fn borrowed(&self) -> TransitionReport<'_> {
+        TransitionReport {
+            verb: TransitionVerb::Resume,
+            replayed: self.replayed,
+            session: &self.record,
+            admitted_plan_id: Some(&self.admitted_plan_id),
+            booted_sandbox: None,
+        }
     }
-    Ok(())
 }
 
 /// The owned values a [`ResumeRequest`] borrows from.
@@ -436,10 +547,8 @@ struct ResumeInputs {
     id: AgentSessionId,
     approval_head: Option<ApprovalHead>,
     material: ResumePlanMaterial,
-    /// The generation this command just read, for the same reason the park path
-    /// passes what it read: the store's fence refuses a caller working from a
-    /// superseded record, and this caller cannot be holding one.
-    expected_generation: u64,
+    /// The operator's `--expected-generation`, or a read at call time.
+    generation: GenerationFence,
 }
 
 impl ResumeInputs {
@@ -451,9 +560,11 @@ impl ResumeInputs {
             .map(ApprovalHead::parse)
             .transpose()
             .map_err(|e| anyhow::anyhow!("invalid --approval-head: {e}"))?;
-        let current = sessions
-            .load(&id)
-            .with_context(|| format!("no agent session '{}' on this host", args.session_id))?;
+        anyhow::ensure!(
+            sessions.exists(&id),
+            "no agent session '{}' on this host",
+            args.session_id
+        );
         Ok(Self {
             id,
             approval_head,
@@ -465,14 +576,14 @@ impl ResumeInputs {
                 cpus: args.cpus,
                 mem_mib: args.mem_mib,
             },
-            expected_generation: current.generation,
+            generation: args.retry.fence(),
         })
     }
 
     fn request(&self) -> ResumeRequest<'_> {
         ResumeRequest {
             session_id: &self.id,
-            expected_generation: self.expected_generation,
+            generation: self.generation,
             // The operator's assertion of where the ledger is now, not the head
             // the record was parked under. Passing the record's own head back
             // would compare it against itself and check nothing.
@@ -492,7 +603,7 @@ fn resume_record(
     sessions: &AgentSessionStore,
     checkpoints: &CheckpointStore,
     args: &ResumeArgs,
-) -> Result<ResumedSession> {
+) -> Result<ResumeOutcome> {
     let inputs = ResumeInputs::parse(sessions, args)?;
     // The nonce ledger is per-invocation, so it refuses a replay within one
     // command and not across two. That is the same posture every other CLI
@@ -516,11 +627,16 @@ fn resume_booting(
     args: &ResumeArgs,
 ) -> Result<()> {
     let booted = resume_boot_record(sessions, checkpoints, args)?;
-
-    println!("{}", summary_line(&booted.record));
-    println!("admitted plan:  {}", booted.started.admitted.plan_id().0);
-    println!("booted sandbox: {}", booted.started.vm_id.0);
-    Ok(())
+    report_transition(
+        &TransitionReport {
+            verb: TransitionVerb::Resume,
+            replayed: false,
+            session: &booted.record,
+            admitted_plan_id: Some(&booted.started.admitted.plan_id().0),
+            booted_sandbox: Some(&booted.started.vm_id.0),
+        },
+        args.retry.json,
+    )
 }
 
 /// Drive a booting resume through the client-owned backend boundary.
@@ -589,14 +705,92 @@ fn resume_audit_extras(record: &AgentSessionRecord, plan_id: &PlanId) -> Vec<(St
 /// Unlike the park entry, this one needs no plan lookup: the resume produced
 /// the plan it is recorded under.
 fn record_resume_in_chain(record: &AgentSessionRecord, admitted: &AdmittedPlan) -> Result<()> {
-    let signer = super::vm::host_signer::load_or_init()
-        .context("loading the host signer to sign the resume entry")?;
-    let emitter = super::vm::audit_chain::AuditEmitter::new(signer.signing)
-        .context("opening the audit chain to record the resume")?;
-    emitter.emit_session_resumed(
+    host_audit_emitter()?.emit_session_resumed(
         admitted.plan(),
         resume_audit_extras(record, admitted.plan_id()),
     )
+}
+
+/// Which transition a report describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TransitionVerb {
+    Park,
+    Resume,
+}
+
+impl TransitionVerb {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Park => "park",
+            Self::Resume => "resume",
+        }
+    }
+}
+
+/// What a transition command reports, in text or JSON.
+///
+/// `replayed` is the one field a retrying caller needs: it separates "this
+/// call applied the transition" from "an earlier call had already applied it
+/// and this is what that call produced".
+#[derive(Debug, Serialize)]
+struct TransitionReport<'a> {
+    #[serde(rename = "transition")]
+    verb: TransitionVerb,
+    replayed: bool,
+    session: &'a AgentSessionRecord,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    admitted_plan_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    booted_sandbox: Option<&'a str>,
+}
+
+impl<'a> TransitionReport<'a> {
+    fn of(verb: TransitionVerb, result: &'a TransitionResult) -> Self {
+        Self {
+            verb,
+            replayed: result.is_replay(),
+            session: result.record(),
+            admitted_plan_id: None,
+            booted_sandbox: None,
+        }
+    }
+}
+
+fn report_transition(report: &TransitionReport<'_>, json: bool) -> Result<()> {
+    if json {
+        return crate::json_out::emit_json(report);
+    }
+    for line in transition_lines(report) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// The text form of a transition report.
+fn transition_lines(report: &TransitionReport<'_>) -> Vec<String> {
+    let mut lines = vec![summary_line(report.session)];
+    if let Some(plan) = report.admitted_plan_id {
+        lines.push(format!("admitted plan:  {plan}"));
+    }
+    match report.booted_sandbox {
+        Some(sandbox) => lines.push(format!("booted sandbox: {sandbox}")),
+        // Said plainly rather than implied by silence: a resume re-admits the
+        // session under a fresh signed plan and stops there. Restoring the
+        // memory image and starting a sandbox from it is not wired.
+        None if report.verb == TransitionVerb::Resume => lines.push(
+            "(no sandbox was booted — a resume re-admits the session, nothing more)".to_string(),
+        ),
+        None => {}
+    }
+    if report.replayed {
+        lines.push(format!(
+            "replay: this {} had already applied; nothing was written and no audit entry was \
+             added",
+            report.verb.as_str()
+        ));
+    }
+    lines
 }
 
 /// The `ls` row for one session.
@@ -718,6 +912,7 @@ mod tests {
             approval_head: None,
             storage_tier: None,
             park_reason: None,
+            last_transition: None,
         }
     }
 
@@ -942,6 +1137,7 @@ mod tests {
                 reason: "operator".to_string(),
                 journal_cursor: 0,
                 approval_head: None,
+                retry: RetryArgs::default(),
             },
         )
         .expect_err("a hibernated session is not active, so it cannot be parked");
@@ -960,9 +1156,11 @@ mod tests {
                 reason: "approval-wait".to_string(),
                 journal_cursor: 11,
                 approval_head: None,
+                retry: RetryArgs::default(),
             },
         )
-        .expect("an active session parks");
+        .expect("an active session parks")
+        .into_record();
         assert_eq!(parked.state, SandboxResidency::Hibernated);
         assert_eq!(parked.park_reason, Some(ParkReason::ApprovalWait));
         assert_eq!(parked.storage_tier, Some(StorageTier::Parked));
@@ -983,6 +1181,7 @@ mod tests {
                 reason: "operator".to_string(),
                 journal_cursor: 0,
                 approval_head: Some("not-a-digest".to_string()),
+                retry: RetryArgs::default(),
             },
         )
         .expect_err("a malformed head must be refused at the boundary");
@@ -1005,6 +1204,7 @@ mod tests {
             approval_head: None,
             boot: false,
             kernel: None,
+            retry: RetryArgs::default(),
         }
     }
 
@@ -1444,9 +1644,11 @@ mod tests {
                 reason: "approval-wait".to_string(),
                 journal_cursor: 9,
                 approval_head: None,
+                retry: RetryArgs::default(),
             },
         )
-        .expect("the session opened active, so it parks");
+        .expect("the session opened active, so it parks")
+        .into_record();
 
         // What `show` renders, read off the same record `show` would load.
         let rendered = detail_lines(&store.load(&parked.session_id).unwrap()).join("\n");
@@ -1471,5 +1673,239 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = AgentSessionStore::at(tmp.path().join("not-created-yet"));
         ls(&store, false).expect("an empty host has no sessions, which is not an error");
+    }
+
+    // ── exact retry at the CLI boundary ─────────────────────────────────
+
+    fn park_args(reason: &str, expected_generation: Option<u64>) -> ParkArgs {
+        ParkArgs {
+            session_id: "sess-alpha".to_string(),
+            reason: reason.to_string(),
+            journal_cursor: 3,
+            approval_head: None,
+            retry: RetryArgs {
+                expected_generation,
+                json: false,
+            },
+        }
+    }
+
+    /// A host whose member sandbox has a persisted plan, and an emitter over a
+    /// scratch chain, so a park reaches the real chain-writing path.
+    struct ChainedHost {
+        _env: mvm_core::util::test_env::TestEnv,
+        home: tempfile::TempDir,
+        emitter: super::super::vm::audit_chain::AuditEmitter,
+    }
+
+    impl ChainedHost {
+        fn new() -> Self {
+            let home = tempfile::tempdir().unwrap();
+            let mut env = mvm_core::util::test_env::TestEnv::new();
+            env.isolate_mvm_home(home.path());
+            mvm_hostd::audit::plan_persist::write_plan(
+                "vm-alpha",
+                &mvm_core::plan::signing::test_support::sample_plan(),
+            )
+            .unwrap();
+            let emitter = super::super::vm::audit_chain::AuditEmitter::with_dir(
+                ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]),
+                &home.path().join("audit"),
+            )
+            .unwrap();
+            Self {
+                _env: env,
+                home,
+                emitter,
+            }
+        }
+
+        fn park(&self, store: &AgentSessionStore, args: &ParkArgs) -> Result<TransitionResult> {
+            park_and_chain(store, args, |record| {
+                record_park_in_chain(record, &self.emitter)
+            })
+        }
+
+        fn entries(&self, event: &str) -> usize {
+            std::fs::read_to_string(self.home.path().join("audit").join("tenant-a.jsonl"))
+                .unwrap_or_default()
+                .matches(&format!("\"{event}\""))
+                .count()
+        }
+    }
+
+    #[test]
+    fn an_exact_park_retry_is_reported_as_a_replay_and_adds_no_chain_entry() {
+        let host = ChainedHost::new();
+        let store = AgentSessionStore::at(host.home.path().join("sessions"));
+        store.write(&active("sess-alpha")).unwrap();
+        let args = park_args("approval-wait", Some(1));
+
+        let first = host.park(&store, &args).expect("the first park applies");
+        assert!(!first.is_replay());
+        assert_eq!(host.entries("session.parked"), 1, "the park is chained");
+
+        let retry = host
+            .park(&store, &args)
+            .expect("an exact retry is answered");
+        assert!(retry.is_replay());
+        assert_eq!(retry.record(), first.record());
+        assert_eq!(
+            host.entries("session.parked"),
+            1,
+            "a replay must not chain a second park"
+        );
+
+        let json: serde_json::Value = serde_json::from_str(
+            &crate::json_out::to_json_string(&TransitionReport::of(TransitionVerb::Park, &retry))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["replayed"], true);
+        assert_eq!(json["transition"], "park");
+        assert_eq!(json["session"]["state"], "hibernated");
+        let text = transition_lines(&TransitionReport::of(TransitionVerb::Park, &retry)).join("\n");
+        assert!(
+            text.contains("replay: this park had already applied"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_park_retry_with_another_reason_is_a_conflict_naming_it() {
+        let host = ChainedHost::new();
+        let store = AgentSessionStore::at(host.home.path().join("sessions"));
+        store.write(&active("sess-alpha")).unwrap();
+        host.park(&store, &park_args("approval-wait", Some(1)))
+            .unwrap();
+        let before = store
+            .load(&AgentSessionId::parse("sess-alpha").unwrap())
+            .unwrap();
+
+        let err = host
+            .park(&store, &park_args("operator", Some(1)))
+            .expect_err("a changed park must not apply");
+        assert!(
+            format!("{err:#}").contains("reason: recorded approval_wait, retried operator"),
+            "{err:#}"
+        );
+        assert_eq!(
+            store.load(&before.session_id).unwrap(),
+            before,
+            "a conflict must not touch the record"
+        );
+        assert_eq!(host.entries("session.parked"), 1);
+    }
+
+    #[test]
+    fn a_park_with_a_stale_expected_generation_is_refused_naming_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        let record = active("sess-alpha");
+        store.write(&record).unwrap();
+        let err = park_record(&store, &park_args("operator", Some(4)))
+            .expect_err("a caller holding another generation must be refused");
+        assert!(
+            format!("{err:#}").contains("at generation 1, not the expected 4"),
+            "{err:#}"
+        );
+        assert_eq!(store.load(&record.session_id).unwrap(), record);
+    }
+
+    #[test]
+    fn a_fresh_park_report_is_not_marked_as_a_replay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = AgentSessionStore::at(tmp.path());
+        store.write(&active("sess-alpha")).unwrap();
+        let result = park_record(&store, &park_args("idle", None)).unwrap();
+        let report = TransitionReport::of(TransitionVerb::Park, &result);
+        assert!(!report.replayed);
+        assert!(
+            !transition_lines(&report).join("\n").contains("replay"),
+            "an applied park must not read as a replay"
+        );
+    }
+
+    #[test]
+    fn a_resume_report_says_nothing_booted_and_carries_the_plan() {
+        let record = parked("sess-alpha", ParkReason::Operator);
+        let report = OwnedResumeReport {
+            replayed: true,
+            record,
+            admitted_plan_id: "plan-abc".to_string(),
+        };
+        let text = transition_lines(&report.borrowed()).join("\n");
+        assert!(text.contains("admitted plan:  plan-abc"), "{text}");
+        assert!(text.contains("no sandbox was booted"), "{text}");
+        assert!(
+            text.contains("replay: this resume had already applied"),
+            "{text}"
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(&crate::json_out::to_json_string(&report.borrowed()).unwrap())
+                .unwrap();
+        assert_eq!(json["replayed"], true);
+        assert_eq!(json["admitted_plan_id"], "plan-abc");
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn an_exact_resume_retry_replays_the_admitted_plan_at_the_cli() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let sessions = AgentSessionStore::at(home.path().join("sessions"));
+        let checkpoints = CheckpointStore::at(home.path().join("checkpoints"));
+        let parent = seed_resume_checkpoint(&checkpoints, home.path());
+        let mut record = parked("sess-alpha", ParkReason::Operator);
+        record.parent_checkpoint = Some(parent.meta_digest);
+        sessions.write(&record).unwrap();
+        let mut args = resume_args("sess-alpha");
+        args.approval_head = record.approval_head.as_ref().map(ToString::to_string);
+        args.retry.expected_generation = Some(record.generation);
+
+        let plan_id = match resume_record(&sessions, &checkpoints, &args).unwrap() {
+            ResumeOutcome::Resumed(resumed) => resumed.admitted.plan_id().0.clone(),
+            ResumeOutcome::Replayed(_) => panic!("the first resume must apply"),
+        };
+        match resume_record(&sessions, &checkpoints, &args).unwrap() {
+            ResumeOutcome::Replayed(replayed) => {
+                assert_eq!(replayed.admitted_plan_id, plan_id);
+                assert_eq!(replayed.record.generation, record.generation + 1);
+            }
+            ResumeOutcome::Resumed(_) => panic!("an exact retry must not resume again"),
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn a_retried_boot_resume_is_refused_at_the_cli_and_boots_nothing_more() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        install_runtime_overlay(home.path());
+        let sessions = AgentSessionStore::at(home.path().join("sessions"));
+        let checkpoints = CheckpointStore::at(home.path().join("checkpoints"));
+        let parent = seed_resume_checkpoint(&checkpoints, home.path());
+        let mut record = parked("sess-boot", ParkReason::RetentionDemotion);
+        record.parent_checkpoint = Some(parent.meta_digest);
+        sessions.write(&record).unwrap();
+        let kernel = stub_kernel(home.path());
+        let mut args = boot_args("sess-boot", &kernel);
+        args.kernel_sha256 = Some(mvm_core::crypto::image_verify::sha256_file(&kernel).unwrap());
+        args.approval_head = record.approval_head.as_ref().map(ToString::to_string);
+        args.retry.expected_generation = Some(record.generation);
+
+        let booted = resume_boot_record(&sessions, &checkpoints, &args).unwrap();
+        let after_boot = sessions.load(&record.session_id).unwrap();
+        let err = resume_boot_record(&sessions, &checkpoints, &args)
+            .expect_err("a retried boot resume must refuse rather than boot again");
+        let text = format!("{err:#}");
+        assert!(text.contains("already applied"), "{text}");
+        assert!(
+            text.contains(&booted.started.admitted.plan_id().0),
+            "{text}"
+        );
+        assert_eq!(sessions.load(&record.session_id).unwrap(), after_boot);
     }
 }
