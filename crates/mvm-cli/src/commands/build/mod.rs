@@ -7,6 +7,8 @@ pub(super) mod address;
 #[allow(clippy::module_inception)]
 pub(in crate::commands) mod build;
 pub(super) mod compile;
+#[cfg(feature = "builder-vm")]
+pub mod fc_builder_image;
 pub(super) mod group;
 #[cfg(feature = "builder-vm")]
 pub mod hvf_builder_image;

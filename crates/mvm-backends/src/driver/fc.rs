@@ -1058,6 +1058,7 @@ impl VmmDriver for FcDriver {
                 format!("capture Firecracker pid for '{}' after boot", spec.name)
             })?),
             vsock_uds,
+            flush_via_agent: spec.serves_guest_agent(),
         });
         firecracker_guard.defuse();
         Ok(vm)
@@ -1086,6 +1087,9 @@ impl VmmDriver for FcDriver {
             state_dir,
             vsock_uds,
             id: id.clone(),
+            // A reattached handle cannot see the boot spec; keep the flush,
+            // which is what every workload guest needs.
+            flush_via_agent: true,
         }))
     }
 
@@ -1107,6 +1111,10 @@ struct FcRunningVm {
     /// The single host-side vsock mux UDS (`<state_dir>/runtime/v.sock`); the
     /// host dials guest ports through the CONNECT handshake on this socket.
     vsock_uds: String,
+    /// Whether stopping asks the guest agent to flush filesystems first. False
+    /// for a guest booted without an agent port (a builder or Stage 0 guest),
+    /// which has no agent to ask and flushes its own disks before halting.
+    flush_via_agent: bool,
 }
 
 fn require_guest_filesystem_flush(response: GuestResponse) -> Result<()> {
@@ -1163,6 +1171,21 @@ fn stop_after_guest_flush(
     terminated
 }
 
+/// Stop a guest, flushing through its agent only when it has one. Requiring the
+/// flush of an agentless guest would make it unkillable: the connect fails and
+/// the error returns before the process is ever signalled.
+fn stop_firecracker_guest(
+    flush_via_agent: bool,
+    prepare: impl FnOnce() -> Result<()>,
+    terminate: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    if flush_via_agent {
+        stop_after_guest_flush(prepare, terminate)
+    } else {
+        terminate()
+    }
+}
+
 impl RunningVm for FcRunningVm {
     fn id(&self) -> &VmId {
         &self.id
@@ -1192,7 +1215,8 @@ impl RunningVm for FcRunningVm {
             remove_pid_marker_if_matches(&self.pid_file, pid);
             return Ok(());
         }
-        stop_after_guest_flush(
+        stop_firecracker_guest(
+            self.flush_via_agent,
             || prepare_guest_filesystems_for_stop(&self.vsock_uds),
             || terminate_firecracker_pid(&self.id.0, pid, &self.pid_file),
         )
@@ -1817,6 +1841,48 @@ mod tests {
     }
 
     #[test]
+    fn an_agentless_guest_is_terminated_without_asking_an_agent_to_flush() {
+        use std::cell::Cell;
+        let asked = Cell::new(false);
+        let terminated = Cell::new(false);
+
+        stop_firecracker_guest(
+            false,
+            || {
+                asked.set(true);
+                anyhow::bail!("no agent is listening")
+            },
+            || {
+                terminated.set(true);
+                Ok(())
+            },
+        )
+        .expect("an agentless guest stops");
+
+        assert!(!asked.get(), "there is no agent to ask");
+        assert!(terminated.get());
+    }
+
+    #[test]
+    fn a_guest_with_an_agent_is_flushed_before_it_is_terminated() {
+        use std::cell::Cell;
+        let terminated = Cell::new(false);
+
+        let err = stop_firecracker_guest(
+            true,
+            || anyhow::bail!("flush refused"),
+            || {
+                terminated.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("a failed flush is reported");
+
+        assert!(err.to_string().contains("flush refused"));
+        assert!(!terminated.get(), "no terminate after a failed flush");
+    }
+
+    #[test]
     fn kill_removes_the_pid_file_when_the_vm_is_already_gone() {
         // A "no" liveness probe short-circuits the escalation: no signals sent,
         // the pid marker cleaned up, Ok returned.
@@ -1829,6 +1895,7 @@ mod tests {
             pid_file: pid_file.clone(),
             pid: Some(4242),
             vsock_uds: "/state/gone-vm/runtime/v.sock".into(),
+            flush_via_agent: true,
         };
         let _guard = mvm_vmm::host::shell::mock::install_handler(|script| {
             if script.starts_with("cat ") {
@@ -1849,6 +1916,7 @@ mod tests {
             pid_file: PathBuf::from("/state/measured-vm/fc.pid"),
             pid: Some(4242),
             vsock_uds: "/state/measured-vm/runtime/v.sock".into(),
+            flush_via_agent: true,
         };
         assert_eq!(vm.host_process_id(), Some(4242));
     }
@@ -2093,6 +2161,7 @@ mod tests {
             pid_file: PathBuf::from("/state/console-vm/fc.pid"),
             pid: None,
             vsock_uds: "/nonexistent/runtime/v.sock".into(),
+            flush_via_agent: true,
         };
         // In range but no listener ⇒ a connect error (not an allow-list refusal).
         let in_range = vm
@@ -2316,6 +2385,7 @@ mod tests {
             pid_file: dir.path().join("fc.pid"),
             pid: None,
             vsock_uds: vsock.to_string_lossy().into_owned(),
+            flush_via_agent: true,
         };
 
         // The agent port connects through the CONNECT handshake + round-trips.

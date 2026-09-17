@@ -17,6 +17,7 @@ use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::vm_backend::VmStatus;
 
+use super::halt_watch::ConsoleHaltWatch;
 use super::spec::{BuilderSpecInputs, Stage0SpecInputs, builder_spec, stage0_spec};
 use crate::driver::{VmmDriver, VmmSpec};
 use crate::network_endpoint_spawn::{
@@ -126,9 +127,12 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
             output_disk: &transport.output_disk,
             runtime_overlay: b.runtime_overlay,
             console_log: transport.state_dir.join("console.log"),
-            agent_socket: Some(transport.state_dir.join("agent.sock")),
             egress_socket: transport.egress_socket.clone(),
             identity_drive: &transport.identity_drive,
+            // Same reason `stage0` takes its console from the driver: the device
+            // differs per VMM, and the console is where a failed build explains
+            // itself.
+            console_base: &self.driver.workload_base_bootargs(false),
             vcpus: b.vcpus,
             memory_mib: b.memory_mib,
         });
@@ -235,11 +239,20 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
         // A builder is run-to-completion: the guest powers off after the job, and
         // `status()` flips to Stopped/Failed when the supervisor drops its PID
         // file. (Unlike a workload, it reports no exit code over vsock — its result
-        // is the output tar's `result` sidecar.)
+        // is the output tar's `result` sidecar.) A guest whose kernel cannot power
+        // off halts instead, and not every VMM exits on a halt, so the console is
+        // watched for that too.
         let deadline = Instant::now() + BUILD_WAIT_TIMEOUT;
+        let mut halt_watch = ConsoleHaltWatch::new(spec.console.log_path.clone());
         let mut stopped = false;
         while Instant::now() < deadline {
             if !matches!(vm.status()?, VmStatus::Running) {
+                stopped = true;
+                break;
+            }
+            if halt_watch.guest_halted() {
+                tracing::info!(vm = %transport.name, "builder guest halted; stopping its VMM");
+                vm.kill().context("stopping a halted builder VM")?;
                 stopped = true;
                 break;
             }
@@ -634,9 +647,7 @@ mod tests {
     ///
     /// This proves the spec is well-formed per backend, which is what makes a
     /// Firecracker or future Windows Stage 0 a wiring change rather than a
-    /// rewrite. It deliberately does not claim a live boot: `FcDriver::boot`
-    /// still waits for an `mvm-agentd` handshake that a `stage0-init` guest
-    /// never sends, and that opt-out is not built yet.
+    /// rewrite. It is not a live boot, and does not stand in for one.
     #[test]
     fn the_stage0_boot_contract_composes_onto_every_shipped_driver() {
         use crate::driver::VmmDriver;
@@ -697,6 +708,57 @@ mod tests {
             // base pushed it over would fail at boot with nothing to read.
             mvm_build::builder_cmdline::checked_builder_cmdline(spec.cmdline.clone())
                 .unwrap_or_else(|e| panic!("{name}: Stage 0 cmdline is not bootable: {e}"));
+        }
+    }
+
+    /// The same portability check for an ordinary builder job, which is what
+    /// `--builder firecracker` boots once Stage 0 has produced an image.
+    #[test]
+    fn the_builder_boot_contract_composes_onto_every_shipped_driver() {
+        use crate::driver::VmmDriver;
+        use mvm_backends::driver::{fc::FcDriver, hvf::HvfDriver, qemu::QemuDriver};
+
+        let drivers: Vec<(&str, Box<dyn VmmDriver>)> = vec![
+            ("hvf", Box::new(HvfDriver::new())),
+            ("fc", Box::new(FcDriver::new())),
+            ("qemu", Box::new(QemuDriver::new())),
+            ("mock", Box::new(MockDriver::default())),
+        ];
+
+        for (name, driver) in drivers {
+            let base = driver.workload_base_bootargs(false);
+            let spec = builder_spec(&BuilderSpecInputs {
+                name: "builder-portability",
+                kernel: Path::new("/cache/vmlinux"),
+                rootfs: Path::new("/cache/rootfs.ext4"),
+                nix_store: Path::new("/cache/nix-store.img"),
+                input_disk: Path::new("/state/input.img"),
+                output_disk: Path::new("/state/output.img"),
+                runtime_overlay: None,
+                console_log: PathBuf::from("/state/console.log"),
+                egress_socket: PathBuf::from("/state/vsock-5253.sock"),
+                identity_drive: Path::new("/state/flowmux-identity.ext4"),
+                console_base: &base,
+                vcpus: 4,
+                memory_mib: 4096,
+            });
+
+            assert!(
+                spec.cmdline.starts_with(base.trim()),
+                "{name}: the console must be the driver's own: {}",
+                spec.cmdline
+            );
+            assert!(
+                spec.cmdline
+                    .contains(super::super::spec::BUILDER_CMDLINE_TAIL),
+                "{name}: {}",
+                spec.cmdline
+            );
+            // A builder guest runs no agent; a driver that waited for one would
+            // time out on a guest that booted and built correctly.
+            assert!(!spec.serves_guest_agent(), "{name}");
+            mvm_build::builder_cmdline::checked_builder_cmdline(spec.cmdline.clone())
+                .unwrap_or_else(|e| panic!("{name}: builder cmdline is not bootable: {e}"));
         }
     }
 }
