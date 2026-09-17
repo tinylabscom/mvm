@@ -73,8 +73,9 @@ mvmctl deps audit
 
 The supervisor verifies this volume before launch and refuses a tampered one, so
 the dependency set is part of the workload's admitted identity — not a
-convention. `--prod` additionally fails closed on high or critical CVE findings,
-and on a stub SBOM or CVE report.
+convention. The seal-time security lane's prod gate additionally refuses high
+or critical CVE findings and stub SBOM/CVE reports. Production launch rechecks
+the sealed bytes, but does not currently rerun that severity gate.
 
 ## 4. Run it
 

@@ -35,7 +35,7 @@ const FEATURED_CLAIMS: Array<{
     description:
       "The host-side substitution endpoint mints the guest's placeholder environment and resolves the real credential only while preparing an admitted outbound request.",
     witnesses:
-      "fn:handed_placeholders_never_contain_the_secret_value, fn:endpoint_bin_serves_substitution_and_refuses_unbound_destination, fn:substitute",
+      "fn:handed_placeholders_never_contain_the_secret_value, fn:endpoint_bin_serves_substitution_and_refuses_unbound_destination, fn:substitute_bound_credential",
   },
   {
     title: "A production-safe run cannot invoke DevOnly guest-agent verbs",

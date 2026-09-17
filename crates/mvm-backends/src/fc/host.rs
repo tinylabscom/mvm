@@ -562,7 +562,7 @@ impl FcForkRestorer {
 ///
 /// A free function so the composition under test is the same one the restore
 /// performs: drop the grant here, or drop the bound from the launch, and
-/// `a_restored_child_is_cpu_bounded_by_its_admitted_grant` goes red.
+/// `a_firecracker_restored_child_is_cpu_bounded_by_its_admitted_grant` goes red.
 fn child_io(
     child_vm_name: &str,
     child_dir: &std::path::Path,
@@ -602,7 +602,7 @@ mod tests {
     /// prefix the snapshot load will actually use — the same value
     /// `load_snapshot_inner` passes to the launcher — carries the quota.
     #[test]
-    fn a_restored_child_is_cpu_bounded_by_its_admitted_grant() {
+    fn a_firecracker_restored_child_is_cpu_bounded_by_its_admitted_grant() {
         let scratch = tempfile::tempdir().expect("scratch");
         let mut env = mvm_core::util::test_env::TestEnv::new();
         mvm_core::cpu_scope::pretend_mechanism_present(&mut env, scratch.path())

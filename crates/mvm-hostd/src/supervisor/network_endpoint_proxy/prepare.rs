@@ -79,7 +79,7 @@ impl<'a> SubstitutionDriver for NetworkEndpoint<'a> {
         text: &str,
     ) -> Result<String, ProxyError> {
         Ok(self
-            .substitute(placeholder, destination, text)
+            .substitute_bound_credential(placeholder, destination, text)
             .map(|z| z.to_string())?)
     }
 

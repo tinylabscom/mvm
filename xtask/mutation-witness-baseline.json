@@ -161,13 +161,6 @@
       ]
     },
     {
-      "path": "crates/mvm-contract/src/substitution.rs",
-      "package": "mvm-contract",
-      "claims": [
-        13
-      ]
-    },
-    {
       "path": "crates/mvm-core/src/cpu_scope.rs",
       "package": "mvm-core",
       "claims": [
@@ -282,18 +275,6 @@
       "claims": [
         17
       ]
-    },
-    {
-      "path": "crates/mvm-hostd/src/supervisor/network_endpoint_proxy/prepare.rs",
-      "package": "mvm-hostd",
-      "claims": [
-        13
-      ],
-      "scope": {
-        "examine_re": "prepare_request|SubstitutionDriver.*substitute",
-        "why": "This file enters claim 13's mutation surface because it implements the generically named `SubstitutionDriver::substitute` witness adapter. The claim-relevant boundary is that adapter plus `prepare_request`, which refuses substitution errors before forwarding. The rest of this request-preparation module is `prepare_flow`'s egress-gate, fail-closed scan, replacement and redaction ordering, plus the destination and audit-metadata helpers; the endpoint's transport, streaming, AI metering, and vsock plumbing live in sibling modules outside this surface. All of it is covered by focused unit, integration, and fuzz suites rather than claim 13's placeholder-only property.",
-        "excluded_tracked_by": "#2033"
-      }
     },
     {
       "path": "crates/mvm-hostd/src/supervisor/wall_clock.rs",

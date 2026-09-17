@@ -35,6 +35,12 @@
       environments. Workspace check, zero-warning clippy, Linux cross-target
       and feature-gated checks, and all 68 repository gates pass.
 
+- [x] **Make claim-control gaps mechanically honest — issue #3316.**
+      Claim 11 now states the shipped seal-time CVE/SBOM and admission-integrity
+      contract, while the unused severity gate is pinned as dormant. Function
+      witnesses must resolve to exactly one definition; claims 13 and 18 use
+      unique production-control or backend-specific witnesses.
+
 - [ ] **Upgrades found by reviewing an external microVM sandbox.**
       `specs/plans/2026-09-16-sandbox-review-upgrades.md`.
       Issues #3378–#3387.
