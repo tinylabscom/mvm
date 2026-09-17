@@ -1596,7 +1596,10 @@ resume` takes a `current_head` and refuses when it differs from the
       nor a CPU share; a session parked with `approval_head: None` resumes
       with no ledger fence at all. WS5 is partial: retention classes, expiry,
       a scheduler that calls `demote`, and actual byte movement between tiers
-      remain undelivered.
+      remain undelivered. The checkpoint sweep keeps the parent-link closure
+      of every checkpoint it retains (tagged, inside the age cut, or a session
+      resume point), and `mvmctl machine checkpoint rm` refuses a checkpoint a
+      stored descendant restores through, naming it.
 
       WS6 is done and WS7 is partial, both via
       `2026-08-19-session-cli-and-audit` and

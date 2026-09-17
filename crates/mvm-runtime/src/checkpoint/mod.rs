@@ -12,9 +12,15 @@ use mvm_fs::trusted_snapshot::TrustedSnapshotBackend;
 use crate::lineage::{LineageAnchor, LineageGraph, LineageRecord};
 
 mod params;
+mod retention;
 pub use params::{
     CaptureFsQuickParams, CaptureFsQuickParamsBuilder, CaptureVmFullParams,
     CaptureVmFullParamsBuilder, ForkParams, ForkParamsBuilder, ForkParentLiveness,
+};
+
+pub use retention::{
+    Retention, RetentionCut, RetentionVerdict, dependent_children, direct_retention,
+    retention_verdicts,
 };
 
 pub use mvm_core::checkpoint::SUPERVISOR_CONFIG_BLOB as SUPERVISOR_CONFIG_FILE_NAME;

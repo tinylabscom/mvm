@@ -213,6 +213,18 @@ consults `mvm_runtime::agent_session::pinned_checkpoints` and a manual
 and a scheduler that calls `demote` remain undelivered — see that plan's
 "Deferred to later plans" section.)
 
+Holding the resume point alone was not enough. Restoring a checkpoint walks its
+whole parent chain and refuses when any ancestor's record is missing, so the
+sweep decides by reachability: a checkpoint kept for its own sake — tagged,
+inside the age cut, or a live session's resume point — keeps every ancestor it
+restores through, whatever their tag or age, and only checkpoints outside that
+closure are reaped (`mvm_runtime::checkpoint::retention_verdicts`). An ancestor
+kept this way is reported as such by `mvmctl cache prune`. A parent link that
+resolves to nothing ends that branch of the walk rather than aborting the
+prune. `mvmctl machine checkpoint rm` likewise refuses to remove a checkpoint any
+stored checkpoint names as its parent, and names the descendant; removing
+leaf-first still works.
+
 ### D5 — Resume is re-admission, and it is incremental
 
 ```text
@@ -330,7 +342,7 @@ migrating every stored session and re-cutting every digest.
 | Approval arrives after generation fence | Rejected as stale; the ledger's existing stale-response handling applies. |
 | Audit chain head mismatch | Refuse resume. A session whose continuity is not verifiable does not resume under its old identity. |
 | Host loss with `Parked` image | Record and journal survive if replicated; memory image does not. Resume degrades to `Cold`. |
-| Retention GC races a resume | GC refuses any checkpoint named as a parent by a live or hibernated session. |
+| Retention GC races a resume | GC refuses any checkpoint named as a parent by a live or hibernated session, or any ancestor that checkpoint restores through. |
 | Fresh plan fails admission on resume | Session stays hibernated. Failure is recorded; no partial boot. |
 
 Every refusal is fail-closed and matches the existing `StandbyError`
@@ -449,7 +461,11 @@ Numbering was reconciled before these documents landed on main (PR #2691):
       checkpoint any live or hibernated session names as its parent, a manual
       `mvmctl vm checkpoint rm` carries the same refusal, and
       `AgentSessionRecord::demote` gives a parked session a one-way step down
-      the storage ladder. Not yet delivered: retention classes or expiry on
+      the storage ladder. The sweep keeps the lineage closure of everything it
+      retains, not just the directly retained checkpoints, so a tagged
+      checkpoint or a resume point never loses an ancestor its restore walks
+      through; `rm` refuses a checkpoint a stored descendant names as its
+      parent. Not yet delivered: retention classes or expiry on
       the record, a scheduler that calls `demote`, or any actual movement of
       bytes between tiers — demoting only sets a field, nothing relocates a
       memory image, and nothing reads `storage_tier` to decide how to resume.
