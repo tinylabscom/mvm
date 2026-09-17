@@ -79,10 +79,10 @@ fn read_back_tier(backend_name: &str, vm_name: &str, requested: &Grants) -> Enfo
 /// defect was a run that degraded correctly and said nothing, and a test that
 /// can only observe the warning by starting a VM is how that shipped.
 fn degradation_warning(requested: &Grants, enforced: &EnforcedGrants) -> Option<String> {
-    mvm_core::cpu_scope::cpu_degradation_reason(
+    mvm_core::spawn_scope::cpu_degradation_reason(
         requested.cpu.as_ref(),
         enforced.cpu,
-        mvm_core::cpu_scope::mechanism_gap(),
+        mvm_core::spawn_scope::mechanism_gap(),
     )
 }
 
@@ -217,6 +217,7 @@ mod tests {
                 &EnforcedGrants {
                     cpu: EnforcedTier::Cgroup2CpuMax,
                     wall_clock: EnforcedTier::Declared,
+                    ..EnforcedGrants::all_declared()
                 }
             ),
             None

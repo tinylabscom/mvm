@@ -79,7 +79,8 @@ fn qemu_base_bootargs(has_disk: bool) -> String {
     qemu_base_bootargs_for_arch(std::env::consts::ARCH, has_disk)
 }
 
-/// The qemu launch, bounded by whatever CPU share this VM was admitted under.
+/// The qemu launch, bounded by its guest's memory and task ceilings and by
+/// whatever CPU share this VM was admitted under.
 ///
 /// qemu `-daemonize`s, so the process this command returns from is not the one
 /// that ends up running the guest. That is fine and was measured rather than
@@ -90,10 +91,16 @@ fn bounded_qemu_command(
     argv: &[String],
     spec: &VmmSpec,
     state_dir: &Path,
-) -> Command {
+) -> mvm_core::spawn_scope::BoundCommand {
     let mut launch = Command::new(qemu_bin);
     launch.args(argv);
-    mvm_core::cpu_scope::bind_cpu_grant(launch, &spec.name, state_dir, spec.cpu_grant.as_ref())
+    mvm_core::spawn_scope::bind_spawn(
+        launch,
+        &spec.name,
+        state_dir,
+        &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib)
+            .with_cpu_grant(spec.cpu_grant),
+    )
 }
 
 /// Assemble the `qemu-system` argv for a spec boot (everything after the
@@ -437,7 +444,7 @@ impl VmmDriver for QemuDriver {
         tracing::debug!(qemu_bin = %qemu_bin, argv = ?argv, "launching qemu-system");
         let status = bounded_qemu_command(&qemu_bin, &argv, spec, &state_dir)
             .status()
-            .map_err(|e| anyhow!("spawn qemu ({qemu_bin}): {e}"))?;
+            .map_err(|e| anyhow!("spawn qemu ({qemu_bin}): {e:#}"))?;
         if !status.success() {
             let log_path = state_dir.join(QEMU_LOG_FILE);
             bail!(
@@ -1167,7 +1174,7 @@ mod tests {
     fn a_granted_share_wraps_the_qemu_spawn_ahead_of_its_own_argv() {
         let scratch = tempfile::tempdir().expect("scratch");
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        mvm_core::cpu_scope::pretend_mechanism_present(&mut env, scratch.path())
+        mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path())
             .expect("fake mechanism");
 
         let mut spec = spec_with(KernelImage::Bundled, vec![], vec![]);
@@ -1177,7 +1184,7 @@ mod tests {
 
         // The unit carries a per-boot suffix, so it is matched by shape; every
         // other token is still pinned exactly.
-        let mut rendered = mvm_core::cpu_scope::rendered_argv(&cmd);
+        let mut rendered = mvm_core::spawn_scope::rendered_argv(cmd.as_command());
         assert!(
             rendered[5].starts_with("w-") && rendered[5].ends_with(".scope"),
             "unit should be the machine name plus a per-boot suffix, got {}",
@@ -1195,6 +1202,14 @@ mod tests {
                 "<unit>",
                 "-p",
                 "CPUQuota=200%",
+                "-p",
+                "MemoryMax=768M",
+                "-p",
+                "MemorySwapMax=0",
+                "-p",
+                "TasksMax=1024",
+                "-p",
+                "OOMPolicy=stop",
                 "--",
                 "qemu-system-x86_64",
                 "-machine",
@@ -1204,14 +1219,26 @@ mod tests {
     }
 
     #[test]
-    fn an_ungranted_launch_spawns_qemu_directly() {
+    fn an_ungranted_qemu_launch_is_still_memory_and_task_bounded() {
         let scratch = tempfile::tempdir().expect("scratch");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        mvm_core::spawn_scope::pretend_mechanism_present(&mut env, scratch.path())
+            .expect("fake mechanism");
         let spec = spec_with(KernelImage::Bundled, vec![], vec![]);
         let argv = vec!["-machine".to_string(), "microvm".to_string()];
         let cmd = bounded_qemu_command("qemu-system-x86_64", &argv, &spec, scratch.path());
-        assert_eq!(
-            mvm_core::cpu_scope::rendered_argv(&cmd),
-            vec!["qemu-system-x86_64", "-machine", "microvm"]
+        let rendered = mvm_core::spawn_scope::rendered_argv(cmd.as_command());
+        assert!(
+            rendered.contains(&"MemoryMax=768M".to_string()),
+            "{rendered:?}"
+        );
+        assert!(
+            rendered.contains(&"TasksMax=1024".to_string()),
+            "{rendered:?}"
+        );
+        assert!(
+            !rendered.iter().any(|a| a.starts_with("CPUQuota=")),
+            "{rendered:?}"
         );
     }
 }

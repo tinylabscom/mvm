@@ -378,6 +378,10 @@ pub enum EnforcedTier {
     WasmEpoch,
     SupervisorTimer,
     HvfVcpuQuota,
+    /// cgroup v2 `memory.max` on the scope the VMM process was born into.
+    Cgroup2MemoryMax,
+    /// cgroup v2 `pids.max` on the scope the VMM process was born into.
+    Cgroup2PidsMax,
 }
 
 impl EnforcedTier {
@@ -397,16 +401,71 @@ impl EnforcedTier {
             Self::WasmEpoch => "wasmtime:epoch",
             Self::SupervisorTimer => "supervisor:timer",
             Self::HvfVcpuQuota => "hvf:vcpu-quota",
+            Self::Cgroup2MemoryMax => "cgroup2:memory.max",
+            Self::Cgroup2PidsMax => "cgroup2:pids.max",
         }
     }
 }
 
+/// A host ceiling read back off a live control: the mechanism holding it and
+/// the value that control reported.
+///
+/// The value travels with the tier because a ceiling, unlike a CPU tier, is a
+/// number a reader can check against the guest it bounds. It is always the
+/// value read back, never the value that was asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnforcedCeiling {
+    tier: EnforcedTier,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    limit: Option<u64>,
+}
+
+impl EnforcedCeiling {
+    /// Nothing bounded this dimension.
+    #[must_use]
+    pub const fn declared() -> Self {
+        Self {
+            tier: EnforcedTier::Declared,
+            limit: None,
+        }
+    }
+
+    /// `tier` holds this dimension at `limit`, in the dimension's own unit:
+    /// bytes for memory, tasks for a task count.
+    #[must_use]
+    pub const fn enforced(tier: EnforcedTier, limit: u64) -> Self {
+        Self {
+            tier,
+            limit: Some(limit),
+        }
+    }
+
+    /// The mechanism holding this ceiling.
+    #[must_use]
+    pub const fn tier(self) -> EnforcedTier {
+        self.tier
+    }
+
+    /// The ceiling in effect, or `None` when nothing bounds it.
+    #[must_use]
+    pub const fn limit(self) -> Option<u64> {
+        self.limit
+    }
+}
+
 /// What a backend achieved across every dimension for one VM.
+///
+/// `memory` and `tasks` are not grants a plan asks for. They are the host's own
+/// ceilings on the VMM process, reported here because they bound the same
+/// workload and are read back off the same controls.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnforcedGrants {
     pub cpu: EnforcedTier,
     pub wall_clock: EnforcedTier,
+    pub memory: EnforcedCeiling,
+    pub tasks: EnforcedCeiling,
 }
 
 impl EnforcedGrants {
@@ -416,6 +475,8 @@ impl EnforcedGrants {
         Self {
             cpu: EnforcedTier::Declared,
             wall_clock: EnforcedTier::Declared,
+            memory: EnforcedCeiling::declared(),
+            tasks: EnforcedCeiling::declared(),
         }
     }
 }
@@ -547,6 +608,8 @@ mod tests {
         assert_eq!(EnforcedTier::WasmEpoch.label(), "wasmtime:epoch");
         assert_eq!(EnforcedTier::SupervisorTimer.label(), "supervisor:timer");
         assert_eq!(EnforcedTier::HvfVcpuQuota.label(), "hvf:vcpu-quota");
+        assert_eq!(EnforcedTier::Cgroup2MemoryMax.label(), "cgroup2:memory.max");
+        assert_eq!(EnforcedTier::Cgroup2PidsMax.label(), "cgroup2:pids.max");
     }
 
     #[test]
@@ -558,6 +621,8 @@ mod tests {
             EnforcedTier::WasmEpoch.label(),
             EnforcedTier::SupervisorTimer.label(),
             EnforcedTier::HvfVcpuQuota.label(),
+            EnforcedTier::Cgroup2MemoryMax.label(),
+            EnforcedTier::Cgroup2PidsMax.label(),
         ];
         for (i, a) in labels.iter().enumerate() {
             for (j, b) in labels.iter().enumerate() {
@@ -566,6 +631,37 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_declared_ceiling_carries_no_value() {
+        let ceiling = EnforcedCeiling::declared();
+        assert_eq!(ceiling.tier(), EnforcedTier::Declared);
+        assert_eq!(ceiling.limit(), None);
+        assert!(!ceiling.tier().is_enforced());
+    }
+
+    #[test]
+    fn an_enforced_ceiling_round_trips_with_its_read_back_value() {
+        let grants = EnforcedGrants {
+            cpu: EnforcedTier::Declared,
+            wall_clock: EnforcedTier::Declared,
+            memory: EnforcedCeiling::enforced(EnforcedTier::Cgroup2MemoryMax, 805_306_368),
+            tasks: EnforcedCeiling::enforced(EnforcedTier::Cgroup2PidsMax, 1024),
+        };
+        let json = serde_json::to_string(&grants).expect("serialize");
+        assert!(json.contains(r#""memory":{"tier":"cgroup2_memory_max","limit":805306368}"#));
+        assert!(json.contains(r#""tasks":{"tier":"cgroup2_pids_max","limit":1024}"#));
+        let back: EnforcedGrants = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, grants);
+    }
+
+    #[test]
+    fn a_declared_ceiling_serializes_without_a_value() {
+        let json = serde_json::to_string(&EnforcedGrants::all_declared()).expect("serialize");
+        assert!(json.contains(r#""memory":{"tier":"declared"}"#), "{json}");
+        let back: EnforcedGrants = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, EnforcedGrants::all_declared());
     }
 
     #[test]

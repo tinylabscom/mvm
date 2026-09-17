@@ -1388,7 +1388,13 @@ mod engine {
             engine,
             linker,
             store,
-            enforced: EnforcedGrants { cpu, wall_clock },
+            // Wasm runs in-process, with no VMM process of its own for a spawn
+            // scope to hold, so the scope's ceilings are declared here.
+            enforced: EnforcedGrants {
+                cpu,
+                wall_clock,
+                ..EnforcedGrants::all_declared()
+            },
             _ticker: ticker,
         })
     }

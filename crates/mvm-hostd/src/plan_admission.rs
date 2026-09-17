@@ -953,7 +953,8 @@ fn enforceability_gate(grants: &Grants, plan: &ExecutionPlan, posture: RunPostur
     // user session to delegate from. Without this second question a sealed run
     // on a Linux host with no session bus is admitted, boots unbounded, and
     // reports `declared`: refused in prose and permitted in code.
-    if let Some(detail) = host_cpu_mechanism_gap(grants, kind, mvm_core::cpu_scope::mechanism_gap())
+    if let Some(detail) =
+        host_cpu_mechanism_gap(grants, kind, mvm_core::spawn_scope::mechanism_gap())
     {
         return refuse_or_warn(posture.variant, detail);
     }
@@ -969,7 +970,7 @@ fn enforceability_gate(grants: &Grants, plan: &ExecutionPlan, posture: RunPostur
 fn host_cpu_mechanism_gap(
     grants: &Grants,
     kind: BackendKind,
-    gap: Option<mvm_core::cpu_scope::MechanismGap>,
+    gap: Option<mvm_core::spawn_scope::MechanismGap>,
 ) -> Option<String> {
     // Only a share rides on this mechanism. A fuel budget is wasmtime's, and an
     // absent CPU grant has nothing to enforce.
@@ -3432,7 +3433,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn host_cpu_mechanism_gap_requires_a_share_capable_tier_and_a_reported_gap() {
-        use mvm_core::cpu_scope::MechanismGap;
+        use mvm_core::spawn_scope::MechanismGap;
 
         let missing_bus = Some(MechanismGap::NoUserSessionBus);
         assert_eq!(
