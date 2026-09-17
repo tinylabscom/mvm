@@ -196,6 +196,10 @@ jobs:
         env:
           IMAGE: ${{ matrix.image }}
           RELEASES: ${{ join(fromJSON(needs.resolve.outputs.latest), ' ') }}
+          # These immutable artifacts predate the static-payload fix in #3393.
+          # Keep reporting their measured loader failures, but fail closed for
+          # every later release.
+          TOLERATED_LOADER_RELEASES: "v0.17.0 v0.18.0-rc.1"
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/distro"

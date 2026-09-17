@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-09-16
+Last updated: 2026-09-17
 
 ## In progress
 
@@ -97,8 +97,7 @@ Last updated: 2026-09-16
       are complete, as are versioned installs with atomic upgrade and rollback,
       the full host-binary set, the uninstaller, and the installer, distro and
       install-page compat lanes; remaining work adds in-process signature
-      verification to close the claim 20 limits note, and fixes the macOS
-      install of the baked default release those lanes found broken.
+      verification to close the claim 20 limits note.
   - [x] WS1 — publish and monitor `https://runmvm.com/install.sh` (#3268, #3331)
   - [x] WS2 — bake the stable version; API only on confirmed 404 (#3269)
   - [x] WS3 — versioned release directories, one-rename upgrade, rollback, and
@@ -108,7 +107,8 @@ Last updated: 2026-09-16
   - [x] WS6 — installer back-compat, distro glibc, and install-page smoke lanes
         in `installer-compat.yml` (#3273); Linux release payloads are now
         static-musl while retaining compatible asset names (#3371), and the
-        macOS `v0.17.0` install the lanes surfaced is still open
+        installer accepts legacy entitlement profiles under `resources/`
+        (#3370)
   - [x] WS7 — Nix hygiene: package versions read from `Cargo.toml`, the
         check/harness boundary written down, stale Lima and `dev up` docs
         swept, and `check-deferrals` extended to `nix/`, `src/`, `install.sh`

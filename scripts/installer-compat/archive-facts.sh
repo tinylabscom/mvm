@@ -11,6 +11,7 @@
 #   excluded <name>  a top-level executable the installer deliberately leaves out
 #                    (its EXCLUDED_PAYLOADS), which must land nowhere
 #   profile <name>   an entitlement profile the archive carries under assets/
+#                    or the legacy resources/ location
 #
 # The excluded set is read out of install.sh rather than repeated here, so the
 # lane follows the installer's policy instead of a copy of it.
@@ -49,9 +50,10 @@ for path in "$root"/*; do
   fi
 done | sort
 
-if [ -d "$root/assets" ]; then
-  for profile in "$root"/assets/*.entitlements; do
+for profile_dir in "$root/assets" "$root/resources"; do
+  [ -d "$profile_dir" ] || continue
+  for profile in "$profile_dir"/*.entitlements; do
     [ -f "$profile" ] || continue
     printf 'profile %s\n' "${profile##*/}"
-  done | sort
-fi
+  done
+done | sort -u

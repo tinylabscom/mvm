@@ -200,17 +200,20 @@ publish() {
       > "$stage/assets/mvm-supervisor.entitlements"
     printf 'man\n' > "$stage/man/mvmctl.1"
   else
-    # The pre-assets layout: a binary later releases dropped, and the
-    # entitlement profile under resources/ where install.sh does not look.
+    # Pre-assets layouts carried a binary later releases dropped. Some put the
+    # entitlement profile under resources/; older fixtures may lack it.
     printf '#!/bin/sh\nexit 0\n' > "$stage/mvm-bridge"
     chmod 0755 "$stage/mvm-bridge"
-    mkdir -p "$stage/resources"
-    printf '<plist/>\n' > "$stage/resources/mvmctl.entitlements"
+    if [ "$layout" = old ]; then
+      mkdir -p "$stage/resources"
+      printf '<plist/>\n' > "$stage/resources/mvmctl.entitlements"
+    fi
   fi
   tar czf "$out/mvmctl-$target.tar.gz" -C "$work/stage/$tag" "mvmctl-$target"
   printf '%s  %s\n' "$(sha256 "$out/mvmctl-$target.tar.gz")" "mvmctl-$target.tar.gz" > "$out/checksums-sha256.txt"
 }
 
+publish v0.9.0 missing 0.9.0 no
 publish v1.0.0 old 1.0.0 no
 publish v2.0.0 new 2.0.0 no
 publish v2.1.0 new 2.1.0 yes
@@ -224,7 +227,11 @@ expect_eq "archive-facts: executables and assets are entries, the installer's ex
   "$got"
 
 got="$(sh $DIR/archive-facts.sh "$work/srv/tinylabscom/mvm/releases/download/v1.0.0/mvmctl-$target.tar.gz" "$target" install.sh | tr '\n' ',')"
-expect_eq "archive-facts: an old layout carries no assets entry and no profiles" \
+expect_eq "archive-facts: a resources-layout release carries its profile without an assets entry" \
+  "entry mvm-bridge,entry mvm-network-endpoint,entry mvmctl,profile mvmctl.entitlements," "$got"
+
+got="$(sh $DIR/archive-facts.sh "$work/srv/tinylabscom/mvm/releases/download/v0.9.0/mvmctl-$target.tar.gz" "$target" install.sh | tr '\n' ',')"
+expect_eq "archive-facts: a release missing every profile reports none" \
   "entry mvm-bridge,entry mvm-network-endpoint,entry mvmctl," "$got"
 
 expect_fails "archive-facts: an archive for another target is refused" "has no mvmctl-other-target/mvmctl" \
@@ -406,16 +413,20 @@ expect_fails "check-release: an mvmctl reporting another version fails the lane"
   sh $DIR/check-release.sh v3.0.0 "$target" true
 
 if [ "$darwin" = 1 ]; then
-  expect_status 0 "check-release (macOS): an old release without assets/ may be refused when not strict" \
-    sh $DIR/check-release.sh v1.0.0 "$target" false
-  expect_fails "check-release (macOS): the same refusal fails the lane when the release is strict" \
-    "its archive has no assets/mvmctl.entitlements" \
+  expect_status 0 "check-release (macOS): a resources-layout release installs when strict" \
     sh $DIR/check-release.sh v1.0.0 "$target" true
-  expect_status 0 "check-upgrade (macOS): a refused old release, then upgrade, rollback and uninstall" \
-    sh $DIR/check-upgrade.sh "$target" "v1.0.0 v2.0.0 v2.1.0" "v1.0.0"
-  expect_fails "check-upgrade (macOS): the refusal is not tolerated for a release not named tolerated" \
-    "install.sh failed upgrading an empty prefix to v1.0.0" \
+  expect_status 0 "check-upgrade (macOS): a resources-layout release upgrades without tolerance" \
     sh $DIR/check-upgrade.sh "$target" "v1.0.0 v2.0.0 v2.1.0" ""
+  expect_status 0 "check-release (macOS): a release missing its profile may be refused when not strict" \
+    sh $DIR/check-release.sh v0.9.0 "$target" false
+  expect_fails "check-release (macOS): the missing-profile refusal fails the lane when the release is strict" \
+    "its archive has no assets/mvmctl.entitlements" \
+    sh $DIR/check-release.sh v0.9.0 "$target" true
+  expect_status 0 "check-upgrade (macOS): a refused missing-profile release leaves the upgrade path intact" \
+    sh $DIR/check-upgrade.sh "$target" "v0.9.0 v2.0.0 v2.1.0" "v0.9.0"
+  expect_fails "check-upgrade (macOS): a missing-profile refusal is not tolerated for an unnamed release" \
+    "install.sh failed upgrading an empty prefix to v0.9.0" \
+    sh $DIR/check-upgrade.sh "$target" "v0.9.0 v2.0.0 v2.1.0" ""
 else
   expect_status 0 "check-release (Linux): an old release installs; no entitlement step applies" \
     sh $DIR/check-release.sh v1.0.0 "$target" true
@@ -483,6 +494,19 @@ if (
   ok "lib: a refusal is tolerated only when the archive lacks the profile it names"
 else
   bad "lib: a refusal is tolerated only when the archive lacks the profile it names"
+fi
+
+if (
+  # shellcheck source=scripts/installer-compat/lib.sh
+  . $DIR/lib.sh
+  word_list_contains "v0.17.0 v0.18.0-rc.1" "v0.17.0" || exit 1
+  word_list_contains "v0.17.0 v0.18.0-rc.1" "v0.18.0-rc.1" || exit 1
+  if word_list_contains "v0.17.0 v0.18.0-rc.1" "v0.18.0"; then exit 1; fi
+  if word_list_contains "v0.17.0 v0.18.0-rc.1" "v0.1"; then exit 1; fi
+); then
+  ok "lib: compatibility baselines match only exact release tags"
+else
+  bad "lib: compatibility baselines match only exact release tags"
 fi
 
 echo

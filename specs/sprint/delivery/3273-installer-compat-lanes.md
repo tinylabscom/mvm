@@ -53,18 +53,18 @@ failure opens or updates one tracking issue; a green run closes it.
 
 ## Found while building it
 
-- **The current installer cannot install `v0.17.0`, its own baked default, on
-  macOS.** `v0.17.0` and every earlier macOS archive keep
-  `mvmctl.entitlements` under `resources/`, and `install.sh` requires
-  `assets/mvmctl.entitlements`, so it refuses with "missing entitlement
-  profile". The pre-#3346 installer had the same requirement. So the documented
-  one-liner fails on Apple Silicon until the baked default moves to a release
-  with `assets/`. The lane tolerates this refusal only for releases older than
-  the baked default, and only when the archive really lacks the profile named,
-  so the macOS `v0.17.0` cells are red until then.
-- **Rocky Linux 9 cannot run any recent release.** `mvmctl` and
+- **The current installer could not install `v0.17.0`, its own baked default,
+  on macOS.** The lane found that `v0.17.0` and earlier archives keep
+  `mvmctl.entitlements` under `resources/`. Issue #3370 is now fixed: the
+  installer adopts that legacy profile into `assets/`. Archive facts inspect
+  both locations, the strict resources-layout fixture must install, and a
+  refusal is tolerated only for an explicitly non-strict release whose archive
+  genuinely lacks the named profile.
+- **Rocky Linux 9 cannot run the pre-static releases.** `mvmctl` and
   `mvm-host-agent` from `v0.17.0` and `v0.18.0-rc.1` require `GLIBC_2.39`;
-  Rocky 9 ships 2.34. The distro lane is red on both Rocky cells by design.
+  Rocky 9 ships 2.34. Those immutable artifacts remain visible as exact-tag
+  historical baselines after #3371; any later release with a loader error
+  still makes the distro lane red.
 - **The documented version pin did not pin.** `MVM_VERSION=v0.16.1 curl … | sh`
   sets the variable for `curl`, not for `sh`, so it installed the default
   release. Fixed in `install/linux.md`, `install/macos.md`,

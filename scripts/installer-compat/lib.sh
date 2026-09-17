@@ -59,6 +59,16 @@ facts_of() {
   printf '%s\n' "$1" | sed -n "s/^$2 //p"
 }
 
+# Whether a whitespace-delimited list contains one exact word. Compatibility
+# baselines use release tags, so a prefix or prerelease-neighbour must not
+# inherit another tag's exception.
+word_list_contains() {
+  case " $1 " in
+    *" $2 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # A prefix laid out the way a user's would be: an install dir already holding
 # files that are not mvm's, which every install and uninstall must leave alone.
 make_prefix() {

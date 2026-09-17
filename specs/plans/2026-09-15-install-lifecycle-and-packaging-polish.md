@@ -134,18 +134,20 @@ Issue: [#3273](https://github.com/tinylabscom/mvm/issues/3273).
       staying on `-unknown-linux-gnu` costs us versus musl.
       Same workflow, `distro` job, x86_64 and aarch64. First measurement:
       `v0.17.0` and `v0.18.0-rc.1` require `GLIBC_2.39`, so Rocky 9 (2.34)
-      cannot run them.
+      cannot run them. Those immutable pre-static artifacts remain reported as
+      a narrow historical baseline; every later release fails the lane on a
+      loader error.
 - [x] A cold first-run smoke on Linux that executes the exact commands from
       `public/src/content/docs/install/linux.md`, triggered by edits to that
       page or to `install.sh`. The macOS equivalent can only cover install plus
       `doctor` until a self-hosted Apple Silicon runner exists (#3011).
       Same workflow, `docs-smoke` job. The macOS install-plus-`doctor` half is
       the `installer` job on `macos-latest`.
-- [ ] The current installer cannot install `v0.17.0`, its baked default, on
-      macOS: that archive keeps its entitlement profile under `resources/`, not
-      `assets/`. Surfaced by the `installer` lane; fix by moving the baked
-      default to a release with `assets/`, or by teaching `install.sh` the old
-      location.
+- [x] Install `v0.17.0`, the baked default, on macOS even though that archive
+      keeps its entitlement profile under `resources/`, not `assets/` (#3370).
+      The installer adopts legacy profiles into the canonical `assets/`
+      location, and the compat facts/test suite distinguishes that supported
+      layout from an archive that genuinely lacks the required profile.
 
 ## WS7 — Nix hygiene
 

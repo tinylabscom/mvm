@@ -10,7 +10,9 @@
 # is reported per binary even when install.sh then refuses — which it does,
 # because it runs the staged mvmctl before switching to it.
 #
-# Exits non-zero on any loader error, failed install, or wrong version.
+# Exits non-zero on any unexpected loader error, failed install, or wrong
+# version. TOLERATED_LOADER_RELEASES may name immutable historical releases
+# whose already-published loader failure is recorded but cannot be repaired.
 set -eu
 
 [ "$#" -ge 2 ] || { echo "usage: $0 <install.sh> \"<tags>\" [summary-file]" >&2; exit 2; }
@@ -19,8 +21,16 @@ TAGS="$2"
 SUMMARY="${3:-/dev/null}"
 REPO="${COMPAT_REPO:-tinylabscom/mvm}"
 DOWNLOAD_BASE="${MVM_UPDATE_DOWNLOAD_URL:-https://github.com}"
+TOLERATED_LOADER_RELEASES="${TOLERATED_LOADER_RELEASES:-}"
+
+# shellcheck source=scripts/installer-compat/lib.sh
+. "$(dirname "$0")/lib.sh"
 
 say() { printf '[distro] %s\n' "$*"; }
+warning() {
+  printf '[distro] WARNING: %s\n' "$*" >&2
+  printf '::warning::%s\n' "$*"
+}
 error() {
   printf '[distro] ERROR: %s\n' "$*" >&2
   # Workflow commands are read from the container's stdout too.
@@ -69,6 +79,10 @@ requirements="$(cd "$(dirname "$0")" && pwd -P)/glibc-requirements.sh"
 status=0
 rows=""
 for tag in $TAGS; do
+  tolerate_loader=0
+  if word_list_contains "$TOLERATED_LOADER_RELEASES" "$tag"; then
+    tolerate_loader=1
+  fi
   work="$(mktemp -d)"
   archive="$work/archive.tar.gz"
   if ! curl -fsSL --retry 3 --retry-delay 2 -o "$archive" \
@@ -95,7 +109,12 @@ for tag in $TAGS; do
     missing="$(printf '%s\n' "$report" | sed -n 's/^missing //p' | tr '\n' ' ')"
     if [ -n "$missing" ]; then
       loader_errors="$loader_errors $name needs ${missing% };"
-      error "$tag on $DISTRO ($GLIBC): $name fails to load — ${missing% } not found"
+      message="$tag on $DISTRO ($GLIBC): $name fails to load — ${missing% } not found"
+      if [ "$tolerate_loader" = "1" ]; then
+        warning "$message (immutable pre-static release)"
+      else
+        error "$message"
+      fi
     fi
   done
 
@@ -110,11 +129,15 @@ for tag in $TAGS; do
   if [ "$installed" -ne 0 ]; then
     cat "$work/install.log"
     outcome="install failed"
-    status=1
     loader_line="$(grep -m1 "GLIBC_[0-9.]*' not found" "$work/install.log" || true)"
-    if [ -n "$loader_line" ]; then
+    if [ -n "$loader_line" ] && [ "$tolerate_loader" = "1" ]; then
+      outcome="known loader incompatibility (immutable pre-static release)"
+      warning "$tag: install.sh cannot run mvmctl on $DISTRO: $loader_line"
+    elif [ -n "$loader_line" ]; then
+      status=1
       error "$tag: install.sh could not run mvmctl on $DISTRO: $loader_line"
     else
+      status=1
       error "$tag: install.sh failed on $DISTRO (exit $installed)"
     fi
   else
@@ -146,7 +169,7 @@ for tag in $TAGS; do
     fi
   fi
 
-  if [ -n "$loader_errors" ]; then
+  if [ -n "$loader_errors" ] && [ "$tolerate_loader" != "1" ]; then
     status=1
   fi
   rows="$rows| \`$tag\` | $DISTRO | $GLIBC | ${highest:-unknown} | ${loader_errors:-none} | $outcome |
