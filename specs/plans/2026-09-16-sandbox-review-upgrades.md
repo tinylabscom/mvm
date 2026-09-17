@@ -91,11 +91,11 @@ and `save_machine_spec` (`crates/mvm-runtime/src/machine/persist.rs:107-119`)
 check whether the spec exists and then rename a temp file over it. Two creates
 that run together both succeed, and the second overwrites the first.
 
-- [ ] W2.1 Make the non-force create exclusive at the filesystem (a
+- [x] W2.1 Make the non-force create exclusive at the filesystem (a
       no-clobber persist, or `create_new`), and map "already exists" to
       `MvmError::Conflict`.
-- [ ] W2.2 Leave `--force` and `overwrite_machine_spec` unchanged.
-- [ ] W2.3 Test: N concurrent creates of one name produce exactly one success.
+- [x] W2.2 Leave `--force` and `overwrite_machine_spec` unchanged.
+- [x] W2.3 Test: N concurrent creates of one name produce exactly one success.
       The existing reconcile tests still pass.
 
 ## W3 — Keep file ownership in container-layer rootfs images (#3380)
