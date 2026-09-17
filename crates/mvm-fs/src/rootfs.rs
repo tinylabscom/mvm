@@ -458,9 +458,9 @@ fn collect_walk_entries(
 /// and guest-visible extended attributes because both affect the emitted
 /// image. Timestamps are excluded because the deterministic writer zeroes
 /// them. A host walk yields root-owned nodes whatever the host ids are, so the
-/// host's uid and gid never reach the identity. The walk shares enumeration and policy handling
-/// with [`collect_nodes`] so a cache key cannot silently accept an inode the
-/// materializer rejects.
+/// host's uid and gid never reach the identity. The walk shares enumeration
+/// and policy handling with [`collect_nodes`] so a cache key cannot silently
+/// accept an inode the materializer rejects.
 pub fn fingerprint_ext4_source(
     root: &Path,
     options: WalkOptions,
