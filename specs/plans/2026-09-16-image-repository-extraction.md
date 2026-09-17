@@ -353,6 +353,49 @@ Acceptance: tampering, wrong repository/workflow identity, wrong architecture,
 partial sets, incompatible protocol ranges, replayed superseded metadata, and
 revoked packs all have negative tests.
 
+Design constraints found while scoping (inventory taken 2026-09-17):
+
+- **Reuse the pack model; do not add a third manifest.** `mvm_core::packs::PackManifest`
+  is already strict (`deny_unknown_fields`), arch-typed, content-hashed, signed
+  (ed25519 or keyless) and carries inputs, SBOM references and trust metadata.
+  `crypto::image_verify::SignedManifest` and its `RevocationList` are a second,
+  string-typed model whose only caller is an example binary. The image set is a
+  signed index over member packs — each member names its role, guest
+  architecture, boot protocol and `pack_hash` — and the unused model is removed
+  rather than kept beside it.
+- **Guest contract, not host.** Selection keys are guest architecture, boot
+  protocol, artifact format and required capabilities. Backends declare what
+  they satisfy; no member is named after a host OS, and no Windows variant is
+  added until a backend and native witness exist.
+- **Compatibility before boot.** Today the guest-agent protocol range is checked
+  only at the vsock handshake, after boot, and the builder image is gated only
+  by an exact `cache_contract_version`. The set declares its protocol ranges and
+  the host refuses a non-overlapping set before acquisition.
+- **One lock, generated consumers.** The boot-image tag is hand-kept in at least
+  eight places (the Rust default, a second copy in the Stage 0 kernel pin, CI
+  workflows, tests, and a Nix `getEnv`), and two workflows plus a script select
+  the QEMU-wasm smoke pack by "latest", which trust invariant 7 forbids. The
+  existing checked-in value → `build.rs` → compile-time constant path
+  (`[workspace.metadata.mvm.toolchain]`) and `xtask release-boot-image tag`
+  are the mechanisms to extend.
+- **Revocation channel is not live.** No runtime path fetches a revocation list
+  and the `revocations` release has never been published, so the revocation
+  check is built and negatively tested here but enabling it on the fetch path is
+  gated on W6 publishing a signed list.
+
+Delivery slices, one PR each:
+
+- [x] W3a — image-set manifest and lock types, pure validation (completeness,
+      architecture, boot protocol, capabilities, protocol range, supersession),
+      round-trip and negative tests. `mvm_core::image_set`; semver parsing
+      consolidated into `mvm_core::release_version`, shared with the updater.
+- [ ] W3b — offline verification of a signed set against the lock identity and
+      digest, member pack and artifact digests, and revocation; retire
+      `image_verify::SignedManifest` / `RevocationList`.
+- [ ] W3c — the checked-in lock, generated tag/identity/Stage 0 pins, an xtask
+      gate over workflow and script copies, and removal of "latest" selection.
+- [ ] W3d — an offline verifier command over manifest, bundle and artifacts.
+
 ### W4 — Move image sources and reproduce current bytes (#3362)
 
 - [ ] Inventory the exact image-owned paths and shared helper edges.

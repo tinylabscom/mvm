@@ -60,6 +60,9 @@ pub mod icmp_wire;
 /// Content-addressed image version-lineage nodes (the image analog of
 /// [`checkpoint`]). Provenance metadata, never authorization.
 pub mod image_lineage;
+/// The signed, atomic image set: a manifest indexing every member pack, the
+/// lock that pins one set, and the pure checks that gate a set before boot.
+pub mod image_set;
 /// Ingress secret redaction (mask known secret values before they reach the guest).
 pub mod ingress_redaction;
 /// `mvm-init` supervisor core logic: metadata → exec spec, marker progression.
@@ -105,6 +108,10 @@ pub mod pii;
 /// templates a stock binary trusts for its own release packs, with
 /// version interpolation.
 pub mod release_trust;
+/// Semver parsing and precedence for released versions, shared by the
+/// updater and the image-set identities.
+pub mod release_version;
+pub use release_version::{ReleaseVersion, VersionSyntax};
 /// UOR-ADDR-compatible canonical content identity for the Workload IR,
 /// distinct from every exact-byte, trust, and replay identity type.
 pub mod workload_address;
