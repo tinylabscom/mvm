@@ -47,3 +47,7 @@ references alongside paths and `https://` URLs.
   credential-free URL or path).
 - Tests use an in-process registry (`mvm_fs::oci::test_registry`, behind
   `test-support`). Only that fixture was exercised; no hosted registry was.
+- Documented `bundle push` examples are classified at the parse verification
+  tier: the documentation harness proves their CLI shape while the in-process
+  registry tests cover execution without requiring a live registry in the
+  documentation suite.
