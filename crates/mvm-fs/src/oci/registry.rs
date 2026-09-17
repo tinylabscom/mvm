@@ -101,7 +101,7 @@ impl Origin {
 }
 
 /// A token a challenge issued is good for one repository on one registry.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct TokenKey {
     origin: Origin,
     repository: String,
