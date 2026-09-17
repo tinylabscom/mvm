@@ -252,16 +252,16 @@ failure as plain text, although `MvmError` already classifies it. And
 `mvmctl machine run <image-ref> -- <cmd>` treats a misplaced image reference as
 the command, with no hint.
 
-- [ ] W10.1 Add a stable `code` and a `retryable` flag, derived from the
+- [x] W10.1 Add a stable `code` and a `retryable` flag, derived from the
       `MvmError` variant, to every tool error's `_meta`.
-- [ ] W10.2 With no image source flag, refuse a first command word that parses
+- [x] W10.2 With no image source flag, refuse a first command word that parses
       as an image reference, and suggest `--image`.
-- [ ] W10.3 Refuse a known run flag placed after `--`, taking the flag list from
+- [x] W10.3 Refuse a known run flag placed after `--`, taking the flag list from
       the argument parser's own definitions.
-- [ ] W10.4 Tests:
-  - [ ] one tool server test per `MvmError` variant;
-  - [ ] CLI tests for both refusals;
-  - [ ] a colon-bearing command still runs when an image source is given.
+- [x] W10.4 Tests:
+  - [x] one tool server test per `MvmError` variant;
+  - [x] CLI tests for both refusals;
+  - [x] a colon-bearing command still runs when an image source is given.
 
 ## Definition of done for each workstream
 

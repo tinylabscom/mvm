@@ -428,6 +428,21 @@ With no `--image` / `--manifest` / `--flake` / `--deployment` / `--runtime-pack`
 | `ruby`   | `ruby:3-alpine`      | `ruby`, `bundle`, `rake`, `gem`              | `Gemfile`, `Rakefile`                                       |
 | `shell`  | `alpine:3`           | `sh`, `bash`, `ash`                          | —                                                           |
 
+If no source flag is given and step 6 is reached, `mvmctl run` and
+`machine run` also refuse a first command word that reads as an OCI image
+reference — a tag colon, a digest, or an explicit registry host before a
+`/`, and not a path — rather than silently running it as the guest's
+command: `mvmctl machine run app:1.0 -- sh` refuses with a hint to pass
+`--image app:1.0`. Any source flag skips this check entirely, so a
+legitimate command whose first word happens to contain a colon still runs.
+
+Separately, a known run flag (`--image`, `--net`, …) placed as the very
+first word after `--` is refused and named rather than passed to the guest
+verbatim: `trailing_var_arg` never reinterprets anything after `--` as an
+option, so `mvmctl run -- --image alpine` would otherwise hand `--image` to
+the guest silently. Only that first position is checked; the same flag name
+appearing deeper in a workload's own argv is left alone.
+
 An inferred source always announces itself on stderr before booting
 (`[mvm] detected node from the command `npm` — booting node:22-alpine`), so a
 run never boots an image you did not choose without saying so. `--json` stdout
