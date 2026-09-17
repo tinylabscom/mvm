@@ -202,8 +202,12 @@ Last updated: 2026-09-16
       `specs/sprint/delivery/3011-macos-e2e-on-self-hosted-apple-silicon.md`).
       The first post-merge trusted run is green on the runner (release run
       `35151392843`: 309/310 passed, every non-run on the macOS allow-list) and
-      #3011 is closed. Still open: a mechanical fork-isolation proof, and a
-      witness that the release caller blocks on a red live macOS job.
+      #3011 is closed. A red live macOS job is witnessed to refuse the release
+      gate without the evidence record standing in (run `35164778251`), and a
+      test now fails if an untrusted event can reach the `m1` label. Accepted
+      limit: a fork PR that edits a workflow to name the label is stopped only by
+      the approval policy, because the Free plan offers no runner groups
+      (checked 2026-09-16).
 
 - [x] **Linux 6.12.109 synchronized kernel pin — issue #3213.**
       `2026-09-08-kernel-6-12-109`.
