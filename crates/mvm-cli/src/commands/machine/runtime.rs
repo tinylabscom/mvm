@@ -365,7 +365,13 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
     let machine_name = resolve_entrypoint_machine_name(&args)?;
     // Resolve `--net` / `--allow-host` into the egress policy exactly as the
     // transient argv path does, so a baked entrypoint enforces the same posture.
-    let network_policy = shared::resolve_run_network_policy(args.run.net, &args.run.allow_host)?;
+    let network_policy = shared::resolve_run_network_policy_with_preset_and_peers(
+        args.run.net,
+        args.run.network_preset,
+        &args.run.allow_host,
+        &[],
+    )?
+    .with_ai(shared::resolve_ai_policy(args.run.ai_token_budget));
     let stdin = resolve_entrypoint_stdin(args.stdin.as_deref())?;
     invoke::run_entrypoint(invoke::EntrypointCall {
         source,
@@ -725,6 +731,7 @@ mod network_surface_tests {
         mvm_contract::ir::Network {
             mode: mvm_contract::ir::NetworkMode::Bridge,
             ports: vec![],
+            preset: None,
             egress: None,
             peers: vec![],
             dns: None,

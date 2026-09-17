@@ -310,6 +310,31 @@ class NetworkMode2:
 NetworkMode = Union[NetworkMode1, NetworkMode2]
 
 
+class NetworkPreset1(Enum):
+    unrestricted = 'unrestricted'
+
+
+class NetworkPreset2(Enum):
+    none = 'none'
+
+
+class NetworkPreset3(Enum):
+    registries = 'registries'
+
+
+class NetworkPreset4(Enum):
+    dev = 'dev'
+
+
+class NetworkPreset5(Enum):
+    agent = 'agent'
+
+
+NetworkPreset = Union[
+    NetworkPreset1, NetworkPreset2, NetworkPreset3, NetworkPreset4, NetworkPreset5
+]
+
+
 class NodeTool1(Enum):
     pnpm = 'pnpm'
 
@@ -524,6 +549,7 @@ class Network:
     egress: Optional[NetworkEgress] = None
     peers: Optional[List[str]] = None
     ports: Optional[List[PortForward]] = field(default_factory=lambda: [])
+    preset: Optional[NetworkPreset] = None
 
 
 @dataclass

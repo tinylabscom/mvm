@@ -1,5 +1,5 @@
 use crate::ir::{HostPort, Network, NetworkDns, NetworkEgress, NetworkMode, PortForward};
-use mvm_contract::policy::network_policy::AiPolicy;
+use mvm_contract::policy::network_policy::{AiPolicy, NetworkPreset};
 
 /// Network policy with the given mode. Use [`NetworkExt`] chained
 /// setters to declare ports, egress allowlist, peers, and DNS.
@@ -7,6 +7,7 @@ pub fn network(mode: NetworkMode) -> Network {
     Network {
         mode,
         ports: Vec::new(),
+        preset: None,
         egress: None,
         peers: Vec::new(),
         dns: None,
@@ -18,6 +19,7 @@ pub fn network(mode: NetworkMode) -> Network {
 /// `use mvm_sdk::*;`.
 pub trait NetworkExt: Sized {
     fn with_port(self, port: PortForward) -> Self;
+    fn with_preset(self, preset: NetworkPreset) -> Self;
     fn with_egress(self, egress: NetworkEgress) -> Self;
     fn with_peers<I, S>(self, peers: I) -> Self
     where
@@ -33,7 +35,14 @@ impl NetworkExt for Network {
         self
     }
 
+    fn with_preset(mut self, preset: NetworkPreset) -> Self {
+        self.preset = Some(preset);
+        self.egress = None;
+        self
+    }
+
     fn with_egress(mut self, egress: NetworkEgress) -> Self {
+        self.preset = None;
         self.egress = Some(egress);
         self
     }
@@ -100,5 +109,18 @@ mod tests {
         let policy = AiPolicy::metered_with_total_budget(10_000);
         let net = network(NetworkMode::Bridge).with_ai(policy.clone());
         assert_eq!(net.ai, Some(policy));
+    }
+
+    #[test]
+    fn preset_and_explicit_egress_replace_each_other() {
+        let net = network(NetworkMode::Bridge)
+            .with_egress(egress([host_port("example.com", 443)]))
+            .with_preset(NetworkPreset::Agent);
+        assert_eq!(net.preset, Some(NetworkPreset::Agent));
+        assert!(net.egress.is_none());
+
+        let net = net.with_egress(egress([host_port("example.com", 443)]));
+        assert!(net.preset.is_none());
+        assert!(net.egress.is_some());
     }
 }

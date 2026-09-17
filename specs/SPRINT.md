@@ -4080,3 +4080,18 @@ writes the plan:
 - [x] Complete the required focused, workspace, gated-target, generated-stub,
       and hermetic BDD validation matrix.
 - [ ] Merge through the queue and close #3263 from landed evidence.
+
+## 2026-09-17 agent network and AI budget surfaces
+
+- [x] Expose maintained network presets and a positive AI token budget on
+      `machine run`, rejecting the unrestricted preset and conflicting explicit
+      network flags.
+- [x] Carry the preset and AI policy through admission, dry-run receipts,
+      entrypoint dispatch, persistent machine restart, and Workload IR.
+- [x] Add matching Rust, Python, and TypeScript SDK construction and validation,
+      regenerate the schema-derived bindings, and remove the undispatched
+      legacy `up` network fields.
+- [x] Complete focused SDK/CLI/IR coverage, the full workspace suite, Clippy,
+      explicit HVF/Firecracker receipt coverage, Linux builder-VM Clippy,
+      gated-target checks, generated-artifact checks, and all repository gates.
+- [ ] Merge through the queue and close #3287 from landed evidence.

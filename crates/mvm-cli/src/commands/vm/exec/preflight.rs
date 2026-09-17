@@ -46,6 +46,8 @@ pub(super) struct RunPreflightReceipt {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct RunPreflightInvocation {
     pub(super) profile: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) ai_token_budget: Option<u64>,
     /// Requested egress posture the run would boot with.
     pub(super) network_posture: String,
     /// Honest per-backend enforcement fidelity for that posture (see
@@ -145,11 +147,15 @@ impl RunPreflightSummary {
 
         // Report the backend the real run would auto-select, so the dry-run's
         // enforcement tier matches what an actual boot would record.
-        let policy = super::super::shared::resolve_run_network_policy_with_peers(
+        let policy = super::super::shared::resolve_run_network_policy_with_preset_and_peers(
             args.net,
+            args.network_preset,
             &args.allow_host,
             &args.peer,
-        )?;
+        )?
+        .with_ai(super::super::shared::resolve_ai_policy(
+            args.ai_token_budget,
+        ));
         let backend = match backend_override {
             Some(backend) => backend.to_string(),
             None => crate::exec::select_exec_backend(
@@ -168,6 +174,7 @@ impl RunPreflightSummary {
             will_execute: false,
             invocation: RunPreflightInvocation {
                 profile: receipt_input.profile,
+                ai_token_budget: receipt_input.ai_token_budget,
                 network_posture: receipt_input.network_posture,
                 egress_enforcement: receipt_input.egress_enforcement,
                 peers: policy
@@ -223,6 +230,9 @@ pub(super) fn print_run_preflight_human(summary: &RunPreflightSummary) {
         summary.resources.timeout_secs
     );
     println!("profile: {}", summary.invocation.profile);
+    if let Some(tokens) = summary.invocation.ai_token_budget {
+        println!("ai token budget: {tokens}");
+    }
     println!("network: {}", summary.invocation.network_posture);
     if !summary.invocation.peers.is_empty() {
         println!("peers: {}", summary.invocation.peers.join(", "));

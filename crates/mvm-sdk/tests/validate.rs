@@ -236,6 +236,7 @@ fn rejects_network_none_with_ports() {
         egress: None,
         peers: vec![],
         dns: None,
+        preset: None,
         ai: None,
     });
     let errs = validate(&w).unwrap_err();
@@ -251,6 +252,7 @@ fn accepts_network_none_with_empty_ports() {
         egress: None,
         peers: vec![],
         dns: None,
+        preset: None,
         ai: None,
     });
     validate(&w).unwrap();
@@ -274,6 +276,7 @@ fn accepts_bridge_network_with_ports() {
         egress: None,
         peers: vec![],
         dns: None,
+        preset: None,
         ai: None,
     });
     validate(&w).unwrap();
@@ -300,6 +303,7 @@ fn workload_with_ingress(ports: Vec<PortForward>) -> Workload {
         egress: None,
         peers: vec![],
         dns: None,
+        preset: None,
         ai: None,
     });
     workload
@@ -388,6 +392,7 @@ fn function_workload_rejects_host_network_mode() {
         peers: vec![],
         egress: None,
         dns: None,
+        preset: None,
         ai: None,
     });
     let errs = validate(&w).unwrap_err();
@@ -449,6 +454,7 @@ fn function_workload_with_bridge_network_validates() {
         peers: vec![],
         egress: None,
         dns: None,
+        preset: None,
         ai: None,
     });
     validate(&w).unwrap();
@@ -466,6 +472,7 @@ fn command_workload_with_host_network_still_validates() {
         peers: vec![],
         egress: None,
         dns: None,
+        preset: None,
         ai: None,
     });
     validate(&w).unwrap();
@@ -534,6 +541,7 @@ fn rejects_host_network_on_function_entrypoint() {
         egress: None,
         peers: vec![],
         dns: None,
+        preset: None,
         ai: None,
     });
     let errs = validate(&w).unwrap_err();
@@ -557,6 +565,7 @@ fn allows_host_network_on_command_entrypoint() {
         egress: None,
         peers: vec![],
         dns: None,
+        preset: None,
         ai: None,
     });
     validate(&w).unwrap();
@@ -731,6 +740,7 @@ fn rejects_wildcard_host_in_egress_allowlist() {
         }),
         peers: vec![],
         dns: None,
+        preset: None,
         ai: None,
     });
     let errs = validate(&w).unwrap_err();
@@ -749,6 +759,7 @@ fn rejects_invalid_peer_id() {
         egress: None,
         peers: vec!["Bad Peer".to_string()],
         dns: None,
+        preset: None,
         ai: None,
     });
     let errs = validate(&w).unwrap_err();
@@ -772,6 +783,7 @@ fn accepts_well_formed_egress_and_peers() {
         }),
         peers: vec!["sibling-worker".into()],
         dns: None,
+        preset: None,
         ai: None,
     });
     validate(&w).expect("well-formed granular grants should pass");

@@ -38,7 +38,7 @@ invariant. This plan closes both halves.
 | G14 | Secrets reach a workload only through `machine run --entrypoint --from-workload-ir`; transient, persistent and session paths hardcode an empty list, and PID 1 never gets a placeholder | `crates/mvm-cli/src/exec.rs:724`, `commands/vm/up/oci_persist.rs:223`, `exec/session.rs:1036` | WS-S |
 | G15 | Resolved: a kept-alive entrypoint machine preserves the requested `--name`, and its completion notice identifies both the machine and session | `crates/mvm-cli/src/commands/machine/runtime.rs`, `commands/vm/invoke.rs`, `exec/session.rs` | WS-S |
 | G16 | `secret.substituted` is written only when the upstream response completes; a forward that fails after the credential was sent leaves no substitution entry | `crates/mvm-hostd/src/supervisor/network_endpoint_proxy.rs:1944-1963,2524-2540` | WS-S |
-| G17 | The `agent` network preset and the AI token budget cannot be turned on from any dispatched flag | `crates/mvm-cli/src/commands/shared/resolve.rs:192-202`; `network_policy.rs:376-420` (`ai: None`) | WS-S |
+| G17 | Resolved: `machine run` exposes the safe named network presets and a positive AI token budget, and both are represented in Workload IR and the language SDKs | `crates/mvm-cli/src/commands/vm/exec.rs`; `crates/mvm-contract/src/ir/workload.rs`; `crates/mvm-sdk/` | WS-S |
 | G18 | Two guest egress entry points with different capabilities: a `CONNECT`/SOCKS relay on 1080 that cannot substitute, and a forward proxy on 18080 that cannot `CONNECT` | `crates/mvm-agentd/src/forward_proxy.rs`; `commands/vm/invoke.rs:1339-1350` | WS-S |
 
 ## What already works and is not rebuilt here
@@ -46,8 +46,8 @@ invariant. This plan closes both halves.
 - `NetworkPreset::Agent` allow-lists the model API hosts
   (`crates/mvm-contract/src/policy/network_policy.rs`).
 - An AI token-budget policy type exists at the per-VM endpoint
-  (`crates/mvm-hostd/src/supervisor/network_endpoint_proxy.rs`), though no
-  user can configure it today (G17).
+  (`crates/mvm-hostd/src/supervisor/network_endpoint_proxy.rs`) and is now
+  configurable from `machine run` and Workload IR (G17).
 - Credential substitution for absolute-form HTTP requests: placeholder mint
   (`crates/mvm-core/src/keyholder/substitution.rs`), host bindings from
   `mvmctl secret set` enforced at admission
@@ -194,7 +194,7 @@ retires the second guest proxy (#3288).
 - [ ] T10. One secret-resolution step shared by every admission path (#3284),
       and decide PID 1: wire the boot-time token or delete its guest parser.
 - [x] T11. Honor `--name` on the kept-alive entrypoint path (#3285).
-- [ ] T12. Expose the agent preset and the token budget, or delete them, and
+- [x] T12. Expose the agent preset and the token budget, or delete them, and
       delete the unreachable network fields on the undispatched verb (#3287).
 - [ ] T13. Witnesses in `crates/mvm-hostd/tests/connect_substitution_witness.rs`,
       modelled on the wasm egress witness (real gate, registry and recorder;

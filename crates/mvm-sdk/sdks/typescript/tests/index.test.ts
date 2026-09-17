@@ -217,6 +217,23 @@ describe("network()", () => {
     expect(n.ports).toHaveLength(1);
     expect(n.ports?.[0]?.guest).toBe(8080);
   });
+
+  it("exposes the agent preset and AI token budget", () => {
+    const n = mvm.network({
+      mode: "bridge",
+      preset: "agent",
+      ai: mvm.aiPolicy({ budget: mvm.aiBudget({ maxTotalTokens: 12_000 }) }),
+    });
+    expect(n.preset).toBe("agent");
+    expect(n.ai?.budget?.max_total_tokens).toBe(12_000);
+  });
+
+  it("rejects a preset combined with explicit egress", () => {
+    expect(() => mvm.network({
+      preset: "agent",
+      egress: { allowlist: [{ host: "example.com", port: 443 }] },
+    })).toThrow("mutually exclusive");
+  });
 });
 
 describe("workload() guards", () => {

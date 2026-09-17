@@ -107,7 +107,10 @@ Last updated: 2026-09-17
       transport in favour of one versioned C ABI from a new top-of-graph
       crate. The stale `host.secrets.v1` claim authority is resolved: claim 13
       and the SDK sidecar catalog now name the live substitution endpoint and
-      shipped typed services respectively.
+      shipped typed services respectively. WS-S T12 is complete: `machine run`
+      and Workload IR expose the agent preset and AI token budget across Rust,
+      Python, and TypeScript, while the undispatched legacy network fields are
+      removed (#3287).
 
 - [ ] **Workload display plane.**
       `specs/plans/2026-09-15-workload-display-plane.md`. Epic #3276.

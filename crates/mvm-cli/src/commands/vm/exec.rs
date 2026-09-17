@@ -274,11 +274,17 @@ pub(in crate::commands) struct RunArgs {
     #[arg(long, conflicts_with = "runtime")]
     pub no_detect: bool,
     /// Enable outbound networking (off by default).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "network_preset")]
     pub net: bool,
+    /// Select a maintained outbound-network preset.
+    #[arg(long, value_name = "PRESET", value_parser = super::shared::parse_run_network_preset, conflicts_with_all = ["net", "allow_host"])]
+    pub network_preset: Option<mvm_core::network_policy::NetworkPreset>,
     /// Allow outbound access to HOST[:PORT] (repeatable).
     #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
     pub allow_host: Vec<String>,
+    /// Cap total AI tokens for this run.
+    #[arg(long, value_name = "TOKENS", value_parser = clap::value_parser!(u64).range(1..))]
+    pub ai_token_budget: Option<u64>,
     /// Bind a peer route this workload may dial (repeatable).
     #[arg(long = "peer", value_name = "NAME:PORT=ADDR:PORT")]
     pub peer: Vec<String>,
@@ -469,7 +475,9 @@ impl Default for RunArgs {
             runtime: None,
             no_detect: false,
             net: false,
+            network_preset: None,
             allow_host: Vec::new(),
+            ai_token_budget: None,
             peer: Vec::new(),
             // Must track the clap default, which is resolved from the backend
             // this host selects — a test pins the two together, because a
@@ -645,28 +653,22 @@ pub(in crate::commands) fn run_secure_with_source(
         }
         return Ok(());
     }
-    // Settled before anything is resolved or booted, so an output with nowhere
-    // to land is refused first, and before the admit closure: the grants it
-    // signs and the disks the request attaches have to name the same images.
+    // Prepare outputs before admission binds them to the grant.
     let outputs = super::outputs::PreparedOutputs::prepare(&args.outputs, &args.mounts)?;
     let admit_outputs = outputs.grants();
-    // One policy model for every backend: resolve the grant surfaces here —
-    // which settles the egress policy in the same step — and thread the result
-    // down both the json/receipt and the streaming paths.
     let host_config = mvm_core::user_config::load(None);
+    let ai_policy = super::shared::resolve_ai_policy(args.ai_token_budget);
     let resolved_grants = super::shared::resolve_run_grants(super::shared::GrantInputs {
         cpu_limit_millicores: args.cpu_limit,
         timeout_secs: args.timeout,
         allow_host: &args.allow_host,
         peer: &args.peer,
         net: args.net,
+        network_preset: args.network_preset,
         grants_file: args.grants_file.as_deref(),
-        // A transient run names its image on the command line and reads no
-        // project manifest; `machine create` is the verb that sources a
-        // `[grants]` table.
         manifest: None,
         config: &host_config,
-        ai: None,
+        ai: ai_policy.as_ref(),
     })?;
     let network_policy = resolved_grants.network_policy.clone();
 
@@ -1343,12 +1345,10 @@ struct ReceiptInput {
     /// Requested egress posture (`deny-all`, `preset:dev`,
     /// `allow-list:host:port,...`). Non-sensitive; the signature covers it.
     network_posture: String,
-    /// How faithfully the resolved backend actually enforces that posture
-    /// (`flow-drop`, `open`, `<backend>:l4-host-port`). Recorded so the signed
-    /// receipt cannot overstate enforcement fidelity — a host:port allow-list is
-    /// now port-gated on every backend (Firecracker nftables; libkrun/HVF via the
-    /// admission-time DNS pin → L4 scan). See `shared::egress_enforcement_label`.
+    /// Backend enforcement fidelity, recorded in the signed receipt.
     egress_enforcement: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ai_token_budget: Option<u64>,
     command: ReceiptCommand,
     env_keys: Vec<String>,
     mounts: Vec<ReceiptMount>,
@@ -1399,13 +1399,13 @@ use preflight::{RunJsonSummary, RunPreflightSummary, print_run_preflight_human};
 
 impl ReceiptInput {
     fn from_run_args(args: &RunArgs, backend: &str) -> Result<Self> {
-        // Resolve the egress policy once: the requested posture and the honest
-        // per-backend enforcement tier are two views of the same policy.
-        let policy = super::shared::resolve_run_network_policy_with_peers(
+        let policy = super::shared::resolve_run_network_policy_with_preset_and_peers(
             args.net,
+            args.network_preset,
             &args.allow_host,
             &args.peer,
-        )?;
+        )?
+        .with_ai(super::shared::resolve_ai_policy(args.ai_token_budget));
         let command = if let Some(path) = &args.launch_plan {
             ReceiptCommand::LaunchPlan {
                 path_sha256: sha256_hex(path.as_bytes()),
@@ -1477,6 +1477,7 @@ impl ReceiptInput {
                 .to_string(),
             network_posture: policy.posture_label(),
             egress_enforcement: super::shared::egress_enforcement_label(backend, &policy),
+            ai_token_budget: args.ai_token_budget,
             command,
             env_keys,
             mounts,
@@ -1828,6 +1829,23 @@ mod tests {
         args.allow_host = vec!["api.example.com".into()];
         let r = ReceiptInput::from_run_args(&args, "firecracker").expect("receipt input");
         assert_eq!(r.network_posture, "allow-list:api.example.com:443");
+    }
+
+    #[test]
+    fn agent_preset_and_ai_budget_reach_hvf_and_firecracker_receipts() {
+        let mut args = run_args(RunProfile::Standard);
+        args.network_preset = Some(mvm_core::network_policy::NetworkPreset::Agent);
+        args.ai_token_budget = Some(12_000);
+
+        for backend in ["hvf", "firecracker"] {
+            let receipt = ReceiptInput::from_run_args(&args, backend).expect("receipt input");
+            assert_eq!(receipt.network_posture, "preset:agent");
+            assert_eq!(
+                receipt.egress_enforcement,
+                format!("{backend}:l4-host-port")
+            );
+            assert_eq!(receipt.ai_token_budget, Some(12_000));
+        }
     }
 
     #[test]

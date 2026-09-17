@@ -622,20 +622,27 @@ fn machine_run_spec(
         );
     };
     let config = mvm_core::user_config::load(None);
+    let ai = super::shared::resolve_ai_policy(args.run.ai_token_budget);
     let resolved = super::shared::resolve_run_grants(super::shared::GrantInputs {
         cpu_limit_millicores: args.run.cpu_limit,
         timeout_secs: args.run.timeout,
         allow_host: &args.run.allow_host,
         peer: &args.run.peer,
         net: args.run.net,
+        network_preset: args.run.network_preset,
         grants_file: args.run.grants_file.as_deref(),
         // A persistent `machine run` names its source on the command line and
         // reads no project manifest; `machine create` is the verb that sources
         // a `[grants]` table.
         manifest: None,
         config: &config,
-        ai: None,
+        ai: ai.as_ref(),
     })?;
+    let (net, allow_host) = super::shared::persisted_run_network(
+        args.run.net,
+        args.run.network_preset,
+        &args.run.allow_host,
+    );
     let _ = validate_machine_memory(&args.run.memory, None)?;
     let profile = run_profile_name(args.run.profile).to_string();
     Ok(MachineSpec {
@@ -646,10 +653,10 @@ fn machine_run_spec(
         deployment,
         resolved_digest: None,
         runtime_pack: args.run.runtime_pack,
-        net: args.run.net,
-        allow_host: args.run.allow_host.clone(),
+        net,
+        allow_host,
         peer: Vec::new(),
-        ai: None,
+        ai,
         ports: args.port.clone(),
         cpus: args.run.cpus,
         memory: args.run.memory.clone(),
@@ -1138,6 +1145,7 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         allow_host: &allow_host,
         peer: inputs.peer,
         net,
+        network_preset: None,
         grants_file: inputs.grants_file,
         manifest: workflow.map(|workflow| &workflow.grants),
         config: &config,
