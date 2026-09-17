@@ -169,6 +169,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
     let network_policy = shared::enforced_network_policy(
         spec.grants.as_ref().and_then(|g| g.egress.as_ref()),
         spec.net,
+        None,
         &spec.allow_host,
     )?
     .with_ai(spec.ai.clone());

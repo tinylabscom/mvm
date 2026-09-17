@@ -683,6 +683,7 @@ fn helper_to_network(v: Value, path: &Path, line: usize) -> Result<Network, Pars
     Ok(Network {
         mode,
         ports,
+        preset: None,
         egress: None::<NetworkEgress>,
         peers: vec![],
         dns: None,

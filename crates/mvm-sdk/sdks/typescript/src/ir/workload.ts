@@ -211,6 +211,10 @@ provider: string
 })
 export type PortProto = ("tcp" | "udp")
 export type PortTransform = ("opaque" | "http" | "tls")
+/**
+ * Built-in network presets for common workloads.
+ */
+export type NetworkPreset = ("unrestricted" | "none" | "registries" | "dev" | "agent")
 export type Source = ({
 exclude?: string[]
 include?: string[]
@@ -420,6 +424,10 @@ mode: NetworkMode
  */
 peers?: string[]
 ports?: PortForward[]
+/**
+ * Named egress posture. Mutually exclusive with `egress`; use a preset for a maintained service set or `egress` for an explicit allowlist.
+ */
+preset?: (NetworkPreset | null)
 }
 /**
  * AI-specific egress policy attached to a network grant.
