@@ -4,6 +4,11 @@ Last updated: 2026-09-16
 
 ## In progress
 
+- [ ] **Upgrades found by reviewing an external microVM sandbox.**
+      `specs/plans/2026-09-16-sandbox-review-upgrades.md`.
+      Issues #3378–#3387. W1 (restore reseed) first; W5 before W4; W8 is
+      measure-first and sequenced with #3360.
+
 - [x] **macOS builder auto-detection respects the HVF OS floor.**
       `specs/plans/2026-09-15-the-big-cleanup.md` K7, issue #3325. Apple
       Silicon alone no longer selects HVF on macOS 13–25; the existing macOS
