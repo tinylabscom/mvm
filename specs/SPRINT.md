@@ -265,7 +265,11 @@
       the architecture-specific and unaccelerated-build evidence. The same
       broad run exposed and fixed two process-global `MVM_HOME` races in the
       wasm endpoint-plan and broker-path witnesses; all 886 runtime library
-      tests now pass concurrently. The live hosted no-KVM run, documented-
+      tests now pass concurrently. The first endpoint-complete hosted
+      bootstrap passed Stage 0 launch but its source-kernel compilation was
+      cancelled by the 90-minute job wrapper before the builder's existing
+      120-minute deadline; the wrapper is now 180 minutes and structural tests
+      pin the two-budget relationship. The live hosted no-KVM run, documented-
       surface release gate, and merge delivery remain.
 - [x] **Alternative CLI help coverage performance.**
       `2026-09-03-bdd-help-coverage`.
