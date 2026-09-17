@@ -62,6 +62,7 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
+            build_target: aarch64-apple-darwin
             os: macos-latest
           # x86_64-apple-darwin (Intel mac) is DEFERRED. GitHub's macos-13
           # Intel runners are
@@ -71,9 +72,16 @@ jobs:
           # path supports Intel and an Intel runner is available. install.sh /
           # the Homebrew on_intel arm still point at
           # the (currently absent) asset.
+          # Keep the historical `*-unknown-linux-gnu` value in `target`: it is
+          # part of the public asset name that already-installed mvmctl
+          # versions request. `build_target` is deliberately musl so the
+          # payload inside that compatibly named archive runs on older glibc
+          # distributions too.
           - target: x86_64-unknown-linux-gnu
+            build_target: x86_64-unknown-linux-musl
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
+            build_target: aarch64-unknown-linux-musl
             os: ubuntu-latest
 
     runs-on: ${{ matrix.os }}
@@ -88,7 +96,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.97.1
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.build_target }}
 
       # ADR-065: mvm-cli's build.rs cross-compiles the embedded host-vm
       # binaries (mvm-host-vm-init, mvm-egress-proxy) as static
@@ -98,29 +106,19 @@ jobs:
       # fails at "cargo zigbuild failed for mvm-host-vm-init".
       - uses: ./.github/actions/install-zigbuild
 
-      - name: Install cross-compilation tools (Linux aarch64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-
-      - name: Set linker for aarch64-unknown-linux-gnu
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          mkdir -p .cargo
-          cat > .cargo/config.toml << 'EOF'
-          [target.aarch64-unknown-linux-gnu]
-          linker = "aarch64-linux-gnu-gcc"
-          EOF
-
       - name: Build release binary
         env:
-          TARGET: ${{ matrix.target }}
+          BUILD_TARGET: ${{ matrix.build_target }}
           # Use vendored OpenSSL for cross-compilation to avoid linking issues
           OPENSSL_STATIC: 1
           OPENSSL_VENDORED: 1
-        run: cargo build --profile release-min --target "${TARGET}" --features "${MVMCTL_RELEASE_FEATURES}"
+        shell: bash
+        run: |
+          if [[ "${BUILD_TARGET}" == *-unknown-linux-musl ]]; then
+            cargo zigbuild --profile release-min --target "${BUILD_TARGET}" --features "${MVMCTL_RELEASE_FEATURES}"
+          else
+            cargo build --profile release-min --target "${BUILD_TARGET}" --features "${MVMCTL_RELEASE_FEATURES}"
+          fi
 
       # The per-VM host processes mvmctl spawns at runtime (one process per
       # guest). They are SEPARATE bin targets in `mvm-hostd` — the root
@@ -139,30 +137,62 @@ jobs:
       # optional libkrun integration is not part of standard release artifacts.
       - name: Build per-VM host binaries
         env:
-          TARGET: ${{ matrix.target }}
+          BUILD_TARGET: ${{ matrix.build_target }}
           OPENSSL_STATIC: 1
           OPENSSL_VENDORED: 1
         shell: bash
         run: |
-          if [[ "${TARGET}" == *apple-darwin ]]; then
-            cargo build --release --target "${TARGET}" -p mvm-hostd \
+          if [[ "${BUILD_TARGET}" == *apple-darwin ]]; then
+            cargo build --release --target "${BUILD_TARGET}" -p mvm-hostd \
               --bin mvm-hvf-supervisor
           fi
           # Ships on every target — see the note above.
-          cargo build --release --target "${TARGET}" -p mvm-hostd \
-            --bin mvm-host-agent \
-            --bin mvm-signer-helper \
-            --bin mvm-network-endpoint \
-            --bin mvm-broker \
-            --bin mvm-audit-signer
+          if [[ "${BUILD_TARGET}" == *-unknown-linux-musl ]]; then
+            cargo zigbuild --release --target "${BUILD_TARGET}" -p mvm-hostd \
+              --bin mvm-host-agent \
+              --bin mvm-signer-helper \
+              --bin mvm-network-endpoint \
+              --bin mvm-broker \
+              --bin mvm-audit-signer
+          else
+            cargo build --release --target "${BUILD_TARGET}" -p mvm-hostd \
+              --bin mvm-host-agent \
+              --bin mvm-signer-helper \
+              --bin mvm-network-endpoint \
+              --bin mvm-broker \
+              --bin mvm-audit-signer
+          fi
+
+      - name: Verify Linux release payloads are statically linked
+        if: endsWith(matrix.build_target, '-unknown-linux-musl')
+        env:
+          BUILD_TARGET: ${{ matrix.build_target }}
+        shell: bash
+        run: |
+          binaries=(
+            "target/${BUILD_TARGET}/release-min/mvmctl"
+            "target/${BUILD_TARGET}/release/mvm-host-agent"
+            "target/${BUILD_TARGET}/release/mvm-signer-helper"
+            "target/${BUILD_TARGET}/release/mvm-network-endpoint"
+            "target/${BUILD_TARGET}/release/mvm-broker"
+            "target/${BUILD_TARGET}/release/mvm-audit-signer"
+          )
+          for binary in "${binaries[@]}"; do
+            description="$(file --brief "${binary}")"
+            echo "${binary}: ${description}"
+            if [[ "${description}" != *"statically linked"* ]]; then
+              echo "::error::${binary} is not statically linked; publishing it would restore a host glibc dependency" >&2
+              exit 1
+            fi
+          done
 
       - name: Smoke test binary (native targets only)
         if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin'
         env:
-          TARGET: ${{ matrix.target }}
+          BUILD_TARGET: ${{ matrix.build_target }}
         shell: bash
         run: |
-          BIN="target/${TARGET}/release-min/mvmctl"
+          BIN="target/${BUILD_TARGET}/release-min/mvmctl"
           "$BIN" --version
           "$BIN" --help > /dev/null
           "$BIN" ops metrics --json | python3 -c "
@@ -181,11 +211,11 @@ jobs:
         # (24 MiB) for headroom while keeping the size ratchet tight.
         if: matrix.target == 'aarch64-apple-darwin'
         env:
-          TARGET: ${{ matrix.target }}
+          BUILD_TARGET: ${{ matrix.build_target }}
         shell: bash
         run: |
           cargo run --package xtask -- check-binary-size \
-            --path "target/${TARGET}/release-min/mvmctl" \
+            --path "target/${BUILD_TARGET}/release-min/mvmctl" \
             --budget-bytes 25165824
 
       - name: Generate man pages
@@ -197,13 +227,14 @@ jobs:
       - name: Package binary and generate checksums
         env:
           TARGET: ${{ matrix.target }}
+          BUILD_TARGET: ${{ matrix.build_target }}
         shell: bash
         run: |
           BIN_NAME="mvmctl"
           ARCHIVE_NAME="mvmctl-${TARGET}"
 
           mkdir -p "staging/${ARCHIVE_NAME}"
-          cp "target/${TARGET}/release-min/${BIN_NAME}" "staging/${ARCHIVE_NAME}/"
+          cp "target/${BUILD_TARGET}/release-min/${BIN_NAME}" "staging/${ARCHIVE_NAME}/"
           # Per-VM host processes (built in the prior step), shipped next to
           # mvmctl so the backend's adjacent-to-exe resolver finds them on a
           # downloaded install. Kept in step with PER_VM_HOST_BINARIES by
@@ -217,7 +248,7 @@ jobs:
             REQUIRED_HOSTBINS="${REQUIRED_HOSTBINS} mvm-hvf-supervisor"
           fi
           for hostbin in ${REQUIRED_HOSTBINS}; do
-            src="target/${TARGET}/release/${hostbin}"
+            src="target/${BUILD_TARGET}/release/${hostbin}"
             if [ ! -f "$src" ]; then
               echo "::error::${hostbin} was not built for ${TARGET}; mvmctl spawns it at run time and the adjacent-to-exe resolver has no fallback on a downloaded install" >&2
               exit 1

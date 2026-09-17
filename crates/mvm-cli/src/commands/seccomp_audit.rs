@@ -231,8 +231,7 @@ fn run_linux(args: Args) -> Result<()> {
                 continue;
             }
             WaitStatus::PtraceSyscall(_) => {
-                let regs = ptrace::getregs(pid).context("failed to read tracee registers")?;
-                let nr = extract_syscall_number(&regs);
+                let nr = read_syscall_number(pid)?;
 
                 let entering = in_syscall.entry(pid).or_insert(false);
                 *entering = !*entering;
@@ -315,20 +314,60 @@ fn run_linux(args: Args) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-fn extract_syscall_number(regs: &libc::user_regs_struct) -> i64 {
-    #[cfg(target_arch = "x86_64")]
-    {
-        regs.orig_rax as i64
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn read_syscall_number(pid: nix::unistd::Pid) -> Result<i64> {
+    use anyhow::Context;
+
+    let registers = nix::sys::ptrace::getregs(pid).context("failed to read tracee registers")?;
+    Ok(registers.orig_rax as i64)
+}
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+fn read_syscall_number(pid: nix::unistd::Pid) -> Result<i64> {
+    use anyhow::{Context, ensure};
+
+    // nix exposes PTRACE_GETREGS only on x86. AArch64 uses the architecture-
+    // neutral GETREGSET request with NT_PRSTATUS and returns user_pt_regs in
+    // the iovec supplied by the tracer.
+    let mut registers: libc::user_regs_struct = unsafe { std::mem::zeroed() };
+    let mut registers_iovec = libc::iovec {
+        iov_base: std::ptr::from_mut(&mut registers).cast(),
+        iov_len: std::mem::size_of::<libc::user_regs_struct>(),
+    };
+    let note_type = usize::try_from(libc::NT_PRSTATUS)
+        .expect("NT_PRSTATUS must fit in a pointer-sized ptrace argument");
+
+    // SAFETY: GETREGSET writes at most `iov_len` bytes to the live
+    // `user_regs_struct` backing `registers_iovec`. The tracee is stopped at a
+    // ptrace syscall stop, so its register set is available to its tracer.
+    let result = unsafe {
+        libc::ptrace(
+            libc::PTRACE_GETREGSET,
+            pid.as_raw(),
+            note_type as *mut libc::c_void,
+            std::ptr::from_mut(&mut registers_iovec),
+        )
+    };
+    if result == -1 {
+        return Err(std::io::Error::last_os_error()).context("failed to read tracee registers");
     }
-    #[cfg(target_arch = "aarch64")]
-    {
-        regs.regs[8] as i64
-    }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    {
-        compile_error!("mvmctl seccomp-audit only supports x86_64 and aarch64 on Linux");
-    }
+    ensure!(
+        registers_iovec.iov_len >= 9 * std::mem::size_of::<u64>(),
+        "tracee register set is too short to contain the aarch64 syscall register"
+    );
+
+    Ok(aarch64_syscall_number(&registers.regs))
+}
+
+#[cfg(all(
+    target_os = "linux",
+    not(any(target_arch = "x86_64", target_arch = "aarch64"))
+))]
+compile_error!("mvmctl seccomp-audit only supports x86_64 and aarch64 on Linux");
+
+#[cfg(any(all(target_os = "linux", target_arch = "aarch64"), test))]
+fn aarch64_syscall_number(registers: &[u64; 31]) -> i64 {
+    registers[8] as i64
 }
 
 #[cfg(target_os = "linux")]
@@ -418,7 +457,17 @@ mod tests {
 
 #[cfg(test)]
 mod traceclone_tests {
-    use super::is_new_tracee_birth_stop;
+    use super::{aarch64_syscall_number, is_new_tracee_birth_stop};
+
+    #[test]
+    fn aarch64_syscall_number_comes_from_x8() {
+        let mut registers = [0_u64; 31];
+        registers[7] = 41;
+        registers[8] = 42;
+        registers[9] = 43;
+
+        assert_eq!(aarch64_syscall_number(&registers), 42);
+    }
 
     #[test]
     fn a_new_tracees_birth_sigstop_is_not_forwarded() {
