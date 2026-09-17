@@ -35,12 +35,13 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// A sidecar ext4 carrying the one path the SDKs load, built with the in-repo
 /// pure-Rust writer so the fixture needs no `mkfs`.
 fn sidecar_ext4_bytes() -> Vec<u8> {
-    use mvm_fs::ext4::Node;
+    use mvm_fs::ext4::{Node, Owner};
     let nodes = vec![
         Node::Dir {
             path: "/lib".into(),
             mode: 0o555,
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         },
         Node::File {
             path: "/lib/libmvm_host_services.so".into(),
@@ -52,6 +53,7 @@ fn sidecar_ext4_bytes() -> Vec<u8> {
                     .expect("a fixture names a real libc"),
             ]),
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         },
     ];
     mvm_fs::ext4::build_image(nodes).expect("build the sidecar ext4 fixture")

@@ -10,7 +10,7 @@ use fs_ext4::dir::{self, DirEntryType};
 use fs_ext4::file_io;
 use fs_ext4::fs::Filesystem;
 use mvm_fs::ext4::mkfs::format_empty_ext4;
-use mvm_fs::ext4::{Node, build_image};
+use mvm_fs::ext4::{Node, Owner, build_image};
 
 /// An in-memory block device over our image bytes (safe).
 struct MemDev(Vec<u8>);
@@ -113,22 +113,26 @@ fn tree_round_trips_through_real_reader() {
             path: "/etc".into(),
             mode: 0o755,
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         },
         Node::File {
             path: "/etc/hosts".into(),
             mode: 0o644,
             data: hosts.clone(),
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         },
         Node::File {
             path: "/hello".into(),
             mode: 0o755,
             data: hello.clone(),
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         },
         Node::Symlink {
             path: "/etc/localhost".into(),
             target: "hosts".into(),
+            owner: Owner::ROOT,
         },
     ];
     let fs = mount(build_image(nodes).unwrap());
@@ -184,11 +188,13 @@ fn symlink_targets_round_trip_across_fast_slow_boundary() {
         path: "/links".into(),
         mode: 0o755,
         xattrs: Vec::new(),
+        owner: Owner::ROOT,
     }];
     for (path, target) in &cases {
         nodes.push(Node::Symlink {
             path: path.clone(),
             target: target.clone(),
+            owner: Owner::ROOT,
         });
     }
 
@@ -256,12 +262,14 @@ fn output_is_deterministic() {
             path: "/a".into(),
             mode: 0o755,
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         },
         Node::File {
             path: "/a/f".into(),
             mode: 0o644,
             data: b"xyz".to_vec(),
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         },
     ];
     let one = build_image(nodes.clone()).unwrap();
@@ -287,18 +295,21 @@ fn multi_group_image_round_trips_through_real_reader() {
             path: "/etc".into(),
             mode: 0o755,
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         },
         Node::File {
             path: "/etc/marker".into(),
             mode: 0o644,
             data: small.clone(),
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         },
         Node::File {
             path: "/big".into(),
             mode: 0o644,
             data: big.clone(),
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         },
     ];
 
@@ -345,6 +356,7 @@ fn depth1_extent_tree_file_round_trips_through_real_reader() {
         mode: 0o644,
         data: big,
         xattrs: Vec::new(),
+        owner: Owner::ROOT,
     }];
     let image = build_image(nodes).unwrap();
 
@@ -380,12 +392,14 @@ fn root_owned_fixture() -> Vec<Node> {
             path: "/etc".into(),
             mode: 0o755,
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         },
         Node::File {
             path: "/etc/hosts".into(),
             mode: 0o644,
             data: b"127.0.0.1 localhost\n".to_vec(),
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         },
         Node::File {
             path: "/ping".into(),
@@ -395,10 +409,12 @@ fn root_owned_fixture() -> Vec<Node> {
                 name: "security.capability".into(),
                 value: vec![1, 0, 0, 2],
             }],
+            owner: Owner::ROOT,
         },
         Node::Symlink {
             path: "/etc/localhost".into(),
             target: "hosts".into(),
+            owner: Owner::ROOT,
         },
     ]
 }
@@ -425,4 +441,176 @@ fn root_owned_fingerprint_is_pinned() {
         mvm_fs::rootfs::fingerprint_ext4_nodes(&root_owned_fixture()).unwrap(),
         "51bd9a5461b60b1e94762b3985784b2e61db8d721e6a2a55795694863a139179",
     );
+}
+
+/// Walk `path` (guest-absolute, `/`-separated) from the root inode and return
+/// the inode number the independent reader resolves it to.
+fn resolve(fs: &Filesystem, path: &str) -> u32 {
+    path.trim_start_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .fold(2, |dir, segment| {
+            find(&list_dir(fs, dir), segment)
+                .unwrap_or_else(|| panic!("{path}: no entry {segment}"))
+                .0
+        })
+}
+
+/// The owner the independent reader reports for `path`.
+fn owner_of(fs: &Filesystem, path: &str) -> Owner {
+    let (inode, _) = fs.read_inode_verified(resolve(fs, path)).unwrap();
+    Owner::new(inode.uid, inode.gid)
+}
+
+/// Every node kind carries its owner onto the inode, and an id past 16 bits
+/// survives through the high-half fields rather than being truncated.
+#[test]
+fn owners_round_trip_through_real_reader() {
+    let svc = Owner::new(999, 999);
+    let wide = Owner::new(70_000, 131_072);
+    let widest = Owner::new(u32::MAX, u32::MAX - 1);
+    let nodes = vec![
+        Node::Dir {
+            path: "/data".into(),
+            mode: 0o700,
+            xattrs: Vec::new(),
+            owner: svc,
+        },
+        Node::File {
+            path: "/data/state".into(),
+            mode: 0o600,
+            data: b"ready\n".to_vec(),
+            xattrs: Vec::new(),
+            owner: wide,
+        },
+        Node::Symlink {
+            path: "/data/current".into(),
+            target: "state".into(),
+            owner: widest,
+        },
+        Node::File {
+            path: "/rootfile".into(),
+            mode: 0o644,
+            data: Vec::new(),
+            xattrs: Vec::new(),
+            owner: Owner::ROOT,
+        },
+    ];
+    let fs = mount(build_image(nodes).unwrap());
+    assert_eq!(owner_of(&fs, "/data"), svc);
+    assert_eq!(owner_of(&fs, "/data/state"), wide);
+    assert_eq!(owner_of(&fs, "/data/current"), widest);
+    assert_eq!(owner_of(&fs, "/rootfile"), Owner::ROOT);
+    let (root, _) = fs.read_inode_verified(2).unwrap();
+    assert_eq!(Owner::new(root.uid, root.gid), Owner::ROOT);
+}
+
+fn owned_header(path: &str, kind: tar::EntryType, owner: Owner, body_len: u64) -> tar::Header {
+    let mut header = tar::Header::new_gnu();
+    header.set_path(path).unwrap();
+    header.set_size(body_len);
+    header.set_mode(match kind {
+        tar::EntryType::Directory => 0o750,
+        _ => 0o640,
+    });
+    header.set_entry_type(kind);
+    header.set_uid(u64::from(owner.uid));
+    header.set_gid(u64::from(owner.gid));
+    header.set_cksum();
+    header
+}
+
+/// A service layer as a container image ships one: the data directory and
+/// its contents owned by the service account, under parents the stream never
+/// lists.
+fn service_layer(svc: Owner, wide: Owner) -> Vec<u8> {
+    let mut builder = tar::Builder::new(Vec::new());
+    builder
+        .append(
+            &owned_header("var/lib/svc/", tar::EntryType::Directory, svc, 0),
+            std::io::empty(),
+        )
+        .unwrap();
+    builder
+        .append(
+            &owned_header("var/lib/svc/db", tar::EntryType::Regular, svc, 3),
+            b"row".as_slice(),
+        )
+        .unwrap();
+    builder
+        .append(
+            &owned_header("home/wide/.profile", tar::EntryType::Regular, wide, 0),
+            std::io::empty(),
+        )
+        .unwrap();
+    builder.into_inner().unwrap()
+}
+
+fn materialize_layer(layer: &[u8]) -> Vec<u8> {
+    use mvm_fs::oci::unpack::{UnpackOptions, unpack_layer};
+    use mvm_fs::ownership::OwnerTable;
+    use mvm_fs::rootfs::{MaterializeOptions, build_ext4_pure};
+
+    let root = tempfile::tempdir().unwrap();
+    let report = unpack_layer(layer, root.path(), &UnpackOptions::default()).unwrap();
+    assert!(report.refused.is_empty(), "{:?}", report.refused);
+    let mut owners = OwnerTable::new();
+    owners.absorb(&report.ownership);
+    let options = MaterializeOptions::builder().owners(owners).build();
+    build_ext4_pure(root.path(), &options).unwrap().0
+}
+
+/// The unpack runs unprivileged and cannot `chown`, so the host tree is owned
+/// by whoever ran it. The owners in the layer's tar headers still have to be
+/// the owners inside the image.
+#[test]
+fn layer_owners_survive_unpack_and_materialize() {
+    let svc = Owner::new(999, 999);
+    let wide = Owner::new(100_000, 100_001);
+    let image = materialize_layer(&service_layer(svc, wide));
+    let fs = mount(image);
+    assert_eq!(owner_of(&fs, "/var/lib/svc"), svc);
+    assert_eq!(owner_of(&fs, "/var/lib/svc/db"), svc);
+    assert_eq!(owner_of(&fs, "/home/wide/.profile"), wide);
+    assert_eq!(
+        owner_of(&fs, "/var/lib"),
+        Owner::ROOT,
+        "a parent the layer only implied is root-owned"
+    );
+    assert_eq!(owner_of(&fs, "/home/wide"), Owner::ROOT);
+}
+
+/// Ownership is content, not host state: the same layer materializes to the
+/// same bytes every time.
+#[test]
+fn owned_layer_materializes_deterministically() {
+    let layer = service_layer(Owner::new(999, 999), Owner::new(100_000, 100_001));
+    assert_eq!(materialize_layer(&layer), materialize_layer(&layer));
+}
+
+/// A cache keyed on the fingerprint must miss when only an owner changed —
+/// otherwise a root-owned image built earlier would be reused for a tree that
+/// now declares a service account.
+#[test]
+fn changing_only_an_owner_changes_the_fingerprint() {
+    use mvm_fs::rootfs::fingerprint_ext4_nodes;
+
+    let base = fingerprint_ext4_nodes(&root_owned_fixture()).unwrap();
+    let mut seen = std::collections::HashSet::from([base.clone()]);
+    for index in 0..root_owned_fixture().len() {
+        for owner in [
+            Owner::new(999, 0),
+            Owner::new(0, 999),
+            Owner::new(70_000, 70_000),
+        ] {
+            let mut nodes = root_owned_fixture();
+            nodes[index].set_owner(owner);
+            let changed = fingerprint_ext4_nodes(&nodes).unwrap();
+            assert_ne!(changed, base, "node {index} owner {owner:?}");
+            assert!(
+                seen.insert(changed),
+                "node {index} owner {owner:?} collided"
+            );
+        }
+    }
 }

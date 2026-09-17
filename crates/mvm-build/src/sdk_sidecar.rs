@@ -472,12 +472,13 @@ mod tests {
     /// here would let a fixture disagree with its own slot silently — the exact
     /// mistake the check exists to catch.
     fn sidecar_ext4_bytes(libc: GuestLibc) -> Vec<u8> {
-        use mvm_fs::ext4::Node;
+        use mvm_fs::ext4::{Node, Owner};
         let nodes = vec![
             Node::Dir {
                 path: "/lib".into(),
                 mode: 0o555,
                 xattrs: Vec::new(),
+                owner: Owner::ROOT,
             },
             Node::File {
                 path: "/lib/libmvm_host_services.so".into(),
@@ -487,6 +488,7 @@ mod tests {
                     libc.libc_soname().expect("a fixture names a real libc"),
                 ]),
                 xattrs: Vec::new(),
+                owner: Owner::ROOT,
             },
         ];
         mvm_fs::ext4::build_image(nodes).expect("build the sidecar ext4 fixture")

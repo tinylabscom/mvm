@@ -1450,7 +1450,7 @@ mod tests {
     #[cfg(feature = "test-support")]
     fn install_runtime_overlay(home: &std::path::Path) {
         use mvm_build::runtime_overlay::{InstallOptions, install_overlay_into_cache};
-        use mvm_fs::ext4::Node;
+        use mvm_fs::ext4::{Node, Owner};
         use mvm_fs::overlay::{REQUIRED_OVERLAY_GUEST_PATHS, read_overlay_artifact_from_dir};
 
         let source = home.join("runtime-overlay-source");
@@ -1462,6 +1462,7 @@ mod tests {
                 mode: 0o755,
                 data: b"session-resume-runtime-stub".to_vec(),
                 xattrs: Vec::new(),
+                owner: Owner::ROOT,
             })
             .collect();
         let ext4 = mvm_fs::ext4::build_image(nodes).unwrap();

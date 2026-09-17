@@ -7,7 +7,7 @@
 //! The tree here MUST match what `.github/workflows/ci.yml::ext4-real-mount`
 //! asserts after mounting.
 
-use mvm_fs::ext4::{Node, Xattr, build_image};
+use mvm_fs::ext4::{Node, Owner, Xattr, build_image};
 
 fn main() {
     let out = std::env::args()
@@ -28,27 +28,32 @@ fn main() {
             path: "/etc".into(),
             mode: 0o755,
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         },
         Node::File {
             path: "/etc/hosts".into(),
             mode: 0o644,
             data: b"127.0.0.1 localhost\n".to_vec(),
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         },
         Node::File {
             path: "/hello".into(),
             mode: 0o755,
             data: b"hi from pure-rust ext4\n".to_vec(),
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         },
         Node::Symlink {
             path: "/etc/localhost".into(),
             target: "hosts".into(),
+            owner: Owner::ROOT,
         },
         Node::Dir {
             path: "/bin".into(),
             mode: 0o755,
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         },
         Node::File {
             path: "/bin/ping".into(),
@@ -58,6 +63,7 @@ fn main() {
                 name: "security.capability".into(),
                 value: cap,
             }],
+            owner: Owner::ROOT,
         },
         // A big file so the image exceeds 128 data blocks (512 KiB) — this
         // forces a MULTI-level verity hash tree, so the byte-for-byte cmp
@@ -67,6 +73,7 @@ fn main() {
             mode: 0o644,
             data: (0..700 * 1024u32).map(|i| (i % 251) as u8).collect(),
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         },
     ];
     let image = build_image(nodes).expect("build ext4 image");

@@ -605,12 +605,13 @@ mod sdk_sidecar_host_resolution_tests {
     /// with the slot it was filed under, so a defaulted fixture could disagree
     /// with its own slot silently.
     fn sidecar_ext4_bytes(libc: mvm_contract::guest_libc::GuestLibc) -> Vec<u8> {
-        use mvm_fs::ext4::Node;
+        use mvm_fs::ext4::{Node, Owner};
         let nodes = vec![
             Node::Dir {
                 path: "/lib".into(),
                 mode: 0o555,
                 xattrs: Vec::new(),
+                owner: Owner::ROOT,
             },
             Node::File {
                 path: "/lib/libmvm_host_services.so".into(),
@@ -620,6 +621,7 @@ mod sdk_sidecar_host_resolution_tests {
                     libc.libc_soname().expect("a fixture names a real libc"),
                 ]),
                 xattrs: Vec::new(),
+                owner: Owner::ROOT,
             },
         ];
         mvm_fs::ext4::build_image(nodes).expect("build sidecar ext4 fixture")
@@ -941,7 +943,7 @@ mod runtime_overlay_attach_tests {
     use mvm_core::arch::GuestArch;
     use mvm_core::util::test_env::TestEnv;
     use mvm_core::vm_backend::VmStartConfig;
-    use mvm_fs::ext4::Node;
+    use mvm_fs::ext4::{Node, Owner};
     use mvm_fs::overlay::RuntimeOverlayResolver;
     use sha2::{Digest, Sha256};
 
@@ -968,6 +970,7 @@ mod runtime_overlay_attach_tests {
                     path.trim_start_matches('/').as_bytes().to_vec()
                 },
                 xattrs: Vec::new(),
+                owner: Owner::ROOT,
             })
             .collect();
         mvm_fs::ext4::build_image(nodes).expect("build valid overlay ext4 fixture")

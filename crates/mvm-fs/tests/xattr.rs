@@ -8,7 +8,7 @@ use fs_ext4::block_io::BlockDevice;
 use fs_ext4::dir::{self, DirEntryType};
 use fs_ext4::file_io;
 use fs_ext4::fs::Filesystem;
-use mvm_fs::ext4::{Node, Xattr, build_image};
+use mvm_fs::ext4::{Node, Owner, Xattr, build_image};
 
 struct MemDev(Vec<u8>);
 impl BlockDevice for MemDev {
@@ -58,6 +58,7 @@ fn file_capability_round_trips_through_the_reader() {
             name: "security.capability".into(),
             value: cap.clone(),
         }],
+        owner: Owner::ROOT,
     }];
     let dev = Arc::new(MemDev(build_image(nodes).expect("build with xattr")));
     let fs = Filesystem::mount(dev.clone()).expect("mount");
@@ -93,6 +94,7 @@ fn xattrs_are_deterministic_and_order_independent() {
             mode: 0o644,
             data: b"x".to_vec(),
             xattrs,
+            owner: Owner::ROOT,
         }])
         .unwrap()
     };

@@ -685,12 +685,14 @@ mod tests {
             mvm_fs::ext4::Node::Symlink {
                 path: "/usr/share/man/man7/pam.7.gz".to_string(),
                 target: "PAM.7.gz".to_string(),
+                owner: mvm_fs::ext4::Owner::ROOT,
             },
             mvm_fs::ext4::Node::File {
                 path: "/opt/run".to_string(),
                 mode: 0o755,
                 data: b"body".to_vec(),
                 xattrs: Vec::new(),
+                owner: mvm_fs::ext4::Owner::ROOT,
             },
         ];
         write_deferred_nodes(tmp.path(), SAMPLE_DIGEST, &nodes).expect("write");
@@ -717,6 +719,7 @@ mod tests {
         let nodes = vec![mvm_fs::ext4::Node::Symlink {
             path: "/a".to_string(),
             target: "b".to_string(),
+            owner: mvm_fs::ext4::Owner::ROOT,
         }];
         write_deferred_nodes(tmp.path(), SAMPLE_DIGEST, &nodes).expect("write");
         write_deferred_nodes(tmp.path(), SAMPLE_DIGEST, &[]).expect("clear");
@@ -734,6 +737,7 @@ mod tests {
         let nodes = vec![mvm_fs::ext4::Node::Symlink {
             path: "/a".to_string(),
             target: "b".to_string(),
+            owner: mvm_fs::ext4::Owner::ROOT,
         }];
         write_deferred_nodes(tmp.path(), SAMPLE_DIGEST, &nodes).expect("write");
 

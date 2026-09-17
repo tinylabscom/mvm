@@ -932,6 +932,7 @@ mod tests {
         let deferred = vec![mvm_fs::ext4::Node::Symlink {
             path: "/usr/share/man/man7/pam.7.gz".to_string(),
             target: "PAM.7.gz".to_string(),
+            owner: mvm_fs::ext4::Owner::ROOT,
         }];
         crate::commands::image::cache::write_deferred_nodes(tmp.path(), digest, &deferred)
             .expect("record deferred nodes");
