@@ -1,0 +1,328 @@
+{
+  "tools": [
+    {
+      "description": "Describe the selected backend and client operation surface.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "name": "mvm.backend_capabilities",
+      "requires": null
+    },
+    {
+      "description": "Create a stopped machine through MvmClient.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "cpus": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "image": {
+            "type": "string"
+          },
+          "memory_mib": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "image"
+        ],
+        "type": "object"
+      },
+      "name": "mvm.machine.create",
+      "requires": "create"
+    },
+    {
+      "description": "Run a non-interactive command when the selected client supports it.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "command"
+        ],
+        "type": "object"
+      },
+      "name": "mvm.machine.exec",
+      "requires": "exec"
+    },
+    {
+      "description": "Inspect one machine.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "mvm.machine.inspect",
+      "requires": "inspect"
+    },
+    {
+      "description": "List machines visible through the selected client.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "starting",
+              "running",
+              "stopped",
+              "paused",
+              "failed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "mvm.machine.list",
+      "requires": "list"
+    },
+    {
+      "description": "Read bounded machine logs.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "follow": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "tail_lines": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "mvm.machine.logs",
+      "requires": "logs"
+    },
+    {
+      "description": "Pause a running machine.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "primed_barrier": {
+            "type": "boolean"
+          },
+          "primed_timeout_secs": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "mvm.machine.pause",
+      "requires": "pause"
+    },
+    {
+      "description": "Patch supported machine configuration fields.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_host": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "cpus": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "memory_mib": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "net": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "mvm.machine.reconfigure",
+      "requires": "reconfigure"
+    },
+    {
+      "description": "Remove a machine idempotently.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "mvm.machine.remove",
+      "requires": "remove"
+    },
+    {
+      "description": "Resume a paused machine.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "warm": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "mvm.machine.resume",
+      "requires": "resume"
+    },
+    {
+      "description": "Create and start a machine through MvmClient.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "cpus": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "image": {
+            "type": "string"
+          },
+          "memory_mib": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "image"
+        ],
+        "type": "object"
+      },
+      "name": "mvm.machine.run",
+      "requires": "run"
+    },
+    {
+      "description": "Set or clear a machine TTL.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "mvm.machine.set_ttl",
+      "requires": "set_ttl"
+    },
+    {
+      "description": "Start a created machine.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "mvm.machine.start",
+      "requires": "start"
+    },
+    {
+      "description": "Stop a machine idempotently.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "mvm.machine.stop",
+      "requires": "stop"
+    }
+  ]
+}
