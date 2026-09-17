@@ -3,7 +3,7 @@
 Backing: shipped-source
 Validation: check-declared-backing
 
-**Status: W1–W6 COMPLETE** (host-side; no live boot on any backend yet — see Validation).
+**Status: W1–W7 COMPLETE** (HVF Stage 0 and x86_64 Firecracker Stage 0 + builds live-proven — see Validation).
 
 Stage 0 — the bootstrap that builds the builder-VM image from nothing — was the
 last builder path that talked to a VMM directly instead of through the
@@ -124,6 +124,20 @@ appends the token unconditionally, fixes it for every backend.
   and verity sealer stop mapping `Hvf` onto `LibkrunBuilderVm`; the shell-job
   records move out of `libkrun_builder` so `libkrun` leaves the HVF builder's
   public signature.
+- [x] **W7 — Firecracker serves builds (issue #3324).**
+  `fc_builder_image::resolve_fc_builder_image` hands `DriverBuilderVm<FcDriver>`
+  the Stage 0 image as-is: the builder-vm flake already installs
+  `mvm-host-vm-init`, so there is no patcher VM. Getting there fixed two things
+  that were wrong on every driver-backed builder and only mattered on
+  Firecracker: the builder's egress port said `HostDials` (the guest dials;
+  HVF ignores the direction, Firecracker bridges only `GuestDials`), and its
+  console tokens were an HVF-shaped constant. The one-shot builder also stopped
+  declaring an agent port its guest never serves. Builder shell jobs on
+  Firecracker admit the current source image first, as libkrun's do. The
+  persistent builder still refuses Firecracker by name. The live run added two
+  more: the runner stops a guest whose kernel halts instead of powering off
+  (Firecracker does not exit on a halt), and `FcRunningVm::kill` no longer
+  requires a guest agent to flush through.
 
 ## Deliberately out of scope
 - **Deleting the libkrun Stage 0 body.** It stays as the second working
@@ -134,10 +148,8 @@ appends the token unconditionally, fixes it for every backend.
   was deleted from the tree. Its written end state (a libkrun host VM with
   nested Firecracker) is now clearly the wrong topology — W5 makes Firecracker
   the Linux builder directly — so this should be deleted rather than finished.
-- **A Firecracker builder-image resolver.** Firecracker bootstraps but cannot
-  serve steady-state builds: only HVF has a resolver
-  (`hvf_builder_image.rs`), so `register_driver_builders` returns `None` for
-  Firecracker and those paths refuse by name.
+- **A Firecracker persistent builder.** One-shot builds and shell jobs run on
+  Firecracker (W7); `mvmctl persistent-builder start` still refuses it by name.
 - **The rest of the libkrun module residue.** `BuilderVmImage`, the Stage 0
   store chain, the transport helpers and the image-cache readers are all
   VMM-neutral but still live in `libkrun_builder`, so the module cannot yet be
@@ -157,7 +169,15 @@ label, substituter traffic through the host egress endpoint, and
 `stage0-init: done; halting`. The cache then held a 760 MiB `rootfs.ext4`, a
 `vmlinux`, `manifest.json`, `cmdline.txt` and provenance.
 
-Firecracker is not live-proven: this host has no KVM. The libkrun Stage 0 body is
+**Firecracker is live-proven on x86_64** (W7). On an Ubuntu 24.04 KVM host with
+Firecracker v1.14.1, a cold `MVM_HOME` and nothing selected or killed by hand,
+auto-detect chose Firecracker, Stage 0 exited 0 after 17 minutes, and a builder
+shell job exited 0 with its `/out` intact — including a `curl` of
+cache.nixos.org through the guest's egress channel. The first attempt hung at
+Stage 0's halt; that is the W7 halt fix. aarch64 Firecracker is untested.
+`specs/sprint/delivery/3324-firecracker-builder-image.md` carries the evidence.
+
+The libkrun Stage 0 body is
 untouched and reachable by name, but it is no longer a fallback — nothing lowers
 onto it.
 

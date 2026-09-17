@@ -607,12 +607,12 @@ fn declare_embedded_host_binaries() {
 fn declare_embedded_host_binaries() {}
 
 fn register_inhouse_builder() {
-    // Wire the HVF builder constructor so that
-    // `mvm_build::builder_backend_select` can create it when the
-    // resolved choice is `BuilderBackendChoice::Hvf`. This is a
-    // one-time registration at startup; `mvm-build` cannot reach
-    // `mvm-backend` or `mvm-cli` directly (dependency direction), so
-    // the CLI bridges the gap here.
+    // Wire the driver-backed builder constructors so that
+    // `mvm_build::builder_backend_select` can create them when the resolved
+    // choice is HVF or Firecracker. This is a one-time registration at
+    // startup; `mvm-build` cannot reach `mvm-backends` or `mvm-cli` directly
+    // (dependency direction), so the CLI bridges the gap here. The two arms
+    // differ only in the driver and in how the image is resolved.
     #[cfg(feature = "builder-vm")]
     mvm_build::builder_backend_select::register_driver_builders(Box::new(|choice| {
         use mvm_build::builder_backend_select::BuilderBackendChoice as Choice;
@@ -633,10 +633,18 @@ fn register_inhouse_builder() {
                     },
                 ),
             ),
-            // Firecracker boots the same builder image over the same disk
-            // transport; what it still lacks is an image resolver of its own,
-            // so it bootstraps (Stage 0, below) but does not yet serve builds.
-            Choice::Firecracker => None,
+            Choice::Firecracker => Some(
+                crate::commands::build::fc_builder_image::resolve_fc_builder_image().map(|image| {
+                    Box::new(
+                        DriverBuilderVm::new(
+                            mvm_backends::driver::fc::FcDriver::new(),
+                            image.kernel,
+                            image.rootfs,
+                        )
+                        .with_closure_nar(image.closure_nar),
+                    ) as Boxed
+                }),
+            ),
             Choice::Libkrun | Choice::Qemu | Choice::WebLinux => None,
         }
     }));

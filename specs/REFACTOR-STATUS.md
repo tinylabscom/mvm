@@ -4,16 +4,39 @@ Last updated: 2026-09-16
 
 ## In progress
 
+- [ ] **Upgrades found by reviewing an external microVM sandbox.**
+      `specs/plans/2026-09-16-sandbox-review-upgrades.md`.
+      Issues #3378–#3387. W1 (restore reseed) first; W5 before W4; W8 is
+      measure-first and sequenced with #3360.
+
 - [x] **macOS builder auto-detection respects the HVF OS floor.**
       `specs/plans/2026-09-15-the-big-cleanup.md` K7, issue #3325. Apple
       Silicon alone no longer selects HVF on macOS 13–25; the existing macOS
       26+ platform predicate gates that default without adding fallback policy.
+
+- [ ] **Image release-train repository extraction.**
+      `specs/plans/2026-09-16-image-repository-extraction.md`.
+      Issues #3362–#3369 and #3373.
+      Move the builder VM, default boot image, runtime overlay, SDK sidecars,
+      kernel/seed inputs, and their signed atomic manifest into one public
+      `mvm-images` repository. The migration starts by taking cold source image
+      preparation out of release E2E, preserves a focused nightly source-build
+      witness, supports explicit sibling-worktree development at a dev-only
+      trust tier, and keeps legacy consumers working through dual publication.
+      After cutover, separately measure and gate any history compaction rather
+      than folding a destructive rewrite into the repository move.
 
 - [x] **Hermetic published-documentation link gate.**
       `specs/plans/2026-09-15-the-big-cleanup.md` I8, issue #3328. Resolve
       repository files, same-repository GitHub links, generated Markdown
       routes, internal content/page routes, and static assets in `check-all`;
       external hosts remain non-blocking.
+
+- [x] **Extended CI Firecracker warm-claim repair.**
+      `specs/plans/2026-09-16-extended-ci-warm-claim.md`, issue #3330. Keep the
+      claim-bearing lane fail-closed while giving its snapshot device-path
+      remap the mount-namespace privilege it requires. The full PR matrix and
+      exact-head live Firecracker witness pass.
 
 - [x] **Canonical user-config and MVM child paths.**
       `specs/plans/2026-09-15-the-big-cleanup.md` A4.5, issue #3308. One
@@ -93,9 +116,11 @@ Last updated: 2026-09-16
       Linux-with-KVM, and `Stage0Vm<D>`/`DriverBuilderVm<D>` are generic over
       the driver, so a future Windows backend inherits both. W1–W6 landed.
       **HVF Stage 0 is live-proven** on a plain `just embed` build, after its
-      bootstrap kernel moved to a source pin; Firecracker is not (no KVM host
-      in that run), and it bootstraps but has
-      no builder-image resolver, so steady-state builds on it refuse by name.
+      bootstrap kernel moved to a source pin. W7 (#3324) gives Firecracker a
+      builder-image resolver and stops guests that halt instead of powering
+      off; **x86_64 Firecracker Stage 0 and builder shell jobs are
+      live-proven** on a KVM host. Its persistent builder still refuses by
+      name, and aarch64 Firecracker is untested.
 
 - [x] **Claim-witness mutation coverage — issue #3250.**
       `specs/plans/2026-09-15-claim-witness-mutation-coverage.md`.
@@ -182,8 +207,12 @@ Last updated: 2026-09-16
       `specs/sprint/delivery/3011-macos-e2e-on-self-hosted-apple-silicon.md`).
       The first post-merge trusted run is green on the runner (release run
       `35151392843`: 309/310 passed, every non-run on the macOS allow-list) and
-      #3011 is closed. Still open: a mechanical fork-isolation proof, and a
-      witness that the release caller blocks on a red live macOS job.
+      #3011 is closed. A red live macOS job is witnessed to refuse the release
+      gate without the evidence record standing in (run `35164778251`), and a
+      test now fails if an untrusted event can reach the `m1` label. Accepted
+      limit: a fork PR that edits a workflow to name the label is stopped only by
+      the approval policy, because the Free plan offers no runner groups
+      (checked 2026-09-16).
 
 - [x] **Linux 6.12.109 synchronized kernel pin — issue #3213.**
       `2026-09-08-kernel-6-12-109`.

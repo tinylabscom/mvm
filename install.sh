@@ -293,6 +293,105 @@ entitlement_required() {
   esac
 }
 
+# The macOS entitlement key an executable's role requires — the same key its
+# profile in assets/*.entitlements declares. Only defined for names
+# entitlement_required knows about.
+required_entitlement_key() {
+  case "$1" in
+    mvmctl) echo "com.apple.security.virtualization" ;;
+    mvm-hvf-supervisor) echo "com.apple.security.hypervisor" ;;
+  esac
+}
+
+# Whether $1 already carries a valid signature granting entitlement key $2, so
+# a binary a release already entitled at build time is left alone rather than
+# needlessly re-signed — checked before falling back to
+# builtin_entitlement_profile below, not before find_entitlement_profile: a
+# release that ships a profile is still signed with it as before.
+already_entitled() {
+  target="$1"
+  key="$2"
+  codesign --verify --strict "$target" >/dev/null 2>&1 || return 1
+  case "$(codesign -d --entitlements - --xml "$target" 2>/dev/null)" in
+    *"<key>$key</key>"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Path to a required entitlement profile inside a staged release directory,
+# checked under `assets/` first — where install.sh has always written the
+# profiles it needs itself, and where a signed rebuild's runtime lookup reads
+# them from beside its own executable — then `resources/`, where every
+# published release through v0.17.0 shipped them. Prints nothing when the
+# profile is in neither location.
+find_entitlement_profile() {
+  release_root="$1"
+  profile_name="$2"
+  if [ -f "$release_root/assets/$profile_name" ]; then
+    printf '%s\n' "$release_root/assets/$profile_name"
+  elif [ -f "$release_root/resources/$profile_name" ]; then
+    printf '%s\n' "$release_root/resources/$profile_name"
+  fi
+}
+
+# Copy a profile found under resources/ into assets/, so the release
+# directory always carries it at the one path codesign — and any later
+# re-sign — reads it from.
+adopt_resources_entitlement() {
+  release_root="$1"
+  profile_name="$2"
+  $SUDO mkdir -p "$release_root/assets" \
+    && $SUDO cp "$release_root/resources/$profile_name" "$release_root/assets/$profile_name"
+}
+
+# The one entitlement profile install.sh carries a fallback copy of,
+# byte-identical to the checked-in assets/mvm-supervisor.entitlements in this
+# repo (a test holds them equal). Prints nothing and fails for any other name
+# — deliberately not mvmctl.entitlements: that profile has shipped somewhere
+# (resources/ or assets/) in every mvmctl release ever published, so a
+# release missing it too would be a data problem worth failing closed on
+# rather than papering over.
+#
+# Last-resort only: used when a release ships mvm-supervisor.entitlements at
+# neither assets/ nor resources/ and the shipped mvm-hvf-supervisor is not
+# already signed with the key it needs. Every published release through
+# v0.17.0 is in that position — the file did not exist anywhere until #2322,
+# a month after v0.17.0 shipped — so without this an unmodified v0.17.0
+# archive cannot install on Apple Silicon no matter where install.sh looks
+# for a profile that release never carried. The content is a fixed,
+# non-secret, two-line capability declaration matching what install.sh's own
+# ad-hoc `codesign --sign -` already grants for every other release;
+# embedding it does not extend trust anywhere the local signing step does
+# not already reach, and it changes nothing about how the downloaded archive
+# itself is authenticated.
+builtin_entitlement_profile() {
+  case "$1" in
+    mvm-supervisor.entitlements)
+      printf '%s\n' \
+        '<?xml version="1.0" encoding="UTF-8"?>' \
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+        '<plist version="1.0">' \
+        '<dict>' \
+        '	<key>com.apple.security.hypervisor</key>' \
+        '	<true/>' \
+        '</dict>' \
+        '</plist>'
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# Write install.sh's own copy of a profile into assets/, for a release that
+# ships it at neither location. Fails without writing anything for a name
+# builtin_entitlement_profile does not recognise.
+adopt_builtin_entitlement() {
+  release_root="$1"
+  profile_name="$2"
+  content="$(builtin_entitlement_profile "$profile_name")" || return 1
+  $SUDO mkdir -p "$release_root/assets" || return 1
+  printf '%s\n' "$content" | $SUDO tee "$release_root/assets/$profile_name" >/dev/null
+}
+
 prepare_dirs() {
   if [ ! -e "$LIB_DIR" ] && [ ! -L "$LIB_DIR" ]; then
     LIB_CREATED=1
@@ -408,13 +507,29 @@ sign_release() {
   command -v codesign >/dev/null 2>&1 || die "codesign is required on macOS"
   for name in $(release_entries "$STAGE"); do
     [ -f "$STAGE/$name" ] || continue
-    profile="$STAGE/assets/$(entitlement_profile "$name")"
-    if [ ! -f "$profile" ]; then
-      if entitlement_required "$name"; then
-        die "missing entitlement profile: $profile"
+    profile_name="$(entitlement_profile "$name")"
+    profile="$(find_entitlement_profile "$STAGE" "$profile_name")"
+    if [ -z "$profile" ]; then
+      if ! entitlement_required "$name"; then
+        continue
       fi
-      continue
+      if already_entitled "$STAGE/$name" "$(required_entitlement_key "$name")"; then
+        say "Already entitled: $name"
+        continue
+      fi
+      if adopt_builtin_entitlement "$STAGE" "$profile_name"; then
+        profile="$STAGE/assets/$profile_name"
+      else
+        die "missing entitlement profile: $STAGE/assets/$profile_name"
+      fi
     fi
+    case "$profile" in
+      "$STAGE/resources/"*)
+        adopt_resources_entitlement "$STAGE" "$profile_name" \
+          || die "could not install $profile_name from resources/ into assets/"
+        profile="$STAGE/assets/$profile_name"
+        ;;
+    esac
     output="$($SUDO codesign --sign - --force --entitlements "$profile" "$STAGE/$name" 2>&1)" \
       || die "codesign failed for $STAGE/$name: $output"
     say "Codesigned: $name"

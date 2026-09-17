@@ -10,6 +10,17 @@
 
 ## In progress
 
+- [ ] **Upgrades found by reviewing an external microVM sandbox.**
+      `specs/plans/2026-09-16-sandbox-review-upgrades.md`.
+      Issues #3378–#3387.
+      Three defects in our tree: a restore reseed reported as done when it
+      failed (and not immediate when it succeeds), a machine-create race, and
+      container-layer rootfs images losing file ownership. Seven upgrades: HVF
+      free-page memory return, copy-on-write HVF restore, spawn-time memory and
+      task limits, chunked durable checkpoints, measured guest flush cost,
+      signed bundles through image registries, and structured agent-facing
+      errors.
+
 - [x] **Keep pre-26 Apple Silicon Macs off the unavailable HVF builder — issue #3325.**
       Auto-detection now requires both Apple Silicon and the existing macOS
       26+ HVF-default tier before selecting HVF; older supported Macs select
@@ -19,6 +30,19 @@
       gates pass. The full workspace run passed all suites except two parallel
       image-lock collisions, and both exact isolated reruns passed.
 
+- [ ] **Extract the image release train into `mvm-images`.**
+      `specs/plans/2026-09-16-image-repository-extraction.md`.
+      Issues #3362–#3369 and #3373.
+      Planned in eight incremental workstreams: remove cold source-image
+      preparation from the release critical path; establish a separately
+      governed image repository; define one signed image-set manifest and lock;
+      move and reproduce the image sources; ship explicit sibling-checkout
+      development; migrate trust and consumers; dual-publish through a support
+      window; then cut over and measure. An optional ninth workstream measures
+      whether a separately approved, archived history rewrite is worthwhile.
+      Production must never auto-discover or accept unsigned local sibling
+      artifacts.
+
 - [x] **Hermetic published-documentation link gate — issue #3328.**
       Validate repository files, same-repository GitHub links, and internal
       documentation/site routes on every `check-all` run, and repair the
@@ -26,6 +50,16 @@
       published-doc scan pass, along with workspace check and clippy; the full
       workspace run passed all suites except one load-induced lease-TTL flake,
       whose exact isolated rerun passed.
+
+- [x] **Extended CI Firecracker warm-claim repair — issue #3330.**
+      `specs/plans/2026-09-16-extended-ci-warm-claim.md`. The scheduled lane
+      reaches KVM and captures the parent, then fails while preloading the
+      child because snapshot device-path remapping needs a private mount
+      namespace and the hosted runner user lacks `CAP_SYS_ADMIN`. The lane now
+      crosses the runner's passwordless-sudo boundary for the guarded recipe,
+      preserves only its required environment, and retains complete warm-pool
+      failure context. The full PR matrix and exact-head live Firecracker
+      witness pass.
 
 - [x] **Cover `agent-session resume --boot` and reconcile session status — issue #3264.**
       Exercise a successful cold-tier boot through the CLI boundary and make

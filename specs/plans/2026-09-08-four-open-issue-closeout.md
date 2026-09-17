@@ -269,14 +269,21 @@ an unprovisioned label would not provide the required live witness.
       narrowly scoped, non-persisted registration token. Record owner,
       patch/update cadence, capacity, alerting, teardown, and credential-rotation
       procedures outside the source tree where operational secrets belong.
-- [ ] Because this is a public repository, prove the unique label is reachable
-      only from trusted merged-main schedules and protected release callers.
-      Fork pull-request code must never execute on this runner. Partial:
-      `e2e-docs.yml` is `workflow_call`-only (Extended CI's cron/dispatch and
-      `release.yml`), and the fork-PR approval policy is
-      `all_external_contributors`. Approval is still a human gate, not a
-      mechanical refusal — a maintainer who approves a fork PR editing
-      `.github/` can still reach the label.
+- [ ] ~~Because this is a public repository, prove the unique label is
+      reachable only from trusted merged-main schedules and protected release
+      callers. Fork pull-request code must never execute on this runner.~~
+      **Accepted as a limit, not proven** — on 2026-09-16 the organization's
+      Actions settings offered no *New runner group* on the Free plan, so the
+      mechanical refusal (a runner group limited to selected workflows) is not
+      available without Team. What holds instead:
+      `no_untrusted_event_can_place_a_job_on_the_self_hosted_runner`
+      (`tests/github_actions_self_hosted_runner.rs`) fails if any workflow that
+      can place a job on `m1`, directly or through a reusable workflow, is
+      started by a pull-request, merge-queue, comment or `workflow_run` event,
+      or by a `push` admitting a branch other than `main`; and the fork-PR
+      approval policy is `all_external_contributors`. The residual risk is a
+      maintainer approving a fork PR that edits a workflow to name the label.
+      Revisit if the organization moves to Team.
 - [ ] Ensure each job begins from a clean workspace and leaves no workload VM,
       builder session, TAP/device state, signing material, or job credential
       behind. Bound concurrency to the host's proven capacity.
@@ -306,9 +313,21 @@ an unprovisioned label would not provide the required live witness.
       that did not run carry reasons on the macOS allow-list (4 `@wip`, 5
       Firecracker, 6 TLS-tunnel client, 2 bundle fixture, 1 perf-budget host,
       1 warm claim, 1 unenforceable wall clock).
-- [ ] Prove the release caller blocks on the live macOS job when it fails and
+- [x] Prove the release caller blocks on the live macOS job when it fails and
       cannot quietly substitute a stale committed evidence record while the
-      capable runner path is selected.
+      capable runner path is selected. A dry-run `release.yml` dispatch cannot
+      witness this: under `dry_run=true` the `initramfs-image` job is skipped,
+      so the release job is refused on every dry run whatever macOS does. The
+      witness instead called the real `e2e-docs.yml` exactly as `release.yml`
+      does (`macos_blocks_on_unusable_host: true`) from a throwaway branch, with
+      only the live macOS job forced red and the Linux lane stubbed, and gated a
+      job on the release job's own clause,
+      `!cancelled() && needs.e2e-docs.result == 'success'`. Run `35164778251`:
+      host check `success` on `m1-runner`, `e2e-docs-macos` `failure` on
+      `m1-runner` at the forced step, `e2e-docs-macos-evidence` `skipped`, and
+      the gated job `skipped` — the run reports
+      `e2e-docs=failure release-gate=skipped`. That `release.yml`'s condition carries that
+      clause is `the_release_workflow_waits_for_the_documented_surface`.
 - [x] Run workflow lint, `tests/github_actions_extended_e2e.rs`, repository
       policy gates, and the complete live macOS documented-surface suite. Lint,
       the structural tests and the gates ran on #3354; the live suite is the

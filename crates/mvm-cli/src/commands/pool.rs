@@ -40,6 +40,12 @@ use mvm_hostd::plan_admission::{
     AdmittedPlan, InMemoryNonceLedger, SystemClock, admit_for_run, stash_plan_and_mint_verb_grant,
 };
 
+mod status;
+mod warm;
+
+use status::{PoolStatus, PoolStatusEntry};
+pub use warm::WarmResult;
+
 struct HostChildGrantIssuer;
 
 impl ChildGrantIssuer for HostChildGrantIssuer {
@@ -359,15 +365,6 @@ pub struct WarmParams<'a> {
     pub launch: &'a VmStartConfig,
 }
 
-/// Summary returned by [`warm_to_target`].
-#[derive(Debug, PartialEq, Eq)]
-pub struct WarmResult {
-    /// Standbys newly spawned and recorded in this call.
-    pub spawned: u32,
-    /// Spawn attempts that failed (each was logged as a warning).
-    pub failed: u32,
-}
-
 /// Warm the pool toward `target` idle standbys for the given kernel+resources.
 /// Spawn failures are logged and counted; the caller decides whether to
 /// surface them as an error.  Returns a [`WarmResult`] with success and
@@ -583,6 +580,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
         return Ok(WarmResult {
             spawned: 0,
             failed: 0,
+            failures: Vec::new(),
         });
     }
     if !p.backend.capabilities().standby_pool {
@@ -590,6 +588,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
             return Ok(WarmResult {
                 spawned: 0,
                 failed: 0,
+                failures: Vec::new(),
             });
         }
         return Err(anyhow::Error::new(StandbyError::Unsupported {
@@ -622,6 +621,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
     };
     let mut spawned = 0u32;
     let mut failed = 0u32;
+    let mut failures = Vec::new();
     for _ in have..p.target {
         // Every compat field comes from `want`, so the recorded handle's own
         // `compat()` is `want` — the exact value the claim searches for.
@@ -669,6 +669,8 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
                             if let Err(error) =
                                 p.backend.preload_standby_via_runner(&preload, &mut handle)
                             {
+                                failures
+                                    .push(format!("preloading standby '{}': {error:#}", handle.id));
                                 tracing::warn!(
                                     standby = %handle.id,
                                     %error,
@@ -686,6 +688,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
                         spawned += 1;
                     }
                     Err(e) => {
+                        failures.push(format!("auditing captured standby '{}': {e:#}", handle.id));
                         tracing::warn!(
                             standby = %handle.id,
                             error = %e,
@@ -698,6 +701,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
                 }
             }
             Err(e) => {
+                failures.push(format!("spawning standby: {e:#}"));
                 tracing::warn!(error = %e, "spawn standby failed; pool stays under target");
                 failed += 1;
             }
@@ -716,7 +720,11 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
             "evicted warm parents over memory budget"
         );
     }
-    Ok(WarmResult { spawned, failed })
+    Ok(WarmResult {
+        spawned,
+        failed,
+        failures,
+    })
 }
 
 /// The compat-key image identity for a launch: the sha256 of its rootfs image.
@@ -2187,6 +2195,15 @@ mod tests {
             result.failed, 2,
             "both spawn attempts must be counted as failures"
         );
+        assert_eq!(result.failures.len(), 2);
+        assert!(
+            result
+                .failures
+                .iter()
+                .all(|failure| failure.contains("spawning standby")),
+            "each failed attempt should retain its error context: {:?}",
+            result.failures
+        );
     }
 
     #[cfg(feature = "test-support")]
@@ -2230,6 +2247,7 @@ mod tests {
         // Already at target → no spawns attempted, no failures.
         assert_eq!(result.spawned, 0);
         assert_eq!(result.failed, 0);
+        assert!(result.failures.is_empty());
     }
 
     // Two launches warming the same pool to the same target concurrently must
@@ -2449,8 +2467,9 @@ fn run_warm(pool: &SupervisorStandbyPool, req: &WarmRequest) -> Result<()> {
             "{}/{} standby(s) warmed; {} spawn(s) failed — check logs for details.",
             idle_after, target, result.failed,
         ));
+        let details = result.failures.join("; ");
         return Err(anyhow::anyhow!(
-            "pool warm: {}/{} standby(s) warmed, {} failed",
+            "pool warm: {}/{} standby(s) warmed, {} failed: {details}",
             idle_after,
             target,
             result.failed,
@@ -2469,30 +2488,6 @@ fn run_warm(pool: &SupervisorStandbyPool, req: &WarmRequest) -> Result<()> {
          (MVM_RESIDENCY=warm on hosts whose default is parked).",
     );
     Ok(())
-}
-
-/// Machine-readable `pool status --json` shape.
-#[derive(serde::Serialize)]
-struct PoolStatus {
-    idle: usize,
-    claimed: usize,
-    parked: usize,
-    dead: usize,
-    standbys: Vec<PoolStatusEntry>,
-}
-
-#[derive(serde::Serialize)]
-struct PoolStatusEntry {
-    id: String,
-    state: &'static str,
-    pid: u32,
-    kernel_sha256: String,
-    vcpus: u8,
-    mem_mib: u32,
-    /// The image half of the compat key: sha256 of the rootfs the parent
-    /// booted. Every standby carries one, since a parent is only ever spawned
-    /// for a resolved launch shape; absent marks a record predating that.
-    image_sha256: Option<String>,
 }
 
 fn build_pool_status(standbys: &[StandbyHandle]) -> PoolStatus {

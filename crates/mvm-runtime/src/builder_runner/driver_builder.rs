@@ -1,18 +1,19 @@
-//! `HvfBuilderVm` — the HVF builder as a `mvm_build::builder_vm::
-//! BuilderVm`, so it plugs into the existing builder dispatch (approach A). It
+//! `DriverBuilderVm<D>` — a builder VM on any `VmmDriver`, as a
+//! `mvm_build::builder_vm::BuilderVm`, so it plugs into the builder dispatch. It
 //! reuses the backend-agnostic runtime helpers (`stage_job_dir` renders the
 //! flake `cmd.sh`, `acquire_nix_store_image_lock` allocates the persistent Nix
 //! store, `finalize_flake_job` reads the artifact) and drives the boot + disk
 //! transport through [`BuilderRunner`].
 //!
 //! The adapter lives here (not in mvm-build) because `BuilderRunner`/`VmmDriver`
-//! sit above mvm-build; mvm-cli — which sees both crates — selects it for
-//! `--builder hvf`.
+//! sit above mvm-build; mvm-cli — which sees both crates — constructs it for
+//! `--builder hvf` and `--builder firecracker`.
 //!
-//! Image resolution (an HVF-bootable kernel + a rootfs whose baked
-//! `mvm-host-vm-init` speaks the disk transport) is supplied by the caller. The
-//! self-hosting bootstrap (`mvm_build::rootfs_inject`) produces such a rootfs;
-//! wiring an auto-resolver that re-bakes on demand is the remaining follow-up.
+//! Image resolution (a kernel the driver can boot + a rootfs whose baked
+//! `mvm-host-vm-init` speaks the disk transport) is supplied by the caller, one
+//! resolver per backend in mvm-cli. Every name and error this type produces
+//! comes from the driver, so a failure on Firecracker does not report itself as
+//! an HVF failure.
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -106,7 +107,7 @@ impl<D: VmmDriver + Clone + 'static> DriverBuilderVm<D> {
         let host_bin_dir = cache.join("shell-job-empty-mvm-bins");
         std::fs::create_dir_all(&host_bin_dir).map_err(|e| {
             BuilderVmError::ExtractionFailed(format!(
-                "creating HVF builder shell-job host bin dir {}: {e}",
+                "creating builder shell-job host bin dir {}: {e}",
                 host_bin_dir.display()
             ))
         })?;
@@ -128,11 +129,14 @@ impl<D: VmmDriver + Clone + 'static> DriverBuilderVm<D> {
                 vcpus: self.vcpus,
                 memory_mib: self.memory_mib,
             })
-            .map_err(|e| map_runner_failure(format!("hvf builder shell job: {e}")))?;
+            .map_err(|e| {
+                map_runner_failure(format!("{} builder shell job: {e}", self.driver.name()))
+            })?;
         if !outcome.stopped {
-            return Err(map_runner_failure(
-                "hvf builder VM shell job did not power off within the deadline".into(),
-            ));
+            return Err(map_runner_failure(format!(
+                "{} builder VM shell job did not power off within the deadline",
+                self.driver.name()
+            )));
         }
 
         let vm_state_dir = mvm_core::config::vm_state_dir(&name);
@@ -245,10 +249,11 @@ pub(super) fn copy_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io
 }
 
 impl<D: VmmDriver + Clone + 'static> BuilderVm for DriverBuilderVm<D> {
-    /// Neither Stage 0 nor the dependency install is wired on hvf.
+    /// Neither Stage 0 nor the dependency install is served by this type.
     ///
     /// `run_build` serves ordinary build jobs against an already-bootstrapped
-    /// builder, which is why this is not simply "hvf does not work".
+    /// builder. Stage 0 runs on `Stage0Vm<D>` instead, because it runs before
+    /// any builder image exists and this type is constructed from one.
     fn capabilities(&self) -> BuilderCapabilities {
         BuilderCapabilities {
             stage0_bootstrap: false,
@@ -266,10 +271,11 @@ impl<D: VmmDriver + Clone + 'static> BuilderVm for DriverBuilderVm<D> {
     ) -> Result<(), BuilderVmError> {
         Err(BuilderVmError::VmmUnavailable {
             requested: "stage0-bootstrap".to_string(),
-            reason: "the hvf builder cannot bootstrap a builder VM from nothing; \
-                     select libkrun or qemu with `--builder`, which both wire \
-                     Stage 0"
-                .to_string(),
+            reason: format!(
+                "the {} builder is constructed from a builder image, so it cannot \
+                 bootstrap one; Stage 0 runs on that backend's Stage 0 bootstrapper",
+                self.driver.name()
+            ),
         })
     }
 
@@ -285,10 +291,12 @@ impl<D: VmmDriver + Clone + 'static> BuilderVm for DriverBuilderVm<D> {
         // sentence.
         if matches!(job, BuilderJob::Install { .. }) {
             return Err(BuilderVmError::VmmUnavailable {
-                requested: "hvf-dependency-install".to_string(),
-                reason: "the hvf builder does not serve dependency installs; \
-                         select libkrun or qemu with `--builder`"
-                    .to_string(),
+                requested: format!("{}-dependency-install", self.driver.name()),
+                reason: format!(
+                    "the {} builder does not serve dependency installs; \
+                     select libkrun or qemu with `--builder`",
+                    self.driver.name()
+                ),
             });
         }
 
@@ -314,9 +322,10 @@ impl<D: VmmDriver + Clone + 'static> BuilderVm for DriverBuilderVm<D> {
                 .map(|_| mounts.flake_src.as_path()),
         )?;
 
-        // Boot the builder VM over the hvf VMM + disk transport; the guest
-        // runs cmd.sh and tars its artifacts back onto the output disk.
-        let name = format!("mvm-hvf-builder-{job_id}");
+        // Boot the builder VM over the driver + disk transport; the guest runs
+        // cmd.sh and tars its artifacts back onto the output disk. The name
+        // carries the driver so HVF keeps `mvm-hvf-builder-*` unchanged.
+        let name = format!("mvm-{}-builder-{job_id}", self.driver.name());
         let runtime_overlay = require_runtime_overlay_ext4()?;
         let outcome = BuilderRunner::new(self.driver.clone())
             .build(&BuilderBuild {
@@ -333,11 +342,12 @@ impl<D: VmmDriver + Clone + 'static> BuilderVm for DriverBuilderVm<D> {
                 vcpus: self.vcpus,
                 memory_mib: self.memory_mib,
             })
-            .map_err(|e| map_runner_failure(format!("hvf builder run: {e}")))?;
+            .map_err(|e| map_runner_failure(format!("{} builder run: {e}", self.driver.name())))?;
         if !outcome.stopped {
-            return Err(map_runner_failure(
-                "hvf builder VM did not power off within the deadline".into(),
-            ));
+            return Err(map_runner_failure(format!(
+                "{} builder VM did not power off within the deadline",
+                self.driver.name()
+            )));
         }
 
         // The output tar (extracted into `output_dir`) carries rootfs.ext4 +
