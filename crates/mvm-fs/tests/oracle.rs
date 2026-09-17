@@ -371,3 +371,58 @@ fn depth1_extent_tree_file_round_trips_through_real_reader() {
         );
     }
 }
+
+/// A root-owned tree touching every node kind: a directory, an inline file, an
+/// xattr-bearing file, and a fast symlink.
+fn root_owned_fixture() -> Vec<Node> {
+    vec![
+        Node::Dir {
+            path: "/etc".into(),
+            mode: 0o755,
+            xattrs: Vec::new(),
+        },
+        Node::File {
+            path: "/etc/hosts".into(),
+            mode: 0o644,
+            data: b"127.0.0.1 localhost\n".to_vec(),
+            xattrs: Vec::new(),
+        },
+        Node::File {
+            path: "/ping".into(),
+            mode: 0o755,
+            data: b"\x7fELF".to_vec(),
+            xattrs: vec![mvm_fs::ext4::Xattr {
+                name: "security.capability".into(),
+                value: vec![1, 0, 0, 2],
+            }],
+        },
+        Node::Symlink {
+            path: "/etc/localhost".into(),
+            target: "hosts".into(),
+        },
+    ]
+}
+
+/// Images built without any ownership must stay byte-identical to what the
+/// writer emitted before inodes could carry an owner: flake-built images and
+/// host-directory shares are root-owned, and their cached verity roots must
+/// not move.
+#[test]
+fn root_owned_image_bytes_are_pinned() {
+    use sha2::Digest as _;
+    let image = build_image(root_owned_fixture()).unwrap();
+    assert_eq!(
+        hex::encode(sha2::Sha256::digest(&image)),
+        "42b16364352722d7b9ade5566df33b278339c5b8204dc8f8497b1fb813a4dd03",
+    );
+}
+
+/// The content fingerprint of a root-owned tree is pinned for the same reason:
+/// a cache keyed on it must keep hitting for trees that carry no owners.
+#[test]
+fn root_owned_fingerprint_is_pinned() {
+    assert_eq!(
+        mvm_fs::rootfs::fingerprint_ext4_nodes(&root_owned_fixture()).unwrap(),
+        "51bd9a5461b60b1e94762b3985784b2e61db8d721e6a2a55795694863a139179",
+    );
+}
