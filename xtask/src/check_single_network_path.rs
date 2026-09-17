@@ -265,7 +265,17 @@ const PEER_BRANCH_NON_DERIVERS: &[&str] = &[
 /// resolve a peer through it. The substitution proxy refuses peer destinations
 /// outright rather than falling through, so it names the peer suffix without
 /// dispatching on it.
-const PEER_REFUSAL_SITES: &[&str] = &["crates/mvm-hostd/src/supervisor/network_endpoint_proxy.rs"];
+///
+/// The proxy is a module tree: the facade plus every file under its directory.
+/// Naming only the facade would pass while reading nothing, because the facade
+/// holds no request path at all.
+const PEER_REFUSAL_SITES: &[&str] = &[
+    "crates/mvm-hostd/src/supervisor/network_endpoint_proxy.rs",
+    "crates/mvm-hostd/src/supervisor/network_endpoint_proxy",
+];
+
+/// What marks the proxy's one peer refusal.
+const PEER_REFUSAL_MARKER: &str = "PeerName::is_peer_target";
 
 fn check_single_peer_resolver(workspace: &Path) -> Result<()> {
     // The branch itself exists exactly once, in the gate.
@@ -324,17 +334,56 @@ fn check_single_peer_resolver(workspace: &Path) -> Result<()> {
     }
 
     // A refusal site may name the suffix; it may not resolve through it.
+    let mut sources = Vec::new();
     for rel in PEER_REFUSAL_SITES {
-        let src = production_code(&read(workspace, rel)?);
-        if src.contains("decide_peer(") || src.contains("decide_target(") {
-            bail!(
-                "check-single-network-path: {rel} resolves a peer target. It is a refusal \
-                 site: peer traffic goes over FlowMux, not the substitution proxy. If that \
-                 is meant to change, change it deliberately and move this entry."
-            );
+        let path = workspace.join(rel);
+        if !path.exists() {
+            bail!("check-single-network-path: {rel} is missing");
         }
+        scan_path(workspace, &path, &mut |file, code| {
+            sources.push((file.to_string(), code.to_string()));
+        })?;
+    }
+    let violations = peer_refusal_violations(&sources);
+    if !violations.is_empty() {
+        bail!("check-single-network-path:\n  {}", violations.join("\n  "));
     }
     Ok(())
+}
+
+/// Check the substitution proxy's files, already reduced to production code.
+///
+/// Two halves. No file may resolve a peer target. And exactly one file must
+/// carry the refusal: zero means the refusal is gone — or has slid behind a
+/// `#[cfg(test)]` that `production_code` stops reading at, so the first half
+/// is no longer looking at it — and two means a second request path has grown
+/// its own copy.
+fn peer_refusal_violations(sources: &[(String, String)]) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut refusing = Vec::new();
+    for (file, code) in sources {
+        if code.contains("decide_peer(") || code.contains("decide_target(") {
+            violations.push(format!(
+                "{file} resolves a peer target. It is a refusal site: peer traffic goes over \
+                 FlowMux, not the substitution proxy. If that is meant to change, change it \
+                 deliberately and move this entry."
+            ));
+        }
+        if code.contains(PEER_REFUSAL_MARKER) {
+            refusing.push(file.as_str());
+        }
+    }
+    if refusing.len() != 1 {
+        violations.push(format!(
+            "the substitution proxy ({}) must refuse peer destinations in exactly one file \
+             (`{PEER_REFUSAL_MARKER}`), found {}: [{}]. One request-preparation seam owns the \
+             refusal; none means it was removed or moved out of the scanned production code.",
+            PEER_REFUSAL_SITES.join(", "),
+            refusing.len(),
+            refusing.join(", ")
+        ));
+    }
+    violations
 }
 
 /// Label keys a connect-path audit entry may carry.
@@ -667,6 +716,58 @@ mod tests {
                 .iter()
                 .any(|(path, _)| *path == "crates/mvm-hostd/src/supervisor/l7_proxy.rs")
         );
+    }
+
+    fn proxy_file(name: &str, code: &str) -> (String, String) {
+        (
+            format!("crates/mvm-hostd/src/supervisor/network_endpoint_proxy/{name}"),
+            code.to_string(),
+        )
+    }
+
+    #[test]
+    fn one_proxy_file_refusing_peers_and_none_resolving_is_clean() {
+        let sources = [
+            proxy_file(
+                "prepare.rs",
+                "if PeerName::is_peer_target(host) { refuse() }",
+            ),
+            proxy_file("pipeline.rs", "fn process() {}"),
+        ];
+        assert!(peer_refusal_violations(&sources).is_empty());
+    }
+
+    #[test]
+    fn a_proxy_file_resolving_a_peer_target_is_named() {
+        let sources = [
+            proxy_file(
+                "prepare.rs",
+                "if PeerName::is_peer_target(host) { refuse() }",
+            ),
+            proxy_file("pipeline.rs", "let v = gate.decide_target(host);"),
+        ];
+        let violations = peer_refusal_violations(&sources);
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert!(violations[0].contains("pipeline.rs resolves a peer target"));
+    }
+
+    #[test]
+    fn a_missing_peer_refusal_fails_rather_than_passing_vacuously() {
+        let sources = [proxy_file("prepare.rs", "fn prepare_flow() {}")];
+        let violations = peer_refusal_violations(&sources);
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert!(violations[0].contains("found 0"));
+    }
+
+    #[test]
+    fn a_second_peer_refusal_is_a_second_request_path() {
+        let sources = [
+            proxy_file("prepare.rs", "PeerName::is_peer_target(a)"),
+            proxy_file("pipeline.rs", "PeerName::is_peer_target(b)"),
+        ];
+        let violations = peer_refusal_violations(&sources);
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert!(violations[0].contains("found 2"));
     }
 
     #[test]
