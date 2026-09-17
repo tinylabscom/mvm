@@ -742,3 +742,77 @@ fn agent_session_park_retry_is_reported_as_a_replay() {
         String::from_utf8_lossy(&changed.stderr)
     );
 }
+
+#[test]
+fn agent_session_renew_help_lists_its_flags() {
+    let home = tempfile::tempdir().unwrap();
+    let out = agent_session(home.path(), &["renew", "--help"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let help = String::from_utf8_lossy(&out.stdout);
+    for flag in [
+        "--for",
+        "--expected-deadline",
+        "--expected-generation",
+        "--json",
+    ] {
+        assert!(help.contains(flag), "missing {flag}: {help}");
+    }
+    let park = agent_session(home.path(), &["park", "--help"]);
+    assert!(String::from_utf8_lossy(&park.stdout).contains("--retain-for"));
+}
+
+/// Park with a deadline, read it back, renew exactly twice, then try to
+/// shorten: the real binary replays the retry and refuses the shortening.
+#[test]
+fn agent_session_renew_extends_replays_and_refuses_to_shorten() {
+    let home = tempfile::tempdir().unwrap();
+    let ok = |out: std::process::Output| -> serde_json::Value {
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null)
+    };
+    ok(agent_session(home.path(), &["open", "sess-a"]));
+    ok(agent_session(
+        home.path(),
+        &[
+            "park",
+            "sess-a",
+            "--reason",
+            "operator",
+            "--retain-for",
+            "1h",
+        ],
+    ));
+    let shown = ok(agent_session(home.path(), &["show", "sess-a", "--json"]));
+    assert_eq!(shown["retention"]["state"], "alive");
+    let deadline = shown["retain_until_unix"].as_u64().unwrap().to_string();
+
+    let renew = [
+        "renew",
+        "sess-a",
+        "--for",
+        "5h",
+        "--expected-generation",
+        "1",
+        "--expected-deadline",
+        deadline.as_str(),
+        "--json",
+    ];
+    assert_eq!(ok(agent_session(home.path(), &renew))["replayed"], false);
+    assert_eq!(ok(agent_session(home.path(), &renew))["replayed"], true);
+
+    let shorten = agent_session(home.path(), &["renew", "sess-a", "--for", "1m"]);
+    assert!(!shorten.status.success());
+    assert!(
+        String::from_utf8_lossy(&shorten.stderr).contains("can only extend"),
+        "{}",
+        String::from_utf8_lossy(&shorten.stderr)
+    );
+}

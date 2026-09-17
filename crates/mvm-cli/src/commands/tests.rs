@@ -2187,6 +2187,57 @@ fn an_agent_session_json_report_reserves_stdout() {
 }
 
 #[test]
+fn agent_session_renew_requires_a_duration_and_takes_both_fences() {
+    assert!(Cli::try_parse_from(["mvmctl", "agent-session", "renew", "sess-a"]).is_err());
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "agent-session",
+        "renew",
+        "sess-a",
+        "--for",
+        "48h",
+        "--expected-generation",
+        "2",
+        "--expected-deadline",
+        "1800000000",
+        "--json",
+    ])
+    .unwrap();
+    let Commands::AgentSession(args) = cli.command else {
+        panic!("expected the agent-session command")
+    };
+    assert!(args.emits_machine_readable_stdout());
+    let agent_session::AgentSessionAction::Renew(renew) = args.action else {
+        panic!("expected the renew subcommand")
+    };
+    assert_eq!(renew.extend_for, "48h");
+    assert_eq!(renew.expected_deadline, Some(1_800_000_000));
+    assert_eq!(renew.retry.expected_generation, Some(2));
+}
+
+#[test]
+fn agent_session_park_takes_a_retention() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "agent-session",
+        "park",
+        "sess-a",
+        "--reason",
+        "operator",
+        "--retain-for",
+        "7d",
+    ])
+    .unwrap();
+    let Commands::AgentSession(args) = cli.command else {
+        panic!("expected the agent-session command")
+    };
+    let agent_session::AgentSessionAction::Park(park) = args.action else {
+        panic!("expected the park subcommand")
+    };
+    assert_eq!(park.retain_for.as_deref(), Some("7d"));
+}
+
+#[test]
 fn test_start_verb_is_unrecognized() {
     let result = Cli::try_parse_from(["mvmctl", "start", "--flake", "."]);
     assert!(result.is_err(), "`start` alias was dropped in plan 40");

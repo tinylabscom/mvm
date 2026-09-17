@@ -1,6 +1,6 @@
-# Session exact replay: retrying a park or resume whose response was lost
+# Session exact replay and retention deadlines
 
-`specs/plans/2026-08-18-durable-agent-sessions.md` WS3, WS4 and WS7.
+`specs/plans/2026-08-18-durable-agent-sessions.md` WS3, WS4, WS5 and WS7.
 
 Before this, a caller whose `agent-session park` or `resume` applied but whose
 response was lost could not retry safely. A retried park refused because the
@@ -86,3 +86,81 @@ parked. The caller could not tell "not applied" from "applied, response lost".
 - `tests/cli.rs`: help lists the flags, a non-numeric generation is refused, and
   `open` → `park --json` → identical `park --json` against the real binary
   reports `replayed` false then true, then a changed reason is refused.
+
+## Retention deadlines
+
+A parked session had no deadline, so how long it was kept depended only on pool
+TTLs tuned for warm capacity. This change gives each park a deadline.
+
+- **`AgentSessionRecord::retain_until_unix`.** Park sets it to now plus
+  `ParkInput::retention_secs()`, which is the explicit `retain_for_secs` or
+  `default_retention(reason)`. Resume clears it. The defaults are named
+  constants tied to what they stand for: `APPROVAL_WAIT_RETENTION` is
+  `MAX_APPROVAL_TTL_MS`, and `IDLE_RETENTION` is `STANDBY_POOL_TTL`.
+  `HOST_SHUTDOWN_RETENTION` and `OPERATOR_RETENTION` are 48h, the plan's
+  unmeasured starting proposal. `RETENTION_DEMOTION_RETENTION` is 30d. The
+  resolved retention is a park identity input, so a retry with another
+  `--retain-for` conflicts and names it.
+- **`AgentSessionRecord::renew`** moves the deadline only later. It refuses
+  `WouldShorten`, `Expired` ("already past its promise"), `NoDeadline`, a closed
+  session and an active one. A renewal to exactly the current deadline is not a
+  shortening.
+- **`AgentSessionStore::renew`** goes through `classify_retry` like park. A
+  renewal observes the deadline it extends: `renew_claim` records that deadline
+  as observed state, not as an input. Successive renewals share a generation,
+  and the observed deadline is what separates a retry of one renewal from the
+  next renewal. A replay needs both `--expected-generation` and
+  `--expected-deadline`. A deadline that moved since the caller read it is
+  refused as `TransitionConflict::ObservedStateMoved`, naming both values.
+- **`RetentionStatus`** (`Alive { until_unix, remaining_secs }` /
+  `Expired { until_unix, expired_for_secs }`) is derived from the clock, never
+  stored. `ls` prints `retention=alive(2h left)` / `retention=expired(3h ago)`.
+  `show` prints `retain until:` with the same status. Under `--json` both add a
+  `retention` object beside the flattened record.
+- **CLI.** `park --retain-for <duration>` and
+  `renew <id> --for <duration> [--expected-generation] [--expected-deadline] [--json]`.
+  Durations go through the shared `mvm_core::crypto::policy::parse_ttl` (1s to
+  30d).
+- **Audit.** `AuditEmitter::emit_session_renewed` writes `session.renewed` under
+  the member sandbox's persisted plan, as a park is. Its extras are
+  `renewed_session`, `renewed_at_generation`, `renewed_until_unix` and
+  `renewed_from_unix`, all disjoint from the signed plan labels. The park entry
+  gains `park_retain_until_unix`. The event is registered in the lifecycle
+  classification test and in `tests/audit_total_coverage.rs`, and a replayed
+  renewal adds no entry.
+
+### Not delivered: automatic demotion on expiry
+
+No scheduler acts on an expired deadline, and none was wired, because no
+demotion today is truthful. `AgentSessionRecord::demote` rewrites `storage_tier`
+and nothing else. `SupervisorStandbyPool::demote_to_saved_state` clears a pool
+standby's pid and child, but no session record names a standby. A scheduler
+calling either would report RAM or a memory image released when neither was.
+An expired session is therefore reported and refuses renewal, but still resumes
+and still pins its resume point. The plan tracks the scheduler as an unchecked
+WS5 item.
+
+### Tests
+
+- `mvm-runtime`: every reason's default maps to its constant, and the approval
+  and idle constants equal what they are tied to; park sets the default or the
+  explicit deadline; resume clears it; renew extends; a shortening, an expired
+  session, and a closed or active session all refuse; renewing to exactly the
+  current deadline is not a shortening; the alive/expired boundary; a store renew
+  replay writes nothing; a renew from the new deadline is a new renewal; another
+  extension from the same deadline conflicts naming it; a moved deadline refuses
+  naming both values; a renew without an observed deadline cannot replay; a
+  store renewal of an expired session writes nothing; the renew identity ignores
+  the clock; record round trip; the park identity covers the retention.
+- `mvm-hostd`: `session.renewed` is chain-signed and keeps the plan labels.
+- `mvm-cli`: `--retain-for` sets the deadline, the default applies without it,
+  and a malformed value is refused before the record moves; a changed retention
+  conflicts; renew through the real chain writer leaves one `session.renewed`
+  after an exact retry; shortening, expired, closed, active and a malformed
+  duration are refused; renew extras do not collide with plan labels; `ls`/`show`
+  report alive and expired in text and JSON; an active session reports no
+  retention; park extras carry the deadline; argument parsing for `renew` and
+  `--retain-for`.
+- `tests/cli.rs`: renew and park help list the flags. Against the real binary,
+  open → park `--retain-for 1h` → `show --json` (alive) → an exact renew twice
+  (`replayed` false, then true) → a shortening renew refused.

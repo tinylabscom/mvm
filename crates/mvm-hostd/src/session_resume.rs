@@ -808,6 +808,7 @@ mod tests {
             approval_head: None,
             storage_tier: None,
             park_reason: None,
+            retain_until_unix: None,
             last_transition: None,
         };
         active
@@ -818,6 +819,7 @@ mod tests {
                     // A real recorded head, so a request that passes the wrong
                     // one — or none — has something to be refused against.
                     approval_head: Some(head_of("ab")),
+                    retain_for_secs: None,
                 },
                 1_755_000_100,
             )

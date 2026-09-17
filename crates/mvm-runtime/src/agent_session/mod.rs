@@ -18,6 +18,7 @@ use mvm_contract::protocol::agent_session::AgentSessionId;
 use mvm_core::session_transition::{SessionTransitionDigest, TransitionIdentity, TransitionKind};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 const RECORD_FILE: &str = "session.json";
 
@@ -81,6 +82,16 @@ pub struct AgentSessionRecord {
     /// Why the session was parked. `None` while the session is active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub park_reason: Option<ParkReason>,
+    /// Unix second until which the host promises to keep this parked session
+    /// resumable. Set by park, only ever moved later by renew, and cleared by
+    /// resume. `None` while the session is active.
+    ///
+    /// A promise, not an enforcement: nothing reclaims a session when its
+    /// deadline passes, because no demotion today releases what the lower tier
+    /// claims to. What the deadline does decide is that an expired session can
+    /// no longer be renewed, and that listings say it is expired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retain_until_unix: Option<u64>,
     /// The transition this record last took, kept so a caller whose response
     /// was lost can retry it and be told it already happened. `None` for a
     /// record no transition has touched since it was opened.
@@ -213,6 +224,16 @@ pub enum TransitionConflict {
         generation: u64,
         differences: String,
     },
+    /// State the caller conditioned on has since changed.
+    #[error("session {session}'s {name} is {current}, not the expected {expected}{last}")]
+    ObservedStateMoved {
+        session: String,
+        name: &'static str,
+        current: String,
+        expected: String,
+        /// Rendered description of the transition that moved it, or empty.
+        last: String,
+    },
     /// The record has moved past the generation the caller observed.
     #[error("session {session} is at generation {current}, not the expected {expected}{last}")]
     Superseded {
@@ -302,6 +323,34 @@ pub fn park_identity(
             "approval_head",
             input.approval_head.as_ref().map(ToString::to_string),
         )
+        .input("retain_for_secs", input.retention_secs())
+}
+
+/// Name of the observed deadline in a renewal's identity.
+const OBSERVED_DEADLINE: &str = "retain_until_unix";
+
+/// The identity of renewing `current` as `request` asks.
+///
+/// The deadline the caller observed is part of it, as observed state rather
+/// than as an input: two renewals from different deadlines are successive
+/// steps, while two from the same deadline asking for different extensions
+/// compete for one step.
+#[must_use]
+pub fn renew_claim(current: &AgentSessionRecord, request: &RenewRequest) -> TransitionClaim {
+    let observed_deadline = request.expected_deadline_unix.or(current.retain_until_unix);
+    TransitionClaim {
+        identity: TransitionIdentity::new(
+            TransitionKind::Renew,
+            current.session_id.as_str(),
+            request.generation.resolve(current),
+        )
+        .observing(
+            OBSERVED_DEADLINE,
+            observed_deadline.map(|deadline| deadline.to_string()),
+        )
+        .input("extend_for_secs", request.extend_for_secs),
+        replayable: request.generation.is_observed() && request.expected_deadline_unix.is_some(),
+    }
 }
 
 /// The serde spelling of a park reason, which is also what a record stores.
@@ -354,6 +403,21 @@ pub enum SessionTransitionError {
     Closed,
     #[error("session is already at the coldest storage tier")]
     AlreadyColdest,
+    #[error("session records no retention deadline to renew")]
+    NoDeadline,
+    #[error(
+        "session's retention deadline passed at unix {deadline_unix}; it is already past its \
+         promise, so it cannot be renewed"
+    )]
+    Expired { deadline_unix: u64 },
+    #[error(
+        "renewing to unix {requested_unix} would end before the current deadline of unix \
+         {deadline_unix}; a renewal can only extend"
+    )]
+    WouldShorten {
+        deadline_unix: u64,
+        requested_unix: u64,
+    },
 }
 
 /// What a park commits alongside the state transition.
@@ -370,6 +434,84 @@ pub struct ParkInput {
     pub journal_cursor: u64,
     /// Approval-ledger head the session was last admitted under, if it has one.
     pub approval_head: Option<mvm_core::checkpoint::ApprovalHead>,
+    /// How long the host promises to keep the parked session resumable, in
+    /// seconds. `None` takes [`default_retention`] for the reason.
+    pub retain_for_secs: Option<u64>,
+}
+
+impl ParkInput {
+    /// The retention this park promises: the explicit one, or the reason's
+    /// default.
+    #[must_use]
+    pub fn retention_secs(&self) -> u64 {
+        self.retain_for_secs
+            .unwrap_or_else(|| default_retention(self.reason).as_secs())
+    }
+}
+
+/// Retention for a park waiting on an approval: as long as an approval can
+/// live. Holding the session past the point its approval must have expired
+/// promises a wake that cannot come.
+pub const APPROVAL_WAIT_RETENTION: Duration =
+    Duration::from_millis(mvm_contract::policy::approval::MAX_APPROVAL_TTL_MS);
+
+/// Retention for an idle park: the standby TTL. An idle session is the one
+/// that may stay resident, and a resident sandbox is reaped on that clock.
+pub const IDLE_RETENTION: Duration = crate::standby_pool::STANDBY_POOL_TTL;
+
+/// Retention for a park forced by host shutdown. A starting proposal, not a
+/// measured one: long enough to span a maintenance window and a weekend
+/// morning, short enough that a memory image does not sit on disk forgotten.
+pub const HOST_SHUTDOWN_RETENTION: Duration = Duration::from_secs(48 * 60 * 60);
+
+/// Retention for an operator's explicit park. Same starting proposal as a
+/// host shutdown; an operator who wants longer says so with `retain_for_secs`.
+pub const OPERATOR_RETENTION: Duration = Duration::from_secs(48 * 60 * 60);
+
+/// Retention for a session already demoted to the record-and-journal tier,
+/// which costs kilobytes to hold.
+pub const RETENTION_DEMOTION_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// The retention a park promises when the caller names none.
+#[must_use]
+pub fn default_retention(reason: ParkReason) -> Duration {
+    match reason {
+        ParkReason::ApprovalWait => APPROVAL_WAIT_RETENTION,
+        ParkReason::Idle => IDLE_RETENTION,
+        ParkReason::HostShutdown => HOST_SHUTDOWN_RETENTION,
+        ParkReason::Operator => OPERATOR_RETENTION,
+        ParkReason::RetentionDemotion => RETENTION_DEMOTION_RETENTION,
+    }
+}
+
+/// Whether a parked session's retention promise still holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RetentionStatus {
+    /// The deadline is in the future.
+    Alive {
+        until_unix: u64,
+        remaining_secs: u64,
+    },
+    /// The deadline has passed. The session has not been reclaimed — nothing
+    /// reclaims one — but it can no longer be renewed.
+    Expired {
+        until_unix: u64,
+        expired_for_secs: u64,
+    },
+}
+
+/// What a store renewal is asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenewRequest {
+    pub generation: GenerationFence,
+    /// The deadline the caller read. Successive renewals of one parked session
+    /// share a generation, so this is what tells a retry of one renewal from
+    /// the next renewal. `None` reads the deadline at call time, which fences
+    /// nothing and cannot claim a replay.
+    pub expected_deadline_unix: Option<u64>,
+    /// How far past `now` the new deadline lies.
+    pub extend_for_secs: u64,
 }
 
 impl AgentSessionRecord {
@@ -390,8 +532,65 @@ impl AgentSessionRecord {
             park_reason: Some(input.reason),
             journal_cursor: input.journal_cursor,
             approval_head: input.approval_head.clone(),
+            retain_until_unix: Some(now_unix.saturating_add(input.retention_secs())),
             updated_unix: now_unix,
             ..self.clone()
+        })
+    }
+
+    /// Move a parked session's retention deadline later. Returns the renewed
+    /// record; does not write it.
+    ///
+    /// Extend-only. A renewal that would end before the current deadline is
+    /// refused rather than quietly clamped, because a caller that asked for a
+    /// shorter promise believes something about the session that is not true.
+    /// An expired session is refused too: its promise has already lapsed, and
+    /// renewing it would claim a continuity the host never guaranteed.
+    pub fn renew(
+        &self,
+        extend_for_secs: u64,
+        now_unix: u64,
+    ) -> Result<Self, SessionTransitionError> {
+        match self.state {
+            SandboxResidency::Closed => return Err(SessionTransitionError::Closed),
+            SandboxResidency::Active => return Err(SessionTransitionError::NotHibernated),
+            SandboxResidency::Hibernated => {}
+        }
+        let deadline_unix = self
+            .retain_until_unix
+            .ok_or(SessionTransitionError::NoDeadline)?;
+        if now_unix >= deadline_unix {
+            return Err(SessionTransitionError::Expired { deadline_unix });
+        }
+        let requested_unix = now_unix.saturating_add(extend_for_secs);
+        if requested_unix < deadline_unix {
+            return Err(SessionTransitionError::WouldShorten {
+                deadline_unix,
+                requested_unix,
+            });
+        }
+        Ok(Self {
+            retain_until_unix: Some(requested_unix),
+            updated_unix: now_unix,
+            ..self.clone()
+        })
+    }
+
+    /// Whether this record's retention promise holds at `now_unix`. `None` for
+    /// a record with no deadline, which is every active one.
+    #[must_use]
+    pub fn retention_status(&self, now_unix: u64) -> Option<RetentionStatus> {
+        let until_unix = self.retain_until_unix?;
+        Some(if now_unix < until_unix {
+            RetentionStatus::Alive {
+                until_unix,
+                remaining_secs: until_unix - now_unix,
+            }
+        } else {
+            RetentionStatus::Expired {
+                until_unix,
+                expired_for_secs: now_unix - until_unix,
+            }
         })
     }
 
@@ -410,6 +609,7 @@ impl AgentSessionRecord {
             generation: self.generation + 1,
             storage_tier: None,
             park_reason: None,
+            retain_until_unix: None,
             updated_unix: now_unix,
             ..self.clone()
         })
@@ -651,6 +851,45 @@ impl AgentSessionStore {
         Ok(TransitionResult::Applied(parked))
     }
 
+    /// Extend a parked session's retention deadline.
+    ///
+    /// Fenced and retry-exact like `park`, with one more observation: the
+    /// deadline the caller read. A retry carrying both the generation and the
+    /// deadline replays; a renewal whose deadline moved since the caller read
+    /// it is refused naming both values.
+    pub fn renew(
+        &self,
+        id: &AgentSessionId,
+        request: RenewRequest,
+        now_unix: u64,
+    ) -> Result<TransitionResult> {
+        let current = self.load(id)?;
+        let claim = renew_claim(&current, &request);
+        if classify_retry(&current, &claim)? == RetryVerdict::Replay {
+            return Ok(TransitionResult::Replayed(current));
+        }
+        if let Some(expected) = request.expected_deadline_unix
+            && current.retain_until_unix != Some(expected)
+        {
+            return Err(TransitionConflict::ObservedStateMoved {
+                session: current.session_id.as_str().to_string(),
+                name: "retention deadline",
+                current: current
+                    .retain_until_unix
+                    .map_or_else(|| "(none)".to_string(), |d| format!("unix {d}")),
+                expected: format!("unix {expected}"),
+                last: describe_last_transition(&current),
+            }
+            .into());
+        }
+        let mut renewed = current
+            .renew(request.extend_for_secs, now_unix)
+            .map_err(|e| refused(&current, e))?;
+        renewed.last_transition = Some(RecordedTransition::new(claim.identity, None));
+        self.write(&renewed)?;
+        Ok(TransitionResult::Applied(renewed))
+    }
+
     /// Resume a session, refusing if it has moved past the generation its
     /// claim observed.
     ///
@@ -784,6 +1023,7 @@ mod tests {
             approval_head: None,
             storage_tier: None,
             park_reason: None,
+            retain_until_unix: None,
             last_transition: None,
         }
     }
@@ -794,6 +1034,7 @@ mod tests {
             reason,
             journal_cursor: 0,
             approval_head: None,
+            retain_for_secs: None,
         }
     }
 
@@ -1037,6 +1278,7 @@ mod tests {
                     reason: ParkReason::ApprovalWait,
                     journal_cursor: 42,
                     approval_head: Some(head.clone()),
+                    retain_for_secs: None,
                 },
                 1_755_000_100,
             )
@@ -1067,6 +1309,7 @@ mod tests {
                     reason: ParkReason::Idle,
                     journal_cursor: 7,
                     approval_head: None,
+                    retain_for_secs: None,
                 },
                 100,
             )
@@ -1083,6 +1326,7 @@ mod tests {
                         reason: ParkReason::Idle,
                         journal_cursor: 99,
                         approval_head: None,
+                        retain_for_secs: None,
                     },
                     200,
                 )
@@ -1267,6 +1511,7 @@ mod tests {
             reason: ParkReason::ApprovalWait,
             journal_cursor: 42,
             approval_head: Some(head_of("ab")),
+            retain_for_secs: None,
         };
         let parked = rec.park(&park_input, 100).unwrap();
         assert_eq!(parked.parent_checkpoint, rec.parent_checkpoint);
@@ -1322,6 +1567,7 @@ mod tests {
                     reason: ParkReason::ApprovalWait,
                     journal_cursor: 5,
                     approval_head: Some(head.clone()),
+                    retain_for_secs: None,
                 },
                 100,
             )
@@ -1348,6 +1594,7 @@ mod tests {
                     reason: ParkReason::ApprovalWait,
                     journal_cursor: 5,
                     approval_head: Some(head_of("ab")),
+                    retain_for_secs: None,
                 },
                 100,
             )
@@ -1380,6 +1627,7 @@ mod tests {
                     reason: ParkReason::Idle,
                     journal_cursor: 0,
                     approval_head: None,
+                    retain_for_secs: None,
                 },
                 100,
             )
@@ -1502,6 +1750,7 @@ mod tests {
                     reason: ParkReason::Idle,
                     journal_cursor: 42,
                     approval_head: Some(head.clone()),
+                    retain_for_secs: None,
                 },
                 100,
             )
@@ -1812,6 +2061,7 @@ mod tests {
             reason: ParkReason::Idle,
             journal_cursor: 1,
             approval_head: None,
+            retain_for_secs: None,
         };
         let digest = |generation, input: &ParkInput| park_identity(&id, generation, input).digest();
         let reference = digest(1, &base);
@@ -1827,6 +2077,10 @@ mod tests {
             },
             ParkInput {
                 approval_head: Some(head_of("ab")),
+                ..base.clone()
+            },
+            ParkInput {
+                retain_for_secs: Some(60),
                 ..base.clone()
             },
         ] {
@@ -1861,6 +2115,294 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<AgentSessionRecord>(&json).unwrap(),
             rec
+        );
+    }
+
+    // ── retention deadline ──────────────────────────────────────────────
+
+    const HOUR: u64 = 60 * 60;
+
+    fn parked_at(reason: ParkReason, retain_for_secs: Option<u64>, now: u64) -> AgentSessionRecord {
+        record("sess-alpha")
+            .park(
+                &ParkInput {
+                    retain_for_secs,
+                    ..park_input(reason)
+                },
+                now,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn each_reason_has_a_named_default_retention() {
+        assert_eq!(
+            default_retention(ParkReason::ApprovalWait),
+            APPROVAL_WAIT_RETENTION
+        );
+        assert_eq!(default_retention(ParkReason::Idle), IDLE_RETENTION);
+        assert_eq!(
+            default_retention(ParkReason::HostShutdown),
+            HOST_SHUTDOWN_RETENTION
+        );
+        assert_eq!(default_retention(ParkReason::Operator), OPERATOR_RETENTION);
+        assert_eq!(
+            default_retention(ParkReason::RetentionDemotion),
+            RETENTION_DEMOTION_RETENTION
+        );
+        // Tied to what they are named for, not copied from it.
+        assert_eq!(
+            APPROVAL_WAIT_RETENTION.as_millis(),
+            u128::from(mvm_contract::policy::approval::MAX_APPROVAL_TTL_MS)
+        );
+        assert_eq!(IDLE_RETENTION, crate::standby_pool::STANDBY_POOL_TTL);
+    }
+
+    #[test]
+    fn a_park_sets_the_reasons_default_deadline() {
+        let parked = parked_at(ParkReason::ApprovalWait, None, 1_000);
+        assert_eq!(
+            parked.retain_until_unix,
+            Some(1_000 + APPROVAL_WAIT_RETENTION.as_secs())
+        );
+    }
+
+    #[test]
+    fn an_explicit_retention_overrides_the_default() {
+        let parked = parked_at(ParkReason::ApprovalWait, Some(5 * HOUR), 1_000);
+        assert_eq!(parked.retain_until_unix, Some(1_000 + 5 * HOUR));
+    }
+
+    #[test]
+    fn a_resume_clears_the_deadline() {
+        let live = parked_at(ParkReason::Operator, None, 1_000)
+            .resume(2_000)
+            .unwrap();
+        assert_eq!(live.retain_until_unix, None);
+        assert_eq!(live.retention_status(2_000), None);
+    }
+
+    #[test]
+    fn a_renewal_moves_the_deadline_later() {
+        let parked = parked_at(ParkReason::Operator, Some(HOUR), 1_000);
+        let renewed = parked.renew(10 * HOUR, 2_000).unwrap();
+        assert_eq!(renewed.retain_until_unix, Some(2_000 + 10 * HOUR));
+        assert_eq!(renewed.updated_unix, 2_000);
+        assert_eq!(
+            renewed.generation, parked.generation,
+            "a renewal is not a residency"
+        );
+    }
+
+    #[test]
+    fn a_renewal_that_would_shorten_the_deadline_refuses() {
+        let parked = parked_at(ParkReason::Operator, Some(10 * HOUR), 1_000);
+        assert_eq!(
+            parked.renew(HOUR, 2_000),
+            Err(SessionTransitionError::WouldShorten {
+                deadline_unix: 1_000 + 10 * HOUR,
+                requested_unix: 2_000 + HOUR,
+            })
+        );
+    }
+
+    #[test]
+    fn a_renewal_to_exactly_the_current_deadline_is_not_a_shortening() {
+        let parked = parked_at(ParkReason::Operator, Some(HOUR), 1_000);
+        let renewed = parked.renew(HOUR - 500, 1_500).unwrap();
+        assert_eq!(renewed.retain_until_unix, parked.retain_until_unix);
+    }
+
+    #[test]
+    fn an_expired_session_cannot_be_renewed() {
+        let parked = parked_at(ParkReason::Operator, Some(HOUR), 1_000);
+        let deadline = 1_000 + HOUR;
+        let err = parked.renew(30 * 24 * HOUR, deadline).unwrap_err();
+        assert_eq!(
+            err,
+            SessionTransitionError::Expired {
+                deadline_unix: deadline
+            }
+        );
+        assert!(err.to_string().contains("past its promise"), "{err}");
+    }
+
+    #[test]
+    fn a_closed_or_active_session_cannot_be_renewed() {
+        let mut closed = parked_at(ParkReason::Operator, None, 1_000);
+        closed.state = SandboxResidency::Closed;
+        assert_eq!(
+            closed.renew(HOUR, 1_001),
+            Err(SessionTransitionError::Closed)
+        );
+        assert_eq!(
+            record("sess-alpha").renew(HOUR, 1_001),
+            Err(SessionTransitionError::NotHibernated)
+        );
+    }
+
+    #[test]
+    fn retention_status_is_alive_before_the_deadline_and_expired_from_it() {
+        let parked = parked_at(ParkReason::Operator, Some(100), 1_000);
+        assert_eq!(
+            parked.retention_status(1_060),
+            Some(RetentionStatus::Alive {
+                until_unix: 1_100,
+                remaining_secs: 40
+            })
+        );
+        assert_eq!(
+            parked.retention_status(1_100),
+            Some(RetentionStatus::Expired {
+                until_unix: 1_100,
+                expired_for_secs: 0
+            })
+        );
+        assert_eq!(record("sess-alpha").retention_status(1_100), None);
+    }
+
+    /// A parked session in a store, and its deadline.
+    fn stored_parked(tmp: &Path) -> (AgentSessionStore, AgentSessionId, u64) {
+        let store = AgentSessionStore::at(tmp);
+        let rec = record("sess-alpha");
+        store.write(&rec).unwrap();
+        let parked = store
+            .park(
+                &rec.session_id,
+                GenerationFence::Observed(1),
+                ParkInput {
+                    retain_for_secs: Some(HOUR),
+                    ..park_input(ParkReason::Operator)
+                },
+                1_000,
+            )
+            .unwrap()
+            .into_record();
+        (store, rec.session_id, parked.retain_until_unix.unwrap())
+    }
+
+    fn renew_request(deadline: Option<u64>, extend_for_secs: u64) -> RenewRequest {
+        RenewRequest {
+            generation: GenerationFence::Observed(1),
+            expected_deadline_unix: deadline,
+            extend_for_secs,
+        }
+    }
+
+    #[test]
+    fn an_exact_renew_retry_replays_and_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, id, deadline) = stored_parked(tmp.path());
+        let request = renew_request(Some(deadline), 5 * HOUR);
+        let first = store.renew(&id, request, 2_000).unwrap();
+        assert!(!first.is_replay());
+        let before = record_bytes(tmp.path(), "sess-alpha");
+
+        let retry = store.renew(&id, request, 3_000).unwrap();
+        assert!(retry.is_replay());
+        assert_eq!(retry.record(), first.record());
+        assert_eq!(record_bytes(tmp.path(), "sess-alpha"), before);
+    }
+
+    #[test]
+    fn a_renewal_from_the_new_deadline_is_a_new_renewal_not_a_replay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, id, deadline) = stored_parked(tmp.path());
+        let first = store
+            .renew(&id, renew_request(Some(deadline), 5 * HOUR), 2_000)
+            .unwrap()
+            .into_record();
+        let second = store
+            .renew(&id, renew_request(first.retain_until_unix, 5 * HOUR), 4_000)
+            .unwrap();
+        assert!(!second.is_replay());
+        assert_eq!(second.record().retain_until_unix, Some(4_000 + 5 * HOUR));
+    }
+
+    #[test]
+    fn a_renew_retry_asking_for_another_extension_is_a_conflict_naming_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, id, deadline) = stored_parked(tmp.path());
+        store
+            .renew(&id, renew_request(Some(deadline), 5 * HOUR), 2_000)
+            .unwrap();
+        let err = store
+            .renew(&id, renew_request(Some(deadline), 9 * HOUR), 2_100)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains(&format!(
+                "extend_for_secs: recorded {}, retried {}",
+                5 * HOUR,
+                9 * HOUR
+            )),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_renewal_from_a_deadline_that_moved_is_refused_naming_both() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, id, deadline) = stored_parked(tmp.path());
+        let err = store
+            .renew(&id, renew_request(Some(deadline + 7), 5 * HOUR), 2_000)
+            .unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains(&format!(
+                "retention deadline is unix {deadline}, not the expected unix {}",
+                deadline + 7
+            )),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_renew_without_an_observed_deadline_cannot_claim_a_replay() {
+        // Without the deadline the caller read, a retry reads the deadline the
+        // first renewal wrote and so looks like a renewal from there.
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, id, _) = stored_parked(tmp.path());
+        store
+            .renew(&id, renew_request(None, 5 * HOUR), 2_000)
+            .unwrap();
+        let retry = store
+            .renew(&id, renew_request(None, 5 * HOUR), 2_500)
+            .unwrap();
+        assert!(!retry.is_replay());
+        assert_eq!(retry.record().retain_until_unix, Some(2_500 + 5 * HOUR));
+    }
+
+    #[test]
+    fn a_store_renewal_of_an_expired_session_refuses_and_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, id, deadline) = stored_parked(tmp.path());
+        let before = record_bytes(tmp.path(), "sess-alpha");
+        let err = store
+            .renew(&id, renew_request(Some(deadline), 5 * HOUR), deadline + 1)
+            .unwrap_err();
+        assert!(err.to_string().contains("past its promise"), "{err}");
+        assert_eq!(record_bytes(tmp.path(), "sess-alpha"), before);
+    }
+
+    #[test]
+    fn renew_identity_ignores_the_clock() {
+        let parked = parked_at(ParkReason::Operator, Some(HOUR), 1_000);
+        let request = renew_request(parked.retain_until_unix, HOUR);
+        let a = renew_claim(&parked, &request);
+        let mut later = parked.clone();
+        later.updated_unix = 99_999;
+        assert_eq!(renew_claim(&later, &request), a);
+        assert!(a.replayable);
+    }
+
+    #[test]
+    fn a_record_with_a_deadline_round_trips() {
+        let parked = parked_at(ParkReason::Operator, Some(HOUR), 1_000);
+        let json = serde_json::to_string(&parked).unwrap();
+        assert!(json.contains("\"retain_until_unix\""), "{json}");
+        assert_eq!(
+            serde_json::from_str::<AgentSessionRecord>(&json).unwrap(),
+            parked
         );
     }
 }
