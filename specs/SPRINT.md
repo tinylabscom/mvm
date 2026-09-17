@@ -10,6 +10,17 @@
 
 ## In progress
 
+- [ ] **Upgrades found by reviewing an external microVM sandbox.**
+      `specs/plans/2026-09-16-sandbox-review-upgrades.md`.
+      Issues #3378–#3387.
+      Three defects in our tree: a restore reseed reported as done when it
+      failed (and not immediate when it succeeds), a machine-create race, and
+      container-layer rootfs images losing file ownership. Seven upgrades: HVF
+      free-page memory return, copy-on-write HVF restore, spawn-time memory and
+      task limits, chunked durable checkpoints, measured guest flush cost,
+      signed bundles through image registries, and structured agent-facing
+      errors.
+
 - [x] **Keep pre-26 Apple Silicon Macs off the unavailable HVF builder — issue #3325.**
       Auto-detection now requires both Apple Silicon and the existing macOS
       26+ HVF-default tier before selecting HVF; older supported Macs select
