@@ -19,8 +19,10 @@
       so the fixed default macOS release must install while only explicitly
       non-strict missing-profile releases may be tolerated. Immutable
       pre-static v0.17.0/v0.18.0-rc.1 loader failures remain visible without
-      keeping Rocky 9 red; every later release still fails closed. The focused
-      suite, shellcheck, and actionlint pass on the rebased head.
+      keeping Rocky 9 red; every later release still fails closed. Hosted
+      macOS provisions the trusted historical libkrun runtime before exercising
+      v0.16.1. The focused suite, shellcheck, and actionlint pass on the rebased
+      head.
 
 - [ ] **Upgrades found by reviewing an external microVM sandbox.**
       `specs/plans/2026-09-16-sandbox-review-upgrades.md`.

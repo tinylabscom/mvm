@@ -25,6 +25,8 @@ Issue #3273, plan
   predates the `--quiesce` check must be refused with nothing removed, and
   `--force` then removes it. Only the unrelated files may remain, unchanged,
   and the state directory is kept.
+  The macOS job installs the trusted historical libkrun runtime first because
+  the immutable v0.16.1 Apple Silicon binary dynamically links libkrunfw.
 - **upgrade** walks one prefix through those releases oldest to newest. After
   each step the replaced release directory is still complete and its mvmctl
   still runs, and entries the older release had and the newer dropped are gone.

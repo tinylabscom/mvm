@@ -134,6 +134,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # v0.16.1's Apple Silicon mvmctl dynamically links libkrunfw. Exercise
+      # that immutable release with the dependency it documented rather than
+      # misclassifying a missing host library as an installer regression.
+      - name: Install historical macOS runtime dependency
+        if: matrix.runner == 'macos-latest'
+        uses: ./.github/actions/install-libkrun
+
       - name: Install, verify against the archive, and uninstall
         env:
           RELEASE: ${{ matrix.release }}
@@ -157,6 +164,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+
+      - name: Install historical macOS runtime dependency
+        if: matrix.runner == 'macos-latest'
+        uses: ./.github/actions/install-libkrun
 
       - name: Walk one prefix through the releases, roll back, uninstall
         env:
