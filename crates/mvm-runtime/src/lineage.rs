@@ -12,6 +12,8 @@
 //! parent hash-link is followed by content-address, so editing any ancestor's
 //! sealed record is caught from any descendant.
 
+use std::collections::BTreeMap;
+
 use anyhow::Result;
 use mvm_core::checkpoint::CheckpointDigest;
 
@@ -315,6 +317,46 @@ where
     Ok(out)
 }
 
+/// Every record reachable by following parent hash-links from `roots`, mapped
+/// to the label of the root whose walk reached it first. A root is in the
+/// result only when another root's walk reaches it.
+///
+/// This is the collector's walk, not the verifier's, and it does not fail
+/// closed. A parent link that resolves to no record ends that branch, and a
+/// revisited digest ends it rather than looping; refusing on either would let
+/// one missing or edited record block every future collection. Nor does it
+/// verify digests against the audit chain: deciding what may be deleted is not
+/// where trust is decided, and the restore that later reads a kept record
+/// verifies it then.
+pub(crate) fn ancestors_of<'r, G>(
+    graph: &G,
+    roots: impl IntoIterator<Item = &'r G::Record>,
+) -> Result<BTreeMap<CheckpointDigest, String>>
+where
+    G: LineageGraph,
+    G::Record: 'r,
+{
+    let mut reached: BTreeMap<CheckpointDigest, String> = BTreeMap::new();
+    for root in roots {
+        let label = root.id_label();
+        let mut link = root.parent_link().cloned();
+        while let Some(digest) = link {
+            // Everything above a digest already reached was walked when it was
+            // first reached, so this branch has nothing new to add. The same
+            // check is what stops a cycle.
+            if reached.contains_key(&digest) {
+                break;
+            }
+            let Some(parent) = graph.by_digest(&digest)? else {
+                break;
+            };
+            reached.insert(digest, label.clone());
+            link = parent.parent_link().cloned();
+        }
+    }
+    Ok(reached)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,6 +464,79 @@ mod tests {
             recompute: digest(stored),
             parent: parent.map(digest),
         }
+    }
+
+    #[test]
+    fn ancestors_of_follows_every_generation_to_genesis() {
+        let graph = MockGraph::new(vec![
+            record('a', None),
+            record('b', Some('a')),
+            record('c', Some('b')),
+        ]);
+        let root = graph.read(&digest('c')).unwrap();
+        let reached = ancestors_of(&graph, [&root]).unwrap();
+        assert_eq!(
+            reached.keys().cloned().collect::<Vec<_>>(),
+            vec![digest('a'), digest('b')],
+            "both ancestors, and not the root itself"
+        );
+        assert!(
+            reached
+                .values()
+                .all(|label| label == &digest('c').to_string())
+        );
+    }
+
+    #[test]
+    fn ancestors_of_stops_at_a_dangling_link_without_failing() {
+        let graph = MockGraph::new(vec![record('b', Some('e')), record('c', Some('b'))]);
+        let root = graph.read(&digest('c')).unwrap();
+        let reached = ancestors_of(&graph, [&root]).unwrap();
+        assert_eq!(
+            reached.keys().cloned().collect::<Vec<_>>(),
+            vec![digest('b')]
+        );
+    }
+
+    #[test]
+    fn ancestors_of_terminates_on_a_cycle() {
+        let graph = MockGraph::new(vec![
+            record('a', Some('b')),
+            record('b', Some('a')),
+            record('c', Some('a')),
+        ]);
+        let root = graph.read(&digest('c')).unwrap();
+        let reached = ancestors_of(&graph, [&root]).unwrap();
+        assert_eq!(
+            reached.keys().cloned().collect::<Vec<_>>(),
+            vec![digest('a'), digest('b')]
+        );
+    }
+
+    #[test]
+    fn ancestors_of_credits_a_shared_ancestor_to_the_first_root_that_reaches_it() {
+        let graph = MockGraph::new(vec![
+            record('a', None),
+            record('b', Some('a')),
+            record('c', Some('a')),
+        ]);
+        let first = graph.read(&digest('b')).unwrap();
+        let second = graph.read(&digest('c')).unwrap();
+        let reached = ancestors_of(&graph, [&first, &second]).unwrap();
+        assert_eq!(reached.len(), 1);
+        assert_eq!(reached[&digest('a')], digest('b').to_string());
+    }
+
+    #[test]
+    fn ancestors_of_includes_a_root_another_root_restores_through() {
+        let graph = MockGraph::new(vec![record('a', None), record('b', Some('a'))]);
+        let parent = graph.read(&digest('a')).unwrap();
+        let child = graph.read(&digest('b')).unwrap();
+        let reached = ancestors_of(&graph, [&parent, &child]).unwrap();
+        assert_eq!(
+            reached.keys().cloned().collect::<Vec<_>>(),
+            vec![digest('a')]
+        );
     }
 
     #[test]
