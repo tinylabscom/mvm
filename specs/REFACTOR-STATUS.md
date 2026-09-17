@@ -4,6 +4,11 @@ Last updated: 2026-09-17
 
 ## In progress
 
+- [x] **Bootstrap helpers inherit the selected builder backend.**
+      `specs/plans/2026-09-15-vmm-agnostic-stage0.md` W8, issue #3390.
+      Linux helper subprocesses no longer replace shared Firecracker
+      auto-detection with a local QEMU override.
+
 - [ ] **Upgrades found by reviewing an external microVM sandbox.**
       `specs/plans/2026-09-16-sandbox-review-upgrades.md`.
       Issues #3378–#3387. W1 (restore reseed) first; W5 before W4; W8 is

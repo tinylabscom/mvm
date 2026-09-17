@@ -28,6 +28,13 @@
       cold hosted runner cannot consume the entire budget installing the
       pinned cross toolchain before the guest lifecycle runs.
 
+- [x] **Preserve builder backend selection across bootstrap helpers — issue #3390.**
+      Remove the stale Linux-only QEMU override so helper subprocesses inherit
+      the caller's explicit backend or leave selection to the shared detector.
+      Regression coverage exercises both unset and explicit Firecracker
+      environments. Workspace check, zero-warning clippy, Linux cross-target
+      and feature-gated checks, and all 68 repository gates pass.
+
 - [ ] **Upgrades found by reviewing an external microVM sandbox.**
       `specs/plans/2026-09-16-sandbox-review-upgrades.md`.
       Issues #3378–#3387.
