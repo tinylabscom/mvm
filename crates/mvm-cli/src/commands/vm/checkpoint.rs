@@ -1726,6 +1726,8 @@ mod tests {
                 approval_head: None,
                 storage_tier: None,
                 park_reason: None,
+                retain_until_unix: None,
+                last_transition: None,
             })
             .unwrap();
 

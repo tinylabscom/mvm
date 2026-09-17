@@ -905,10 +905,11 @@ concept over a different store.
 | Command                                                                                                                                                                | Description                                                                                                                                                                                                  |
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `mvmctl agent-session open <id> [--resume-point <sha256:...>] [--member <name>]...`                                                                                    | Record a new session, resident from the start, at generation 1. Refuses if a record already exists under that id. `--member` is repeatable.                                                                  |
-| `mvmctl agent-session ls [--json]`                                                                                                                                     | List every session recorded on this host, one summary line each: id, generation, residency, and — when parked — reason and storage tier.                                                                     |
-| `mvmctl agent-session show <id> [--json]`                                                                                                                              | Print one session's recorded state in full: residency, generation, storage tier, park reason, journal cursor, resume point, approval head, members, timestamps. An absent session is an error naming the id. |
-| `mvmctl agent-session park <id> --reason <reason> [--journal-cursor <n>] [--approval-head <sha256:...>]`                                                               | Release an active session's sandbox. `--reason` is one of `approval-wait`, `idle`, `host-shutdown`, `operator`, `retention-demotion`, and selects the storage tier. Emits a `session.parked` chain entry.    |
-| `mvmctl agent-session resume <id> --backend <name> --image <ref> --image-sha256 <hex> --cpus <n> --mem-mib <n> [--kernel-sha256 <hex>] [--approval-head <sha256:...>]` | Re-admit a parked session under a freshly signed `ExecutionPlan`. Emits a `session.resumed` chain entry.                                                                                                     |
+| `mvmctl agent-session ls [--json]`                                                                                                                                     | List every session recorded on this host, one summary line each: id, generation, residency, and — when parked — reason, storage tier and whether the retention deadline is alive or expired.                  |
+| `mvmctl agent-session show <id> [--json]`                                                                                                                              | Print one session's recorded state in full: residency, generation, storage tier, park reason, journal cursor, retention deadline and its status, resume point, approval head, members, timestamps. An absent session is an error naming the id. |
+| `mvmctl agent-session park <id> --reason <reason> [--journal-cursor <n>] [--approval-head <sha256:...>] [--retain-for <duration>] [--expected-generation <n>] [--json]` | Release an active session's sandbox. `--reason` is one of `approval-wait`, `idle`, `host-shutdown`, `operator`, `retention-demotion`, and selects the storage tier and the default retention deadline. Emits a `session.parked` chain entry. |
+| `mvmctl agent-session resume <id> --backend <name> --image <ref> --image-sha256 <hex> --cpus <n> --mem-mib <n> [--kernel-sha256 <hex>] [--approval-head <sha256:...>] [--boot [--kernel <path>]] [--expected-generation <n>] [--json]` | Re-admit a parked session under a freshly signed `ExecutionPlan`. Emits a `session.resumed` chain entry. |
+| `mvmctl agent-session renew <id> --for <duration> [--expected-generation <n>] [--expected-deadline <unix>] [--json]` | Move a parked session's retention deadline to `--for` from now. Extend-only. Emits a `session.renewed` chain entry. |
 
 `open` is what gives the other four subcommands something to act on: `park` and
 `resume` both need a record that already exists, and nothing else on the host
@@ -931,7 +932,78 @@ park time, so a session cannot silently resume under grants it was never
 admitted for. A session parked without a head resumes unfenced, and
 `agent-session show` says so in as many words.
 
-Both chain entries are best-effort: if the entry cannot be written the
+### Retention deadlines
+
+A park sets a retention deadline: the time until which the host promises to
+keep the parked session resumable. `--retain-for` names it (`30m`, `48h`, `7d`,
+at most `30d`). Without it the reason picks a default:
+
+| Reason               | Default | Why                                                      |
+| -------------------- | ------- | -------------------------------------------------------- |
+| `approval-wait`      | 24h     | the longest an approval can live                         |
+| `idle`               | 30m     | the standby TTL a resident sandbox is reaped on          |
+| `host-shutdown`      | 48h     | starting proposal, not measured                          |
+| `operator`           | 48h     | starting proposal, not measured                          |
+| `retention-demotion` | 30d     | the record-and-journal tier costs kilobytes to hold      |
+
+`renew --for <duration>` moves the deadline to that long from now, and only
+ever later. It refuses if the new deadline would end before the current one,
+if the deadline has already passed (the session is past its promise), and if
+the session is active or closed. `ls` and `show` report the deadline as
+`alive` or `expired`. Under `--json` they add a `retention` object with `state`
+and either `remaining_secs` or `expired_for_secs`.
+
+A deadline is a promise, not an enforcement. Nothing reclaims a session when its
+deadline passes, and an expired session still resumes. No demotion yet actually
+releases what a lower storage tier claims to, so no scheduler demotes on expiry.
+
+Successive renewals of one parked session share a generation. A renew retry
+therefore needs `--expected-deadline` as well as `--expected-generation` to be
+recognised as a replay. The deadline is the value `show` prints. Without both, a
+retry is applied as a new renewal.
+
+### Retrying after a lost response
+
+A caller whose `park` or `resume` applied but whose response never arrived
+cannot tell that apart from one that did not apply. `--expected-generation`
+makes the retry safe. Pass the generation you read the session at (as `show`
+prints it) and repeat the command unchanged:
+
+- If that exact transition already applied, the command returns its original
+  result marked as a replay — `replay: this park had already applied` in text,
+  `"replayed": true` under `--json` — writes nothing, and adds no audit entry.
+  A replayed `resume` reports the plan the original was admitted under and
+  admits no second one.
+- If the same step was taken with different inputs (another `--reason`, other
+  plan material, `--boot` added or dropped), the command refuses and names each
+  input that differs. It never applies a second transition.
+- If the session has since moved past that generation, the command refuses
+  naming the current generation and the transition that moved it.
+
+The same rules apply to `renew`, which also needs `--expected-deadline` (see
+above).
+
+The identity a retry is compared by is a SHA-256 over a domain-separation tag
+and length-prefixed fields: the transition kind, the session, the observed
+generation, and every input that decides the outcome — for `park` the reason,
+journal cursor, approval head and retention; for `renew` the observed deadline
+and the extension; for `resume` the approval head, backend,
+image, image and kernel SHA-256, vCPUs, memory, and whether it boots.
+Timestamps are not part of it. Only the session's last transition is kept, so a
+retry of anything older is refused as superseded.
+
+Without `--expected-generation` the generation is read at call time. That fences
+nothing, and a retry cannot be recognised: a second `park` refuses because the
+session is no longer active, and a second `resume` refuses because it is no
+longer parked.
+
+`resume --boot` is never replayed. A retry of a boot resume that already applied
+is refused with a message saying it applied and under which plan: the record
+moves before the boot is attempted, so it cannot say whether that boot
+succeeded, and answering "booted" from it would claim something it does not
+know. Check the machine named after the session directly.
+
+All three chain entries are best-effort: if the entry cannot be written the
 transition is still reported as done, with a warning, because the store write
 already succeeded and failing afterwards would tell an operator a park did not
 happen when it did. A caller that needs the entry must verify the chain

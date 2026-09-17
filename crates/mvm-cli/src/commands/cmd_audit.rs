@@ -207,6 +207,10 @@ impl Commands {
                 machine::MachineAction::Restore(a) => a.json,
                 _ => false,
             },
+            // A transition's `--json` report is what a retrying caller parses
+            // to learn whether it was a replay; a chain warning printed into it
+            // would make that report unreadable exactly when it matters.
+            Commands::AgentSession(a) => a.emits_machine_readable_stdout(),
             _ => false,
         }
     }

@@ -1625,9 +1625,12 @@ resume` takes a `current_head` and refuses when it differs from the
       credential minting are not implemented; the synthesized plan carries
       `grants: None`, so a resumed session re-arms neither a wall-clock bound
       nor a CPU share; a session parked with `approval_head: None` resumes
-      with no ledger fence at all. WS5 is partial: retention classes, expiry,
-      a scheduler that calls `demote`, and actual byte movement between tiers
-      remain undelivered. The checkpoint sweep keeps the parent-link closure
+      with no ledger fence at all. WS5 is partial: a per-record retention
+      deadline landed (set at park, extend-only `agent-session renew`, alive or
+      expired in `ls`/`show`), but retention classes, a scheduler that acts on
+      expiry, and actual byte movement between tiers remain undelivered. The
+      scheduler is held back on purpose: no demotion yet releases what the
+      lower tier claims to. The checkpoint sweep keeps the parent-link closure
       of every checkpoint it retains (tagged, inside the age cut, or a session
       resume point), and `mvmctl machine checkpoint rm` refuses a checkpoint a
       stored descendant restores through, naming it.
@@ -1648,6 +1651,15 @@ resume` takes a `current_head` and refuses when it differs from the
       derived from it; the derived file is not itself pinned. WS7 still lacks
       whole-session chain verification and several lifecycle events; WS8 BDD
       remains untouched.
+
+      Park and resume are retry-exact
+      (`specs/sprint/delivery/session-exact-replay-and-retention.md`): the
+      record keeps its last transition's identity
+      (`mvm_core::session_transition`), and a retry carrying
+      `--expected-generation` replays the recorded result with no write and no
+      chain entry, or refuses naming the input or generation that differs. A
+      retried `resume --boot` is refused rather than replayed. `renew` takes the
+      same fence plus `--expected-deadline`, and emits `session.renewed`.
 
 - [~] **Admission-bound AI assurance sessions** —
       `specs/plans/2026-08-17-admission-bound-ai-assurance-sessions.md`. W1–W4,

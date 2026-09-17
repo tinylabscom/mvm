@@ -32,4 +32,18 @@ impl AuditEmitter {
     ) -> Result<()> {
         self.emit(plan, "session.resumed", labels)
     }
+
+    /// Emit `session.renewed` — a parked durable agent session's retention
+    /// deadline was moved later.
+    ///
+    /// Bound to the same plan a park entry is, the one the parked residency
+    /// was admitted under: a renewal changes how long the host holds that
+    /// residency, not what it is authorized to do.
+    pub fn emit_session_renewed(
+        &self,
+        plan: &ExecutionPlan,
+        labels: Vec<(String, String)>,
+    ) -> Result<()> {
+        self.emit(plan, "session.renewed", labels)
+    }
 }
