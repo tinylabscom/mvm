@@ -36,6 +36,7 @@ use oci_types::CosignIdentity;
 pub(in crate::commands) use pull_core::ensure_prod_digest_pin;
 use pull_core::pull_image_with_trust;
 pub(in crate::commands) use pull_core::resolve_or_pull_run_image;
+pub(in crate::commands) use trust::registry_auth_for;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {

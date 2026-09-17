@@ -15,12 +15,12 @@
 //! sha256 re-check. See `mvm_core::plan::bundle` module rustdoc for the
 //! full rejection ladder.
 //!
-//! ## Scope
+//! ## Transport
 //!
-//! `export` and `fetch` over local filesystem paths. HTTP fetch
-//! and supervisor admit-time re-verify (`ExecutionPlan::PlanArtifact`)
-//! are deferred follow-ups — both touch larger surfaces (a wire
-//! client and an `ExecutionPlan` schema bump respectively).
+//! `fetch` and `install` read a local path, an `https://` URL, or an
+//! `oci://` image-registry reference; `push` publishes to a registry. A
+//! registry is only a transport: whatever it serves still has to pass the
+//! signature check against the local trust store.
 
 use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};
@@ -33,6 +33,8 @@ mod export;
 pub(super) mod fetch;
 mod gc;
 mod install;
+mod push;
+mod registry;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -50,6 +52,10 @@ pub(in crate::commands) enum BundleAction {
     /// Reports the parsed manifest on success; rejects on any of
     /// the failure modes in `BundleVerifyError`.
     Fetch(fetch::Args),
+    /// Publish a `.mvmpkg` archive to an image registry. The bundle
+    /// must verify against the local trust store first; prints the
+    /// digest-pinned reference it was stored at.
+    Push(push::Args),
     /// Verify and atomically install a `.mvmpkg` archive into the
     /// local bundle registry (`~/.mvm/bundles/<sha>/`). Once
     /// installed, `mvmctl up --manifest <sha>` launches from it.
@@ -65,6 +71,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         BundleAction::Export(a) => export::run(cli, a, cfg),
         BundleAction::Fetch(a) => fetch::run(cli, a, cfg),
         BundleAction::Install(a) => install::run(cli, a, cfg),
+        BundleAction::Push(a) => push::run(cli, a, cfg),
         BundleAction::Gc(a) => gc::run(cli, a, cfg),
     }
 }

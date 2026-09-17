@@ -241,6 +241,10 @@ pub enum LocalAuditKind {
     /// Detail: `removed=<count>,shas=<sha1>[,sha2,...]` (truncated
     /// to the first ~5 shas for sweeps).
     BundleGc,
+    /// `mvmctl bundle push <file> <ref>` — published a bundle that verified
+    /// against the local trust store to an image registry. Detail:
+    /// `bundle_sha256=<64hex>,key_id=<32hex>,reference=oci://<ref>@<digest>`.
+    BundlePush,
     /// `mvmctl manifest export-oci <template> --out <path>` —
     /// copied a slot's OCI tarball (produced by `mkGuest`'s
     /// `dockerTools.streamLayeredImage`) to a user-supplied path
@@ -1215,6 +1219,7 @@ mod tests {
             // Bundle registry mutations.
             LocalAuditKind::BundleInstall,
             LocalAuditKind::BundleGc,
+            LocalAuditKind::BundlePush,
             // OCI export follow-on.
             LocalAuditKind::ImageExportOci,
             // Stage 0 bootstrap lifecycle.
@@ -1264,6 +1269,7 @@ mod tests {
             // Bundle registry mutations.
             (LocalAuditKind::BundleInstall, "bundle_install"),
             (LocalAuditKind::BundleGc, "bundle_gc"),
+            (LocalAuditKind::BundlePush, "bundle_push"),
             // OCI export follow-on.
             (LocalAuditKind::ImageExportOci, "image_export_oci"),
             // Stage 0 bootstrap lifecycle. Wire strings are

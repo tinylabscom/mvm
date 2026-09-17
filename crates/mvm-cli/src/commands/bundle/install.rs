@@ -3,8 +3,9 @@
 //! `mvmctl up <bundle-sha256>` calls can launch from it.
 //!
 //! Reuses the source-parsing + transport rules from
-//! [`super::fetch::BundleSource`] (local path or `https://` URL,
-//! plain HTTP refused unless `--allow-http`). After verification
+//! [`super::fetch::BundleSource`] (local path, `https://` URL, or `oci://`
+//! registry reference; plain HTTP refused unless `--allow-http`; a tag
+//! reference refused under `--prod`). After verification
 //! the archive is atomically installed under
 //! `~/.mvm/bundles/<bundle_sha256>/` via
 //! [`mvm_core::plan::BundleRegistry::install`]; the archive bytes are
@@ -20,12 +21,14 @@ use mvm_core::plan::{BundleRegistry, FsTrustStore};
 use mvm_core::user_config::MvmConfig;
 
 use super::super::Cli;
-use super::fetch::load_bundle_bytes;
+use super::fetch::{LoadOptions, load_bundle};
+use super::registry::display_reference;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
-    /// Local path to a `.mvmpkg` archive, or an `https://` URL
-    /// (HTTP is opt-in via `--allow-http`).
+    /// Local path to a `.mvmpkg` archive, an `https://` URL, or an
+    /// `oci://<registry>/<repository>:<tag>` or `@sha256:<digest>`
+    /// registry reference (HTTP is opt-in via `--allow-http`).
     #[arg(value_name = "SOURCE")]
     pub source: String,
     /// Override the trust store directory. Defaults to
@@ -36,11 +39,15 @@ pub(in crate::commands) struct Args {
     /// `~/.mvm/bundles/`.
     #[arg(long, value_name = "DIR")]
     pub registry: Option<PathBuf>,
-    /// Allow plain-HTTP downloads. The Ed25519 signature still
-    /// catches tampering, but HTTP exposes traffic metadata. Off
+    /// Allow plain-HTTP downloads and registries. The Ed25519 signature
+    /// still catches tampering, but HTTP exposes traffic metadata. Off
     /// by default.
     #[arg(long)]
     pub allow_http: bool,
+    /// Production mode: refuse a registry reference that names a tag
+    /// rather than a digest, before contacting the registry.
+    #[arg(long)]
+    pub prod: bool,
     /// Overwrite an existing install with the same bundle_sha256
     /// instead of erroring. Bundles are content-addressed so a
     /// matching sha256 means the contents are byte-identical
@@ -50,8 +57,15 @@ pub(in crate::commands) struct Args {
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
-    let bytes = load_bundle_bytes(&args.source, args.allow_http)
-        .with_context(|| format!("loading bundle archive from {}", args.source))?;
+    let loaded = load_bundle(
+        &args.source,
+        LoadOptions {
+            allow_http: args.allow_http,
+            prod: args.prod,
+        },
+    )
+    .with_context(|| format!("loading bundle archive from {}", args.source))?;
+    let bytes = loaded.bytes;
 
     let trust = match args.trust_store {
         Some(p) => FsTrustStore::new(p),
@@ -82,6 +96,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         installed.manifest.key_id.0,
     );
     println!("  registry root: {}", installed.root.display());
+    if let Some(resolved) = &loaded.resolved {
+        println!("  source:        {}", display_reference(resolved));
+    }
     println!(
         "  launch with:   mvmctl machine run --manifest {}",
         installed.sha256

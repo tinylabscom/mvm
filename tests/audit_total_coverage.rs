@@ -419,6 +419,9 @@ const BUNDLE_SUB: &[(&str, AuditPosture)] = &[
     // `bundle gc` removes one (or all) installed bundles and emits
     // `LocalAuditKind::BundleGc` on the success arm.
     ("gc", AuditPosture::Emits("BundleGc")),
+    // `bundle push` publishes a verified bundle to an image registry and
+    // emits `LocalAuditKind::BundlePush` naming the digest it landed at.
+    ("push", AuditPosture::Emits("BundlePush")),
 ];
 
 // trust add/remove mutate `~/.mvm/trusted-publishers/` and emit
@@ -810,6 +813,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "VmProcStdin",
         "BundleGc",
         "BundleInstall",
+        "BundlePush",
         "ImageExportOci",
         "ImageFetch",
         "TranscriptArmed",
