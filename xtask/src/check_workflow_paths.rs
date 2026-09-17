@@ -1118,6 +1118,8 @@ mod tests {
         }
         assert!(source_build < source_copy);
         assert!(bootstrap.contains("needs: no-kvm-prepare"));
+        assert!(bootstrap.contains("timeout-minutes: 180"));
+        assert!(bootstrap.contains("MVM_BUILDER_VM_TIMEOUT_SECS: 7200"));
         assert!(build.contains("needs: no-kvm-bootstrap"));
         assert!(smoke.contains("needs: no-kvm-build"));
         assert!(workload > smoke.find(grant).expect("smoke must grant vhost-vsock"));

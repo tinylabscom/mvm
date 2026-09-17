@@ -53,6 +53,8 @@ const BINARY_ARTIFACT: &str = "no-kvm-binaries";
 const BOOTSTRAP_ARTIFACT: &str = "no-kvm-bootstrap-cache";
 const BUNDLE_ARTIFACT: &str = "no-kvm-bundle";
 const REQUIRED_PREPARE_TIMEOUT: &str = "timeout-minutes: 45";
+const REQUIRED_BOOTSTRAP_TIMEOUT: &str = "timeout-minutes: 180";
+const REQUIRED_BUILDER_TIMEOUT: &str = "MVM_BUILDER_VM_TIMEOUT_SECS: 7200";
 
 #[test]
 fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
@@ -197,6 +199,8 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
     assert!(
         bootstrap_job.contains("needs: no-kvm-prepare")
             && bootstrap_job.contains(&format!("name: {BINARY_ARTIFACT}"))
+            && bootstrap_job.contains(REQUIRED_BOOTSTRAP_TIMEOUT)
+            && bootstrap_job.contains(REQUIRED_BUILDER_TIMEOUT)
             && bootstrap_job.contains(REQUIRED_SOURCE_FLAKE_RESTORE)
             && bootstrap_job.contains(REQUIRED_SOURCE_KERNEL_BUILD)
             && bootstrap_job.contains("uses: actions/upload-artifact@v7")
