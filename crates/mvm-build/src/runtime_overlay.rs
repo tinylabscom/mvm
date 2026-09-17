@@ -289,12 +289,14 @@ fn collect_overlay_nodes(root: &Path) -> Result<Vec<mvm_fs::ext4::Node>, Runtime
                 out.push(mvm_fs::ext4::Node::Symlink {
                     path: overlay_guest_path(root, &path),
                     target: target.to_string_lossy().into_owned(),
+                    owner: mvm_fs::ext4::Owner::ROOT,
                 });
             } else if file_type.is_dir() {
                 out.push(mvm_fs::ext4::Node::Dir {
                     path: overlay_guest_path(root, &path),
                     mode: overlay_mode_of(&path, 0o755),
                     xattrs: Vec::new(),
+                    owner: mvm_fs::ext4::Owner::ROOT,
                 });
                 stack.push(path);
             } else if file_type.is_file() {
@@ -303,6 +305,7 @@ fn collect_overlay_nodes(root: &Path) -> Result<Vec<mvm_fs::ext4::Node>, Runtime
                     mode: overlay_mode_of(&path, 0o644),
                     data: std::fs::read(&path)?,
                     xattrs: Vec::new(),
+                    owner: mvm_fs::ext4::Owner::ROOT,
                 });
             }
         }
@@ -1234,7 +1237,7 @@ pub(crate) fn curl_download(url: &str, dest: &Path) -> Result<(), RuntimeOverlay
 mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
-    use mvm_fs::ext4::Node;
+    use mvm_fs::ext4::{Node, Owner};
     use tempfile::TempDir;
 
     const FAKE_ROOTHASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -1276,6 +1279,7 @@ mod tests {
                 mode: 0o555,
                 data: path.as_bytes().to_vec(),
                 xattrs: Vec::new(),
+                owner: Owner::ROOT,
             })
             .collect();
         nodes.push(Node::File {
@@ -1283,6 +1287,7 @@ mod tests {
             mode: 0o444,
             data: b"0.14.0\n".to_vec(),
             xattrs: Vec::new(),
+            owner: Owner::ROOT,
         });
         mvm_fs::ext4::build_image(nodes).expect("build valid overlay ext4 fixture")
     }

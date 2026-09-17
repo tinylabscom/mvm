@@ -197,12 +197,14 @@ pub enum Node {
         path: String,
         mode: u16,
         xattrs: Vec<Xattr>,
+        owner: Owner,
     },
     File {
         path: String,
         mode: u16,
         data: Vec<u8>,
         xattrs: Vec<Xattr>,
+        owner: Owner,
     },
     /// A regular file whose bytes stay on the host until the emit pass reads
     /// them.
@@ -227,10 +229,12 @@ pub enum Node {
         /// emitter refuses a short, long, unreadable, or content-changed file.
         expected_sha256: Option<[u8; 32]>,
         xattrs: Vec<Xattr>,
+        owner: Owner,
     },
     Symlink {
         path: String,
         target: String,
+        owner: Owner,
     },
 }
 
@@ -241,6 +245,46 @@ pub enum Node {
 pub struct Xattr {
     pub name: String,
     pub value: Vec<u8>,
+}
+
+/// The uid and gid an inode is owned by.
+///
+/// ext4 stores 32-bit ids split across two 16-bit fields each: the low halves
+/// in the classic inode fields and the high halves in the Linux-specific
+/// `osd2` area. [`Owner::ROOT`] is the default, and writing it leaves every one
+/// of those bytes zero — an image whose nodes carry no ownership is
+/// byte-identical to one built before owners existed.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct Owner {
+    pub uid: u32,
+    pub gid: u32,
+}
+
+impl Owner {
+    /// uid 0, gid 0.
+    pub const ROOT: Owner = Owner::new(0, 0);
+
+    #[must_use]
+    pub const fn new(uid: u32, gid: u32) -> Self {
+        Self { uid, gid }
+    }
+
+    #[must_use]
+    pub const fn is_root(&self) -> bool {
+        self.uid == 0 && self.gid == 0
+    }
 }
 
 /// Deterministic superblock metadata to stamp into a built image.
@@ -273,6 +317,33 @@ impl Node {
             | Node::FileFromHost { path, .. }
             | Node::Symlink { path, .. } => path,
         }
+    }
+
+    /// The uid and gid the node's inode is written with.
+    pub fn owner(&self) -> Owner {
+        match self {
+            Node::Dir { owner, .. }
+            | Node::File { owner, .. }
+            | Node::FileFromHost { owner, .. }
+            | Node::Symlink { owner, .. } => *owner,
+        }
+    }
+
+    /// Replace the node's owner.
+    pub fn set_owner(&mut self, new_owner: Owner) {
+        match self {
+            Node::Dir { owner, .. }
+            | Node::File { owner, .. }
+            | Node::FileFromHost { owner, .. }
+            | Node::Symlink { owner, .. } => *owner = new_owner,
+        }
+    }
+
+    /// The same node, owned by `owner`.
+    #[must_use]
+    pub fn with_owner(mut self, owner: Owner) -> Self {
+        self.set_owner(owner);
+        self
     }
 
     /// The node's extended attributes (empty for symlinks).
@@ -435,6 +506,7 @@ struct Planned {
     ino: u32,
     kind: Kind,
     mode: u16,
+    owner: Owner,
     parent: u32,
     // Physical extents backing this inode's data; empty for fast symlinks and
     // the (never-materialized) empty root. Directories carry exactly one.
@@ -683,6 +755,7 @@ where
         ino: ROOT_INO,
         kind: Kind::Dir,
         mode: S_IFDIR | 0o755,
+        owner: Owner::ROOT,
         parent: ROOT_INO,
         extents: Vec::new(),
         leaf_blocks: Vec::new(),
@@ -708,6 +781,7 @@ where
         let xattr_block = encode_inline_xattrs(node.xattrs())
             .ok_or(Ext4Error::XattrTooLarge { ino })
             .map_err(EmitImageError::Build)?;
+        let owner = node.owner();
         // `node` is consumed here: a file's bytes move into the plan rather
         // than being cloned out of it.
         let (kind, mode, data, symlink_target, size, ft) = match node {
@@ -771,6 +845,7 @@ where
             ino,
             kind,
             mode,
+            owner,
             parent: parent_ino,
             extents: Vec::new(),
             leaf_blocks: Vec::new(),
@@ -1168,13 +1243,18 @@ fn write_inode(img: &mut Image, layout: &Layout, p: &Planned) {
     let (g, local) = layout.locate_inode(p.ino);
     let off = img.block_off(layout.inode_table(g)) + local as usize * INODE_SIZE as usize;
     img.put_u16(off, p.mode);
-    img.put_u16(off + 0x02, 0); // uid
+    img.put_u16(off + 0x02, p.owner.uid as u16); // i_uid (low 16 bits)
     img.put_u32(off + 0x04, (p.size & 0xFFFF_FFFF) as u32); // size_lo
     // atime/ctime/mtime/dtime = 0 (determinism).
+    img.put_u16(off + 0x18, p.owner.gid as u16); // i_gid (low 16 bits)
     img.put_u16(off + 0x1A, p.links);
     // i_blocks counts data blocks + extent-tree leaf blocks (both occupy disk).
     let sectors = (p.block_count + p.leaf_blocks.len() as u32) * (BLOCK_SIZE / 512);
     img.put_u32(off + 0x1C, sectors); // i_blocks_lo
+    // osd2.linux2: l_i_blocks_high (0x74) and l_i_file_acl_high (0x76) stay
+    // zero; the high halves of the ids follow them.
+    img.put_u16(off + 0x78, (p.owner.uid >> 16) as u16); // l_i_uid_high
+    img.put_u16(off + 0x7A, (p.owner.gid >> 16) as u16); // l_i_gid_high
     img.put_u16(off + 0x80, 32); // i_extra_isize
 
     // In-inode extended attributes: pre-encoded region (magic + entries +
@@ -1416,23 +1496,27 @@ mod tests {
                 path: "/etc".into(),
                 mode: 0o755,
                 xattrs: Vec::new(),
+                owner: super::Owner::ROOT,
             },
             super::Node::Dir {
                 path: "/bin".into(),
                 mode: 0o755,
                 xattrs: Vec::new(),
+                owner: super::Owner::ROOT,
             },
             super::Node::File {
                 path: "/etc/hosts".into(),
                 mode: 0o644,
                 data: b"127.0.0.1 localhost\n".to_vec(),
                 xattrs: Vec::new(),
+                owner: super::Owner::ROOT,
             },
             super::Node::File {
                 path: "/bin/hello".into(),
                 mode: 0o755,
                 data: vec![0x7f; super::BLOCK_SIZE_USIZE + 31],
                 xattrs: Vec::new(),
+                owner: super::Owner::ROOT,
             },
         ];
         let dense =
@@ -1459,6 +1543,7 @@ mod tests {
             mode: 0o644,
             data: vec![1u8; super::BLOCK_SIZE_USIZE * 2],
             xattrs: Vec::new(),
+            owner: super::Owner::ROOT,
         }];
         let err = emit_image_with_options(nodes, &BuildOptions::default(), |_offset, _bytes| {
             Err::<(), _>("synthetic sink failure")

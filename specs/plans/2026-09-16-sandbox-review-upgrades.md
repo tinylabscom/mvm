@@ -112,18 +112,18 @@ fields, `write_inode` (`:1171`) writes uid 0, and the unpacker writes into a
 host directory that cannot keep the owners from tar headers. A service whose
 data directory ships owned by its own account boots with root-owned files.
 
-- [ ] W3.1 Record each tar entry's uid and gid during unpack
+- [x] W3.1 Record each tar entry's uid and gid during unpack
       (`crates/mvm-fs/src/oci/unpack/`), in a side table keyed by path.
-- [ ] W3.2 Add owner fields to `Node`, and write the low and high uid/gid
+- [x] W3.2 Add owner fields to `Node`, and write the low and high uid/gid
       inode fields.
-- [ ] W3.3 Include ownership in `fingerprint_ext4_nodes`
+- [x] W3.3 Include ownership in `fingerprint_ext4_nodes`
       (`crates/mvm-fs/src/rootfs.rs`).
-- [ ] W3.4 Keep host-directory walks (`--mount`) normalized unless a caller
+- [x] W3.4 Keep host-directory walks (`--mount`) normalized unless a caller
       asks for ownership.
-- [ ] W3.5 Tests:
-  - [ ] a layer file owned 999:999 round-trips;
-  - [ ] a uid above 65535 round-trips through the high fields;
-  - [ ] changing only an owner changes the fingerprint.
+- [x] W3.5 Tests:
+  - [x] a layer file owned 999:999 round-trips;
+  - [x] a uid above 65535 round-trips through the high fields;
+  - [x] changing only an owner changes the fingerprint.
 - [ ] W3.6 Live test: an image whose service data directory is owned by a
       non-root account starts that service.
 

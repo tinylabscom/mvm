@@ -8,7 +8,7 @@ use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use crate::ext4::Node;
+use crate::ext4::{Node, Owner};
 
 use super::device_nodes::DeviceNodeAction;
 use super::fs_ops::{HardlinkAction, Rooted};
@@ -30,6 +30,8 @@ pub(super) struct EntryCtx<'a> {
     pub(super) raw_path: &'a [u8],
     pub(super) target: &'a Path,
     pub(super) prior_layer_paths: &'a HashSet<PathBuf>,
+    /// The owner the entry's tar header declares.
+    pub(super) owner: Owner,
 }
 
 /// Carry an entry the host tree cannot hold into the image instead of
@@ -83,6 +85,7 @@ pub(super) fn defer_colliding_entry<R: Read>(
                 mode: mode as u16,
                 data,
                 xattrs: into_ext4_xattrs(entry_xattrs),
+                owner: ctx.owner,
             }
         }
         tar::EntryType::Symlink => {
@@ -98,7 +101,11 @@ pub(super) fn defer_colliding_entry<R: Read>(
                     return;
                 }
             };
-            Node::Symlink { path, target }
+            Node::Symlink {
+                path,
+                target,
+                owner: ctx.owner,
+            }
         }
         // Directories are created 0o755 regardless of header mode on the
         // host path too, so the deferred node matches what the tree would
@@ -107,6 +114,7 @@ pub(super) fn defer_colliding_entry<R: Read>(
             path,
             mode: 0o755,
             xattrs: into_ext4_xattrs(entry_xattrs),
+            owner: ctx.owner,
         },
         _ => {
             report.refused.push(RefusedEntry {
@@ -117,6 +125,10 @@ pub(super) fn defer_colliding_entry<R: Read>(
         }
     };
 
+    match &node {
+        Node::Dir { .. } => report.ownership.record_dir(ctx.rel_path, ctx.owner),
+        _ => report.ownership.record_leaf(ctx.rel_path, ctx.owner),
+    }
     report.deferred_nodes.push(node);
 }
 
@@ -150,6 +162,7 @@ pub(super) fn unpack_regular_entry<R: Read>(
             ) {
                 Ok(()) => {
                     report.files_written += 1;
+                    report.ownership.record_leaf(ctx.rel_path, ctx.owner);
                     apply_collected_xattrs(ctx.target, ctx.raw_path, entry_xattrs, report);
                     current_layer_paths.insert(ctx.rel_path.to_path_buf());
                     report.paths_written.insert(ctx.rel_path.to_path_buf());
@@ -167,7 +180,10 @@ pub(super) fn unpack_regular_entry<R: Read>(
                 .rooted
                 .apply_opaque_whiteout(parent_rel, current_layer_paths)
             {
-                Ok(()) => report.opaque_markers_applied += 1,
+                Ok(()) => {
+                    report.opaque_markers_applied += 1;
+                    report.ownership.record_opaque(parent_rel);
+                }
                 Err(refuse) => report.refused.push(RefusedEntry {
                     raw_path: ctx.raw_path.to_vec(),
                     reason: refuse,
@@ -182,7 +198,10 @@ pub(super) fn unpack_regular_entry<R: Read>(
                 .rooted
                 .apply_regular_whiteout(&sibling_rel, current_layer_paths)
             {
-                Ok(()) => report.whiteouts_applied += 1,
+                Ok(()) => {
+                    report.whiteouts_applied += 1;
+                    report.ownership.record_whiteout(&sibling_rel);
+                }
                 Err(refuse) => report.refused.push(RefusedEntry {
                     raw_path: ctx.raw_path.to_vec(),
                     reason: refuse,
@@ -213,6 +232,7 @@ pub(super) fn unpack_directory_entry(
             if created {
                 report.dirs_created += 1;
             }
+            report.ownership.record_dir(ctx.rel_path, ctx.owner);
             apply_collected_xattrs(ctx.target, ctx.raw_path, entry_xattrs, report);
             current_layer_paths.insert(ctx.rel_path.to_path_buf());
             report.paths_written.insert(ctx.rel_path.to_path_buf());
@@ -239,6 +259,7 @@ pub(super) fn unpack_symlink_entry<R: Read>(
     {
         Ok(()) => {
             report.symlinks_written += 1;
+            report.ownership.record_leaf(ctx.rel_path, ctx.owner);
             apply_collected_xattrs(ctx.target, ctx.raw_path, entry_xattrs, report);
             current_layer_paths.insert(ctx.rel_path.to_path_buf());
             report.paths_written.insert(ctx.rel_path.to_path_buf());
@@ -269,12 +290,14 @@ pub(super) fn unpack_hardlink_entry<R: Read>(
     ) {
         Ok(HardlinkAction::Linked) => {
             report.hardlinks_written += 1;
+            record_hardlink_owner(report, ctx, link_target.as_deref());
             apply_collected_xattrs(ctx.target, ctx.raw_path, entry_xattrs, report);
             current_layer_paths.insert(ctx.rel_path.to_path_buf());
             report.paths_written.insert(ctx.rel_path.to_path_buf());
         }
         Ok(HardlinkAction::Copied) => {
             report.hardlink_copies_written += 1;
+            record_hardlink_owner(report, ctx, link_target.as_deref());
             apply_collected_xattrs(ctx.target, ctx.raw_path, entry_xattrs, report);
             current_layer_paths.insert(ctx.rel_path.to_path_buf());
             report.paths_written.insert(ctx.rel_path.to_path_buf());
@@ -283,6 +306,20 @@ pub(super) fn unpack_hardlink_entry<R: Read>(
             raw_path: ctx.raw_path.to_vec(),
             reason: refuse,
         }),
+    }
+}
+
+/// A hardlink names its target's inode, so the owner the link header declares
+/// becomes the owner of both paths — the result a privileged extraction's
+/// `chown` of the shared inode leaves behind.
+fn record_hardlink_owner(report: &mut UnpackReport, ctx: &EntryCtx, link_target: Option<&[u8]>) {
+    match link_target {
+        Some(target) => report.ownership.record_hardlink(
+            ctx.rel_path,
+            Path::new(OsStr::from_bytes(target)),
+            ctx.owner,
+        ),
+        None => report.ownership.record_leaf(ctx.rel_path, ctx.owner),
     }
 }
 
@@ -305,6 +342,7 @@ pub(super) fn unpack_device_entry<R: Read>(
     ) {
         Ok(DeviceNodeAction::Materialized) => {
             report.device_nodes_written += 1;
+            report.ownership.record_leaf(ctx.rel_path, ctx.owner);
             apply_collected_xattrs(ctx.target, ctx.raw_path, entry_xattrs, report);
             current_layer_paths.insert(ctx.rel_path.to_path_buf());
             report.paths_written.insert(ctx.rel_path.to_path_buf());

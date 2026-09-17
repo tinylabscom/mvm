@@ -209,6 +209,51 @@ pub(super) fn read_deferred_nodes(
     serde_json::from_slice(&body).with_context(|| format!("parse {}", path.display()))
 }
 
+/// Sidecar holding the owners the image's layers declared, beside the
+/// unpacked tree for the same reason the deferred nodes sit there: the tree
+/// cannot hold them, and a rebuild from the tree must not lose them.
+fn layer_owners_sidecar(cache_root: &Path, resolved_digest: &str) -> Result<PathBuf> {
+    let hex = sha256_hex(resolved_digest)?;
+    Ok(cache_root
+        .join("unpacked")
+        .join(format!("{hex}.owners.json")))
+}
+
+/// Persist the layers' owners next to the unpacked tree.
+///
+/// Written even when every owner is root. Its absence is what marks a tree
+/// unpacked before owners were recorded, and such a tree cannot rebuild a
+/// faithful image.
+pub(super) fn write_layer_owners(
+    cache_root: &Path,
+    resolved_digest: &str,
+    owners: &mvm_fs::ownership::OwnerTable,
+) -> Result<()> {
+    let path = layer_owners_sidecar(cache_root, resolved_digest)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let body = serde_json::to_vec(owners).context("serialize layer owners")?;
+    fs::write(&path, body).with_context(|| format!("write {}", path.display()))
+}
+
+/// Read back what [`write_layer_owners`] stored, or `None` when the unpacked
+/// tree predates owner recording and must be unpacked again.
+pub(super) fn read_layer_owners(
+    cache_root: &Path,
+    resolved_digest: &str,
+) -> Result<Option<mvm_fs::ownership::OwnerTable>> {
+    let path = layer_owners_sidecar(cache_root, resolved_digest)?;
+    let body = match fs::read(&path) {
+        Ok(body) => body,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
+    };
+    serde_json::from_slice(&body)
+        .map(Some)
+        .with_context(|| format!("parse {}", path.display()))
+}
+
 pub(super) fn sha256_hex(digest: &str) -> Result<String> {
     let Some(hex) = digest.strip_prefix("sha256:") else {
         bail!("unsupported digest algorithm in {digest:?}");
@@ -685,12 +730,14 @@ mod tests {
             mvm_fs::ext4::Node::Symlink {
                 path: "/usr/share/man/man7/pam.7.gz".to_string(),
                 target: "PAM.7.gz".to_string(),
+                owner: mvm_fs::ext4::Owner::ROOT,
             },
             mvm_fs::ext4::Node::File {
                 path: "/opt/run".to_string(),
                 mode: 0o755,
                 data: b"body".to_vec(),
                 xattrs: Vec::new(),
+                owner: mvm_fs::ext4::Owner::ROOT,
             },
         ];
         write_deferred_nodes(tmp.path(), SAMPLE_DIGEST, &nodes).expect("write");
@@ -717,6 +764,7 @@ mod tests {
         let nodes = vec![mvm_fs::ext4::Node::Symlink {
             path: "/a".to_string(),
             target: "b".to_string(),
+            owner: mvm_fs::ext4::Owner::ROOT,
         }];
         write_deferred_nodes(tmp.path(), SAMPLE_DIGEST, &nodes).expect("write");
         write_deferred_nodes(tmp.path(), SAMPLE_DIGEST, &[]).expect("clear");
@@ -729,11 +777,67 @@ mod tests {
     }
 
     #[test]
+    fn layer_owners_roundtrip_through_their_sidecar() {
+        use mvm_fs::oci::unpack::{UnpackOptions, unpack_layer};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let unpacked = tempfile::tempdir().expect("unpacked");
+        let mut header = tar::Header::new_gnu();
+        header.set_path("var/lib/svc/").unwrap();
+        header.set_size(0);
+        header.set_mode(0o750);
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_uid(999);
+        header.set_gid(70_000);
+        header.set_cksum();
+        let mut builder = tar::Builder::new(Vec::new());
+        builder.append(&header, std::io::empty()).unwrap();
+        let layer = builder.into_inner().unwrap();
+        let report = unpack_layer(layer.as_slice(), unpacked.path(), &UnpackOptions::default())
+            .expect("unpack");
+        let mut owners = mvm_fs::ownership::OwnerTable::new();
+        owners.absorb(&report.ownership);
+
+        write_layer_owners(tmp.path(), SAMPLE_DIGEST, &owners).expect("write");
+        let read = read_layer_owners(tmp.path(), SAMPLE_DIGEST)
+            .expect("read")
+            .expect("sidecar present");
+        assert_eq!(read, owners);
+        assert_eq!(
+            read.owner_of("/var/lib/svc"),
+            mvm_fs::ext4::Owner::new(999, 70_000)
+        );
+    }
+
+    #[test]
+    fn a_tree_with_no_owner_sidecar_reads_as_unrecorded_not_as_root_owned() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(
+            read_layer_owners(tmp.path(), SAMPLE_DIGEST)
+                .expect("read")
+                .is_none(),
+            "a tree unpacked before owners were recorded must not pass for an all-root image"
+        );
+        write_layer_owners(
+            tmp.path(),
+            SAMPLE_DIGEST,
+            &mvm_fs::ownership::OwnerTable::new(),
+        )
+        .expect("write");
+        assert_eq!(
+            read_layer_owners(tmp.path(), SAMPLE_DIGEST).expect("read"),
+            Some(mvm_fs::ownership::OwnerTable::new()),
+            "an image whose layers declare only root is still recorded"
+        );
+    }
+
+    #[test]
     fn the_sidecar_sits_beside_the_unpacked_tree_not_inside_it() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let nodes = vec![mvm_fs::ext4::Node::Symlink {
             path: "/a".to_string(),
             target: "b".to_string(),
+            owner: mvm_fs::ext4::Owner::ROOT,
         }];
         write_deferred_nodes(tmp.path(), SAMPLE_DIGEST, &nodes).expect("write");
 

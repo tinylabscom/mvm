@@ -40,6 +40,7 @@ pub mod oci;
 pub mod oci_to_rootfs;
 pub mod output;
 pub mod overlay;
+pub mod ownership;
 pub mod parallel;
 pub mod rootfs;
 pub mod sdk_sidecar;

@@ -124,6 +124,7 @@ fn ingest_archive_streamed<R: Read + std::io::Seek>(
 
     let mut prior_layer_paths = std::collections::HashSet::<PathBuf>::new();
     let mut deferred_nodes = Vec::new();
+    let mut owners = mvm_fs::ownership::OwnerTable::new();
     let metadata = stream_oci_archive(reader, &platform, |descriptor, raw| {
         let report = if is_gzip_layer(&descriptor.media_type) {
             unpack_layer_with_prior_paths(
@@ -147,6 +148,7 @@ fn ingest_archive_streamed<R: Read + std::io::Seek>(
                 descriptor.digest, report.refused
             )));
         }
+        owners.absorb(&report.ownership);
         prior_layer_paths.extend(report.paths_written);
         deferred_nodes.extend(report.deferred_nodes);
         Ok(())
@@ -175,12 +177,14 @@ fn ingest_archive_streamed<R: Read + std::io::Seek>(
     let rootfs_only_tree =
         prepare_rootfs_only_tree(cache_root, &unpacked_root, &metadata.manifest_digest)?;
     super::cache::write_deferred_nodes(cache_root, &metadata.manifest_digest, &deferred_nodes)?;
+    super::cache::write_layer_owners(cache_root, &metadata.manifest_digest, &owners)?;
     materialize_overlay_lean_rootfs(
         cache_root,
         &unpacked_root,
         &rootfs_abs,
         &metadata.manifest_digest,
         deferred_nodes,
+        owners,
     )?;
 
     let provenance = OciProvenance {
@@ -236,6 +240,7 @@ pub(super) fn ingest_archive_from_reader<R: Read>(
         .with_context(|| format!("create {}", unpacked_root.display()))?;
     let mut prior_layer_paths = std::collections::HashSet::new();
     let mut deferred_nodes = Vec::new();
+    let mut owners = mvm_fs::ownership::OwnerTable::new();
     for layer in &image.layers {
         let report = unpack_layer_bytes(
             &layer.descriptor,
@@ -244,6 +249,7 @@ pub(super) fn ingest_archive_from_reader<R: Read>(
             &prior_layer_paths,
         )
         .with_context(|| format!("unpack layer {}", layer.descriptor.digest))?;
+        owners.absorb(&report.ownership);
         prior_layer_paths.extend(report.paths_written);
         deferred_nodes.extend(report.deferred_nodes);
     }
@@ -256,12 +262,14 @@ pub(super) fn ingest_archive_from_reader<R: Read>(
     let rootfs_only_tree =
         prepare_rootfs_only_tree(cache_root, &unpacked_root, &image.manifest_digest)?;
     super::cache::write_deferred_nodes(cache_root, &image.manifest_digest, &deferred_nodes)?;
+    super::cache::write_layer_owners(cache_root, &image.manifest_digest, &owners)?;
     materialize_overlay_lean_rootfs(
         cache_root,
         &unpacked_root,
         &rootfs_abs,
         &image.manifest_digest,
         deferred_nodes,
+        owners,
     )?;
 
     let provenance = OciProvenance {
