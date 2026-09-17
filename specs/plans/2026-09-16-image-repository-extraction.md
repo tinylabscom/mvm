@@ -142,8 +142,13 @@ they become a small versioned interface rather than being copied.
 - artifact acquisition, verification, cache, and admission code;
 - the guest/host protocol and compatibility declarations;
 - the compiled default image-set pin;
-- live boot and cross-version compatibility tests; and
+- live boot and cross-version compatibility tests;
+- the code that boots a builder: Stage 0 orchestration in `mvm-build`, the
+  builder runner in `mvm-runtime`, and the VMM drivers both use; and
 - explicit source-build integration used by contributors.
+
+Stage 0's *seed inputs* move; the code that runs Stage 0 does not. Fixes to how
+a builder boots, stops, or reclaims its store (#3360) therefore land in `mvm`.
 
 `mvm-images` may check out an exact public `mvm` commit to cross-compile guest
 and builder binaries. It records that commit in the image-set manifest. It must
@@ -270,15 +275,17 @@ staging directories, VM/TAP/socket names, and mutable Stage 0 state to the
 worktree pair. Immutable, content-addressed outputs may be shared only after an
 atomic publish into the cache.
 
-Two current worktrees overlap this migration:
+Two worktrees overlapped this migration when it was planned; both are resolved:
 
-- `mvm-m1-e2e-docs-sidecar` changes the documented-surface E2E path used by W1;
-- `mvm-fc-builder-image` changes builder-image behavior and later W4 paths.
+- `mvm-m1-e2e-docs-sidecar` was deleted unmerged. W1 supersedes it, and its
+  diff is archived on #3374, which tracks the part W1's workflow changes do not
+  fix.
+- `mvm-fc-builder-image` landed as #3376 (Firecracker builder image, and a
+  builder guest that halts instead of powering off). It changed host-side
+  builder code, which stays in `mvm`, so W4 has nothing of it to move.
 
-Reconcile or land the M1 sidecar work before W1 edits that workflow. Preserve
-and land or deliberately transplant the Firecracker builder work before W4
-moves its paths. Do not begin destructive path moves while either source area
-has unintegrated changes. In steady state, independent paired worktrees should
+Do not begin destructive path moves while a source area W4 touches has
+unintegrated changes. In steady state, independent paired worktrees should
 collide less than they do in the monorepository, provided mutable state remains
 pair-scoped.
 
