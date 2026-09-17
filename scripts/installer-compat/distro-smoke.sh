@@ -83,7 +83,9 @@ for tag in $TAGS; do
   highest=""
   loader_errors=""
   for binary in "$work/unpacked/mvmctl-$TARGET"/*; do
-    [ -f "$binary" ] && [ -x "$binary" ] || continue
+    if [ ! -f "$binary" ] || [ ! -x "$binary" ]; then
+      continue
+    fi
     name="${binary##*/}"
     report="$(sh "$requirements" "$binary")"
     need="$(printf '%s\n' "$report" | sed -n 's/^required //p')"

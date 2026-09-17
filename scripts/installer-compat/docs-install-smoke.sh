@@ -16,7 +16,10 @@
 # install commands.
 set -eu
 
-[ "$#" -ge 1 ] && [ "$#" -le 2 ] || { echo "usage: $0 <page.md> [installer-url]" >&2; exit 2; }
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+  echo "usage: $0 <page.md> [installer-url]" >&2
+  exit 2
+fi
 PAGE="$1"
 OVERRIDE_URL="${2:-}"
 

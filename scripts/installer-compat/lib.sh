@@ -150,8 +150,9 @@ assert_entries_linked() {
     if [ "$name" = "assets" ]; then
       [ -d "$PREFIX_LIB/current/assets" ] || fail "$PREFIX_LIB/current/assets is not a directory"
     else
-      [ -f "$PREFIX_LIB/current/$name" ] && [ -x "$PREFIX_LIB/current/$name" ] \
-        || fail "$PREFIX_LIB/current/$name is not an executable file"
+      if [ ! -f "$PREFIX_LIB/current/$name" ] || [ ! -x "$PREFIX_LIB/current/$name" ]; then
+        fail "$PREFIX_LIB/current/$name is not an executable file"
+      fi
     fi
   done
   for name in $(facts_of "$linked_facts" excluded); do
