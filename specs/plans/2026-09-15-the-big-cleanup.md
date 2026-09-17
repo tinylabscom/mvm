@@ -330,7 +330,10 @@ next oversized file arrives unnoticed.
       The repair must scan `crates/`, root `src/`, `xtask/`, and `build.rs`,
       exempt modules gated at their declaration site, and pin every current
       oversized file to a shrinking-only allowance.
-- [ ] **C2** Split `network_endpoint_proxy.rs` — 5,281 lines. #3302.
+- [x] **C2** Split `network_endpoint_proxy.rs` — 5,281 lines. #3302. Now a
+      facade plus twelve responsibility modules under
+      `network_endpoint_proxy/`, the largest at about 500 production lines;
+      external paths are unchanged and its grandfathered size allowance is gone.
 - [ ] **C3** `mvm-core`: 2,197 LOC across 13 public modules is referenced by
       nothing; the pack subsystem (2,448 LOC) is a real seam; 1,850 LOC belongs
       to exactly one crate each. The remaining five core modules have
