@@ -66,5 +66,26 @@ script's macOS allow-list (4 `@wip`, 5 Firecracker, 6 TLS-tunnel client, 2
 bundle fixture, 1 perf-budget host, 1 warm claim, 1 unenforceable wall clock).
 #3011 is closed.
 
-Not yet witnessed: the release caller blocking on a red live macOS job, and a
-fork-isolation guarantee stronger than the approval policy.
+## The gate refuses a red macOS lane
+
+A `release.yml` dry run could not show this: `dry_run=true` skips
+`initramfs-image`, and the release job requires its success, so every dry run
+is refused regardless of macOS — a witness that passes for the wrong reason.
+
+Run `35164778251` instead called the real `e2e-docs.yml` the way `release.yml`
+does, from a throwaway branch where only the live macOS job was forced red. On
+`m1-runner` the host check passed and the live job failed at the forced step;
+the evidence job was skipped rather than substituting; and a job gated on the
+release job's own `e2e-docs` clause was skipped. The branch was deleted after.
+
+## Fork isolation
+
+`tests/github_actions_self_hosted_runner.rs` fails if any workflow that can
+place a job on `m1`, directly or through a reusable workflow, is started by an
+event that runs unmerged code. It was checked against a mutation: adding
+`pull_request` to `ci-full.yml` turns it red.
+
+It cannot stop a fork PR that edits a workflow to name the label. Today that is
+stopped by the `all_external_contributors` approval policy — a person, not a
+mechanism. The mechanism is a runner group limited to selected workflows, which
+GitHub documents for the Team plan; the organization is on Free.
