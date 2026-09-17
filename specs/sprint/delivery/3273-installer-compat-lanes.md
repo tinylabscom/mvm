@@ -77,4 +77,7 @@ failure opens or updates one tracking issue; a green run closes it.
 ## Verified only by a live run
 
 The container runs, hosted macOS signing and `doctor`, real `ldd -v` output
-formats, and the tracking-issue job.
+formats, and the tracking-issue job. The merge-queue live BDD witness keeps a
+45-minute job bound because a cold hosted runner can spend more than half of a
+30-minute budget installing the pinned cross toolchain before it compiles and
+boots the guest lifecycle.

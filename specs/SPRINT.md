@@ -24,7 +24,9 @@
       Every later release still fails closed. Hosted
       macOS provisions the trusted historical libkrun runtime before exercising
       v0.16.1. The focused suite, shellcheck, and actionlint pass on the rebased
-      head.
+      head. The merge-queue live BDD witness now has a 45-minute bound so a
+      cold hosted runner cannot consume the entire budget installing the
+      pinned cross toolchain before the guest lifecycle runs.
 
 - [ ] **Upgrades found by reviewing an external microVM sandbox.**
       `specs/plans/2026-09-16-sandbox-review-upgrades.md`.

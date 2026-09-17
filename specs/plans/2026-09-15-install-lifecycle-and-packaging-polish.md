@@ -138,7 +138,9 @@ Issue: [#3273](https://github.com/tinylabscom/mvm/issues/3273).
       a narrow historical baseline; every later release fails the lane on a
       loader error. The workflow passes the exact-tag baseline through the
       `docker run` boundary, with a static regression assertion in the focused
-      compat suite.
+      compat suite. The merge-queue live BDD witness has a separately pinned
+      45-minute bound: cold cross-toolchain setup previously exhausted the
+      30-minute job budget before the guest lifecycle could finish.
 - [x] A cold first-run smoke on Linux that executes the exact commands from
       `public/src/content/docs/install/linux.md`, triggered by edits to that
       page or to `install.sh`. The macOS equivalent can only cover install plus

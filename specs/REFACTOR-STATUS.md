@@ -109,7 +109,9 @@ Last updated: 2026-09-17
         static-musl while retaining compatible asset names (#3371), and the
         installer accepts legacy entitlement profiles under `resources/`
         (#3370); the immutable Rocky loader baseline is forwarded explicitly
-        into the distro container and pinned by the focused suite
+        into the distro container and pinned by the focused suite; the live
+        merge-queue BDD witness retains a bounded 45-minute budget so cold
+        cross-toolchain setup cannot crowd out the guest lifecycle
   - [x] WS7 — Nix hygiene: package versions read from `Cargo.toml`, the
         check/harness boundary written down, stale Lima and `dev up` docs
         swept, and `check-deferrals` extended to `nix/`, `src/`, `install.sh`
