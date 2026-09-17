@@ -606,6 +606,21 @@ fn declare_embedded_host_binaries() {
 #[cfg(not(feature = "builder-vm"))]
 fn declare_embedded_host_binaries() {}
 
+/// Declare the Cargo features the running `mvmctl` was compiled with, as the
+/// root package's comma-separated feature names.
+///
+/// Only the root package can see those, so `main` passes them in. They reach
+/// `mvm-build`, which builds any bootstrap helper this binary needs with the
+/// same set rather than with `embed-host-bins` alone. Without `builder-vm`
+/// there is no helper to build.
+#[cfg(feature = "builder-vm")]
+pub fn declare_binary_features(enabled: &str) {
+    mvm_build::builder_vm_bootstrap::declare_current_exe_features(enabled);
+}
+
+#[cfg(not(feature = "builder-vm"))]
+pub fn declare_binary_features(_enabled: &str) {}
+
 fn register_inhouse_builder() {
     // Wire the driver-backed builder constructors so that
     // `mvm_build::builder_backend_select` can create them when the resolved

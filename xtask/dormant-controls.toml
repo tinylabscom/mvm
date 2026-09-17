@@ -78,3 +78,15 @@ under a plan that never named it and `enforce_admitted_shares` had nothing to \
 check the attachment against (claim 1). The function being correct is not the \
 control — being called from the admit closure is. Its unit tests pass whether \
 or not anything calls it, which is the failure this file exists to catch."""
+
+[[control]]
+symbol = "declare_current_exe_features"
+file = "crates/mvm-build/src/builder_vm_bootstrap.rs"
+dormant = false
+why = """
+Carries the running `mvmctl`'s Cargo features to the builder-VM bootstrap \
+helper it compiles. Without a caller the helper is built with \
+`embed-host-bins` alone, dropping `release-artifact-bootstrap`, so a caller \
+configured to fetch the builder image gets a helper that can only build it \
+from source — a silent cold Stage 0 on a lane that asked to avoid one. Every \
+unit test of the feature mirror passes whether or not anything declares."""
