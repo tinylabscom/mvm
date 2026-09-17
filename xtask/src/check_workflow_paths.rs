@@ -1101,10 +1101,21 @@ mod tests {
         assert!(
             prepare.contains("cargo build --release -p mvmctl --features user,embed-host-bins")
         );
+        assert!(prepare.contains("cargo build --release -p mvm-hostd --bin mvm-network-endpoint"));
+        assert!(
+            prepare
+                .contains("cp target/release/mvm-network-endpoint ci-artifacts/no-kvm-binaries/")
+        );
         assert!(prepare.contains(
             "cargo build --release -p mvmctl --features \
              user,release-artifact-bootstrap,release-channel"
         ));
+        for live_job in [bootstrap, smoke] {
+            assert!(live_job.contains(
+                "install -m 0755 /tmp/no-kvm-binaries/mvm-network-endpoint \
+                 /tmp/mvm-network-endpoint"
+            ));
+        }
         assert!(source_build < source_copy);
         assert!(bootstrap.contains("needs: no-kvm-prepare"));
         assert!(build.contains("needs: no-kvm-bootstrap"));

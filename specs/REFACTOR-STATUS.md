@@ -27,6 +27,12 @@ Last updated: 2026-09-16
       routes, internal content/page routes, and static assets in `check-all`;
       external hosts remain non-blocking.
 
+- [x] **Extended CI Firecracker warm-claim repair.**
+      `specs/plans/2026-09-16-extended-ci-warm-claim.md`, issue #3330. Keep the
+      claim-bearing lane fail-closed while giving its snapshot device-path
+      remap the mount-namespace privilege it requires. The full PR matrix and
+      exact-head live Firecracker witness pass.
+
 - [x] **Canonical user-config and MVM child paths.**
       `specs/plans/2026-09-15-the-big-cleanup.md` A4.5, issue #3308. One
       canonical config path and tenant parser; named helpers for every direct

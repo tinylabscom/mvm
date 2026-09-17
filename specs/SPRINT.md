@@ -40,6 +40,16 @@
       workspace run passed all suites except one load-induced lease-TTL flake,
       whose exact isolated rerun passed.
 
+- [x] **Extended CI Firecracker warm-claim repair — issue #3330.**
+      `specs/plans/2026-09-16-extended-ci-warm-claim.md`. The scheduled lane
+      reaches KVM and captures the parent, then fails while preloading the
+      child because snapshot device-path remapping needs a private mount
+      namespace and the hosted runner user lacks `CAP_SYS_ADMIN`. The lane now
+      crosses the runner's passwordless-sudo boundary for the guarded recipe,
+      preserves only its required environment, and retains complete warm-pool
+      failure context. The full PR matrix and exact-head live Firecracker
+      witness pass.
+
 - [x] **Cover `agent-session resume --boot` and reconcile session status — issue #3264.**
       Exercise a successful cold-tier boot through the CLI boundary and make
       the durable-session plan and refactor rollup distinguish partial

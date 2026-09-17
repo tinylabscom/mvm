@@ -96,6 +96,7 @@ let
     ".build"
     "dev-prebuilt"
     # Test / generated outputs.
+    ".mvm-ci"
     ".mvm-test"
     "graphify-out"
     ".ur-seed-result"

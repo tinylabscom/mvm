@@ -828,18 +828,17 @@ mod tests {
     /// growing its own rule.
     #[test]
     fn a_runtime_binary_resolves_from_the_overlay_and_never_the_baked_path() {
-        for (overlay, baked) in [(EGRESS_CLIENT_OVERLAY, "/usr/local/bin/mvm-egress-client")] {
-            assert_eq!(
-                resolve_runtime_binary_for(overlay, |p| p == Path::new(overlay)),
-                Some(PathBuf::from(overlay)),
-                "{overlay} did not resolve from the overlay"
-            );
-            assert_eq!(
-                resolve_runtime_binary_for(overlay, |p| p == Path::new(baked)),
-                None,
-                "{overlay} accepted a binary at the old baked path {baked}"
-            );
-        }
+        let (overlay, baked) = (EGRESS_CLIENT_OVERLAY, "/usr/local/bin/mvm-egress-client");
+        assert_eq!(
+            resolve_runtime_binary_for(overlay, |p| p == Path::new(overlay)),
+            Some(PathBuf::from(overlay)),
+            "{overlay} did not resolve from the overlay"
+        );
+        assert_eq!(
+            resolve_runtime_binary_for(overlay, |p| p == Path::new(baked)),
+            None,
+            "{overlay} accepted a binary at the old baked path {baked}"
+        );
     }
 
     #[test]
