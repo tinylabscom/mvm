@@ -330,7 +330,13 @@ Last updated: 2026-09-17
       mounts are admitted while directory snapshots remain read-only. A
       no-explicit-sync write survived a second fresh Alpine VM on macOS HVF;
       gated compilation, the full workspace nextest suite, doc tests, all-targets Clippy,
-      policy checks, and BDD are green. Broader surface design and merge remain.
+      policy checks, and BDD are green. `--output HOST_DIR:/GUEST[:SIZE[:MAX_ENTRIES]]`
+      now hands results back through a fresh writable disk the host reads after
+      teardown: a signed `ExecutionPlan.outputs` grant, bounded link-refusing
+      collection in `mvm_fs::output`, a sorted manifest beside the outputs, and
+      a chain-signed `plan.outputs` entry. Live on macOS HVF (collected, symlink
+      refused, byte bound refused). Hard-link refusal needs inode identity the
+      ext4 reader does not expose; that item stays open.
 
 - [x] **Refresh host-directory snapshots at machine start.**
       `2026-09-03-refresh-host-snapshot-at-start`.

@@ -382,6 +382,7 @@ shell).
 | `mvmctl run --mount .:/work:ro -- <cmd>`             | Attach a read-only host directory, materialized into an ext4 image at boot (a snapshot, not a live share)                                                                                                                                                                                       |
 | `mvmctl run --profile permissive -- <cmd>`           | Escape hatch; requires `MVM_ACK_PERMISSIVE_RUN=1`                                                                                                                                                                                  |
 | `mvmctl run --mount HOST:GUEST:ro -- <cmd>`          | Attach a read-only host directory, materialized into an ext4 image at boot (a snapshot, not a live share)                                                                                                                                                                                       |
+| `mvmctl run --output HOST_DIR:/GUEST[:SIZE[:MAX_ENTRIES]] -- <cmd>` | Give the workload a fresh writable disk at `/GUEST`; after it exits, copy its regular files and directories into `HOST_DIR` (absent or empty) under a byte bound (default `64M`) and an entry bound (default `10000`), refusing the whole collection past either. Repeatable; also on `machine run` (foreground only); disabled by `--profile restrictive` |
 | `mvmctl run --env KEY=VAL -- <cmd>`                  | Inject an explicit environment variable. Repeatable; disabled by `--profile restrictive`                                                                                                                                           |
 | `mvmctl run --cpus <n> --memory <size> -- <cmd>`     | Resize the transient VM                                                                                                                                                                                                            |
 | `mvmctl run --timeout <secs> -- <cmd>`               | Per-command timeout                                                                                                                                                                                                                |
@@ -1027,6 +1028,47 @@ paths and file contents are not written to audit logs; successful copies emit
 `--json` follows the same redaction rule: the summary includes direction, VM
 name, guest path, copied byte count, and effective copy options, but not the
 host endpoint.
+
+### Handing results back (`--output`)
+
+`--output HOST_DIR:/GUEST[:SIZE[:MAX_ENTRIES]]` is how a transient run returns
+files. It is not a share: nothing on the host is visible to the guest. The guest
+gets a new, empty ext4 disk mounted writable at `/GUEST` (which must sit under
+the same guest-mount allow-roots as `--mount`), and the workload writes there.
+When the workload exits — whatever its exit code — its filesystem is flushed,
+the VM is torn down, and the host reads the disk image in-process. There is no
+protocol with the guest to speak.
+
+Collection accepts only regular files and directories. It refuses, and writes
+nothing, when the disk holds a symlink, device node, FIFO, or socket; a name
+that is empty, `.`, `..`, not UTF-8, or contains `/` or NUL; a directory entry
+whose type disagrees with its inode; a path deeper than 64 components or longer
+than 4096 bytes; more file bytes than `SIZE`; or more entries than
+`MAX_ENTRIES`. The refusal names the rule or bound that fired. `HOST_DIR` must
+be absent or empty and its parent must exist; files are created exclusively
+through directory handles that never follow a link, so nothing is overwritten
+and nothing lands outside `HOST_DIR`. File permissions are not carried over
+(files are `0644`, directories `0755`).
+
+A file hard-linked under two names inside the disk is collected as two
+independent host files, each counted against `SIZE` — the ext4 reader does not
+expose inode identity, so the link cannot be refused, but the host never
+receives an alias.
+
+The grant — guest path, resolved `HOST_DIR`, and both bounds — is recorded in
+the signed execution plan before boot. After collection a chain-signed
+`plan.outputs` audit entry records `outcome=collected` with `manifest_sha256`,
+`entry_count`, `total_bytes`, and `tree_sha256` (the identity `--asset` would
+compute for `HOST_DIR`, so a later run consuming these files names them the
+same way), or `outcome=refused` with the rule's `reason`. The full manifest —
+every `(path, size, sha256)` sorted by path — is written beside the outputs as
+`HOST_DIR.manifest.json`, which must not already exist.
+
+```bash
+mvmctl machine run --image alpine --output ./results:/data/out:16M \
+  -- sh -c 'echo done > /data/out/status.txt'
+cat ./results/status.txt ./results.manifest.json
+```
 
 ### Run examples
 

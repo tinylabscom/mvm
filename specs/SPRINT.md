@@ -346,8 +346,11 @@
       image locks remain held through teardown, and directory snapshots remain
       read-only. A no-explicit-sync write survived into a second fresh Alpine
       VM on macOS HVF. Gated compilation, the full workspace nextest suite, doc
-      tests, all-targets zero-warning Clippy, policy checks, and BDD are green;
-      the plan's broader output-surface design and merge delivery remain.
+      tests, all-targets zero-warning Clippy, policy checks, and BDD are green.
+      The `--output` surface, signed grant, bounded collection, and
+      `plan.outputs` record have landed (see
+      `specs/sprint/delivery/workload-output-manifest.md`); hard-link refusal
+      remains open.
 
 - [ ] **Retire runtime directory-share volume variants.**
       `2026-09-02-retire-dirshare`.

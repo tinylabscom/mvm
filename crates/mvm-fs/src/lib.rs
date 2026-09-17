@@ -17,6 +17,8 @@
 //!   [`snapshot_store`]'s content-addressed create.
 //! - [`snapshot_store`]: content-addressed snapshot persistence used by the
 //!   warm-parent pool.
+//! - [`output`]: bounded, link-refusing collection of the files a transient
+//!   workload writes to its output disk, with a canonical manifest digest.
 //!
 //! The crate-level lint is `deny(unsafe_code)` rather than `forbid` so that
 //! the [`clone`] module can use the small, platform-specific unsafe blocks
@@ -36,6 +38,7 @@ pub mod oci;
 /// size caps (decompression-bomb mitigation). ext4 generation
 /// (`mke2fs -d` against the staging dir) runs inside the builder VM.
 pub mod oci_to_rootfs;
+pub mod output;
 pub mod overlay;
 pub mod parallel;
 pub mod rootfs;

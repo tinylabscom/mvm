@@ -611,6 +611,23 @@ pub enum UnpackError {
     EntryCountExceeded { cap: u64 },
 }
 
+/// The refusals every host-side extraction of guest- or registry-supplied
+/// paths shares: a path that starts at `/`, or one with a `..` segment.
+///
+/// Segment-by-segment, never substring: `..foo` is a valid name and `../foo`
+/// is not. Paths are slash-separated regardless of host OS. Callers layer
+/// their own stricter rules on top — an OCI layer legitimately carries `./`
+/// prefixes and trailing slashes, which a workload's output does not.
+pub(crate) fn escaping_path_refusal(raw_path: &[u8]) -> Option<RefusalReason> {
+    if raw_path.first() == Some(&b'/') {
+        return Some(RefusalReason::AbsolutePath);
+    }
+    if raw_path.split(|b| *b == b'/').any(|seg| seg == b"..") {
+        return Some(RefusalReason::TraversalSegment);
+    }
+    None
+}
+
 /// Unpack a single layer tarball under `output_root`, applying the
 /// safety policies described at module level.
 ///
@@ -755,24 +772,9 @@ fn unpack_layer_inner<R: Read>(
             continue;
         }
 
-        // Safety check 1 — absolute paths.
-        if raw_path.first() == Some(&b'/') {
-            report.refused.push(RefusedEntry {
-                raw_path,
-                reason: RefusalReason::AbsolutePath,
-            });
-            continue;
-        }
-
-        // Safety check 2 — traversal segments. Segment-by-segment
-        // (never substring): `..foo` is a valid name; `../foo` is
-        // not. Tar paths are slash-separated regardless of host OS.
-        let traversal = raw_path.split(|b| *b == b'/').any(|seg| seg == b"..");
-        if traversal {
-            report.refused.push(RefusedEntry {
-                raw_path,
-                reason: RefusalReason::TraversalSegment,
-            });
+        // Safety checks 1 and 2 — absolute paths and traversal segments.
+        if let Some(reason) = escaping_path_refusal(&raw_path) {
+            report.refused.push(RefusedEntry { raw_path, reason });
             continue;
         }
 

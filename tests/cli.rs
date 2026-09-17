@@ -816,3 +816,64 @@ fn agent_session_renew_extends_replays_and_refuses_to_shorten() {
         String::from_utf8_lossy(&shorten.stderr)
     );
 }
+
+/// `--output` is advertised on `machine run`, and each pre-boot refusal fires
+/// before anything is resolved or booted: a profile that allows no host
+/// shares, a persistent machine that has no exit to collect at, and a
+/// destination that already holds files.
+#[test]
+fn machine_run_output_is_advertised_and_refused_before_boot() {
+    #[allow(deprecated)]
+    let help = Command::cargo_bin("mvmctl")
+        .unwrap()
+        .args(["machine", "run", "--help"])
+        .output()
+        .unwrap();
+    let help_text = String::from_utf8_lossy(&help.stdout);
+    assert!(help.status.success());
+    assert!(
+        help_text.contains("--output <HOST_DIR:GUEST[:SIZE]>"),
+        "help must advertise --output:\n{help_text}"
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let populated = tmp.path().join("populated");
+    std::fs::create_dir(&populated).unwrap();
+    std::fs::write(populated.join("keep"), b"mine").unwrap();
+    let fresh = format!("{}:/data/out", tmp.path().join("fresh").display());
+    let occupied = format!("{}:/data/out", populated.display());
+
+    let run = |extra: &[&str]| {
+        #[allow(deprecated)]
+        let out = Command::cargo_bin("mvmctl")
+            .unwrap()
+            .env("HOME", tmp.path())
+            .env("MVM_HOME", tmp.path().join("state"))
+            .env("MVM_NO_AUTO_DEV", "1")
+            .args(["machine", "run", "--image", "alpine"])
+            .args(extra)
+            .args(["--", "true"])
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{extra:?} must not run");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+
+    let stderr = run(&["--profile", "restrictive", "--output", &fresh]);
+    assert!(
+        stderr.contains("does not allow --mount or --output"),
+        "restrictive must refuse --output, stderr: {stderr}"
+    );
+    let stderr = run(&["-d", "--output", &fresh]);
+    assert!(
+        stderr.contains("has no exit to collect at"),
+        "a persistent machine must refuse --output, stderr: {stderr}"
+    );
+    let stderr = run(&["--output", &occupied]);
+    assert!(
+        stderr.contains("not an empty directory"),
+        "a populated destination must be refused, stderr: {stderr}"
+    );
+    assert_eq!(std::fs::read(populated.join("keep")).unwrap(), b"mine");
+    assert!(!tmp.path().join("fresh").exists());
+}

@@ -419,6 +419,7 @@ impl OperatorConfiguredTrialBooter {
             .strip_prefix("sha256:")
             .expect("validated digest always has its prefix");
         let synthesis = SynthesisInput {
+            outputs: Vec::new(),
             vm_name: &vm_name,
             tenant: Some(self.config.tenant.as_str()),
             backend_name,

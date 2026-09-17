@@ -331,6 +331,12 @@ pub(super) fn resolve_machine_build_mode(manifest: Option<&str>, name: &str) -> 
 }
 
 fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<String>) -> Result<()> {
+    if !args.run.outputs.is_empty() {
+        anyhow::bail!(
+            "machine run --entrypoint does not accept --output; collect outputs from a \
+             foreground `machine run -- <cmd>`"
+        );
+    }
     if args.run.deployment.is_some() {
         anyhow::bail!(
             "machine run --entrypoint does not accept --deployment; use a manifest or flake source"
@@ -493,6 +499,12 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
             run_secure_with_source(cli, run_args, cfg, source)
         }
         MachineRunMode::Persistent => {
+            if !args.run.outputs.is_empty() {
+                anyhow::bail!(
+                    "--output is collected when a foreground run exits; a persistent machine \
+                     (-d, --ttl, --port, --healthcheck, --up-json) has no exit to collect at"
+                );
+            }
             run_persistent(cli, args, cfg, resolved_flake_slot.as_deref())
         }
         MachineRunMode::InteractiveTransient => {

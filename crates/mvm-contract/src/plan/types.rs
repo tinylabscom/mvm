@@ -1468,7 +1468,7 @@ pub struct HostShareGrant {
 }
 
 /// Reject a non-absolute or empty guest path at deserialize time.
-fn deserialize_abs_path<'de, D>(d: D) -> Result<String, D::Error>
+pub(crate) fn deserialize_abs_path<'de, D>(d: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
